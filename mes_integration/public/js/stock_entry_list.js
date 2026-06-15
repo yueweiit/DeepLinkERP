@@ -20,7 +20,7 @@ frappe.listview_settings["Stock Entry"].formatters = {
 		}
 
 		const status = value || "Unpushed";
-		const color = status === "Pushed" ? "blue" : "red";
+		const color = status === "Pushed" ? "green" : "red";
 
 		return `<span class="indicator-pill ${color} no-indicator-dot">${__(status)}</span>`;
 	},
