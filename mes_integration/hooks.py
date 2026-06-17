@@ -46,7 +46,6 @@ doctype_js = {
 	"Delivery Note": "public/js/delivery_note.js",
 	"Material Request": "public/js/material_request.js",
 	"Stock Entry": "public/js/stock_entry.js",
-	"BOM": "public/js/bom_scrap_rate.js",
 }
 doctype_list_js = {
 	"Delivery Note": "public/js/delivery_note_list.js",
@@ -171,9 +170,6 @@ doc_events = {
 		],
 		"on_cancel": "mes_integration.mes_integration.stock_entry.update_material_request_transferred_qty",
 	},
-	"BOM": {
-		"validate": "mes_integration.mes_integration.bom_customizations.validate_custom_scrap_rate",
-	},
 }
 
 # Scheduled Tasks
@@ -206,9 +202,9 @@ doc_events = {
 # ------------------------------
 #
 # Specify custom mixins to extend the standard doctype controller.
-extend_doctype_class = {
-	"BOM": "mes_integration.mes_integration.bom_customizations.BOMScrapRateMixin",
-}
+# extend_doctype_class = {
+# 	"ToDo": ["app.overrides.CustomToDo"]
+# }
 
 # Overriding Methods
 # ------------------------------
