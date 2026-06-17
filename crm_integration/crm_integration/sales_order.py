@@ -38,6 +38,66 @@ PRODUCT_SERIES_NAME_MAP = {
 }
 
 
+@frappe.whitelist()
+def get_sales_order_list_details(sales_orders):
+	if isinstance(sales_orders, str):
+		sales_orders = frappe.parse_json(sales_orders)
+
+	sales_orders = [name for name in (sales_orders or []) if name]
+	if not sales_orders:
+		return {}
+
+	allowed_sales_orders = [
+		name
+		for name in sales_orders
+		if frappe.has_permission("Sales Order", "read", doc=name)
+	]
+	if not allowed_sales_orders:
+		return {}
+
+	details = {
+		name: {"sales_person": "", "product": ""}
+		for name in allowed_sales_orders
+	}
+	set_first_sales_person(details, allowed_sales_orders)
+	set_first_product(details, allowed_sales_orders)
+	return details
+
+
+def set_first_sales_person(details, sales_orders):
+	seen = set()
+	sales_team_rows = frappe.get_all(
+		"Sales Team",
+		filters={"parenttype": "Sales Order", "parent": ["in", sales_orders]},
+		fields=["parent", "sales_person"],
+		order_by="parent asc, idx asc",
+	)
+
+	for row in sales_team_rows:
+		if row.parent in seen:
+			continue
+
+		details[row.parent]["sales_person"] = row.sales_person or ""
+		seen.add(row.parent)
+
+
+def set_first_product(details, sales_orders):
+	seen = set()
+	item_rows = frappe.get_all(
+		"Sales Order Item",
+		filters={"parent": ["in", sales_orders]},
+		fields=["parent", "custom_product"],
+		order_by="parent asc, idx asc",
+	)
+
+	for row in item_rows:
+		if row.parent in seen:
+			continue
+
+		details[row.parent]["product"] = row.custom_product or ""
+		seen.add(row.parent)
+
+
 def set_process_status(sales_order, process_status, status=None):
 	"""Update process status without running the full Sales Order save cycle."""
 	sales_order.db_set("custom_process_status", process_status, update_modified=True)

@@ -68,3 +68,5 @@ Update Items,Actualizar
 驳回,Rechazar
 "以下销售订单状态不允许创建或保存销售出库草稿：<br>{0}","Los siguientes pedidos de venta no permiten crear o guardar borradores de nota de entrega:<br>{0}"
 "以下销售订单未放行发货，不能提交销售出库：<br>{0}","Los siguientes pedidos de venta no están liberados para entrega y no pueden enviarse:<br>{0}"
+业务员,Vendedor
+产品,Producto
