@@ -10,6 +10,7 @@ def create_and_submit_sales_order(sales_order=None):
 	"""Create a Sales Order from an external system and submit it immediately."""
 	payload = get_request_payload(sales_order)
 	validate_sales_order_payload(payload)
+	ensure_sales_persons_exist(payload)
 
 	crm_log = create_crm_log(
 		direction="Inbound",
@@ -86,9 +87,33 @@ def validate_sales_order_payload(payload):
 	if not payload.get("customer"):
 		frappe.throw(_("缺少必填字段：customer"))
 
-
 	if not payload.get("items"):
 		frappe.throw(_("缺少销售订单明细：items"))
+
+
+def ensure_sales_persons_exist(payload):
+	"""Ensure every Sales Person referenced in sales_team exists in ERP.
+
+	If a Sales Person does not exist, create it automatically as a leaf node.
+	"""
+	sales_team = payload.get("sales_team")
+	if not sales_team:
+		return
+
+	for row in sales_team:
+		person_name = row.get("sales_person")
+		if not person_name:
+			continue
+
+		if not frappe.db.exists("Sales Person", {"sales_person_name": person_name}):
+			frappe.get_doc(
+				{
+					"doctype": "Sales Person",
+					"sales_person_name": person_name,
+					"is_group": 0,
+					"enabled": 1,
+				}
+			).insert(ignore_permissions=True)
 
 
 def get_request_url():
