@@ -166,16 +166,27 @@ function load_sales_order_extra_columns(listview) {
 
 function enforce_result_width(listview) {
 	const $result = listview.$result;
-	if (!$result) return;
+	if (!$result?.length) {
+		return;
+	}
 
-	const $rows = $result.find(".list-row-container");
-	if (!$rows.length) return;
+	window.requestAnimationFrame(() => {
+		const $rows = $result.find(".list-row-container");
+		if (!$rows.length) {
+			$result.css("min-width", "");
+			return;
+		}
 
-	const max_row_width = Array.from($rows).reduce(
-		(max, row) => Math.max(max, row.scrollWidth),
-		0
-	);
-	$result.css("min-width", max_row_width + "px");
+		const $result_container = $result.parent(".result-container");
+		const container_width = $result_container.get(0)?.clientWidth || 0;
+		const max_row_width = Array.from($rows).reduce(
+			(max, row) => Math.max(max, row.scrollWidth),
+			0
+		);
+		const result_width = Math.max(max_row_width, container_width);
+
+		$result.css("min-width", result_width ? `${result_width}px` : "");
+	});
 }
 
 function apply_sales_order_extra_details(listview, details) {
