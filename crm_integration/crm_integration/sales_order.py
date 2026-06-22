@@ -249,24 +249,29 @@ def get_mes_sales_order_push_authorization():
 
 
 def push_sales_order_to_mes(sales_order):
-	payload = build_mes_sales_order_payload(sales_order)
-	request_url = get_mes_sales_order_push_url()
-	headers = {
-		"Content-Type": "application/json",
-		"Authorization": get_mes_sales_order_push_authorization(),
-	}
-	mes_log = create_mes_log(
-		direction="Outbound",
-		event="Sales Order Push To MES",
-		status="Pending",
-		reference_doctype="Sales Order",
-		reference_name=sales_order.name,
-		source="ERPNext",
-		request_url=request_url,
-		request_payload=payload,
-	)
+	payload = None
+	request_url = None
+	mes_log = None
+	response = None
+	response_payload = None
 
 	try:
+		payload = build_mes_sales_order_payload(sales_order)
+		request_url = get_mes_sales_order_push_url()
+		headers = {
+			"Content-Type": "application/json",
+			"Authorization": get_mes_sales_order_push_authorization(),
+		}
+		mes_log = create_mes_log(
+			direction="Outbound",
+			event="Sales Order Push To MES",
+			status="Pending",
+			reference_doctype="Sales Order",
+			reference_name=sales_order.name,
+			source="ERPNext",
+			request_url=request_url,
+			request_payload=payload,
+		)
 		response = requests.post(
 			request_url,
 			json=payload,
@@ -278,22 +283,27 @@ def push_sales_order_to_mes(sales_order):
 		validate_mes_sales_order_response(response_payload)
 	except RequestException as exc:
 		response = getattr(exc, "response", None)
-		update_mes_log(
-			mes_log,
-			status="Failed",
-			response_payload=parse_crm_response(response) if response else None,
+		response_payload = parse_crm_response(response) if response else response_payload
+		log_failed_mes_sales_order_push(
+			sales_order=sales_order,
+			mes_log=mes_log,
+			request_url=request_url,
+			request_payload=payload,
+			response_payload=response_payload,
 			error_message=frappe.get_traceback(),
 			http_status_code=getattr(response, "status_code", None),
 		)
 		frappe.log_error(title=_("MES 销售订单推送失败"), message=frappe.get_traceback())
 		frappe.throw(_("MES 销售订单推送失败：{0}").format(str(exc)))
 	except Exception:
-		update_mes_log(
-			mes_log,
-			status="Failed",
-			response_payload=locals().get("response_payload"),
+		log_failed_mes_sales_order_push(
+			sales_order=sales_order,
+			mes_log=mes_log,
+			request_url=request_url,
+			request_payload=payload,
+			response_payload=response_payload,
 			error_message=frappe.get_traceback(),
-			http_status_code=getattr(locals().get("response"), "status_code", None),
+			http_status_code=getattr(response, "status_code", None),
 		)
 		frappe.log_error(title=_("MES 销售订单推送失败"), message=frappe.get_traceback())
 		raise
@@ -305,6 +315,41 @@ def push_sales_order_to_mes(sales_order):
 		http_status_code=response.status_code,
 	)
 	return response_payload
+
+
+def log_failed_mes_sales_order_push(
+	sales_order,
+	mes_log=None,
+	request_url=None,
+	request_payload=None,
+	response_payload=None,
+	error_message=None,
+	http_status_code=None,
+):
+	log_values = {
+		"status": "Failed",
+		"response_payload": response_payload,
+		"error_message": error_message,
+		"http_status_code": http_status_code,
+	}
+	if mes_log:
+		update_mes_log(mes_log, **log_values)
+	else:
+		create_mes_log(
+			direction="Outbound",
+			event="Sales Order Push To MES",
+			status="Failed",
+			reference_doctype="Sales Order",
+			reference_name=sales_order.name,
+			source="ERPNext",
+			request_url=request_url,
+			request_payload=request_payload,
+			response_payload=response_payload,
+			error_message=error_message,
+			http_status_code=http_status_code,
+		)
+
+	frappe.db.commit()
 
 
 def build_mes_sales_order_payload(sales_order):
