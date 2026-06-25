@@ -115,6 +115,57 @@ def get_single_material_request_item_source_warehouse(material_request):
     return warehouses.pop() if len(warehouses) == 1 else None
 
 
+@frappe.whitelist()
+def submit_issue_and_push_to_dlm(material_request_name):
+    """
+    一键操作：提交物料需求 → 发料出库 → 提交出库单 → 推送至 DLM。
+
+    步骤 1-3 在同一事务中，任一失败则全部回滚。
+    步骤 4 (push_to_mes) 内部会独立 commit，推送失败时 Stock Entry 仍已提交，
+    返回 partial 状态提示用户手动推送。
+    """
+    mr = frappe.get_doc("Material Request", material_request_name)
+
+    if mr.docstatus != 0:
+        frappe.throw(_("物料需求必须是草稿状态"))
+
+    # Step 1: 提交物料需求
+    mr.submit()
+
+    # Step 2: 创建发料出库单（基于已提交的物料需求映射）
+    stock_entry = make_issue_stock_entry(mr.name)
+    stock_entry.insert()
+
+    # Step 3: 提交出库单
+    stock_entry.submit()
+
+    # Step 4: 推送至 DLM
+    # push_to_mes 内部在 HTTP 失败时会 frappe.db.commit() 再 raise，
+    # 因此捕获异常，将推送失败视为非致命错误（出库单已提交但未推送）。
+    from mes_integration.mes_integration.stock_entry import push_to_mes
+
+    try:
+        push_result = push_to_mes(stock_entry.name)
+    except Exception:
+        frappe.log_error(title="DLM 推送失败（发料并推送）", message=frappe.get_traceback())
+        return {
+            "status": "partial",
+            "message": _("物料需求已提交，出库单 {0} 已创建并提交，但推送至 DLM 失败，请手动推送。").format(
+                stock_entry.name
+            ),
+            "material_request": mr.name,
+            "stock_entry": stock_entry.name,
+        }
+
+    return {
+        "status": "success",
+        "message": _("物料需求已提交，出库单 {0} 已创建、提交并推送至 DLM。").format(stock_entry.name),
+        "material_request": mr.name,
+        "stock_entry": stock_entry.name,
+        "push_result": push_result,
+    }
+
+
 def validate_item_details(doc, method=None):
     details = doc.get("custom_item_details") or []
     if not details:

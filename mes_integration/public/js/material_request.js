@@ -276,10 +276,11 @@ function mes_format_detail_qty(value) {
 
 function add_custom_issue_stock_entry_button(frm) {
 	frm.remove_custom_button(__("提交并发料"));
+	frm.remove_custom_button(__("发料并推送至DLM"));
 
-	if (can_submit_and_issue_material_request(frm)) {
-		frm.add_custom_button(__("提交并发料"), function() {
-			submit_and_issue_material_request(frm);
+	if (can_submit_issue_and_push_to_dlm(frm)) {
+		frm.add_custom_button(__("发料并推送至DLM"), function() {
+			submit_issue_and_push_to_dlm(frm);
 		});
 		style_submit_and_issue_button(frm);
 		return;
@@ -295,7 +296,7 @@ function add_custom_issue_stock_entry_button(frm) {
 	frm.page.set_inner_btn_group_as_primary(__("Create"));
 }
 
-function can_submit_and_issue_material_request(frm) {
+function can_submit_issue_and_push_to_dlm(frm) {
 	return (
 		frm &&
 		frm.doc &&
@@ -305,28 +306,58 @@ function can_submit_and_issue_material_request(frm) {
 	);
 }
 
-function submit_and_issue_material_request(frm) {
+function submit_issue_and_push_to_dlm(frm) {
 	frappe.confirm(
-		__("确认提交此物料需求并立即发料？"),
+		__("确认提交此物料需求、发料并推送至 DLM？此操作将自动完成提交、发料、提交出库单和推送。"),
 		function() {
 			frm._mes_submit_and_issue = true;
-			frm.save("Submit")
-				.then(function() {
+			frappe.call({
+				method: "mes_integration.mes_integration.material_request.submit_issue_and_push_to_dlm",
+				args: {
+					material_request_name: frm.doc.name
+				},
+				freeze: true,
+				freeze_message: __("正在提交、发料并推送至 DLM，请稍候..."),
+				callback: function(r) {
 					frm._mes_submit_and_issue = false;
-					setTimeout(function() {
-						open_issue_stock_entry(frm);
-					}, 300);
-				})
-				.catch(function() {
+
+					if (r.exc) {
+						return;
+					}
+
+					const result = r.message;
+					if (result.status === "success") {
+						frappe.msgprint({
+							title: __("成功"),
+							indicator: "green",
+							message: result.message
+						});
+					} else if (result.status === "partial") {
+						frappe.msgprint({
+							title: __("部分完成"),
+							indicator: "orange",
+							message: result.message
+						});
+					}
+
+					frm.reload_doc();
+				},
+				error: function() {
 					frm._mes_submit_and_issue = false;
-				});
+					frappe.msgprint({
+						title: __("操作失败"),
+						indicator: "red",
+						message: __("提交、发料或推送过程中发生错误，请查看错误日志或联系管理员。")
+					});
+				}
+			});
 		}
 	);
 }
 
 function style_submit_and_issue_button(frm) {
 	requestAnimationFrame(function() {
-		const labels = [...new Set(["提交并发料", __("提交并发料")])];
+		const labels = [...new Set(["发料并推送至DLM", __("发料并推送至DLM")])];
 		const selector = labels
 			.map(function(label) {
 				return `.page-actions button[data-label="${encodeURIComponent(label)}"]`;
