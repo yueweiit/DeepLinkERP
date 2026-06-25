@@ -16,6 +16,7 @@ PENDING_PRODUCTION = "Pending Production"
 PENDING_FINAL_PAYMENT = "Pending Final Payment"
 DELIVERABLE = "Deliverable"
 CLOSED = "Closed"
+CANCELLED = "Cancelled"
 
 CRM_STATUS_API_TIMEOUT = 15
 MES_SALES_ORDER_PUSH_EVENT = "sales_order.created"
@@ -496,6 +497,13 @@ def set_pending_deposit_confirmation_on_submit(doc, method=None):
 	doc.notify_update()
 
 
+def set_cancelled_process_status_on_cancel(doc, method=None):
+	"""Keep the custom production flow status aligned with native cancellation."""
+	doc.db_set("custom_process_status", CANCELLED, update_modified=True)
+	doc.custom_process_status = CANCELLED
+	doc.notify_update()
+
+
 def prevent_rejected_sales_order_submit(doc, method=None):
 	"""Rejected CRM/MES flow orders must not be submitted later."""
 	if doc.get("custom_process_status") == REJECTED:
@@ -534,9 +542,6 @@ def reconcile_final_payment(sales_order_name):
 
 	if sales_order.docstatus != 1:
 		frappe.throw(_("销售订单必须提交后才能核销尾款。"))
-
-	if sales_order.get("custom_process_status") != PENDING_FINAL_PAYMENT:
-		frappe.throw(_("只有待核销尾款的销售订单可以执行此操作。"))
 
 	grand_total = flt(sales_order.get("grand_total"), sales_order.precision("grand_total"))
 	advance_paid = flt(sales_order.get("advance_paid"), sales_order.precision("advance_paid"))

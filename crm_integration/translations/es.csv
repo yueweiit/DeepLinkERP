@@ -1,6 +1,7 @@
 CRM 状态推送失败,Error al enviar el estado a CRM
 CRM 状态推送失败：{0},Error al enviar el estado a CRM: {0}
 Closed,Cerrado
+Cancelled,Cancelado
 Completed,Completado
 Deliverable,Entrega
 MES 销售订单推送失败,Error al enviar el pedido de venta a MES
@@ -70,3 +71,4 @@ Update Items,Actualizar
 "以下销售订单未放行发货，不能提交销售出库：<br>{0}","Los siguientes pedidos de venta no están liberados para entrega y no pueden enviarse:<br>{0}"
 业务员,Vendedor
 产品,Producto
+确认核销尾款？{0}/{1},¿Confirmar la conciliación del pago final? {0}/{1}

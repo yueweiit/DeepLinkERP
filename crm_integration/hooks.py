@@ -158,6 +158,7 @@ doc_events = {
 		"after_insert": "crm_integration.crm_integration.integration_log.log_inbound_sales_order",
 		"before_submit": "crm_integration.crm_integration.sales_order.prevent_rejected_sales_order_submit",
 		"on_submit": "crm_integration.crm_integration.sales_order.set_pending_deposit_confirmation_on_submit",
+		"on_cancel": "crm_integration.crm_integration.sales_order.set_cancelled_process_status_on_cancel",
 	},
 	"Work Order": {
 		"validate": "crm_integration.crm_integration.work_order.validate_sales_order_process_status",

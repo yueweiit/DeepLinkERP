@@ -237,7 +237,7 @@ function add_production_flow_buttons(frm) {
 
 	if (frm.doc.docstatus === 1 && process_status === "Pending Final Payment") {
 		frm.add_custom_button(__("核销尾款"), function() {
-			reconcile_final_payment(frm);
+			confirm_reconcile_final_payment(frm);
 		});
 		apply_primary_action_style("核销尾款");
 	}
@@ -359,6 +359,7 @@ function get_process_status_color(process_status) {
 		"Deliverable": "blue",
 		"Completed": "green",
 		"Closed": "green",
+		"Cancelled": "red",
 	};
 
 	return color_map[process_status] || "gray";
@@ -394,6 +395,17 @@ function reject_sales_order(frm) {
 			});
 		}
 	);
+}
+
+function confirm_reconcile_final_payment(frm) {
+	const message = __("确认核销尾款？{0}/{1}", [
+		format_sales_order_currency(frm, frm.doc.advance_paid),
+		format_sales_order_currency(frm, frm.doc.grand_total)
+	]);
+
+	frappe.confirm(message, function() {
+		reconcile_final_payment(frm);
+	});
 }
 
 function reconcile_final_payment(frm) {

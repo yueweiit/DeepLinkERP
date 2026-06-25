@@ -39,14 +39,6 @@ sales_order_list_settings.before_render = function() {
 	}
 };
 
-sales_order_list_settings.refresh = function(listview) {
-	if (sales_order_list_refresh) {
-		sales_order_list_refresh(listview);
-	}
-
-	enforce_result_width(listview);
-};
-
 sales_order_list_settings.formatters = {
 	...(sales_order_list_settings.formatters || {}),
 	custom_process_status: function(value) {
@@ -60,6 +52,7 @@ sales_order_list_settings.formatters = {
 			"Deliverable": "blue",
 			"Completed": "green",
 			"Closed": "green",
+			"Cancelled": "red",
 		};
 
 		return `<span class="indicator-pill ${colors[status] || "gray"} no-indicator-dot">${__(status)}</span>`;
@@ -141,7 +134,6 @@ function load_sales_order_extra_columns(listview) {
 			listview,
 			listview._sales_order_extra_columns_details || {}
 		);
-		enforce_result_width(listview);
 		return;
 	}
 
@@ -159,33 +151,7 @@ function load_sales_order_extra_columns(listview) {
 			listview._sales_order_extra_columns_details = details;
 			apply_sales_order_extra_details(listview, details);
 			listview.render();
-			enforce_result_width(listview);
 		},
-	});
-}
-
-function enforce_result_width(listview) {
-	const $result = listview.$result;
-	if (!$result?.length) {
-		return;
-	}
-
-	window.requestAnimationFrame(() => {
-		const $rows = $result.find(".list-row-container");
-		if (!$rows.length) {
-			$result.css("min-width", "");
-			return;
-		}
-
-		const $result_container = $result.parent(".result-container");
-		const container_width = $result_container.get(0)?.clientWidth || 0;
-		const max_row_width = Array.from($rows).reduce(
-			(max, row) => Math.max(max, row.scrollWidth),
-			0
-		);
-		const result_width = Math.max(max_row_width, container_width);
-
-		$result.css("min-width", result_width ? `${result_width}px` : "");
 	});
 }
 
