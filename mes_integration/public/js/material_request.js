@@ -278,9 +278,9 @@ function add_custom_issue_stock_entry_button(frm) {
 	frm.remove_custom_button(__("提交并发料"));
 	frm.remove_custom_button(__("发料并推送至DLM"));
 
-	if (can_submit_issue_and_push_to_dlm(frm)) {
-		frm.add_custom_button(__("发料并推送至DLM"), function() {
-			submit_issue_and_push_to_dlm(frm);
+	if (can_submit_and_issue_material_request(frm)) {
+		frm.add_custom_button(__("提交并发料"), function() {
+			submit_and_issue_material_request(frm);
 		});
 		style_submit_and_issue_button(frm);
 		return;
@@ -294,6 +294,35 @@ function add_custom_issue_stock_entry_button(frm) {
 		open_issue_stock_entry(frm);
 	}, __("Create"));
 	frm.page.set_inner_btn_group_as_primary(__("Create"));
+}
+
+function can_submit_and_issue_material_request(frm) {
+	return (
+		frm &&
+		frm.doc &&
+		frm.doc.docstatus === 0 &&
+		!frm.is_new() &&
+		SUBMIT_AND_ISSUE_MATERIAL_REQUEST_TYPES.includes(frm.doc.material_request_type)
+	);
+}
+
+function submit_and_issue_material_request(frm) {
+	frappe.confirm(
+		__("确认提交此物料需求并立即发料？"),
+		function() {
+			frm._mes_submit_and_issue = true;
+			frm.save("Submit")
+				.then(function() {
+					frm._mes_submit_and_issue = false;
+					setTimeout(function() {
+						open_issue_stock_entry(frm);
+					}, 300);
+				})
+				.catch(function() {
+					frm._mes_submit_and_issue = false;
+				});
+		}
+	);
 }
 
 function can_submit_issue_and_push_to_dlm(frm) {
@@ -357,7 +386,7 @@ function submit_issue_and_push_to_dlm(frm) {
 
 function style_submit_and_issue_button(frm) {
 	requestAnimationFrame(function() {
-		const labels = [...new Set(["发料并推送至DLM", __("发料并推送至DLM")])];
+		const labels = [...new Set(["提交并发料", __("提交并发料")])];
 		const selector = labels
 			.map(function(label) {
 				return `.page-actions button[data-label="${encodeURIComponent(label)}"]`;
