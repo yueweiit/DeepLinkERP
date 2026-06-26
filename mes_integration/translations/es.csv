@@ -137,3 +137,4 @@
 "第 {0} 行本次发料数量 {1} 超过剩余数量 {2}","La cantidad a emitir {1} en la línea {0} supera la cantidad restante {2}"
 "需求数量","Cantidad requerida"
 "实际数量","Cantidad real"
+"预计剩余数量","Cantidad restante estimada"

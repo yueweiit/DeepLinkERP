@@ -404,6 +404,7 @@ function get_issue_and_push_dialog_rows(frm) {
 				qty: remaining_qty,
 				s_warehouse: get_default_issue_source_warehouse(frm, row),
 				actual_qty: 0,
+				projected_remaining_qty: 0 - remaining_qty,
 				t_warehouse: get_default_issue_target_warehouse(frm, row)
 			};
 		})
@@ -419,6 +420,9 @@ function get_issue_and_push_dialog_fields(frm, is_transfer) {
 	const update_actual_qty = function() {
 		update_issue_dialog_row_actual_qty(this && this.doc);
 	};
+	const update_projected_remaining_qty = function() {
+		update_issue_dialog_row_projected_remaining_qty(this && this.doc);
+	};
 
 	return [
 		{ fieldtype: "Data", fieldname: "material_request_item", label: __("Material Request Item"), hidden: 1, read_only: 1 },
@@ -428,9 +432,10 @@ function get_issue_and_push_dialog_fields(frm, is_transfer) {
 		{ fieldtype: "Float", fieldname: "requested_qty", label: __("需求数量"), in_list_view: 1, read_only: 1, columns: 1 },
 		{ fieldtype: "Float", fieldname: "issued_qty", label: __("已发料数量"), read_only: 1, columns: 1 },
 		{ fieldtype: "Float", fieldname: "remaining_qty", label: __("剩余数量"), in_list_view: 1, read_only: 1, columns: 1 },
-		{ fieldtype: "Float", fieldname: "qty", label: __("本次发料数量"), in_list_view: 1, reqd: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "qty", label: __("本次发料数量"), in_list_view: 1, reqd: 1, columns: 1, onchange: update_projected_remaining_qty },
 		{ fieldtype: "Link", fieldname: "s_warehouse", label: __("发料仓"), options: "Warehouse", in_list_view: 1, reqd: 1, columns: 2, get_query: warehouse_query, onchange: update_actual_qty },
 		{ fieldtype: "Float", fieldname: "actual_qty", label: __("实际数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "projected_remaining_qty", label: __("预计剩余数量"), in_list_view: 1, read_only: 1, columns: 1 },
 		{ fieldtype: "Link", fieldname: "t_warehouse", label: __("目标仓库"), options: "Warehouse", in_list_view: is_transfer ? 1 : 0, hidden: is_transfer ? 0 : 1, reqd: is_transfer ? 1 : 0, columns: 2, get_query: warehouse_query }
 	];
 }
@@ -463,6 +468,14 @@ function setup_issue_dialog_actual_qty_refresh(dialog) {
 	grid.wrapper.on("change", '[data-fieldname="s_warehouse"] input', function() {
 		setTimeout(function() {
 			refresh_issue_dialog_actual_qty(dialog);
+		}, 100);
+	});
+
+	grid.wrapper.on("change", '[data-fieldname="qty"] input', function() {
+		setTimeout(function() {
+			const rows = dialog.get_value("items") || [];
+			rows.forEach(update_issue_dialog_row_projected_remaining_qty);
+			grid.refresh();
 		}, 100);
 	});
 }
@@ -505,8 +518,21 @@ function set_issue_dialog_row_actual_qty(row, actual_qty) {
 	}
 
 	row.actual_qty = flt(actual_qty);
+	update_issue_dialog_row_projected_remaining_qty(row);
 	if (row.doctype && row.name && locals[row.doctype] && locals[row.doctype][row.name]) {
 		locals[row.doctype][row.name].actual_qty = row.actual_qty;
+		locals[row.doctype][row.name].projected_remaining_qty = row.projected_remaining_qty;
+	}
+}
+
+function update_issue_dialog_row_projected_remaining_qty(row) {
+	if (!row) {
+		return;
+	}
+
+	row.projected_remaining_qty = flt(row.actual_qty) - flt(row.qty);
+	if (row.doctype && row.name && locals[row.doctype] && locals[row.doctype][row.name]) {
+		locals[row.doctype][row.name].projected_remaining_qty = row.projected_remaining_qty;
 	}
 }
 
