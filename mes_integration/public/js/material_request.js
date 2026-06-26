@@ -282,6 +282,15 @@ function add_custom_issue_stock_entry_button(frm) {
 		frm.add_custom_button(__("提交并发料"), function() {
 			submit_and_issue_material_request(frm);
 		});
+	}
+
+	if (can_submit_issue_and_push_to_dlm(frm)) {
+		frm.add_custom_button(__("发料并推送至DLM"), function() {
+			submit_issue_and_push_to_dlm(frm);
+		});
+	}
+
+	if (can_submit_and_issue_material_request(frm) || can_submit_issue_and_push_to_dlm(frm)) {
 		style_submit_and_issue_button(frm);
 		return;
 	}
@@ -326,67 +335,334 @@ function submit_and_issue_material_request(frm) {
 }
 
 function can_submit_issue_and_push_to_dlm(frm) {
-	return (
-		frm &&
-		frm.doc &&
-		frm.doc.docstatus === 0 &&
-		!frm.is_new() &&
-		SUBMIT_AND_ISSUE_MATERIAL_REQUEST_TYPES.includes(frm.doc.material_request_type)
-	);
+	return can_create_issue_stock_entry(frm);
 }
 
 function submit_issue_and_push_to_dlm(frm) {
-	frappe.confirm(
-		__("确认提交此物料需求、发料并推送至 DLM？此操作将自动完成提交、发料、提交出库单和推送。"),
-		function() {
-			frm._mes_submit_and_issue = true;
-			frappe.call({
-				method: "mes_integration.mes_integration.material_request.submit_issue_and_push_to_dlm",
-				args: {
-					material_request_name: frm.doc.name
-				},
-				freeze: true,
-				freeze_message: __("正在提交、发料并推送至 DLM，请稍候..."),
-				callback: function(r) {
-					frm._mes_submit_and_issue = false;
+	const rows = get_issue_and_push_dialog_rows(frm);
+	if (!rows.length) {
+		frappe.msgprint({
+			title: __("提示"),
+			indicator: "orange",
+			message: __("没有可发料的明细")
+		});
+		return;
+	}
 
-					if (r.exc) {
-						return;
-					}
+	const is_transfer = frm.doc.material_request_type === "Material Transfer for Manufacture";
+	const dialog = new frappe.ui.Dialog({
+		title: __("发料并推送至DLM"),
+		size: "extra-large",
+		fields: [
+			{
+				fieldtype: "HTML",
+				fieldname: "message",
+				options: `<p class="text-muted">${__("请确认本次发料数量和发料仓，确认后将自动创建并提交物料移动，然后推送至 DLM。")}</p>`
+			},
+			{
+				fieldtype: "Table",
+				fieldname: "items",
+				label: __("物料"),
+				cannot_add_rows: true,
+				cannot_delete_rows: true,
+				in_place_edit: true,
+				data: rows,
+				fields: get_issue_and_push_dialog_fields(frm, is_transfer)
+			}
+		],
+		primary_action_label: __("确定"),
+		primary_action: function(values) {
+			const issue_rows = get_validated_issue_and_push_rows(values.items || [], is_transfer);
+			if (!issue_rows) {
+				return;
+			}
 
-					const result = r.message;
-					if (result.status === "success") {
-						frappe.msgprint({
-							title: __("成功"),
-							indicator: "green",
-							message: result.message
-						});
-					} else if (result.status === "partial") {
-						frappe.msgprint({
-							title: __("部分完成"),
-							indicator: "orange",
-							message: result.message
-						});
-					}
+			dialog.hide();
+			call_issue_and_push_to_dlm(frm, issue_rows);
+		}
+	});
 
-					frm.reload_doc();
-				},
-				error: function() {
-					frm._mes_submit_and_issue = false;
-					frappe.msgprint({
-						title: __("操作失败"),
-						indicator: "red",
-						message: __("提交、发料或推送过程中发生错误，请查看错误日志或联系管理员。")
-					});
-				}
+	dialog.show();
+	setup_issue_and_push_dialog_warehouse_queries(frm, dialog);
+	setup_issue_dialog_actual_qty_refresh(dialog);
+	refresh_issue_dialog_actual_qty(dialog);
+	dialog.$wrapper.addClass("mes-issue-push-dialog");
+}
+
+function get_issue_and_push_dialog_rows(frm) {
+	return (frm.doc.items || [])
+		.map(function(row) {
+			const remaining_qty = get_material_request_item_remaining_qty(row);
+			return {
+				material_request_item: row.name,
+				item_code: row.item_code,
+				item_name: row.item_name,
+				uom: row.uom || row.stock_uom,
+				requested_qty: flt(row.qty),
+				issued_qty: get_material_request_item_issued_qty(row),
+				remaining_qty: remaining_qty,
+				qty: remaining_qty,
+				s_warehouse: get_default_issue_source_warehouse(frm, row),
+				actual_qty: 0,
+				t_warehouse: get_default_issue_target_warehouse(frm, row)
+			};
+		})
+		.filter(function(row) {
+			return row.item_code && flt(row.remaining_qty) > 0;
+		});
+}
+
+function get_issue_and_push_dialog_fields(frm, is_transfer) {
+	const warehouse_query = function() {
+		return get_material_request_issue_warehouse_query(frm, this && this.doc);
+	};
+	const update_actual_qty = function() {
+		update_issue_dialog_row_actual_qty(this && this.doc);
+	};
+
+	return [
+		{ fieldtype: "Data", fieldname: "material_request_item", label: __("Material Request Item"), hidden: 1, read_only: 1 },
+		{ fieldtype: "Link", fieldname: "item_code", label: __("物料编码"), options: "Item", in_list_view: 1, read_only: 1, columns: 2 },
+		{ fieldtype: "Data", fieldname: "item_name", label: __("物料名称"), read_only: 1, columns: 2 },
+		{ fieldtype: "Data", fieldname: "uom", label: __("单位"), read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "requested_qty", label: __("需求数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "issued_qty", label: __("已发料数量"), read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "remaining_qty", label: __("剩余数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "qty", label: __("本次发料数量"), in_list_view: 1, reqd: 1, columns: 1 },
+		{ fieldtype: "Link", fieldname: "s_warehouse", label: __("发料仓"), options: "Warehouse", in_list_view: 1, reqd: 1, columns: 2, get_query: warehouse_query, onchange: update_actual_qty },
+		{ fieldtype: "Float", fieldname: "actual_qty", label: __("实际数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Link", fieldname: "t_warehouse", label: __("目标仓库"), options: "Warehouse", in_list_view: is_transfer ? 1 : 0, hidden: is_transfer ? 0 : 1, reqd: is_transfer ? 1 : 0, columns: 2, get_query: warehouse_query }
+	];
+}
+
+function setup_issue_and_push_dialog_warehouse_queries(frm, dialog) {
+	const grid = dialog.fields_dict.items && dialog.fields_dict.items.grid;
+	if (!grid) {
+		return;
+	}
+
+	["s_warehouse", "t_warehouse"].forEach(function(fieldname) {
+		const field = grid.get_field(fieldname);
+		if (!field) {
+			return;
+		}
+
+		field.get_query = function(doc, cdt, cdn) {
+			const row = get_issue_dialog_grid_row_doc(grid, cdt, cdn) || (this && this.doc);
+			return get_material_request_issue_warehouse_query(frm, row);
+		};
+	});
+}
+
+function setup_issue_dialog_actual_qty_refresh(dialog) {
+	const grid = dialog.fields_dict.items && dialog.fields_dict.items.grid;
+	if (!grid) {
+		return;
+	}
+
+	grid.wrapper.on("change", '[data-fieldname="s_warehouse"] input', function() {
+		setTimeout(function() {
+			refresh_issue_dialog_actual_qty(dialog);
+		}, 100);
+	});
+}
+
+function refresh_issue_dialog_actual_qty(dialog) {
+	const grid = dialog.fields_dict.items && dialog.fields_dict.items.grid;
+	const rows = dialog.get_value("items") || [];
+	const promises = rows.map(function(row) {
+		return update_issue_dialog_row_actual_qty(row);
+	});
+
+	Promise.all(promises).then(function() {
+		if (grid) {
+			grid.refresh();
+		}
+	});
+}
+
+function update_issue_dialog_row_actual_qty(row) {
+	if (!row || !row.item_code || !row.s_warehouse) {
+		set_issue_dialog_row_actual_qty(row, 0);
+		return Promise.resolve();
+	}
+
+	return frappe.call({
+		method: "mes_integration.mes_integration.material_request.get_item_warehouse_actual_qty",
+		args: {
+			item_code: row.item_code,
+			warehouse: row.s_warehouse
+		},
+		callback: function(r) {
+			set_issue_dialog_row_actual_qty(row, flt(r.message));
+		}
+	});
+}
+
+function set_issue_dialog_row_actual_qty(row, actual_qty) {
+	if (!row) {
+		return;
+	}
+
+	row.actual_qty = flt(actual_qty);
+	if (row.doctype && row.name && locals[row.doctype] && locals[row.doctype][row.name]) {
+		locals[row.doctype][row.name].actual_qty = row.actual_qty;
+	}
+}
+
+function get_issue_dialog_grid_row_doc(grid, cdt, cdn) {
+	if (cdn && grid.grid_rows_by_docname && grid.grid_rows_by_docname[cdn]) {
+		return grid.grid_rows_by_docname[cdn].doc;
+	}
+
+	if (cdt && cdn && locals[cdt] && locals[cdt][cdn]) {
+		return locals[cdt][cdn];
+	}
+
+	return null;
+}
+
+function get_material_request_issue_warehouse_query(frm, row) {
+	return {
+		query: "mes_integration.mes_integration.material_request.issue_warehouse_query",
+		filters: {
+			company: frm.doc.company,
+			item_code: row && row.item_code ? row.item_code : ""
+		}
+	};
+}
+
+function get_validated_issue_and_push_rows(rows, is_transfer) {
+	const issue_rows = [];
+	for (const [index, row] of rows.entries()) {
+		const qty = flt(row.qty);
+		if (qty <= 0) {
+			continue;
+		}
+
+		if (qty > flt(row.remaining_qty)) {
+			frappe.msgprint({
+				title: __("操作失败"),
+				indicator: "red",
+				message: __("第 {0} 行本次发料数量不能超过剩余数量", [index + 1])
+			});
+			return null;
+		}
+
+		if (!row.s_warehouse) {
+			frappe.msgprint({
+				title: __("操作失败"),
+				indicator: "red",
+				message: __("第 {0} 行缺少发料仓", [index + 1])
+			});
+			return null;
+		}
+
+		if (is_transfer && !row.t_warehouse) {
+			frappe.msgprint({
+				title: __("操作失败"),
+				indicator: "red",
+				message: __("第 {0} 行缺少目标仓库", [index + 1])
+			});
+			return null;
+		}
+
+		issue_rows.push({
+			material_request_item: row.material_request_item,
+			item_code: row.item_code,
+			qty: qty,
+			s_warehouse: row.s_warehouse,
+			t_warehouse: row.t_warehouse
+		});
+	}
+
+	if (!issue_rows.length) {
+		frappe.msgprint({
+			title: __("提示"),
+			indicator: "orange",
+			message: __("没有可发料的明细")
+		});
+		return null;
+	}
+
+	return issue_rows;
+}
+
+function call_issue_and_push_to_dlm(frm, issue_rows) {
+	frappe.call({
+		method: "mes_integration.mes_integration.material_request.issue_and_push_to_dlm_from_dialog",
+		args: {
+			material_request_name: frm.doc.name,
+			items: issue_rows
+		},
+		freeze: true,
+		freeze_message: __("正在创建物料移动并推送至 DLM，请稍候..."),
+		callback: function(r) {
+			if (r.exc) {
+				return;
+			}
+
+			const result = r.message || {};
+			if (result.status === "success") {
+				frappe.msgprint({
+					title: __("成功"),
+					indicator: "green",
+					message: result.message
+				});
+			} else if (result.status === "partial") {
+				frappe.msgprint({
+					title: __("部分完成"),
+					indicator: "orange",
+					message: result.message
+				});
+			}
+
+			frm.reload_doc();
+		},
+		error: function() {
+			frappe.msgprint({
+				title: __("操作失败"),
+				indicator: "red",
+				message: __("发料或推送过程中发生错误，请查看错误日志或联系管理员。")
 			});
 		}
-	);
+	});
+}
+
+function get_material_request_item_remaining_qty(row) {
+	const conversion_factor = flt(row.conversion_factor) || 1;
+	const requested_stock_qty = flt(row.stock_qty) || flt(row.qty) * conversion_factor;
+	const issued_stock_qty = flt(row.custom_transferred_qty || row.ordered_qty);
+	return flt(Math.max(requested_stock_qty - issued_stock_qty, 0) / conversion_factor);
+}
+
+function get_material_request_item_issued_qty(row) {
+	const conversion_factor = flt(row.conversion_factor) || 1;
+	return flt(row.custom_transferred_qty || row.ordered_qty) / conversion_factor;
+}
+
+function get_default_issue_source_warehouse(frm, row) {
+	if (frm.doc.material_request_type === "Material Transfer for Manufacture") {
+		return row.from_warehouse || frm.doc.set_from_warehouse || "";
+	}
+
+	return row.warehouse || row.from_warehouse || frm.doc.set_warehouse || frm.doc.set_from_warehouse || "";
+}
+
+function get_default_issue_target_warehouse(frm, row) {
+	if (frm.doc.material_request_type !== "Material Transfer for Manufacture") {
+		return "";
+	}
+
+	return row.warehouse || frm.doc.set_warehouse || "";
 }
 
 function style_submit_and_issue_button(frm) {
 	requestAnimationFrame(function() {
-		const labels = [...new Set(["提交并发料", __("提交并发料")])];
+		const labels = [...new Set([
+			"提交并发料", __("提交并发料"),
+			"发料并推送至DLM", __("发料并推送至DLM")
+		])];
 		const selector = labels
 			.map(function(label) {
 				return `.page-actions button[data-label="${encodeURIComponent(label)}"]`;
