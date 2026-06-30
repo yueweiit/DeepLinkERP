@@ -364,7 +364,6 @@ function submit_issue_and_push_to_dlm(frm) {
 				fieldname: "items",
 				label: __("物料"),
 				cannot_add_rows: true,
-				cannot_delete_rows: true,
 				in_place_edit: true,
 				data: rows,
 				fields: get_issue_and_push_dialog_fields(frm, is_transfer)
@@ -404,7 +403,7 @@ function get_issue_and_push_dialog_rows(frm) {
 				qty: remaining_qty,
 				s_warehouse: get_default_issue_source_warehouse(frm, row),
 				actual_qty: 0,
-				projected_remaining_qty: 0 - remaining_qty,
+				projected_remaining_qty: 0,
 				t_warehouse: get_default_issue_target_warehouse(frm, row)
 			};
 		})

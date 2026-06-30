@@ -138,3 +138,5 @@
 "需求数量","Cantidad requerida"
 "实际数量","Cantidad real"
 "预计剩余数量","Cantidad restante estimada"
+"物料需求明细 {0} 在本次发料中重复","La línea de solicitud de materiales {0} está duplicada en esta emisión"
+"第 {0} 行物料 {1} 发料数量 {2} 超过仓库 {3} 实际数量 {4}","La cantidad a emitir {2} del artículo {1} en la línea {0} supera la cantidad real {4} del almacén {3}"

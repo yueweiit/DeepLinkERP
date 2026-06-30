@@ -290,6 +290,8 @@ def issue_and_push_to_dlm_from_dialog(material_request_name, items=None):
     """Create, submit and push a Stock Entry from editable Material Request issue rows."""
     from mes_integration.mes_integration.stock_entry import push_to_mes
 
+    lock_material_request_for_issue(material_request_name)
+
     mr = frappe.get_doc("Material Request", material_request_name)
     validate_material_request_can_issue_to_dlm(mr)
 
@@ -320,6 +322,17 @@ def issue_and_push_to_dlm_from_dialog(material_request_name, items=None):
     }
 
 
+def lock_material_request_for_issue(material_request_name):
+    frappe.db.sql(
+        "SELECT name FROM `tabMaterial Request` WHERE name = %s FOR UPDATE",
+        material_request_name,
+    )
+    frappe.db.sql(
+        "SELECT name FROM `tabMaterial Request Item` WHERE parent = %s FOR UPDATE",
+        material_request_name,
+    )
+
+
 def validate_material_request_can_issue_to_dlm(mr):
     if mr.docstatus != 1:
         frappe.throw(_("物料需求必须已提交"))
@@ -346,6 +359,10 @@ def build_stock_entry_from_material_request_issue_rows(mr, issue_rows):
         frappe.throw(_("没有可发料的明细"))
 
     mr_items = {row.name: row for row in mr.get("items", [])}
+    real_time_issued_stock_qty = get_realtime_issued_stock_qty_by_mr_item(mr_items.keys())
+    validate_issue_dialog_rows_not_duplicated(issue_rows)
+    validate_issue_dialog_stock_availability(issue_rows, mr_items)
+
     stock_entry = frappe.new_doc("Stock Entry")
     stock_entry.company = mr.company
     stock_entry.stock_entry_type = get_stock_entry_type(mr)
@@ -356,7 +373,7 @@ def build_stock_entry_from_material_request_issue_rows(mr, issue_rows):
         stock_entry.to_warehouse = get_stock_entry_target_warehouse(mr, issue_rows, mr_items)
 
     for index, issue_row in enumerate(issue_rows, start=1):
-        mr_item = validate_issue_dialog_row(mr, mr_items, issue_row, index)
+        mr_item = validate_issue_dialog_row(mr, mr_items, issue_row, index, real_time_issued_stock_qty)
         qty = flt(issue_row.get("qty"))
         conversion_factor = flt(mr_item.get("conversion_factor")) or 1
         stock_entry.append(
@@ -385,7 +402,7 @@ def build_stock_entry_from_material_request_issue_rows(mr, issue_rows):
     return stock_entry
 
 
-def validate_issue_dialog_row(mr, mr_items, issue_row, index):
+def validate_issue_dialog_row(mr, mr_items, issue_row, index, real_time_issued_stock_qty=None):
     mr_item_name = issue_row.get("material_request_item")
     if not mr_item_name or mr_item_name not in mr_items:
         frappe.throw(_("第 {0} 行物料需求明细不存在或不属于当前物料需求").format(index))
@@ -398,7 +415,7 @@ def validate_issue_dialog_row(mr, mr_items, issue_row, index):
     if qty <= 0:
         frappe.throw(_("第 {0} 行本次发料数量必须大于 0").format(index))
 
-    remaining_qty = get_material_request_item_remaining_qty(mr_item)
+    remaining_qty = get_material_request_item_remaining_qty(mr_item, real_time_issued_stock_qty)
     if qty > remaining_qty:
         frappe.throw(
             _("第 {0} 行本次发料数量 {1} 超过剩余数量 {2}").format(
@@ -417,10 +434,89 @@ def validate_issue_dialog_row(mr, mr_items, issue_row, index):
     return mr_item
 
 
-def get_material_request_item_remaining_qty(mr_item):
+def validate_issue_dialog_rows_not_duplicated(issue_rows):
+    seen = set()
+    for row in issue_rows:
+        mr_item_name = row.get("material_request_item")
+        if not mr_item_name:
+            continue
+
+        if mr_item_name in seen:
+            frappe.throw(_("物料需求明细 {0} 在本次发料中重复").format(mr_item_name))
+
+        seen.add(mr_item_name)
+
+
+def validate_issue_dialog_stock_availability(issue_rows, mr_items):
+    requested_stock_qty_by_item_warehouse = {}
+    row_indexes_by_item_warehouse = {}
+
+    for index, row in enumerate(issue_rows, start=1):
+        mr_item = mr_items.get(row.get("material_request_item"))
+        if not mr_item or not row.get("s_warehouse"):
+            continue
+
+        conversion_factor = flt(mr_item.get("conversion_factor")) or 1
+        key = (mr_item.item_code, row.get("s_warehouse"))
+        requested_stock_qty_by_item_warehouse[key] = flt(
+            requested_stock_qty_by_item_warehouse.get(key)
+        ) + flt(row.get("qty")) * conversion_factor
+        row_indexes_by_item_warehouse.setdefault(key, []).append(index)
+
+    for (item_code, warehouse), requested_stock_qty in requested_stock_qty_by_item_warehouse.items():
+        actual_qty = get_item_warehouse_actual_qty(item_code, warehouse)
+        if requested_stock_qty > actual_qty:
+            frappe.throw(
+                _("第 {0} 行物料 {1} 发料数量 {2} 超过仓库 {3} 实际数量 {4}").format(
+                    ", ".join(str(row_index) for row_index in row_indexes_by_item_warehouse[(item_code, warehouse)]),
+                    item_code,
+                    flt(requested_stock_qty),
+                    warehouse,
+                    flt(actual_qty),
+                )
+            )
+
+
+def get_realtime_issued_stock_qty_by_mr_item(mr_item_names):
+    mr_item_names = tuple(mr_item_names or [])
+    if not mr_item_names:
+        return {}
+
+    placeholders = ", ".join(["%s"] * len(mr_item_names))
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            sed.material_request_item,
+            SUM(
+                CASE
+                    WHEN IFNULL(se.is_return, 0) = 1 THEN -IFNULL(sed.transfer_qty, 0)
+                    ELSE IFNULL(sed.transfer_qty, 0)
+                END
+            ) AS issued_stock_qty
+        FROM `tabStock Entry Detail` sed
+        INNER JOIN `tabStock Entry` se ON se.name = sed.parent
+        WHERE sed.material_request_item IN ({placeholders})
+            AND sed.docstatus = 1
+            AND se.docstatus = 1
+            AND IFNULL(sed.s_warehouse, '') != ''
+        GROUP BY sed.material_request_item
+        """,
+        mr_item_names,
+        as_dict=True,
+    )
+
+    return {row.material_request_item: flt(row.issued_stock_qty) for row in rows}
+
+
+def get_material_request_item_remaining_qty(mr_item, real_time_issued_stock_qty=None):
     conversion_factor = flt(mr_item.get("conversion_factor")) or 1
     requested_stock_qty = flt(mr_item.get("stock_qty")) or flt(mr_item.get("qty")) * conversion_factor
-    issued_stock_qty = flt(mr_item.get("custom_transferred_qty") or mr_item.get("ordered_qty"))
+
+    if real_time_issued_stock_qty is not None:
+        issued_stock_qty = flt(real_time_issued_stock_qty.get(mr_item.name))
+    else:
+        issued_stock_qty = flt(mr_item.get("custom_transferred_qty") or mr_item.get("ordered_qty"))
+
     remaining_stock_qty = max(requested_stock_qty - issued_stock_qty, 0)
     return flt(remaining_stock_qty / conversion_factor)
 
