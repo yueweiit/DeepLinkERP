@@ -1,5 +1,7 @@
 import frappe
 
+from crm_integration.crm_integration.settings import is_crm_integration_enabled
+
 
 CRM_SYSTEM_USER = "crm system"
 
@@ -79,6 +81,9 @@ def as_json(value):
 
 
 def log_inbound_sales_order(doc, method=None):
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	create_crm_log(
 		direction="Inbound",
 		event="Sales Order Created",

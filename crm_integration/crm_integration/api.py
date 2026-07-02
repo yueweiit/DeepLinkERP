@@ -3,6 +3,7 @@ from frappe import _
 
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from crm_integration.crm_integration.sales_order import PENDING_DEPOSIT_CONFIRMATION
+from crm_integration.crm_integration.settings import is_crm_integration_enabled, throw_crm_integration_disabled
 
 
 @frappe.whitelist(methods=["POST"])
@@ -10,6 +11,8 @@ def create_and_submit_sales_order(sales_order=None):
 	"""Create a Sales Order from an external system and submit it immediately."""
 	payload = get_request_payload(sales_order)
 	validate_sales_order_payload(payload)
+	if not is_crm_integration_enabled(payload.get("company")):
+		throw_crm_integration_disabled(payload.get("company"))
 	ensure_sales_persons_exist(payload)
 
 	crm_log = create_crm_log(

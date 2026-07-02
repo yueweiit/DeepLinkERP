@@ -1,6 +1,7 @@
 import frappe
 from frappe import _
 
+from crm_integration.crm_integration.settings import is_crm_integration_enabled
 from crm_integration.crm_integration.sales_order import (
 	DELIVERABLE,
 	PENDING_FINAL_PAYMENT,
@@ -14,6 +15,9 @@ DRAFT_ALLOWED_STATUSES = (PENDING_PRODUCTION, PENDING_FINAL_PAYMENT, DELIVERABLE
 
 
 def validate_sales_order_process_status(doc, method=None):
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	validate_linked_sales_orders_in_statuses(
 		doc,
 		DRAFT_ALLOWED_STATUSES,
@@ -22,6 +26,9 @@ def validate_sales_order_process_status(doc, method=None):
 
 
 def validate_sales_order_deliverable_before_submit(doc, method=None):
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	validate_linked_sales_orders_in_statuses(
 		doc,
 		(DELIVERABLE,),
@@ -30,6 +37,9 @@ def validate_sales_order_deliverable_before_submit(doc, method=None):
 
 
 def set_pending_final_payment_before_insert(doc, method=None):
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	for sales_order in get_linked_sales_orders(doc):
 		process_status = frappe.db.get_value("Sales Order", sales_order, "custom_process_status")
 		if process_status == PENDING_PRODUCTION:
@@ -37,6 +47,9 @@ def set_pending_final_payment_before_insert(doc, method=None):
 
 
 def rollback_pending_final_payment_on_trash(doc, method=None):
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	if doc.docstatus != 0:
 		return
 
@@ -52,6 +65,9 @@ def rollback_pending_final_payment_on_trash(doc, method=None):
 
 
 def mark_sales_orders_completed_on_submit(doc, method=None):
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	sales_orders = get_linked_sales_orders(doc)
 	if not sales_orders:
 		return

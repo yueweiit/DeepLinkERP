@@ -18,7 +18,8 @@ function set_sales_order_query(frm) {
 			return {
 				query: "crm_integration.crm_integration.work_order.query_sales_order",
 				filters: {
-					production_item: frm.doc.production_item
+					production_item: frm.doc.production_item,
+					company: frm.doc.company
 				}
 			};
 		}
@@ -26,7 +27,6 @@ function set_sales_order_query(frm) {
 		return {
 			filters: {
 				docstatus: 1,
-				custom_process_status: "Pending Production",
 				status: ["not in", ["Closed", "On Hold"]]
 			}
 		};

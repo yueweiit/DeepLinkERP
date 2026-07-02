@@ -7,6 +7,9 @@ from frappe.utils.data import get_datetime
 
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
+from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
+
+from crm_integration.crm_integration.settings import is_crm_integration_enabled, throw_crm_integration_disabled
 
 
 PENDING_CONFIRMATION = "Pending Confirmation"
@@ -101,6 +104,9 @@ def set_first_product(details, sales_orders):
 
 def set_process_status(sales_order, process_status, status=None):
 	"""Update process status without running the full Sales Order save cycle."""
+	if not is_crm_integration_enabled(sales_order.get("company")):
+		return
+
 	sales_order.db_set("custom_process_status", process_status, update_modified=True)
 	if status:
 		sales_order.db_set("status", status, update_modified=True)
@@ -150,6 +156,9 @@ def get_crm_status_event(external_status):
 
 
 def push_sales_order_status_to_crm(sales_order, external_status, remark=None):
+	if not is_crm_integration_enabled(sales_order.get("company")):
+		throw_crm_integration_disabled(sales_order.get("company"))
+
 	external_order_id = sales_order.get("custom_crm_order_no")
 	if not external_order_id:
 		frappe.throw(_("缺少 CRM 订单编号，无法推送状态到 CRM。"))
@@ -250,6 +259,9 @@ def get_mes_sales_order_push_authorization():
 
 
 def push_sales_order_to_mes(sales_order):
+	if not is_mes_integration_enabled(sales_order.get("company")):
+		throw_mes_integration_disabled(sales_order.get("company"))
+
 	payload = None
 	request_url = None
 	mes_log = None
@@ -463,6 +475,8 @@ def compact_dict(data):
 def reject_sales_order(sales_order_name, remark=None):
 	"""Reject and cancel a submitted Sales Order while it is waiting for deposit confirmation."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	if not is_crm_integration_enabled(sales_order.get("company")):
+		throw_crm_integration_disabled(sales_order.get("company"))
 	assert_sales_order_not_closed(sales_order)
 
 	if sales_order.docstatus != 1:
@@ -489,6 +503,9 @@ def reject_sales_order(sales_order_name, remark=None):
 
 def set_pending_deposit_confirmation_on_submit(doc, method=None):
 	"""Move the production flow forward after the native ERPNext submit succeeds."""
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	if doc.get("custom_process_status") == REJECTED:
 		return
 
@@ -499,6 +516,9 @@ def set_pending_deposit_confirmation_on_submit(doc, method=None):
 
 def set_cancelled_process_status_on_cancel(doc, method=None):
 	"""Keep the custom production flow status aligned with native cancellation."""
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	doc.db_set("custom_process_status", CANCELLED, update_modified=True)
 	doc.custom_process_status = CANCELLED
 	doc.notify_update()
@@ -506,6 +526,9 @@ def set_cancelled_process_status_on_cancel(doc, method=None):
 
 def prevent_rejected_sales_order_submit(doc, method=None):
 	"""Rejected CRM/MES flow orders must not be submitted later."""
+	if not is_crm_integration_enabled(doc.get("company")):
+		return
+
 	if doc.get("custom_process_status") == REJECTED:
 		frappe.throw(_("已驳回的销售订单不能提交。"))
 
@@ -514,6 +537,8 @@ def prevent_rejected_sales_order_submit(doc, method=None):
 def confirm_deposit_and_push_to_mes(sales_order_name):
 	"""Confirm deposit, notify CRM, and push the Sales Order to MES."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	if not is_crm_integration_enabled(sales_order.get("company")):
+		throw_crm_integration_disabled(sales_order.get("company"))
 	assert_sales_order_not_closed(sales_order)
 
 	if sales_order.docstatus != 1:
@@ -538,6 +563,8 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 def reconcile_final_payment(sales_order_name):
 	"""Release Sales Order for delivery after final payment is fully covered by advances."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	if not is_crm_integration_enabled(sales_order.get("company")):
+		throw_crm_integration_disabled(sales_order.get("company"))
 	assert_sales_order_not_closed(sales_order)
 
 	if sales_order.docstatus != 1:

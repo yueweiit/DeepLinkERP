@@ -1,6 +1,19 @@
+function load_crm_integration_enabled(frm) {
+	if (!frm || !frm.doc || !frm.doc.company) {
+		return Promise.resolve(false);
+	}
+	return frappe.db.get_value("Company", frm.doc.company, "custom_enable_crm_integration").then(function(r) {
+		return cint(r && r.message ? r.message.custom_enable_crm_integration : 0) === 1;
+	});
+}
+
 frappe.ui.form.on("Delivery Note", {
 	refresh: function(frm) {
-		restrict_sales_order_item_selection(frm);
+		load_crm_integration_enabled(frm).then(function(enabled) {
+			if (enabled) {
+				restrict_sales_order_item_selection(frm);
+			}
+		});
 	}
 });
 

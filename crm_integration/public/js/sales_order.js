@@ -1,26 +1,23 @@
 // Sales Order production flow actions
 frappe.ui.form.on("Sales Order", {
 	onload: function(frm) {
-		install_work_order_creation_guard(frm);
-		install_production_plan_creation_guard(frm);
-		install_delivery_note_creation_guard(frm);
-		install_sales_invoice_source_tracker(frm);
-		add_production_flow_buttons(frm);
-		display_process_status(frm);
-		render_payment_entry_link_in_details(frm);
-		restrict_fulfillment_creation(frm);
+		load_crm_integration_enabled(frm).then(function() {
+			refresh_crm_integration_ui(frm);
+		});
 	},
 
 	refresh: function(frm) {
-		hide_submit_for_rejected_sales_order(frm);
-		install_work_order_creation_guard(frm);
-		install_production_plan_creation_guard(frm);
-		install_delivery_note_creation_guard(frm);
-		install_sales_invoice_source_tracker(frm);
-		add_production_flow_buttons(frm);
-		display_process_status(frm);
-		render_payment_entry_link_in_details(frm);
-		restrict_fulfillment_creation(frm);
+		load_crm_integration_enabled(frm).then(function() {
+			refresh_crm_integration_ui(frm);
+		});
+	},
+
+	company: function(frm) {
+		frm._crm_integration_company = null;
+		frm._crm_integration_enabled = false;
+		load_crm_integration_enabled(frm).then(function() {
+			refresh_crm_integration_ui(frm);
+		});
 	},
 
 	dashboard_update: function(frm) {
@@ -40,7 +37,51 @@ $(document).on("page-change", function() {
 	$(".process-status-badge").remove();
 });
 
+
+function load_crm_integration_enabled(frm) {
+	if (!frm || !frm.doc || !frm.doc.company) {
+		frm._crm_integration_enabled = false;
+		return Promise.resolve(false);
+	}
+
+	if (frm._crm_integration_company === frm.doc.company) {
+		return Promise.resolve(Boolean(frm._crm_integration_enabled));
+	}
+
+	frm._crm_integration_company = frm.doc.company;
+	return frappe.db.get_value("Company", frm.doc.company, "custom_enable_crm_integration").then(function(r) {
+		const value = r && r.message ? r.message.custom_enable_crm_integration : 0;
+		frm._crm_integration_enabled = cint(value) === 1;
+		return frm._crm_integration_enabled;
+	});
+}
+
+function is_crm_integration_enabled(frm) {
+	return Boolean(frm && frm._crm_integration_enabled);
+}
+
+function refresh_crm_integration_ui(frm) {
+	cleanup_reject_cancel_button(frm);
+	if (!is_crm_integration_enabled(frm)) {
+		$(".process-status-badge").remove();
+		$(".crm-payment-entry-link-wrapper").remove();
+		return;
+	}
+
+	hide_submit_for_rejected_sales_order(frm);
+	install_delivery_note_creation_guard(frm);
+	install_sales_invoice_source_tracker(frm);
+	add_production_flow_buttons(frm);
+	display_process_status(frm);
+	render_payment_entry_link_in_details(frm);
+	restrict_fulfillment_creation(frm);
+}
+
 function hide_submit_for_rejected_sales_order(frm) {
+	if (!is_crm_integration_enabled(frm)) {
+		return;
+	}
+
 	if (!frm || !frm.doc || frm.doc.custom_process_status !== "Rejected") {
 		return;
 	}
@@ -89,51 +130,6 @@ function remember_sales_invoice_source_sales_order(frm, sales_invoice_name) {
 	);
 }
 
-function install_work_order_creation_guard(frm) {
-	if (!frm || !frm.cscript || frm._crm_work_order_guard_installed) {
-		return;
-	}
-
-	const original_make_work_order = frm.cscript.make_work_order;
-	if (typeof original_make_work_order !== "function") {
-		return;
-	}
-
-	frm._crm_work_order_guard_installed = true;
-	frm.cscript.make_work_order = function() {
-		if (frm.doc.custom_process_status !== "Pending Production") {
-			frappe.msgprint({
-				title: __("无法创建工单"),
-				indicator: "orange",
-				message: __("只有流程状态为 Pending Production 的销售订单才可以创建工单。")
-			});
-			return;
-		}
-
-		return original_make_work_order.apply(this, arguments);
-	};
-}
-
-function install_production_plan_creation_guard(frm) {
-	if (!frm || !frm.cscript || frm._crm_production_plan_guard_installed) {
-		return;
-	}
-
-	const original_make_production_plan = frm.cscript.make_production_plan;
-	if (typeof original_make_production_plan !== "function") {
-		return;
-	}
-
-	frm._crm_production_plan_guard_installed = true;
-	frm.cscript.make_production_plan = function() {
-		if (!can_create_production_document(frm)) {
-			show_production_block_message(__("无法创建生产计划"));
-			return;
-		}
-
-		return original_make_production_plan.apply(this, arguments);
-	};
-}
 
 function install_delivery_note_creation_guard(frm) {
 	if (!frm || !frm.cscript || frm._crm_delivery_note_guard_installed) {
@@ -146,7 +142,7 @@ function install_delivery_note_creation_guard(frm) {
 
 	if (typeof original_make_delivery_note_based_on_delivery_date === "function") {
 		frm.cscript.make_delivery_note_based_on_delivery_date = function() {
-			if (!can_create_delivery_note(frm)) {
+			if (is_crm_integration_enabled(frm) && !can_create_delivery_note(frm)) {
 				show_delivery_note_block_message();
 				return;
 			}
@@ -157,7 +153,7 @@ function install_delivery_note_creation_guard(frm) {
 
 	if (typeof original_make_delivery_note === "function") {
 		frm.cscript.make_delivery_note = function() {
-			if (!can_create_delivery_note(frm)) {
+			if (is_crm_integration_enabled(frm) && !can_create_delivery_note(frm)) {
 				show_delivery_note_block_message();
 				return;
 			}
@@ -170,16 +166,15 @@ function install_delivery_note_creation_guard(frm) {
 }
 
 function restrict_fulfillment_creation(frm) {
+	if (!is_crm_integration_enabled(frm)) {
+		return;
+	}
+
 	if (!frm || !frm.doc) {
 		return;
 	}
 
 	const remove_buttons = function() {
-		if (frm.doc.custom_process_status !== "Pending Production") {
-			frm.remove_custom_button(__("Work Order"), __("Create"));
-			frm.remove_custom_button(__("Production Plan"), __("Create"));
-		}
-
 		if (!can_create_delivery_note(frm)) {
 			frm.remove_custom_button(__("Delivery Note"), __("Create"));
 		}
@@ -190,17 +185,6 @@ function restrict_fulfillment_creation(frm) {
 	setTimeout(remove_buttons, 300);
 }
 
-function can_create_production_document(frm) {
-	return frm.doc.custom_process_status === "Pending Production";
-}
-
-function show_production_block_message(title) {
-	frappe.msgprint({
-		title: title,
-		indicator: "orange",
-		message: __("只有流程状态为 Pending Production 的销售订单才可以创建生产计划或工单。")
-	});
-}
 
 function can_create_delivery_note(frm) {
 	return frm.doc.custom_process_status === "Deliverable";
@@ -215,6 +199,10 @@ function show_delivery_note_block_message() {
 }
 
 function add_production_flow_buttons(frm) {
+	if (!is_crm_integration_enabled(frm)) {
+		return;
+	}
+
 	cleanup_reject_cancel_button(frm);
 
 	if (!frm || !frm.doc || frm.doc.__islocal) {
@@ -321,6 +309,10 @@ function replace_cancel_button_with_reject(frm) {
 }
 
 function display_process_status(frm) {
+	if (!is_crm_integration_enabled(frm)) {
+		return;
+	}
+
 	const currentUrl = window.location.pathname;
 	if (!currentUrl || currentUrl === "/desk/sales-order") {
 		$(".process-status-badge").remove();
@@ -501,6 +493,10 @@ function format_sales_order_currency(frm, value) {
 
 
 function render_payment_entry_link_in_details(frm) {
+	if (!is_crm_integration_enabled(frm)) {
+		return;
+	}
+
 	$(".crm-payment-entry-link-wrapper").remove();
 
 	if (!frm || frm.doctype !== "Sales Order" || !frm.doc || frm.doc.__islocal) {

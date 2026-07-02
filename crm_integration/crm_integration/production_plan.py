@@ -1,18 +1,13 @@
 import json
 
 import frappe
-from frappe import _
 from pypika.terms import ExistsCriterion
 
 from erpnext.selling.doctype.sales_order.sales_order import make_production_plan as native_make_production_plan
 
 
-PENDING_PRODUCTION = "Pending Production"
-
-
 @frappe.whitelist()
 def make_production_plan(source_name, target_doc=None):
-	validate_single_sales_order_for_production(source_name)
 	return native_make_production_plan(source_name, target_doc)
 
 
@@ -44,12 +39,13 @@ def sales_order_query(doctype=None, txt=None, searchfield=None, start=None, page
 		.where(
 			(table.qty > table.production_plan_qty)
 			& (table.docstatus == 1)
-			& (so_table.custom_process_status == PENDING_PRODUCTION)
 		)
 	)
 
 	if filters.get("company"):
 		query = query.where(so_table.company == filters.get("company"))
+
+	query = query.where(so_table.status.notin(["Stopped", "Closed", "On Hold"]))
 
 	if filters.get("sales_orders"):
 		query = query.where(so_table.name.isin(filters.get("sales_orders")))
@@ -102,7 +98,6 @@ def get_sales_orders(doc):
 			(so_item.parent == so.name)
 			& (so.docstatus == 1)
 			& (so.status.notin(["Stopped", "Closed"]))
-			& (so.custom_process_status == PENDING_PRODUCTION)
 			& (so.company == doc.company)
 			& (so_item.qty > so_item.production_plan_qty)
 		)
@@ -136,47 +131,3 @@ def get_sales_orders(doc):
 
 	return open_so_query.run(as_dict=True)
 
-
-def validate_sales_order_process_status(doc, method=None):
-	sales_orders = set()
-
-	for row in doc.get("sales_orders", []):
-		if row.sales_order:
-			sales_orders.add(row.sales_order)
-
-	for row in doc.get("po_items", []):
-		if row.sales_order:
-			sales_orders.add(row.sales_order)
-
-	invalid_sales_orders = get_invalid_sales_orders(sales_orders)
-	if invalid_sales_orders:
-		frappe.throw(
-			_("以下销售订单未放行生产，不能创建或保存生产计划：{0}").format(
-				", ".join(invalid_sales_orders)
-			)
-		)
-
-
-def validate_single_sales_order_for_production(sales_order):
-	invalid_sales_orders = get_invalid_sales_orders([sales_order])
-	if invalid_sales_orders:
-		process_status = frappe.db.get_value("Sales Order", sales_order, "custom_process_status")
-		frappe.throw(
-			_("销售订单 {0} 未放行生产，当前流程状态：{1}").format(
-				sales_order, process_status or ""
-			)
-		)
-
-
-def get_invalid_sales_orders(sales_orders):
-	if not sales_orders:
-		return []
-
-	return frappe.get_all(
-		"Sales Order",
-		filters={
-			"name": ["in", list(sales_orders)],
-			"custom_process_status": ["!=", PENDING_PRODUCTION],
-		},
-		pluck="name",
-	)

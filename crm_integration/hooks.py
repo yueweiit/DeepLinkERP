@@ -160,12 +160,6 @@ doc_events = {
 		"on_submit": "crm_integration.crm_integration.sales_order.set_pending_deposit_confirmation_on_submit",
 		"on_cancel": "crm_integration.crm_integration.sales_order.set_cancelled_process_status_on_cancel",
 	},
-	"Work Order": {
-		"validate": "crm_integration.crm_integration.work_order.validate_sales_order_process_status",
-	},
-	"Production Plan": {
-		"validate": "crm_integration.crm_integration.production_plan.validate_sales_order_process_status",
-	},
 	"Delivery Note": {
 		"before_insert": "crm_integration.crm_integration.delivery_note.set_pending_final_payment_before_insert",
 		"validate": "crm_integration.crm_integration.delivery_note.validate_sales_order_process_status",
