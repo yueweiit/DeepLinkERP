@@ -1,6 +1,21 @@
+function load_mes_integration_enabled(frm) {
+	if (!frm || !frm.doc || !frm.doc.company) {
+		return Promise.resolve(false);
+	}
+	return frappe.db.get_value("Company", frm.doc.company, "custom_enable_mes_integration").then(function(r) {
+		return cint(r && r.message ? r.message.custom_enable_mes_integration : 0) === 1;
+	});
+}
+
 frappe.ui.form.on("Delivery Note", {
 	refresh(frm) {
-		schedule_delivery_readiness_badge(frm);
+		load_mes_integration_enabled(frm).then(function(enabled) {
+		if (enabled) {
+			schedule_delivery_readiness_badge(frm);
+		} else {
+			remove_delivery_readiness_badge(frm);
+		}
+	});
 	},
 	custom_delivery_readiness_status(frm) {
 		schedule_delivery_readiness_badge(frm);

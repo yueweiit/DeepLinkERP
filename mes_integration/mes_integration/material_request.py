@@ -1,5 +1,7 @@
 import frappe
 from frappe import _
+
+from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
 from frappe.model.mapper import get_mapped_doc
 from frappe.utils import cint, flt, now
 
@@ -28,6 +30,9 @@ def create_and_submit_material_request_from_mes(data=None, material_request=None
 
     if not isinstance(material_request_data, dict):
         frappe.throw(_("缺少 Material Request 数据或数据格式不正确"))
+
+    if not is_mes_integration_enabled(material_request_data.get("company")):
+        throw_mes_integration_disabled(material_request_data.get("company"))
 
     material_request_data = material_request_data.copy()
     material_request_data["doctype"] = "Material Request"
@@ -293,6 +298,8 @@ def issue_and_push_to_dlm_from_dialog(material_request_name, items=None):
     lock_material_request_for_issue(material_request_name)
 
     mr = frappe.get_doc("Material Request", material_request_name)
+    if not is_mes_integration_enabled(mr.get("company")):
+        throw_mes_integration_disabled(mr.get("company"))
     validate_material_request_can_issue_to_dlm(mr)
 
     issue_rows = get_issue_dialog_rows(items)
@@ -552,6 +559,8 @@ def submit_issue_and_push_to_dlm(material_request_name):
     返回 partial 状态提示用户手动推送。
     """
     mr = frappe.get_doc("Material Request", material_request_name)
+    if not is_mes_integration_enabled(mr.get("company")):
+        throw_mes_integration_disabled(mr.get("company"))
 
     if mr.docstatus != 0:
         frappe.throw(_("物料需求必须是草稿状态"))
@@ -594,6 +603,9 @@ def submit_issue_and_push_to_dlm(material_request_name):
 
 
 def validate_item_details(doc, method=None):
+    if not is_mes_integration_enabled(doc.get("company")):
+        return
+
     details = doc.get("custom_item_details") or []
     if not details:
         return

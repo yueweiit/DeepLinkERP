@@ -7,6 +7,7 @@ from frappe.utils import flt, get_request_session, getdate, now
 
 from erpnext.stock.doctype.item.item import get_item_defaults
 
+from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
 from mes_integration.mes_integration.integration_log import (
     create_mes_log,
     is_mes_api_user,
@@ -20,6 +21,8 @@ def push_to_mes(stock_entry_name):
     将已提交的 Stock Entry 发料结果回写到 MES。
     """
     stock_entry = frappe.get_doc("Stock Entry", stock_entry_name)
+    if not is_mes_integration_enabled(stock_entry.get("company")):
+        throw_mes_integration_disabled(stock_entry.get("company"))
 
     if stock_entry.docstatus != 1:
         frappe.throw(frappe._("库存移动单必须已提交才能推送到 MES"))
@@ -309,6 +312,8 @@ def reset_mes_status(stock_entry_name):
     重置库存转移单的 MES Status 为 Unpushed（当已推送的订单被修改时）
     """
     stock_entry = frappe.get_doc("Stock Entry", stock_entry_name)
+    if not is_mes_integration_enabled(stock_entry.get("company")):
+        throw_mes_integration_disabled(stock_entry.get("company"))
 
     if stock_entry.get("custom_mes_status") == "Pushed":
         stock_entry.db_set("custom_mes_status", "Unpushed")
@@ -374,6 +379,8 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None):
     stock_entry_data.pop("sales_order_name", None)
     if not stock_entry_data.get("company") and sales_order_doc:
         stock_entry_data["company"] = sales_order_doc.company
+    if not is_mes_integration_enabled(stock_entry_data.get("company")):
+        throw_mes_integration_disabled(stock_entry_data.get("company"))
 
     stock_entry_data["doctype"] = "Stock Entry"
     stock_entry_data["stock_entry_type"] = stock_entry_type
@@ -624,6 +631,9 @@ def validate_mes_stock_entry_data(stock_entry, sales_order=None):
             frappe.throw(frappe._("第 {0} 行至少需要来源仓库或目标仓库").format(row.idx))
 
 def update_material_request_transferred_qty(stock_entry, method=None):
+    if not is_mes_integration_enabled(stock_entry.get("company")):
+        return
+
     mr_item_names = {
         row.material_request_item
         for row in stock_entry.get("items", [])

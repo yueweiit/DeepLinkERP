@@ -1,5 +1,7 @@
 import frappe
 
+from mes_integration.mes_integration.settings import is_mes_integration_enabled
+
 
 LOGGED_MATERIAL_REQUEST_TYPES = {"Injection Molding Issuance", "Material Issue"}
 
@@ -86,6 +88,9 @@ def log_inbound_stock_entry(doc, method=None):
 
 def log_inbound_document(doc, method=None):
 	if doc.doctype not in ("Material Request", "Stock Entry"):
+		return
+
+	if not is_mes_integration_enabled(doc.get("company")):
 		return
 
 	event = get_inbound_document_event(doc, method)

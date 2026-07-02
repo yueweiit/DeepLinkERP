@@ -14,6 +14,7 @@ from crm_integration.crm_integration.sales_order import (
     set_process_status,
 )
 from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
+from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
 from mes_integration.mes_integration.stock_entry import (
     get_mes_item_largest_stock_warehouse,
     get_mes_receipt_fallback_target_warehouse,
@@ -27,6 +28,11 @@ def create_draft_delivery_note_from_mes(data=None):
 
     if not isinstance(payload, dict):
         frappe.throw(_("缺少请求数据或数据格式不正确"))
+
+    sales_order_name = payload.get("sales_order")
+    company = frappe.db.get_value("Sales Order", sales_order_name, "company") if sales_order_name else None
+    if not is_mes_integration_enabled(company):
+        throw_mes_integration_disabled(company)
 
     validate_mes_api_user()
     validate_mes_delivery_note_permissions()
@@ -308,10 +314,16 @@ DELIVERED = "Delivered"
 
 
 def set_delivery_readiness_status(doc, method=None):
+    if not is_mes_integration_enabled(doc.get("company")):
+        return
+
     doc.custom_delivery_readiness_status = get_delivery_readiness_status(doc)
 
 
 def validate_delivery_note_ready_to_deliver(doc, method=None):
+    if not is_mes_integration_enabled(doc.get("company")):
+        return
+
     set_delivery_readiness_status(doc, method)
     if (
         doc.custom_delivery_readiness_status
@@ -321,12 +333,18 @@ def validate_delivery_note_ready_to_deliver(doc, method=None):
 
 
 def set_delivered_readiness_status(doc, method=None):
+    if not is_mes_integration_enabled(doc.get("company")):
+        return
+
     status = get_delivery_readiness_status(doc)
     if frappe.db.has_column("Delivery Note", "custom_delivery_readiness_status"):
         doc.db_set("custom_delivery_readiness_status", status, update_modified=False)
 
 
 def clear_delivery_readiness_status(doc, method=None):
+    if not is_mes_integration_enabled(doc.get("company")):
+        return
+
     if frappe.db.has_column("Delivery Note", "custom_delivery_readiness_status"):
         doc.db_set("custom_delivery_readiness_status", None, update_modified=False)
 
@@ -378,6 +396,9 @@ def update_delivery_readiness_status_for_sales_orders(sales_orders):
     delivery_notes = get_draft_delivery_notes_for_sales_orders(sales_orders)
     for delivery_note_name in delivery_notes:
         delivery_note = frappe.get_doc("Delivery Note", delivery_note_name)
+        if not is_mes_integration_enabled(delivery_note.get("company")):
+            continue
+
         status = get_delivery_readiness_status(delivery_note)
         if delivery_note.get("custom_delivery_readiness_status") != status:
             delivery_note.db_set("custom_delivery_readiness_status", status, update_modified=False)
