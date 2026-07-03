@@ -11,6 +11,7 @@ from crm_integration.crm_integration.sales_order import (
     DELIVERABLE,
     PENDING_FINAL_PAYMENT,
     PENDING_PRODUCTION,
+    PARTIALLY_DELIVERED,
     set_process_status,
 )
 from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
@@ -115,7 +116,8 @@ def create_draft_delivery_note(payload):
 
     if sales_order.get("custom_process_status") == PENDING_PRODUCTION:
         set_process_status(sales_order, PENDING_FINAL_PAYMENT)
-
+    if sales_order.get("custom_process_status") == PARTIALLY_DELIVERED:
+        delivery_note.db_set("custom_delivery_readiness_status", "Ready to Deliver", update_modified=False)
     return delivery_note
 
 
@@ -124,7 +126,7 @@ def validate_sales_order_for_mes_delivery_note(sales_order):
         frappe.throw(_("销售订单 {0} 必须已提交").format(sales_order.name))
 
     process_status = sales_order.get("custom_process_status")
-    if process_status not in (PENDING_PRODUCTION, PENDING_FINAL_PAYMENT):
+    if process_status not in (PENDING_PRODUCTION, PENDING_FINAL_PAYMENT, DELIVERABLE,PARTIALLY_DELIVERED):
         frappe.throw(
             _("销售订单 {0} 状态为 {1}，不允许创建出库草稿").format(
                 sales_order.name, process_status or ""
@@ -318,18 +320,6 @@ def set_delivery_readiness_status(doc, method=None):
         return
 
     doc.custom_delivery_readiness_status = get_delivery_readiness_status(doc)
-
-
-def validate_delivery_note_ready_to_deliver(doc, method=None):
-    if not is_mes_integration_enabled(doc.get("company")):
-        return
-
-    set_delivery_readiness_status(doc, method)
-    if (
-        doc.custom_delivery_readiness_status
-        and doc.custom_delivery_readiness_status != READY_TO_DELIVER
-    ):
-        frappe.throw(_("销售出库关联的销售订单尚未全部放行发货，不能提交。"))
 
 
 def set_delivered_readiness_status(doc, method=None):

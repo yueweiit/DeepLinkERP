@@ -155,7 +155,6 @@ doctype_css = {"Stock Entry": "public/css/stock_entry.css"}
 doc_events = {
 	"Delivery Note": {
 		"validate": "mes_integration.mes_integration.delivery_note.set_delivery_readiness_status",
-		"before_submit": "mes_integration.mes_integration.delivery_note.validate_delivery_note_ready_to_deliver",
 		"on_submit": "mes_integration.mes_integration.delivery_note.set_delivered_readiness_status",
 		"on_cancel": "mes_integration.mes_integration.delivery_note.clear_delivery_readiness_status",
 	},

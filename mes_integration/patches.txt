@@ -39,3 +39,7 @@ mes_integration.patches.v1_0.add_company_integration_switches
 mes_integration.patches.v1_0.add_mes_custom_fields
 
 mes_integration.patches.v1_0.remove_material_request_mes_status
+
+mes_integration.patches.v1_0.add_mes_portal_workspace_link
+
+mes_integration.patches.v1_0.add_mes_portal_workspace_sidebar_item
