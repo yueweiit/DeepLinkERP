@@ -187,14 +187,14 @@ function restrict_fulfillment_creation(frm) {
 
 
 function can_create_delivery_note(frm) {
-	return frm.doc.custom_process_status === "Deliverable";
+	return ["Deliverable", "Partially Delivered"].includes(frm.doc.custom_process_status);
 }
 
 function show_delivery_note_block_message() {
 	frappe.msgprint({
 		title: __("无法创建销售出库"),
 		indicator: "orange",
-		message: __("只有流程状态为 Deliverable 的销售订单才可以创建销售出库。")
+		message: __("只有流程状态为 Deliverable 或 Partially Delivered 的销售订单才可以创建销售出库。")
 	});
 }
 
@@ -349,6 +349,7 @@ function get_process_status_color(process_status) {
 		"Pending Production": "blue",
 		"Pending Final Payment": "yellow",
 		"Deliverable": "blue",
+		"Partially Delivered": "orange",
 		"Completed": "green",
 		"Closed": "green",
 		"Cancelled": "red",

@@ -18,6 +18,7 @@ PENDING_DEPOSIT_CONFIRMATION = "Pending Deposit Confirmation"
 PENDING_PRODUCTION = "Pending Production"
 PENDING_FINAL_PAYMENT = "Pending Final Payment"
 DELIVERABLE = "Deliverable"
+PARTIALLY_DELIVERED= "Partially Delivered"
 CLOSED = "Closed"
 CANCELLED = "Cancelled"
 

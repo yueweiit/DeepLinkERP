@@ -165,6 +165,7 @@ doc_events = {
 		"validate": "crm_integration.crm_integration.delivery_note.validate_sales_order_process_status",
 		"before_submit": "crm_integration.crm_integration.delivery_note.validate_sales_order_deliverable_before_submit",
 		"on_submit": "crm_integration.crm_integration.delivery_note.mark_sales_orders_completed_on_submit",
+		"on_cancel": "crm_integration.crm_integration.delivery_note.update_sales_orders_delivery_process_status_on_cancel",
 		"on_trash": "crm_integration.crm_integration.delivery_note.rollback_pending_final_payment_on_trash",
 	},
 }

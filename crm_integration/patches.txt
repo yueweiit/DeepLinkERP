@@ -6,3 +6,4 @@
 # Patches added in this section will be executed after doctypes are migrated
 crm_integration.patches.add_company_integration_switches
 crm_integration.patches.add_crm_custom_fields
+crm_integration.patches.update_process_status_options_for_partial_delivery

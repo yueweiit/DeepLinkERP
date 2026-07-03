@@ -9,6 +9,7 @@ PROCESS_STATUS_OPTIONS = "\n".join(
 		"Pending Production",
 		"Pending Final Payment",
 		"Deliverable",
+		"Partially Delivered",
 		"Completed",
 		"Rejected",
 		"Cancelled",

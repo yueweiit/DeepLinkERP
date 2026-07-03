@@ -72,3 +72,5 @@ Update Items,Actualizar
 业务员,Vendedor
 产品,Producto
 确认核销尾款？{0}/{1},¿Confirmar la conciliación del pago final? {0}/{1}
+Partially Delivered,Parcialmente entregado
+只有流程状态为 Deliverable 或 Partially Delivered 的销售订单才可以创建销售出库。,Solo los pedidos de venta con estado de proceso Deliverable o Partially Delivered pueden crear notas de entrega.

@@ -50,6 +50,7 @@ sales_order_list_settings.formatters = {
 			"Pending Production": "blue",
 			"Pending Final Payment": "yellow",
 			"Deliverable": "blue",
+			"Partially Delivered": "orange",
 			"Completed": "green",
 			"Closed": "green",
 			"Cancelled": "red",
