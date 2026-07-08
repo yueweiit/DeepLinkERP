@@ -69,9 +69,19 @@ def execute():
 					"label": "new material weight",
 				},
 			],
+			"Item": [
+				{
+					"fieldname": "custom_mes_issue_uom",
+					"fieldtype": "Link",
+					"insert_after": "stock_uom",
+					"label": "MES Default Issue UOM",
+					"options": "UOM",
+					"description": "Default UOM used by the MES Material Request issue dialog. It must exist in the item's UOM Conversion Details or match the stock UOM.",
+				},
+			],
 		},
 		update=True,
 	)
 
-	for doctype in ("Stock Entry", "Material Request", "Material Request Item"):
+	for doctype in ("Stock Entry", "Material Request", "Material Request Item", "Item"):
 		frappe.clear_cache(doctype=doctype)

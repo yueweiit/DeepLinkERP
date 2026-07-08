@@ -401,6 +401,51 @@ function submit_issue_and_push_to_dlm(frm) {
 		return;
 	}
 
+	frappe.call({
+		method: "mes_integration.mes_integration.material_request.get_issue_dialog_default_uoms",
+		args: {
+			item_codes: rows.map(function(row) {
+				return row.item_code;
+			})
+		},
+		callback: function(r) {
+			const result = r.message || {};
+			apply_issue_dialog_default_uoms(rows, result.default_uoms || {});
+			show_issue_and_push_dialog(frm, rows);
+			show_issue_dialog_default_uom_warnings(result.warnings || []);
+		},
+		error: function() {
+			show_issue_and_push_dialog(frm, rows);
+		}
+	});
+}
+
+function apply_issue_dialog_default_uoms(rows, default_uoms) {
+	(rows || []).forEach(function(row) {
+		const default_uom = default_uoms[row.item_code];
+		if (!default_uom || !default_uom.uom || !flt(default_uom.conversion_factor)) {
+			return;
+		}
+
+		row.uom = default_uom.uom;
+		set_issue_dialog_row_conversion_factor(row, default_uom.conversion_factor);
+	});
+}
+
+function show_issue_dialog_default_uom_warnings(warnings) {
+	warnings = (warnings || []).filter(Boolean);
+	if (!warnings.length) {
+		return;
+	}
+
+	frappe.msgprint({
+		title: __("默认发料单位提示"),
+		indicator: "orange",
+		message: warnings.join("<br>")
+	});
+}
+
+function show_issue_and_push_dialog(frm, rows) {
 	const is_transfer = frm.doc.material_request_type === "Material Transfer for Manufacture";
 	const dialog = new frappe.ui.Dialog({
 		title: __("发料并推送至DLM"),
@@ -438,17 +483,32 @@ function submit_issue_and_push_to_dlm(frm) {
 	setup_issue_dialog_actual_qty_refresh(dialog);
 	refresh_issue_dialog_actual_qty(dialog);
 	dialog.$wrapper.addClass("mes-issue-push-dialog");
+	dialog.$wrapper.find(".modal-dialog").css({
+		"width": "min(1200px, 92vw)",
+		"max-width": "92vw"
+	});
 }
 
 function get_issue_and_push_dialog_rows(frm) {
 	return (frm.doc.items || [])
 		.map(function(row) {
+			const original_conversion_factor = flt(row.conversion_factor) || 1;
 			const remaining_qty = get_material_request_item_remaining_qty(row);
+			const remaining_stock_qty = remaining_qty * original_conversion_factor;
+			const max_issue_stock_qty = get_issue_dialog_max_issue_stock_qty(remaining_stock_qty, original_conversion_factor);
 			return {
 				material_request_item: row.name,
 				item_code: row.item_code,
 				item_name: row.item_name,
 				uom: row.uom || row.stock_uom,
+				request_uom: row.uom || row.stock_uom,
+				stock_uom: row.stock_uom || row.uom,
+				original_conversion_factor: original_conversion_factor,
+				conversion_factor: original_conversion_factor,
+				remaining_stock_qty: remaining_stock_qty,
+				max_issue_stock_qty: max_issue_stock_qty,
+				actual_stock_qty: 0,
+				max_issue_qty: max_issue_stock_qty / original_conversion_factor,
 				requested_qty: flt(row.qty),
 				issued_qty: get_material_request_item_issued_qty(row),
 				remaining_qty: remaining_qty,
@@ -456,6 +516,7 @@ function get_issue_and_push_dialog_rows(frm) {
 				s_warehouse: get_default_issue_source_warehouse(frm, row),
 				actual_qty: 0,
 				projected_remaining_qty: 0,
+				projected_remaining_stock_qty: 0,
 				t_warehouse: get_default_issue_target_warehouse(frm, row)
 			};
 		})
@@ -471,22 +532,33 @@ function get_issue_and_push_dialog_fields(frm, is_transfer) {
 	const update_actual_qty = function() {
 		update_issue_dialog_row_actual_qty(this && this.doc);
 	};
+	const update_uom = function() {
+		update_issue_dialog_row_uom(this && this.doc);
+	};
 	const update_projected_remaining_qty = function() {
 		update_issue_dialog_row_projected_remaining_qty(this && this.doc);
 	};
 
 	return [
 		{ fieldtype: "Data", fieldname: "material_request_item", label: __("Material Request Item"), hidden: 1, read_only: 1 },
-		{ fieldtype: "Link", fieldname: "item_code", label: __("物料编码"), options: "Item", in_list_view: 1, read_only: 1, columns: 2 },
-		{ fieldtype: "Data", fieldname: "item_name", label: __("物料名称"), read_only: 1, columns: 2 },
-		{ fieldtype: "Data", fieldname: "uom", label: __("单位"), read_only: 1, columns: 1 },
-		{ fieldtype: "Float", fieldname: "requested_qty", label: __("需求数量"), in_list_view: 1, read_only: 1, columns: 1 },
-		{ fieldtype: "Float", fieldname: "issued_qty", label: __("已发料数量"), read_only: 1, columns: 1 },
-		{ fieldtype: "Float", fieldname: "remaining_qty", label: __("剩余数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Link", fieldname: "item_code", label: __("物料编码"), options: "Item", in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Data", fieldname: "item_name", label: __("物料名称"), hidden: 1, read_only: 1 },
+		{ fieldtype: "Link", fieldname: "uom", label: __("单位"), options: "UOM", in_list_view: 1, reqd: 1, columns: 1, onchange: update_uom },
 		{ fieldtype: "Float", fieldname: "qty", label: __("本次发料数量"), in_list_view: 1, reqd: 1, columns: 1, onchange: update_projected_remaining_qty },
+		{ fieldtype: "Float", fieldname: "original_conversion_factor", hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "conversion_factor", hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "remaining_stock_qty", hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "max_issue_stock_qty", hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "max_issue_qty", hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "actual_qty", hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "projected_remaining_qty", hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "requested_qty", label: __("需求数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "issued_qty", label: __("已发料数量"), hidden: 1, read_only: 1 },
+		{ fieldtype: "Float", fieldname: "remaining_qty", label: __("剩余数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Data", fieldname: "request_uom", label: __("需求单位"), in_list_view: 1, read_only: 1, columns: 1 },
 		{ fieldtype: "Link", fieldname: "s_warehouse", label: __("发料仓"), options: "Warehouse", in_list_view: 1, reqd: 1, columns: 2, get_query: warehouse_query, onchange: update_actual_qty },
-		{ fieldtype: "Float", fieldname: "actual_qty", label: __("实际数量"), in_list_view: 1, read_only: 1, columns: 1 },
-		{ fieldtype: "Float", fieldname: "projected_remaining_qty", label: __("预计剩余数量"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "actual_stock_qty", label: __("实际库存"), in_list_view: 1, read_only: 1, columns: 1 },
+		{ fieldtype: "Float", fieldname: "projected_remaining_stock_qty", label: __("预计剩余"), in_list_view: 1, read_only: 1, columns: 1 },
 		{ fieldtype: "Link", fieldname: "t_warehouse", label: __("目标仓库"), options: "Warehouse", in_list_view: is_transfer ? 1 : 0, hidden: is_transfer ? 0 : 1, reqd: is_transfer ? 1 : 0, columns: 2, get_query: warehouse_query }
 	];
 }
@@ -519,6 +591,15 @@ function setup_issue_dialog_actual_qty_refresh(dialog) {
 	grid.wrapper.on("change", '[data-fieldname="s_warehouse"] input', function() {
 		setTimeout(function() {
 			refresh_issue_dialog_actual_qty(dialog);
+		}, 100);
+	});
+
+	grid.wrapper.on("change", '[data-fieldname="uom"] input', function() {
+		setTimeout(function() {
+			const rows = dialog.get_value("items") || [];
+			Promise.all(rows.map(update_issue_dialog_row_uom)).then(function() {
+				grid.refresh();
+			});
 		}, 100);
 	});
 
@@ -560,7 +641,49 @@ function update_issue_dialog_row_actual_qty(row) {
 		callback: function(r) {
 			set_issue_dialog_row_actual_qty(row, flt(r.message));
 		}
+	}); 
+}
+
+function update_issue_dialog_row_uom(row) {
+	if (!row || !row.item_code || !row.uom) {
+		return Promise.resolve();
+	}
+
+	return frappe.call({
+		method: "erpnext.stock.get_item_details.get_conversion_factor",
+		args: {
+			item_code: row.item_code,
+			uom: row.uom
+		},
+		callback: function(r) {
+			const conversion_factor = flt(r.message && r.message.conversion_factor) || 1;
+			set_issue_dialog_row_conversion_factor(row, conversion_factor);
+		}
 	});
+}
+
+function set_issue_dialog_row_conversion_factor(row, conversion_factor) {
+	if (!row) {
+		return;
+	}
+
+	row.conversion_factor = flt(conversion_factor) || 1;
+	row.max_issue_stock_qty = get_issue_dialog_max_issue_stock_qty(row.remaining_stock_qty, row.conversion_factor);
+	row.max_issue_qty = flt(row.max_issue_stock_qty) / row.conversion_factor;
+	row.actual_qty = flt(row.actual_stock_qty) / row.conversion_factor;
+	row.qty = row.max_issue_qty;
+	update_issue_dialog_row_projected_remaining_qty(row);
+	if (row.doctype && row.name && locals[row.doctype] && locals[row.doctype][row.name]) {
+		Object.assign(locals[row.doctype][row.name], {
+			conversion_factor: row.conversion_factor,
+			max_issue_stock_qty: row.max_issue_stock_qty,
+			max_issue_qty: row.max_issue_qty,
+			actual_qty: row.actual_qty,
+			qty: row.qty,
+			projected_remaining_qty: row.projected_remaining_qty,
+			projected_remaining_stock_qty: row.projected_remaining_stock_qty
+		});
+	}
 }
 
 function set_issue_dialog_row_actual_qty(row, actual_qty) {
@@ -568,11 +691,14 @@ function set_issue_dialog_row_actual_qty(row, actual_qty) {
 		return;
 	}
 
-	row.actual_qty = flt(actual_qty);
+	row.actual_stock_qty = flt(actual_qty);
+	row.actual_qty = row.actual_stock_qty / (flt(row.conversion_factor) || 1);
 	update_issue_dialog_row_projected_remaining_qty(row);
 	if (row.doctype && row.name && locals[row.doctype] && locals[row.doctype][row.name]) {
+		locals[row.doctype][row.name].actual_stock_qty = row.actual_stock_qty;
 		locals[row.doctype][row.name].actual_qty = row.actual_qty;
 		locals[row.doctype][row.name].projected_remaining_qty = row.projected_remaining_qty;
+		locals[row.doctype][row.name].projected_remaining_stock_qty = row.projected_remaining_stock_qty;
 	}
 }
 
@@ -581,10 +707,23 @@ function update_issue_dialog_row_projected_remaining_qty(row) {
 		return;
 	}
 
-	row.projected_remaining_qty = flt(row.actual_qty) - flt(row.qty);
+	row.projected_remaining_stock_qty = flt(row.actual_stock_qty) - flt(row.qty) * (flt(row.conversion_factor) || 1);
+	row.projected_remaining_qty = row.projected_remaining_stock_qty / (flt(row.conversion_factor) || 1);
 	if (row.doctype && row.name && locals[row.doctype] && locals[row.doctype][row.name]) {
 		locals[row.doctype][row.name].projected_remaining_qty = row.projected_remaining_qty;
+		locals[row.doctype][row.name].projected_remaining_stock_qty = row.projected_remaining_stock_qty;
 	}
+}
+
+
+function get_issue_dialog_max_issue_stock_qty(remaining_stock_qty, conversion_factor) {
+	remaining_stock_qty = flt(remaining_stock_qty);
+	conversion_factor = flt(conversion_factor) || 1;
+	if (remaining_stock_qty <= 0) {
+		return 0;
+	}
+
+	return Math.ceil(remaining_stock_qty / conversion_factor) * conversion_factor;
 }
 
 function get_issue_dialog_grid_row_doc(grid, cdt, cdn) {
@@ -617,11 +756,20 @@ function get_validated_issue_and_push_rows(rows, is_transfer) {
 			continue;
 		}
 
-		if (qty > flt(row.remaining_qty)) {
+		if (qty > flt(row.max_issue_qty || row.remaining_qty)) {
 			frappe.msgprint({
 				title: __("操作失败"),
 				indicator: "red",
 				message: __("第 {0} 行本次发料数量不能超过剩余数量", [index + 1])
+			});
+			return null;
+		}
+
+		if (!row.uom) {
+			frappe.msgprint({
+				title: __("操作失败"),
+				indicator: "red",
+				message: __("第 {0} 行缺少单位", [index + 1])
 			});
 			return null;
 		}
@@ -648,6 +796,7 @@ function get_validated_issue_and_push_rows(rows, is_transfer) {
 			material_request_item: row.material_request_item,
 			item_code: row.item_code,
 			qty: qty,
+			uom: row.uom,
 			s_warehouse: row.s_warehouse,
 			t_warehouse: row.t_warehouse
 		});

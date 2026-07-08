@@ -8,10 +8,12 @@ from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from erpnext.stock.doctype.item.item import get_item_defaults
 
 from crm_integration.crm_integration.sales_order import (
+    CRM_STATUS_PRODUCTION_PROGRESS_REPORTED,
     DELIVERABLE,
     PENDING_FINAL_PAYMENT,
     PENDING_PRODUCTION,
     PARTIALLY_DELIVERED,
+    enqueue_sales_order_status_to_crm,
     set_process_status,
 )
 from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
@@ -19,7 +21,10 @@ from mes_integration.mes_integration.settings import is_mes_integration_enabled,
 from mes_integration.mes_integration.stock_entry import (
     get_mes_item_largest_stock_warehouse,
     get_mes_receipt_fallback_target_warehouse,
+    get_mes_status_callback_url,
+    post_stock_entry_status_to_mes,
     validate_mes_api_user,
+    validate_stock_entry_status_response,
 )
 
 
@@ -79,7 +84,56 @@ def create_draft_delivery_note_from_mes(data=None):
         response_payload=response,
     )
 
+    enqueue_crm_production_progress_event(payload, delivery_note)
+
     return response
+
+
+def enqueue_crm_production_progress_event(payload, delivery_note):
+    try:
+        items = get_crm_production_progress_items(payload.get("items"))
+        enqueue_sales_order_status_to_crm(
+            sales_order_name=payload.get("sales_order"),
+            external_status=CRM_STATUS_PRODUCTION_PROGRESS_REPORTED,
+            triggered_status=PENDING_FINAL_PAYMENT,
+            trigger_event="production_progress_reported",
+            delivery_note_name=delivery_note.name,
+            items=items,
+            remark=get_crm_production_progress_remark(delivery_note.name, items),
+        )
+    except Exception:
+        frappe.log_error(
+            title="Failed to enqueue CRM production progress event",
+            message=frappe.get_traceback(),
+        )
+
+
+def get_crm_production_progress_items(mes_items):
+    qty_by_item = {}
+    for row in mes_items or []:
+        if not isinstance(row, dict):
+            continue
+        item_code = row.get("item_code")
+        qty = flt(row.get("qty"))
+        if not item_code or qty <= 0:
+            continue
+        qty_by_item[item_code] = flt(qty_by_item.get(item_code)) + qty
+
+    return [
+        {"externalItemId": item_code, "quantity": qty}
+        for item_code, qty in sorted(qty_by_item.items())
+    ]
+
+
+def get_crm_production_progress_remark(delivery_note_name, items):
+    if not items:
+        return _("MES已汇报生产进度")
+
+    item_descriptions = [
+        _("{0} {1}个").format(item.get("externalItemId"), item.get("quantity"))
+        for item in items
+    ]
+    return _("本次生产：{0}").format(", ".join(item_descriptions))
 
 
 def create_draft_delivery_note(payload):
@@ -313,6 +367,8 @@ def append_delivery_note_item(delivery_note, allocation):
 PENDING_RELEASE = "Pending Release"
 READY_TO_DELIVER = "Ready to Deliver"
 DELIVERED = "Delivered"
+DELIVERY_NOTE_STATUS_EVENT = "Delivery Note Status Callback"
+DELIVERY_NOTE_STATUS_DOCUMENT_TYPE = "delivery_note"
 
 
 def set_delivery_readiness_status(doc, method=None):
@@ -350,7 +406,7 @@ def get_delivery_readiness_status(doc):
     if doc.docstatus != 0:
         return None
 
-    if all(status == DELIVERABLE for status in statuses):
+    if all(status in (DELIVERABLE,PARTIALLY_DELIVERED) for status in statuses):
         return READY_TO_DELIVER
 
     return PENDING_RELEASE
@@ -408,6 +464,184 @@ def get_draft_delivery_notes_for_sales_orders(sales_orders):
         as_dict=True,
     )
     return [row.name for row in rows]
+
+
+def enqueue_delivery_note_status_callback(delivery_note_name):
+    frappe.enqueue(
+        "mes_integration.mes_integration.delivery_note.push_delivery_note_status_to_mes",
+        queue="short",
+        enqueue_after_commit=True,
+        delivery_note_name=delivery_note_name,
+    )
+
+
+def push_delivery_note_status_to_mes(delivery_note_name):
+    delivery_note = frappe.get_doc("Delivery Note", delivery_note_name)
+    if not is_mes_integration_enabled(delivery_note.get("company")):
+        return []
+
+    results = []
+    for sales_order_name in get_linked_sales_orders(delivery_note):
+        try:
+            results.append(
+                push_delivery_note_sales_order_status_to_mes(delivery_note, sales_order_name)
+            )
+        except Exception:
+            # The failure has already been recorded in MES Integration Log.
+            # Continue so one Sales Order does not block callbacks for the rest.
+            results.append({"sales_order": sales_order_name, "status": "failed"})
+
+    return results
+
+
+def push_delivery_note_sales_order_status_to_mes(delivery_note, sales_order_name):
+    payload = build_delivery_note_status_payload(delivery_note, sales_order_name)
+    mes_log = create_mes_log(
+        direction="Outbound",
+        event=DELIVERY_NOTE_STATUS_EVENT,
+        status="Pending",
+        reference_doctype="Delivery Note",
+        reference_name=delivery_note.name,
+        source="DeeplinkERP",
+        request_payload=payload,
+    )
+
+    try:
+        request_url = get_mes_status_callback_url()
+        update_mes_log(mes_log, request_url=request_url)
+
+        frappe.logger().info(
+            f"回写销售出库 {delivery_note.name} / 销售订单 {sales_order_name} 状态到 MES: {frappe.as_json(payload)}"
+        )
+
+        response = post_stock_entry_status_to_mes(payload, request_url)
+        validate_stock_entry_status_response(response, payload)
+    except Exception:
+        update_mes_log(
+            mes_log,
+            status="Failed",
+            error_message=frappe.get_traceback(),
+        )
+        raise
+
+    update_mes_log(
+        mes_log,
+        status="Success",
+        response_payload=response,
+        trace_id=response.get("traceId"),
+        http_status_code=200,
+    )
+
+    return {
+        "status": "success",
+        "delivery_note": delivery_note.name,
+        "sales_order": sales_order_name,
+        "trace_id": response.get("traceId"),
+        "timestamp": now(),
+    }
+
+
+@frappe.whitelist()
+def retry_push_delivery_note_status_to_mes(delivery_note_name):
+    if not frappe.has_permission("Delivery Note", "read"):
+        frappe.throw(_("缺少 Delivery Note 读取权限"), frappe.PermissionError)
+
+    delivery_note = frappe.get_doc("Delivery Note", delivery_note_name)
+    if not is_mes_integration_enabled(delivery_note.get("company")):
+        throw_mes_integration_disabled(delivery_note.get("company"))
+
+    return push_delivery_note_status_to_mes(delivery_note.name)
+
+
+def build_delivery_note_status_payload(delivery_note, sales_order_name):
+    sales_order_status = frappe.db.get_value(
+        "Sales Order", sales_order_name, "custom_process_status"
+    )
+    delivery_note_status = get_delivery_note_status(delivery_note)
+
+    return {
+        "documentType": DELIVERY_NOTE_STATUS_DOCUMENT_TYPE,
+        "erpDeliveryNoteNo": delivery_note.name,
+        "delivery_note": delivery_note.name,
+        "documentNo": delivery_note.name,
+        "erpSalesOrderNo": sales_order_name,
+        "sales_order": sales_order_name,
+        "referenceNo": sales_order_name,
+        "docstatus": delivery_note.docstatus,
+        "deliveryNoteStatus": delivery_note_status,
+        "erpDeliveryNoteStatus": delivery_note_status,
+        "salesOrderStatus": sales_order_status,
+        "erpSalesOrderStatus": sales_order_status,
+        "message": get_delivery_note_status_message(
+            delivery_note, sales_order_name, sales_order_status, delivery_note_status
+        ),
+        "items": get_delivery_note_status_items(delivery_note, sales_order_name),
+    }
+
+
+def get_delivery_note_status_message(
+    delivery_note, sales_order_name, sales_order_status, delivery_note_status
+):
+    action = {
+        0: "为草稿",
+        1: "已提交",
+        2: "已取消",
+    }.get(delivery_note.docstatus, f"状态为 {delivery_note_status}")
+
+    return (
+        f"ERP Delivery Note {delivery_note.name} {action}，"
+        f"Sales Order {sales_order_name} 状态：{sales_order_status or ''}"
+    )
+
+
+def get_delivery_note_status(delivery_note):
+    readiness_status = delivery_note.get("custom_delivery_readiness_status")
+    if readiness_status:
+        return readiness_status
+
+    if delivery_note.get("status"):
+        return delivery_note.get("status")
+
+    return {
+        0: "Draft",
+        1: "Submitted",
+        2: "Cancelled",
+    }.get(delivery_note.docstatus, "Unknown")
+
+
+def get_delivery_note_status_items(delivery_note, sales_order_name):
+    qty_by_item = {}
+    for row in delivery_note.get("items", []):
+        if row.get("against_sales_order") != sales_order_name:
+            continue
+
+        item_code = row.get("item_code")
+        shipped_qty = flt(row.get("stock_qty") or row.get("qty"))
+        if not item_code or shipped_qty <= 0:
+            continue
+
+        qty_by_item[item_code] = flt(qty_by_item.get(item_code)) + shipped_qty
+
+    return [
+        {
+            "itemCode": item_code,
+            "item_code": item_code,
+            "shippedQty": shipped_qty,
+            "shipped_qty": shipped_qty,
+        }
+        for item_code, shipped_qty in sorted(qty_by_item.items())
+    ]
+
+
+def get_linked_sales_orders(doc):
+    return sorted(
+        {
+            row.get("against_sales_order")
+            for row in doc.get("items", [])
+            if row.get("against_sales_order")
+        }
+    )
+
 
 def validate_mes_delivery_note_permissions():
     if not frappe.has_permission("Delivery Note", "create"):

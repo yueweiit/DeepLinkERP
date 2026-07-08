@@ -165,7 +165,7 @@ def post_issue_confirm(payload, url=None):
         response = get_request_session().post(
             url,
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers=get_mes_push_headers(),
             timeout=timeout,
         )
         response.raise_for_status()
@@ -739,4 +739,212 @@ def update_material_request_issue_status(mr_name):
         "per_ordered": flt(per_ordered),
         "status": status,
     }
+
+
+def is_mes_receipt_stock_entry(stock_entry):
+    return stock_entry.get("stock_entry_type") in MES_RECEIPT_STOCK_ENTRY_TYPES
+
+
+DEFAULT_RECEIPT_STATUS_DOCUMENT_TYPE = "stock_entry"
+MES_RECEIPT_STATUS_EVENT = "Stock Entry Receipt Status Callback"
+VALID_RECEIPT_STATUS_RESPONSE_STATUSES = {"processed"}
+
+
+def notify_mes_stock_entry_status(stock_entry, method=None):
+    """
+    Stock Entry on_submit / on_cancel hook handler.
+
+    Calls the MES status callback for finished/semi-finished goods receipt
+    Stock Entries. Any MES-side failure is logged but never blocks the ERP
+    document transaction.
+    """
+    if not is_mes_integration_enabled(stock_entry.get("company")):
+        return
+
+    if not is_mes_receipt_stock_entry(stock_entry):
+        return
+
+    try:
+        push_stock_entry_status_to_mes(stock_entry)
+    except Exception:
+        # The failure has already been recorded in MES Integration Log.
+        # Do not re-raise so the ERP submit/cancel transaction completes.
+        pass
+
+
+def push_stock_entry_status_to_mes(stock_entry, erp_status=None, message=None):
+    """
+    Push a finished/semi-finished goods receipt Stock Entry status to MES.
+
+    Raises on failure so the caller can decide whether to block or swallow.
+    """
+    if not is_mes_receipt_stock_entry(stock_entry):
+        frappe.throw(frappe._("只有成品/半成品入库单支持 MES 状态回写"))
+
+    payload = build_stock_entry_status_payload(
+        stock_entry, erp_status=erp_status, message=message
+    )
+
+    mes_log = create_mes_log(
+        direction="Outbound",
+        event=MES_RECEIPT_STATUS_EVENT,
+        status="Pending",
+        reference_doctype="Stock Entry",
+        reference_name=stock_entry.name,
+        source="ERPNext",
+        request_url=None,
+        request_payload=payload,
+        batch_no=stock_entry.get("custom_stock_entry_no"),
+    )
+
+    try:
+        request_url = get_mes_status_callback_url()
+        update_mes_log(mes_log, request_url=request_url)
+
+        frappe.logger().info(
+            f"回写入库单状态 {stock_entry.name} 到 MES: {frappe.as_json(payload)}"
+        )
+
+        response = post_stock_entry_status_to_mes(payload, request_url)
+        validate_stock_entry_status_response(response, payload)
+    except Exception:
+        update_mes_log(
+            mes_log,
+            status="Failed",
+            error_message=frappe.get_traceback(),
+        )
+        raise
+
+    update_mes_log(
+        mes_log,
+        status="Success",
+        response_payload=response,
+        trace_id=response.get("traceId"),
+        http_status_code=200,
+    )
+
+    return {
+        "status": "success",
+        "message": f"入库单 {stock_entry.name} 状态已成功回写 MES",
+        "trace_id": response.get("traceId"),
+        "timestamp": now(),
+    }
+
+
+@frappe.whitelist()
+def retry_push_stock_entry_status_to_mes(stock_entry_name):
+    """
+    Manually re-trigger the MES status callback for a receipt Stock Entry.
+    """
+    if not frappe.has_permission("Stock Entry", "read"):
+        frappe.throw(frappe._("缺少 Stock Entry 读取权限"), frappe.PermissionError)
+
+    stock_entry = frappe.get_doc("Stock Entry", stock_entry_name)
+
+    if not is_mes_integration_enabled(stock_entry.get("company")):
+        throw_mes_integration_disabled(stock_entry.get("company"))
+
+    return push_stock_entry_status_to_mes(stock_entry)
+
+
+def build_stock_entry_status_payload(stock_entry, erp_status=None, message=None):
+    if erp_status is None or message is None:
+        mapped_status, mapped_message = map_stock_entry_docstatus_to_erp_status(
+            stock_entry.docstatus, stock_entry.name
+        )
+        erp_status = erp_status or mapped_status
+        message = message or mapped_message
+
+    payload = {
+        "documentType": DEFAULT_RECEIPT_STATUS_DOCUMENT_TYPE,
+        "erpStockEntryName": stock_entry.name,
+        "documentNo": stock_entry.name,
+        "docstatus": stock_entry.docstatus,
+        "erpStatus": erp_status,
+        "message": message,
+    }
+
+    reference_no = stock_entry.get("custom_stock_entry_no")
+    if reference_no:
+        payload["referenceNo"] = reference_no
+
+    return payload
+
+
+def map_stock_entry_docstatus_to_erp_status(docstatus, stock_entry_name):
+    return {
+        0: ("draft", f"ERP Stock Entry {stock_entry_name} 为草稿"),
+        1: ("submitted", f"ERP Stock Entry {stock_entry_name} 已提交"),
+        2: ("cancelled", f"ERP Stock Entry {stock_entry_name} 已取消"),
+    }.get(docstatus, ("unknown", f"ERP Stock Entry {stock_entry_name} 状态未知"))
+
+
+def post_stock_entry_status_to_mes(payload, url=None):
+    url = url or get_mes_status_callback_url()
+    timeout = flt(
+        frappe.conf.get("mes_status_callback_timeout")
+        or frappe.conf.get("mes_request_timeout")
+        or 15
+    )
+
+    try:
+        response = get_request_session().post(
+            url,
+            json=payload,
+            headers=get_mes_push_headers(),
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+    except RequestException as exc:
+        response = getattr(exc, "response", None)
+        log_mes_push_error("MES 状态回写接口 HTTP 调用失败", payload, response)
+        frappe.throw(
+            get_mes_http_error_message(response)
+            or frappe._("MES 状态回写接口调用失败：{0}").format(url)
+        )
+    except ValueError:
+        log_mes_push_error("MES 状态回写接口响应不是 JSON", payload)
+        frappe.throw(frappe._("MES 状态回写接口响应不是 JSON，请查看 Error Log"))
+
+
+def validate_stock_entry_status_response(response, payload):
+    if not isinstance(response, dict):
+        log_mes_push_error("MES 状态回写接口响应格式异常", payload, response)
+        frappe.throw(frappe._("MES 状态回写接口响应格式异常"))
+
+    if not response.get("success"):
+        log_mes_push_error("MES 状态回写接口返回失败", payload, response)
+        frappe.throw(get_mes_error_message(response) or frappe._("MES 状态回写失败"))
+
+    data = response.get("data") or {}
+    status = data.get("status")
+    if status not in VALID_RECEIPT_STATUS_RESPONSE_STATUSES:
+        log_mes_push_error("MES 状态回写业务状态异常", payload, response)
+        frappe.throw(
+            get_mes_error_message(response)
+            or frappe._("MES 状态回写业务状态异常：{0}").format(status)
+        )
+
+
+def get_mes_status_callback_url():
+    url = frappe.conf.get("mes_status_callback_url")
+    if not url:
+        frappe.throw(frappe._("缺少 MES 状态回写接口配置：mes_status_callback_url"))
+    return url
+
+
+def get_mes_push_headers():
+    return {
+        "Authorization": get_mes_push_authorization(),
+        "Content-Type": "application/json",
+    }
+
+
+def get_mes_push_authorization():
+    authorization = frappe.conf.get("mes_push_authorization")
+    if not authorization:
+        frappe.throw(frappe._("缺少 MES 推送接口配置：mes_push_authorization"))
+
+    return authorization
 

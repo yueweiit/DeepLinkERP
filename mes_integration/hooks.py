@@ -166,8 +166,12 @@ doc_events = {
 		"on_submit": [
 			"mes_integration.mes_integration.integration_log.log_inbound_stock_entry",
 			"mes_integration.mes_integration.stock_entry.update_material_request_transferred_qty",
+			"mes_integration.mes_integration.stock_entry.notify_mes_stock_entry_status",
 		],
-		"on_cancel": "mes_integration.mes_integration.stock_entry.update_material_request_transferred_qty",
+		"on_cancel": [
+			"mes_integration.mes_integration.stock_entry.update_material_request_transferred_qty",
+			"mes_integration.mes_integration.stock_entry.notify_mes_stock_entry_status",
+		],
 	},
 }
 

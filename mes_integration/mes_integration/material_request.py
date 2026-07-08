@@ -1,3 +1,5 @@
+from math import ceil
+
 import frappe
 from frappe import _
 
@@ -291,6 +293,58 @@ def get_item_warehouse_actual_qty(item_code, warehouse):
 
 
 @frappe.whitelist()
+def get_issue_dialog_default_uoms(item_codes=None):
+    """Return configured MES default issue UOMs for the Material Request issue dialog."""
+    from erpnext.stock.get_item_details import get_conversion_factor
+    from mes_integration.mes_integration.stock_entry import parse_json_if_needed
+
+    if not frappe.db.has_column("Item", "custom_mes_issue_uom"):
+        return {"default_uoms": {}, "warnings": []}
+
+    item_codes = parse_json_if_needed(item_codes)
+    if not isinstance(item_codes, list):
+        return {"default_uoms": {}, "warnings": []}
+
+    item_codes = list(dict.fromkeys(item_code for item_code in item_codes if item_code))
+    if not item_codes:
+        return {"default_uoms": {}, "warnings": []}
+
+    items = frappe.get_all(
+        "Item",
+        filters={"name": ["in", item_codes]},
+        fields=["name", "custom_mes_issue_uom"],
+    )
+
+    default_uoms = {}
+    warnings = []
+    for item in items:
+        uom = item.get("custom_mes_issue_uom")
+        if not uom:
+            continue
+
+        conversion_factor = 0
+        try:
+            conversion_factor = flt(get_conversion_factor(item.name, uom).get("conversion_factor"))
+        except Exception:
+            conversion_factor = 0
+
+        if conversion_factor:
+            default_uoms[item.name] = {
+                "uom": uom,
+                "conversion_factor": conversion_factor,
+            }
+        else:
+            warnings.append(
+                _("物料 {0} 的 MES 默认发料单位 {1} 缺少有效换算设置，已使用物料需求单位。").format(
+                    item.name,
+                    uom,
+                )
+            )
+
+    return {"default_uoms": default_uoms, "warnings": warnings}
+
+
+@frappe.whitelist()
 def issue_and_push_to_dlm_from_dialog(material_request_name, items=None):
     """Create, submit and push a Stock Entry from editable Material Request issue rows."""
     from mes_integration.mes_integration.stock_entry import push_to_mes
@@ -382,7 +436,8 @@ def build_stock_entry_from_material_request_issue_rows(mr, issue_rows):
     for index, issue_row in enumerate(issue_rows, start=1):
         mr_item = validate_issue_dialog_row(mr, mr_items, issue_row, index, real_time_issued_stock_qty)
         qty = flt(issue_row.get("qty"))
-        conversion_factor = flt(mr_item.get("conversion_factor")) or 1
+        uom = get_issue_dialog_row_uom(issue_row, mr_item)
+        conversion_factor = get_issue_dialog_row_conversion_factor(mr_item, uom)
         stock_entry.append(
             "items",
             {
@@ -391,7 +446,7 @@ def build_stock_entry_from_material_request_issue_rows(mr, issue_rows):
                 "description": mr_item.get("description"),
                 "qty": qty,
                 "transfer_qty": qty * conversion_factor,
-                "uom": mr_item.get("uom") or mr_item.get("stock_uom"),
+                "uom": uom,
                 "stock_uom": mr_item.get("stock_uom"),
                 "conversion_factor": conversion_factor,
                 "s_warehouse": issue_row.get("s_warehouse"),
@@ -422,8 +477,16 @@ def validate_issue_dialog_row(mr, mr_items, issue_row, index, real_time_issued_s
     if qty <= 0:
         frappe.throw(_("第 {0} 行本次发料数量必须大于 0").format(index))
 
-    remaining_qty = get_material_request_item_remaining_qty(mr_item, real_time_issued_stock_qty)
-    if qty > remaining_qty:
+    uom = get_issue_dialog_row_uom(issue_row, mr_item)
+    conversion_factor = get_issue_dialog_row_conversion_factor(mr_item, uom)
+    remaining_stock_qty = get_material_request_item_remaining_stock_qty(
+        mr_item,
+        real_time_issued_stock_qty,
+    )
+    issue_stock_qty = qty * conversion_factor
+    max_issue_stock_qty = get_issue_dialog_max_issue_stock_qty(remaining_stock_qty, conversion_factor)
+    if issue_stock_qty > max_issue_stock_qty:
+        remaining_qty = flt(max_issue_stock_qty / conversion_factor)
         frappe.throw(
             _("第 {0} 行本次发料数量 {1} 超过剩余数量 {2}").format(
                 index,
@@ -463,7 +526,8 @@ def validate_issue_dialog_stock_availability(issue_rows, mr_items):
         if not mr_item or not row.get("s_warehouse"):
             continue
 
-        conversion_factor = flt(mr_item.get("conversion_factor")) or 1
+        uom = get_issue_dialog_row_uom(row, mr_item)
+        conversion_factor = get_issue_dialog_row_conversion_factor(mr_item, uom)
         key = (mr_item.item_code, row.get("s_warehouse"))
         requested_stock_qty_by_item_warehouse[key] = flt(
             requested_stock_qty_by_item_warehouse.get(key)
@@ -515,7 +579,20 @@ def get_realtime_issued_stock_qty_by_mr_item(mr_item_names):
     return {row.material_request_item: flt(row.issued_stock_qty) for row in rows}
 
 
-def get_material_request_item_remaining_qty(mr_item, real_time_issued_stock_qty=None):
+def get_material_request_item_remaining_qty(
+    mr_item,
+    real_time_issued_stock_qty=None,
+    conversion_factor=None,
+):
+    conversion_factor = flt(conversion_factor) or flt(mr_item.get("conversion_factor")) or 1
+    remaining_stock_qty = get_material_request_item_remaining_stock_qty(
+        mr_item,
+        real_time_issued_stock_qty,
+    )
+    return flt(remaining_stock_qty / conversion_factor)
+
+
+def get_material_request_item_remaining_stock_qty(mr_item, real_time_issued_stock_qty=None):
     conversion_factor = flt(mr_item.get("conversion_factor")) or 1
     requested_stock_qty = flt(mr_item.get("stock_qty")) or flt(mr_item.get("qty")) * conversion_factor
 
@@ -524,8 +601,32 @@ def get_material_request_item_remaining_qty(mr_item, real_time_issued_stock_qty=
     else:
         issued_stock_qty = flt(mr_item.get("custom_transferred_qty") or mr_item.get("ordered_qty"))
 
-    remaining_stock_qty = max(requested_stock_qty - issued_stock_qty, 0)
-    return flt(remaining_stock_qty / conversion_factor)
+    return max(requested_stock_qty - issued_stock_qty, 0)
+
+
+def get_issue_dialog_max_issue_stock_qty(remaining_stock_qty, conversion_factor):
+    remaining_stock_qty = flt(remaining_stock_qty)
+    conversion_factor = flt(conversion_factor) or 1
+    if remaining_stock_qty <= 0:
+        return 0
+
+    return ceil(remaining_stock_qty / conversion_factor) * conversion_factor
+
+
+def get_issue_dialog_row_uom(issue_row, mr_item):
+    return issue_row.get("uom") or mr_item.get("uom") or mr_item.get("stock_uom")
+
+
+def get_issue_dialog_row_conversion_factor(mr_item, uom):
+    from erpnext.stock.get_item_details import get_conversion_factor
+
+    conversion_factor = flt(get_conversion_factor(mr_item.item_code, uom).get("conversion_factor"))
+    if not conversion_factor:
+        frappe.throw(
+            _("物料 {0} 缺少单位 {1} 的换算设置").format(mr_item.item_code, uom)
+        )
+
+    return conversion_factor
 
 
 def get_stock_entry_source_warehouse(mr, issue_rows, mr_items):
