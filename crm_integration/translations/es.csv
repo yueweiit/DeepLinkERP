@@ -8,7 +8,11 @@ MES 销售订单推送失败,Error al enviar el pedido de venta a MES
 MES 销售订单推送失败。,Falló el envío del pedido de venta a MES.
 MES 销售订单推送失败：{0},Error al enviar el pedido de venta a MES: {0}
 MES 销售订单推送接口响应格式异常。,El formato de respuesta del endpoint de pedidos de venta de MES es inválido.
+Confirmed Deposit Push Production,Anticipo confirmado y enviado a producción
+Final Payment Reconciled,Conciliación del pago final
+In Production,En producción
 Order Change,Cambio
+Production Progress Reported,Avance de producción reportado
 Pending Confirmation,Pendiente
 Pending Deposit Confirmation,Anticipo pendiente
 Pending Final Payment,Pago final
@@ -32,8 +36,6 @@ Update Items,Actualizar
 只有草稿销售订单可以驳回。,Solo se pueden rechazar pedidos de venta en borrador.
 定金已确认，销售订单已推送至MES。,El anticipo fue confirmado y el pedido de venta fue enviado a MES.
 尾款已核销，销售订单已放行发货。,El pago final fue conciliado y el pedido de venta quedó liberado para entrega.
-尾款核销失败,Error al conciliar el pago final
-尾款核销失败：预付款 {0} 小于总计 {1}。,Error al conciliar el pago final: el anticipo {0} es menor que el total {1}.
 已关闭的销售订单不能执行生产流程操作，请先重新打开订单。,Los pedidos de venta cerrados no pueden ejecutar operaciones del flujo de producción. Reabra primero el pedido.
 已驳回的销售订单不能提交。,Los pedidos de venta rechazados no se pueden enviar.
 无法创建工单,No se puede crear la orden de trabajo
@@ -57,7 +59,6 @@ Update Items,Actualizar
 缺少 CRM 订单编号，无法推送状态到 CRM。,Falta el número de pedido de CRM; no se puede enviar el estado a CRM.
 缺少 CRM 订单编号，无法推送销售订单到 MES。,Falta el número de pedido de CRM; no se puede enviar el pedido de venta a MES.
 缺少 MES 销售订单推送接口配置：mes_sales_order_push_url,Falta la configuración del endpoint para enviar pedidos de venta a MES: mes_sales_order_push_url
-缺少 MES 销售订单推送认证配置：mes_sales_order_push_authorization,Falta la configuración de autenticación para enviar pedidos de venta a MES: mes_sales_order_push_authorization
 请确认定金金额：{0}/{1},Confirme el monto del anticipo: {0}/{1}
 返回销售订单,Volver al pedido de venta
 销售订单 {0} 未放行生产，当前流程状态：{1},El pedido de venta {0} no está liberado para producción. Estado actual del proceso: {1}
@@ -65,7 +66,6 @@ Update Items,Actualizar
 销售订单必须提交后才能核销尾款。,El pedido de venta debe estar enviado antes de conciliar el pago final.
 销售订单必须提交后才能确认定金。,El pedido de venta debe estar enviado antes de confirmar el anticipo.
 销售订单缺少可推送到 MES 的明细行。,El pedido de venta no tiene líneas disponibles para enviar a MES.
-预付款小于总计，不能放行发货。,El anticipo es menor que el total; no se puede liberar para entrega.
 驳回,Rechazar
 "以下销售订单状态不允许创建或保存销售出库草稿：<br>{0}","Los siguientes pedidos de venta no permiten crear o guardar borradores de nota de entrega:<br>{0}"
 "以下销售订单未放行发货，不能提交销售出库：<br>{0}","Los siguientes pedidos de venta no están liberados para entrega y no pueden enviarse:<br>{0}"
@@ -74,3 +74,22 @@ Update Items,Actualizar
 确认核销尾款？{0}/{1},¿Confirmar la conciliación del pago final? {0}/{1}
 Partially Delivered,Parcialmente entregado
 只有流程状态为 Deliverable 或 Partially Delivered 的销售订单才可以创建销售出库。,Solo los pedidos de venta con estado de proceso Deliverable o Partially Delivered pueden crear notas de entrega.
+缺少 MES 推送接口配置：mes_push_authorization,Falta la configuración de autorización para el envío a MES: mes_push_authorization
+出货详情,Detalles de envío
+出货详情报表,Reporte de detalles de envío
+出货汇总,Resumen de envío
+销售出库明细,Detalle de notas de entrega
+下载 Excel,Descargar Excel
+销售出库单,Nota de entrega
+过账日期,Fecha de contabilización
+订单数量,Cantidad del pedido
+已出货数量,Cantidad enviada
+未出货数量,Cantidad pendiente
+出库数量,Cantidad entregada
+暂无出货记录,No hay registros de envío
+汇总,Resumen
+明细,Detalle
+单位,Unidad
+上一页,Anterior
+下一页,Siguiente
+显示 {0}-{1} / 共 {2} 行,Mostrando {0}-{1} / {2} filas

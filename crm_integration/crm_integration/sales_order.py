@@ -25,11 +25,19 @@ CANCELLED = "Cancelled"
 CRM_STATUS_API_TIMEOUT = 15
 MES_SALES_ORDER_PUSH_EVENT = "sales_order.created"
 CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION = "CONFIRMED_DEPOSIT_PUSH_PRODUCTION"
+CRM_STATUS_IN_PRODUCTION = "IN_PRODUCTION"
 CRM_STATUS_FINANCE_REJECTED = "FINANCE_REJECTED"
+CRM_STATUS_SHIPMENT_CREATED = "SHIPMENT_CREATED"
+CRM_STATUS_PENDING_SHIPMENT = "PENDING_SHIPMENT"
+CRM_STATUS_PRODUCTION_PROGRESS_REPORTED = "PRODUCTION_PROGRESS_REPORTED"
 
 CRM_STATUS_EVENTS = {
 	CRM_STATUS_FINANCE_REJECTED: "Sales Order Rejected",
 	CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION: "Confirmed Deposit Push Production",
+	CRM_STATUS_IN_PRODUCTION: "In Production",
+	CRM_STATUS_SHIPMENT_CREATED: "Shipment Created",
+	CRM_STATUS_PENDING_SHIPMENT: "Final Payment Reconciled",
+	CRM_STATUS_PRODUCTION_PROGRESS_REPORTED: "Production Progress Reported",
 }
 
 PRODUCT_SERIES_NAME_MAP = {
@@ -227,6 +235,156 @@ def push_sales_order_status_to_crm(sales_order, external_status, remark=None):
 	return response_payload
 
 
+def enqueue_sales_order_status_to_crm(
+	sales_order_name,
+	external_status,
+	triggered_status=None,
+	trigger_event=None,
+	delivery_note_name=None,
+	items=None,
+	remark=None,
+):
+	frappe.enqueue(
+		"crm_integration.crm_integration.sales_order.push_sales_order_status_to_crm_job",
+		queue="short",
+		enqueue_after_commit=True,
+		sales_order_name=sales_order_name,
+		external_status=external_status,
+		triggered_status=triggered_status,
+		trigger_event=trigger_event,
+		delivery_note_name=delivery_note_name,
+		items=items or [],
+		remark=remark,
+	)
+
+
+def push_sales_order_status_to_crm_job(
+	sales_order_name,
+	external_status,
+	triggered_status=None,
+	trigger_event=None,
+	delivery_note_name=None,
+	items=None,
+	remark=None,
+):
+	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	if not is_crm_integration_enabled(sales_order.get("company")):
+		return None
+
+	return push_sales_order_status_payload_to_crm(
+		sales_order=sales_order,
+		external_status=external_status,
+		triggered_status=triggered_status,
+		trigger_event=trigger_event,
+		delivery_note_name=delivery_note_name,
+		items=items or [],
+		remark=remark,
+	)
+
+
+def push_sales_order_status_payload_to_crm(
+	sales_order,
+	external_status,
+	triggered_status=None,
+	trigger_event=None,
+	delivery_note_name=None,
+	items=None,
+	remark=None,
+):
+	external_order_id = sales_order.get("custom_crm_order_no")
+	trace_id = make_crm_trace_id(
+		sales_order.name,
+		"-".join(filter(None, [external_status, delivery_note_name])),
+	)
+	payload = {
+		"sourceSystem": "ERP",
+		"externalStatus": external_status,
+		"externalOrderId": external_order_id,
+		"remark": remark
+		if remark is not None
+		else get_crm_status_remark(sales_order, triggered_status, delivery_note_name),
+		"traceId": trace_id,
+		"attachments": [],
+	}
+
+	items = items or []
+	if items:
+		payload["items"] = items
+
+	if trigger_event:
+		payload["triggerEvent"] = trigger_event
+		payload["trigger_event"] = trigger_event
+
+	crm_log = create_crm_log(
+		direction="Outbound",
+		event=get_crm_status_event(external_status),
+		status="Pending",
+		reference_doctype="Sales Order",
+		reference_name=sales_order.name,
+		source="ERPNext",
+		request_payload=payload,
+		trace_id=trace_id,
+		external_status=external_status,
+	)
+
+	if not external_order_id:
+		error_message = _("缺少 CRM 订单编号，无法推送状态到 CRM。")
+		update_crm_log(crm_log, status="Failed", error_message=error_message)
+		frappe.throw(error_message)
+
+	response = None
+	try:
+		request_url = get_crm_status_api_url()
+		update_crm_log(crm_log, request_url=request_url)
+		headers = {
+			"Content-Type": "application/json",
+			"X-API-Key": get_crm_status_api_key(),
+		}
+		response = requests.post(
+			request_url,
+			json=payload,
+			headers=headers,
+			timeout=CRM_STATUS_API_TIMEOUT,
+			verify=get_crm_status_api_verify_ssl(),
+		)
+		response_payload = parse_crm_response(response)
+		response.raise_for_status()
+	except Exception:
+		update_crm_log(
+			crm_log,
+			status="Failed",
+			response_payload=parse_crm_response(response) if response else None,
+			error_message=frappe.get_traceback(),
+			http_status_code=getattr(response, "status_code", None),
+		)
+		frappe.log_error(
+			title=_("CRM 状态推送失败"),
+			message=frappe.get_traceback(),
+		)
+		raise
+
+	update_crm_log(
+		crm_log,
+		status="Success",
+		response_payload=response_payload,
+		http_status_code=response.status_code,
+	)
+	frappe.logger().info(
+		f"Pushed Sales Order {sales_order.name} status {external_status} to CRM with traceId {trace_id}"
+	)
+	return response_payload
+
+
+def get_crm_status_remark(sales_order, triggered_status=None, delivery_note_name=None):
+	process_status = triggered_status or sales_order.get("custom_process_status") or ""
+	if delivery_note_name:
+		return _("销售出库 {0} 已提交，ERP流程状态：{1}").format(
+			delivery_note_name, process_status
+		)
+
+	return sales_order.get("custom_remark") or ""
+
+
 def make_crm_trace_id(sales_order_name, external_status):
 	timestamp = get_datetime().strftime("%Y%m%d%H%M%S")
 	return f"erp-{sales_order_name}-{external_status}-{timestamp}"
@@ -253,9 +411,9 @@ def get_mes_sales_order_push_url():
 
 
 def get_mes_sales_order_push_authorization():
-	authorization = frappe.conf.get("mes_sales_order_push_authorization")
+	authorization = frappe.conf.get("mes_push_authorization")
 	if not authorization:
-		frappe.throw(_("缺少 MES 销售订单推送认证配置：mes_sales_order_push_authorization"))
+		frappe.throw(_("缺少 MES 推送接口配置：mes_push_authorization"))
 	return authorization
 
 
@@ -549,6 +707,7 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
 
 	push_sales_order_status_to_crm(sales_order, CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION)
+	push_sales_order_status_to_crm(sales_order, CRM_STATUS_IN_PRODUCTION)
 	push_sales_order_to_mes(sales_order)
 	set_process_status(sales_order, PENDING_PRODUCTION)
 
@@ -562,7 +721,7 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 
 @frappe.whitelist()
 def reconcile_final_payment(sales_order_name):
-	"""Release Sales Order for delivery after final payment is fully covered by advances."""
+	"""Release Sales Order for delivery after user confirmation."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		throw_crm_integration_disabled(sales_order.get("company"))
@@ -574,21 +733,20 @@ def reconcile_final_payment(sales_order_name):
 	grand_total = flt(sales_order.get("grand_total"), sales_order.precision("grand_total"))
 	advance_paid = flt(sales_order.get("advance_paid"), sales_order.precision("advance_paid"))
 
-	if advance_paid < grand_total:
-		return {
-			"status": "failed",
-			"message": _("尾款核销失败：预付款 {0} 小于总计 {1}。").format(
-				frappe.format_value(advance_paid, {"fieldtype": "Currency", "options": "currency"}, sales_order),
-				frappe.format_value(grand_total, {"fieldtype": "Currency", "options": "currency"}, sales_order),
-			),
-			"process_status": PENDING_FINAL_PAYMENT,
-			"advance_paid": advance_paid,
-			"grand_total": grand_total,
-			"timestamp": now(),
-		}
-
 	set_process_status(sales_order, DELIVERABLE)
 	frappe.logger().info(f"Sales Order {sales_order_name} final payment reconciled")
+	enqueue_sales_order_status_to_crm(
+		sales_order_name=sales_order.name,
+		external_status=CRM_STATUS_PENDING_SHIPMENT,
+		triggered_status=DELIVERABLE,
+		trigger_event="final_payment_reconciled",
+		remark=_("尾款已核销，销售订单已放行发货。"),
+	)
+	enqueue_mes_sales_order_status_callback(
+		sales_order.name,
+		triggered_status=DELIVERABLE,
+		trigger_event="final_payment_reconciled",
+	)
 
 	return {
 		"status": "success",
@@ -598,4 +756,24 @@ def reconcile_final_payment(sales_order_name):
 		"grand_total": grand_total,
 		"timestamp": now(),
 	}
+
+
+def enqueue_mes_sales_order_status_callback(
+	sales_order_name, triggered_status=None, trigger_event=None
+):
+	try:
+		from mes_integration.mes_integration.sales_order import (
+			enqueue_sales_order_status_callback,
+		)
+
+		enqueue_sales_order_status_callback(
+			sales_order_name,
+			triggered_status=triggered_status,
+			trigger_event=trigger_event,
+		)
+	except Exception:
+		frappe.log_error(
+			title="Failed to enqueue MES Sales Order status callback",
+			message=frappe.get_traceback(),
+		)
 

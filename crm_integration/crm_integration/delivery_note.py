@@ -1,11 +1,14 @@
 import frappe
 from frappe import _
+from frappe.utils import flt
 
 from crm_integration.crm_integration.settings import is_crm_integration_enabled
 from crm_integration.crm_integration.sales_order import (
+	CRM_STATUS_SHIPMENT_CREATED,
 	DELIVERABLE,
 	PENDING_FINAL_PAYMENT,
 	PENDING_PRODUCTION,
+	enqueue_sales_order_status_to_crm,
 	set_process_status,
 )
 
@@ -90,10 +93,98 @@ def update_sales_orders_delivery_process_status(doc):
 		process_status = get_sales_order_delivery_process_status(sales_order_name)
 		set_process_status(sales_order, process_status)
 		updated_statuses.append(f"{sales_order_name}: {process_status}")
+		if doc.docstatus == 1:
+			enqueue_crm_delivery_note_shipment_event(
+				doc, sales_order_name, process_status
+			)
 
 	frappe.logger().info(
 		f"Delivery Note {doc.name} updated Sales Order delivery process statuses: {', '.join(updated_statuses)}"
 	)
+	if doc.docstatus in (1, 2):
+		enqueue_mes_delivery_note_status_callback(doc.name)
+
+
+def enqueue_crm_delivery_note_shipment_event(doc, sales_order_name, process_status):
+	items = get_delivery_note_shipment_items(doc, sales_order_name)
+	if not items:
+		return
+
+	try:
+		enqueue_sales_order_status_to_crm(
+			sales_order_name=sales_order_name,
+			external_status=CRM_STATUS_SHIPMENT_CREATED,
+			triggered_status=process_status,
+			trigger_event="delivery_note_submitted",
+			delivery_note_name=doc.name,
+			items=items,
+			remark=get_delivery_note_shipment_remark(
+				doc.name, sales_order_name, process_status
+			),
+		)
+	except Exception:
+		frappe.log_error(
+			title="Failed to enqueue CRM Delivery Note shipment event",
+			message=frappe.get_traceback(),
+		)
+
+
+def get_delivery_note_shipment_remark(delivery_note_name, sales_order_name, process_status):
+	if process_status == COMPLETED:
+		return "全部发货"
+
+	shipment_count = get_submitted_delivery_note_count(sales_order_name, delivery_note_name)
+	return f"第{shipment_count}次部分发货"
+
+
+def get_submitted_delivery_note_count(sales_order_name, current_delivery_note):
+	rows = frappe.db.sql(
+		"""
+		SELECT COUNT(DISTINCT dn.name) AS delivery_note_count
+		FROM `tabDelivery Note` dn
+		INNER JOIN `tabDelivery Note Item` dni ON dni.parent = dn.name
+		INNER JOIN `tabDelivery Note` current_dn ON current_dn.name = %s
+		WHERE dn.docstatus = 1
+			AND dni.against_sales_order = %s
+			AND dn.creation <= current_dn.creation
+		""",
+		(current_delivery_note, sales_order_name),
+		as_dict=True,
+	)
+	return max(int(rows[0].delivery_note_count if rows else 0), 1)
+
+
+def get_delivery_note_shipment_items(doc, sales_order_name):
+	qty_by_item = {}
+	for row in doc.get("items", []):
+		if row.get("against_sales_order") != sales_order_name:
+			continue
+
+		item_code = row.get("item_code")
+		quantity = flt(row.get("stock_qty") or row.get("qty"))
+		if not item_code or quantity <= 0:
+			continue
+
+		qty_by_item[item_code] = flt(qty_by_item.get(item_code)) + quantity
+
+	return [
+		{"externalItemId": item_code, "quantity": quantity}
+		for item_code, quantity in sorted(qty_by_item.items())
+	]
+
+
+def enqueue_mes_delivery_note_status_callback(delivery_note_name):
+	try:
+		from mes_integration.mes_integration.delivery_note import (
+			enqueue_delivery_note_status_callback,
+		)
+
+		enqueue_delivery_note_status_callback(delivery_note_name)
+	except Exception:
+		frappe.log_error(
+			title="Failed to enqueue MES Delivery Note status callback",
+			message=frappe.get_traceback(),
+		)
 
 
 def get_sales_order_delivery_process_status(sales_order_name):
