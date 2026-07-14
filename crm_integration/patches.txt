@@ -7,4 +7,5 @@
 crm_integration.patches.add_company_integration_switches
 crm_integration.patches.add_crm_custom_fields
 crm_integration.patches.update_process_status_options_for_partial_delivery
-crm_integration.patches.add_shipment_details_tab
+crm_integration.patches.remove_shipment_details_tab
+crm_integration.patches.add_item_tax_amount_field
