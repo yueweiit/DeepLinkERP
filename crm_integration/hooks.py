@@ -102,6 +102,8 @@ doctype_css = {"Sales Order": "public/css/sales_order.css"}
 
 # before_install = "crm_integration.install.before_install"
 # after_install = "crm_integration.install.after_install"
+after_install = "crm_integration.setup.after_install"
+after_migrate = "crm_integration.setup.after_migrate"
 
 # Uninstallation
 # ------------
