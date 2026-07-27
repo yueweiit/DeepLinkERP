@@ -10,7 +10,7 @@ def execute():
 					"fieldname": "custom_mes_issue_uom",
 					"fieldtype": "Link",
 					"insert_after": "stock_uom",
-					"label": "MES Default Issue UOM",
+					"label": "MES默认发料单位",
 					"options": "UOM",
 					"description": "Default UOM used by the MES Material Request issue dialog. It must exist in the item's UOM Conversion Details or match the stock UOM.",
 				},

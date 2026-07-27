@@ -94,6 +94,8 @@ doctype_css = {"Stock Entry": "public/css/stock_entry.css"}
 
 # before_install = "mes_integration.install.before_install"
 # after_install = "mes_integration.install.after_install"
+after_install = "mes_integration.setup.after_install"
+after_migrate = "mes_integration.setup.after_migrate"
 
 # Uninstallation
 # ------------
