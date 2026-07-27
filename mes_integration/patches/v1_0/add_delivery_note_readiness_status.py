@@ -38,6 +38,11 @@ def backfill_delivery_note_readiness_status():
 		"""
 	)
 
+	# CRM owns this field. During a fresh multi-app migrate, MES may run
+	# before CRM has created it; the next migrate will complete this update.
+	if not frappe.db.has_column("Sales Order", "custom_process_status"):
+		return
+
 	frappe.db.sql(
 		"""
 		UPDATE `tabDelivery Note` dn
