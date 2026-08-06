@@ -76,8 +76,9 @@ def preserve_explicit_zero_rates(doc, payload):
 		item.rate = 0
 		item.price_list_rate = 0
 		item.discount_amount = 0
-		item.pricing_rules = []
+		item.pricing_rules = None
 
+	doc.flags.ignore_pricing_rule = True
 	doc.calculate_taxes_and_totals()
 	doc.save(ignore_permissions=True)
 
