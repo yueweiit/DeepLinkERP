@@ -563,8 +563,8 @@ function get_issue_and_push_dialog_fields(frm, is_transfer) {
 	];
 }
 
-function setup_issue_and_push_dialog_warehouse_queries(frm, dialog) {
-	const grid = dialog.fields_dict.items && dialog.fields_dict.items.grid;
+function setup_issue_and_push_dialog_warehouse_queries(frm, dialog, fieldname = "items") {
+	const grid = dialog.fields_dict[fieldname] && dialog.fields_dict[fieldname].grid;
 	if (!grid) {
 		return;
 	}
@@ -582,8 +582,8 @@ function setup_issue_and_push_dialog_warehouse_queries(frm, dialog) {
 	});
 }
 
-function setup_issue_dialog_actual_qty_refresh(dialog) {
-	const grid = dialog.fields_dict.items && dialog.fields_dict.items.grid;
+function setup_issue_dialog_actual_qty_refresh(dialog, fieldname = "items") {
+	const grid = dialog.fields_dict[fieldname] && dialog.fields_dict[fieldname].grid;
 	if (!grid) {
 		return;
 	}
@@ -596,7 +596,7 @@ function setup_issue_dialog_actual_qty_refresh(dialog) {
 
 	grid.wrapper.on("change", '[data-fieldname="uom"] input', function() {
 		setTimeout(function() {
-			const rows = dialog.get_value("items") || [];
+			const rows = dialog.get_value(fieldname) || [];
 			Promise.all(rows.map(update_issue_dialog_row_uom)).then(function() {
 				grid.refresh();
 			});
@@ -605,16 +605,16 @@ function setup_issue_dialog_actual_qty_refresh(dialog) {
 
 	grid.wrapper.on("change", '[data-fieldname="qty"] input', function() {
 		setTimeout(function() {
-			const rows = dialog.get_value("items") || [];
+			const rows = dialog.get_value(fieldname) || [];
 			rows.forEach(update_issue_dialog_row_projected_remaining_qty);
 			grid.refresh();
 		}, 100);
 	});
 }
 
-function refresh_issue_dialog_actual_qty(dialog) {
-	const grid = dialog.fields_dict.items && dialog.fields_dict.items.grid;
-	const rows = dialog.get_value("items") || [];
+function refresh_issue_dialog_actual_qty(dialog, fieldname = "items") {
+	const grid = dialog.fields_dict[fieldname] && dialog.fields_dict[fieldname].grid;
+	const rows = dialog.get_value(fieldname) || [];
 	const promises = rows.map(function(row) {
 		return update_issue_dialog_row_actual_qty(row);
 	});

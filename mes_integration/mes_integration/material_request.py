@@ -703,6 +703,77 @@ def submit_issue_and_push_to_dlm(material_request_name):
     }
 
 
+@frappe.whitelist()
+def batch_issue_and_push_to_dlm(material_requests=None, items=None):
+    """Issue and push submitted, partially unissued Material Requests one by one."""
+    from mes_integration.mes_integration.stock_entry import parse_json_if_needed
+
+    names = parse_json_if_needed(material_requests)
+    grouped_items = parse_json_if_needed(items) if items else {}
+    if not isinstance(names, list) or not names:
+        frappe.throw(_("请选择至少一个物料需求。"))
+
+    results = []
+    for index, name in enumerate(dict.fromkeys(names), start=1):
+        savepoint = f"batch_material_request_{index}"
+        try:
+            frappe.db.savepoint(savepoint)
+            mr = frappe.get_doc("Material Request", name)
+            validate_batch_issue_material_request(mr)
+            issue_rows = grouped_items.get(mr.name) if isinstance(grouped_items, dict) else None
+            result = issue_and_push_to_dlm_from_dialog(mr.name, issue_rows or build_batch_issue_rows(mr))
+            results.append({"material_request": mr.name, **result})
+        except Exception:
+            frappe.db.rollback(save_point=savepoint)
+            results.append(
+                {
+                    "material_request": name,
+                    "status": "failed",
+                    "message": frappe.get_exception_message(),
+                }
+            )
+
+    return {
+        "status": "success" if all(row["status"] == "success" for row in results) else "partial",
+        "results": results,
+    }
+
+
+def validate_batch_issue_material_request(mr):
+    if mr.docstatus != 1:
+        frappe.throw(_("物料需求 {0} 必须已提交。").format(mr.name))
+    if mr.per_ordered >= 100:
+        frappe.throw(_("物料需求 {0} 已发料完成。").format(mr.name))
+
+
+def build_batch_issue_rows(mr):
+    issue_rows = []
+    for row in mr.items:
+        conversion_factor = flt(row.conversion_factor) or 1
+        remaining_stock_qty = max(flt(row.stock_qty) - flt(row.ordered_qty), 0)
+        if remaining_stock_qty <= 0:
+            continue
+
+        issue_rows.append(
+            {
+                "material_request_item": row.name,
+                "item_code": row.item_code,
+                "item_name": row.item_name,
+                "uom": row.uom or row.stock_uom,
+                "request_uom": row.uom or row.stock_uom,
+                "stock_uom": row.stock_uom or row.uom,
+                "conversion_factor": conversion_factor,
+                "qty": remaining_stock_qty / conversion_factor,
+                "s_warehouse": row.from_warehouse or row.warehouse or mr.set_from_warehouse or mr.set_warehouse,
+                "t_warehouse": row.warehouse or mr.set_warehouse,
+            }
+        )
+
+    if not issue_rows:
+        frappe.throw(_("物料需求 {0} 没有可发料的明细。").format(mr.name))
+    return issue_rows
+
+
 def validate_item_details(doc, method=None):
     if not is_mes_integration_enabled(doc.get("company")):
         return
@@ -750,4 +821,3 @@ def validate_item_details(doc, method=None):
             )
         elif not detail.get("uom") and detail.item_code:
             detail.uom = frappe.db.get_value("Item", detail.item_code, "stock_uom")
-
