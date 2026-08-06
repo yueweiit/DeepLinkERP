@@ -2,6 +2,7 @@ from typing import Any
 
 import frappe
 from frappe import _
+from frappe.utils import flt
 
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from crm_integration.crm_integration.sales_order import PENDING_DEPOSIT_CONFIRMATION
@@ -30,6 +31,7 @@ def create_and_submit_sales_order(sales_order=None):
 	try:
 		doc = frappe.get_doc(payload)
 		doc.insert(ignore_permissions=True)
+		preserve_explicit_zero_rates(doc, payload)
 		doc.submit()
 
 		if doc.get("custom_process_status") != PENDING_DEPOSIT_CONFIRMATION:
@@ -61,6 +63,23 @@ def create_and_submit_sales_order(sales_order=None):
 			http_status_code=500,
 		)
 		raise
+
+
+def preserve_explicit_zero_rates(doc, payload):
+	"""Keep an explicitly supplied zero rate from being replaced by price lookup."""
+	for payload_item, item in zip(payload.get("items") or [], doc.get("items") or []):
+		if "rate" not in payload_item or payload_item.get("rate") is None:
+			continue
+		if flt(payload_item.get("rate")) != 0:
+			continue
+
+		item.rate = 0
+		item.price_list_rate = 0
+		item.discount_amount = 0
+		item.pricing_rules = []
+
+	doc.calculate_taxes_and_totals()
+	doc.save(ignore_permissions=True)
 
 
 @frappe.whitelist(methods=["POST"])
