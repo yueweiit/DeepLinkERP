@@ -25,6 +25,14 @@ def execute():
 def create_crm_custom_fields():
 	create_custom_fields(
 		{
+			"Item": [
+				{
+					"fieldname": "custom_specifications",
+					"fieldtype": "Data",
+					"label": "Specifications",
+					"insert_after": "item_name",
+				},
+			],
 			"Sales Order": [
 				{
 					"fieldname": "custom_process_status",
@@ -82,5 +90,5 @@ def create_crm_custom_fields():
 
 
 def clear_crm_custom_field_cache():
-	for doctype in ("Sales Order", "Sales Order Item"):
+	for doctype in ("Item", "Sales Order", "Sales Order Item"):
 		frappe.clear_cache(doctype=doctype)

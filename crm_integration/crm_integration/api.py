@@ -247,3 +247,162 @@ def get_request_url():
 		return None
 
 	return getattr(frappe.request, "url", None)
+
+
+# ---------------------------------------------------------------------------
+# Item Sync APIs
+# ---------------------------------------------------------------------------
+
+
+def _validate_item_group(item_group):
+	"""验证物料组存在且为叶子节点"""
+	if not item_group:
+		frappe.throw(_("缺少必填字段：item_group"))
+
+	if not frappe.db.exists("Item Group", item_group):
+		frappe.throw(_("物料组不存在：{0}").format(item_group))
+
+	is_group = frappe.db.get_value("Item Group", item_group, "is_group")
+	if is_group:
+		frappe.throw(_("物料组 {0} 是父级分组，请选择叶子分组。").format(item_group))
+
+
+def _validate_uom(uom):
+	"""验证单位存在"""
+	if not uom:
+		frappe.throw(_("缺少必填字段：stock_uom"))
+
+	if not frappe.db.exists("UOM", uom):
+		frappe.throw(_("单位不存在：{0}").format(uom))
+
+
+@frappe.whitelist()
+def get_item_group_list(keyword=None):
+	"""查询物料组列表，支持模糊搜索。返回叶子物料组。"""
+	filters = {"is_group": 0}
+	if keyword:
+		filters["name"] = ["like", "%{}%".format(keyword)]
+
+	groups = frappe.get_all(
+		"Item Group",
+		filters=filters,
+		fields=["name", "parent_item_group", "item_group_name"],
+		order_by="name asc",
+		limit_page_length=100,
+	)
+	return {"status": "success", "data": groups}
+
+
+@frappe.whitelist()
+def check_item_exists(item_code):
+	"""检查物料是否已存在，返回完整物料信息"""
+	if not item_code:
+		frappe.throw(_("缺少必填字段：item_code"))
+
+	exists = frappe.db.exists("Item", item_code)
+	if exists:
+		fields = [
+			# 基础字段
+			"item_code", "item_name", "item_group", "stock_uom",
+			"description", "brand", "disabled",
+			# 自定义字段
+			"custom_specifications", "custom_short_name", "custom_item_short_name",
+			"custom_mnemonic_code", "custom_sku", "custom_external_code",
+			"custom_item_classification", "custom_dpci",
+		]
+		# 过滤掉不存在的字段
+		meta = frappe.get_meta("Item")
+		valid_fields = [f for f in fields if meta.has_field(f) or f in frappe.model.default_fields]
+
+		item = frappe.get_value("Item", item_code, valid_fields, as_dict=True)
+		return {"status": "success", "exists": True, **item}
+
+	return {"status": "success", "exists": False, "item_code": item_code}
+
+
+@frappe.whitelist(methods=["POST"])
+def create_item_from_crm(item_data=None):
+	"""从 CRM 创建物料到 ERP。"""
+	payload = get_request_payload(item_data)
+	validate_item_payload(payload)
+
+	item_code = payload["item_code"]
+
+	# 检查物料是否已存在
+	if frappe.db.exists("Item", item_code):
+		item = frappe.get_value(
+			"Item", item_code,
+			["item_code", "item_name", "item_group"],
+			as_dict=True,
+		)
+		return {"status": "exists", "message": _("物料已存在。"), **item}
+
+	# 校验物料组和单位
+	_validate_item_group(payload["item_group"])
+	_validate_uom(payload["stock_uom"])
+
+	# 记录日志
+	crm_log = create_crm_log(
+		direction="Inbound",
+		event="Item Create From CRM",
+		status="Pending",
+		source="CRM",
+		request_url=get_request_url(),
+		request_payload=payload,
+	)
+
+	try:
+		doc = frappe.get_doc({
+			"doctype": "Item",
+			"item_code": item_code,
+			"item_name": payload["item_name"],
+			"item_group": payload["item_group"],
+			"stock_uom": payload["stock_uom"],
+			"custom_specifications": payload.get("custom_specifications"),
+		})
+		doc.insert(ignore_permissions=True)
+
+		response = {
+			"status": "success",
+			"message": _("物料已创建。"),
+			"item_code": doc.item_code,
+			"item_name": doc.item_name,
+			"item_group": doc.item_group,
+		}
+
+		update_crm_log(
+			crm_log,
+			status="Success",
+			reference_doctype="Item",
+			reference_name=doc.name,
+			response_payload=response,
+			http_status_code=200,
+		)
+		return response
+
+	except Exception:
+		update_crm_log(
+			crm_log,
+			status="Failed",
+			error_message=frappe.get_traceback(),
+			http_status_code=500,
+		)
+		raise
+
+
+def validate_item_payload(payload):
+	"""校验物料创建请求体"""
+	if not isinstance(payload, dict):
+		frappe.throw(_("请求体必须是 JSON 对象。"))
+
+	if not payload.get("item_code"):
+		frappe.throw(_("缺少必填字段：item_code"))
+
+	if not payload.get("item_name"):
+		frappe.throw(_("缺少必填字段：item_name"))
+
+	if not payload.get("item_group"):
+		frappe.throw(_("缺少必填字段：item_group"))
+
+	if not payload.get("stock_uom"):
+		frappe.throw(_("缺少必填字段：stock_uom"))
