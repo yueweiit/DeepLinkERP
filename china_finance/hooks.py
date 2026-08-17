@@ -260,6 +260,9 @@ doc_events["*"] = {
 	"on_submit": "china_finance.services.voucher.on_gl_source_submit",
 	"on_cancel": "china_finance.services.voucher.on_gl_source_cancel",
 }
+doc_events["Bank Transaction"] = {
+	"on_submit": "china_finance.services.bank_reconciliation.auto_create_voucher_on_submit",
+}
 
 # Scheduled Tasks
 # ---------------

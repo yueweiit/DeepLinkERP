@@ -12,7 +12,7 @@ from frappe.utils.file_manager import save_file
 
 
 STANDARD_HEADERS = ["日期", "存款", "取款", "摘要", "描述", "参考号码", "银行账户", "货币"]
-SUPPORTED_BANK_PARSERS = {"招商银行": "cmb"}
+SUPPORTED_BANK_PARSERS = {"招商银行": "cmb", "招商": "cmb"}
 REQUIRED_CMB_HEADERS = {"交易日", "借方金额", "贷方金额", "摘要", "流水号"}
 CMB_OPTIONAL_HEADERS = {"交易类型", "收(付)方名称", "收(付)方账号", "收(付)方开户行名"}
 CURRENCY_MAP = {"人民币": "CNY", "CNY": "CNY", "美元": "USD", "USD": "USD", "港币": "HKD", "HKD": "HKD"}
@@ -65,7 +65,7 @@ def convert_bank_statement_import_log(statement_import_id, source_file):
 	doc = frappe.get_doc("Bank Statement Import Log", statement_import_id)
 	doc.check_permission("write")
 	bank_account = frappe.db.get_value("Bank Account", doc.bank_account, ["bank", "account"] , as_dict=True)
-	if not bank_account or bank_account.bank != "招商银行":
+	if not bank_account or bank_account.bank not in SUPPORTED_BANK_PARSERS:
 		return {"supported": False}
 
 	file_doc = _get_attached_source_file(doc, source_file, "Bank Statement Import Log")
