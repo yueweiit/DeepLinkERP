@@ -5761,6 +5761,101 @@ def pull_and_save_to_erp_from_env() -> dict:
     }
 
 
+def pull_latest_logistics_approvals_to_erp(
+    *,
+    start: str | None = "",
+    end: str | None = "",
+    transport_modes: tuple[str, ...] | list[str] | str = "ALL",
+    limit: int | None = 200,
+    env_file: str | None = None,
+    process_code: str | None = "",
+    api_style: str = "auto",
+    list_api: str = "auto",
+    page_size: int | None = None,
+    max_pages: int | None = None,
+    chunk_days: int | None = None,
+    access_token: str = "",
+) -> dict:
+    """手动拉取指定时间范围内的国际物流 OA，并保存/更新为成本批次。"""
+
+    resolved_env_file = resolve_dingtalk_env_file(env_file)
+    env_file_loaded = False
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+        env_file_loaded = True
+
+    if not _has_dingtalk_pull_credentials() and not _clean(access_token):
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "未配置钉钉拉取凭据，本次未执行拉取。",
+            "env_file_loaded": env_file_loaded,
+        }
+
+    resolved_start = _clean(start)
+    resolved_end = _clean(end)
+    if not resolved_start or not resolved_end:
+        default_start, default_end = _build_scheduled_pull_window()
+        resolved_start = resolved_start or default_start
+        resolved_end = resolved_end or default_end
+
+    pull_result = pull_logistics_approvals(
+        process_code=resolve_logistics_process_code(
+            process_code
+            or _runtime_config_value(
+                "DINGTALK_LOGISTICS_PROCESS_CODE",
+                "overseas_costing_dingtalk_logistics_process_code",
+            )
+        ),
+        start=resolved_start,
+        end=resolved_end,
+        api_style=api_style or _runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default="auto"),
+        list_api=list_api or _runtime_config_value("DINGTALK_LIST_API", "overseas_costing_dingtalk_list_api", default="auto"),
+        page_size=page_size
+        or _runtime_config_int("DINGTALK_SCHEDULE_PAGE_SIZE", "DINGTALK_PAGE_SIZE", default=20),
+        max_pages=max_pages
+        or _runtime_config_int("DINGTALK_SCHEDULE_MAX_PAGES", "DINGTALK_MAX_PAGES", default=20),
+        chunk_days=chunk_days
+        or _runtime_config_int("DINGTALK_SCHEDULE_CHUNK_DAYS", "DINGTALK_CHUNK_DAYS", default=30),
+        limit=limit or None,
+        include_raw=False,
+        include_all=False,
+        access_token=access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
+        transport_modes=transport_modes or "ALL",
+    )
+    save_result = save_sea_approvals_to_erp(pull_result)
+    summary = {
+        "ok": bool(save_result.get("ok")),
+        "manual": True,
+        "env_file_loaded": env_file_loaded,
+        "start": resolved_start,
+        "end": resolved_end,
+        "transport_modes": pull_result.get("transport_modes"),
+        "pull": {
+            "total_instance_count": pull_result.get("total_instance_count", 0),
+            "detail_count": pull_result.get("detail_count", 0),
+            "transport_counts": pull_result.get("transport_counts", {}),
+            "filtered_count": pull_result.get("filtered_count", 0),
+        },
+        "save": {
+            "created_count": save_result.get("created_count", 0),
+            "updated_count": save_result.get("updated_count", 0),
+            "unchanged_count": save_result.get("unchanged_count", 0),
+            "skipped_count": save_result.get("skipped_count", 0),
+            "message": save_result.get("message"),
+        },
+        "items": (save_result.get("items") or [])[:20],
+        "skipped_items": (save_result.get("skipped_items") or [])[:20],
+    }
+    _log_scheduled_pull_summary(summary)
+    return summary
+
+
 def _build_scheduled_pull_window() -> tuple[str, str]:
     start = _runtime_config_value(
         "DINGTALK_SCHEDULE_PULL_START",

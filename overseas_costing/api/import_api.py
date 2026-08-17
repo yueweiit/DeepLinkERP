@@ -640,6 +640,37 @@ def refresh_existing_oa_logistics_details(
 
 
 @frappe.whitelist()
+def pull_latest_oa_logistics_approvals(
+    start: str | None = None,
+    end: str | None = None,
+    transport_modes: str | None = "ALL",
+    limit: int | None = 200,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    access_token: str | None = None,
+) -> dict:
+    """手动拉取国际物流 OA 审批单，并保存/更新成本批次。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    try:
+        normalized_limit = int(limit or 0) or None
+    except (TypeError, ValueError):
+        normalized_limit = 200
+    return import_oa_logistics.pull_latest_logistics_approvals_to_erp(
+        start=start or "",
+        end=end or "",
+        transport_modes=transport_modes or "ALL",
+        limit=normalized_limit,
+        env_file=env_file,
+        api_style=api_style or "auto",
+        list_api=list_api or "auto",
+        access_token=access_token or "",
+    )
+
+
+@frappe.whitelist()
 def refresh_oa_logistics_detail(
     target: str,
     limit: int | None = 50,
