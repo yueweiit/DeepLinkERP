@@ -9,3 +9,13 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+data/
+overseas_costing/data/
+tmp/
+*.sql
+*.sql.gz
+*.tar
+*.tar.gz
+site_config*.json
+*_site_config*.json
+*site_config_backup*.json

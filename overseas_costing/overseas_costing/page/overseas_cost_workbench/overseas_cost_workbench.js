@@ -5610,9 +5610,9 @@ class OverseasCostWorkbench {
   }
 
   renderBatchFocusControls() {
-    const isFocused = Boolean(this.focusedBatchName && this.getDisplayedBatches().length === 1);
-    this.$root.find("[data-action='clear-batch-focus']").prop("hidden", !isFocused);
-    this.$root.find("[data-action='expand-current'], [data-action='collapse-current']").prop("hidden", isFocused);
+    const inFocusedView = Boolean(this.focusedBatchName);
+    this.$root.find("[data-action='clear-batch-focus']").prop("hidden", !inFocusedView);
+    this.$root.find("[data-action='expand-current'], [data-action='collapse-current']").prop("hidden", inFocusedView);
   }
 
   renderAuditList() {
