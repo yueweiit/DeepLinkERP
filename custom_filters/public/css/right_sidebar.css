@@ -2,7 +2,7 @@
 	position: relative;
 	order: -1;
 	flex-shrink: 0;
-	width: 50px;
+	width: 64px;
 	height: 100vh;
 	z-index: 1020;
 }
@@ -13,7 +13,7 @@
 	left: 0;
 	display: flex;
 	flex-direction: column;
-	width: 50px;
+	width: 64px;
 	height: 100vh;
 	border-right: 1px solid var(--sidebar-border-color, #ededed);
 	background: var(--surface-menu-bar, var(--fg-color, #f8f9fa));
@@ -42,7 +42,7 @@
 	align-items: center;
 	justify-content: center;
 	flex: 0 0 auto;
-	width: 42px;
+	width: 56px;
 	min-height: 54px;
 	padding: 0;
 	border: 0;
@@ -68,14 +68,15 @@
 .custom-filters-right-sidebar-item.active {
 	position: relative;
 	z-index: 1021;
-	background: var(--sidebar-hover-color, #f3f3f3);
-	border-radius: 10px;
-	box-shadow: inset 3px 0 0 var(--primary, #2490ef);
+	background: var(--sidebar-active-color, #ffffff);
+	border-radius: 8px;
+	box-shadow: var(--shadow-sm);
+	outline: 2px solid #707684;
+	outline-offset: -2px;
 }
 
-/* Keep the active state compact and app-like; the native sidebar remains visually separate. */
-.custom-filters-right-sidebar-item.active::after {
-	display: none;
+.custom-filters-right-sidebar-item.active .custom-filters-right-sidebar-item-label {
+	font-weight: 500;
 }
 
 .custom-filters-right-sidebar-item:focus-visible {
@@ -84,7 +85,8 @@
 }
 
 .custom-filters-right-sidebar-item.active:focus-visible {
-	outline: none;
+	outline: 2px solid var(--primary, #2490ef);
+	outline-offset: -2px;
 }
 
 .custom-filters-right-sidebar-item-icon {
@@ -188,7 +190,7 @@
 }
 
 .custom-filters-right-sidebar-flyout-item:focus-visible {
-	outline: 2px solid var(--primary, #2490ef);
+	outline: 2px solid #707684;
 	outline-offset: -2px;
 }
 

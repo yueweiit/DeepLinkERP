@@ -255,7 +255,7 @@
 			const rect = trigger.getBoundingClientRect();
 			const top = Math.max(8, Math.min(rect.top, window.innerHeight - this.flyout.offsetHeight - 8));
 			Object.assign(this.flyout.style, {
-				left: `${rect.right + 8}px`,
+				left: `${rect.right + 6}px`,
 				right: "auto",
 				top: `${top}px`,
 			});
