@@ -975,10 +975,12 @@ def auto_reconcile_vouchers(
 	)
 
 	if len(bank_transactions) > 10:
-		for bank_transaction_batch in create_batch(bank_transactions, 1000):
+		for idx, bank_transaction_batch in enumerate(create_batch(bank_transactions, 1000)):
 			frappe.enqueue(
 				method="erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool.start_auto_reconcile",
 				queue="long",
+				job_id=f"bank_auto_reconcile_{bank_account}_{idx}",
+				deduplicate=True,
 				bank_transactions=bank_transaction_batch,
 				from_date=from_date,
 				to_date=to_date,

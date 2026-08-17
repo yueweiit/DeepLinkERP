@@ -52,6 +52,7 @@ erpnext.accounts.bank_reconciliation.DialogManager = class DialogManager {
 					this.dialog.set_values(r.message);
 					this.copy_data_to_voucher();
 					this.dialog.show();
+					this.update_options();
 				}
 			},
 		});
@@ -466,6 +467,12 @@ erpnext.accounts.bank_reconciliation.DialogManager = class DialogManager {
 				selected_attributes.push($(col).attr("data-fieldname"));
 			}
 		});
+
+		if (selected_attributes.length === 0) {
+			this.dialog.$wrapper.find(".checkbox input").each((i, col) => {
+				selected_attributes.push($(col).attr("data-fieldname"));
+			});
+		}
 
 		return selected_attributes;
 	}
