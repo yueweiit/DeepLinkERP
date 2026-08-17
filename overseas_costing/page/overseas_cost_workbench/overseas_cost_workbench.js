@@ -137,6 +137,7 @@ class OverseasCostWorkbench {
                   <span class="ocw-summary-pill" data-area="hierarchy-summary">加载批次中</span>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="file-parse">文件解析</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">商品归类</button>
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="pull-oa-logistics">钉钉拉取</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="export-current">导出当前结果</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="add-batch">+ 添加报关运单</button>
@@ -249,6 +250,7 @@ class OverseasCostWorkbench {
     );
     this.$root.on("click", "[data-action='recalculate']", (event) => this.recalculate($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='open-import']", () => this.openImportDialog());
+    this.$root.on("click", "[data-action='pull-oa-logistics']", () => this.openOaLogisticsPullDialog());
     this.$root.on("change", "[data-role='data-check-batch-select']", (event) => {
       const batchName = String($(event.currentTarget).val() || "");
       const batch = this.findBatch(batchName);
@@ -1522,6 +1524,161 @@ class OverseasCostWorkbench {
         <td>${this.escape(this.formatNumber(taxes.iva_amount_mxn || 0))}</td>
       </tr>
     `;
+  }
+
+  openOaLogisticsPullDialog() {
+    const defaults = this.getDefaultPullDateRange();
+    const dialog = new frappe.ui.Dialog({
+      title: "拉取钉钉国际物流审批",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "pull_note",
+          options: `
+            <div class="ocw-pull-note">
+              <strong>只补拉钉钉国际物流审批单</strong>
+              <span>新单会创建批次，已有单据只更新追溯、附件、采购字段和明确费用，不会清空或删除已有批次。</span>
+            </div>
+          `,
+        },
+        { fieldtype: "Date", fieldname: "start", label: "开始日期", default: defaults.start, reqd: 1 },
+        { fieldtype: "Date", fieldname: "end", label: "结束日期", default: defaults.end, reqd: 1 },
+        {
+          fieldtype: "Select",
+          fieldname: "transport_modes",
+          label: "运输方式",
+          options: "全部\n海运\n空运\n快递",
+          default: "全部",
+        },
+        {
+          fieldtype: "Int",
+          fieldname: "limit",
+          label: "最多读取审批单数",
+          default: 200,
+          description: "用于限制本次读取详情数量，避免时间范围过大时等待太久。",
+        },
+        {
+          fieldtype: "HTML",
+          fieldname: "pull_result",
+          options: `<div class="ocw-pull-result empty" data-area="oa-pull-result">尚未开始拉取</div>`,
+        },
+      ],
+      primary_action_label: "开始拉取",
+      primary_action: async (values) => {
+        await this.pullOaLogisticsApprovals(dialog, values || {});
+      },
+    });
+    dialog.show();
+    this.setOaPullPrimaryState(dialog, "ready");
+  }
+
+  async pullOaLogisticsApprovals(dialog, values) {
+    if (dialog.$wrapper.data("ocw-pull-completed") && !values.force) {
+      frappe.confirm("刚刚已经完成一次拉取，确认要按当前日期范围重新拉取吗？", () => {
+        this.pullOaLogisticsApprovals(dialog, { ...values, force: true }).catch((error) => this.showError(error));
+      });
+      return;
+    }
+    const start = String(values.start || "").trim();
+    const end = String(values.end || "").trim();
+    if (!start || !end) {
+      frappe.msgprint("请先选择开始日期和结束日期。");
+      return;
+    }
+    dialog.$wrapper.data("ocw-pull-completed", false);
+    this.setOaPullPrimaryState(dialog, "running");
+    try {
+      this.renderOaPullResult(dialog, null, "loading");
+      const result = await this.call(
+        "overseas_costing.api.import_api.pull_latest_oa_logistics_approvals",
+        {
+          start,
+          end,
+          transport_modes: this.normalizePullTransportMode(values.transport_modes),
+          limit: Number(values.limit || 200) || 200,
+        },
+        true
+      );
+      this.renderOaPullResult(dialog, result, result.skipped ? "warn" : "ready");
+      if (result.skipped) {
+        this.setOaPullPrimaryState(dialog, "ready");
+        frappe.show_alert({ message: result.reason || "钉钉拉取已跳过", indicator: "orange" });
+        return;
+      }
+      const save = result.save || {};
+      const message = `钉钉拉取完成：新增 ${save.created_count || 0}，更新 ${save.updated_count || 0}，已存在 ${save.unchanged_count || 0}，跳过 ${save.skipped_count || 0}`;
+      frappe.show_alert({ message, indicator: "green" });
+      this.resetFilterValues();
+      await this.loadBatches();
+      dialog.$wrapper.data("ocw-pull-completed", true);
+      this.setOaPullPrimaryState(dialog, "completed");
+    } catch (error) {
+      dialog.$wrapper.data("ocw-pull-completed", false);
+      this.setOaPullPrimaryState(dialog, "ready");
+      this.showError(error);
+    }
+  }
+
+  setOaPullPrimaryState(dialog, state = "ready") {
+    const $button = dialog.get_primary_btn ? dialog.get_primary_btn() : dialog.$wrapper.find(".modal-footer .btn-primary");
+    if (!$button || !$button.length) return;
+    if (state === "running") {
+      $button.prop("disabled", true).text("拉取中...");
+      return;
+    }
+    $button.prop("disabled", false).text(state === "completed" ? "重新拉取" : "开始拉取");
+  }
+
+  renderOaPullResult(dialog, result, state = "empty") {
+    const $target = dialog.$wrapper.find("[data-area='oa-pull-result']");
+    $target.removeClass("empty loading ready warn");
+    if (state === "loading") {
+      $target.addClass("loading").text("正在拉取钉钉审批单并写入成本批次...");
+      return;
+    }
+    if (!result) {
+      $target.addClass("empty").text("尚未开始拉取");
+      return;
+    }
+    if (result.skipped) {
+      $target.addClass("warn").html(`<strong>本次未执行拉取</strong><span>${this.escape(result.reason || "缺少钉钉配置")}</span>`);
+      return;
+    }
+    const pull = result.pull || {};
+    const save = result.save || {};
+    const counts = pull.transport_counts || {};
+    const modeText = (result.transport_modes || []).map((mode) => this.transportLabel(mode)).join("、") || "全部";
+    const writeCount = Number(save.created_count || 0) + Number(save.updated_count || 0);
+    const completionText = writeCount ? "已写入最新变化，页面列表已刷新。" : "当前范围内审批单已在系统中，页面列表已刷新。";
+    $target.addClass("ready").html(`
+      <div class="ocw-pull-success-head">
+        <strong>拉取完成</strong>
+        <span>${this.escape(completionText)}需要再次执行时，请点击底部“重新拉取”。</span>
+      </div>
+      <div class="ocw-pull-result-grid">
+        <div><span>日期范围</span><strong>${this.escape(result.start || "--")} 至 ${this.escape(result.end || "--")}</strong></div>
+        <div><span>运输方式</span><strong>${this.escape(modeText)}</strong></div>
+        <div><span>读取详情</span><strong>${this.escape(String(pull.detail_count || 0))}</strong></div>
+        <div><span>命中国际物流</span><strong>${this.escape(String(pull.filtered_count || 0))}</strong></div>
+        <div><span>新增批次</span><strong>${this.escape(String(save.created_count || 0))}</strong></div>
+        <div><span>更新批次</span><strong>${this.escape(String(save.updated_count || 0))}</strong></div>
+        <div><span>已存在</span><strong>${this.escape(String(save.unchanged_count || 0))}</strong></div>
+        <div><span>跳过</span><strong>${this.escape(String(save.skipped_count || 0))}</strong></div>
+      </div>
+      <div class="ocw-pull-mode-counts">
+        <span>海运 ${this.escape(String(counts.SEA || 0))}</span>
+        <span>空运 ${this.escape(String(counts.AIR || 0))}</span>
+        <span>快递 ${this.escape(String(counts.EXPRESS || 0))}</span>
+      </div>
+    `);
+  }
+
+  normalizePullTransportMode(value) {
+    const text = String(value || "").trim();
+    if (text === "海运") return "SEA";
+    if (text === "空运") return "AIR";
+    if (text === "快递") return "EXPRESS";
+    return "ALL";
   }
 
   openImportDialog() {
@@ -7463,6 +7620,21 @@ class OverseasCostWorkbench {
   normalizeEditorValue(value) {
     if (value === null || value === undefined) return "";
     return String(value).replace(/,/g, "").trim();
+  }
+
+  getDefaultPullDateRange() {
+    const endDate = new Date();
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - (this.defaultRecentDays - 1));
+    return {
+      start: this.formatDateInput(startDate),
+      end: this.formatDateInput(endDate),
+    };
+  }
+
+  formatDateInput(date) {
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
   }
 
   nowText() {
