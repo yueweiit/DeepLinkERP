@@ -4,12 +4,16 @@ frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
   const workbench = new OverseasCostWorkbench(wrapper);
   frappe.pages["overseas-cost-workbench"].workbench = workbench;
   workbench.init();
+  // 离开工作台时恢复桌面外壳（侧栏 / 顶部标签栏 / 右侧栏），避免影响其它页面。
+  $(wrapper).on("hide", function () {
+    workbench.restoreDeskChrome();
+  });
 };
 
 frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   const workbench = frappe.pages["overseas-cost-workbench"].workbench;
   if (!workbench) return;
-  workbench.hideResiduePageContainers();
+  workbench.hideDeskChrome();
   workbench.applyDeskLayout();
   requestAnimationFrame(() => workbench.applyDeskLayout());
 };
@@ -72,28 +76,36 @@ class OverseasCostWorkbench {
   }
 
   prepareWorkbenchContainer() {
-    const $wrapper = $(this.wrapper);
-    // Frappe 的 add_page() 会把 wrapper 本身生成为 `.page-container`（即 `#page-*` 容器），
-    // 因此 `.closest(".page-container")` 匹配到的是 wrapper 自己，原逻辑清不掉任何兄弟节点。
-    // 真正的"旧 Workspace / 桌面残留"是 #body 下其它仍可见的 page 容器，需逐一隐藏。
-    this.hideResiduePageContainers();
-    $wrapper.empty();
+    // 清空 wrapper，再由 make_app_page 重建页面骨架。
+    $(this.wrapper).empty();
   }
 
-  hideResiduePageContainers() {
-    const $wrapper = $(this.wrapper);
-    if (!$wrapper || !$wrapper.length) return;
-    // 只隐藏"可见"的其它 page 容器，保留已隐藏页面的 DOM 引用，供路由切换复用。
-    const $allSiblings = $wrapper.siblings(".page-container");
-    const $visible = $allSiblings.filter(":visible");
-    console.info("[overseas-cost-workbench] 清场诊断", {
-      wrapper_id: $wrapper.attr("id") || $wrapper.attr("data-page-route"),
-      sibling_total: $allSiblings.length,
-      sibling_visible: $visible.length,
-      sibling_visible_ids: $visible.map((_i, el) => el.id || el.getAttribute("data-page-route")).get(),
+  // 隐藏 ERP 桌面外壳：左侧模块导航、custom_filters 顶部标签栏、右侧栏。
+  // 这些元素挂在 document.body / #body 上、不属于本工作台，会挤压或遮挡全屏界面。
+  hideDeskChrome() {
+    const targets = [
+      $(".body-sidebar-container"),
+      $("#custom-filters-desk-tabs-bar"),
+      $(".custom-filters-right-sidebar-container"),
+    ];
+    this._hiddenChrome = targets
+      .filter(($el) => $el.length && $el.is(":visible"))
+      .map(($el) => ({ el: $el, display: $el[0].style.display }));
+    this._hiddenChrome.forEach((item) => {
+      item.el[0].style.display = "none";
     });
-    if ($visible.length) {
-      $visible.addClass("ocw-cleared-residue").hide();
+    console.info("[overseas-cost-workbench] 隐藏桌面外壳", {
+      hidden: this._hiddenChrome.map((item) => item.el.attr("id") || item.el.attr("class")),
+    });
+  }
+
+  // 离开工作台时恢复上面隐藏的元素，避免影响其它页面。
+  restoreDeskChrome() {
+    if (this._hiddenChrome && this._hiddenChrome.length) {
+      this._hiddenChrome.forEach((item) => {
+        item.el[0].style.display = item.display;
+      });
+      this._hiddenChrome = null;
     }
   }
 
