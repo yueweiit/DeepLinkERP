@@ -9,6 +9,7 @@ frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
 frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   const workbench = frappe.pages["overseas-cost-workbench"].workbench;
   if (!workbench) return;
+  workbench.hideResiduePageContainers();
   workbench.applyDeskLayout();
   requestAnimationFrame(() => workbench.applyDeskLayout());
 };
@@ -72,11 +73,28 @@ class OverseasCostWorkbench {
 
   prepareWorkbenchContainer() {
     const $wrapper = $(this.wrapper);
-    const $pageContainer = $wrapper.closest(".page-container");
-    if ($pageContainer.length) {
-      $pageContainer.children().not($wrapper).remove();
-    }
+    // Frappe 的 add_page() 会把 wrapper 本身生成为 `.page-container`（即 `#page-*` 容器），
+    // 因此 `.closest(".page-container")` 匹配到的是 wrapper 自己，原逻辑清不掉任何兄弟节点。
+    // 真正的"旧 Workspace / 桌面残留"是 #body 下其它仍可见的 page 容器，需逐一隐藏。
+    this.hideResiduePageContainers();
     $wrapper.empty();
+  }
+
+  hideResiduePageContainers() {
+    const $wrapper = $(this.wrapper);
+    if (!$wrapper || !$wrapper.length) return;
+    // 只隐藏"可见"的其它 page 容器，保留已隐藏页面的 DOM 引用，供路由切换复用。
+    const $allSiblings = $wrapper.siblings(".page-container");
+    const $visible = $allSiblings.filter(":visible");
+    console.info("[overseas-cost-workbench] 清场诊断", {
+      wrapper_id: $wrapper.attr("id") || $wrapper.attr("data-page-route"),
+      sibling_total: $allSiblings.length,
+      sibling_visible: $visible.length,
+      sibling_visible_ids: $visible.map((_i, el) => el.id || el.getAttribute("data-page-route")).get(),
+    });
+    if ($visible.length) {
+      $visible.addClass("ocw-cleared-residue").hide();
+    }
   }
 
   resetDeskLayoutClasses() {
