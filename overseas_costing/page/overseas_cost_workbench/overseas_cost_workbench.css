@@ -10,26 +10,6 @@
   min-height: calc(100vh - 160px);
 }
 
-body.ocw-page-active .body-sidebar-container,
-body.ocw-page-active #custom-filters-desk-tabs-bar,
-body.ocw-page-active .custom-filters-right-sidebar-container,
-body.ocw-page-active .layout-side-section,
-body.ocw-page-active .workspace-sidebar,
-body.ocw-page-active .page-sidebar,
-body.ocw-page-active .sidebar-column {
-  display: none !important;
-}
-
-body.ocw-page-active .layout-main,
-body.ocw-page-active .layout-main-section-wrapper,
-body.ocw-page-active .layout-main-section,
-body.ocw-page-active .page-body,
-body.ocw-page-active .page-content,
-body.ocw-page-active .container {
-  max-width: none !important;
-  width: 100% !important;
-}
-
 .ocw-topbar {
   display: flex;
   gap: 12px;
