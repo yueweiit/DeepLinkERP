@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -20,6 +21,8 @@ except Exception:  # pragma: no cover - 本地单测无 Frappe 时保持可导�
 
 DEFAULT_TIMEOUT = 20
 SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
+PUSH_MODE_STANDARD = "standard_purchase"
+PUSH_MODE_GENERIC = "generic_resource"
 
 
 if frappe is not None:
@@ -34,7 +37,7 @@ else:  # pragma: no cover - 本地单测无 Frappe 时保持可导入
 
 @whitelist()
 def check_erp_connection() -> dict:
-    """检查 ERP 对接设置是否能连通目标 DocType。
+    """检查 ERP 对接设置是否能连通目标模块。
 
     这里只发 GET 检查请求，不创建、不修改 ERP 单据。
     """
@@ -49,26 +52,28 @@ def check_erp_connection() -> dict:
             "request": _redact_request_config(config),
         }
 
-    url = f"{_build_resource_url(config)}?limit_page_length=1"
-    request = Request(
-        url,
-        headers={
-            "Authorization": config["authorization"],
-            "Content-Type": "application/json",
-        },
-        method="GET",
-    )
+    urls = _connection_check_urls(config)
     try:
-        with urlopen(request, timeout=config["timeout"]) as response:
-            response_text = response.read().decode("utf-8", errors="ignore")
-            return {
-                "ok": True,
-                "config_ready": True,
-                "http_status": getattr(response, "status", 200),
-                "message": "ERP 连接检查通过，接口地址、鉴权和目标 DocType 可访问。",
-                "request": _redact_request_config(config),
-                "response": _load_json_response(response_text),
-            }
+        responses = []
+        for url in urls:
+            request = _build_request(config, url=url, method="GET")
+            with urlopen(request, timeout=config["timeout"]) as response:
+                response_text = response.read().decode("utf-8", errors="ignore")
+                responses.append(
+                    {
+                        "url": url,
+                        "http_status": getattr(response, "status", 200),
+                        "response": _load_json_response(response_text),
+                    }
+                )
+        return {
+            "ok": True,
+            "config_ready": True,
+            "http_status": responses[-1]["http_status"] if responses else 200,
+            "message": _connection_success_message(config),
+            "request": _redact_request_config(config),
+            "response": {"checks": responses},
+        }
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
         return {
@@ -92,11 +97,11 @@ def check_erp_connection() -> dict:
 def push_overseas_cost_payload(payload: dict) -> dict:
     """把已确认的海外成本报文推送到 DeepLinkERP。
 
-    目标 DocType 和字段映射尚未最终确认，所以这里做成配置化：
-    - OVERSEAS_COSTING_ERP_BASE_URL / DEEPLINKERP_BASE_URL
-    - OVERSEAS_COSTING_ERP_AUTHORIZATION / DEEPLINKERP_AUTHORIZATION
-    - OVERSEAS_COSTING_ERP_TARGET_DOCTYPE / DEEPLINKERP_TARGET_DOCTYPE
-    - OVERSEAS_COSTING_ERP_FIELD_MAP 可选，JSON 对象：ERP字段 -> 本地报文路径
+    默认走 ERPNext 标准模块：
+    - Item：物料档案
+    - Purchase Order：采购订单草稿
+
+    通用 DocType 推送保留为兜底模式，避免影响既有测试入口。
     """
 
     config = get_erp_push_config()
@@ -110,17 +115,16 @@ def push_overseas_cost_payload(payload: dict) -> dict:
             "request": _redact_request_config(config),
         }
 
+    if config.get("push_mode") == PUSH_MODE_STANDARD:
+        return _push_standard_purchase_flow(payload, config)
+
+    return _push_generic_resource(payload, config)
+
+
+def _push_generic_resource(payload: dict, config: dict) -> dict:
     body = _build_resource_body(payload, config)
     url = _build_resource_url(config)
-    request = Request(
-        url,
-        data=json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"),
-        headers={
-            "Authorization": config["authorization"],
-            "Content-Type": "application/json",
-        },
-        method=config["method"],
-    )
+    request = _build_request(config, url=url, method=config["method"], body=body)
 
     try:
         with urlopen(request, timeout=config["timeout"]) as response:
@@ -155,6 +159,65 @@ def push_overseas_cost_payload(payload: dict) -> dict:
             "status": "Failed",
             "config_ready": True,
             "message": f"DeepLinkERP 接口调用失败：{exc}",
+            "request": _redact_request_config(config),
+            "response": {},
+        }
+
+
+def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
+    try:
+        purchase_order_name = _find_existing_purchase_order(payload, config)
+        item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
+
+        if purchase_order_name:
+            return {
+                "ok": True,
+                "status": "Success",
+                "config_ready": True,
+                "erp_target_doc": purchase_order_name,
+                "message": f"DeepLinkERP 已存在采购订单 {purchase_order_name}，本次未重复创建。",
+                "request": _redact_request_config(config),
+                "response": {
+                    "purchase_order": {"name": purchase_order_name, "deduplicated": True},
+                    "items": item_results,
+                },
+            }
+
+        po_body = _build_purchase_order_body(payload, config)
+        url = _build_doctype_url(config, "Purchase Order")
+        request = _build_request(config, url=url, method="POST", body=po_body)
+        with urlopen(request, timeout=config["timeout"]) as response:
+            response_text = response.read().decode("utf-8", errors="ignore")
+            response_body = _load_json_response(response_text)
+            target_doc = _extract_target_doc(response_body)
+            return {
+                "ok": True,
+                "status": "Success",
+                "config_ready": True,
+                "http_status": getattr(response, "status", 200),
+                "erp_target_doc": target_doc,
+                "message": f"已推送到 DeepLinkERP：物料 {len(item_results)} 条，采购订单 {target_doc or '已创建'}。",
+                "request": _redact_request_config(config),
+                "response": {"purchase_order": response_body, "items": item_results},
+            }
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        response_body = _load_json_response(detail)
+        return {
+            "ok": False,
+            "status": "Failed",
+            "config_ready": True,
+            "http_status": exc.code,
+            "message": f"DeepLinkERP 标准模块推送失败：HTTP {exc.code} {_compact_text(detail)}",
+            "request": _redact_request_config(config),
+            "response": response_body,
+        }
+    except (URLError, TimeoutError, OSError) as exc:
+        return {
+            "ok": False,
+            "status": "Failed",
+            "config_ready": True,
+            "message": f"DeepLinkERP 标准模块调用失败：{exc}",
             "request": _redact_request_config(config),
             "response": {},
         }
@@ -201,9 +264,82 @@ def get_erp_push_config() -> dict:
         settings=settings,
         settings_field="field_map_json",
     )
+    push_mode = _clean(
+        _conf_value(
+            "OVERSEAS_COSTING_ERP_PUSH_MODE",
+            "DEEPLINKERP_PUSH_MODE",
+            settings=settings,
+            settings_field="push_mode",
+        )
+    )
+    if push_mode in ("标准模块（物料+采购订单）", "standard", "standard_purchase_order"):
+        push_mode = PUSH_MODE_STANDARD
+    elif push_mode in ("通用单据", "generic"):
+        push_mode = PUSH_MODE_GENERIC
+    push_mode = push_mode or PUSH_MODE_STANDARD
     return {
         "base_url": _clean(base_url),
         "authorization": _clean(authorization),
+        "push_mode": push_mode,
+        "company": _clean(
+            _conf_value(
+                "OVERSEAS_COSTING_ERP_COMPANY",
+                "DEEPLINKERP_COMPANY",
+                settings=settings,
+                settings_field="company",
+            )
+        ),
+        "supplier": _clean(
+            _conf_value(
+                "OVERSEAS_COSTING_ERP_SUPPLIER",
+                "DEEPLINKERP_SUPPLIER",
+                settings=settings,
+                settings_field="supplier",
+            )
+        ),
+        "cost_center": _clean(
+            _conf_value(
+                "OVERSEAS_COSTING_ERP_COST_CENTER",
+                "DEEPLINKERP_COST_CENTER",
+                settings=settings,
+                settings_field="cost_center",
+            )
+        ),
+        "item_group": _clean(
+            _conf_value(
+                "OVERSEAS_COSTING_ERP_ITEM_GROUP",
+                "DEEPLINKERP_ITEM_GROUP",
+                default="All Item Groups",
+                settings=settings,
+                settings_field="item_group",
+            )
+        ),
+        "stock_uom": _clean(
+            _conf_value(
+                "OVERSEAS_COSTING_ERP_STOCK_UOM",
+                "DEEPLINKERP_STOCK_UOM",
+                default="Nos",
+                settings=settings,
+                settings_field="stock_uom",
+            )
+        ),
+        "default_currency": _clean(
+            _conf_value(
+                "OVERSEAS_COSTING_ERP_DEFAULT_CURRENCY",
+                "DEEPLINKERP_DEFAULT_CURRENCY",
+                default="CNY",
+                settings=settings,
+                settings_field="default_currency",
+            )
+        ),
+        "schedule_date": _clean(
+            _conf_value(
+                "OVERSEAS_COSTING_ERP_SCHEDULE_DATE",
+                "DEEPLINKERP_SCHEDULE_DATE",
+                settings=settings,
+                settings_field="schedule_date",
+            )
+        ),
         "target_doctype": _clean(
             _conf_value(
                 "OVERSEAS_COSTING_ERP_TARGET_DOCTYPE",
@@ -246,19 +382,62 @@ def _missing_config_reasons(config: dict) -> list[str]:
         reasons.append("缺少 DeepLinkERP 接口地址配置")
     if not config.get("authorization"):
         reasons.append("缺少 DeepLinkERP 鉴权配置")
-    if not config.get("target_doctype"):
+    if config.get("push_mode") == PUSH_MODE_GENERIC and not config.get("target_doctype"):
         reasons.append("缺少 DeepLinkERP 目标 DocType 配置")
+    if config.get("push_mode") == PUSH_MODE_STANDARD:
+        if not config.get("supplier"):
+            reasons.append("缺少默认供应商配置")
+        if not config.get("item_group"):
+            reasons.append("缺少默认物料组配置")
+        if not config.get("stock_uom"):
+            reasons.append("缺少默认计量单位配置")
     if config.get("enabled") is False:
         reasons.append("ERP 推送设置当前未启用")
-    if config.get("method") not in {"POST", "PUT", "PATCH"}:
+    if config.get("push_mode") == PUSH_MODE_GENERIC and config.get("method") not in {"POST", "PUT", "PATCH"}:
         reasons.append("DeepLinkERP HTTP 方法只支持 POST/PUT/PATCH")
     return reasons
 
 
 def _build_resource_url(config: dict) -> str:
+    return _build_doctype_url(config, str(config.get("target_doctype") or "").strip())
+
+
+def _build_doctype_url(config: dict, doctype: str, docname: str | None = None) -> str:
     base_url = str(config.get("base_url") or "").rstrip("/")
-    doctype = quote(str(config.get("target_doctype") or "").strip(), safe="")
+    doctype = quote(str(doctype or "").strip(), safe="")
+    if docname:
+        return f"{base_url}/{doctype}/{quote(str(docname), safe='')}"
     return f"{base_url}/{doctype}"
+
+
+def _build_request(config: dict, url: str, method: str, body: dict | None = None) -> Request:
+    data = None
+    if body is not None:
+        data = json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")
+    return Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": config["authorization"],
+            "Content-Type": "application/json",
+        },
+        method=method,
+    )
+
+
+def _connection_check_urls(config: dict) -> list[str]:
+    if config.get("push_mode") == PUSH_MODE_STANDARD:
+        return [
+            f"{_build_doctype_url(config, 'Item')}?limit_page_length=1",
+            f"{_build_doctype_url(config, 'Purchase Order')}?limit_page_length=1",
+        ]
+    return [f"{_build_resource_url(config)}?limit_page_length=1"]
+
+
+def _connection_success_message(config: dict) -> str:
+    if config.get("push_mode") == PUSH_MODE_STANDARD:
+        return "ERP 连接检查通过，Item 和 Purchase Order 标准模块可访问。"
+    return "ERP 连接检查通过，接口地址、鉴权和目标 DocType 可访问。"
 
 
 def _build_resource_body(payload: dict, config: dict) -> dict:
@@ -305,6 +484,170 @@ def _extract_target_doc(response_body) -> str:
     return ""
 
 
+def _find_existing_purchase_order(payload: dict, config: dict) -> str:
+    batch_no = payload.get("batch_no") or payload.get("batch_name") or ""
+    version_code = payload.get("version_code") or payload.get("version_name") or ""
+    if not batch_no:
+        return ""
+
+    filters = [["custom_overseas_batch_no", "=", batch_no]]
+    if version_code:
+        filters.append(["custom_overseas_cost_version", "=", version_code])
+    url = (
+        f"{_build_doctype_url(config, 'Purchase Order')}"
+        f"?fields={quote(json.dumps(['name'], ensure_ascii=False), safe='')}"
+        f"&filters={quote(json.dumps(filters, ensure_ascii=False), safe='')}"
+        "&limit_page_length=1"
+    )
+    request = _build_request(config, url=url, method="GET")
+    try:
+        with urlopen(request, timeout=config["timeout"]) as response:
+            response_body = _load_json_response(response.read().decode("utf-8", errors="ignore"))
+    except HTTPError as exc:
+        if exc.code == 417:
+            return ""
+        raise
+    data = response_body.get("data") if isinstance(response_body, dict) else None
+    if isinstance(data, list) and data:
+        return str((data[0] or {}).get("name") or "")
+    return ""
+
+
+def _ensure_item(item: dict, payload: dict, config: dict) -> dict:
+    item_code = str(item.get("material_code") or "").strip()
+    if not item_code:
+        return {"ok": False, "message": "物料编码为空，已跳过。"}
+
+    body = _build_item_body(item, payload, config)
+    exists = _resource_exists(config, "Item", item_code)
+    method = "PUT" if exists else "POST"
+    url = _build_doctype_url(config, "Item", item_code) if exists else _build_doctype_url(config, "Item")
+    request = _build_request(config, url=url, method=method, body=body)
+    with urlopen(request, timeout=config["timeout"]) as response:
+        response_body = _load_json_response(response.read().decode("utf-8", errors="ignore"))
+        return {
+            "ok": True,
+            "item_code": item_code,
+            "action": "updated" if exists else "created",
+            "http_status": getattr(response, "status", 200),
+            "response": response_body,
+        }
+
+
+def _resource_exists(config: dict, doctype: str, docname: str) -> bool:
+    request = _build_request(config, url=_build_doctype_url(config, doctype, docname), method="GET")
+    try:
+        with urlopen(request, timeout=config["timeout"]):
+            return True
+    except HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
+
+
+def _build_item_body(item: dict, payload: dict, config: dict) -> dict:
+    formula = item.get("cost_formula") or {}
+    item_code = str(item.get("material_code") or "").strip()
+    item_name = str(item.get("material_name") or item.get("product_name") or item_code).strip()
+    return {
+        "item_code": item_code,
+        "item_name": item_name or item_code,
+        "item_group": config.get("item_group") or "All Item Groups",
+        "stock_uom": config.get("stock_uom") or "Nos",
+        "is_stock_item": 1,
+        "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
+        "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
+        "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
+        "custom_overseas_original_unit_price": item.get("original_unit_price") or formula.get("original_unit_price") or 0,
+        "custom_overseas_comprehensive_unit_price": item.get("comprehensive_unit_price")
+        or formula.get("comprehensive_unit_price")
+        or 0,
+    }
+
+
+def _build_purchase_order_body(payload: dict, config: dict) -> dict:
+    items = payload.get("items") or []
+    schedule_date = config.get("schedule_date") or date.today().isoformat()
+    company = config.get("company") or payload.get("subsidiary_code") or ""
+    currency = _normalize_currency(_first_item_value(items, "purchase_currency") or config.get("default_currency") or "CNY")
+    return {
+        "company": company,
+        "supplier": config.get("supplier") or "",
+        "transaction_date": date.today().isoformat(),
+        "schedule_date": schedule_date,
+        "currency": currency,
+        "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
+        "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
+        "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
+        "custom_overseas_total_cost_rmb": payload.get("total_cost_rmb") or 0,
+        "custom_overseas_cost_payload_json": json.dumps(payload, ensure_ascii=False, default=str),
+        "items": [_build_purchase_order_item(row, payload, config, schedule_date) for row in items],
+    }
+
+
+def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule_date: str) -> dict:
+    formula = item.get("cost_formula") or {}
+    expense_detail = item.get("expense_detail") or {}
+    logistics = expense_detail.get("logistics") or {}
+    clearance_tax = expense_detail.get("clearance_and_tax") or {}
+    qty = item.get("source_quantity") or item.get("outbound_quantity") or formula.get("quantity") or 0
+    original_unit_price = item.get("original_unit_price") or formula.get("original_unit_price") or 0
+    comprehensive_unit_price = item.get("comprehensive_unit_price") or formula.get("comprehensive_unit_price") or 0
+    original_amount = item.get("goods_value") or formula.get("goods_value") or _multiply(original_unit_price, qty)
+    comprehensive_amount = formula.get("total_cost") or _multiply(comprehensive_unit_price, qty)
+    freight_amount = logistics.get("freight_alloc_rmb") or formula.get("allocated_logistics_cost") or 0
+    clearance_amount = clearance_tax.get("mexico_customs_rmb") or clearance_tax.get("mexico_customs_mxn") or 0
+    tax_amount = (
+        clearance_tax.get("import_tax_total")
+        or _multiply(1, clearance_tax.get("igi_amount") or 0) + _multiply(1, clearance_tax.get("iva_amount") or 0)
+    )
+    row = {
+        "item_code": item.get("material_code") or "",
+        "item_name": item.get("material_name") or "",
+        "qty": qty,
+        "uom": config.get("stock_uom") or "Nos",
+        "stock_uom": config.get("stock_uom") or "Nos",
+        "conversion_factor": 1,
+        "schedule_date": schedule_date,
+        "rate": original_unit_price,
+        "custom_overseas_original_unit_price": original_unit_price,
+        "custom_overseas_comprehensive_unit_price": comprehensive_unit_price,
+        "custom_overseas_original_amount": original_amount,
+        "custom_overseas_comprehensive_amount": comprehensive_amount,
+        "custom_overseas_freight_alloc_amount": freight_amount,
+        "custom_overseas_clearance_alloc_amount": clearance_amount,
+        "custom_overseas_tax_alloc_amount": tax_amount,
+        "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
+        "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
+        "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
+    }
+    if config.get("cost_center"):
+        row["cost_center"] = config.get("cost_center")
+    return row
+
+
+def _first_item_value(items: list[dict], fieldname: str):
+    for item in items:
+        value = item.get(fieldname)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _normalize_currency(value) -> str:
+    currency = str(value or "").strip().upper()
+    if currency == "RMB":
+        return "CNY"
+    return currency or "CNY"
+
+
+def _multiply(left, right) -> float:
+    try:
+        return round(float(left or 0) * float(right or 0), 6)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _load_json_response(text: str):
     text = str(text or "").strip()
     if not text:
@@ -323,11 +666,17 @@ def _compact_text(text: str, limit: int = 300) -> str:
 def _redact_request_config(config: dict) -> dict:
     return {
         "base_url": config.get("base_url") or "",
+        "push_mode": config.get("push_mode") or "",
         "target_doctype": config.get("target_doctype") or "",
         "method": config.get("method") or "",
         "timeout": config.get("timeout") or DEFAULT_TIMEOUT,
         "authorization_configured": bool(config.get("authorization")),
         "field_map_configured": bool(config.get("field_map")),
+        "company_configured": bool(config.get("company")),
+        "supplier_configured": bool(config.get("supplier")),
+        "cost_center_configured": bool(config.get("cost_center")),
+        "item_group": config.get("item_group") or "",
+        "stock_uom": config.get("stock_uom") or "",
     }
 
 
@@ -346,6 +695,14 @@ def _load_erp_settings() -> dict:
         "enabled",
         "base_url",
         "authorization",
+        "push_mode",
+        "company",
+        "supplier",
+        "cost_center",
+        "item_group",
+        "stock_uom",
+        "default_currency",
+        "schedule_date",
         "target_doctype",
         "http_method",
         "timeout",

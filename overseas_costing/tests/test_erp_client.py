@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+from urllib.error import HTTPError
 
 from overseas_costing.services import erp_client
 
@@ -44,6 +46,7 @@ def test_get_erp_push_config_prefers_single_settings(monkeypatch) -> None:
     assert config["base_url"] == "https://erp.example.com/api/resource"
     assert config["authorization"] == "token abc:def"
     assert config["target_doctype"] == "Overseas Cost Push"
+    assert config["push_mode"] == "standard_purchase"
     assert config["method"] == "POST"
     assert config["timeout"] == 30
     assert config["field_map"] == {"name": "batch_name"}
@@ -97,3 +100,101 @@ def test_check_erp_connection_uses_get_without_writing(monkeypatch) -> None:
         "method": "GET",
         "timeout": 30,
     }
+
+
+def test_push_standard_purchase_flow_creates_item_and_purchase_order(monkeypatch) -> None:
+    monkeypatch.setattr(
+        erp_client,
+        "get_erp_push_config",
+        lambda: {
+            "enabled": True,
+            "base_url": "https://erp.example.com/api/resource",
+            "authorization": "token abc:def",
+            "push_mode": "standard_purchase",
+            "company": "Empresas Mexico",
+            "supplier": "Default Supplier",
+            "cost_center": "Main - EM",
+            "item_group": "Products",
+            "stock_uom": "Nos",
+            "default_currency": "CNY",
+            "schedule_date": "2026-08-20",
+            "target_doctype": "",
+            "method": "POST",
+            "timeout": 30,
+            "field_map": {},
+            "payload_field": "payload_json",
+        },
+    )
+
+    captured = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        captured.append({"url": request.full_url, "method": request.get_method(), "body": body, "timeout": timeout})
+        if request.get_method() == "GET" and "/Purchase%20Order?" in request.full_url:
+            return FakeResponse({"data": []})
+        if request.get_method() == "GET" and "/Item/YL000001" in request.full_url:
+            raise HTTPError(request.full_url, 404, "Not Found", None, io.BytesIO(b"{}"))
+        if request.get_method() == "POST" and request.full_url.endswith("/Item"):
+            return FakeResponse({"data": {"name": "YL000001"}})
+        if request.get_method() == "POST" and request.full_url.endswith("/Purchase%20Order"):
+            return FakeResponse({"data": {"name": "PO-0001"}})
+        raise AssertionError(f"unexpected request {request.get_method()} {request.full_url}")
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+
+    result = erp_client.push_overseas_cost_payload(
+        {
+            "batch_no": "BATCH-001",
+            "version_code": "V1",
+            "subsidiary_code": "Empresas Mexico",
+            "total_cost_rmb": 25,
+            "items": [
+                {
+                    "material_code": "YL000001",
+                    "material_name": "太阳眼镜",
+                    "purchase_currency": "RMB",
+                    "source_quantity": 2,
+                    "original_unit_price": 8,
+                    "comprehensive_unit_price": 12.5,
+                    "cost_formula": {
+                        "goods_value": 16,
+                        "total_cost": 25,
+                        "allocated_logistics_cost": 6,
+                    },
+                    "expense_detail": {
+                        "logistics": {"freight_alloc_rmb": 6},
+                        "clearance_and_tax": {"mexico_customs_rmb": 2, "import_tax_total": 1},
+                    },
+                }
+            ],
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["erp_target_doc"] == "PO-0001"
+    item_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Item"))
+    po_body = next(row["body"] for row in captured if row["method"] == "POST" and row["url"].endswith("/Purchase%20Order"))
+    assert item_body["item_code"] == "YL000001"
+    assert item_body["custom_overseas_comprehensive_unit_price"] == 12.5
+    assert po_body["company"] == "Empresas Mexico"
+    assert po_body["supplier"] == "Default Supplier"
+    assert po_body["currency"] == "CNY"
+    assert po_body["items"][0]["rate"] == 8
+    assert po_body["items"][0]["custom_overseas_comprehensive_amount"] == 25
+    assert all("valuation_rate" not in (row["body"] or {}) for row in captured)

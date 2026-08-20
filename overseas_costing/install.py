@@ -30,13 +30,167 @@ WORKSPACE_NAME_CANDIDATES = (
 def after_install() -> None:
     """中文用途：Frappe 安装 app 后的初始化入口。"""
 
+    ensure_erpnext_standard_fields()
     ensure_workspace()
 
 
 def after_migrate() -> None:
     """中文用途：Frappe migrate 后确保桌面入口存在。"""
 
+    ensure_erpnext_standard_fields()
     ensure_workspace()
+
+
+def ensure_erpnext_standard_fields() -> dict:
+    """给 ERPNext 标准单据补海外成本展示字段。
+
+    只新增展示/追溯字段，不改库存估值、入库成本和总账逻辑。
+    """
+
+    try:
+        import frappe
+        from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+    except Exception:
+        return {"ok": False, "message": "当前未连接 Frappe 或 Custom Field 工具不可用。"}
+
+    required_doctypes = ("Item", "Purchase Order", "Purchase Order Item")
+    missing_doctypes = [doctype for doctype in required_doctypes if not frappe.db.exists("DocType", doctype)]
+    if missing_doctypes:
+        return {"ok": False, "message": "ERPNext 标准 DocType 不存在，已跳过自定义字段。", "missing": missing_doctypes}
+
+    custom_fields = {
+        "Item": [
+            {
+                "fieldname": "custom_overseas_batch_no",
+                "label": "海外成本批次号",
+                "fieldtype": "Data",
+                "insert_after": "item_name",
+            },
+            {
+                "fieldname": "custom_overseas_cost_version",
+                "label": "海外成本计算版本",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_batch_no",
+            },
+            {
+                "fieldname": "custom_overseas_business_entity",
+                "label": "业务主体/子公司",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_cost_version",
+            },
+            {
+                "fieldname": "custom_overseas_original_unit_price",
+                "label": "原始采购单价",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_business_entity",
+            },
+            {
+                "fieldname": "custom_overseas_comprehensive_unit_price",
+                "label": "综合物品单价",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_original_unit_price",
+            },
+        ],
+        "Purchase Order": [
+            {
+                "fieldname": "custom_overseas_batch_no",
+                "label": "海外成本批次号",
+                "fieldtype": "Data",
+                "insert_after": "company",
+            },
+            {
+                "fieldname": "custom_overseas_cost_version",
+                "label": "海外成本计算版本",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_batch_no",
+            },
+            {
+                "fieldname": "custom_overseas_business_entity",
+                "label": "业务主体/子公司",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_cost_version",
+            },
+            {
+                "fieldname": "custom_overseas_total_cost_rmb",
+                "label": "综合成本金额 RMB",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_business_entity",
+            },
+            {
+                "fieldname": "custom_overseas_cost_payload_json",
+                "label": "海外成本技术报文",
+                "fieldtype": "Long Text",
+                "insert_after": "custom_overseas_total_cost_rmb",
+            },
+        ],
+        "Purchase Order Item": [
+            {
+                "fieldname": "custom_overseas_original_unit_price",
+                "label": "原始采购单价",
+                "fieldtype": "Currency",
+                "insert_after": "rate",
+            },
+            {
+                "fieldname": "custom_overseas_comprehensive_unit_price",
+                "label": "综合物品单价",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_original_unit_price",
+            },
+            {
+                "fieldname": "custom_overseas_original_amount",
+                "label": "原始采购金额",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_comprehensive_unit_price",
+            },
+            {
+                "fieldname": "custom_overseas_comprehensive_amount",
+                "label": "综合成本金额",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_original_amount",
+            },
+            {
+                "fieldname": "custom_overseas_freight_alloc_amount",
+                "label": "运费分摊额",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_comprehensive_amount",
+            },
+            {
+                "fieldname": "custom_overseas_clearance_alloc_amount",
+                "label": "清关费分摊额",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_freight_alloc_amount",
+            },
+            {
+                "fieldname": "custom_overseas_tax_alloc_amount",
+                "label": "税费分摊额",
+                "fieldtype": "Currency",
+                "insert_after": "custom_overseas_clearance_alloc_amount",
+            },
+            {
+                "fieldname": "custom_overseas_batch_no",
+                "label": "批次号",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_tax_alloc_amount",
+            },
+            {
+                "fieldname": "custom_overseas_cost_version",
+                "label": "成本计算版本",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_batch_no",
+            },
+            {
+                "fieldname": "custom_overseas_business_entity",
+                "label": "业务主体/子公司",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_cost_version",
+            },
+        ],
+    }
+    try:
+        create_custom_fields(custom_fields, ignore_validate=True)
+    except TypeError:
+        create_custom_fields(custom_fields)
+    return {"ok": True, "message": "ERPNext 标准单据海外成本字段已确保存在。"}
 
 
 def ensure_workspace() -> dict:
@@ -112,6 +266,10 @@ def _ensure_erp_settings_defaults(frappe) -> dict:
     defaults = {
         "enabled": 1,
         "base_url": "https://deeplinkerp.com/api/resource",
+        "push_mode": "标准模块（物料+采购订单）",
+        "item_group": "All Item Groups",
+        "stock_uom": "Nos",
+        "default_currency": "CNY",
         "http_method": "POST",
         "timeout": 20,
         "payload_field": "payload_json",

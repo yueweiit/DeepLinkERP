@@ -9,6 +9,16 @@
     "connection_section",
     "base_url",
     "authorization",
+    "push_mode",
+    "standard_module_section",
+    "company",
+    "supplier",
+    "cost_center",
+    "item_group",
+    "stock_uom",
+    "default_currency",
+    "schedule_date",
+    "generic_section",
     "target_doctype",
     "http_method",
     "timeout",
@@ -40,6 +50,71 @@
       "fieldtype": "Password",
       "label": "鉴权 Token",
       "description": "例如：token api_key:api_secret"
+    },
+    {
+      "fieldname": "push_mode",
+      "fieldtype": "Select",
+      "label": "推送模式",
+      "options": "standard_purchase\n标准模块（物料+采购订单）\ngeneric_resource\n通用单据",
+      "default": "standard_purchase",
+      "description": "默认直接推送 ERPNext 标准模块：物料 Item + 采购订单 Purchase Order。"
+    },
+    {
+      "fieldname": "standard_module_section",
+      "fieldtype": "Section Break",
+      "label": "标准模块默认值"
+    },
+    {
+      "fieldname": "company",
+      "fieldtype": "Link",
+      "label": "默认公司",
+      "options": "Company",
+      "description": "可选。为空时使用批次业务主体/子公司作为采购订单公司。"
+    },
+    {
+      "fieldname": "supplier",
+      "fieldtype": "Link",
+      "label": "默认供应商",
+      "options": "Supplier",
+      "description": "创建采购订单时必填。先用一个确认过的默认供应商，后续再按采购单来源细分。"
+    },
+    {
+      "fieldname": "cost_center",
+      "fieldtype": "Link",
+      "label": "默认成本中心",
+      "options": "Cost Center"
+    },
+    {
+      "fieldname": "item_group",
+      "fieldtype": "Link",
+      "label": "默认物料组",
+      "options": "Item Group",
+      "default": "All Item Groups"
+    },
+    {
+      "fieldname": "stock_uom",
+      "fieldtype": "Link",
+      "label": "默认计量单位",
+      "options": "UOM",
+      "default": "Nos"
+    },
+    {
+      "fieldname": "default_currency",
+      "fieldtype": "Link",
+      "label": "默认币种",
+      "options": "Currency",
+      "default": "CNY"
+    },
+    {
+      "fieldname": "schedule_date",
+      "fieldtype": "Date",
+      "label": "默认交付日期",
+      "description": "可选。为空时使用当天日期。"
+    },
+    {
+      "fieldname": "generic_section",
+      "fieldtype": "Section Break",
+      "label": "通用单据兜底"
     },
     {
       "fieldname": "target_doctype",
