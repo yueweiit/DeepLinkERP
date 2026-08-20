@@ -22,6 +22,73 @@ DEFAULT_TIMEOUT = 20
 SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 
 
+if frappe is not None:
+    whitelist = frappe.whitelist
+else:  # pragma: no cover - 本地单测无 Frappe 时保持可导入
+    def whitelist(*args, **kwargs):
+        def decorator(fn):
+            return fn
+
+        return decorator
+
+
+@whitelist()
+def check_erp_connection() -> dict:
+    """检查 ERP 对接设置是否能连通目标 DocType。
+
+    这里只发 GET 检查请求，不创建、不修改 ERP 单据。
+    """
+
+    config = get_erp_push_config()
+    missing = _missing_config_reasons(config)
+    if missing:
+        return {
+            "ok": False,
+            "config_ready": False,
+            "message": "；".join(missing),
+            "request": _redact_request_config(config),
+        }
+
+    url = f"{_build_resource_url(config)}?limit_page_length=1"
+    request = Request(
+        url,
+        headers={
+            "Authorization": config["authorization"],
+            "Content-Type": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=config["timeout"]) as response:
+            response_text = response.read().decode("utf-8", errors="ignore")
+            return {
+                "ok": True,
+                "config_ready": True,
+                "http_status": getattr(response, "status", 200),
+                "message": "ERP 连接检查通过，接口地址、鉴权和目标 DocType 可访问。",
+                "request": _redact_request_config(config),
+                "response": _load_json_response(response_text),
+            }
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        return {
+            "ok": False,
+            "config_ready": True,
+            "http_status": exc.code,
+            "message": f"ERP 连接检查失败：HTTP {exc.code} {_compact_text(detail)}",
+            "request": _redact_request_config(config),
+            "response": _load_json_response(detail),
+        }
+    except (URLError, TimeoutError, OSError) as exc:
+        return {
+            "ok": False,
+            "config_ready": True,
+            "message": f"ERP 连接检查失败：{exc}",
+            "request": _redact_request_config(config),
+            "response": {},
+        }
+
+
 def push_overseas_cost_payload(payload: dict) -> dict:
     """把已确认的海外成本报文推送到 DeepLinkERP。
 
@@ -285,11 +352,29 @@ def _load_erp_settings() -> dict:
         "payload_field",
         "field_map_json",
     ):
-        try:
-            settings[fieldname] = values.get(fieldname)
-        except Exception:
-            settings[fieldname] = getattr(values, fieldname, None)
+        settings[fieldname] = _get_doc_field_value(values, fieldname)
     return settings
+
+
+def _get_doc_field_value(doc, fieldname: str):
+    if fieldname == "authorization" and hasattr(doc, "get_password"):
+        try:
+            value = doc.get_password(fieldname, raise_exception=False)
+            if _has_value(value):
+                return value
+        except TypeError:
+            try:
+                value = doc.get_password(fieldname)
+                if _has_value(value):
+                    return value
+            except Exception:
+                pass
+        except Exception:
+            pass
+    try:
+        return doc.get(fieldname)
+    except Exception:
+        return getattr(doc, fieldname, None)
 
 
 def _conf_value(*keys: str, default: str = "", settings: dict | None = None, settings_field: str = "") -> str:
