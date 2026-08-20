@@ -75,6 +75,7 @@ def ensure_workspace() -> dict:
     _set_if_field(doc, "label", WORKSPACE_LABEL)
     _set_if_field(doc, "title", WORKSPACE_TITLE)
     _set_if_field(doc, "module", "Overseas Costing")
+    _set_if_field(doc, "type", "Workspace")
     _set_if_field(doc, "public", 1)
     _set_if_field(doc, "is_hidden", 0)
     _set_if_field(doc, "icon", "calculator")
@@ -111,7 +112,6 @@ def _ensure_erp_settings_defaults(frappe) -> dict:
     defaults = {
         "enabled": 1,
         "base_url": "https://deeplinkerp.com/api/resource",
-        "authorization": "token a3ec2b540c6e915:b849581652d0f79",
         "http_method": "POST",
         "timeout": 20,
         "payload_field": "payload_json",
