@@ -13,6 +13,7 @@ frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
 frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   const workbench = frappe.pages["overseas-cost-workbench"].workbench;
   if (!workbench) return;
+  workbench.setWorkbenchBodyState(true);
   workbench.hideDeskChrome();
   workbench.applyDeskLayout();
   requestAnimationFrame(() => workbench.applyDeskLayout());
@@ -67,6 +68,7 @@ class OverseasCostWorkbench {
   init() {
     this.resetDeskLayoutClasses();
     this.prepareWorkbenchContainer();
+    this.setWorkbenchBodyState(true);
     this.page = frappe.ui.make_app_page({
       parent: this.wrapper,
       title: "海外采购综合成本核算",
@@ -112,6 +114,7 @@ class OverseasCostWorkbench {
       });
       this._hiddenChrome = null;
     }
+    this.setWorkbenchBodyState(false);
   }
 
   resetDeskLayoutClasses() {
@@ -142,6 +145,12 @@ class OverseasCostWorkbench {
     // 操作入口保留在工作台内部，避免 Frappe 顶部 Actions 与页面按钮重复。
     if (this.page.clear_primary_action) this.page.clear_primary_action();
     if (this.page.clear_actions_menu) this.page.clear_actions_menu();
+  }
+
+  setWorkbenchBodyState(active) {
+    const body = document.body;
+    if (!body) return;
+    body.classList.toggle("ocw-page-active", Boolean(active));
   }
 
   renderShell() {
