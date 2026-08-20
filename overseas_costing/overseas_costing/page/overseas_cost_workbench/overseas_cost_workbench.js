@@ -1,10 +1,18 @@
 frappe.pages["overseas-cost-workbench"] = frappe.pages["overseas-cost-workbench"] || {};
 
+function hideDeskChromeWhenReady(workbench) {
+  workbench.hideDeskChrome();
+  requestAnimationFrame(() => workbench.hideDeskChrome());
+  window.setTimeout(() => {
+    if ($(workbench.wrapper).is(":visible")) workbench.hideDeskChrome();
+  }, 300);
+}
+
 frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
   const workbench = new OverseasCostWorkbench(wrapper);
   frappe.pages["overseas-cost-workbench"].workbench = workbench;
   workbench.init();
-  requestAnimationFrame(() => workbench.hideDeskChrome());
+  hideDeskChromeWhenReady(workbench);
   // 离开工作台时恢复桌面外壳（侧栏 / 顶部标签栏 / 右侧栏），避免影响其它页面。
   $(wrapper).on("hide", function () {
     workbench.restoreDeskChrome();
@@ -14,7 +22,7 @@ frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
 frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   const workbench = frappe.pages["overseas-cost-workbench"].workbench;
   if (!workbench) return;
-  workbench.hideDeskChrome();
+  hideDeskChromeWhenReady(workbench);
   workbench.applyDeskLayout();
   requestAnimationFrame(() => workbench.applyDeskLayout());
 };

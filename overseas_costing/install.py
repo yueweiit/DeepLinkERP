@@ -263,19 +263,20 @@ def _ensure_erp_settings_defaults(frappe) -> dict:
         return {"ok": False, "message": f"ERP 对接设置读取失败：{exc}"}
 
     changed = False
+    stock_uom = "Nos" if frappe.db.exists("UOM", "Nos") else None
     defaults = {
         "enabled": 1,
         "base_url": "https://deeplinkerp.com/api/resource",
         "push_mode": "标准模块（物料+采购订单）",
         "item_group": "All Item Groups",
-        "stock_uom": "Nos",
+        "stock_uom": stock_uom,
         "default_currency": "CNY",
         "http_method": "POST",
         "timeout": 20,
         "payload_field": "payload_json",
     }
     for fieldname, value in defaults.items():
-        if _has_field(settings, fieldname) and not getattr(settings, fieldname, None):
+        if value is not None and _has_field(settings, fieldname) and not getattr(settings, fieldname, None):
             setattr(settings, fieldname, value)
             changed = True
 
