@@ -10,9 +10,13 @@ from overseas_costing.services.batch_service import (
     EXTRA_ITEM_FIELDS,
     _build_item_query_args,
     _build_batch_source_status,
+    _build_calculation_confirmation_readiness,
+    _build_erp_push_payload,
     _build_export_xlsx_content,
     _build_writeback_readiness,
+    _build_writeback_field_gaps,
     _export_cell_value,
+    _load_erp_push_context,
     _normalize_item_query_filters,
     _normalize_limit,
     check_writeback_ready,
@@ -21,6 +25,7 @@ from overseas_costing.services.batch_service import (
     get_batch_list,
     get_batch_items,
     is_hidden_approval_status,
+    writeback_to_erp,
 )
 
 
@@ -69,13 +74,16 @@ def test_excel_columns_include_spec_model_after_product_name() -> None:
     fieldnames = [column["fieldname"] for column in EXCEL_COLUMNS]
     spec_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "spec_model")
     quantity_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "quantity")
+    shipped_quantity_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "actual_shipped_qty")
     unit_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "unit")
     total_unit_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "total_unit_rmb")
 
     assert fieldnames.index("spec_model") == fieldnames.index("product_name") + 1
-    assert fieldnames.index("unit") == fieldnames.index("quantity") + 1
+    assert fieldnames.index("actual_shipped_qty") == fieldnames.index("quantity") + 1
+    assert fieldnames.index("unit") == fieldnames.index("actual_shipped_qty") + 1
     assert "Especificación / Modelo" in spec_column["label"]
     assert quantity_column["label"] == "采购数量"
+    assert shipped_quantity_column["label"] == "出库数量（实际发货）"
     assert unit_column["label"] == "单位"
     assert total_unit_column["label"] == "综合单价 RMB"
 
@@ -83,13 +91,14 @@ def test_excel_columns_include_spec_model_after_product_name() -> None:
 def test_sea_air_express_share_same_item_columns() -> None:
     fieldnames = [column["fieldname"] for column in EXCEL_COLUMNS]
 
-    assert fieldnames[:8] == [
+    assert fieldnames[:9] == [
         "material_code",
         "product_name",
         "spec_model",
         "unit_price",
         "purchase_currency",
         "quantity",
+        "actual_shipped_qty",
         "unit",
         "goods_value",
     ]
@@ -353,12 +362,60 @@ def test_check_writeback_ready_dry_run_returns_blocking_reasons() -> None:
     assert result["item_issue_examples"] == []
 
 
+def test_load_erp_push_context_skips_subsidiary_column_when_schema_lags(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    queried_fields = []
+
+    class FakeDB:
+        @staticmethod
+        def has_column(doctype, fieldname):
+            assert doctype == "Overseas Cost Batch"
+            assert fieldname == "subsidiary_code"
+            return False
+
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            queried_fields.append((doctype, fields))
+            if doctype == "Overseas Cost Batch":
+                assert "subsidiary_code" not in fields
+                return {
+                    "name": name,
+                    "batch_no": "BATCH-001",
+                    "status": "Calculated",
+                    "confirm_status": "Pending",
+                    "current_version": "VERSION-001",
+                    "item_count": 0,
+                    "estimated_total_cost_rmb": 0,
+                    "actual_total_cost_rmb": 0,
+                }
+            return {"name": name, "rule_snapshot_json": "[]"}
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(*args, **kwargs):
+            return []
+
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda batch_name: "BATCH-DOC")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda batch_name, version_name=None: "VERSION-DOC")
+
+    result = _load_erp_push_context("BATCH-DOC", "VERSION-DOC")
+
+    assert result["ok"] is True
+    assert result["batch"]["subsidiary_code"] == ""
+    assert queried_fields[0][0] == "Overseas Cost Batch"
+
+
 def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
     result = _build_writeback_readiness(
         batch={
             "status": "Clean",
             "confirm_status": "Confirmed",
             "current_version": "VERSION-001",
+            "subsidiary_code": "MX01",
             "item_count": 1,
             "actual_total_cost_rmb": 25,
         },
@@ -369,6 +426,7 @@ def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
                 "material_code": "YL000001",
                 "product_name": "太阳眼镜",
                 "quantity": 2,
+                "actual_shipped_qty": 2,
                 "unit_price": 8,
                 "purchase_currency": "RMB",
                 "goods_value": 16,
@@ -389,6 +447,7 @@ def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
             "status": "Dirty",
             "confirm_status": "Draft",
             "current_version": "",
+            "subsidiary_code": "",
             "item_count": 2,
             "estimated_total_cost_rmb": 0,
             "actual_total_cost_rmb": 0,
@@ -400,6 +459,7 @@ def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
                 "material_code": "",
                 "product_name": "保护膜",
                 "quantity": 0,
+                "actual_shipped_qty": 0,
                 "unit_price": "",
                 "purchase_currency": "",
                 "goods_value": 0,
@@ -412,10 +472,423 @@ def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
     assert result["checks"]["has_current_version"] is False
     assert result["checks"]["has_dirty_data"] is True
     assert result["item_issue_counts"]["material_code"] == 1
+    assert result["item_issue_counts"]["actual_shipped_qty"] == 1
     assert result["item_issue_counts"]["unit_price"] == 1
     assert result["item_issue_examples"][0]["row_no"] == 7
     assert "当前批次还没有确认。" in result["blocking_reasons"]
     assert "批次记录明细数为 2，实际查询到 1 条。" in result["warning_reasons"]
+
+
+def test_build_calculation_confirmation_readiness_requires_subsidiary_and_fee_pools() -> None:
+    result = _build_calculation_confirmation_readiness(
+        batch={
+            "status": "Calculated",
+            "confirm_status": "Pending",
+            "current_version": "VERSION-001",
+            "subsidiary_code": "",
+            "item_count": 1,
+            "estimated_total_cost_rmb": 25,
+        },
+        resolved_version_name="VERSION-001",
+        rules=[],
+        items=[
+            {
+                "row_no": 1,
+                "material_code": "YL000001",
+                "product_name": "太阳眼镜",
+                "quantity": 2,
+                "actual_shipped_qty": 2,
+                "unit_price": 8,
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "total_unit_rmb": 12.5,
+            }
+        ],
+    )
+
+    assert result["ready"] is False
+    assert result["checks"]["has_subsidiary_code"] is False
+    assert result["checks"]["has_international_freight"] is False
+    assert "当前批次缺少归属业务主体。" in result["blocking_reasons"]
+    assert "当前批次缺少国际运费费用池或分摊结果。" in result["blocking_reasons"]
+    assert any(gap["fieldname"] == "subsidiary_code" for gap in result["field_gaps"]["batch"])
+    assert any(gap["fieldname"] == "国际运费" for gap in result["field_gaps"]["rules"])
+
+
+def test_build_calculation_confirmation_readiness_allows_complete_calculation() -> None:
+    result = _build_calculation_confirmation_readiness(
+        batch={
+            "status": "Calculated",
+            "confirm_status": "Pending",
+            "current_version": "VERSION-001",
+            "subsidiary_code": "MX01",
+            "item_count": 1,
+            "estimated_total_cost_rmb": 25,
+        },
+        resolved_version_name="VERSION-001",
+        rules=[
+            {
+                "rule_code": "china_ocean_usd",
+                "expense_category": "中国海运费",
+                "allocation_basis": "gross_weight",
+                "currency": "USD",
+                "amount": 30,
+            },
+            {
+                "rule_code": "mexico_customs_mxn",
+                "expense_category": "墨西哥清关费",
+                "allocation_basis": "goods_value",
+                "currency": "MXN",
+                "amount": 10,
+            },
+            {
+                "rule_code": "import_tax_total",
+                "expense_category": "关税税费",
+                "allocation_basis": "goods_value",
+                "currency": "MXN",
+                "amount": 4,
+            },
+        ],
+        items=[
+            {
+                "row_no": 1,
+                "material_code": "YL000001",
+                "product_name": "太阳眼镜",
+                "quantity": 2,
+                "actual_shipped_qty": 2,
+                "unit_price": 8,
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "freight_alloc_rmb": 6,
+                "mexico_customs_mxn": 10,
+                "import_tax_total": 4,
+                "total_unit_rmb": 12.5,
+            }
+        ],
+    )
+
+    assert result["ready"] is True
+    assert result["checks"]["has_subsidiary_code"] is True
+    assert result["checks"]["has_clearance_fee"] is True
+    assert result["checks"]["has_tariff"] is True
+
+
+def test_calculation_readiness_accepts_zero_confirmed_clearance_and_tariff() -> None:
+    result = _build_calculation_confirmation_readiness(
+        batch={
+            "status": "Calculated",
+            "confirm_status": "Pending",
+            "current_version": "VERSION-001",
+            "subsidiary_code": "Empresas Dragon",
+            "item_count": 1,
+            "estimated_total_cost_rmb": 16,
+        },
+        resolved_version_name="VERSION-001",
+        rules=[
+            {
+                "rule_code": "china_ocean_usd",
+                "expense_category": "中国海运费",
+                "allocation_basis": "gross_weight",
+                "currency": "USD",
+                "amount": 30,
+            },
+            {
+                "rule_code": "manual_clearance_fee",
+                "expense_category": "清关费",
+                "allocation_basis": "gross_weight",
+                "currency": "MXN",
+                "amount": 0,
+                "remark": "OCW_ZERO_CONFIRMED | 人工确认本票清关费为0",
+            },
+            {
+                "rule_code": "manual_tariff_tax",
+                "expense_category": "关税税费",
+                "allocation_basis": "goods_value",
+                "currency": "MXN",
+                "amount": 0,
+                "remark": "OCW_ZERO_CONFIRMED | 人工确认本票关税为0",
+            },
+        ],
+        items=[
+            {
+                "row_no": 1,
+                "material_code": "YL000001",
+                "product_name": "太阳眼镜",
+                "quantity": 2,
+                "actual_shipped_qty": 2,
+                "unit_price": 8,
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "freight_alloc_rmb": 6,
+                "total_unit_rmb": 8,
+            }
+        ],
+    )
+
+    assert result["ready"] is True
+    assert result["checks"]["has_clearance_fee"] is True
+    assert result["checks"]["has_tariff"] is True
+    assert not any(gap["fieldname"] == "清关费" for gap in result["field_gaps"]["rules"])
+    assert not any(gap["fieldname"] == "关税" for gap in result["field_gaps"]["rules"])
+
+
+def test_build_writeback_field_gaps_groups_missing_info_by_scope() -> None:
+    gaps = _build_writeback_field_gaps(
+        batch={
+            "subsidiary_code": "",
+            "current_version": "",
+            "estimated_total_cost_rmb": 0,
+            "actual_total_cost_rmb": 0,
+        },
+        items=[
+            {
+                "row_no": 1,
+                "material_code": "",
+                "product_name": "太阳眼镜",
+                "quantity": 0,
+                "actual_shipped_qty": 0,
+                "unit_price": 0,
+                "purchase_currency": "",
+                "goods_value": 0,
+                "total_unit_rmb": 0,
+            }
+        ],
+        rules=[],
+        resolved_version_name=None,
+    )
+
+    assert any(gap["fieldname"] == "subsidiary_code" for gap in gaps["batch"])
+    assert any(gap["fieldname"] == "current_version" for gap in gaps["batch"])
+    assert any(gap["fieldname"] == "material_code" for gap in gaps["items"])
+    assert any(gap["fieldname"] == "国际运费" for gap in gaps["rules"])
+
+
+def test_build_erp_push_payload_contains_core_fields_and_expense_details() -> None:
+    payload = _build_erp_push_payload(
+        batch={"name": "BATCH-001", "batch_no": "HPCU5155607", "subsidiary_code": "MX01"},
+        version={"name": "VERSION-001", "version_code": "V1"},
+        readiness={"total_cost_rmb": 25},
+        rules=[
+            {
+                "rule_code": "china_ocean_usd",
+                "expense_category": "中国海运费",
+                "allocation_basis": "gross_weight",
+                "currency": "USD",
+                "amount": 30,
+            }
+        ],
+        items=[
+            {
+                "row_no": 1,
+                "material_code": "YL000001",
+                "product_name": "太阳眼镜",
+                "quantity": 2,
+                "actual_shipped_qty": 2,
+                "unit_price": 8,
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "freight_alloc_rmb": 6,
+                "import_tax_total": 3,
+                "total_cost_rmb": 25,
+                "total_unit_rmb": 12.5,
+            }
+        ],
+    )
+
+    assert payload["target_system"] == "DeepLinkERP"
+    assert payload["subsidiary_code"] == "MX01"
+    assert payload["items"][0]["material_code"] == "YL000001"
+    assert payload["items"][0]["original_unit_price"] == 8
+    assert payload["items"][0]["comprehensive_unit_price"] == 12.5
+    assert payload["items"][0]["outbound_quantity"] == 2
+    assert payload["items"][0]["expense_detail"]["logistics"]["freight_alloc_rmb"] == 6
+
+
+def test_writeback_to_erp_records_failed_attempt_when_config_missing(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    set_values = []
+    inserted_logs = []
+
+    class FakeDB:
+        @staticmethod
+        def set_value(doctype, name, values, update_modified=False):
+            set_values.append((doctype, name, values, update_modified))
+
+        @staticmethod
+        def commit():
+            pass
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, ignore_permissions=False):
+            inserted_logs.append((self.payload, ignore_permissions))
+            return self
+
+    class FakeSession:
+        user = "tester@example.com"
+
+    class FakeFrappe:
+        db = FakeDB()
+        session = FakeSession()
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        batch_service,
+        "preview_erp_payload",
+        lambda batch_name, version_name=None: {
+            "ok": True,
+            "ready": True,
+            "batch_name": "BATCH-001",
+            "version_name": "VERSION-001",
+            "payload": {"target_system": "DeepLinkERP", "batch_no": "BATCH-001", "item_count": 1, "subsidiary_code": "MX01"},
+        },
+    )
+    monkeypatch.setattr(
+        batch_service,
+        "_load_erp_push_context",
+        lambda batch_name, version_name=None: {"batch": {"extra_json": "{}"}},
+    )
+    monkeypatch.setattr(
+        batch_service.erp_client,
+        "push_overseas_cost_payload",
+        lambda payload: {
+            "ok": False,
+            "status": "Failed",
+            "message": "缺少 DeepLinkERP 目标 DocType 配置",
+            "request": {"authorization_configured": True},
+            "response": {},
+        },
+    )
+
+    result = writeback_to_erp("BATCH-001", "VERSION-001")
+
+    assert result["ok"] is False
+    assert result["writeback_status"] == "Failed"
+    assert result["retryable"] is True
+    assert set_values[0][2]["writeback_status"] == "Failed"
+    assert set_values[0][2]["writeback_message"] == "缺少 DeepLinkERP 目标 DocType 配置"
+    saved_extra = json.loads(set_values[0][2]["extra_json"])
+    assert saved_extra["erp_writeback"]["attempt_count"] == 1
+    assert saved_extra["erp_writeback"]["attempt_history"][0]["status"] == "Failed"
+    assert inserted_logs[0][0]["action_type"] == "WRITEBACK"
+
+
+def test_writeback_to_erp_records_success_and_target_doc(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    set_values = []
+
+    class FakeDB:
+        @staticmethod
+        def set_value(doctype, name, values, update_modified=False):
+            set_values.append((doctype, name, values, update_modified))
+
+        @staticmethod
+        def commit():
+            pass
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, ignore_permissions=False):
+            return self
+
+    class FakeSession:
+        user = "tester@example.com"
+
+    class FakeFrappe:
+        db = FakeDB()
+        session = FakeSession()
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    previous_extra = {
+        "erp_writeback": {
+            "attempt_count": 1,
+            "attempt_history": [{"attempt_no": 1, "status": "Failed"}],
+        }
+    }
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        batch_service,
+        "preview_erp_payload",
+        lambda batch_name, version_name=None: {
+            "ok": True,
+            "ready": True,
+            "batch_name": "BATCH-001",
+            "version_name": "VERSION-001",
+            "payload": {"target_system": "DeepLinkERP", "batch_no": "BATCH-001", "item_count": 1, "subsidiary_code": "MX01"},
+        },
+    )
+    monkeypatch.setattr(
+        batch_service,
+        "_load_erp_push_context",
+        lambda batch_name, version_name=None: {"batch": {"extra_json": json.dumps(previous_extra, ensure_ascii=False)}},
+    )
+    monkeypatch.setattr(
+        batch_service.erp_client,
+        "push_overseas_cost_payload",
+        lambda payload: {
+            "ok": True,
+            "status": "Success",
+            "message": "DeepLinkERP 返回成功，目标单据 ERP-PUSH-001。",
+            "erp_target_doc": "ERP-PUSH-001",
+            "http_status": 200,
+            "request": {"target_doctype": "Overseas Cost Push"},
+            "response": {"data": {"name": "ERP-PUSH-001"}},
+        },
+    )
+
+    result = writeback_to_erp("BATCH-001", "VERSION-001")
+
+    assert result["ok"] is True
+    assert result["pushed"] is True
+    assert result["writeback_status"] == "Success"
+    assert result["erp_target_doc"] == "ERP-PUSH-001"
+    assert set_values[0][2]["writeback_status"] == "Success"
+    assert set_values[0][2]["erp_target_doc"] == "ERP-PUSH-001"
+    saved_extra = json.loads(set_values[0][2]["extra_json"])
+    assert saved_extra["erp_writeback"]["attempt_count"] == 2
+    assert [item["status"] for item in saved_extra["erp_writeback"]["attempt_history"]] == ["Failed", "Success"]
+
+
+def test_build_writeback_field_gaps_exposes_missing_item_fieldnames() -> None:
+    gaps = _build_writeback_field_gaps(
+        batch={
+            "subsidiary_code": "",
+            "current_version": "",
+            "estimated_total_cost_rmb": 0,
+            "actual_total_cost_rmb": 0,
+        },
+        items=[
+            {
+                "name": "ITEM-001",
+                "row_no": 1,
+                "material_code": "",
+                "product_name": "澶槼鐪奸暅",
+                "quantity": 0,
+                "actual_shipped_qty": 0,
+                "unit_price": 0,
+                "purchase_currency": "",
+                "goods_value": 0,
+                "total_unit_rmb": 0,
+            }
+        ],
+        rules=[],
+        resolved_version_name=None,
+    )
+
+    assert gaps["items"][0]["missing_fieldnames"]
 
 
 def test_hidden_approval_status_matches_revoked_dingtalk_statuses() -> None:
@@ -527,19 +1000,16 @@ def test_build_batch_source_status_exposes_quote_candidates_without_raw_oa_text(
     )
 
     assert status["logistics_quote_candidate_count"] == 1
-    assert status["logistics_quote_candidates"] == [
-        {
-            "carrier": "SISA",
-            "amount": 5730,
-            "currency": "RMB",
-            "volume_m3": 1.5,
-            "evidence_line": "合计价格：5730元",
-            "source_field": "物流报价",
-            "status": "待确认",
-        }
-    ]
+    quote = status["logistics_quote_candidates"][0]
+    assert quote["carrier"] == "SISA"
+    assert quote["amount"] == 5730
+    assert quote["currency"] == "RMB"
+    assert quote["volume_m3"] == 1.5
+    assert quote["evidence_line"] == "合计价格：5730元"
+    assert quote["source_field"] == "物流报价"
+    assert quote["status"] == "待确认"
     assert status["has_confirmed_logistics_quote"] is True
-    assert "source_value" not in status["logistics_quote_candidates"][0]
+    assert "source_value" not in quote
 
 
 def test_build_batch_source_status_exposes_logistics_text_summary() -> None:

@@ -184,6 +184,7 @@ def writeback_to_erp(batch_name: str, version_name: str) -> dict:
 
 import json as _json
 
+from overseas_costing.services import erp_client
 from overseas_costing.utils.field_mapper import normalize_transport_mode
 
 EXCEL_COLUMNS = [
@@ -193,6 +194,7 @@ EXCEL_COLUMNS = [
     {"excel_col": "C", "fieldname": "unit_price", "label": "采购单价"},
     {"excel_col": "C1", "fieldname": "purchase_currency", "label": "采购币种"},
     {"excel_col": "D", "fieldname": "quantity", "label": "采购数量"},
+    {"excel_col": "D2", "fieldname": "actual_shipped_qty", "label": "出库数量（实际发货）"},
     {"excel_col": "D1", "fieldname": "unit", "label": "单位"},
     {"excel_col": "E", "fieldname": "goods_value", "label": "总货值"},
     {"excel_col": "F", "fieldname": "import_name", "label": "海关进口名称"},
@@ -598,6 +600,14 @@ def _quote_candidate_summary(candidate: dict) -> dict:
         "amount": candidate.get("amount"),
         "currency": str(candidate.get("currency") or "").strip(),
         "volume_m3": candidate.get("volume_m3"),
+        "gross_weight_kg": candidate.get("gross_weight_kg"),
+        "chargeable_weight_kg": candidate.get("chargeable_weight_kg"),
+        "unit_freight_per_kg": candidate.get("unit_freight_per_kg"),
+        "billing_method": str(candidate.get("billing_method") or "").strip(),
+        "allocation_basis": str(candidate.get("allocation_basis") or "").strip(),
+        "pre_delivery_date": str(candidate.get("pre_delivery_date") or "").strip(),
+        "destination": str(candidate.get("destination") or "").strip(),
+        "source": str(candidate.get("source") or "").strip(),
         "evidence_line": str(candidate.get("evidence_line") or "").strip(),
         "source_field": str(candidate.get("source_field") or "").strip(),
         "status": str(candidate.get("status") or "待确认").strip(),
@@ -896,6 +906,7 @@ def get_batch_list(filters: dict) -> dict:
         "waybill_no",
         "transport_mode",
         "project_collection",
+        "subsidiary_code",
         "source_type",
         "source_file_name",
         "source_sheet",
@@ -908,6 +919,10 @@ def get_batch_list(filters: dict) -> dict:
         "source_created_at",
         "status",
         "current_version",
+        "confirm_status",
+        "writeback_status",
+        "writeback_time",
+        "writeback_message",
         "item_count",
         "total_goods_value",
         "total_gross_weight_kg",
@@ -1021,6 +1036,7 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
             "commercial_invoice_no",
             "transport_mode",
             "project_collection",
+            "subsidiary_code",
             "source_type",
             "source_file_name",
             "source_sheet",
@@ -1032,6 +1048,8 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
             "current_version",
             "confirm_status",
             "writeback_status",
+            "writeback_time",
+            "writeback_message",
             "item_count",
             "total_goods_value",
             "total_gross_weight_kg",
@@ -1618,13 +1636,48 @@ def export_current_result_xlsx(batch_names_json=None, transport_label: str | Non
 
 
 WRITEBACK_REQUIRED_ITEM_FIELDS = (
-    ("material_code", "物料编码", "text"),
-    ("product_name", "物料名称", "text"),
-    ("quantity", "数量", "positive_number"),
-    ("unit_price", "采购单价", "positive_number"),
-    ("purchase_currency", "采购币种", "text"),
-    ("goods_value", "总货值", "positive_number"),
-    ("total_unit_rmb", "综合物品单价RMB", "positive_number"),
+    ("material_code", "物料编码", "text", "钉钉物流 OA 货物信息 / 装箱单解析 / 手工明细补录"),
+    ("product_name", "物料名称", "text", "钉钉物流 OA 货物信息 / 装箱单解析 / 手工明细补录"),
+    ("quantity", "采购数量", "positive_number", "钉钉物流 OA 货物信息 / 采购支出 OA / 装箱单解析"),
+    ("actual_shipped_qty", "出库数量", "positive_number", "装箱单解析 / 手工明细补录"),
+    ("unit_price", "采购单价", "positive_number", "采购支出 OA / 商业发票 / 手工明细补录"),
+    ("purchase_currency", "采购币种", "text", "采购支出 OA / 商业发票 / 手工明细补录"),
+    ("goods_value", "总货值", "positive_number", "采购支出 OA / 商业发票 / 重新试算"),
+    ("total_unit_rmb", "综合物品单价RMB", "positive_number", "重新试算生成"),
+)
+
+ERP_PAYLOAD_ITEM_FIELDS = list(
+    dict.fromkeys(
+        [
+            "name",
+            "row_no",
+            "excel_row_no",
+            "material_code",
+            "product_name",
+            "quantity",
+            "actual_shipped_qty",
+            "unit_price",
+            "purchase_currency",
+            "goods_value",
+            "goods_value_ratio",
+            "weight_ratio",
+            "gross_weight_kg",
+            "volume_m3",
+            "chargeable_weight_kg",
+            "china_to_mexico_freight_rmb",
+            "freight_alloc_rmb",
+            "freight_alloc_mxn",
+            "total_logistics_mxn",
+            "mexico_customs_mxn",
+            "mexico_customs_rmb",
+            "mexico_customs_usd",
+            "import_tax_total",
+            "igi_amount",
+            "iva_amount",
+            "total_cost_rmb",
+            "total_unit_rmb",
+        ]
+    )
 )
 
 
@@ -1641,26 +1694,164 @@ def _is_blank(value) -> bool:
     return value is None or str(value).strip() == ""
 
 
+ZERO_FEE_CONFIRMATION_MARKER = "OCW_ZERO_CONFIRMED"
+
+
+def _has_positive_rule(rules: list[dict], keywords: tuple[str, ...]) -> bool:
+    for rule in rules:
+        text = " ".join(
+            str(rule.get(fieldname) or "")
+            for fieldname in ("rule_code", "expense_category", "remark")
+        ).lower()
+        if _as_float(rule.get("amount")) > 0 and any(keyword.lower() in text for keyword in keywords):
+            return True
+    return False
+
+
+def _has_zero_confirmed_rule(rules: list[dict], keywords: tuple[str, ...]) -> bool:
+    for rule in rules:
+        text = " ".join(
+            str(rule.get(fieldname) or "")
+            for fieldname in ("rule_code", "expense_category", "remark")
+        ).lower()
+        marker_hit = ZERO_FEE_CONFIRMATION_MARKER.lower() in text
+        keyword_hit = any(keyword.lower() in text for keyword in keywords)
+        if marker_hit and keyword_hit and _as_float(rule.get("amount")) == 0:
+            return True
+    return False
+
+
+def _has_fee_pool_or_zero_confirmation(rules: list[dict], keywords: tuple[str, ...]) -> bool:
+    return _has_positive_rule(rules, keywords) or _has_zero_confirmed_rule(rules, keywords)
+
+
+def _sum_item_fields(items: list[dict], fieldnames: tuple[str, ...]) -> float:
+    return sum(_as_float(item.get(fieldname)) for item in items for fieldname in fieldnames)
+
+
+def _has_positive_item_value(items: list[dict], fieldnames: tuple[str, ...]) -> bool:
+    return _sum_item_fields(items, fieldnames) > 0
+
+
+def _load_json_value(text):
+    if not text:
+        return {}
+    try:
+        return _json.loads(text)
+    except Exception:
+        return {}
+
+
+def _round_payload_amount(value, digits: int = 6):
+    number = _as_float(value)
+    return round(number, digits) if number else 0
+
+
+def _build_cost_formula(item: dict) -> dict:
+    quantity = _as_float(item.get("actual_shipped_qty")) or _as_float(item.get("quantity"))
+    total_cost = _as_float(item.get("total_cost_rmb"))
+    unit_price = _as_float(item.get("unit_price"))
+    goods_value = _as_float(item.get("goods_value")) or unit_price * quantity
+    allocated_cost = max(total_cost - goods_value, 0) if total_cost else 0
+    logistics_cost = _as_float(item.get("freight_alloc_rmb"))
+    clearance_tax_cost = max(allocated_cost - logistics_cost, 0)
+    return {
+        "original_unit_price": _round_payload_amount(unit_price),
+        "quantity": _round_payload_amount(quantity),
+        "goods_value": _round_payload_amount(goods_value),
+        "allocated_logistics_cost": _round_payload_amount(logistics_cost),
+        "allocated_clearance_tax_cost": _round_payload_amount(clearance_tax_cost),
+        "allocated_total_cost": _round_payload_amount(allocated_cost),
+        "total_cost": _round_payload_amount(total_cost),
+        "comprehensive_unit_price": _round_payload_amount(item.get("total_unit_rmb")),
+        "formula": "原始单价 + 单件分摊物流成本 + 单件分摊清关/关税成本 = 综合物品单价",
+    }
+
+
+def _item_expense_detail(item: dict) -> dict:
+    return {
+        "logistics": {
+            "freight_alloc_rmb": _round_payload_amount(item.get("freight_alloc_rmb")),
+            "freight_alloc_mxn": _round_payload_amount(item.get("freight_alloc_mxn")),
+            "total_logistics_mxn": _round_payload_amount(item.get("total_logistics_mxn")),
+        },
+        "clearance_and_tax": {
+            "import_tax_total": _round_payload_amount(item.get("import_tax_total")),
+            "igi_amount": _round_payload_amount(item.get("igi_amount")),
+            "iva_amount": _round_payload_amount(item.get("iva_amount")),
+            "mexico_customs_mxn": _round_payload_amount(item.get("mexico_customs_mxn")),
+            "mexico_customs_rmb": _round_payload_amount(item.get("mexico_customs_rmb")),
+            "mexico_customs_usd": _round_payload_amount(item.get("mexico_customs_usd")),
+        },
+        "allocation_basis": {
+            "goods_value_ratio": _round_payload_amount(item.get("goods_value_ratio")),
+            "weight_ratio": _round_payload_amount(item.get("weight_ratio")),
+            "gross_weight_kg": _round_payload_amount(item.get("gross_weight_kg")),
+            "volume_m3": _round_payload_amount(item.get("volume_m3")),
+            "chargeable_weight_kg": _round_payload_amount(item.get("chargeable_weight_kg")),
+        },
+    }
+
+
+def _build_expense_pool_summary(rules: list[dict], items: list[dict]) -> dict:
+    rule_pools = [
+        {
+            "rule_code": rule.get("rule_code") or "",
+            "expense_category": rule.get("expense_category") or "",
+            "amount": _round_payload_amount(rule.get("amount")),
+            "currency": rule.get("currency") or "",
+            "allocation_basis": rule.get("allocation_basis") or rule.get("basis_field") or "",
+            "source": "allocation_rule",
+            "remark": rule.get("remark") or "",
+        }
+        for rule in rules
+        if _as_float(rule.get("amount")) > 0
+    ]
+    item_allocations = {
+        "logistics_allocated_rmb": _round_payload_amount(_sum_item_fields(items, ("freight_alloc_rmb",))),
+        "logistics_allocated_mxn": _round_payload_amount(_sum_item_fields(items, ("freight_alloc_mxn",))),
+        "clearance_fee_mxn": _round_payload_amount(_sum_item_fields(items, ("mexico_customs_mxn",))),
+        "clearance_fee_rmb": _round_payload_amount(_sum_item_fields(items, ("mexico_customs_rmb",))),
+        "clearance_fee_usd": _round_payload_amount(_sum_item_fields(items, ("mexico_customs_usd",))),
+        "tariff_tax_total": _round_payload_amount(_sum_item_fields(items, ("import_tax_total", "igi_amount", "iva_amount"))),
+    }
+    return {
+        "rules": rule_pools,
+        "item_allocations": item_allocations,
+        "allocation_basis_fields": sorted(
+            {
+                rule.get("allocation_basis") or rule.get("basis_field")
+                for rule in rules
+                if rule.get("allocation_basis") or rule.get("basis_field")
+            }
+        ),
+    }
+
+
 def _build_writeback_item_quality(items: list[dict]) -> dict:
-    issue_counts = {fieldname: 0 for fieldname, _label, _rule in WRITEBACK_REQUIRED_ITEM_FIELDS}
+    issue_counts = {fieldname: 0 for fieldname, _label, _rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS}
     issue_examples = []
 
     for index, item in enumerate(items, start=1):
         item_missing_labels = []
-        for fieldname, label, rule in WRITEBACK_REQUIRED_ITEM_FIELDS:
+        item_missing_fieldnames = []
+        for fieldname, label, rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS:
             value = item.get(fieldname)
             has_issue = _is_blank(value) if rule == "text" else _as_float(value) <= 0
             if has_issue:
                 issue_counts[fieldname] += 1
                 item_missing_labels.append(label)
+                item_missing_fieldnames.append(fieldname)
 
         if item_missing_labels and len(issue_examples) < 5:
             issue_examples.append(
                 {
+                    "item_name": item.get("name") or "",
                     "row_no": item.get("row_no") or item.get("excel_row_no") or index,
                     "material_code": item.get("material_code") or "",
                     "product_name": item.get("product_name") or "",
                     "missing_fields": item_missing_labels,
+                    "missing_fieldnames": item_missing_fieldnames,
                 }
             )
 
@@ -1670,7 +1861,7 @@ def _build_writeback_item_quality(items: list[dict]) -> dict:
     }
     blocking_reasons = [
         f"有 {count} 条 SKU 缺少或未填有效的{label}。"
-        for fieldname, label, _rule in WRITEBACK_REQUIRED_ITEM_FIELDS
+        for fieldname, label, _rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS
         if (count := issue_counts[fieldname]) > 0
     ]
 
@@ -1682,12 +1873,201 @@ def _build_writeback_item_quality(items: list[dict]) -> dict:
     }
 
 
+def _build_writeback_field_gaps(batch: dict, items: list[dict], rules: list[dict], resolved_version_name: str | None) -> dict:
+    item_quality = _build_writeback_item_quality(items)
+    actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
+    estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
+    total_cost = actual_total_cost or estimated_total_cost
+
+    batch_gaps = []
+    if _is_blank(batch.get("subsidiary_code")):
+        batch_gaps.append(
+            {
+                "scope": "batch",
+                "fieldname": "subsidiary_code",
+                "label": "业务主体",
+                "missing_count": 1,
+                "source_hint": "钉钉国际物流 OA 业务主体字段",
+                "suggestion": "从钉钉表单补取业务主体后再确认。",
+            }
+        )
+    if not (resolved_version_name or batch.get("current_version")):
+        batch_gaps.append(
+            {
+                "scope": "batch",
+                "fieldname": "current_version",
+                "label": "当前版本",
+                "missing_count": 1,
+                "source_hint": "综合单价重算结果",
+                "suggestion": "先完成重新试算，再执行人工校验。",
+            }
+        )
+    if total_cost <= 0:
+        batch_gaps.append(
+            {
+                "scope": "batch",
+                "fieldname": "total_cost_rmb",
+                "label": "综合成本",
+                "missing_count": 1,
+                "source_hint": "费用池 + 分摊结果",
+                "suggestion": "先补齐费用池或重新试算。",
+            }
+        )
+
+    rule_gaps = []
+    pool_needles = [
+        (("freight", "logistics", "运输", "运费", "海运", "物流"), "国际运费", "钉钉物流 OA / 货代账单 / 费用清单"),
+        (("clearance", "customs", "清关", "报关", "货代"), "清关费", "清关资料 / 费用清单"),
+        (("tariff", "duty", "tax", "关税", "税费", "igi", "iva"), "关税", "完税凭证 / 税费资料"),
+    ]
+    for keywords, label, source_hint in pool_needles:
+        has_pool = _has_fee_pool_or_zero_confirmation(rules, keywords)
+        if not has_pool:
+            rule_gaps.append(
+                {
+                    "scope": "rule",
+                    "fieldname": label,
+                    "label": label,
+                    "missing_count": 1,
+                    "source_hint": source_hint,
+                    "suggestion": f"补充{label}费用池或分摊规则后再确认。",
+                }
+            )
+
+    item_gaps = []
+    for fieldname, label, rule, source in WRITEBACK_REQUIRED_ITEM_FIELDS:
+        count = item_quality["issue_counts"].get(fieldname, 0)
+        if count <= 0:
+            continue
+        examples = [
+            example
+            for example in item_quality["issue_examples"]
+            if fieldname in (example.get("missing_fieldnames") or [])
+        ]
+        item_gaps.append(
+            {
+                "scope": "item",
+                "fieldname": fieldname,
+                "label": label,
+                "missing_count": count,
+                "source_hint": source,
+                "missing_fieldnames": [fieldname],
+                "suggestion": f"{label} 缺失 {count} 行，建议从 {source} 补齐后重新试算。",
+            }
+        )
+
+    return {
+        "batch": batch_gaps,
+        "rules": rule_gaps,
+        "items": item_gaps,
+        "missing_total": len(batch_gaps) + len(rule_gaps) + len(item_gaps),
+    }
+
+
+def _build_calculation_confirmation_readiness(
+    batch: dict,
+    items: list[dict],
+    rules: list[dict],
+    resolved_version_name: str | None,
+) -> dict:
+    item_quality = _build_writeback_item_quality(items)
+    field_gaps = _build_writeback_field_gaps(batch, items, rules, resolved_version_name)
+    actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
+    estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
+    total_cost = actual_total_cost or estimated_total_cost
+    recorded_item_count = int(_as_float(batch.get("item_count")))
+    actual_item_count = len(items)
+
+    has_international_freight = _has_positive_rule(
+        rules,
+        ("freight", "logistics", "运输", "运费", "海运", "物流"),
+    ) or _has_positive_item_value(
+        items,
+        ("china_to_mexico_freight_rmb", "freight_alloc_rmb", "freight_alloc_mxn"),
+    )
+    has_clearance_fee = _has_positive_rule(
+        rules,
+        ("clearance", "customs", "清关", "报关", "货代"),
+    ) or _has_zero_confirmed_rule(
+        rules,
+        ("clearance", "customs", "清关", "报关", "货代"),
+    ) or _has_positive_item_value(
+        items,
+        ("mexico_customs_mxn", "mexico_customs_rmb", "mexico_customs_usd"),
+    )
+    has_tariff = _has_positive_rule(
+        rules,
+        ("tariff", "duty", "tax", "关税", "税费", "igi", "iva"),
+    ) or _has_zero_confirmed_rule(
+        rules,
+        ("tariff", "duty", "tax", "关税", "税费", "igi", "iva"),
+    ) or _has_positive_item_value(
+        items,
+        ("import_tax_total", "igi_amount", "iva_amount"),
+    )
+
+    checks = {
+        "batch_exists": True,
+        "has_current_version": bool(resolved_version_name or batch.get("current_version")),
+        "has_subsidiary_code": not _is_blank(batch.get("subsidiary_code")),
+        "has_dirty_data": batch.get("status") == "Dirty",
+        "has_items": actual_item_count > 0,
+        "has_total_cost": total_cost > 0,
+        "has_international_freight": has_international_freight,
+        "has_clearance_fee": has_clearance_fee,
+        "has_tariff": has_tariff,
+        **item_quality["checks"],
+    }
+
+    blocking_reasons = []
+    if not checks["has_current_version"]:
+        blocking_reasons.append("当前批次没有当前版本。")
+    if not checks["has_subsidiary_code"]:
+        blocking_reasons.append("当前批次缺少归属业务主体。")
+    if checks["has_dirty_data"]:
+        blocking_reasons.append("当前批次存在未重新计算的数据。")
+    if not checks["has_items"]:
+        blocking_reasons.append("当前批次没有 SKU 明细。")
+    if not checks["has_total_cost"]:
+        blocking_reasons.append("当前批次没有可确认的综合成本结果。")
+    if not checks["has_international_freight"]:
+        blocking_reasons.append("当前批次缺少国际运费费用池或分摊结果。")
+    if not checks["has_clearance_fee"]:
+        blocking_reasons.append("当前批次缺少清关费费用池或分摊结果。")
+    if not checks["has_tariff"]:
+        blocking_reasons.append("当前批次缺少关税费用池或分摊结果。")
+    blocking_reasons.extend(item_quality["blocking_reasons"])
+
+    warning_reasons = []
+    if recorded_item_count and recorded_item_count != actual_item_count:
+        warning_reasons.append(f"批次记录明细数为 {recorded_item_count}，实际查询到 {actual_item_count} 条。")
+    if estimated_total_cost > 0 and actual_total_cost <= 0:
+        warning_reasons.append("当前只有系统计算成本，尚无凭证后的实际总成本。")
+
+    ready = not blocking_reasons
+    return {
+        "ready": ready,
+        "checks": checks,
+        "blocking_reasons": blocking_reasons,
+        "warning_reasons": warning_reasons,
+        "item_issue_counts": item_quality["issue_counts"],
+        "item_issue_examples": item_quality["issue_examples"],
+        "field_gaps": field_gaps,
+        "item_count": actual_item_count,
+        "total_cost_rmb": total_cost,
+        "expense_pools": _build_expense_pool_summary(rules, items),
+        "message": "允许确认计算结果。" if ready else "当前批次暂不满足计算结果确认条件：" + "；".join(blocking_reasons),
+    }
+
+
 def _build_writeback_readiness(
     batch: dict,
     items: list[dict],
     resolved_version_name: str | None,
+    rules: list[dict] | None = None,
 ) -> dict:
     item_quality = _build_writeback_item_quality(items)
+    field_gaps = _build_writeback_field_gaps(batch, items, rules or [], resolved_version_name)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
     estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
     total_cost = actual_total_cost or estimated_total_cost
@@ -1697,6 +2077,7 @@ def _build_writeback_readiness(
     checks = {
         "batch_exists": True,
         "has_current_version": bool(resolved_version_name or batch.get("current_version")),
+        "has_subsidiary_code": not _is_blank(batch.get("subsidiary_code")),
         "is_confirmed": batch.get("confirm_status") == "Confirmed",
         "has_dirty_data": batch.get("status") == "Dirty",
         "has_items": actual_item_count > 0,
@@ -1707,6 +2088,8 @@ def _build_writeback_readiness(
     blocking_reasons = []
     if not checks["has_current_version"]:
         blocking_reasons.append("当前批次没有当前版本。")
+    if not checks["has_subsidiary_code"]:
+        blocking_reasons.append("当前批次缺少归属业务主体。")
     if not checks["is_confirmed"]:
         blocking_reasons.append("当前批次还没有确认。")
     if checks["has_dirty_data"]:
@@ -1731,9 +2114,174 @@ def _build_writeback_readiness(
         "warning_reasons": warning_reasons,
         "item_issue_counts": item_quality["issue_counts"],
         "item_issue_examples": item_quality["issue_examples"],
+        "field_gaps": field_gaps,
         "item_count": actual_item_count,
         "total_cost_rmb": total_cost,
         "message": "允许回写。" if ready else "当前批次暂不满足回写条件：" + "；".join(blocking_reasons),
+    }
+
+
+def _build_erp_push_payload(
+    batch: dict,
+    version: dict,
+    items: list[dict],
+    rules: list[dict],
+    readiness: dict,
+) -> dict:
+    subsidiary_code = batch.get("subsidiary_code") or ""
+    payload_items = []
+    for item in items:
+        formula = _build_cost_formula(item)
+        payload_items.append(
+            {
+                "subsidiary_code": subsidiary_code,
+                "material_code": item.get("material_code") or "",
+                "material_name": item.get("product_name") or "",
+                "original_unit_price": formula["original_unit_price"],
+                "purchase_currency": item.get("purchase_currency") or "",
+                "comprehensive_unit_price": formula["comprehensive_unit_price"],
+                "outbound_quantity": _round_payload_amount(item.get("actual_shipped_qty")),
+                "source_quantity": _round_payload_amount(item.get("quantity")),
+                "cost_formula": formula,
+                "expense_detail": _item_expense_detail(item),
+            }
+        )
+
+    return {
+        "target_system": "DeepLinkERP",
+        "payload_version": "overseas_cost.v1",
+        "batch_name": batch.get("name") or "",
+        "batch_no": batch.get("batch_no") or batch.get("name") or "",
+        "version_name": version.get("name") or "",
+        "version_code": version.get("version_code") or "",
+        "subsidiary_code": subsidiary_code,
+        "item_count": len(payload_items),
+        "total_cost_rmb": _round_payload_amount(readiness.get("total_cost_rmb")),
+        "expense_pools": _build_expense_pool_summary(rules, items),
+        "items": payload_items,
+    }
+
+
+def _insert_batch_audit_log(
+    batch_doc_name: str,
+    version_name: str | None,
+    action_type: str,
+    field_name: str,
+    old_value: str | None = None,
+    new_value: str | None = None,
+    action_remark: str | None = None,
+) -> None:
+    frappe.get_doc(
+        {
+            "doctype": "Overseas Cost Audit Log",
+            "batch": batch_doc_name,
+            "version": version_name,
+            "action_type": action_type,
+            "field_name": field_name,
+            "old_value": old_value or "",
+            "new_value": new_value or "",
+            "operator_name": getattr(frappe.session, "user", "") if getattr(frappe, "session", None) else "",
+            "action_remark": action_remark or "",
+        }
+    ).insert(ignore_permissions=True)
+
+
+def _db_has_column(doctype: str, fieldname: str) -> bool:
+    if frappe is None:
+        return True
+    try:
+        if hasattr(frappe.db, "has_column"):
+            return bool(frappe.db.has_column(doctype, fieldname))
+    except Exception:
+        pass
+    try:
+        return fieldname in set(frappe.db.get_table_columns(doctype))
+    except Exception:
+        return True
+
+
+def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> dict:
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {"ok": False, "message": f"未找到批次：{batch_name}"}
+
+    resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    batch_fields = [
+        "name",
+        "batch_no",
+        "status",
+        "confirm_status",
+        "current_version",
+        "item_count",
+        "estimated_total_cost_rmb",
+        "actual_total_cost_rmb",
+        "extra_json",
+    ]
+    if _db_has_column("Overseas Cost Batch", "subsidiary_code"):
+        batch_fields.insert(3, "subsidiary_code")
+    batch = frappe.db.get_value(
+        "Overseas Cost Batch",
+        batch_doc_name,
+        batch_fields,
+        as_dict=True,
+    ) or {"name": batch_doc_name}
+    batch.setdefault("subsidiary_code", "")
+    version = {}
+    rules = []
+    if resolved_version_name:
+        version = frappe.db.get_value(
+            "Overseas Cost Version",
+            resolved_version_name,
+            [
+                "name",
+                "version_code",
+                "version_type",
+                "status",
+                "calculated_at",
+                "rule_snapshot_json",
+                "summary_snapshot_json",
+            ],
+            as_dict=True,
+        ) or {"name": resolved_version_name}
+        rules = frappe.get_all(
+            "Overseas Cost Allocation Rule",
+            filters={"batch": batch_doc_name, "version": resolved_version_name},
+            fields=[
+                "name",
+                "rule_code",
+                "expense_category",
+                "allocation_basis",
+                "basis_field",
+                "currency",
+                "amount",
+                "remark",
+            ],
+            order_by="priority_no asc, modified asc",
+            limit_page_length=1000,
+        )
+        if not rules:
+            rules = _load_json_value(version.get("rule_snapshot_json"))
+            if not isinstance(rules, list):
+                rules = []
+
+    item_filters = {"batch": batch_doc_name}
+    if resolved_version_name:
+        item_filters["version"] = resolved_version_name
+    items = frappe.get_all(
+        "Overseas Cost Item",
+        filters=item_filters,
+        fields=ERP_PAYLOAD_ITEM_FIELDS,
+        order_by="row_no asc",
+        limit_page_length=10000,
+    )
+    return {
+        "ok": True,
+        "batch_doc_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "batch": batch,
+        "version": version,
+        "rules": rules,
+        "items": items,
     }
 
 
@@ -1827,47 +2375,252 @@ def check_writeback_ready(batch_name: str, version_name: str | None = None) -> d
         }
 
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
-    batch = frappe.db.get_value(
-        "Overseas Cost Batch",
-        batch_doc_name,
-        [
-            "status",
-            "confirm_status",
-            "current_version",
-            "item_count",
-            "estimated_total_cost_rmb",
-            "actual_total_cost_rmb",
-        ],
-        as_dict=True,
-    ) or {}
-    item_filters = {"batch": batch_doc_name}
-    if resolved_version_name:
-        item_filters["version"] = resolved_version_name
-    items = frappe.get_all(
-        "Overseas Cost Item",
-        filters=item_filters,
-        fields=[
-            "name",
-            "row_no",
-            "excel_row_no",
-            "material_code",
-            "product_name",
-            "quantity",
-            "unit_price",
-            "purchase_currency",
-            "goods_value",
-            "total_unit_rmb",
-        ],
-        limit_page_length=10000,
-    )
+    context = _load_erp_push_context(batch_doc_name, resolved_version_name)
+    if not context.get("ok"):
+        return {**context, "ready": False}
     readiness = _build_writeback_readiness(
-        batch=batch,
-        items=items,
-        resolved_version_name=resolved_version_name,
+        batch=context["batch"],
+        items=context["items"],
+        resolved_version_name=context["version_name"],
+        rules=context["rules"],
+    )
+    if readiness.get("field_gaps"):
+        readiness["field_gaps"]["summary"] = {
+            "missing_total": readiness["field_gaps"].get("missing_total", 0),
+            "batch_count": len(readiness["field_gaps"].get("batch") or []),
+            "rule_count": len(readiness["field_gaps"].get("rules") or []),
+            "item_count": len(readiness["field_gaps"].get("items") or []),
+        }
+    return {
+        "ok": True,
+        "batch_name": context["batch_doc_name"],
+        "version_name": context["version_name"],
+        **readiness,
+    }
+
+
+def confirm_calculation_result(batch_name: str, version_name: str | None = None, remark: str | None = None) -> dict:
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "confirmed": False,
+            "batch_name": batch_name,
+            "version_name": version_name,
+            "message": "当前未连接 Frappe，不能真实确认计算结果。",
+        }
+
+    context = _load_erp_push_context(batch_name, version_name)
+    if not context.get("ok"):
+        return {**context, "confirmed": False}
+
+    readiness = _build_calculation_confirmation_readiness(
+        batch=context["batch"],
+        items=context["items"],
+        rules=context["rules"],
+        resolved_version_name=context["version_name"],
+    )
+    if not readiness["ready"]:
+        return {
+            "ok": False,
+            "confirmed": False,
+            "batch_name": context["batch_doc_name"],
+            "version_name": context["version_name"],
+            **readiness,
+        }
+
+    old_status = {
+        "status": context["batch"].get("status"),
+        "confirm_status": context["batch"].get("confirm_status"),
+        "version_status": context["version"].get("status"),
+    }
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        context["batch_doc_name"],
+        {
+            "status": "Confirmed",
+            "confirm_status": "Confirmed",
+            "is_locked": 1,
+            "writeback_status": context["batch"].get("writeback_status") or "Not Started",
+        },
+        update_modified=True,
+    )
+    if context["version_name"]:
+        frappe.db.set_value(
+            "Overseas Cost Version",
+            context["version_name"],
+            "status",
+            "Confirmed",
+            update_modified=True,
+        )
+    _insert_batch_audit_log(
+        batch_doc_name=context["batch_doc_name"],
+        version_name=context["version_name"],
+        action_type="BATCH_EDIT",
+        field_name="confirm_status",
+        old_value=_json.dumps(old_status, ensure_ascii=False, default=str),
+        new_value=_json.dumps({"confirm_status": "Confirmed", "remark": remark or ""}, ensure_ascii=False, default=str),
+        action_remark="人工校验通过，确认综合单价计算结果。",
+    )
+    frappe.db.commit()
+
+    return {
+        "ok": True,
+        "confirmed": True,
+        "batch_name": context["batch_doc_name"],
+        "version_name": context["version_name"],
+        **readiness,
+        "message": "计算结果已确认，可预览并组织 DeepLinkERP 推送报文。",
+    }
+
+
+def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dict:
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "ready": False,
+            "batch_name": batch_name,
+            "version_name": version_name,
+            "message": "当前未连接 Frappe，不能生成真实 ERP 推送报文。",
+        }
+
+    context = _load_erp_push_context(batch_name, version_name)
+    if not context.get("ok"):
+        return {**context, "ready": False}
+
+    readiness = _build_writeback_readiness(
+        batch=context["batch"],
+        items=context["items"],
+        resolved_version_name=context["version_name"],
+        rules=context["rules"],
+    )
+    if readiness.get("field_gaps"):
+        readiness["field_gaps"]["summary"] = {
+            "missing_total": readiness["field_gaps"].get("missing_total", 0),
+            "batch_count": len(readiness["field_gaps"].get("batch") or []),
+            "rule_count": len(readiness["field_gaps"].get("rules") or []),
+            "item_count": len(readiness["field_gaps"].get("items") or []),
+        }
+    if not readiness["ready"]:
+        return {
+            "ok": False,
+            "batch_name": context["batch_doc_name"],
+            "version_name": context["version_name"],
+            **readiness,
+        }
+
+    payload = _build_erp_push_payload(
+        batch=context["batch"],
+        version=context["version"],
+        items=context["items"],
+        rules=context["rules"],
+        readiness=readiness,
     )
     return {
         "ok": True,
-        "batch_name": batch_doc_name,
-        "version_name": resolved_version_name,
+        "ready": True,
+        "batch_name": context["batch_doc_name"],
+        "version_name": context["version_name"],
+        "payload": payload,
         **readiness,
+        "message": "DeepLinkERP 推送报文已生成，请人工预览后执行推送。",
+    }
+
+
+def writeback_to_erp(batch_name: str, version_name: str | None = None) -> dict:
+    preview = preview_erp_payload(batch_name=batch_name, version_name=version_name)
+    if not preview.get("ok"):
+        return {
+            **preview,
+            "queued": False,
+        }
+    if frappe is None:
+        return {
+            **preview,
+            "queued": False,
+            "message": "当前未连接 Frappe，不能组织 ERP 推送。",
+        }
+
+    context = _load_erp_push_context(batch_name, version_name)
+    batch_extra = _load_json_value((context.get("batch") or {}).get("extra_json"))
+    if not isinstance(batch_extra, dict):
+        batch_extra = {}
+    previous_push = batch_extra.get("erp_writeback")
+    if not isinstance(previous_push, dict):
+        previous_push = {}
+
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    attempt_no = int(previous_push.get("attempt_count") or 0) + 1
+    push_result = erp_client.push_overseas_cost_payload(preview.get("payload") or {})
+    writeback_status = "Success" if push_result.get("ok") else "Failed"
+    message = push_result.get("message") or (
+        "DeepLinkERP 推送成功。" if writeback_status == "Success" else "DeepLinkERP 推送失败。"
+    )
+    target_doc = push_result.get("erp_target_doc") or ""
+    attempt_record = {
+        "attempt_no": attempt_no,
+        "status": writeback_status,
+        "pushed_at": now_text,
+        "message": message,
+        "erp_target_doc": target_doc,
+        "http_status": push_result.get("http_status"),
+        "request": push_result.get("request") or {},
+        "response": push_result.get("response") or {},
+    }
+    attempt_history = list(previous_push.get("attempt_history") or [])
+    attempt_history.append(attempt_record)
+    batch_extra["erp_writeback"] = {
+        "status": writeback_status,
+        "attempt_count": attempt_no,
+        "last_attempt_at": now_text,
+        "last_message": message,
+        "erp_target_doc": target_doc,
+        "payload": preview.get("payload") or {},
+        "attempt_history": attempt_history[-20:],
+    }
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        preview["batch_name"],
+        {
+            "writeback_status": writeback_status,
+            "writeback_time": now_text,
+            "writeback_message": message,
+            "erp_target_doc": target_doc,
+            "extra_json": _json.dumps(batch_extra, ensure_ascii=False, default=str),
+        },
+        update_modified=True,
+    )
+    _insert_batch_audit_log(
+        batch_doc_name=preview["batch_name"],
+        version_name=preview["version_name"],
+        action_type="WRITEBACK",
+        field_name="erp_payload",
+        new_value=_json.dumps(
+            {
+                "target_system": "DeepLinkERP",
+                "item_count": preview["payload"].get("item_count"),
+                "subsidiary_code": preview["payload"].get("subsidiary_code"),
+                "writeback_status": writeback_status,
+                "erp_target_doc": target_doc,
+                "attempt_no": attempt_no,
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+        action_remark=message,
+    )
+    frappe.db.commit()
+
+    return {
+        **preview,
+        "ok": bool(push_result.get("ok")),
+        "queued": writeback_status != "Success",
+        "pushed": writeback_status == "Success",
+        "retryable": writeback_status == "Failed",
+        "writeback_status": writeback_status,
+        "erp_target_doc": target_doc,
+        "erp_response": push_result.get("response") or {},
+        "attempt_no": attempt_no,
+        "message": message,
     }

@@ -143,6 +143,18 @@ LOGISTICS_DESTINATION_FIELD_ALIASES = (
     "目的国",
 )
 GOODS_TABLE_FIELD_ALIASES = ("货物信息", "Bienes")
+BUSINESS_ENTITY_FIELD_ALIASES = (
+    "业务主体",
+    "业务主体Empresas",
+    "Entidad comercial",
+    "Empresas",
+    "Empresa",
+    "Business Entity",
+    "Company",
+    "公司主体",
+    "归属公司",
+    "子公司",
+)
 PURCHASE_DETAIL_TABLE_FIELD_ALIASES = (
     "需求明细",
     "Desglose de los gastos",
@@ -1705,6 +1717,13 @@ def extract_form_fields(instance: dict) -> dict[str, Any]:
         ext_value = _parse_json_text(component.get("ext_value") or component.get("extValue"))
         if name:
             resolved_value = value if value not in (None, "") else ext_value
+            if _field_matches_alias(name, BUSINESS_ENTITY_FIELD_ALIASES):
+                ext_entity = _extract_dingtalk_entity_value(ext_value)
+                value_entity = _extract_dingtalk_entity_value(value)
+                if ext_entity.get("name"):
+                    resolved_value = ext_value
+                elif value_entity.get("name"):
+                    resolved_value = value
             if name not in fields or fields[name] in (None, ""):
                 fields[name] = resolved_value
         for key in ("details", "children", "items"):
@@ -1748,23 +1767,209 @@ def _flatten_detail_row(row: dict) -> list[dict]:
 
 
 def _find_field_value(fields: dict[str, Any], aliases: tuple[str, ...]) -> Any:
-    normalized_aliases = [_normalize_key(alias) for alias in aliases]
     for key, value in fields.items():
-        normalized_key = _normalize_key(key)
-        if any(alias and alias in normalized_key for alias in normalized_aliases):
+        if _field_matches_alias(key, aliases):
             if value not in (None, ""):
                 return value
     return ""
 
 
 def _find_field_entry(fields: dict[str, Any], aliases: tuple[str, ...]) -> tuple[str, Any]:
-    normalized_aliases = [_normalize_key(alias) for alias in aliases]
     for key, value in fields.items():
-        normalized_key = _normalize_key(key)
-        if any(alias and alias in normalized_key for alias in normalized_aliases):
+        if _field_matches_alias(key, aliases):
             if value not in (None, ""):
                 return key, value
     return "", ""
+
+
+def _field_matches_alias(fieldname: Any, aliases: tuple[str, ...]) -> bool:
+    normalized_fieldname = _normalize_key(fieldname)
+    normalized_aliases = [_normalize_key(alias) for alias in aliases]
+    return any(alias and alias in normalized_fieldname for alias in normalized_aliases)
+
+
+def _extract_dingtalk_entity_value(value: Any) -> dict[str, str]:
+    parsed = _parse_json_text(value)
+    if isinstance(parsed, list):
+        for item in parsed:
+            entity = _extract_dingtalk_entity_value(item)
+            if entity.get("name") or entity.get("id"):
+                return entity
+        return {"name": "", "id": ""}
+    if isinstance(parsed, dict):
+        for key in ("selectedOptions", "selected_options", "options", "items", "list", "data"):
+            nested_value = parsed.get(key)
+            if isinstance(nested_value, str):
+                nested_value = _parse_json_text(nested_value)
+            if isinstance(nested_value, (list, dict)):
+                nested_entity = _extract_dingtalk_entity_value(nested_value)
+                if nested_entity.get("name") or nested_entity.get("id"):
+                    return nested_entity
+        name = _clean(
+            parsed.get("deptName")
+            or parsed.get("name")
+            or parsed.get("label")
+            or parsed.get("displayName")
+            or parsed.get("displayValue")
+            or parsed.get("optionName")
+            or parsed.get("orgName")
+            or parsed.get("corpName")
+            or parsed.get("companyName")
+            or parsed.get("businessName")
+            or parsed.get("title")
+            or parsed.get("text")
+            or parsed.get("value")
+        )
+        entity_id = _clean(
+            parsed.get("itemId")
+            or parsed.get("deptId")
+            or parsed.get("id")
+            or parsed.get("value")
+        )
+        return {"name": name, "id": entity_id}
+    text = _clean(parsed)
+    return {"name": text, "id": ""}
+
+
+def _extract_subsidiary_from_form_components(components: Any) -> dict[str, str]:
+    if not isinstance(components, list):
+        return {"subsidiary_code": "", "business_entity_name": "", "business_entity_id": "", "source_field": "", "source": ""}
+
+    stack = list(reversed(components))
+    while stack:
+        component = stack.pop()
+        if not isinstance(component, dict):
+            continue
+        for child_key in ("details", "children", "items"):
+            children = component.get(child_key)
+            if isinstance(children, str):
+                children = _parse_json_text(children)
+            if isinstance(children, list):
+                stack.extend(reversed(children))
+        source_field = _clean(
+            component.get("name")
+            or component.get("label")
+            or component.get("bizAlias")
+            or component.get("componentName")
+            or component.get("id")
+        )
+        component_type = _clean(component.get("componentType") or component.get("component_type")).lower()
+        value = component.get("value")
+        ext_value = component.get("ext_value") or component.get("extValue")
+        raw_value = ext_value if ext_value not in (None, "") else value
+        entity = _extract_dingtalk_entity_value(raw_value)
+        if not (entity.get("name") or entity.get("id")):
+            continue
+
+        if _field_matches_alias(source_field, BUSINESS_ENTITY_FIELD_ALIASES):
+            name = entity.get("name") or entity.get("id") or ""
+        elif component_type in {"departmentfield", "deptfield", "organizationfield", "companyfield"}:
+            name = entity.get("name") or entity.get("id") or ""
+        else:
+            continue
+
+        if not name:
+            continue
+        return {
+            "subsidiary_code": name,
+            "business_entity_name": entity.get("name") or "",
+            "business_entity_id": entity.get("id") or "",
+            "source_field": source_field,
+            "source": "dingtalk_form_business_entity" if source_field else "",
+        }
+
+    return {"subsidiary_code": "", "business_entity_name": "", "business_entity_id": "", "source_field": "", "source": ""}
+
+
+def extract_subsidiary_from_approval(item: dict) -> dict[str, str]:
+    """从钉钉表单提取归属子公司/业务主体，当前直接使用中文主体名称。"""
+
+    form_fields = item.get("form_fields") or {}
+    source_field, raw_value = _find_field_entry(form_fields, BUSINESS_ENTITY_FIELD_ALIASES)
+    entity = _extract_dingtalk_entity_value(raw_value)
+    name = entity.get("name") or entity.get("id") or ""
+    if not name:
+        raw_components = item.get("raw_form_components") or item.get("form_component_values") or item.get("formComponentValues") or []
+        fallback = _extract_subsidiary_from_form_components(raw_components)
+        if fallback.get("subsidiary_code"):
+            return fallback
+    return {
+        "subsidiary_code": name,
+        "business_entity_name": entity.get("name") or "",
+        "business_entity_id": entity.get("id") or "",
+        "source_field": source_field,
+        "source": "dingtalk_form_business_entity" if source_field else "",
+    }
+
+
+def _component_name_matches_business_entity(name: Any) -> bool:
+    normalized = _normalize_key(name)
+    if not normalized:
+        return False
+    extra_tokens = ("empresa", "entidad", "businessentity", "company", "公司", "主体")
+    return _field_matches_alias(name, BUSINESS_ENTITY_FIELD_ALIASES) or any(token in normalized for token in extra_tokens)
+
+
+def _collect_business_entity_debug_candidates(item: dict, *, max_count: int = 12) -> list[dict]:
+    candidates: list[dict] = []
+    form_fields = item.get("form_fields") or {}
+    for fieldname, value in form_fields.items():
+        if not _component_name_matches_business_entity(fieldname):
+            continue
+        entity = _extract_dingtalk_entity_value(value)
+        candidates.append(
+            {
+                "source": "form_fields",
+                "field": _clean(fieldname),
+                "entity_name": entity.get("name") or "",
+                "entity_id": entity.get("id") or "",
+                "raw_type": type(value).__name__,
+                "raw_preview": _clean(value)[:160],
+            }
+        )
+        if len(candidates) >= max_count:
+            return candidates
+
+    stack = list(reversed(item.get("raw_form_components") or item.get("form_component_values") or item.get("formComponentValues") or []))
+    while stack and len(candidates) < max_count:
+        component = stack.pop()
+        if not isinstance(component, dict):
+            continue
+        for child_key in ("details", "children", "items"):
+            children = component.get(child_key)
+            if isinstance(children, str):
+                children = _parse_json_text(children)
+            if isinstance(children, list):
+                stack.extend(reversed(children))
+        name = _clean(
+            component.get("name")
+            or component.get("label")
+            or component.get("bizAlias")
+            or component.get("componentName")
+            or component.get("id")
+        )
+        component_type = _clean(component.get("componentType") or component.get("component_type"))
+        if not _component_name_matches_business_entity(name) and _clean(component_type).lower() not in {
+            "departmentfield",
+            "deptfield",
+            "organizationfield",
+            "companyfield",
+        }:
+            continue
+        raw_value = component.get("ext_value") or component.get("extValue") or component.get("value")
+        entity = _extract_dingtalk_entity_value(raw_value)
+        candidates.append(
+            {
+                "source": "raw_form_components",
+                "field": name,
+                "component_type": component_type,
+                "entity_name": entity.get("name") or "",
+                "entity_id": entity.get("id") or "",
+                "raw_type": type(raw_value).__name__,
+                "raw_preview": _clean(raw_value)[:160],
+            }
+        )
+    return candidates
 
 
 def _normalize_currency_code(value: Any) -> str:
@@ -1778,6 +1983,21 @@ def _normalize_currency_code(value: Any) -> str:
     if any(token in normalized for token in ("mxn", "peso", "pesos", "比索", "墨西哥")):
         return "MXN"
     return ""
+
+
+def _normalize_allocation_basis(value: Any) -> str:
+    text = _normalize_key(value)
+    if text in {"goods_value", "gross_weight", "volume", "chargeable_weight"}:
+        return text
+    if text in {"货值", "按货值", "按货值分摊"} or "货值" in text:
+        return "goods_value"
+    if text in {"计费重", "计费重量", "体积重", "按计费重", "按计费重量", "按计费重分摊"} or "计费重" in text:
+        return "chargeable_weight"
+    if text in {"体积", "方数", "按体积", "按方数", "按体积分摊"} or "体积" in text or "方数" in text:
+        return "volume"
+    if text in {"毛重", "重量", "按毛重", "按重量", "按毛重分摊", "按重量分摊"} or "毛重" in text or "重量" in text:
+        return "gross_weight"
+    return "gross_weight"
 
 
 def _parse_money_amount(value: Any) -> float | None:
@@ -2642,6 +2862,7 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "linked_purchase_approvals": linked_purchase_approvals,
         "oa_form_attachment_count": len(oa_form_attachments),
         "oa_form_attachments": oa_form_attachments,
+        "raw_form_components": _get_form_components(instance),
         "form_fields": fields,
     }
     summary["logistics_fee"] = extract_logistics_fee_from_approval(summary)
@@ -3299,11 +3520,13 @@ def build_batch_values_from_approval(item: dict) -> dict:
     oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
     attachment_count = len(oa_form_attachments) if oa_form_attachments else _count_dingtalk_attachments(form_fields)
     transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or "SEA"
+    subsidiary = extract_subsidiary_from_approval(item)
     values = {
         "batch_no": batch_no,
         "waybill_no": logistics_no,
         "container_no": logistics_no if _looks_like_container_no(logistics_no) else "",
         "transport_mode": transport_mode,
+        "subsidiary_code": subsidiary.get("subsidiary_code") or "",
         "source_type": "oa_logistics",
         "source_data_id": source_instance_id or source_approval_no,
         "source_approval_no": source_approval_no,
@@ -3333,6 +3556,7 @@ def build_batch_values_from_approval(item: dict) -> dict:
                 "logistics_quote_candidates": item.get("logistics_quote_candidates") or extract_logistics_quote_candidates_from_approval(item),
                 "linked_purchase_approvals": item.get("linked_purchase_approvals") or [],
                 "oa_form_attachments": oa_form_attachments,
+                "subsidiary": subsidiary,
                 "form_fields": form_fields,
             }
         ),
@@ -3573,6 +3797,152 @@ def _sync_oa_goods_items(
     }
 
 
+def _purchase_expense_rows_from_preview(preview_result: dict) -> list[dict]:
+    rows = preview_result.get("mapped_preview_items") or []
+    return [row for row in rows if isinstance(row, dict) and _clean(row.get("material_code"))]
+
+
+def _build_purchase_expense_item_doc_values(
+    *,
+    row: dict,
+    row_no: int,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+) -> dict:
+    quantity = _to_number_or_none(row.get("quantity")) or 0
+    goods_value = _to_number_or_none(row.get("goods_value"))
+    unit_price = _to_number_or_none(row.get("unit_price"))
+    if goods_value is None and unit_price is not None and quantity:
+        goods_value = round(unit_price * quantity, 6)
+    values = {
+        "doctype": "Overseas Cost Item",
+        "batch": batch_name,
+        "version": version_name,
+        "row_no": row_no,
+        "material_code": row.get("material_code") or "",
+        "product_name": row.get("product_name") or "",
+        "spec_model": row.get("spec_model") or "",
+        "quantity": quantity,
+        "actual_shipped_qty": quantity,
+        "unit": normalize_unit(row.get("unit")) or row.get("unit") or "",
+        "unit_price": unit_price,
+        "purchase_currency": row.get("purchase_currency") or "",
+        "goods_value": goods_value,
+        "source_type": "PURCHASE_EXPENSE_OA",
+        "source_doc_no": row.get("source_approval_no") or row.get("source_instance_id") or "",
+        "parse_status": "SUCCESS",
+        "dingtalk_instance_id": row.get("source_instance_id") or "",
+        "dingtalk_official_url": row.get("source_dingtalk_url") or "",
+        "raw_excel_json": _json_dumps(row),
+        "extra_json": _json_dumps(
+            {
+                "source": "linked_purchase_expense_oa",
+                "display_grain": "purchase_expense_line",
+                "actual_shipped_qty_source": "purchase_quantity",
+                "logistics_source_approval_no": approval_item.get("source_approval_no") or "",
+                "logistics_source_instance_id": approval_item.get("source_instance_id") or "",
+                "purchase_source_approval_no": row.get("source_approval_no") or "",
+                "purchase_source_instance_id": row.get("source_instance_id") or "",
+            }
+        ),
+    }
+    return _filter_item_values(values)
+
+
+def _replace_items_with_purchase_expense_rows(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+    purchase_rows: list[dict],
+) -> dict:
+    if frappe is None:
+        return {
+            "action": "preview",
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "purchase_item_count": len(purchase_rows),
+        }
+    if not version_name:
+        return {
+            "action": "skipped",
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "reason": "当前批次没有版本，无法按采购支出明细重建 SKU。",
+        }
+    if not purchase_rows:
+        return {
+            "action": "skipped",
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "reason": "关联采购支出 OA 没有可用明细，保留当前 SKU。",
+        }
+
+    existing_items = frappe.get_all(
+        "Overseas Cost Item",
+        filters={"batch": batch_name, "version": version_name},
+        fields=["name", "manual_override_flag", "source_type"],
+        limit_page_length=10000,
+    )
+    manual_items = [item for item in existing_items if int(item.get("manual_override_flag") or 0)]
+    if manual_items:
+        return {
+            "action": "skipped",
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "reason": "当前批次存在人工修改的 SKU 明细，未自动按采购支出明细替换。",
+            "manual_count": len(manual_items),
+            "existing_count": len(existing_items),
+        }
+
+    if existing_items:
+        frappe.db.delete("Overseas Cost Item", {"batch": batch_name, "version": version_name})
+
+    created_names: list[str] = []
+    for index, row in enumerate(purchase_rows, start=1):
+        values = _build_purchase_expense_item_doc_values(
+            row=row,
+            row_no=index,
+            batch_name=batch_name,
+            version_name=version_name,
+            approval_item=approval_item,
+        )
+        values["doctype"] = "Overseas Cost Item"
+        created_names.append(frappe.get_doc(values).insert(ignore_permissions=True).name)
+
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        batch_name,
+        {
+            "item_count": len(created_names),
+            "status": "Imported",
+        },
+        update_modified=True,
+    )
+    _insert_batch_audit_log(
+        batch_name=batch_name,
+        field_name="purchase_expense_items",
+        old_value={"item_count": len(existing_items), "source": "oa_logistics_items"},
+        new_value={"created_count": len(created_names), "display_grain": "purchase_expense_line"},
+        remark="按经理口径以关联采购支出 OA 明细作为 SKU 展示和 ERP 推送粒度，国际物流 OA 仅作为费用来源。",
+    )
+    return {
+        "action": "replaced",
+        "ok": True,
+        "created_count": len(created_names),
+        "updated_count": len(created_names),
+        "deleted_count": len(existing_items),
+        "purchase_item_count": len(purchase_rows),
+        "item_names": created_names,
+        "message": f"已按采购支出 OA 明细重建 {len(created_names)} 条 SKU。",
+    }
+
+
 def _oa_attachment_parse_targets(record: dict) -> list[str]:
     attachment_type = _clean(record.get("attachment_type"))
     extension = _clean(record.get("file_ext")).lower()
@@ -3650,6 +4020,25 @@ def _find_existing_oa_attachment(values: dict) -> str:
     return frappe.db.get_value("Overseas Cost Attachment", filters, "name") or ""
 
 
+def _save_existing_oa_attachment(existing_name: str, values: dict) -> None:
+    doc = frappe.get_doc("Overseas Cost Attachment", existing_name)
+    if hasattr(doc, "reload"):
+        doc.reload()
+    for fieldname, value in values.items():
+        setattr(doc, fieldname, value)
+    try:
+        doc.save(ignore_permissions=True)
+    except Exception as exc:
+        if exc.__class__.__name__ != "TimestampMismatchError":
+            raise
+        doc = frappe.get_doc("Overseas Cost Attachment", existing_name)
+        if hasattr(doc, "reload"):
+            doc.reload()
+        for fieldname, value in values.items():
+            setattr(doc, fieldname, value)
+        doc.save(ignore_permissions=True)
+
+
 def _sync_oa_form_attachments(
     *,
     batch_name: str,
@@ -3685,10 +4074,7 @@ def _sync_oa_form_attachments(
         )
         existing_name = _find_existing_oa_attachment(values)
         if existing_name:
-            doc = frappe.get_doc("Overseas Cost Attachment", existing_name)
-            for fieldname, value in values.items():
-                setattr(doc, fieldname, value)
-            doc.save(ignore_permissions=True)
+            _save_existing_oa_attachment(existing_name, values)
             updated_names.append(existing_name)
         else:
             doc = frappe.get_doc({"doctype": "Overseas Cost Attachment", **values}).insert(ignore_permissions=True)
@@ -3747,6 +4133,35 @@ def _sync_linked_purchase_fields(
     try:
         from overseas_costing.services import import_service
 
+        preview_result = import_service.preview_linked_purchase_expense_oa(
+            batch_name=batch_name,
+            version_name=version_name,
+            linked_purchase_json=_json_dumps(linked_approvals),
+        )
+        purchase_rows = _purchase_expense_rows_from_preview(preview_result)
+        if preview_result.get("ok") and purchase_rows:
+            rebuild_result = _replace_items_with_purchase_expense_rows(
+                batch_name=batch_name,
+                version_name=version_name,
+                approval_item=approval_item,
+                purchase_rows=purchase_rows,
+            )
+            return {
+                "action": "synced" if rebuild_result.get("ok") else "failed",
+                "sync_strategy": "purchase_expense_items",
+                "ok": bool(rebuild_result.get("ok")),
+                "linked_purchase_count": len(linked_approvals),
+                "updated_count": rebuild_result.get("updated_count", 0),
+                "changed_field_count": rebuild_result.get("created_count", 0),
+                "created_count": rebuild_result.get("created_count", 0),
+                "deleted_count": rebuild_result.get("deleted_count", 0),
+                "skipped_count": 0 if rebuild_result.get("action") == "replaced" else 1,
+                "unmatched_count": 0,
+                "ambiguous_count": 0,
+                "message": rebuild_result.get("message") or rebuild_result.get("reason") or "",
+                "rebuild_result": rebuild_result,
+            }
+
         result = import_service.apply_linked_purchase_expense_fillable_fields(
             batch_name=batch_name,
             version_name=version_name,
@@ -3764,6 +4179,7 @@ def _sync_linked_purchase_fields(
 
     return {
         "action": "synced" if result.get("ok") else "failed",
+        "sync_strategy": "matched_field_update",
         "ok": bool(result.get("ok")),
         "linked_purchase_count": len(linked_approvals),
         "updated_count": result.get("updated_count", 0),
@@ -3821,13 +4237,14 @@ def _sync_oa_logistics_allocation_rule(
 
     amount = float(parsed_amount)
     currency = _normalize_currency_code(fee.get("currency")) or "RMB"
+    allocation_basis = _normalize_allocation_basis(fee.get("allocation_basis") or approval_item.get("allocation_basis"))
     values = {
         "batch": batch_name,
         "version": version_name,
         "rule_code": "oa_logistics_freight",
         "expense_category": "国际物流费用",
-        "allocation_basis": "gross_weight",
-        "basis_field": "gross_weight",
+        "allocation_basis": allocation_basis,
+        "basis_field": allocation_basis,
         "currency": currency,
         "amount": amount,
         "priority_no": 20,
@@ -5730,6 +6147,75 @@ def pull_from_env() -> dict:
     return result
 
 
+def diagnose_business_entity_from_env() -> dict:
+    """只拉取钉钉审批详情并诊断业务主体字段，不写入数据库。"""
+
+    resolved_env_file = resolve_dingtalk_env_file(os.environ.get("DINGTALK_ENV_FILE"))
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    result = pull_logistics_approvals(
+        process_code=resolve_logistics_process_code(),
+        start=_clean(os.environ.get("DINGTALK_PULL_START")),
+        end=_clean(os.environ.get("DINGTALK_PULL_END")),
+        api_style=_clean(os.environ.get("DINGTALK_API_STYLE")) or "auto",
+        list_api=_clean(os.environ.get("DINGTALK_LIST_API")) or "auto",
+        page_size=int(os.environ.get("DINGTALK_PAGE_SIZE") or 20),
+        max_pages=int(os.environ.get("DINGTALK_MAX_PAGES") or 20),
+        chunk_days=int(os.environ.get("DINGTALK_CHUNK_DAYS") or 30),
+        limit=int(os.environ.get("DINGTALK_LIMIT") or 5) or 5,
+        include_raw=True,
+        include_all=True,
+        transport_modes=os.environ.get("DINGTALK_TRANSPORT_MODES") or os.environ.get("DINGTALK_TRANSPORT_MODE") or "ALL",
+    )
+    items = result.get("items") or []
+    diagnosed_items = []
+    for item in items[:10]:
+        subsidiary = extract_subsidiary_from_approval(item)
+        candidates = _collect_business_entity_debug_candidates(item)
+        diagnosed_items.append(
+            {
+                "source_instance_id": item.get("source_instance_id") or "",
+                "source_approval_no": item.get("source_approval_no") or "",
+                "approval_title": item.get("approval_title") or "",
+                "transport_mode": item.get("transport_mode") or "",
+                "subsidiary_code": subsidiary.get("subsidiary_code") or "",
+                "business_entity_name": subsidiary.get("business_entity_name") or "",
+                "business_entity_id": subsidiary.get("business_entity_id") or "",
+                "source_field": subsidiary.get("source_field") or "",
+                "business_entity_candidates": candidates,
+                "form_field_keys": sorted((item.get("form_fields") or {}).keys())[:80],
+                "raw_form_component_count": len(item.get("raw_form_components") or []),
+            }
+        )
+
+    first = next(
+        (item for item in diagnosed_items if item.get("subsidiary_code") or item.get("business_entity_candidates")),
+        diagnosed_items[0] if diagnosed_items else {},
+    )
+    return {
+        "ok": bool(result.get("ok")),
+        "env_file_loaded": bool(resolved_env_file),
+        "total_instance_count": result.get("total_instance_count", 0),
+        "detail_count": result.get("detail_count", 0),
+        "filtered_count": result.get("filtered_count", 0),
+        "diagnosed_count": len(diagnosed_items),
+        "diagnosed_items": diagnosed_items,
+        "first_item": {
+            "source_instance_id": first.get("source_instance_id") or "",
+            "source_approval_no": first.get("source_approval_no") or "",
+            "approval_title": first.get("approval_title") or "",
+            "transport_mode": first.get("transport_mode") or "",
+            "subsidiary_code": first.get("subsidiary_code") or "",
+            "business_entity_name": first.get("business_entity_name") or "",
+            "business_entity_id": first.get("business_entity_id") or "",
+            "source_field": first.get("source_field") or "",
+            "form_field_keys": first.get("form_field_keys") or [],
+            "business_entity_candidates": first.get("business_entity_candidates") or [],
+            "raw_form_component_count": first.get("raw_form_component_count") or 0,
+        },
+    }
+
+
 def pull_purchase_expenses_from_env() -> dict:
     """从环境变量拉采购支出 OA 预览，不写数据库，适合 bench execute 调试。"""
 
@@ -5827,7 +6313,11 @@ def pull_latest_logistics_approvals_to_erp(
     chunk_days: int | None = None,
     access_token: str = "",
 ) -> dict:
-    """手动拉取指定时间范围内的国际物流 OA，并保存/更新为成本批次。"""
+    """手动拉取指定时间范围内的国际物流 OA，并保存/更新为成本批次。
+
+    该入口给前端“钉钉拉取”使用；不清空历史批次，不删除已有明细。
+    新审批单会创建批次，已有审批单只补追溯、附件、采购字段和明确费用规则。
+    """
 
     resolved_env_file = resolve_dingtalk_env_file(env_file)
     env_file_loaded = False

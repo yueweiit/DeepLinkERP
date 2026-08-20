@@ -48,3 +48,21 @@ AUDIT_ACTION_TYPES = (
     "UPLOAD_ATTACHMENT",
     "WRITEBACK",
 )
+
+USAGE_ACTION_TYPES = (
+    "PAGE_VIEW",
+    "BATCH_VIEW",
+    "DINGTALK_PULL",
+    "EXCEL_IMPORT",
+    "FILE_PARSE",
+    "RECALCULATE",
+    "CONFIRM_RESULT",
+    "PREVIEW_ERP",
+    "PUSH_ERP",
+    "EXPORT",
+    "DATA_CHECK",
+    "ATTACHMENT_VIEW",
+    "OTHER",
+)
+
+USAGE_STATUSES = ("Success", "Failed")

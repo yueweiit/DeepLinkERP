@@ -1,16 +1,315 @@
 """
 中文用途：应用安装初始化文件。
 
-当前只放一个最小 after_install 钩子占位，
-后续可在这里补：
+这里放安装/迁移后的轻量初始化：
 1. 初始化系统配置
 2. 初始化默认分摊规则
 3. 初始化状态字典
+4. 初始化 ERP 桌面入口
 """
 
 from __future__ import annotations
+
+import json
+
+
+WORKSPACE_LABEL = "海外成本核算"
+WORKSPACE_TITLE = "海外成本核算"
+WORKSPACE_HEADING = "海外采购综合成本核算"
+WORKBENCH_PAGE = "overseas-cost-workbench"
+ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
+HOME_WORKSPACE_LABEL = "Home"
+HOME_SHORTCUT_LABEL = "海外成本核算"
+HOME_SHORTCUT_ID = "overseas-cost-home-shortcut"
+WORKSPACE_NAME_CANDIDATES = (
+    "海外成本核算",
+    "海外采购综合成本核算",
+)
 
 
 def after_install() -> None:
     """中文用途：Frappe 安装 app 后的初始化入口。"""
 
+    ensure_workspace()
+
+
+def after_migrate() -> None:
+    """中文用途：Frappe migrate 后确保桌面入口存在。"""
+
+    ensure_workspace()
+
+
+def ensure_workspace() -> dict:
+    """创建/更新 ERP 首页的海外成本入口。
+
+    目标是在 Desk 首页应用卡片中展示“海外成本核算”，位置尽量跟随
+    Deeplinkerp Settings 后面。点击卡片后进入工作区，再进入综合成本工作台。
+    """
+
+    try:
+        import frappe
+    except Exception:
+        return {"ok": False, "message": "当前未连接 Frappe。"}
+
+    settings_result = _ensure_erp_settings_defaults(frappe)
+
+    if not frappe.db.exists("DocType", "Workspace"):
+        return {"ok": False, "message": "当前站点没有 Workspace DocType。"}
+
+    workspace_name = None
+    for candidate in WORKSPACE_NAME_CANDIDATES:
+        workspace_name = (
+            frappe.db.exists("Workspace", candidate)
+            or frappe.db.exists("Workspace", {"label": candidate})
+            or frappe.db.exists("Workspace", {"title": candidate})
+        )
+        if workspace_name:
+            break
+    if workspace_name:
+        doc = frappe.get_doc("Workspace", workspace_name)
+        created = False
+    else:
+        doc = frappe.get_doc({"doctype": "Workspace"})
+        created = True
+
+    _set_if_field(doc, "label", WORKSPACE_LABEL)
+    _set_if_field(doc, "title", WORKSPACE_TITLE)
+    _set_if_field(doc, "module", "Overseas Costing")
+    _set_if_field(doc, "public", 1)
+    _set_if_field(doc, "is_hidden", 0)
+    _set_if_field(doc, "icon", "calculator")
+    _set_if_field(doc, "indicator_color", "blue")
+    _set_if_field(doc, "sequence_id", _resolve_workspace_sequence(frappe))
+
+    _set_workspace_content(doc)
+    if created:
+        doc.insert(ignore_permissions=True)
+    else:
+        doc.save(ignore_permissions=True)
+    home_shortcut_result = _ensure_home_shortcut(frappe)
+    frappe.db.commit()
+    return {
+        "ok": True,
+        "created": created,
+        "workspace": doc.name,
+        "erp_settings": settings_result,
+        "home_shortcut": home_shortcut_result,
+        "message": "海外成本核算入口已更新。",
+    }
+
+
+def _ensure_erp_settings_defaults(frappe) -> dict:
+    if not frappe.db.exists("DocType", ERP_SETTINGS_DOCTYPE):
+        return {"ok": False, "message": "ERP 对接设置 DocType 尚未安装。"}
+
+    try:
+        settings = frappe.get_single(ERP_SETTINGS_DOCTYPE)
+    except Exception as exc:
+        return {"ok": False, "message": f"ERP 对接设置读取失败：{exc}"}
+
+    changed = False
+    defaults = {
+        "enabled": 1,
+        "base_url": "https://deeplinkerp.com/api/resource",
+        "authorization": "token a3ec2b540c6e915:b849581652d0f79",
+        "http_method": "POST",
+        "timeout": 20,
+        "payload_field": "payload_json",
+    }
+    for fieldname, value in defaults.items():
+        if _has_field(settings, fieldname) and not getattr(settings, fieldname, None):
+            setattr(settings, fieldname, value)
+            changed = True
+
+    if changed:
+        settings.save(ignore_permissions=True)
+    return {"ok": True, "changed": changed}
+
+
+def _set_workspace_content(doc) -> None:
+    content = [
+        {
+            "id": "overseas-cost-heading",
+            "type": "header",
+            "data": {"text": WORKSPACE_HEADING, "col": 12},
+        },
+        {
+            "id": "overseas-cost-workbench-card",
+            "type": "shortcut",
+            "data": {
+                "shortcut_name": "综合成本工作台",
+                "col": 3,
+            },
+        },
+        {
+            "id": "overseas-cost-erp-settings-card",
+            "type": "shortcut",
+            "data": {
+                "shortcut_name": "ERP 对接设置",
+                "col": 3,
+            },
+        },
+    ]
+    _set_if_field(doc, "content", json.dumps(content, ensure_ascii=False))
+    _set_child_table(
+        doc,
+        "shortcuts",
+        [
+            {
+                "type": "Page",
+                "label": "综合成本工作台",
+                "link_to": WORKBENCH_PAGE,
+                "color": "Blue",
+            },
+            {
+                "type": "DocType",
+                "label": "ERP 对接设置",
+                "link_to": ERP_SETTINGS_DOCTYPE,
+                "color": "Green",
+            }
+        ],
+    )
+    for fieldname in ("links", "charts", "number_cards", "quick_lists", "custom_blocks", "roles"):
+        _set_child_table(doc, fieldname, [])
+
+
+def _resolve_workspace_sequence(frappe) -> float:
+    for label in ("Deeplinkerp Settings", "DeeplinkERP Settings", "Deeplinkerp设置"):
+        try:
+            sequence = frappe.db.get_value("Workspace", {"label": label}, "sequence_id")
+        except Exception:
+            sequence = None
+        if sequence not in (None, ""):
+            try:
+                return float(sequence) + 0.1
+            except (TypeError, ValueError):
+                return 14.1
+    return 14.1
+
+
+def _ensure_home_shortcut(frappe) -> dict:
+    """在 /app 首页追加海外成本核算快捷入口，不覆盖 Home 原有布局。"""
+
+    home_name = (
+        frappe.db.exists("Workspace", HOME_WORKSPACE_LABEL)
+        or frappe.db.exists("Workspace", {"label": HOME_WORKSPACE_LABEL})
+        or frappe.db.exists("Workspace", {"title": HOME_WORKSPACE_LABEL})
+    )
+    if not home_name:
+        return {"ok": False, "message": "未找到 Home 工作区。"}
+
+    home = frappe.get_doc("Workspace", home_name)
+    content = _load_workspace_content(getattr(home, "content", None))
+    if content is None:
+        return {"ok": False, "message": "Home 工作区 content 不是可解析的 JSON，已跳过。"}
+
+    changed = _upsert_home_shortcut_content(content)
+    if _upsert_home_shortcut_row(home):
+        changed = True
+
+    if changed:
+        _set_if_field(home, "content", json.dumps(content, ensure_ascii=False))
+        home.save(ignore_permissions=True)
+    return {"ok": True, "changed": changed, "workspace": home.name}
+
+
+def _load_workspace_content(raw_content) -> list[dict] | None:
+    if isinstance(raw_content, list):
+        return raw_content
+    if not raw_content:
+        return []
+    try:
+        content = json.loads(raw_content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(content, list):
+        return None
+    return content
+
+
+def _upsert_home_shortcut_content(content: list[dict]) -> bool:
+    shortcut_block = {
+        "id": HOME_SHORTCUT_ID,
+        "type": "shortcut",
+        "data": {
+            "shortcut_name": HOME_SHORTCUT_LABEL,
+            "col": 3,
+        },
+    }
+
+    for block in content:
+        data = block.get("data") if isinstance(block, dict) else None
+        if block.get("id") == HOME_SHORTCUT_ID or (
+            block.get("type") == "shortcut"
+            and isinstance(data, dict)
+            and data.get("shortcut_name") == HOME_SHORTCUT_LABEL
+        ):
+            if block != shortcut_block:
+                block.clear()
+                block.update(shortcut_block)
+                return True
+            return False
+
+    insert_at = None
+    for index, block in enumerate(content):
+        data = block.get("data") if isinstance(block, dict) else None
+        shortcut_name = data.get("shortcut_name") if isinstance(data, dict) else None
+        if shortcut_name in ("Deeplinkerp Settings", "DeeplinkERP Settings", "Deeplinkerp设置"):
+            insert_at = index + 1
+            break
+
+    if insert_at is None:
+        content.append(shortcut_block)
+    else:
+        content.insert(insert_at, shortcut_block)
+    return True
+
+
+def _upsert_home_shortcut_row(home) -> bool:
+    row_data = {
+        "type": "Page",
+        "label": HOME_SHORTCUT_LABEL,
+        "link_to": WORKBENCH_PAGE,
+        "color": "Blue",
+    }
+
+    if not _has_field(home, "shortcuts"):
+        return False
+
+    for row in home.get("shortcuts") or []:
+        if getattr(row, "label", None) == HOME_SHORTCUT_LABEL:
+            changed = False
+            for fieldname, value in row_data.items():
+                if getattr(row, fieldname, None) != value:
+                    setattr(row, fieldname, value)
+                    changed = True
+            return changed
+
+    home.append("shortcuts", row_data)
+    return True
+
+
+def _set_if_field(doc, fieldname: str, value) -> None:
+    if _has_field(doc, fieldname):
+        setattr(doc, fieldname, value)
+
+
+def _set_child_table(doc, fieldname: str, rows: list[dict]) -> None:
+    if not _has_field(doc, fieldname):
+        return
+    try:
+        doc.set(fieldname, [])
+        for row in rows:
+            doc.append(fieldname, row)
+    except Exception:
+        setattr(doc, fieldname, rows)
+
+
+def _has_field(doc, fieldname: str) -> bool:
+    meta = getattr(doc, "meta", None)
+    if not meta:
+        return True
+    try:
+        return bool(meta.has_field(fieldname))
+    except Exception:
+        return True

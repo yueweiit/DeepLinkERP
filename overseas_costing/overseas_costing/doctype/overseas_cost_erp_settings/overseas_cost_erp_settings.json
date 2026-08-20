@@ -1,0 +1,101 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost ERP Settings",
+  "module": "Overseas Costing",
+  "issingle": 1,
+  "track_changes": 1,
+  "field_order": [
+    "enabled",
+    "connection_section",
+    "base_url",
+    "authorization",
+    "target_doctype",
+    "http_method",
+    "timeout",
+    "payload_field",
+    "advanced_section",
+    "field_map_json",
+    "remark"
+  ],
+  "fields": [
+    {
+      "fieldname": "enabled",
+      "fieldtype": "Check",
+      "label": "启用 ERP 推送",
+      "default": "1"
+    },
+    {
+      "fieldname": "connection_section",
+      "fieldtype": "Section Break",
+      "label": "连接配置"
+    },
+    {
+      "fieldname": "base_url",
+      "fieldtype": "Data",
+      "label": "接口地址",
+      "description": "例如：https://deeplinkerp.com/api/resource"
+    },
+    {
+      "fieldname": "authorization",
+      "fieldtype": "Password",
+      "label": "鉴权 Token",
+      "description": "例如：token api_key:api_secret"
+    },
+    {
+      "fieldname": "target_doctype",
+      "fieldtype": "Data",
+      "label": "目标 DocType",
+      "description": "例如：Item、Purchase Order，或 DeepLinkERP 提供的自定义单据"
+    },
+    {
+      "fieldname": "http_method",
+      "fieldtype": "Select",
+      "label": "请求方式",
+      "options": "POST\nPUT\nPATCH",
+      "default": "POST"
+    },
+    {
+      "fieldname": "timeout",
+      "fieldtype": "Int",
+      "label": "超时时间（秒）",
+      "default": "20"
+    },
+    {
+      "fieldname": "payload_field",
+      "fieldtype": "Data",
+      "label": "完整报文字段名",
+      "default": "payload_json",
+      "description": "未配置字段映射时，完整 JSON 报文会写入这个字段"
+    },
+    {
+      "fieldname": "advanced_section",
+      "fieldtype": "Section Break",
+      "label": "高级映射"
+    },
+    {
+      "fieldname": "field_map_json",
+      "fieldtype": "Code",
+      "label": "字段映射 JSON",
+      "options": "JSON",
+      "description": "可选。格式：{\"erp_field\": \"local.payload.path\"}"
+    },
+    {
+      "fieldname": "remark",
+      "fieldtype": "Small Text",
+      "label": "备注"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    }
+  ]
+}

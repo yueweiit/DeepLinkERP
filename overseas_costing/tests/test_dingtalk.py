@@ -15,6 +15,7 @@ from overseas_costing.utils.dingtalk import (
 from overseas_costing.scripts.import_oa_logistics import (
     DEFAULT_LOGISTICS_PROCESS_CODE,
     _merge_oa_extra_json,
+    _normalize_allocation_basis,
     _recalculate_after_purchase_sync,
     _sync_oa_form_attachments,
     _sync_oa_logistics_allocation_rule,
@@ -30,6 +31,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     extract_oa_goods_rows,
     extract_form_fields,
     extract_linked_purchase_approvals,
+    extract_subsidiary_from_approval,
     extract_purchase_expense_rows,
     get_access_token,
     get_process_attachment_download_url,
@@ -37,6 +39,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     is_hidden_approval_status,
     is_sea_approval,
     load_env_file,
+    pull_latest_logistics_approvals_to_erp,
     refresh_missing_oa_finished_times,
     refresh_oa_logistics_detail,
     resolve_logistics_process_code,
@@ -74,6 +77,13 @@ def test_build_dingtalk_order_payload_prefers_desktop_protocol() -> None:
     assert payload["desktop_url"].startswith("dingtalk://")
     assert payload["open_url"] == payload["desktop_url"]
     assert payload["can_open"] is True
+
+
+def test_normalize_allocation_basis_accepts_business_words() -> None:
+    assert _normalize_allocation_basis("按计费重") == "chargeable_weight"
+    assert _normalize_allocation_basis("体积分摊") == "volume"
+    assert _normalize_allocation_basis("货值比例") == "goods_value"
+    assert _normalize_allocation_basis("") == "gross_weight"
 
 
 def test_build_dingtalk_order_payload_fallback_to_official_url() -> None:
@@ -833,7 +843,97 @@ def test_extract_form_attachments_ignores_comment_attachments() -> None:
     assert "评论里的凭证.pdf" not in [row["file_name"] for row in attachments]
     assert summary["oa_form_attachment_count"] == 2
     assert values["source_attachment_count"] == 2
+    assert values["subsidiary_code"] == "YW MOLDES MX模具"
     assert extra["oa_form_attachments"][0]["file_id"] == "FILE-001"
+    assert extra["subsidiary"]["subsidiary_code"] == "YW MOLDES MX模具"
+
+
+def test_extract_subsidiary_from_approval_uses_business_entity_name() -> None:
+    subsidiary = extract_subsidiary_from_approval(
+        {
+            "form_fields": {
+                "业务主体Entidad comercial": {
+                    "deptName": "YW MOLDES MX模具",
+                    "itemId": "1089528309",
+                    "name": "YW MOLDES MX模具",
+                }
+            }
+        }
+    )
+
+    assert subsidiary == {
+        "subsidiary_code": "YW MOLDES MX模具",
+        "business_entity_name": "YW MOLDES MX模具",
+        "business_entity_id": "1089528309",
+        "source_field": "业务主体Entidad comercial",
+        "source": "dingtalk_form_business_entity",
+    }
+
+
+def test_extract_subsidiary_from_empresas_prefers_display_value() -> None:
+    instance = {
+        "formComponentValues": [
+            {
+                "componentType": "DepartmentField",
+                "name": "业务主体Empresas",
+                "value": "1089528309",
+                "extValue": json.dumps(
+                    {"deptName": "YW MOLDES MX MOLDE", "itemId": "1089528309"},
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+    }
+
+    fields = extract_form_fields(instance)
+    subsidiary = extract_subsidiary_from_approval({"form_fields": fields})
+
+    assert subsidiary["subsidiary_code"] == "YW MOLDES MX MOLDE"
+    assert subsidiary["business_entity_id"] == "1089528309"
+    assert subsidiary["source_field"] == "业务主体Empresas"
+
+
+def test_extract_subsidiary_from_empresas_plain_text_value() -> None:
+    fields = extract_form_fields(
+        {
+            "formComponentValues": [
+                {
+                    "componentType": "TextField",
+                    "name": "业务主体Empresas",
+                    "value": "YW MOLDES/UV",
+                }
+            ]
+        }
+    )
+
+    subsidiary = extract_subsidiary_from_approval({"form_fields": fields})
+
+    assert subsidiary["subsidiary_code"] == "YW MOLDES/UV"
+    assert subsidiary["business_entity_name"] == "YW MOLDES/UV"
+    assert subsidiary["source_field"] == "业务主体Empresas"
+
+
+def test_extract_subsidiary_falls_back_to_raw_form_components() -> None:
+    subsidiary = extract_subsidiary_from_approval(
+        {
+            "form_fields": {},
+            "raw_form_components": [
+                {
+                    "componentType": "DepartmentField",
+                    "name": "业务主体Empresas",
+                    "value": "1089528309",
+                    "extValue": json.dumps(
+                        {"deptName": "YW MOLDES MX", "itemId": "1089528309"},
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+        }
+    )
+
+    assert subsidiary["subsidiary_code"] == "YW MOLDES MX"
+    assert subsidiary["business_entity_id"] == "1089528309"
+    assert subsidiary["source_field"] == "业务主体Empresas"
 
 
 def test_extract_purchase_expense_rows_keeps_first_non_empty_currency() -> None:
@@ -1654,6 +1754,7 @@ def test_sync_linked_purchase_fields_applies_existing_import_service(monkeypatch
         }
 
     monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(import_service, "preview_linked_purchase_expense_oa", lambda **_kwargs: {"ok": True, "mapped_preview_items": []})
     monkeypatch.setattr(import_service, "apply_linked_purchase_expense_fillable_fields", fake_apply_linked_purchase_expense_fillable_fields)
 
     result = _sync_linked_purchase_fields(
@@ -1673,6 +1774,154 @@ def test_sync_linked_purchase_fields_applies_existing_import_service(monkeypatch
     assert calls[0]["batch_name"] == "BATCH-001"
     assert calls[0]["version_name"] == "VER-001"
     assert "202604300000000596348" in calls[0]["linked_purchase_json"]
+
+
+def test_sync_linked_purchase_fields_rebuilds_items_from_purchase_expense_rows(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    inserted_items = []
+    deleted_filters = []
+    batch_updates = []
+    inserted_audits = []
+
+    class FakeMeta:
+        @staticmethod
+        def has_field(_fieldname):
+            return True
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = dict(payload)
+            self.name = f"DOC-{len(inserted_items) + len(inserted_audits) + 1}"
+
+        def insert(self, **_kwargs):
+            if self.payload.get("doctype") == "Overseas Cost Item":
+                self.name = f"ITEM-{len(inserted_items) + 1}"
+                self.payload["name"] = self.name
+                inserted_items.append(self.payload)
+            else:
+                inserted_audits.append(self.payload)
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def delete(doctype, filters):
+            deleted_filters.append((doctype, filters))
+
+        @staticmethod
+        def set_value(doctype, name, values, **_kwargs):
+            batch_updates.append((doctype, name, values))
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Item":
+                return [
+                    {"name": "OLD-1", "manual_override_flag": 0, "source_type": "OA_LOGISTICS"},
+                    {"name": "OLD-2", "manual_override_flag": 0, "source_type": "OA_LOGISTICS"},
+                ]
+            return []
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+        @staticmethod
+        def get_meta(_doctype):
+            return FakeMeta()
+
+    def fake_preview_linked_purchase_expense_oa(**_kwargs):
+        return {
+            "ok": True,
+            "mapped_preview_items": [
+                {
+                    "material_code": "MBA101291",
+                    "product_name": "壳甲TPU模具",
+                    "spec_model": "HR Redmi A7 4G",
+                    "quantity": 1,
+                    "unit": "套",
+                    "unit_price": 7250,
+                    "goods_value": 7250,
+                    "purchase_currency": "RMB",
+                    "source_approval_no": "PUR-001",
+                    "source_instance_id": "PROC-PUR-001",
+                },
+                {
+                    "material_code": "MBA201291",
+                    "product_name": "壳甲PC模具",
+                    "spec_model": "HR Redmi A7 4G",
+                    "quantity": 1,
+                    "unit": "套",
+                    "unit_price": 7250,
+                    "goods_value": 7250,
+                    "purchase_currency": "RMB",
+                    "source_approval_no": "PUR-001",
+                    "source_instance_id": "PROC-PUR-001",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "preview_linked_purchase_expense_oa", fake_preview_linked_purchase_expense_oa)
+
+    result = _sync_linked_purchase_fields(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={
+            "source_approval_no": "LOG-001",
+            "source_instance_id": "PROC-LOG-001",
+            "linked_purchase_approvals": [{"approval_no": "PUR-001", "source_instance_id": "PROC-PUR-001"}],
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["sync_strategy"] == "purchase_expense_items"
+    assert result["created_count"] == 2
+    assert deleted_filters == [("Overseas Cost Item", {"batch": "BATCH-001", "version": "VER-001"})]
+    assert [item["material_code"] for item in inserted_items] == ["MBA101291", "MBA201291"]
+    assert inserted_items[0]["actual_shipped_qty"] == 1
+    assert inserted_items[0]["source_type"] == "PURCHASE_EXPENSE_OA"
+    assert batch_updates[0][2]["item_count"] == 2
+
+
+def test_sync_linked_purchase_fields_does_not_rebuild_manual_items(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    class FakeDB:
+        @staticmethod
+        def delete(*_args, **_kwargs):
+            raise AssertionError("manual items must not be deleted")
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Item":
+                return [{"name": "MANUAL-1", "manual_override_flag": 1, "source_type": "manual"}]
+            return []
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        import_service,
+        "preview_linked_purchase_expense_oa",
+        lambda **_kwargs: {"ok": True, "mapped_preview_items": [{"material_code": "MBA101291", "quantity": 1}]},
+    )
+
+    result = _sync_linked_purchase_fields(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={"linked_purchase_approvals": [{"approval_no": "PUR-001", "source_instance_id": "PROC-PUR-001"}]},
+    )
+
+    assert result["ok"] is True
+    assert result["sync_strategy"] == "purchase_expense_items"
+    assert result["rebuild_result"]["action"] == "skipped"
+    assert result["rebuild_result"]["manual_count"] == 1
 
 
 def test_sync_oa_logistics_allocation_rule_creates_rule_and_recalculates(monkeypatch) -> None:
@@ -2276,3 +2525,56 @@ def test_revoked_approval_is_skipped_when_saving_oa_trace() -> None:
     assert result["valid_count"] == 0
     assert result["skipped_count"] == 1
     assert result["skipped_items"][0]["reason"] == "审批单已撤销或终止，不进入成本表格"
+
+
+def test_pull_latest_logistics_approvals_to_erp_reuses_pull_and_save(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = {}
+
+    def fake_pull_logistics_approvals(**kwargs):
+        calls["pull"] = kwargs
+        return {
+            "ok": True,
+            "transport_modes": ["SEA", "AIR"],
+            "total_instance_count": 3,
+            "detail_count": 3,
+            "filtered_count": 2,
+            "transport_counts": {"SEA": 1, "AIR": 1, "EXPRESS": 0},
+            "items": [{"source_approval_no": "OA-1"}, {"source_approval_no": "OA-2"}],
+        }
+
+    def fake_save_sea_approvals_to_erp(result):
+        calls["save"] = result
+        return {
+            "ok": True,
+            "created_count": 1,
+            "updated_count": 1,
+            "unchanged_count": 0,
+            "skipped_count": 0,
+            "items": [{"batch_no": "NEW-SEA"}, {"batch_no": "NEW-AIR"}],
+            "skipped_items": [],
+            "message": "saved",
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "_has_dingtalk_pull_credentials", lambda: True)
+    monkeypatch.setattr(import_oa_logistics, "pull_logistics_approvals", fake_pull_logistics_approvals)
+    monkeypatch.setattr(import_oa_logistics, "save_sea_approvals_to_erp", fake_save_sea_approvals_to_erp)
+
+    result = pull_latest_logistics_approvals_to_erp(
+        start="2026-08-01",
+        end="2026-08-17",
+        transport_modes="SEA,AIR",
+        limit=50,
+    )
+
+    assert result["ok"] is True
+    assert result["start"] == "2026-08-01"
+    assert result["end"] == "2026-08-17"
+    assert result["pull"]["filtered_count"] == 2
+    assert result["save"]["created_count"] == 1
+    assert result["save"]["updated_count"] == 1
+    assert calls["pull"]["transport_modes"] == "SEA,AIR"
+    assert calls["pull"]["limit"] == 50
+    assert calls["save"]["items"][0]["source_approval_no"] == "OA-1"
