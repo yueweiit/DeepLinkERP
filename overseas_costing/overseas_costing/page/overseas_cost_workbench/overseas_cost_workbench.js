@@ -4,6 +4,7 @@ frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
   const workbench = new OverseasCostWorkbench(wrapper);
   frappe.pages["overseas-cost-workbench"].workbench = workbench;
   workbench.init();
+  requestAnimationFrame(() => workbench.hideDeskChrome());
   // 离开工作台时恢复桌面外壳（侧栏 / 顶部标签栏 / 右侧栏），避免影响其它页面。
   $(wrapper).on("hide", function () {
     workbench.restoreDeskChrome();
@@ -93,9 +94,14 @@ class OverseasCostWorkbench {
       $("#custom-filters-desk-tabs-bar"),
       $(".custom-filters-right-sidebar-container"),
     ];
-    this._hiddenChrome = targets
-      .filter(($el) => $el.length && $el.is(":visible"))
-      .map(($el) => ({ el: $el, display: $el[0].style.display }));
+    this._hiddenChrome = this._hiddenChrome || [];
+    const trackedElements = this._hiddenChrome.map((item) => item.el[0]);
+    const newlyVisibleTargets = targets
+      .filter(($el) => $el.length && $el.is(":visible") && !trackedElements.includes($el[0]));
+    this._hiddenChrome.push(
+      ...newlyVisibleTargets
+        .map(($el) => ({ el: $el, display: $el[0].style.display }))
+    );
     this._hiddenChrome.forEach((item) => {
       item.el[0].style.display = "none";
     });
