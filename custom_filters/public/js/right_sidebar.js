@@ -405,9 +405,8 @@
 			});
 
 			const candidates = new Set();
-			const route_key = normalize_path(
-				(frappe.get_route ? frappe.get_route() : []).join("/")
-			);
+		const current_route = frappe.get_route ? frappe.get_route() : [];
+		const route_key = normalize_path((current_route || []).join("/"));
 			const path_key = normalize_path(window.location.pathname);
 			if (route_key) candidates.add(route_key);
 			if (path_key) candidates.add(path_key);
