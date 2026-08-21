@@ -30,7 +30,7 @@ app_include_css = [
 	"/assets/custom_filters/css/right_sidebar.css",
 ]
 app_include_js = [
-	"custom_filters/public/js/naming_series_i18n.js",
+	"/assets/custom_filters/js/naming_series_i18n.js",
 	"/assets/custom_filters/js/desk_tabs.js",
 	"/assets/custom_filters/js/desktop_user_menu.js",
 	"/assets/custom_filters/js/right_sidebar.js",
