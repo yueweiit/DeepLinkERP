@@ -468,6 +468,35 @@ def _load_json(text: str | None) -> dict:
         return {}
 
 
+def _resolve_batch_subsidiary_code(batch: dict) -> str:
+    direct_value = batch.get("subsidiary_code")
+    if direct_value is not None and str(direct_value).strip():
+        return str(direct_value).strip()
+
+    source_data = _load_json(batch.get("extra_json"))
+    subsidiary = source_data.get("subsidiary")
+    candidates = [
+        source_data.get("subsidiary_code"),
+        source_data.get("business_entity_name"),
+    ]
+    if isinstance(subsidiary, dict):
+        candidates.extend(
+            [
+                subsidiary.get("subsidiary_code"),
+                subsidiary.get("business_entity_name"),
+                subsidiary.get("name"),
+                subsidiary.get("deptName"),
+            ]
+        )
+    elif subsidiary is not None:
+        candidates.append(subsidiary)
+
+    for candidate in candidates:
+        if candidate is not None and str(candidate).strip():
+            return str(candidate).strip()
+    return ""
+
+
 def _clean_query_value(value) -> str:
     if value in (None, ""):
         return ""
@@ -988,6 +1017,7 @@ def get_batch_list(filters: dict) -> dict:
 
     classic_keys = set(CLASSIC_HISTORY_BATCH_KEYS)
     for item in items:
+        item["subsidiary_code"] = _resolve_batch_subsidiary_code(item)
         if item.get("batch_no") in classic_keys or item.get("source_approval_no") in classic_keys or item.get("name") in classic_keys:
             item["is_classic_sample"] = 1
             item["sample_note"] = "历史样本"
@@ -1880,7 +1910,7 @@ def _build_writeback_field_gaps(batch: dict, items: list[dict], rules: list[dict
     total_cost = actual_total_cost or estimated_total_cost
 
     batch_gaps = []
-    if _is_blank(batch.get("subsidiary_code")):
+    if not _resolve_batch_subsidiary_code(batch):
         batch_gaps.append(
             {
                 "scope": "batch",
@@ -2009,7 +2039,7 @@ def _build_calculation_confirmation_readiness(
     checks = {
         "batch_exists": True,
         "has_current_version": bool(resolved_version_name or batch.get("current_version")),
-        "has_subsidiary_code": not _is_blank(batch.get("subsidiary_code")),
+        "has_subsidiary_code": bool(_resolve_batch_subsidiary_code(batch)),
         "has_dirty_data": batch.get("status") == "Dirty",
         "has_items": actual_item_count > 0,
         "has_total_cost": total_cost > 0,
@@ -2077,7 +2107,7 @@ def _build_writeback_readiness(
     checks = {
         "batch_exists": True,
         "has_current_version": bool(resolved_version_name or batch.get("current_version")),
-        "has_subsidiary_code": not _is_blank(batch.get("subsidiary_code")),
+        "has_subsidiary_code": bool(_resolve_batch_subsidiary_code(batch)),
         "is_confirmed": batch.get("confirm_status") == "Confirmed",
         "has_dirty_data": batch.get("status") == "Dirty",
         "has_items": actual_item_count > 0,
@@ -2128,7 +2158,7 @@ def _build_erp_push_payload(
     rules: list[dict],
     readiness: dict,
 ) -> dict:
-    subsidiary_code = batch.get("subsidiary_code") or ""
+    subsidiary_code = _resolve_batch_subsidiary_code(batch)
     payload_items = []
     for item in items:
         formula = _build_cost_formula(item)
@@ -2225,7 +2255,7 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
         batch_fields,
         as_dict=True,
     ) or {"name": batch_doc_name}
-    batch.setdefault("subsidiary_code", "")
+    batch["subsidiary_code"] = _resolve_batch_subsidiary_code(batch)
     version = {}
     rules = []
     if resolved_version_name:

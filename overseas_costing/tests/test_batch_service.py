@@ -19,6 +19,7 @@ from overseas_costing.services.batch_service import (
     _load_erp_push_context,
     _normalize_item_query_filters,
     _normalize_limit,
+    _resolve_batch_subsidiary_code,
     check_writeback_ready,
     create_batch,
     get_audit_logs,
@@ -27,6 +28,32 @@ from overseas_costing.services.batch_service import (
     is_hidden_approval_status,
     writeback_to_erp,
 )
+
+
+def test_resolve_batch_subsidiary_code_falls_back_to_saved_dingtalk_entity() -> None:
+    batch = {
+        "subsidiary_code": "",
+        "extra_json": json.dumps(
+            {
+                "subsidiary": {
+                    "subsidiary_code": "YW MOLDES MX模具",
+                    "business_entity_name": "YW MOLDES MX模具",
+                }
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+    assert _resolve_batch_subsidiary_code(batch) == "YW MOLDES MX模具"
+
+
+def test_resolve_batch_subsidiary_code_keeps_batch_field_first() -> None:
+    batch = {
+        "subsidiary_code": "Empresas Mexico",
+        "extra_json": json.dumps({"subsidiary": {"subsidiary_code": "旧主体"}}, ensure_ascii=False),
+    }
+
+    assert _resolve_batch_subsidiary_code(batch) == "Empresas Mexico"
 
 
 def test_normalize_item_query_filters_strips_empty_values() -> None:
@@ -513,6 +540,38 @@ def test_build_calculation_confirmation_readiness_requires_subsidiary_and_fee_po
     assert "当前批次缺少国际运费费用池或分摊结果。" in result["blocking_reasons"]
     assert any(gap["fieldname"] == "subsidiary_code" for gap in result["field_gaps"]["batch"])
     assert any(gap["fieldname"] == "国际运费" for gap in result["field_gaps"]["rules"])
+
+
+def test_build_calculation_confirmation_readiness_uses_saved_entity_fallback() -> None:
+    result = _build_calculation_confirmation_readiness(
+        batch={
+            "subsidiary_code": "",
+            "extra_json": json.dumps({"subsidiary": {"name": "Empresas Mexico"}}, ensure_ascii=False),
+            "status": "Calculated",
+            "current_version": "VERSION-001",
+            "item_count": 1,
+            "estimated_total_cost_rmb": 20,
+        },
+        items=[
+            {
+                "material_code": "ITEM-001",
+                "product_name": "物料",
+                "quantity": 2,
+                "actual_shipped_qty": 2,
+                "unit_price": 8,
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "freight_alloc_rmb": 4,
+                "mexico_customs_mxn": 1,
+                "import_tax_total": 1,
+                "total_unit_rmb": 10,
+            }
+        ],
+        rules=[],
+        resolved_version_name="VERSION-001",
+    )
+
+    assert result["checks"]["has_subsidiary_code"] is True
 
 
 def test_build_calculation_confirmation_readiness_allows_complete_calculation() -> None:

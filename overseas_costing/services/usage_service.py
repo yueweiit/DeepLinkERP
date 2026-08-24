@@ -195,8 +195,8 @@ def get_usage_summary(*, days: int | str | None = 30, limit: int | str | None = 
         fields=[
             "operator_name",
             "operator_full_name",
-            {"COUNT": "name", "as": "action_count"},
-            {"MAX": "creation", "as": "last_seen"},
+            "count(name) as action_count",
+            "max(creation) as last_seen",
         ],
         group_by="operator_name, operator_full_name",
         order_by="action_count desc",
@@ -205,7 +205,7 @@ def get_usage_summary(*, days: int | str | None = 30, limit: int | str | None = 
     actions = frappe.get_all(
         "Overseas Cost Usage Log",
         filters=filters,
-        fields=["action_type", {"COUNT": "name", "as": "action_count"}],
+        fields=["action_type", "count(name) as action_count"],
         group_by="action_type",
         order_by="action_count desc",
         limit_page_length=normalized_limit,

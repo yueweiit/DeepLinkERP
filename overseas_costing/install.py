@@ -17,6 +17,7 @@ WORKSPACE_LABEL = "海外成本核算"
 WORKSPACE_TITLE = "海外成本核算"
 WORKSPACE_HEADING = "海外采购综合成本核算"
 WORKBENCH_PAGE = "overseas-cost-workbench"
+ACCESS_ROLE = "海外成本核算用户"
 ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 HOME_WORKSPACE_LABEL = "Home"
 HOME_SHORTCUT_LABEL = "海外成本核算"
@@ -30,6 +31,7 @@ WORKSPACE_NAME_CANDIDATES = (
 def after_install() -> None:
     """中文用途：Frappe 安装 app 后的初始化入口。"""
 
+    ensure_access_role()
     ensure_erpnext_standard_fields()
     ensure_workspace()
 
@@ -37,8 +39,41 @@ def after_install() -> None:
 def after_migrate() -> None:
     """中文用途：Frappe migrate 后确保桌面入口存在。"""
 
+    ensure_access_role()
     ensure_erpnext_standard_fields()
     ensure_workspace()
+
+
+def ensure_access_role() -> dict:
+    """创建工作台专用角色，避免业务人员必须使用 System Manager。"""
+
+    try:
+        import frappe
+    except Exception:
+        return {"ok": False, "message": "当前未连接 Frappe。"}
+
+    if not frappe.db.exists("Role", ACCESS_ROLE):
+        role = frappe.get_doc(
+            {
+                "doctype": "Role",
+                "role_name": ACCESS_ROLE,
+                "desk_access": 1,
+                "is_custom": 1,
+            }
+        )
+        role.insert(ignore_permissions=True)
+        frappe.db.commit()
+        return {"ok": True, "created": True, "role": ACCESS_ROLE}
+
+    role = frappe.get_doc("Role", ACCESS_ROLE)
+    changed = False
+    if hasattr(role, "desk_access") and not role.desk_access:
+        role.desk_access = 1
+        changed = True
+    if changed:
+        role.save(ignore_permissions=True)
+        frappe.db.commit()
+    return {"ok": True, "created": False, "changed": changed, "role": ACCESS_ROLE}
 
 
 def ensure_erpnext_standard_fields() -> dict:
@@ -79,10 +114,16 @@ def ensure_erpnext_standard_fields() -> dict:
                 "insert_after": "custom_overseas_cost_version",
             },
             {
+                "fieldname": "custom_overseas_supplier",
+                "label": "供应商",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_business_entity",
+            },
+            {
                 "fieldname": "custom_overseas_original_unit_price",
                 "label": "原始采购单价",
                 "fieldtype": "Currency",
-                "insert_after": "custom_overseas_business_entity",
+                "insert_after": "custom_overseas_supplier",
             },
             {
                 "fieldname": "custom_overseas_comprehensive_unit_price",
@@ -111,10 +152,16 @@ def ensure_erpnext_standard_fields() -> dict:
                 "insert_after": "custom_overseas_cost_version",
             },
             {
+                "fieldname": "custom_overseas_supplier_source",
+                "label": "供应商来源",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_business_entity",
+            },
+            {
                 "fieldname": "custom_overseas_total_cost_rmb",
                 "label": "综合成本金额 RMB",
                 "fieldtype": "Currency",
-                "insert_after": "custom_overseas_business_entity",
+                "insert_after": "custom_overseas_supplier_source",
             },
             {
                 "fieldname": "custom_overseas_cost_payload_json",

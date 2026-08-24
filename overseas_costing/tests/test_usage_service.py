@@ -3,7 +3,7 @@ from __future__ import annotations
 from overseas_costing.services import usage_service
 
 
-def test_get_usage_summary_uses_frappe_v16_aggregate_fields(monkeypatch) -> None:
+def test_get_usage_summary_uses_frappe_v15_string_aggregate_fields(monkeypatch) -> None:
     queries = []
 
     class FakeDB:
@@ -33,7 +33,7 @@ def test_get_usage_summary_uses_frappe_v16_aggregate_fields(monkeypatch) -> None
     assert queries[0]["fields"] == [
         "operator_name",
         "operator_full_name",
-        {"COUNT": "name", "as": "action_count"},
-        {"MAX": "creation", "as": "last_seen"},
+        "count(name) as action_count",
+        "max(creation) as last_seen",
     ]
-    assert queries[1]["fields"] == ["action_type", {"COUNT": "name", "as": "action_count"}]
+    assert queries[1]["fields"] == ["action_type", "count(name) as action_count"]
