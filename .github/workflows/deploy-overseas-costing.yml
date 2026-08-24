@@ -1,0 +1,78 @@
+name: Overseas Costing CI/CD
+
+on:
+  push:
+    branches:
+      - overseas_costing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest -r requirements.txt
+
+      - name: Run backend tests
+        run: python -m pytest -q overseas_costing/tests
+
+      - name: Compile Python files
+        run: python -m compileall -q overseas_costing
+
+  deploy:
+    name: Deploy to DeepLinkERP
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check deployment secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          test -n "$DEPLOY_HOST" || (echo "Missing DEPLOY_HOST" && exit 1)
+          test -n "$DEPLOY_USER" || (echo "Missing DEPLOY_USER" && exit 1)
+          test -n "$DEPLOY_SSH_PRIVATE_KEY" || (echo "Missing DEPLOY_SSH_PRIVATE_KEY" && exit 1)
+          test -n "$DEPLOY_KNOWN_HOSTS" || (echo "Missing DEPLOY_KNOWN_HOSTS" && exit 1)
+
+      - name: Load SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+
+      - name: Configure known hosts
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Upgrade and migrate ERP
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && git pull --ff-only && ./upgrade_bench.sh && ./migrate_site.sh deeplinkerp.com'
+
+      - name: Check online login page
+        run: curl --fail --silent --show-error --retry 3 https://deeplinkerp.com/login >/dev/null
