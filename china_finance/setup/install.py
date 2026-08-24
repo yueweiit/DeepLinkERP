@@ -18,16 +18,32 @@ DAILY_NAVIGATION = (
 	("China Cash Flow Assignment", "现金流量指定单", "DocType"),
 	("China Tax Invoice", "中国税务发票", "DocType"),
 	("China Sales Settlement", "销售结算单", "DocType"),
-	("China Reconciliation Statement", "对账单", "DocType"),
 )
 
-CLOSING_NAVIGATION = (
-	("China Voucher Ledger", "查凭证", "Report"),
-	("China Financial Statements", "中国财务报表", "Report"),
+VOUCHER_NAVIGATION = (
+	("Journal Entry", "记账凭证", "DocType"),
+	("Period Closing Voucher", "期末结账凭证", "DocType"),
 	("China Closing Run", "中国结账运行单", "DocType"),
 )
 
-CORE_NAVIGATION = DAILY_NAVIGATION + CLOSING_NAVIGATION
+REPORT_NAVIGATION = (
+	("China Voucher Ledger", "查凭证", "Report"),
+	("China Financial Statements", "中国财务报表", "Report"),
+)
+
+BANK_NAVIGATION = (
+	("Bank Reconciliation Tool", "银行对账工具", "DocType"),
+	("China Reconciliation Statement", "对账单", "DocType"),
+)
+
+CORE_NAVIGATION = DAILY_NAVIGATION + VOUCHER_NAVIGATION + REPORT_NAVIGATION + BANK_NAVIGATION
+
+NAVIGATION_SECTIONS = (
+	("日常工作", "briefcase", DAILY_NAVIGATION),
+	("凭证与结账", "notebook-pen", VOUCHER_NAVIGATION),
+	("报表与查询", "sheet", REPORT_NAVIGATION),
+	("银行与对账", "landmark", BANK_NAVIGATION),
+)
 
 ADMIN_NAVIGATION_GROUPS = (
 	(
@@ -71,8 +87,10 @@ MAPPING_CONSOLE_LINK = ("china-statement-mapping", "科目映射控制台", "Pag
 MAPPING_CONSOLE_ICON = "list-tree"
 
 WORKSPACE_CONTENT = json.dumps([
-	{"id": "cf-daily", "type": "card", "data": {"card_name": "日常工作", "col": 4}},
-	{"id": "cf-closing", "type": "card", "data": {"card_name": "报表与结账", "col": 4}},
+	*[
+		{"id": f"cf-nav-{index}", "type": "card", "data": {"card_name": label, "col": 4}}
+		for index, (label, _icon, _links) in enumerate(NAVIGATION_SECTIONS, 1)
+	],
 	*[
 		{"id": f"cf-admin-{index}", "type": "card", "data": {"card_name": label, "col": 4}}
 		for index, (label, _icon, _links) in enumerate(ADMIN_NAVIGATION_GROUPS, 1)
@@ -145,6 +163,7 @@ def after_install():
 	sync_sales_settlement_custom_fields()
 	sync_china_financial_statement_report_filters()
 	sync_china_financial_statement_print_format()
+	sync_china_accounting_voucher_print_format()
 	backfill_bank_transaction_summaries()
 	sync_reclassification_rules()
 	sync_navigation_metadata()
@@ -170,6 +189,7 @@ def after_migrate():
 	sync_sales_settlement_custom_fields()
 	sync_china_financial_statement_report_filters()
 	sync_china_financial_statement_print_format()
+	sync_china_accounting_voucher_print_format()
 	backfill_bank_transaction_summaries()
 	sync_reclassification_rules()
 	sync_navigation_metadata()
@@ -321,6 +341,63 @@ const columns = report.get_columns_for_print().filter(col => !col.hidden);
 		doc = frappe.get_doc(values)
 		doc.flags.ignore_permissions = True
 		doc.insert()
+	frappe.clear_cache(doctype="Print Format")
+
+
+def sync_china_accounting_voucher_print_format():
+	"""Keep the Chinese accounting voucher printouts aligned with statutory paper layouts."""
+	if not frappe.db.exists("DocType", "China Accounting Voucher"):
+		return
+
+	formats = (
+		("China Accounting Voucher", "china_accounting_voucher", "china_accounting_voucher.html", 10, 8, 10, 10),
+		(
+			"China Accounting Voucher A5 Landscape",
+			"china_accounting_voucher_a5_landscape",
+			"china_accounting_voucher_a5_landscape.html",
+			7,
+			6,
+			8,
+			8,
+		),
+	)
+
+	for name, folder, filename, margin_top, margin_bottom, margin_left, margin_right in formats:
+		path = frappe.get_app_path("china_finance", "china_finance", "print_format", folder, filename)
+		with open(path, encoding="utf-8") as template_file:
+			html = template_file.read()
+
+		values = {
+			"doctype": "Print Format",
+			"name": name,
+			"doc_type": "China Accounting Voucher",
+			"print_format_for": "DocType",
+			"print_format_type": "Jinja",
+			"custom_format": 1,
+			"disabled": 0,
+			"standard": "Yes",
+			"module": "China Finance",
+			"pdf_generator": "wkhtmltopdf",
+			"font_size": 10,
+			"margin_top": margin_top,
+			"margin_bottom": margin_bottom,
+			"margin_left": margin_left,
+			"margin_right": margin_right,
+			"page_number": "Hide",
+			"html": html,
+		}
+
+		if frappe.db.exists("Print Format", name):
+			doc = frappe.get_doc("Print Format", name)
+			changed = any(doc.get(field) != value for field, value in values.items() if field not in ("doctype", "name"))
+			if changed:
+				doc.update({key: value for key, value in values.items() if key not in ("doctype", "name")})
+				doc.flags.ignore_permissions = True
+				doc.save()
+		else:
+			doc = frappe.get_doc(values)
+			doc.flags.ignore_permissions = True
+			doc.insert()
 	frappe.clear_cache(doctype="Print Format")
 
 
@@ -515,11 +592,10 @@ def _desired_sidebar_items(custom_links=None):
 			"keep_closed": 0, "show_arrow": 0, "icon": "landmark",
 		},
 		{**_sidebar_link(*MAPPING_CONSOLE_LINK), "child": 0, "icon": MAPPING_CONSOLE_ICON},
-		_sidebar_section("日常工作", "briefcase"),
 	]
-	items.extend(_sidebar_link(*link) for link in DAILY_NAVIGATION)
-	items.append(_sidebar_section("报表与结账", "sheet"))
-	items.extend(_sidebar_link(*link) for link in CLOSING_NAVIGATION)
+	for label, icon, links in NAVIGATION_SECTIONS:
+		items.append(_sidebar_section(label, icon))
+		items.extend(_sidebar_link(*link) for link in links)
 	items.append(_sidebar_section("管理与审计", "settings", 1))
 	for label, icon, links in ADMIN_NAVIGATION_GROUPS:
 		items.append(_sidebar_section(label, icon, 1))
@@ -545,10 +621,10 @@ def _workspace_card(label, link_count):
 
 
 def _desired_workspace_links(custom_links=None):
-	links = [_workspace_card("日常工作", len(DAILY_NAVIGATION))]
-	links.extend(_workspace_link(*link) for link in DAILY_NAVIGATION)
-	links.append(_workspace_card("报表与结账", len(CLOSING_NAVIGATION)))
-	links.extend(_workspace_link(*link) for link in CLOSING_NAVIGATION)
+	links = []
+	for label, _icon, group_links in NAVIGATION_SECTIONS:
+		links.append(_workspace_card(label, len(group_links)))
+		links.extend(_workspace_link(*link) for link in group_links)
 	for label, _icon, group_links in ADMIN_NAVIGATION_GROUPS:
 		links.append(_workspace_card(label, len(group_links)))
 		links.extend(_workspace_link(*link) for link in group_links)
@@ -597,7 +673,7 @@ def sync_simplified_navigation(navigation_name="China Finance"):
 			workspace.set("links", desired)
 			workspace.flags.ignore_permissions = True
 			workspace.save()
-		if (workspace.content or "").replace(" ", "") == LEGACY_WORKSPACE_CONTENT:
+		if not workspace.custom_blocks:
 			workspace.db_set("content", WORKSPACE_CONTENT, update_modified=False)
 
 

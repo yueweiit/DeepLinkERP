@@ -75,12 +75,45 @@
    "type": "Link"
   },
   {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "notebook-pen",
+   "indent": 1,
+   "keep_closed": 0,
+   "label": "\u51ed\u8bc1\u4e0e\u7ed3\u8d26",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Section Break"
+  },
+  {
    "child": 1,
    "collapsible": 1,
    "indent": 0,
    "keep_closed": 0,
-   "label": "\u5bf9\u8d26\u5355",
-   "link_to": "China Reconciliation Statement",
+   "label": "\u8bb0\u8d26\u51ed\u8bc1",
+   "link_to": "Journal Entry",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u671f\u672b\u7ed3\u8d26\u51ed\u8bc1",
+   "link_to": "Period Closing Voucher",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u4e2d\u56fd\u7ed3\u8d26\u8fd0\u884c\u5355",
+   "link_to": "China Closing Run",
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Link"
@@ -91,7 +124,7 @@
    "icon": "sheet",
    "indent": 1,
    "keep_closed": 0,
-   "label": "\u62a5\u8868\u4e0e\u7ed3\u8d26",
+   "label": "\u62a5\u8868\u4e0e\u67e5\u8be2",
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Section Break"
@@ -119,12 +152,34 @@
    "type": "Link"
   },
   {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "landmark",
+   "indent": 1,
+   "keep_closed": 0,
+   "label": "\u94f6\u884c\u4e0e\u5bf9\u8d26",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Section Break"
+  },
+  {
    "child": 1,
    "collapsible": 1,
    "indent": 0,
    "keep_closed": 0,
-   "label": "\u4e2d\u56fd\u7ed3\u8d26\u8fd0\u884c\u5355",
-   "link_to": "China Closing Run",
+   "label": "\u94f6\u884c\u5bf9\u8d26\u5de5\u5177",
+   "link_to": "Bank Reconciliation Tool",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u5bf9\u8d26\u5355",
+   "link_to": "China Reconciliation Statement",
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Link"
@@ -361,7 +416,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-05 11:25:34.105195",
+ "modified": "2026-08-24 06:39:31.204455",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Finance",

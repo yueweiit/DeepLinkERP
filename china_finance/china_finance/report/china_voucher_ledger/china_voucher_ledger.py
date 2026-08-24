@@ -24,6 +24,8 @@ def execute(filters=None):
 	):
 		if filters.get(fieldname):
 			conditions.append(f"{column}=%({fieldname})s")
+	if filters.get("voucher_number"):
+		conditions.append("v.source_name=%(voucher_number)s")
 	if filters.get("search_text"):
 		filters.search_pattern = f"%{filters.search_text}%"
 		conditions.append("(v.statutory_number LIKE %(search_pattern)s OR v.source_name LIKE %(search_pattern)s OR v.remarks LIKE %(search_pattern)s OR e.account LIKE %(search_pattern)s OR e.remarks LIKE %(search_pattern)s)")
@@ -67,6 +69,8 @@ def build_tree_data(entries):
 					"indent": 0,
 					"posting_date": entry.posting_date,
 					"statutory_number": entry.statutory_number,
+					"voucher_number": entry.source_name,
+					"print_voucher": "",
 					"accounting_period": entry.accounting_period,
 					"remarks": summary,
 					"source_doctype": entry.source_doctype,
@@ -88,6 +92,8 @@ def build_tree_data(entries):
 				**entry,
 				"posting_date": None,
 				"statutory_number": None,
+				"voucher_number": None,
+				"print_voucher": None,
 				"accounting_period": None,
 				"remarks": None,
 				"source_doctype": None,
@@ -153,6 +159,8 @@ def get_auxiliary_accounting(entry):
 def get_columns():
 	return [
 		{"label": _("凭证字号"), "fieldname": "statutory_number", "fieldtype": "Data", "width": 80},
+		{"label": _("凭证编号"), "fieldname": "voucher_number", "fieldtype": "Data", "width": 160},
+		{"label": _("查看/打印"), "fieldname": "print_voucher", "fieldtype": "HTML", "width": 85},
 		{"label": _("凭证日期"), "fieldname": "posting_date", "fieldtype": "Date", "width": 120},
 		{"label": _("会计期间"), "fieldname": "accounting_period", "fieldtype": "Data", "width": 100},
 		{"label": _("摘要"), "fieldname": "remarks", "fieldtype": "Data", "width": 130},

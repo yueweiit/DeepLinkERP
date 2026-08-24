@@ -30,6 +30,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 			options: ["", "Journal Entry", "Payment Entry"],
 		},
 		{ fieldname: "source_name", label: __("来源单据"), fieldtype: "Data" },
+		{ fieldname: "voucher_number", label: __("凭证编号"), fieldtype: "Data" },
 		{ fieldname: "account", label: __("科目"), fieldtype: "Link", options: "Account" },
 		{
 			fieldname: "party_type",
@@ -46,6 +47,14 @@ frappe.query_reports["China Voucher Ledger"] = {
 	initial_depth: 1,
 	formatter(value, row, column, data, default_formatter) {
 		const formatted = default_formatter(value, row, column, data);
+		if (column.fieldname === "voucher_number" && data?.source_doctype && data?.source_name) {
+			const route = frappe.utils.get_form_link(data.source_doctype, data.source_name);
+			return `<a href="${route}" class="china-voucher-link" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${formatted}</a>`;
+		}
+		if (column.fieldname === "print_voucher" && data?.voucher_snapshot) {
+			const route = frappe.utils.get_form_link("China Accounting Voucher", data.voucher_snapshot);
+			return `<a href="${route}" class="china-voucher-snapshot-link" data-snapshot-name="${encodeURIComponent(data.voucher_snapshot)}">查看/打印</a>`;
+		}
 		if (column.fieldname === "voucher_status" && data?.voucher_status !== undefined && data?.voucher_status !== null) {
 			const status = {
 				0: [__("草稿"), "orange"],
@@ -78,6 +87,11 @@ frappe.query_reports["China Voucher Ledger"] = {
 			const source_doctype = decodeURIComponent(event.currentTarget.dataset.sourceDoctype);
 			const source_name = decodeURIComponent(event.currentTarget.dataset.sourceName);
 			frappe.set_route("Form", source_doctype, source_name);
+		});
+		report.page.wrapper.on("click", ".china-voucher-snapshot-link", (event) => {
+			event.preventDefault();
+			const snapshot_name = decodeURIComponent(event.currentTarget.dataset.snapshotName);
+			frappe.set_route("Form", "China Accounting Voucher", snapshot_name);
 		});
 		if (!report.get_filter_value("company")) {
 			report.set_filter_value("company", frappe.defaults.get_user_default("Company"));

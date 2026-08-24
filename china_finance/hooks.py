@@ -77,6 +77,7 @@ doctype_js = {
 doctype_list_js = {
 	"Journal Entry": "public/js/source_voucher_number_list.js",
 	"Payment Entry": "public/js/source_voucher_number_list.js",
+	"China Accounting Voucher": "public/js/china_accounting_voucher_list.js",
 	"China Financial Statement Template": "public/js/china_financial_statement_template_list.js",
 	"China Financial Statement Mapping": "public/js/china_financial_statement_mapping_list.js",
 	"China Sales Settlement": "public/js/china_sales_settlement_list.js",

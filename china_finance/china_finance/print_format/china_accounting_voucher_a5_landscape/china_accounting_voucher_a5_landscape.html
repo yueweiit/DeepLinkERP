@@ -1,0 +1,140 @@
+<style>
+  @page { size: A5 landscape; margin: 7mm 8mm 6mm; }
+  .print-format { padding: 0 !important; }
+  .cf-voucher-page {
+    font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
+    color: #111;
+    font-size: 9.5pt;
+  }
+  .cf-voucher-page + .cf-voucher-page { page-break-before: always; }
+  .cf-title {
+    text-align: center;
+    font-size: 19pt;
+    font-weight: 700;
+    letter-spacing: 7px;
+    margin: 0 0 5px;
+  }
+  .cf-topline, .cf-date-line, .cf-signatures {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .cf-topline td, .cf-date-line td { padding: 1px 3px; }
+  .cf-topline .cf-right, .cf-date-line .cf-right { text-align: right; }
+  .cf-date-line { margin-bottom: 4px; }
+  .cf-lines {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  .cf-lines th, .cf-lines td {
+    border: 1px solid #222;
+    padding: 4px !important;
+    vertical-align: top;
+  }
+  .cf-lines th {
+    text-align: center;
+    font-weight: 700;
+    background: #fafafa;
+  }
+  .cf-lines .cf-summary { width: 27%; }
+  .cf-lines .cf-account { width: 39%; }
+  .cf-lines .cf-amount { width: 17%; }
+  .cf-account-code { font-weight: 700; }
+  .cf-subtext { color: #555; font-size: 7.5pt; line-height: 1.25; }
+  .cf-num { text-align: right; white-space: nowrap; }
+  .cf-total td { font-weight: 700; }
+  .cf-signatures { margin-top: 10px; table-layout: fixed; }
+  .cf-signatures td {
+    width: 20%;
+    padding: 2px 1px !important;
+    font-size: 8pt;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: break-word;
+    word-break: break-all;
+  }
+  .cf-footnote { margin-top: 5px; color: #666; font-size: 7pt; }
+  @media print {
+    thead { display: table-header-group; }
+    tr { page-break-inside: avoid; }
+  }
+</style>
+
+{% set page_size = 8 %}
+{% set pages = doc.entries|batch(page_size, fill_with=None)|list %}
+{% if not pages %}{% set pages = [[]] %}{% endif %}
+
+{% for page in pages %}
+<div class="cf-voucher-page">
+  <div class="cf-title">记 账 凭 证</div>
+  <table class="cf-topline">
+    <tr>
+      <td>公司：{{ doc.company }}</td>
+      <td class="cf-right">附单据：{{ doc.attachment_count or 0 }} 张</td>
+    </tr>
+  </table>
+  <table class="cf-date-line">
+    <tr>
+      <td>日期：{{ frappe.utils.format_date(doc.posting_date) }}</td>
+      <td class="cf-right">
+        凭证号：{{ doc.statutory_number or doc.voucher_word }}
+        {% if pages|length > 1 %}（{{ loop.index }}/{{ pages|length }}）{% endif %}
+      </td>
+    </tr>
+  </table>
+
+  <table class="cf-lines">
+    <thead>
+      <tr>
+        <th class="cf-summary">摘要</th>
+        <th class="cf-account">会计科目</th>
+        <th class="cf-amount">借方金额</th>
+        <th class="cf-amount">贷方金额</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in page %}
+        {% if row %}
+          {% set account_info = frappe.db.get_value("Account", row.account, ["account_number", "account_name"], as_dict=True) %}
+          {% set summary = (row.remarks or doc.remarks or "").split("\n", 1)[0] %}
+          {% if "｜" in summary %}{% set summary = summary.split("｜", 1)[0] %}{% endif %}
+          <tr>
+            <td>{{ summary }}</td>
+            <td>
+              {% if account_info %}
+                <span class="cf-account-code">{{ account_info.account_number or "" }}</span>
+                {{ account_info.account_name or "" }}
+              {% else %}
+                {{ row.account or "" }}
+              {% endif %}
+              {% if row.party %}<div class="cf-subtext">{{ row.party_type or "往来" }}：{{ row.party }}</div>{% endif %}
+            </td>
+            <td class="cf-num">{% if row.debit %}{{ row.get_formatted("debit", doc) }}{% endif %}</td>
+            <td class="cf-num">{% if row.credit %}{{ row.get_formatted("credit", doc) }}{% endif %}</td>
+          </tr>
+        {% endif %}
+      {% endfor %}
+      {% if loop.last %}
+        <tr class="cf-total">
+          <td colspan="2" class="cf-num">合计</td>
+          <td class="cf-num">{{ doc.get_formatted("total_debit") }}</td>
+          <td class="cf-num">{{ doc.get_formatted("total_credit") }}</td>
+        </tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  {% if loop.last %}
+    <table class="cf-signatures">
+      <tr>
+        <td>会计主管：__________</td>
+        <td>记账：{{ doc.posted_by or "__________" }}</td>
+        <td>审核：{{ doc.reviewed_by or "__________" }}</td>
+        <td>出纳：__________</td>
+        <td>制单：{{ doc.prepared_by or "__________" }}</td>
+      </tr>
+    </table>
+    <div class="cf-footnote">会计期间：{{ doc.accounting_period or "" }}　币种：{{ doc.currency or "CNY" }}</div>
+  {% endif %}
+</div>
+{% endfor %}
