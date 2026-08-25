@@ -2038,11 +2038,9 @@
   line-height: 1.2 !important;
 }
 
-.ocw-desk-fullwidth .layout-main,
 .ocw-desk-layout {
   display: flex !important;
   min-width: 0 !important;
-  margin-left: 0 !important;
   margin-right: 0 !important;
 }
 

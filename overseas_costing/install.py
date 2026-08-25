@@ -23,6 +23,17 @@ ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 HOME_WORKSPACE_LABEL = "Home"
 HOME_SHORTCUT_LABEL = "海外成本核算"
 HOME_SHORTCUT_ID = "overseas-cost-home-shortcut"
+DESKTOP_ICON_IMAGE = (
+    "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20"
+    "width%3D%2296%22%20height%3D%2296%22%20viewBox%3D%220%200%2096%2096%22%3E"
+    "%3Crect%20width%3D%2296%22%20height%3D%2296%22%20rx%3D%2222%22%20fill%3D%22%230B8CF0%22/%3E"
+    "%3Cpath%20d%3D%22M25%2026h46v44H25z%22%20fill%3D%22none%22%20stroke%3D%22white%22%20"
+    "stroke-width%3D%226%22%20stroke-linejoin%3D%22round%22/%3E"
+    "%3Cpath%20d%3D%22M34%2039h28M34%2052h12M56%2052h6M34%2064h28%22%20stroke%3D%22white%22%20"
+    "stroke-width%3D%226%22%20stroke-linecap%3D%22round%22/%3E"
+    "%3Cpath%20d%3D%22M63%2018v17h17%22%20fill%3D%22none%22%20stroke%3D%22white%22%20"
+    "stroke-width%3D%226%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22/%3E%3C/svg%3E"
+)
 WORKSPACE_NAME_CANDIDATES = (
     "海外成本核算",
     "海外采购综合成本核算",
@@ -399,7 +410,8 @@ def _ensure_deeplink_desktop_icon(frappe) -> dict:
         "link_type": "Workspace Sidebar",
         "link_to": WORKSPACE_LABEL,
         "parent_icon": "",
-        "icon": "calculator",
+        "icon": "",
+        "icon_image": DESKTOP_ICON_IMAGE,
         "hidden": 0,
         "standard": 1,
         "app": "overseas_costing",

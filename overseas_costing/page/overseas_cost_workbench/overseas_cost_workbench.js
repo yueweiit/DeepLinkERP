@@ -95,11 +95,9 @@ class OverseasCostWorkbench {
     $(this.wrapper).empty();
   }
 
-  // 隐藏 ERP 桌面外壳：左侧模块导航、custom_filters 顶部标签栏、右侧栏。
-  // 这些元素挂在 document.body / #body 上、不属于本工作台，会挤压或遮挡全屏界面。
+  // 保留 ERP 原生左侧模块导航，只隐藏会遮挡工作台的扩展标签栏和右侧栏。
   hideDeskChrome() {
     const targets = [
-      $(".body-sidebar-container"),
       $("#custom-filters-desk-tabs-bar"),
       $(".custom-filters-right-sidebar-container"),
     ];
@@ -145,7 +143,7 @@ class OverseasCostWorkbench {
     $mainSection
       .addClass("ocw-desk-main")
       .parents(
-        ".container, .page-body, .page-content, .page-wrapper, .layout-main, .layout-main-section, .layout-main-section-wrapper"
+        ".container, .page-body, .page-content, .page-wrapper, .layout-main-section, .layout-main-section-wrapper"
       )
       .addClass("ocw-desk-wide-node");
 
@@ -271,11 +269,12 @@ class OverseasCostWorkbench {
                   <span>批次详情</span>
                   <strong data-area="batch-drawer-title">双击批次查看详情</strong>
                 </div>
-                <div class="ocw-batch-drawer-head-actions">
+              <div class="ocw-batch-drawer-head-actions">
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="clear-batch-focus">返回全部批次</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="export-drawer-batch">导出当前批次</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-batch-drawer-dingtalk">钉钉原单</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-batch-drawer-recalculate">重新试算</button>
-                  <button class="ocw-icon-btn" data-action="close-batch-drawer" aria-label="关闭">×</button>
+                  <button class="ocw-icon-btn" data-action="close-batch-drawer" aria-label="关闭详情" title="关闭详情">×</button>
                 </div>
               </div>
               <div class="ocw-batch-drawer-tabs">
@@ -6083,6 +6082,9 @@ class OverseasCostWorkbench {
     const stats = this.erpQueueStats();
     return `
       <div class="ocw-erp-queue-toolbar">
+        <div class="ocw-erp-queue-navigation">
+          <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="set-main-view" data-view="cost">返回成本列表</button>
+        </div>
         <div class="ocw-erp-queue-tabs">
           ${options
             .map(
