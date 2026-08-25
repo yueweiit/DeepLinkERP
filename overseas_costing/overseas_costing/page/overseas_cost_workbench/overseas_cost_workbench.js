@@ -71,6 +71,7 @@ class OverseasCostWorkbench {
     this.isOpeningDingtalk = false;
     this.isParsingManualDocuments = false;
     this.defaultRecentDays = 30;
+    this.erpFlowBlockState = null;
   }
 
   init() {
@@ -194,12 +195,14 @@ class OverseasCostWorkbench {
                 </div>
                 <div class="ocw-head-actions">
                   <span class="ocw-summary-pill" data-area="hierarchy-summary">加载批次中</span>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="file-parse">文件解析</button>
+                  <button class="ocw-warning-btn ocw-mini-btn" data-action="file-parse">凭证对比</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">商品归类</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="pull-oa-logistics">钉钉拉取</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="export-current">导出当前结果</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="add-batch">+ 添加报关运单</button>
+                  <div class="ocw-head-export-row">
+                    <button class="ocw-success-btn ocw-mini-btn" data-action="export-current">导出当前全部批次结果</button>
+                  </div>
                 </div>
               </div>
 
@@ -238,7 +241,9 @@ class OverseasCostWorkbench {
                     <button class="ocw-outline-btn ocw-mini-btn" data-action="clear-filters">重置</button>
                   </div>
                 </div>
-                <div class="ocw-search-result" data-area="search-result">所有输入框均为可选，可单独或组合查询</div>
+                <div class="ocw-query-footer">
+                  <div class="ocw-search-result" data-area="search-result">所有输入框均为可选，可单独或组合查询</div>
+                </div>
               </div>
 
               <div class="ocw-table-toolbar">
@@ -605,16 +610,23 @@ class OverseasCostWorkbench {
 
   clearFilters() {
     this.resetFilterValues();
+    this.resetBatchScopeState();
     this.batchItems = {};
     this.loadBatches();
   }
 
+  resetBatchScopeState() {
+    this.focusedBatchName = "";
+    this.exportPinnedBatchName = "";
+    this.dataCheckBatchName = "";
+    this.erpFlowBlockState = null;
+    this.closeBatchDrawer({ updateUrl: false });
+    this.updateBatchUrl("", { replace: true, view: "" });
+  }
+
   async setTransportFilter(mode = "") {
     this.filters.transport_mode = this.normalizeTransportMode(mode);
-    this.focusedBatchName = "";
-    this.closeBatchDrawer({ updateUrl: false });
-    this.updateBatchUrl("", { replace: true });
-    this.exportPinnedBatchName = "";
+    this.resetBatchScopeState();
     if (!this.batches.length) {
       await this.loadBatches();
       return;
@@ -752,6 +764,9 @@ class OverseasCostWorkbench {
       await this.loadAuditLogs(batch.name, batch.current_version);
       this.renderTable();
       if (this.drawerBatchName === batch.name && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
+        if (this.erpFlowBlockState && this.erpFlowBlockState.batchName === batch.name) {
+          await this.syncErpFlowBlock(batch.name);
+        }
         this.renderBatchDrawer();
       }
     } catch (error) {
@@ -1095,6 +1110,56 @@ class OverseasCostWorkbench {
   }
 
   showErpFlowBlock(result = {}, title = "流程阻断") {
+    const batchName = result.batch_name || this.drawerBatchName || this.activeBatchName;
+    this.erpFlowBlockState = {
+      batchName,
+      title,
+      result: {
+        ...result,
+        batch_name: batchName,
+      },
+    };
+    if (this.drawerBatchName === batchName && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
+      this.renderBatchDrawer();
+    }
+  }
+
+  async syncErpFlowBlock(batchName = "") {
+    const batch = this.findBatch(batchName || this.drawerBatchName || this.activeBatchName);
+    if (!batch) return;
+    const readiness = await this.call(
+      "overseas_costing.api.writeback.check_writeback_ready",
+      {
+        batch_name: batch.name,
+        version_name: batch.current_version || null,
+      },
+      false
+    );
+    if (readiness.ok && readiness.ready) {
+      if (this.erpFlowBlockState && this.erpFlowBlockState.batchName === batch.name) {
+        this.erpFlowBlockState = null;
+      }
+      return readiness;
+    }
+    this.erpFlowBlockState = {
+      batchName: batch.name,
+      title: "校验未通过",
+      result: readiness || {},
+    };
+    return readiness;
+  }
+
+  renderErpFlowBlockInline(batch) {
+    if (!this.erpFlowBlockState || this.erpFlowBlockState.batchName !== batch.name) return "";
+    const state = this.erpFlowBlockState;
+    return `
+      <div class="ocw-erp-block-inline">
+        ${this.renderErpFlowBlockContent(state.result || {}, state.title || "流程阻断")}
+      </div>
+    `;
+  }
+
+  renderErpFlowBlockContent(result = {}, title = "流程阻断") {
     const reasons = Array.isArray(result.blocking_reasons) ? result.blocking_reasons : [];
     const fieldGaps = result.field_gaps || {};
     const gapHtml = this.renderErpFieldGapsWithActions(
@@ -1105,75 +1170,19 @@ class OverseasCostWorkbench {
     const reasonHtml = reasons.length
       ? `<ul>${reasons.map((reason) => `<li>${this.escape(reason)}</li>`).join("")}</ul>`
       : `<p>${this.escape(result.message || "请补齐基础数据或重新试算后再继续。")}</p>`;
-    const dialog = new frappe.ui.Dialog({
-      title,
-      size: "large",
-      fields: [
-        {
-          fieldtype: "HTML",
-          fieldname: "erp_flow_block",
-          options: `<div class="ocw-erp-block-dialog">${gapHtml}${reasonHtml}</div>`,
-        },
-      ],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
-    });
-    dialog.show();
-    dialog.$wrapper.addClass("ocw-erp-block-modal");
-    dialog.$wrapper
-      .off("click.ocwErpGap")
-      .on("click.ocwErpGap", "[data-action='gap-repull-dingtalk']", (event) => {
-        const $button = $(event.currentTarget);
-        $button.prop("disabled", true).text("处理中...");
-        this.repullGapDingtalk($button.attr("data-batch-name"))
-          .then(() => dialog.hide())
-          .catch((error) => this.showError(error))
-          .finally(() => $button.prop("disabled", false).text("重拉钉钉"));
-      })
-      .on("click.ocwErpGap", "[data-action='gap-confirm-actual-qty']", (event) => {
-        dialog.hide();
-        this.confirmActualQtyFromQuantity($(event.currentTarget).attr("data-batch-name")).catch((error) => this.showError(error));
-      })
-      .on("click.ocwErpGap", "[data-action='gap-open-fee-pool']", (event) => {
-        const $button = $(event.currentTarget);
-        dialog.hide();
-        this.openFeePoolGapDialog($button.attr("data-batch-name"), {
-          fieldname: $button.attr("data-gap-fieldname"),
-          label: $button.attr("data-gap-label"),
-        });
-      })
-      .on("click.ocwErpGap", "[data-action='gap-confirm-zero-fee']", (event) => {
-        const $button = $(event.currentTarget);
-        dialog.hide();
-        this.confirmZeroFeeGap($button.attr("data-batch-name"), {
-          fieldname: $button.attr("data-gap-fieldname"),
-          label: $button.attr("data-gap-label"),
-        }).catch((error) => this.showError(error));
-      })
-      .on("click.ocwErpGap", "[data-action='gap-open-item-edit']", (event) => {
-        dialog.hide();
-        this.openGapItemEdit(
-          $(event.currentTarget).attr("data-batch-name"),
-          $(event.currentTarget).attr("data-item-name"),
-          $(event.currentTarget).attr("data-fieldname")
-        ).catch((error) => this.showError(error));
-      })
-      .on("click.ocwErpGap", "[data-action='gap-open-source-center']", (event) => {
-        dialog.hide();
-        this.openSourceCenterDialog(
-          $(event.currentTarget).attr("data-batch-name"),
-          {
-            fieldname: $(event.currentTarget).attr("data-gap-fieldname"),
-            label: $(event.currentTarget).attr("data-gap-label"),
-          }
-        );
-      })
-      .on("click.ocwErpGap", "[data-action='gap-recalculate']", (event) => {
-        dialog.hide();
-        this.recalculate($(event.currentTarget).attr("data-batch-name"));
-      });
+    return `
+      <div class="ocw-erp-block-dialog">
+        <div class="ocw-erp-block-head">
+          <div>
+            <h5>${this.escape(title)}</h5>
+            <span>${this.escape(reasons.length ? `待补信息共 ${reasons.length} 项` : result.message || "请补齐基础数据或重新试算后再继续。")}</span>
+          </div>
+        </div>
+        ${gapHtml}
+        <div class="ocw-erp-block-reason">${reasonHtml}</div>
+      </div>
+    `;
   }
-
   renderErpFieldGaps(fieldGaps = {}) {
     const sections = [
       { key: "batch", title: "批次头待补" },
@@ -1373,7 +1382,7 @@ class OverseasCostWorkbench {
     const batchOptions = this.renderSelectableBatchOptions(batchName, selectableBatches);
     const batchSelectDisabled = selectableBatches.length ? "" : " disabled";
     const dialog = new frappe.ui.Dialog({
-      title: "文件解析预览",
+      title: "完税凭证对比",
       fields: [
         {
           fieldtype: "HTML",
@@ -1382,8 +1391,8 @@ class OverseasCostWorkbench {
             <div class="ocw-file-parse-box">
               <div class="ocw-voucher-target">
                 <label class="ocw-voucher-batch-picker">
-                  <span>解析对比批次</span>
-                  <select class="form-control ocw-batch-select" data-role="voucher-batch-select" aria-label="选择文件解析批次"${batchSelectDisabled}>${batchOptions}</select>
+                  <span>对比批次</span>
+                  <select class="form-control ocw-batch-select" data-role="voucher-batch-select" aria-label="选择凭证对比批次"${batchSelectDisabled}>${batchOptions}</select>
                 </label>
                 <em data-area="voucher-batch-hint">${this.escape(batchHint)}</em>
               </div>
@@ -1393,17 +1402,17 @@ class OverseasCostWorkbench {
                 <div class="ocw-import-drop-icon">PDF</div>
                 <div>
                   <strong data-area="voucher-file-name">拖放 PDF 到这里，或点击选择</strong>
-                  <span>当前仅做完税凭证解析预览，不写入成本表。</span>
+                  <span>当前仅做完税凭证识别与系统数据对比，不写入成本表。</span>
                 </div>
               </div>
               <div class="ocw-import-preview-actions">
-                <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="preview-voucher">解析预览</button>
-                <span data-area="voucher-preview-status">选择文件后可先预览凭证字段。</span>
+                <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="preview-voucher">对比预览</button>
+                <span data-area="voucher-preview-status">选择文件后可先对比凭证字段。</span>
               </div>
-              <div class="ocw-voucher-preview empty" data-area="voucher-preview">尚未解析</div>
+              <div class="ocw-voucher-preview empty" data-area="voucher-preview">尚未对比</div>
               <div class="ocw-voucher-records">
                 <div class="ocw-voucher-records-head">
-                  <strong>已保存解析记录</strong>
+                  <strong>已保存对比记录</strong>
                   <div class="ocw-voucher-records-actions">
                     <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="refresh-voucher-records">刷新</button>
                     <button class="ocw-danger-btn ocw-mini-btn" type="button" data-action="delete-voucher-records">删除</button>
@@ -1415,7 +1424,7 @@ class OverseasCostWorkbench {
           `,
         },
       ],
-      primary_action_label: "保存解析结果",
+      primary_action_label: "保存对比结果",
       primary_action: async () => {
         try {
           await this.saveTaxCertificateParseResult(dialog);
@@ -1560,12 +1569,12 @@ class OverseasCostWorkbench {
 
     const preview = dialog.$wrapper.data("ocw-voucher-preview") || {};
     if (!preview.ok) {
-      frappe.msgprint("请先点击「解析预览」，确认凭证已匹配到系统批次后再保存。");
+      frappe.msgprint("请先点击「对比预览」，确认凭证已匹配到系统批次后再保存。");
       return;
     }
     const canSave = Boolean(preview.reconciliation && preview.reconciliation.batch && preview.reconciliation.batch.name);
     if (!canSave) {
-      frappe.msgprint("当前凭证还没有匹配到系统批次，暂不能保存解析结果。");
+      frappe.msgprint("当前凭证还没有匹配到系统批次，暂不能保存对比结果。");
       return;
     }
 
@@ -1587,7 +1596,7 @@ class OverseasCostWorkbench {
       throw error;
     }
     if (!result || !result.ok) {
-      frappe.msgprint((result && result.message) || "保存解析结果失败。");
+      frappe.msgprint((result && result.message) || "保存对比结果失败。");
       this.updateVoucherPrimarySaveAction(dialog, canSave);
       return;
     }
@@ -1675,11 +1684,11 @@ class OverseasCostWorkbench {
     const targetNames = Array.isArray(recordNames) ? recordNames.filter(Boolean) : [];
     const recordCount = targetNames.length;
     if (!recordCount) {
-      frappe.msgprint("当前列表没有可删除的解析记录。");
+      frappe.msgprint("当前列表没有可删除的对比记录。");
       return;
     }
     frappe.confirm(
-      `确认删除当前列表显示的 ${recordCount} 条完税凭证解析记录？删除后只移除解析记录，不会删除批次和物料明细。`,
+      `确认删除当前列表显示的 ${recordCount} 条完税凭证对比记录？删除后只移除对比记录，不会删除批次和物料明细。`,
       async () => {
         const result = await this.call(
           "overseas_costing.api.import_api.delete_tax_certificate_parse_records",
@@ -1687,10 +1696,10 @@ class OverseasCostWorkbench {
           true
         );
         if (!result || !result.ok) {
-          frappe.msgprint((result && result.message) || "删除解析记录失败。");
+          frappe.msgprint((result && result.message) || "删除对比记录失败。");
           return;
         }
-        frappe.show_alert({ message: result.message || "解析记录已删除。", indicator: "green" });
+        frappe.show_alert({ message: result.message || "对比记录已删除。", indicator: "green" });
         await this.loadTaxCertificateRecords(dialog);
         await this.refreshBatch(batchName).catch((error) => this.showError(error));
       }
@@ -1704,12 +1713,12 @@ class OverseasCostWorkbench {
       true
     );
     if (!result || !result.ok) {
-      frappe.msgprint((result && result.message) || "未能读取完税凭证解析记录。");
+      frappe.msgprint((result && result.message) || "未能读取完税凭证对比记录。");
       return;
     }
 
     const detailDialog = new frappe.ui.Dialog({
-      title: "完税凭证解析记录",
+      title: "完税凭证对比记录",
       fields: [
         {
           fieldtype: "HTML",
@@ -1957,8 +1966,8 @@ class OverseasCostWorkbench {
       return;
     }
     if (!result) {
-      $status.text("选择文件后可先预览凭证字段。");
-      $preview.addClass("empty").text("尚未解析");
+      $status.text("选择文件后可先对比凭证字段。");
+      $preview.addClass("empty").text("尚未对比");
       return;
     }
 
@@ -2027,7 +2036,7 @@ class OverseasCostWorkbench {
     `);
   }
 
-  updateVoucherPrimarySaveAction(dialog, canSave, label = "保存解析结果") {
+  updateVoucherPrimarySaveAction(dialog, canSave, label = "保存对比结果") {
     if (!dialog || !dialog.$wrapper) return;
     const $primary = dialog.get_primary_btn ? dialog.get_primary_btn() : dialog.$wrapper.find(".modal-footer .btn-primary");
     if (!$primary || !$primary.length) return;
@@ -2093,8 +2102,8 @@ class OverseasCostWorkbench {
     const saveButton = !showSaveButton
       ? ""
       : batch.name
-        ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse">${reconciliation.saved_attachment_name ? "已保存解析结果" : "保存解析结果"}</button>`
-        : `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse" disabled>保存解析结果</button>`;
+        ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse">${reconciliation.saved_attachment_name ? "已保存对比结果" : "保存对比结果"}</button>`
+        : `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse" disabled>保存对比结果</button>`;
 
     return `
       <div class="ocw-voucher-reconciliation ${this.escape(status)}">
@@ -2368,8 +2377,7 @@ class OverseasCostWorkbench {
       });
       frappe.show_alert({ message, indicator: "green" });
       this.resetFilterValues();
-      this.updateBatchUrl("", { replace: true, view: "" });
-      this.focusedBatchName = "";
+      this.resetBatchScopeState();
       await this.loadBatches();
       dialog.$wrapper.data("ocw-pull-completed", true);
       this.setOaPullPrimaryState(dialog, "completed");
@@ -6901,7 +6909,7 @@ class OverseasCostWorkbench {
     );
     if (!result.ok) throw new Error(result.message || "导出失败");
     this.downloadBase64File(result.content_base64, result.file_name, result.mime_type);
-    this.recordUsage("EXPORT", { remark: `导出当前结果：${label || "全部"}，${result.total || 0} 行`, extra: { total: result.total || 0 } });
+    this.recordUsage("EXPORT", { remark: `导出当前全部批次结果：${label || "全部"}，${result.total || 0} 行`, extra: { total: result.total || 0 } });
     frappe.show_alert({ message: result.message || `已导出 ${result.total || 0} 行 SKU 明细。`, indicator: "green" });
   }
 
@@ -7063,7 +7071,7 @@ class OverseasCostWorkbench {
       </tr>
     `).join("");
     return `
-      <div class="ocw-batch-drawer-section">
+      <div class="ocw-batch-drawer-section ocw-batch-drawer-overview-brief">
         <div class="ocw-batch-drawer-field-grid">
           ${fields.map(([label, value]) => `<div><span>${this.escape(label)}</span><strong>${this.escape(this.formatValue(value))}</strong></div>`).join("")}
         </div>
@@ -7104,11 +7112,12 @@ class OverseasCostWorkbench {
       { label: "回写状态", value: writebackInfo.label, state: writebackInfo.state },
       { label: "业务主体", value: batch.subsidiary_code || "--", state: this.hasText(batch.subsidiary_code) ? "is-ok" : "is-warn" },
     ];
+    const blockHtml = this.renderErpFlowBlockInline(batch);
     return `
       <div class="ocw-batch-drawer-section">
         <div class="ocw-erp-flow-panel">
           <div class="ocw-erp-flow-head">
-            <h4>综合单价确认</h4>
+            <h4>校验计算结果</h4>
             <span>${this.escape(statusInfo.label || "")}</span>
           </div>
           <div class="ocw-erp-flow-grid">
@@ -7130,6 +7139,7 @@ class OverseasCostWorkbench {
           </div>
           <div class="ocw-erp-flow-note">${this.escape(note)}</div>
         </div>
+        ${blockHtml}
       </div>
     `;
   }
@@ -7599,7 +7609,7 @@ class OverseasCostWorkbench {
       BATCH_VIEW: "查看批次",
       DINGTALK_PULL: "钉钉拉取",
       EXCEL_IMPORT: "Excel 导入",
-      FILE_PARSE: "文件解析",
+      FILE_PARSE: "凭证对比",
       RECALCULATE: "重新试算",
       CONFIRM_RESULT: "校验结果",
       PREVIEW_ERP: "预览 ERP",

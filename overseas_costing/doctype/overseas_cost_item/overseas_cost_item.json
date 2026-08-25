@@ -82,6 +82,7 @@
     "total_cost_rmb",
     "total_unit_rmb",
     "project_collection",
+    "supplier",
     "transport_mode",
     "source_type",
     "source_doc_no",
@@ -483,6 +484,11 @@
       "label": "项目归集"
     },
     {
+      "fieldname": "supplier",
+      "fieldtype": "Data",
+      "label": "供应商"
+    },
+    {
       "fieldname": "transport_mode",
       "fieldtype": "Select",
       "label": "运输方式",
@@ -568,6 +574,16 @@
       "print": 1,
       "email": 1,
       "export": 1
+    },
+    {
+      "role": "海外成本核算用户",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1,
+      "report": 1
     }
   ]
 }

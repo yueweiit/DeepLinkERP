@@ -55,8 +55,8 @@
       "fieldname": "push_mode",
       "fieldtype": "Select",
       "label": "推送模式",
-      "options": "standard_purchase\n标准模块（物料+采购订单）\ngeneric_resource\n通用单据",
-      "default": "standard_purchase",
+      "options": "标准模块（物料+采购订单）\n通用单据",
+      "default": "标准模块（物料+采购订单）",
       "description": "默认直接推送 ERPNext 标准模块：物料 Item + 采购订单 Purchase Order。"
     },
     {
