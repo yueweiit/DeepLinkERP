@@ -22,6 +22,7 @@ DAILY_NAVIGATION = (
 
 VOUCHER_NAVIGATION = (
 	("Journal Entry", "记账凭证", "DocType"),
+	("China Accounting Voucher", "中国会计凭证", "DocType"),
 	("Period Closing Voucher", "期末结账凭证", "DocType"),
 	("China Closing Run", "中国结账运行单", "DocType"),
 )
@@ -408,12 +409,14 @@ def sync_sales_settlement_custom_fields():
 	create_custom_fields({
 		"Journal Entry": [
 			{"fieldname": "custom_china_voucher_number", "label": "凭证字号", "fieldtype": "Data", "read_only": 1, "in_list_view": 1, "insert_before": "name"},
+			{"fieldname": "custom_china_bank_transaction", "label": "银行流水来源", "fieldtype": "Link", "options": "Bank Transaction", "read_only": 1, "insert_after": "cheque_no"},
 		],
 		"Payment Entry": [
 			{"fieldname": "custom_china_voucher_number", "label": "凭证字号", "fieldtype": "Data", "read_only": 1, "in_list_view": 1, "insert_before": "name"},
 		],
 		"Bank Transaction": [
 			{"fieldname": "custom_summary", "label": "摘要", "fieldtype": "Small Text", "insert_after": "description"},
+			{"fieldname": "custom_china_journal_entry", "label": "对应记账凭证", "fieldtype": "Link", "options": "Journal Entry", "read_only": 1, "insert_after": "payment_entries"},
 		],
 		"Sales Order": [
 			{"fieldname": "custom_china_settlement_section", "label": "中国财务结算", "fieldtype": "Section Break", "insert_after": "customer_name"},
@@ -587,9 +590,10 @@ def _sidebar_section(label, icon, keep_closed=0):
 def _desired_sidebar_items(custom_links=None):
 	items = [
 		{
-			"type": "Link", "label": "中国财务工作台", "link_to": "China Finance",
-			"link_type": "Workspace", "child": 0, "collapsible": 1, "indent": 0,
-			"keep_closed": 0, "show_arrow": 0, "icon": "landmark",
+			"type": "Link", "label": "中国财务工作台",
+			"link_type": "URL", "url": "/desk/china-finance", "child": 0,
+			"collapsible": 1, "indent": 0, "keep_closed": 0, "show_arrow": 0,
+			"icon": "landmark",
 		},
 		{**_sidebar_link(*MAPPING_CONSOLE_LINK), "child": 0, "icon": MAPPING_CONSOLE_ICON},
 	]

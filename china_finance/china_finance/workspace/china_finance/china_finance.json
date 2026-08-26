@@ -1,7 +1,7 @@
 {
  "app": "china_finance",
  "charts": [],
- "content": "[{\"id\":\"cf-daily\",\"type\":\"card\",\"data\":{\"card_name\":\"\u65e5\u5e38\u5de5\u4f5c\",\"col\":4}},{\"id\":\"cf-closing\",\"type\":\"card\",\"data\":{\"card_name\":\"\u62a5\u8868\u4e0e\u7ed3\u8d26\",\"col\":4}},{\"id\":\"cf-admin-1\",\"type\":\"card\",\"data\":{\"card_name\":\"\u542f\u7528\u4e0e\u57fa\u7840\u8bbe\u7f6e\",\"col\":4}},{\"id\":\"cf-admin-2\",\"type\":\"card\",\"data\":{\"card_name\":\"\u4e1a\u52a1\u63a7\u5236\u89c4\u5219\",\"col\":4}},{\"id\":\"cf-admin-3\",\"type\":\"card\",\"data\":{\"card_name\":\"\u6cd5\u5b9a\u62a5\u8868\u914d\u7f6e\",\"col\":4}},{\"id\":\"cf-admin-4\",\"type\":\"card\",\"data\":{\"card_name\":\"\u5ba1\u8ba1\u4e0e\u5f52\u6863\",\"col\":4}}]",
+ "content": "[{\"id\":\"cf-nav-1\",\"type\":\"card\",\"data\":{\"card_name\":\"\u65e5\u5e38\u5de5\u4f5c\",\"col\":4}},{\"id\":\"cf-nav-2\",\"type\":\"card\",\"data\":{\"card_name\":\"\u51ed\u8bc1\u4e0e\u7ed3\u8d26\",\"col\":4}},{\"id\":\"cf-nav-3\",\"type\":\"card\",\"data\":{\"card_name\":\"\u62a5\u8868\u4e0e\u67e5\u8be2\",\"col\":4}},{\"id\":\"cf-nav-4\",\"type\":\"card\",\"data\":{\"card_name\":\"\u94f6\u884c\u4e0e\u5bf9\u8d26\",\"col\":4}},{\"id\":\"cf-admin-1\",\"type\":\"card\",\"data\":{\"card_name\":\"\u542f\u7528\u4e0e\u57fa\u7840\u8bbe\u7f6e\",\"col\":4}},{\"id\":\"cf-admin-2\",\"type\":\"card\",\"data\":{\"card_name\":\"\u4e1a\u52a1\u63a7\u5236\u89c4\u5219\",\"col\":4}},{\"id\":\"cf-admin-3\",\"type\":\"card\",\"data\":{\"card_name\":\"\u6cd5\u5b9a\u62a5\u8868\u914d\u7f6e\",\"col\":4}},{\"id\":\"cf-admin-4\",\"type\":\"card\",\"data\":{\"card_name\":\"\u5ba1\u8ba1\u4e0e\u5f52\u6863\",\"col\":4}}]",
  "creation": "2026-07-17 00:00:00",
  "custom_blocks": [],
  "docstatus": 0,
@@ -55,7 +55,7 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "\u51ed\u8bc1\u4e0e\u7ed3\u8d26",
-   "link_count": 3,
+   "link_count": 4,
    "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
@@ -66,6 +66,16 @@
    "label": "\u8bb0\u8d26\u51ed\u8bc1",
    "link_count": 0,
    "link_to": "Journal Entry",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "\u4e2d\u56fd\u4f1a\u8ba1\u51ed\u8bc1",
+   "link_count": 0,
+   "link_to": "China Accounting Voucher",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -355,7 +365,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-24 06:39:31.269852",
+ "modified": "2026-08-25 07:28:21.836381",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Finance",

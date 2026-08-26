@@ -13,10 +13,10 @@
    "indent": 0,
    "keep_closed": 0,
    "label": "\u4e2d\u56fd\u8d22\u52a1\u5de5\u4f5c\u53f0",
-   "link_to": "China Finance",
-   "link_type": "Workspace",
+   "link_type": "URL",
    "show_arrow": 0,
-   "type": "Link"
+   "type": "Link",
+   "url": "/desk/china-finance"
   },
   {
    "child": 0,
@@ -92,6 +92,17 @@
    "keep_closed": 0,
    "label": "\u8bb0\u8d26\u51ed\u8bc1",
    "link_to": "Journal Entry",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "\u4e2d\u56fd\u4f1a\u8ba1\u51ed\u8bc1",
+   "link_to": "China Accounting Voucher",
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Link"
@@ -416,7 +427,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-24 06:39:31.204455",
+ "modified": "2026-08-25 11:38:23.715936",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Finance",

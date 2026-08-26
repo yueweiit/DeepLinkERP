@@ -67,48 +67,84 @@ def clean_bank_summary(value):
 
 @frappe.whitelist()
 def create_journal_entry_with_summary(remarks=None, **kwargs):
-	"""Create the native editable Journal Entry draft and set its summary."""
+	"""Create an editable Journal Entry draft and link it to the bank transaction."""
 	kwargs.pop("cmd", None)
-	allow_edit = kwargs.pop("allow_edit", None)
+	kwargs.pop("allow_edit", None)
 	journal_entry = create_journal_entry_bts(**kwargs, allow_edit=True)
 	if remarks:
-		journal_entry.remarks = remarks
+		if journal_entry.meta.has_field("user_remark"):
+			journal_entry.user_remark = remarks
+		if journal_entry.meta.has_field("remark"):
+			journal_entry.remark = remarks
 		for entry in journal_entry.accounts:
 			entry.user_remark = remarks
-	if allow_edit:
-		return journal_entry
-
+	if journal_entry.meta.has_field("custom_china_bank_transaction"):
+		journal_entry.custom_china_bank_transaction = kwargs["bank_transaction_name"]
 	journal_entry.insert()
-	journal_entry.submit()
-	bank_transaction = frappe.db.get_value(
-		"Bank Transaction",
-		kwargs["bank_transaction_name"],
-		["deposit", "withdrawal"],
-		as_dict=True,
-	)
-	paid_amount = (
-		bank_transaction.deposit
-		if bank_transaction.deposit > 0.0
-		else bank_transaction.withdrawal
-	)
-	return reconcile_vouchers(
-		kwargs["bank_transaction_name"],
-		json.dumps([{
-			"payment_doctype": "Journal Entry",
-			"payment_name": journal_entry.name,
-			"amount": paid_amount,
-		}]),
-	)
+	if frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
+		frappe.db.set_value(
+			"Bank Transaction",
+			kwargs["bank_transaction_name"],
+			"custom_china_journal_entry",
+			journal_entry.name,
+			update_modified=False,
+		)
+	return journal_entry
+
+
+def on_journal_entry_submit(doc, method=None):
+	"""Reconcile a reviewed bank-generated Journal Entry after it is submitted."""
+	bank_transaction_name = doc.get("custom_china_bank_transaction")
+	if not bank_transaction_name or not frappe.db.exists("Bank Transaction", bank_transaction_name):
+		return
+
+	bank_transaction = frappe.get_doc("Bank Transaction", bank_transaction_name)
+	if bank_transaction.docstatus != 1 or flt(bank_transaction.allocated_amount) > 0:
+		return
+
+	if frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
+		frappe.db.set_value(
+			"Bank Transaction",
+			bank_transaction_name,
+			"custom_china_journal_entry",
+			doc.name,
+			update_modified=False,
+		)
+
+	amount = flt(bank_transaction.deposit) if flt(bank_transaction.deposit) > 0 else flt(bank_transaction.withdrawal)
+	if amount <= 0:
+		return
+
+	try:
+		reconcile_vouchers(
+			bank_transaction_name,
+			json.dumps([{
+				"payment_doctype": "Journal Entry",
+				"payment_name": doc.name,
+				"amount": amount,
+			}]),
+		)
+	except Exception:
+		frappe.log_error(
+			f"Bank reconciliation after Journal Entry submit failed for {doc.name}: {frappe.get_traceback()}",
+			"Bank Reconciliation After Journal Entry Submit",
+		)
 
 
 def auto_create_voucher_on_submit(doc, method=None):
-	"""Create a Journal Entry when a Bank Transaction is submitted.
+	"""Create a draft Journal Entry when a Bank Transaction is submitted.
 
 	Called via doc_events on_submit hook. Only creates a voucher if:
 	- The bank transaction has no allocated amount yet
 	- A matching bank account GL account exists
 	"""
 	if flt(doc.allocated_amount) > 0:
+		return
+	if (
+		frappe.db.has_column("Bank Transaction", "custom_china_journal_entry")
+		and doc.get("custom_china_journal_entry")
+		and frappe.db.exists("Journal Entry", doc.custom_china_journal_entry)
+	):
 		return
 
 	bank_account_gl = frappe.db.get_value("Bank Account", doc.bank_account, "account")
@@ -138,7 +174,11 @@ def auto_create_voucher_on_submit(doc, method=None):
 		je.voucher_type = "Journal Entry"
 		je.cheque_no = doc.reference_number or doc.name
 		je.cheque_date = doc.date
-		je.remark = f"Auto-created for bank transaction {doc.name}: {desc}"
+		je.remark = f"银行流水 {doc.name}：{desc}"
+		if je.meta.has_field("user_remark"):
+			je.user_remark = clean_bank_summary(desc)
+		if je.meta.has_field("custom_china_bank_transaction"):
+			je.custom_china_bank_transaction = doc.name
 
 		if is_withdrawal:
 			je.append("accounts", {
@@ -164,19 +204,16 @@ def auto_create_voucher_on_submit(doc, method=None):
 			})
 
 		je.insert(ignore_permissions=True)
-		je.submit()
-
-		# Auto-reconcile
-		reconcile_vouchers(
-			doc.name,
-			json.dumps([{
-				"payment_doctype": "Journal Entry",
-				"payment_name": je.name,
-				"amount": amount,
-			}]),
-		)
+		if frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
+			frappe.db.set_value(
+				"Bank Transaction",
+				doc.name,
+				"custom_china_journal_entry",
+				je.name,
+				update_modified=False,
+			)
 		frappe.msgprint(
-			f"Auto-created Journal Entry {je.name} for Bank Transaction {doc.name}",
+			f"已为银行流水 {doc.name} 生成待审核记账凭证 {je.name}，请检查后手动提交",
 			alert=True,
 		)
 

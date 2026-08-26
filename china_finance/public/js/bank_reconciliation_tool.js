@@ -116,14 +116,16 @@ frappe.ui.form.on("Bank Reconciliation Tool", {
 					entry_type: values.journal_entry_type,
 					second_account: values.second_account,
 					remarks: this.bank_transaction.custom_summary || this.bank_transaction.description || "",
+					allow_edit: true,
 				},
 				callback: (response) => {
-					const alert_string = __("Bank Transaction {0} added as Journal Entry", [
+					const docs = frappe.model.sync(response.message);
+					const alert_string = __("Bank Transaction {0} added as a draft Journal Entry", [
 						this.bank_transaction.name,
 					]);
 					frappe.show_alert(alert_string);
-					this.update_dt_cards(response.message);
 					this.dialog.hide();
+					if (docs?.[0]) frappe.set_route("Form", docs[0].doctype, docs[0].name);
 				},
 			});
 	};

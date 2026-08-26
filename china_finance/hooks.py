@@ -208,10 +208,27 @@ _gl_source_approval_events = {
 _journal_entry_events = {
 	"before_naming": "china_finance.services.naming.sync_journal_entry_series",
 	**_gl_source_approval_events,
+	"on_submit": [
+		"china_finance.services.voucher.on_gl_source_submit",
+		"china_finance.services.bank_reconciliation.on_journal_entry_submit",
+	],
+	"on_cancel": "china_finance.services.voucher.on_gl_source_cancel",
+}
+
+_payment_entry_events = {
+	**_gl_source_approval_events,
+	"on_submit": "china_finance.services.voucher.on_gl_source_submit",
+	"on_cancel": "china_finance.services.voucher.on_gl_source_cancel",
 }
 
 doc_events = {
-	doctype: _journal_entry_events if doctype == "Journal Entry" else _gl_source_approval_events
+	doctype: (
+		_journal_entry_events
+		if doctype == "Journal Entry"
+		else _payment_entry_events
+		if doctype == "Payment Entry"
+		else _gl_source_approval_events
+	)
 	for doctype in (
 		"Journal Entry",
 		"Payment Entry",
