@@ -72,6 +72,7 @@ class OverseasCostWorkbench {
     this.isParsingManualDocuments = false;
     this.defaultRecentDays = 30;
     this.erpFlowBlockState = null;
+    this.advancedFiltersOpen = false;
   }
 
   init() {
@@ -162,50 +163,34 @@ class OverseasCostWorkbench {
     this.$root = $(`
       <div class="ocw-page">
         <div class="ocw-shell">
-          <aside class="ocw-sidebar">
-            <div class="ocw-brand">
-              <div class="ocw-logo">YW</div>
-              <div>
-                <p>Mexico Ocean Costing</p>
-                <h1>海外采购综合成本核算</h1>
-              </div>
-            </div>
-            <section class="ocw-logistics-panel">
-              <div class="ocw-logistics-panel-head">
-                <span>运输方式</span>
-                <button class="ocw-text-btn" type="button" data-action="set-transport-filter" data-transport-mode="">全部</button>
-              </div>
-              <div class="ocw-logistics-list" data-area="transport-workbench"></div>
-              <div class="ocw-sidebar-scope-note">
-                <span>仅显示近 30 天拉取数据</span>
-                <span>历史单据请用单号搜索</span>
-              </div>
-            </section>
-          </aside>
-
           <main class="ocw-main">
             <section class="ocw-workbench-card">
               <div class="ocw-workbench-head">
                 <div>
-                  <h3>SKU 成本分摊明细 / 物料详情</h3>
-                  <p>父级行展示报关单号、运单号、运费汇总；展开后按 Excel A~BE 原列顺序查看 SKU 明细。</p>
-                  <div class="ocw-data-scope-note">当前默认显示：最近 30 天钉钉单据；输入批次号、报关单号或运单号可追溯历史单据。</div>
+                  <h3>海外采购综合成本核算</h3>
+                  <p>先定位报关/来源单，再按需查看批次详情或展开 SKU 成本明细。</p>
+                  <div class="ocw-data-scope-note">默认显示最近 30 天数据；历史单据可通过单号搜索。</div>
                 </div>
                 <div class="ocw-head-actions">
                   <span class="ocw-summary-pill" data-area="hierarchy-summary">加载批次中</span>
-                  <button class="ocw-warning-btn ocw-mini-btn" data-action="file-parse">凭证对比</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">商品归类</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="pull-oa-logistics">钉钉拉取</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="add-batch">+ 添加报关运单</button>
-                  <div class="ocw-head-export-row">
-                    <button class="ocw-success-btn ocw-mini-btn" data-action="export-current">导出当前全部批次结果</button>
-                  </div>
+                  <details class="ocw-head-more">
+                    <summary class="ocw-outline-btn ocw-mini-btn">更多操作</summary>
+                    <div class="ocw-head-more-menu">
+                      <button class="ocw-warning-btn ocw-mini-btn" data-action="file-parse">凭证对比</button>
+                      <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">商品归类</button>
+                      <button class="ocw-outline-btn ocw-mini-btn" data-action="pull-oa-logistics">钉钉拉取</button>
+                      <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
+                      <button class="ocw-success-btn ocw-mini-btn" data-action="export-current">导出当前结果</button>
+                    </div>
+                  </details>
                 </div>
               </div>
 
+              <div class="ocw-transport-tabs" data-area="transport-workbench" aria-label="按运输方式筛选"></div>
+
               <div class="ocw-query-toolbar">
-                <div class="ocw-filter-grid">
+                <div class="ocw-filter-grid ocw-filter-grid-primary">
                   <label class="ocw-toolbar-field">
                     <span>报关单号</span>
                     <input data-filter="customs_no" class="form-control" type="search" placeholder="请输入报关单号" />
@@ -218,6 +203,13 @@ class OverseasCostWorkbench {
                     <span>物料编码</span>
                     <input data-filter="material_code" class="form-control" type="search" placeholder="请输入物料编码" />
                   </label>
+                  <div class="ocw-filter-actions">
+                    <button class="ocw-primary-btn ocw-mini-btn" data-action="apply-filters">查询</button>
+                    <button class="ocw-outline-btn ocw-mini-btn" data-action="clear-filters">重置</button>
+                    <button class="ocw-text-btn ocw-mini-btn" type="button" data-action="toggle-advanced-filters" aria-expanded="false">高级筛选</button>
+                  </div>
+                </div>
+                <div class="ocw-filter-grid ocw-filter-grid-advanced" data-area="advanced-filters" hidden>
                   <label class="ocw-toolbar-field">
                     <span>物料名称</span>
                     <input data-filter="product_name" class="form-control" type="search" placeholder="请输入物料名称" />
@@ -234,10 +226,6 @@ class OverseasCostWorkbench {
                     <span>大类</span>
                     <input data-filter="category" class="form-control" type="search" placeholder="请输入大类" />
                   </label>
-                  <div class="ocw-filter-actions">
-                    <button class="ocw-primary-btn ocw-mini-btn" data-action="apply-filters">查询</button>
-                    <button class="ocw-outline-btn ocw-mini-btn" data-action="clear-filters">重置</button>
-                  </div>
                 </div>
                 <div class="ocw-query-footer">
                   <div class="ocw-search-result" data-area="search-result">所有输入框均为可选，可单独或组合查询</div>
@@ -247,12 +235,14 @@ class OverseasCostWorkbench {
               <div class="ocw-table-toolbar">
                 <div class="ocw-table-toolbar-left">
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="clear-batch-focus" hidden>返回全部批次</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="expand-current">+ 全部展开</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="collapse-current">- 全部收起</button>
                   <strong data-area="table-title">明细</strong>
                   <span data-area="table-count"></span>
                 </div>
                 <div class="ocw-table-actions">
+                  <div class="ocw-role-switch" aria-label="列表角色视图">
+                    <button class="active" type="button" data-action="set-role-view" data-role-view="purchase">采购视图</button>
+                    <button type="button" data-action="set-role-view" data-role-view="finance">财务视图</button>
+                  </div>
                   <div class="ocw-view-switch">
                     <button class="active" type="button" data-action="set-main-view" data-view="cost">成本列表</button>
                     <button type="button" data-action="set-main-view" data-view="erp_queue">ERP 队列</button>
@@ -267,7 +257,7 @@ class OverseasCostWorkbench {
               <div class="ocw-batch-drawer-head">
                 <div>
                   <span>批次详情</span>
-                  <strong data-area="batch-drawer-title">双击批次查看详情</strong>
+                  <strong data-area="batch-drawer-title">选择单号查看批次详情</strong>
                 </div>
               <div class="ocw-batch-drawer-head-actions">
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="clear-batch-focus">返回全部批次</button>
@@ -316,6 +306,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='set-erp-queue-status']", (event) => this.setErpQueueStatus($(event.currentTarget).attr("data-status")));
     this.$root.on("click", "[data-action='apply-filters']", () => this.applyFilters());
     this.$root.on("click", "[data-action='clear-filters']", () => this.clearFilters());
+    this.$root.on("click", "[data-action='toggle-advanced-filters']", () => this.toggleAdvancedFilters());
     this.$root.on("click", "[data-action='set-transport-filter']", (event) =>
       this.setTransportFilter($(event.currentTarget).attr("data-transport-mode")).catch((error) => this.showError(error))
     );
@@ -612,6 +603,15 @@ class OverseasCostWorkbench {
     this.resetBatchScopeState();
     this.batchItems = {};
     this.loadBatches();
+  }
+
+  toggleAdvancedFilters() {
+    this.advancedFiltersOpen = !this.advancedFiltersOpen;
+    const $panel = this.$root.find("[data-area='advanced-filters']");
+    const $button = this.$root.find("[data-action='toggle-advanced-filters']");
+    $panel.prop("hidden", !this.advancedFiltersOpen);
+    $button.attr("aria-expanded", String(this.advancedFiltersOpen));
+    $button.text(this.advancedFiltersOpen ? "收起筛选" : "高级筛选");
   }
 
   resetBatchScopeState() {
@@ -5888,22 +5888,20 @@ class OverseasCostWorkbench {
     const stats = this.transportWorkbenchStats();
     const activeMode = this.normalizeTransportMode(this.filters.transport_mode);
     const totalCount = (this.batches || []).length;
-    this.$root
-      .find("[data-action='set-transport-filter'][data-transport-mode='']")
-      .toggleClass("active", !activeMode)
-      .text(activeMode ? "全部" : `全部 ${totalCount}`);
-    const html = modes
+    const options = [
+      { value: "", label: "全部", count: totalCount },
+      ...modes.map((mode) => ({
+        ...mode,
+        count: (stats[mode.value] || {}).batchCount || 0,
+      })),
+    ];
+    const html = options
       .map((mode) => {
-        const row = stats[mode.value] || { batchCount: 0, itemCount: 0 };
         const isActive = activeMode === mode.value;
         return `
-          <button class="ocw-logistics-card ${isActive ? "active" : ""}" type="button" data-action="set-transport-filter" data-transport-mode="${this.escape(mode.value)}">
-            <span>
-              <strong>${this.escape(mode.label)}</strong>
-              <em>${this.escape(mode.tip)}</em>
-            </span>
-            <b>${this.escape(String(row.batchCount))}</b>
-            <small>${this.escape(String(row.itemCount))} 行物料</small>
+          <button class="ocw-transport-tab ${isActive ? "active" : ""}" type="button" data-action="set-transport-filter" data-transport-mode="${this.escape(mode.value)}">
+            <span>${this.escape(mode.label)}</span>
+            <b>${this.escape(String(mode.count))}</b>
           </button>
         `;
       })

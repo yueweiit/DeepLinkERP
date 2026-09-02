@@ -10,6 +10,101 @@
   min-height: calc(100vh - 160px);
 }
 
+/* 2026 工作台密度改版：主内容单列、运输方式横向展示。 */
+.ocw-shell {
+  display: block;
+}
+
+.ocw-main {
+  min-width: 0;
+  width: 100%;
+}
+
+.ocw-transport-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 10px 16px 4px;
+  scrollbar-width: thin;
+}
+
+.ocw-transport-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid #b8cecc;
+  border-radius: 999px;
+  background: #fff;
+  color: #47605f;
+  white-space: nowrap;
+}
+
+.ocw-transport-tab b {
+  color: #0d777a;
+}
+
+.ocw-transport-tab.active {
+  border-color: #0d777a;
+  background: #e2f3f1;
+  color: #075f62;
+  box-shadow: inset 0 0 0 1px rgba(13, 119, 122, 0.12);
+}
+
+.ocw-filter-grid-primary {
+  grid-template-columns: repeat(3, minmax(180px, 1fr)) auto;
+}
+
+.ocw-filter-grid-advanced {
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  margin-top: 10px;
+}
+
+.ocw-filter-grid-advanced[hidden] {
+  display: none !important;
+}
+
+.ocw-head-more {
+  position: relative;
+}
+
+.ocw-head-more > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.ocw-head-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ocw-head-more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 6px;
+  min-width: 190px;
+  padding: 8px;
+  border: 1px solid #c8d8d6;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(22, 57, 58, 0.16);
+}
+
+.ocw-head-more-menu button {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+@media (max-width: 1100px) {
+  .ocw-filter-grid-primary,
+  .ocw-filter-grid-advanced {
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+  }
+}
+
 .ocw-topbar {
   display: flex;
   gap: 12px;
@@ -5662,6 +5757,40 @@
   }
 
   .ocw-batch-drawer-overview-brief .ocw-batch-drawer-field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Keep density-layout overrides after legacy workbench rules. */
+.ocw-page .ocw-shell {
+  display: block;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ocw-page .ocw-main {
+  min-width: 0;
+  width: 100%;
+}
+
+.ocw-page .ocw-filter-grid-primary {
+  grid-template-columns: repeat(3, minmax(180px, 1fr)) auto;
+}
+
+.ocw-page .ocw-filter-grid-advanced {
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  margin-top: 10px;
+}
+
+@media (max-width: 1100px) {
+  .ocw-page .ocw-filter-grid-primary,
+  .ocw-page .ocw-filter-grid-advanced {
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .ocw-page .ocw-filter-grid-primary,
+  .ocw-page .ocw-filter-grid-advanced {
     grid-template-columns: 1fr;
   }
 }
