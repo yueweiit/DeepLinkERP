@@ -134,7 +134,21 @@ function apply_balance_sheet_compact_style() {
 function add_china_finance_export_actions(report) {
 	if (report.__china_finance_export_actions_added || !report.page?.add_action_item) return;
 	report.__china_finance_export_actions_added = true;
-	const excel_item = report.page.add_action_item(__("导出 Excel"), () => frappe.query_report.export_report());
+	const excel_item = report.page.add_action_item(__("导出 Excel"), () => {
+		frappe.call({
+			method: "china_finance.china_finance.report.china_financial_statements.china_financial_statements.export_current_report_xlsx",
+			args: { filters: report.get_filter_values() },
+			freeze: true,
+			freeze_message: __("正在生成 Excel"),
+			callback(response) {
+				const file_url = response.message?.file_url;
+				if (!file_url) {
+					frappe.throw(__("Excel 生成失败，未返回文件链接"));
+				}
+				window.open(file_url, "_blank", "noopener");
+			},
+		});
+	});
 	const pdf_item = report.page.add_action_item(__("导出 PDF"), () => {
 		frappe.call({
 			method: "china_finance.china_finance.report.china_financial_statements.china_financial_statements.export_current_report_pdf",

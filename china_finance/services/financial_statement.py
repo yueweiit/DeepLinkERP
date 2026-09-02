@@ -146,9 +146,10 @@ def build_statement(
 		ytd_values = get_statement_values(
 			company, mappings, statement_type, year_start, to_date, finance_book, cost_center, project, template=template
 		)
+		opening_date = add_days(year_start, -1) if statement_type == "Balance Sheet" else add_days(from_date, -1)
 		opening_values = (
 			get_statement_values(
-				company, mappings, statement_type, None, add_days(from_date, -1), finance_book, cost_center, project,
+				company, mappings, statement_type, None, opening_date, finance_book, cost_center, project,
 				as_at_date=True, template=template, reclassifications=reclassifications,
 			)
 			if statement_type in {"Balance Sheet", "Changes in Equity"} else None
@@ -619,7 +620,7 @@ def _roll_up_small_profit_and_loss_rows(template, values):
 		for child in rows[index + 1:]:
 			if child.indent <= parent.indent:
 				break
-			if child.row_type == "Mapped Accounts" and not (child.label or "").strip().startswith("其中："):
+			if child.row_type == "Mapped Accounts":
 				children.append(child.row_code)
 		if children:
 			values[parent.row_code] += sum(flt(values[code]) for code in children)

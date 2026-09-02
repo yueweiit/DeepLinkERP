@@ -9,6 +9,7 @@ from china_finance.services.financial_statement import (
 	get_comparison_period,
 	get_fiscal_year_start,
 	get_template,
+	get_unclosed_profit,
 )
 
 
@@ -16,6 +17,10 @@ def _apply_default_period(filters):
 	"""Resolve the report period before the browser-side filter script is ready."""
 	to_date = getdate(filters.to_date or nowdate())
 	filters.to_date = to_date
+	if not filters.get("fiscal_year"):
+		from erpnext.accounts.utils import get_fiscal_year
+
+		filters.fiscal_year = get_fiscal_year(to_date, company=filters.company)[0]
 	filters.from_date = getdate(filters.from_date or get_fiscal_year_start(filters.company, to_date))
 
 
@@ -40,10 +45,6 @@ def execute(filters=None):
 	)
 	comparison_from = filters.comparison_from_date
 	comparison_to = filters.comparison_to_date
-	if not comparison_to:
-		comparison_from, comparison_to = get_comparison_period(
-			filters.company, filters.statement_type, filters.from_date, filters.to_date
-		)
 	if comparison_to and get_template(
 		filters.company, filters.statement_type, comparison_to, required=False
 	):
@@ -94,7 +95,11 @@ def execute(filters=None):
 		)
 	if filters.statement_type == "Profit and Loss":
 		return (
-			get_columns(include_variance=True, company=filters.company),
+			get_columns(
+				include_comparison=bool(comparison_to),
+				include_variance=bool(comparison_to),
+				company=filters.company,
+			),
 			result["rows"],
 			message,
 			get_profit_and_loss_chart(result["rows"], filters.company, filters),
@@ -102,7 +107,7 @@ def execute(filters=None):
 		)
 	if filters.statement_type == "Cash Flow":
 		return (
-			get_columns(company=filters.company),
+			get_columns(include_comparison=bool(comparison_to), company=filters.company),
 			result["rows"],
 			message,
 			get_cash_flow_chart(result["rows"], filters.company, filters),
@@ -110,7 +115,7 @@ def execute(filters=None):
 		)
 	if filters.statement_type == "Changes in Equity" and result.get("equity_matrix"):
 		return get_equity_columns(result["equity_matrix"], filters.company), result["equity_matrix"]["rows"], message
-	return get_columns(company=filters.company), result["rows"], message
+	return get_columns(include_comparison=bool(comparison_to), company=filters.company), result["rows"], message
 
 
 def execute_native_trial_balance(filters, activity_balance=False):
@@ -132,16 +137,52 @@ def execute_native_trial_balance(filters, activity_balance=False):
 		"project": filters.project,
 		"include_default_book_entries": 1,
 		"show_net_values": 1,
-		"show_group_accounts": 1,
+		"show_group_accounts": 0,
 		"show_zero_values": filters.get("show_zero_values", 0),
 		"with_period_closing_entry_for_opening": 1,
 		"with_period_closing_entry_for_current_period": 1,
 	})
 	columns, data = execute_trial_balance(native_filters)
 	_adjust_opening_entries_by_posting_date(data, filters)
+	_format_native_account_labels(columns, data, filters.company)
 	if activity_balance:
 		_rename_activity_balance_columns(columns)
+		return columns, data, _activity_balance_message(filters)
 	return columns, data
+
+
+def _format_native_account_labels(columns, rows, company):
+	"""Show the numbered account hierarchy without changing the Account master."""
+	accounts = frappe.get_all(
+		"Account",
+		filters={"company": company},
+		fields=["name", "account_number", "account_name", "parent_account"],
+	)
+	account_map = {account.name: account for account in accounts}
+	label_cache = {}
+
+	def account_label(account_name):
+		if account_name in label_cache:
+			return label_cache[account_name]
+		parts = []
+		visited = set()
+		current = account_map.get(account_name)
+		while current and current.name not in visited:
+			visited.add(current.name)
+			if current.account_number:
+				parts.append(f"{current.account_number} - {current.account_name}")
+			current = account_map.get(current.parent_account)
+		label_cache[account_name] = " - ".join(reversed(parts)) or account_name
+		return label_cache[account_name]
+
+	for column in columns:
+		if column.get("fieldname") == "account":
+			column["fieldtype"] = "Data"
+			column.pop("options", None)
+			column["width"] = max(column.get("width") or 0, 280)
+	for row in rows:
+		if row.get("account") in account_map:
+			row["account"] = account_label(row["account"])
 
 
 def _adjust_opening_entries_by_posting_date(rows, filters):
@@ -237,6 +278,22 @@ def _rename_activity_balance_columns(columns):
 	"""Use Chinese period labels and wider native columns for this report."""
 	for column in columns:
 		fieldname = column.get("fieldname")
+		labels = {
+			"account": _("科目"),
+			"acc_name": _("科目名称"),
+			"acc_number": _("科目编码"),
+			"currency": _("币种"),
+			"opening_debit": _("期初（借方）"),
+			"opening_credit": _("期初（贷方）"),
+			"debit": _("本期借方"),
+			"credit": _("本期贷方"),
+			"closing_debit": _("期末（借方）"),
+			"closing_credit": _("期末（贷方）"),
+			"party_type": _("往来类型"),
+			"party": _("往来单位"),
+		}
+		if fieldname in labels:
+			column["label"] = labels[fieldname]
 		native_widths = {
 			"account": 280,
 			"party_type": 120,
@@ -414,7 +471,7 @@ def execute_account_activity_balance(filters):
 		"project": filters.project,
 		"include_default_book_entries": 1,
 		"show_net_values": 1,
-		"show_group_accounts": 1,
+		"show_group_accounts": 0,
 		"show_zero_values": filters.get("show_zero_values", 0),
 		"with_period_closing_entry_for_opening": 1,
 		"with_period_closing_entry_for_current_period": 1,
@@ -422,11 +479,12 @@ def execute_account_activity_balance(filters):
 	columns, native_rows = execute_trial_balance(native_filters)
 	_adjust_opening_entries_by_posting_date(native_rows, filters)
 	if not filters.get("expand_party"):
-		return columns, native_rows, _("数据来源：ERPNext 原生试算平衡表")
+		_format_native_account_labels(columns, native_rows, filters.company)
+		return columns, native_rows, _activity_balance_message(filters)
 
 	account_names = [row.get("account") for row in native_rows if row.get("account") and row.get("is_group_account") == 0]
 	if not account_names:
-		return columns, native_rows, _("数据来源：ERPNext 原生试算平衡表")
+		return columns, native_rows, _activity_balance_message(filters)
 	params = {"company": filters.company, "from_date": filters.from_date, "to_date": filters.to_date, "accounts": tuple(account_names)}
 	conditions = ["gle.company=%(company)s", "gle.is_cancelled=0", "gle.account IN %(accounts)s"]
 	if filters.finance_book:
@@ -498,7 +556,26 @@ def execute_account_activity_balance(filters):
 					"closing_credit": party.get("closing_credit"),
 				}
 				output.append(party_row)
-	return party_columns, output
+	_format_native_account_labels(party_columns, output, filters.company)
+	return party_columns, output, _activity_balance_message(filters)
+
+
+def _activity_balance_message(filters):
+	message = _("数据来源：ERPNext 原生试算平衡表")
+	open_profit = get_unclosed_profit(
+		filters.company,
+		filters.to_date,
+		filters.finance_book,
+		filters.cost_center,
+		filters.project,
+	)
+	if abs(flt(open_profit)) > 0.005:
+		closing_account = frappe.db.get_value("China Finance Settings", filters.company, "profit_loss_account")
+		closing_label = closing_account or _("本年利润")
+		message += _("；提示：截至 {0} 损益类科目尚未全部结转至 {1}，当前净余额 {2}，需完成月度结转后再作为正式报表使用").format(
+			filters.to_date, closing_label, flt(open_profit, 2)
+		)
+	return message
 
 
 def _set_report_currency(columns, company):
@@ -509,14 +586,15 @@ def _set_report_currency(columns, company):
 	return columns
 
 
-def get_columns(include_variance=False, company=None):
+def get_columns(include_comparison=False, include_variance=False, company=None):
 	columns = [
 		{"label": _("项目"), "fieldname": "label", "fieldtype": "Data", "width": 420},
 		{"label": _("期初金额"), "fieldname": "opening_amount", "fieldtype": "Currency", "width": 160},
 		{"label": _("本期金额/期末余额"), "fieldname": "amount", "fieldtype": "Currency", "width": 180},
 		{"label": _("本年累计"), "fieldname": "year_to_date_amount", "fieldtype": "Currency", "width": 160},
-		{"label": _("比较期金额"), "fieldname": "comparison_amount", "fieldtype": "Currency", "width": 180},
 	]
+	if include_comparison:
+		columns.append({"label": _("比较期金额"), "fieldname": "comparison_amount", "fieldtype": "Currency", "width": 180})
 	if include_variance:
 		columns.extend([
 			{"label": _("增减额"), "fieldname": "variance_amount", "fieldtype": "Currency", "width": 160},
@@ -623,6 +701,67 @@ def export_current_report_pdf(filters=None):
 	statement_title = _statement_title(filters.statement_type)
 	filename = f"{statement_title}-{filters.company}-{filters.to_date}.pdf"
 	file_doc = save_file(filename, get_pdf(html), "Company", filters.company, is_private=1)
+	return {"file_url": file_doc.file_url, "file_name": file_doc.file_name}
+
+
+@frappe.whitelist()
+def export_current_report_xlsx(filters=None):
+	"""Export the selected Chinese financial report with an explicit Chinese title."""
+	if isinstance(filters, str):
+		filters = frappe.parse_json(filters)
+	filters = frappe._dict(filters or {})
+	if not filters.company:
+		frappe.throw(_("请选择公司"))
+	frappe.has_permission("Company", doc=filters.company, throw=True)
+
+	columns, rows, *_ = execute(filters)
+	visible_columns = [column for column in columns if column.get("fieldname") and not column.get("hidden")]
+	if not visible_columns:
+		frappe.throw(_("当前报表没有可导出的列"))
+
+	from io import BytesIO
+
+	import xlsxwriter
+
+	buffer = BytesIO()
+	workbook = xlsxwriter.Workbook(buffer, {"in_memory": True})
+	statement_title = _statement_title(filters.statement_type)
+	worksheet = workbook.add_worksheet(statement_title[:31])
+	title = workbook.add_format({"bold": True, "font_size": 15, "align": "center", "valign": "vcenter"})
+	subtitle = workbook.add_format({"font_size": 10, "align": "center", "valign": "vcenter"})
+	header = workbook.add_format({"bold": True, "bg_color": "#E2E8F0", "border": 1, "align": "center"})
+	text_cell = workbook.add_format({"border": 1})
+	number_cell = workbook.add_format({"border": 1, "num_format": "#,##0.00"})
+	last_column = len(visible_columns) - 1
+	worksheet.merge_range(0, 0, 0, last_column, statement_title, title)
+	worksheet.merge_range(
+		1, 0, 1, last_column,
+		f"{filters.company}　期间：{filters.from_date} 至 {filters.to_date}",
+		subtitle,
+	)
+	for index, column in enumerate(visible_columns):
+		worksheet.write(3, index, column.get("label") or column.get("fieldname"), header)
+
+	for row_index, row in enumerate(rows, start=4):
+		for column_index, column in enumerate(visible_columns):
+			fieldname = column["fieldname"]
+			value = row.get(fieldname, "") if hasattr(row, "get") else ""
+			if value is None:
+				value = ""
+			if column.get("fieldtype") in {"Currency", "Float", "Percent", "Int"} and value != "":
+				worksheet.write_number(row_index, column_index, flt(value), number_cell)
+			else:
+				worksheet.write(row_index, column_index, str(value), text_cell)
+
+	for column_index, column in enumerate(visible_columns):
+		width = min(max(flt(column.get("width") or 120) / 8, 12), 36)
+		worksheet.set_column(column_index, column_index, width)
+	worksheet.freeze_panes(4, 0)
+	worksheet.autofilter(3, 0, max(3, len(rows) + 3), last_column)
+	workbook.close()
+
+	filename = f"{statement_title}_{filters.company}_{filters.from_date}_{filters.to_date}.xlsx"
+	file_doc = save_file(filename, buffer.getvalue(), "Company", filters.company, is_private=1)
 	return {"file_url": file_doc.file_url, "file_name": file_doc.file_name}
 
 
