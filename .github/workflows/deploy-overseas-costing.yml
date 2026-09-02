@@ -82,10 +82,13 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
+          remote_asset_script="/tmp/sync_and_verify_assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/sync_and_verify_assets.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_asset_script"
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            'cd /home/yuewei/ERPNext-Docker/frappe_docker && bash -s' \
-            < .github/scripts/sync_and_verify_assets.sh
+            "cd /home/yuewei/ERPNext-Docker/frappe_docker && bash '$remote_asset_script'; script_exit_code=\$?; rm -f '$remote_asset_script'; exit \$script_exit_code"
 
       - name: Check online login page
         run: curl --fail --silent --show-error --retry 3 https://deeplinkerp.com/login >/dev/null
