@@ -384,6 +384,24 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='open-generic-link']", (event) => this.openDingtalkLink($(event.currentTarget).attr("data-open-url")));
     this.$root.on("click", "[data-action='add-batch']", () => this.openAddBatchDialog());
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
+    this.$root.on("click", "[data-action='scroll-child-table']", (event) => {
+      const $button = $(event.currentTarget);
+      this.scrollChildTable($button.attr("data-batch-name"), Number($button.attr("data-direction")));
+    });
+    this.$root.on("input", "[data-role='child-table-range']", (event) => {
+      const $range = $(event.currentTarget);
+      this.setChildScrollRatio($range.attr("data-batch-name"), $range.val());
+    });
+    this.$root.on("click", "[data-action='jump-child-columns']", (event) => {
+      const $button = $(event.currentTarget);
+      this.jumpChildColumns($button.attr("data-batch-name"), Number($button.attr("data-column-start")));
+    });
+    this.$root.on("wheel", "[data-role='child-table-scroll']", (event) => {
+      const originalEvent = event.originalEvent;
+      if (!originalEvent || !originalEvent.shiftKey) return;
+      event.preventDefault();
+      event.currentTarget.scrollLeft += originalEvent.deltaY || originalEvent.deltaX;
+    });
     this.$root.on("click", "[data-action='refresh-batch']", (event) => this.refreshBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='delete-batch']", (event) => this.confirmDeleteBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='add-material']", (event) => this.openAddMaterialDialog($(event.currentTarget).attr("data-batch-name")));
@@ -6241,12 +6259,12 @@ class OverseasCostWorkbench {
     const voucherDiffDisplay = this.batchVoucherDiffDisplay(batch);
     const erpStatusDisplay = this.batchErpStatusDisplay(batch);
     const importedClass = this.lastImportedBatchNames.has(batch.name) ? "imported" : "";
+    this.activeBatchName = this.activeBatchName || batch.name;
     const selectedClass = this.activeBatchName === batch.name ? "is-selected" : "";
     const submittedAt = this.formatDateTimeMinute(batch.source_created_at);
     const sampleBadge = batch.is_classic_sample
       ? `<span class="ocw-sample-badge">${this.escape(batch.sample_note || "历史样本")}</span>`
       : "";
-    this.activeBatchName = this.activeBatchName || batch.name;
     return `
       <tr class="ocw-parent-row ${isExpanded ? "expanded" : ""} ${importedClass} ${selectedClass}" data-batch-name="${this.escape(batch.name)}">
         <td>
@@ -6691,6 +6709,7 @@ class OverseasCostWorkbench {
 
   renderChildRow(batch) {
     const items = this.batchItems[batch.name] || [];
+    const batchName = this.escape(batch.name);
     return `
       <tr class="ocw-child-row">
         <td colspan="11">
@@ -6700,9 +6719,19 @@ class OverseasCostWorkbench {
               <button class="ocw-outline-btn ocw-mini-btn ocw-add-material-sticky" data-action="add-material" data-batch-name="${this.escape(batch.name)}">+ 添加新物料</button>
             </div>
             ${this.renderAllocationOverview(batch, items)}
+            <div class="ocw-sku-column-groups" data-role="child-column-groups" data-batch-name="${batchName}" aria-label="SKU 字段分组">
+              <button class="active" type="button" data-action="jump-child-columns" data-column-start="0" data-batch-name="${batchName}">基础信息 A–H</button>
+              <button type="button" data-action="jump-child-columns" data-column-start="8" data-batch-name="${batchName}">采购数据 I–P</button>
+              <button type="button" data-action="jump-child-columns" data-column-start="16" data-batch-name="${batchName}">物流费用 Q–Z</button>
+              <button type="button" data-action="jump-child-columns" data-column-start="26" data-batch-name="${batchName}">税费 AA–AJ</button>
+              <button type="button" data-action="jump-child-columns" data-column-start="36" data-batch-name="${batchName}">综合成本 AK–BE</button>
+            </div>
             ${this.renderChildTable(batch)}
-            <div class="ocw-child-table-x-scroll" data-role="child-table-x-scroll" data-batch-name="${this.escape(batch.name)}" aria-label="SKU 明细横向滚动条">
-              <div class="ocw-child-table-x-scroll-spacer" data-role="child-table-x-scroll-spacer"></div>
+            <div class="ocw-child-table-navigator" data-role="child-table-navigator" data-batch-name="${batchName}">
+              <button type="button" data-action="scroll-child-table" data-direction="-1" data-batch-name="${batchName}" aria-label="SKU 字段向左移动一屏">◀</button>
+              <input class="ocw-child-table-range" type="range" min="0" max="1000" value="0" data-role="child-table-range" data-batch-name="${batchName}" aria-label="拖动浏览 SKU 字段" />
+              <button type="button" data-action="scroll-child-table" data-direction="1" data-batch-name="${batchName}" aria-label="SKU 字段向右移动一屏">▶</button>
+              <span data-role="child-table-range-label">当前 A–H / 全部 A–BE</span>
             </div>
           </div>
         </td>
@@ -6741,7 +6770,7 @@ class OverseasCostWorkbench {
       .map((column, index) => {
         const sticky = index < 2 ? `ocw-sticky-head ocw-sticky-${index}` : "";
         return `
-          <th class="${sticky} ${this.escape(this.columnAlignClass(column))} notranslate" translate="no" title="${this.escape(column.excel_col + " " + column.label)}">
+          <th class="${sticky} ${this.escape(this.columnAlignClass(column))} notranslate" translate="no" data-column-index="${index}" data-excel-col="${this.escape(column.excel_col)}" title="${this.escape(column.excel_col + " " + column.label)}">
             ${this.renderHeaderCell(column)}
           </th>
         `;
@@ -6834,6 +6863,86 @@ class OverseasCostWorkbench {
     return this.highlightText(this.formatValue(value || "--"), this.filterTermsForColumn(fieldname));
   }
 
+  childScrollElements(batchName) {
+    const normalizedName = String(batchName || "");
+    const byBatchName = (_, element) => $(element).attr("data-batch-name") === normalizedName;
+    return {
+      $source: this.$root.find("[data-role='child-table-scroll']").filter(byBatchName),
+      $header: this.$root.find("[data-role='child-table-head-scroll']").filter(byBatchName),
+      $navigator: this.$root.find("[data-role='child-table-navigator']").filter(byBatchName),
+      $groups: this.$root.find("[data-role='child-column-groups']").filter(byBatchName),
+    };
+  }
+
+  scrollChildTable(batchName, direction) {
+    const { $source } = this.childScrollElements(batchName);
+    const source = $source.get(0);
+    if (!source) return;
+    source.scrollBy({ left: Number(direction) * Math.max(240, source.clientWidth * 0.8), behavior: "smooth" });
+  }
+
+  setChildScrollRatio(batchName, value) {
+    const { $source } = this.childScrollElements(batchName);
+    const source = $source.get(0);
+    if (!source) return;
+    const max = Math.max(0, source.scrollWidth - source.clientWidth);
+    source.scrollLeft = (max * Math.max(0, Math.min(1000, Number(value)))) / 1000;
+    this.updateChildNavigator(batchName);
+  }
+
+  jumpChildColumns(batchName, columnIndex) {
+    const { $source, $header } = this.childScrollElements(batchName);
+    const source = $source.get(0);
+    const cell = $header.find(`[data-column-index='${Number(columnIndex)}']`).get(0);
+    if (!source || !cell) return;
+    source.scrollLeft = Math.max(0, cell.offsetLeft - 420);
+    this.updateChildNavigator(batchName);
+  }
+
+  visibleChildColumnRange($header) {
+    const header = $header.get(0);
+    if (!header) return [];
+    const viewport = header.getBoundingClientRect();
+    return $header
+      .find("th[data-excel-col]")
+      .toArray()
+      .filter((cell) => {
+        const rect = cell.getBoundingClientRect();
+        return rect.right > viewport.left + 420 && rect.left < viewport.right;
+      })
+      .map((cell) => ({ code: String(cell.dataset.excelCol || ""), index: Number(cell.dataset.columnIndex || 0) }))
+      .filter((column) => column.code);
+  }
+
+  updateChildNavigator(batchName) {
+    const { $source, $header, $navigator, $groups } = this.childScrollElements(batchName);
+    const source = $source.get(0);
+    if (!source || !$navigator.length) return;
+    const max = Math.max(0, source.scrollWidth - source.clientWidth);
+    const ratio = max ? Math.round((source.scrollLeft / max) * 1000) : 0;
+    const visibleColumns = this.visibleChildColumnRange($header);
+    const allColumns = this.batchColumns || [];
+    const first = source.scrollLeft <= 1 ? (allColumns[0] || {}).excel_col || "A" : (visibleColumns[0] || {}).code || "A";
+    const last = (visibleColumns[visibleColumns.length - 1] || {}).code || first;
+    const allFirst = (allColumns[0] || {}).excel_col || "A";
+    const allLast = (allColumns[allColumns.length - 1] || {}).excel_col || allFirst;
+    const rangeText = `当前 ${first}–${last} / 全部 ${allFirst}–${allLast}`;
+    $navigator.toggleClass("is-hidden", max <= 1);
+    $groups.toggleClass("is-hidden", max <= 1);
+    $navigator.find("[data-role='child-table-range']").val(ratio).prop("disabled", max <= 1).attr("aria-valuetext", rangeText);
+    $navigator.find("[data-direction='-1']").prop("disabled", source.scrollLeft <= 1);
+    $navigator.find("[data-direction='1']").prop("disabled", source.scrollLeft >= max - 1);
+    $navigator.find("[data-role='child-table-range-label']").text(rangeText);
+
+    const currentIndex = source.scrollLeft <= 1 ? 0 : (visibleColumns[0] || {}).index || 0;
+    const groupStarts = [0, 8, 16, 26, 36];
+    const activeStart = groupStarts.reduce((active, start) => (start <= currentIndex ? start : active), 0);
+    $groups.find("[data-action='jump-child-columns']").each((_, button) => {
+      const $button = $(button);
+      $button.toggleClass("active", Number($button.attr("data-column-start")) === activeStart);
+    });
+  }
+
   bindHierarchyScrollbars() {
     const bindPair = ($source, $bar) => {
       if (!$source.length || !$bar.length) return;
@@ -6875,14 +6984,18 @@ class OverseasCostWorkbench {
     bindPair($hierarchyWrap, this.$root.find("[data-role='hierarchy-x-scroll']"));
     this.$root.find("[data-role='child-table-scroll']").each((_, element) => {
       const $source = $(element);
-      bindPair($source, $source.next("[data-role='child-table-x-scroll']"));
+      const source = $source.get(0);
+      const batchName = $source.attr("data-batch-name");
+      const { $header } = this.childScrollElements(batchName);
+      const update = () => {
+        if ($header.length) $header.get(0).scrollLeft = source.scrollLeft;
+        this.updateChildNavigator(batchName);
+      };
+      $source.off("scroll.ocwStickyX").on("scroll.ocwStickyX", update);
+      update();
+      window.requestAnimationFrame(update);
+      window.setTimeout(update, 80);
     });
-    this.positionChildScrollbars();
-    $hierarchyWrap
-      .off("scroll.ocwChildScrollbarPosition")
-      .on("scroll.ocwChildScrollbarPosition", () => {
-        window.requestAnimationFrame(() => this.positionChildScrollbars());
-      });
     $(window)
       .off("resize.ocwHierarchyScrollbars")
       .on("resize.ocwHierarchyScrollbars", () => {

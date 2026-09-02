@@ -1762,8 +1762,8 @@
   background: var(--ocw-accent-soft);
 }
 
-.ocw-col-code { width: 148px; }
-.ocw-col-product { width: 300px; }
+.ocw-col-code { width: 160px; }
+.ocw-col-product { width: 260px; }
 .ocw-col-long { width: 340px; }
 .ocw-col-short { width: 145px; }
 .ocw-col-number { width: 132px; }
@@ -1779,7 +1779,7 @@
 }
 
 .ocw-sticky-1 {
-  left: 148px;
+  left: 160px;
   z-index: 6;
 }
 
@@ -5852,4 +5852,113 @@
 .ocw-tree-toggle {
   min-width: 30px;
   min-height: 30px;
+}
+
+.ocw-sku-column-groups {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-top: 1px solid #dce7e5;
+  border-bottom: 1px solid #dce7e5;
+  background: #f7fbfa;
+}
+
+.ocw-sku-column-groups button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid #abc6c4;
+  border-radius: 6px;
+  background: #fff;
+  color: #0d777a;
+  font-size: 12px;
+}
+
+.ocw-sku-column-groups button.active {
+  border-color: #0d777a;
+  background: #0d777a;
+  color: #fff;
+}
+
+.ocw-child-table-navigator {
+  position: sticky;
+  bottom: 0;
+  z-index: 18;
+  display: grid;
+  grid-template-columns: 34px minmax(180px, 1fr) 34px auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-top: 2px solid #0d777a;
+  background: #fff;
+  box-shadow: 0 -6px 16px rgba(18, 67, 67, 0.08);
+}
+
+.ocw-child-table-navigator.is-hidden,
+.ocw-sku-column-groups.is-hidden {
+  display: none;
+}
+
+.ocw-child-table-navigator button {
+  width: 34px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #8bb3b1;
+  border-radius: 6px;
+  background: #edf8f7;
+  color: #0d777a;
+  font-weight: 900;
+}
+
+.ocw-child-table-navigator button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.ocw-child-table-range {
+  width: 100%;
+  accent-color: #0d777a;
+  cursor: ew-resize;
+}
+
+.ocw-child-table-navigator span {
+  color: #4f6665;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ocw-child-sku-table tbody tr {
+  height: 56px;
+}
+
+.ocw-sticky-cell,
+.ocw-sticky-head {
+  background: #fff;
+}
+
+.ocw-sticky-cell .ocw-table-display,
+.ocw-sticky-head .ocw-sku-header-primary,
+.ocw-sticky-head .ocw-sku-header-secondary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.ocw-sticky-1 {
+  box-shadow: 5px 0 8px rgba(23, 76, 76, 0.08);
+}
+
+@media (max-width: 760px) {
+  .ocw-child-table-navigator {
+    grid-template-columns: 34px minmax(130px, 1fr) 34px;
+  }
+
+  .ocw-child-table-navigator span {
+    grid-column: 1 / -1;
+    text-align: center;
+  }
 }
