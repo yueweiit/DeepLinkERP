@@ -20,7 +20,8 @@ from frappe.utils.oauth import (
 )
 
 
-EIMS_PROVIDER = "eims"
+EIMS_PROVIDER_CONFIG_KEY = "eims_social_login_key"
+EIMS_PROVIDER_FALLBACK = "eims"
 EIMS_USER_ID_FIELD = "custom_eims_app_user_id"
 EIMS_HOME_PATH = "/desk"
 EIMS_START_PATH = "/api/method/custom_filters.overrides.oauth.start_eims_login"
@@ -43,9 +44,12 @@ class EIMSUserBindingError(Exception):
 @rate_limit(limit=SSO_START_RATE_LIMIT, seconds=SSO_RATE_LIMIT_SECONDS)
 def start_eims_login(redirect_to: str | None = None):
 	"""Create the server-side OAuth state/PKCE pair and start EIMS authorization."""
-	flow = get_oauth2_flow(EIMS_PROVIDER)
+	provider = _get_eims_provider()
 	oauth2_providers = get_oauth2_providers()
-	provider_config = oauth2_providers.get(EIMS_PROVIDER) or {}
+	provider_config = oauth2_providers.get(provider) or {}
+	if not provider_config:
+		frappe.throw(_("未找到配置的 EIMS Social Login Key：{0}").format(provider))
+	flow = get_oauth2_flow(provider)
 	if not provider_config.get("flow_params", {}).get("authorize_url"):
 		frappe.throw(_("EIMS Social Login Key 未配置授权地址"))
 
@@ -77,7 +81,7 @@ def start_eims_login(redirect_to: str | None = None):
 	auth_url_data = provider_config.get("auth_url_data", {}) or {}
 	authorize_params = {
 		"client_id": flow.client_id,
-		"redirect_uri": get_redirect_uri(EIMS_PROVIDER),
+		"redirect_uri": get_redirect_uri(provider),
 		"response_type": "code",
 		"scope": auth_url_data.get("scope", "openid profile"),
 		"state": state,
@@ -113,9 +117,12 @@ def login_via_eims(code: str, state: str):
 			frappe.throw(_("EIMS OAuth 回调缺少授权码"))
 
 		state_data = _consume_state(state)
-		flow = get_oauth2_flow(EIMS_PROVIDER)
+		provider = _get_eims_provider()
 		oauth2_providers = get_oauth2_providers()
-		provider_config = oauth2_providers.get(EIMS_PROVIDER) or {}
+		provider_config = oauth2_providers.get(provider) or {}
+		if not provider_config:
+			frappe.throw(_("未找到配置的 EIMS Social Login Key：{0}").format(provider))
+		flow = get_oauth2_flow(provider)
 		api_endpoint = provider_config.get("api_endpoint")
 		if not api_endpoint:
 			frappe.throw(_("EIMS Social Login Key 未配置 UserInfo 地址"))
@@ -126,7 +133,7 @@ def login_via_eims(code: str, state: str):
 			flow.access_token_url,
 			data={
 				"code": code.strip(),
-				"redirect_uri": get_redirect_uri(EIMS_PROVIDER),
+				"redirect_uri": get_redirect_uri(provider),
 				"grant_type": "authorization_code",
 				"client_id": flow.client_id,
 				"client_secret": flow.client_secret,
@@ -175,7 +182,7 @@ def login_via_eims(code: str, state: str):
 		redirect_post_login(
 			desk_user=user.user_type == "System User",
 			redirect_to=state_data.get("redirect_to"),
-			provider=EIMS_PROVIDER,
+			provider=provider,
 		)
 
 	except EIMSUserBindingError as e:
@@ -209,9 +216,10 @@ def update_website_context(context):
 	if request_path != "/login":
 		return
 
+	provider_name = _get_eims_provider()
 	redirect_to = frappe.local.request.args.get("redirect-to")
 	for provider in context.get("provider_logins", []):
-		if provider.get("name") == EIMS_PROVIDER:
+		if provider.get("name") == provider_name:
 			provider["auth_url"] = _build_start_url(redirect_to)
 
 
@@ -259,15 +267,24 @@ def redirect_guest_home_to_eims(path: str):
 	"""Start SSO when an unauthenticated user opens the ERP home page."""
 	from frappe.website.path_resolver import resolve_path
 
+	provider = _get_eims_provider()
 	if (
 		path in ("", "app", "desk")
 		and frappe.session.user == "Guest"
-		and frappe.db.get_value("Social Login Key", EIMS_PROVIDER, "enable_social_login")
+		and frappe.db.get_value("Social Login Key", provider, "enable_social_login")
 	):
 		frappe.flags.redirect_location = _build_start_url(EIMS_HOME_PATH)
 		raise frappe.Redirect(302)
 
 	return resolve_path(path)
+
+
+def _get_eims_provider() -> str:
+	"""Return the configured Social Login Key document name for EIMS."""
+	provider = frappe.conf.get(EIMS_PROVIDER_CONFIG_KEY)
+	if isinstance(provider, str) and provider.strip():
+		return provider.strip()
+	return EIMS_PROVIDER_FALLBACK
 
 
 def _build_start_url(redirect_to: str | None = None) -> str:

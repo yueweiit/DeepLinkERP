@@ -8,6 +8,18 @@ from custom_filters.overrides import oauth
 
 
 class TestEIMSOAuth(TestCase):
+	def test_provider_name_comes_from_site_config(self):
+		with patch.object(
+			oauth.frappe,
+			"conf",
+			{"eims_social_login_key": "eims企业信息管理系统"},
+		):
+			self.assertEqual(oauth._get_eims_provider(), "eims企业信息管理系统")
+
+	def test_provider_name_falls_back_to_legacy_name(self):
+		with patch.object(oauth.frappe, "conf", {}):
+			self.assertEqual(oauth._get_eims_provider(), "eims")
+
 	@patch.object(oauth.frappe, "cache")
 	@patch.object(oauth, "sanitize_redirect", side_effect=lambda value: value)
 	@patch.object(oauth, "get_redirect_uri", return_value="https://erp.example.com/callback")
@@ -20,7 +32,7 @@ class TestEIMSOAuth(TestCase):
 		flow.get_authorize_url.return_value = "https://eims.example.com/oauth/authorize"
 		get_oauth2_flow.return_value = flow
 		get_oauth2_providers.return_value = {
-			"eims": {
+			"eims企业信息管理系统": {
 				"flow_params": {"authorize_url": "https://eims.example.com/oauth/authorize"},
 				"auth_url_data": {"response_type": "code", "scope": "openid profile"},
 			}
@@ -32,10 +44,14 @@ class TestEIMSOAuth(TestCase):
 			cookie_manager=Mock(),
 		)
 		with patch.object(oauth.frappe, "local", local), patch.object(
-			oauth.frappe, "conf", {"encryption_key": "test-key"}
+			oauth.frappe,
+			"conf",
+			{"encryption_key": "test-key", "eims_social_login_key": "eims企业信息管理系统"},
 		):
 			oauth.start_eims_login("/desk")
 
+		get_oauth2_flow.assert_called_once_with("eims企业信息管理系统")
+		get_redirect_uri.assert_called_once_with("eims企业信息管理系统")
 		params = flow.get_authorize_url.call_args.kwargs
 		self.assertEqual(params["client_id"], "erp-client")
 		self.assertEqual(params["response_type"], "code")
