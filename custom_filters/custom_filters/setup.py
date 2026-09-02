@@ -6,6 +6,18 @@ def after_migrate():
 	"""Create custom fields owned by custom_filters (idempotent)."""
 	create_custom_fields(
 		{
+			"User": [
+				{
+					"fieldname": "custom_eims_app_user_id",
+					"fieldtype": "Data",
+					"length": 20,
+					"label": "EIMS App User ID",
+					"description": "Must match the app_user_id returned by EIMS OAuth userinfo.",
+					"insert_after": "username",
+					"unique": 1,
+					"in_list_view": 1,
+				}
+			],
 			"Buying Settings": [
 				{
 					"fieldname": "custom_supplier_quotation_warehouse",
