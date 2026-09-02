@@ -10,6 +10,10 @@ PAGE_DIRS = (
 )
 
 
+def method_source(js: str, start: str, end: str) -> str:
+    return js.split(start, 1)[1].split(end, 1)[0]
+
+
 @pytest.fixture(params=PAGE_DIRS, ids=("compat", "module"))
 def workbench_source(request):
     page_dir = request.param
@@ -48,3 +52,36 @@ def test_sku_mouse_navigation_and_frozen_columns_exist(workbench_source):
     assert ".ocw-col-product { width: 260px; }" in css
     assert ".ocw-sticky-1" in css and "left: 160px" in css
     assert "-webkit-line-clamp: 2" in css
+
+
+def test_sku_group_jumps_use_excel_codes_not_guessed_indexes(workbench_source):
+    js = workbench_source["js"]
+    for column_code in ("A", "I", "Q", "AA", "AK"):
+        assert f'data-column-code="{column_code}"' in js
+    assert "jumpChildColumns(batchName, columnCode)" in js
+
+
+def test_list_load_and_normal_filters_do_not_prefetch_or_expand_skus(workbench_source):
+    js = workbench_source["js"]
+    load_batches = method_source(js, "  async loadBatches() {", "  async prefetchBatchItems(")
+    apply_filters = method_source(js, "  async applyFilters() {", "  clearFilters() {")
+    transport_filter = method_source(js, "  async setTransportFilter(", "  syncActiveSelectionWithVisible() {")
+    restore_focus = method_source(js, "  restoreBatchFocusStateFromUrl() {", "  async applyBatchFocusFromUrl() {")
+    assert "prefetchBatchItems" not in load_batches
+    assert "expandedBatchNames" not in apply_filters
+    assert "prefetchBatchItems" not in transport_filter
+    assert "expandedBatchNames" not in restore_focus
+
+
+def test_role_views_are_capability_gated_and_user_scoped(workbench_source):
+    js = workbench_source["js"]
+    assert "availableRoleViews()" in js
+    assert 'const user = (frappe.session && frappe.session.user) || "guest"' in js
+    assert "`ocw-role-view:${user}`" in js
+    assert "renderParentActions(batch)" in js
+
+
+def test_drawer_error_has_local_retry(workbench_source):
+    js = workbench_source["js"]
+    assert 'data-action="retry-batch-drawer"' in js
+    assert "this.openBatchDrawer(this.drawerBatchName, { updateUrl: false })" in js

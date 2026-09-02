@@ -289,8 +289,9 @@ class OverseasCostWorkbench {
 
   bindEvents() {
     this.$root.on("click", "[data-batch-name]", (event) => {
-      if ($(event.currentTarget).hasClass("ocw-parent-row")) return;
-      const batchName = $(event.currentTarget).attr("data-batch-name");
+      const $target = $(event.currentTarget);
+      if ($target.hasClass("ocw-parent-row") || $target.attr("data-action") === "open-batch-drawer") return;
+      const batchName = $target.attr("data-batch-name");
       if (batchName) {
         this.activeBatchName = batchName;
         this.exportPinnedBatchName = batchName;
@@ -335,6 +336,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='open-batch-drawer']", (event) => {
       event.preventDefault();
       this.openBatchDrawer($(event.currentTarget).attr("data-batch-name"));
+    });
+    this.$root.on("click", "[data-action='retry-batch-drawer']", () => {
+      this.openBatchDrawer(this.drawerBatchName, { updateUrl: false });
     });
     this.$root.on("click", ".ocw-parent-row", (event) => {
       if ($(event.target).closest("button, input, select, textarea, a").length) return;
@@ -393,7 +397,7 @@ class OverseasCostWorkbench {
     });
     this.$root.on("click", "[data-action='jump-child-columns']", (event) => {
       const $button = $(event.currentTarget);
-      this.jumpChildColumns($button.attr("data-batch-name"), Number($button.attr("data-column-start")));
+      this.jumpChildColumns($button.attr("data-batch-name"), $button.attr("data-column-code"));
     });
     this.$root.on("wheel", "[data-role='child-table-scroll']", (event) => {
       const originalEvent = event.originalEvent;
@@ -465,7 +469,6 @@ class OverseasCostWorkbench {
       this.batches = this.sortBatchesNewestFirst(result.items || []);
       this.visibleBatches = this.batches.slice();
       this.expandedBatchNames.clear();
-      await this.prefetchBatchItems(this.visibleBatches);
       this.visibleBatches = this.filterBatches();
       const urlBatch = this.restoreBatchFocusStateFromUrl();
       this.renderTransportWorkbench();
@@ -595,13 +598,10 @@ class OverseasCostWorkbench {
         await this.loadBatches();
         return;
       }
-      await this.prefetchBatchItems(this.batches);
+      if (this.hasItemFilters()) await this.prefetchBatchItems(this.batches);
       this.visibleBatches = this.filterBatches();
       this.renderTransportWorkbench();
       this.syncActiveSelectionWithVisible();
-      if (this.hasActiveFilters()) {
-        this.expandedBatchNames = new Set(this.visibleBatches.map((batch) => batch.name));
-      }
       this.renderTable();
       this.updateSearchResult();
     } catch (error) {
@@ -641,7 +641,6 @@ class OverseasCostWorkbench {
       await this.loadBatches();
       return;
     }
-    await this.prefetchBatchItems(this.batches);
     this.visibleBatches = this.filterBatches();
     this.syncActiveSelectionWithVisible();
     if (!this.visibleBatches.length) {
@@ -676,6 +675,12 @@ class OverseasCostWorkbench {
     if (!this.visibleBatches.some((batch) => batch.name === this.dataCheckBatchName)) {
       this.dataCheckBatchName = this.activeBatchName;
     }
+  }
+
+  hasItemFilters() {
+    return ["material_code", "product_name", "import_name", "hs_code", "category"].some(
+      (fieldname) => String(this.filters[fieldname] || "").trim() !== ""
+    );
   }
 
   getServerSearchKeyword() {
@@ -758,21 +763,36 @@ class OverseasCostWorkbench {
     this.renderTable();
   }
 
+  roleViewStorageKey() {
+    const user = (frappe.session && frappe.session.user) || "guest";
+    return `ocw-role-view:${user}`;
+  }
+
+  availableRoleViews() {
+    const roles = (frappe.user_roles || []).map((role) => String(role));
+    const canPurchase = roles.some((role) => /purchase|采购/i.test(role));
+    const canFinance = roles.some((role) => /accounts?|finance|财务|会计/i.test(role));
+    if (canPurchase && !canFinance) return ["purchase"];
+    if (canFinance && !canPurchase) return ["finance"];
+    return ["purchase", "finance"];
+  }
+
   loadRoleViewPreference() {
+    const available = this.availableRoleViews();
     try {
-      const saved = window.localStorage.getItem("ocw-role-view");
-      if (saved === "purchase" || saved === "finance") return saved;
+      const saved = window.localStorage.getItem(this.roleViewStorageKey());
+      if (available.includes(saved)) return saved;
     } catch (_error) {
       // 浏览器禁用本地存储时继续使用角色推断。
     }
-    const roles = (frappe.user_roles || []).join(" ");
-    return roles.includes("财务") ? "finance" : "purchase";
+    return available.includes("purchase") ? "purchase" : available[0];
   }
 
   setRoleView(view = "purchase") {
-    this.roleView = view === "finance" ? "finance" : "purchase";
+    const available = this.availableRoleViews();
+    this.roleView = available.includes(view) ? view : available[0];
     try {
-      window.localStorage.setItem("ocw-role-view", this.roleView);
+      window.localStorage.setItem(this.roleViewStorageKey(), this.roleView);
     } catch (_error) {
       // 视图切换不依赖本地存储成功。
     }
@@ -840,7 +860,6 @@ class OverseasCostWorkbench {
     }
     await this.loadBatchItems(batch.name, batch.current_version, true);
     await this.loadAuditLogs(batch.name, batch.current_version);
-    this.expandedBatchNames.add(batch.name);
     this.renderTable();
     if (this.drawerBatchName === batch.name && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
       this.renderBatchDrawer();
@@ -2469,7 +2488,7 @@ class OverseasCostWorkbench {
       return;
     }
     this.closeBatchDrawer({ updateUrl: false });
-    await this.focusBatch(batch.name, { updateUrl: false });
+    await this.focusBatch(batch.name, { updateUrl: false, expand: true });
 
     // focusBatch() rerenders the table, so locate the cell after rendering.
     const $target = this.$root
@@ -2926,9 +2945,6 @@ class OverseasCostWorkbench {
     const imported = new Set(batchNames);
     this.lastImportedBatchNames = imported;
     this.visibleBatches = this.batches.slice();
-    await this.prefetchBatchItems(this.visibleBatches);
-    this.expandedBatchNames = new Set(this.visibleBatches.filter((batch) => imported.has(batch.name)).map((batch) => batch.name));
-
     const activeBatch = this.visibleBatches.find((batch) => imported.has(batch.name));
     if (activeBatch) {
       this.activeBatchName = activeBatch.name;
@@ -2944,7 +2960,7 @@ class OverseasCostWorkbench {
     const visibleLabels = labels.slice(0, 3).join("、");
     const suffix = labels.length > 3 ? `等 ${labels.length} 个批次` : "";
     const selected = result.selected_summary || {};
-    const message = `本次导入：${selected.block_count || labels.length || 0} 个批次，${selected.item_count || 0} 行 SKU；${statsText || this.summarizeImportResult(result)}。已在完整列表中展开 ${visibleLabels}${suffix}`;
+    const message = `本次导入：${selected.block_count || labels.length || 0} 个批次，${selected.item_count || 0} 行 SKU；${statsText || this.summarizeImportResult(result)}。已在完整列表中标记 ${visibleLabels}${suffix}`;
     this.$root.find("[data-area='search-result']").removeClass("empty").addClass("active imported").text(message);
   }
 
@@ -3319,7 +3335,6 @@ class OverseasCostWorkbench {
       }
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
-      this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.renderDiffPanel();
       frappe.show_alert({ message: result.message || "采购字段已同步", indicator: result.updated_count ? "green" : "blue" });
@@ -5532,7 +5547,6 @@ class OverseasCostWorkbench {
       }
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
-      this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.renderDiffPanel();
       frappe.show_alert({ message: result.message || `${actionLabels[resolutionAction]}已保存`, indicator: "green" });
@@ -5649,7 +5663,6 @@ class OverseasCostWorkbench {
       }
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
-      this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.renderDiffPanel();
       if (this.activeOaAttachmentDialog && this.activeOaAttachmentDialog.$wrapper && this.activeOaAttachmentDialog.$wrapper.is(":visible")) {
@@ -6060,9 +6073,12 @@ class OverseasCostWorkbench {
       const view = $button.attr("data-view");
       $button.toggleClass("active", this.erpQueueMode ? view === "erp_queue" : view === "cost");
     });
+    const available = this.availableRoleViews();
+    this.$root.find(".ocw-role-switch").toggle(available.length > 1);
     this.$root.find("[data-action='set-role-view']").each((_, node) => {
       const $button = $(node);
-      $button.toggleClass("active", $button.attr("data-role-view") === this.roleView);
+      const view = $button.attr("data-role-view");
+      $button.toggle(available.includes(view)).toggleClass("active", view === this.roleView);
     });
   }
 
@@ -6292,14 +6308,28 @@ class OverseasCostWorkbench {
         <td>${this.renderParentMetric(totalCostDisplay)}</td>
         <td class="ocw-finance-only">${this.renderParentMetric(voucherDiffDisplay)}</td>
         <td class="ocw-finance-only">${this.renderParentMetric(erpStatusDisplay)}</td>
-        <td class="ocw-row-actions">
-          <div class="ocw-row-action-group">
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}">重新试算</button>
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">资料</button>
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
-          </div>
-        </td>
+        <td class="ocw-row-actions">${this.renderParentActions(batch)}</td>
       </tr>
+    `;
+  }
+
+  renderParentActions(batch) {
+    const batchName = this.escape(batch.name);
+    if (this.roleView === "finance") {
+      return `
+        <div class="ocw-row-action-group">
+          <button class="ocw-outline-btn ocw-mini-btn" data-action="open-batch-drawer" data-batch-name="${batchName}">核对详情</button>
+          <button class="ocw-outline-btn ocw-mini-btn" data-action="queue-preview-erp" data-batch-name="${batchName}">ERP 预览</button>
+          <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${batchName}">更多</button>
+        </div>
+      `;
+    }
+    return `
+      <div class="ocw-row-action-group">
+        <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${batchName}">重新试算</button>
+        <button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${batchName}">资料</button>
+        <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${batchName}">更多</button>
+      </div>
     `;
   }
 
@@ -6712,6 +6742,7 @@ class OverseasCostWorkbench {
   renderChildRow(batch) {
     const items = this.batchItems[batch.name] || [];
     const batchName = this.escape(batch.name);
+    const navigationClass = items.length && this.batchColumns.length ? "" : "is-hidden";
     return `
       <tr class="ocw-child-row">
         <td colspan="11">
@@ -6721,15 +6752,15 @@ class OverseasCostWorkbench {
               <button class="ocw-outline-btn ocw-mini-btn ocw-add-material-sticky" data-action="add-material" data-batch-name="${this.escape(batch.name)}">+ 添加新物料</button>
             </div>
             ${this.renderAllocationOverview(batch, items)}
-            <div class="ocw-sku-column-groups" data-role="child-column-groups" data-batch-name="${batchName}" aria-label="SKU 字段分组">
-              <button class="active" type="button" data-action="jump-child-columns" data-column-start="0" data-batch-name="${batchName}">基础信息 A–H</button>
-              <button type="button" data-action="jump-child-columns" data-column-start="8" data-batch-name="${batchName}">采购数据 I–P</button>
-              <button type="button" data-action="jump-child-columns" data-column-start="16" data-batch-name="${batchName}">物流费用 Q–Z</button>
-              <button type="button" data-action="jump-child-columns" data-column-start="26" data-batch-name="${batchName}">税费 AA–AJ</button>
-              <button type="button" data-action="jump-child-columns" data-column-start="36" data-batch-name="${batchName}">综合成本 AK–BE</button>
+            <div class="ocw-sku-column-groups ${navigationClass}" data-role="child-column-groups" data-batch-name="${batchName}" aria-label="SKU 字段分组">
+              <button class="active" type="button" data-action="jump-child-columns" data-column-code="A" data-batch-name="${batchName}">基础信息 A–H</button>
+              <button type="button" data-action="jump-child-columns" data-column-code="I" data-batch-name="${batchName}">采购数据 I–P</button>
+              <button type="button" data-action="jump-child-columns" data-column-code="Q" data-batch-name="${batchName}">物流费用 Q–Z</button>
+              <button type="button" data-action="jump-child-columns" data-column-code="AA" data-batch-name="${batchName}">税费 AA–AJ</button>
+              <button type="button" data-action="jump-child-columns" data-column-code="AK" data-batch-name="${batchName}">综合成本 AK–BE</button>
             </div>
             ${this.renderChildTable(batch)}
-            <div class="ocw-child-table-navigator" data-role="child-table-navigator" data-batch-name="${batchName}">
+            <div class="ocw-child-table-navigator ${navigationClass}" data-role="child-table-navigator" data-batch-name="${batchName}">
               <button type="button" data-action="scroll-child-table" data-direction="-1" data-batch-name="${batchName}" aria-label="SKU 字段向左移动一屏">◀</button>
               <input class="ocw-child-table-range" type="range" min="0" max="1000" value="0" data-role="child-table-range" data-batch-name="${batchName}" aria-label="拖动浏览 SKU 字段" />
               <button type="button" data-action="scroll-child-table" data-direction="1" data-batch-name="${batchName}" aria-label="SKU 字段向右移动一屏">▶</button>
@@ -6788,10 +6819,12 @@ class OverseasCostWorkbench {
               ? ""
               : this.normalizeEditorValue(row[column.fieldname]);
             const displayValue = this.formatCellValue(row[column.fieldname], column);
+            const focusable = index < 2 ? ' tabindex="0"' : "";
             return `
               <td
                 class="${sticky} ${this.escape(this.columnAlignClass(column))} ${editable ? "ocw-editable-cell" : "ocw-readonly-cell"}"
                 title="${this.escape(displayValue || "")}"
+                ${focusable}
                 data-editable-cell="${editable ? "1" : "0"}"
                 data-batch-name="${this.escape(batch.name)}"
                 data-item-name="${this.escape(row.name || "")}"
@@ -6892,13 +6925,23 @@ class OverseasCostWorkbench {
     this.updateChildNavigator(batchName);
   }
 
-  jumpChildColumns(batchName, columnIndex) {
+  jumpChildColumns(batchName, columnCode) {
     const { $source, $header } = this.childScrollElements(batchName);
     const source = $source.get(0);
-    const cell = $header.find(`[data-column-index='${Number(columnIndex)}']`).get(0);
+    const normalizedCode = String(columnCode || "").toUpperCase();
+    const cell = $header
+      .find("th[data-excel-col]")
+      .filter((_, element) => String(element.dataset.excelCol || "").toUpperCase() === normalizedCode)
+      .get(0);
     if (!source || !cell) return;
     source.scrollLeft = Math.max(0, cell.offsetLeft - 420);
     this.updateChildNavigator(batchName);
+  }
+
+  excelColumnRank(columnCode) {
+    const letters = String(columnCode || "").toUpperCase().match(/^[A-Z]+/);
+    if (!letters) return 0;
+    return Array.from(letters[0]).reduce((rank, letter) => rank * 26 + letter.charCodeAt(0) - 64, 0);
   }
 
   visibleChildColumnRange($header) {
@@ -6931,17 +6974,22 @@ class OverseasCostWorkbench {
     const rangeText = `当前 ${first}–${last} / 全部 ${allFirst}–${allLast}`;
     $navigator.toggleClass("is-hidden", max <= 1);
     $groups.toggleClass("is-hidden", max <= 1);
+    $source.closest(".ocw-child-table-shell").toggleClass("is-at-right-edge", max <= 1 || source.scrollLeft >= max - 1);
     $navigator.find("[data-role='child-table-range']").val(ratio).prop("disabled", max <= 1).attr("aria-valuetext", rangeText);
     $navigator.find("[data-direction='-1']").prop("disabled", source.scrollLeft <= 1);
     $navigator.find("[data-direction='1']").prop("disabled", source.scrollLeft >= max - 1);
     $navigator.find("[data-role='child-table-range-label']").text(rangeText);
 
-    const currentIndex = source.scrollLeft <= 1 ? 0 : (visibleColumns[0] || {}).index || 0;
-    const groupStarts = [0, 8, 16, 26, 36];
-    const activeStart = groupStarts.reduce((active, start) => (start <= currentIndex ? start : active), 0);
+    const currentCode = source.scrollLeft <= 1 ? "A" : (visibleColumns[0] || {}).code || "A";
+    const currentRank = this.excelColumnRank(currentCode);
+    const groupCodes = ["A", "I", "Q", "AA", "AK"];
+    const activeCode = groupCodes.reduce(
+      (active, code) => (this.excelColumnRank(code) <= currentRank ? code : active),
+      "A"
+    );
     $groups.find("[data-action='jump-child-columns']").each((_, button) => {
       const $button = $(button);
-      $button.toggleClass("active", Number($button.attr("data-column-start")) === activeStart);
+      $button.toggleClass("active", $button.attr("data-column-code") === activeCode);
     });
   }
 
@@ -7003,40 +7051,6 @@ class OverseasCostWorkbench {
       .on("resize.ocwHierarchyScrollbars", () => {
         window.requestAnimationFrame(() => this.bindHierarchyScrollbars());
       });
-  }
-
-  positionChildScrollbars() {
-    const $wrap = this.$root.find("[data-area='table']");
-    if (!$wrap.length) return;
-    const wrap = $wrap.get(0);
-    const wrapRect = wrap.getBoundingClientRect();
-    const hierarchyBarHeight = this.$root.find("[data-role='hierarchy-x-scroll']").not(".is-hidden").outerHeight() || 0;
-    const visibleTop = wrapRect.top;
-    const visibleBottom = wrapRect.bottom - hierarchyBarHeight;
-
-    this.$root.find("[data-role='child-table-x-scroll']").each((_, barElement) => {
-      const $bar = $(barElement);
-      const $shell = $bar.closest(".ocw-child-table-shell");
-      const $source = $bar.prev("[data-role='child-table-scroll']");
-      if (!$shell.length || !$source.length) {
-        $bar.addClass("is-hidden");
-        return;
-      }
-      const shell = $shell.get(0);
-      const source = $source.get(0);
-      const shellRect = shell.getBoundingClientRect();
-      const visibleHeight = Math.min(shellRect.bottom, visibleBottom) - Math.max(shellRect.top, visibleTop);
-      const hasHorizontalScroll = source.scrollWidth > source.clientWidth + 1;
-      if (!hasHorizontalScroll || visibleHeight < 64) {
-        $bar.addClass("is-hidden");
-        return;
-      }
-      const barHeight = barElement.offsetHeight || 18;
-      const maxTop = Math.max(0, shell.offsetHeight - barHeight);
-      const nextTop = Math.max(0, Math.min(visibleBottom - shellRect.top - barHeight, maxTop));
-      barElement.style.top = `${nextTop}px`;
-      $bar.removeClass("is-hidden");
-    });
   }
 
   async exportCurrentResult() {
@@ -7144,6 +7158,7 @@ class OverseasCostWorkbench {
       <div class="ocw-batch-drawer-empty">
         <strong>批次详情加载失败</strong>
         <span>${this.escape(error && error.message ? error.message : "请刷新后重试")}</span>
+        <button class="ocw-outline-btn" type="button" data-action="retry-batch-drawer">重试加载</button>
       </div>
     `);
   }
@@ -8324,11 +8339,10 @@ class OverseasCostWorkbench {
     this.activeBatchName = batch.name;
     this.exportPinnedBatchName = batch.name;
     this.dataCheckBatchName = batch.name;
-    await Promise.all([
-      this.loadBatchItems(batch.name, batch.current_version),
-      this.loadAuditLogs(batch.name, batch.current_version),
-    ]);
-    this.expandedBatchNames.add(batch.name);
+    const requests = [this.loadAuditLogs(batch.name, batch.current_version)];
+    if (options.expand === true) requests.push(this.loadBatchItems(batch.name, batch.current_version));
+    await Promise.all(requests);
+    if (options.expand === true) this.expandedBatchNames.add(batch.name);
     this.renderTable();
     this.renderDiffPanel();
     if (options.updateUrl !== false) this.updateBatchUrl(this.batchUrlKey(batch), { view: "" });
@@ -8408,7 +8422,6 @@ class OverseasCostWorkbench {
     this.exportPinnedBatchName = batch.name;
     this.dataCheckBatchName = batch.name;
     this.focusedBatchName = batch.name;
-    this.expandedBatchNames = new Set([batch.name]);
     return batch;
   }
 
@@ -8435,19 +8448,6 @@ class OverseasCostWorkbench {
     } else {
       this.closeBatchDrawer({ updateUrl: false });
     }
-  }
-
-  async setAllExpanded(expanded) {
-    const displayBatches = this.getDisplayedBatches();
-    if (expanded) {
-      await this.prefetchBatchItems(displayBatches);
-      this.expandedBatchNames = new Set(displayBatches.map((batch) => batch.name));
-      this.addAudit("人工", "manual", "全部展开");
-    } else {
-      this.expandedBatchNames.clear();
-      this.addAudit("系统", "system", "全部收起");
-    }
-    this.renderTable();
   }
 
   confirmDeleteBatch(batchName) {
@@ -8553,7 +8553,6 @@ class OverseasCostWorkbench {
       if (result.batch_name) {
         const batch = this.findBatch(result.batch_name);
         await this.loadBatchItems(result.batch_name, batch ? batch.current_version : result.version_name, true);
-        this.expandedBatchNames.add(result.batch_name);
         this.renderTable();
         this.updateSearchResult();
       }
@@ -8628,7 +8627,6 @@ class OverseasCostWorkbench {
       this.resetFilterValues();
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
-      this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.updateSearchResult();
       frappe.show_alert({ message: result.message || "物料已新增", indicator: "green" });
@@ -8672,7 +8670,6 @@ class OverseasCostWorkbench {
       this.markBatchDirty(batch.name);
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
-      this.expandedBatchNames.add(batch.name);
       this.renderTable();
       frappe.show_alert({ message: result.message || "物料已删除", indicator: "green" });
     } catch (error) {

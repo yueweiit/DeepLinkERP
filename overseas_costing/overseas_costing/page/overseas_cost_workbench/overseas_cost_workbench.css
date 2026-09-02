@@ -1360,6 +1360,23 @@
   animation: ocw-drawer-open 180ms ease-out;
 }
 
+.ocw-child-table-shell::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 48px;
+  z-index: 17;
+  width: 28px;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(13, 115, 119, 0.14));
+  transition: opacity 120ms ease;
+}
+
+.ocw-child-table-shell.is-at-right-edge::after {
+  opacity: 0;
+}
+
 @keyframes ocw-drawer-open {
   from {
     opacity: 0;
@@ -5946,6 +5963,11 @@
   -webkit-line-clamp: 2;
   overflow: hidden;
   overflow-wrap: anywhere;
+}
+
+.ocw-sticky-cell:focus-visible {
+  outline: 2px solid #0d777a;
+  outline-offset: -2px;
 }
 
 .ocw-sticky-1 {
