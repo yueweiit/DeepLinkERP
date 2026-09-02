@@ -41,20 +41,9 @@ frappe.query_reports["China Voucher Ledger"] = {
 		{ fieldname: "party", label: __("往来单位"), fieldtype: "Data" },
 		{ fieldname: "search_text", label: __("关键词"), fieldtype: "Data" },
 	],
-	tree: true,
-	name_field: "row_id",
-	parent_field: "parent_row_id",
-	initial_depth: 1,
+	tree: false,
 	formatter(value, row, column, data, default_formatter) {
 		const formatted = default_formatter(value, row, column, data);
-		if (column.fieldname === "voucher_number" && data?.source_doctype && data?.source_name) {
-			const route = frappe.utils.get_form_link(data.source_doctype, data.source_name);
-			return `<a href="${route}" class="china-voucher-link" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${formatted}</a>`;
-		}
-		if (column.fieldname === "print_voucher" && data?.voucher_snapshot) {
-			const route = frappe.utils.get_form_link("China Accounting Voucher", data.voucher_snapshot);
-			return `<a href="${route}" class="china-voucher-snapshot-link" data-snapshot-name="${encodeURIComponent(data.voucher_snapshot)}">查看/打印</a>`;
-		}
 		if (column.fieldname === "voucher_status" && data?.voucher_status !== undefined && data?.voucher_status !== null) {
 			const status = {
 				0: [__("草稿"), "orange"],
@@ -64,14 +53,11 @@ frappe.query_reports["China Voucher Ledger"] = {
 			if (!status) return "";
 			return `<span class="china-voucher-status-text ${status[1]}">${status[0]}</span>`;
 		}
-		if (data?.indent > 0 && ["posting_date", "statutory_number", "accounting_period", "remarks", "source_doctype"].includes(column.fieldname)) {
-			return "";
-		}
 		if (column.fieldname === "statutory_number" && data?.source_doctype && data?.source_name) {
 			const route = frappe.utils.get_form_link(data.source_doctype, data.source_name);
 			return `<a href="${route}" class="china-voucher-link" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${formatted}</a>`;
 		}
-		if (!data || !["posting_date", "statutory_number", "accounting_period", "remarks", "source_doctype", "source_name", "source_event"].includes(column.fieldname)) {
+		if (!data || !["posting_date", "statutory_number", "accounting_period", "remarks"].includes(column.fieldname)) {
 			return formatted;
 		}
 		const index = Number.isInteger(row?._index) ? row._index : frappe.query_report.data?.indexOf(data);
@@ -112,8 +98,14 @@ function ensure_voucher_ledger_styles() {
 	$("<style>")
 		.attr("id", "china-voucher-ledger-inline-style")
 		.text(`
-			.china-voucher-ledger-report .dt-scrollable,
-			.china-voucher-ledger-report .dt-header { max-width: 100%; }
+			.china-voucher-ledger-report .dt-header,
+			.china-voucher-ledger-report .dt-scrollable { max-width: none; }
+			.china-voucher-ledger-report .dt-row {
+				min-width: 100%;
+				width: max-content;
+			}
+			.china-voucher-ledger-report .dt-cell { flex: 0 0 auto; }
+			.china-voucher-ledger-report .dt-scrollable { overflow-x: auto; }
 			.china-voucher-ledger-report .dt-cell__content {
 				line-height: 24px;
 				padding-left: 6px;
