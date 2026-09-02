@@ -12,6 +12,7 @@
 | `recalculate_batch.py` | 批次重算脚本 | 调用正式重算服务，支持 bench execute 或命令行调试单个批次 |
 | `compare_manual_excel_baseline.py` | 人工Excel对照脚本 | 读取人工核算表指定批次，与系统当前批次试算结果生成 xlsx 对照表 |
 | `restore_hpcu_demo.py` | HPCU5155607演示批次恢复脚本 | `restore` 按装箱单解析恢复；`restore_manual_baseline` 按人工核算表 22 行恢复经理演示基准版 |
+| `test_purchase_order_writeback.py` | 本地采购订单写入验证 | 从 HPCU5155607 复制 4 条明细，写入 `ERPTEST-` 物料和草稿采购订单，回读 11 个海外成本字段；不连接线上、不提交、不影响库存估值 |
 | `test_dingtalk_order_link.py` | 钉钉跳转测试脚本 | 本地验证审批实例链接和钉钉唤起链接生成 |
 
 ## 当前约定

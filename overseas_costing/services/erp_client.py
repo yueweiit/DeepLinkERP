@@ -104,21 +104,31 @@ def push_overseas_cost_payload(payload: dict) -> dict:
     通用 DocType 推送保留为兜底模式，避免影响既有测试入口。
     """
 
-    config = get_erp_push_config()
-    missing = _missing_config_reasons(config)
-    if missing:
+    validation = validate_payload_for_push(payload)
+    if not validation.get("ok"):
         return {
-            "ok": False,
             "status": "Failed",
-            "message": "；".join(missing),
-            "config_ready": False,
-            "request": _redact_request_config(config),
+            **validation,
         }
 
+    config = get_erp_push_config()
     if config.get("push_mode") == PUSH_MODE_STANDARD:
         return _push_standard_purchase_flow(payload, config)
 
     return _push_generic_resource(payload, config)
+
+
+def validate_payload_for_push(payload: dict | None = None) -> dict:
+    config = get_erp_push_config()
+    missing = _missing_config_reasons(config, payload=payload or {})
+    return {
+        "ok": not missing,
+        "ready": not missing,
+        "config_ready": not missing,
+        "blocking_reasons": missing,
+        "request": _redact_request_config(config),
+        "message": "ERP 推送配置已完成。" if not missing else "ERP 推送配置未完成：" + "；".join(missing),
+    }
 
 
 def _push_generic_resource(payload: dict, config: dict) -> dict:
@@ -376,8 +386,9 @@ def get_erp_push_config() -> dict:
     }
 
 
-def _missing_config_reasons(config: dict) -> list[str]:
+def _missing_config_reasons(config: dict, payload: dict | None = None) -> list[str]:
     reasons = []
+    payload = payload or {}
     if not config.get("base_url"):
         reasons.append("缺少 DeepLinkERP 接口地址配置")
     if not config.get("authorization"):
@@ -385,7 +396,7 @@ def _missing_config_reasons(config: dict) -> list[str]:
     if config.get("push_mode") == PUSH_MODE_GENERIC and not config.get("target_doctype"):
         reasons.append("缺少 DeepLinkERP 目标 DocType 配置")
     if config.get("push_mode") == PUSH_MODE_STANDARD:
-        if not config.get("supplier"):
+        if not config.get("supplier") and not _payload_has_supplier(payload):
             reasons.append("缺少默认供应商配置")
         if not config.get("item_group"):
             reasons.append("缺少默认物料组配置")
@@ -396,6 +407,12 @@ def _missing_config_reasons(config: dict) -> list[str]:
     if config.get("push_mode") == PUSH_MODE_GENERIC and config.get("method") not in {"POST", "PUT", "PATCH"}:
         reasons.append("DeepLinkERP HTTP 方法只支持 POST/PUT/PATCH")
     return reasons
+
+
+def _payload_has_supplier(payload: dict) -> bool:
+    if str(payload.get("supplier") or "").strip():
+        return True
+    return bool(_unique_item_value(payload.get("items") or [], "supplier"))
 
 
 def _build_resource_url(config: dict) -> str:
@@ -558,6 +575,7 @@ def _build_item_body(item: dict, payload: dict, config: dict) -> dict:
         "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
         "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
+        "custom_overseas_supplier": item.get("supplier") or payload.get("supplier") or "",
         "custom_overseas_original_unit_price": item.get("original_unit_price") or formula.get("original_unit_price") or 0,
         "custom_overseas_comprehensive_unit_price": item.get("comprehensive_unit_price")
         or formula.get("comprehensive_unit_price")
@@ -570,9 +588,10 @@ def _build_purchase_order_body(payload: dict, config: dict) -> dict:
     schedule_date = config.get("schedule_date") or date.today().isoformat()
     company = config.get("company") or payload.get("subsidiary_code") or ""
     currency = _normalize_currency(_first_item_value(items, "purchase_currency") or config.get("default_currency") or "CNY")
+    supplier, supplier_source = _resolve_supplier(payload, config, items)
     return {
         "company": company,
-        "supplier": config.get("supplier") or "",
+        "supplier": supplier,
         "transaction_date": date.today().isoformat(),
         "schedule_date": schedule_date,
         "currency": currency,
@@ -580,6 +599,7 @@ def _build_purchase_order_body(payload: dict, config: dict) -> dict:
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
         "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
         "custom_overseas_total_cost_rmb": payload.get("total_cost_rmb") or 0,
+        "custom_overseas_supplier_source": supplier_source,
         "custom_overseas_cost_payload_json": json.dumps(payload, ensure_ascii=False, default=str),
         "items": [_build_purchase_order_item(row, payload, config, schedule_date) for row in items],
     }
@@ -596,10 +616,27 @@ def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule
     original_amount = item.get("goods_value") or formula.get("goods_value") or _multiply(original_unit_price, qty)
     comprehensive_amount = formula.get("total_cost") or _multiply(comprehensive_unit_price, qty)
     freight_amount = logistics.get("freight_alloc_rmb") or formula.get("allocated_logistics_cost") or 0
-    clearance_amount = clearance_tax.get("mexico_customs_rmb") or clearance_tax.get("mexico_customs_mxn") or 0
-    tax_amount = (
-        clearance_tax.get("import_tax_total")
-        or _multiply(1, clearance_tax.get("igi_amount") or 0) + _multiply(1, clearance_tax.get("iva_amount") or 0)
+    clearance_amount = clearance_tax.get("clearance_alloc_rmb")
+    if clearance_amount is None:
+        clearance_amount = clearance_tax.get("mexico_customs_rmb") or clearance_tax.get("mexico_customs_mxn") or 0
+    tax_amount = clearance_tax.get("tax_alloc_rmb")
+    if tax_amount is None:
+        tax_amount = (
+            clearance_tax.get("import_tax_total")
+            or _multiply(1, clearance_tax.get("igi_amount") or 0) + _multiply(1, clearance_tax.get("iva_amount") or 0)
+        )
+    original_amount = _round_currency(original_amount)
+    freight_amount = _round_currency(freight_amount)
+    clearance_amount = _round_currency(clearance_amount)
+    tax_amount = _round_currency(tax_amount)
+    comprehensive_amount = _round_currency(comprehensive_amount)
+    clearance_amount = _round_currency(
+        clearance_amount
+        + comprehensive_amount
+        - original_amount
+        - freight_amount
+        - clearance_amount
+        - tax_amount
     )
     row = {
         "item_code": item.get("material_code") or "",
@@ -620,10 +657,34 @@ def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule
         "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
         "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
+        "custom_overseas_cost_center": config.get("cost_center") or payload.get("cost_center") or "",
     }
     if config.get("cost_center"):
         row["cost_center"] = config.get("cost_center")
     return row
+
+
+def _resolve_supplier(payload: dict, config: dict, items: list[dict]) -> tuple[str, str]:
+    for source, value in (
+        ("batch", payload.get("supplier")),
+        ("item", _unique_item_value(items, "supplier")),
+        ("config", config.get("supplier")),
+    ):
+        cleaned = str(value or "").strip()
+        if cleaned:
+            return cleaned, source
+    return "", "missing"
+
+
+def _unique_item_value(items: list[dict], fieldname: str):
+    values = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get(fieldname) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return values[0] if len(values) == 1 else None
 
 
 def _first_item_value(items: list[dict], fieldname: str):
@@ -635,15 +696,34 @@ def _first_item_value(items: list[dict], fieldname: str):
 
 
 def _normalize_currency(value) -> str:
-    currency = str(value or "").strip().upper()
-    if currency == "RMB":
-        return "CNY"
+    currency = str(value or "").strip().upper().replace(" ", "")
+    currency_aliases = {
+        "RMB": "CNY",
+        "人民币": "CNY",
+        "人民币RMB": "CNY",
+        "CNY人民币": "CNY",
+        "美元": "USD",
+        "美元USD": "USD",
+        "USD美元": "USD",
+        "墨西哥比索": "MXN",
+        "墨西哥比索MXN": "MXN",
+        "MXN墨西哥比索": "MXN",
+    }
+    if currency in currency_aliases:
+        return currency_aliases[currency]
     return currency or "CNY"
 
 
 def _multiply(left, right) -> float:
     try:
         return round(float(left or 0) * float(right or 0), 6)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _round_currency(value) -> float:
+    try:
+        return round(float(value or 0), 2)
     except (TypeError, ValueError):
         return 0
 

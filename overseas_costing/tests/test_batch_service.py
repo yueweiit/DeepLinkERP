@@ -748,6 +748,7 @@ def test_build_erp_push_payload_contains_core_fields_and_expense_details() -> No
                 "goods_value": 16,
                 "freight_alloc_rmb": 6,
                 "import_tax_total": 3,
+                "derived_json": json.dumps({"fx_rmb_to_mxn": 3}),
                 "total_cost_rmb": 25,
                 "total_unit_rmb": 12.5,
             }
@@ -761,6 +762,9 @@ def test_build_erp_push_payload_contains_core_fields_and_expense_details() -> No
     assert payload["items"][0]["comprehensive_unit_price"] == 12.5
     assert payload["items"][0]["outbound_quantity"] == 2
     assert payload["items"][0]["expense_detail"]["logistics"]["freight_alloc_rmb"] == 6
+    clearance_tax = payload["items"][0]["expense_detail"]["clearance_and_tax"]
+    assert clearance_tax["clearance_alloc_rmb"] == 2
+    assert clearance_tax["tax_alloc_rmb"] == 1
 
 
 def test_writeback_to_erp_records_failed_attempt_when_config_missing(monkeypatch) -> None:

@@ -611,6 +611,12 @@ def ensure_erpnext_standard_fields() -> dict:
                 "fieldtype": "Data",
                 "insert_after": "custom_overseas_cost_version",
             },
+            {
+                "fieldname": "custom_overseas_cost_center",
+                "label": "成本中心",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_business_entity",
+            },
         ],
     }
     try:

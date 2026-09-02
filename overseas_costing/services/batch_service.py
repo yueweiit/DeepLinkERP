@@ -1798,7 +1798,20 @@ def _build_cost_formula(item: dict) -> dict:
     }
 
 
-def _item_expense_detail(item: dict) -> dict:
+def _item_expense_detail(item: dict, formula: dict | None = None) -> dict:
+    formula = formula or _build_cost_formula(item)
+    clearance_tax_total_rmb = _as_float(formula.get("allocated_clearance_tax_cost"))
+    import_tax_mxn = _as_float(item.get("import_tax_total"))
+    if not import_tax_mxn:
+        import_tax_mxn = sum(_as_float(item.get(fieldname)) for fieldname in TAX_COMPONENT_FIELDS)
+
+    calculation_meta = _load_json_value(item.get("derived_json"))
+    fx_rmb_to_mxn = _as_float(calculation_meta.get("fx_rmb_to_mxn"))
+    tax_alloc_rmb = import_tax_mxn / fx_rmb_to_mxn if import_tax_mxn and fx_rmb_to_mxn else 0.0
+    # The total is already used by the cost formula. Split it only for ERP display.
+    tax_alloc_rmb = min(tax_alloc_rmb, clearance_tax_total_rmb)
+    clearance_alloc_rmb = max(clearance_tax_total_rmb - tax_alloc_rmb, 0.0)
+
     return {
         "logistics": {
             "freight_alloc_rmb": _round_payload_amount(item.get("freight_alloc_rmb")),
@@ -1806,7 +1819,9 @@ def _item_expense_detail(item: dict) -> dict:
             "total_logistics_mxn": _round_payload_amount(item.get("total_logistics_mxn")),
         },
         "clearance_and_tax": {
-            "import_tax_total": _round_payload_amount(item.get("import_tax_total")),
+            "clearance_alloc_rmb": _round_payload_amount(clearance_alloc_rmb),
+            "tax_alloc_rmb": _round_payload_amount(tax_alloc_rmb),
+            "import_tax_total_mxn": _round_payload_amount(import_tax_mxn),
             "igi_amount": _round_payload_amount(item.get("igi_amount")),
             "iva_amount": _round_payload_amount(item.get("iva_amount")),
             "mexico_customs_mxn": _round_payload_amount(item.get("mexico_customs_mxn")),
@@ -2173,7 +2188,7 @@ def _build_erp_push_payload(
                 "outbound_quantity": _round_payload_amount(item.get("actual_shipped_qty")),
                 "source_quantity": _round_payload_amount(item.get("quantity")),
                 "cost_formula": formula,
-                "expense_detail": _item_expense_detail(item),
+                "expense_detail": _item_expense_detail(item, formula),
             }
         )
 
