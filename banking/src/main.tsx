@@ -5,7 +5,7 @@ import App from './App.tsx'
 import './lib/namespace'
 import { DirectionProvider } from './components/ui/direction.tsx'
 
-const bankingRoot = ((window as any).__BANKING_ROOT__ || document.getElementById('root')) as HTMLElement | null
+const bankingRoot = window.__BANKING_ROOT__ || document.getElementById('root')
 
 function mountBankingApp(layoutDirection: string) {
 	if (!bankingRoot) {

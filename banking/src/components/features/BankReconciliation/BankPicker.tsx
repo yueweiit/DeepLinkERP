@@ -65,7 +65,10 @@ const BankPicker = ({ className }: { className?: string }) => {
             </EmptyHeader>
             <EmptyContent>
                 <Button asChild>
-                    <a href={`/desk/bank-account?company=${encodeURIComponent(selectedCompany)}&is_company_account=1`}>
+                    <a
+                        href={`/desk/bank-account?company=${encodeURIComponent(selectedCompany)}&is_company_account=1`}
+                        target="_top"
+                    >
                         {_("Configure Bank Accounts")}
                     </a>
                 </Button>

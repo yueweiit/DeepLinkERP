@@ -12,8 +12,9 @@ const BankStatementImporter = lazy(() => import('@/pages/BankStatementImporter')
 const ViewBankStatementImportLog = lazy(() => import('@/pages/ViewBankStatementImportLog'))
 
 function App() {
-	const isEmbedded = Boolean((window as any).__BANKING_ROOT__)
-	const currentUser = window.frappe?.boot?.user?.name || (window.frappe as any)?.session?.user || window.frappe?.boot?.user
+	const isEmbedded = Boolean(window.__BANKING_ROOT__) ||
+		new URLSearchParams(window.location.search).get('embedded') === '1'
+	const currentUser = window.frappe?.boot?.user?.name || window.frappe?.session?.user || window.frappe?.boot?.user
 	const routes = (
 		<Routes>
 			<Route index element={<BankReconciliation />} />
@@ -41,7 +42,7 @@ function App() {
 			window.location.href = '/login?redirect-to=/banking'
 			return
 		}
-	}, [])
+	}, [isEmbedded])
 
 	return (
 		<LucideProvider

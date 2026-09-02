@@ -24,9 +24,9 @@
    "icon": "tool",
    "indent": 0,
    "keep_closed": 0,
-   "label": "Bank Reconciliation",
-   "link_to": "Bank Reconciliation Tool",
-   "link_type": "DocType",
+   "label": "\u94f6\u884c\u5bf9\u8d26",
+   "link_to": "china-banking",
+   "link_type": "Page",
    "show_arrow": 0,
    "type": "Link"
   },
@@ -180,7 +180,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-01-10 00:06:13.017457",
+ "modified": "2026-09-01 08:50:08.075356",
  "modified_by": "Administrator",
  "module": "Accounts",
  "name": "Banking",

@@ -27,7 +27,8 @@ const BankClearanceSummary = lazy(() => import('@/components/features/BankReconc
 const IncorrectlyClearedEntries = lazy(() => import('@/components/features/BankReconciliation/IncorrectlyClearedEntries'))
 
 const BankReconciliation = () => {
-	const isEmbedded = Boolean((window as any).__BANKING_ROOT__)
+	const isEmbedded = Boolean(window.__BANKING_ROOT__) ||
+		new URLSearchParams(window.location.search).get('embedded') === '1'
 
     const [headerHeight, setHeaderHeight] = useState(0)
 
@@ -50,7 +51,7 @@ const BankReconciliation = () => {
                             <Breadcrumb>
                                 <BreadcrumbList>
                                     <BreadcrumbItem>
-                                        <a href="/desk" className="text-ink-gray-7">
+                                        <a href="/desk" target="_top" className="text-ink-gray-7">
                                             <HomeIcon size={16} />
                                         </a>
                                     </BreadcrumbItem>
@@ -60,7 +61,6 @@ const BankReconciliation = () => {
                                             <div className="flex gap-1 items-center">
                                                 {_("Banking")} <Badge theme="violet" variant="subtle">{_("Beta")}</Badge>
                                             </div>
-
                                         </BreadcrumbPage>
                                     </BreadcrumbItem>
                                 </BreadcrumbList>
@@ -97,7 +97,7 @@ const BankReconciliation = () => {
                     </EmptyHeader>
                     <EmptyContent>
                         <Button asChild>
-                            <a href="/desk">
+                            <a href="/desk" target="_top">
                                 {_("Go to Desktop")}
                             </a>
                         </Button>

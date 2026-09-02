@@ -11,7 +11,7 @@ const BankStatementImporterContainer = () => {
                 <Breadcrumb>
                     <BreadcrumbList>
                         <BreadcrumbItem>
-                            <a href="/desk" className="text-ink-gray-7">
+                            <a href="/desk" target="_top" className="text-ink-gray-7">
                                 <HomeIcon size={16} />
                             </a>
                         </BreadcrumbItem>
