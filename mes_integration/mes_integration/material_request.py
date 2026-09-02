@@ -1,11 +1,18 @@
+import hashlib
+import time
+from contextlib import contextmanager
+from copy import deepcopy
 from math import ceil
 
 import frappe
 from frappe import _
 
-from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
+from frappe.model.document import bulk_insert
 from frappe.model.mapper import get_mapped_doc
-from frappe.utils import cint, flt, now
+from frappe.query_builder import Case
+from frappe.query_builder.functions import Sum
+from frappe.utils import cint, flt, get_datetime, now, now_datetime, time_diff_in_seconds
+from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
 
 
 CUSTOM_ISSUE_MATERIAL_REQUEST_TYPES = (
@@ -13,11 +20,47 @@ CUSTOM_ISSUE_MATERIAL_REQUEST_TYPES = (
     "Material Transfer for Manufacture",
     "Injection Molding Issuance",
 )
+MES_ITEM_DETAILS_FIELD = "custom_item_details"
+MES_ITEM_DETAIL_DOCTYPE = "MES Material Request Item Detail"
+MES_INTEGRATION_REQUEST_FLAG = "mes_integration_request"
+MES_INWARD_MATERIAL_REQUEST_TYPES = (
+	"Purchase",
+	"Manufacture",
+	"Customer Provided",
+	"Material Transfer",
+)
+MES_CREATE_MAX_ATTEMPTS = 5
+MES_CREATE_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
+MES_IDEMPOTENCY_KEY_FIELDS = ("custom_material_request_no", "request_id", "idempotency_key")
+MES_BIN_LOCK_TIMEOUT_SECONDS = 180
+MES_DETAIL_BULK_CHUNK_SIZE = 2000
+MES_ITEM_DETAILS_VALIDATED_FLAG = "mes_item_details_validated"
+MES_MATERIAL_REQUEST_TASK_DOCTYPE = "MES Material Request Task"
+MES_TASK_QUEUE = "long"
+MES_TASK_TIMEOUT = 1500
+MES_TASK_STALE_SECONDS = 1800
+MES_TASK_RECOVERY_BATCH_SIZE = 100
+
+
+class MESMaterialRequestPerformanceMixin:
+    """Defer stock-demand synchronization for Material Requests created by MES."""
+
+    def update_child_table(self, fieldname, df=None):
+        if self.flags.get(MES_INTEGRATION_REQUEST_FLAG) and fieldname == MES_ITEM_DETAILS_FIELD:
+            return
+
+        return super().update_child_table(fieldname, df)
+
+    def update_requested_qty(self, mr_item_rows=None):
+        if not self.flags.get(MES_INTEGRATION_REQUEST_FLAG):
+            return super().update_requested_qty(mr_item_rows)
+
+        return enqueue_mes_material_request_bin_sync(self, mr_item_rows)
 
 
 @frappe.whitelist()
 def create_and_submit_material_request_from_mes(data=None, material_request=None):
-    """Create a Material Request draft from MES and submit it immediately."""
+    """Accept a Material Request from MES and process it asynchronously."""
     from mes_integration.mes_integration.stock_entry import validate_mes_api_user
 
     payload = get_mes_material_request_payload(data=data, material_request=material_request)
@@ -26,35 +69,851 @@ def create_and_submit_material_request_from_mes(data=None, material_request=None
         frappe.throw(_("缺少请求数据或数据格式不正确"))
 
     validate_mes_api_user()
-    validate_mes_material_request_permissions()
+    queue_material_request_task(payload)
 
+
+def queue_material_request_task(payload):
+    """Persist an MES payload and enqueue only its task id.
+
+    The payload stays in MariaDB until the worker finishes, so a large request
+    does not have to be serialized into every Redis job argument.
+    """
     material_request_data = extract_material_request_data(payload)
-
-    if not isinstance(material_request_data, dict):
-        frappe.throw(_("缺少 Material Request 数据或数据格式不正确"))
+    validate_mes_material_request_payload(material_request_data)
 
     if not is_mes_integration_enabled(material_request_data.get("company")):
         throw_mes_integration_disabled(material_request_data.get("company"))
 
     material_request_data = material_request_data.copy()
     material_request_data["doctype"] = "Material Request"
+    request_key = get_mes_idempotency_key(payload, material_request_data)
+    task_payload = material_request_data.copy()
+    if request_key and frappe.db.has_column("Material Request", "custom_material_request_no"):
+        task_payload["custom_material_request_no"] = request_key
+    task_name = build_material_request_task_name(
+        material_request_data.get("company"), request_key
+    )
 
-    material_request_doc = frappe.get_doc(material_request_data)
+    existing_task = frappe.db.exists(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
+    if existing_task:
+        task = frappe.get_doc(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
+        validate_material_request_task_access(task)
+
+        if task.status == "Failed":
+            frappe.db.set_value(
+                MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+                task.name,
+                {
+                    "status": "Queued",
+                    "material_request": None,
+                    "request_payload": frappe.as_json(task_payload),
+                    "item_count": len(material_request_data.get("items") or []),
+                    "detail_count": len(
+                        material_request_data.get(MES_ITEM_DETAILS_FIELD) or []
+                    ),
+                    "error_message": None,
+                    "started_at": None,
+                    "finished_at": None,
+                },
+                update_modified=True,
+            )
+            task.reload()
+        elif task.status == "Processing" and is_stale_material_request_task(task):
+            frappe.db.set_value(
+                MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+                task.name,
+                {
+                    "status": "Queued",
+                    "error_message": None,
+                    "started_at": None,
+                    "finished_at": None,
+                },
+                update_modified=True,
+            )
+            task.reload()
+
+        if task.status == "Queued":
+            schedule_material_request_task(task.name)
+
+        set_material_request_task_response(task, reused=True)
+        return
+
+    existing_material_request = get_existing_material_request_name(
+        material_request_data.get("company"), request_key
+    )
+    task = frappe.get_doc(
+        {
+            "doctype": MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+            "name": task_name,
+            "request_key": request_key,
+            "company": material_request_data.get("company"),
+            "status": "Success" if existing_material_request else "Queued",
+            "submitted_by": frappe.session.user,
+            "material_request": existing_material_request,
+            "request_payload": None
+            if existing_material_request
+            else frappe.as_json(task_payload),
+            "item_count": len(material_request_data.get("items") or []),
+            "detail_count": len(material_request_data.get(MES_ITEM_DETAILS_FIELD) or []),
+        }
+    )
+
+    try:
+        task.insert(ignore_permissions=True, set_name=task_name)
+    except frappe.DuplicateEntryError:
+        # Another request with the same company/key won the race. Do not create
+        # a second job; return the already persisted task instead.
+        frappe.db.rollback()
+        task = frappe.get_doc(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
+        validate_material_request_task_access(task)
+        set_material_request_task_response(task, reused=True)
+        return
+
+    if task.status == "Queued":
+        schedule_material_request_task(task.name)
+
+    set_material_request_task_response(task)
+
+
+@frappe.whitelist()
+def get_material_request_task_status(task_id=None, request_id=None):
+    """Return the current status of an asynchronously created Material Request."""
+    from mes_integration.mes_integration.stock_entry import validate_mes_api_user
+
+    validate_mes_api_user()
+    task_id = (task_id or "").strip()
+    request_id = (request_id or "").strip()
+
+    if task_id:
+        task_name = task_id
+    elif request_id:
+        task_name = frappe.db.get_value(
+            MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+            {"request_key": request_id, "submitted_by": frappe.session.user},
+            "name",
+            order_by="creation desc",
+        )
+    else:
+        frappe.throw(_("缺少 task_id 或 request_id"))
+
+    if not task_name or not frappe.db.exists(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name):
+        frappe.throw(
+            _("未找到物料需求异步任务 {0}").format(task_id or request_id),
+            frappe.DoesNotExistError,
+        )
+
+    task = frappe.get_doc(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
+    validate_material_request_task_access(task)
+    set_material_request_task_response(task)
+
+
+def create_and_submit_material_request_payload(payload):
+    """Synchronously create and submit a validated payload inside a worker."""
+    material_request_data = extract_material_request_data(payload)
+
+    if not isinstance(material_request_data, dict):
+        frappe.throw(_("缺少 Material Request 数据或数据格式不正确"))
+
+    validate_mes_material_request_payload(material_request_data)
+    validate_mes_material_request_permissions()
+
+    if not is_mes_integration_enabled(material_request_data.get("company")):
+        throw_mes_integration_disabled(material_request_data.get("company"))
+
+    material_request_data = material_request_data.copy()
+    material_request_data["doctype"] = "Material Request"
+    request_key = get_mes_idempotency_key(payload, material_request_data)
+    material_request_data.pop("request_id", None)
+    material_request_data.pop("idempotency_key", None)
+
+    if request_key and frappe.db.has_column("Material Request", "custom_material_request_no"):
+        material_request_data["custom_material_request_no"] = request_key
+
+    existing_name = get_existing_material_request_name(
+        material_request_data.get("company"), request_key
+    )
+    if existing_name:
+        existing_doc = frappe.get_doc("Material Request", existing_name)
+        if existing_doc.docstatus != 1:
+            frappe.throw(
+                _("MES 请求号 {0} 已存在，但对应物料需求尚未提交。请稍后重试。").format(
+                    request_key
+                )
+            )
+        set_material_request_response(existing_doc, reused=True)
+        return existing_doc
+
+    for attempt in range(MES_CREATE_MAX_ATTEMPTS):
+        try:
+            material_request_doc = create_material_request_attempt(
+                material_request_data,
+                request_key,
+                isolate_payload=attempt > 0,
+            )
+        except frappe.DuplicateEntryError:
+            if not request_key:
+                raise
+
+            # A concurrent request with the same key may have committed first.
+            frappe.db.rollback()
+            existing_name = get_existing_material_request_name(
+                material_request_data.get("company"), request_key
+            )
+            if not existing_name:
+                raise
+
+            existing_doc = frappe.get_doc("Material Request", existing_name)
+            if existing_doc.docstatus != 1:
+                raise
+            set_material_request_response(existing_doc, reused=True)
+            return existing_doc
+        except frappe.QueryDeadlockError:
+            frappe.db.rollback()
+            if attempt >= MES_CREATE_MAX_ATTEMPTS - 1:
+                raise
+            time.sleep(MES_CREATE_RETRY_DELAYS[attempt])
+            continue
+
+        set_material_request_response(material_request_doc)
+        return material_request_doc
+
+
+def validate_mes_material_request_payload(material_request_data):
+    """Perform cheap validation before storing a task; full validation runs in the worker."""
+    if not isinstance(material_request_data, dict):
+        frappe.throw(_("缺少 Material Request 数据或数据格式不正确"))
+
+    if material_request_data.get("doctype") not in (None, "Material Request"):
+        frappe.throw(_("只能通过此接口创建 Material Request"))
+
+    if material_request_data.get("docstatus") not in (None, 0, "0"):
+        frappe.throw(_("MES 传入的物料需求必须是草稿状态"))
+
+    if not material_request_data.get("material_request_type"):
+        frappe.throw(_("缺少物料需求类型 material_request_type"))
+
+    if not material_request_data.get("company"):
+        frappe.throw(_("缺少物料需求公司"))
+
+    items = material_request_data.get("items") or []
+    if not isinstance(items, (list, tuple)) or not items:
+        frappe.throw(_("物料需求至少需要一行明细"))
+
+    for idx, row in enumerate(items, start=1):
+        if not isinstance(row, dict):
+            frappe.throw(_("第 {0} 行物料需求格式不正确").format(idx))
+
+        if not row.get("item_code"):
+            frappe.throw(_("第 {0} 行缺少物料号").format(row.get("idx") or idx))
+
+        if flt(row.get("qty")) <= 0:
+            frappe.throw(_("第 {0} 行数量必须大于 0").format(row.get("idx") or idx))
+
+
+def build_material_request_task_name(company, request_key=None):
+    seed = f"{company or ''}\0{request_key or frappe.generate_hash(length=32)}"
+    suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+    return f"MES-MRT-{suffix}"
+
+
+def is_stale_material_request_task(task):
+    if not task.started_at:
+        return False
+
+    return (
+        time_diff_in_seconds(now_datetime(), get_datetime(task.started_at))
+        > MES_TASK_STALE_SECONDS
+    )
+
+
+def recover_material_request_tasks():
+    """Requeue tasks left behind by a crashed request process or worker."""
+    tasks = frappe.get_all(
+        MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+        filters={"status": ["in", ["Queued", "Processing"]]},
+        fields=["name", "status", "started_at"],
+        order_by="modified asc",
+        limit=MES_TASK_RECOVERY_BATCH_SIZE,
+    )
+
+    for task in tasks:
+        if task.status == "Processing":
+            if not is_stale_material_request_task(task):
+                continue
+
+            frappe.db.set_value(
+                MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+                task.name,
+                {
+                    "status": "Queued",
+                    "error_message": "任务超过最大处理时间，已自动重新排队。",
+                    "started_at": None,
+                    "finished_at": None,
+                },
+                update_modified=True,
+            )
+            frappe.db.commit()
+
+        enqueue_material_request_task_job(task.name)
+
+
+def schedule_material_request_task(task_name):
+    """Enqueue after the task row is committed, passing only the task name."""
+    callback = lambda: enqueue_material_request_task_job(task_name)
+    request = getattr(frappe.local, "request", None)
+    if request and hasattr(request, "after_response"):
+        request.after_response.add(callback)
+    else:
+        frappe.db.after_commit.add(callback)
+
+
+def enqueue_material_request_task_job(task_name):
+    try:
+        frappe.enqueue(
+            "mes_integration.mes_integration.material_request.process_material_request_task",
+            queue=MES_TASK_QUEUE,
+            timeout=MES_TASK_TIMEOUT,
+            job_id=f"mes-material-request-task:{task_name}",
+            deduplicate=True,
+            task_name=task_name,
+        )
+    except Exception:
+        error_message = frappe.get_traceback()
+        try:
+            frappe.db.set_value(
+                MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+                task_name,
+                {"status": "Failed", "error_message": error_message, "finished_at": now()},
+                update_modified=True,
+            )
+            frappe.db.commit()
+        except Exception:
+            error_message += "\nFailed to update async task:\n" + frappe.get_traceback()
+
+        frappe.log_error(
+            title="Failed to enqueue MES Material Request task",
+            message=error_message,
+        )
+
+
+def process_material_request_task(task_name):
+    """Create and submit one persisted MES task in a background worker."""
+    task = frappe.get_doc(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
+    if task.status == "Success":
+        return
+
+    # A scheduler recovery job may be enqueued by Administrator. Preserve the
+    # original MES user's permissions and audit identity while processing it.
+    if task.submitted_by and task.submitted_by != frappe.session.user:
+        frappe.set_user(task.submitted_by)
+
+    if not task.request_payload:
+        mark_material_request_task_failed(task_name, "异步任务缺少原始请求数据")
+        return
+
+    attempts = cint(task.attempts) + 1
+    frappe.db.set_value(
+        MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+        task_name,
+        {
+            "status": "Processing",
+            "attempts": attempts,
+            "started_at": now(),
+            "error_message": None,
+        },
+        update_modified=True,
+    )
+    frappe.db.commit()
+
+    try:
+        payload = frappe.parse_json(task.request_payload)
+        material_request_doc = create_and_submit_material_request_payload(payload)
+    except (frappe.QueryDeadlockError, frappe.RetryBackgroundJobError) as exc:
+        frappe.db.rollback()
+        frappe.db.set_value(
+            MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+            task_name,
+            {"status": "Queued", "error_message": str(exc)},
+            update_modified=True,
+        )
+        frappe.db.commit()
+        raise
+    except Exception:
+        error_message = frappe.get_traceback()
+        frappe.db.rollback()
+        mark_material_request_task_failed(task_name, error_message)
+        return
+
+    frappe.db.set_value(
+        MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+        task_name,
+        {
+            "status": "Success",
+            "material_request": material_request_doc.name,
+            "request_payload": None,
+            "error_message": None,
+            "finished_at": now(),
+        },
+        update_modified=True,
+    )
+    frappe.db.commit()
+
+
+def mark_material_request_task_failed(task_name, error_message):
+    frappe.db.set_value(
+        MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+        task_name,
+        {"status": "Failed", "error_message": error_message, "finished_at": now()},
+        update_modified=True,
+    )
+    frappe.db.commit()
+
+
+def validate_material_request_task_access(task):
+    if task.submitted_by == frappe.session.user or "System Manager" in frappe.get_roles():
+        return
+
+    frappe.throw(_("无权访问该物料需求异步任务"), frappe.PermissionError)
+
+
+def set_material_request_task_response(task, reused=False):
+    status = (task.status or "Queued").lower()
+    response = {
+        "status": status,
+        "task_status": task.status,
+        "task_id": task.name,
+        "message": {
+            "queued": "物料需求已进入异步处理队列。",
+            "processing": "物料需求正在后台处理中。",
+            "success": "物料需求已创建并提交。",
+            "failed": "物料需求异步处理失败。",
+        }.get(status, "物料需求异步任务状态已更新。"),
+        "material_request": task.material_request,
+        "material_request_docstatus": 1 if status == "success" else None,
+        "idempotent_reuse": reused,
+        "timestamp": now(),
+    }
+    if status == "failed":
+        response["error_message"] = task.error_message
+
+    frappe.response["data"] = response
+    frappe.response["http_status_code"] = 202 if status in ("queued", "processing") else 200
+
+
+@contextmanager
+def lock_mes_material_request_bins(material_request_data):
+    """Lock affected Bin rows while a background reconciliation runs.
+
+    The lock is acquired in a stable order so concurrent reconciliations of the
+    same Item-Warehouse pair wait instead of overwriting each other's result.
+    """
+    item_warehouse_pairs = get_mes_material_request_item_warehouse_pairs(material_request_data)
+
+    if not item_warehouse_pairs:
+        yield
+        return
+
+    from erpnext.stock.utils import get_bin
+
+    lock_names = [
+        "mes_mr_bin_"
+        + hashlib.sha256(
+            "|".join(
+                str(value)
+                for value in (
+                    getattr(frappe.local, "site", ""),
+                    material_request_data.get("company") or "",
+                    item_code,
+                    warehouse,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        for item_code, warehouse in item_warehouse_pairs
+    ]
+    acquired_lock_names = []
+
+    try:
+        # The advisory lock coordinates concurrent MES reconciliation jobs.
+        # The row lock below also coordinates with standard ERPNext Bin writes.
+        if getattr(frappe.db, "db_type", None) == "mariadb":
+            for lock_name in lock_names:
+                result = frappe.db.sql(
+                    "SELECT GET_LOCK(%s, %s)",
+                    (lock_name, MES_BIN_LOCK_TIMEOUT_SECONDS),
+                )
+                if not result or result[0][0] != 1:
+                    raise frappe.QueryDeadlockError(
+                        "Timed out waiting for MES Material Request inventory lock"
+                    )
+                acquired_lock_names.append(lock_name)
+
+        for item_code, warehouse in item_warehouse_pairs:
+            # get_bin handles the first request that creates an Item-Warehouse row.
+            get_bin(item_code, warehouse)
+            if getattr(frappe.db, "db_type", None) != "sqlite":
+                frappe.db.sql(
+                    """
+                    SELECT name
+                    FROM `tabBin`
+                    WHERE item_code = %s AND warehouse = %s
+                    FOR UPDATE
+                    """,
+                    (item_code, warehouse),
+                )
+
+        yield
+    finally:
+        if getattr(frappe.db, "db_type", None) == "mariadb":
+            release_lock_names = tuple(reversed(acquired_lock_names))
+            if release_lock_names:
+                release_locks = lambda: release_mes_material_request_locks(release_lock_names)
+                # Release only after the request transaction has committed or
+                # rolled back. Releasing here would let another request enter
+                # while this transaction is still uncommitted.
+                frappe.db.after_commit.add(release_locks)
+                frappe.db.after_rollback.add(release_locks)
+
+
+def release_mes_material_request_locks(lock_names):
+    for lock_name in lock_names:
+        frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_name,))
+
+
+def get_mes_material_request_item_warehouse_pairs(material_request_data, mr_item_rows=None):
+    requested_item_rows = set(mr_item_rows or [])
+    item_warehouse_pairs = {
+        (row.get("item_code"), row.get("warehouse"))
+        for row in material_request_data.get("items") or []
+        if (not mr_item_rows or row.name in requested_item_rows)
+        and row.get("item_code")
+        and row.get("warehouse")
+    }
+    return sorted(item_warehouse_pairs)
+
+
+def enqueue_mes_material_request_bin_sync(material_request, mr_item_rows=None):
+    """Schedule an idempotent Bin reconciliation after the MES request commits."""
+    if not material_request.name:
+        return
+
+    item_warehouse_pairs = get_mes_material_request_item_warehouse_pairs(
+        material_request, mr_item_rows
+    )
+    if not item_warehouse_pairs:
+        return
+
+    callback = lambda: enqueue_mes_material_request_bin_sync_job(
+        material_request_name=material_request.name,
+        item_warehouse_pairs=item_warehouse_pairs,
+    )
+    request = getattr(frappe.local, "request", None)
+    if request and hasattr(request, "after_response"):
+        # The parent transaction is committed before after_response callbacks run.
+        request.after_response.add(callback)
+    else:
+        frappe.db.after_commit.add(callback)
+
+
+def enqueue_mes_material_request_bin_sync_job(
+    material_request_name, item_warehouse_pairs=None
+):
+    """Queue Bin reconciliation, with a synchronous fallback if Redis is unavailable."""
+    kwargs = {
+        "material_request_name": material_request_name,
+        "item_warehouse_pairs": item_warehouse_pairs,
+    }
+    try:
+        frappe.enqueue(
+            "mes_integration.mes_integration.material_request.sync_material_request_bins",
+            queue="short",
+            timeout=300,
+            job_id=f"mes-material-request-bin-sync:{material_request_name}",
+            deduplicate=True,
+            **kwargs,
+        )
+    except Exception:
+        enqueue_error = frappe.get_traceback()
+        try:
+            sync_material_request_bins(**kwargs)
+            # This callback runs after the API transaction has committed. Commit
+            # the fallback's own transaction so the successful API is not left
+            # with a stale Bin value when Redis is unavailable.
+            frappe.db.commit()
+        except Exception:
+            enqueue_error += "\nFallback Bin sync failed:\n" + frappe.get_traceback()
+
+        frappe.log_error(
+            title="Failed to enqueue MES Material Request Bin sync",
+            message=enqueue_error,
+        )
+
+
+def sync_material_request_bins(material_request_name, item_warehouse_pairs=None):
+    """Recalculate Bin demand for a submitted MES request, safely repeatable."""
+    if not material_request_name:
+        return
+
+    item_warehouse_pairs = normalize_mes_item_warehouse_pairs(item_warehouse_pairs)
+    if not item_warehouse_pairs:
+        rows = frappe.get_all(
+            "Material Request Item",
+            filters={"parent": material_request_name},
+            fields=["item_code", "warehouse"],
+            limit_page_length=0,
+        )
+        item_warehouse_pairs = get_mes_material_request_item_warehouse_pairs(
+            {"items": rows}
+        )
+
+    item_warehouse_pairs = get_stock_item_warehouse_pairs(item_warehouse_pairs)
+    if not item_warehouse_pairs:
+        return
+
+    company = frappe.db.get_value("Material Request", material_request_name, "company") or ""
+    lock_data = {
+        "company": company,
+        "items": [
+            {"item_code": item_code, "warehouse": warehouse}
+            for item_code, warehouse in item_warehouse_pairs
+        ],
+    }
+
+    try:
+        with lock_mes_material_request_bins(lock_data):
+            indented_qty_map = get_mes_indented_qty_map(item_warehouse_pairs)
+            from erpnext.stock.stock_balance import update_bin_qty
+
+            for item_code, warehouse in item_warehouse_pairs:
+                update_bin_qty(
+                    item_code,
+                    warehouse,
+                    {"indented_qty": indented_qty_map.get((item_code, warehouse), 0)},
+                )
+    except frappe.QueryDeadlockError as exc:
+        raise frappe.RetryBackgroundJobError(
+            "MES Material Request Bin sync encountered a deadlock"
+        ) from exc
+
+
+def normalize_mes_item_warehouse_pairs(item_warehouse_pairs):
+    return sorted(
+        {
+            (pair[0], pair[1])
+            for pair in item_warehouse_pairs or []
+            if isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and pair[0]
+            and pair[1]
+        }
+    )
+
+
+def get_stock_item_warehouse_pairs(item_warehouse_pairs):
+    item_codes = {item_code for item_code, _ in item_warehouse_pairs}
+    if not item_codes:
+        return []
+
+    stock_item_codes = set(
+        frappe.get_all(
+            "Item",
+            filters={"name": ["in", list(item_codes)], "is_stock_item": 1},
+            pluck="name",
+            limit_page_length=0,
+        )
+    )
+    return [
+        pair for pair in item_warehouse_pairs if pair[0] in stock_item_codes
+    ]
+
+
+def create_material_request_attempt(material_request_data, request_key=None, isolate_payload=False):
+    # A failed insert/submit may mutate child document objects before the
+    # transaction is rolled back. Isolate only retry attempts; the normal
+    # success path avoids copying the complete large payload.
+    document_data = deepcopy(material_request_data) if isolate_payload else material_request_data
+    material_request_doc = frappe.get_doc(document_data)
     validate_mes_material_request_data(material_request_doc)
+    material_request_doc.flags[MES_INTEGRATION_REQUEST_FLAG] = True
 
-    material_request_doc.insert()
+    mes_item_details = detach_mes_item_details(material_request_doc)
+    material_request_doc.insert(
+        set_name=build_mes_material_request_name(
+            request_key=request_key,
+            company=material_request_data.get("company"),
+        )
+    )
+    validate_and_prepare_mes_item_details(material_request_doc, mes_item_details)
+    insert_mes_item_details(mes_item_details)
+    material_request_doc.set(MES_ITEM_DETAILS_FIELD, mes_item_details)
     material_request_doc.submit()
+    return material_request_doc
 
+
+def get_mes_idempotency_key(payload, material_request_data):
+    request = getattr(frappe.local, "request", None)
+    request_header = request.headers.get("X-Idempotency-Key") if request else None
+    candidates = [request_header]
+    candidates.extend(material_request_data.get(fieldname) for fieldname in MES_IDEMPOTENCY_KEY_FIELDS)
+    if isinstance(payload, dict):
+        candidates.extend(payload.get(fieldname) for fieldname in MES_IDEMPOTENCY_KEY_FIELDS)
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        candidate = str(candidate).strip()
+        if candidate:
+            if len(candidate) > 140:
+                frappe.throw(_("MES 幂等请求号长度不能超过 140 个字符。"))
+            return candidate
+
+    return None
+
+
+def get_existing_material_request_name(company, request_key):
+    if not company or not request_key:
+        return None
+    if not frappe.db.has_column("Material Request", "custom_material_request_no"):
+        return None
+
+    return frappe.db.get_value(
+        "Material Request",
+        {"company": company, "custom_material_request_no": request_key},
+        "name",
+        order_by="creation desc",
+    )
+
+
+def build_mes_material_request_name(request_key=None, company=None):
+    if request_key:
+        seed = f"{company or ''}\0{request_key}"
+        suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+    else:
+        suffix = frappe.generate_hash(length=24)
+
+    return f"MAT-MR-MES-{suffix}"
+
+
+def set_material_request_response(material_request, reused=False):
     frappe.response["data"] = {
         "status": "success",
-        "message": _("物料需求已创建并提交。"),
-        "material_request": material_request_doc.name,
-        "material_request_type": material_request_doc.material_request_type,
-        "material_request_docstatus": material_request_doc.docstatus,
+        "message": _("物料需求已存在并返回原单据。") if reused else _("物料需求已创建并提交。"),
+        "material_request": material_request.name,
+        "material_request_type": material_request.material_request_type,
+        "material_request_docstatus": material_request.docstatus,
         "material_request_url": frappe.utils.get_url_to_form(
-            "Material Request", material_request_doc.name
+            "Material Request", material_request.name
         ),
+        "idempotent_reuse": reused,
         "timestamp": now(),
+    }
+
+
+def detach_mes_item_details(material_request):
+    """Keep MES detail validation, but postpone child-row inserts until after parent insert."""
+    details = list(material_request.get(MES_ITEM_DETAILS_FIELD) or [])
+    if details:
+        material_request.flags.mes_item_detail_count = len(details)
+        material_request.set(MES_ITEM_DETAILS_FIELD, [])
+
+    return details
+
+
+def validate_and_prepare_mes_item_details(material_request, details):
+    """Validate MES detail rows and prepare them for a bulk insert."""
+    if not details:
+        return
+
+    # The custom validation needs the submitted MR item names generated by insert().
+    material_request.set(MES_ITEM_DETAILS_FIELD, details)
+    validate_item_details(material_request)
+    material_request._action = "save"
+
+    for idx, detail in enumerate(details, start=1):
+        detail.parent = material_request.name
+        detail.parenttype = material_request.doctype
+        detail.parentfield = MES_ITEM_DETAILS_FIELD
+        detail.idx = idx
+        detail.docstatus = 1
+        detail.set("__islocal", True)
+        detail.set_new_name()
+        detail._action = "save"
+
+    # The parent Item links were already validated by insert(). Detail Item
+    # links are restricted to those parent rows, and UOM links are validated in
+    # one query by validate_item_details(). Let the parent validate its child
+    # rows in one pass; its child loop performs the same data/length checks as
+    # detail._validate() without repeating parent-level setup 5000 times.
+    material_request.set(MES_ITEM_DETAILS_FIELD, details)
+    material_request._validate()
+    material_request.set(MES_ITEM_DETAILS_FIELD, [])
+
+    material_request.flags[MES_ITEM_DETAILS_VALIDATED_FLAG] = True
+    material_request.set(MES_ITEM_DETAILS_FIELD, [])
+
+
+def insert_mes_item_details(details):
+    """Insert validated MES detail rows in batches before the MR is submitted.
+
+    The child DocType has no hooks or controller logic. Validation is performed
+    in validate_and_prepare_mes_item_details before using Frappe's bulk insert.
+    """
+    if details:
+        bulk_insert(
+            MES_ITEM_DETAIL_DOCTYPE,
+            details,
+            chunk_size=MES_DETAIL_BULK_CHUNK_SIZE,
+        )
+        for detail in details:
+            if hasattr(detail, "__islocal"):
+                delattr(detail, "__islocal")
+
+
+def get_mes_indented_qty_map(item_warehouse_pairs):
+    """Return the same indented quantities as get_indented_qty, in one query."""
+    item_codes = {item_code for item_code, _ in item_warehouse_pairs}
+    warehouses = {warehouse for _, warehouse in item_warehouse_pairs}
+    request_item = frappe.qb.DocType("Material Request Item")
+    material_request = frappe.qb.DocType("Material Request")
+    outstanding_qty = request_item.stock_qty - request_item.ordered_qty
+    material_request_types = (*MES_INWARD_MATERIAL_REQUEST_TYPES, "Material Issue")
+
+    query = (
+        frappe.qb.from_(request_item)
+        .join(material_request)
+        .on(request_item.parent == material_request.name)
+        .select(
+            request_item.item_code,
+            request_item.warehouse,
+            Sum(
+                Case()
+                .when(
+                    material_request.material_request_type.isin(MES_INWARD_MATERIAL_REQUEST_TYPES),
+                    outstanding_qty,
+                )
+                .else_(0)
+            ).as_("inward_qty"),
+            Sum(
+                Case()
+                .when(material_request.material_request_type == "Material Issue", outstanding_qty)
+                .else_(0)
+            ).as_("outward_qty"),
+        )
+        .where(
+            (request_item.item_code.isin(item_codes))
+            & (request_item.warehouse.isin(warehouses))
+            & (material_request.material_request_type.isin(material_request_types))
+            & (request_item.stock_qty > request_item.ordered_qty)
+            & (material_request.status != "Stopped")
+            & (material_request.docstatus == 1)
+        )
+        .groupby(request_item.item_code, request_item.warehouse)
+    )
+
+    requested_pairs = set(item_warehouse_pairs)
+    return {
+        (row.item_code, row.warehouse): flt(row.inward_qty) - flt(row.outward_qty)
+        for row in query.run(as_dict=True)
+        if (row.item_code, row.warehouse) in requested_pairs
     }
 
 
@@ -778,12 +1637,31 @@ def validate_item_details(doc, method=None):
     if not is_mes_integration_enabled(doc.get("company")):
         return
 
+    if doc.flags.get(MES_ITEM_DETAILS_VALIDATED_FLAG):
+        return
+
     details = doc.get("custom_item_details") or []
     if not details:
         return
 
     item_rows_by_idx = {cint(row.idx): row for row in doc.get("items") if row.idx}
+    item_rows_by_code = {row.item_code: row for row in doc.get("items") if row.item_code}
     item_codes = {row.item_code for row in doc.get("items") if row.item_code}
+    detail_uom_by_item = {
+        row.item_code: row.get("stock_uom")
+        for row in item_rows_by_code.values()
+        if row.get("stock_uom")
+    }
+    missing_item_uoms = {
+        detail.item_code
+        for detail in details
+        if detail.item_code in item_codes
+        and not detail.material_request_item_idx
+        and not detail.get("uom")
+        and detail.item_code not in detail_uom_by_item
+    }
+    if missing_item_uoms:
+        detail_uom_by_item.update(get_detail_uom_by_item(details, missing_item_uoms))
 
     for detail in details:
         if flt(detail.order_qty) < 0:
@@ -819,5 +1697,56 @@ def validate_item_details(doc, method=None):
                     detail.idx, detail.item_code
                 )
             )
-        elif not detail.get("uom") and detail.item_code:
-            detail.uom = frappe.db.get_value("Item", detail.item_code, "stock_uom")
+        else:
+            item_row = item_rows_by_code.get(detail.item_code)
+            if item_row:
+                detail.item_name = item_row.item_name
+            if not detail.get("uom") and detail.item_code:
+                detail.uom = detail_uom_by_item.get(detail.item_code) or (
+                    item_row.get("stock_uom") if item_row else None
+                )
+
+    validate_mes_item_detail_uoms(details)
+
+
+def validate_mes_item_detail_uoms(details):
+    uoms = {detail.get("uom") for detail in details if detail.get("uom")}
+    if not uoms:
+        return
+
+    valid_uoms = set(
+        frappe.get_all(
+            "UOM",
+            filters={"name": ["in", list(uoms)]},
+            pluck="name",
+            limit_page_length=0,
+        )
+    )
+    for detail in details:
+        if detail.get("uom") and detail.uom not in valid_uoms:
+            frappe.throw(
+                _("Could not find UOM {0} in row {1}").format(detail.uom, detail.idx),
+                frappe.LinkValidationError,
+            )
+
+
+def get_detail_uom_by_item(details, item_codes):
+    item_codes_requiring_uom = {
+        detail.item_code
+        for detail in details
+        if detail.item_code in item_codes
+        and not detail.material_request_item_idx
+        and not detail.get("uom")
+    }
+    if not item_codes_requiring_uom:
+        return {}
+
+    return {
+        row.name: row.stock_uom
+        for row in frappe.get_all(
+            "Item",
+            filters={"name": ["in", list(item_codes_requiring_uom)]},
+            fields=["name", "stock_uom"],
+            limit_page_length=0,
+        )
+    }

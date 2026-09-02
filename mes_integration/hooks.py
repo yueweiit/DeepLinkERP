@@ -97,6 +97,14 @@ doctype_css = {"Stock Entry": "public/css/stock_entry.css"}
 after_install = "mes_integration.setup.after_install"
 after_migrate = "mes_integration.setup.after_migrate"
 
+scheduler_events = {
+	"cron": {
+		"*/5 * * * *": [
+			"mes_integration.mes_integration.material_request.recover_material_request_tasks"
+		]
+	}
+}
+
 # Uninstallation
 # ------------
 
@@ -175,6 +183,17 @@ doc_events = {
 			"mes_integration.mes_integration.stock_entry.notify_mes_stock_entry_status",
 		],
 	},
+}
+
+extend_doctype_class = {
+	"Material Request": [
+		"mes_integration.mes_integration.material_request.MESMaterialRequestPerformanceMixin"
+	],
+}
+
+default_log_clearing_doctypes = {
+	"MES Integration Log": 180,
+	"MES Material Request Task": 30,
 }
 
 # Scheduled Tasks
