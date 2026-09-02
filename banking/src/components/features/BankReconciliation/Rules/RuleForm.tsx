@@ -605,7 +605,7 @@ const ConfigureAccountsModalContent = () => {
                         </TableCell>
                         <TableCell className="align-top text-ink-gray-5">
                             <span className="px-2">
-                                Bank GL Account
+                                {_("Bank GL Account")}
                             </span>
                         </TableCell>
                         <TableCell className="align-top">
@@ -697,7 +697,7 @@ const ConfigureAccountsModalContent = () => {
                                     disabled={index === fields.length - 1}
                                     inputProps={{
                                         className: 'text-end',
-                                        placeholder: _("0.00"),
+                                        placeholder: "0.00",
                                         disabled: index === fields.length - 1
                                     }}
                                     hideLabel
@@ -712,7 +712,7 @@ const ConfigureAccountsModalContent = () => {
                                     disabled={index === fields.length - 1}
                                     inputProps={{
                                         className: 'text-end',
-                                        placeholder: _("0.00"),
+                                        placeholder: "0.00",
                                         disabled: index === fields.length - 1
                                     }}
                                     hideLabel

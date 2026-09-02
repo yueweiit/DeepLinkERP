@@ -299,7 +299,7 @@ const NoTransactionsFoundBanner = ({ text, description, onClearFilters }: { text
             {description && <EmptyDescription>{description}</EmptyDescription>}
         </EmptyHeader>
         <EmptyContent>
-            {onClearFilters ? <Button type='button' size='sm' variant='subtle' onClick={onClearFilters}>Clear Filters</Button> :
+            {onClearFilters ? <Button type='button' size='sm' variant='subtle' onClick={onClearFilters}>{_("Clear Filters")}</Button> :
                 <Button type='button' asChild size='sm' variant='subtle'>
                     <Link to="/statement-importer">
                         {_("Import Bank Statement")}
@@ -356,7 +356,7 @@ const UnreconciledTransactionItem = ({ transaction }: { transaction: Unreconcile
                     <div className="flex items-center gap-1">
                         <span className="font-medium text-sm">{formatDate(transaction.date)}</span>
                         {transaction.transaction_type &&
-                            <Badge theme="blue">{transaction.transaction_type}</Badge>}
+                            <Badge theme="blue">{_(transaction.transaction_type)}</Badge>}
                         {transaction.reference_number && <Badge
                             title={transaction.reference_number}
                             className="max-w-[300px] text-ellipsis"
@@ -722,7 +722,7 @@ const RuleAction = ({ transaction }: { transaction: UnreconciledTransaction }) =
                     <div className="flex items-center gap-0.5">
                         <Badge size='lg'
                             theme={rule.classify_as === "Bank Entry" ? "blue" : rule.classify_as === "Payment Entry" ? "green" : rule.classify_as === "Transfer" ? "violet" : "orange"}>
-                            {rule.classify_as}
+                            {_(rule.classify_as)}
                         </Badge>
                     </div>
                 </CardTitle>
@@ -763,7 +763,7 @@ const RuleAction = ({ transaction }: { transaction: UnreconciledTransaction }) =
                         size="md"
                     >
                         {getActionIcon()}
-                        <span>{_("Create")} {rule.classify_as}</span>
+                        <span>{_("Create")} {_(rule.classify_as)}</span>
                     </Button>
                     <p className="text-sm text-ink-gray-5 mt-2 text-center leading-relaxed">
                         {getActionDescription()}
@@ -789,7 +789,7 @@ const VouchersForTransaction = ({ transaction, contentHeight }: { transaction: U
         return <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2 text-sm text-ink-gray-5">
                 <Separator className="flex-1" />
-                <span>or</span>
+                <span>{_("or")}</span>
                 <Separator className="flex-1" />
             </div>
             <Skeleton className="h-16 w-full" />
@@ -804,7 +804,7 @@ const VouchersForTransaction = ({ transaction, contentHeight }: { transaction: U
     return <div className="relative space-y-2">
         <div className="flex items-center gap-2 text-sm text-ink-gray-5">
             <Separator className="flex-1" />
-            <span>or</span>
+            <span>{_("or")}</span>
             <Separator className="flex-1" />
         </div>
         {voucherList.length === 0 && <Empty className="my-4">

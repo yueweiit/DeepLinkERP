@@ -8,9 +8,8 @@ import { ActionLogItem, ActionLog as ActionLogType, bankRecActionLog, bankRecDat
 import { useGetBankAccounts } from '../BankReconciliation/utils'
 import { getCompanyCurrency } from '@/lib/company'
 import { formatCurrency } from '@/lib/numbers'
-import dayjs from 'dayjs'
 import { cn } from '@/lib/utils'
-import { formatDate } from '@/lib/date'
+import { formatDate, getTimeago } from '@/lib/date'
 import { Separator } from '@/components/ui/separator'
 import { slug } from '@/lib/frappe'
 import { PaymentEntry } from '@/types/Accounts/PaymentEntry'
@@ -100,7 +99,7 @@ const ActionGroupHeader = ({ action }: { action: ActionLogType }) => {
         {action.type === 'transfer' && <ArrowRightLeftIcon className='w-4 h-4' />}
         {action.type === 'bank_entry' && <LandmarkIcon className='w-4 h-4' />}
         <span className='flex items-center gap-2 text-sm'>
-            {label} - {dayjs(action.timestamp).fromNow()}
+            {label} - {getTimeago(action.timestamp)}
         </span>
     </div>
 }

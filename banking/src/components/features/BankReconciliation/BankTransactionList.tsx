@@ -109,7 +109,7 @@ const BankTransactionListView = () => {
                 header: _("Type"),
                 size: 112,
                 cell: ({ row }) =>
-                    row.original.transaction_type ? <Badge>{row.original.transaction_type}</Badge> : null,
+                    row.original.transaction_type ? <Badge>{_(row.original.transaction_type)}</Badge> : null,
             },
             {
                 id: "status",

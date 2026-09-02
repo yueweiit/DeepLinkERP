@@ -149,7 +149,7 @@ const StatementDetails = ({ data }: Props) => {
                         <TableRow>
                             <TableHead>{_("Account")}</TableHead>
                             <TableCell>
-                                <span title="GL Account" className="text-sm">{bank?.account}</span>
+                                <span title={_("GL Account")} className="text-sm">{bank?.account}</span>
                             </TableCell>
                         </TableRow>
                         <TableRow>
@@ -211,8 +211,8 @@ const StatementDetails = ({ data }: Props) => {
                                 </div>
                             </TableHead>
                             <TableCell>
-                                {dateFormat || data.date_format} (e.g.{" "}
-                                {formatDate(new Date(), dateFormat || "YYYY-MM-DD")})
+                                {dateFormat || data.date_format} （例如：{" "}
+                                {formatDate(new Date(), dateFormat || "YYYY-MM-DD")}）
                             </TableCell>
                         </TableRow>
                     </TableBody>

@@ -1,4 +1,5 @@
 import dayjs from 'dayjs';
+import 'dayjs/locale/zh-cn';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import advancedFormat from 'dayjs/plugin/advancedFormat';
@@ -13,6 +14,10 @@ dayjs.extend(advancedFormat);
 dayjs.extend(relativeTime);
 dayjs.extend(quarterOfYear);
 dayjs.extend(customParseFormat);
+
+if (typeof window !== 'undefined' && window.frappe?.boot?.lang === 'zh') {
+    dayjs.locale('zh-cn');
+}
 
 const FRAPPE_DATE_FORMAT = "YYYY-MM-DD"
 
