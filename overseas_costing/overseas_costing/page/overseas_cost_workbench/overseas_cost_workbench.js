@@ -594,6 +594,7 @@ class OverseasCostWorkbench {
       this.updateBatchUrl("", { replace: true });
       this.exportPinnedBatchName = "";
       this.batchItems = {};
+      this.expandedBatchNames.clear();
       const searchedServer = await this.reloadBatchesForServerSearch();
       if (!this.batches.length && !searchedServer) {
         await this.loadBatches();

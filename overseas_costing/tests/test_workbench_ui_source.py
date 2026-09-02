@@ -68,7 +68,9 @@ def test_list_load_and_normal_filters_do_not_prefetch_or_expand_skus(workbench_s
     transport_filter = method_source(js, "  async setTransportFilter(", "  syncActiveSelectionWithVisible() {")
     restore_focus = method_source(js, "  restoreBatchFocusStateFromUrl() {", "  async applyBatchFocusFromUrl() {")
     assert "prefetchBatchItems" not in load_batches
-    assert "expandedBatchNames" not in apply_filters
+    assert "this.expandedBatchNames.clear()" in apply_filters
+    assert "this.expandedBatchNames.add(" not in apply_filters
+    assert "this.expandedBatchNames = new Set" not in apply_filters
     assert "prefetchBatchItems" not in transport_filter
     assert "expandedBatchNames" not in restore_focus
 
