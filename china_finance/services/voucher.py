@@ -373,6 +373,11 @@ def create_voucher_from_source(doc, source_event="Posting", force=False):
 		}
 	)
 	voucher.flags.ignore_permissions = True
+	# The cancellation snapshot must retain the link to its cancelled source
+	# document. Frappe normally rejects links to cancelled documents, but this
+	# audit snapshot is created precisely because the source was cancelled.
+	if source_event == "Cancellation":
+		voucher.flags.ignore_links = True
 	voucher.insert()
 	voucher.submit()
 	if doc.doctype in ("Journal Entry", "Payment Entry") and frappe.db.has_column(doc.doctype, "custom_china_voucher_number"):
