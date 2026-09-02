@@ -2,7 +2,7 @@
 	if (window.__custom_filters_right_sidebar_loaded) return;
 	window.__custom_filters_right_sidebar_loaded = true;
 
-	const RIGHT_SIDEBAR_VERSION = "2026.08.07.3";
+		const RIGHT_SIDEBAR_VERSION = "2026.08.31.1";
 	const BAR_ID = "custom-filters-right-sidebar";
 	const FLYOUT_ID = "custom-filters-right-sidebar-flyout";
 	const FLYOUT_CLOSE_DELAY = 200;
@@ -206,16 +206,68 @@
 			return frappe.utils.desktop_icon(icon.label || "?", icon.bg_color || "gray", "sm");
 		}
 
-		resolve_route(icon) {
-			if (this.route_cache.has(icon.label)) return this.route_cache.get(icon.label);
-			let route = null;
-			try {
-				route = frappe.utils.get_route_for_icon(icon) || null;
-			} catch (error) {
-				route = null;
+		invalidate_route_cache() {
+			this.route_cache.clear();
+		}
+
+		get_sidebar_entry(icon) {
+			const sidebar_items = frappe.boot.workspace_sidebar_item || {};
+			const candidates = [icon.sidebar, icon.link_to, icon.label, icon.name]
+				.filter((value) => value !== null && value !== undefined && String(value).trim())
+				.map((value) => String(value).trim());
+
+			for (const candidate of candidates) {
+				const key = candidate.toLowerCase();
+				if (sidebar_items[key]) {
+					return { key, data: sidebar_items[key] };
+				}
 			}
-			if (typeof route !== "string" || !route) route = null;
-			this.route_cache.set(icon.label, route);
+
+			// 图标标题可能已翻译，而 sidebar map 保留原始标题，最后按标题匹配。
+			for (const [key, data] of Object.entries(sidebar_items)) {
+				const sidebar_label = String(data?.label || "").toLowerCase();
+				if (candidates.some((candidate) => candidate.toLowerCase() === sidebar_label)) {
+					return { key, data };
+				}
+			}
+
+			return null;
+		}
+
+		resolve_route(icon) {
+			if (!icon || this.is_folder(icon)) return null;
+
+			const cache_key = icon.name || icon.label;
+			if (this.route_cache.has(cache_key)) return this.route_cache.get(cache_key);
+
+			const sidebar_entry = this.get_sidebar_entry(icon);
+			let route = null;
+			let error = null;
+			try {
+				const route_icon = Object.assign({}, icon);
+				if (icon.link_type === "Workspace Sidebar" && sidebar_entry) {
+					// get_route_for_icon 按标题查找 sidebar，使用 boot map 的规范 key。
+					route_icon.label = sidebar_entry.key;
+				}
+				route = frappe.utils.get_route_for_icon(route_icon) || null;
+			} catch (route_error) {
+				error = route_error;
+			}
+
+			if (typeof route !== "string" || !route) {
+				// 首次渲染时 boot/workspace 数据可能尚未就绪，失败结果不能缓存。
+				this.route_cache.delete(cache_key);
+				console.warn("[custom_filters right_sidebar] unable to resolve icon route", {
+					icon: icon.label || icon.name,
+					link_type: icon.link_type,
+					link_to: icon.link_to,
+					sidebar: sidebar_entry?.key || null,
+					error,
+				});
+				return null;
+			}
+
+			this.route_cache.set(cache_key, route);
 			return route;
 		}
 
@@ -230,9 +282,10 @@
 			// (e.g. Balance Sheet) and bypass the workspace page, so core's sidebar
 			// resolver keeps the previous workspace. Hand the target sidebar to core
 			// via route_options (consumed by frappe.app.sidebar on route change).
-			const sidebar = frappe.boot.workspace_sidebar_item[(icon.label || "").toLowerCase()];
-			if (icon.link_type === "Workspace Sidebar" && sidebar) {
-				frappe.route_options = Object.assign({}, frappe.route_options, { sidebar: icon.label });
+			const sidebar_entry = this.get_sidebar_entry(icon);
+			if (icon.link_type === "Workspace Sidebar" && sidebar_entry) {
+				const sidebar_name = sidebar_entry.data?.label || sidebar_entry.key;
+				frappe.route_options = Object.assign({}, frappe.route_options, { sidebar: sidebar_name });
 			}
 			frappe.set_route(route.replace(/^\/+/, ""));
 		}
@@ -333,6 +386,7 @@
 
 		bind_route() {
 			frappe.router.on("change", () => {
+				this.invalidate_route_cache();
 				if (this.route_frame) return;
 				this.route_frame = window.requestAnimationFrame(() => {
 					this.route_frame = null;
@@ -343,6 +397,7 @@
 
 			// 与左侧边栏同一触发源：页面渲染完成后同步显隐（desktop.js 设置 hide_sidebar）
 			$(document).on("page-change", () => {
+				this.invalidate_route_cache();
 				this.update_visibility();
 				this.update_active();
 				window.setTimeout(() => this.update_active(), 100);
