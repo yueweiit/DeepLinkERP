@@ -3,7 +3,7 @@ import json
 from requests.exceptions import RequestException
 
 import frappe
-from frappe.utils import flt, get_request_session, getdate, now
+from frappe.utils import cint, flt, get_request_session, getdate, now
 
 from erpnext.stock.doctype.item.item import get_item_defaults
 
@@ -332,9 +332,14 @@ def reset_mes_status(stock_entry_name):
 
 SEMI_FINISHED_GOODS_RECEIPT = "Semi Finished Goods Receipt"
 FINISHED_GOODS_RECEIPT = "Finished Goods Receipt"
-MES_RECEIPT_STOCK_ENTRY_TYPES = {
+STANDARD_MATERIAL_RECEIPT = "Material Receipt"
+MES_CUSTOM_RECEIPT_STOCK_ENTRY_TYPES = {
     SEMI_FINISHED_GOODS_RECEIPT,
     FINISHED_GOODS_RECEIPT,
+}
+MES_RECEIPT_STOCK_ENTRY_TYPES = {
+    *MES_CUSTOM_RECEIPT_STOCK_ENTRY_TYPES,
+    STANDARD_MATERIAL_RECEIPT,
 }
 MES_RECEIPT_FALLBACK_TARGET_WAREHOUSE = "半成品 - YC"
 DLM_ISSUE_STOCK_ENTRY_TYPES = {
@@ -345,12 +350,12 @@ DLM_ISSUE_STOCK_ENTRY_TYPES = {
 
 
 @frappe.whitelist()
-def create_draft_stock_entry_from_mes(data=None, stock_entry=None):
+def create_draft_stock_entry_from_mes(data=None, stock_entry=None, submit=False):
     """
-    Create a draft Stock Entry from MES.
+    Create a Stock Entry from MES, optionally submitting it immediately.
 
     Accepted payloads:
-    1. data={"sales_order": "SAL-ORD-...", "stock_entry": {...}}
+    1. data={"sales_order": "CRM-ORDER-...", "stock_entry": {...}}
     2. data={...} with sales_order inside the Stock Entry payload
     """
     payload = parse_json_if_needed(data if data is not None else stock_entry)
@@ -370,7 +375,7 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None):
         frappe.throw(frappe._("缺少 Stock Entry 数据或数据格式不正确"))
 
     stock_entry_data = stock_entry_data.copy()
-    sales_order_doc = get_sales_order_by_name(payload, stock_entry_data, required=False)
+    sales_order_doc = get_sales_order_by_reference(payload, stock_entry_data, required=True)
 
     stock_entry_type = stock_entry_data.get("stock_entry_type")
     validate_mes_receipt_stock_entry_type(stock_entry_type)
@@ -385,6 +390,8 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None):
     stock_entry_data["doctype"] = "Stock Entry"
     stock_entry_data["stock_entry_type"] = stock_entry_type
     stock_entry_data["purpose"] = "Material Receipt"
+    mark_mes_receipt_stock_entry(stock_entry_data)
+    set_mes_stock_entry_sales_order(stock_entry_data, sales_order_doc)
     set_mes_stock_entry_default_target_warehouses(stock_entry_data)
 
     stock_entry_doc = frappe.get_doc(stock_entry_data)
@@ -392,17 +399,35 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None):
     validate_mes_stock_entry_data(stock_entry_doc, sales_order_doc)
     prepare_mes_stock_entry_for_submit(stock_entry_doc)
     set_allow_zero_valuation_rate_for_mes_items_without_cost(stock_entry_doc)
+    # Keep an explicit marker for standard receipts created through this API.
+    # It allows the submit hook to distinguish them from ordinary ERP receipts.
+    stock_entry_doc.flags.mes_receipt_request = True
     stock_entry_doc.insert()
     stock_entry_doc.db_set("stock_entry_type", stock_entry_type, update_modified=False)
     stock_entry_doc.reload()
 
+    if cint(submit):
+        stock_entry_doc.flags.mes_receipt_request = True
+        stock_entry_doc.submit()
+        stock_entry_doc.reload()
+
+    submitted = stock_entry_doc.docstatus == 1
+
     return {
         "status": "success",
-        "message": frappe._("物料移动草稿已创建，可在 ERP 审核后直接提交。"),
+        "message": (
+            frappe._("入库单已创建并提交。")
+            if submitted
+            else frappe._("物料移动草稿已创建，可在 ERP 审核后直接提交。")
+        ),
         "stock_entry": stock_entry_doc.name,
         "stock_entry_type": stock_entry_doc.stock_entry_type,
         "stock_entry_docstatus": stock_entry_doc.docstatus,
+        "submitted": submitted,
         "sales_order": sales_order_doc.name if sales_order_doc else None,
+        "sales_order_crm_order_no": (
+            sales_order_doc.get("custom_crm_order_no") if sales_order_doc else None
+        ),
         "stock_entry_url": frappe.utils.get_url_to_form("Stock Entry", stock_entry_doc.name),
         "timestamp": now(),
     }
@@ -410,26 +435,85 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None):
 
 @frappe.whitelist()
 def create_and_submit_stock_entry_from_mes(data=None, stock_entry=None):
-    return create_draft_stock_entry_from_mes(data=data, stock_entry=stock_entry)
+    """Create and submit a MES receipt Stock Entry in one transaction."""
+    return create_draft_stock_entry_from_mes(
+        data=data,
+        stock_entry=stock_entry,
+        submit=True,
+    )
 
 
-def get_sales_order_by_name(payload, stock_entry_data, required=True):
-    sales_order = (
+def get_sales_order_by_reference(payload, stock_entry_data, required=True):
+    """Resolve an ERP Sales Order by ERP name or CRM order number.
+
+    MES should send the CRM order number in ``sales_order``.  ERP document
+    names remain supported so existing integrations do not break.
+    """
+    sales_order_reference = (
         payload.get("sales_order")
         or payload.get("sales_order_name")
         or stock_entry_data.get("sales_order")
         or stock_entry_data.get("sales_order_name")
     )
 
-    if not sales_order:
+    if not sales_order_reference:
         if required:
             frappe.throw(frappe._("缺少销售订单编号 sales_order"))
         return None
 
-    if not frappe.db.exists("Sales Order", sales_order):
-        frappe.throw(frappe._("未找到销售订单 {0}").format(sales_order))
+    # Prefer an exact ERP document name when one exists. This keeps the old
+    # contract working even if an ERP name happens to resemble a CRM number.
+    if frappe.db.exists("Sales Order", sales_order_reference):
+        return frappe.get_doc("Sales Order", sales_order_reference)
 
-    return frappe.get_doc("Sales Order", sales_order)
+    if not frappe.db.has_column("Sales Order", "custom_crm_order_no"):
+        frappe.throw(
+            frappe._("未找到 ERP 销售订单或 CRM 销售订单号 {0}").format(
+                sales_order_reference
+            )
+        )
+
+    sales_order_names = frappe.get_all(
+        "Sales Order",
+        filters={"custom_crm_order_no": sales_order_reference},
+        pluck="name",
+        limit_page_length=2,
+    )
+
+    if len(sales_order_names) > 1:
+        frappe.throw(
+            frappe._("CRM 销售订单号 {0} 对应多张 ERP 销售订单，无法安全关联").format(
+                sales_order_reference
+            )
+        )
+
+    if not sales_order_names:
+        frappe.throw(
+            frappe._("未找到 ERP 销售订单或 CRM 销售订单号 {0}").format(
+                sales_order_reference
+            )
+        )
+
+    return frappe.get_doc("Sales Order", sales_order_names[0])
+
+
+def get_sales_order_by_name(payload, stock_entry_data, required=True):
+    """Backward-compatible alias for callers using the old helper name."""
+    return get_sales_order_by_reference(payload, stock_entry_data, required=required)
+
+
+def set_mes_stock_entry_sales_order(stock_entry_data, sales_order_doc):
+    """Persist the resolved ERP Sales Order on the Stock Entry when available."""
+    if not sales_order_doc or not frappe.db.has_column("Stock Entry", "custom_sales_order"):
+        return
+
+    stock_entry_data["custom_sales_order"] = sales_order_doc.name
+
+
+def mark_mes_receipt_stock_entry(stock_entry_data):
+    """Persist the MES source for receipts that may be submitted later."""
+    if frappe.db.has_column("Stock Entry", "custom_mes_receipt"):
+        stock_entry_data["custom_mes_receipt"] = 1
 
 
 def parse_json_if_needed(value):
@@ -742,7 +826,19 @@ def update_material_request_issue_status(mr_name):
 
 
 def is_mes_receipt_stock_entry(stock_entry):
-    return stock_entry.get("stock_entry_type") in MES_RECEIPT_STOCK_ENTRY_TYPES
+    stock_entry_type = stock_entry.get("stock_entry_type")
+    if stock_entry_type in MES_CUSTOM_RECEIPT_STOCK_ENTRY_TYPES:
+        return True
+
+    # A standard Material Receipt is also used by ordinary ERP users.  It must
+    # be identified by the MES request context or by the persisted marker on a
+    # MES-created draft; the generic savedocs route is not sufficient because
+    # the ERP Desk uses the same route for manual submissions.
+    return stock_entry_type == STANDARD_MATERIAL_RECEIPT and (
+        is_mes_api_user()
+        or stock_entry.flags.get("mes_receipt_request")
+        or cint(stock_entry.get("custom_mes_receipt"))
+    )
 
 
 DEFAULT_RECEIPT_STATUS_DOCUMENT_TYPE = "stock_entry"
@@ -844,6 +940,7 @@ def retry_push_stock_entry_status_to_mes(stock_entry_name):
     if not is_mes_integration_enabled(stock_entry.get("company")):
         throw_mes_integration_disabled(stock_entry.get("company"))
 
+    stock_entry.flags.mes_receipt_request = True
     return push_stock_entry_status_to_mes(stock_entry)
 
 
@@ -947,4 +1044,3 @@ def get_mes_push_authorization():
         frappe.throw(frappe._("缺少 MES 推送接口配置：mes_push_authorization"))
 
     return authorization
-
