@@ -107,10 +107,12 @@ EXPENSE_RULES = [
     {"priority": 93, "patterns": [r"公积金", r"住房公积金"], "account": "应付职工薪酬-公积金"},
     {"priority": 90, "patterns": [r"国库", r"税收", r"增值税", r"所得税", r"印花税", r"附加税", r"公共缴费", r"扣税"], "account": "应交税费"},
     {"priority": 80, "patterns": [r"货款", r"采购", r"供应商", r"材料", r"商品"], "account": "应付账款"},
-    {"priority": 70, "patterns": [r"房租", r"租金", r"物业"], "account": "管理费用-房租"},
+    {"priority": 72, "patterns": [r"物业", r"水电", r"电费"], "account": "管理费用-物业水电费"},
+    {"priority": 71, "patterns": [r"房租", r"租金"], "account": "管理费用-租金"},
+    {"priority": 70, "patterns": [r"招聘"], "account": "管理费用-招聘费"},
     {"priority": 65, "patterns": [r"运费", r"物流", r"运输"], "account": "管理费用-运输费"},
     {"priority": 60, "patterns": [r"快递", r"办公", r"耗材", r"用品", r"服务费", r"咨询费", r"技术服务"], "account": "管理费用-办公费"},
-    {"priority": 55, "patterns": [r"报销", r"差旅", r"餐费", r"招待"], "account": "管理费用-报销"},
+    {"priority": 55, "patterns": [r"报销", r"差旅", r"餐费", r"招待"], "account": "管理费用-办公费"},
     {"priority": 40, "patterns": [r"利息"], "account": "财务费用-利息"},
 ]
 
