@@ -5796,3 +5796,60 @@
     grid-template-columns: 1fr;
   }
 }
+
+.ocw-source-link {
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #075f62;
+  font: inherit;
+  font-weight: 750;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.ocw-source-link:hover,
+.ocw-source-link:focus-visible {
+  color: #0d777a;
+  text-decoration-thickness: 2px;
+}
+
+.ocw-parent-row.is-selected > td {
+  background: #edf8f7;
+}
+
+.ocw-role-switch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid #c4d6d4;
+  border-radius: 8px;
+  background: #f6f9f9;
+}
+
+.ocw-role-switch button {
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #667574;
+}
+
+.ocw-role-switch button.active {
+  background: #0d777a;
+  color: #fff;
+}
+
+.ocw-page[data-role-view="purchase"] .ocw-finance-only,
+.ocw-page[data-role-view="finance"] .ocw-purchase-only {
+  display: none;
+}
+
+.ocw-tree-toggle {
+  min-width: 30px;
+  min-height: 30px;
+}
