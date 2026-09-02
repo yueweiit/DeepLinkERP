@@ -71,7 +71,10 @@ const RawTableGrid = ({ rows, columnMapping, headerIndex, editable, disabled, on
     }, [stringRows, headerIndex, dateColumn, amountColumns])
 
     return (
-        <Table containerClassName="rounded-none">
+        <Table
+            className="w-max min-w-full"
+            containerClassName="w-full max-w-full overflow-x-auto overflow-y-visible rounded-none"
+        >
             <TableBody>
                 {editable && (
                     <TableRow className="border-b border-outline-gray-2 bg-surface-white hover:bg-surface-white">
