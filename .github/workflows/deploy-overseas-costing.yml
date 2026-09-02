@@ -40,6 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Check deployment secrets
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
