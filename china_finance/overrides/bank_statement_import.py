@@ -1,7 +1,11 @@
 """Bank statement import extensions that do not modify ERPNext core code."""
 
 import frappe
+from frappe import _
 from erpnext.accounts.doctype.bank_statement_import.bank_statement_import import BankStatementImport
+from erpnext.accounts.doctype.bank_statement_import_log.bank_statement_import_log import (
+	BankStatementImportLog,
+)
 
 
 def get_full_import_preview(importer):
@@ -57,3 +61,108 @@ class ChinaFinanceBankStatementImport(BankStatementImport):
 			return
 
 		return get_full_import_preview(self.get_importer())
+
+
+class ChinaFinanceBankStatementImportLog(BankStatementImportLog):
+	"""Make repeated statement uploads idempotent by filtering known references."""
+
+	def get_final_transactions(self, transaction_rows):
+		transactions = super().get_final_transactions(transaction_rows)
+		if not self.bank_account or not transactions:
+			return transactions
+
+		references = {
+			str(transaction.get("reference") or "").strip()
+			for transaction in transactions
+			if str(transaction.get("reference") or "").strip()
+		}
+		if not references:
+			return transactions
+
+		existing_references = set(
+			frappe.get_all(
+				"Bank Transaction",
+				filters={
+					"bank_account": self.bank_account,
+					"reference_number": ["in", list(references)],
+					"docstatus": ["!=", 2],
+				},
+				pluck="reference_number",
+			)
+		)
+		return [
+			transaction
+			for transaction in transactions
+			if str(transaction.get("reference") or "").strip() not in existing_references
+		]
+
+	def insert_transactions(self):
+		"""Import the complete batch atomically after validating every row.
+
+		The standard importer creates and submits transactions one at a time. That
+		allowed an early row to trigger an automatic draft voucher before a later
+		row failed validation. Validate the final batch first, then protect the
+		whole write phase with a savepoint so an unexpected failure cannot leave a
+		partial import behind.
+		"""
+		if self.status == "Completed":
+			return super().insert_transactions()
+
+		transactions = _get_transactions_for_import(self)
+		_validate_import_batch(transactions)
+
+		save_point = f"china_bank_import_{frappe.generate_hash(length=8)}"
+		message_log = list(frappe.get_message_log())
+		frappe.db.savepoint(save_point)
+		try:
+			return super().insert_transactions()
+		except Exception:
+			frappe.db.rollback(save_point=save_point)
+			# Keep the actual error message but remove success messages emitted by
+			# earlier rows that have now been rolled back.
+			new_messages = [
+				message
+				for message in frappe.get_message_log()[len(message_log):]
+				if not str(message.get("message") or "").startswith("已为银行流水 ")
+			]
+			frappe.local.message_log = message_log + new_messages
+			raise
+		finally:
+			try:
+				frappe.db.release_savepoint(save_point)
+			except Exception:
+				# The outer request may already have rolled back the transaction.
+				pass
+
+
+def _get_transactions_for_import(import_log):
+	"""Build the same final transaction list used by ERPNext's importer."""
+	if import_log.is_pdf():
+		return import_log.get_pdf_final_transactions()
+
+	raw_data = import_log.get_data()
+	transaction_rows, _starting_index, _ending_index = import_log.get_transaction_rows(raw_data)
+	return import_log.get_final_transactions(transaction_rows=transaction_rows)
+
+
+def _validate_import_batch(transactions):
+	"""Reject known row-level failures before any Bank Transaction is inserted."""
+	seen_references = set()
+	max_transaction_id_length = 140
+
+	for row_index, transaction in enumerate(transactions, 1):
+		reference = str(transaction.get("reference") or "").strip()
+		if reference and len(reference) > max_transaction_id_length:
+			frappe.throw(
+				_("第 {0} 条银行流水的流水号超过 {1} 个字符，请检查参考号字段映射。").format(
+					row_index, max_transaction_id_length
+				),
+				title=_("银行流水导入失败"),
+			)
+		if reference in seen_references:
+			frappe.throw(
+				_("第 {0} 条银行流水的流水号重复：{1}。").format(row_index, reference),
+				title=_("银行流水导入失败"),
+			)
+		if reference:
+			seen_references.add(reference)

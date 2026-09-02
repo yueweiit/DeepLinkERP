@@ -11,7 +11,10 @@ from frappe import _
 from frappe.utils.file_manager import save_file
 
 
-STANDARD_HEADERS = ["日期", "存款", "取款", "摘要", "描述", "参考号码", "银行账户", "货币"]
+# Keep the normalized file compatible with ERPNext's new Banking importer. The
+# original CMB headers are Chinese, but the native Bank Statement Import Log
+# mapper recognizes these English standard headers.
+STANDARD_HEADERS = ["Date", "Deposit", "Withdrawal", "Description", "Reference", "Bank Account", "Currency"]
 SUPPORTED_BANK_PARSERS = {"招商银行": "cmb", "招商": "cmb"}
 REQUIRED_CMB_HEADERS = {"交易日", "借方金额", "贷方金额", "摘要", "流水号"}
 CMB_OPTIONAL_HEADERS = {"交易类型", "收(付)方名称", "收(付)方账号", "收(付)方开户行名"}
@@ -79,6 +82,10 @@ def convert_bank_statement_import_log(statement_import_id, source_file):
 		doc, rows, file_hash, doctype="Bank Statement Import Log", fieldname="file"
 	)
 	doc.file = converted_file.file_url
+	# The document was initially created against the original CMB workbook.
+	# Rebuild its mapping and totals against the normalized file so the new
+	# Banking preview sees the same rows that will actually be imported.
+	doc.set_file_properties(doc.get_data())
 	doc.save()
 	return {"supported": True, "file_url": converted_file.file_url, "row_count": len(rows), "reused": reused}
 
@@ -142,9 +149,9 @@ def _parse_cmb_rows(worksheet, header_row, header_indexes, bank_account):
 		row = _row_as_dict(values, header_indexes)
 		try:
 			converted = _convert_cmb_row(row, bank_account)
-			if converted[5] in references:
-				raise ValueError(_("流水号重复：{0}").format(converted[5]))
-			references.add(converted[5])
+			if converted[4] in references:
+				raise ValueError(_("流水号重复：{0}").format(converted[4]))
+			references.add(converted[4])
 			rows.append(converted)
 		except ValueError as exc:
 			errors.append(_("第 {0} 行：{1}").format(row_number, exc))
@@ -153,6 +160,7 @@ def _parse_cmb_rows(worksheet, header_row, header_indexes, bank_account):
 		frappe.throw("<br>".join(errors[:20]), title=_("银行流水转换失败"))
 	if not rows:
 		frappe.throw(_("未找到可导入的招商银行流水。"), title=_("银行流水转换"))
+	_validate_cmb_balances(worksheet, header_row, header_indexes)
 	return rows
 
 
@@ -177,12 +185,10 @@ def _convert_cmb_row(row, bank_account):
 		raise ValueError(_("不支持的币种：{0}").format(row.get("币种") or _("空")))
 
 	description = _build_description(row)
-	summary = str(row.get("摘要") or "").strip()
 	return [
 		transaction_date,
 		_format_amount(deposit),
 		_format_amount(withdrawal),
-		summary,
 		description,
 		reference,
 		bank_account,
@@ -220,11 +226,69 @@ def _format_amount(amount):
 
 def _build_description(row):
 	parts = [str(row.get("摘要") or "").strip()]
-	for label, fieldname in (("对方", "收(付)方名称"), ("账号", "收(付)方账号"), ("开户行", "收(付)方开户行名"), ("交易类型", "交易类型")):
+	for label, fieldname in (
+		("对方", "收(付)方名称"),
+		("账号", "收(付)方账号"),
+		("开户行", "收(付)方开户行名"),
+		("交易类型", "交易类型"),
+		("开户地址", "收(付)方开户行地址"),
+		("业务参考号", "业务参考号"),
+		("流程实例号", "流程实例号"),
+		("交易时间", "交易时间"),
+		("起息日", "起息日"),
+		("扩展摘要", "扩展摘要"),
+		("交易分析码", "交易分析码"),
+	):
 		value = str(row.get(fieldname) or "").strip()
 		if value:
 			parts.append(f"{label}：{value}")
 	return "｜".join(part for part in parts if part)
+
+
+def _validate_cmb_balances(worksheet, header_row, header_indexes):
+	"""Reject a statement when its row balances prove that rows are missing or reordered."""
+	if _normalize_header("余额") not in header_indexes:
+		return
+
+	previous_balance = _find_cmb_metadata_amount(worksheet, header_row, "对账单期初余额", "期初余额")
+	closing_balance = _find_cmb_metadata_amount(worksheet, header_row, "对账单余额", "期末余额")
+	for row_number, values in enumerate(worksheet.iter_rows(min_row=header_row + 1, values_only=True), header_row + 1):
+		if not any(value not in (None, "") for value in values):
+			continue
+		row = _row_as_dict(values, header_indexes)
+		try:
+			balance = _parse_amount(row.get("余额"), "余额")
+			deposit = _parse_amount(row.get("贷方金额"), "贷方金额")
+			withdrawal = _parse_amount(row.get("借方金额"), "借方金额")
+		except ValueError:
+			# Row-level amount validation already reports the transaction error.
+			continue
+		if previous_balance is not None and abs(previous_balance + deposit - withdrawal - balance) > Decimal("0.01"):
+			frappe.throw(
+				_("第 {0} 行余额与上一笔流水不连续，请检查是否漏行、重复或排序错误。").format(row_number),
+				title=_("银行流水校验失败"),
+			)
+		previous_balance = balance
+
+	if closing_balance is not None and previous_balance is not None and abs(previous_balance - closing_balance) > Decimal("0.01"):
+		frappe.throw(
+			_("流水末笔余额与对账单期末余额不一致，请检查是否漏行、重复或排序错误。"),
+			title=_("银行流水校验失败"),
+		)
+
+
+def _find_cmb_metadata_amount(worksheet, header_row, *labels):
+	"""Read a labelled amount from the CMB statement summary area above the table."""
+	labels = {_normalize_header(label) for label in labels}
+	for values in worksheet.iter_rows(min_row=1, max_row=max(header_row - 1, 1), values_only=True):
+		for index, value in enumerate(values[:-1]):
+			if _normalize_header(value) not in labels:
+				continue
+			try:
+				return _parse_amount(values[index + 1], str(value))
+			except ValueError:
+				return None
+	return None
 
 
 def _normalize_header(value):
@@ -233,7 +297,10 @@ def _normalize_header(value):
 
 def _get_or_create_converted_file(doc, rows, file_hash, doctype=None, fieldname="import_file"):
 	doctype = doctype or doc.doctype
-	filename = f"招商银行流水-{file_hash[:12]}.csv"
+	# Bump the normalized-file format whenever the column layout changes. This
+	# prevents a previously generated, misaligned CSV from being reused for the
+	# same source workbook after the parser is fixed.
+	filename = f"招商银行流水-v2-{file_hash[:12]}.csv"
 	existing = frappe.db.get_value(
 		"File",
 		{"attached_to_doctype": doctype, "attached_to_name": doc.name, "file_name": filename},
