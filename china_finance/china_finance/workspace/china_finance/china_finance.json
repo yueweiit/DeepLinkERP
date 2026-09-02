@@ -141,10 +141,10 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "\u94f6\u884c\u5bf9\u8d26\u5de5\u5177",
+   "label": "\u94f6\u884c\u5bf9\u8d26",
    "link_count": 0,
-   "link_to": "Bank Reconciliation Tool",
-   "link_type": "DocType",
+   "link_to": "china-banking",
+   "link_type": "Page",
    "onboard": 0,
    "type": "Link"
   },

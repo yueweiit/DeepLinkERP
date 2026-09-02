@@ -1,10 +1,9 @@
 /* Small compatibility layer for the native ERPNext reconciliation dialog. */
 frappe.ui.form.on("Bank Reconciliation Tool", {
 	refresh(frm) {
-		frm.add_custom_button(__("打开新对账工具"), () => {
-			window.open("/banking", "_blank", "noopener,noreferrer");
-		});
-		frm.change_custom_button_type(__("打开新对账工具"), null, "primary");
+		// Keep old bookmarks working while making the React Banking module the
+		// single entry point for import, matching, reconciliation and summaries.
+		window.location.replace("/banking");
 	},
 });
 

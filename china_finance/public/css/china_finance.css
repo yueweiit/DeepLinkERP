@@ -24,9 +24,22 @@
 		grid-template-columns: 1fr;
 	}
 }
-.china-voucher-ledger-report .dt-scrollable,
-.china-voucher-ledger-report .dt-header {
-		max-width: 100%;
+.china-voucher-ledger-report .dt-header,
+.china-voucher-ledger-report .dt-scrollable {
+	max-width: none;
+}
+
+.china-voucher-ledger-report .dt-row {
+	min-width: 100%;
+	width: max-content;
+}
+
+.china-voucher-ledger-report .dt-cell {
+	flex: 0 0 auto;
+}
+
+.china-voucher-ledger-report .dt-scrollable {
+	overflow-x: auto;
 }
 
 .china-voucher-ledger-report .dt-cell__content {
@@ -39,7 +52,7 @@
 }
 
 .china-voucher-ledger-report .dt-row {
-		min-height: 28px;
+	min-height: 28px;
 }
 
 

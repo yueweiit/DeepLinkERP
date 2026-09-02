@@ -33,7 +33,7 @@ REPORT_NAVIGATION = (
 )
 
 BANK_NAVIGATION = (
-	("Bank Reconciliation Tool", "银行对账工具", "DocType"),
+	("china-banking", "银行对账", "Page"),
 	("China Reconciliation Statement", "对账单", "DocType"),
 )
 
@@ -105,6 +105,7 @@ LEGACY_WORKSPACE_CONTENT = json.dumps([
 ], ensure_ascii=False, separators=(",", ":"))
 
 LEGACY_NAVIGATION = {
+	"Bank Reconciliation Tool",
 	"China Accounting Voucher",
 	"China Voucher Ledger",
 	"China Voucher Integrity",
@@ -484,6 +485,7 @@ def backfill_bank_transaction_summaries():
 def sync_navigation_metadata():
 	"""Keep route identifiers stable while translations provide Chinese labels."""
 	sync_payments_voucher_report_link()
+	sync_banking_sidebar_navigation()
 	navigation_name = "China Finance"
 	values_by_doctype = {
 		"Workspace": {"label": navigation_name, "title": navigation_name},
@@ -569,13 +571,46 @@ def sync_payments_voucher_report_link():
 	sidebar.save()
 
 
+def sync_banking_sidebar_navigation():
+	"""Route the standard Banking sidebar entry into the Desk workspace."""
+	if not frappe.db.exists("Workspace Sidebar", "Banking"):
+		return
+
+	sidebar = frappe.get_doc("Workspace Sidebar", "Banking")
+	changed = False
+	for item in sidebar.items:
+		is_legacy_link = item.link_type == "DocType" and item.link_to == "Bank Reconciliation Tool"
+		is_previous_url = item.link_type == "URL" and item.url == "/banking"
+		if is_legacy_link or is_previous_url:
+			item.label = "银行对账"
+			item.link_type = "Page"
+			item.link_to = "china-banking"
+			item.url = None
+			changed = True
+
+	if changed:
+		sidebar.flags.ignore_permissions = True
+		sidebar.save()
+
+
 def _known_navigation_links():
 	return {link[0] for link in (*CORE_NAVIGATION, *ADMIN_NAVIGATION)} | LEGACY_NAVIGATION | {"China Finance"}
 
 
 def _sidebar_link(link_to, label, link_type):
-	return {
+	item = {
 		"type": "Link", "label": label, "link_to": link_to, "link_type": link_type,
+		"child": 1, "collapsible": 1, "indent": 0, "keep_closed": 0, "show_arrow": 0,
+	}
+	if link_type == "URL":
+		item["url"] = link_to
+		item["link_to"] = None
+	return item
+
+
+def _sidebar_url(url, label):
+	return {
+		"type": "Link", "label": label, "link_type": "URL", "url": url,
 		"child": 1, "collapsible": 1, "indent": 0, "keep_closed": 0, "show_arrow": 0,
 	}
 
@@ -599,7 +634,8 @@ def _desired_sidebar_items(custom_links=None):
 	]
 	for label, icon, links in NAVIGATION_SECTIONS:
 		items.append(_sidebar_section(label, icon))
-		items.extend(_sidebar_link(*link) for link in links)
+		for link in links:
+			items.append(_sidebar_link(*link))
 	items.append(_sidebar_section("管理与审计", "settings", 1))
 	for label, icon, links in ADMIN_NAVIGATION_GROUPS:
 		items.append(_sidebar_section(label, icon, 1))
@@ -645,7 +681,12 @@ def sync_simplified_navigation(navigation_name="China Finance"):
 		sidebar = frappe.get_doc("Workspace Sidebar", navigation_name)
 		custom = []
 		for item in sidebar.items:
-			if item.type == "Link" and item.link_to not in known and item.link_to != "china-banking":
+			if (
+				item.type == "Link"
+				and item.link_type != "URL"
+				and item.link_to
+				and item.link_to not in known
+			):
 				custom.append(_sidebar_link(item.link_to, item.label, item.link_type))
 		desired = _desired_sidebar_items(custom)
 		current = [
@@ -668,7 +709,7 @@ def sync_simplified_navigation(navigation_name="China Finance"):
 		workspace = frappe.get_doc("Workspace", navigation_name)
 		custom = []
 		for item in workspace.links:
-			if item.type == "Link" and item.link_to not in known and item.link_to != "china-banking":
+			if item.type == "Link" and item.link_to not in known:
 				custom.append(_workspace_link(item.link_to, item.label, item.link_type))
 		desired = _desired_workspace_links(custom)
 		current = [(row.type, row.label, row.link_to, row.link_type) for row in workspace.links]

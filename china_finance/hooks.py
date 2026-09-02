@@ -97,6 +97,7 @@ override_whitelisted_methods = {
 # China Finance bank adapters to return the complete converted-file preview.
 override_doctype_class = {
 	"Bank Statement Import": "china_finance.overrides.bank_statement_import.ChinaFinanceBankStatementImport",
+	"Bank Statement Import Log": "china_finance.overrides.bank_statement_import.ChinaFinanceBankStatementImportLog",
 }
 
 # Svg Icons
@@ -279,6 +280,7 @@ doc_events["*"] = {
 	"on_cancel": "china_finance.services.voucher.on_gl_source_cancel",
 }
 doc_events["Bank Transaction"] = {
+	"before_insert": "china_finance.services.bank_reconciliation.prepare_bank_transaction",
 	"on_submit": "china_finance.services.bank_reconciliation.auto_create_voucher_on_submit",
 }
 
