@@ -16,6 +16,7 @@
     "sea_bill_no",
     "commercial_invoice_no",
     "transport_mode",
+    "business_type",
     "project_collection",
     "subsidiary_code",
     "source_type",
@@ -36,6 +37,10 @@
     "status",
     "current_version",
     "is_locked",
+    "edit_lock_owner",
+    "edit_lock_token",
+    "edit_lock_acquired_at",
+    "edit_lock_expires_at",
     "confirm_status",
     "writeback_status",
     "writeback_time",
@@ -95,6 +100,13 @@
       "label": "运输方式",
       "options": "SEA\nAIR\nEXPRESS",
       "default": "SEA",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "business_type",
+      "fieldtype": "Select",
+      "label": "业务类型",
+      "options": "SEA_STANDARD\nSEA_DDP\nAIR_DDP\nAIR_STANDARD\nEXPRESS",
       "in_list_view": 1
     },
     {
@@ -204,6 +216,31 @@
       "fieldname": "is_locked",
       "fieldtype": "Check",
       "label": "是否锁定"
+    },
+    {
+      "fieldname": "edit_lock_owner",
+      "fieldtype": "Data",
+      "label": "编辑租约持有人",
+      "read_only": 1
+    },
+    {
+      "fieldname": "edit_lock_token",
+      "fieldtype": "Data",
+      "label": "编辑租约令牌",
+      "read_only": 1,
+      "hidden": 1
+    },
+    {
+      "fieldname": "edit_lock_acquired_at",
+      "fieldtype": "Datetime",
+      "label": "编辑租约开始时间",
+      "read_only": 1
+    },
+    {
+      "fieldname": "edit_lock_expires_at",
+      "fieldtype": "Datetime",
+      "label": "编辑租约过期时间",
+      "read_only": 1
     },
     {
       "fieldname": "confirm_status",

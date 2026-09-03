@@ -28,6 +28,7 @@ CLASSIC_HISTORY_BATCH_KEYS = (
     "FSCU8486789",
     "MXT959831",
 )
+TAX_COMPONENT_FIELDS = ("igi_amount", "iva_amount", "dta", "prv_duty", "prv_iva")
 
 
 def _get_batch_source_meta(batch_name: str) -> dict:
@@ -185,7 +186,7 @@ def writeback_to_erp(batch_name: str, version_name: str) -> dict:
 import json as _json
 
 from overseas_costing.services import erp_client
-from overseas_costing.utils.field_mapper import normalize_transport_mode
+from overseas_costing.utils.field_mapper import normalize_business_type, normalize_transport_mode
 
 EXCEL_COLUMNS = [
     {"excel_col": "A", "fieldname": "material_code", "label": "物料编码"},
@@ -272,6 +273,18 @@ EXTRA_ITEM_FIELDS = [
     "dingtalk_instance_id",
     "dingtalk_official_url",
     "derived_json",
+    "sales_quantity",
+    "sales_unit_price",
+    "sales_currency",
+    "sales_fx_rate",
+    "sales_amount",
+    "sales_amount_rmb",
+    "sales_cost_rmb",
+    "other_sales_expense_rmb",
+    "gross_profit_rmb",
+    "profit_rmb",
+    "profit_margin",
+    "profit_status",
 ]
 ITEM_FILTER_FIELDS = (
     "customs_no",
@@ -286,15 +299,61 @@ ITEM_KEYWORD_FIELDS = ITEM_FILTER_FIELDS + ("project_collection", "transport_mod
 DEFAULT_FX_RMB_TO_MXN = 2.6
 DEFAULT_FX_USD_TO_RMB = round(1 / 0.1393, 6)
 HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
+INVALID_APPROVAL_STATUSES = HIDDEN_APPROVAL_STATUSES + (
+    "REJECTED",
+    "REFUSED",
+    "DENIED",
+    "ABORTED",
+    "拒绝",
+    "已拒绝",
+    "驳回",
+    "已驳回",
+    "不通过",
+    "未通过",
+    "终止",
+    "已终止",
+    "取消",
+    "已取消",
+    "作废",
+    "已作废",
+)
+APPROVAL_STATUS_FIELDNAMES = (
+    "approval_status",
+    "approvalStatus",
+    "source_approval_status",
+    "status",
+    "process_status",
+    "processStatus",
+)
+APPROVAL_MESSAGE_FIELDNAMES = (
+    "message",
+    "reason",
+    "remark",
+    "comment",
+    "refuse_reason",
+    "reject_reason",
+    "approval_result",
+    "approvalResult",
+    "result",
+)
 
 
 def is_hidden_approval_status(status: str | None) -> bool:
-    """判断钉钉审批状态是否不应在成本表格中展示。"""
+    """判断钉钉审批状态是否属于无效审批状态。"""
 
     normalized = str(status or "").strip().upper()
     if not normalized:
         return False
     return any(str(hidden).upper() in normalized for hidden in HIDDEN_APPROVAL_STATUSES)
+
+
+def is_invalid_approval_status(status: str | None) -> bool:
+    """判断审批是否代表业务已拒绝、撤销或终止。"""
+
+    normalized = str(status or "").strip().upper()
+    if not normalized:
+        return False
+    return any(str(invalid).upper() in normalized for invalid in INVALID_APPROVAL_STATUSES)
 
 
 def _load_batch_payload(batch_payload: str | dict | None) -> dict:
@@ -324,6 +383,10 @@ def _build_manual_batch_values(payload: dict) -> dict:
         "sea_bill_no": _clean_payload_text(payload, "sea_bill_no"),
         "commercial_invoice_no": _clean_payload_text(payload, "commercial_invoice_no"),
         "transport_mode": normalize_transport_mode(payload.get("transport_mode")) or "SEA",
+        "business_type": normalize_business_type(
+            payload.get("business_type"),
+            transport_mode=payload.get("transport_mode"),
+        ) or "SEA_STANDARD",
         "project_collection": _clean_payload_text(payload, "project_collection"),
         "source_type": "manual",
         "source_approval_no": _clean_payload_text(payload, "source_approval_no"),
@@ -468,17 +531,20 @@ def _load_json(text: str | None) -> dict:
         return {}
 
 
-def _resolve_batch_subsidiary_code(batch: dict) -> str:
-    direct_value = batch.get("subsidiary_code")
-    if direct_value is not None and str(direct_value).strip():
-        return str(direct_value).strip()
-
-    source_data = _load_json(batch.get("extra_json"))
-    subsidiary = source_data.get("subsidiary")
-    candidates = [
-        source_data.get("subsidiary_code"),
-        source_data.get("business_entity_name"),
-    ]
+def _append_subsidiary_candidates(candidates: list, payload: dict) -> None:
+    if not isinstance(payload, dict):
+        return
+    candidates.extend(
+        [
+            payload.get("subsidiary_code"),
+            payload.get("business_entity_name"),
+            payload.get("business_entity"),
+            payload.get("entity_name"),
+            payload.get("company"),
+            payload.get("company_name"),
+        ]
+    )
+    subsidiary = payload.get("subsidiary")
     if isinstance(subsidiary, dict):
         candidates.extend(
             [
@@ -491,10 +557,94 @@ def _resolve_batch_subsidiary_code(batch: dict) -> str:
     elif subsidiary is not None:
         candidates.append(subsidiary)
 
+    form_fields = payload.get("form_fields")
+    if not isinstance(form_fields, dict):
+        return
+    for fieldname, value in form_fields.items():
+        normalized = str(fieldname or "").replace(" ", "").lower()
+        if (
+            "entidadcomercial" in normalized
+            or "businessentity" in normalized
+            or "empresa" in normalized
+            or "company" in normalized
+            or "业务主体" in normalized
+            or "公司" in normalized
+            or "主体" in normalized
+        ):
+            candidates.append(value)
+
+
+def _subsidiary_candidate_text(candidate) -> str:
+    if isinstance(candidate, dict):
+        for fieldname in (
+            "subsidiary_code",
+            "business_entity_name",
+            "business_entity",
+            "entity_name",
+            "name",
+            "deptName",
+            "label",
+            "text",
+            "displayName",
+            "displayValue",
+            "optionName",
+            "orgName",
+            "companyName",
+            "value",
+        ):
+            text = _subsidiary_candidate_text(candidate.get(fieldname))
+            if text:
+                return text
+        for fieldname in ("selectedOptions", "selected_options", "options", "items", "list", "data", "children"):
+            text = _subsidiary_candidate_text(candidate.get(fieldname))
+            if text:
+                return text
+        return ""
+    if isinstance(candidate, list):
+        for item in candidate:
+            text = _subsidiary_candidate_text(item)
+            if text:
+                return text
+        return ""
+    return str(candidate or "").strip()
+
+
+def _resolve_batch_subsidiary_code(batch: dict) -> str:
+    direct_value = batch.get("subsidiary_code")
+    if direct_value is not None and str(direct_value).strip():
+        return str(direct_value).strip()
+
+    source_data = _load_json(batch.get("extra_json"))
+    trace = source_data.get("oa_logistics_trace") if isinstance(source_data.get("oa_logistics_trace"), dict) else {}
+    candidates = []
+    _append_subsidiary_candidates(candidates, source_data)
+    _append_subsidiary_candidates(candidates, trace)
+
     for candidate in candidates:
-        if candidate is not None and str(candidate).strip():
-            return str(candidate).strip()
+        text = _subsidiary_candidate_text(candidate)
+        if text:
+            return text
     return ""
+
+
+def _resolve_batch_business_type(batch: dict) -> str:
+    direct_value = batch.get("business_type")
+    transport_mode = batch.get("transport_mode")
+    normalized = normalize_business_type(direct_value)
+    if normalized:
+        return normalized
+
+    source_data = _load_json(batch.get("extra_json"))
+    source_transport_mode = transport_mode or source_data.get("transport_mode")
+    normalized = normalize_business_type(
+        source_data.get("business_type") or source_data.get("businessType")
+    )
+    if normalized:
+        return normalized
+    return normalize_business_type(
+        source_transport_mode,
+        transport_mode=source_transport_mode,
+    ) or ""
 
 
 def _clean_query_value(value) -> str:
@@ -623,6 +773,141 @@ def _get_oa_logistics_trace(extra_json) -> dict:
     return trace if isinstance(trace, dict) else payload
 
 
+def _invalid_approval_text(row: dict) -> str:
+    for fieldname in APPROVAL_STATUS_FIELDNAMES + APPROVAL_MESSAGE_FIELDNAMES:
+        value = row.get(fieldname)
+        if value is not None and is_invalid_approval_status(str(value)):
+            return str(value).strip()
+    return ""
+
+
+def _linked_purchase_approval_lists(trace: dict) -> list[list[dict]]:
+    candidates = [
+        trace.get("linked_purchase_approvals"),
+        trace.get("purchase_summaries"),
+    ]
+    purchase_sync = trace.get("purchase_sync")
+    if isinstance(purchase_sync, dict):
+        candidates.extend(
+            [
+                purchase_sync.get("linked_purchase_approvals"),
+                purchase_sync.get("purchase_summaries"),
+                purchase_sync.get("items"),
+            ]
+        )
+    return [rows for rows in candidates if isinstance(rows, list)]
+
+
+def _build_purchase_approval_status_summary(trace: dict) -> dict:
+    """汇总关联采购审批状态，供列表、详情和回写检查共用。"""
+
+    approvals: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for rows in _linked_purchase_approval_lists(trace):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            approval_no = str(
+                row.get("approval_no")
+                or row.get("source_approval_no")
+                or row.get("business_id")
+                or row.get("businessId")
+                or row.get("source_instance_id")
+                or row.get("proc_inst_id")
+                or row.get("instance_id")
+                or ""
+            ).strip()
+            instance_id = str(
+                row.get("source_instance_id")
+                or row.get("proc_inst_id")
+                or row.get("instance_id")
+                or ""
+            ).strip()
+            key = (approval_no, instance_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            approvals.append(
+                {
+                    "approval_no": approval_no,
+                    "source_instance_id": instance_id,
+                    "approval_status": str(
+                        row.get("approval_status")
+                        or row.get("source_approval_status")
+                        or row.get("status")
+                        or ""
+                    ).strip(),
+                    "approval_title": str(
+                        row.get("approval_title") or row.get("title") or row.get("display_name") or ""
+                    ).strip(),
+                    "message": str(row.get("message") or row.get("reason") or "").strip(),
+                }
+            )
+
+    invalid = [row for row in approvals if is_invalid_approval_status(row["approval_status"]) or is_invalid_approval_status(row["message"])]
+    missing_status = [row for row in approvals if not row["approval_status"]]
+    if not approvals:
+        state = "missing"
+        message = "当前国际物流审批未关联采购审批，采购单价来源待确认。"
+    elif invalid:
+        state = "invalid"
+        message = f"已关联 {len(approvals)} 条采购审批，其中 {len(invalid)} 条已拒绝/撤销/终止。"
+    elif missing_status:
+        state = "pending"
+        message = f"已关联 {len(approvals)} 条采购审批，但有 {len(missing_status)} 条状态尚未同步。"
+    else:
+        state = "valid"
+        message = f"已关联 {len(approvals)} 条采购审批，状态已同步。"
+
+    return {
+        "state": state,
+        "message": message,
+        "linked_purchase_count": len(approvals),
+        "linked_purchase_approval_nos": [row["approval_no"] for row in approvals if row["approval_no"]],
+        "linked_purchase_approval_statuses": [row["approval_status"] for row in approvals if row["approval_status"]],
+        "invalid_purchase_approval_count": len(invalid),
+        "linked_purchase_approvals": approvals,
+    }
+
+
+def _build_invalid_business_state(batch: dict) -> dict:
+    source_status = batch.get("source_approval_status")
+    if is_invalid_approval_status(source_status):
+        return {
+            "invalid": True,
+            "scope": "source_approval",
+            "status": str(source_status or "").strip(),
+            "message": f"当前 OA 审批状态为 {str(source_status or '').strip()}，业务已拒绝/撤销/终止，不进入综合成本确认或 ERP 推送。",
+        }
+
+    trace = _get_oa_logistics_trace(batch.get("extra_json"))
+    for rows in _linked_purchase_approval_lists(trace):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            invalid_text = _invalid_approval_text(row)
+            if not invalid_text:
+                continue
+            approval_no = (
+                row.get("approval_no")
+                or row.get("source_approval_no")
+                or row.get("business_id")
+                or row.get("businessId")
+                or row.get("source_instance_id")
+                or row.get("proc_inst_id")
+                or row.get("instance_id")
+                or "未标注单号"
+            )
+            return {
+                "invalid": True,
+                "scope": "linked_purchase_approval",
+                "approval_no": str(approval_no or "").strip(),
+                "status": invalid_text,
+                "message": f"关联采购支出审批 {str(approval_no or '').strip()} 状态为 {invalid_text}，该业务已拒绝/撤销/终止，不进入综合成本确认或 ERP 推送。",
+            }
+    return {"invalid": False}
+
+
 def _quote_candidate_summary(candidate: dict) -> dict:
     return {
         "carrier": str(candidate.get("carrier") or "").strip(),
@@ -728,11 +1013,23 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
     confirmed_quote = trace.get("confirmed_logistics_quote")
     confirmed_quote = _quote_candidate_summary(confirmed_quote) if isinstance(confirmed_quote, dict) else {}
     logistics_text_summary = _logistics_text_summary(trace)
+    purchase_status = _build_purchase_approval_status_summary(trace)
+    invalid_business_state = _build_invalid_business_state(batch)
 
     return {
         "source_no": source_no,
         "has_oa_logistics": bool(has_oa_logistics),
         "source_approval_status": batch.get("source_approval_status") or "",
+        "invalid_business": bool(invalid_business_state.get("invalid")),
+        "invalid_business_reason": invalid_business_state.get("message") or "",
+        "invalid_business_scope": invalid_business_state.get("scope") or "",
+        "purchase_approval_sync_state": purchase_status["state"],
+        "purchase_approval_sync_message": purchase_status["message"],
+        "linked_purchase_count": purchase_status["linked_purchase_count"],
+        "linked_purchase_approval_nos": purchase_status["linked_purchase_approval_nos"],
+        "linked_purchase_approval_statuses": purchase_status["linked_purchase_approval_statuses"],
+        "invalid_purchase_approval_count": purchase_status["invalid_purchase_approval_count"],
+        "linked_purchase_approvals": purchase_status["linked_purchase_approvals"],
         "oa_attachment_count": oa_attachment_count,
         "registered_attachment_count": len(attachment_rows),
         "packing_list_count": len(packing_list_rows),
@@ -856,12 +1153,32 @@ def _recent_start(recent_days: int) -> str:
     return start.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _date_filter_boundary(value: object, *, end_of_day: bool = False) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+    try:
+        date_value = datetime.strptime(raw_value[:10], "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return date_value.strftime("%Y-%m-%d 23:59:59" if end_of_day else "%Y-%m-%d 00:00:00")
+
+
 def _build_default_batch_time_filters(filters: dict) -> tuple[list, list, int, bool]:
     recent_days = max(_to_int(filters.get("recent_days"), DEFAULT_BATCH_RECENT_DAYS), 1)
     include_history = _to_bool(filters.get("include_history"))
     has_keyword = bool(str(filters.get("keyword") or "").strip())
-    if include_history or has_keyword:
+    start_date = _date_filter_boundary(filters.get("start_date"))
+    end_date = _date_filter_boundary(filters.get("end_date"), end_of_day=True)
+    if include_history or (has_keyword and not (start_date or end_date)):
         return [], [], recent_days, False
+    if start_date or end_date:
+        date_filters = []
+        if start_date:
+            date_filters.append(["source_created_at", ">=", start_date])
+        if end_date:
+            date_filters.append(["source_created_at", "<=", end_date])
+        return date_filters, [], recent_days, False
 
     return [["source_created_at", ">=", _recent_start(recent_days)]], _classic_history_or_filters(), recent_days, True
 
@@ -908,6 +1225,49 @@ def _keyword_item_batch_names(keyword: str) -> list[str]:
     return names
 
 
+def _normalize_transport_filter(value) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value or raw_value in {"ALL", "*", "全部"}:
+        return ""
+    return normalize_transport_mode(raw_value) or raw_value
+
+
+def get_batch_filter_options() -> dict:
+    """返回钉钉业务主体字段的完整选项，不随当前列表查询条件收缩。"""
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "items": [],
+        }
+
+    fields = ["extra_json"]
+    if _db_has_column("Overseas Cost Batch", "subsidiary_code"):
+        fields.insert(0, "subsidiary_code")
+    rows = frappe.get_list(
+        "Overseas Cost Batch",
+        filters={},
+        fields=fields,
+        limit_page_length=0,
+    )
+    values = {
+        _resolve_batch_subsidiary_code(row)
+        for row in rows
+        if _resolve_batch_subsidiary_code(row)
+    }
+    return {
+        "ok": True,
+        "items": sorted(values, key=lambda value: value.casefold()),
+        "business_types": [
+            {"value": "SEA_STANDARD", "label": "海运正报正清"},
+            {"value": "SEA_DDP", "label": "海运 DDP（双清包税）"},
+            {"value": "AIR_DDP", "label": "空运 DDP（双清包税）"},
+            {"value": "AIR_STANDARD", "label": "正常空运"},
+            {"value": "EXPRESS", "label": "快递"},
+        ],
+    }
+
+
 def get_batch_list(filters: dict) -> dict:
     if frappe is None:
         return {
@@ -919,9 +1279,13 @@ def get_batch_list(filters: dict) -> dict:
             "total": 0,
         }
 
+    transport_mode = _normalize_transport_filter(filters.get("transport_mode"))
     db_filters = []
-    if filters.get("transport_mode"):
-        db_filters.append(["transport_mode", "=", filters["transport_mode"]])
+    if transport_mode:
+        db_filters.append(["transport_mode", "=", transport_mode])
+    has_business_type_column = _db_has_column("Overseas Cost Batch", "business_type")
+    if filters.get("business_type") and has_business_type_column:
+        db_filters.append(["business_type", "=", filters["business_type"]])
     if filters.get("status"):
         db_filters.append(["status", "=", filters["status"]])
     recent_filters, default_or_filters, recent_days, recent_only = _build_default_batch_time_filters(filters)
@@ -935,7 +1299,6 @@ def get_batch_list(filters: dict) -> dict:
         "waybill_no",
         "transport_mode",
         "project_collection",
-        "subsidiary_code",
         "source_type",
         "source_file_name",
         "source_sheet",
@@ -960,11 +1323,21 @@ def get_batch_list(filters: dict) -> dict:
         "extra_json",
         "modified",
     ]
+    if has_business_type_column:
+        fields.insert(5, "business_type")
+    if _db_has_column("Overseas Cost Batch", "subsidiary_code"):
+        fields.insert(7 if has_business_type_column else 6, "subsidiary_code")
+    raw_candidate_limit = filters.get("candidate_limit")
+    try:
+        candidate_limit = 200 if raw_candidate_limit is None else int(raw_candidate_limit)
+    except (TypeError, ValueError):
+        candidate_limit = 200
+    candidate_limit = 0 if candidate_limit <= 0 else min(10000, candidate_limit)
     query_kwargs = {
         "filters": db_filters,
         "fields": fields,
         "order_by": "source_created_at desc, modified desc",
-        "limit_page_length": 200,
+        "limit_page_length": candidate_limit,
     }
     if keyword:
         like_keyword = f"%{keyword}%"
@@ -977,31 +1350,36 @@ def get_batch_list(filters: dict) -> dict:
             ["project_collection", "like", like_keyword],
         ]
 
-    items = frappe.get_all("Overseas Cost Batch", **query_kwargs)
+    # get_list 会应用当前用户的 Role/User Permission/共享规则；工作台不能用 get_all 绕过这些边界。
+    items = frappe.get_list("Overseas Cost Batch", **query_kwargs)
     if keyword:
         item_batch_names = _keyword_item_batch_names(str(keyword).strip())
         if item_batch_names:
             item_filters = []
-            if filters.get("transport_mode"):
-                item_filters.append(["transport_mode", "=", filters["transport_mode"]])
+            if transport_mode:
+                item_filters.append(["transport_mode", "=", transport_mode])
+            if filters.get("business_type") and has_business_type_column:
+                item_filters.append(["business_type", "=", filters["business_type"]])
             if filters.get("status"):
                 item_filters.append(["status", "=", filters["status"]])
             item_filters.append(["name", "in", item_batch_names])
-            item_batches = frappe.get_all(
+            item_batches = frappe.get_list(
                 "Overseas Cost Batch",
                 filters=item_filters,
                 fields=fields,
                 order_by="source_created_at desc, modified desc",
-                limit_page_length=200,
+                limit_page_length=candidate_limit,
             )
             items = _dedupe_batches(items + item_batches)
     if default_or_filters:
         classic_filters = []
-        if filters.get("transport_mode"):
-            classic_filters.append(["transport_mode", "=", filters["transport_mode"]])
+        if transport_mode:
+            classic_filters.append(["transport_mode", "=", transport_mode])
+        if filters.get("business_type") and has_business_type_column:
+            classic_filters.append(["business_type", "=", filters["business_type"]])
         if filters.get("status"):
             classic_filters.append(["status", "=", filters["status"]])
-        classic_items = frappe.get_all(
+        classic_items = frappe.get_list(
             "Overseas Cost Batch",
             filters=classic_filters,
             or_filters=default_or_filters,
@@ -1017,12 +1395,19 @@ def get_batch_list(filters: dict) -> dict:
 
     classic_keys = set(CLASSIC_HISTORY_BATCH_KEYS)
     for item in items:
+        item["business_type"] = _resolve_batch_business_type(item)
         item["subsidiary_code"] = _resolve_batch_subsidiary_code(item)
         if item.get("batch_no") in classic_keys or item.get("source_approval_no") in classic_keys or item.get("name") in classic_keys:
             item["is_classic_sample"] = 1
             item["sample_note"] = "历史样本"
 
-    items = [item for item in items if not is_hidden_approval_status(item.get("source_approval_status"))]
+    if filters.get("business_type") and not has_business_type_column:
+        normalized_business_type = normalize_business_type(filters["business_type"])
+        items = [
+            item
+            for item in items
+            if _resolve_batch_business_type(item) == normalized_business_type
+        ]
     items = _attach_batch_source_status(items)
     items = _attach_batch_calculation_snapshot(items)
     for item in items:
@@ -1053,41 +1438,48 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     if not batch_doc_name:
         return {"ok": False, "message": f"未找到批次：{batch_name}"}
 
+    header_fields = [
+        "name",
+        "modified",
+        "batch_no",
+        "customs_no",
+        "waybill_no",
+        "container_no",
+        "sea_bill_no",
+        "commercial_invoice_no",
+        "transport_mode",
+        "project_collection",
+        "source_type",
+        "source_file_name",
+        "source_sheet",
+        "source_range",
+        "source_approval_no",
+        "source_instance_id",
+        "source_dingtalk_url",
+        "status",
+        "current_version",
+        "confirm_status",
+        "writeback_status",
+        "writeback_time",
+        "writeback_message",
+        "item_count",
+        "total_goods_value",
+        "total_gross_weight_kg",
+        "estimated_total_cost_rmb",
+        "actual_total_cost_rmb",
+    ]
+    if _db_has_column("Overseas Cost Batch", "business_type"):
+        header_fields.insert(8, "business_type")
+    if _db_has_column("Overseas Cost Batch", "subsidiary_code"):
+        header_fields.insert(10 if _db_has_column("Overseas Cost Batch", "business_type") else 9, "subsidiary_code")
     header = frappe.db.get_value(
         "Overseas Cost Batch",
         batch_doc_name,
-        [
-            "name",
-            "batch_no",
-            "customs_no",
-            "waybill_no",
-            "container_no",
-            "sea_bill_no",
-            "commercial_invoice_no",
-            "transport_mode",
-            "project_collection",
-            "subsidiary_code",
-            "source_type",
-            "source_file_name",
-            "source_sheet",
-            "source_range",
-            "source_approval_no",
-            "source_instance_id",
-            "source_dingtalk_url",
-            "status",
-            "current_version",
-            "confirm_status",
-            "writeback_status",
-            "writeback_time",
-            "writeback_message",
-            "item_count",
-            "total_goods_value",
-            "total_gross_weight_kg",
-            "estimated_total_cost_rmb",
-            "actual_total_cost_rmb",
-        ],
+        header_fields,
         as_dict=True,
-    )
+    ) or {}
+    header["business_type"] = _resolve_batch_business_type(header)
+    header["subsidiary_code"] = _resolve_batch_subsidiary_code(header)
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
     version = {}
     summary = {}
@@ -1188,8 +1580,20 @@ def get_batch_items(
         or_filters=or_filters,
         fields=fields,
         order_by="row_no asc",
-        limit_page_length=10000,
+        limit_page_length=0,
     )
+    batch_fields = ["transport_mode", "extra_json"]
+    if _db_has_column("Overseas Cost Batch", "business_type"):
+        batch_fields.insert(0, "business_type")
+    batch_header = frappe.db.get_value(
+        "Overseas Cost Batch",
+        batch_doc_name,
+        batch_fields,
+        as_dict=True,
+    ) or {}
+    batch_business_type = _resolve_batch_business_type(batch_header)
+    for item in items:
+        item["business_type"] = batch_business_type
     return {
         "ok": True,
         "message": "批次明细已返回。",
@@ -1283,6 +1687,7 @@ EXPORT_BATCH_FALLBACK_FIELDS = [
     "sea_bill_no",
     "commercial_invoice_no",
     "transport_mode",
+    "business_type",
     "project_collection",
     "source_approval_no",
     "source_instance_id",
@@ -1300,6 +1705,7 @@ EXPORT_MERGE_FIELDNAMES = {
     "china_to_mexico_freight_rmb",
     "project_collection",
     "transport_mode",
+    "business_type",
 }
 EXPORT_ZERO_AS_EMPTY_FIELDNAMES = {
     "limpieza_contenedor",
@@ -1316,6 +1722,7 @@ EXPORT_MIN_COLUMN_WIDTHS = {
     "waybill_no": 24,
     "project_collection": 36,
     "transport_mode": 14,
+    "business_type": 24,
 }
 EXPORT_MAX_COLUMN_WIDTHS = {
     "product_name": 42,
@@ -1327,6 +1734,7 @@ EXPORT_MAX_COLUMN_WIDTHS = {
     "waybill_no": 30,
     "project_collection": 52,
     "transport_mode": 18,
+    "business_type": 32,
 }
 EXPORT_WRAP_FIELDNAMES = {
     "product_name",
@@ -1337,6 +1745,7 @@ EXPORT_WRAP_FIELDNAMES = {
     "waybill_no",
     "project_collection",
     "transport_mode",
+    "business_type",
 }
 EXPORT_HEADER_LABELS = {
     "spec_model": "规格型号\nEspecificación / Modelo",
@@ -1438,6 +1847,19 @@ def _transport_label(value) -> str:
     return TRANSPORT_MODE_LABELS.get(code, str(value or ""))
 
 
+BUSINESS_TYPE_LABELS = {
+    "SEA_STANDARD": "海运正报正清",
+    "SEA_DDP": "海运 DDP（双清包税）",
+    "AIR_DDP": "空运 DDP（双清包税）",
+    "AIR_STANDARD": "正常空运",
+    "EXPRESS": "快递",
+}
+
+
+def _business_type_label(value) -> str:
+    return BUSINESS_TYPE_LABELS.get(str(value or "").strip(), str(value or ""))
+
+
 def _clean_export_filename_part(value: str) -> str:
     text = str(value or "").strip() or "全部"
     for char in '\\/:*?"<>|':
@@ -1452,6 +1874,8 @@ def _export_cell_value(item: dict, batch: dict, column: dict):
         value = batch.get(fieldname)
     if fieldname == "transport_mode":
         value = _transport_label(value)
+    if fieldname == "business_type":
+        value = _business_type_label(value)
     if value in (None, ""):
         return ""
     if fieldname in EXPORT_ZERO_AS_EMPTY_FIELDNAMES:
@@ -1633,12 +2057,22 @@ def export_current_result_xlsx(batch_names_json=None, transport_label: str | Non
         batch_doc_name = _resolve_batch_name(batch_name)
         if not batch_doc_name:
             continue
+        batch_fields = [
+            fieldname
+            for fieldname in EXPORT_BATCH_FALLBACK_FIELDS
+            if fieldname not in {"business_type", "subsidiary_code"}
+            or _db_has_column("Overseas Cost Batch", fieldname)
+        ]
+        if "extra_json" not in batch_fields:
+            batch_fields.append("extra_json")
         batch = frappe.db.get_value(
             "Overseas Cost Batch",
             batch_doc_name,
-            EXPORT_BATCH_FALLBACK_FIELDS,
+            batch_fields,
             as_dict=True,
         ) or {}
+        batch["business_type"] = _resolve_batch_business_type(batch)
+        batch["subsidiary_code"] = _resolve_batch_subsidiary_code(batch)
         detail = get_batch_items(
             batch_name=batch_doc_name,
             version_name=batch.get("current_version"),
@@ -1684,6 +2118,7 @@ ERP_PAYLOAD_ITEM_FIELDS = list(
             "excel_row_no",
             "material_code",
             "product_name",
+            "supplier",
             "quantity",
             "actual_shipped_qty",
             "unit_price",
@@ -1873,6 +2308,15 @@ def _build_expense_pool_summary(rules: list[dict], items: list[dict]) -> dict:
     }
 
 
+def _resolve_payload_supplier(items: list[dict]) -> str:
+    suppliers = []
+    for item in items:
+        supplier = str(item.get("supplier") or "").strip()
+        if supplier and supplier not in suppliers:
+            suppliers.append(supplier)
+    return suppliers[0] if len(suppliers) == 1 else ""
+
+
 def _build_writeback_item_quality(items: list[dict]) -> dict:
     issue_counts = {fieldname: 0 for fieldname, _label, _rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS}
     issue_examples = []
@@ -2022,6 +2466,7 @@ def _build_calculation_confirmation_readiness(
     total_cost = actual_total_cost or estimated_total_cost
     recorded_item_count = int(_as_float(batch.get("item_count")))
     actual_item_count = len(items)
+    invalid_business_state = _build_invalid_business_state(batch)
 
     has_international_freight = _has_positive_rule(
         rules,
@@ -2055,6 +2500,7 @@ def _build_calculation_confirmation_readiness(
         "batch_exists": True,
         "has_current_version": bool(resolved_version_name or batch.get("current_version")),
         "has_subsidiary_code": bool(_resolve_batch_subsidiary_code(batch)),
+        "has_invalid_business_approval": bool(invalid_business_state.get("invalid")),
         "has_dirty_data": batch.get("status") == "Dirty",
         "has_items": actual_item_count > 0,
         "has_total_cost": total_cost > 0,
@@ -2065,6 +2511,8 @@ def _build_calculation_confirmation_readiness(
     }
 
     blocking_reasons = []
+    if checks["has_invalid_business_approval"]:
+        blocking_reasons.append(invalid_business_state.get("message") or "当前批次存在已拒绝/撤销/终止审批，不进入综合成本确认或 ERP 推送。")
     if not checks["has_current_version"]:
         blocking_reasons.append("当前批次没有当前版本。")
     if not checks["has_subsidiary_code"]:
@@ -2098,6 +2546,7 @@ def _build_calculation_confirmation_readiness(
         "item_issue_counts": item_quality["issue_counts"],
         "item_issue_examples": item_quality["issue_examples"],
         "field_gaps": field_gaps,
+        "invalid_business": invalid_business_state,
         "item_count": actual_item_count,
         "total_cost_rmb": total_cost,
         "expense_pools": _build_expense_pool_summary(rules, items),
@@ -2118,11 +2567,13 @@ def _build_writeback_readiness(
     total_cost = actual_total_cost or estimated_total_cost
     recorded_item_count = int(_as_float(batch.get("item_count")))
     actual_item_count = len(items)
+    invalid_business_state = _build_invalid_business_state(batch)
 
     checks = {
         "batch_exists": True,
         "has_current_version": bool(resolved_version_name or batch.get("current_version")),
         "has_subsidiary_code": bool(_resolve_batch_subsidiary_code(batch)),
+        "has_invalid_business_approval": bool(invalid_business_state.get("invalid")),
         "is_confirmed": batch.get("confirm_status") == "Confirmed",
         "has_dirty_data": batch.get("status") == "Dirty",
         "has_items": actual_item_count > 0,
@@ -2131,6 +2582,8 @@ def _build_writeback_readiness(
     }
 
     blocking_reasons = []
+    if checks["has_invalid_business_approval"]:
+        blocking_reasons.append(invalid_business_state.get("message") or "当前批次存在已拒绝/撤销/终止审批，不进入综合成本确认或 ERP 推送。")
     if not checks["has_current_version"]:
         blocking_reasons.append("当前批次没有当前版本。")
     if not checks["has_subsidiary_code"]:
@@ -2160,6 +2613,7 @@ def _build_writeback_readiness(
         "item_issue_counts": item_quality["issue_counts"],
         "item_issue_examples": item_quality["issue_examples"],
         "field_gaps": field_gaps,
+        "invalid_business": invalid_business_state,
         "item_count": actual_item_count,
         "total_cost_rmb": total_cost,
         "message": "允许回写。" if ready else "当前批次暂不满足回写条件：" + "；".join(blocking_reasons),
@@ -2174,14 +2628,17 @@ def _build_erp_push_payload(
     readiness: dict,
 ) -> dict:
     subsidiary_code = _resolve_batch_subsidiary_code(batch)
+    supplier = _resolve_payload_supplier(items)
     payload_items = []
     for item in items:
         formula = _build_cost_formula(item)
         payload_items.append(
             {
                 "subsidiary_code": subsidiary_code,
+                "business_type": batch.get("business_type") or "",
                 "material_code": item.get("material_code") or "",
                 "material_name": item.get("product_name") or "",
+                "supplier": item.get("supplier") or "",
                 "original_unit_price": formula["original_unit_price"],
                 "purchase_currency": item.get("purchase_currency") or "",
                 "comprehensive_unit_price": formula["comprehensive_unit_price"],
@@ -2200,6 +2657,8 @@ def _build_erp_push_payload(
         "version_name": version.get("name") or "",
         "version_code": version.get("version_code") or "",
         "subsidiary_code": subsidiary_code,
+        "business_type": batch.get("business_type") or "",
+        "supplier": supplier,
         "item_count": len(payload_items),
         "total_cost_rmb": _round_payload_amount(readiness.get("total_cost_rmb")),
         "expense_pools": _build_expense_pool_summary(rules, items),
@@ -2258,18 +2717,22 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
         "confirm_status",
         "current_version",
         "item_count",
+        "source_approval_status",
         "estimated_total_cost_rmb",
         "actual_total_cost_rmb",
         "extra_json",
     ]
     if _db_has_column("Overseas Cost Batch", "subsidiary_code"):
         batch_fields.insert(3, "subsidiary_code")
+    if _db_has_column("Overseas Cost Batch", "business_type"):
+        batch_fields.insert(4, "business_type")
     batch = frappe.db.get_value(
         "Overseas Cost Batch",
         batch_doc_name,
         batch_fields,
         as_dict=True,
     ) or {"name": batch_doc_name}
+    batch["business_type"] = _resolve_batch_business_type(batch)
     batch["subsidiary_code"] = _resolve_batch_subsidiary_code(batch)
     version = {}
     rules = []
@@ -2562,6 +3025,22 @@ def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dic
         rules=context["rules"],
         readiness=readiness,
     )
+    config_readiness = erp_client.validate_payload_for_push(payload)
+    if not config_readiness.get("ready"):
+        blocking_reasons = list(readiness.get("blocking_reasons") or [])
+        blocking_reasons.extend(config_readiness.get("blocking_reasons") or [])
+        return {
+            "ok": False,
+            "ready": False,
+            "batch_name": context["batch_doc_name"],
+            "version_name": context["version_name"],
+            "payload": payload,
+            **readiness,
+            "blocking_reasons": blocking_reasons,
+            "config_ready": False,
+            "erp_config": config_readiness.get("request") or {},
+            "message": config_readiness.get("message") or "ERP 推送配置未完成。",
+        }
     return {
         "ok": True,
         "ready": True,
@@ -2569,6 +3048,8 @@ def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dic
         "version_name": context["version_name"],
         "payload": payload,
         **readiness,
+        "config_ready": True,
+        "erp_config": config_readiness.get("request") or {},
         "message": "DeepLinkERP 推送报文已生成，请人工预览后执行推送。",
     }
 
@@ -2588,6 +3069,21 @@ def writeback_to_erp(batch_name: str, version_name: str | None = None) -> dict:
         }
 
     context = _load_erp_push_context(batch_name, version_name)
+    batch = context.get("batch") or {}
+    confirm_status = str(batch.get("confirm_status") or batch.get("status") or "").strip().lower()
+    if "confirmed" not in confirm_status:
+        blocking_reason = "请先点击“校验计算结果”，确认通过后再推送 ERP。"
+        return {
+            **preview,
+            "ok": False,
+            "queued": False,
+            "pushed": False,
+            "retryable": False,
+            "writeback_status": batch.get("writeback_status") or "Not Started",
+            "message": blocking_reason,
+            "blocking_reasons": list(preview.get("blocking_reasons") or []) + [blocking_reason],
+        }
+
     batch_extra = _load_json_value((context.get("batch") or {}).get("extra_json"))
     if not isinstance(batch_extra, dict):
         batch_extra = {}

@@ -2,6 +2,8 @@
 中文用途：导入服务骨架测试。
 """
 
+from __future__ import annotations
+
 import json
 import shutil
 from pathlib import Path
@@ -279,7 +281,7 @@ def test_preview_purchase_order_match_builds_price_rows_without_writing(monkeypa
     def fake_writeback_preview(**kwargs):
         captured.update(kwargs)
         updates = kwargs["update_builder"](kwargs["mapped_rows"][0], {})
-        assert updates == {"unit_price": 0.619, "purchase_currency": "USD", "goods_value": 742.8}
+        assert updates == {"unit_price": 0.619, "purchase_currency": "USD", "goods_value": 742.8, "supplier": "HUAFON"}
         return {"version_name": "VER-PO", "matched_count": 1, "fillable_row_count": 1, "message": "预览完成"}
 
     monkeypatch.setattr(import_service, "preview_oa_source_attachment", fake_source_preview)
@@ -291,6 +293,7 @@ def test_preview_purchase_order_match_builds_price_rows_without_writing(monkeypa
     assert result["purchase_order"]["purchase_order_no"] == "PO2026050901"
     assert result["purchase_order"]["recognized_line_count"] == 1
     assert result["source_rows"][0]["material_code"] == "S890"
+    assert result["source_rows"][0]["supplier"] == "HUAFON"
     assert captured["batch_name"] == "BATCH-PO"
     assert captured["trust_unique_material_code"] is True
 
@@ -3308,3 +3311,219 @@ def test_preview_yuewei_excel_file_returns_selected_batches_without_import(monke
     assert result["selected_summary"]["block_count"] == 1
     assert result["selected_summary"]["item_count"] == 1
     assert result["preview_batches"][0]["batch_no"] == "PO-001"
+
+
+def test_preview_batch_excel_supplement_rejects_foreign_batch(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "_resolve_excel_file_path", lambda **_kwargs: Path("supplement.xlsx"))
+    monkeypatch.setattr(
+        import_service,
+        "parse_yuewei_excel_workbook",
+        lambda path, sheet_name=None: (
+            {"sourceSheet": "成本"},
+            [
+                {"id": "CURRENT-001", "batchNo": "CURRENT-001", "items": [["SKU-1", "产品一", 10, 2, 20]]},
+                {"id": "OTHER-002", "batchNo": "OTHER-002", "items": [["SKU-2", "产品二", 20, 1, 20]]},
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        import_service,
+        "_batch_identity_map",
+        lambda batch_name: {
+            "id": {"CURRENT-001"},
+            "batchNo": {"CURRENT-001"},
+            "customsNo": set(),
+            "waybillNo": set(),
+        },
+    )
+
+    result = import_service.preview_batch_excel_supplement(
+        "CURRENT-001", file_url="/private/files/supplement.xlsx"
+    )
+
+    assert result["ok"] is False
+    assert result["foreign_batches"] == ["OTHER-002"]
+
+
+def test_batch_supplement_rejects_conflicting_secondary_identity() -> None:
+    from overseas_costing.services.import_service import _excel_block_identity_conflicts
+
+    conflicts = _excel_block_identity_conflicts(
+        {
+            "batchNo": "CURRENT-001",
+            "waybillNo": "OTHER-WAYBILL",
+        },
+        {
+            "id": {"BATCH-DOC", "CURRENT-001", "CURRENT-WAYBILL"},
+            "batchNo": {"BATCH-DOC", "CURRENT-001"},
+            "customsNo": {"CURRENT-CUSTOMS"},
+            "waybillNo": {"CURRENT-WAYBILL"},
+        },
+    )
+
+    assert conflicts == ["waybillNo=OTHER-WAYBILL"]
+
+
+def test_batch_supplement_rejects_conflicting_block_id_even_when_batch_no_matches() -> None:
+    from overseas_costing.services.import_service import _excel_block_identity_conflicts
+
+    conflicts = _excel_block_identity_conflicts(
+        {
+            "id": "OTHER-001",
+            "batchNo": "CURRENT-001",
+        },
+        {
+            "id": {"BATCH-DOC", "CURRENT-001"},
+            "batchNo": {"BATCH-DOC", "CURRENT-001"},
+            "customsNo": set(),
+            "waybillNo": set(),
+        },
+    )
+
+    assert conflicts == ["id=OTHER-001"]
+
+
+def test_batch_supplement_only_writes_nonempty_non_identity_values() -> None:
+    from overseas_costing.services.import_service import _batch_supplement_update_values
+
+    values = _batch_supplement_update_values(
+        {
+            "row_no": 1,
+            "material_code": "SKU-1",
+            "product_name": "更新名称",
+            "unit_price": None,
+            "quantity": "",
+            "goods_value": 0,
+            "supplier": "供应商A",
+        }
+    )
+
+    assert values == {"product_name": "更新名称", "goods_value": 0, "supplier": "供应商A"}
+
+
+def test_batch_supplement_matches_existing_item_by_material_code_not_row_number(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    writes = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [
+                {"name": "ITEM-A", "row_no": 1, "material_code": "SKU-A"},
+                {"name": "ITEM-B", "row_no": 2, "material_code": "SKU-B"},
+            ]
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(import_service, "_filter_doctype_values", lambda _doctype, values: values)
+    monkeypatch.setattr(
+        import_service,
+        "_update_item_fields",
+        lambda **kwargs: writes.append(kwargs) or [{"field_name": "product_name"}],
+    )
+
+    result = import_service._apply_batch_supplement_items(
+        batch_doc_name="BATCH-1",
+        version_name="VER-1",
+        mapped_rows=[{"row_no": 1, "material_code": "SKU-B", "product_name": "B 新名称", "unit_price": None}],
+        raw_rows=[["SKU-B", "B 新名称"]],
+    )
+
+    assert result["ok"] is True
+    assert result["created_count"] == 0
+    assert writes[0]["item_name"] == "ITEM-B"
+    assert writes[0]["field_updates"] == {"product_name": "B 新名称"}
+
+
+def test_batch_supplement_rejects_unknown_material_before_any_write(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    writes = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [{"name": "ITEM-A", "row_no": 1, "material_code": "SKU-A"}]
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(import_service, "_update_item_fields", lambda **kwargs: writes.append(kwargs))
+
+    result = import_service._apply_batch_supplement_items(
+        batch_doc_name="BATCH-1",
+        version_name="VER-1",
+        mapped_rows=[{"material_code": "SKU-OTHER", "product_name": "不应写入"}],
+        raw_rows=[["SKU-OTHER", "不应写入"]],
+    )
+
+    assert result["ok"] is False
+    assert "未写入任何数据" in result["message"]
+    assert writes == []
+
+
+def test_batch_supplement_preview_reports_unknown_material_before_apply(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [{"name": "ITEM-A", "row_no": 1, "material_code": "SKU-A"}]
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(
+        import_service,
+        "_prepare_batch_excel_supplement",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "batch_doc_name": "BATCH-1",
+            "version_name": "VER-1",
+            "mapped_rows": [{"material_code": "SKU-OTHER", "product_name": "未知物料"}],
+            "raw_rows": [["SKU-OTHER", "未知物料"]],
+            "conflicts": [],
+        },
+    )
+
+    result = import_service.preview_batch_excel_supplement("BATCH-1", file_url="/private/files/supplement.xlsx")
+
+    assert result["ok"] is False
+    assert result["conflicts"] == ["当前批次不存在物料：SKU-OTHER"]
+    assert "mapped_rows" not in result
+
+
+def test_apply_batch_excel_supplement_passes_explicit_batch_to_safe_updater(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    captured = {}
+    monkeypatch.setattr(
+        import_service,
+        "_prepare_batch_excel_supplement",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "batch_doc_name": "BATCH-DOC",
+            "version_name": "VER-1",
+            "mapped_rows": [{"material_code": "SKU-1"}],
+            "raw_rows": [["SKU-1"]],
+        },
+    )
+    monkeypatch.setattr(
+        import_service,
+        "_apply_batch_supplement_items",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "ok": True,
+            "total_count": 1,
+            "created_count": 0,
+            "updated_count": 1,
+            "unchanged_count": 0,
+            "changed_field_count": 2,
+        },
+    )
+
+    result = import_service.apply_batch_excel_supplement(
+        "BATCH-DOC", file_url="/private/files/supplement.xlsx"
+    )
+
+    assert result["ok"] is True
+    assert captured["batch_doc_name"] == "BATCH-DOC"
+    assert captured["version_name"] == "VER-1"

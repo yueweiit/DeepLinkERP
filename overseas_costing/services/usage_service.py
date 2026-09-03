@@ -189,35 +189,26 @@ def get_usage_summary(*, days: int | str | None = 30, limit: int | str | None = 
 
     since_date = add_days(nowdate(), -normalized_days) if add_days and nowdate else None
     filters = {"creation": [">=", since_date]} if since_date else {}
-    where_clause = "WHERE creation >= %(since_date)s" if since_date else ""
-    params = {"since_date": since_date} if since_date else {}
-    users = frappe.db.sql(
-        f"""
-        SELECT operator_name,
-               operator_full_name,
-               COUNT(name) AS action_count,
-               MAX(creation) AS last_seen
-        FROM `tabOverseas Cost Usage Log`
-        {where_clause}
-        GROUP BY operator_name, operator_full_name
-        ORDER BY action_count DESC
-        LIMIT {normalized_limit}
-        """,
-        params,
-        as_dict=True,
+    users = frappe.get_all(
+        "Overseas Cost Usage Log",
+        filters=filters,
+        fields=[
+            "operator_name",
+            "operator_full_name",
+            "count(name) as action_count",
+            "max(creation) as last_seen",
+        ],
+        group_by="operator_name, operator_full_name",
+        order_by="action_count desc",
+        limit_page_length=normalized_limit,
     )
-    actions = frappe.db.sql(
-        f"""
-        SELECT action_type,
-               COUNT(name) AS action_count
-        FROM `tabOverseas Cost Usage Log`
-        {where_clause}
-        GROUP BY action_type
-        ORDER BY action_count DESC
-        LIMIT {normalized_limit}
-        """,
-        params,
-        as_dict=True,
+    actions = frappe.get_all(
+        "Overseas Cost Usage Log",
+        filters=filters,
+        fields=["action_type", "count(name) as action_count"],
+        group_by="action_type",
+        order_by="action_count desc",
+        limit_page_length=normalized_limit,
     )
     total = frappe.db.count("Overseas Cost Usage Log", filters)
     return {

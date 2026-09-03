@@ -16,6 +16,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     DEFAULT_LOGISTICS_PROCESS_CODE,
     _merge_oa_extra_json,
     _normalize_allocation_basis,
+    _purchase_expense_rows_from_preview,
     _recalculate_after_purchase_sync,
     _sync_oa_form_attachments,
     _sync_oa_logistics_allocation_rule,
@@ -1336,6 +1337,7 @@ def test_build_batch_values_from_oa_logistics_approval() -> None:
     assert values["waybill_no"] == "HPCU5155607"
     assert values["container_no"] == "HPCU5155607"
     assert values["transport_mode"] == "SEA"
+    assert values["business_type"] == "SEA_STANDARD"
     assert values["source_type"] == "oa_logistics"
     assert values["source_approval_no"] == "202601291020000337788"
     assert values["source_instance_id"] == "PROC-SEA-TRACE"
@@ -1774,6 +1776,109 @@ def test_sync_linked_purchase_fields_applies_existing_import_service(monkeypatch
     assert calls[0]["batch_name"] == "BATCH-001"
     assert calls[0]["version_name"] == "VER-001"
     assert "202604300000000596348" in calls[0]["linked_purchase_json"]
+
+
+def test_sync_linked_purchase_fields_persists_rejected_purchase_status(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    saved_values = []
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            assert doctype == "Overseas Cost Batch"
+            assert name == "BATCH-001"
+            return {
+                "extra_json": json.dumps(
+                    {
+                        "oa_logistics_trace": {
+                            "linked_purchase_approvals": [
+                                {
+                                    "approval_no": "PUR-REJECTED-001",
+                                    "source_instance_id": "PROC-PUR-001",
+                                }
+                            ]
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+        @staticmethod
+        def set_value(doctype, name, fieldname, value, **_kwargs):
+            saved_values.append((doctype, name, fieldname, value))
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        import_service,
+        "preview_linked_purchase_expense_oa",
+        lambda **_kwargs: {
+            "ok": True,
+            "mapped_preview_items": [],
+            "purchase_summaries": [
+                {
+                    "source_approval_no": "PUR-REJECTED-001",
+                    "source_instance_id": "PROC-PUR-001",
+                    "approval_status": "REJECTED",
+                    "message": "总经理拒绝，本次不采购。",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        import_service,
+        "apply_linked_purchase_expense_fillable_fields",
+        lambda **_kwargs: {"ok": True, "updated_count": 0},
+    )
+
+    result = _sync_linked_purchase_fields(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={
+            "linked_purchase_approvals": [
+                {"approval_no": "PUR-REJECTED-001", "source_instance_id": "PROC-PUR-001"}
+            ]
+        },
+    )
+
+    assert result["ok"] is True
+    assert saved_values
+    saved_extra = json.loads(saved_values[0][3])
+    saved_link = saved_extra["oa_logistics_trace"]["linked_purchase_approvals"][0]
+    assert saved_link["approval_status"] == "REJECTED"
+    assert saved_link["message"] == "总经理拒绝，本次不采购。"
+
+
+def test_purchase_expense_rows_from_preview_excludes_rejected_approvals() -> None:
+    rows = _purchase_expense_rows_from_preview(
+        {
+            "purchase_summaries": [
+                {
+                    "source_approval_no": "PUR-REJECTED-001",
+                    "source_instance_id": "PROC-PUR-001",
+                    "approval_status": "REJECTED",
+                }
+            ],
+            "mapped_preview_items": [
+                {
+                    "material_code": "MAT-INVALID",
+                    "source_approval_no": "PUR-REJECTED-001",
+                    "source_instance_id": "PROC-PUR-001",
+                },
+                {
+                    "material_code": "MAT-VALID",
+                    "source_approval_no": "PUR-OK-001",
+                    "source_instance_id": "PROC-PUR-OK",
+                },
+            ],
+        }
+    )
+
+    assert [row["material_code"] for row in rows] == ["MAT-VALID"]
 
 
 def test_sync_linked_purchase_fields_rebuilds_items_from_purchase_expense_rows(monkeypatch) -> None:

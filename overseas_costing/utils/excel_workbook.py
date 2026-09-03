@@ -762,7 +762,7 @@ def _normalize_cell_value(value):
     if isinstance(value, str):
         cleaned = value.strip()
         return cleaned or None
-    if isinstance(value, datetime | date | time):
+    if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     return value
 

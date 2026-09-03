@@ -15,6 +15,7 @@ from __future__ import annotations
 import frappe
 
 from overseas_costing.services import calculate_service
+from overseas_costing.services.access_control import require_doctype_permission
 
 
 @frappe.whitelist()
@@ -25,9 +26,12 @@ def update_item_field(
     version_name: str | None = None,
     remark: str | None = None,
     manual_override_reason: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """更新单行明细中的某个字段。"""
 
+    require_doctype_permission("Overseas Cost Item", "write", doc=item_name)
     return calculate_service.update_item_field(
         item_name=item_name,
         fieldname=fieldname,
@@ -35,6 +39,8 @@ def update_item_field(
         version_name=version_name,
         remark=remark,
         manual_override_reason=manual_override_reason,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
 
 
@@ -44,14 +50,19 @@ def batch_update_items(
     updates: str,
     version_name: str | None = None,
     remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """批量更新批次明细字段。"""
 
+    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
     return calculate_service.batch_update_items(
         batch_name=batch_name,
         updates=updates,
         version_name=version_name,
         remark=remark,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
 
 
@@ -60,13 +71,18 @@ def confirm_actual_shipped_qty_from_quantity(
     batch_name: str,
     version_name: str | None = None,
     remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """按采购数量批量确认缺失的实际发货数量。"""
 
+    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
     return calculate_service.confirm_actual_shipped_qty_from_quantity(
         batch_name=batch_name,
         version_name=version_name,
         remark=remark,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
 
 
@@ -76,14 +92,19 @@ def create_item(
     item_payload: str | None = None,
     version_name: str | None = None,
     remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """在当前批次版本下新增一条物料明细。"""
 
+    require_doctype_permission("Overseas Cost Item", "create")
     return calculate_service.create_item(
         batch_name=batch_name,
         item_payload=item_payload,
         version_name=version_name,
         remark=remark,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
 
 
@@ -93,14 +114,19 @@ def delete_item(
     batch_name: str | None = None,
     version_name: str | None = None,
     remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """删除一条物料明细，并写审计日志。"""
 
+    require_doctype_permission("Overseas Cost Item", "delete", doc=item_name)
     return calculate_service.delete_item(
         item_name=item_name,
         batch_name=batch_name,
         version_name=version_name,
         remark=remark,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
 
 
@@ -108,6 +134,7 @@ def delete_item(
 def delete_batch(batch_name: str, remark: str | None = None) -> dict:
     """删除一个批次及其关联明细、版本、规则、附件和修改记录。"""
 
+    require_doctype_permission("Overseas Cost Batch", "delete", doc=batch_name)
     return calculate_service.delete_batch(batch_name=batch_name, remark=remark)
 
 
@@ -115,6 +142,7 @@ def delete_batch(batch_name: str, remark: str | None = None) -> dict:
 def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
     """触发整票重算。"""
 
+    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
     return calculate_service.recalculate_batch(batch_name=batch_name, version_name=version_name)
 
 
@@ -122,6 +150,7 @@ def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
 def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str) -> dict:
     """更新分摊规则。"""
 
+    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
     return calculate_service.update_allocation_rule(
         batch_name=batch_name,
         version_name=version_name,
@@ -133,6 +162,7 @@ def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str
 def create_version(batch_name: str, source_version_name: str, version_type: str) -> dict:
     """基于现有版本创建新版本。"""
 
+    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
     return calculate_service.create_version(
         batch_name=batch_name,
         source_version_name=source_version_name,
@@ -144,6 +174,7 @@ def create_version(batch_name: str, source_version_name: str, version_type: str)
 def switch_version(batch_name: str, target_version_name: str) -> dict:
     """切换当前版本。"""
 
+    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
     return calculate_service.switch_version(
         batch_name=batch_name,
         target_version_name=target_version_name,

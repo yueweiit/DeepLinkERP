@@ -39,6 +39,7 @@ from overseas_costing.utils.field_mapper import (
     map_packing_list_row_to_item,
     map_purchase_expense_row_to_item,
     map_yuewei_excel_block_item_to_item,
+    normalize_business_type,
     normalize_transport_mode,
     normalize_unit,
 )
@@ -51,11 +52,13 @@ PURCHASE_WRITEBACK_FIELDS = (
     "unit_price",
     "purchase_currency",
     "goods_value",
+    "supplier",
 )
 PURCHASE_ORDER_FIELD_LABELS = {
     "unit_price": "采购单价",
     "purchase_currency": "采购币种",
     "goods_value": "采购货值",
+    "supplier": "供应商",
     "source_type": "价格来源",
     "source_file_name": "来源文件",
     "source_attachment_id": "来源附件 ID",
@@ -73,6 +76,7 @@ PURCHASE_FIELD_LABELS = {
     "unit_price": "单价Precio",
     "purchase_currency": "币种Moneda",
     "goods_value": "总金额Monto Total",
+    "supplier": "供应商",
     "source_type": "来源类型",
     "source_doc_no": "来源审批编号",
     "dingtalk_instance_id": "钉钉实例ID",
@@ -487,6 +491,429 @@ def preview_yuewei_excel_file(
             "batch_ids": batch_ids or "",
             "limit": limit,
         },
+    }
+
+
+def _batch_identity_map(batch_name: str) -> dict[str, set[str]]:
+    """按单号类型返回单批次 Excel 补充允许的标识。"""
+
+    normalized_name = str(batch_name or "").strip()
+    if not normalized_name:
+        return {}
+    if frappe is None:
+        return {
+            "id": {normalized_name},
+            "batchNo": {normalized_name},
+            "customsNo": set(),
+            "waybillNo": set(),
+        }
+
+    from overseas_costing.services import batch_service
+
+    batch_doc_name = batch_service._resolve_batch_name(normalized_name)
+    if not batch_doc_name:
+        return {}
+    row = frappe.db.get_value(
+        "Overseas Cost Batch",
+        batch_doc_name,
+        ["name", "batch_no", "customs_no", "waybill_no"],
+        as_dict=True,
+    ) or {}
+    name_values = {
+        str(row.get(field) or "").strip()
+        for field in ("name", "batch_no")
+        if str(row.get(field) or "").strip()
+    }
+    customs_values = {str(row.get("customs_no") or "").strip()} - {""}
+    waybill_values = {str(row.get("waybill_no") or "").strip()} - {""}
+    return {
+        "id": name_values | customs_values | waybill_values,
+        "batchNo": name_values,
+        "customsNo": customs_values,
+        "waybillNo": waybill_values,
+    }
+
+
+def _batch_identity_values(batch_name: str) -> set[str]:
+    """兼容旧调用：返回所有允许的单号。"""
+
+    identity_map = _batch_identity_map(batch_name)
+    return set().union(*identity_map.values()) if identity_map else set()
+
+
+def _excel_block_identity_values(block: dict) -> set[str]:
+    return {
+        str(block.get(field) or "").strip()
+        for field in ("id", "batchNo", "customsNo", "waybillNo")
+        if str(block.get(field) or "").strip()
+    }
+
+
+def _excel_block_identity_conflicts(block: dict, identity_map: dict[str, set[str]]) -> list[str]:
+    """检查同一 block 中每类非空标识，防止“批次号匹配但运单号属于别的批次”。"""
+
+    conflicts = []
+    for fieldname in ("id", "batchNo", "customsNo", "waybillNo"):
+        value = str(block.get(fieldname) or "").strip()
+        expected = identity_map.get(fieldname) or set()
+        if value and value not in expected:
+            conflicts.append(f"{fieldname}={value}")
+    return conflicts
+
+
+def _excel_block_identity_label(block: dict) -> str:
+    return _first_non_empty(
+        block.get("batchNo"),
+        block.get("id"),
+        block.get("customsNo"),
+        block.get("waybillNo"),
+        "无法识别批次",
+    )
+
+
+def _prepare_batch_excel_supplement(
+    batch_name: str,
+    *,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    source_sheet: str | None = None,
+) -> dict:
+    """解析文件并确认其中所有有数据的 block 都属于显式目标批次。"""
+
+    resolved_path = _resolve_excel_file_path(file_path=file_path, file_url=file_url)
+    normalized_sheet = (source_sheet or "").strip() or None
+    parser_meta, blocks = parse_yuewei_excel_workbook(resolved_path, sheet_name=normalized_sheet)
+    identity_map = _batch_identity_map(batch_name)
+    identities = set().union(*identity_map.values()) if identity_map else set()
+    if not identities:
+        return {"ok": False, "message": f"未找到目标批次：{batch_name}", "foreign_batches": []}
+
+    relevant_blocks = []
+    foreign_batches = []
+    identity_conflicts = []
+    for block in blocks:
+        if not (block.get("items") or []):
+            continue
+        block_identities = _excel_block_identity_values(block)
+        block_conflicts = _excel_block_identity_conflicts(block, identity_map)
+        if block_conflicts:
+            identity_conflicts.extend(block_conflicts)
+        if block_conflicts or not block_identities or identities.isdisjoint(block_identities):
+            foreign_batches.append(str(_excel_block_identity_label(block)))
+            continue
+        relevant_blocks.append(block)
+
+    if foreign_batches:
+        return {
+            "ok": False,
+            "message": "文件包含其他批次，未写入任何数据。",
+            "batch_name": batch_name,
+            "foreign_batches": sorted(set(foreign_batches)),
+            "identity_conflicts": sorted(set(identity_conflicts)),
+            "matched_block_count": len(relevant_blocks),
+        }
+    if not relevant_blocks:
+        return {
+            "ok": False,
+            "message": "文件中没有与当前批次匹配的 SKU 数据。",
+            "batch_name": batch_name,
+            "foreign_batches": [],
+        }
+
+    if frappe is None:
+        batch_doc_name = str(batch_name)
+        version_name = None
+    else:
+        from overseas_costing.services import batch_service
+
+        batch_doc_name = batch_service._resolve_batch_name(batch_name)
+        version_name = batch_service._resolve_version_name(batch_doc_name) if batch_doc_name else None
+    if not batch_doc_name:
+        return {"ok": False, "message": f"未找到目标批次：{batch_name}", "foreign_batches": []}
+    if frappe is not None and not version_name:
+        return {"ok": False, "message": "当前批次没有可补充的版本。", "foreign_batches": []}
+
+    raw_rows = []
+    mapped_rows = []
+    for block in relevant_blocks:
+        block_rows = block.get("items") or []
+        start_index = len(raw_rows)
+        raw_rows.extend(block_rows)
+        mapped_rows.extend(
+            map_yuewei_excel_block_item_to_item(block, row, row_index=start_index + index + 1)
+            for index, row in enumerate(block_rows)
+        )
+
+    ignored_fields = {"doctype", "name", "batch", "version", "raw_excel_json"}
+    changed_fields = sorted(
+        {
+            fieldname
+            for row in mapped_rows
+            for fieldname, value in row.items()
+            if fieldname not in ignored_fields and value not in (None, "")
+        }
+    )
+    return {
+        "ok": True,
+        "message": "已确认文件只包含当前批次，可以安全补充。",
+        "batch_name": batch_name,
+        "batch_doc_name": batch_doc_name,
+        "version_name": version_name,
+        "file_name": Path(resolved_path).name,
+        "file_url": file_url or "",
+        "source_sheet": parser_meta.get("sourceSheet") or normalized_sheet or "",
+        "parser_meta": parser_meta,
+        "matched_block_count": len(relevant_blocks),
+        "sku_count": len(mapped_rows),
+        "changed_fields": changed_fields,
+        "conflicts": [],
+        "skipped_items": [],
+        "foreign_batches": [],
+        "mapped_rows": mapped_rows,
+        "raw_rows": raw_rows,
+    }
+
+
+def preview_batch_excel_supplement(
+    batch_name: str,
+    *,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    source_sheet: str | None = None,
+) -> dict:
+    result = _prepare_batch_excel_supplement(
+        batch_name,
+        file_path=file_path,
+        file_url=file_url,
+        source_sheet=source_sheet,
+    )
+    if result.get("ok") and frappe is not None:
+        validation = _validate_batch_supplement_items(
+            batch_doc_name=result["batch_doc_name"],
+            version_name=result["version_name"],
+            mapped_rows=result["mapped_rows"],
+        )
+        if not validation.get("ok"):
+            result.update(validation)
+        else:
+            result["matched_sku_count"] = len(validation.get("matches") or [])
+    preview = dict(result)
+    preview.pop("mapped_rows", None)
+    preview.pop("raw_rows", None)
+    preview.pop("matches", None)
+    return preview
+
+
+_BATCH_SUPPLEMENT_IDENTITY_FIELDS = {
+    "doctype",
+    "name",
+    "batch",
+    "version",
+    "row_no",
+    "excel_row_no",
+    "material_code",
+    "raw_excel_json",
+    "source_type",
+    "transport_mode",
+}
+
+
+def _batch_supplement_update_values(mapped_row: dict) -> dict:
+    """补充文件只写入显式提供的非标识字段，空值不会清空现有数据。"""
+
+    return {
+        fieldname: value
+        for fieldname, value in (mapped_row or {}).items()
+        if fieldname not in _BATCH_SUPPLEMENT_IDENTITY_FIELDS and value not in (None, "")
+    }
+
+
+def _validate_batch_supplement_items(
+    *,
+    batch_doc_name: str,
+    version_name: str,
+    mapped_rows: list[dict],
+) -> dict:
+    """在预览和应用阶段执行同一套 SKU 唯一匹配校验。"""
+
+    if frappe is None:
+        return {"ok": True, "matches": []}
+    existing_rows = frappe.get_all(
+        "Overseas Cost Item",
+        filters={"batch": batch_doc_name, "version": version_name},
+        fields=["name", "row_no", "material_code"],
+        limit_page_length=0,
+    )
+    existing_by_code: dict[str, list[dict]] = defaultdict(list)
+    for row in existing_rows:
+        code = str(row.get("material_code") or "").strip().casefold()
+        if code:
+            existing_by_code[code].append(row)
+
+    source_codes: set[str] = set()
+    conflicts = []
+    matches = []
+    for mapped_row in mapped_rows:
+        display_code = str(mapped_row.get("material_code") or "").strip()
+        code = display_code.casefold()
+        if not code:
+            conflicts.append("补充行缺少物料编码")
+            continue
+        if code in source_codes:
+            conflicts.append(f"文件中物料编码重复：{display_code}")
+            continue
+        source_codes.add(code)
+        candidates = existing_by_code.get(code) or []
+        if not candidates:
+            conflicts.append(f"当前批次不存在物料：{display_code}")
+            continue
+        if len(candidates) > 1:
+            conflicts.append(f"当前批次物料编码不唯一：{display_code}")
+            continue
+        matches.append((mapped_row, candidates[0]))
+
+    if conflicts:
+        return {
+            "ok": False,
+            "message": "物料匹配不唯一或不存在，未写入任何数据。",
+            "conflicts": conflicts,
+            "matches": [],
+        }
+    return {"ok": True, "conflicts": [], "matches": matches}
+
+
+def _apply_batch_supplement_items(
+    *,
+    batch_doc_name: str,
+    version_name: str,
+    mapped_rows: list[dict],
+    raw_rows: list,
+) -> dict:
+    """按唯一物料编码定位现有 SKU；不按行号覆盖，也不在补充流程中新建 SKU。"""
+
+    if frappe is None:
+        return {
+            "ok": True,
+            "total_count": len(mapped_rows),
+            "created_count": 0,
+            "updated_count": 0,
+            "unchanged_count": len(mapped_rows),
+            "changed_field_count": 0,
+        }
+
+    validation = _validate_batch_supplement_items(
+        batch_doc_name=batch_doc_name,
+        version_name=version_name,
+        mapped_rows=mapped_rows,
+    )
+    if not validation.get("ok"):
+        return {
+            "ok": False,
+            "message": validation.get("message"),
+            "conflicts": validation.get("conflicts") or [],
+            "total_count": len(mapped_rows),
+            "created_count": 0,
+            "updated_count": 0,
+            "unchanged_count": 0,
+            "changed_field_count": 0,
+        }
+    matches = validation.get("matches") or []
+
+    updated_count = 0
+    unchanged_count = 0
+    changed_field_count = 0
+    for mapped_row, existing in matches:
+        values = _filter_doctype_values("Overseas Cost Item", _batch_supplement_update_values(mapped_row))
+        changed = _update_item_fields(
+            item_name=existing["name"],
+            batch_doc_name=batch_doc_name,
+            version_name=version_name,
+            row_no=existing.get("row_no"),
+            field_updates=values,
+            action_remark="单批次 Excel 补充",
+        )
+        if changed:
+            updated_count += 1
+            changed_field_count += len(changed)
+        else:
+            unchanged_count += 1
+
+    return {
+        "ok": True,
+        "total_count": len(matches),
+        "created_count": 0,
+        "updated_count": updated_count,
+        "unchanged_count": unchanged_count,
+        "changed_field_count": changed_field_count,
+        "conflicts": [],
+    }
+
+
+def apply_batch_excel_supplement(
+    batch_name: str,
+    *,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    source_sheet: str | None = None,
+    expected_modified: str | None = None,
+    edit_token: str | None = None,
+) -> dict:
+    prepared = _prepare_batch_excel_supplement(
+        batch_name,
+        file_path=file_path,
+        file_url=file_url,
+        source_sheet=source_sheet,
+    )
+    if not prepared.get("ok"):
+        return prepared
+
+    if frappe is not None:
+        from overseas_costing.services import edit_session_service
+
+        edit_session_service.assert_batch_write(
+            prepared["batch_doc_name"],
+            edit_token=edit_token,
+            expected_modified=expected_modified,
+        )
+
+    item_result = _apply_batch_supplement_items(
+        batch_doc_name=prepared["batch_doc_name"],
+        version_name=prepared["version_name"],
+        mapped_rows=prepared["mapped_rows"],
+        raw_rows=prepared["raw_rows"],
+    )
+    if not item_result.get("ok"):
+        return item_result
+    if frappe is not None:
+        _mark_batch_dirty(prepared["batch_doc_name"])
+        _create_audit_log(
+            batch_doc_name=prepared["batch_doc_name"],
+            version_name=prepared["version_name"],
+            row_no=None,
+            field_name="batch_excel_supplement",
+            old_value="",
+            new_value=f"{item_result.get('updated_count', 0)} SKU / {item_result.get('changed_field_count', 0)} 字段",
+            action_remark=f"单批次 Excel 补充：{prepared.get('file_name') or ''}",
+        )
+        if hasattr(frappe.db, "commit"):
+            frappe.db.commit()
+    batch_modified = (
+        frappe.db.get_value("Overseas Cost Batch", prepared["batch_doc_name"], "modified")
+        if frappe is not None
+        else None
+    )
+    return {
+        "ok": True,
+        "message": f"已补充当前批次 {item_result.get('total_count', 0)} 行 SKU。",
+        "batch_name": prepared["batch_doc_name"],
+        "version_name": prepared["version_name"],
+        "sku_count": item_result.get("total_count", 0),
+        "created_count": item_result.get("created_count", 0),
+        "updated_count": item_result.get("updated_count", 0),
+        "unchanged_count": item_result.get("unchanged_count", 0),
+        "failed_count": 0,
+        "changed_field_count": item_result.get("changed_field_count", 0),
+        "batch_modified": batch_modified,
     }
 
 
@@ -1557,6 +1984,7 @@ def preview_oa_purchase_order_match(
         source_rows.append(
             {
                 **row,
+                "supplier": row.get("supplier") or purchase_order.get("supplier") or "",
                 "source_type": "PURCHASE_ORDER_ATTACHMENT",
                 "source_attachment_id": attachment_name,
                 "source_file_name": source_preview.get("source_name") or "",
@@ -1662,6 +2090,8 @@ def apply_oa_purchase_order_fillable_fields(
             continue
 
         field_updates.update(provenance)
+        if purchase_order.get("supplier") and not field_updates.get("supplier"):
+            field_updates["supplier"] = purchase_order.get("supplier")
         changed_fields = _update_item_fields(
             item_name=target_item_name,
             batch_doc_name=batch_doc_name,
@@ -1738,6 +2168,7 @@ def _compact_purchase_order_row(row: dict) -> dict:
         "material_code": row.get("material_code") or "",
         "product_name": row.get("product_name") or "",
         "spec_model": row.get("spec_model") or "",
+        "supplier": row.get("supplier") or "",
         "quantity": row.get("quantity"),
         "unit_price": row.get("unit_price"),
         "purchase_currency": row.get("purchase_currency") or "",
@@ -2445,6 +2876,10 @@ def _build_excel_block_preview(block: dict) -> dict:
         "customs_no": block.get("customsNo"),
         "waybill_no": block.get("waybillNo"),
         "transport_mode": normalize_transport_mode(block.get("transportMode")),
+        "business_type": normalize_business_type(
+            block.get("businessType") or block.get("business_type") or block.get("transportMode"),
+            transport_mode=block.get("transportMode"),
+        ),
         "item_count": len(items),
         "mapped_preview_items": mapped_preview_items,
     }
@@ -2470,6 +2905,10 @@ def _resolve_or_create_excel_batch(
         "customs_no": block.get("customsNo") or "",
         "waybill_no": waybill_no,
         "transport_mode": normalize_transport_mode(block.get("transportMode") or transport_mode) or "SEA",
+        "business_type": normalize_business_type(
+            block.get("businessType") or block.get("business_type") or block.get("transportMode"),
+            transport_mode=block.get("transportMode") or transport_mode,
+        ) or normalize_business_type(transport_mode, transport_mode=transport_mode) or "SEA_STANDARD",
         "project_collection": project_collection or block.get("projectCollection") or "",
         "source_type": "excel",
         "source_file_name": source_name,
@@ -2810,6 +3249,15 @@ def _get_linked_purchase_approvals_from_extra(extra_json: str | dict | None) -> 
         payload.get("linked_purchase_approvals"),
         trace.get("linked_purchase_approvals"),
     ]
+    purchase_sync = trace.get("purchase_sync")
+    if isinstance(purchase_sync, dict):
+        candidates.extend(
+            [
+                purchase_sync.get("linked_purchase_approvals"),
+                purchase_sync.get("purchase_summaries"),
+                purchase_sync.get("items"),
+            ]
+        )
     linked: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for value in candidates:
@@ -3145,6 +3593,7 @@ def _build_purchase_summary_preview_row(summary: dict) -> dict:
         "source_dingtalk_url": official_url,
         "approval_title": summary.get("approval_title"),
         "approval_status": summary.get("approval_status"),
+        "message": summary.get("message") or "",
         "purchase_currency": summary.get("purchase_currency"),
         "detail_row_count": summary.get("detail_row_count"),
         "open_url": dingtalk_payload.get("open_url") or "",
@@ -4493,6 +4942,7 @@ def _build_packing_updates_for_preview(mapped_row: dict, _target: dict) -> dict:
         "chargeable_weight_kg": mapped_row.get("chargeable_weight_kg"),
         "unit_price": mapped_row.get("unit_price"),
         "purchase_currency": mapped_row.get("purchase_currency"),
+        "supplier": mapped_row.get("supplier"),
         "goods_value": mapped_row.get("goods_value"),
         "hs_code": mapped_row.get("hs_code"),
         "source_type": mapped_row.get("source_type") or "PACKING_LIST",

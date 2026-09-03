@@ -15,8 +15,6 @@ def get_data() -> list[dict]:
         {
             "module_name": "Overseas Costing",
             "type": "module",
-            "label": "海外成本核算",
-            "icon": "fa fa-calculator",
-            "color": "blue",
+            "label": "海外采购综合成本核算",
         }
     ]

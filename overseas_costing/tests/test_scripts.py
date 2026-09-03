@@ -1,5 +1,7 @@
 """中文用途：调试脚本测试。"""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from openpyxl import load_workbook

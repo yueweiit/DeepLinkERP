@@ -7,6 +7,7 @@ import json
 import frappe
 
 from overseas_costing.services import usage_service
+from overseas_costing.services.access_control import require_batch_permission, require_doctype_permission
 
 
 def _loads_extra(value: str | None) -> dict:
@@ -31,6 +32,9 @@ def record_usage(
 ) -> dict:
     """记录一次工作台使用行为。"""
 
+    if batch_name:
+        batch_name = require_batch_permission(batch_name, "read")
+    require_doctype_permission("Overseas Cost Usage Log", "create")
     return usage_service.record_usage(
         action_type=action_type,
         batch_name=batch_name,
@@ -51,6 +55,11 @@ def get_usage_logs(
 ) -> dict:
     """返回使用记录明细。"""
 
+    if batch_name:
+        batch_name = require_batch_permission(batch_name, "read")
+    else:
+        frappe.only_for("System Manager")
+    require_doctype_permission("Overseas Cost Usage Log", "read")
     return usage_service.get_usage_logs(batch_name=batch_name, action_type=action_type, user=user, limit=limit)
 
 
@@ -58,4 +67,6 @@ def get_usage_logs(
 def get_usage_summary(days: int | str = 30, limit: int | str = 20) -> dict:
     """返回最近使用情况汇总。"""
 
+    frappe.only_for("System Manager")
+    require_doctype_permission("Overseas Cost Usage Log", "read")
     return usage_service.get_usage_summary(days=days, limit=limit)

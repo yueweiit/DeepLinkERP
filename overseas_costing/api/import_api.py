@@ -11,6 +11,18 @@ from __future__ import annotations
 import frappe
 
 from overseas_costing.services import import_service
+from overseas_costing.services.access_control import (
+    require_attachment_permission,
+    require_batch_permission,
+    require_doctype_permission,
+)
+
+
+def _require_batch_or_system_manager(batch_name: str | None, ptype: str = "read") -> str | None:
+    if batch_name:
+        return require_batch_permission(batch_name, ptype)
+    frappe.only_for("System Manager")
+    return None
 
 
 @frappe.whitelist()
@@ -27,6 +39,9 @@ def import_main_excel(
 ) -> dict:
     """导入主表并生成批次。"""
 
+    frappe.only_for("System Manager")
+    require_doctype_permission("Overseas Cost Batch", "create")
+    require_doctype_permission("Overseas Cost Batch", "write")
     return import_service.import_main_excel(
         source_name=source_name,
         source_type=source_type,
@@ -56,6 +71,9 @@ def import_parsed_excel_blocks(
 ) -> dict:
     """导入已解析 Excel block JSON，支持按一期范围筛选。"""
 
+    frappe.only_for("System Manager")
+    require_doctype_permission("Overseas Cost Batch", "create")
+    require_doctype_permission("Overseas Cost Batch", "write")
     return import_service.import_parsed_excel_blocks(
         source_name=source_name,
         blocks_json=blocks_json,
@@ -88,6 +106,9 @@ def import_yuewei_excel_file(
 ) -> dict:
     """导入真实 Yuewei 成本总表 xlsx 文件。"""
 
+    frappe.only_for("System Manager")
+    require_doctype_permission("Overseas Cost Batch", "create")
+    require_doctype_permission("Overseas Cost Batch", "write")
     return import_service.import_yuewei_excel_file(
         source_name=source_name,
         file_path=file_path,
@@ -117,6 +138,7 @@ def preview_yuewei_excel_file(
 ) -> dict:
     """预览真实 xlsx 解析结果，不写入数据库。"""
 
+    frappe.only_for("System Manager")
     return import_service.preview_yuewei_excel_file(
         source_name=source_name,
         file_path=file_path,
@@ -130,9 +152,47 @@ def preview_yuewei_excel_file(
 
 
 @frappe.whitelist()
+def preview_batch_excel_supplement(
+    batch_name: str,
+    file_url: str,
+    source_sheet: str | None = None,
+) -> dict:
+    """预览只作用于显式批次的 Excel 补充，不写入数据。"""
+
+    batch_name = require_batch_permission(batch_name, "read")
+    return import_service.preview_batch_excel_supplement(
+        batch_name=batch_name,
+        file_url=file_url,
+        source_sheet=source_sheet,
+    )
+
+
+@frappe.whitelist()
+def apply_batch_excel_supplement(
+    batch_name: str,
+    file_url: str,
+    source_sheet: str | None = None,
+    expected_modified: str | None = None,
+    edit_token: str | None = None,
+) -> dict:
+    """将 Excel 只补充到显式目标批次。"""
+
+    batch_name = require_batch_permission(batch_name, "write")
+    return import_service.apply_batch_excel_supplement(
+        batch_name=batch_name,
+        file_url=file_url,
+        source_sheet=source_sheet,
+        expected_modified=expected_modified,
+        edit_token=edit_token,
+    )
+
+
+@frappe.whitelist()
 def upload_attachment(batch_name: str, version_name: str | None = None, file_url: str | None = None) -> dict:
     """上传或登记附件，后续用于凭证解析。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
+    require_doctype_permission("Overseas Cost Attachment", "create")
     return import_service.upload_attachment(
         batch_name=batch_name,
         version_name=version_name,
@@ -148,6 +208,7 @@ def list_manual_document_attachments(
 ) -> dict:
     """查询人工上传的资料清单附件。"""
 
+    batch_name = require_batch_permission(batch_name, "read")
     return import_service.list_manual_document_attachments(
         batch_name=batch_name,
         logistics_type=logistics_type,
@@ -171,6 +232,8 @@ def register_manual_document_attachment(
 ) -> dict:
     """登记人工上传资料，只做归档和回溯，不触发字段解析。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
+    require_doctype_permission("Overseas Cost Attachment", "create")
     return import_service.register_manual_document_attachment(
         batch_name=batch_name,
         logistics_type=logistics_type,
@@ -190,6 +253,7 @@ def register_manual_document_attachment(
 def delete_manual_document_attachment(attachment_name: str) -> dict:
     """删除人工上传资料记录。"""
 
+    attachment_name = require_attachment_permission(attachment_name, "delete")
     return import_service.delete_manual_document_attachment(attachment_name=attachment_name)
 
 
@@ -203,6 +267,7 @@ def parse_manual_document_attachments(
 ) -> dict:
     """批量解析人工补传资料；仅可识别内容会写入，其他保留原件复核。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
     skip_parsed_flag = str(skip_parsed or "").strip().lower() in ("1", "true", "yes", "y")
     recalculate_flag = str(recalculate or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.parse_manual_document_attachments(
@@ -218,6 +283,7 @@ def parse_manual_document_attachments(
 def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
     """查询钉钉发起表单附件记录；评论附件本阶段不纳入。"""
 
+    batch_name = require_batch_permission(batch_name, "read")
     return import_service.list_oa_form_attachments(
         batch_name=batch_name,
         limit=limit,
@@ -232,6 +298,7 @@ def download_oa_form_attachment(
 ) -> dict:
     """下载钉钉发起表单附件到系统文件，评论附件本阶段不处理。"""
 
+    attachment_name = require_attachment_permission(attachment_name, "write")
     return import_service.download_oa_form_attachment(
         attachment_name=attachment_name,
         env_file=env_file,
@@ -247,6 +314,7 @@ def diagnose_oa_form_attachment_download(
 ) -> dict:
     """诊断钉钉发起表单附件自动下载链路，不保存文件。"""
 
+    attachment_name = require_attachment_permission(attachment_name, "read")
     return import_service.diagnose_oa_form_attachment_download(
         attachment_name=attachment_name,
         env_file=env_file,
@@ -258,6 +326,7 @@ def diagnose_oa_form_attachment_download(
 def preview_oa_source_attachment(attachment_name: str) -> dict:
     """识别已下载的 OA 附件内容，返回资料类型和字段候选，不写入核算明细。"""
 
+    attachment_name = require_attachment_permission(attachment_name, "read")
     return import_service.preview_oa_source_attachment(attachment_name=attachment_name)
 
 
@@ -269,6 +338,7 @@ def confirm_oa_source_attachment_type(
 ) -> dict:
     """保存人工确认的 OA 附件资料类型，不写入单价、货值或费用。"""
 
+    attachment_name = require_attachment_permission(attachment_name, "write")
     return import_service.confirm_oa_source_attachment_type(
         attachment_name=attachment_name,
         confirmed_type=confirmed_type,
@@ -283,6 +353,7 @@ def preview_oa_purchase_order_match(
 ) -> dict:
     """预览采购订单附件与当前批次物料的匹配结果，不写入数据。"""
 
+    attachment_name = require_attachment_permission(attachment_name, "read")
     return import_service.preview_oa_purchase_order_match(
         attachment_name=attachment_name,
         version_name=version_name,
@@ -297,6 +368,7 @@ def apply_oa_purchase_order_fillable_fields(
 ) -> dict:
     """确认补入采购订单附件中匹配且为空的采购字段。"""
 
+    attachment_name = require_attachment_permission(attachment_name, "write")
     recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.apply_oa_purchase_order_fillable_fields(
         attachment_name=attachment_name,
@@ -315,6 +387,7 @@ def preview_tax_certificate_pdf(
 ) -> dict:
     """预览解析进口完税凭证 PDF，不写入成本明细。"""
 
+    batch_name = _require_batch_or_system_manager(batch_name, "read")
     return import_service.preview_tax_certificate_pdf(
         source_name=source_name,
         file_path=file_path,
@@ -334,6 +407,8 @@ def save_tax_certificate_parse_result(
 ) -> dict:
     """保存进口完税凭证 PDF 解析结果，不写入成本明细。"""
 
+    batch_name = _require_batch_or_system_manager(batch_name, "write")
+    require_doctype_permission("Overseas Cost Attachment", "create")
     return import_service.save_tax_certificate_parse_result(
         source_name=source_name,
         file_path=file_path,
@@ -347,6 +422,7 @@ def save_tax_certificate_parse_result(
 def list_tax_certificate_parse_records(batch_name: str | None = None, limit: int | None = 20) -> dict:
     """查询已保存完税凭证解析记录摘要。"""
 
+    batch_name = _require_batch_or_system_manager(batch_name, "read")
     return import_service.list_tax_certificate_parse_records(
         batch_name=batch_name,
         limit=limit,
@@ -357,6 +433,10 @@ def list_tax_certificate_parse_records(batch_name: str | None = None, limit: int
 def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
     """查询单条完税凭证解析记录详情。"""
 
+    if record_name:
+        record_name = require_attachment_permission(record_name, "read")
+    else:
+        frappe.only_for("System Manager")
     return import_service.get_tax_certificate_parse_record(record_name=record_name)
 
 
@@ -368,6 +448,13 @@ def delete_tax_certificate_parse_records(
 ) -> dict:
     """删除已保存的完税凭证解析记录。"""
 
+    if record_name:
+        require_attachment_permission(record_name, "delete")
+    elif batch_name:
+        batch_name = require_batch_permission(batch_name, "write")
+        require_doctype_permission("Overseas Cost Attachment", "delete")
+    else:
+        frappe.only_for("System Manager")
     return import_service.delete_tax_certificate_parse_records(
         batch_name=batch_name,
         record_name=record_name,
@@ -384,6 +471,10 @@ def resolve_tax_certificate_reconciliation(
 ) -> dict:
     """保存完税凭证差异人工处理结果，不写入成本字段。"""
 
+    if record_name:
+        record_name = require_attachment_permission(record_name, "write")
+    else:
+        frappe.only_for("System Manager")
     return import_service.resolve_tax_certificate_reconciliation(
         record_name=record_name,
         resolution_action=resolution_action,
@@ -403,6 +494,7 @@ def import_purchase_expense_oa(
 ) -> dict:
     """从采购支出 OA 补采购单价、采购币种和货值来源。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
     return import_service.import_purchase_expense_oa(
         batch_name=batch_name,
         source_instance_id=source_instance_id,
@@ -423,6 +515,7 @@ def preview_linked_purchase_expense_oa(
 ) -> dict:
     """预览当前批次关联采购支出 OA 能补哪些采购价格字段，不写入数据。"""
 
+    batch_name = require_batch_permission(batch_name, "read")
     return import_service.preview_linked_purchase_expense_oa(
         batch_name=batch_name,
         version_name=version_name,
@@ -443,6 +536,7 @@ def apply_linked_purchase_expense_fillable_fields(
 ) -> dict:
     """确认补入当前批次关联采购支出 OA 中可安全写入的采购字段。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
     recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.apply_linked_purchase_expense_fillable_fields(
         batch_name=batch_name,
@@ -463,6 +557,7 @@ def confirm_logistics_quote_candidate(
 ) -> dict:
     """人工确认一条物流报价候选后，生成对应的整票物流费用分摊规则。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
     return import_service.confirm_logistics_quote_candidate(
         batch_name=batch_name,
         candidate_index=candidate_index,
@@ -490,6 +585,7 @@ def save_manual_logistics_quote(
 ) -> dict:
     """手工补录物流报价后，生成/更新对应的整票物流费用分摊规则。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
     return import_service.save_manual_logistics_quote(
         batch_name=batch_name,
         version_name=version_name,
@@ -519,6 +615,9 @@ def preview_packing_list_attachment(
 ) -> dict:
     """预览装箱单/物流附件可补哪些实际发货、重量、体积字段，不写入数据。"""
 
+    batch_name = require_batch_permission(batch_name, "read")
+    if attachment_name:
+        attachment_name = require_attachment_permission(attachment_name, "read")
     return import_service.preview_packing_list_attachment(
         batch_name=batch_name,
         attachment_name=attachment_name,
@@ -541,6 +640,9 @@ def apply_packing_list_fillable_fields(
 ) -> dict:
     """确认补入装箱单/物流附件中可安全写入的实际发货、重量、体积字段。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
+    if attachment_name:
+        attachment_name = require_attachment_permission(attachment_name, "write")
     recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.apply_packing_list_fillable_fields(
         batch_name=batch_name,
@@ -567,6 +669,9 @@ def resolve_packing_list_conflict_row(
 ) -> dict:
     """保存单条装箱单差异处理结果。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
+    if attachment_name:
+        attachment_name = require_attachment_permission(attachment_name, "write")
     recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.resolve_packing_list_conflict_row(
         batch_name=batch_name,
@@ -592,6 +697,7 @@ def parse_oa_packing_list_attachments(
 ) -> dict:
     """批量下载并解析钉钉发起附件里的 Excel 装箱单，写入可补字段。"""
 
+    batch_name = _require_batch_or_system_manager(batch_name, "write")
     skip_parsed_flag = str(skip_parsed or "").strip().lower() in ("1", "true", "yes", "y")
     recalculate_flag = str(recalculate or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.parse_oa_packing_list_attachments(
@@ -615,6 +721,7 @@ def parse_oa_source_attachments(
 ) -> dict:
     """批量下载并解析钉钉发起附件；Excel 可回填，图片/PDF 等只保存识别快照。"""
 
+    batch_name = _require_batch_or_system_manager(batch_name, "write")
     skip_parsed_flag = str(skip_parsed or "").strip().lower() in ("1", "true", "yes", "y")
     recalculate_flag = str(recalculate or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.parse_oa_source_attachments(
@@ -638,6 +745,9 @@ def parse_packing_list_attachment(
 ) -> dict:
     """解析装箱单附件，补实际发货数量、重量和体积相关字段。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
+    if attachment_name:
+        attachment_name = require_attachment_permission(attachment_name, "write")
     return import_service.parse_packing_list_attachment(
         batch_name=batch_name,
         attachment_name=attachment_name,
@@ -663,6 +773,13 @@ def refresh_existing_oa_logistics_details(
     """重拉已有国际物流 OA 批次详情，并自动同步关联采购支出字段。"""
 
     from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import batch_service
+
+    permission_target = target or batch_name or batch_no
+    if permission_target and batch_service._resolve_batch_name(permission_target):
+        require_batch_permission(permission_target, "write")
+    else:
+        frappe.only_for("System Manager")
 
     include_non_sea_flag = str(include_non_sea or "").strip().lower() in ("1", "true", "yes", "y")
     return import_oa_logistics.refresh_existing_oa_logistics_details(
@@ -691,6 +808,7 @@ def pull_latest_oa_logistics_approvals(
 ) -> dict:
     """手动拉取最近国际物流 OA 审批单，并保存/更新成本批次。"""
 
+    frappe.only_for("System Manager")
     from overseas_costing.scripts import import_oa_logistics
 
     try:
@@ -723,6 +841,12 @@ def refresh_oa_logistics_detail(
     """按内部批次名、批次号或钉钉审批编号精准重拉一张国际物流 OA。"""
 
     from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import batch_service
+
+    if batch_service._resolve_batch_name(target):
+        target = require_batch_permission(target, "write")
+    else:
+        frappe.only_for("System Manager")
 
     include_non_sea_flag = str(include_non_sea or "").strip().lower() in ("1", "true", "yes", "y")
     return import_oa_logistics.refresh_oa_logistics_detail(
@@ -739,6 +863,7 @@ def refresh_oa_logistics_detail(
 def sync_existing_oa_finished_times(limit: int | None = 200) -> dict:
     """从已保存 OA 快照回填批次来源完成时间，仅补空值。"""
 
+    frappe.only_for("System Manager")
     from overseas_costing.scripts import import_oa_logistics
 
     return import_oa_logistics.sync_existing_oa_finished_times(limit=limit)
@@ -753,6 +878,7 @@ def refresh_missing_oa_finished_times(
 ) -> dict:
     """回钉钉重拉详情，只补缺失的来源完成时间和审批状态。"""
 
+    frappe.only_for("System Manager")
     from overseas_costing.scripts import import_oa_logistics
 
     return import_oa_logistics.refresh_missing_oa_finished_times(
@@ -781,6 +907,7 @@ def sync_purchase_expenses_from_process(
 ) -> dict:
     """从采购支出 OA 流程批量拉单，并按物料编码/规格同步已有国际物流批次。"""
 
+    frappe.only_for("System Manager")
     from overseas_costing.scripts import import_oa_logistics
 
     include_running_flag = str(include_running or "").strip().lower() in ("1", "true", "yes", "y")
@@ -819,6 +946,7 @@ def preview_purchase_expenses_from_process(
 ) -> dict:
     """预览采购支出 OA 流程能匹配哪些已有国际物流批次，不写入数据。"""
 
+    frappe.only_for("System Manager")
     from overseas_costing.scripts import import_oa_logistics
 
     include_running_flag = str(include_running or "").strip().lower() in ("1", "true", "yes", "y")

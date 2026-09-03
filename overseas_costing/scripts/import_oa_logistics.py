@@ -43,7 +43,12 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
-from overseas_costing.utils.field_mapper import map_oa_row_to_item, map_purchase_expense_row_to_item, normalize_unit
+from overseas_costing.utils.field_mapper import (
+    map_oa_row_to_item,
+    map_purchase_expense_row_to_item,
+    normalize_business_type,
+    normalize_unit,
+)
 
 NEW_TOKEN_PATH = "/v1.0/oauth2/{corp_id}/token"
 NEW_LIST_INSTANCE_IDS_PATH = "/v1.0/workflow/processes/instanceIds/query"
@@ -74,7 +79,30 @@ TRANSPORT_MODE_LABELS = {
     "AIR": "空运",
     "EXPRESS": "快递",
 }
-HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
+HIDDEN_APPROVAL_STATUSES = (
+    "TERMINATED",
+    "CANCELED",
+    "CANCELLED",
+    "REVOKED",
+    "REJECTED",
+    "REFUSED",
+    "DENIED",
+    "ABORTED",
+    "撤销",
+    "已撤销",
+    "拒绝",
+    "已拒绝",
+    "驳回",
+    "已驳回",
+    "不通过",
+    "未通过",
+    "终止",
+    "已终止",
+    "取消",
+    "已取消",
+    "作废",
+    "已作废",
+)
 COMPLETED_APPROVAL_STATUSES = ("COMPLETED", "FINISHED", "AGREE", "APPROVED", "已完成", "审批通过", "同意")
 TRANSPORT_FIELD_ALIASES = (
     "物流方式",
@@ -2808,6 +2836,15 @@ def is_hidden_approval_status(status: str | None) -> bool:
     return any(_clean(hidden).upper() in normalized for hidden in HIDDEN_APPROVAL_STATUSES)
 
 
+def is_invalid_approval_status(status: str | None) -> bool:
+    """判断采购审批是否已经拒绝、撤销或终止。"""
+
+    normalized = _clean(status).upper()
+    if not normalized:
+        return False
+    return any(_clean(invalid).upper() in normalized for invalid in HIDDEN_APPROVAL_STATUSES)
+
+
 def is_completed_approval_status(status: str | None, *, allow_empty: bool = True) -> bool:
     """判断审批是否已完成；空状态默认放行以兼容部分旧接口响应。"""
 
@@ -3520,12 +3557,18 @@ def build_batch_values_from_approval(item: dict) -> dict:
     oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
     attachment_count = len(oa_form_attachments) if oa_form_attachments else _count_dingtalk_attachments(form_fields)
     transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or "SEA"
+    transport_mode_raw = item.get("transport_mode_raw") or ""
+    business_type = normalize_business_type(
+        item.get("business_type") or transport_mode_raw,
+        transport_mode=transport_mode,
+    ) or "SEA_STANDARD"
     subsidiary = extract_subsidiary_from_approval(item)
     values = {
         "batch_no": batch_no,
         "waybill_no": logistics_no,
         "container_no": logistics_no if _looks_like_container_no(logistics_no) else "",
         "transport_mode": transport_mode,
+        "business_type": business_type,
         "subsidiary_code": subsidiary.get("subsidiary_code") or "",
         "source_type": "oa_logistics",
         "source_data_id": source_instance_id or source_approval_no,
@@ -3550,6 +3593,7 @@ def build_batch_values_from_approval(item: dict) -> dict:
             {
                 "source": "dingtalk_oa_logistics",
                 "transport_mode": transport_mode,
+                "business_type": business_type,
                 "transport_mode_raw": item.get("transport_mode_raw"),
                 "open_url": item.get("open_url"),
                 "logistics_fee": item.get("logistics_fee") or extract_logistics_fee_from_approval(item),
@@ -3681,7 +3725,13 @@ def _create_oa_trace_batch(values: dict) -> dict:
 def _update_oa_trace_batch(batch_name: str, values: dict) -> dict:
     current = frappe.db.get_value("Overseas Cost Batch", batch_name, list(_filter_batch_values(values).keys()), as_dict=True) or {}
     updates: dict[str, Any] = {}
-    always_refresh_fields = {"transport_mode", "source_approval_status", "source_attachment_count", "source_finished_at"}
+    always_refresh_fields = {
+        "transport_mode",
+        "business_type",
+        "source_approval_status",
+        "source_attachment_count",
+        "source_finished_at",
+    }
     for fieldname, new_value in _filter_batch_values(values).items():
         if fieldname in {"batch_no", "status", "confirm_status", "writeback_status", "version_count", "item_count"}:
             continue
@@ -3798,8 +3848,29 @@ def _sync_oa_goods_items(
 
 
 def _purchase_expense_rows_from_preview(preview_result: dict) -> list[dict]:
+    invalid_approval_nos = set()
+    invalid_instance_ids = set()
+    for summary in preview_result.get("purchase_summaries") or []:
+        if not isinstance(summary, dict):
+            continue
+        if not is_invalid_approval_status(summary.get("approval_status")) and not is_invalid_approval_status(summary.get("message")):
+            continue
+        approval_no = _clean(summary.get("source_approval_no") or summary.get("approval_no"))
+        instance_id = _clean(summary.get("source_instance_id") or summary.get("instance_id"))
+        if approval_no:
+            invalid_approval_nos.add(approval_no)
+        if instance_id:
+            invalid_instance_ids.add(instance_id)
+
     rows = preview_result.get("mapped_preview_items") or []
-    return [row for row in rows if isinstance(row, dict) and _clean(row.get("material_code"))]
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and _clean(row.get("material_code"))
+        and _clean(row.get("source_approval_no")) not in invalid_approval_nos
+        and _clean(row.get("source_instance_id")) not in invalid_instance_ids
+    ]
 
 
 def _build_purchase_expense_item_doc_values(
@@ -4138,6 +4209,12 @@ def _sync_linked_purchase_fields(
             version_name=version_name,
             linked_purchase_json=_json_dumps(linked_approvals),
         )
+        purchase_summaries = preview_result.get("purchase_summaries") or []
+        if purchase_summaries:
+            _persist_linked_purchase_approval_statuses(
+                batch_name=batch_name,
+                summaries=purchase_summaries,
+            )
         purchase_rows = _purchase_expense_rows_from_preview(preview_result)
         if preview_result.get("ok") and purchase_rows:
             rebuild_result = _replace_items_with_purchase_expense_rows(
@@ -4188,7 +4265,102 @@ def _sync_linked_purchase_fields(
         "unmatched_count": result.get("unmatched_count", 0),
         "ambiguous_count": result.get("ambiguous_count", 0),
         "message": result.get("message") or "",
-    }
+        }
+
+
+def _persist_linked_purchase_approval_statuses(*, batch_name: str, summaries: list[dict]) -> None:
+    """保存关联采购审批的最新状态，便于后续解释为何不进入核算。"""
+
+    if frappe is None or not summaries or not hasattr(frappe, "db"):
+        return
+    if not hasattr(frappe.db, "get_value") or not hasattr(frappe.db, "set_value"):
+        return
+
+    row = frappe.db.get_value(
+        "Overseas Cost Batch",
+        batch_name,
+        ["extra_json"],
+        as_dict=True,
+    ) or {}
+    root, trace, is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+    linked_lists: list[list[dict]] = []
+    for candidate in (
+        trace.get("linked_purchase_approvals"),
+        trace.get("purchase_summaries"),
+        (trace.get("purchase_sync") or {}).get("linked_purchase_approvals")
+        if isinstance(trace.get("purchase_sync"), dict)
+        else None,
+        (trace.get("purchase_sync") or {}).get("purchase_summaries")
+        if isinstance(trace.get("purchase_sync"), dict)
+        else None,
+        (trace.get("purchase_sync") or {}).get("items")
+        if isinstance(trace.get("purchase_sync"), dict)
+        else None,
+    ):
+        if isinstance(candidate, list) and candidate not in linked_lists:
+            linked_lists.append(candidate)
+    if not linked_lists:
+        return
+
+    summary_by_key = {}
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        key = (
+            _clean(summary.get("source_approval_no")),
+            _clean(summary.get("source_instance_id")),
+        )
+        summary_by_key[key] = summary
+
+    def update_links(linked_approvals: list[dict]) -> list[dict]:
+        updated_links = []
+        for linked in linked_approvals:
+            if not isinstance(linked, dict):
+                updated_links.append(linked)
+                continue
+            key = (
+                _clean(linked.get("approval_no") or linked.get("source_approval_no")),
+                _clean(
+                    linked.get("source_instance_id")
+                    or linked.get("proc_inst_id")
+                    or linked.get("instance_id")
+                ),
+            )
+            summary = summary_by_key.get(key)
+            if not summary:
+                updated_links.append(linked)
+                continue
+            updated_links.append(
+                {
+                    **linked,
+                    "approval_status": summary.get("approval_status") or "",
+                    "approval_title": summary.get("approval_title") or "",
+                    "message": summary.get("message") or "",
+                }
+            )
+        return updated_links
+
+    updated_lists = [update_links(linked_approvals) for linked_approvals in linked_lists]
+    if isinstance(trace.get("linked_purchase_approvals"), list):
+        trace["linked_purchase_approvals"] = updated_lists[0]
+    else:
+        trace["linked_purchase_approvals"] = updated_lists[0]
+    purchase_sync = trace.get("purchase_sync")
+    if isinstance(purchase_sync, dict):
+        for fieldname in ("linked_purchase_approvals", "purchase_summaries", "items"):
+            candidate = purchase_sync.get(fieldname)
+            for index, original in enumerate(linked_lists):
+                if candidate is original:
+                    purchase_sync[fieldname] = updated_lists[index]
+                    break
+        trace["purchase_sync"] = purchase_sync
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        batch_name,
+        "extra_json",
+        _set_oa_trace_in_extra(root, trace, is_root_trace),
+        update_modified=False,
+    )
 
 
 def _sync_oa_logistics_allocation_rule(

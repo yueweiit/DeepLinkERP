@@ -11,12 +11,14 @@ from __future__ import annotations
 import frappe
 
 from overseas_costing.services import batch_service
+from overseas_costing.services.access_control import require_batch_permission
 
 
 @frappe.whitelist()
 def check_writeback_ready(batch_name: str, version_name: str | None = None) -> dict:
     """检查当前批次/版本是否可回写 ERP。"""
 
+    batch_name = require_batch_permission(batch_name, "read")
     return batch_service.check_writeback_ready(batch_name=batch_name, version_name=version_name)
 
 
@@ -24,6 +26,7 @@ def check_writeback_ready(batch_name: str, version_name: str | None = None) -> d
 def confirm_calculation_result(batch_name: str, version_name: str | None = None, remark: str | None = None) -> dict:
     """人工确认当前计算结果，通过后才允许组织 ERP 推送报文。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
     return batch_service.confirm_calculation_result(
         batch_name=batch_name,
         version_name=version_name,
@@ -35,6 +38,7 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
 def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dict:
     """预览当前批次将推送给 DeepLinkERP 的报文。"""
 
+    batch_name = require_batch_permission(batch_name, "read")
     return batch_service.preview_erp_payload(batch_name=batch_name, version_name=version_name)
 
 
@@ -42,4 +46,5 @@ def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dic
 def writeback_to_erp(batch_name: str, version_name: str | None = None) -> dict:
     """执行回写 ERP。"""
 
+    batch_name = require_batch_permission(batch_name, "write")
     return batch_service.writeback_to_erp(batch_name=batch_name, version_name=version_name)

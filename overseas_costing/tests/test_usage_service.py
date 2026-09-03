@@ -3,7 +3,7 @@ from __future__ import annotations
 from overseas_costing.services import usage_service
 
 
-def test_get_usage_summary_uses_v16_safe_aggregate_queries(monkeypatch) -> None:
+def test_get_usage_summary_uses_frappe_v15_string_aggregate_fields(monkeypatch) -> None:
     queries = []
 
     class FakeDB:
@@ -13,13 +13,14 @@ def test_get_usage_summary_uses_v16_safe_aggregate_queries(monkeypatch) -> None:
             assert filters == {"creation": [">=", "2026-08-01"]}
             return 3
 
-        @staticmethod
-        def sql(query, params, as_dict=False):
-            queries.append({"query": query, "params": params, "as_dict": as_dict})
-            return []
-
     class FakeFrappe:
         db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            assert doctype == "Overseas Cost Usage Log"
+            queries.append(kwargs)
+            return []
 
     monkeypatch.setattr(usage_service, "frappe", FakeFrappe)
     monkeypatch.setattr(usage_service, "nowdate", lambda: "2026-08-31")
@@ -29,10 +30,10 @@ def test_get_usage_summary_uses_v16_safe_aggregate_queries(monkeypatch) -> None:
     result = usage_service.get_usage_summary(days=30)
 
     assert result["total"] == 3
-    assert len(queries) == 2
-    assert all(query["params"] == {"since_date": "2026-08-01"} for query in queries)
-    assert all(query["as_dict"] for query in queries)
-    assert "COUNT(name) AS action_count" in queries[0]["query"]
-    assert "MAX(creation) AS last_seen" in queries[0]["query"]
-    assert "GROUP BY operator_name, operator_full_name" in queries[0]["query"]
-    assert "GROUP BY action_type" in queries[1]["query"]
+    assert queries[0]["fields"] == [
+        "operator_name",
+        "operator_full_name",
+        "count(name) as action_count",
+        "max(creation) as last_seen",
+    ]
+    assert queries[1]["fields"] == ["action_type", "count(name) as action_count"]

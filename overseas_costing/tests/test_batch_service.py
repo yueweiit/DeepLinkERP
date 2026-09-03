@@ -19,12 +19,15 @@ from overseas_costing.services.batch_service import (
     _load_erp_push_context,
     _normalize_item_query_filters,
     _normalize_limit,
+    _resolve_batch_business_type,
     _resolve_batch_subsidiary_code,
     check_writeback_ready,
     create_batch,
     get_audit_logs,
+    get_batch_filter_options,
     get_batch_list,
     get_batch_items,
+    is_invalid_approval_status,
     is_hidden_approval_status,
     writeback_to_erp,
 )
@@ -54,6 +57,72 @@ def test_resolve_batch_subsidiary_code_keeps_batch_field_first() -> None:
     }
 
     assert _resolve_batch_subsidiary_code(batch) == "Empresas Mexico"
+
+
+def test_resolve_batch_subsidiary_code_reads_nested_oa_trace_entity() -> None:
+    batch = {
+        "subsidiary_code": "",
+        "extra_json": json.dumps(
+            {
+                "source": "excel",
+                "oa_logistics_trace": {
+                    "subsidiary": {"business_entity_name": "产品&开发Departamento de Producto y Desarrollo"}
+                },
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+    assert _resolve_batch_subsidiary_code(batch) == "产品&开发Departamento de Producto y Desarrollo"
+
+
+def test_resolve_batch_subsidiary_code_reads_entidad_comercial_form_field() -> None:
+    batch = {
+        "subsidiary_code": "",
+        "extra_json": json.dumps(
+            {
+                "form_fields": {
+                    "业务主体Entidad comercial": {
+                        "name": "YW MOLDES/UV",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+    assert _resolve_batch_subsidiary_code(batch) == "YW MOLDES/UV"
+
+
+def test_resolve_batch_subsidiary_code_reads_nested_selected_entity_option() -> None:
+    batch = {
+        "subsidiary_code": "",
+        "extra_json": json.dumps(
+            {
+                "form_fields": {
+                    "Entidad comercial": {
+                        "selectedOptions": [
+                            {"itemId": "ENTITY-001", "name": "Empresas Mexico"}
+                        ]
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+    assert _resolve_batch_subsidiary_code(batch) == "Empresas Mexico"
+
+
+def test_resolve_batch_business_type_falls_back_to_transport_mode() -> None:
+    assert _resolve_batch_business_type({"business_type": "", "transport_mode": "SEA"}) == "SEA_STANDARD"
+    assert _resolve_batch_business_type(
+        {
+            "business_type": "",
+            "transport_mode": "AIR",
+            "extra_json": json.dumps({"business_type": "AIR_DDP"}),
+        }
+    ) == "AIR_DDP"
 
 
 def test_normalize_item_query_filters_strips_empty_values() -> None:
@@ -113,6 +182,7 @@ def test_excel_columns_include_spec_model_after_product_name() -> None:
     assert shipped_quantity_column["label"] == "出库数量（实际发货）"
     assert unit_column["label"] == "单位"
     assert total_unit_column["label"] == "综合单价 RMB"
+    assert "business_type" not in fieldnames
 
 
 def test_sea_air_express_share_same_item_columns() -> None:
@@ -166,6 +236,7 @@ def test_get_batch_list_defaults_to_recent_days_with_classic_samples(monkeypatch
                 }
             ]
 
+    FakeFrappe.get_list = FakeFrappe.get_all
     monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
     monkeypatch.setattr(batch_service, "_recent_start", lambda recent_days: "2026-07-15 00:00:00")
     monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
@@ -182,6 +253,95 @@ def test_get_batch_list_defaults_to_recent_days_with_classic_samples(monkeypatch
     classic_item = next(item for item in result["items"] if item["batch_no"] == "HPCU5155607")
     assert classic_item["is_classic_sample"] == 1
     assert classic_item["sample_note"]
+
+
+def test_get_batch_list_uses_permission_aware_get_list(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_list(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            return []
+
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            raise AssertionError("批次列表不得使用绕过权限的 get_all")
+
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
+    monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
+
+    result = get_batch_list({"transport_mode": "", "recent_days": 30, "include_history": 1})
+
+    assert result["ok"] is True
+    assert calls[0][0] == "Overseas Cost Batch"
+
+
+def test_get_batch_list_keeps_invalid_historical_approval_for_traceability(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            assert doctype == "Overseas Cost Batch"
+            return [
+                {
+                    "name": "BATCH-TERMINATED",
+                    "batch_no": "202608250001",
+                    "transport_mode": "SEA",
+                    "source_created_at": "2026-08-25 10:00:00",
+                    "source_approval_status": "TERMINATED",
+                    "extra_json": "{}",
+                    "modified": "2026-08-25 10:00:00",
+                }
+            ]
+
+    def attach_source_status(items):
+        for item in items:
+            item["source_status"] = {
+                "invalid_business": True,
+                "invalid_business_scope": "source_approval",
+            }
+        return items
+
+    FakeFrappe.get_list = FakeFrappe.get_all
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_attach_batch_source_status", attach_source_status)
+    monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
+
+    result = get_batch_list({"transport_mode": "", "recent_days": 30, "include_history": 1})
+
+    assert result["total"] == 1
+    assert result["items"][0]["name"] == "BATCH-TERMINATED"
+    assert result["items"][0]["source_status"]["invalid_business"] is True
+
+
+def test_get_batch_list_treats_all_transport_mode_as_no_filter(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            return []
+
+    FakeFrappe.get_list = FakeFrappe.get_all
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
+    monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
+    monkeypatch.setattr(batch_service, "_recent_start", lambda recent_days: "2026-07-15 00:00:00")
+
+    result = get_batch_list({"transport_mode": "ALL", "recent_days": 30, "include_history": 1})
+
+    assert result["ok"] is True
+    assert calls[0][0] == "Overseas Cost Batch"
+    assert ["transport_mode", "=", "ALL"] not in calls[0][1]["filters"]
+    assert not any(field_filter[0] == "transport_mode" for field_filter in calls[0][1]["filters"])
 
 
 def test_get_batch_list_keyword_can_find_history_batch_by_item_field(monkeypatch) -> None:
@@ -209,6 +369,7 @@ def test_get_batch_list_keyword_can_find_history_batch_by_item_field(monkeypatch
                 ]
             return []
 
+    FakeFrappe.get_list = FakeFrappe.get_all
     monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
     monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
     monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
@@ -221,6 +382,62 @@ def test_get_batch_list_keyword_can_find_history_batch_by_item_field(monkeypatch
     assert any(call[0] == "Overseas Cost Item" for call in calls)
 
 
+def test_get_batch_list_uses_explicit_source_created_date_range(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            return []
+
+    FakeFrappe.get_list = FakeFrappe.get_all
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
+    monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
+
+    result = get_batch_list(
+        {
+            "transport_mode": "",
+            "recent_days": 30,
+            "start_date": "2026-07-21",
+            "end_date": "2026-08-21",
+        }
+    )
+
+    assert result["ok"] is True
+    assert calls[0][1]["filters"] == [
+        ["source_created_at", ">=", "2026-07-21 00:00:00"],
+        ["source_created_at", "<=", "2026-08-21 23:59:59"],
+    ]
+    assert "or_filters" not in calls[0][1]
+
+
+def test_get_batch_filter_options_uses_all_dingtalk_entities(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            assert doctype == "Overseas Cost Batch"
+            assert kwargs["filters"] == {}
+            return [
+                {"subsidiary_code": "LEMOS MX", "extra_json": "{}"},
+                {"subsidiary_code": "", "extra_json": json.dumps({"subsidiary": {"name": "YW MOLDES/UV"}})},
+                {"subsidiary_code": "LEMOS MX", "extra_json": "{}"},
+            ]
+
+    FakeFrappe.get_list = FakeFrappe.get_all
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+
+    result = get_batch_filter_options()
+
+    assert result["ok"] is True
+    assert result["items"] == ["LEMOS MX", "YW MOLDES/UV"]
+
+
 def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
     result = create_batch(
         json.dumps(
@@ -229,6 +446,7 @@ def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
                 "customs_no": "26 16 1681 6000151",
                 "waybill_no": "HPCU5155607",
                 "transport_mode": "海运",
+                "business_type": "SEA_DDP",
                 "project_collection": "Yuewei",
                 "source_dingtalk_url": "https://aflow.dingtalk.com/dingtalk/web/query/pchomepage.htm#/plainapproval?procInstId=PROC-MANUAL-001",
             },
@@ -241,6 +459,7 @@ def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
     assert result["batch"]["batch_no"] == "MANUAL-001"
     assert result["batch"]["waybill_no"] == "HPCU5155607"
     assert result["batch"]["transport_mode"] == "SEA"
+    assert result["batch"]["business_type"] == "SEA_DDP"
     assert result["batch"]["source_type"] == "manual"
     assert result["batch"]["source_instance_id"] == "PROC-MANUAL-001"
     assert result["version"]["version_code"] == "手工-MANUAL-001"
@@ -504,6 +723,129 @@ def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
     assert result["item_issue_examples"][0]["row_no"] == 7
     assert "当前批次还没有确认。" in result["blocking_reasons"]
     assert "批次记录明细数为 2，实际查询到 1 条。" in result["warning_reasons"]
+
+
+def test_rejected_linked_purchase_approval_blocks_confirmation_and_writeback() -> None:
+    batch = {
+        "status": "Calculated",
+        "confirm_status": "Confirmed",
+        "current_version": "VERSION-001",
+        "subsidiary_code": "MX01",
+        "item_count": 1,
+        "actual_total_cost_rmb": 25,
+        "extra_json": json.dumps(
+            {
+                "linked_purchase_approvals": [
+                    {
+                        "approval_no": "PUR-REJECTED-001",
+                        "approval_status": "REJECTED",
+                        "message": "总经理拒绝，本次不采购。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    }
+    items = [
+        {
+            "row_no": 1,
+            "material_code": "YL000001",
+            "product_name": "太阳眼镜",
+            "quantity": 2,
+            "actual_shipped_qty": 2,
+            "unit_price": 8,
+            "purchase_currency": "RMB",
+            "goods_value": 16,
+            "freight_alloc_rmb": 6,
+            "mexico_customs_mxn": 10,
+            "import_tax_total": 4,
+            "total_unit_rmb": 12.5,
+        }
+    ]
+    rules = [
+        {"expense_category": "国际运费", "amount": 6},
+        {"expense_category": "清关费", "amount": 10},
+        {"expense_category": "关税", "amount": 4},
+    ]
+
+    confirmation = _build_calculation_confirmation_readiness(
+        batch=batch,
+        items=items,
+        rules=rules,
+        resolved_version_name="VERSION-001",
+    )
+    writeback = _build_writeback_readiness(
+        batch=batch,
+        items=items,
+        rules=rules,
+        resolved_version_name="VERSION-001",
+    )
+
+    assert confirmation["ready"] is False
+    assert writeback["ready"] is False
+    assert confirmation["checks"]["has_invalid_business_approval"] is True
+    assert writeback["checks"]["has_invalid_business_approval"] is True
+    assert "PUR-REJECTED-001" in confirmation["blocking_reasons"][0]
+    assert "不进入综合成本确认或 ERP 推送" in writeback["blocking_reasons"][0]
+
+
+def test_build_batch_source_status_exposes_invalid_linked_purchase_approval() -> None:
+    status = _build_batch_source_status(
+        {
+            "name": "BATCH-REJECTED",
+            "batch_no": "202608181457000111961",
+            "source_type": "oa_logistics",
+            "source_approval_no": "LOGISTICS-001",
+            "extra_json": json.dumps(
+                {
+                    "linked_purchase_approvals": [
+                        {
+                            "approval_no": "PUR-REJECTED-001",
+                            "source_instance_id": "PROC-PUR-001",
+                            "approval_status": "REJECTED",
+                            "message": "总经理拒绝，本次不采购。",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    assert status["invalid_business"] is True
+    assert status["invalid_business_scope"] == "linked_purchase_approval"
+    assert status["purchase_approval_sync_state"] == "invalid"
+    assert status["linked_purchase_count"] == 1
+    assert status["invalid_purchase_approval_count"] == 1
+    assert status["linked_purchase_approval_nos"] == ["PUR-REJECTED-001"]
+
+
+def test_build_batch_source_status_explains_missing_and_pending_purchase_approval() -> None:
+    missing = _build_batch_source_status(
+        {
+            "name": "BATCH-MISSING",
+            "source_type": "oa_logistics",
+            "source_approval_no": "LOGISTICS-001",
+        }
+    )
+    pending = _build_batch_source_status(
+        {
+            "name": "BATCH-PENDING",
+            "source_type": "oa_logistics",
+            "source_approval_no": "LOGISTICS-002",
+            "extra_json": json.dumps(
+                {"linked_purchase_approvals": [{"approval_no": "PUR-PENDING-001"}]},
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    assert missing["invalid_business"] is False
+    assert missing["purchase_approval_sync_state"] == "missing"
+    assert "未关联采购审批" in missing["purchase_approval_sync_message"]
+    assert pending["invalid_business"] is False
+    assert pending["purchase_approval_sync_state"] == "pending"
+    assert "尚未同步" in pending["purchase_approval_sync_message"]
 
 
 def test_build_calculation_confirmation_readiness_requires_subsidiary_and_fee_pools() -> None:
@@ -816,7 +1158,7 @@ def test_writeback_to_erp_records_failed_attempt_when_config_missing(monkeypatch
     monkeypatch.setattr(
         batch_service,
         "_load_erp_push_context",
-        lambda batch_name, version_name=None: {"batch": {"extra_json": "{}"}},
+        lambda batch_name, version_name=None: {"batch": {"extra_json": "{}", "confirm_status": "Confirmed"}},
     )
     monkeypatch.setattr(
         batch_service.erp_client,
@@ -841,6 +1183,60 @@ def test_writeback_to_erp_records_failed_attempt_when_config_missing(monkeypatch
     assert saved_extra["erp_writeback"]["attempt_count"] == 1
     assert saved_extra["erp_writeback"]["attempt_history"][0]["status"] == "Failed"
     assert inserted_logs[0][0]["action_type"] == "WRITEBACK"
+
+
+def test_writeback_to_erp_blocks_when_not_confirmed(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    set_values = []
+
+    class FakeDB:
+        @staticmethod
+        def set_value(doctype, name, values, update_modified=False):
+            set_values.append((doctype, name, values, update_modified))
+
+        @staticmethod
+        def commit():
+            pass
+
+    class FakeSession:
+        user = "tester@example.com"
+
+    class FakeFrappe:
+        db = FakeDB()
+        session = FakeSession()
+
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        batch_service,
+        "preview_erp_payload",
+        lambda batch_name, version_name=None: {
+            "ok": True,
+            "ready": True,
+            "batch_name": "BATCH-001",
+            "version_name": "VERSION-001",
+            "payload": {"target_system": "DeepLinkERP", "batch_no": "BATCH-001", "item_count": 1, "subsidiary_code": "MX01"},
+        },
+    )
+    monkeypatch.setattr(
+        batch_service,
+        "_load_erp_push_context",
+        lambda batch_name, version_name=None: {"batch": {"extra_json": "{}", "confirm_status": "Pending", "writeback_status": "Not Started"}},
+    )
+    monkeypatch.setattr(
+        batch_service.erp_client,
+        "push_overseas_cost_payload",
+        lambda payload: (_ for _ in ()).throw(AssertionError("push_overseas_cost_payload should not run")),
+    )
+
+    result = writeback_to_erp("BATCH-001", "VERSION-001")
+
+    assert result["ok"] is False
+    assert result["queued"] is False
+    assert result["pushed"] is False
+    assert result["retryable"] is False
+    assert "校验计算结果" in result["message"]
+    assert set_values == []
 
 
 def test_writeback_to_erp_records_success_and_target_doc(monkeypatch) -> None:
@@ -896,7 +1292,12 @@ def test_writeback_to_erp_records_success_and_target_doc(monkeypatch) -> None:
     monkeypatch.setattr(
         batch_service,
         "_load_erp_push_context",
-        lambda batch_name, version_name=None: {"batch": {"extra_json": json.dumps(previous_extra, ensure_ascii=False)}},
+        lambda batch_name, version_name=None: {
+            "batch": {
+                "extra_json": json.dumps(previous_extra, ensure_ascii=False),
+                "confirm_status": "Confirmed",
+            }
+        },
     )
     monkeypatch.setattr(
         batch_service.erp_client,
@@ -959,6 +1360,9 @@ def test_hidden_approval_status_matches_revoked_dingtalk_statuses() -> None:
     assert is_hidden_approval_status("已撤销") is True
     assert is_hidden_approval_status("COMPLETED") is False
     assert is_hidden_approval_status("") is False
+    assert is_invalid_approval_status("REJECTED") is True
+    assert is_invalid_approval_status("已驳回") is True
+    assert is_invalid_approval_status("COMPLETED") is False
 
 
 def test_build_batch_source_status_summarizes_oa_and_voucher_records() -> None:

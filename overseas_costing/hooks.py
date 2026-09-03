@@ -18,6 +18,8 @@ app_license = "MIT"
 after_install = "overseas_costing.install.after_install"
 after_migrate = "overseas_costing.install.after_migrate"
 
+auth_hooks = ["overseas_costing.services.access_control.validate_api_access"]
+
 fixtures = []
 
 doctype_js = {}

@@ -1199,6 +1199,9 @@ def update_item_field(
     version_name: str | None = None,
     remark: str | None = None,
     manual_override_reason: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
+    _skip_edit_check: bool = False,
 ) -> dict:
     edit_remark = _normalize_edit_remark(remark, manual_override_reason)
     is_allowed, validation_message, edit_mode = _validate_edit_field(fieldname, edit_remark)
@@ -1244,6 +1247,14 @@ def update_item_field(
         }
 
     item_doc = _frappe.get_doc("Overseas Cost Item", item_name)
+    if not _skip_edit_check:
+        from overseas_costing.services import edit_session_service
+
+        edit_session_service.assert_batch_write(
+            item_doc.batch,
+            edit_token=edit_token,
+            expected_modified=expected_modified,
+        )
     old_value = getattr(item_doc, fieldname, None)
     if _edit_values_equal(fieldname, old_value, coerced_value):
         return {
@@ -1276,6 +1287,7 @@ def update_item_field(
         action_remark=f"单字段编辑：{edit_remark}" if edit_remark else "单字段编辑",
     )
     _frappe.db.commit()
+    batch_modified = _frappe.db.get_value("Overseas Cost Batch", item_doc.batch, "modified")
     return {
         "ok": True,
         "changed": True,
@@ -1286,6 +1298,7 @@ def update_item_field(
         "version_name": version_name or item_doc.version,
         "manual_override_reason": edit_remark,
         "edit_mode": edit_mode,
+        "batch_modified": batch_modified,
         "message": "字段已更新，批次已标记为 Dirty。",
     }
 
@@ -1295,6 +1308,8 @@ def batch_update_items(
     updates: str,
     version_name: str | None = None,
     remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     try:
         loaded_updates = _load_updates_payload(updates)
@@ -1331,6 +1346,13 @@ def batch_update_items(
     batch_doc_name = _resolve_batch_name(batch_name)
     if not batch_doc_name:
         return {"ok": False, "message": f"未找到批次：{batch_name}"}
+    from overseas_costing.services import edit_session_service
+
+    edit_session_service.assert_batch_write(
+        batch_doc_name,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+    )
 
     changed_count = 0
     skipped_count = 0
@@ -1368,7 +1390,14 @@ def batch_update_items(
             )
             continue
 
-        result = update_item_field(item_name, fieldname, value, version_name=version_name, remark=edit_remark)
+        result = update_item_field(
+            item_name,
+            fieldname,
+            value,
+            version_name=version_name,
+            remark=edit_remark,
+            _skip_edit_check=True,
+        )
         results.append(result)
         if not result.get("ok"):
             error_count += 1
@@ -1403,6 +1432,8 @@ def confirm_actual_shipped_qty_from_quantity(
     version_name: str | None = None,
     remark: str | None = None,
     preview_items: str | list[dict] | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     edit_remark = remark or "人工确认采购数量等于实际发货数量"
 
@@ -1462,12 +1493,16 @@ def confirm_actual_shipped_qty_from_quantity(
         version_name=resolved_version_name,
         updates=_json_dumps(updates),
         remark=edit_remark,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
-    return {
+    response = {
         **result,
         "missing_quantity_count": preview["missing_quantity_count"],
         "message": f"已按采购数量确认实际发货数量 {result.get('changed_count', 0)} 行；请重新试算后再校验结果。",
     }
+    response["batch_modified"] = _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified")
+    return response
 
 
 def _build_confirm_actual_qty_preview(
@@ -1523,6 +1558,8 @@ def create_item(
     item_payload: str | dict | None = None,
     version_name: str | None = None,
     remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     try:
         payload = _load_payload(item_payload)
@@ -1550,6 +1587,13 @@ def create_item(
     batch_doc_name = _resolve_batch_name(batch_name)
     if not batch_doc_name:
         return {"ok": False, "message": f"未找到批次：{batch_name}"}
+    from overseas_costing.services import edit_session_service
+
+    edit_session_service.assert_batch_write(
+        batch_doc_name,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+    )
 
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
     if not resolved_version_name:
@@ -1587,7 +1631,14 @@ def create_item(
     }
 
 
-def delete_item(item_name: str, batch_name: str | None = None, version_name: str | None = None, remark: str | None = None) -> dict:
+def delete_item(
+    item_name: str,
+    batch_name: str | None = None,
+    version_name: str | None = None,
+    remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
+) -> dict:
     if not item_name:
         return {"ok": False, "dry_run": _frappe is None, "message": "缺少要删除的物料明细。"}
 
@@ -1603,6 +1654,13 @@ def delete_item(item_name: str, batch_name: str | None = None, version_name: str
         }
 
     item_doc = _frappe.get_doc("Overseas Cost Item", item_name)
+    from overseas_costing.services import edit_session_service
+
+    edit_session_service.assert_batch_write(
+        item_doc.batch,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+    )
     if batch_name:
         batch_doc_name = _resolve_batch_name(batch_name)
         if batch_doc_name and item_doc.batch != batch_doc_name:
