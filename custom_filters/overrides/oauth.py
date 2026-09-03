@@ -411,22 +411,27 @@ def _safe_log_text(value, max_length: int = 300) -> str:
 	return text[:max_length]
 
 
-def _normalize_app_user_id(value) -> int:
+def _normalize_app_user_id(value) -> str:
+	"""Normalize EIMS identity values without coercing string IDs to integers."""
 	if isinstance(value, bool) or value is None:
 		raise RuntimeError("EIMS userinfo 未返回有效的 app_user_id")
 
-	try:
-		app_user_id = int(value)
-	except (TypeError, ValueError, OverflowError) as e:
-		raise RuntimeError("EIMS userinfo 返回的 app_user_id 不是有效整数") from e
+	if isinstance(value, str):
+		app_user_id = value.strip()
+	elif isinstance(value, int):
+		# Some EIMS responses still return numeric JSON values. Keep the lookup
+		# field's string semantics while remaining compatible with those responses.
+		app_user_id = str(value)
+	else:
+		raise RuntimeError("EIMS userinfo 返回的 app_user_id 必须是字符串")
 
-	if app_user_id <= 0 or (isinstance(value, float) and not value.is_integer()):
-		raise RuntimeError("EIMS userinfo 返回的 app_user_id 不是正整数")
+	if not app_user_id:
+		raise RuntimeError("EIMS userinfo 未返回有效的 app_user_id")
 
 	return app_user_id
 
 
-def _get_user_by_eims_app_user_id(app_user_id: int):
+def _get_user_by_eims_app_user_id(app_user_id: str):
 	if not frappe.get_meta("User").has_field(EIMS_USER_ID_FIELD):
 		frappe.throw(_("ERP 尚未创建 EIMS App User ID 字段，请先执行 migrate"))
 

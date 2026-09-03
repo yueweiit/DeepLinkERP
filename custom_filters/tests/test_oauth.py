@@ -137,10 +137,12 @@ class TestEIMSOAuth(TestCase):
 		local.cookie_manager.delete_cookie.assert_not_called()
 
 	def test_normalize_app_user_id(self):
-		self.assertEqual(oauth._normalize_app_user_id(12), 12)
-		self.assertEqual(oauth._normalize_app_user_id("12"), 12)
+		self.assertEqual(oauth._normalize_app_user_id(12), "12")
+		self.assertEqual(oauth._normalize_app_user_id("12"), "12")
+		self.assertEqual(oauth._normalize_app_user_id("0012"), "0012")
+		self.assertEqual(oauth._normalize_app_user_id("user-12"), "user-12")
 
-		for value in (None, True, "", "abc", 0, -1, 1.5):
+		for value in (None, True, "", "   ", 1.5, {}, []):
 			with self.subTest(value=value), self.assertRaises(RuntimeError):
 				oauth._normalize_app_user_id(value)
 
@@ -174,11 +176,11 @@ class TestEIMSOAuth(TestCase):
 		user = SimpleNamespace(name="user@example.com", enabled=1)
 		get_doc.return_value = user
 
-		self.assertIs(oauth._get_user_by_eims_app_user_id(12), user)
+		self.assertIs(oauth._get_user_by_eims_app_user_id("user-0012"), user)
 
 		get_all.assert_called_once_with(
 			"User",
-			filters={"custom_eims_app_user_id": "12"},
+			filters={"custom_eims_app_user_id": "user-0012"},
 			pluck="name",
 			limit_page_length=2,
 		)
