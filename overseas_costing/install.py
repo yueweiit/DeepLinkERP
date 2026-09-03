@@ -16,12 +16,24 @@ import json
 WORKSPACE_LABEL = "海外成本核算"
 WORKSPACE_TITLE = "海外成本核算"
 WORKSPACE_HEADING = "海外采购综合成本核算"
+MODULE_NAME = "Overseas Costing"
 WORKBENCH_PAGE = "overseas-cost-workbench"
 ACCESS_ROLE = "海外成本核算用户"
 ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 HOME_WORKSPACE_LABEL = "Home"
 HOME_SHORTCUT_LABEL = "海外成本核算"
 HOME_SHORTCUT_ID = "overseas-cost-home-shortcut"
+DESKTOP_ICON_IMAGE = (
+    "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20"
+    "width%3D%2296%22%20height%3D%2296%22%20viewBox%3D%220%200%2096%2096%22%3E"
+    "%3Crect%20width%3D%2296%22%20height%3D%2296%22%20rx%3D%2222%22%20fill%3D%22%230B8CF0%22/%3E"
+    "%3Cpath%20d%3D%22M25%2026h46v44H25z%22%20fill%3D%22none%22%20stroke%3D%22white%22%20"
+    "stroke-width%3D%226%22%20stroke-linejoin%3D%22round%22/%3E"
+    "%3Cpath%20d%3D%22M34%2039h28M34%2052h12M56%2052h6M34%2064h28%22%20stroke%3D%22white%22%20"
+    "stroke-width%3D%226%22%20stroke-linecap%3D%22round%22/%3E"
+    "%3Cpath%20d%3D%22M63%2018v17h17%22%20fill%3D%22none%22%20stroke%3D%22white%22%20"
+    "stroke-width%3D%226%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22/%3E%3C/svg%3E"
+)
 WORKSPACE_NAME_CANDIDATES = (
     "海外成本核算",
     "海外采购综合成本核算",
@@ -35,6 +47,9 @@ def after_install() -> None:
     ensure_access_role()
     ensure_erpnext_standard_fields()
     ensure_workspace()
+    ensure_workspace_sidebar()
+    ensure_desktop_icon()
+    clear_permission_cache()
 
 
 def after_migrate() -> None:
@@ -44,6 +59,9 @@ def after_migrate() -> None:
     ensure_access_role()
     ensure_erpnext_standard_fields()
     ensure_workspace()
+    ensure_workspace_sidebar()
+    ensure_desktop_icon()
+    clear_permission_cache()
 
 
 def _normalize_language_code(value: object) -> str:
@@ -150,6 +168,172 @@ def ensure_access_role() -> dict:
         role.save(ignore_permissions=True)
         frappe.db.commit()
     return {"ok": True, "created": False, "changed": changed, "role": ACCESS_ROLE}
+
+
+def ensure_desktop_icon() -> dict:
+    """同步 ERP 首页的模块图标，让有权限的业务用户可直接进入工作台。"""
+
+    try:
+        import frappe
+    except Exception:
+        return {"ok": False, "message": "当前未连接 Frappe。"}
+
+    if not frappe.db.exists("DocType", "Desktop Icon"):
+        return {"ok": False, "message": "当前站点没有 Desktop Icon，已跳过。"}
+
+    icon_meta = frappe.get_meta("Desktop Icon")
+    if icon_meta.has_field("module_name"):
+        return _ensure_standard_desktop_icon(frappe)
+    return _ensure_deeplink_desktop_icon(frappe)
+
+
+def ensure_workspace_sidebar() -> dict:
+    """创建 DeepLinkERP 首页图标实际使用的工作区侧边栏入口。"""
+
+    try:
+        import frappe
+    except Exception:
+        return {"ok": False, "message": "当前未连接 Frappe。"}
+
+    if not frappe.db.exists("DocType", "Workspace Sidebar"):
+        return {"ok": False, "message": "当前站点没有 Workspace Sidebar，已跳过。"}
+    if not frappe.db.exists("Page", WORKBENCH_PAGE):
+        return {"ok": False, "message": "工作台页面尚未安装。"}
+
+    sidebar_name = frappe.db.exists("Workspace Sidebar", WORKSPACE_LABEL)
+    if sidebar_name:
+        sidebar = frappe.get_doc("Workspace Sidebar", sidebar_name)
+        created = False
+    else:
+        sidebar = frappe.get_doc(
+            {
+                "doctype": "Workspace Sidebar",
+                "title": WORKSPACE_LABEL,
+            }
+        )
+        created = True
+
+    _set_if_field(sidebar, "title", WORKSPACE_LABEL)
+    _set_if_field(sidebar, "module", MODULE_NAME)
+    _set_if_field(sidebar, "standard", 1)
+    _set_if_field(sidebar, "app", "overseas_costing")
+    _set_child_table(
+        sidebar,
+        "items",
+        [
+            {
+                "label": "综合成本工作台",
+                "type": "Link",
+                "link_type": "Page",
+                "link_to": WORKBENCH_PAGE,
+                "icon": "calculator",
+                "idx": 1,
+            }
+        ],
+    )
+
+    if created:
+        sidebar.insert(ignore_permissions=True)
+    else:
+        sidebar.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"ok": True, "created": created, "sidebar": sidebar.name}
+
+
+def _ensure_standard_desktop_icon(frappe) -> dict:
+    from frappe.desk.doctype.desktop_icon.desktop_icon import sync_from_app
+
+    try:
+        sync_from_app("overseas_costing")
+    except Exception as exc:
+        return {"ok": False, "message": f"桌面图标同步失败：{exc}"}
+
+    icon_name = frappe.db.exists("Desktop Icon", {"module_name": MODULE_NAME})
+    if not icon_name:
+        return {"ok": False, "message": "未找到海外成本核算桌面图标。"}
+
+    icon = frappe.get_doc("Desktop Icon", icon_name)
+    values = {
+        "label": WORKSPACE_LABEL,
+        "module_name": MODULE_NAME,
+        "type": "module",
+        "icon": "fa fa-calculator",
+        "color": "blue",
+        "hidden": 0,
+    }
+    changed = False
+    for fieldname, value in values.items():
+        if _has_field(icon, fieldname) and getattr(icon, fieldname, None) != value:
+            setattr(icon, fieldname, value)
+            changed = True
+
+    if changed:
+        icon.save(ignore_permissions=True)
+        frappe.db.commit()
+    return {"ok": True, "changed": changed, "icon": icon.name}
+
+
+def _ensure_deeplink_desktop_icon(frappe) -> dict:
+    """兼容 DeepLinkERP 的定制 Desktop Icon：图标直接打开工作台页面。"""
+
+    icon_name = frappe.db.exists("Desktop Icon", {"label": WORKSPACE_LABEL})
+    if icon_name:
+        icon = frappe.get_doc("Desktop Icon", icon_name)
+        created = False
+    else:
+        icon = frappe.get_doc({"doctype": "Desktop Icon"})
+        created = True
+
+    values = {
+        "label": WORKSPACE_LABEL,
+        "icon_type": "Link",
+        "link_type": "Workspace Sidebar",
+        "link_to": WORKSPACE_LABEL,
+        "parent_icon": "",
+        "icon": "",
+        "icon_image": DESKTOP_ICON_IMAGE,
+        "hidden": 0,
+        "standard": 1,
+        "app": "overseas_costing",
+        "bg_color": "blue",
+    }
+    changed = False
+    for fieldname, value in values.items():
+        if _has_field(icon, fieldname) and getattr(icon, fieldname, None) != value:
+            setattr(icon, fieldname, value)
+            changed = True
+
+    if created:
+        if _has_field(icon, "idx"):
+            icon.idx = _get_next_desktop_icon_idx(frappe)
+        icon.insert(ignore_permissions=True)
+        frappe.db.commit()
+        return {"ok": True, "created": True, "icon": icon.name}
+
+    if changed:
+        icon.save(ignore_permissions=True)
+        frappe.db.commit()
+    return {"ok": True, "created": False, "changed": changed, "icon": icon.name}
+
+
+def clear_permission_cache() -> dict:
+    """清理页面/模块权限缓存，让新分配的角色立即生效。"""
+
+    try:
+        import frappe
+
+        frappe.clear_cache()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def _get_next_desktop_icon_idx(frappe) -> int:
+    try:
+        result = frappe.db.sql("select coalesce(max(idx), 0) from `tabDesktop Icon`")
+        return int(result[0][0] or 0) + 1
+    except Exception:
+        return 1
 
 
 def ensure_erpnext_standard_fields() -> dict:
