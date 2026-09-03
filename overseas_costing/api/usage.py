@@ -34,7 +34,6 @@ def record_usage(
 
     if batch_name:
         batch_name = require_batch_permission(batch_name, "read")
-    require_doctype_permission("Overseas Cost Usage Log", "create")
     return usage_service.record_usage(
         action_type=action_type,
         batch_name=batch_name,
