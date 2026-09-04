@@ -341,3 +341,70 @@ def test_materialize_allows_attachment_from_excluded_linked_approval(monkeypatch
     )
 
     assert result == {"ok": True, "attachment_name": "ATT-EXCLUDED", "created": False}
+
+
+def test_materialized_excluded_attachment_is_persisted_as_audit_only(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    inserted = []
+
+    class FakeDoc:
+        name = "ATT-NEW"
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            inserted.append(self.payload)
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def sql(*_args, **_kwargs):
+            return []
+
+        @staticmethod
+        def get_value(_doctype, _name, _fields, as_dict=False):
+            return {"name": "BATCH-1", "current_version": "VERSION-1"}
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return []
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+    monkeypatch.setattr(service, "get_batch_dingtalk_approval_detail", lambda _batch: {
+        "ok": True,
+        "main_approval": {"instance_id": "PROC-MAIN", "attachments": []},
+        "linked_purchase_approvals": [],
+        "excluded_linked_purchase_approvals": [{
+            "instance_id": "PROC-REFUSED",
+            "business_id": "PUR-REFUSED",
+            "excluded": True,
+            "exclusion_reason": "审批结果为拒绝",
+            "attachments": [{
+                "file_id": "FILE-REFUSED",
+                "file_name": "装箱单.xlsx",
+                "process_instance_id": "PROC-REFUSED",
+                "archive_status": "archived",
+                "packing_candidate": True,
+            }],
+        }],
+    })
+
+    result = service.materialize_batch_dingtalk_attachment(
+        "BATCH-1", "PROC-REFUSED", "FILE-REFUSED"
+    )
+
+    assert result["created"] is True
+    assert inserted[0]["attachment_type"] == "Other"
+    snapshot = json.loads(inserted[0]["parse_result_json"])
+    assert snapshot["approval_excluded"] is True
+    assert snapshot["cost_source_allowed"] is False
+    assert snapshot["exclusion_reason"] == "审批结果为拒绝"

@@ -846,12 +846,16 @@ def _build_purchase_approval_status_summary(trace: dict) -> dict:
 
     invalid = [row for row in approvals if is_invalid_approval_status(row["approval_status"]) or is_invalid_approval_status(row["message"])]
     missing_status = [row for row in approvals if not row["approval_status"]]
+    valid = [row for row in approvals if row not in invalid and row not in missing_status]
     if not approvals:
         state = "missing"
         message = "当前国际物流审批未关联采购审批，采购单价来源待确认。"
+    elif invalid and valid:
+        state = "partial"
+        message = f"已关联 {len(approvals)} 条采购审批，其中 {len(valid)} 条有效，{len(invalid)} 条已排除。"
     elif invalid:
-        state = "invalid"
-        message = f"已关联 {len(approvals)} 条采购审批，其中 {len(invalid)} 条已拒绝/撤销/终止。"
+        state = "excluded"
+        message = f"已关联 {len(approvals)} 条采购审批，均已拒绝/撤销/终止并排除。"
     elif missing_status:
         state = "pending"
         message = f"已关联 {len(approvals)} 条采购审批，但有 {len(missing_status)} 条状态尚未同步。"
@@ -880,31 +884,6 @@ def _build_invalid_business_state(batch: dict) -> dict:
             "message": f"当前 OA 审批状态为 {str(source_status or '').strip()}，业务已拒绝/撤销/终止，不进入综合成本确认或 ERP 推送。",
         }
 
-    trace = _get_oa_logistics_trace(batch.get("extra_json"))
-    for rows in _linked_purchase_approval_lists(trace):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            invalid_text = _invalid_approval_text(row)
-            if not invalid_text:
-                continue
-            approval_no = (
-                row.get("approval_no")
-                or row.get("source_approval_no")
-                or row.get("business_id")
-                or row.get("businessId")
-                or row.get("source_instance_id")
-                or row.get("proc_inst_id")
-                or row.get("instance_id")
-                or "未标注单号"
-            )
-            return {
-                "invalid": True,
-                "scope": "linked_purchase_approval",
-                "approval_no": str(approval_no or "").strip(),
-                "status": invalid_text,
-                "message": f"关联采购支出审批 {str(approval_no or '').strip()} 状态为 {invalid_text}，该业务已拒绝/撤销/终止，不进入综合成本确认或 ERP 推送。",
-            }
     return {"invalid": False}
 
 

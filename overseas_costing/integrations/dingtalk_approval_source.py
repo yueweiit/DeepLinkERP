@@ -302,8 +302,13 @@ class PostgresApprovalSource:
                 if actor_pairs:
                     corp_ids = [pair[0] for pair in actor_pairs]
                     user_ids = [pair[1] for pair in actor_pairs]
-                    cursor.execute(actor_sql, (corp_ids, user_ids))
-                    actor_rows = cursor.fetchall()
+                    try:
+                        cursor.execute(actor_sql, (corp_ids, user_ids))
+                        actor_rows = cursor.fetchall()
+                    except Exception:
+                        # 人员姓名是可选增强字段；视图尚未部署时仍需返回审批和附件。
+                        connection.rollback()
+                        actor_rows = []
                 else:
                     actor_rows = []
                 cursor.execute(health_sql, ())

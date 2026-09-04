@@ -134,7 +134,7 @@ def classify_batch(batch: dict, stats: dict) -> dict:
     writeback = str(batch.get("writeback_status") or "").lower()
     issues = []
     if (
-        approval_state in {"missing", "pending", "invalid"}
+        approval_state in {"missing", "pending", "excluded"}
         or not batch.get("subsidiary_code")
         or stats.get("missing_purchase_count", 0)
         or not stats.get("item_count", 0)

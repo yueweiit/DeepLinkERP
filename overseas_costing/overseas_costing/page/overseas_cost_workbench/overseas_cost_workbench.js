@@ -10140,15 +10140,11 @@ class OverseasCostWorkbench {
     sourceStatus.linked_purchase_approval_statuses = [...approvals, ...excluded]
       .map((approval) => approval.effective_status || approval.status || approval.result)
       .filter(Boolean);
-    sourceStatus.purchase_approval_sync_state = excluded.length ? "invalid" : "valid";
+    sourceStatus.purchase_approval_sync_state = excluded.length ? (approvals.length ? "partial" : "excluded") : "valid";
     sourceStatus.purchase_approval_sync_message = excluded.length
       ? `已排除 ${excluded.length} 条拒绝、撤销或终止的关联采购审批；其数据不参与成本写入。`
       : `已关联 ${approvals.length} 条有效采购审批，状态已同步。`;
-    if (excluded.length) {
-      sourceStatus.invalid_business = true;
-      sourceStatus.invalid_business_scope = "linked_purchase_approval";
-      sourceStatus.invalid_business_reason = sourceStatus.purchase_approval_sync_message;
-    } else if (sourceStatus.invalid_business_scope === "linked_purchase_approval") {
+    if (sourceStatus.invalid_business_scope === "linked_purchase_approval") {
       sourceStatus.invalid_business = false;
       sourceStatus.invalid_business_scope = "";
       sourceStatus.invalid_business_reason = "";

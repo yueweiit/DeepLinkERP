@@ -181,7 +181,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
 .ocw-erp-module-link:hover,
 .ocw-erp-module-link.is-active {
   background: #eff6ff;
-  color: #0877d1;
+  color: #076fbe;
 }
 
 .ocw-erp-module-icon {
@@ -191,9 +191,9 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   align-items: center;
   justify-content: center;
   border-radius: 8px;
-  background: #0d8bf2;
+  background: #0b8cf0;
   color: #ffffff;
-  box-shadow: 0 2px 5px rgba(13, 139, 242, 0.2);
+  box-shadow: 0 2px 5px rgba(11, 140, 240, 0.2);
 }
 
 .ocw-erp-module-icon svg {
@@ -213,7 +213,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
 
 .ocw-erp-module-link.is-active .ocw-erp-module-icon,
 .ocw-erp-module-link:hover .ocw-erp-module-icon {
-  background: #0877d1;
+  background: #076fbe;
 }
 
 .ocw-page .ocw-shell {
@@ -420,7 +420,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   padding: 10px;
   color: var(--ocw-ink);
   font-size: 12px;
-  border: 1px solid #dbe6e4;
+  border: 1px solid #d9e6f5;
   border-radius: 8px;
   background: #fff;
 }
@@ -434,7 +434,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
 
 .ocw-import-preview.ready {
   border-color: rgba(11, 140, 240, 0.26);
-  background: #f8fcfb;
+  background: #f7fbff;
 }
 
 .ocw-import-preview.warn {
@@ -501,7 +501,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   line-height: 1.5;
   border: 1px solid rgba(11, 140, 240, 0.18);
   border-radius: 8px;
-  background: #f7fcfb;
+  background: #f7fbff;
 }
 
 .ocw-pull-note strong {
@@ -516,7 +516,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   padding: 10px;
   color: var(--ocw-ink);
   font-size: 12px;
-  border: 1px solid #dbe6e4;
+  border: 1px solid #d9e6f5;
   border-radius: 8px;
   background: #fff;
 }
@@ -530,7 +530,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
 
 .ocw-pull-result.ready {
   border-color: rgba(11, 140, 240, 0.26);
-  background: #f8fcfb;
+  background: #f7fbff;
 }
 
 .ocw-pull-result.warn {
@@ -845,7 +845,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   padding: 10px;
   color: var(--ocw-ink);
   font-size: 12px;
-  border: 1px solid #dbe6e4;
+  border: 1px solid #d9e6f5;
   border-radius: 8px;
   background: #fff;
 }
@@ -859,7 +859,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
 
 .ocw-voucher-preview.ready {
   border-color: rgba(11, 140, 240, 0.26);
-  background: #f8fcfb;
+  background: #f7fbff;
 }
 
 .ocw-voucher-preview.warn {
@@ -1234,7 +1234,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   gap: 8px;
   align-items: start;
   padding-top: 6px;
-  border-top: 1px dashed #dbe6e4;
+  border-top: 1px dashed #d9e6f5;
 }
 
 .ocw-voucher-resolution-history div:first-of-type {
@@ -1261,7 +1261,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
 .ocw-voucher-resolution-history p {
   margin: 0;
   padding-top: 6px;
-  border-top: 1px dashed #dbe6e4;
+  border-top: 1px dashed #d9e6f5;
 }
 
 .ocw-voucher-resolution-form {
@@ -1288,7 +1288,7 @@ body.ocw-has-erp-module-sidebar-fallback .ocw-page {
   color: var(--ocw-ink);
   font-size: 12px;
   line-height: 1.35;
-  border: 1px solid #cbd8d6;
+  border: 1px solid #cbd8e6;
   border-radius: 7px;
   background: #fff;
 }

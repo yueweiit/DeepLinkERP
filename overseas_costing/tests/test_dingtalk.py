@@ -2059,6 +2059,14 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
 
     class FakeDB:
         @staticmethod
+        def savepoint(name):
+            assert name == "before_invalid_purchase_item_repair"
+
+        @staticmethod
+        def rollback(*, save_point):
+            raise AssertionError(f"successful repair must not roll back {save_point}")
+
+        @staticmethod
         def delete(doctype, filters):
             deleted_filters.append((doctype, filters))
 
@@ -2166,6 +2174,82 @@ def test_invalid_purchase_item_repair_protects_mixed_or_manual_rows(monkeypatch)
     assert protected["action"] == "manual_required"
     assert protected["deleted_count"] == 0
     assert protected["protected_count"] == 1
+
+
+def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    events = []
+
+    class FakeMeta:
+        @staticmethod
+        def has_field(_fieldname):
+            return True
+
+    class FailingDoc:
+        def insert(self, **_kwargs):
+            events.append("insert_failed")
+            raise RuntimeError("insert failed")
+
+    class FakeDB:
+        @staticmethod
+        def savepoint(name):
+            events.append(("savepoint", name))
+
+        @staticmethod
+        def rollback(*, save_point):
+            events.append(("rollback", save_point))
+
+        @staticmethod
+        def delete(_doctype, _filters):
+            events.append("delete")
+
+        @staticmethod
+        def set_value(*_args, **_kwargs):
+            events.append("batch_update")
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(_doctype, **_kwargs):
+            return [{
+                "name": "PURCHASE-1",
+                "manual_override_flag": 0,
+                "source_type": "PURCHASE_EXPENSE_OA",
+                "dingtalk_instance_id": "PROC-PUR-REFUSED",
+            }]
+
+        @staticmethod
+        def get_doc(_payload):
+            return FailingDoc()
+
+        @staticmethod
+        def get_meta(_doctype):
+            return FakeMeta()
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "build_oa_item_values_from_approval", lambda _approval: [{
+        "row_no": 1,
+        "material_code": "MAT-MAIN",
+        "source_type": "oa_logistics",
+    }])
+
+    result = _restore_main_logistics_items_after_excluded_purchases(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={"source_instance_id": "PROC-LOG-001"},
+        excluded_purchase_summaries=[{"source_instance_id": "PROC-PUR-REFUSED"}],
+    )
+
+    assert result["action"] == "manual_required"
+    assert result["deleted_count"] == 0
+    assert events == [
+        ("savepoint", "before_invalid_purchase_item_repair"),
+        "delete",
+        "insert_failed",
+        ("rollback", "before_invalid_purchase_item_repair"),
+    ]
 
 
 def test_purchase_expense_rows_from_preview_excludes_rejected_approvals() -> None:
@@ -2475,6 +2559,7 @@ def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch
 
     detail_calls = []
     save_calls = []
+    invalid_updates = []
 
     class FakeFrappe:
         @staticmethod
@@ -2571,6 +2656,12 @@ def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch
     monkeypatch.setattr(import_oa_logistics, "get_process_instance_detail", fake_get_process_instance_detail)
     monkeypatch.setattr(import_oa_logistics, "summarize_approval", fake_summarize_approval)
     monkeypatch.setattr(import_oa_logistics, "save_sea_approvals_to_erp", fake_save_sea_approvals_to_erp)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "_update_oa_trace_batch",
+        lambda batch_name, values: invalid_updates.append((batch_name, values)) or {"action": "updated"},
+    )
+    monkeypatch.setattr(import_oa_logistics, "_commit_oa_pull_progress", lambda: None)
 
     result = refresh_existing_oa_logistics_details(limit=50)
 
@@ -2586,6 +2677,8 @@ def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch
     assert save_calls[0]["items"][0]["linked_purchase_approvals"][0]["source_instance_id"] == "PROC-PURCHASE-001"
     assert result["skipped_count"] == 2
     assert {item["batch_name"] for item in result["skipped_items"]} == {"BATCH-MISSING-ID", "BATCH-REVOKED"}
+    assert invalid_updates[0][0] == "BATCH-REVOKED"
+    assert invalid_updates[0][1]["source_approval_status"] == "TERMINATED"
 
 
 def test_refresh_existing_oa_logistics_details_can_target_one_batch(monkeypatch) -> None:
@@ -2945,6 +3038,32 @@ def test_revoked_approval_is_skipped_when_saving_oa_trace() -> None:
     assert result["valid_count"] == 0
     assert result["skipped_count"] == 1
     assert result["skipped_items"][0]["reason"] == "审批单已撤销或终止，不进入成本表格"
+
+
+def test_revoked_existing_approval_updates_stored_main_status(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    updates = []
+    monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(import_oa_logistics, "_resolve_existing_batch_name", lambda _values: "BATCH-REVOKED")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "_update_oa_trace_batch",
+        lambda batch_name, values: updates.append((batch_name, values)) or {"action": "updated"},
+    )
+    monkeypatch.setattr(import_oa_logistics, "_commit_oa_pull_progress", lambda: None)
+
+    result = save_sea_approvals_to_erp({"items": [{
+        "source_approval_no": "OA-REVOKED",
+        "source_instance_id": "PROC-REVOKED",
+        "approval_status": "TERMINATED",
+        "transport_mode": "SEA",
+        "form_fields": {},
+    }]})
+
+    assert result["skipped_count"] == 1
+    assert updates[0][0] == "BATCH-REVOKED"
+    assert updates[0][1]["source_approval_status"] == "TERMINATED"
 
 
 def test_pull_latest_logistics_approvals_to_erp_reuses_pull_and_save(monkeypatch) -> None:

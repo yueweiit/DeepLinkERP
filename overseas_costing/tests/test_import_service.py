@@ -597,6 +597,42 @@ def test_preview_linked_purchase_expense_oa_excludes_refused_summary(monkeypatch
     assert result["mapped_preview_items"][0]["source_instance_id"] == "PROC-PUR-VALID"
 
 
+def test_preview_packing_list_rejects_audit_only_excluded_attachment(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            assert doctype == "Overseas Cost Attachment"
+            assert name == "ATT-EXCLUDED"
+            return {
+                "batch": "BATCH-001",
+                "parse_result_json": json.dumps({
+                    "approval_excluded": True,
+                    "cost_source_allowed": False,
+                }),
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        import_service,
+        "_build_packing_preview_items",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("audit-only file must not be parsed")),
+    )
+
+    result = preview_packing_list_attachment(
+        batch_name="BATCH-001",
+        attachment_name="ATT-EXCLUDED",
+        file_url="/private/files/excluded.xlsx",
+    )
+
+    assert result["ok"] is False
+    assert result["audit_only"] is True
+
+
 def test_pull_linked_purchase_summaries_includes_running(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
     from overseas_costing.services import import_service

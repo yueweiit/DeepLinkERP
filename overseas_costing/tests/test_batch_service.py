@@ -725,7 +725,7 @@ def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
     assert "批次记录明细数为 2，实际查询到 1 条。" in result["warning_reasons"]
 
 
-def test_rejected_linked_purchase_approval_blocks_confirmation_and_writeback() -> None:
+def test_rejected_linked_purchase_approval_is_audit_only_for_confirmation_and_writeback() -> None:
     batch = {
         "status": "Calculated",
         "confirm_status": "Confirmed",
@@ -781,12 +781,10 @@ def test_rejected_linked_purchase_approval_blocks_confirmation_and_writeback() -
         resolved_version_name="VERSION-001",
     )
 
-    assert confirmation["ready"] is False
-    assert writeback["ready"] is False
-    assert confirmation["checks"]["has_invalid_business_approval"] is True
-    assert writeback["checks"]["has_invalid_business_approval"] is True
-    assert "PUR-REJECTED-001" in confirmation["blocking_reasons"][0]
-    assert "不进入综合成本确认或 ERP 推送" in writeback["blocking_reasons"][0]
+    assert confirmation["ready"] is True
+    assert writeback["ready"] is True
+    assert confirmation["checks"]["has_invalid_business_approval"] is False
+    assert writeback["checks"]["has_invalid_business_approval"] is False
 
 
 def test_build_batch_source_status_exposes_invalid_linked_purchase_approval() -> None:
@@ -812,12 +810,28 @@ def test_build_batch_source_status_exposes_invalid_linked_purchase_approval() ->
         }
     )
 
-    assert status["invalid_business"] is True
-    assert status["invalid_business_scope"] == "linked_purchase_approval"
-    assert status["purchase_approval_sync_state"] == "invalid"
+    assert status["invalid_business"] is False
+    assert status["invalid_business_scope"] == ""
+    assert status["purchase_approval_sync_state"] == "excluded"
     assert status["linked_purchase_count"] == 1
     assert status["invalid_purchase_approval_count"] == 1
     assert status["linked_purchase_approval_nos"] == ["PUR-REJECTED-001"]
+
+
+def test_build_batch_source_status_marks_mixed_purchase_approvals_partial() -> None:
+    status = _build_batch_source_status({
+        "name": "BATCH-MIXED",
+        "source_type": "oa_logistics",
+        "source_approval_no": "LOGISTICS-001",
+        "extra_json": json.dumps({"linked_purchase_approvals": [
+            {"approval_no": "PUR-VALID", "approval_status": "COMPLETED"},
+            {"approval_no": "PUR-REFUSED", "approval_status": "REJECTED"},
+        ]}),
+    })
+
+    assert status["invalid_business"] is False
+    assert status["purchase_approval_sync_state"] == "partial"
+    assert status["invalid_purchase_approval_count"] == 1
 
 
 def test_build_batch_source_status_explains_missing_and_pending_purchase_approval() -> None:

@@ -476,6 +476,9 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
     batch = frappe.db.get_value("Overseas Cost Batch", batch_name, ["name", "current_version"], as_dict=True) or {}
     parse_snapshot = {
         "source": "dingtalk_postgres_archive",
+        "approval_excluded": bool(source_approval.get("excluded")),
+        "cost_source_allowed": not bool(source_approval.get("excluded")),
+        "exclusion_reason": source_approval.get("exclusion_reason") or "",
         "process_instance_id": process_instance_id,
         "file_id": file_id,
         "space_id": source.get("space_id") or "",
@@ -495,11 +498,19 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
         "version": batch.get("current_version") or None,
         "source_type": "OA",
         "oa_attachment_origin": source.get("origin") or "Form",
-        "attachment_type": "Packing List" if source.get("packing_candidate") else "Other",
+        "attachment_type": (
+            "Packing List"
+            if source.get("packing_candidate") and not source_approval.get("excluded")
+            else "Other"
+        ),
         "source_doc_no": source_approval.get("business_id") or process_instance_id,
         "file_name": source.get("file_name") or file_id,
         "parse_status": "Queued",
         "parse_result_json": json.dumps(parse_snapshot, ensure_ascii=False),
-        "remark": "由钉钉审批归档清单按需创建，文件内容将从 MinIO 下载。",
+        "remark": (
+            "由已排除钉钉审批归档按需创建，仅供审计查看和下载，不可作为成本或装箱数据源。"
+            if source_approval.get("excluded")
+            else "由钉钉审批归档清单按需创建，文件内容将从 MinIO 下载。"
+        ),
     }).insert(ignore_permissions=True)
     return {"ok": True, "attachment_name": doc.name, "created": True}

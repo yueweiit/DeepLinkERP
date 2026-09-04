@@ -389,7 +389,7 @@
 
 .ocw-category-status.noop {
   color: #556b7f;
-  background: #edf3f2;
+  background: #edf3f8;
 }
 
 .ocw-error-modal .modal-dialog {
@@ -498,14 +498,14 @@
   width: 100%;
   padding: 12px;
   text-align: left;
-  border: 1px solid #dbe6e4;
+  border: 1px solid #d9e6f5;
   border-radius: 8px;
   background: #fff;
 }
 
 .ocw-quick-card:hover {
   border-color: rgba(11, 140, 240, 0.45);
-  background: #f8fcfb;
+  background: #f7fbff;
 }
 
 .ocw-quick-card strong {

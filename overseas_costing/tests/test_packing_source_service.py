@@ -72,6 +72,33 @@ def test_attachment_preview_requires_local_download_before_parsing(monkeypatch) 
     assert result["attachment_name"] == "ATTACH-1"
 
 
+def test_attachment_preview_rejects_audit_only_excluded_approval(monkeypatch) -> None:
+    from overseas_costing.services import packing_source_service as service
+
+    monkeypatch.setattr(service, "_attachment_source", lambda _batch, _source: {
+        "name": "ATTACH-EXCLUDED",
+        "file_name": "装箱单.xlsx",
+        "file_url": "/private/files/excluded.xlsx",
+        "modified": "2026-09-04 10:00:00",
+        "parse_result_json": json.dumps({
+            "approval_excluded": True,
+            "cost_source_allowed": False,
+            "process_instance_id": "PROC-PUR-REFUSED",
+        }),
+    })
+    monkeypatch.setattr(
+        service.import_service,
+        "preview_packing_list_attachment",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("audit-only file must not be parsed")),
+    )
+
+    result = service.preview_packing_source("BATCH-1", "attachment", "ATTACH-EXCLUDED")
+
+    assert result["ok"] is False
+    assert result["audit_only"] is True
+    assert "已排除审批" in result["message"]
+
+
 def test_revision_is_signed_and_bound_to_batch_and_version(monkeypatch) -> None:
     from overseas_costing.services import packing_source_service as service
 

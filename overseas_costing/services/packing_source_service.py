@@ -239,9 +239,19 @@ def _attachment_source(batch_name: str, source_id: str) -> dict:
     return frappe.db.get_value(
         "Overseas Cost Attachment",
         {"name": source_id, "batch": batch_name, "source_type": "OA"},
-        ["name", "batch", "file_name", "file_url", "modified"],
+        ["name", "batch", "file_name", "file_url", "modified", "parse_result_json"],
         as_dict=True,
     ) or {}
+
+
+def _attachment_is_audit_only(source: dict) -> bool:
+    try:
+        snapshot = json.loads(source.get("parse_result_json") or "{}")
+    except (TypeError, ValueError):
+        snapshot = {}
+    if not isinstance(snapshot, dict):
+        return False
+    return bool(snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False)
 
 
 def _find_comment_source(batch_name: str, source_id: str) -> dict:
@@ -305,6 +315,12 @@ def preview_packing_source(
         source = _attachment_source(batch_name, resolved_source_id)
         if not source:
             return {"ok": False, "message": "未找到当前批次的钉钉附件。"}
+        if _attachment_is_audit_only(source):
+            return {
+                "ok": False,
+                "audit_only": True,
+                "message": "该附件来自已排除审批，仅供审计查看和下载，不能作为装箱或成本数据源。",
+            }
         source_hash = _attachment_hash(source)
         if not str(source.get("file_url") or "").strip():
             return {
@@ -384,6 +400,13 @@ def apply_packing_source(
         return {"ok": False, "source_changed": True, "message": "批次数据已变化，请重新预览后确认。"}
     if kind == "attachment":
         source = _attachment_source(batch_name, source_id)
+        if source and _attachment_is_audit_only(source):
+            return {
+                "ok": False,
+                "audit_only": True,
+                "source_changed": True,
+                "message": "该附件来自已排除审批，不能写入装箱或成本数据。",
+            }
         actual_hash = _attachment_hash(source) if source else ""
         kwargs = {
             "batch_name": batch_name,

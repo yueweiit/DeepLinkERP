@@ -216,6 +216,52 @@ def test_postgres_source_loads_all_approval_actors_with_one_scoped_query() -> No
     assert result["actors"]["CORP-1"]["USER-3"]["name"] == "陈一"
 
 
+def test_postgres_source_tolerates_missing_optional_actor_view() -> None:
+    class MissingActorCursor(FakeCursor):
+        def __init__(self):
+            super().__init__([])
+            self.result_sets = [
+                [{
+                    "corp_id": "CORP-1",
+                    "process_instance_id": "PROC-MAIN",
+                    "originator_user_id": "USER-1",
+                    "raw_payload": {},
+                }],
+                [],
+                [{"source_lag_seconds": 3}],
+            ]
+            self.result_index = 0
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+            if "approval_actor_names_v1" in sql:
+                raise RuntimeError('relation "costing_read.approval_actor_names_v1" does not exist')
+
+        def fetchall(self):
+            value = self.result_sets[self.result_index]
+            self.result_index += 1
+            return value
+
+    class RecoverableConnection(FakeConnection):
+        def __init__(self, cursor):
+            super().__init__(cursor)
+            self.rollback_count = 0
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    cursor = MissingActorCursor()
+    connection = RecoverableConnection(cursor)
+    source = PostgresApprovalSource(_config(), connect=lambda **_kwargs: connection)
+
+    result = source.get_instance_bundle(["PROC-MAIN"])
+
+    assert connection.rollback_count == 1
+    assert result["instances"]["PROC-MAIN"]["originatorUserId"] == "USER-1"
+    assert result["actors"] == {}
+    assert result["health"]["source_lag_seconds"] == 3
+
+
 class FakeObjectResponse:
     def __init__(self, content: bytes):
         self.content = content

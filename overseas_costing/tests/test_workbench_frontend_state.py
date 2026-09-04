@@ -81,12 +81,25 @@ def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_co
 def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
     redesign = (PARTS / "25-workbench-redesign.css").read_text(encoding="utf-8").lower()
     detail = (PARTS / "45-detail-page.css").read_text(encoding="utf-8").lower()
+    all_styles = "\n".join(path.read_text(encoding="utf-8").lower() for path in PARTS.glob("*.css"))
 
     assert "--ocw-accent: #0b8cf0" in redesign
     assert "--ocw-accent-dark: #076fbe" in redesign
     assert "--ocw-accent-soft: #eaf5ff" in redesign
     for legacy_teal in ("#087d82", "#05666b", "#e9f7f6", "rgba(8, 125, 130", "#318e92"):
         assert legacy_teal not in redesign + detail
+    for legacy_interactive_color in (
+        "#0877d1",
+        "#0d8bf2",
+        "#0876d1",
+        "#075fa5",
+        "#cfe2dc",
+        "#eef8f4",
+        "#8ac8c1",
+        "#f5fbfa",
+        "#e9f5f3",
+    ):
+        assert legacy_interactive_color not in all_styles
     assert ".ocw-issue.is-ready { color: #067647; }" in redesign
 
 
@@ -115,7 +128,8 @@ def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> 
     assert "approval.batch_name !== batch.name" in overview_block
 
     assert "syncPurchaseApprovalStatusFromDingtalk" in approval_page
-    assert 'purchase_approval_sync_state = excluded.length ? "invalid" : "valid"' in approval_page
+    assert 'excluded.length ? (approvals.length ? "partial" : "excluded") : "valid"' in approval_page
+    assert 'sourceStatus.invalid_business = true' not in approval_page
     assert "linked_purchase_approval_statuses" in approval_page
 
 

@@ -3836,6 +3836,12 @@ def build_batch_values_from_approval(item: dict) -> dict:
         "extra_json": _json_dumps(
             {
                 "source": "dingtalk_oa_logistics",
+                "process_status": item.get("process_status") or item.get("approval_status") or "",
+                "approval_result": item.get("approval_result") or "",
+                "effective_status": item.get("effective_status") or item.get("approval_status") or "",
+                "excluded": bool(item.get("excluded") or is_hidden_approval_status(
+                    item.get("approval_status"), item.get("approval_result")
+                )),
                 "transport_mode": transport_mode,
                 "business_type": business_type,
                 "transport_mode_raw": item.get("transport_mode_raw"),
@@ -4345,41 +4351,66 @@ def _restore_main_logistics_items_after_excluded_purchases(
             "reason": "主物流审批没有可恢复的物料行，保留现有数据待人工处理。",
         }
 
-    frappe.db.delete("Overseas Cost Item", {"batch": batch_name, "version": version_name})
-    created_names: list[str] = []
-    for values in main_item_values:
-        doc_values = _filter_item_values(
-            {
-                **values,
-                "doctype": "Overseas Cost Item",
-                "batch": batch_name,
-                "version": version_name,
-            }
-        )
-        doc_values["doctype"] = "Overseas Cost Item"
-        created_names.append(frappe.get_doc(doc_values).insert(ignore_permissions=True).name)
+    savepoint = getattr(frappe.db, "savepoint", None)
+    rollback = getattr(frappe.db, "rollback", None)
+    savepoint_name = "before_invalid_purchase_item_repair"
+    if not callable(savepoint) or not callable(rollback):
+        return {
+            "action": "manual_required",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "existing_count": len(existing_items),
+            "reason": "当前数据库不支持修复保存点，为避免部分删除已停止自动恢复。",
+        }
 
-    frappe.db.set_value(
-        "Overseas Cost Batch",
-        batch_name,
-        {"item_count": len(created_names), "status": "Imported"},
-        update_modified=True,
-    )
-    _insert_batch_audit_log(
-        batch_name=batch_name,
-        field_name="invalid_purchase_item_repair",
-        old_value={
-            "item_count": len(existing_items),
-            "source": "PURCHASE_EXPENSE_OA",
-            "excluded_purchase_instance_ids": sorted(excluded_instance_ids),
-        },
-        new_value={
-            "created_count": len(created_names),
-            "source": "oa_logistics",
-            "logistics_source_instance_id": approval_item.get("source_instance_id") or "",
-        },
-        remark="关联采购审批已拒绝、撤销或终止，已将可证明由该采购审批生成的 SKU 恢复为主物流审批物料。",
-    )
+    savepoint(savepoint_name)
+    created_names: list[str] = []
+    try:
+        frappe.db.delete("Overseas Cost Item", {"batch": batch_name, "version": version_name})
+        for values in main_item_values:
+            doc_values = _filter_item_values(
+                {
+                    **values,
+                    "doctype": "Overseas Cost Item",
+                    "batch": batch_name,
+                    "version": version_name,
+                }
+            )
+            doc_values["doctype"] = "Overseas Cost Item"
+            created_names.append(frappe.get_doc(doc_values).insert(ignore_permissions=True).name)
+
+        frappe.db.set_value(
+            "Overseas Cost Batch",
+            batch_name,
+            {"item_count": len(created_names), "status": "Imported"},
+            update_modified=True,
+        )
+        _insert_batch_audit_log(
+            batch_name=batch_name,
+            field_name="invalid_purchase_item_repair",
+            old_value={
+                "item_count": len(existing_items),
+                "source": "PURCHASE_EXPENSE_OA",
+                "excluded_purchase_instance_ids": sorted(excluded_instance_ids),
+            },
+            new_value={
+                "created_count": len(created_names),
+                "source": "oa_logistics",
+                "logistics_source_instance_id": approval_item.get("source_instance_id") or "",
+            },
+            remark="关联采购审批已拒绝、撤销或终止，已将可证明由该采购审批生成的 SKU 恢复为主物流审批物料。",
+        )
+    except Exception as exc:
+        rollback(save_point=savepoint_name)
+        return {
+            "action": "manual_required",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "existing_count": len(existing_items),
+            "reason": f"恢复主物流审批 SKU 失败，已回滚到修复前：{exc}",
+        }
     return {
         "action": "restored_main_logistics_items",
         "ok": True,
@@ -5551,14 +5582,23 @@ def refresh_existing_oa_logistics_details(
             )
             continue
 
-        if is_hidden_approval_status(summary.get("approval_status")):
+        summary["source_approval_no"] = summary.get("source_approval_no") or row.get("source_approval_no") or trace.get("source_approval_no") or ""
+        summary["source_dingtalk_url"] = summary.get("source_dingtalk_url") or row.get("source_dingtalk_url") or trace.get("source_dingtalk_url") or ""
+        summary["logistics_no"] = summary.get("logistics_no") or row.get("waybill_no") or row.get("batch_no") or ""
+        if is_hidden_approval_status(summary.get("approval_status"), summary.get("approval_result")):
+            invalid_update = _update_oa_trace_batch(
+                row.get("name"),
+                build_batch_values_from_approval(summary),
+            )
+            _commit_oa_pull_progress()
             skipped_items.append(
                 {
                     "batch_name": row.get("name"),
                     "batch_no": row.get("batch_no"),
                     "source_instance_id": instance_id,
                     "approval_status": summary.get("approval_status"),
-                    "reason": "审批单已撤销或终止，不再刷新到成本表",
+                    "invalid_update_action": invalid_update.get("action"),
+                    "reason": "审批单已拒绝、撤销或终止，已更新批次状态并从当前工作台排除。",
                 }
             )
             continue
@@ -5575,9 +5615,6 @@ def refresh_existing_oa_logistics_details(
             )
             continue
 
-        summary["source_approval_no"] = summary.get("source_approval_no") or row.get("source_approval_no") or trace.get("source_approval_no") or ""
-        summary["source_dingtalk_url"] = summary.get("source_dingtalk_url") or row.get("source_dingtalk_url") or trace.get("source_dingtalk_url") or ""
-        summary["logistics_no"] = summary.get("logistics_no") or row.get("waybill_no") or row.get("batch_no") or ""
         refreshed_items.append(summary)
 
     save_result = save_sea_approvals_to_erp({"ok": True, "items": refreshed_items}) if refreshed_items else {
@@ -5931,9 +5968,16 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
             "approval_status": item.get("approval_status"),
         }
         for item in raw_items
-        if is_hidden_approval_status(item.get("approval_status"))
+        if is_hidden_approval_status(item.get("approval_status"), item.get("approval_result"))
     ]
-    items = [item for item in raw_items if not is_hidden_approval_status(item.get("approval_status"))]
+    invalid_items = [
+        item for item in raw_items
+        if is_hidden_approval_status(item.get("approval_status"), item.get("approval_result"))
+    ]
+    items = [
+        item for item in raw_items
+        if not is_hidden_approval_status(item.get("approval_status"), item.get("approval_result"))
+    ]
     preview = [build_batch_values_from_approval(item) for item in items]
     preview = [item for item in preview if item.get("batch_no")]
     if frappe is None:
@@ -5955,6 +5999,22 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
     updated_count = 0
     unchanged_count = 0
     saved_items: list[dict] = []
+    for invalid_item in invalid_items:
+        invalid_values = build_batch_values_from_approval(invalid_item)
+        existing_name = _resolve_existing_batch_name(invalid_values)
+        if not existing_name:
+            continue
+        invalid_update = _update_oa_trace_batch(existing_name, invalid_values)
+        _commit_oa_pull_progress()
+        for skipped in skipped_items:
+            if (
+                skipped.get("source_instance_id") == invalid_item.get("source_instance_id")
+                or skipped.get("source_approval_no") == invalid_item.get("source_approval_no")
+            ):
+                skipped["batch_name"] = existing_name
+                skipped["invalid_update_action"] = invalid_update.get("action")
+                skipped["reason"] = "审批单已拒绝、撤销或终止，已更新历史批次状态并从当前工作台排除。"
+                break
     for item in items:
         values = build_batch_values_from_approval(item)
         if not values.get("batch_no"):

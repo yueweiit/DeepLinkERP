@@ -5298,6 +5298,24 @@ def _build_packing_preview_items(
     }
 
 
+def _packing_attachment_is_audit_only(batch_name: str, attachment_name: str | None) -> bool:
+    if frappe is None or not attachment_name:
+        return False
+    try:
+        row = frappe.db.get_value(
+            "Overseas Cost Attachment",
+            attachment_name,
+            ["batch", "parse_result_json"],
+            as_dict=True,
+        ) or {}
+    except Exception:
+        return False
+    if row.get("batch") and str(row.get("batch")) != str(batch_name):
+        return True
+    snapshot = _json_loads_dict(row.get("parse_result_json"))
+    return bool(snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False)
+
+
 def preview_packing_list_attachment(
     *,
     batch_name: str,
@@ -5308,6 +5326,15 @@ def preview_packing_list_attachment(
     sheet_rows_json: str | None = None,
 ) -> dict:
     """预览装箱单/物流附件可补哪些实际发货、重量、体积字段，不写入数据。"""
+
+    if _packing_attachment_is_audit_only(batch_name, attachment_name):
+        return {
+            "ok": False,
+            "audit_only": True,
+            "batch_name": batch_name,
+            "attachment_name": attachment_name,
+            "message": "该附件来自已排除审批，仅供审计查看和下载，不能作为装箱或成本数据源。",
+        }
 
     preview_items, parser_meta = _build_packing_preview_items(
         attachment_name=attachment_name,
