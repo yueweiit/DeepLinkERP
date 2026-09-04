@@ -48,6 +48,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     resolve_logistics_process_code,
     resolve_purchase_process_code,
     refresh_existing_oa_logistics_details,
+    resolve_approval_decision,
     pull_purchase_expense_approvals,
     preview_purchase_expenses_from_process,
     save_sea_approvals_to_erp,
@@ -1196,6 +1197,19 @@ def test_completed_approval_status_filters_running() -> None:
     assert is_completed_approval_status("审批通过") is True
     assert is_completed_approval_status("RUNNING") is False
     assert is_completed_approval_status("TERMINATED") is False
+
+
+def test_approval_decision_combines_process_status_and_result() -> None:
+    assert resolve_approval_decision("COMPLETED", "refuse") == {
+        "process_status": "COMPLETED",
+        "approval_result": "refuse",
+        "effective_status": "REJECTED",
+        "excluded": True,
+    }
+    assert resolve_approval_decision("TERMINATED", "agree")["excluded"] is True
+    assert resolve_approval_decision("COMPLETED", "agree")["effective_status"] == "COMPLETED"
+    assert resolve_approval_decision("RUNNING", "agree")["effective_status"] == "RUNNING"
+    assert is_completed_approval_status("COMPLETED", result="refuse") is False
 
 
 def test_pull_purchase_expense_approvals_reads_process_details(monkeypatch) -> None:

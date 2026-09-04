@@ -104,6 +104,21 @@ HIDDEN_APPROVAL_STATUSES = (
     "作废",
     "已作废",
 )
+INVALID_APPROVAL_RESULTS = (
+    "REFUSE",
+    "REFUSED",
+    "REJECT",
+    "REJECTED",
+    "DENY",
+    "DENIED",
+    "DISAGREE",
+    "拒绝",
+    "已拒绝",
+    "驳回",
+    "已驳回",
+    "不通过",
+    "未通过",
+)
 COMPLETED_APPROVAL_STATUSES = ("COMPLETED", "FINISHED", "AGREE", "APPROVED", "已完成", "审批通过", "同意")
 TRANSPORT_FIELD_ALIASES = (
     "物流方式",
@@ -2973,13 +2988,36 @@ def is_transport_approval(fields: dict[str, Any], transport_modes: tuple[str, ..
     return bool(mode and mode in transport_modes)
 
 
-def is_hidden_approval_status(status: str | None) -> bool:
-    """钉钉已撤销/终止审批不进入成本表格。"""
-
-    normalized = _clean(status).upper()
+def _is_invalid_approval_result(result: str | None) -> bool:
+    normalized = _clean(result).upper()
     if not normalized:
         return False
-    return any(_clean(hidden).upper() in normalized for hidden in HIDDEN_APPROVAL_STATUSES)
+    return any(_clean(invalid).upper() in normalized for invalid in INVALID_APPROVAL_RESULTS)
+
+
+def is_hidden_approval_status(status: str | None, result: str | None = None) -> bool:
+    """钉钉已撤销/终止/拒绝审批不进入成本表格。"""
+
+    normalized = _clean(status).upper()
+    hidden_status = bool(normalized) and any(
+        _clean(hidden).upper() in normalized for hidden in HIDDEN_APPROVAL_STATUSES
+    )
+    return hidden_status or _is_invalid_approval_result(result)
+
+
+def resolve_approval_decision(status: str | None, result: str | None = None) -> dict:
+    """合并钉钉流程状态和审批结果，形成唯一业务判定。"""
+
+    process_status = _clean(status)
+    approval_result = _clean(result)
+    rejected = _is_invalid_approval_result(approval_result)
+    status_excluded = is_hidden_approval_status(process_status)
+    return {
+        "process_status": process_status,
+        "approval_result": approval_result,
+        "effective_status": "REJECTED" if rejected else process_status or approval_result,
+        "excluded": bool(rejected or status_excluded),
+    }
 
 
 def is_invalid_approval_status(status: str | None) -> bool:
@@ -2991,13 +3029,18 @@ def is_invalid_approval_status(status: str | None) -> bool:
     return any(_clean(invalid).upper() in normalized for invalid in HIDDEN_APPROVAL_STATUSES)
 
 
-def is_completed_approval_status(status: str | None, *, allow_empty: bool = True) -> bool:
+def is_completed_approval_status(
+    status: str | None,
+    *,
+    result: str | None = None,
+    allow_empty: bool = True,
+) -> bool:
     """判断审批是否已完成；空状态默认放行以兼容部分旧接口响应。"""
 
     normalized = _clean(status).upper()
     if not normalized:
         return allow_empty
-    if is_hidden_approval_status(normalized):
+    if is_hidden_approval_status(normalized, result):
         return False
     return any(_clean(completed).upper() in normalized for completed in COMPLETED_APPROVAL_STATUSES)
 
@@ -3029,13 +3072,18 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         official_url=official_url,
     )
     transport_mode_raw = _find_field_value(fields, TRANSPORT_FIELD_ALIASES)
+    decision = resolve_approval_decision(
+        instance.get("status") or instance.get("approvalStatus"),
+        instance.get("result") or instance.get("approvalResult"),
+    )
     summary = {
         "source_instance_id": instance_id,
         "source_approval_no": approval_no,
         "source_dingtalk_url": official_url,
         "open_url": dingtalk_payload.get("open_url") or "",
         "approval_title": _clean(instance.get("title") or instance.get("process_instance_title") or instance.get("processInstanceTitle")),
-        "approval_status": _clean(instance.get("status") or instance.get("approvalStatus")),
+        "approval_status": decision["effective_status"],
+        **decision,
         "originator_userid": _clean(instance.get("originator_userid") or instance.get("originatorUserId")),
         "originator_dept_id": _clean(instance.get("originator_dept_id") or instance.get("originatorDeptId")),
         "create_time": instance.get("create_time") or instance.get("createTime") or "",
@@ -3600,13 +3648,18 @@ def summarize_purchase_approval(instance: dict, *, process_instance_id: str = ""
     )
     detail_rows = extract_purchase_expense_rows(instance)
     mapped_items = build_purchase_expense_item_values_from_approval(instance)
+    decision = resolve_approval_decision(
+        instance.get("status") or instance.get("approvalStatus"),
+        instance.get("result") or instance.get("approvalResult"),
+    )
     return {
         "source_instance_id": instance_id,
         "source_approval_no": approval_no,
         "source_dingtalk_url": official_url,
         "open_url": dingtalk_payload.get("open_url") or "",
         "approval_title": _clean(instance.get("title") or instance.get("process_instance_title") or instance.get("processInstanceTitle")),
-        "approval_status": _clean(instance.get("status") or instance.get("approvalStatus")),
+        "approval_status": decision["effective_status"],
+        **decision,
         "originator_userid": _clean(instance.get("originator_userid") or instance.get("originatorUserId")),
         "originator_dept_id": _clean(instance.get("originator_dept_id") or instance.get("originatorDeptId")),
         "create_time": instance.get("create_time") or instance.get("createTime") or "",
