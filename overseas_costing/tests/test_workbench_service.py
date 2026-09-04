@@ -69,6 +69,62 @@ def test_classify_batch_marks_calculated_batch_ready_for_cost_review() -> None:
     assert result["primary_action"] == "view"
 
 
+def test_classified_batches_hides_only_invalid_main_approval(monkeypatch) -> None:
+    common = {
+        "status": "Calculated",
+        "writeback_status": "Not Started",
+        "actual_total_cost_rmb": 100,
+        "subsidiary_code": "MX",
+    }
+    monkeypatch.setattr(
+        batch_service,
+        "get_batch_list",
+        lambda _query: {
+            "items": [
+                {
+                    **common,
+                    "name": "INVALID-MAIN",
+                    "source_status": {
+                        "invalid_business": True,
+                        "invalid_business_scope": "source_approval",
+                        "purchase_approval_sync_state": "valid",
+                    },
+                },
+                {
+                    **common,
+                    "name": "VALID-WITH-INVALID-PURCHASE",
+                    "source_status": {
+                        "invalid_business": True,
+                        "invalid_business_scope": "linked_purchase_approval",
+                        "purchase_approval_sync_state": "invalid",
+                    },
+                },
+                {
+                    **common,
+                    "name": "VALID",
+                    "source_status": {
+                        "invalid_business": False,
+                        "invalid_business_scope": "",
+                        "purchase_approval_sync_state": "valid",
+                    },
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        workbench_service,
+        "_load_current_item_stats",
+        lambda names: {
+            name: {"item_count": 1, "missing_purchase_count": 0, "missing_logistics_count": 0}
+            for name in names
+        },
+    )
+
+    visible = workbench_service._classified_batches()
+
+    assert [row["name"] for row in visible] == ["VALID-WITH-INVALID-PURCHASE", "VALID"]
+
+
 def test_normalize_page_caps_page_length_and_handles_invalid_values() -> None:
     assert normalize_page("0", "999") == (1, 100)
     assert normalize_page("3", "30") == (3, 30)

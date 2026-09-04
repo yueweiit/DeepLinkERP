@@ -524,6 +524,14 @@ def _classified_batches(filters: dict | None = None) -> list[dict]:
     # 分类和异常统计必须基于完整结果集，不能在 2000 条时静默截断。
     query["candidate_limit"] = 0
     batches = batch_service.get_batch_list(query).get("items") or []
+    batches = [
+        row
+        for row in batches
+        if not (
+            (row.get("source_status") or {}).get("invalid_business")
+            and (row.get("source_status") or {}).get("invalid_business_scope") == "source_approval"
+        )
+    ]
     stats = _load_current_item_stats([row["name"] for row in batches])
     classified = [
         {**row, **classify_batch(row, stats.get(row["name"], {}))}
