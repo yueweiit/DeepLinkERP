@@ -561,6 +561,42 @@ def test_preview_linked_purchase_expense_oa_matches_without_writing(monkeypatch)
     assert any(change["status"] == "conflict" for change in second_changes)
 
 
+def test_preview_linked_purchase_expense_oa_excludes_refused_summary(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", None)
+
+    result = preview_linked_purchase_expense_oa(
+        batch_name="BATCH-001",
+        purchase_summaries_json=json.dumps(
+            [
+                {
+                    "source_approval_no": "PUR-VALID-001",
+                    "source_instance_id": "PROC-PUR-VALID",
+                    "process_status": "COMPLETED",
+                    "approval_result": "agree",
+                    "mapped_preview_items": [{"material_code": "MAT-VALID"}],
+                },
+                {
+                    "source_approval_no": "PUR-REFUSED-001",
+                    "source_instance_id": "PROC-PUR-REFUSED",
+                    "process_status": "COMPLETED",
+                    "approval_result": "refuse",
+                    "mapped_preview_items": [{"material_code": "MAT-REFUSED"}],
+                },
+            ],
+            ensure_ascii=False,
+        ),
+    )
+
+    assert result["purchase_summary_count"] == 2
+    assert result["excluded_purchase_summary_count"] == 1
+    assert result["excluded_purchase_summaries"][0]["source_instance_id"] == "PROC-PUR-REFUSED"
+    assert result["excluded_purchase_summaries"][0]["effective_status"] == "REJECTED"
+    assert result["mapped_purchase_row_count"] == 1
+    assert result["mapped_preview_items"][0]["source_instance_id"] == "PROC-PUR-VALID"
+
+
 def test_pull_linked_purchase_summaries_includes_running(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
     from overseas_costing.services import import_service

@@ -3792,16 +3792,27 @@ def save_manual_logistics_quote(
 
 
 def _normalize_purchase_summary(summary: dict) -> dict:
+    from overseas_costing.scripts.import_oa_logistics import resolve_approval_decision
+
     mapped_items = summary.get("mapped_preview_items")
     if not isinstance(mapped_items, list):
         mapped_items = []
+    process_status = summary.get("process_status") or summary.get("approval_status") or summary.get("status") or ""
+    approval_result = summary.get("approval_result") or summary.get("result") or ""
+    decision = resolve_approval_decision(process_status, approval_result)
+    excluded = bool(summary.get("excluded") or decision.get("excluded"))
+    effective_status = summary.get("effective_status") or decision.get("effective_status") or ""
     return {
         "ok": summary.get("ok", True),
         "source_approval_no": summary.get("source_approval_no") or summary.get("approval_no") or "",
         "source_instance_id": summary.get("source_instance_id") or "",
         "source_dingtalk_url": summary.get("source_dingtalk_url") or summary.get("official_url") or "",
         "approval_title": summary.get("approval_title") or "",
-        "approval_status": summary.get("approval_status") or "",
+        "approval_status": effective_status,
+        "process_status": decision.get("process_status") or "",
+        "approval_result": decision.get("approval_result") or "",
+        "effective_status": effective_status,
+        "excluded": excluded,
         "purchase_currency": summary.get("purchase_currency") or "",
         "detail_row_count": summary.get("detail_row_count") or len(mapped_items),
         "mapped_preview_items": mapped_items,
@@ -3828,6 +3839,10 @@ def _build_purchase_summary_preview_row(summary: dict) -> dict:
         "source_dingtalk_url": official_url,
         "approval_title": summary.get("approval_title"),
         "approval_status": summary.get("approval_status"),
+        "process_status": summary.get("process_status") or "",
+        "approval_result": summary.get("approval_result") or "",
+        "effective_status": summary.get("effective_status") or summary.get("approval_status") or "",
+        "excluded": bool(summary.get("excluded")),
         "message": summary.get("message") or "",
         "purchase_currency": summary.get("purchase_currency"),
         "detail_row_count": summary.get("detail_row_count"),
@@ -4924,6 +4939,8 @@ def preview_linked_purchase_expense_oa(
             "batch_no": batch_trace.get("batch_no") or batch_name,
             "linked_purchase_count": 0,
             "purchase_summary_count": 0,
+            "excluded_purchase_summary_count": 0,
+            "excluded_purchase_summaries": [],
             "mapped_purchase_row_count": 0,
             "writeback_preview": {
                 "matched_count": 0,
@@ -4947,8 +4964,10 @@ def preview_linked_purchase_expense_oa(
             env_file=env_file,
         )
 
+    excluded_purchase_summaries = [summary for summary in purchase_summaries if summary.get("excluded")]
+    active_purchase_summaries = [summary for summary in purchase_summaries if not summary.get("excluded")]
     mapped_rows: list[dict] = []
-    for summary in purchase_summaries:
+    for summary in active_purchase_summaries:
         source_approval_no = summary.get("source_approval_no") or ""
         source_instance_id = summary.get("source_instance_id") or ""
         source_dingtalk_url = summary.get("source_dingtalk_url") or ""
@@ -4995,6 +5014,10 @@ def preview_linked_purchase_expense_oa(
         "linked_purchase_approvals": linked_approvals,
         "purchase_summary_count": len(purchase_summaries),
         "purchase_summaries": [_build_purchase_summary_preview_row(summary) for summary in purchase_summaries],
+        "excluded_purchase_summary_count": len(excluded_purchase_summaries),
+        "excluded_purchase_summaries": [
+            _build_purchase_summary_preview_row(summary) for summary in excluded_purchase_summaries
+        ],
         "mapped_purchase_row_count": len(mapped_rows),
         "mapped_preview_items": [_compact_purchase_row(row) for row in mapped_rows[:20]],
         "writeback_targets": [PURCHASE_FIELD_LABELS[field] for field in PURCHASE_WRITEBACK_FIELDS],

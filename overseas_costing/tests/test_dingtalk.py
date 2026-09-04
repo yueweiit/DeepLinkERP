@@ -1973,6 +1973,63 @@ def test_sync_linked_purchase_fields_persists_rejected_purchase_status(monkeypat
     assert saved_link["message"] == "总经理拒绝，本次不采购。"
 
 
+def test_sync_linked_purchase_fields_does_not_apply_when_all_purchases_are_excluded(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    apply_calls = []
+    monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(import_oa_logistics, "_persist_linked_purchase_approval_statuses", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        import_service,
+        "preview_linked_purchase_expense_oa",
+        lambda **_kwargs: {
+            "ok": True,
+            "mapped_preview_items": [],
+            "purchase_summaries": [
+                {
+                    "source_approval_no": "PUR-REFUSED-001",
+                    "source_instance_id": "PROC-PUR-REFUSED",
+                    "process_status": "COMPLETED",
+                    "approval_result": "refuse",
+                    "effective_status": "REJECTED",
+                    "approval_status": "REJECTED",
+                    "excluded": True,
+                }
+            ],
+            "excluded_purchase_summary_count": 1,
+            "excluded_purchase_summaries": [
+                {
+                    "source_approval_no": "PUR-REFUSED-001",
+                    "source_instance_id": "PROC-PUR-REFUSED",
+                    "effective_status": "REJECTED",
+                    "excluded": True,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        import_service,
+        "apply_linked_purchase_expense_fillable_fields",
+        lambda **kwargs: apply_calls.append(kwargs) or {"ok": True},
+    )
+
+    result = _sync_linked_purchase_fields(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={
+            "linked_purchase_approvals": [
+                {"approval_no": "PUR-REFUSED-001", "source_instance_id": "PROC-PUR-REFUSED"}
+            ]
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "skipped"
+    assert result["excluded_purchase_count"] == 1
+    assert apply_calls == []
+
+
 def test_purchase_expense_rows_from_preview_excludes_rejected_approvals() -> None:
     rows = _purchase_expense_rows_from_preview(
         {

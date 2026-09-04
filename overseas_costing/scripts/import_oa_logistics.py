@@ -4473,6 +4473,22 @@ def _sync_linked_purchase_fields(
                 summaries=purchase_summaries,
             )
         purchase_rows = _purchase_expense_rows_from_preview(preview_result)
+        excluded_purchase_count = int(preview_result.get("excluded_purchase_summary_count") or 0)
+        if purchase_summaries and excluded_purchase_count >= len(purchase_summaries):
+            return {
+                "action": "skipped",
+                "sync_strategy": "excluded_purchase_approvals",
+                "ok": True,
+                "linked_purchase_count": len(linked_approvals),
+                "excluded_purchase_count": excluded_purchase_count,
+                "updated_count": 0,
+                "changed_field_count": 0,
+                "skipped_count": len(purchase_summaries),
+                "unmatched_count": 0,
+                "ambiguous_count": 0,
+                "message": "关联采购审批已拒绝、撤销或终止，已排除对应采购数据和成本写入。",
+                "excluded_purchase_summaries": preview_result.get("excluded_purchase_summaries") or [],
+            }
         if preview_result.get("ok") and purchase_rows:
             rebuild_result = _replace_items_with_purchase_expense_rows(
                 batch_name=batch_name,
