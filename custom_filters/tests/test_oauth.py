@@ -47,6 +47,54 @@ class TestEIMSOAuth(TestCase):
 			"/api/method/custom_filters.overrides.oauth.start_eims_login?redirect_to=%2Fdesk",
 		)
 
+	def test_eims_referrer_matches_authorization_origin(self):
+		with patch.object(
+			oauth.frappe,
+			"get_request_header",
+			return_value="http://192.168.5.238:8006/",
+		), patch.object(oauth, "_get_eims_provider", return_value="eims"), patch.object(
+			oauth,
+			"get_oauth2_providers",
+			return_value={
+				"eims": {
+					"flow_params": {
+						"authorize_url": "http://192.168.5.238:8006/oauth/authorize"
+					}
+				}
+			},
+		):
+			self.assertTrue(oauth._is_eims_referrer())
+
+	def test_other_referrer_does_not_start_eims_login(self):
+		with patch.object(
+			oauth.frappe,
+			"get_request_header",
+			return_value="http://192.168.5.238:8001/desk",
+		):
+			self.assertFalse(oauth._is_eims_referrer())
+
+	def test_eims_entry_supports_no_referrer_fetch_metadata(self):
+		local = SimpleNamespace(args={})
+		headers = {
+			"Referer": "",
+			"Sec-Fetch-Site": "same-site",
+			"Sec-Fetch-Mode": "navigate",
+			"Sec-Fetch-Dest": "document",
+		}
+		with patch.object(oauth.frappe, "local", local), patch.object(
+			oauth.frappe,
+			"get_request_header",
+			side_effect=lambda key, default="": headers.get(key, default),
+		), patch.object(oauth, "_is_eims_referrer", return_value=False):
+			self.assertTrue(oauth._is_eims_entry_request())
+
+	def test_direct_entry_without_eims_signal_is_not_redirected(self):
+		local = SimpleNamespace(args={})
+		with patch.object(oauth.frappe, "local", local), patch.object(
+			oauth.frappe, "get_request_header", return_value=""
+		), patch.object(oauth, "_is_eims_referrer", return_value=False):
+			self.assertFalse(oauth._is_eims_entry_request())
+
 	def test_provider_name_comes_from_site_config(self):
 		with patch.object(
 			oauth.frappe,

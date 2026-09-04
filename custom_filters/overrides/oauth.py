@@ -4,7 +4,7 @@ import hmac
 import json
 import pickle
 import secrets
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import frappe
 import redis
@@ -25,6 +25,7 @@ EIMS_PROVIDER_FALLBACK = "eims"
 EIMS_USER_ID_FIELD = "custom_eims_app_user_id"
 EIMS_HOME_PATH = "/desk"
 EIMS_START_PATH = "/api/method/custom_filters.overrides.oauth.start_eims_login"
+EIMS_ENTRY_QUERY_PARAM = "from_eims"
 EIMS_STATE_PREFIX = "eims_oauth_state:"
 EIMS_BROWSER_NONCE_COOKIE = "eims_oauth_nonce"
 EIMS_STATE_TTL_SECONDS = 10 * 60
@@ -299,19 +300,69 @@ def _redact_log_payload(value):
 
 
 def redirect_guest_home_to_eims(path: str):
-	"""Start SSO when an unauthenticated user opens the ERP home page."""
+	"""Start SSO for the legacy EIMS link without changing direct ERP access."""
 	from frappe.website.path_resolver import resolve_path
 
 	provider = _get_eims_provider()
 	if (
-		path in ("", "app", "desk")
+		path in ("", "/")
 		and frappe.session.user == "Guest"
 		and frappe.db.get_value("Social Login Key", provider, "enable_social_login")
+		and _is_eims_entry_request()
 	):
 		frappe.flags.redirect_location = _build_start_url(EIMS_HOME_PATH)
 		raise frappe.Redirect(302)
 
 	return resolve_path(path)
+
+
+def _is_eims_entry_request() -> bool:
+	"""Identify EIMS entry navigation without redirecting direct ERP visits."""
+	request = getattr(frappe.local, "request", None)
+	args = getattr(request, "args", None)
+	if args and args.get(EIMS_ENTRY_QUERY_PARAM) in {"1", "true", "yes"}:
+		return True
+
+	if _is_eims_referrer():
+		return True
+
+	# EIMS sends Referrer-Policy: no-referrer. Modern browsers still send
+	# Fetch Metadata for a same-site navigation from EIMS (same host, port 8006).
+	# This keeps the legacy root link working while a direct address-bar visit
+	# remains Sec-Fetch-Site: none.
+	return (
+		not frappe.get_request_header("Referer", "")
+		and frappe.get_request_header("Sec-Fetch-Site", "").lower() == "same-site"
+		and frappe.get_request_header("Sec-Fetch-Mode", "").lower() == "navigate"
+		and frappe.get_request_header("Sec-Fetch-Dest", "").lower() == "document"
+	)
+
+
+def _is_eims_referrer() -> bool:
+	"""Allow the legacy home link only when navigation came from EIMS."""
+	referrer = frappe.get_request_header("Referer", "")
+	if not referrer:
+		return False
+
+	try:
+		providers = get_oauth2_providers()
+		provider_config = providers.get(_get_eims_provider()) or {}
+		authorize_url = provider_config.get("flow_params", {}).get("authorize_url")
+		return _url_origin(referrer) == _url_origin(authorize_url)
+	except (AttributeError, RuntimeError, TypeError, ValueError):
+		return False
+
+
+def _url_origin(url: str | None):
+	if not isinstance(url, str) or not url:
+		return None
+
+	parsed = urlsplit(url)
+	if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+		return None
+
+	port = parsed.port or (443 if parsed.scheme == "https" else 80)
+	return parsed.scheme.lower(), parsed.hostname.lower().rstrip("."), port
 
 
 def _get_eims_provider() -> str:
