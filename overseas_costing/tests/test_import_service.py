@@ -1028,6 +1028,7 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
                     "batch": "BATCH-DOC",
                     "version": "VER-DOC",
                     "source_type": "OA",
+                    "oa_attachment_origin": "Comment",
                     "attachment_type": "Packing List",
                     "source_doc_no": "202607220001::FILE-001",
                     "file_name": "装箱单.xlsx",
@@ -1039,7 +1040,10 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
                             "file_id": "FILE-001",
                             "space_id": "SPACE-001",
                             "file_ext": "xlsx",
-                            "comment_attachments_included": False,
+                            "comment_attachments_included": True,
+                            "comment_user_name": "张三",
+                            "comment_time": "2026-09-01 10:00:00",
+                            "comment_remark": "补充装箱单",
                             "last_download_error": {
                                 "error_type": "dingtalk_attachment_file_access",
                                 "message": "当前账号无附件访问权",
@@ -1049,7 +1053,7 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
                     "mapped_result_json": attachment_parse_service._json_dumps(
                         {"parse_targets": ["actual_shipped_qty", "gross_weight_kg", "volume_m3"]}
                     ),
-                    "remark": "钉钉发起表单附件已登记，等待下载和解析；评论附件暂不导入。",
+                    "remark": "钉钉评论附件已登记，等待归档。",
                 }
             ]
 
@@ -1058,13 +1062,15 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
     result = list_oa_form_attachments(batch_name="FSCU8486789")
 
     assert result["ok"] is True
-    assert result["comment_attachments_included"] is False
+    assert result["comment_attachments_included"] is True
     assert result["total"] == 1
     assert result["items"][0]["file_name"] == "装箱单.xlsx"
     assert result["items"][0]["file_id"] == "FILE-001"
     assert result["items"][0]["can_download"] is True
     assert result["items"][0]["parse_targets"] == ["actual_shipped_qty", "gross_weight_kg", "volume_m3"]
     assert result["items"][0]["last_download_error"]["error_type"] == "dingtalk_attachment_file_access"
+    assert result["items"][0]["oa_attachment_origin"] == "Comment"
+    assert result["items"][0]["comment_user_name"] == "张三"
 
 
 def test_download_oa_form_attachment_saves_file_url_and_keeps_trace(monkeypatch) -> None:
@@ -1147,6 +1153,156 @@ def test_download_oa_form_attachment_saves_file_url_and_keeps_trace(monkeypatch)
     assert attachment_doc.parse_status == "Queued"
     assert updated_snapshot["download"]["file_id"] == "FILE-001"
     assert commit_count["value"] == 1
+
+
+def test_download_oa_attachment_reads_verified_minio_archive_in_postgres_mode(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    commit_count = {"value": 0}
+
+    class FakeAttachmentDoc:
+        name = "ATTACH-ARCHIVED"
+        source_type = "OA"
+        oa_attachment_origin = "Comment"
+        attachment_type = "Packing List"
+        file_name = "comment-packing.xlsx"
+        file_url = ""
+        parse_status = "Queued"
+        remark = ""
+        parse_result_json = json.dumps(
+            {
+                "source": "dingtalk_oa_comment_attachment",
+                "instance_id": "PROC-SEA-001",
+                "file_id": "FILE-COMMENT-001",
+                "space_id": "SPACE-001",
+                "comment_user_name": "张三",
+                "comment_time": "2026-09-01 10:00:00",
+                "comment_remark": "补充装箱单",
+            },
+            ensure_ascii=False,
+        )
+
+        def save(self, **_kwargs):
+            return self
+
+    attachment_doc = FakeAttachmentDoc()
+
+    class FakeDB:
+        @staticmethod
+        def commit():
+            commit_count["value"] += 1
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_doc(*args):
+            assert args == ("Overseas Cost Attachment", "ATTACH-ARCHIVED")
+            return attachment_doc
+
+    class FakeSource:
+        @staticmethod
+        def get_attachment_manifest(process_instance_id, file_id):
+            assert (process_instance_id, file_id) == ("PROC-SEA-001", "FILE-COMMENT-001")
+            return {
+                "archive_status": "archived",
+                "object_key": "corp/PROC-SEA-001/FILE-COMMENT-001",
+                "actual_size": 13,
+                "sha256": "abc",
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "archived_at": "2026-09-04T03:16:00+00:00",
+            }
+
+    class FakeArchiveClient:
+        @staticmethod
+        def download(manifest):
+            assert manifest["archive_status"] == "archived"
+            return b"archived-data", {
+                "content_length": 13,
+                "sha256": "abc",
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "object_key": manifest["object_key"],
+                "archive_status": "archived",
+            }
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "resolve_approval_source_mode", lambda: "postgres")
+    monkeypatch.setattr(import_service, "_get_oa_postgres_source", lambda: FakeSource())
+    monkeypatch.setattr(import_service, "_get_minio_archive_client", lambda: FakeArchiveClient())
+    monkeypatch.setattr(
+        import_service,
+        "_save_content_as_frappe_file",
+        lambda **_kwargs: {"file_url": "/private/files/comment-packing.xlsx"},
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "get_access_token",
+        lambda **_kwargs: pytest.fail("归档模式不应请求钉钉 token"),
+    )
+
+    result = download_oa_form_attachment("ATTACH-ARCHIVED")
+    snapshot = json.loads(attachment_doc.parse_result_json)
+
+    assert result["ok"] is True
+    assert result["data_source"] == "minio_archive"
+    assert result["archive_status"] == "archived"
+    assert result["fallback_used"] is False
+    assert attachment_doc.file_url == "/private/files/comment-packing.xlsx"
+    assert snapshot["download"]["sha256"] == "abc"
+    assert snapshot["download"]["object_key"].endswith("FILE-COMMENT-001")
+    assert snapshot["comment_user_name"] == "张三"
+    assert commit_count["value"] == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_message", "manual"),
+    [
+        ("retry", "附件正在归档", False),
+        ("manual_required", "历史附件已失效", True),
+    ],
+)
+def test_download_oa_attachment_reports_archive_state(monkeypatch, status, expected_message, manual) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    class FakeAttachmentDoc:
+        source_type = "OA"
+        file_name = "packing.xlsx"
+        file_url = ""
+        parse_status = "Queued"
+        remark = ""
+        parse_result_json = json.dumps({"instance_id": "PROC-1", "file_id": "FILE-1"})
+
+        def save(self, **_kwargs):
+            return self
+
+    class FakeFrappe:
+        class db:
+            @staticmethod
+            def commit():
+                return None
+
+        @staticmethod
+        def get_doc(*_args):
+            return FakeAttachmentDoc()
+
+    class FakeSource:
+        @staticmethod
+        def get_attachment_manifest(*_args):
+            return {"archive_status": status, "last_error": "历史附件已失效" if manual else "temporary"}
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "resolve_approval_source_mode", lambda: "postgres")
+    monkeypatch.setattr(import_service, "_get_oa_postgres_source", lambda: FakeSource())
+
+    result = download_oa_form_attachment("ATTACH-1")
+
+    assert result["ok"] is False
+    assert result["archive_status"] == status
+    assert expected_message in result["message"]
+    assert result["needs_manual_upload"] is manual
+    assert result["fallback_used"] is False
 
 
 def test_fetch_dingtalk_attachment_content_passes_signed_headers(monkeypatch) -> None:

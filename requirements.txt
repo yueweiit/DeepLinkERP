@@ -1,3 +1,5 @@
 # 中文用途：后端额外依赖清单。
 #
 openpyxl>=3.1.0
+psycopg[binary]>=3.1,<4
+minio>=7.2,<8

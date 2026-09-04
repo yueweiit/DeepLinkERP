@@ -28,6 +28,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     extract_logistics_fee_from_approval,
     extract_logistics_quote_candidates_from_approval,
     extract_logistics_text_summary_from_approval,
+    extract_approval_attachments,
     extract_form_attachments,
     extract_oa_goods_rows,
     extract_form_fields,
@@ -783,7 +784,7 @@ def test_extract_linked_purchase_approvals_from_top_level_related_payload() -> N
     assert linked[0]["source_instance_id"] == "PROC-PURCHASE-TOP"
 
 
-def test_extract_form_attachments_ignores_comment_attachments() -> None:
+def test_extract_form_attachments_remains_form_only_while_summary_includes_comments() -> None:
     instance = {
         "processInstanceId": "PROC-SEA-ATTACH",
         "businessId": "202607220001",
@@ -843,10 +844,87 @@ def test_extract_form_attachments_ignores_comment_attachments() -> None:
     assert attachments[1]["attachment_type"] == "Logistics Bill"
     assert "评论里的凭证.pdf" not in [row["file_name"] for row in attachments]
     assert summary["oa_form_attachment_count"] == 2
-    assert values["source_attachment_count"] == 2
+    assert summary["oa_comment_attachment_count"] == 1
+    assert values["source_attachment_count"] == 3
     assert values["subsidiary_code"] == "YW MOLDES MX模具"
     assert extra["oa_form_attachments"][0]["file_id"] == "FILE-001"
+    assert extra["oa_comment_attachments"][0]["file_id"] == "COMMENT-FILE-001"
     assert extra["subsidiary"]["subsidiary_code"] == "YW MOLDES MX模具"
+
+
+def test_extract_approval_attachments_includes_form_and_operation_record_files() -> None:
+    shared = {
+        "fileName": "重复凭证.pdf",
+        "fileId": "FILE-SHARED",
+        "spaceId": "SPACE-001",
+        "fileSize": 128,
+    }
+    instance = {
+        "processInstanceId": "PROC-SEA-ATTACH",
+        "formComponentValues": [
+            {
+                "componentType": "DDAttachment",
+                "name": "物品清单",
+                "value": json.dumps(
+                    [
+                        {
+                            "fileName": "packing.xlsx",
+                            "fileId": "FILE-FORM",
+                            "spaceId": "SPACE-001",
+                        },
+                        shared,
+                    ],
+                    ensure_ascii=False,
+                ),
+            }
+        ],
+        "operationRecords": [
+            {
+                "userId": "COMMENTER-001",
+                "date": "2026-09-03 10:00:00",
+                "remark": "补充凭证",
+                "attachments": [shared, {"fileName": "评论附件.png", "fileId": "FILE-COMMENT", "spaceId": "SPACE-002"}],
+            }
+        ],
+    }
+
+    attachments = extract_approval_attachments(instance)
+
+    assert [item["file_id"] for item in attachments] == ["FILE-FORM", "FILE-SHARED", "FILE-COMMENT"]
+    assert [item["origin"] for item in attachments] == ["Form", "Form", "Comment"]
+    assert attachments[2]["comment_user_id"] == "COMMENTER-001"
+    assert attachments[2]["comment_time"] == "2026-09-03 10:00:00"
+    assert attachments[2]["comment_remark"] == "补充凭证"
+
+
+def test_summarize_approval_counts_form_and_comment_attachments() -> None:
+    instance = {
+        "processInstanceId": "PROC-SEA-ATTACH",
+        "businessId": "OA-001",
+        "formComponentValues": [
+            {
+                "componentType": "DDAttachment",
+                "name": "物品清单",
+                "value": json.dumps([{"fileName": "packing.xlsx", "fileId": "FILE-FORM"}]),
+            }
+        ],
+        "operationRecords": [
+            {
+                "userId": "COMMENTER-001",
+                "attachments": [{"fileName": "评论附件.pdf", "fileId": "FILE-COMMENT"}],
+            }
+        ],
+    }
+
+    summary = summarize_approval(instance)
+    values = build_batch_values_from_approval(summary)
+    extra = json.loads(values["extra_json"])
+
+    assert summary["oa_attachment_count"] == 2
+    assert summary["oa_form_attachment_count"] == 1
+    assert summary["oa_comment_attachment_count"] == 1
+    assert values["source_attachment_count"] == 2
+    assert [item["origin"] for item in extra["oa_attachments"]] == ["Form", "Comment"]
 
 
 def test_extract_subsidiary_from_approval_uses_business_entity_name() -> None:
@@ -1658,7 +1736,7 @@ def test_existing_oa_batch_refreshes_transport_mode(monkeypatch) -> None:
     assert audits[0]["field_name"] == "oa_logistics_trace"
 
 
-def test_sync_oa_form_attachments_creates_attachment_records(monkeypatch) -> None:
+def test_sync_oa_form_attachments_creates_form_and_comment_records(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 
     inserted_attachments = []
@@ -1709,8 +1787,9 @@ def test_sync_oa_form_attachments_creates_attachment_records(monkeypatch) -> Non
         approval_item={
             "source_approval_no": "202607220001",
             "source_instance_id": "PROC-SEA-ATTACH",
-            "oa_form_attachments": [
+            "oa_attachments": [
                 {
+                    "origin": "Form",
                     "source_field": "Adjunto物品清单/运费报价等附件信息",
                     "component_type": "DDAttachment",
                     "file_id": "FILE-001",
@@ -1720,12 +1799,27 @@ def test_sync_oa_form_attachments_creates_attachment_records(monkeypatch) -> Non
                     "file_url": "",
                     "attachment_type": "Packing List",
                     "raw": {"fileName": "2026.7.3DHL快递清单.xlsx", "fileId": "FILE-001"},
+                },
+                {
+                    "origin": "Comment",
+                    "source_field": "operationRecords",
+                    "component_type": "CommentAttachment",
+                    "file_id": "FILE-002",
+                    "space_id": "SPACE-002",
+                    "file_name": "评论凭证.pdf",
+                    "file_ext": "pdf",
+                    "file_url": "",
+                    "attachment_type": "Other",
+                    "comment_user_id": "COMMENTER-001",
+                    "comment_time": "2026-09-03 10:00:00",
+                    "comment_remark": "补充凭证",
+                    "raw": {"fileName": "评论凭证.pdf", "fileId": "FILE-002"},
                 }
             ],
         },
     )
 
-    assert result["created_count"] == 1
+    assert result["created_count"] == 2
     assert inserted_attachments[0]["batch"] == "BATCH-001"
     assert inserted_attachments[0]["version"] == "VER-001"
     assert inserted_attachments[0]["source_type"] == "OA"
@@ -1733,8 +1827,12 @@ def test_sync_oa_form_attachments_creates_attachment_records(monkeypatch) -> Non
     assert inserted_attachments[0]["file_name"] == "2026.7.3DHL快递清单.xlsx"
     assert inserted_attachments[0]["parse_status"] == "Queued"
     assert "FILE-001" in inserted_attachments[0]["source_doc_no"]
-    assert json.loads(inserted_attachments[0]["parse_result_json"])["comment_attachments_included"] is False
-    assert inserted_audits[0]["field_name"] == "oa_form_attachments"
+    assert inserted_attachments[0]["oa_attachment_origin"] == "Form"
+    assert inserted_attachments[1]["oa_attachment_origin"] == "Comment"
+    comment_snapshot = json.loads(inserted_attachments[1]["parse_result_json"])
+    assert comment_snapshot["comment_user_id"] == "COMMENTER-001"
+    assert comment_snapshot["comment_attachments_included"] is True
+    assert inserted_audits[0]["field_name"] == "oa_attachments"
 
 
 def test_sync_linked_purchase_fields_applies_existing_import_service(monkeypatch) -> None:

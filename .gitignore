@@ -20,3 +20,4 @@ tmp/
 site_config*.json
 *_site_config*.json
 *site_config_backup*.json
+.venv/

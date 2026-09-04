@@ -11,6 +11,7 @@
     "batch",
     "version",
     "source_type",
+    "oa_attachment_origin",
     "attachment_type",
     "source_doc_no",
     "file_name",
@@ -40,6 +41,15 @@
       "label": "来源类型",
       "options": "OA\nExcel\nManual\nVoucher\nAttachment",
       "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "oa_attachment_origin",
+      "fieldtype": "Select",
+      "label": "OA附件位置",
+      "options": "Form\nComment",
+      "default": "Form",
+      "depends_on": "eval:doc.source_type == 'OA'",
       "in_list_view": 1
     },
     {

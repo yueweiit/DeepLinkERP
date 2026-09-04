@@ -27,6 +27,11 @@ except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导�
     frappe = None
 
 from overseas_costing.services import attachment_parse_service
+from overseas_costing.integrations.dingtalk_approval_source import (
+    ArchiveIntegrityError,
+    ArchiveNotReady,
+    MinioArchiveClient,
+)
 from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
 from overseas_costing.utils.excel_blocks import (
     select_excel_blocks,
@@ -1305,8 +1310,164 @@ def _attach_existing_file_to_attachment(file_url: str, attachment_name: str) -> 
         return
 
 
+def _get_oa_postgres_source():
+    from overseas_costing.scripts.import_oa_logistics import _get_postgres_approval_source
+
+    return _get_postgres_approval_source()
+
+
+def _get_minio_archive_client() -> MinioArchiveClient:
+    from minio import Minio
+
+    from overseas_costing.scripts.import_oa_logistics import _runtime_config_bool, _runtime_config_value
+
+    endpoint = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_MINIO_ENDPOINT",
+        "overseas_costing_oa_minio_endpoint",
+        default="10.203.0.1:9000",
+    )
+    bucket = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_MINIO_BUCKET",
+        "overseas_costing_oa_minio_bucket",
+        default="dingtalk-approval-archive",
+    )
+    access_key = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_MINIO_ACCESS_KEY",
+        "overseas_costing_oa_minio_access_key",
+    )
+    secret_key = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_MINIO_SECRET_KEY",
+        "overseas_costing_oa_minio_secret_key",
+    )
+    if not endpoint or not bucket or not access_key or not secret_key:
+        raise ValueError("缺少 MinIO OA 归档读取配置（endpoint/bucket/access key/secret key）。")
+    client = Minio(
+        endpoint,
+        access_key=access_key,
+        secret_key=secret_key,
+        secure=_runtime_config_bool(
+            "OVERSEAS_COSTING_OA_MINIO_SECURE",
+            "overseas_costing_oa_minio_secure",
+            default=False,
+        ),
+    )
+    return MinioArchiveClient(bucket=bucket, client=client)
+
+
+def _download_oa_attachment_from_archive(
+    *,
+    attachment_doc,
+    attachment_name: str,
+    parse_snapshot: dict,
+    process_instance_id: str,
+    file_id: str,
+    file_name: str,
+) -> dict:
+    manifest = _get_oa_postgres_source().get_attachment_manifest(process_instance_id, file_id)
+    if not manifest:
+        manifest = {"archive_status": "pending", "last_error": "归档清单尚未生成"}
+
+    archive_status = str(manifest.get("archive_status") or "pending")
+    parse_snapshot["archive"] = {
+        "status": archive_status,
+        "object_key": manifest.get("object_key") or "",
+        "source_updated_at": manifest.get("updated_at") or manifest.get("archived_at") or "",
+        "last_error": manifest.get("last_error") or "",
+    }
+    if archive_status != "archived":
+        manual_required = archive_status == "manual_required"
+        if manual_required:
+            reason = str(manifest.get("last_error") or "归档服务已标记为需要人工补传")
+            message = f"附件无法自动归档：{reason}。请从钉钉原单手动下载后上传。"
+            attachment_doc.parse_status = "Failed"
+        else:
+            message = "附件正在归档，请稍后重试。"
+        attachment_doc.parse_result_json = _json_dumps(parse_snapshot)
+        attachment_doc.remark = message[:500]
+        attachment_doc.save(ignore_permissions=True)
+        if hasattr(frappe.db, "commit"):
+            frappe.db.commit()
+        return {
+            "ok": False,
+            "downloaded": False,
+            "attachment_name": attachment_name,
+            "file_name": file_name,
+            "data_source": "minio_archive",
+            "archive_status": archive_status,
+            "fallback_used": False,
+            "needs_manual_upload": manual_required,
+            "message": message,
+        }
+
+    try:
+        content, response_meta = _get_minio_archive_client().download(manifest)
+        file_doc = _save_content_as_frappe_file(
+            file_name=file_name,
+            content=content,
+            attached_to_name=attachment_name,
+        )
+    except (ArchiveIntegrityError, ArchiveNotReady) as exc:
+        return {
+            "ok": False,
+            "downloaded": False,
+            "attachment_name": attachment_name,
+            "file_name": file_name,
+            "data_source": "minio_archive",
+            "archive_status": archive_status,
+            "fallback_used": False,
+            "message": f"归档附件校验失败：{exc}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "downloaded": False,
+            "attachment_name": attachment_name,
+            "file_name": file_name,
+            "data_source": "minio_archive",
+            "archive_status": archive_status,
+            "fallback_used": False,
+            "message": f"MinIO 归档读取失败：{exc}",
+        }
+
+    file_url = _get_doc_value(file_doc, "file_url") or ""
+    parse_snapshot.pop("last_download_error", None)
+    parse_snapshot["download"] = {
+        "source": "minio_archive",
+        "process_instance_id": process_instance_id,
+        "file_id": file_id,
+        "object_key": response_meta.get("object_key") or manifest.get("object_key") or "",
+        "sha256": response_meta.get("sha256") or manifest.get("sha256") or "",
+        "content_type": response_meta.get("content_type") or "",
+        "content_length": response_meta.get("content_length") or len(content),
+        "archived_at": manifest.get("archived_at") or "",
+    }
+    attachment_doc.file_url = file_url
+    attachment_doc.parse_status = getattr(attachment_doc, "parse_status", "") or "Queued"
+    attachment_doc.parse_result_json = _json_dumps(parse_snapshot)
+    origin = getattr(attachment_doc, "oa_attachment_origin", "") or parse_snapshot.get("attachment_origin") or "Form"
+    attachment_doc.remark = f"钉钉{'评论' if origin == 'Comment' else '表单'}附件已从 MinIO 归档保存，可继续解析。"
+    attachment_doc.save(ignore_permissions=True)
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+    return {
+        "ok": True,
+        "downloaded": True,
+        "attachment_name": attachment_name,
+        "file_name": file_name,
+        "source_file_name": file_name,
+        "file_url": file_url,
+        "content_type": response_meta.get("content_type") or "",
+        "content_length": response_meta.get("content_length") or len(content),
+        "data_source": "minio_archive",
+        "source_updated_at": manifest.get("updated_at") or manifest.get("archived_at") or None,
+        "archive_status": "archived",
+        "fallback_used": False,
+        "message": "归档附件已保存，可下载或继续解析。",
+    }
+
+
 def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
-    """返回钉钉发起表单附件记录；评论附件本阶段不纳入。"""
+    """返回钉钉表单和评论附件记录。"""
 
     if frappe is None:
         return {
@@ -1337,6 +1498,7 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
             "batch",
             "version",
             "source_type",
+            "oa_attachment_origin",
             "attachment_type",
             "source_doc_no",
             "file_name",
@@ -1362,12 +1524,14 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
             source_preview.get("classification") if isinstance(source_preview.get("classification"), dict) else {}
         )
         last_download_error = parse_result.get("last_download_error") if isinstance(parse_result.get("last_download_error"), dict) else {}
+        archive = parse_result.get("archive") if isinstance(parse_result.get("archive"), dict) else {}
         items.append(
             {
                 "name": row.get("name"),
                 "batch": row.get("batch"),
                 "version": row.get("version"),
                 "attachment_type": row.get("attachment_type") or "Other",
+                "oa_attachment_origin": row.get("oa_attachment_origin") or parse_result.get("attachment_origin") or "Form",
                 "source_doc_no": row.get("source_doc_no") or "",
                 "file_name": row.get("file_name") or "",
                 "file_url": row.get("file_url") or "",
@@ -1384,6 +1548,13 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
                 "extraction_method": source_preview.get("extraction_method") or "",
                 "text_length": source_preview.get("text_length") or 0,
                 "last_download_error": last_download_error,
+                "comment_user_name": parse_result.get("comment_user_name") or "",
+                "comment_time": parse_result.get("comment_time") or "",
+                "comment_remark": parse_result.get("comment_remark") or "",
+                "archive_status": archive.get("status") or ("downloaded" if row.get("file_url") else "pending"),
+                "data_source": "minio_archive" if archive else "dingtalk_api",
+                "source_updated_at": archive.get("source_updated_at") or row.get("modified"),
+                "fallback_used": False,
                 "can_download": bool(parse_result.get("file_id")) and not bool(row.get("file_url")),
                 "remark": row.get("remark") or "",
                 "creation": row.get("creation"),
@@ -1397,8 +1568,8 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
         "batch_doc_name": batch_doc_name,
         "items": items,
         "total": len(items),
-        "comment_attachments_included": False,
-        "message": "钉钉发起表单附件记录已返回；评论附件未纳入。",
+        "comment_attachments_included": True,
+        "message": "钉钉表单和评论附件记录已返回。",
     }
 
 
@@ -1407,7 +1578,7 @@ def download_oa_form_attachment(
     env_file: str | None = None,
     access_token: str | None = None,
 ) -> dict:
-    """下载钉钉审批发起表单附件，并回填系统文件地址。"""
+    """从 MinIO 归档（或人工应急 API）下载 OA 表单/评论附件。"""
 
     resolved_attachment_name = str(attachment_name or "").strip()
     if not resolved_attachment_name:
@@ -1482,6 +1653,18 @@ def download_oa_form_attachment(
         }
 
     file_name = str(getattr(attachment_doc, "file_name", "") or raw_attachment.get("fileName") or file_id).strip()
+    from overseas_costing.scripts.import_oa_logistics import resolve_approval_source_mode
+
+    if resolve_approval_source_mode() == "postgres":
+        return _download_oa_attachment_from_archive(
+            attachment_doc=attachment_doc,
+            attachment_name=resolved_attachment_name,
+            parse_snapshot=parse_snapshot,
+            process_instance_id=process_instance_id,
+            file_id=file_id,
+            file_name=file_name,
+        )
+
     try:
         from overseas_costing.scripts.import_oa_logistics import (
             get_access_token,
@@ -1651,7 +1834,7 @@ def download_oa_form_attachment(
     attachment_doc.file_url = file_url
     attachment_doc.parse_status = getattr(attachment_doc, "parse_status", "") or "Queued"
     attachment_doc.parse_result_json = _json_dumps(parse_snapshot)
-    attachment_doc.remark = "钉钉发起表单附件已保存，可在附件列表中下载到本地；评论附件暂不处理。"
+    attachment_doc.remark = "钉钉 OA 附件已通过人工应急 API 保存，可继续解析。"
     attachment_doc.save(ignore_permissions=True)
     if hasattr(frappe.db, "commit"):
         frappe.db.commit()
@@ -1665,7 +1848,11 @@ def download_oa_form_attachment(
         "file_url": file_url,
         "content_type": response_meta.get("content_type") or "",
         "content_length": response_meta.get("content_length") or len(content),
-        "message": "钉钉附件已保存，可点击下载到本地，也可以继续解析预览。",
+        "data_source": "dingtalk_api",
+        "source_updated_at": None,
+        "archive_status": "api_emergency",
+        "fallback_used": True,
+        "message": "钉钉附件已通过人工应急 API 保存，可继续解析。",
     }
 
 

@@ -42,6 +42,7 @@ PACKAGE_ROOT = CURRENT_FILE.parents[2]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
+from overseas_costing.integrations.dingtalk_approval_source import ApprovalSourceConfig, PostgresApprovalSource
 from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
 from overseas_costing.utils.field_mapper import (
     map_oa_row_to_item,
@@ -327,7 +328,81 @@ def _runtime_config_bool(*keys: str, default: bool = False) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on", "开启", "启用")
 
 
+def resolve_approval_source_mode() -> str:
+    """返回 OA 读取源。默认保持 API，生产通过 site_config 显式切换。"""
+
+    mode = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_SOURCE",
+        "overseas_costing_oa_source",
+        default="api",
+    ).lower()
+    if mode not in ("api", "postgres"):
+        raise ValueError(f"不支持的 OA 数据源：{mode}")
+    return mode
+
+
+def _assert_emergency_api_enabled() -> None:
+    """Block explicitly disabled API mode while preserving legacy unset installs."""
+
+    configured = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_EMERGENCY_API_ENABLED",
+        "overseas_costing_oa_emergency_api_enabled",
+    )
+    if configured and not _runtime_config_bool(
+        "OVERSEAS_COSTING_OA_EMERGENCY_API_ENABLED",
+        "overseas_costing_oa_emergency_api_enabled",
+    ):
+        raise PermissionError("钉钉 API 应急开关未开启，禁止消耗接口额度。")
+
+
+def _get_postgres_approval_source() -> PostgresApprovalSource:
+    host = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_DB_HOST",
+        "overseas_costing_oa_db_host",
+        default="10.203.0.1",
+    )
+    database = _runtime_config_value(
+        "OVERSEAS_COSTING_OA_DB_NAME",
+        "overseas_costing_oa_db_name",
+        default="dingtalk_oa",
+    )
+    user = _runtime_config_value("OVERSEAS_COSTING_OA_DB_USER", "overseas_costing_oa_db_user")
+    password = _runtime_config_value("OVERSEAS_COSTING_OA_DB_PASSWORD", "overseas_costing_oa_db_password")
+    if not host or not database or not user or not password:
+        raise ValueError("缺少 PostgreSQL OA 数据源配置（host/name/user/password）。")
+    return PostgresApprovalSource(
+        ApprovalSourceConfig(
+            host=host,
+            port=_runtime_config_int(
+                "OVERSEAS_COSTING_OA_DB_PORT",
+                "overseas_costing_oa_db_port",
+                default=5432,
+            ),
+            database=database,
+            user=user,
+            password=password,
+            sslmode=_runtime_config_value(
+                "OVERSEAS_COSTING_OA_DB_SSLMODE",
+                "overseas_costing_oa_db_sslmode",
+            )
+            or None,
+        )
+    )
+
+
+def _serialize_source_updated_at(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    text = _clean(value)
+    return text or None
+
+
 def _has_dingtalk_pull_credentials() -> bool:
+    if resolve_approval_source_mode() == "postgres":
+        return bool(
+            _runtime_config_value("OVERSEAS_COSTING_OA_DB_USER", "overseas_costing_oa_db_user")
+            and _runtime_config_value("OVERSEAS_COSTING_OA_DB_PASSWORD", "overseas_costing_oa_db_password")
+        )
     if _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"):
         return True
     if _runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key") and _runtime_config_value(
@@ -569,6 +644,10 @@ def get_access_token(
     3. 旧版 OpenAPI：app_key + app_secret
     """
 
+    if resolve_approval_source_mode() == "postgres":
+        return ""
+    _assert_emergency_api_enabled()
+
     token = _clean(access_token) or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token")
     if token:
         return token
@@ -769,6 +848,11 @@ def get_process_instance_detail(*, token: str, process_instance_id: str, api_sty
     """读取单个审批实例详情。"""
 
     instance_id = _clean(process_instance_id)
+    if resolve_approval_source_mode() == "postgres":
+        details = _get_postgres_approval_source().get_instances([instance_id])
+        if instance_id not in details:
+            raise LookupError(f"审批实例不在成本系统数据库白名单视图中：{instance_id}")
+        return details[instance_id]
     resolved_api_style = _resolve_api_style(api_style)
     if resolved_api_style == "legacy":
         try:
@@ -2787,6 +2871,68 @@ def extract_form_attachments(instance: dict) -> list[dict]:
     return _dedupe_attachment_records(records)
 
 
+def extract_approval_attachments(instance: dict) -> list[dict]:
+    """提取审批附件，并保留来源信息。"""
+
+    records = [
+        {
+            **record,
+            "source": "oa_form_attachment",
+            "origin": "Form",
+        }
+        for record in extract_form_attachments(instance)
+    ]
+    operation_records = instance.get("operationRecords") or instance.get("operation_records") or instance.get("comments") or []
+    if isinstance(operation_records, dict):
+        operation_records = [operation_records]
+    for operation in operation_records if isinstance(operation_records, list) else []:
+        if not isinstance(operation, dict):
+            continue
+        comment_user_id = _clean(
+            operation.get("userId")
+            or operation.get("user_id")
+            or operation.get("operatorUserId")
+            or operation.get("operator_user_id")
+        )
+        comment_time = operation.get("date") or operation.get("createTime") or operation.get("create_time") or ""
+        comment_remark = _clean(operation.get("remark") or operation.get("comment") or operation.get("content"))
+        comment_records = _extract_attachments_from_value(
+            operation,
+            source_field="operationRecords",
+            component_type="CommentAttachment",
+            value_source="operationRecords",
+        )
+        records.extend(
+            {
+                **record,
+                "source": "oa_comment_attachment",
+                "origin": "Comment",
+                "comment_user_id": comment_user_id,
+                "comment_time": comment_time,
+                "comment_remark": comment_remark,
+            }
+            for record in comment_records
+        )
+
+    deduped: list[dict] = []
+    seen: set[tuple[str, ...]] = set()
+    for record in records:
+        file_id = _clean(record.get("file_id"))
+        if file_id:
+            key = ("file_id", file_id)
+        else:
+            key = (
+                "fallback",
+                _clean(record.get("file_url")),
+                _clean(record.get("file_name")),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
+
+
 def extract_attachments_from_form_fields(form_fields: dict[str, Any]) -> list[dict]:
     """从已拍平的表单字段中兜底提取附件清单。"""
 
@@ -2861,7 +3007,9 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
 
     fields = extract_form_fields(instance)
     linked_purchase_approvals = extract_linked_purchase_approvals(instance)
-    oa_form_attachments = extract_form_attachments(instance)
+    oa_attachments = extract_approval_attachments(instance)
+    oa_form_attachments = [item for item in oa_attachments if item.get("origin") == "Form"]
+    oa_comment_attachments = [item for item in oa_attachments if item.get("origin") == "Comment"]
     instance_id = (
         _clean(process_instance_id)
         or _clean(instance.get("process_instance_id"))
@@ -2897,8 +3045,12 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "logistics_no": _find_field_value(fields, BATCH_NO_FIELD_ALIASES),
         "linked_purchase_count": len(linked_purchase_approvals),
         "linked_purchase_approvals": linked_purchase_approvals,
+        "oa_attachment_count": len(oa_attachments),
+        "oa_attachments": oa_attachments,
         "oa_form_attachment_count": len(oa_form_attachments),
         "oa_form_attachments": oa_form_attachments,
+        "oa_comment_attachment_count": len(oa_comment_attachments),
+        "oa_comment_attachments": oa_comment_attachments,
         "raw_form_components": _get_form_components(instance),
         "form_fields": fields,
     }
@@ -2922,12 +3074,18 @@ def _compact_extra_json_for_audit(value: Any) -> dict:
     trace = data.get("oa_logistics_trace") if isinstance(data.get("oa_logistics_trace"), dict) else data
     linked_approvals = trace.get("linked_purchase_approvals") if isinstance(trace, dict) else []
     linked_approvals = linked_approvals or []
+    attachments = trace.get("oa_attachments") if isinstance(trace, dict) else []
+    attachments = attachments or []
     form_attachments = trace.get("oa_form_attachments") if isinstance(trace, dict) else []
     form_attachments = form_attachments or []
+    comment_attachments = trace.get("oa_comment_attachments") if isinstance(trace, dict) else []
+    comment_attachments = comment_attachments or []
     return {
         "source": data.get("source"),
         "has_form_fields": bool(trace.get("form_fields")) if isinstance(trace, dict) else False,
         "oa_form_attachment_count": len(form_attachments) if isinstance(form_attachments, list) else 0,
+        "oa_comment_attachment_count": len(comment_attachments) if isinstance(comment_attachments, list) else 0,
+        "oa_attachment_count": len(attachments) if isinstance(attachments, list) else 0,
         "linked_purchase_count": len(linked_approvals) if isinstance(linked_approvals, list) else 0,
         "linked_purchase_approval_nos": [
             linked.get("approval_no") or linked.get("source_approval_no")
@@ -2992,7 +3150,9 @@ def _merge_oa_extra_json(old_value: Any, new_value: Any) -> str:
             "logistics_fee": new_data.get("logistics_fee") or {},
             "logistics_quote_candidates": new_data.get("logistics_quote_candidates") or [],
             "linked_purchase_approvals": new_data.get("linked_purchase_approvals") or [],
+            "oa_attachments": new_data.get("oa_attachments") or [],
             "oa_form_attachments": new_data.get("oa_form_attachments") or [],
+            "oa_comment_attachments": new_data.get("oa_comment_attachments") or [],
             "form_fields": new_data.get("form_fields") or {},
         }
     return _json_dumps(merged)
@@ -3467,6 +3627,19 @@ def pull_linked_purchase_approval_details(
 ) -> list[dict]:
     """按关联审批实例 ID 拉取采购支出详情并返回解析摘要。"""
 
+    source_mode = resolve_approval_source_mode()
+    database_details: dict[str, dict] = {}
+    if source_mode == "postgres":
+        instance_ids = list(
+            dict.fromkeys(
+                _clean(linked.get("source_instance_id") or linked.get("proc_inst_id") or linked.get("instance_id"))
+                for linked in linked_approvals
+                if isinstance(linked, dict)
+                and _clean(linked.get("source_instance_id") or linked.get("proc_inst_id") or linked.get("instance_id"))
+            )
+        )
+        database_details = _get_postgres_approval_source().get_instances(instance_ids)
+
     summaries: list[dict] = []
     for linked in linked_approvals:
         if not isinstance(linked, dict):
@@ -3482,7 +3655,22 @@ def pull_linked_purchase_approval_details(
                 }
             )
             continue
-        detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=api_style)
+        if source_mode == "postgres":
+            detail = database_details.get(instance_id)
+            if detail is None:
+                summaries.append(
+                    {
+                        "ok": False,
+                        "source_approval_no": linked.get("approval_no") or linked.get("source_approval_no") or "",
+                        "source_instance_id": instance_id,
+                        "data_source": "postgres",
+                        "fallback_used": False,
+                        "message": "关联采购审批不在成本系统数据库白名单视图中。",
+                    }
+                )
+                continue
+        else:
+            detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=api_style)
         summary = summarize_purchase_approval(detail, process_instance_id=instance_id)
         if is_hidden_approval_status(summary.get("approval_status")):
             summary["ok"] = False
@@ -3498,6 +3686,8 @@ def pull_linked_purchase_approval_details(
             summary["message"] = "采购支出审批未完成，未用于采购字段同步。"
         else:
             summary["ok"] = True
+        summary["data_source"] = source_mode
+        summary["fallback_used"] = False
         summary["linked_from"] = linked
         summaries.append(summary)
     return summaries
@@ -3555,7 +3745,8 @@ def build_batch_values_from_approval(item: dict) -> dict:
     batch_no = _clean(_first_non_empty(logistics_no, source_approval_no, source_instance_id))
     source_dingtalk_url = _clean(item.get("source_dingtalk_url"))
     oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
-    attachment_count = len(oa_form_attachments) if oa_form_attachments else _count_dingtalk_attachments(form_fields)
+    oa_attachments = item.get("oa_attachments") or oa_form_attachments
+    attachment_count = len(oa_attachments) if oa_attachments else _count_dingtalk_attachments(form_fields)
     transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or "SEA"
     transport_mode_raw = item.get("transport_mode_raw") or ""
     business_type = normalize_business_type(
@@ -3599,7 +3790,9 @@ def build_batch_values_from_approval(item: dict) -> dict:
                 "logistics_fee": item.get("logistics_fee") or extract_logistics_fee_from_approval(item),
                 "logistics_quote_candidates": item.get("logistics_quote_candidates") or extract_logistics_quote_candidates_from_approval(item),
                 "linked_purchase_approvals": item.get("linked_purchase_approvals") or [],
+                "oa_attachments": oa_attachments,
                 "oa_form_attachments": oa_form_attachments,
+                "oa_comment_attachments": item.get("oa_comment_attachments") or [],
                 "subsidiary": subsidiary,
                 "form_fields": form_fields,
             }
@@ -4045,9 +4238,12 @@ def _build_oa_attachment_values(
     approval_item: dict,
     record: dict,
 ) -> dict:
+    origin = _clean(record.get("origin")) or "Form"
+    origin_label = "评论" if origin == "Comment" else "发起表单"
     parse_snapshot = {
-        "source": "dingtalk_oa_form_attachment",
-        "comment_attachments_included": False,
+        "source": "dingtalk_oa_comment_attachment" if origin == "Comment" else "dingtalk_oa_form_attachment",
+        "attachment_origin": origin,
+        "comment_attachments_included": True,
         "approval_no": approval_item.get("source_approval_no") or "",
         "instance_id": approval_item.get("source_instance_id") or "",
         "originator_userid": approval_item.get("originator_userid") or "",
@@ -4057,16 +4253,20 @@ def _build_oa_attachment_values(
         "space_id": record.get("space_id") or "",
         "file_size": record.get("file_size") or "",
         "file_ext": record.get("file_ext") or "",
+        "comment_user_id": record.get("comment_user_id") or "",
+        "comment_time": record.get("comment_time") or "",
+        "comment_remark": record.get("comment_remark") or "",
         "raw_attachment": record.get("raw") or {},
     }
     mapped_snapshot = {
         "parse_targets": _oa_attachment_parse_targets(record),
-        "next_step": "待下载钉钉发起表单附件后解析；评论附件暂未纳入。",
+        "next_step": "待从归档存储下载附件后解析。",
     }
     return {
         "batch": batch_name,
         "version": version_name,
         "source_type": "OA",
+        "oa_attachment_origin": origin,
         "attachment_type": record.get("attachment_type") or "Other",
         "source_doc_no": _oa_attachment_source_doc_no(approval_item, record),
         "file_name": record.get("file_name") or "",
@@ -4074,7 +4274,7 @@ def _build_oa_attachment_values(
         "parse_status": "Queued",
         "parse_result_json": _json_dumps(parse_snapshot),
         "mapped_result_json": _json_dumps(mapped_snapshot),
-        "remark": "钉钉发起表单附件已登记，等待下载和解析；评论附件暂不导入。",
+        "remark": f"钉钉{origin_label}附件已登记，等待归档、下载和解析。",
     }
 
 
@@ -4116,7 +4316,11 @@ def _sync_oa_form_attachments(
     version_name: str,
     approval_item: dict,
 ) -> dict:
-    attachments = approval_item.get("oa_form_attachments") or extract_attachments_from_form_fields(approval_item.get("form_fields") or {})
+    attachments = (
+        approval_item.get("oa_attachments")
+        or approval_item.get("oa_form_attachments")
+        or extract_attachments_from_form_fields(approval_item.get("form_fields") or {})
+    )
     if frappe is None:
         return {
             "action": "preview",
@@ -4131,7 +4335,7 @@ def _sync_oa_form_attachments(
             "attachment_count": 0,
             "created_count": 0,
             "updated_count": 0,
-            "reason": "钉钉发起表单未解析到附件；评论附件本阶段不处理。",
+            "reason": "钉钉审批未解析到表单或评论附件。",
         }
 
     created_names: list[str] = []
@@ -4154,15 +4358,15 @@ def _sync_oa_form_attachments(
     if created_names or updated_names:
         _insert_batch_audit_log(
             batch_name=batch_name,
-            field_name="oa_form_attachments",
+            field_name="oa_attachments",
             old_value=None,
             new_value={
                 "created_count": len(created_names),
                 "updated_count": len(updated_names),
                 "attachment_count": len(attachments),
-                "comment_attachments_included": False,
+                "comment_attachments_included": True,
             },
-            remark="登记钉钉发起表单附件，评论附件暂未纳入",
+            remark="登记钉钉发起表单和评论附件",
         )
 
     return {
@@ -4899,10 +5103,7 @@ def supplement_empty_oa_goods_items(batch_name: str) -> dict:
 
 
 def sync_existing_oa_form_attachments(limit: int | None = 200) -> dict:
-    """从已有 OA 批次的 extra_json.form_fields 回填发起表单附件记录。
-
-    只处理发起表单附件，不处理审批评论附件。
-    """
+    """从已有 OA 批次快照回填表单和评论附件记录。"""
 
     if frappe is None:
         return {
@@ -4936,16 +5137,22 @@ def sync_existing_oa_form_attachments(limit: int | None = 200) -> dict:
     for row in rows:
         root, trace, is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
         form_fields = trace.get("form_fields") or {}
-        attachments = trace.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
+        form_attachments = trace.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
+        comment_attachments = trace.get("oa_comment_attachments") or []
+        attachments = trace.get("oa_attachments") or _dedupe_attachment_records(
+            [*(form_attachments or []), *(comment_attachments or [])]
+        )
         if not attachments:
-            skipped_items.append({"batch_name": row.get("name"), "batch_no": row.get("batch_no"), "reason": "未找到发起表单附件"})
+            skipped_items.append({"batch_name": row.get("name"), "batch_no": row.get("batch_no"), "reason": "未找到表单或评论附件"})
             continue
 
         approval_item = {
             "source_approval_no": row.get("source_approval_no") or trace.get("source_approval_no") or "",
             "source_instance_id": row.get("source_instance_id") or trace.get("source_instance_id") or "",
             "form_fields": form_fields,
-            "oa_form_attachments": attachments,
+            "oa_attachments": attachments,
+            "oa_form_attachments": form_attachments,
+            "oa_comment_attachments": comment_attachments,
         }
         sync_result = _sync_oa_form_attachments(
             batch_name=row.get("name"),
@@ -4955,8 +5162,13 @@ def sync_existing_oa_form_attachments(limit: int | None = 200) -> dict:
         total_created += int(sync_result.get("created_count") or 0)
         total_updated += int(sync_result.get("updated_count") or 0)
 
-        if trace.get("oa_form_attachments") != attachments or int(row.get("source_attachment_count") or 0) != len(attachments):
-            trace = {**trace, "oa_form_attachments": attachments}
+        if trace.get("oa_attachments") != attachments or int(row.get("source_attachment_count") or 0) != len(attachments):
+            trace = {
+                **trace,
+                "oa_attachments": attachments,
+                "oa_form_attachments": form_attachments,
+                "oa_comment_attachments": comment_attachments,
+            }
             frappe.db.set_value(
                 "Overseas Cost Batch",
                 row.get("name"),
@@ -4989,7 +5201,7 @@ def sync_existing_oa_form_attachments(limit: int | None = 200) -> dict:
         "updated_count": total_updated,
         "items": synced_items,
         "skipped_items": skipped_items,
-        "message": "已有 OA 批次的发起表单附件已登记；评论附件未纳入。",
+        "message": "已有 OA 批次的表单和评论附件已登记。",
     }
 
 
@@ -5649,38 +5861,72 @@ def pull_logistics_approvals(
 ) -> dict:
     """拉取并按运输方式筛选国际物流审批单，不写数据库。"""
 
+    source_mode = resolve_approval_source_mode()
     resolved_api_style = _resolve_api_style(api_style)
     resolved_list_api = _resolve_list_api_mode(list_api, resolved_api_style)
     resolved_transport_modes = _parse_transport_modes(transport_modes)
     start_time_ms = _parse_datetime_ms(start)
     end_time_ms = _parse_datetime_ms(end, end_of_day=True)
-    token = get_access_token(
-        api_style=resolved_api_style,
-        access_token=access_token,
-        corp_id=corp_id,
-        client_id=client_id,
-        client_secret=client_secret,
-        app_key=app_key,
-        app_secret=app_secret,
-    )
-    instance_ids = list_process_instance_ids(
-        token=token,
-        process_code=process_code,
-        start_time_ms=start_time_ms,
-        end_time_ms=end_time_ms,
-        api_style=resolved_api_style,
-        list_api=resolved_list_api,
-        page_size=page_size,
-        max_pages=max_pages,
-        chunk_days=chunk_days,
-    )
-    if limit:
-        instance_ids = instance_ids[:limit]
+    source_metadata = {
+        "data_source": source_mode,
+        "source_updated_at": None,
+        "source_lag_seconds": None,
+        "fallback_used": False,
+    }
+    details_by_id: dict[str, dict] = {}
+
+    if source_mode == "postgres":
+        database_result = _get_postgres_approval_source().list_instances(
+            process_code=process_code,
+            start=start,
+            end=end,
+            limit=limit or max(1, page_size * max_pages),
+        )
+        details = database_result.get("items") or []
+        instance_ids = [
+            _clean(detail.get("processInstanceId") or detail.get("process_instance_id"))
+            for detail in details
+        ]
+        instance_ids = [value for value in instance_ids if value]
+        details_by_id = dict(zip(instance_ids, details))
+        source_metadata.update(
+            {
+                "source_updated_at": _serialize_source_updated_at(database_result.get("source_updated_at")),
+                "source_lag_seconds": database_result.get("source_lag_seconds"),
+            }
+        )
+    else:
+        token = get_access_token(
+            api_style=resolved_api_style,
+            access_token=access_token,
+            corp_id=corp_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            app_key=app_key,
+            app_secret=app_secret,
+        )
+        instance_ids = list_process_instance_ids(
+            token=token,
+            process_code=process_code,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            api_style=resolved_api_style,
+            list_api=resolved_list_api,
+            page_size=page_size,
+            max_pages=max_pages,
+            chunk_days=chunk_days,
+        )
+        if limit:
+            instance_ids = instance_ids[:limit]
 
     all_items: list[dict] = []
     matched_items: list[dict] = []
     for instance_id in instance_ids:
-        detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=resolved_api_style)
+        detail = details_by_id.get(instance_id) if source_mode == "postgres" else get_process_instance_detail(
+            token=token,
+            process_instance_id=instance_id,
+            api_style=resolved_api_style,
+        )
         summary = summarize_approval(detail, process_instance_id=instance_id, include_raw=include_raw)
         all_items.append(summary)
         if is_transport_approval(summary["form_fields"], resolved_transport_modes) and not is_hidden_approval_status(summary.get("approval_status")):
@@ -5710,6 +5956,7 @@ def pull_logistics_approvals(
         "filtered_count": len(matched_items),
         "sea_count": transport_counts.get("SEA", 0),
         "items": matched_items,
+        **source_metadata,
     }
     if include_all:
         result["all_items"] = all_items
@@ -5784,6 +6031,7 @@ def pull_purchase_expense_approvals(
 ) -> dict:
     """按采购支出流程批量拉取审批详情，并解析行级单价、币种、总金额。"""
 
+    source_mode = resolve_approval_source_mode()
     resolved_process_code = resolve_purchase_process_code(process_code)
     if not resolved_process_code:
         raise ValueError("缺少采购支出流程模板 process_code，请配置 DINGTALK_PURCHASE_PROCESS_CODE。")
@@ -5792,33 +6040,65 @@ def pull_purchase_expense_approvals(
     resolved_list_api = _resolve_list_api_mode(list_api, resolved_api_style)
     start_time_ms = _parse_datetime_ms(start)
     end_time_ms = _parse_datetime_ms(end, end_of_day=True)
-    token = get_access_token(
-        api_style=resolved_api_style,
-        access_token=access_token,
-        corp_id=corp_id,
-        client_id=client_id,
-        client_secret=client_secret,
-        app_key=app_key,
-        app_secret=app_secret,
-    )
-    instance_ids = list_process_instance_ids(
-        token=token,
-        process_code=resolved_process_code,
-        start_time_ms=start_time_ms,
-        end_time_ms=end_time_ms,
-        api_style=resolved_api_style,
-        list_api=resolved_list_api,
-        page_size=page_size,
-        max_pages=max_pages,
-        chunk_days=chunk_days,
-    )
-    if limit:
-        instance_ids = instance_ids[:limit]
+    source_metadata = {
+        "data_source": source_mode,
+        "source_updated_at": None,
+        "source_lag_seconds": None,
+        "fallback_used": False,
+    }
+    details_by_id: dict[str, dict] = {}
+    if source_mode == "postgres":
+        database_result = _get_postgres_approval_source().list_instances(
+            process_code=resolved_process_code,
+            start=start,
+            end=end,
+            limit=limit or max(1, page_size * max_pages),
+        )
+        details = database_result.get("items") or []
+        instance_ids = [
+            _clean(detail.get("processInstanceId") or detail.get("process_instance_id"))
+            for detail in details
+        ]
+        instance_ids = [value for value in instance_ids if value]
+        details_by_id = dict(zip(instance_ids, details))
+        source_metadata.update(
+            {
+                "source_updated_at": _serialize_source_updated_at(database_result.get("source_updated_at")),
+                "source_lag_seconds": database_result.get("source_lag_seconds"),
+            }
+        )
+    else:
+        token = get_access_token(
+            api_style=resolved_api_style,
+            access_token=access_token,
+            corp_id=corp_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            app_key=app_key,
+            app_secret=app_secret,
+        )
+        instance_ids = list_process_instance_ids(
+            token=token,
+            process_code=resolved_process_code,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            api_style=resolved_api_style,
+            list_api=resolved_list_api,
+            page_size=page_size,
+            max_pages=max_pages,
+            chunk_days=chunk_days,
+        )
+        if limit:
+            instance_ids = instance_ids[:limit]
 
     items: list[dict] = []
     skipped_items: list[dict] = []
     for instance_id in instance_ids:
-        detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=resolved_api_style)
+        detail = details_by_id.get(instance_id) if source_mode == "postgres" else get_process_instance_detail(
+            token=token,
+            process_instance_id=instance_id,
+            api_style=resolved_api_style,
+        )
         summary = summarize_purchase_approval(detail, process_instance_id=instance_id)
         if include_raw:
             summary["raw_instance"] = detail
@@ -5869,6 +6149,7 @@ def pull_purchase_expense_approvals(
         "skipped_count": len(skipped_items),
         "items": items,
         "skipped_items": skipped_items,
+        **source_metadata,
     }
 
 
