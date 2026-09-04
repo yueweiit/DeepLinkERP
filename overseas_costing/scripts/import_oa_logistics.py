@@ -4260,6 +4260,138 @@ def _replace_items_with_purchase_expense_rows(
     }
 
 
+def _restore_main_logistics_items_after_excluded_purchases(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+    excluded_purchase_summaries: list[dict],
+) -> dict:
+    """只在现有行全部能证明来自已排除采购审批时，恢复主物流审批物料。"""
+
+    if frappe is None or not hasattr(frappe, "get_all"):
+        return {
+            "action": "skipped",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "reason": "当前环境无法检查历史 SKU 来源，未执行恢复。",
+        }
+    if not version_name:
+        return {
+            "action": "manual_required",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "reason": "当前批次没有版本，无法安全恢复主物流审批物料。",
+        }
+
+    excluded_instance_ids = {
+        _clean(summary.get("source_instance_id") or summary.get("instance_id"))
+        for summary in excluded_purchase_summaries
+        if isinstance(summary, dict)
+        and _clean(summary.get("source_instance_id") or summary.get("instance_id"))
+    }
+    if not excluded_instance_ids:
+        return {
+            "action": "manual_required",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "reason": "已排除采购审批缺少流程实例 ID，不能安全判断历史 SKU 来源。",
+        }
+
+    existing_items = frappe.get_all(
+        "Overseas Cost Item",
+        filters={"batch": batch_name, "version": version_name},
+        fields=["name", "manual_override_flag", "source_type", "dingtalk_instance_id"],
+        limit_page_length=10000,
+    )
+    if not existing_items:
+        return {
+            "action": "skipped",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "reason": "当前批次没有需要修复的历史 SKU。",
+        }
+
+    protected_items = [
+        item
+        for item in existing_items
+        if int(item.get("manual_override_flag") or 0)
+        or _clean(item.get("source_type")).upper() != "PURCHASE_EXPENSE_OA"
+        or _clean(item.get("dingtalk_instance_id")) not in excluded_instance_ids
+    ]
+    if protected_items:
+        return {
+            "action": "manual_required",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "protected_count": len(protected_items),
+            "existing_count": len(existing_items),
+            "reason": "当前 SKU 包含人工修改、其他来源或无法证明来自已排除采购审批的数据，未自动替换。",
+        }
+
+    main_item_values = build_oa_item_values_from_approval(approval_item)
+    if not main_item_values:
+        return {
+            "action": "manual_required",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "existing_count": len(existing_items),
+            "reason": "主物流审批没有可恢复的物料行，保留现有数据待人工处理。",
+        }
+
+    frappe.db.delete("Overseas Cost Item", {"batch": batch_name, "version": version_name})
+    created_names: list[str] = []
+    for values in main_item_values:
+        doc_values = _filter_item_values(
+            {
+                **values,
+                "doctype": "Overseas Cost Item",
+                "batch": batch_name,
+                "version": version_name,
+            }
+        )
+        doc_values["doctype"] = "Overseas Cost Item"
+        created_names.append(frappe.get_doc(doc_values).insert(ignore_permissions=True).name)
+
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        batch_name,
+        {"item_count": len(created_names), "status": "Imported"},
+        update_modified=True,
+    )
+    _insert_batch_audit_log(
+        batch_name=batch_name,
+        field_name="invalid_purchase_item_repair",
+        old_value={
+            "item_count": len(existing_items),
+            "source": "PURCHASE_EXPENSE_OA",
+            "excluded_purchase_instance_ids": sorted(excluded_instance_ids),
+        },
+        new_value={
+            "created_count": len(created_names),
+            "source": "oa_logistics",
+            "logistics_source_instance_id": approval_item.get("source_instance_id") or "",
+        },
+        remark="关联采购审批已拒绝、撤销或终止，已将可证明由该采购审批生成的 SKU 恢复为主物流审批物料。",
+    )
+    return {
+        "action": "restored_main_logistics_items",
+        "ok": True,
+        "created_count": len(created_names),
+        "updated_count": len(created_names),
+        "deleted_count": len(existing_items),
+        "excluded_purchase_instance_ids": sorted(excluded_instance_ids),
+        "item_names": created_names,
+        "message": f"已排除无效采购审批，并恢复 {len(created_names)} 条主物流审批 SKU。",
+    }
+
+
 def _oa_attachment_parse_targets(record: dict) -> list[str]:
     attachment_type = _clean(record.get("attachment_type"))
     extension = _clean(record.get("file_ext")).lower()
@@ -4475,19 +4607,30 @@ def _sync_linked_purchase_fields(
         purchase_rows = _purchase_expense_rows_from_preview(preview_result)
         excluded_purchase_count = int(preview_result.get("excluded_purchase_summary_count") or 0)
         if purchase_summaries and excluded_purchase_count >= len(purchase_summaries):
+            repair_result = _restore_main_logistics_items_after_excluded_purchases(
+                batch_name=batch_name,
+                version_name=version_name,
+                approval_item=approval_item,
+                excluded_purchase_summaries=preview_result.get("excluded_purchase_summaries") or purchase_summaries,
+            )
             return {
-                "action": "skipped",
+                "action": repair_result.get("action") or "skipped",
                 "sync_strategy": "excluded_purchase_approvals",
                 "ok": True,
                 "linked_purchase_count": len(linked_approvals),
                 "excluded_purchase_count": excluded_purchase_count,
-                "updated_count": 0,
-                "changed_field_count": 0,
+                "updated_count": repair_result.get("updated_count", 0),
+                "changed_field_count": repair_result.get("created_count", 0),
+                "created_count": repair_result.get("created_count", 0),
+                "deleted_count": repair_result.get("deleted_count", 0),
                 "skipped_count": len(purchase_summaries),
                 "unmatched_count": 0,
                 "ambiguous_count": 0,
-                "message": "关联采购审批已拒绝、撤销或终止，已排除对应采购数据和成本写入。",
+                "message": repair_result.get("message")
+                or repair_result.get("reason")
+                or "关联采购审批已拒绝、撤销或终止，已排除对应采购数据和成本写入。",
                 "excluded_purchase_summaries": preview_result.get("excluded_purchase_summaries") or [],
+                "repair_result": repair_result,
             }
         if preview_result.get("ok") and purchase_rows:
             rebuild_result = _replace_items_with_purchase_expense_rows(

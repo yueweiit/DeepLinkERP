@@ -19,6 +19,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     _normalize_allocation_basis,
     _purchase_expense_rows_from_preview,
     _recalculate_after_purchase_sync,
+    _restore_main_logistics_items_after_excluded_purchases,
     _sync_oa_form_attachments,
     _sync_oa_logistics_allocation_rule,
     _sync_linked_purchase_fields,
@@ -2028,6 +2029,142 @@ def test_sync_linked_purchase_fields_does_not_apply_when_all_purchases_are_exclu
     assert result["action"] == "skipped"
     assert result["excluded_purchase_count"] == 1
     assert apply_calls == []
+
+
+def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    deleted_filters = []
+    inserted_items = []
+    inserted_audits = []
+    batch_updates = []
+
+    class FakeMeta:
+        @staticmethod
+        def has_field(_fieldname):
+            return True
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = dict(payload)
+            self.name = f"DOC-{len(inserted_items) + len(inserted_audits) + 1}"
+
+        def insert(self, **_kwargs):
+            if self.payload.get("doctype") == "Overseas Cost Item":
+                inserted_items.append(self.payload)
+            else:
+                inserted_audits.append(self.payload)
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def delete(doctype, filters):
+            deleted_filters.append((doctype, filters))
+
+        @staticmethod
+        def set_value(doctype, name, values, **_kwargs):
+            batch_updates.append((doctype, name, values))
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Item":
+                return [
+                    {
+                        "name": "PURCHASE-1",
+                        "manual_override_flag": 0,
+                        "source_type": "PURCHASE_EXPENSE_OA",
+                        "dingtalk_instance_id": "PROC-PUR-REFUSED",
+                    }
+                ]
+            return []
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+        @staticmethod
+        def get_meta(_doctype):
+            return FakeMeta()
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "build_oa_item_values_from_approval",
+        lambda _approval: [
+            {
+                "row_no": 1,
+                "material_code": "MAT-MAIN",
+                "product_name": "主物流审批物料",
+                "source_type": "oa_logistics",
+                "dingtalk_instance_id": "PROC-LOG-001",
+            }
+        ],
+    )
+
+    repaired = _restore_main_logistics_items_after_excluded_purchases(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={"source_instance_id": "PROC-LOG-001"},
+        excluded_purchase_summaries=[{"source_instance_id": "PROC-PUR-REFUSED"}],
+    )
+
+    assert repaired["action"] == "restored_main_logistics_items"
+    assert repaired["deleted_count"] == 1
+    assert repaired["created_count"] == 1
+    assert deleted_filters == [("Overseas Cost Item", {"batch": "BATCH-001", "version": "VER-001"})]
+    assert inserted_items[0]["material_code"] == "MAT-MAIN"
+    assert inserted_audits[0]["field_name"] == "invalid_purchase_item_repair"
+    assert batch_updates[0][2]["item_count"] == 1
+
+
+def test_invalid_purchase_item_repair_protects_mixed_or_manual_rows(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    class FakeDB:
+        @staticmethod
+        def delete(*_args, **_kwargs):
+            raise AssertionError("protected rows must not be deleted")
+
+        @staticmethod
+        def set_value(*_args, **_kwargs):
+            raise AssertionError("protected rows must not be changed")
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            assert doctype == "Overseas Cost Item"
+            return [
+                {
+                    "name": "PURCHASE-1",
+                    "manual_override_flag": 0,
+                    "source_type": "PURCHASE_EXPENSE_OA",
+                    "dingtalk_instance_id": "PROC-PUR-REFUSED",
+                },
+                {
+                    "name": "MANUAL-1",
+                    "manual_override_flag": 1,
+                    "source_type": "manual",
+                    "dingtalk_instance_id": "",
+                },
+            ]
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+
+    protected = _restore_main_logistics_items_after_excluded_purchases(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={"source_instance_id": "PROC-LOG-001"},
+        excluded_purchase_summaries=[{"source_instance_id": "PROC-PUR-REFUSED"}],
+    )
+
+    assert protected["action"] == "manual_required"
+    assert protected["deleted_count"] == 0
+    assert protected["protected_count"] == 1
 
 
 def test_purchase_expense_rows_from_preview_excludes_rejected_approvals() -> None:
