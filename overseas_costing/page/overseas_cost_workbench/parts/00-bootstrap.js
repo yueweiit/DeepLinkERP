@@ -4,74 +4,30 @@ function hideDeskChromeWhenReady(workbench) {
   workbench.hideDeskChrome();
   requestAnimationFrame(() => workbench.hideDeskChrome());
   window.setTimeout(() => {
-    if ($(workbench.wrapper).is(":visible")) workbench.hideDeskChrome();
+    if (!$(workbench.wrapper).is(":visible")) return;
+    workbench.hideDeskChrome();
+    ensureDeskModuleSidebar(workbench);
   }, 300);
 }
 
 function ensureDeskModuleSidebar(workbench) {
-  const $nativeSidebar = $(
-    ".body-sidebar-container, .desk-sidebar-container, .app-sidebar, .standard-sidebar"
-  ).first();
+  // DeeplinkERP 将授权后的模块图标放在这个独立容器。
+  // .body-sidebar-container 是工作区内部侧栏，不是 ERP 模块栏。
+  const $nativeSidebar = $(".custom-filters-right-sidebar-container").first();
   if ($nativeSidebar.length) {
+    if (!workbench._erpModuleSidebarSnapshot) {
+      workbench._erpModuleSidebarSnapshot = {
+        element: $nativeSidebar.get(0),
+        display: $nativeSidebar.get(0).style.display,
+        visibility: $nativeSidebar.get(0).style.visibility,
+        opacity: $nativeSidebar.get(0).style.opacity,
+      };
+    }
     $nativeSidebar.css({ display: "", visibility: "visible", opacity: "1" });
     $("#ocw-erp-module-sidebar-fallback").remove();
     $("body").removeClass("ocw-has-erp-module-sidebar-fallback");
-    if (workbench.applyModuleSidebarPreference) workbench.applyModuleSidebarPreference();
     return;
   }
-
-  const fallbackHosts = new Set(["127.0.0.1", "localhost", "development.localhost"]);
-  if (!fallbackHosts.has(window.location.hostname)) {
-    $("#ocw-erp-module-sidebar-fallback").remove();
-    $("body").removeClass("ocw-has-erp-module-sidebar-fallback");
-    return;
-  }
-
-  if ($("#ocw-erp-module-sidebar-fallback").length) return;
-
-  const modules = [
-    { label: "组织", href: "/app/users", icon: "users" },
-    { label: "会计", href: "/app/accounting", icon: "book-open" },
-    { label: "资产", href: "/app/assets", icon: "asset" },
-    { label: "采购", href: "/app/buying", icon: "shopping-cart" },
-    { label: "生产", href: "/app/manufacturing", icon: "production" },
-    { label: "项目", href: "/app/projects", icon: "folder" },
-    { label: "质量", href: "/app/quality", icon: "check-circle" },
-    { label: "销售", href: "/app/selling", icon: "sell" },
-    { label: "库存", href: "/app/stock", icon: "stock" },
-    { label: "委外", href: "/app/subcontracting-order", icon: "tool" },
-    { label: "设置", href: "/app/system-settings", icon: "setting" },
-    {
-      label: "海外成本核算",
-      href: "/app/overseas-cost-workbench",
-      icon: "calculator",
-      active: true,
-    },
-  ];
-  const renderIcon = (name) =>
-    frappe.utils && frappe.utils.icon
-      ? frappe.utils.icon(name, "md")
-      : `<span class="ocw-erp-module-icon-fallback">${name.slice(0, 1).toUpperCase()}</span>`;
-  const $sidebar = $(
-    `<aside id="ocw-erp-module-sidebar-fallback" aria-label="ERP 模块导航">
-      <div class="ocw-erp-module-sidebar-items">
-        ${modules
-          .map(
-            (item) => `
-              <a class="ocw-erp-module-link${item.active ? " is-active" : ""}"
-                 href="${item.href}" title="${item.label}" aria-label="${item.label}">
-                <span class="ocw-erp-module-icon">${renderIcon(item.icon)}</span>
-                <span class="ocw-erp-module-label">${item.label}</span>
-              </a>
-            `
-          )
-          .join("")}
-      </div>
-    </aside>`
-  );
-  $("body").append($sidebar).addClass("ocw-has-erp-module-sidebar-fallback");
-  if (workbench.applyModuleSidebarPreference) workbench.applyModuleSidebarPreference();
-  workbench.applyDeskLayout();
 }
 
 frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {

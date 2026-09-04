@@ -39,33 +39,31 @@
   }
 
   moduleSidebarStorageKey() {
-    return "overseas-cost-workbench:desk-sidebar";
+    return "overseas-cost-workbench:workspace-sidebar";
   }
 
   moduleSidebarCollapsed() {
     try {
-      return (window.localStorage.getItem(this.moduleSidebarStorageKey()) || "collapsed") !== "expanded";
+      const saved = window.localStorage.getItem(this.moduleSidebarStorageKey());
+      return saved ? saved === "collapsed" : this.currentModuleSidebarCollapsed();
     } catch (_error) {
-      return true;
+      return this.currentModuleSidebarCollapsed();
     }
   }
 
   nativeModuleSidebar() {
-    return frappe.app && frappe.app.sidebar ? frappe.app.sidebar : null;
+    return $(".body-sidebar-container").first();
   }
 
   setModuleSidebarCollapsed(collapsed) {
-    const nativeSidebar = this.nativeModuleSidebar();
-    OverseasCostWorkbenchState.syncModuleSidebar(collapsed, nativeSidebar);
-    $("body").toggleClass("ocw-module-sidebar-collapsed", collapsed);
+    const $workspaceSidebar = this.nativeModuleSidebar();
+    $("body").toggleClass("ocw-workspace-sidebar-collapsed", collapsed);
+    if ($workspaceSidebar.length) $workspaceSidebar.css("display", collapsed ? "none" : "");
   }
 
   currentModuleSidebarCollapsed() {
-    const nativeSidebar = this.nativeModuleSidebar();
-    if (nativeSidebar && typeof nativeSidebar.sidebar_expanded === "boolean") {
-      return !nativeSidebar.sidebar_expanded;
-    }
-    return $("body").hasClass("ocw-module-sidebar-collapsed");
+    const $workspaceSidebar = this.nativeModuleSidebar();
+    return $("body").hasClass("ocw-workspace-sidebar-collapsed") || Boolean($workspaceSidebar.length && !$workspaceSidebar.is(":visible"));
   }
 
   persistModuleSidebarPreference(collapsed) {
@@ -78,13 +76,10 @@
 
   applyModuleSidebarPreference() {
     if (!this._moduleSidebarSnapshot) {
-      const nativeSidebar = this.nativeModuleSidebar();
+      const $workspaceSidebar = this.nativeModuleSidebar();
       this._moduleSidebarSnapshot = {
-        bodyHadClass: $("body").hasClass("ocw-module-sidebar-collapsed"),
-        nativeExpanded:
-          nativeSidebar && typeof nativeSidebar.sidebar_expanded === "boolean"
-            ? nativeSidebar.sidebar_expanded
-            : null,
+        bodyHadClass: $("body").hasClass("ocw-workspace-sidebar-collapsed"),
+        display: $workspaceSidebar.length ? $workspaceSidebar.get(0).style.display : null,
       };
     }
     this.setModuleSidebarCollapsed(this.moduleSidebarCollapsed());
@@ -98,14 +93,11 @@
 
   restoreModuleSidebar() {
     if (!this._moduleSidebarSnapshot) return;
-    $(document).off("sidebar-expand.ocwModuleSidebar");
-    if (this._moduleSidebarSnapshot.nativeExpanded !== null) {
-      OverseasCostWorkbenchState.syncModuleSidebar(
-        !this._moduleSidebarSnapshot.nativeExpanded,
-        this.nativeModuleSidebar()
-      );
+    const $workspaceSidebar = this.nativeModuleSidebar();
+    if ($workspaceSidebar.length && this._moduleSidebarSnapshot.display !== null) {
+      $workspaceSidebar.get(0).style.display = this._moduleSidebarSnapshot.display;
     }
-    $("body").toggleClass("ocw-module-sidebar-collapsed", this._moduleSidebarSnapshot.bodyHadClass);
+    $("body").toggleClass("ocw-workspace-sidebar-collapsed", this._moduleSidebarSnapshot.bodyHadClass);
     this._moduleSidebarSnapshot = null;
   }
 
@@ -120,14 +112,6 @@
   }
 
   bindRedesignEvents() {
-    $(document)
-      .off("sidebar-expand.ocwModuleSidebar")
-      .on("sidebar-expand.ocwModuleSidebar", (_event, data) => {
-        if (!$(this.wrapper).is(":visible")) return;
-        const collapsed = !Boolean(data && data.sidebar_expand);
-        $("body").toggleClass("ocw-module-sidebar-collapsed", collapsed);
-        this.persistModuleSidebarPreference(collapsed);
-      });
     $(document)
       .off("click.ocwActionMenus")
       .on("click.ocwActionMenus", (event) => {
@@ -219,6 +203,37 @@
     this.$root.on("click", "[data-action='switch-detail-tab']", (event) =>
       this.switchDetailTab($(event.currentTarget).attr("data-tab"))
     );
+    this.$root.on("click", "[data-action='view-dingtalk-approval']", () => this.switchDetailTab("dingtalk"));
+    this.$root.on("click", "[data-action='open-dingtalk-packing-picker']", () =>
+      this.openDingtalkPackingSourcePicker().catch((error) => this.showError(error))
+    );
+    this.$root.on("click", "[data-action='download-dingtalk-attachment']", (event) => {
+      const $button = $(event.currentTarget);
+      this.downloadDingtalkAttachmentFromDetail(
+        $button.attr("data-attachment-name"), $button,
+        $button.attr("data-process-instance-id"), $button.attr("data-file-id")
+      ).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='preview-dingtalk-attachment']", (event) => {
+      const $button = $(event.currentTarget);
+      this.previewDingtalkAttachmentFromDetail(
+        $button.attr("data-attachment-name"),
+        $button.attr("data-file-url"),
+        $button.attr("data-file-name"),
+        $button,
+        $button.attr("data-process-instance-id"),
+        $button.attr("data-file-id")
+      ).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='use-dingtalk-packing-source']", (event) => {
+      const $button = $(event.currentTarget);
+      this.openDingtalkPackingPreview(
+        $button.attr("data-source-kind"),
+        $button.attr("data-source-id"),
+        $button.attr("data-process-instance-id"),
+        $button.attr("data-file-id")
+      ).catch((error) => this.showError(error));
+    });
     this.$root.on("click", "[data-action='toggle-detail-tools']", (event) => {
       const $button = $(event.currentTarget);
       const $menu = this.$root.find("[data-area='detail-tools']");

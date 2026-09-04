@@ -124,6 +124,7 @@
       "fieldname": "source_type",
       "fieldtype": "Select",
       "label": "来源类型",
+      "permlevel": 1,
       "options": "excel\noa_logistics\nerp_purchase\nmanual\nattachment_parse",
       "default": "excel"
     },
@@ -145,17 +146,20 @@
     {
       "fieldname": "source_data_id",
       "fieldtype": "Data",
-      "label": "来源数据ID"
+      "label": "来源数据ID",
+      "permlevel": 1
     },
     {
       "fieldname": "source_approval_no",
       "fieldtype": "Data",
-      "label": "来源审批编号"
+      "label": "来源审批编号",
+      "permlevel": 1
     },
     {
       "fieldname": "source_instance_id",
       "fieldtype": "Data",
-      "label": "来源实例ID"
+      "label": "来源实例ID",
+      "permlevel": 1
     },
     {
       "fieldname": "source_dingtalk_url",
@@ -323,10 +327,18 @@
     {
       "fieldname": "extra_json",
       "fieldtype": "Long Text",
-      "label": "扩展JSON"
+      "label": "扩展JSON",
+      "permlevel": 1
     }
   ],
   "permissions": [
+    {
+      "role": "System Manager",
+      "permlevel": 1,
+      "read": 1,
+      "write": 1,
+      "create": 1
+    },
     {
       "role": "System Manager",
       "read": 1,

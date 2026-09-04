@@ -1046,6 +1046,10 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
                             "comment_remark": "补充装箱单",
                             "archive": {
                                 "status": "pending",
+                                "archive_method": "workflow_download",
+                                "content_quality": "original",
+                                "failure_code": "userNotExist",
+                                "failure_reason": "download authorization failed: userNotExist",
                                 "source_updated_at": "2026-09-04T06:00:00+00:00",
                             },
                             "last_download_error": {
@@ -1077,6 +1081,12 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
     assert result["items"][0]["comment_user_name"] == "张三"
     assert result["items"][0]["data_source"] == "minio_archive"
     assert result["items"][0]["archive_status"] == "pending"
+    assert result["items"][0]["archive_method"] == "workflow_download"
+    assert result["items"][0]["content_quality"] == "original"
+    assert result["items"][0]["failure_code"] == "userNotExist"
+    assert "尚不能判断文件是否删除" in result["items"][0]["failure_reason"]
+    assert result["items"][0]["previewable"] is False
+    assert result["items"][0]["downloadable"] is False
     assert result["items"][0]["source_lag_seconds"] >= 0
 
 

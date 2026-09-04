@@ -1,30 +1,5 @@
-body.ocw-module-sidebar-collapsed .desk-sidebar-container,
-body.ocw-module-sidebar-collapsed .app-sidebar,
-body.ocw-module-sidebar-collapsed .standard-sidebar {
-  width: 56px !important;
-  min-width: 56px !important;
-  flex-basis: 56px !important;
-}
-
-body.ocw-module-sidebar-collapsed .desk-sidebar-container .sidebar-item-label,
-body.ocw-module-sidebar-collapsed .app-sidebar .sidebar-item-label,
-body.ocw-module-sidebar-collapsed .standard-sidebar .sidebar-item-label,
-body.ocw-module-sidebar-collapsed #ocw-erp-module-sidebar-fallback .ocw-erp-module-label {
+body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   display: none !important;
-}
-
-body.ocw-module-sidebar-collapsed #ocw-erp-module-sidebar-fallback {
-  width: 56px;
-}
-
-body.ocw-module-sidebar-collapsed #ocw-erp-module-sidebar-fallback .ocw-erp-module-link {
-  width: 46px;
-  min-height: 46px;
-}
-
-body.ocw-module-sidebar-collapsed.ocw-has-erp-module-sidebar-fallback .ocw-page {
-  width: calc(100% - 56px);
-  margin-left: 56px;
 }
 
 .ocw-page.ocw-redesign {

@@ -56,7 +56,7 @@
     this.activeBatchName = batch.name;
     const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
     const dialog = new frappe.ui.Dialog({
-      title: "发起附件",
+      title: "钉钉审批附件",
       size: "large",
       fields: [
         {
@@ -66,9 +66,9 @@
             <div class="ocw-purchase-target">
               <span>当前批次</span>
               <strong>${this.escape(batchLabel)}</strong>
-              <em>只显示钉钉审批发起表单上传的附件；评论附件暂不纳入。</em>
+              <em>显示钉钉审批的表单附件和评论附件。</em>
             </div>
-            <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取发起附件</div>
+            <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取钉钉审批附件</div>
           `,
         },
       ],
@@ -104,7 +104,7 @@
     this.loadOaFormAttachments(batch, dialog).catch((error) => {
       dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
         <div class="ocw-purchase-empty">
-          <strong>发起附件读取失败</strong>
+          <strong>钉钉审批附件读取失败</strong>
           <span>${this.escape(this.normalizeErrorMessage(error))}</span>
         </div>
       `);
@@ -124,8 +124,8 @@
     if (!result || !result.ok) {
       $target.html(`
         <div class="ocw-purchase-empty">
-          <strong>暂时无法读取发起附件</strong>
-          <span>${this.escape((result && result.message) || "当前批次没有可读取的发起附件。")}</span>
+          <strong>暂时无法读取钉钉审批附件</strong>
+          <span>${this.escape((result && result.message) || "当前批次没有可读取的钉钉审批附件。")}</span>
         </div>
       `);
       return;
@@ -165,7 +165,7 @@
       message: "附件已开始下载到本地",
       indicator: "green",
     });
-    await this.loadOaFormAttachments(batch, dialog);
+    if (batch && dialog) await this.loadOaFormAttachments(batch, dialog);
     if (openParseAfterDownload && result.file_url) {
       this.openPackingListPreviewDialog(batch.name, result.attachment_name || attachmentName, result.file_url);
     }
@@ -265,7 +265,7 @@
         <div class="ocw-purchase-target ocw-source-document-target">
           <span>原始附件</span>
           <strong>${this.escape(fileName || "--")}</strong>
-          <em>这里显示的是钉钉发起附件原件，供人工复核使用，不代表系统已完整解析。</em>
+          <em>这里显示的是钉钉审批附件原件，供人工复核使用，不代表系统已完整解析。</em>
         </div>
         <div class="ocw-attachment-file-preview-actions">${downloadLink}</div>
         <div class="ocw-attachment-file-preview-body">${previewBody}</div>
@@ -742,8 +742,8 @@
     if (!items.length) {
       return `
         <section class="ocw-purchase-section">
-          <h4>发起附件清单</h4>
-          <div class="ocw-purchase-empty-line">暂无发起附件记录</div>
+          <h4>钉钉审批附件清单</h4>
+          <div class="ocw-purchase-empty-line">暂无附件记录</div>
         </section>
       `;
     }
@@ -823,9 +823,9 @@
       .join("");
     return `
       <section class="ocw-purchase-section">
-        <h4>发起附件清单</h4>
-        <div class="ocw-confirm-note">这些是钉钉审批发起人提交的附件。请按资料类型查看和核对；评论附件暂不处理。</div>
-        <div class="ocw-confirm-note">已登记 ${this.escape(String(items.length))} 个发起附件，${this.escape(String(downloadableCount))} 个待从钉钉下载，${this.escape(String(downloadedCount))} 个已保存，${this.escape(String(downloadFailedCount))} 个下载受限。</div>
+        <h4>钉钉审批附件清单</h4>
+        <div class="ocw-confirm-note">这里同时显示表单附件和评论附件，两者均可用于复核与装箱资料提取。</div>
+        <div class="ocw-confirm-note">已登记 ${this.escape(String(items.length))} 个附件，${this.escape(String(downloadableCount))} 个待归档或保存，${this.escape(String(downloadedCount))} 个已保存，${this.escape(String(downloadFailedCount))} 个需处理。</div>
         <div class="ocw-purchase-table-wrap">
           <table class="ocw-purchase-table ocw-attachment-table">
             <colgroup>

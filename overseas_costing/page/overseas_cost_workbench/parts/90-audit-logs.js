@@ -859,10 +859,10 @@
         suggestion: logisticsTextBrief || "可从钉钉正文识别物流方式、报价、重量、预计发货日期和目的地",
       },
       {
-        label: "发起附件",
+        label: "钉钉审批附件",
         status: attachmentCount ? `${attachmentCount} 个` : "待拉取",
         statusClass: attachmentCount ? "ocw-check-ok" : "ocw-check-warn",
-        suggestion: attachmentCount ? `资料里可查看${transportCopy.attachmentExamples}` : "从国际物流 OA 拉取发起人上传附件",
+        suggestion: attachmentCount ? `资料里可查看${transportCopy.attachmentExamples}` : "从国际物流 OA 读取表单和评论附件",
       },
       {
         label: transportCopy.packingLabel,

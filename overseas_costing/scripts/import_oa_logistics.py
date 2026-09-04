@@ -2731,17 +2731,17 @@ def _file_extension(file_name: str, payload: dict | None = None) -> str:
 
 def _guess_oa_attachment_type(file_name: str, payload: dict | None = None) -> str:
     normalized_name = _normalize_key(file_name)
-    extension = _file_extension(file_name, payload)
     if any(keyword in normalized_name for keyword in ("完税", "税单", "pedimento", "taxcertificate")):
         return "Tax Certificate"
     if any(keyword in normalized_name for keyword in ("发票", "invoice", "factura")):
         return "Commercial Invoice"
-    if any(keyword in normalized_name for keyword in ("装箱", "装柜", "物品清单", "packing", "packinglist", "清单")):
+    if any(
+        keyword in normalized_name
+        for keyword in ("装箱单", "装箱计划", "装柜清单", "发货清单", "快递清单", "物品清单", "packing", "packinglist")
+    ):
         return "Packing List"
     if any(keyword in normalized_name for keyword in ("运费", "物流", "报价", "燃油", "dhl", "fedex", "ups", "bill")):
         return "Logistics Bill"
-    if extension in {"xls", "xlsx", "csv"}:
-        return "Packing List"
     return "Other"
 
 

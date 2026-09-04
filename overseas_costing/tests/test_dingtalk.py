@@ -15,6 +15,7 @@ from overseas_costing.utils.dingtalk import (
 from overseas_costing.scripts.import_oa_logistics import (
     DEFAULT_LOGISTICS_PROCESS_CODE,
     _merge_oa_extra_json,
+    _guess_oa_attachment_type,
     _normalize_allocation_basis,
     _purchase_expense_rows_from_preview,
     _recalculate_after_purchase_sync,
@@ -55,6 +56,13 @@ from overseas_costing.scripts.import_oa_logistics import (
     summarize_approval,
     summarize_purchase_approval,
 )
+
+
+def test_excel_attachment_requires_packing_evidence_instead_of_extension_only() -> None:
+    assert _guess_oa_attachment_type("装箱计划.xlsx") == "Packing List"
+    assert _guess_oa_attachment_type("packing list.xlsm") == "Packing List"
+    assert _guess_oa_attachment_type("商业发票.xlsx") == "Commercial Invoice"
+    assert _guess_oa_attachment_type("历史数据.xlsx") == "Other"
 
 
 def test_build_mobile_and_desktop_approval_url() -> None:

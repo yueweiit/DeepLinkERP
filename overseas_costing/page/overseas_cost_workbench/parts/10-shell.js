@@ -93,6 +93,7 @@ class OverseasCostWorkbench {
       requestId: 0,
       skuRequestId: 0,
       refreshRequestId: 0,
+      dingtalkRequestId: 0,
     };
   }
 
@@ -118,12 +119,9 @@ class OverseasCostWorkbench {
     $(this.wrapper).empty();
   }
 
-  // 保留 ERP 原生模块侧边栏，只隐藏会遮挡工作台的顶部标签栏和右侧栏。
+  // 保留 ERP 模块栏和工作区侧栏，只隐藏会遮挡工作台的顶部标签栏。
   hideDeskChrome() {
-    const targets = [
-      $("#custom-filters-desk-tabs-bar"),
-      $(".custom-filters-right-sidebar-container"),
-    ];
+    const targets = [$("#custom-filters-desk-tabs-bar")];
     this._hiddenChrome = this._hiddenChrome || [];
     const trackedElements = this._hiddenChrome.map((item) => item.el[0]);
     const newlyVisibleTargets = targets
@@ -153,6 +151,13 @@ class OverseasCostWorkbench {
       this._hiddenChrome = null;
     }
     if (this.restoreModuleSidebar) this.restoreModuleSidebar();
+    if (this._erpModuleSidebarSnapshot) {
+      const snapshot = this._erpModuleSidebarSnapshot;
+      snapshot.element.style.display = snapshot.display;
+      snapshot.element.style.visibility = snapshot.visibility;
+      snapshot.element.style.opacity = snapshot.opacity;
+      this._erpModuleSidebarSnapshot = null;
+    }
     this.resetDeskLayoutClasses();
   }
 

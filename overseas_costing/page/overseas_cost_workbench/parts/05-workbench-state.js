@@ -4,7 +4,7 @@
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window, function () {
   const TASKS = new Set(["pending", "cost", "erp"]);
-  const TABS = new Set(["overview", "documents", "items", "vouchers", "audit"]);
+  const TABS = new Set(["overview", "dingtalk", "documents", "items", "vouchers", "audit"]);
   const TRANSPORT_MODE_ALIASES = Object.freeze({
     SEA: "SEA",
     AIR: "AIR",
@@ -258,6 +258,7 @@
   function detailTabResource(tab) {
     const resources = {
       overview: "detail",
+      dingtalk: "dingtalk",
       documents: "documents",
       items: "items",
       vouchers: "vouchers",

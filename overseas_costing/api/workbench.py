@@ -7,6 +7,7 @@ import json
 import frappe
 
 from overseas_costing.services import workbench_service
+from overseas_costing.services import dingtalk_approval_service
 from overseas_costing.services.access_control import require_batch_permission, require_overseas_cost_access
 
 
@@ -77,3 +78,11 @@ def locate_batch_item(batch_name, item_name, version_name=None, page_length=50) 
         version_name=version_name,
         page_length=page_length,
     )
+
+
+@frappe.whitelist()
+def get_batch_dingtalk_approval_detail(batch_name) -> dict:
+    """返回当前批次的物流审批、关联采购、评论及附件。"""
+
+    batch_name = require_batch_permission(batch_name, "read")
+    return dingtalk_approval_service.get_batch_dingtalk_approval_detail(batch_name)

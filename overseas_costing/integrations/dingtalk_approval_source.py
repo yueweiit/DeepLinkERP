@@ -126,7 +126,9 @@ class PostgresApprovalSource:
             "result": "result",
             "title": "title",
             "originator_user_id": "originatorUserId",
+            "originator_user_name": "originatorUserName",
             "originator_dept_id": "originatorDeptId",
+            "originator_dept_name": "originatorDeptName",
             "create_time": "createTime",
             "finish_time": "finishTime",
             "form_component_values": "formComponentValues",
@@ -212,6 +214,50 @@ class PostgresApprovalSource:
                 cursor.execute(sql, (process_instance_id, file_id))
                 rows = cursor.fetchall()
         return dict(rows[0]) if rows else None
+
+    def get_instance_bundle(self, instance_ids: Iterable[str]) -> dict[str, Any]:
+        """批量读取审批、附件清单和同步健康状态，共用一个只读连接。"""
+
+        unique_ids = list(dict.fromkeys(str(value).strip() for value in instance_ids if str(value).strip()))
+        if not unique_ids:
+            return {"instances": {}, "attachments": [], "health": {}}
+        approval_sql = """
+            SELECT *
+              FROM costing_read.approval_instances_v1
+             WHERE process_instance_id = ANY(%s)
+        """
+        attachment_sql = """
+            SELECT *
+              FROM costing_read.attachment_archives_v1
+             WHERE process_instance_id = ANY(%s)
+             ORDER BY process_instance_id, attachment_origin, file_name, file_id
+        """
+        health_sql = "SELECT * FROM costing_read.sync_health_v1 LIMIT 1"
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(approval_sql, (unique_ids,))
+                approval_rows = cursor.fetchall()
+                cursor.execute(attachment_sql, (unique_ids,))
+                attachment_rows = cursor.fetchall()
+                cursor.execute(health_sql, ())
+                health_rows = cursor.fetchall()
+
+        by_id = {
+            str(row["process_instance_id"]): self._raw_payload(row)
+            for row in approval_rows
+            if row.get("process_instance_id")
+        }
+        return {
+            "instances": {
+                instance_id: by_id[instance_id]
+                for instance_id in unique_ids
+                if instance_id in by_id
+            },
+            "attachments": [dict(row) for row in attachment_rows],
+            "health": dict(health_rows[0]) if health_rows else {},
+            "data_source": "postgres",
+            "fallback_used": False,
+        }
 
 
 class MinioArchiveClient:

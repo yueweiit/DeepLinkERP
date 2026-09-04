@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import frappe
 
-from overseas_costing.services import import_service
+from overseas_costing.services import import_service, packing_source_service
 from overseas_costing.services.access_control import (
     require_attachment_permission,
     require_batch_permission,
@@ -281,7 +281,7 @@ def parse_manual_document_attachments(
 
 @frappe.whitelist()
 def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
-    """查询钉钉发起表单附件记录；评论附件本阶段不纳入。"""
+    """查询钉钉审批的表单附件和评论附件。"""
 
     batch_name = require_batch_permission(batch_name, "read")
     return import_service.list_oa_form_attachments(
@@ -296,13 +296,28 @@ def download_oa_form_attachment(
     env_file: str | None = None,
     access_token: str | None = None,
 ) -> dict:
-    """下载钉钉发起表单附件到系统文件，评论附件本阶段不处理。"""
+    """从归档下载钉钉表单附件或评论附件到系统文件。"""
 
     attachment_name = require_attachment_permission(attachment_name, "write")
     return import_service.download_oa_form_attachment(
         attachment_name=attachment_name,
         env_file=env_file,
         access_token=access_token,
+    )
+
+
+@frappe.whitelist()
+def prepare_dingtalk_archive_attachment(batch_name: str, process_instance_id: str, file_id: str) -> dict:
+    """为当前批次审批中的归档附件按需创建本地附件记录。"""
+
+    from overseas_costing.services import dingtalk_approval_service
+
+    batch_name = require_batch_permission(batch_name, "write")
+    require_doctype_permission("Overseas Cost Attachment", "create")
+    return dingtalk_approval_service.materialize_batch_dingtalk_attachment(
+        batch_name,
+        str(process_instance_id or "").strip(),
+        str(file_id or "").strip(),
     )
 
 
@@ -652,6 +667,53 @@ def apply_packing_list_fillable_fields(
         template_hint=template_hint,
         sheet_rows_json=sheet_rows_json,
         recalculate_after_writeback=recalculate_flag,
+    )
+
+
+@frappe.whitelist()
+def preview_packing_source(
+    batch_name: str,
+    source_kind: str,
+    source_id: str,
+    version_name: str | None = None,
+) -> dict:
+    """预览钉钉附件或纯评论中的装箱信息，不写入数据。"""
+
+    batch_name = require_batch_permission(batch_name, "read")
+    source_kind = str(source_kind or "").strip().lower()
+    if source_kind == "attachment":
+        source_id = require_attachment_permission(source_id, "read")
+    return packing_source_service.preview_packing_source(
+        batch_name=batch_name,
+        source_kind=source_kind,
+        source_id=source_id,
+        version_name=version_name,
+    )
+
+
+@frappe.whitelist()
+def apply_packing_source(
+    batch_name: str,
+    source_revision: str,
+    resolutions_json: str | None = None,
+    version_name: str | None = None,
+) -> dict:
+    """确认写入已预览的钉钉装箱来源。"""
+
+    batch_name = require_batch_permission(batch_name, "write")
+    claims = packing_source_service.get_source_revision_claims(source_revision)
+    if str(claims.get("batch") or "") != batch_name:
+        frappe.throw("装箱预览不属于当前批次，请重新预览。", frappe.PermissionError)
+    if str(claims.get("kind") or "") == "attachment":
+        attachment_name = require_attachment_permission(str(claims.get("id") or ""), "write")
+        attachment_batch = frappe.db.get_value("Overseas Cost Attachment", attachment_name, "batch")
+        if attachment_batch != batch_name:
+            frappe.throw("装箱附件不属于当前批次。", frappe.PermissionError)
+    return packing_source_service.apply_packing_source(
+        batch_name=batch_name,
+        source_revision=source_revision,
+        resolutions_json=resolutions_json,
+        version_name=version_name,
     )
 
 

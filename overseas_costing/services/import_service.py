@@ -1392,6 +1392,12 @@ def _download_oa_attachment_from_archive(
         "object_key": manifest.get("object_key") or "",
         "source_updated_at": source_updated_at or "",
         "last_error": manifest.get("last_error") or "",
+        "archive_method": manifest.get("archive_method") or "",
+        "content_quality": manifest.get("content_quality") or "",
+        "failure_code": manifest.get("failure_code") or "",
+        "failure_reason": manifest.get("last_error") or "",
+        "last_attempt_strategy": manifest.get("last_attempt_strategy") or "",
+        "diagnostic_json": manifest.get("diagnostic_json") or [],
     }
     if archive_status != "archived":
         manual_required = archive_status == "manual_required"
@@ -1552,6 +1558,13 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
         last_download_error = parse_result.get("last_download_error") if isinstance(parse_result.get("last_download_error"), dict) else {}
         archive = parse_result.get("archive") if isinstance(parse_result.get("archive"), dict) else {}
         source_updated_at = archive.get("source_updated_at") or row.get("modified")
+        failure_code = str(archive.get("failure_code") or "")
+        failure_reason = str(archive.get("failure_reason") or archive.get("last_error") or "")
+        if failure_code == "userNotExist" or "userNotExist" in failure_reason:
+            failure_reason = "钉钉下载授权返回 userNotExist，尚不能判断文件是否删除。"
+        archive_status = archive.get("status") or ("archived" if row.get("file_url") else "pending")
+        has_local_file = bool(row.get("file_url"))
+        is_archived = archive_status == "archived"
         items.append(
             {
                 "name": row.get("name"),
@@ -1578,7 +1591,14 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
                 "comment_user_name": parse_result.get("comment_user_name") or "",
                 "comment_time": parse_result.get("comment_time") or "",
                 "comment_remark": parse_result.get("comment_remark") or "",
-                "archive_status": archive.get("status") or ("downloaded" if row.get("file_url") else "pending"),
+                "archive_status": archive_status,
+                "archive_method": archive.get("archive_method") or "",
+                "content_quality": archive.get("content_quality") or "",
+                "failure_code": failure_code,
+                "failure_reason": failure_reason,
+                "last_attempt_strategy": archive.get("last_attempt_strategy") or "",
+                "previewable": has_local_file or is_archived,
+                "downloadable": has_local_file or is_archived,
                 "data_source": "minio_archive" if archive else "dingtalk_api",
                 "source_updated_at": source_updated_at,
                 "source_lag_seconds": _source_lag_seconds(source_updated_at),
@@ -1633,7 +1653,7 @@ def download_oa_form_attachment(
         return {
             "ok": False,
             "attachment_name": resolved_attachment_name,
-            "message": "该记录不是钉钉 OA 发起附件，不能用钉钉附件下载接口处理。",
+            "message": "该记录不是钉钉审批附件，不能用归档附件下载接口处理。",
         }
 
     existing_file_url = str(getattr(attachment_doc, "file_url", "") or "").strip()
@@ -1803,8 +1823,8 @@ def download_oa_form_attachment(
             }
         if _is_dingtalk_attachment_user_error(error_message):
             message = (
-                "钉钉无法使用该历史审批单的发起人账号读取附件，可能是发起人账号已停用。"
-                "请在钉钉原单下载附件后拖放上传，或联系系统管理员配置有审批权限的在职账号。"
+                "钉钉下载授权返回 userNotExist，尚不能判断文件是否删除，也不能直接归因为员工离职。"
+                "请由阿里云归档服务使用管理员身份继续多策略诊断；若仍失败，再从钉钉原单人工补传。"
             )
             _record_oa_attachment_download_failure(
                 attachment_doc,
@@ -5326,10 +5346,12 @@ def apply_packing_list_fillable_fields(
     sheet_rows_json: str | None = None,
     recalculate_after_writeback: bool = True,
     auto_create_unmatched_items: bool = False,
+    preview_result: dict | None = None,
+    commit_after_writeback: bool = True,
 ) -> dict:
     """确认补入装箱单/物流附件中可安全写入的物理属性与价格字段。"""
 
-    preview_result = preview_packing_list_attachment(
+    preview_result = preview_result or preview_packing_list_attachment(
         batch_name=batch_name,
         attachment_name=attachment_name,
         file_url=file_url,
@@ -5454,7 +5476,7 @@ def apply_packing_list_fillable_fields(
             },
         )
         commit = getattr(getattr(frappe, "db", None), "commit", None)
-        if callable(commit):
+        if callable(commit) and commit_after_writeback:
             commit()
         recalculate_result = _recalculate_after_writeback(
             batch_doc_name=batch_doc_name,
@@ -5852,6 +5874,8 @@ def resolve_packing_list_conflict_row(
     template_hint: str | None = None,
     sheet_rows_json: str | None = None,
     recalculate_after_writeback: bool = True,
+    preview_result: dict | None = None,
+    commit_after_writeback: bool = True,
 ) -> dict:
     """按单条物料行处理装箱单差异：采用附件、保留系统或待核对。"""
 
@@ -5866,7 +5890,7 @@ def resolve_packing_list_conflict_row(
     if not str(target_item_name or "").strip():
         return {"ok": False, "message": "缺少要处理的物料行。"}
 
-    preview_result = preview_packing_list_attachment(
+    preview_result = preview_result or preview_packing_list_attachment(
         batch_name=batch_name,
         attachment_name=attachment_name,
         file_url=file_url,
@@ -5956,7 +5980,7 @@ def resolve_packing_list_conflict_row(
 
     resolution_saved = _record_packing_conflict_resolution(attachment_name, resolution)
     commit = getattr(getattr(frappe, "db", None), "commit", None)
-    if callable(commit):
+    if callable(commit) and commit_after_writeback:
         commit()
     recalculate_result = _recalculate_after_writeback(
         batch_doc_name=batch_doc_name,

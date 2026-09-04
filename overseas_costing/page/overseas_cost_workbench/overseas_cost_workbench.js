@@ -4,74 +4,30 @@ function hideDeskChromeWhenReady(workbench) {
   workbench.hideDeskChrome();
   requestAnimationFrame(() => workbench.hideDeskChrome());
   window.setTimeout(() => {
-    if ($(workbench.wrapper).is(":visible")) workbench.hideDeskChrome();
+    if (!$(workbench.wrapper).is(":visible")) return;
+    workbench.hideDeskChrome();
+    ensureDeskModuleSidebar(workbench);
   }, 300);
 }
 
 function ensureDeskModuleSidebar(workbench) {
-  const $nativeSidebar = $(
-    ".body-sidebar-container, .desk-sidebar-container, .app-sidebar, .standard-sidebar"
-  ).first();
+  // DeeplinkERP 将授权后的模块图标放在这个独立容器。
+  // .body-sidebar-container 是工作区内部侧栏，不是 ERP 模块栏。
+  const $nativeSidebar = $(".custom-filters-right-sidebar-container").first();
   if ($nativeSidebar.length) {
+    if (!workbench._erpModuleSidebarSnapshot) {
+      workbench._erpModuleSidebarSnapshot = {
+        element: $nativeSidebar.get(0),
+        display: $nativeSidebar.get(0).style.display,
+        visibility: $nativeSidebar.get(0).style.visibility,
+        opacity: $nativeSidebar.get(0).style.opacity,
+      };
+    }
     $nativeSidebar.css({ display: "", visibility: "visible", opacity: "1" });
     $("#ocw-erp-module-sidebar-fallback").remove();
     $("body").removeClass("ocw-has-erp-module-sidebar-fallback");
-    if (workbench.applyModuleSidebarPreference) workbench.applyModuleSidebarPreference();
     return;
   }
-
-  const fallbackHosts = new Set(["127.0.0.1", "localhost", "development.localhost"]);
-  if (!fallbackHosts.has(window.location.hostname)) {
-    $("#ocw-erp-module-sidebar-fallback").remove();
-    $("body").removeClass("ocw-has-erp-module-sidebar-fallback");
-    return;
-  }
-
-  if ($("#ocw-erp-module-sidebar-fallback").length) return;
-
-  const modules = [
-    { label: "组织", href: "/app/users", icon: "users" },
-    { label: "会计", href: "/app/accounting", icon: "book-open" },
-    { label: "资产", href: "/app/assets", icon: "asset" },
-    { label: "采购", href: "/app/buying", icon: "shopping-cart" },
-    { label: "生产", href: "/app/manufacturing", icon: "production" },
-    { label: "项目", href: "/app/projects", icon: "folder" },
-    { label: "质量", href: "/app/quality", icon: "check-circle" },
-    { label: "销售", href: "/app/selling", icon: "sell" },
-    { label: "库存", href: "/app/stock", icon: "stock" },
-    { label: "委外", href: "/app/subcontracting-order", icon: "tool" },
-    { label: "设置", href: "/app/system-settings", icon: "setting" },
-    {
-      label: "海外成本核算",
-      href: "/app/overseas-cost-workbench",
-      icon: "calculator",
-      active: true,
-    },
-  ];
-  const renderIcon = (name) =>
-    frappe.utils && frappe.utils.icon
-      ? frappe.utils.icon(name, "md")
-      : `<span class="ocw-erp-module-icon-fallback">${name.slice(0, 1).toUpperCase()}</span>`;
-  const $sidebar = $(
-    `<aside id="ocw-erp-module-sidebar-fallback" aria-label="ERP 模块导航">
-      <div class="ocw-erp-module-sidebar-items">
-        ${modules
-          .map(
-            (item) => `
-              <a class="ocw-erp-module-link${item.active ? " is-active" : ""}"
-                 href="${item.href}" title="${item.label}" aria-label="${item.label}">
-                <span class="ocw-erp-module-icon">${renderIcon(item.icon)}</span>
-                <span class="ocw-erp-module-label">${item.label}</span>
-              </a>
-            `
-          )
-          .join("")}
-      </div>
-    </aside>`
-  );
-  $("body").append($sidebar).addClass("ocw-has-erp-module-sidebar-fallback");
-  if (workbench.applyModuleSidebarPreference) workbench.applyModuleSidebarPreference();
-  workbench.applyDeskLayout();
 }
 
 frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
@@ -101,7 +57,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window, function () {
   const TASKS = new Set(["pending", "cost", "erp"]);
-  const TABS = new Set(["overview", "documents", "items", "vouchers", "audit"]);
+  const TABS = new Set(["overview", "dingtalk", "documents", "items", "vouchers", "audit"]);
   const TRANSPORT_MODE_ALIASES = Object.freeze({
     SEA: "SEA",
     AIR: "AIR",
@@ -355,6 +311,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   function detailTabResource(tab) {
     const resources = {
       overview: "detail",
+      dingtalk: "dingtalk",
       documents: "documents",
       items: "items",
       vouchers: "vouchers",
@@ -489,6 +446,7 @@ class OverseasCostWorkbench {
       requestId: 0,
       skuRequestId: 0,
       refreshRequestId: 0,
+      dingtalkRequestId: 0,
     };
   }
 
@@ -514,12 +472,9 @@ class OverseasCostWorkbench {
     $(this.wrapper).empty();
   }
 
-  // 保留 ERP 原生模块侧边栏，只隐藏会遮挡工作台的顶部标签栏和右侧栏。
+  // 保留 ERP 模块栏和工作区侧栏，只隐藏会遮挡工作台的顶部标签栏。
   hideDeskChrome() {
-    const targets = [
-      $("#custom-filters-desk-tabs-bar"),
-      $(".custom-filters-right-sidebar-container"),
-    ];
+    const targets = [$("#custom-filters-desk-tabs-bar")];
     this._hiddenChrome = this._hiddenChrome || [];
     const trackedElements = this._hiddenChrome.map((item) => item.el[0]);
     const newlyVisibleTargets = targets
@@ -549,6 +504,13 @@ class OverseasCostWorkbench {
       this._hiddenChrome = null;
     }
     if (this.restoreModuleSidebar) this.restoreModuleSidebar();
+    if (this._erpModuleSidebarSnapshot) {
+      const snapshot = this._erpModuleSidebarSnapshot;
+      snapshot.element.style.display = snapshot.display;
+      snapshot.element.style.visibility = snapshot.visibility;
+      snapshot.element.style.opacity = snapshot.opacity;
+      this._erpModuleSidebarSnapshot = null;
+    }
     this.resetDeskLayoutClasses();
   }
 
@@ -991,7 +953,6 @@ class OverseasCostWorkbench {
     const response = await frappe.call({ method, args, freeze });
     return response.message || {};
   }
-
   async loadBatches() {
     this.setTableLoading();
     try {
@@ -3109,33 +3070,31 @@ class OverseasCostWorkbench {
   }
 
   moduleSidebarStorageKey() {
-    return "overseas-cost-workbench:desk-sidebar";
+    return "overseas-cost-workbench:workspace-sidebar";
   }
 
   moduleSidebarCollapsed() {
     try {
-      return (window.localStorage.getItem(this.moduleSidebarStorageKey()) || "collapsed") !== "expanded";
+      const saved = window.localStorage.getItem(this.moduleSidebarStorageKey());
+      return saved ? saved === "collapsed" : this.currentModuleSidebarCollapsed();
     } catch (_error) {
-      return true;
+      return this.currentModuleSidebarCollapsed();
     }
   }
 
   nativeModuleSidebar() {
-    return frappe.app && frappe.app.sidebar ? frappe.app.sidebar : null;
+    return $(".body-sidebar-container").first();
   }
 
   setModuleSidebarCollapsed(collapsed) {
-    const nativeSidebar = this.nativeModuleSidebar();
-    OverseasCostWorkbenchState.syncModuleSidebar(collapsed, nativeSidebar);
-    $("body").toggleClass("ocw-module-sidebar-collapsed", collapsed);
+    const $workspaceSidebar = this.nativeModuleSidebar();
+    $("body").toggleClass("ocw-workspace-sidebar-collapsed", collapsed);
+    if ($workspaceSidebar.length) $workspaceSidebar.css("display", collapsed ? "none" : "");
   }
 
   currentModuleSidebarCollapsed() {
-    const nativeSidebar = this.nativeModuleSidebar();
-    if (nativeSidebar && typeof nativeSidebar.sidebar_expanded === "boolean") {
-      return !nativeSidebar.sidebar_expanded;
-    }
-    return $("body").hasClass("ocw-module-sidebar-collapsed");
+    const $workspaceSidebar = this.nativeModuleSidebar();
+    return $("body").hasClass("ocw-workspace-sidebar-collapsed") || Boolean($workspaceSidebar.length && !$workspaceSidebar.is(":visible"));
   }
 
   persistModuleSidebarPreference(collapsed) {
@@ -3148,13 +3107,10 @@ class OverseasCostWorkbench {
 
   applyModuleSidebarPreference() {
     if (!this._moduleSidebarSnapshot) {
-      const nativeSidebar = this.nativeModuleSidebar();
+      const $workspaceSidebar = this.nativeModuleSidebar();
       this._moduleSidebarSnapshot = {
-        bodyHadClass: $("body").hasClass("ocw-module-sidebar-collapsed"),
-        nativeExpanded:
-          nativeSidebar && typeof nativeSidebar.sidebar_expanded === "boolean"
-            ? nativeSidebar.sidebar_expanded
-            : null,
+        bodyHadClass: $("body").hasClass("ocw-workspace-sidebar-collapsed"),
+        display: $workspaceSidebar.length ? $workspaceSidebar.get(0).style.display : null,
       };
     }
     this.setModuleSidebarCollapsed(this.moduleSidebarCollapsed());
@@ -3168,14 +3124,11 @@ class OverseasCostWorkbench {
 
   restoreModuleSidebar() {
     if (!this._moduleSidebarSnapshot) return;
-    $(document).off("sidebar-expand.ocwModuleSidebar");
-    if (this._moduleSidebarSnapshot.nativeExpanded !== null) {
-      OverseasCostWorkbenchState.syncModuleSidebar(
-        !this._moduleSidebarSnapshot.nativeExpanded,
-        this.nativeModuleSidebar()
-      );
+    const $workspaceSidebar = this.nativeModuleSidebar();
+    if ($workspaceSidebar.length && this._moduleSidebarSnapshot.display !== null) {
+      $workspaceSidebar.get(0).style.display = this._moduleSidebarSnapshot.display;
     }
-    $("body").toggleClass("ocw-module-sidebar-collapsed", this._moduleSidebarSnapshot.bodyHadClass);
+    $("body").toggleClass("ocw-workspace-sidebar-collapsed", this._moduleSidebarSnapshot.bodyHadClass);
     this._moduleSidebarSnapshot = null;
   }
 
@@ -3190,14 +3143,6 @@ class OverseasCostWorkbench {
   }
 
   bindRedesignEvents() {
-    $(document)
-      .off("sidebar-expand.ocwModuleSidebar")
-      .on("sidebar-expand.ocwModuleSidebar", (_event, data) => {
-        if (!$(this.wrapper).is(":visible")) return;
-        const collapsed = !Boolean(data && data.sidebar_expand);
-        $("body").toggleClass("ocw-module-sidebar-collapsed", collapsed);
-        this.persistModuleSidebarPreference(collapsed);
-      });
     $(document)
       .off("click.ocwActionMenus")
       .on("click.ocwActionMenus", (event) => {
@@ -3289,6 +3234,37 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='switch-detail-tab']", (event) =>
       this.switchDetailTab($(event.currentTarget).attr("data-tab"))
     );
+    this.$root.on("click", "[data-action='view-dingtalk-approval']", () => this.switchDetailTab("dingtalk"));
+    this.$root.on("click", "[data-action='open-dingtalk-packing-picker']", () =>
+      this.openDingtalkPackingSourcePicker().catch((error) => this.showError(error))
+    );
+    this.$root.on("click", "[data-action='download-dingtalk-attachment']", (event) => {
+      const $button = $(event.currentTarget);
+      this.downloadDingtalkAttachmentFromDetail(
+        $button.attr("data-attachment-name"), $button,
+        $button.attr("data-process-instance-id"), $button.attr("data-file-id")
+      ).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='preview-dingtalk-attachment']", (event) => {
+      const $button = $(event.currentTarget);
+      this.previewDingtalkAttachmentFromDetail(
+        $button.attr("data-attachment-name"),
+        $button.attr("data-file-url"),
+        $button.attr("data-file-name"),
+        $button,
+        $button.attr("data-process-instance-id"),
+        $button.attr("data-file-id")
+      ).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='use-dingtalk-packing-source']", (event) => {
+      const $button = $(event.currentTarget);
+      this.openDingtalkPackingPreview(
+        $button.attr("data-source-kind"),
+        $button.attr("data-source-id"),
+        $button.attr("data-process-instance-id"),
+        $button.attr("data-file-id")
+      ).catch((error) => this.showError(error));
+    });
     this.$root.on("click", "[data-action='toggle-detail-tools']", (event) => {
       const $button = $(event.currentTarget);
       const $menu = this.$root.find("[data-area='detail-tools']");
@@ -5519,6 +5495,8 @@ class OverseasCostWorkbench {
               ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${this.escape(status.note || (slot.oaSource ? "优先从钉钉读取" : "缺了再补传"))}</em>`}
             </div>
             <div class="ocw-manual-doc-actions">
+              ${slot.oaSource ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button>` : ""}
+              ${slot.attachmentType === "Packing List" ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-dingtalk-packing-picker">从钉钉获取</button>` : ""}
               <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">
                 ${attachment ? "重传" : "上传"}
               </button>
@@ -6284,7 +6262,7 @@ class OverseasCostWorkbench {
     this.activeBatchName = batch.name;
     const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
     const dialog = new frappe.ui.Dialog({
-      title: "发起附件",
+      title: "钉钉审批附件",
       size: "large",
       fields: [
         {
@@ -6294,9 +6272,9 @@ class OverseasCostWorkbench {
             <div class="ocw-purchase-target">
               <span>当前批次</span>
               <strong>${this.escape(batchLabel)}</strong>
-              <em>只显示钉钉审批发起表单上传的附件；评论附件暂不纳入。</em>
+              <em>显示钉钉审批的表单附件和评论附件。</em>
             </div>
-            <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取发起附件</div>
+            <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取钉钉审批附件</div>
           `,
         },
       ],
@@ -6332,7 +6310,7 @@ class OverseasCostWorkbench {
     this.loadOaFormAttachments(batch, dialog).catch((error) => {
       dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
         <div class="ocw-purchase-empty">
-          <strong>发起附件读取失败</strong>
+          <strong>钉钉审批附件读取失败</strong>
           <span>${this.escape(this.normalizeErrorMessage(error))}</span>
         </div>
       `);
@@ -6352,8 +6330,8 @@ class OverseasCostWorkbench {
     if (!result || !result.ok) {
       $target.html(`
         <div class="ocw-purchase-empty">
-          <strong>暂时无法读取发起附件</strong>
-          <span>${this.escape((result && result.message) || "当前批次没有可读取的发起附件。")}</span>
+          <strong>暂时无法读取钉钉审批附件</strong>
+          <span>${this.escape((result && result.message) || "当前批次没有可读取的钉钉审批附件。")}</span>
         </div>
       `);
       return;
@@ -6393,7 +6371,7 @@ class OverseasCostWorkbench {
       message: "附件已开始下载到本地",
       indicator: "green",
     });
-    await this.loadOaFormAttachments(batch, dialog);
+    if (batch && dialog) await this.loadOaFormAttachments(batch, dialog);
     if (openParseAfterDownload && result.file_url) {
       this.openPackingListPreviewDialog(batch.name, result.attachment_name || attachmentName, result.file_url);
     }
@@ -6493,7 +6471,7 @@ class OverseasCostWorkbench {
         <div class="ocw-purchase-target ocw-source-document-target">
           <span>原始附件</span>
           <strong>${this.escape(fileName || "--")}</strong>
-          <em>这里显示的是钉钉发起附件原件，供人工复核使用，不代表系统已完整解析。</em>
+          <em>这里显示的是钉钉审批附件原件，供人工复核使用，不代表系统已完整解析。</em>
         </div>
         <div class="ocw-attachment-file-preview-actions">${downloadLink}</div>
         <div class="ocw-attachment-file-preview-body">${previewBody}</div>
@@ -6970,8 +6948,8 @@ class OverseasCostWorkbench {
     if (!items.length) {
       return `
         <section class="ocw-purchase-section">
-          <h4>发起附件清单</h4>
-          <div class="ocw-purchase-empty-line">暂无发起附件记录</div>
+          <h4>钉钉审批附件清单</h4>
+          <div class="ocw-purchase-empty-line">暂无附件记录</div>
         </section>
       `;
     }
@@ -7051,9 +7029,9 @@ class OverseasCostWorkbench {
       .join("");
     return `
       <section class="ocw-purchase-section">
-        <h4>发起附件清单</h4>
-        <div class="ocw-confirm-note">这些是钉钉审批发起人提交的附件。请按资料类型查看和核对；评论附件暂不处理。</div>
-        <div class="ocw-confirm-note">已登记 ${this.escape(String(items.length))} 个发起附件，${this.escape(String(downloadableCount))} 个待从钉钉下载，${this.escape(String(downloadedCount))} 个已保存，${this.escape(String(downloadFailedCount))} 个下载受限。</div>
+        <h4>钉钉审批附件清单</h4>
+        <div class="ocw-confirm-note">这里同时显示表单附件和评论附件，两者均可用于复核与装箱资料提取。</div>
+        <div class="ocw-confirm-note">已登记 ${this.escape(String(items.length))} 个附件，${this.escape(String(downloadableCount))} 个待归档或保存，${this.escape(String(downloadedCount))} 个已保存，${this.escape(String(downloadFailedCount))} 个需处理。</div>
         <div class="ocw-purchase-table-wrap">
           <table class="ocw-purchase-table ocw-attachment-table">
             <colgroup>
@@ -9692,6 +9670,7 @@ class OverseasCostWorkbench {
         <nav class="ocw-detail-tabs" aria-label="批次详情分类">
           ${[
             ["overview", "总览"],
+            ["dingtalk", "钉钉审批"],
             ["documents", "资料与费用"],
             ["items", "SKU 明细"],
             ["vouchers", "凭证核对"],
@@ -9719,6 +9698,7 @@ class OverseasCostWorkbench {
     if (allowed === "items") return this.loadSkuPage();
     if (allowed === "audit") return this.renderAuditDetailTab();
     if (allowed === "vouchers") return this.renderVoucherDetailTab();
+    if (allowed === "dingtalk") return this.renderDingtalkApprovalTab();
     if (allowed === "documents") return this.renderDocumentsDetailTab();
     return this.renderOverviewDetailTab();
   }
@@ -9734,7 +9714,7 @@ class OverseasCostWorkbench {
     const batch = this.getDetailBatch();
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
-        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div>
+        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>
         ${this.renderBatchDrawerOverview(batch, [])}
       </div>
     `);
@@ -10086,6 +10066,276 @@ class OverseasCostWorkbench {
         () => resolve(false)
       );
     });
+  }
+
+  async loadDingtalkApprovalDetail() {
+    const batch = this.getDetailBatch();
+    const result = await this.call("overseas_costing.api.workbench.get_batch_dingtalk_approval_detail", {
+      batch_name: batch.name,
+    });
+    if (!result || !result.ok) throw new Error((result && result.message) || "钉钉审批读取失败");
+    this.detailState.dingtalkApproval = result;
+    return result;
+  }
+
+  async renderDingtalkApprovalTab() {
+    const requestId = Number(this.detailState.dingtalkRequestId || 0) + 1;
+    this.detailState.dingtalkRequestId = requestId;
+    const requestedBatch = this.detailState.batchName;
+    this.renderDetailTabLoading("正在读取钉钉审批");
+    try {
+      const result = await this.loadDingtalkApprovalDetail();
+      if (this.detailState.dingtalkRequestId !== requestId || this.detailState.batchName !== requestedBatch || this.detailState.tab !== "dingtalk") return;
+      const health = result.archive_health || {};
+      this.$root.find("[data-area='detail-content']").html(`
+        <div class="ocw-detail-section-head">
+          <div><span>数据源·${this.escape(result.data_source || "postgres")}</span><h2>钉钉审批</h2></div>
+          <button class="ocw-outline-btn" type="button" data-action="detail-dingtalk">在钉钉中打开</button>
+        </div>
+        <div class="ocw-dingtalk-health">
+          <span>最近同步：<strong>${this.escape(this.formatDateTimeMinute(result.source_updated_at) || result.source_updated_at || "--")}</strong></span>
+          <span>延迟：<strong>${this.escape(result.source_lag_seconds == null ? "--" : `${result.source_lag_seconds} 秒`)}</strong></span>
+          <span>附件：<strong>${this.escape(`${health.archived || 0}/${health.total || 0} 已归档`)}</strong></span>
+          ${Number(health.manual_required || 0) ? `<span class="is-warning">需人工：<strong>${this.escape(String(health.manual_required))}</strong></span>` : ""}
+          ${Number(health.preview_only || 0) ? `<span class="is-warning">仅预览图：<strong>${this.escape(String(health.preview_only))}</strong></span>` : ""}
+        </div>
+        ${this.renderDingtalkApprovalCard(result.main_approval || {}, "国际物流主审批", false)}
+        <section class="ocw-dingtalk-linked">
+          <div class="ocw-detail-section-head"><div><span>关联流程</span><h3>采购审批</h3></div><span>${this.escape(String((result.linked_purchase_approvals || []).length))} 条</span></div>
+          ${(result.linked_purchase_approvals || []).length
+            ? result.linked_purchase_approvals.map((approval) => this.renderDingtalkApprovalCard(approval, "关联采购审批", true)).join("")
+            : `<div class="ocw-detail-empty"><strong>暂无关联采购审批</strong></div>`}
+        </section>
+      `);
+    } catch (error) {
+      if (this.detailState.dingtalkRequestId !== requestId || this.detailState.batchName !== requestedBatch || this.detailState.tab !== "dingtalk") return;
+      this.renderDetailTabError("钉钉审批", error);
+    }
+  }
+
+  renderDingtalkApprovalCard(approval = {}, label = "审批", collapsible = false) {
+    const content = `
+      <div class="ocw-dingtalk-summary-grid">
+        ${this.renderDingtalkSummaryField("审批编号", approval.business_id)}
+        ${this.renderDingtalkSummaryField("状态 / 结果", [approval.status, approval.result].filter(Boolean).join(" / "))}
+        ${this.renderDingtalkSummaryField("发起人", approval.originator_user_name || approval.originator_user_id)}
+        ${this.renderDingtalkSummaryField("部门", approval.originator_dept_name)}
+        ${this.renderDingtalkSummaryField("发起时间", this.formatDateTimeMinute(approval.create_time) || approval.create_time)}
+        ${this.renderDingtalkSummaryField("完成时间", this.formatDateTimeMinute(approval.finish_time) || approval.finish_time)}
+      </div>
+      <section class="ocw-dingtalk-subsection"><h4>表单字段</h4>${this.renderDingtalkFormFields(approval.form_fields || [])}</section>
+      <section class="ocw-dingtalk-subsection"><h4>操作与评论</h4>${this.renderDingtalkTimeline(approval.timeline || [])}</section>
+      <section class="ocw-dingtalk-subsection"><h4>审批附件</h4>${this.renderDingtalkAttachments(approval.attachments || [])}</section>
+    `;
+    if (collapsible) {
+      return `<details class="ocw-dingtalk-approval-card"><summary><strong>${this.escape(approval.title || label)}</strong><span>${this.escape(approval.business_id || approval.instance_id || "--")}</span></summary><div class="ocw-dingtalk-card-body">${content}</div></details>`;
+    }
+    return `<article class="ocw-dingtalk-approval-card is-main"><header><div><span>${this.escape(label)}</span><h3>${this.escape(approval.title || approval.business_id || approval.instance_id || "--")}</h3></div><span>${this.escape(approval.status || "--")}</span></header><div class="ocw-dingtalk-card-body">${content}</div></article>`;
+  }
+
+  renderDingtalkSummaryField(label, value) {
+    return `<div><span>${this.escape(label)}</span><strong>${this.escape(value || "--")}</strong></div>`;
+  }
+
+  renderDingtalkFormFields(fields = []) {
+    if (!fields.length) return `<div class="ocw-purchase-empty-line">无可展示表单字段</div>`;
+    return `<dl class="ocw-dingtalk-form-fields">${fields.map((field) => `<div><dt>${this.escape(field.label || "未命名字段")}</dt><dd>${this.escape(field.value || "--")}</dd></div>`).join("")}</dl>`;
+  }
+
+  renderDingtalkTimeline(items = []) {
+    if (!items.length) return `<div class="ocw-purchase-empty-line">无操作或评论记录</div>`;
+    return `<ol class="ocw-dingtalk-timeline">${items.map((item) => `
+      <li>
+        <div><strong>${this.escape(item.user_name || item.user_id || "系统")}</strong><span>${this.escape(this.formatDateTimeMinute(item.operation_time) || item.operation_time || "--")}</span></div>
+        <p>${this.escape(item.remark || [item.operation_type, item.result].filter(Boolean).join(" / ") || "--")}</p>
+        ${item.packing_candidate && item.source_id ? `<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="comment" data-source-id="${this.escape(item.source_id)}">作为装箱信息预览</button>` : ""}
+      </li>`).join("")}</ol>`;
+  }
+
+  dingtalkArchiveStatus(item = {}) {
+    const labels = {
+      archived: "已归档",
+      pending: "待归档",
+      archiving: "归档中",
+      retry: "等待重试",
+      manual_required: "需人工处理",
+    };
+    const status = item.archive_status || "pending";
+    const quality = item.content_quality === "preview" ? "·仅预览图" : "";
+    return `${labels[status] || status}${quality}`;
+  }
+
+  renderDingtalkAttachments(items = []) {
+    if (!items.length) return `<div class="ocw-purchase-empty-line">无附件</div>`;
+    return `<div class="ocw-dingtalk-attachments">${items.map((item) => {
+      const canFetch = Boolean(item.downloadable);
+      const actions = [];
+      if (canFetch) {
+        actions.push(`<button class="ocw-link-btn" type="button" data-action="preview-dingtalk-attachment" data-attachment-name="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}" data-file-url="${this.escape(item.file_url || "")}" data-file-name="${this.escape(item.file_name || "")}">预览</button>`);
+        actions.push(`<button class="ocw-link-btn" type="button" data-action="download-dingtalk-attachment" data-attachment-name="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}">下载</button>`);
+      }
+      if (item.packing_candidate && item.downloadable) {
+        actions.push(`<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="attachment" data-source-id="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}">作为装箱单使用</button>`);
+      }
+      return `<div class="ocw-dingtalk-attachment-row">
+        <div><strong>${this.escape(item.file_name || item.file_id || "--")}</strong><span>${this.escape(item.origin === "Comment" ? "评论附件" : "表单附件")} · ${this.escape(this.dingtalkArchiveStatus(item))}</span>${item.comment_remark ? `<em>${this.escape(item.comment_remark)}</em>` : ""}${item.failure_reason ? `<em class="is-error">${this.escape(item.failure_reason)}</em>` : ""}</div>
+        <div class="ocw-attachment-actions">${actions.join("") || `<span class="ocw-purchase-source-disabled">暂不可下载</span>`}</div>
+      </div>`;
+    }).join("")}</div>`;
+  }
+
+  async ensureDingtalkLocalAttachment(attachmentName, processInstanceId, fileId) {
+    if (attachmentName) return attachmentName;
+    const batch = this.getDetailBatch();
+    const result = await this.call("overseas_costing.api.import_api.prepare_dingtalk_archive_attachment", {
+      batch_name: batch.name,
+      process_instance_id: processInstanceId,
+      file_id: fileId,
+    }, true);
+    if (!result || !result.ok || !result.attachment_name) throw new Error((result && result.message) || "无法准备钉钉归档附件");
+    return result.attachment_name;
+  }
+
+  async downloadDingtalkAttachmentFromDetail(attachmentName, $button = null, processInstanceId = "", fileId = "") {
+    const batch = this.getDetailBatch();
+    attachmentName = await this.ensureDingtalkLocalAttachment(attachmentName, processInstanceId, fileId);
+    await this.downloadOaFormAttachment(batch, null, attachmentName, $button, false);
+    if (this.detailState.tab === "dingtalk") await this.renderDingtalkApprovalTab();
+  }
+
+  async previewDingtalkAttachmentFromDetail(attachmentName, fileUrl, fileName, $button = null, processInstanceId = "", fileId = "") {
+    const batch = this.getDetailBatch();
+    attachmentName = await this.ensureDingtalkLocalAttachment(attachmentName, processInstanceId, fileId);
+    await this.openOaAttachmentFilePreview(batch, null, attachmentName, fileUrl, fileName, $button);
+    if (!fileUrl && this.detailState.tab === "dingtalk") await this.renderDingtalkApprovalTab();
+  }
+
+  dingtalkPackingCandidates(detail = {}) {
+    const approvals = [detail.main_approval, ...(detail.linked_purchase_approvals || [])].filter(Boolean);
+    const candidates = [];
+    approvals.forEach((approval) => {
+      (approval.attachments || []).forEach((item) => {
+        if (!item.packing_candidate || !item.downloadable) return;
+        candidates.push({ kind: "attachment", id: item.attachment_name || "", instanceId: item.process_instance_id || approval.instance_id, fileId: item.file_id, label: item.file_name, meta: `${item.origin === "Comment" ? "评论附件" : "表单附件"} · ${approval.business_id || approval.instance_id}` });
+      });
+      (approval.timeline || []).forEach((item) => {
+        if (!item.packing_candidate || !item.source_id) return;
+        candidates.push({ kind: "comment", id: item.source_id, label: item.remark, meta: `纯评论 · ${item.user_name || item.user_id || "--"} · ${this.formatDateTimeMinute(item.operation_time) || item.operation_time || "--"}` });
+      });
+    });
+    return candidates;
+  }
+
+  async openDingtalkPackingSourcePicker() {
+    const detail = await this.loadDingtalkApprovalDetail();
+    const candidates = this.dingtalkPackingCandidates(detail);
+    const dialog = new frappe.ui.Dialog({
+      title: "从钉钉获取装箱单",
+      size: "large",
+      fields: [{ fieldtype: "HTML", fieldname: "sources", options: `
+        <div class="ocw-purchase-target"><span>当前批次</span><strong>${this.escape(detail.batch_name || "--")}</strong><em>可选表单附件、评论附件或纯评论文字；选择后先预览，不会直接写入。</em></div>
+        <div class="ocw-dingtalk-source-picker">${candidates.length ? candidates.map((item) => `<button type="button" data-action="pick-dingtalk-packing-source" data-source-kind="${item.kind}" data-source-id="${this.escape(item.id)}" data-process-instance-id="${this.escape(item.instanceId || "")}" data-file-id="${this.escape(item.fileId || "")}"><strong>${this.escape(item.label || "--")}</strong><span>${this.escape(item.meta)}</span></button>`).join("") : `<div class="ocw-detail-empty"><strong>未找到装箱候选</strong><span>系统会识别装箱单、装箱计划、packing list、发货/装柜/物品清单，以及包含数量重量的评论。</span></div>`}</div>
+      ` }],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.on("click.ocwDingtalkPackingPicker", "[data-action='pick-dingtalk-packing-source']", (event) => {
+      const $button = $(event.currentTarget);
+      dialog.hide();
+      this.openDingtalkPackingPreview($button.attr("data-source-kind"), $button.attr("data-source-id"), $button.attr("data-process-instance-id"), $button.attr("data-file-id")).catch((error) => this.showError(error));
+    });
+  }
+
+  async openDingtalkPackingPreview(sourceKind, sourceId, processInstanceId = "", fileId = "") {
+    const batch = this.getDetailBatch();
+    if (sourceKind === "attachment") sourceId = await this.ensureDingtalkLocalAttachment(sourceId, processInstanceId, fileId);
+    const dialog = new frappe.ui.Dialog({
+      title: "钉钉装箱资料预览",
+      size: "large",
+      fields: [{ fieldtype: "HTML", fieldname: "preview", options: `<div class="ocw-purchase-loading" data-area="dingtalk-packing-preview">正在解析，当前不会写入数据</div>` }],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    const load = async () => {
+      let result = await this.call("overseas_costing.api.import_api.preview_packing_source", {
+        batch_name: batch.name,
+        version_name: batch.current_version || null,
+        source_kind: sourceKind,
+        source_id: sourceId,
+      }, true);
+      if (result && result.download_required && result.attachment_name) {
+        const saved = await this.call("overseas_costing.api.import_api.download_oa_form_attachment", { attachment_name: result.attachment_name }, true);
+        if (!saved || !saved.ok) throw new Error((saved && saved.message) || "附件尚未归档");
+        result = await this.call("overseas_costing.api.import_api.preview_packing_source", {
+          batch_name: batch.name,
+          version_name: batch.current_version || null,
+          source_kind: sourceKind,
+          source_id: sourceId,
+        }, true);
+      }
+      this.renderDingtalkPackingPreview(dialog, result, batch);
+    };
+    try { await load(); } catch (error) {
+      dialog.$wrapper.find("[data-area='dingtalk-packing-preview']").html(`<div class="ocw-detail-empty is-error"><strong>装箱资料预览失败</strong><span>${this.escape(this.normalizeErrorMessage(error))}</span></div>`);
+    }
+  }
+
+  renderDingtalkPackingPreview(dialog, result, batch) {
+    const $target = dialog.$wrapper.find("[data-area='dingtalk-packing-preview']");
+    if (!result || !result.ok) {
+      $target.html(`<div class="ocw-detail-empty is-error"><strong>无法生成装箱预览</strong><span>${this.escape((result && result.message) || "请检查来源内容。")}</span></div>`);
+      return;
+    }
+    const preview = result.writeback_preview || {};
+    const matched = preview.matched_rows || [];
+    const fillable = matched.filter((row) => row.has_fillable);
+    const conflicts = matched.filter((row) => row.has_conflict);
+    $target.html(`
+      <div class="ocw-purchase-target"><span>来源</span><strong>${this.escape(result.source_kind === "comment" ? "钉钉评论" : "钉钉附件")}</strong><em>${this.escape(result.message || "预览已生成，尚未写入。")}</em></div>
+      <div class="ocw-purchase-summary"><div><span>匹配行</span><strong>${this.escape(String(preview.matched_count || 0))}</strong></div><div><span>可写入</span><strong>${this.escape(String(preview.fillable_row_count || 0))}</strong></div><div><span>冲突</span><strong>${this.escape(String(preview.conflict_row_count || 0))}</strong></div><div><span>未匹配</span><strong>${this.escape(String(preview.unmatched_count || 0))}</strong></div></div>
+      <div class="ocw-purchase-note">只自动填充空值或 0；已有值差异须选择处理方式，多物料歧义不会自动写入。</div>
+      ${this.renderDingtalkPackingApplyActions(preview)}
+      ${this.renderPurchasePreviewSection("可写入装箱字段", fillable, "fillable")}
+      ${this.renderPackingConflictSection(conflicts)}
+      ${this.renderPackingUnmatchedSection(preview.unmatched_rows || [], preview.ambiguous_rows || [])}
+    `);
+    dialog.$wrapper.off("click.ocwDingtalkPackingPreview")
+      .on("click.ocwDingtalkPackingPreview", "[data-action='apply-dingtalk-packing']", (event) => {
+        const createUnmatched = $(event.currentTarget).attr("data-create-unmatched") === "1";
+        this.applyDingtalkPackingSource(dialog, result, batch, { create_unmatched_items: createUnmatched }).catch((error) => this.showError(error));
+      })
+      .on("click.ocwDingtalkPackingPreview", "[data-action='resolve-packing-conflict']", (event) => {
+        const $button = $(event.currentTarget);
+        this.applyDingtalkPackingSource(dialog, result, batch, { conflicts: [{ target_item_name: $button.attr("data-target-item-name"), action: $button.attr("data-resolution-action") }] }).catch((error) => this.showError(error));
+      });
+  }
+
+  renderDingtalkPackingApplyActions(preview = {}) {
+    const fillable = Number(preview.fillable_row_count || 0);
+    const unmatched = Number(preview.unmatched_count || 0);
+    if (!fillable && !unmatched) return "";
+    return `<div class="ocw-purchase-apply"><div><strong>确认后才写入</strong><span>写入后将重新计算批次并记录钉钉来源。</span></div><div class="ocw-attachment-actions">${fillable ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="apply-dingtalk-packing">写入可补字段</button>` : ""}${unmatched ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="apply-dingtalk-packing" data-create-unmatched="1">确认并新建未匹配物料</button>` : ""}</div></div>`;
+  }
+
+  async applyDingtalkPackingSource(dialog, previewResult, batch, resolutions = {}) {
+    const confirmed = await new Promise((resolve) => frappe.confirm(
+      "确认按预览结果写入当前批次并重新计算？",
+      () => resolve(true),
+      () => resolve(false)
+    ));
+    if (!confirmed) return;
+    const result = await this.call("overseas_costing.api.import_api.apply_packing_source", {
+      batch_name: batch.name,
+      version_name: batch.current_version || null,
+      source_revision: previewResult.source_revision,
+      resolutions_json: JSON.stringify(resolutions),
+    }, true);
+    if (!result || !result.ok) throw new Error((result && result.message) || "装箱资料写入失败");
+    frappe.show_alert({ message: result.message || "装箱资料已写入", indicator: "green" });
+    dialog.hide();
+    await this.refreshDetailSummary();
   }
 
   splitHeaderLabel(label) {
@@ -10949,10 +11199,10 @@ class OverseasCostWorkbench {
         suggestion: logisticsTextBrief || "可从钉钉正文识别物流方式、报价、重量、预计发货日期和目的地",
       },
       {
-        label: "发起附件",
+        label: "钉钉审批附件",
         status: attachmentCount ? `${attachmentCount} 个` : "待拉取",
         statusClass: attachmentCount ? "ocw-check-ok" : "ocw-check-warn",
-        suggestion: attachmentCount ? `资料里可查看${transportCopy.attachmentExamples}` : "从国际物流 OA 拉取发起人上传附件",
+        suggestion: attachmentCount ? `资料里可查看${transportCopy.attachmentExamples}` : "从国际物流 OA 读取表单和评论附件",
       },
       {
         label: transportCopy.packingLabel,
@@ -11036,7 +11286,6 @@ class OverseasCostWorkbench {
     });
     this.renderAuditList();
   }
-
   async toggleBatch(batchName) {
     if (!batchName) return;
     this.activeBatchName = batchName;

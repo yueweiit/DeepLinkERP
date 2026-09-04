@@ -125,6 +125,47 @@ def test_postgres_source_fetches_linked_instances_in_one_query() -> None:
     assert items["PROC-A"]["title"] == "A"
 
 
+def test_postgres_source_loads_instance_bundle_without_per_record_queries() -> None:
+    class SequenceCursor(FakeCursor):
+        def __init__(self):
+            super().__init__([])
+            self.result_sets = [
+                [
+                    {
+                        "process_instance_id": "PROC-MAIN",
+                        "originator_user_name": "张三",
+                        "originator_dept_name": "国际物流",
+                        "raw_payload": {"title": "物流"},
+                    },
+                    {"process_instance_id": "PROC-BUY", "raw_payload": {"title": "采购"}},
+                ],
+                [
+                    {
+                        "process_instance_id": "PROC-MAIN",
+                        "file_id": "FILE-1",
+                        "archive_status": "archived",
+                    }
+                ],
+                [{"source_updated_at": datetime(2026, 9, 4, tzinfo=timezone.utc), "source_lag_seconds": 8}],
+            ]
+
+        def fetchall(self):
+            return self.result_sets[len(self.calls) - 1]
+
+    cursor = SequenceCursor()
+    source = PostgresApprovalSource(_config(), connect=lambda **_kwargs: FakeConnection(cursor))
+
+    result = source.get_instance_bundle(["PROC-MAIN", "PROC-BUY", "PROC-MAIN"])
+
+    assert len(cursor.calls) == 3
+    assert all(call[1] == (["PROC-MAIN", "PROC-BUY"],) for call in cursor.calls[:2])
+    assert result["instances"]["PROC-MAIN"]["title"] == "物流"
+    assert result["instances"]["PROC-MAIN"]["originatorUserName"] == "张三"
+    assert result["instances"]["PROC-MAIN"]["originatorDeptName"] == "国际物流"
+    assert result["attachments"][0]["file_id"] == "FILE-1"
+    assert result["health"]["source_lag_seconds"] == 8
+
+
 class FakeObjectResponse:
     def __init__(self, content: bytes):
         self.content = content

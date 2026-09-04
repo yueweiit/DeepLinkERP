@@ -214,6 +214,7 @@
         <nav class="ocw-detail-tabs" aria-label="批次详情分类">
           ${[
             ["overview", "总览"],
+            ["dingtalk", "钉钉审批"],
             ["documents", "资料与费用"],
             ["items", "SKU 明细"],
             ["vouchers", "凭证核对"],
@@ -241,6 +242,7 @@
     if (allowed === "items") return this.loadSkuPage();
     if (allowed === "audit") return this.renderAuditDetailTab();
     if (allowed === "vouchers") return this.renderVoucherDetailTab();
+    if (allowed === "dingtalk") return this.renderDingtalkApprovalTab();
     if (allowed === "documents") return this.renderDocumentsDetailTab();
     return this.renderOverviewDetailTab();
   }
@@ -256,7 +258,7 @@
     const batch = this.getDetailBatch();
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
-        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div>
+        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>
         ${this.renderBatchDrawerOverview(batch, [])}
       </div>
     `);
