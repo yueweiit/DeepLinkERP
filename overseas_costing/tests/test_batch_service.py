@@ -725,7 +725,7 @@ def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
     assert "批次记录明细数为 2，实际查询到 1 条。" in result["warning_reasons"]
 
 
-def test_rejected_linked_purchase_approval_is_audit_only_for_confirmation_and_writeback() -> None:
+def test_all_rejected_linked_purchase_approvals_block_confirmation_and_writeback() -> None:
     batch = {
         "status": "Calculated",
         "confirm_status": "Confirmed",
@@ -781,10 +781,74 @@ def test_rejected_linked_purchase_approval_is_audit_only_for_confirmation_and_wr
         resolved_version_name="VERSION-001",
     )
 
-    assert confirmation["ready"] is True
-    assert writeback["ready"] is True
-    assert confirmation["checks"]["has_invalid_business_approval"] is False
-    assert writeback["checks"]["has_invalid_business_approval"] is False
+    assert confirmation["ready"] is False
+    assert writeback["ready"] is False
+    assert confirmation["checks"]["has_invalid_business_approval"] is True
+    assert writeback["checks"]["has_invalid_business_approval"] is True
+    assert confirmation["invalid_business"]["scope"] == "linked_purchase_approval"
+
+
+def test_mixed_purchase_approvals_allow_only_verified_valid_purchase_rows() -> None:
+    batch = {
+        "status": "Calculated",
+        "confirm_status": "Confirmed",
+        "current_version": "VERSION-001",
+        "subsidiary_code": "MX01",
+        "item_count": 1,
+        "actual_total_cost_rmb": 25,
+        "extra_json": json.dumps({"linked_purchase_approvals": [
+            {
+                "approval_no": "PUR-VALID",
+                "source_instance_id": "PROC-VALID",
+                "approval_status": "COMPLETED",
+            },
+            {
+                "approval_no": "PUR-REJECTED",
+                "source_instance_id": "PROC-REJECTED",
+                "approval_status": "REJECTED",
+            },
+        ]}),
+    }
+    valid_item = {
+        "row_no": 1,
+        "material_code": "YL000001",
+        "product_name": "太阳眼镜",
+        "quantity": 2,
+        "actual_shipped_qty": 2,
+        "unit_price": 8,
+        "purchase_currency": "RMB",
+        "goods_value": 16,
+        "freight_alloc_rmb": 6,
+        "mexico_customs_mxn": 10,
+        "import_tax_total": 4,
+        "total_unit_rmb": 12.5,
+        "source_type": "PURCHASE_EXPENSE_OA",
+        "dingtalk_instance_id": "PROC-VALID",
+    }
+    rules = [
+        {"expense_category": "国际运费", "amount": 6},
+        {"expense_category": "清关费", "amount": 10},
+        {"expense_category": "关税", "amount": 4},
+    ]
+
+    safe = _build_calculation_confirmation_readiness(
+        batch=batch,
+        items=[valid_item],
+        rules=rules,
+        resolved_version_name="VERSION-001",
+    )
+    contaminated = _build_calculation_confirmation_readiness(
+        batch=batch,
+        items=[{**valid_item, "dingtalk_instance_id": "PROC-REJECTED"}],
+        rules=rules,
+        resolved_version_name="VERSION-001",
+    )
+
+    assert safe["ready"] is True
+    assert safe["checks"]["has_invalid_business_approval"] is False
+    assert contaminated["ready"] is False
+    assert contaminated["checks"]["has_invalid_business_approval"] is True
+    assert contaminated["invalid_business"]["scope"] == "linked_purchase_approval"
 
 
 def test_build_batch_source_status_exposes_invalid_linked_purchase_approval() -> None:
@@ -810,8 +874,8 @@ def test_build_batch_source_status_exposes_invalid_linked_purchase_approval() ->
         }
     )
 
-    assert status["invalid_business"] is False
-    assert status["invalid_business_scope"] == ""
+    assert status["invalid_business"] is True
+    assert status["invalid_business_scope"] == "linked_purchase_approval"
     assert status["purchase_approval_sync_state"] == "excluded"
     assert status["linked_purchase_count"] == 1
     assert status["invalid_purchase_approval_count"] == 1

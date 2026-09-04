@@ -129,7 +129,9 @@ def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> 
 
     assert "syncPurchaseApprovalStatusFromDingtalk" in approval_page
     assert 'excluded.length ? (approvals.length ? "partial" : "excluded") : "valid"' in approval_page
-    assert 'sourceStatus.invalid_business = true' not in approval_page
+    assert 'sourceStatus.invalid_business = true' in approval_page
+    assert 'sourceStatus.invalid_business_scope = "linked_purchase_approval"' in approval_page
+    assert 'sourceStatus.invalid_business = false' in approval_page
     assert "linked_purchase_approval_statuses" in approval_page
 
 

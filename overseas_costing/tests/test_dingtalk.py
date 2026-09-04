@@ -2117,7 +2117,13 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
         batch_name="BATCH-001",
         version_name="VER-001",
         approval_item={"source_instance_id": "PROC-LOG-001"},
-        excluded_purchase_summaries=[{"source_instance_id": "PROC-PUR-REFUSED"}],
+        excluded_purchase_summaries=[{
+            "source_instance_id": "PROC-PUR-REFUSED",
+            "source_approval_no": "PUR-REFUSED",
+            "process_status": "COMPLETED",
+            "approval_result": "REFUSE",
+            "effective_status": "REJECTED",
+        }],
     )
 
     assert repaired["action"] == "restored_main_logistics_items"
@@ -2126,6 +2132,16 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
     assert deleted_filters == [("Overseas Cost Item", {"batch": "BATCH-001", "version": "VER-001"})]
     assert inserted_items[0]["material_code"] == "MAT-MAIN"
     assert inserted_audits[0]["field_name"] == "invalid_purchase_item_repair"
+    audit_new_value = json.loads(inserted_audits[0]["new_value"])
+    assert audit_new_value["excluded_purchase_decisions"] == [{
+        "source_approval_no": "PUR-REFUSED",
+        "source_instance_id": "PROC-PUR-REFUSED",
+        "process_status": "COMPLETED",
+        "approval_result": "REFUSE",
+        "effective_status": "REJECTED",
+        "message": "",
+    }]
+    assert "dingtalk_instance_id" in audit_new_value["affected_fields"]
     assert batch_updates[0][2]["item_count"] == 1
 
 
@@ -2180,6 +2196,7 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
     from overseas_costing.scripts import import_oa_logistics
 
     events = []
+    audit_payloads = []
 
     class FakeMeta:
         @staticmethod
@@ -2190,6 +2207,14 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
         def insert(self, **_kwargs):
             events.append("insert_failed")
             raise RuntimeError("insert failed")
+
+    class AuditDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            audit_payloads.append(self.payload)
+            return self
 
     class FakeDB:
         @staticmethod
@@ -2221,7 +2246,9 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
             }]
 
         @staticmethod
-        def get_doc(_payload):
+        def get_doc(payload):
+            if payload.get("doctype") == "Overseas Cost Audit Log":
+                return AuditDoc(payload)
             return FailingDoc()
 
         @staticmethod
@@ -2250,6 +2277,11 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
         "insert_failed",
         ("rollback", "before_invalid_purchase_item_repair"),
     ]
+    assert audit_payloads[0]["field_name"] == "invalid_purchase_item_repair_review"
+    audit_result = json.loads(audit_payloads[0]["new_value"])
+    assert audit_result["action"] == "manual_required"
+    assert audit_result["rolled_back"] is True
+    assert "insert failed" in audit_result["reason"]
 
 
 def test_purchase_expense_rows_from_preview_excludes_rejected_approvals() -> None:

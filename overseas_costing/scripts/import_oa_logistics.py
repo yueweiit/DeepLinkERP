@@ -4275,6 +4275,44 @@ def _restore_main_logistics_items_after_excluded_purchases(
 ) -> dict:
     """只在现有行全部能证明来自已排除采购审批时，恢复主物流审批物料。"""
 
+    excluded_purchase_decisions = [
+        {
+            "source_approval_no": _clean(summary.get("source_approval_no")),
+            "source_instance_id": _clean(summary.get("source_instance_id") or summary.get("instance_id")),
+            "process_status": _clean(summary.get("process_status")),
+            "approval_result": _clean(summary.get("approval_result")),
+            "effective_status": _clean(summary.get("effective_status") or summary.get("approval_status")),
+            "message": _clean(summary.get("message")),
+        }
+        for summary in excluded_purchase_summaries
+        if isinstance(summary, dict)
+    ]
+
+    def manual_required(reason: str, **details) -> dict:
+        result = {
+            "action": "manual_required",
+            "ok": True,
+            "created_count": 0,
+            "deleted_count": 0,
+            "reason": reason,
+            **details,
+        }
+        try:
+            _insert_batch_audit_log(
+                batch_name=batch_name,
+                field_name="invalid_purchase_item_repair_review",
+                old_value={"version_name": version_name},
+                new_value={
+                    **result,
+                    "excluded_purchase_decisions": excluded_purchase_decisions,
+                    "affected_fields": ["source_type", "dingtalk_instance_id", "item_count"],
+                },
+                remark="已排除采购审批的历史 SKU 无法安全自动恢复，已保留现状并标记人工处理。",
+            )
+        except Exception:
+            pass
+        return result
+
     if frappe is None or not hasattr(frappe, "get_all"):
         return {
             "action": "skipped",
@@ -4284,13 +4322,7 @@ def _restore_main_logistics_items_after_excluded_purchases(
             "reason": "当前环境无法检查历史 SKU 来源，未执行恢复。",
         }
     if not version_name:
-        return {
-            "action": "manual_required",
-            "ok": True,
-            "created_count": 0,
-            "deleted_count": 0,
-            "reason": "当前批次没有版本，无法安全恢复主物流审批物料。",
-        }
+        return manual_required("当前批次没有版本，无法安全恢复主物流审批物料。")
 
     excluded_instance_ids = {
         _clean(summary.get("source_instance_id") or summary.get("instance_id"))
@@ -4299,13 +4331,7 @@ def _restore_main_logistics_items_after_excluded_purchases(
         and _clean(summary.get("source_instance_id") or summary.get("instance_id"))
     }
     if not excluded_instance_ids:
-        return {
-            "action": "manual_required",
-            "ok": True,
-            "created_count": 0,
-            "deleted_count": 0,
-            "reason": "已排除采购审批缺少流程实例 ID，不能安全判断历史 SKU 来源。",
-        }
+        return manual_required("已排除采购审批缺少流程实例 ID，不能安全判断历史 SKU 来源。")
 
     existing_items = frappe.get_all(
         "Overseas Cost Item",
@@ -4330,39 +4356,27 @@ def _restore_main_logistics_items_after_excluded_purchases(
         or _clean(item.get("dingtalk_instance_id")) not in excluded_instance_ids
     ]
     if protected_items:
-        return {
-            "action": "manual_required",
-            "ok": True,
-            "created_count": 0,
-            "deleted_count": 0,
-            "protected_count": len(protected_items),
-            "existing_count": len(existing_items),
-            "reason": "当前 SKU 包含人工修改、其他来源或无法证明来自已排除采购审批的数据，未自动替换。",
-        }
+        return manual_required(
+            "当前 SKU 包含人工修改、其他来源或无法证明来自已排除采购审批的数据，未自动替换。",
+            protected_count=len(protected_items),
+            existing_count=len(existing_items),
+        )
 
     main_item_values = build_oa_item_values_from_approval(approval_item)
     if not main_item_values:
-        return {
-            "action": "manual_required",
-            "ok": True,
-            "created_count": 0,
-            "deleted_count": 0,
-            "existing_count": len(existing_items),
-            "reason": "主物流审批没有可恢复的物料行，保留现有数据待人工处理。",
-        }
+        return manual_required(
+            "主物流审批没有可恢复的物料行，保留现有数据待人工处理。",
+            existing_count=len(existing_items),
+        )
 
     savepoint = getattr(frappe.db, "savepoint", None)
     rollback = getattr(frappe.db, "rollback", None)
     savepoint_name = "before_invalid_purchase_item_repair"
     if not callable(savepoint) or not callable(rollback):
-        return {
-            "action": "manual_required",
-            "ok": True,
-            "created_count": 0,
-            "deleted_count": 0,
-            "existing_count": len(existing_items),
-            "reason": "当前数据库不支持修复保存点，为避免部分删除已停止自动恢复。",
-        }
+        return manual_required(
+            "当前数据库不支持修复保存点，为避免部分删除已停止自动恢复。",
+            existing_count=len(existing_items),
+        )
 
     savepoint(savepoint_name)
     created_names: list[str] = []
@@ -4398,19 +4412,18 @@ def _restore_main_logistics_items_after_excluded_purchases(
                 "created_count": len(created_names),
                 "source": "oa_logistics",
                 "logistics_source_instance_id": approval_item.get("source_instance_id") or "",
+                "excluded_purchase_decisions": excluded_purchase_decisions,
+                "affected_fields": ["source_type", "dingtalk_instance_id", "item_count"],
             },
             remark="关联采购审批已拒绝、撤销或终止，已将可证明由该采购审批生成的 SKU 恢复为主物流审批物料。",
         )
     except Exception as exc:
         rollback(save_point=savepoint_name)
-        return {
-            "action": "manual_required",
-            "ok": True,
-            "created_count": 0,
-            "deleted_count": 0,
-            "existing_count": len(existing_items),
-            "reason": f"恢复主物流审批 SKU 失败，已回滚到修复前：{exc}",
-        }
+        return manual_required(
+            f"恢复主物流审批 SKU 失败，已回滚到修复前：{exc}",
+            existing_count=len(existing_items),
+            rolled_back=True,
+        )
     return {
         "action": "restored_main_logistics_items",
         "ok": True,

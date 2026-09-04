@@ -25,7 +25,11 @@
     sourceStatus.purchase_approval_sync_message = excluded.length
       ? `已排除 ${excluded.length} 条拒绝、撤销或终止的关联采购审批；其数据不参与成本写入。`
       : `已关联 ${approvals.length} 条有效采购审批，状态已同步。`;
-    if (sourceStatus.invalid_business_scope === "linked_purchase_approval") {
+    if (excluded.length && !approvals.length) {
+      sourceStatus.invalid_business = true;
+      sourceStatus.invalid_business_scope = "linked_purchase_approval";
+      sourceStatus.invalid_business_reason = "关联采购审批均已拒绝、撤销或终止，当前批次不能确认成本或推送 ERP。";
+    } else if (sourceStatus.invalid_business_scope === "linked_purchase_approval") {
       sourceStatus.invalid_business = false;
       sourceStatus.invalid_business_scope = "";
       sourceStatus.invalid_business_reason = "";

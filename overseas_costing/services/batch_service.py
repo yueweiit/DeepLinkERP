@@ -874,7 +874,7 @@ def _build_purchase_approval_status_summary(trace: dict) -> dict:
     }
 
 
-def _build_invalid_business_state(batch: dict) -> dict:
+def _build_invalid_business_state(batch: dict, items: list[dict] | None = None) -> dict:
     source_status = batch.get("source_approval_status")
     if is_invalid_approval_status(source_status):
         return {
@@ -883,6 +883,43 @@ def _build_invalid_business_state(batch: dict) -> dict:
             "status": str(source_status or "").strip(),
             "message": f"当前 OA 审批状态为 {str(source_status or '').strip()}，业务已拒绝/撤销/终止，不进入综合成本确认或 ERP 推送。",
         }
+
+    trace = _get_oa_logistics_trace(batch.get("extra_json"))
+    purchase_status = _build_purchase_approval_status_summary(trace)
+    if purchase_status["state"] == "excluded":
+        return {
+            "invalid": True,
+            "scope": "linked_purchase_approval",
+            "status": "excluded",
+            "message": "当前批次的关联采购审批均已拒绝/撤销/终止，不进入综合成本确认或 ERP 推送。",
+        }
+
+    if purchase_status["state"] == "partial" and items is not None:
+        invalid_instance_ids = {
+            str(row.get("source_instance_id") or "").strip()
+            for row in purchase_status["linked_purchase_approvals"]
+            if (
+                is_invalid_approval_status(row.get("approval_status"))
+                or is_invalid_approval_status(row.get("message"))
+            )
+            and str(row.get("source_instance_id") or "").strip()
+        }
+        contaminated_rows = []
+        for item in items:
+            source_type = str(item.get("source_type") or "").strip().upper()
+            instance_id = str(item.get("dingtalk_instance_id") or "").strip()
+            if instance_id in invalid_instance_ids or (
+                source_type == "PURCHASE_EXPENSE_OA" and not instance_id
+            ):
+                contaminated_rows.append(item)
+        if contaminated_rows:
+            return {
+                "invalid": True,
+                "scope": "linked_purchase_approval",
+                "status": "manual_required",
+                "contaminated_item_count": len(contaminated_rows),
+                "message": "当前批次仍包含已拒绝/撤销/终止的关联采购审批数据，需完成人工清理后才能确认成本或推送 ERP。",
+            }
 
     return {"invalid": False}
 
@@ -2445,7 +2482,7 @@ def _build_calculation_confirmation_readiness(
     total_cost = actual_total_cost or estimated_total_cost
     recorded_item_count = int(_as_float(batch.get("item_count")))
     actual_item_count = len(items)
-    invalid_business_state = _build_invalid_business_state(batch)
+    invalid_business_state = _build_invalid_business_state(batch, items)
 
     has_international_freight = _has_positive_rule(
         rules,
@@ -2546,7 +2583,7 @@ def _build_writeback_readiness(
     total_cost = actual_total_cost or estimated_total_cost
     recorded_item_count = int(_as_float(batch.get("item_count")))
     actual_item_count = len(items)
-    invalid_business_state = _build_invalid_business_state(batch)
+    invalid_business_state = _build_invalid_business_state(batch, items)
 
     checks = {
         "batch_exists": True,

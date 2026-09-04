@@ -188,6 +188,53 @@ def test_preview_oa_source_attachment_caches_recognition_snapshot(monkeypatch) -
     assert attachment_doc.save_count == 1
 
 
+def test_excluded_approval_attachment_cannot_be_recognized_or_manually_classified(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeAttachmentDoc:
+        file_name = "PO-rejected.xlsx"
+        file_url = "/private/files/PO-rejected.xlsx"
+        batch = "BATCH-001"
+        version = "VER-001"
+        attachment_type = "Other"
+        parse_status = "Queued"
+        parse_result_json = json.dumps({
+            "approval_excluded": True,
+            "cost_source_allowed": False,
+            "exclusion_reason": "采购审批已拒绝",
+        })
+        mapped_result_json = "{}"
+
+        def save(self, **_kwargs):
+            raise AssertionError("audit-only attachment must not be modified")
+
+    attachment_doc = FakeAttachmentDoc()
+
+    class FakeFrappe:
+        @staticmethod
+        def get_doc(*args):
+            assert args == ("Overseas Cost Attachment", "ATT-REJECTED")
+            return attachment_doc
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        attachment_parse_service,
+        "preview_source_document",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("audit-only attachment must not be parsed")),
+    )
+
+    preview = preview_oa_source_attachment("ATT-REJECTED")
+    confirmed = confirm_oa_source_attachment_type(
+        attachment_name="ATT-REJECTED",
+        confirmed_type="purchase_price_document",
+    )
+
+    assert preview["ok"] is False
+    assert preview["audit_only"] is True
+    assert confirmed["ok"] is False
+    assert confirmed["audit_only"] is True
+
+
 def test_confirm_oa_source_attachment_type_requires_frappe_environment() -> None:
     result = confirm_oa_source_attachment_type(
         attachment_name="ATTACHMENT-001",
@@ -219,13 +266,14 @@ def test_build_attachment_price_provenance_uses_attachment_metadata(monkeypatch)
         def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
             assert doctype == "Overseas Cost Attachment"
             assert name_or_filters == "ATT-PRICE-001"
-            assert fields == ["name", "file_name", "file_url", "source_doc_no"]
+            assert fields == ["name", "file_name", "file_url", "source_doc_no", "parse_result_json"]
             assert as_dict is True
             return {
                 "name": "ATT-PRICE-001",
                 "file_name": "5月指环扣双清-未关联采购单.xlsx",
                 "file_url": "/private/files/5月指环扣双清-未关联采购单.xlsx",
                 "source_doc_no": "202605270001",
+                "parse_result_json": "{}",
             }
 
     class FakeFrappe:
@@ -245,6 +293,30 @@ def test_build_attachment_price_provenance_uses_attachment_metadata(monkeypatch)
         "source_doc_no": "202605270001",
         "parse_status": "SUCCESS",
     }
+
+
+def test_build_attachment_price_provenance_rejects_audit_only_attachment(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {
+                "name": "ATT-REJECTED",
+                "file_name": "PO-rejected.xlsx",
+                "parse_result_json": json.dumps({
+                    "approval_excluded": True,
+                    "cost_source_allowed": False,
+                }),
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    with pytest.raises(ValueError, match="仅供审计"):
+        _build_attachment_price_provenance(attachment_name="ATT-REJECTED")
 
 
 def test_preview_purchase_order_match_builds_price_rows_without_writing(monkeypatch) -> None:

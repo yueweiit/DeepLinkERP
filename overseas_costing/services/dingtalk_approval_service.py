@@ -419,6 +419,32 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
     }
 
 
+def _backfill_attachment_audit_policy(attachment_name: str | None, source_approval: dict) -> None:
+    """Fail closed when an existing local attachment belongs to an excluded approval."""
+
+    if not attachment_name or not source_approval.get("excluded"):
+        return
+    get_doc = getattr(frappe, "get_doc", None)
+    if not callable(get_doc):
+        return
+    attachment_doc = get_doc("Overseas Cost Attachment", attachment_name)
+    snapshot = _json_dict(getattr(attachment_doc, "parse_result_json", ""))
+    expected = {
+        "approval_excluded": True,
+        "cost_source_allowed": False,
+        "exclusion_reason": source_approval.get("exclusion_reason") or "",
+    }
+    changed = any(snapshot.get(key) != value for key, value in expected.items())
+    snapshot.update(expected)
+    if changed:
+        attachment_doc.parse_result_json = json.dumps(snapshot, ensure_ascii=False, default=str)
+    if str(getattr(attachment_doc, "attachment_type", "") or "") != "Other":
+        attachment_doc.attachment_type = "Other"
+        changed = True
+    if changed:
+        attachment_doc.save(ignore_permissions=True)
+
+
 def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: str, file_id: str) -> dict:
     """Create the local attachment record only after an authorized user requests the archived file."""
 
@@ -449,6 +475,7 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
     if not source:
         return {"ok": False, "message": "该附件不属于当前批次审批。"}
     if source.get("attachment_name"):
+        _backfill_attachment_audit_policy(source["attachment_name"], source_approval)
         return {"ok": True, "attachment_name": source["attachment_name"], "created": False}
     if str(source.get("archive_status") or "") != "archived":
         return {"ok": False, "message": source.get("failure_reason") or "附件尚未归档，暂不能下载。"}
@@ -471,6 +498,7 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
             str(snapshot.get("process_instance_id") or "") == str(process_instance_id or "")
             and str(snapshot.get("file_id") or "") == str(file_id or "")
         ):
+            _backfill_attachment_audit_policy(row.get("name"), source_approval)
             return {"ok": True, "attachment_name": row.get("name"), "created": False}
 
     batch = frappe.db.get_value("Overseas Cost Batch", batch_name, ["name", "current_version"], as_dict=True) or {}

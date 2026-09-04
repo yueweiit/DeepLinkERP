@@ -315,6 +315,58 @@ def test_materialize_allows_download_from_excluded_approval_audit(monkeypatch) -
     assert result == {"ok": True, "attachment_name": "ATT-EXCLUDED", "created": False}
 
 
+def test_materialize_backfills_audit_policy_on_existing_excluded_attachment(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    class FakeAttachmentDoc:
+        parse_result_json = json.dumps({
+            "process_instance_id": "PROC-REFUSED",
+            "file_id": "FILE-REFUSED",
+        })
+        attachment_type = "Packing List"
+        save_count = 0
+
+        def save(self, **_kwargs):
+            self.save_count += 1
+
+    attachment_doc = FakeAttachmentDoc()
+
+    class FakeFrappe:
+        @staticmethod
+        def get_doc(doctype, name):
+            assert (doctype, name) == ("Overseas Cost Attachment", "ATT-EXCLUDED")
+            return attachment_doc
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+    monkeypatch.setattr(service, "get_batch_dingtalk_approval_detail", lambda _batch: {
+        "ok": True,
+        "main_approval": {"instance_id": "PROC-MAIN", "attachments": []},
+        "linked_purchase_approvals": [],
+        "excluded_linked_purchase_approvals": [{
+            "instance_id": "PROC-REFUSED",
+            "excluded": True,
+            "exclusion_reason": "审批结果为拒绝",
+            "attachments": [{
+                "file_id": "FILE-REFUSED",
+                "attachment_name": "ATT-EXCLUDED",
+                "archive_status": "archived",
+            }],
+        }],
+    })
+
+    result = service.materialize_batch_dingtalk_attachment(
+        "BATCH-1", "PROC-REFUSED", "FILE-REFUSED"
+    )
+
+    assert result == {"ok": True, "attachment_name": "ATT-EXCLUDED", "created": False}
+    snapshot = json.loads(attachment_doc.parse_result_json)
+    assert snapshot["approval_excluded"] is True
+    assert snapshot["cost_source_allowed"] is False
+    assert snapshot["exclusion_reason"] == "审批结果为拒绝"
+    assert attachment_doc.attachment_type == "Other"
+    assert attachment_doc.save_count == 1
+
+
 def test_materialize_allows_attachment_from_excluded_linked_approval(monkeypatch) -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

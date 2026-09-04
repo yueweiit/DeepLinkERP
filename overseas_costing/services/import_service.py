@@ -2035,6 +2035,20 @@ def diagnose_oa_form_attachment_download(
     return result
 
 
+def _attachment_doc_is_audit_only(attachment_doc) -> bool:
+    snapshot = _json_loads_dict(getattr(attachment_doc, "parse_result_json", ""))
+    return bool(snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False)
+
+
+def _audit_only_attachment_response(attachment_name: str) -> dict:
+    return {
+        "ok": False,
+        "audit_only": True,
+        "attachment_name": attachment_name,
+        "message": "该附件来自已排除审批，仅供审计查看和下载，不能识别、分类或写入任何成本数据。",
+    }
+
+
 def preview_oa_source_attachment(attachment_name: str) -> dict:
     """识别已下载 OA 附件的内容类型和字段候选，不写回物料字段。"""
 
@@ -2052,6 +2066,8 @@ def preview_oa_source_attachment(attachment_name: str) -> dict:
         attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
     except Exception as exc:
         return {"ok": False, "attachment_name": resolved_attachment_name, "message": f"未找到附件记录：{exc}"}
+    if _attachment_doc_is_audit_only(attachment_doc):
+        return _audit_only_attachment_response(resolved_attachment_name)
 
     file_url = str(getattr(attachment_doc, "file_url", "") or "").strip()
     if not file_url:
@@ -2134,6 +2150,8 @@ def confirm_oa_source_attachment_type(
         attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
     except Exception as exc:
         return {"ok": False, "attachment_name": resolved_attachment_name, "message": f"未找到附件记录：{exc}"}
+    if _attachment_doc_is_audit_only(attachment_doc):
+        return _audit_only_attachment_response(resolved_attachment_name)
 
     mapped_result = _json_loads_dict(getattr(attachment_doc, "mapped_result_json", ""))
     previous_review = _source_document_manual_review(mapped_result)
@@ -5228,11 +5246,14 @@ def _build_attachment_price_provenance(
             attachment_row = frappe.db.get_value(
                 "Overseas Cost Attachment",
                 resolved_attachment_name,
-                ["name", "file_name", "file_url", "source_doc_no"],
+                ["name", "file_name", "file_url", "source_doc_no", "parse_result_json"],
                 as_dict=True,
             ) or {}
         except Exception:
             attachment_row = {}
+    attachment_policy = _json_loads_dict(attachment_row.get("parse_result_json"))
+    if attachment_policy.get("approval_excluded") or attachment_policy.get("cost_source_allowed") is False:
+        raise ValueError("该附件来自已排除审批，仅供审计查看和下载，不能写入成本数据。")
 
     resolved_file_url = str(attachment_row.get("file_url") or file_url or "").strip()
     source_doc_no = str(attachment_row.get("source_doc_no") or resolved_file_url or resolved_attachment_name).strip()
