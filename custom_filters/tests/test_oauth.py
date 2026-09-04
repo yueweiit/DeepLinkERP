@@ -1,3 +1,4 @@
+import base64
 import json
 import pickle
 from types import SimpleNamespace
@@ -8,6 +9,44 @@ from custom_filters.overrides import oauth
 
 
 class TestEIMSOAuth(TestCase):
+	def test_decode_legacy_frappe_state(self):
+		payload = {
+			"site": "https://erp.example.com",
+			"token": "legacy-token",
+			"redirect_to": "/desk",
+		}
+		state = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+		with patch.object(oauth.frappe.utils, "get_url", return_value=payload["site"]):
+			self.assertEqual(oauth._decode_legacy_frappe_state(state), payload)
+
+	def test_decode_legacy_frappe_state_rejects_other_site(self):
+		payload = {
+			"site": "https://other.example.com",
+			"token": "legacy-token",
+		}
+		state = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+		with patch.object(oauth.frappe.utils, "get_url", return_value="https://erp.example.com"):
+			self.assertIsNone(oauth._decode_legacy_frappe_state(state))
+
+	@patch.object(
+		oauth,
+		"_decode_legacy_frappe_state",
+		return_value={"site": "https://erp.example.com", "token": "legacy-token", "redirect_to": "/desk"},
+	)
+	@patch.object(oauth, "sanitize_redirect", side_effect=lambda value: value)
+	def test_legacy_callback_restarts_pkce_flow(self, _sanitize_redirect, _decode_state):
+		local = SimpleNamespace(response={})
+		with patch.object(oauth.frappe, "local", local):
+			oauth.login_via_eims("authorization-code", "legacy-state")
+
+		self.assertEqual(local.response["type"], "redirect")
+		self.assertEqual(
+			local.response["location"],
+			"/api/method/custom_filters.overrides.oauth.start_eims_login?redirect_to=%2Fdesk",
+		)
+
 	def test_provider_name_comes_from_site_config(self):
 		with patch.object(
 			oauth.frappe,

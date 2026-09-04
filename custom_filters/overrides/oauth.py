@@ -116,6 +116,18 @@ def login_via_eims(code: str, state: str):
 		if not isinstance(code, str) or not code.strip():
 			frappe.throw(_("EIMS OAuth 回调缺少授权码"))
 
+		# A login page rendered before PKCE was enabled can still have the old
+		# Frappe OAuth URL in the browser. Its state has no server-side verifier.
+		# Discard that authorization code and restart the flow instead of ever
+		# exchanging a code without PKCE validation.
+		legacy_state = _decode_legacy_frappe_state(state)
+		if legacy_state:
+			redirect_to = legacy_state.get("redirect_to")
+			redirect_to = sanitize_redirect(redirect_to) if redirect_to else None
+			frappe.local.response["type"] = "redirect"
+			frappe.local.response["location"] = _build_start_url(redirect_to)
+			return
+
 		state_data = _consume_state(state)
 		provider = _get_eims_provider()
 		oauth2_providers = get_oauth2_providers()
@@ -208,6 +220,29 @@ def login_via_eims(code: str, state: str):
 			fullpage=True,
 		)
 		return
+
+
+def _decode_legacy_frappe_state(state):
+	"""Return the old Frappe OAuth state, if this is a stale login-page flow."""
+	if not isinstance(state, str):
+		return None
+
+	try:
+		padding = "=" * (-len(state) % 4)
+		payload = json.loads(base64.urlsafe_b64decode(state + padding).decode("utf-8"))
+	except (TypeError, ValueError, UnicodeError):
+		return None
+
+	if not isinstance(payload, dict):
+		return None
+	if not isinstance(payload.get("site"), str) or not payload.get("token"):
+		return None
+
+	configured_site = frappe.utils.get_url().rstrip("/")
+	if payload["site"].rstrip("/") != configured_site:
+		return None
+
+	return payload
 
 
 def update_website_context(context):
