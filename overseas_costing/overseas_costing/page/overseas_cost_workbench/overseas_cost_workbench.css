@@ -2295,10 +2295,20 @@
   }
 }
 
+.body-sidebar-container .sidebar-header > .sidebar-item-icon {
+  display: flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
 .body-sidebar-container .sidebar-header > .sidebar-item-icon > .ocw-workspace-sidebar-icon {
   display: block;
-  width: 100%;
-  height: 100%;
+  width: 32px;
+  height: 32px;
   object-fit: contain;
 }
 

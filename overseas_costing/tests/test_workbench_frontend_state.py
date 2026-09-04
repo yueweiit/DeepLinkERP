@@ -57,6 +57,12 @@ def test_workspace_header_reuses_authorized_desktop_icon_and_restores_original()
     assert "ocw-workspace-sidebar-icon" in bootstrap
     assert "_workspaceSidebarIconSnapshot" in shell
     assert ".ocw-workspace-sidebar-icon" in stylesheet
+    slot_selector = ".body-sidebar-container .sidebar-header > .sidebar-item-icon {"
+    assert slot_selector in stylesheet
+    slot_rule = stylesheet.split(slot_selector, 1)[1].split("}", 1)[0]
+    assert "width: 32px" in slot_rule
+    assert "height: 32px" in slot_rule
+    assert "flex: 0 0 32px" in slot_rule
 
 
 def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_copy() -> None:
