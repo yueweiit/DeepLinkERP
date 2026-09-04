@@ -84,6 +84,41 @@ def test_batch_detail_normalizes_main_linked_comments_and_archives(monkeypatch) 
     assert "raw_payload" not in result["main_approval"]
 
 
+def test_form_fields_render_structured_values_without_download_credentials() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    fields = service._form_fields({
+        "formComponentValues": [
+            {
+                "name": "装箱单附件",
+                "value": json.dumps([{
+                    "fileName": "装箱计划.xlsx",
+                    "fileId": "FILE-SECRET",
+                    "spaceId": "SPACE-SECRET",
+                    "thumbnail": {"authMediaId": "AUTH-SECRET"},
+                }], ensure_ascii=False),
+            },
+            {
+                "name": "货物信息",
+                "value": json.dumps([{
+                    "rowNumber": "ROW-SECRET",
+                    "rowValue": [
+                        {"label": "物料编码", "value": "FL000429", "key": "FIELD-SECRET"},
+                        {"label": "数量", "value": "100000", "key": "FIELD-SECRET-2"},
+                    ],
+                }], ensure_ascii=False),
+            },
+        ],
+    })
+
+    assert fields == [
+        {"label": "装箱单附件", "value": "装箱计划.xlsx"},
+        {"label": "货物信息", "value": "物料编码：FL000429；数量：100000"},
+    ]
+    rendered = json.dumps(fields, ensure_ascii=False)
+    assert "SECRET" not in rendered
+
+
 def test_materialize_rechecks_existing_attachment_while_batch_is_locked(monkeypatch) -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

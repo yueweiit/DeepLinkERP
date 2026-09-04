@@ -80,20 +80,67 @@ def _approval_matches_batch(batch: dict, payload: dict) -> bool:
     )
 
 
+FORM_VALUE_PRIVATE_KEYS = {
+    "authcode",
+    "authmediaid",
+    "mediaid",
+    "fileid",
+    "spaceid",
+    "downloadurl",
+    "previewurl",
+    "url",
+    "key",
+    "rownumber",
+}
+
+
+def _safe_form_value(value):
+    if isinstance(value, list):
+        return [_safe_form_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("fileName") and (value.get("fileId") or value.get("spaceId")):
+        return str(value.get("fileName") or "审批附件")
+    return {
+        str(key): _safe_form_value(item)
+        for key, item in value.items()
+        if str(key).replace("_", "").lower() not in FORM_VALUE_PRIVATE_KEYS
+    }
+
+
 def _display_value(value) -> str:
     if value is None:
         return ""
+    decoded = value
     if isinstance(value, str):
         try:
             decoded = json.loads(value)
         except (TypeError, ValueError):
             return value
-        if isinstance(decoded, (dict, list)):
-            return json.dumps(decoded, ensure_ascii=False)
-        return str(decoded)
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+    sanitized = _safe_form_value(decoded)
+    if isinstance(sanitized, list):
+        if all(isinstance(item, str) for item in sanitized):
+            return "；".join(sanitized)
+        table_rows = []
+        for item in sanitized:
+            cells = item.get("rowValue") if isinstance(item, dict) else None
+            if not isinstance(cells, list):
+                table_rows = []
+                break
+            pairs = []
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    continue
+                label = str(cell.get("label") or "字段")
+                cell_value = _display_value(cell.get("value"))
+                pairs.append(f"{label}：{cell_value or '--'}")
+            if pairs:
+                table_rows.append("；".join(pairs))
+        if table_rows:
+            return "\n".join(table_rows)
+    if isinstance(sanitized, (dict, list)):
+        return json.dumps(sanitized, ensure_ascii=False)
+    return str(sanitized)
 
 
 def _form_fields(payload: dict) -> list[dict]:
