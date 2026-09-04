@@ -119,6 +119,117 @@ def test_form_fields_render_structured_values_without_download_credentials() -> 
     assert "SECRET" not in rendered
 
 
+def test_batch_detail_resolves_actor_names_and_audits_excluded_linked_approval(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(_doctype, _name, _fields, as_dict=False):
+            return {
+                "name": "BATCH-1",
+                "batch_no": "OA-001",
+                "source_type": "oa_logistics",
+                "source_approval_no": "OA-001",
+                "source_instance_id": "PROC-MAIN",
+                "extra_json": json.dumps({
+                    "linked_purchase_approvals": [
+                        {"source_instance_id": "PROC-BUY-VALID"},
+                        {"source_instance_id": "PROC-BUY-REFUSED"},
+                    ]
+                }),
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    class FakeSource:
+        @staticmethod
+        def get_instance_bundle(instance_ids):
+            assert instance_ids == ["PROC-MAIN", "PROC-BUY-VALID", "PROC-BUY-REFUSED"]
+            return {
+                "instances": {
+                    "PROC-MAIN": {
+                        "corpId": "CORP-1",
+                        "processInstanceId": "PROC-MAIN",
+                        "businessId": "OA-001",
+                        "status": "COMPLETED",
+                        "result": "agree",
+                        "originatorUserId": "0217304551217188371",
+                        "operationRecords": [
+                            {"userId": "16693147192083157833", "type": "EXECUTE_TASK_NORMAL", "date": "2026-09-04"},
+                            {"userId": "UNKNOWN", "type": "PROCESS_CC", "date": "2026-09-04"},
+                            {"userId": "bpms_system", "type": "SYSTEM", "date": "2026-09-04"},
+                        ],
+                    },
+                    "PROC-BUY-VALID": {
+                        "corpId": "CORP-1",
+                        "processInstanceId": "PROC-BUY-VALID",
+                        "businessId": "PUR-VALID",
+                        "status": "COMPLETED",
+                        "result": "agree",
+                        "originatorUserId": "USER-3",
+                    },
+                    "PROC-BUY-REFUSED": {
+                        "corpId": "CORP-1",
+                        "processInstanceId": "PROC-BUY-REFUSED",
+                        "businessId": "PUR-REFUSED",
+                        "status": "COMPLETED",
+                        "result": "refuse",
+                        "originatorUserId": "USER-4",
+                    },
+                },
+                "attachments": [{
+                    "corp_id": "CORP-1",
+                    "process_instance_id": "PROC-MAIN",
+                    "file_id": "FILE-1",
+                    "file_name": "评论附件.pdf",
+                    "attachment_origin": "comment",
+                    "archive_status": "archived",
+                    "comment_user_id": "USER-3",
+                }],
+                "actors": {"CORP-1": {
+                    "0217304551217188371": {"name": "李仲华"},
+                    "16693147192083157833": {"name": "周汉琴"},
+                    "USER-3": {"name": "陈一"},
+                    "USER-4": {"name": "王二"},
+                }},
+                "health": {},
+            }
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+    monkeypatch.setattr(service, "_get_approval_source", lambda: FakeSource())
+    monkeypatch.setattr(
+        service,
+        "_trusted_linked_instance_ids",
+        lambda _payload: ["PROC-BUY-VALID", "PROC-BUY-REFUSED"],
+    )
+
+    result = service.get_batch_dingtalk_approval_detail("BATCH-1")
+
+    main = result["main_approval"]
+    assert main["originator_user_name"] == "李仲华"
+    assert main["originator_name_source"] == "directory"
+    assert main["timeline"][0]["user_name"] == "周汉琴"
+    assert main["timeline"][0]["user_name_source"] == "directory"
+    assert main["timeline"][1]["user_name_unresolved"] is True
+    assert main["timeline"][2]["user_name"] == "系统"
+    assert main["attachments"][0]["comment_user_name"] == "陈一"
+    assert main["raw_status"] == "COMPLETED"
+    assert main["raw_result"] == "agree"
+    assert main["process_status"] == "COMPLETED"
+    assert main["approval_result"] == "agree"
+    assert main["effective_status"] == "COMPLETED"
+    assert main["excluded"] is False
+
+    assert [row["instance_id"] for row in result["linked_purchase_approvals"]] == ["PROC-BUY-VALID"]
+    excluded = result["excluded_linked_purchase_approvals"][0]
+    assert excluded["instance_id"] == "PROC-BUY-REFUSED"
+    assert excluded["originator_user_name"] == "王二"
+    assert excluded["effective_status"] == "REJECTED"
+    assert excluded["excluded"] is True
+    assert excluded["exclusion_reason"] == "审批结果为拒绝"
+
+
 def test_materialize_rechecks_existing_attachment_while_batch_is_locked(monkeypatch) -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 
@@ -164,3 +275,31 @@ def test_materialize_rechecks_existing_attachment_while_batch_is_locked(monkeypa
 
     assert result == {"ok": True, "attachment_name": "ATT-EXISTING", "created": False}
     assert "FOR UPDATE" in sql_calls[0][0]
+
+
+def test_materialize_allows_attachment_from_excluded_linked_approval(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    monkeypatch.setattr(service, "frappe", object())
+    monkeypatch.setattr(service, "get_batch_dingtalk_approval_detail", lambda _batch: {
+        "ok": True,
+        "main_approval": {"instance_id": "PROC-MAIN", "attachments": []},
+        "linked_purchase_approvals": [],
+        "excluded_linked_purchase_approvals": [{
+            "instance_id": "PROC-REFUSED",
+            "excluded": True,
+            "attachments": [{
+                "file_id": "FILE-EXCLUDED",
+                "attachment_name": "ATT-EXCLUDED",
+                "archive_status": "archived",
+            }],
+        }],
+    })
+
+    result = service.materialize_batch_dingtalk_attachment(
+        "BATCH-1",
+        "PROC-REFUSED",
+        "FILE-EXCLUDED",
+    )
+
+    assert result == {"ok": True, "attachment_name": "ATT-EXCLUDED", "created": False}

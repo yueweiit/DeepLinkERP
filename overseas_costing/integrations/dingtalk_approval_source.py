@@ -119,6 +119,7 @@ class PostgresApprovalSource:
             raw_payload = dict(raw_payload)
         payload = dict(raw_payload)
         field_map = {
+            "corp_id": "corpId",
             "process_instance_id": "processInstanceId",
             "business_id": "businessId",
             "process_code": "processCode",
@@ -138,6 +139,55 @@ class PostgresApprovalSource:
             if value is not None and api_name not in payload:
                 payload[api_name] = value
         return payload
+
+    @classmethod
+    def _actor_pairs(
+        cls,
+        approval_rows: Iterable[Mapping[str, Any]],
+        attachment_rows: Iterable[Mapping[str, Any]],
+    ) -> list[tuple[str, str]]:
+        pairs: set[tuple[str, str]] = set()
+        for row in approval_rows:
+            corp_id = str(row.get("corp_id") or "").strip()
+            if not corp_id:
+                continue
+            payload = cls._raw_payload(row)
+            originator_id = str(
+                payload.get("originatorUserId") or payload.get("originator_user_id") or ""
+            ).strip()
+            if originator_id:
+                pairs.add((corp_id, originator_id))
+            operations = (
+                payload.get("operationRecords")
+                or payload.get("operation_records")
+                or payload.get("comments")
+                or []
+            )
+            if isinstance(operations, str):
+                try:
+                    operations = json.loads(operations)
+                except (TypeError, ValueError):
+                    operations = []
+            if not isinstance(operations, list):
+                operations = []
+            for operation in operations:
+                if not isinstance(operation, Mapping):
+                    continue
+                user_id = str(
+                    operation.get("userId")
+                    or operation.get("user_id")
+                    or operation.get("operatorUserId")
+                    or ""
+                ).strip()
+                if user_id:
+                    pairs.add((corp_id, user_id))
+
+        for row in attachment_rows:
+            corp_id = str(row.get("corp_id") or "").strip()
+            user_id = str(row.get("comment_user_id") or "").strip()
+            if corp_id and user_id:
+                pairs.add((corp_id, user_id))
+        return sorted(pairs)
 
     def list_instances(
         self,
@@ -232,6 +282,15 @@ class PostgresApprovalSource:
              WHERE process_instance_id = ANY(%s)
              ORDER BY process_instance_id, attachment_origin, file_name, file_id
         """
+        actor_sql = """
+            WITH requested(corp_id, user_id) AS (
+                SELECT * FROM unnest(%s::text[], %s::text[])
+            )
+            SELECT actor.*
+              FROM costing_read.approval_actor_names_v1 actor
+              JOIN requested USING (corp_id, user_id)
+             ORDER BY actor.corp_id, actor.user_id
+        """
         health_sql = "SELECT * FROM costing_read.sync_health_v1 LIMIT 1"
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -239,6 +298,14 @@ class PostgresApprovalSource:
                 approval_rows = cursor.fetchall()
                 cursor.execute(attachment_sql, (unique_ids,))
                 attachment_rows = cursor.fetchall()
+                actor_pairs = self._actor_pairs(approval_rows, attachment_rows)
+                if actor_pairs:
+                    corp_ids = [pair[0] for pair in actor_pairs]
+                    user_ids = [pair[1] for pair in actor_pairs]
+                    cursor.execute(actor_sql, (corp_ids, user_ids))
+                    actor_rows = cursor.fetchall()
+                else:
+                    actor_rows = []
                 cursor.execute(health_sql, ())
                 health_rows = cursor.fetchall()
 
@@ -247,6 +314,12 @@ class PostgresApprovalSource:
             for row in approval_rows
             if row.get("process_instance_id")
         }
+        actors: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in actor_rows:
+            corp_id = str(row.get("corp_id") or "")
+            user_id = str(row.get("user_id") or "")
+            if corp_id and user_id:
+                actors.setdefault(corp_id, {})[user_id] = dict(row)
         return {
             "instances": {
                 instance_id: by_id[instance_id]
@@ -254,6 +327,7 @@ class PostgresApprovalSource:
                 if instance_id in by_id
             },
             "attachments": [dict(row) for row in attachment_rows],
+            "actors": actors,
             "health": dict(health_rows[0]) if health_rows else {},
             "data_source": "postgres",
             "fallback_used": False,

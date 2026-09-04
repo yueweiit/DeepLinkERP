@@ -166,6 +166,56 @@ def test_postgres_source_loads_instance_bundle_without_per_record_queries() -> N
     assert result["health"]["source_lag_seconds"] == 8
 
 
+def test_postgres_source_loads_all_approval_actors_with_one_scoped_query() -> None:
+    class SequenceCursor(FakeCursor):
+        def __init__(self):
+            super().__init__([])
+            self.result_sets = [
+                [{
+                    "corp_id": "CORP-1",
+                    "process_instance_id": "PROC-MAIN",
+                    "originator_user_id": "USER-1",
+                    "raw_payload": {
+                        "operationRecords": [{"userId": "USER-2"}],
+                    },
+                }],
+                [{
+                    "corp_id": "CORP-1",
+                    "process_instance_id": "PROC-MAIN",
+                    "file_id": "FILE-1",
+                    "comment_user_id": "USER-3",
+                }],
+                [
+                    {"corp_id": "CORP-1", "user_id": "USER-1", "name": "李仲华", "title": ""},
+                    {"corp_id": "CORP-1", "user_id": "USER-2", "name": "周汉琴", "title": ""},
+                    {"corp_id": "CORP-1", "user_id": "USER-3", "name": "陈一", "title": ""},
+                ],
+                [{"source_lag_seconds": 3}],
+            ]
+
+        def fetchall(self):
+            return self.result_sets[len(self.calls) - 1]
+
+    cursor = SequenceCursor()
+    source = PostgresApprovalSource(_config(), connect=lambda **_kwargs: FakeConnection(cursor))
+
+    result = source.get_instance_bundle(["PROC-MAIN"])
+
+    assert len(cursor.calls) == 4
+    actor_sql, actor_params = cursor.calls[2]
+    assert "costing_read.approval_actor_names_v1" in actor_sql
+    assert "unnest(%s::text[], %s::text[])" in actor_sql
+    assert set(zip(*actor_params)) == {
+        ("CORP-1", "USER-1"),
+        ("CORP-1", "USER-2"),
+        ("CORP-1", "USER-3"),
+    }
+    assert result["instances"]["PROC-MAIN"]["corpId"] == "CORP-1"
+    assert result["actors"]["CORP-1"]["USER-1"]["name"] == "李仲华"
+    assert result["actors"]["CORP-1"]["USER-2"]["name"] == "周汉琴"
+    assert result["actors"]["CORP-1"]["USER-3"]["name"] == "陈一"
+
+
 class FakeObjectResponse:
     def __init__(self, content: bytes):
         self.content = content

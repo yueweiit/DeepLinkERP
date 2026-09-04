@@ -155,8 +155,47 @@ def _form_fields(payload: dict) -> list[dict]:
     ]
 
 
-def _timeline(payload: dict, instance_id: str) -> list[dict]:
+def _actor_identity(
+    *,
+    corp_id: str,
+    user_id: str,
+    provided_name: str = "",
+    actors: dict | None = None,
+) -> dict:
+    user_id = str(user_id or "").strip()
+    provided_name = str(provided_name or "").strip()
+    if provided_name and provided_name != user_id:
+        return {
+            "user_name": provided_name,
+            "user_name_source": "payload",
+            "user_name_unresolved": False,
+        }
+    if not user_id or user_id.lower() in {"bpms_system", "system", "dingtalk_system"}:
+        return {
+            "user_name": "系统",
+            "user_name_source": "system",
+            "user_name_unresolved": False,
+        }
+    actor = ((actors or {}).get(str(corp_id or ""), {}) or {}).get(user_id) or {}
+    if isinstance(actor, str):
+        actor = {"name": actor}
+    actor_name = str(actor.get("name") or "").strip() if isinstance(actor, dict) else ""
+    if actor_name and actor_name.lower() != "unknown" and actor_name != user_id:
+        return {
+            "user_name": actor_name,
+            "user_name_source": "directory",
+            "user_name_unresolved": False,
+        }
+    return {
+        "user_name": "",
+        "user_name_source": "unresolved",
+        "user_name_unresolved": True,
+    }
+
+
+def _timeline(payload: dict, instance_id: str, actors: dict | None = None) -> list[dict]:
     operations = _json_list(payload.get("operationRecords") or payload.get("operation_records") or payload.get("comments"))
+    corp_id = str(payload.get("corpId") or payload.get("corp_id") or "")
     result = []
     for row in operations:
         if not isinstance(row, dict):
@@ -165,11 +204,17 @@ def _timeline(payload: dict, instance_id: str) -> list[dict]:
         operation_time = str(row.get("date") or row.get("createTime") or row.get("operationTime") or "")
         remark = str(row.get("remark") or row.get("comment") or row.get("content") or "").strip()
         packing = parse_packing_comment(remark)
+        identity = _actor_identity(
+            corp_id=corp_id,
+            user_id=user_id,
+            provided_name=str(row.get("userName") or row.get("user_name") or row.get("operatorName") or ""),
+            actors=actors,
+        )
         item = {
             "operation_type": str(row.get("type") or row.get("operationType") or "comment"),
             "result": str(row.get("result") or ""),
             "user_id": user_id,
-            "user_name": str(row.get("userName") or row.get("user_name") or row.get("operatorName") or ""),
+            **identity,
             "operation_time": operation_time,
             "remark": remark,
             "packing_candidate": bool(packing.get("is_candidate")),
@@ -201,7 +246,7 @@ def _local_attachment_map(batch_name: str) -> dict[tuple[str, str], dict]:
     return result
 
 
-def _attachment_item(row: dict, local: dict | None) -> dict:
+def _attachment_item(row: dict, local: dict | None, actors: dict | None = None) -> dict:
     file_name = str(row.get("file_name") or row.get("file_id") or "")
     archive_status = str(row.get("archive_status") or "pending")
     file_url = str((local or {}).get("file_url") or "")
@@ -214,6 +259,13 @@ def _attachment_item(row: dict, local: dict | None) -> dict:
     failure_reason = str(row.get("last_error") or "")
     if failure_code == "userNotExist" or "userNotExist" in failure_reason:
         failure_reason = "钉钉下载授权返回 userNotExist，尚不能判断文件是否删除。"
+    comment_user_id = str(row.get("comment_user_id") or "")
+    comment_identity = _actor_identity(
+        corp_id=str(row.get("corp_id") or ""),
+        user_id=comment_user_id,
+        provided_name=str(row.get("comment_user_name") or ""),
+        actors=actors,
+    )
     return {
         "attachment_name": (local or {}).get("name") or "",
         "file_id": str(row.get("file_id") or ""),
@@ -223,7 +275,10 @@ def _attachment_item(row: dict, local: dict | None) -> dict:
         "declared_size": row.get("declared_size"),
         "actual_size": row.get("actual_size"),
         "origin": "Comment" if str(row.get("attachment_origin")) == "comment" else "Form",
-        "comment_user_name": str(row.get("comment_user_name") or ""),
+        "comment_user_id": comment_user_id,
+        "comment_user_name": comment_identity["user_name"],
+        "comment_user_name_source": comment_identity["user_name_source"],
+        "comment_user_name_unresolved": comment_identity["user_name_unresolved"],
         "comment_time": str(row.get("comment_time") or ""),
         "comment_remark": str(row.get("comment_remark") or ""),
         "archive_status": archive_status,
@@ -238,22 +293,56 @@ def _attachment_item(row: dict, local: dict | None) -> dict:
     }
 
 
-def _approval(payload: dict, attachments: list[dict]) -> dict:
+def _approval(payload: dict, attachments: list[dict], actors: dict | None = None) -> dict:
+    from overseas_costing.scripts.import_oa_logistics import resolve_approval_decision
+
     instance_id = str(payload.get("processInstanceId") or payload.get("process_instance_id") or "")
+    corp_id = str(payload.get("corpId") or payload.get("corp_id") or "")
+    raw_status = str(payload.get("status") or "")
+    raw_result = str(payload.get("result") or "")
+    decision = resolve_approval_decision(raw_status, raw_result)
+    status_upper = raw_status.strip().upper()
+    rejection_tokens = ("REJECT", "REFUS", "DENY", "DISAGREE", "拒绝", "驳回", "不通过", "未通过")
+    if decision.get("excluded"):
+        if raw_result.strip() and decision.get("effective_status") == "REJECTED":
+            exclusion_reason = "审批结果为拒绝"
+        elif any(token in status_upper for token in rejection_tokens):
+            exclusion_reason = "审批状态为拒绝"
+        else:
+            exclusion_reason = "审批已撤销、终止或作废"
+    else:
+        exclusion_reason = ""
+    originator_user_id = str(payload.get("originatorUserId") or payload.get("originator_user_id") or "")
+    originator_identity = _actor_identity(
+        corp_id=corp_id,
+        user_id=originator_user_id,
+        provided_name=str(payload.get("originatorUserName") or payload.get("originator_user_name") or ""),
+        actors=actors,
+    )
     return {
+        "corp_id": corp_id,
         "instance_id": instance_id,
         "business_id": str(payload.get("businessId") or payload.get("business_id") or ""),
         "process_code": str(payload.get("processCode") or payload.get("process_code") or ""),
         "title": str(payload.get("title") or ""),
-        "status": str(payload.get("status") or ""),
-        "result": str(payload.get("result") or ""),
-        "originator_user_id": str(payload.get("originatorUserId") or payload.get("originator_user_id") or ""),
-        "originator_user_name": str(payload.get("originatorUserName") or payload.get("originator_user_name") or ""),
+        "status": raw_status,
+        "result": raw_result,
+        "raw_status": raw_status,
+        "raw_result": raw_result,
+        "process_status": decision.get("process_status") or "",
+        "approval_result": decision.get("approval_result") or "",
+        "effective_status": decision.get("effective_status") or "",
+        "excluded": bool(decision.get("excluded")),
+        "exclusion_reason": exclusion_reason,
+        "originator_user_id": originator_user_id,
+        "originator_user_name": originator_identity["user_name"],
+        "originator_name_source": originator_identity["user_name_source"],
+        "originator_name_unresolved": originator_identity["user_name_unresolved"],
         "originator_dept_name": str(payload.get("originatorDeptName") or payload.get("originator_dept_name") or ""),
         "create_time": str(payload.get("createTime") or payload.get("create_time") or ""),
         "finish_time": str(payload.get("finishTime") or payload.get("finish_time") or ""),
         "form_fields": _form_fields(payload),
-        "timeline": _timeline(payload, instance_id),
+        "timeline": _timeline(payload, instance_id, actors),
         "attachments": attachments,
     }
 
@@ -274,6 +363,7 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
     instance_ids = [main_id, *candidate_linked_ids]
     bundle = _get_approval_source().get_instance_bundle(instance_ids)
     instances = bundle.get("instances") or {}
+    actors = bundle.get("actors") or {}
     manifests_by_instance: dict[str, list[dict]] = defaultdict(list)
     local_by_file = _local_attachment_map(batch.get("name") or batch_name)
     for row in bundle.get("attachments") or []:
@@ -281,7 +371,9 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
             continue
         instance_id = str(row.get("process_instance_id") or "")
         file_id = str(row.get("file_id") or "")
-        manifests_by_instance[instance_id].append(_attachment_item(row, local_by_file.get((instance_id, file_id))))
+        manifests_by_instance[instance_id].append(
+            _attachment_item(row, local_by_file.get((instance_id, file_id)), actors)
+        )
     main_payload = instances.get(main_id)
     if not isinstance(main_payload, dict):
         return {"ok": False, "message": "成本系统数据库中未找到该物流审批。"}
@@ -298,6 +390,12 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
         "manual_required": sum(1 for row in archive_rows if row.get("archive_status") == "manual_required"),
         "preview_only": sum(1 for row in archive_rows if row.get("content_quality") == "preview"),
     }
+    main_approval = _approval(main_payload, manifests_by_instance.get(main_id, []), actors)
+    linked_approvals = [
+        _approval(instances[instance_id], manifests_by_instance.get(instance_id, []), actors)
+        for instance_id in linked_ids
+        if isinstance(instances.get(instance_id), dict)
+    ]
     return {
         "ok": True,
         "batch_name": batch.get("name") or batch_name,
@@ -306,12 +404,9 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
         "source_updated_at": health.get("source_updated_at"),
         "source_lag_seconds": health.get("source_lag_seconds"),
         "archive_health": archive_health,
-        "main_approval": _approval(main_payload, manifests_by_instance.get(main_id, [])),
-        "linked_purchase_approvals": [
-            _approval(instances[instance_id], manifests_by_instance.get(instance_id, []))
-            for instance_id in linked_ids
-            if isinstance(instances.get(instance_id), dict)
-        ],
+        "main_approval": main_approval,
+        "linked_purchase_approvals": [row for row in linked_approvals if not row.get("excluded")],
+        "excluded_linked_purchase_approvals": [row for row in linked_approvals if row.get("excluded")],
         "missing_linked_instance_ids": [instance_id for instance_id in linked_ids if instance_id not in instances],
     }
 
@@ -322,7 +417,11 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
     detail = get_batch_dingtalk_approval_detail(batch_name)
     if not detail.get("ok"):
         return detail
-    approvals = [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]
+    approvals = [
+        detail.get("main_approval"),
+        *(detail.get("linked_purchase_approvals") or []),
+        *(detail.get("excluded_linked_purchase_approvals") or []),
+    ]
     source_approval = next(
         (
             approval for approval in approvals
