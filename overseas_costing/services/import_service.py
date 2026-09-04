@@ -5246,9 +5246,9 @@ def _build_packing_preview_items(
                 raw_row.get("行号"),
             )
             row["source_remark"] = _first_non_empty(raw_row.get("备注"), raw_row.get("source_remark"))
-            row["source_file_name"] = attachment_name or row.get("source_file_name") or ""
-            row["source_doc_no"] = file_url or row.get("source_doc_no") or attachment_name or ""
-            row["source_attachment_id"] = attachment_name or row.get("source_attachment_id") or ""
+            row["source_file_name"] = attachment_name or raw_row.get("source_file_name") or row.get("source_file_name") or ""
+            row["source_doc_no"] = file_url or raw_row.get("source_doc_no") or row.get("source_doc_no") or attachment_name or ""
+            row["source_attachment_id"] = attachment_name or raw_row.get("source_attachment_id") or row.get("source_attachment_id") or ""
             rows.append(row)
         return rows, {"parser": "json_rows", "source": "sheet_rows_json"}
 

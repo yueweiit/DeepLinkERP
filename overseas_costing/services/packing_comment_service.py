@@ -30,6 +30,13 @@ def _clean_product_name(value: str) -> str:
     return text.strip()
 
 
+def _quantity(value: str, multiplier: str | None = None) -> float:
+    quantity = _number(value)
+    if str(multiplier or "").strip() == "万":
+        quantity *= 10_000
+    return _compact_number(quantity)
+
+
 def parse_packing_comment(remark: str) -> dict:
     text = str(remark or "").strip()
     rows: list[dict] = []
@@ -70,6 +77,29 @@ def parse_packing_comment(remark: str) -> dict:
             seen.add(key)
             rows.append(row)
 
+    # 历史评论常把多个物料紧凑写成“品名10万套+品名22000个”。
+    # 只在数量单位后面是分隔符或发货类结尾词时接受匹配，避免把
+    # “亮甲2.0包装袋”中的 2.0 误当成“2 包”。
+    product_first_pattern = re.compile(
+        rf"^\s*(?P<name>[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9._\-\s]{{0,40}})"
+        rf"(?P<quantity>{NUMBER})\s*(?P<multiplier>万)?\s*(?P<unit>{QUANTITY_UNITS})"
+        rf"(?=\s*(?:$|发货|发出|寄出|过去|到仓|请知悉))",
+        re.I,
+    )
+    for segment in re.split(r"[+＋,，;；\n]+", text):
+        match = product_first_pattern.search(segment)
+        if not match:
+            continue
+        product_name = _clean_product_name(match.group("name"))
+        if not product_name or not re.search(r"[\u4e00-\u9fff]", product_name):
+            continue
+        quantity = _quantity(match.group("quantity"), match.group("multiplier"))
+        unit = match.group("unit").upper() if match.group("unit").lower() == "pcs" else match.group("unit")
+        key = ("", product_name, quantity)
+        if key not in seen:
+            seen.add(key)
+            rows.append({"product_name": product_name, "actual_shipped_qty": quantity, "unit": unit})
+
     chinese_pattern = re.compile(rf"({NUMBER})\s*({QUANTITY_UNITS})\s*([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_-]{{0,20}})", re.I)
     for match in chinese_pattern.finditer(text):
         product_name = _clean_product_name(match.group(3))
@@ -77,6 +107,8 @@ def parse_packing_comment(remark: str) -> dict:
             continue
         quantity = _number(match.group(1))
         unit = match.group(2).upper() if match.group(2).lower() == "pcs" else match.group(2)
+        if unit == "包" and product_name.startswith("装"):
+            continue
         key = ("", product_name, quantity)
         if key in seen:
             continue

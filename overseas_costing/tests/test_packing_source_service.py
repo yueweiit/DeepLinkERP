@@ -31,7 +31,9 @@ def test_comment_source_preview_rechecks_hash_and_delegates_to_existing_preview(
     rows = json.loads(captured["sheet_rows_json"])
     assert rows[0]["material_code"] == "MBA101283"
     assert rows[0]["gross_weight_kg"] == 2.5
-    assert captured["attachment_name"] == f"DINGTALK-COMMENT:{'a' * 64}"
+    assert captured["attachment_name"] is None
+    assert rows[0]["source_attachment_id"] == f"DINGTALK-COMMENT:{'a' * 64}"
+    assert rows[0]["source_file_name"] == "钉钉审批评论"
     assert "PROC-1" in rows[0]["source_remark"]
     assert "USER-1" in rows[0]["source_remark"]
     assert "2026-09-01T10:00:00+08:00" in rows[0]["source_remark"]

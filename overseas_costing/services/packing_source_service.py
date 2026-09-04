@@ -276,10 +276,13 @@ def _comment_preview_kwargs(batch_name: str, source: dict, version_name: str | N
             **row,
             "source_remark": source_remark,
             "source_doc_no": f"DINGTALK-COMMENT:{source_id}",
+            "source_attachment_id": f"DINGTALK-COMMENT:{source_id}",
+            "source_file_name": "钉钉审批评论",
         })
     kwargs = {
         "batch_name": batch_name,
-        "attachment_name": f"DINGTALK-COMMENT:{source_id}",
+        # 评论不是 Overseas Cost Attachment 单据，不要传虚拟附件名称触发 Frappe 的不存在提示。
+        "attachment_name": None,
         "version_name": version_name,
         "template_hint": "dingtalk_comment",
         "sheet_rows_json": json.dumps(rows, ensure_ascii=False),

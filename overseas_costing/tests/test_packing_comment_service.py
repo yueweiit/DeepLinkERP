@@ -40,6 +40,16 @@ def test_parses_material_quantity_and_aggregate_bag_comment() -> None:
     assert aggregate["rows"][0]["actual_shipped_qty"] == 5200.0
 
 
+def test_parses_compact_multi_item_comment_without_treating_product_version_as_quantity() -> None:
+    result = parse_packing_comment("超队指环扣10万套+亮甲2.0包装袋22000个+宠物用品24000个发货，请知悉")
+
+    assert result["rows"] == [
+        {"product_name": "超队指环扣", "actual_shipped_qty": 100000.0, "unit": "套"},
+        {"product_name": "亮甲2.0包装袋", "actual_shipped_qty": 22000.0, "unit": "个"},
+        {"product_name": "宠物用品", "actual_shipped_qty": 24000.0, "unit": "个"},
+    ]
+
+
 def test_ordinary_approval_comment_is_not_treated_as_packing_data() -> None:
     assert parse_packing_comment("同意，请按计划安排发货")["is_candidate"] is False
 
