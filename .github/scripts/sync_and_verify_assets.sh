@@ -27,7 +27,8 @@ docker compose -f "$COMPOSE_FILE" exec -T backend \
     bench --site "$SITE_NAME" clear-website-cache
 
 echo "== Verify overseas costing application release =="
-docker compose -f "$COMPOSE_FILE" exec -T backend python3 - <<'PY'
+docker compose -f "$COMPOSE_FILE" exec -T backend \
+    /home/frappe/frappe-bench/env/bin/python - <<'PY'
 from pathlib import Path
 
 from overseas_costing.api import workbench
