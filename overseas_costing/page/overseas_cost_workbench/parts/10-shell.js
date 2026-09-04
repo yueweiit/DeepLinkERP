@@ -94,6 +94,7 @@ class OverseasCostWorkbench {
       skuRequestId: 0,
       refreshRequestId: 0,
       dingtalkRequestId: 0,
+      dingtalkApproval: null,
     };
   }
 

@@ -58,6 +58,22 @@ def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_co
     assert stylesheet == (deployed / "overseas_cost_workbench.css").read_text(encoding="utf-8")
 
 
+def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> None:
+    detail_page = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
+    approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")
+
+    overview_block = detail_page.split("renderOverviewDetailTab()", 1)[1].split(
+        "detailDocumentAdapter()", 1
+    )[0]
+    assert "this.loadDingtalkApprovalDetail()" in overview_block
+    assert 'this.detailState.tab === "overview"' in overview_block
+    assert "approval.batch_name !== batch.name" in overview_block
+
+    assert "syncPurchaseApprovalStatusFromDingtalk" in approval_page
+    assert 'purchase_approval_sync_state = "valid"' in approval_page
+    assert "linked_purchase_approval_statuses" in approval_page
+
+
 def test_batch_source_provenance_fields_are_not_editable_by_cost_users() -> None:
     path = ROOT / "overseas_costing" / "doctype" / "overseas_cost_batch" / "overseas_cost_batch.json"
     definition = json.loads(path.read_text(encoding="utf-8"))

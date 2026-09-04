@@ -26,6 +26,7 @@
     if (this.detailState.editToken && this.detailState.batchName && this.detailState.batchName !== normalizedName) {
       await this.releaseEditSession();
     }
+    if (this.detailState.batchName !== normalizedName) this.detailState.dingtalkApproval = null;
     const allowedTab = OverseasCostWorkbenchState.parseWorkbenchState(
       `${window.location.pathname}?screen=detail&batch=${encodeURIComponent(normalizedName)}&tab=${encodeURIComponent(tab || "items")}`
     ).tab;
@@ -96,6 +97,7 @@
     this.detailState.batchName = "";
     this.detailState.header = null;
     this.detailState.detail = null;
+    this.detailState.dingtalkApproval = null;
     this.exportPinnedBatchName = "";
     this.dataCheckBatchName = "";
     this.drawerBatchName = "";
@@ -256,6 +258,17 @@
 
   renderOverviewDetailTab() {
     const batch = this.getDetailBatch();
+    const approval = this.detailState.dingtalkApproval;
+    if (!approval || approval.batch_name !== batch.name) {
+      const requestedBatch = batch.name;
+      this.loadDingtalkApprovalDetail()
+        .then(() => {
+          if (this.detailState.tab === "overview" && this.detailState.batchName === requestedBatch) {
+            this.renderOverviewDetailTab();
+          }
+        })
+        .catch(() => {});
+    }
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
         <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>

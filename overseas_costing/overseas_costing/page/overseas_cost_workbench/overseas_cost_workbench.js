@@ -448,6 +448,7 @@ class OverseasCostWorkbench {
       skuRequestId: 0,
       refreshRequestId: 0,
       dingtalkRequestId: 0,
+      dingtalkApproval: null,
     };
   }
 
@@ -9483,6 +9484,7 @@ class OverseasCostWorkbench {
     if (this.detailState.editToken && this.detailState.batchName && this.detailState.batchName !== normalizedName) {
       await this.releaseEditSession();
     }
+    if (this.detailState.batchName !== normalizedName) this.detailState.dingtalkApproval = null;
     const allowedTab = OverseasCostWorkbenchState.parseWorkbenchState(
       `${window.location.pathname}?screen=detail&batch=${encodeURIComponent(normalizedName)}&tab=${encodeURIComponent(tab || "items")}`
     ).tab;
@@ -9553,6 +9555,7 @@ class OverseasCostWorkbench {
     this.detailState.batchName = "";
     this.detailState.header = null;
     this.detailState.detail = null;
+    this.detailState.dingtalkApproval = null;
     this.exportPinnedBatchName = "";
     this.dataCheckBatchName = "";
     this.drawerBatchName = "";
@@ -9713,6 +9716,17 @@ class OverseasCostWorkbench {
 
   renderOverviewDetailTab() {
     const batch = this.getDetailBatch();
+    const approval = this.detailState.dingtalkApproval;
+    if (!approval || approval.batch_name !== batch.name) {
+      const requestedBatch = batch.name;
+      this.loadDingtalkApprovalDetail()
+        .then(() => {
+          if (this.detailState.tab === "overview" && this.detailState.batchName === requestedBatch) {
+            this.renderOverviewDetailTab();
+          }
+        })
+        .catch(() => {});
+    }
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
         <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>
@@ -10075,8 +10089,27 @@ class OverseasCostWorkbench {
       batch_name: batch.name,
     });
     if (!result || !result.ok) throw new Error((result && result.message) || "钉钉审批读取失败");
+    this.syncPurchaseApprovalStatusFromDingtalk(result);
     this.detailState.dingtalkApproval = result;
     return result;
+  }
+
+  syncPurchaseApprovalStatusFromDingtalk(result = {}) {
+    const approvals = Array.isArray(result.linked_purchase_approvals) ? result.linked_purchase_approvals : [];
+    if (!approvals.length) return;
+    const batch = this.getDetailBatch();
+    const sourceStatus = { ...(batch.source_status || {}) };
+    if (sourceStatus.invalid_business) return;
+    sourceStatus.linked_purchase_count = approvals.length;
+    sourceStatus.linked_purchase_approval_statuses = approvals
+      .map((approval) => approval.status || approval.result)
+      .filter(Boolean);
+    sourceStatus.purchase_approval_sync_state = "valid";
+    delete sourceStatus.purchase_approval_sync_message;
+    batch.source_status = sourceStatus;
+    if (this.detailState.header && this.detailState.header.name === batch.name) {
+      this.detailState.header.source_status = sourceStatus;
+    }
   }
 
   async renderDingtalkApprovalTab() {

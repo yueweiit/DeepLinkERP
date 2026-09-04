@@ -4,8 +4,27 @@
       batch_name: batch.name,
     });
     if (!result || !result.ok) throw new Error((result && result.message) || "钉钉审批读取失败");
+    this.syncPurchaseApprovalStatusFromDingtalk(result);
     this.detailState.dingtalkApproval = result;
     return result;
+  }
+
+  syncPurchaseApprovalStatusFromDingtalk(result = {}) {
+    const approvals = Array.isArray(result.linked_purchase_approvals) ? result.linked_purchase_approvals : [];
+    if (!approvals.length) return;
+    const batch = this.getDetailBatch();
+    const sourceStatus = { ...(batch.source_status || {}) };
+    if (sourceStatus.invalid_business) return;
+    sourceStatus.linked_purchase_count = approvals.length;
+    sourceStatus.linked_purchase_approval_statuses = approvals
+      .map((approval) => approval.status || approval.result)
+      .filter(Boolean);
+    sourceStatus.purchase_approval_sync_state = "valid";
+    delete sourceStatus.purchase_approval_sync_message;
+    batch.source_status = sourceStatus;
+    if (this.detailState.header && this.detailState.header.name === batch.name) {
+      this.detailState.header.source_status = sourceStatus;
+    }
   }
 
   async renderDingtalkApprovalTab() {
