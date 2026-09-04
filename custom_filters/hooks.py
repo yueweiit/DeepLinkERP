@@ -79,7 +79,6 @@ override_whitelisted_methods = {
 }
 
 update_website_context = ["custom_filters.overrides.oauth.update_website_context"]
-website_path_resolver = ["custom_filters.overrides.oauth.redirect_guest_home_to_eims"]
 after_request = ["custom_filters.overrides.oauth.scrub_sensitive_oauth_request_log"]
 
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
