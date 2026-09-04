@@ -1044,6 +1044,10 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
                             "comment_user_name": "张三",
                             "comment_time": "2026-09-01 10:00:00",
                             "comment_remark": "补充装箱单",
+                            "archive": {
+                                "status": "pending",
+                                "source_updated_at": "2026-09-04T06:00:00+00:00",
+                            },
                             "last_download_error": {
                                 "error_type": "dingtalk_attachment_file_access",
                                 "message": "当前账号无附件访问权",
@@ -1071,6 +1075,9 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
     assert result["items"][0]["last_download_error"]["error_type"] == "dingtalk_attachment_file_access"
     assert result["items"][0]["oa_attachment_origin"] == "Comment"
     assert result["items"][0]["comment_user_name"] == "张三"
+    assert result["items"][0]["data_source"] == "minio_archive"
+    assert result["items"][0]["archive_status"] == "pending"
+    assert result["items"][0]["source_lag_seconds"] >= 0
 
 
 def test_download_oa_form_attachment_saves_file_url_and_keeps_trace(monkeypatch) -> None:
@@ -1212,6 +1219,7 @@ def test_download_oa_attachment_reads_verified_minio_archive_in_postgres_mode(mo
                 "sha256": "abc",
                 "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "archived_at": "2026-09-04T03:16:00+00:00",
+                "updated_at": "2026-09-04T03:17:00+00:00",
             }
 
     class FakeArchiveClient:
@@ -1248,6 +1256,8 @@ def test_download_oa_attachment_reads_verified_minio_archive_in_postgres_mode(mo
     assert result["data_source"] == "minio_archive"
     assert result["archive_status"] == "archived"
     assert result["fallback_used"] is False
+    assert result["source_updated_at"] == "2026-09-04T03:17:00+00:00"
+    assert result["source_lag_seconds"] >= 0
     assert attachment_doc.file_url == "/private/files/comment-packing.xlsx"
     assert snapshot["download"]["sha256"] == "abc"
     assert snapshot["download"]["object_key"].endswith("FILE-COMMENT-001")
@@ -1290,7 +1300,11 @@ def test_download_oa_attachment_reports_archive_state(monkeypatch, status, expec
     class FakeSource:
         @staticmethod
         def get_attachment_manifest(*_args):
-            return {"archive_status": status, "last_error": "历史附件已失效" if manual else "temporary"}
+            return {
+                "archive_status": status,
+                "last_error": "历史附件已失效" if manual else "temporary",
+                "updated_at": "2026-09-04T04:00:00+00:00",
+            }
 
     monkeypatch.setattr(import_service, "frappe", FakeFrappe)
     monkeypatch.setattr(import_oa_logistics, "resolve_approval_source_mode", lambda: "postgres")
@@ -1303,6 +1317,8 @@ def test_download_oa_attachment_reports_archive_state(monkeypatch, status, expec
     assert expected_message in result["message"]
     assert result["needs_manual_upload"] is manual
     assert result["fallback_used"] is False
+    assert result["source_updated_at"] == "2026-09-04T04:00:00+00:00"
+    assert result["source_lag_seconds"] >= 0
 
 
 def test_fetch_dingtalk_attachment_content_passes_signed_headers(monkeypatch) -> None:

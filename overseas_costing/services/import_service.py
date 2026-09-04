@@ -1354,6 +1354,23 @@ def _get_minio_archive_client() -> MinioArchiveClient:
     return MinioArchiveClient(bucket=bucket, client=client)
 
 
+def _source_lag_seconds(value) -> int | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+    return max(0, int((now - parsed).total_seconds()))
+
+
 def _download_oa_attachment_from_archive(
     *,
     attachment_doc,
@@ -1368,10 +1385,12 @@ def _download_oa_attachment_from_archive(
         manifest = {"archive_status": "pending", "last_error": "归档清单尚未生成"}
 
     archive_status = str(manifest.get("archive_status") or "pending")
+    source_updated_at = manifest.get("updated_at") or manifest.get("archived_at") or None
+    source_lag_seconds = _source_lag_seconds(source_updated_at)
     parse_snapshot["archive"] = {
         "status": archive_status,
         "object_key": manifest.get("object_key") or "",
-        "source_updated_at": manifest.get("updated_at") or manifest.get("archived_at") or "",
+        "source_updated_at": source_updated_at or "",
         "last_error": manifest.get("last_error") or "",
     }
     if archive_status != "archived":
@@ -1393,6 +1412,8 @@ def _download_oa_attachment_from_archive(
             "attachment_name": attachment_name,
             "file_name": file_name,
             "data_source": "minio_archive",
+            "source_updated_at": source_updated_at,
+            "source_lag_seconds": source_lag_seconds,
             "archive_status": archive_status,
             "fallback_used": False,
             "needs_manual_upload": manual_required,
@@ -1413,6 +1434,8 @@ def _download_oa_attachment_from_archive(
             "attachment_name": attachment_name,
             "file_name": file_name,
             "data_source": "minio_archive",
+            "source_updated_at": source_updated_at,
+            "source_lag_seconds": source_lag_seconds,
             "archive_status": archive_status,
             "fallback_used": False,
             "message": f"归档附件校验失败：{exc}",
@@ -1424,6 +1447,8 @@ def _download_oa_attachment_from_archive(
             "attachment_name": attachment_name,
             "file_name": file_name,
             "data_source": "minio_archive",
+            "source_updated_at": source_updated_at,
+            "source_lag_seconds": source_lag_seconds,
             "archive_status": archive_status,
             "fallback_used": False,
             "message": f"MinIO 归档读取失败：{exc}",
@@ -1459,7 +1484,8 @@ def _download_oa_attachment_from_archive(
         "content_type": response_meta.get("content_type") or "",
         "content_length": response_meta.get("content_length") or len(content),
         "data_source": "minio_archive",
-        "source_updated_at": manifest.get("updated_at") or manifest.get("archived_at") or None,
+        "source_updated_at": source_updated_at,
+        "source_lag_seconds": source_lag_seconds,
         "archive_status": "archived",
         "fallback_used": False,
         "message": "归档附件已保存，可下载或继续解析。",
@@ -1525,6 +1551,7 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
         )
         last_download_error = parse_result.get("last_download_error") if isinstance(parse_result.get("last_download_error"), dict) else {}
         archive = parse_result.get("archive") if isinstance(parse_result.get("archive"), dict) else {}
+        source_updated_at = archive.get("source_updated_at") or row.get("modified")
         items.append(
             {
                 "name": row.get("name"),
@@ -1553,7 +1580,8 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
                 "comment_remark": parse_result.get("comment_remark") or "",
                 "archive_status": archive.get("status") or ("downloaded" if row.get("file_url") else "pending"),
                 "data_source": "minio_archive" if archive else "dingtalk_api",
-                "source_updated_at": archive.get("source_updated_at") or row.get("modified"),
+                "source_updated_at": source_updated_at,
+                "source_lag_seconds": _source_lag_seconds(source_updated_at),
                 "fallback_used": False,
                 "can_download": bool(parse_result.get("file_id")) and not bool(row.get("file_url")),
                 "remark": row.get("remark") or "",

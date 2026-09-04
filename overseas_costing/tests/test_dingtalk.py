@@ -2739,6 +2739,10 @@ def test_pull_latest_logistics_approvals_to_erp_reuses_pull_and_save(monkeypatch
         calls["pull"] = kwargs
         return {
             "ok": True,
+            "data_source": "postgres",
+            "source_updated_at": "2026-08-17T03:00:00+00:00",
+            "source_lag_seconds": 9,
+            "fallback_used": False,
             "transport_modes": ["SEA", "AIR"],
             "total_instance_count": 3,
             "detail_count": 3,
@@ -2778,6 +2782,10 @@ def test_pull_latest_logistics_approvals_to_erp_reuses_pull_and_save(monkeypatch
     assert result["pull"]["filtered_count"] == 2
     assert result["save"]["created_count"] == 1
     assert result["save"]["updated_count"] == 1
+    assert result["data_source"] == "postgres"
+    assert result["source_updated_at"] == "2026-08-17T03:00:00+00:00"
+    assert result["source_lag_seconds"] == 9
+    assert result["fallback_used"] is False
     assert calls["pull"]["transport_modes"] == "SEA,AIR"
     assert calls["pull"]["limit"] == 50
     assert calls["save"]["items"][0]["source_approval_no"] == "OA-1"

@@ -6825,6 +6825,10 @@ def pull_latest_logistics_approvals_to_erp(
     save_result = save_sea_approvals_to_erp(pull_result)
     summary = {
         "ok": bool(save_result.get("ok")),
+        "data_source": pull_result.get("data_source"),
+        "source_updated_at": pull_result.get("source_updated_at"),
+        "source_lag_seconds": pull_result.get("source_lag_seconds"),
+        "fallback_used": bool(pull_result.get("fallback_used", False)),
         "manual": True,
         "env_file_loaded": env_file_loaded,
         "start": resolved_start,
@@ -6963,6 +6967,10 @@ def scheduled_pull_logistics_approvals() -> dict:
         save_result = save_sea_approvals_to_erp(result)
         summary = {
             "ok": bool(save_result.get("ok")),
+            "data_source": result.get("data_source"),
+            "source_updated_at": result.get("source_updated_at"),
+            "source_lag_seconds": result.get("source_lag_seconds"),
+            "fallback_used": bool(result.get("fallback_used", False)),
             "scheduled": True,
             "env_file_loaded": env_file_loaded,
             "start": start,

@@ -33,6 +33,10 @@ def test_scheduled_pull_logistics_approvals_pulls_all_transport_modes(monkeypatc
         pull_calls.append(kwargs)
         return {
             "ok": True,
+            "data_source": "postgres",
+            "source_updated_at": "2026-07-29T08:00:00+00:00",
+            "source_lag_seconds": 15,
+            "fallback_used": False,
             "transport_modes": ["SEA", "AIR", "EXPRESS"],
             "total_instance_count": 4,
             "detail_count": 4,
@@ -69,6 +73,10 @@ def test_scheduled_pull_logistics_approvals_pulls_all_transport_modes(monkeypatc
     assert result["start"] == "2026-01-01"
     assert result["end"] == "2026-07-29"
     assert result["save"]["created_count"] == 1
+    assert result["data_source"] == "postgres"
+    assert result["source_updated_at"] == "2026-07-29T08:00:00+00:00"
+    assert result["source_lag_seconds"] == 15
+    assert result["fallback_used"] is False
     assert pull_calls[0]["transport_modes"] == "SEA,AIR,EXPRESS"
     assert pull_calls[0]["limit"] == 4
     assert pull_calls[0]["app_key"] == "APP-KEY"
