@@ -3,14 +3,14 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 }
 
 .ocw-page.ocw-redesign {
-  --ocw-accent: #087d82;
-  --ocw-accent-dark: #05666b;
-  --ocw-accent-soft: #e9f7f6;
-  --ocw-border: #dbe5e7;
+  --ocw-accent: #0b8cf0;
+  --ocw-accent-dark: #076fbe;
+  --ocw-accent-soft: #eaf5ff;
+  --ocw-border: #dfe7f0;
   --ocw-surface: #ffffff;
-  --ocw-bg: #f4f7f7;
-  --ocw-text: #172b2f;
-  --ocw-muted: #667a7e;
+  --ocw-bg: #f5f8fb;
+  --ocw-text: #1f2937;
+  --ocw-muted: #667085;
   min-height: calc(100dvh - 24px);
   padding: 12px;
   background: var(--ocw-bg);
@@ -20,7 +20,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-redesign button:focus-visible,
 .ocw-redesign input:focus-visible,
 .ocw-redesign select:focus-visible {
-  outline: 3px solid rgba(8, 125, 130, 0.22);
+  outline: 3px solid rgba(11, 140, 240, 0.22);
   outline-offset: 2px;
 }
 
@@ -98,7 +98,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   border: 1px solid var(--ocw-border);
   border-radius: 10px;
   background: #fff;
-  box-shadow: 0 16px 36px rgba(22, 46, 49, 0.16);
+  box-shadow: 0 16px 36px rgba(22, 42, 66, 0.16);
 }
 
 .ocw-ingest-menu[hidden] {
@@ -189,7 +189,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 
 .ocw-summary-card.is-active {
   border-color: var(--ocw-accent);
-  box-shadow: 0 0 0 2px rgba(8, 125, 130, 0.12);
+  box-shadow: 0 0 0 2px rgba(11, 140, 240, 0.12);
 }
 
 .ocw-summary-card.is-red strong { color: #b42318; }
@@ -290,7 +290,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-batch-grid-head {
   min-height: 38px;
   padding: 8px 14px;
-  background: #f7f9f9;
+  background: #f7f9fc;
   color: var(--ocw-muted);
   font-size: 12px;
   font-weight: 700;
@@ -302,7 +302,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 }
 
 .ocw-workbench-record {
-  border-top: 1px solid #edf1f2;
+  border-top: 1px solid #edf1f5;
 }
 
 .ocw-workbench-record:first-child {
@@ -310,7 +310,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 }
 
 .ocw-workbench-row:hover {
-  background: #fbfdfd;
+  background: #fbfdff;
 }
 
 .ocw-workbench-row > div {
@@ -323,7 +323,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   height: 32px;
   place-items: center;
   padding: 0;
-  border: 1px solid #b9d5d7;
+  border: 1px solid #b8d9f8;
   border-radius: 8px;
   background: #fff;
   color: var(--ocw-accent-dark);
@@ -399,7 +399,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   --ocw-result-table-width: calc(var(--ocw-result-code-width) + var(--ocw-result-name-width) + 910px);
   padding: 14px;
   border-top: 1px solid var(--ocw-border);
-  background: #fbfdfd;
+  background: #fbfdff;
 }
 
 .ocw-result-preview.is-result-compact {
@@ -502,7 +502,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   overflow: hidden;
   border-radius: 8px 8px 0 0;
   background: #fff;
-  box-shadow: 0 7px 12px -12px rgba(23, 43, 47, 0.7);
+  box-shadow: 0 7px 12px -12px rgba(30, 58, 95, 0.7);
 }
 
 .ocw-result-sticky-dock > .ocw-result-summary {
@@ -521,7 +521,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-result-header-scroll {
   overflow: hidden;
   border-bottom: 1px solid var(--ocw-border);
-  background: #f5f9f9;
+  background: #f5f9fd;
   scrollbar-width: none;
 }
 
@@ -564,8 +564,8 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-result-table td {
   height: 48px;
   padding: 8px 10px;
-  border-right: 1px solid #e8eeee;
-  border-bottom: 1px solid #e8eeee;
+  border-right: 1px solid #e8eef5;
+  border-bottom: 1px solid #e8eef5;
   vertical-align: middle;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -573,8 +573,8 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 
 .ocw-result-table th {
   height: 42px;
-  background: #f5f9f9;
-  color: #50686c;
+  background: #f5f9fd;
+  color: #526477;
   font-weight: 700;
   text-align: left;
 }
@@ -620,7 +620,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-result-table thead .ocw-result-cell.is-sticky-code,
 .ocw-result-table thead .ocw-result-cell.is-sticky-name {
   z-index: 3;
-  background: #eef6f6;
+  background: #eef7ff;
 }
 
 .ocw-result-cell.is-sticky-code {
@@ -629,7 +629,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 
 .ocw-result-cell.is-sticky-name {
   left: var(--ocw-result-code-width);
-  box-shadow: 8px 0 12px -12px rgba(23, 43, 47, 0.7);
+  box-shadow: 8px 0 12px -12px rgba(30, 58, 95, 0.7);
 }
 
 .ocw-result-table td.is-sticky-code > span,
@@ -677,14 +677,14 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   align-items: center;
   padding: 8px 10px;
   border-bottom: 1px solid var(--ocw-border);
-  background: #f8fbfb;
+  background: #f8fbff;
 }
 
 .ocw-result-scroll-controls .ocw-scroll-arrow {
   width: 34px;
   height: 30px;
   padding: 0;
-  border: 1px solid #9fc9cc;
+  border: 1px solid #9ccbf5;
   border-radius: 7px;
   background: #fff;
   color: var(--ocw-accent-dark);
@@ -693,9 +693,9 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 }
 
 .ocw-result-scroll-controls .ocw-scroll-arrow:disabled {
-  border-color: #d7e0e1;
-  background: #f2f5f5;
-  color: #a9b6b8;
+  border-color: #d8e0e8;
+  background: #f2f5f8;
+  color: #a8b3c0;
 }
 
 input[type="range"].ocw-result-scrollbar {
@@ -712,9 +712,9 @@ input[type="range"].ocw-result-scrollbar {
 
 input[type="range"].ocw-result-scrollbar::-webkit-slider-runnable-track {
   height: 8px;
-  border: 1px solid #b7cdcf;
+  border: 1px solid #b7d4ee;
   border-radius: 999px;
-  background: #dce9ea;
+  background: #dceeff;
 }
 
 input[type="range"].ocw-result-scrollbar::-webkit-slider-thumb {
@@ -730,9 +730,9 @@ input[type="range"].ocw-result-scrollbar::-webkit-slider-thumb {
 
 input[type="range"].ocw-result-scrollbar::-moz-range-track {
   height: 8px;
-  border: 1px solid #b7cdcf;
+  border: 1px solid #b7d4ee;
   border-radius: 999px;
-  background: #dce9ea;
+  background: #dceeff;
 }
 
 input[type="range"].ocw-result-scrollbar::-moz-range-thumb {
@@ -797,7 +797,7 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-spinner {
   width: 24px;
   height: 24px;
-  border: 3px solid #d5e8e8;
+  border: 3px solid #d7eaff;
   border-top-color: var(--ocw-accent);
   border-radius: 50%;
   animation: ocw-spin 0.8s linear infinite;

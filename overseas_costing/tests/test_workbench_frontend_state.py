@@ -78,6 +78,31 @@ def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_co
     assert stylesheet == (deployed / "overseas_cost_workbench.css").read_text(encoding="utf-8")
 
 
+def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
+    redesign = (PARTS / "25-workbench-redesign.css").read_text(encoding="utf-8").lower()
+    detail = (PARTS / "45-detail-page.css").read_text(encoding="utf-8").lower()
+
+    assert "--ocw-accent: #0b8cf0" in redesign
+    assert "--ocw-accent-dark: #076fbe" in redesign
+    assert "--ocw-accent-soft: #eaf5ff" in redesign
+    for legacy_teal in ("#087d82", "#05666b", "#e9f7f6", "rgba(8, 125, 130", "#318e92"):
+        assert legacy_teal not in redesign + detail
+    assert ".ocw-issue.is-ready { color: #067647; }" in redesign
+
+
+def test_dingtalk_timeline_renders_name_as_primary_and_id_as_secondary() -> None:
+    approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")
+
+    assert "renderDingtalkActor" in approval_page
+    assert "ocw-dingtalk-actor-id" in approval_page
+    assert "姓名未同步" in approval_page
+    assert "excluded_linked_purchase_approvals" in approval_page
+    assert "已排除审批" in approval_page
+    assert "approval && !approval.excluded" in approval_page
+    assert "renderDingtalkTimeline(approval.timeline || [], !approval.excluded)" in approval_page
+    assert "renderDingtalkAttachments(approval.attachments || [], !approval.excluded)" in approval_page
+
+
 def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> None:
     detail_page = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
     approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")
@@ -90,7 +115,7 @@ def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> 
     assert "approval.batch_name !== batch.name" in overview_block
 
     assert "syncPurchaseApprovalStatusFromDingtalk" in approval_page
-    assert 'purchase_approval_sync_state = "valid"' in approval_page
+    assert 'purchase_approval_sync_state = excluded.length ? "invalid" : "valid"' in approval_page
     assert "linked_purchase_approval_statuses" in approval_page
 
 

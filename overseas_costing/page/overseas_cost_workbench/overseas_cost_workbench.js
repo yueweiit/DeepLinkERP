@@ -10130,16 +10130,29 @@ class OverseasCostWorkbench {
 
   syncPurchaseApprovalStatusFromDingtalk(result = {}) {
     const approvals = Array.isArray(result.linked_purchase_approvals) ? result.linked_purchase_approvals : [];
-    if (!approvals.length) return;
+    const excluded = Array.isArray(result.excluded_linked_purchase_approvals) ? result.excluded_linked_purchase_approvals : [];
+    if (!approvals.length && !excluded.length) return;
     const batch = this.getDetailBatch();
     const sourceStatus = { ...(batch.source_status || {}) };
-    if (sourceStatus.invalid_business) return;
-    sourceStatus.linked_purchase_count = approvals.length;
-    sourceStatus.linked_purchase_approval_statuses = approvals
-      .map((approval) => approval.status || approval.result)
+    if (sourceStatus.invalid_business && sourceStatus.invalid_business_scope === "source_approval") return;
+    sourceStatus.linked_purchase_count = approvals.length + excluded.length;
+    sourceStatus.excluded_purchase_count = excluded.length;
+    sourceStatus.linked_purchase_approval_statuses = [...approvals, ...excluded]
+      .map((approval) => approval.effective_status || approval.status || approval.result)
       .filter(Boolean);
-    sourceStatus.purchase_approval_sync_state = "valid";
-    delete sourceStatus.purchase_approval_sync_message;
+    sourceStatus.purchase_approval_sync_state = excluded.length ? "invalid" : "valid";
+    sourceStatus.purchase_approval_sync_message = excluded.length
+      ? `已排除 ${excluded.length} 条拒绝、撤销或终止的关联采购审批；其数据不参与成本写入。`
+      : `已关联 ${approvals.length} 条有效采购审批，状态已同步。`;
+    if (excluded.length) {
+      sourceStatus.invalid_business = true;
+      sourceStatus.invalid_business_scope = "linked_purchase_approval";
+      sourceStatus.invalid_business_reason = sourceStatus.purchase_approval_sync_message;
+    } else if (sourceStatus.invalid_business_scope === "linked_purchase_approval") {
+      sourceStatus.invalid_business = false;
+      sourceStatus.invalid_business_scope = "";
+      sourceStatus.invalid_business_reason = "";
+    }
     batch.source_status = sourceStatus;
     if (this.detailState.header && this.detailState.header.name === batch.name) {
       this.detailState.header.source_status = sourceStatus;
@@ -10174,6 +10187,11 @@ class OverseasCostWorkbench {
             ? result.linked_purchase_approvals.map((approval) => this.renderDingtalkApprovalCard(approval, "关联采购审批", true)).join("")
             : `<div class="ocw-detail-empty"><strong>暂无关联采购审批</strong></div>`}
         </section>
+        ${(result.excluded_linked_purchase_approvals || []).length ? `
+          <section class="ocw-dingtalk-linked is-excluded">
+            <div class="ocw-detail-section-head"><div><span>仅供审计查看</span><h3>已排除审批</h3></div><span>${this.escape(String(result.excluded_linked_purchase_approvals.length))} 条</span></div>
+            ${result.excluded_linked_purchase_approvals.map((approval) => this.renderDingtalkApprovalCard(approval, "已排除的关联采购审批", true)).join("")}
+          </section>` : ""}
       `);
     } catch (error) {
       if (this.detailState.dingtalkRequestId !== requestId || this.detailState.batchName !== requestedBatch || this.detailState.tab !== "dingtalk") return;
@@ -10183,20 +10201,21 @@ class OverseasCostWorkbench {
 
   renderDingtalkApprovalCard(approval = {}, label = "审批", collapsible = false) {
     const content = `
+      ${approval.excluded ? `<div class="ocw-dingtalk-excluded-note"><strong>已排除审批</strong><span>${this.escape(approval.exclusion_reason || "撤销、终止或拒绝的审批不参与成本计算。")}</span></div>` : ""}
       <div class="ocw-dingtalk-summary-grid">
         ${this.renderDingtalkSummaryField("审批编号", approval.business_id)}
         ${this.renderDingtalkSummaryField("状态 / 结果", [approval.status, approval.result].filter(Boolean).join(" / "))}
-        ${this.renderDingtalkSummaryField("发起人", approval.originator_user_name || approval.originator_user_id)}
+        ${this.renderDingtalkActorField("发起人", approval.originator_user_name, approval.originator_user_id, approval.originator_name_source, approval.originator_name_unresolved)}
         ${this.renderDingtalkSummaryField("部门", approval.originator_dept_name)}
         ${this.renderDingtalkSummaryField("发起时间", this.formatDateTimeMinute(approval.create_time) || approval.create_time)}
         ${this.renderDingtalkSummaryField("完成时间", this.formatDateTimeMinute(approval.finish_time) || approval.finish_time)}
       </div>
       <section class="ocw-dingtalk-subsection"><h4>表单字段</h4>${this.renderDingtalkFormFields(approval.form_fields || [])}</section>
-      <section class="ocw-dingtalk-subsection"><h4>操作与评论</h4>${this.renderDingtalkTimeline(approval.timeline || [])}</section>
-      <section class="ocw-dingtalk-subsection"><h4>审批附件</h4>${this.renderDingtalkAttachments(approval.attachments || [])}</section>
+      <section class="ocw-dingtalk-subsection"><h4>操作与评论</h4>${this.renderDingtalkTimeline(approval.timeline || [], !approval.excluded)}</section>
+      <section class="ocw-dingtalk-subsection"><h4>审批附件</h4>${this.renderDingtalkAttachments(approval.attachments || [], !approval.excluded)}</section>
     `;
     if (collapsible) {
-      return `<details class="ocw-dingtalk-approval-card"><summary><strong>${this.escape(approval.title || label)}</strong><span>${this.escape(approval.business_id || approval.instance_id || "--")}</span></summary><div class="ocw-dingtalk-card-body">${content}</div></details>`;
+      return `<details class="ocw-dingtalk-approval-card${approval.excluded ? " is-excluded" : ""}"><summary><strong>${this.escape(approval.title || label)}</strong><span>${this.escape(approval.business_id || approval.instance_id || "--")}</span></summary><div class="ocw-dingtalk-card-body">${content}</div></details>`;
     }
     return `<article class="ocw-dingtalk-approval-card is-main"><header><div><span>${this.escape(label)}</span><h3>${this.escape(approval.title || approval.business_id || approval.instance_id || "--")}</h3></div><span>${this.escape(approval.status || "--")}</span></header><div class="ocw-dingtalk-card-body">${content}</div></article>`;
   }
@@ -10205,18 +10224,32 @@ class OverseasCostWorkbench {
     return `<div><span>${this.escape(label)}</span><strong>${this.escape(value || "--")}</strong></div>`;
   }
 
+  renderDingtalkActor(userName, userId, nameSource = "", unresolved = false) {
+    const name = String(userName || "").trim();
+    const id = String(userId || "").trim();
+    const primary = name || id || "系统";
+    let secondary = "";
+    if (id && name && id !== name) secondary = `ID：${id}`;
+    else if (unresolved || nameSource === "unresolved") secondary = "姓名未同步";
+    return `<span class="ocw-dingtalk-actor"><strong>${this.escape(primary)}</strong>${secondary ? `<small class="ocw-dingtalk-actor-id">${this.escape(secondary)}</small>` : ""}</span>`;
+  }
+
+  renderDingtalkActorField(label, userName, userId, nameSource = "", unresolved = false) {
+    return `<div><span>${this.escape(label)}</span>${this.renderDingtalkActor(userName, userId, nameSource, unresolved)}</div>`;
+  }
+
   renderDingtalkFormFields(fields = []) {
     if (!fields.length) return `<div class="ocw-purchase-empty-line">无可展示表单字段</div>`;
     return `<dl class="ocw-dingtalk-form-fields">${fields.map((field) => `<div><dt>${this.escape(field.label || "未命名字段")}</dt><dd>${this.escape(field.value || "--")}</dd></div>`).join("")}</dl>`;
   }
 
-  renderDingtalkTimeline(items = []) {
+  renderDingtalkTimeline(items = [], allowCostSource = true) {
     if (!items.length) return `<div class="ocw-purchase-empty-line">无操作或评论记录</div>`;
     return `<ol class="ocw-dingtalk-timeline">${items.map((item) => `
       <li>
-        <div><strong>${this.escape(item.user_name || item.user_id || "系统")}</strong><span>${this.escape(this.formatDateTimeMinute(item.operation_time) || item.operation_time || "--")}</span></div>
+        <div>${this.renderDingtalkActor(item.user_name, item.user_id, item.user_name_source, item.user_name_unresolved)}<span>${this.escape(this.formatDateTimeMinute(item.operation_time) || item.operation_time || "--")}</span></div>
         <p>${this.escape(item.remark || [item.operation_type, item.result].filter(Boolean).join(" / ") || "--")}</p>
-        ${item.packing_candidate && item.source_id ? `<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="comment" data-source-id="${this.escape(item.source_id)}">作为装箱信息预览</button>` : ""}
+        ${allowCostSource && item.packing_candidate && item.source_id ? `<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="comment" data-source-id="${this.escape(item.source_id)}">作为装箱信息预览</button>` : ""}
       </li>`).join("")}</ol>`;
   }
 
@@ -10233,7 +10266,7 @@ class OverseasCostWorkbench {
     return `${labels[status] || status}${quality}`;
   }
 
-  renderDingtalkAttachments(items = []) {
+  renderDingtalkAttachments(items = [], allowCostSource = true) {
     if (!items.length) return `<div class="ocw-purchase-empty-line">无附件</div>`;
     return `<div class="ocw-dingtalk-attachments">${items.map((item) => {
       const canFetch = Boolean(item.downloadable);
@@ -10242,11 +10275,11 @@ class OverseasCostWorkbench {
         actions.push(`<button class="ocw-link-btn" type="button" data-action="preview-dingtalk-attachment" data-attachment-name="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}" data-file-url="${this.escape(item.file_url || "")}" data-file-name="${this.escape(item.file_name || "")}">预览</button>`);
         actions.push(`<button class="ocw-link-btn" type="button" data-action="download-dingtalk-attachment" data-attachment-name="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}">下载</button>`);
       }
-      if (item.packing_candidate && item.downloadable) {
+      if (allowCostSource && item.packing_candidate && item.downloadable) {
         actions.push(`<button class="ocw-link-btn" type="button" data-action="use-dingtalk-packing-source" data-source-kind="attachment" data-source-id="${this.escape(item.attachment_name || "")}" data-process-instance-id="${this.escape(item.process_instance_id || "")}" data-file-id="${this.escape(item.file_id || "")}">作为装箱单使用</button>`);
       }
       return `<div class="ocw-dingtalk-attachment-row">
-        <div><strong>${this.escape(item.file_name || item.file_id || "--")}</strong><span>${this.escape(item.origin === "Comment" ? "评论附件" : "表单附件")} · ${this.escape(this.dingtalkArchiveStatus(item))}</span>${item.comment_remark ? `<em>${this.escape(item.comment_remark)}</em>` : ""}${item.failure_reason ? `<em class="is-error">${this.escape(item.failure_reason)}</em>` : ""}</div>
+        <div><strong>${this.escape(item.file_name || item.file_id || "--")}</strong><span>${this.escape(item.origin === "Comment" ? "评论附件" : "表单附件")} · ${this.escape(this.dingtalkArchiveStatus(item))}</span>${item.origin === "Comment" && (item.comment_user_name || item.comment_user_id) ? this.renderDingtalkActor(item.comment_user_name, item.comment_user_id, item.comment_user_name_source, item.comment_user_name_unresolved) : ""}${item.comment_remark ? `<em>${this.escape(item.comment_remark)}</em>` : ""}${item.failure_reason ? `<em class="is-error">${this.escape(item.failure_reason)}</em>` : ""}</div>
         <div class="ocw-attachment-actions">${actions.join("") || `<span class="ocw-purchase-source-disabled">暂不可下载</span>`}</div>
       </div>`;
     }).join("")}</div>`;
@@ -10279,7 +10312,8 @@ class OverseasCostWorkbench {
   }
 
   dingtalkPackingCandidates(detail = {}) {
-    const approvals = [detail.main_approval, ...(detail.linked_purchase_approvals || [])].filter(Boolean);
+    const approvals = [detail.main_approval, ...(detail.linked_purchase_approvals || [])]
+      .filter((approval) => approval && !approval.excluded);
     const candidates = [];
     approvals.forEach((approval) => {
       (approval.attachments || []).forEach((item) => {

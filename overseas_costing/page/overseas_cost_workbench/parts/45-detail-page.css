@@ -32,7 +32,7 @@
   gap: 20px;
   padding: 18px 20px;
   border-bottom: 1px solid var(--ocw-border);
-  background: linear-gradient(135deg, #f7fbfb 0%, #fff 68%);
+  background: linear-gradient(135deg, #f7fbff 0%, #fff 68%);
 }
 
 .ocw-detail-heading,
@@ -73,7 +73,7 @@
   border: 1px solid var(--ocw-border);
   border-radius: 10px;
   background: #fff;
-  box-shadow: 0 16px 36px rgba(22, 46, 49, .16);
+  box-shadow: 0 16px 36px rgba(22, 42, 66, .16);
 }
 
 .ocw-detail-tools[hidden] { display: none; }
@@ -85,7 +85,7 @@
   padding: 10px 20px;
   overflow-x: auto;
   border-bottom: 1px solid var(--ocw-border);
-  background: #fafcfc;
+  background: #fafcff;
 }
 
 .ocw-detail-status {
@@ -170,30 +170,30 @@
 .ocw-sku-table-wrap::-webkit-scrollbar { height: 0; }
 .ocw-sku-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .ocw-sku-table th,
-.ocw-sku-table td { width: 148px; min-width: 148px; max-width: 148px; padding: 9px 10px; border-right: 1px solid #e8eeee; border-bottom: 1px solid #e8eeee; background: #fff; font-size: 12px; vertical-align: middle; }
-.ocw-sku-table th { position: sticky; z-index: 3; top: 0; height: 52px; background: #f5f8f8; color: var(--ocw-muted); text-align: left; }
+.ocw-sku-table td { width: 148px; min-width: 148px; max-width: 148px; padding: 9px 10px; border-right: 1px solid #e8eef5; border-bottom: 1px solid #e8eef5; background: #fff; font-size: 12px; vertical-align: middle; }
+.ocw-sku-table th { position: sticky; z-index: 3; top: 0; height: 52px; background: #f5f8fb; color: var(--ocw-muted); text-align: left; }
 .ocw-sku-table th > span { display: block; color: var(--ocw-accent-dark); font-size: 10px; }
 .ocw-sku-table th button { width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; font-weight: inherit; }
 .ocw-sku-table td { height: 58px; line-height: 1.35; overflow-wrap: anywhere; }
 .ocw-sku-table .ocw-sku-sticky { padding-inline: var(--ocw-sku-sticky-padding-inline); font-size: var(--ocw-sku-sticky-font-size); transition: left 160ms ease, width 160ms ease, min-width 160ms ease, max-width 160ms ease, padding-inline 160ms ease, font-size 160ms ease; }
 .ocw-sku-table .ocw-sku-sticky-0 { position: sticky; z-index: 5; left: 0; width: var(--ocw-sku-sticky-a-width); min-width: var(--ocw-sku-sticky-a-width); max-width: var(--ocw-sku-sticky-a-width); white-space: normal; }
-.ocw-sku-table .ocw-sku-sticky-1 { position: sticky; z-index: 5; left: var(--ocw-sku-sticky-b-left); width: var(--ocw-sku-sticky-b-width); min-width: var(--ocw-sku-sticky-b-width); max-width: var(--ocw-sku-sticky-b-width); white-space: normal; box-shadow: 10px 0 14px -14px rgba(12, 45, 48, .8); }
+.ocw-sku-table .ocw-sku-sticky-1 { position: sticky; z-index: 5; left: var(--ocw-sku-sticky-b-left); width: var(--ocw-sku-sticky-b-width); min-width: var(--ocw-sku-sticky-b-width); max-width: var(--ocw-sku-sticky-b-width); white-space: normal; box-shadow: 10px 0 14px -14px rgba(20, 48, 82, .8); }
 .ocw-sku-table td .ocw-sku-sticky-content { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.ocw-sku-table th.ocw-sku-sticky { z-index: 8; background: #eef6f6; }
+.ocw-sku-table th.ocw-sku-sticky { z-index: 8; background: #eef7ff; }
 .ocw-sku-table td.ocw-sku-sticky { background: #fff; }
 .ocw-sku-table tr:hover td,
-.ocw-sku-table tr:hover td.ocw-sku-sticky { background: #f8fbfb; }
+.ocw-sku-table tr:hover td.ocw-sku-sticky { background: #f8fbff; }
 
-.ocw-sku-scroll-controls { gap: 8px; min-height: 46px; padding: 7px 9px; border-top: 2px solid var(--ocw-accent); background: #f7fbfb; }
-.ocw-sku-scroll-controls > button { flex: 0 0 36px; height: 32px; border: 1px solid #9ecbcd; border-radius: 7px; background: #fff; color: var(--ocw-accent-dark); }
+.ocw-sku-scroll-controls { gap: 8px; min-height: 46px; padding: 7px 9px; border-top: 2px solid var(--ocw-accent); background: #f7fbff; }
+.ocw-sku-scroll-controls > button { flex: 0 0 36px; height: 32px; border: 1px solid #9ccbf5; border-radius: 7px; background: #fff; color: var(--ocw-accent-dark); }
 .ocw-sku-scroll-controls > button:disabled { opacity: .38; }
 .ocw-sku-scroll-controls > span { flex: 0 0 auto; color: var(--ocw-muted); font-size: 11px; font-weight: 700; }
 .ocw-sku-scrollbar { flex: 1 1 auto; width: 100%; height: 22px; margin: 0; padding: 0; border: 0; appearance: none; -webkit-appearance: none; background: transparent; cursor: pointer; }
 .ocw-sku-scrollbar:focus-visible { outline: 2px solid var(--ocw-accent); outline-offset: 2px; }
-.ocw-sku-scrollbar::-webkit-slider-runnable-track { height: 8px; border-radius: 999px; background: #dfe8e8; }
-.ocw-sku-scrollbar::-webkit-slider-thumb { width: 22px; height: 22px; margin-top: -7px; border: 3px solid #dfe8e8; border-radius: 50%; -webkit-appearance: none; background: #318e92; box-shadow: 0 1px 3px rgba(12, 45, 48, .24); }
-.ocw-sku-scrollbar::-moz-range-track { height: 8px; border: 0; border-radius: 999px; background: #dfe8e8; }
-.ocw-sku-scrollbar::-moz-range-thumb { width: 16px; height: 16px; border: 3px solid #dfe8e8; border-radius: 50%; background: #318e92; box-shadow: 0 1px 3px rgba(12, 45, 48, .24); }
+.ocw-sku-scrollbar::-webkit-slider-runnable-track { height: 8px; border-radius: 999px; background: #dbeafe; }
+.ocw-sku-scrollbar::-webkit-slider-thumb { width: 22px; height: 22px; margin-top: -7px; border: 3px solid #dbeafe; border-radius: 50%; -webkit-appearance: none; background: var(--ocw-accent); box-shadow: 0 1px 3px rgba(11, 140, 240, .24); }
+.ocw-sku-scrollbar::-moz-range-track { height: 8px; border: 0; border-radius: 999px; background: #dbeafe; }
+.ocw-sku-scrollbar::-moz-range-thumb { width: 16px; height: 16px; border: 3px solid #dbeafe; border-radius: 50%; background: var(--ocw-accent); box-shadow: 0 1px 3px rgba(11, 140, 240, .24); }
 .ocw-sku-scrollbar:disabled { opacity: 1; cursor: not-allowed; }
 .ocw-sku-scrollbar:disabled::-webkit-slider-runnable-track { background: #e5e7e7; }
 .ocw-sku-scrollbar:disabled::-webkit-slider-thumb { border-color: #e5e7e7; background: #a8b3b3; box-shadow: none; }
