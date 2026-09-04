@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -80,3 +82,20 @@ def test_require_batch_permission_resolves_reference_and_checks_document(monkeyp
 
     assert access_control.require_batch_permission("BATCH-NO", "write") == "BATCH-DOC"
     assert calls == ["role", ("Overseas Cost Batch", "write", "BATCH-DOC")]
+
+
+def test_packing_preview_api_uses_server_attachment_path_not_client_rows() -> None:
+    api_source = (Path(__file__).resolve().parents[1] / "api" / "import_api.py").read_text(encoding="utf-8")
+    block = api_source.split("def preview_packing_list_attachment(", 1)[1].split("@frappe.whitelist()", 1)[0]
+
+    assert "_verified_packing_attachment(batch_name, attachment_name, \"read\")" in block
+    assert "file_url=server_file_url" in block
+    assert "sheet_rows_json=None" in block
+    assert "trusted_server_payload=True" in block
+
+
+def test_public_import_api_never_forwards_client_credentials_or_env_paths() -> None:
+    api_source = (Path(__file__).resolve().parents[1] / "api" / "import_api.py").read_text(encoding="utf-8")
+
+    assert "env_file=env_file" not in api_source
+    assert "access_token=access_token" not in api_source

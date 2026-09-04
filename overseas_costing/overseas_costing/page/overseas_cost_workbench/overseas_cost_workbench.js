@@ -1456,6 +1456,14 @@ class OverseasCostWorkbench {
   async recalculate(batchName = "") {
     const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
     if (!batch) return;
+    const sourceStatus = batch.source_status || {};
+    if (sourceStatus.invalid_business) {
+      frappe.show_alert({
+        message: sourceStatus.invalid_business_reason || "当前批次包含已拒绝、撤销或终止的审批，不能重新计算。",
+        indicator: "red",
+      });
+      return;
+    }
     this.activeBatchName = batch.name;
     this.exportPinnedBatchName = batch.name;
     try {
@@ -1467,6 +1475,9 @@ class OverseasCostWorkbench {
         },
         true
       );
+      if (!result?.ok) {
+        throw new Error(result?.message || "重新试算被服务器拒绝，未修改批次数据。");
+      }
       const summary = result.summary_snapshot || {};
       this.applyRecalculateSummary(batch.name, summary, result.allocation_rules || []);
       this.lastRecalculateResult = { batch_name: batch.name, summary };
@@ -4053,11 +4064,17 @@ class OverseasCostWorkbench {
         },
         true
       );
-      this.renderOaPullResult(dialog, result, result.skipped ? "warn" : "ready");
+      this.renderOaPullResult(dialog, result, result.skipped || !result?.ok ? "warn" : "ready");
       if (result.skipped) {
         this.setOaPullPrimaryState(dialog, "ready");
         frappe.show_alert({ message: result.reason || "钉钉拉取已跳过", indicator: "orange" });
         return;
+      }
+      if (!result?.ok) {
+        const failedCount = Number(result.save?.failed_count || 0);
+        throw new Error(
+          result.save?.message || `钉钉审批已读取，但有 ${failedCount || "部分"} 个批次保存失败，请查看失败明细。`
+        );
       }
       const save = result.save || {};
       const message = `钉钉拉取完成：新增 ${save.created_count || 0}，更新 ${save.updated_count || 0}，已存在 ${save.unchanged_count || 0}，跳过 ${save.skipped_count || 0}`;
@@ -4222,6 +4239,15 @@ class OverseasCostWorkbench {
     const pull = result.pull || {};
     const save = result.save || {};
     const counts = pull.transport_counts || {};
+    if (!result.ok) {
+      const failedCount = Number(save.failed_count || 0);
+      $target.addClass("warn").html(
+        `<strong>拉取未完全成功</strong><span>${this.escape(
+          save.message || `有 ${failedCount || "部分"} 个批次保存失败，未标记为完成。`
+        )}</span>`
+      );
+      return;
+    }
     const modeText = (result.transport_modes || []).map((mode) => this.transportLabel(mode)).join("、") || "全部";
     const writeCount = Number(save.created_count || 0) + Number(save.updated_count || 0);
     const completionText = writeCount
@@ -8211,6 +8237,9 @@ class OverseasCostWorkbench {
     const sampleBadge = batch.is_classic_sample
       ? `<span class="ocw-sample-badge">${this.escape(batch.sample_note || "历史样本")}</span>`
       : "";
+    const recalculateDisabled = (batch.source_status || {}).invalid_business
+      ? `disabled title="${this.escape((batch.source_status || {}).invalid_business_reason || "已排除审批不能重算")}"`
+      : "";
     this.activeBatchName = this.activeBatchName || batch.name;
     return `
       <tr class="ocw-parent-row ${isExpanded ? "expanded" : ""} ${importedClass}" data-batch-name="${this.escape(batch.name)}" title="单击批次可选中并锁定；双击打开详情侧边栏；字段修改请在明细区点击可编辑字段">
@@ -8239,8 +8268,8 @@ class OverseasCostWorkbench {
           <div class="ocw-row-action-group">
             ${this.workRole === "purchase"
               ? `<button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">补资料</button>
-                 <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}">试算</button>`
-              : `<button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}">重新试算</button>
+                 <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>试算</button>`
+              : `<button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>重新试算</button>
                  <button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">资料</button>`}
             <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
           </div>
@@ -10286,7 +10315,7 @@ class OverseasCostWorkbench {
   }
 
   async ensureDingtalkLocalAttachment(attachmentName, processInstanceId, fileId) {
-    if (attachmentName) return attachmentName;
+    if (attachmentName && !(processInstanceId && fileId)) return attachmentName;
     const batch = this.getDetailBatch();
     const result = await this.call("overseas_costing.api.import_api.prepare_dingtalk_archive_attachment", {
       batch_name: batch.name,
@@ -10520,6 +10549,14 @@ class OverseasCostWorkbench {
       $button.removeClass("needs-recalculate is-calculated").text("重新试算").attr("title", "");
       if (!batch) {
         $button.prop("disabled", true).attr("title", "暂无可试算批次");
+        return;
+      }
+
+      const sourceStatus = batch.source_status || {};
+      if (sourceStatus.invalid_business) {
+        $button
+          .prop("disabled", true)
+          .attr("title", sourceStatus.invalid_business_reason || "当前批次包含已拒绝、撤销或终止的审批，不能重新计算");
         return;
       }
 

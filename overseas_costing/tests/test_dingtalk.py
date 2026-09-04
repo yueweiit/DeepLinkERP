@@ -1329,6 +1329,65 @@ def test_sync_purchase_expenses_from_process_requires_process_code(monkeypatch) 
     assert "DINGTALK_PURCHASE_PROCESS_CODE" in result["message"]
 
 
+def test_sync_purchase_expenses_from_process_reports_batch_write_failure(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [{"name": "BATCH-001", "batch_no": "B-001", "current_version": "VER-001"}]
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda _env=None: "")
+    monkeypatch.setattr(import_oa_logistics, "resolve_purchase_process_code", lambda _code="": "PROC-PURCHASE")
+    monkeypatch.setattr(import_oa_logistics, "pull_purchase_expense_approvals", lambda **_kwargs: {
+        "ok": True,
+        "items": [{"source_instance_id": "PROC-PUR-001", "mapped_preview_items": []}],
+    })
+    monkeypatch.setattr(import_service, "apply_linked_purchase_expense_fillable_fields", lambda **_kwargs: {
+        "ok": False,
+        "audit_logged": False,
+        "message": "审计写入失败",
+    })
+    monkeypatch.setattr(import_oa_logistics, "_recalculate_after_purchase_sync", lambda **_kwargs: {"action": "skipped"})
+
+    result = sync_purchase_expenses_from_process(start="2026-01-01", end="2026-09-04")
+
+    assert result["ok"] is False
+    assert result["failed_count"] == 1
+
+
+def test_save_sea_approvals_to_erp_reports_purchase_sync_failure(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(import_oa_logistics, "_resolve_existing_batch_name", lambda _values: "BATCH-001")
+    monkeypatch.setattr(import_oa_logistics, "_update_oa_trace_batch", lambda *_args: {
+        "action": "updated", "batch_name": "BATCH-001", "version_name": "VER-001"
+    })
+    monkeypatch.setattr(import_oa_logistics, "_sync_oa_goods_items", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(import_oa_logistics, "_sync_oa_form_attachments", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(import_oa_logistics, "_sync_linked_purchase_fields", lambda **_kwargs: {
+        "ok": False, "audit_logged": False, "message": "审计写入失败"
+    })
+    monkeypatch.setattr(import_oa_logistics, "_sync_oa_logistics_allocation_rule", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(import_oa_logistics, "_recalculate_after_purchase_sync", lambda **_kwargs: {"action": "skipped"})
+    monkeypatch.setattr(import_oa_logistics, "_commit_oa_pull_progress", lambda: None)
+    monkeypatch.setattr(import_oa_logistics, "_run_with_database_retry", lambda callback: callback())
+
+    result = save_sea_approvals_to_erp({"items": [{
+        "source_approval_no": "OA-001",
+        "source_instance_id": "PROC-LOG-001",
+        "approval_status": "COMPLETED",
+        "transport_mode": "SEA",
+        "form_fields": {},
+    }]})
+
+    assert result["ok"] is False
+    assert result["failed_count"] == 1
+
+
 def test_preview_purchase_expenses_from_process_matches_existing_batches(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
     from overseas_costing.services import import_service
@@ -2032,6 +2091,45 @@ def test_sync_linked_purchase_fields_does_not_apply_when_all_purchases_are_exclu
     assert apply_calls == []
 
 
+def test_sync_linked_purchase_fields_propagates_manual_review_audit_failure(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(import_oa_logistics, "_persist_linked_purchase_approval_statuses", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        import_service,
+        "preview_linked_purchase_expense_oa",
+        lambda **_kwargs: {
+            "ok": True,
+            "purchase_summaries": [{"source_instance_id": "PROC-REFUSED", "excluded": True}],
+            "excluded_purchase_summary_count": 1,
+            "excluded_purchase_summaries": [{"source_instance_id": "PROC-REFUSED", "excluded": True}],
+            "mapped_preview_items": [],
+        },
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "_restore_main_logistics_items_after_excluded_purchases",
+        lambda **_kwargs: {
+            "action": "manual_required",
+            "ok": False,
+            "audit_logged": False,
+            "audit_error": "audit unavailable",
+            "reason": "审计写入失败",
+        },
+    )
+
+    result = _sync_linked_purchase_fields(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={"linked_purchase_approvals": [{"source_instance_id": "PROC-REFUSED"}]},
+    )
+
+    assert result["ok"] is False
+    assert result["repair_result"]["audit_logged"] is False
+
+
 def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 
@@ -2282,6 +2380,39 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
     assert audit_result["action"] == "manual_required"
     assert audit_result["rolled_back"] is True
     assert "insert failed" in audit_result["reason"]
+
+
+def test_invalid_purchase_item_manual_review_reports_audit_failure(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(_doctype, **_kwargs):
+            return [{
+                "name": "MANUAL-1",
+                "manual_override_flag": 1,
+                "source_type": "manual",
+                "dingtalk_instance_id": "",
+            }]
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "_insert_batch_audit_log",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
+    )
+
+    result = _restore_main_logistics_items_after_excluded_purchases(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={"source_instance_id": "PROC-LOG-001"},
+        excluded_purchase_summaries=[{"source_instance_id": "PROC-PUR-REFUSED"}],
+    )
+
+    assert result["action"] == "manual_required"
+    assert result["ok"] is False
+    assert result["audit_logged"] is False
+    assert "audit unavailable" in result["audit_error"]
 
 
 def test_purchase_expense_rows_from_preview_excludes_rejected_approvals() -> None:
@@ -2584,6 +2715,33 @@ def test_sync_express_single_quote_creates_freight_rule(monkeypatch) -> None:
     assert rule_result["rule"]["currency"] == "RMB"
     assert rule_result["rule"]["rule_code"] == "oa_logistics_freight"
     assert inserted_rules[0]["expense_category"] == "国际物流费用"
+
+
+def test_sync_oa_logistics_allocation_rule_blocks_invalid_batch_before_db_write(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(
+        import_service,
+        "_invalid_batch_cost_write_response",
+        lambda _batch_name, _version_name="": {
+            "ok": False,
+            "invalid_business": True,
+            "message": "审批已撤销，禁止写入费用。",
+        },
+    )
+
+    result = import_oa_logistics._sync_oa_logistics_allocation_rule(
+        batch_name="BATCH-REVOKED",
+        version_name="VER-001",
+        approval_item={"logistics_fee": {"amount": "900", "currency": "RMB"}},
+    )
+
+    assert result["ok"] is False
+    assert result["action"] == "blocked"
+    assert result["created_count"] == 0
+    assert result["updated_count"] == 0
 
 
 def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch) -> None:

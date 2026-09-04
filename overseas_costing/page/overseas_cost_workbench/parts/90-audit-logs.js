@@ -81,6 +81,14 @@
         return;
       }
 
+      const sourceStatus = batch.source_status || {};
+      if (sourceStatus.invalid_business) {
+        $button
+          .prop("disabled", true)
+          .attr("title", sourceStatus.invalid_business_reason || "当前批次包含已拒绝、撤销或终止的审批，不能重新计算");
+        return;
+      }
+
       const statusInfo = this.batchStatusInfo(batch.status);
       $button.prop("disabled", false).attr("title", "对当前批次重新计算分摊和综合成本");
       if (statusInfo.needsRecalculate) {

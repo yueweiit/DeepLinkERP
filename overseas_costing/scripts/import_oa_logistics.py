@@ -4309,8 +4309,15 @@ def _restore_main_logistics_items_after_excluded_purchases(
                 },
                 remark="已排除采购审批的历史 SKU 无法安全自动恢复，已保留现状并标记人工处理。",
             )
-        except Exception:
-            pass
+            result["audit_logged"] = True
+        except Exception as exc:
+            result.update(
+                {
+                    "ok": False,
+                    "audit_logged": False,
+                    "audit_error": str(exc),
+                }
+            )
         return result
 
     if frappe is None or not hasattr(frappe, "get_all"):
@@ -4641,6 +4648,7 @@ def _sync_linked_purchase_fields(
             batch_name=batch_name,
             version_name=version_name,
             linked_purchase_json=_json_dumps(linked_approvals),
+            trusted_server_payload=True,
         )
         purchase_summaries = preview_result.get("purchase_summaries") or []
         if purchase_summaries:
@@ -4660,7 +4668,7 @@ def _sync_linked_purchase_fields(
             return {
                 "action": repair_result.get("action") or "skipped",
                 "sync_strategy": "excluded_purchase_approvals",
-                "ok": True,
+                "ok": bool(repair_result.get("ok")),
                 "linked_purchase_count": len(linked_approvals),
                 "excluded_purchase_count": excluded_purchase_count,
                 "updated_count": repair_result.get("updated_count", 0),
@@ -4704,6 +4712,7 @@ def _sync_linked_purchase_fields(
             version_name=version_name,
             linked_purchase_json=_json_dumps(linked_approvals),
             recalculate_after_writeback=False,
+            trusted_server_payload=True,
         )
     except Exception as exc:
         return {
@@ -4893,6 +4902,17 @@ def _sync_oa_logistics_allocation_rule(
             "updated_count": 0,
             "rule": values,
             "fee": fee,
+        }
+
+    from overseas_costing.services import import_service
+
+    invalid_response = import_service._invalid_batch_cost_write_response(batch_name, version_name)
+    if invalid_response:
+        return {
+            **invalid_response,
+            "action": "blocked",
+            "created_count": 0,
+            "updated_count": 0,
         }
 
     existing_name = frappe.db.get_value(
@@ -6012,6 +6032,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
     updated_count = 0
     unchanged_count = 0
     saved_items: list[dict] = []
+    failed_items: list[dict] = []
     for invalid_item in invalid_items:
         invalid_values = build_batch_values_from_approval(invalid_item)
         existing_name = _resolve_existing_batch_name(invalid_values)
@@ -6092,11 +6113,34 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
             }
         )
         saved_items.append(saved)
+        failed_stages = [
+            stage
+            for stage, stage_result in (
+                ("item_sync", item_sync),
+                ("attachment_sync", attachment_sync),
+                ("purchase_sync", purchase_sync),
+                ("logistics_fee_sync", logistics_fee_sync),
+                ("recalculate_sync", recalculate_sync),
+            )
+            if isinstance(stage_result, dict) and stage_result.get("ok") is False
+        ]
+        if failed_stages:
+            failed_items.append(
+                {
+                    "batch_name": saved.get("batch_name"),
+                    "source_instance_id": values.get("source_instance_id"),
+                    "failed_stages": failed_stages,
+                    "message": "；".join(
+                        str(saved.get(stage, {}).get("message") or stage)
+                        for stage in failed_stages
+                    ),
+                }
+            )
 
     _commit_oa_pull_progress()
 
     return {
-        "ok": True,
+        "ok": not failed_items,
         "dry_run": False,
         "message": "钉钉国际物流审批已保存到批次；已生成/保留物料行、登记发起附件，并按关联采购支出 OA 同步采购单价、币种和货值，同时把明确的物流费用生成分摊规则。",
         "total": len(raw_items),
@@ -6104,8 +6148,10 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
         "updated_count": updated_count,
         "unchanged_count": unchanged_count,
         "skipped_count": len(skipped_items),
+        "failed_count": len(failed_items),
         "items": saved_items,
         "skipped_items": skipped_items,
+        "failed_items": failed_items,
     }
 
 
@@ -6523,12 +6569,14 @@ def sync_purchase_expenses_from_process(
     total_changed_fields = 0
     total_unmatched = 0
     total_ambiguous = 0
+    failed_items: list[dict] = []
     for row in rows:
         purchase_sync = import_service.apply_linked_purchase_expense_fillable_fields(
             batch_name=row.get("name"),
             version_name=row.get("current_version") or "",
             purchase_summaries_json=purchase_summaries_json,
             recalculate_after_writeback=False,
+            trusted_server_payload=True,
         )
         recalculate_sync = _recalculate_after_purchase_sync(
             batch_name=row.get("name"),
@@ -6547,9 +6595,18 @@ def sync_purchase_expenses_from_process(
                 "recalculate_sync": recalculate_sync,
             }
         )
+        if purchase_sync.get("ok") is False or recalculate_sync.get("ok") is False:
+            failed_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "purchase_sync": purchase_sync,
+                    "recalculate_sync": recalculate_sync,
+                }
+            )
 
     return {
-        "ok": True,
+        "ok": not failed_items,
         "dry_run": False,
         "env_file_loaded": bool(resolved_env_file),
         "pull": {
@@ -6570,7 +6627,9 @@ def sync_purchase_expenses_from_process(
         "changed_field_count": total_changed_fields,
         "unmatched_count": total_unmatched,
         "ambiguous_count": total_ambiguous,
+        "failed_count": len(failed_items),
         "items": synced_items,
+        "failed_items": failed_items,
         "message": (
             f"已拉取 {len(purchase_summaries)} 张采购支出 OA，并尝试同步 {len(rows)} 个国际物流批次；"
             f"采购字段更新 {total_updated} 行，变更 {total_changed_fields} 个字段。"
@@ -6695,6 +6754,7 @@ def preview_purchase_expenses_from_process(
             batch_name=row.get("name"),
             version_name=row.get("current_version") or "",
             purchase_summaries_json=purchase_summaries_json,
+            trusted_server_payload=True,
         )
         writeback = preview.get("writeback_preview") or {}
         matched_count = int(writeback.get("matched_count") or 0)
@@ -7057,17 +7117,22 @@ def pull_latest_logistics_approvals_to_erp(
     新审批单会创建批次，已有审批单只补追溯、附件、采购字段和明确费用规则。
     """
 
-    resolved_env_file = resolve_dingtalk_env_file(env_file)
+    source_mode = resolve_approval_source_mode()
+    resolved_env_file = resolve_dingtalk_env_file(env_file) if source_mode == "api" else ""
     env_file_loaded = False
     if resolved_env_file:
         load_env_file(resolved_env_file)
         env_file_loaded = True
 
-    if not _has_dingtalk_pull_credentials() and not _clean(access_token):
+    if not _has_dingtalk_pull_credentials() and not (source_mode == "api" and _clean(access_token)):
         return {
             "ok": True,
             "skipped": True,
-            "reason": "未配置钉钉拉取凭据，本次未执行拉取。",
+            "reason": (
+                "未配置 PostgreSQL OA 读取账号，本次未执行拉取。"
+                if source_mode == "postgres"
+                else "未配置钉钉拉取凭据，本次未执行拉取。"
+            ),
             "env_file_loaded": env_file_loaded,
         }
 
@@ -7099,7 +7164,11 @@ def pull_latest_logistics_approvals_to_erp(
         limit=limit or None,
         include_raw=False,
         include_all=False,
-        access_token=access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        access_token=(
+            ""
+            if source_mode == "postgres"
+            else access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token")
+        ),
         corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
         client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
         client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
@@ -7130,6 +7199,8 @@ def pull_latest_logistics_approvals_to_erp(
             "updated_count": save_result.get("updated_count", 0),
             "unchanged_count": save_result.get("unchanged_count", 0),
             "skipped_count": save_result.get("skipped_count", 0),
+            "failed_count": save_result.get("failed_count", 0),
+            "failed_items": (save_result.get("failed_items") or [])[:20],
             "message": save_result.get("message"),
         },
         "items": (save_result.get("items") or [])[:20],
@@ -7196,12 +7267,17 @@ def scheduled_pull_logistics_approvals() -> dict:
         ):
             return {"ok": True, "skipped": True, "reason": "钉钉国际物流自动拉取已关闭。"}
 
-        env_file = resolve_dingtalk_env_file(
-            _runtime_config_value(
-                "DINGTALK_SCHEDULE_ENV_FILE",
-                "DINGTALK_ENV_FILE",
-                "overseas_costing_dingtalk_env_file",
+        source_mode = resolve_approval_source_mode()
+        env_file = (
+            resolve_dingtalk_env_file(
+                _runtime_config_value(
+                    "DINGTALK_SCHEDULE_ENV_FILE",
+                    "DINGTALK_ENV_FILE",
+                    "overseas_costing_dingtalk_env_file",
+                )
             )
+            if source_mode == "api"
+            else ""
         )
         env_file_loaded = False
         if env_file:
@@ -7209,7 +7285,16 @@ def scheduled_pull_logistics_approvals() -> dict:
             env_file_loaded = True
 
         if not _has_dingtalk_pull_credentials():
-            return {"ok": True, "skipped": True, "reason": "未配置钉钉拉取凭据，自动拉取跳过。", "env_file_loaded": env_file_loaded}
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": (
+                    "未配置 PostgreSQL OA 读取账号，自动拉取跳过。"
+                    if source_mode == "postgres"
+                    else "未配置钉钉拉取凭据，自动拉取跳过。"
+                ),
+                "env_file_loaded": env_file_loaded,
+            }
 
         start, end = _build_scheduled_pull_window()
         transport_modes = _runtime_config_value(
@@ -7241,7 +7326,11 @@ def scheduled_pull_logistics_approvals() -> dict:
             or None,
             include_raw=False,
             include_all=False,
-            access_token=_runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+            access_token=(
+                ""
+                if source_mode == "postgres"
+                else _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token")
+            ),
             corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
             client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
             client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
@@ -7272,6 +7361,8 @@ def scheduled_pull_logistics_approvals() -> dict:
                 "updated_count": save_result.get("updated_count", 0),
                 "unchanged_count": save_result.get("unchanged_count", 0),
                 "skipped_count": save_result.get("skipped_count", 0),
+                "failed_count": save_result.get("failed_count", 0),
+                "failed_items": (save_result.get("failed_items") or [])[:20],
                 "message": save_result.get("message"),
             },
         }

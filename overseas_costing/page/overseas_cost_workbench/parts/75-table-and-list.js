@@ -492,6 +492,9 @@
     const sampleBadge = batch.is_classic_sample
       ? `<span class="ocw-sample-badge">${this.escape(batch.sample_note || "历史样本")}</span>`
       : "";
+    const recalculateDisabled = (batch.source_status || {}).invalid_business
+      ? `disabled title="${this.escape((batch.source_status || {}).invalid_business_reason || "已排除审批不能重算")}"`
+      : "";
     this.activeBatchName = this.activeBatchName || batch.name;
     return `
       <tr class="ocw-parent-row ${isExpanded ? "expanded" : ""} ${importedClass}" data-batch-name="${this.escape(batch.name)}" title="单击批次可选中并锁定；双击打开详情侧边栏；字段修改请在明细区点击可编辑字段">
@@ -520,8 +523,8 @@
           <div class="ocw-row-action-group">
             ${this.workRole === "purchase"
               ? `<button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">补资料</button>
-                 <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}">试算</button>`
-              : `<button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}">重新试算</button>
+                 <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>试算</button>`
+              : `<button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>重新试算</button>
                  <button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">资料</button>`}
             <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
           </div>

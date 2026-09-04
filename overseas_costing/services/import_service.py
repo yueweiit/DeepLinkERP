@@ -880,6 +880,12 @@ def apply_batch_excel_supplement(
             edit_token=edit_token,
             expected_modified=expected_modified,
         )
+        invalid_response = _invalid_batch_cost_write_response(
+            prepared["batch_doc_name"],
+            prepared["version_name"],
+        )
+        if invalid_response:
+            return invalid_response
 
     item_result = _apply_batch_supplement_items(
         batch_doc_name=prepared["batch_doc_name"],
@@ -2035,9 +2041,49 @@ def diagnose_oa_form_attachment_download(
     return result
 
 
+def _approval_reference_is_excluded(batch_name: str, snapshot: dict) -> bool:
+    instance_id = str(
+        snapshot.get("process_instance_id")
+        or snapshot.get("instance_id")
+        or snapshot.get("proc_inst_id")
+        or ""
+    ).strip()
+    if frappe is None or not batch_name or not instance_id:
+        return False
+    try:
+        batch = frappe.db.get_value(
+            "Overseas Cost Batch",
+            batch_name,
+            ["source_instance_id", "source_approval_status", "extra_json"],
+            as_dict=True,
+        ) or {}
+    except Exception:
+        return False
+
+    from overseas_costing.scripts.import_oa_logistics import is_hidden_approval_status
+
+    if instance_id == str(batch.get("source_instance_id") or "").strip():
+        return is_hidden_approval_status(batch.get("source_approval_status"))
+    for linked in _get_linked_purchase_approvals_from_extra(batch.get("extra_json")):
+        if instance_id != str(linked.get("source_instance_id") or "").strip():
+            continue
+        return is_hidden_approval_status(
+            linked.get("process_status")
+            or linked.get("approval_status")
+            or linked.get("status"),
+            linked.get("approval_result") or linked.get("result"),
+        )
+    return True
+
+
 def _attachment_doc_is_audit_only(attachment_doc) -> bool:
     snapshot = _json_loads_dict(getattr(attachment_doc, "parse_result_json", ""))
-    return bool(snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False)
+    if snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False:
+        return True
+    return _approval_reference_is_excluded(
+        str(getattr(attachment_doc, "batch", "") or "").strip(),
+        snapshot,
+    )
 
 
 def _audit_only_attachment_response(attachment_name: str) -> dict:
@@ -2315,6 +2361,10 @@ def apply_oa_purchase_order_fillable_fields(
             "preview_result": preview_result,
             "message": "当前批次或版本未匹配成功，未写入数据。",
         }
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        invalid_response["preview_result"] = preview_result
+        return invalid_response
 
     purchase_order = preview_result.get("purchase_order") or {}
     provenance = _build_attachment_price_provenance(attachment_name=attachment_name)
@@ -3495,6 +3545,46 @@ def _get_batch_trace_row(batch_doc_name: str) -> dict:
     ) or {}
 
 
+def _invalid_batch_cost_write_response(
+    batch_doc_name: str,
+    version_name: str | None = None,
+) -> dict | None:
+    """Fail closed before any cost write when approval provenance is invalid."""
+
+    if frappe is None or not batch_doc_name:
+        return None
+    try:
+        batch = frappe.db.get_value(
+            "Overseas Cost Batch",
+            batch_doc_name,
+            ["name", "source_approval_status", "extra_json"],
+            as_dict=True,
+        ) or {}
+        items = _get_batch_items(batch_doc_name, version_name) if version_name else []
+        from overseas_costing.services.batch_service import _build_invalid_business_state
+
+        invalid_business = _build_invalid_business_state(batch, items)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "invalid_business": True,
+            "source_check_failed": True,
+            "batch_doc_name": batch_doc_name,
+            "version_name": version_name,
+            "message": f"审批来源校验失败，已阻止成本写入：{exc}",
+        }
+    if not invalid_business.get("invalid"):
+        return None
+    return {
+        "ok": False,
+        "invalid_business": True,
+        "invalid_business_scope": invalid_business.get("scope") or "",
+        "batch_doc_name": batch_doc_name,
+        "version_name": version_name,
+        "message": invalid_business.get("message") or "当前批次存在已拒绝、撤销或终止的审批，不能写入成本数据。",
+    }
+
+
 def _get_linked_purchase_approvals_from_extra(extra_json: str | dict | None) -> list[dict]:
     payload = _json_loads_dict(extra_json)
     trace = payload.get("oa_logistics_trace") if isinstance(payload.get("oa_logistics_trace"), dict) else {}
@@ -3591,6 +3681,9 @@ def confirm_logistics_quote_candidate(
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
     if not resolved_version_name:
         return {"ok": False, "message": "当前批次没有可用成本版本，无法确认物流报价。"}
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        return invalid_response
     try:
         index = int(candidate_index)
     except (TypeError, ValueError):
@@ -3723,6 +3816,9 @@ def save_manual_logistics_quote(
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
     if not resolved_version_name:
         return {"ok": False, "message": "当前批次没有可用成本版本，无法保存物流报价补录。"}
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        return invalid_response
 
     quote_amount = _to_float(amount)
     if quote_amount <= 0:
@@ -3885,6 +3981,7 @@ def _pull_purchase_summaries_from_dingtalk(*, linked_approvals: list[dict], env_
         get_access_token,
         load_env_file,
         pull_linked_purchase_approval_details,
+        resolve_approval_source_mode,
         _runtime_config_value,
     )
 
@@ -3892,15 +3989,17 @@ def _pull_purchase_summaries_from_dingtalk(*, linked_approvals: list[dict], env_
     if resolved_env_file:
         load_env_file(resolved_env_file)
     api_style = _runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default="auto")
-    token = get_access_token(
-        api_style=api_style,
-        access_token=_runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
-        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
-        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
-        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
-        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
-        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
-    )
+    token = ""
+    if resolve_approval_source_mode() != "postgres":
+        token = get_access_token(
+            api_style=api_style,
+            access_token=_runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+            corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+            client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+            client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+            app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+            app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
+        )
     return [
         _normalize_purchase_summary(summary)
         for summary in pull_linked_purchase_approval_details(
@@ -4294,6 +4393,19 @@ def _run_item_writeback(
             "ambiguous_rows": [],
             "unmatched_rows": mapped_rows,
             "message": f"批次 {batch_name} 暂无可用版本，无法回填。",
+        }
+
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        return {
+            **invalid_response,
+            "matched_count": 0,
+            "updated_count": 0,
+            "ambiguous_count": 0,
+            "unmatched_count": len(mapped_rows),
+            "matched_rows": [],
+            "ambiguous_rows": [],
+            "unmatched_rows": mapped_rows,
         }
 
     items = _get_batch_items(batch_doc_name, resolved_version_name)
@@ -4938,8 +5050,19 @@ def preview_linked_purchase_expense_oa(
     env_file: str | None = None,
     linked_purchase_json: str | None = None,
     purchase_summaries_json: str | None = None,
+    trusted_server_payload: bool = False,
 ) -> dict:
     """预览当前批次关联采购支出 OA 能补哪些采购价格字段，不写入数据。"""
+
+    if frappe is not None and not trusted_server_payload and (
+        env_file or linked_purchase_json or purchase_summaries_json
+    ):
+        return {
+            "ok": False,
+            "untrusted_source": True,
+            "batch_name": batch_name,
+            "message": "审批来源数据必须由服务器从 PostgreSQL 读取，不能使用浏览器提交的审批明细。",
+        }
 
     batch_doc_name = _resolve_batch_name(batch_name) if frappe is not None else None
     batch_trace = _get_batch_trace_row(batch_doc_name) if batch_doc_name else {"batch_no": batch_name}
@@ -5052,6 +5175,7 @@ def apply_linked_purchase_expense_fillable_fields(
     linked_purchase_json: str | None = None,
     purchase_summaries_json: str | None = None,
     recalculate_after_writeback: bool = True,
+    trusted_server_payload: bool = False,
 ) -> dict:
     """写入关联采购支出 OA 中已匹配物料行的采购字段。
 
@@ -5067,6 +5191,7 @@ def apply_linked_purchase_expense_fillable_fields(
         env_file=env_file,
         linked_purchase_json=linked_purchase_json,
         purchase_summaries_json=purchase_summaries_json,
+        trusted_server_payload=trusted_server_payload,
     )
     if not preview_result.get("ok"):
         return {
@@ -5091,6 +5216,10 @@ def apply_linked_purchase_expense_fillable_fields(
             "preview_result": preview_result,
             "message": "当前批次或版本未匹配成功，未写入数据。",
         }
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        invalid_response["preview_result"] = preview_result
+        return invalid_response
 
     applied_rows: list[dict] = []
     skipped_rows: list[dict] = []
@@ -5246,13 +5375,17 @@ def _build_attachment_price_provenance(
             attachment_row = frappe.db.get_value(
                 "Overseas Cost Attachment",
                 resolved_attachment_name,
-                ["name", "file_name", "file_url", "source_doc_no", "parse_result_json"],
+                ["name", "batch", "source_type", "file_name", "file_url", "source_doc_no", "parse_result_json"],
                 as_dict=True,
             ) or {}
         except Exception:
             attachment_row = {}
     attachment_policy = _json_loads_dict(attachment_row.get("parse_result_json"))
-    if attachment_policy.get("approval_excluded") or attachment_policy.get("cost_source_allowed") is False:
+    if (
+        attachment_policy.get("approval_excluded")
+        or attachment_policy.get("cost_source_allowed") is False
+        or _approval_reference_is_excluded(str(attachment_row.get("batch") or ""), attachment_policy)
+    ):
         raise ValueError("该附件来自已排除审批，仅供审计查看和下载，不能写入成本数据。")
 
     resolved_file_url = str(attachment_row.get("file_url") or file_url or "").strip()
@@ -5334,7 +5467,11 @@ def _packing_attachment_is_audit_only(batch_name: str, attachment_name: str | No
     if row.get("batch") and str(row.get("batch")) != str(batch_name):
         return True
     snapshot = _json_loads_dict(row.get("parse_result_json"))
-    return bool(snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False)
+    return bool(
+        snapshot.get("approval_excluded")
+        or snapshot.get("cost_source_allowed") is False
+        or _approval_reference_is_excluded(str(row.get("batch") or batch_name), snapshot)
+    )
 
 
 def preview_packing_list_attachment(
@@ -5345,6 +5482,7 @@ def preview_packing_list_attachment(
     version_name: str | None = None,
     template_hint: str | None = None,
     sheet_rows_json: str | None = None,
+    trusted_server_payload: bool = False,
 ) -> dict:
     """预览装箱单/物流附件可补哪些实际发货、重量、体积字段，不写入数据。"""
 
@@ -5355,6 +5493,14 @@ def preview_packing_list_attachment(
             "batch_name": batch_name,
             "attachment_name": attachment_name,
             "message": "该附件来自已排除审批，仅供审计查看和下载，不能作为装箱或成本数据源。",
+        }
+    if frappe is not None and not trusted_server_payload:
+        return {
+            "ok": False,
+            "untrusted_source": True,
+            "batch_name": batch_name,
+            "attachment_name": attachment_name,
+            "message": "装箱内容必须由服务器按附件记录读取，不能使用浏览器提交的文件路径或明细数据。",
         }
 
     preview_items, parser_meta = _build_packing_preview_items(
@@ -5423,8 +5569,18 @@ def apply_packing_list_fillable_fields(
     auto_create_unmatched_items: bool = False,
     preview_result: dict | None = None,
     commit_after_writeback: bool = True,
+    trusted_server_payload: bool = False,
 ) -> dict:
     """确认补入装箱单/物流附件中可安全写入的物理属性与价格字段。"""
+
+    if frappe is not None and not trusted_server_payload:
+        return {
+            "ok": False,
+            "untrusted_source": True,
+            "batch_name": batch_name,
+            "attachment_name": attachment_name,
+            "message": "装箱写入必须使用服务器核验过的附件或评论来源。",
+        }
 
     preview_result = preview_result or preview_packing_list_attachment(
         batch_name=batch_name,
@@ -5433,6 +5589,7 @@ def apply_packing_list_fillable_fields(
         version_name=version_name,
         template_hint=template_hint,
         sheet_rows_json=sheet_rows_json,
+        trusted_server_payload=trusted_server_payload,
     )
     if not preview_result.get("ok"):
         return {
@@ -5457,6 +5614,10 @@ def apply_packing_list_fillable_fields(
             "preview_result": preview_result,
             "message": "当前批次或版本未匹配成功，未写入数据。",
         }
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        invalid_response["preview_result"] = preview_result
+        return invalid_response
 
     applied_rows: list[dict] = []
     skipped_rows: list[dict] = []
@@ -5599,6 +5760,7 @@ def create_items_from_packing_unmatched_rows(
     template_hint: str | None = None,
     sheet_rows_json: str | None = None,
     recalculate_after_writeback: bool = True,
+    trusted_server_payload: bool = False,
 ) -> dict:
     """将装箱单预览中的未匹配行，经用户确认后新增为当前批次物料行。"""
 
@@ -5609,6 +5771,7 @@ def create_items_from_packing_unmatched_rows(
         version_name=version_name,
         template_hint=template_hint,
         sheet_rows_json=sheet_rows_json,
+        trusted_server_payload=trusted_server_payload,
     )
     if not preview_result.get("ok"):
         return {
@@ -5643,6 +5806,10 @@ def create_items_from_packing_unmatched_rows(
             "preview_result": preview_result,
             "message": "当前批次或版本未匹配成功，未新增物料。",
         }
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        invalid_response["preview_result"] = preview_result
+        return invalid_response
     if not unmatched_rows:
         return {
             "ok": True,
@@ -5947,6 +6114,7 @@ def resolve_packing_list_conflict_row(
     recalculate_after_writeback: bool = True,
     preview_result: dict | None = None,
     commit_after_writeback: bool = True,
+    trusted_server_payload: bool = False,
 ) -> dict:
     """按单条物料行处理装箱单差异：采用附件、保留系统或待核对。"""
 
@@ -5961,6 +6129,15 @@ def resolve_packing_list_conflict_row(
     if not str(target_item_name or "").strip():
         return {"ok": False, "message": "缺少要处理的物料行。"}
 
+    if frappe is not None and not trusted_server_payload:
+        return {
+            "ok": False,
+            "untrusted_source": True,
+            "batch_name": batch_name,
+            "attachment_name": attachment_name,
+            "message": "装箱差异处理必须使用服务器核验过的附件或评论来源。",
+        }
+
     preview_result = preview_result or preview_packing_list_attachment(
         batch_name=batch_name,
         attachment_name=attachment_name,
@@ -5968,6 +6145,7 @@ def resolve_packing_list_conflict_row(
         version_name=version_name,
         template_hint=template_hint,
         sheet_rows_json=sheet_rows_json,
+        trusted_server_payload=trusted_server_payload,
     )
     if not preview_result.get("ok"):
         return {
@@ -6000,6 +6178,10 @@ def resolve_packing_list_conflict_row(
             "preview_result": preview_result,
             "message": "未找到当前装箱单对应的物料差异行。",
         }
+    invalid_response = _invalid_batch_cost_write_response(batch_doc_name, resolved_version_name)
+    if invalid_response:
+        invalid_response["preview_result"] = preview_result
+        return invalid_response
 
     conflict_changes = [
         change
@@ -6609,6 +6791,7 @@ def parse_oa_packing_list_attachments(
                 file_url=file_url,
                 recalculate_after_writeback=False,
                 auto_create_unmatched_items=True,
+                trusted_server_payload=True,
             )
         except Exception as exc:
             item["action"] = "failed"
@@ -6801,6 +6984,7 @@ def parse_oa_source_attachments(
                     file_url=file_url,
                     recalculate_after_writeback=False,
                     auto_create_unmatched_items=True,
+                    trusted_server_payload=True,
                 )
             except Exception as exc:
                 item["action"] = "failed"
@@ -6976,6 +7160,7 @@ def parse_manual_document_attachments(
                     file_url=file_url,
                     recalculate_after_writeback=False,
                     auto_create_unmatched_items=True,
+                    trusted_server_payload=True,
                 )
             except Exception as exc:
                 item["action"] = "failed"
@@ -7104,6 +7289,15 @@ def import_purchase_expense_oa(
     3. 有 Frappe 环境时，按批次内 SKU 自动匹配并回填采购价格字段
     """
 
+    if frappe is not None:
+        return {
+            "ok": False,
+            "untrusted_source": True,
+            "batch_name": batch_name,
+            "source_instance_id": source_instance_id,
+            "message": "该旧接口不再接受客户端提交的采购审批明细；请使用由服务器读取 PostgreSQL 的关联采购审批同步。",
+        }
+
     raw_rows = _load_rows(detail_rows_json)
     preview_items = _build_preview_rows(raw_rows, map_purchase_expense_row_to_item)
     dingtalk_payload = build_dingtalk_order_payload(
@@ -7177,6 +7371,15 @@ def parse_packing_list_attachment(
     2. 预览装箱单明细会映射到哪些物理属性字段
     3. 有 Frappe 环境时，把已解析出的字段回填到批次明细
     """
+
+    if frappe is not None:
+        return {
+            "ok": False,
+            "untrusted_source": True,
+            "batch_name": batch_name,
+            "attachment_name": attachment_name,
+            "message": "该旧接口不再接受浏览器提交的装箱明细；请使用装箱来源预览与确认接口。",
+        }
 
     raw_rows = _load_rows(sheet_rows_json)
     preview_items = _build_preview_rows(raw_rows, map_packing_list_row_to_item)

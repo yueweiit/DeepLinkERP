@@ -251,14 +251,18 @@ def _attachment_is_audit_only(source: dict) -> bool:
         snapshot = {}
     if not isinstance(snapshot, dict):
         return False
-    return bool(snapshot.get("approval_excluded") or snapshot.get("cost_source_allowed") is False)
+    return bool(
+        snapshot.get("approval_excluded")
+        or snapshot.get("cost_source_allowed") is False
+        or import_service._approval_reference_is_excluded(str(source.get("batch") or ""), snapshot)
+    )
 
 
 def _find_comment_source(batch_name: str, source_id: str) -> dict:
     detail = dingtalk_approval_service.get_batch_dingtalk_approval_detail(batch_name)
     approvals = [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]
     for approval in approvals:
-        if not isinstance(approval, dict):
+        if not isinstance(approval, dict) or approval.get("excluded"):
             continue
         for item in approval.get("timeline") or []:
             if not isinstance(item, dict) or str(item.get("source_id") or "") != str(source_id):
@@ -336,6 +340,7 @@ def preview_packing_source(
             attachment_name=source.get("name"),
             file_url=source.get("file_url"),
             version_name=context["version_name"] or version_name,
+            trusted_server_payload=True,
         )
     elif kind == "comment":
         source = _find_comment_source(batch_name, resolved_source_id)
@@ -345,7 +350,7 @@ def preview_packing_source(
         parsed, kwargs = _comment_preview_kwargs(batch_name, source, context["version_name"] or version_name)
         if not parsed.get("is_candidate") or not parsed.get("rows"):
             return {"ok": False, "message": "该评论没有足够的装箱数量或物料信息，不能生成写入预览。"}
-        result = import_service.preview_packing_list_attachment(**kwargs)
+        result = import_service.preview_packing_list_attachment(**kwargs, trusted_server_payload=True)
         _decorate_comment_resolutions(result, _comment_resolutions(batch_name, resolved_source_id))
         result["comment_preview"] = {key: value for key, value in parsed.items() if key != "source_text"}
         result["source_snapshot"] = {
@@ -432,7 +437,7 @@ def apply_packing_source(
             resolutions = {}
     if not isinstance(resolutions, dict):
         resolutions = {}
-    fresh_preview = import_service.preview_packing_list_attachment(**kwargs)
+    fresh_preview = import_service.preview_packing_list_attachment(**kwargs, trusted_server_payload=True)
     if not fresh_preview.get("ok"):
         return {"ok": False, "source_changed": True, "message": fresh_preview.get("message") or "来源重新预览失败。"}
     try:
@@ -442,6 +447,7 @@ def apply_packing_source(
             recalculate_after_writeback=False,
             commit_after_writeback=False,
             auto_create_unmatched_items=bool(resolutions.get("create_unmatched_items")),
+            trusted_server_payload=True,
         )
         if not apply_result.get("ok"):
             _rollback()
@@ -460,6 +466,7 @@ def apply_packing_source(
                 resolution_action=action,
                 recalculate_after_writeback=False,
                 commit_after_writeback=False,
+                trusted_server_payload=True,
             )
             if not result.get("ok"):
                 _rollback()

@@ -133,6 +133,32 @@ def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> 
     assert 'sourceStatus.invalid_business_scope = "linked_purchase_approval"' in approval_page
     assert 'sourceStatus.invalid_business = false' in approval_page
     assert "linked_purchase_approval_statuses" in approval_page
+    assert "if (attachmentName) return attachmentName;" not in approval_page
+    assert "processInstanceId && fileId" in approval_page
+
+
+def test_recalculate_ui_blocks_invalid_approval_batches() -> None:
+    calculation = (PARTS / "30-calculation-erp.js").read_text(encoding="utf-8")
+    table = (PARTS / "75-table-and-list.js").read_text(encoding="utf-8")
+    audit = (PARTS / "90-audit-logs.js").read_text(encoding="utf-8")
+
+    assert "batch.source_status || {}" in calculation
+    assert "invalid_business" in calculation
+    assert "已拒绝、撤销或终止" in calculation
+    assert "if (!result?.ok)" in calculation
+    assert "recalculateDisabled" in table
+    assert "sourceStatus.invalid_business" in audit
+
+
+def test_manual_oa_pull_does_not_report_failed_save_as_completed() -> None:
+    import_ui = (PARTS / "50-import-category.js").read_text(encoding="utf-8")
+    pull_block = import_ui.split("async pullOaLogisticsApprovals(dialog, values)", 1)[1].split(
+        "async repullGapDingtalk", 1
+    )[0]
+
+    assert "if (!result?.ok)" in pull_block
+    assert "failed_count" in pull_block
+    assert "throw new Error" in pull_block
 
 
 def test_batch_source_provenance_fields_are_not_editable_by_cost_users() -> None:

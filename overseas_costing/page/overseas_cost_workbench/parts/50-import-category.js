@@ -72,11 +72,17 @@
         },
         true
       );
-      this.renderOaPullResult(dialog, result, result.skipped ? "warn" : "ready");
+      this.renderOaPullResult(dialog, result, result.skipped || !result?.ok ? "warn" : "ready");
       if (result.skipped) {
         this.setOaPullPrimaryState(dialog, "ready");
         frappe.show_alert({ message: result.reason || "钉钉拉取已跳过", indicator: "orange" });
         return;
+      }
+      if (!result?.ok) {
+        const failedCount = Number(result.save?.failed_count || 0);
+        throw new Error(
+          result.save?.message || `钉钉审批已读取，但有 ${failedCount || "部分"} 个批次保存失败，请查看失败明细。`
+        );
       }
       const save = result.save || {};
       const message = `钉钉拉取完成：新增 ${save.created_count || 0}，更新 ${save.updated_count || 0}，已存在 ${save.unchanged_count || 0}，跳过 ${save.skipped_count || 0}`;
@@ -241,6 +247,15 @@
     const pull = result.pull || {};
     const save = result.save || {};
     const counts = pull.transport_counts || {};
+    if (!result.ok) {
+      const failedCount = Number(save.failed_count || 0);
+      $target.addClass("warn").html(
+        `<strong>拉取未完全成功</strong><span>${this.escape(
+          save.message || `有 ${failedCount || "部分"} 个批次保存失败，未标记为完成。`
+        )}</span>`
+      );
+      return;
+    }
     const modeText = (result.transport_modes || []).map((mode) => this.transportLabel(mode)).join("、") || "全部";
     const writeCount = Number(save.created_count || 0) + Number(save.updated_count || 0);
     const completionText = writeCount

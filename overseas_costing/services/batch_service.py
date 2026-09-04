@@ -904,12 +904,22 @@ def _build_invalid_business_state(batch: dict, items: list[dict] | None = None) 
             )
             and str(row.get("source_instance_id") or "").strip()
         }
+        valid_instance_ids = {
+            str(row.get("source_instance_id") or "").strip()
+            for row in purchase_status["linked_purchase_approvals"]
+            if not (
+                is_invalid_approval_status(row.get("approval_status"))
+                or is_invalid_approval_status(row.get("message"))
+            )
+            and str(row.get("approval_status") or "").strip()
+            and str(row.get("source_instance_id") or "").strip()
+        }
         contaminated_rows = []
         for item in items:
             source_type = str(item.get("source_type") or "").strip().upper()
             instance_id = str(item.get("dingtalk_instance_id") or "").strip()
             if instance_id in invalid_instance_ids or (
-                source_type == "PURCHASE_EXPENSE_OA" and not instance_id
+                source_type == "PURCHASE_EXPENSE_OA" and instance_id not in valid_instance_ids
             ):
                 contaminated_rows.append(item)
         if contaminated_rows:

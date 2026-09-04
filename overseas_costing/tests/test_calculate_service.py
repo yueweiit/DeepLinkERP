@@ -9,8 +9,91 @@ from overseas_costing.services.calculate_service import (
     create_item,
     delete_batch,
     delete_item,
+    recalculate_batch,
     update_item_field,
 )
+
+
+def test_recalculate_batch_rejects_invalid_main_approval_before_writing(monkeypatch) -> None:
+    from overseas_costing.services import calculate_service as service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            assert doctype == "Overseas Cost Batch"
+            assert name == "BATCH-INVALID"
+            assert as_dict is True
+            return {
+                "name": "BATCH-INVALID",
+                "source_approval_status": "REJECTED",
+                "extra_json": "{}",
+            }
+
+        @staticmethod
+        def set_value(*_args, **_kwargs):
+            raise AssertionError("invalid approval must not persist recalculation")
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(service, "_frappe", FakeFrappe)
+    monkeypatch.setattr(service, "_resolve_batch_name", lambda _name: "BATCH-INVALID")
+    monkeypatch.setattr(service, "_resolve_version_name", lambda *_args: "VERSION-1")
+    monkeypatch.setattr(service, "_get_items", lambda *_args: [{"name": "ITEM-1", "source_type": "oa_logistics"}])
+    monkeypatch.setattr(
+        service,
+        "_get_version_context",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("calculation must stop before loading version context")),
+    )
+
+    result = recalculate_batch("BATCH-INVALID")
+
+    assert result["ok"] is False
+    assert result["invalid_business"] is True
+    assert result["invalid_business_scope"] == "source_approval"
+
+
+def test_recalculate_batch_rejects_all_excluded_linked_purchase_approvals(monkeypatch) -> None:
+    from overseas_costing.services import calculate_service as service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {
+                "name": "BATCH-INVALID-PURCHASE",
+                "source_approval_status": "COMPLETED",
+                "extra_json": json.dumps({"linked_purchase_approvals": [{
+                    "source_instance_id": "PROC-REJECTED",
+                    "approval_status": "REJECTED",
+                }]}),
+            }
+
+        @staticmethod
+        def set_value(*_args, **_kwargs):
+            raise AssertionError("excluded purchase approval must not persist recalculation")
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(service, "_frappe", FakeFrappe)
+    monkeypatch.setattr(service, "_resolve_batch_name", lambda _name: "BATCH-INVALID-PURCHASE")
+    monkeypatch.setattr(service, "_resolve_version_name", lambda *_args: "VERSION-1")
+    monkeypatch.setattr(service, "_get_items", lambda *_args: [{
+        "name": "ITEM-1",
+        "source_type": "PURCHASE_EXPENSE_OA",
+        "dingtalk_instance_id": "PROC-REJECTED",
+    }])
+    monkeypatch.setattr(
+        service,
+        "_get_version_context",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("calculation must stop before loading version context")),
+    )
+
+    result = recalculate_batch("BATCH-INVALID-PURCHASE")
+
+    assert result["ok"] is False
+    assert result["invalid_business"] is True
+    assert result["invalid_business_scope"] == "linked_purchase_approval"
 
 
 def test_calculate_item_rows_allocates_by_goods_value_and_weight() -> None:

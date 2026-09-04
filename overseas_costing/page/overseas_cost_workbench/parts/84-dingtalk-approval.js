@@ -167,7 +167,7 @@
   }
 
   async ensureDingtalkLocalAttachment(attachmentName, processInstanceId, fileId) {
-    if (attachmentName) return attachmentName;
+    if (attachmentName && !(processInstanceId && fileId)) return attachmentName;
     const batch = this.getDetailBatch();
     const result = await this.call("overseas_costing.api.import_api.prepare_dingtalk_archive_attachment", {
       batch_name: batch.name,

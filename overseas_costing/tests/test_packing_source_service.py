@@ -40,6 +40,29 @@ def test_comment_source_preview_rechecks_hash_and_delegates_to_existing_preview(
     assert "MBA101283 1PCS" in rows[0]["source_remark"]
 
 
+def test_comment_source_excludes_invalid_main_approval(monkeypatch) -> None:
+    from overseas_costing.services import packing_source_service as service
+
+    monkeypatch.setattr(
+        service.dingtalk_approval_service,
+        "get_batch_dingtalk_approval_detail",
+        lambda _batch: {
+            "ok": True,
+            "main_approval": {
+                "instance_id": "PROC-MAIN-REJECTED",
+                "excluded": True,
+                "timeline": [{
+                    "source_id": "comment-rejected",
+                    "remark": "MBA101283 1PCS，重量2.5kg",
+                }],
+            },
+            "linked_purchase_approvals": [],
+        },
+    )
+
+    assert service._find_comment_source("BATCH-1", "comment-rejected") == {}
+
+
 def test_apply_rejects_stale_comment_revision(monkeypatch) -> None:
     from overseas_costing.services import packing_source_service as service
 
@@ -97,6 +120,30 @@ def test_attachment_preview_rejects_audit_only_excluded_approval(monkeypatch) ->
     assert result["ok"] is False
     assert result["audit_only"] is True
     assert "已排除审批" in result["message"]
+
+
+def test_attachment_preview_rejects_legacy_excluded_approval_from_batch_trace(monkeypatch) -> None:
+    from overseas_costing.services import packing_source_service as service
+
+    monkeypatch.setattr(service, "_attachment_source", lambda _batch, _source: {
+        "name": "ATTACH-LEGACY-EXCLUDED",
+        "batch": "BATCH-1",
+        "file_name": "装箱单.xlsx",
+        "file_url": "/private/files/excluded.xlsx",
+        "modified": "2026-09-04 10:00:00",
+        "parse_result_json": json.dumps({"process_instance_id": "PROC-PUR-REFUSED"}),
+    })
+    monkeypatch.setattr(service.import_service, "_approval_reference_is_excluded", lambda *_args: True)
+    monkeypatch.setattr(
+        service.import_service,
+        "preview_packing_list_attachment",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy audit-only file must not be parsed")),
+    )
+
+    result = service.preview_packing_source("BATCH-1", "attachment", "ATTACH-LEGACY-EXCLUDED")
+
+    assert result["ok"] is False
+    assert result["audit_only"] is True
 
 
 def test_revision_is_signed_and_bound_to_batch_and_version(monkeypatch) -> None:

@@ -5,6 +5,14 @@
   async recalculate(batchName = "") {
     const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
     if (!batch) return;
+    const sourceStatus = batch.source_status || {};
+    if (sourceStatus.invalid_business) {
+      frappe.show_alert({
+        message: sourceStatus.invalid_business_reason || "当前批次包含已拒绝、撤销或终止的审批，不能重新计算。",
+        indicator: "red",
+      });
+      return;
+    }
     this.activeBatchName = batch.name;
     this.exportPinnedBatchName = batch.name;
     try {
@@ -16,6 +24,9 @@
         },
         true
       );
+      if (!result?.ok) {
+        throw new Error(result?.message || "重新试算被服务器拒绝，未修改批次数据。");
+      }
       const summary = result.summary_snapshot || {};
       this.applyRecalculateSummary(batch.name, summary, result.allocation_rules || []);
       this.lastRecalculateResult = { batch_name: batch.name, summary };

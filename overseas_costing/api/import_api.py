@@ -25,6 +25,25 @@ def _require_batch_or_system_manager(batch_name: str | None, ptype: str = "read"
     return None
 
 
+def _verified_packing_attachment(
+    batch_name: str,
+    attachment_name: str | None,
+    ptype: str,
+) -> tuple[str, str]:
+    if not str(attachment_name or "").strip():
+        frappe.throw("装箱预览和写入必须选择当前批次已有的附件。", frappe.PermissionError)
+    resolved_name = require_attachment_permission(str(attachment_name), ptype)
+    row = frappe.db.get_value(
+        "Overseas Cost Attachment",
+        resolved_name,
+        ["batch", "file_url"],
+        as_dict=True,
+    ) or {}
+    if str(row.get("batch") or "") != str(batch_name):
+        frappe.throw("装箱附件不属于当前批次。", frappe.PermissionError)
+    return resolved_name, str(row.get("file_url") or "")
+
+
 @frappe.whitelist()
 def import_main_excel(
     source_name: str,
@@ -301,8 +320,8 @@ def download_oa_form_attachment(
     attachment_name = require_attachment_permission(attachment_name, "write")
     return import_service.download_oa_form_attachment(
         attachment_name=attachment_name,
-        env_file=env_file,
-        access_token=access_token,
+        env_file=None,
+        access_token=None,
     )
 
 
@@ -332,8 +351,8 @@ def diagnose_oa_form_attachment_download(
     attachment_name = require_attachment_permission(attachment_name, "read")
     return import_service.diagnose_oa_form_attachment_download(
         attachment_name=attachment_name,
-        env_file=env_file,
-        access_token=access_token,
+        env_file=None,
+        access_token=None,
     )
 
 
@@ -534,7 +553,7 @@ def preview_linked_purchase_expense_oa(
     return import_service.preview_linked_purchase_expense_oa(
         batch_name=batch_name,
         version_name=version_name,
-        env_file=env_file,
+        env_file=None,
         linked_purchase_json=linked_purchase_json,
         purchase_summaries_json=purchase_summaries_json,
     )
@@ -556,7 +575,7 @@ def apply_linked_purchase_expense_fillable_fields(
     return import_service.apply_linked_purchase_expense_fillable_fields(
         batch_name=batch_name,
         version_name=version_name,
-        env_file=env_file,
+        env_file=None,
         linked_purchase_json=linked_purchase_json,
         purchase_summaries_json=purchase_summaries_json,
         recalculate_after_writeback=recalculate_flag,
@@ -631,15 +650,15 @@ def preview_packing_list_attachment(
     """预览装箱单/物流附件可补哪些实际发货、重量、体积字段，不写入数据。"""
 
     batch_name = require_batch_permission(batch_name, "read")
-    if attachment_name:
-        attachment_name = require_attachment_permission(attachment_name, "read")
+    attachment_name, server_file_url = _verified_packing_attachment(batch_name, attachment_name, "read")
     return import_service.preview_packing_list_attachment(
         batch_name=batch_name,
         attachment_name=attachment_name,
-        file_url=file_url,
+        file_url=server_file_url,
         version_name=version_name,
         template_hint=template_hint,
-        sheet_rows_json=sheet_rows_json,
+        sheet_rows_json=None,
+        trusted_server_payload=True,
     )
 
 
@@ -656,17 +675,17 @@ def apply_packing_list_fillable_fields(
     """确认补入装箱单/物流附件中可安全写入的实际发货、重量、体积字段。"""
 
     batch_name = require_batch_permission(batch_name, "write")
-    if attachment_name:
-        attachment_name = require_attachment_permission(attachment_name, "write")
+    attachment_name, server_file_url = _verified_packing_attachment(batch_name, attachment_name, "write")
     recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.apply_packing_list_fillable_fields(
         batch_name=batch_name,
         attachment_name=attachment_name,
-        file_url=file_url,
+        file_url=server_file_url,
         version_name=version_name,
         template_hint=template_hint,
-        sheet_rows_json=sheet_rows_json,
+        sheet_rows_json=None,
         recalculate_after_writeback=recalculate_flag,
+        trusted_server_payload=True,
     )
 
 
@@ -732,19 +751,19 @@ def resolve_packing_list_conflict_row(
     """保存单条装箱单差异处理结果。"""
 
     batch_name = require_batch_permission(batch_name, "write")
-    if attachment_name:
-        attachment_name = require_attachment_permission(attachment_name, "write")
+    attachment_name, server_file_url = _verified_packing_attachment(batch_name, attachment_name, "write")
     recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.resolve_packing_list_conflict_row(
         batch_name=batch_name,
         attachment_name=attachment_name,
         target_item_name=target_item_name,
         resolution_action=resolution_action,
-        file_url=file_url,
+        file_url=server_file_url,
         version_name=version_name,
         template_hint=template_hint,
-        sheet_rows_json=sheet_rows_json,
+        sheet_rows_json=None,
         recalculate_after_writeback=recalculate_flag,
+        trusted_server_payload=True,
     )
 
 
@@ -765,8 +784,8 @@ def parse_oa_packing_list_attachments(
     return import_service.parse_oa_packing_list_attachments(
         batch_name=batch_name,
         limit=limit,
-        env_file=env_file,
-        access_token=access_token,
+        env_file=None,
+        access_token=None,
         skip_parsed=skip_parsed_flag,
         recalculate=recalculate_flag,
     )
@@ -789,8 +808,8 @@ def parse_oa_source_attachments(
     return import_service.parse_oa_source_attachments(
         batch_name=batch_name,
         limit=limit,
-        env_file=env_file,
-        access_token=access_token,
+        env_file=None,
+        access_token=None,
         skip_parsed=skip_parsed_flag,
         recalculate=recalculate_flag,
     )
@@ -850,10 +869,10 @@ def refresh_existing_oa_logistics_details(
         batch_name=batch_name or "",
         batch_no=batch_no or "",
         source_approval_no=source_approval_no or "",
-        env_file=env_file,
+        env_file=None,
         api_style=api_style,
         include_non_sea=include_non_sea_flag,
-        access_token=access_token or "",
+        access_token="",
     )
 
 
@@ -884,10 +903,10 @@ def pull_latest_oa_logistics_approvals(
         end=end or "",
         transport_modes=transport_modes or "ALL",
         limit=normalized_limit,
-        env_file=env_file,
+        env_file=None,
         api_style=api_style or "auto",
         list_api=list_api or "auto",
-        access_token=access_token or "",
+        access_token="",
     )
 
 
@@ -914,10 +933,10 @@ def refresh_oa_logistics_detail(
     return import_oa_logistics.refresh_oa_logistics_detail(
         target=target,
         limit=limit,
-        env_file=env_file,
+        env_file=None,
         api_style=api_style,
         include_non_sea=include_non_sea_flag,
-        access_token=access_token or "",
+        access_token="",
     )
 
 
@@ -945,9 +964,9 @@ def refresh_missing_oa_finished_times(
 
     return import_oa_logistics.refresh_missing_oa_finished_times(
         limit=limit,
-        env_file=env_file,
+        env_file=None,
         api_style=api_style,
-        access_token=access_token or "",
+        access_token="",
     )
 
 
@@ -977,7 +996,7 @@ def sync_purchase_expenses_from_process(
         process_code=process_code or "",
         start=start or "",
         end=end or "",
-        env_file=env_file,
+        env_file=None,
         api_style=api_style,
         list_api=list_api,
         page_size=int(page_size or 20),
@@ -986,7 +1005,7 @@ def sync_purchase_expenses_from_process(
         limit=limit,
         batch_limit=batch_limit,
         include_running=include_running_flag,
-        access_token=access_token or "",
+        access_token="",
     )
 
 
@@ -1016,7 +1035,7 @@ def preview_purchase_expenses_from_process(
         process_code=process_code or "",
         start=start or "",
         end=end or "",
-        env_file=env_file,
+        env_file=None,
         api_style=api_style,
         list_api=list_api,
         page_size=int(page_size or 20),
@@ -1025,5 +1044,5 @@ def preview_purchase_expenses_from_process(
         limit=limit,
         batch_limit=batch_limit,
         include_running=include_running_flag,
-        access_token=access_token or "",
+        access_token="",
     )

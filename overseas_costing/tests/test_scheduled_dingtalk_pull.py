@@ -82,3 +82,121 @@ def test_scheduled_pull_logistics_approvals_pulls_all_transport_modes(monkeypatc
     assert pull_calls[0]["app_key"] == "APP-KEY"
     assert save_calls[0]["items"][0]["source_approval_no"] == "202601300932000271071"
     assert logged[0]["pull"]["transport_counts"] == {"SEA": 2, "AIR": 1, "EXPRESS": 1}
+
+
+def test_scheduled_pull_postgres_mode_does_not_require_dingtalk_credentials(monkeypatch) -> None:
+    pull_calls = []
+    for key in (
+        "DINGTALK_ACCESS_TOKEN",
+        "DINGTALK_APP_KEY",
+        "DINGTALK_APPKEY",
+        "DINGTALK_APP_SECRET",
+        "DINGTALK_APPSECRET",
+        "DINGTALK_CORP_ID",
+        "DINGTALK_CLIENT_ID",
+        "DINGTALK_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_SOURCE", "postgres")
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_DB_USER", "costing_reader")
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_DB_PASSWORD", "secret")
+    monkeypatch.setenv("DINGTALK_SCHEDULE_PULL_START", "2026-01-01")
+    monkeypatch.setenv("DINGTALK_SCHEDULE_PULL_END", "2026-09-04")
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "pull_logistics_approvals",
+        lambda **kwargs: pull_calls.append(kwargs)
+        or {
+            "ok": True,
+            "data_source": "postgres",
+            "items": [],
+            "transport_modes": [],
+        },
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "save_sea_approvals_to_erp",
+        lambda _result: {"ok": True, "message": "ok"},
+    )
+
+    result = import_oa_logistics.scheduled_pull_logistics_approvals()
+
+    assert result["ok"] is True
+    assert result.get("skipped") is not True
+    assert result["data_source"] == "postgres"
+    assert pull_calls[0]["access_token"] == ""
+    assert pull_calls[0]["app_key"] == ""
+
+
+def test_manual_pull_postgres_mode_does_not_require_dingtalk_credentials(monkeypatch) -> None:
+    pull_calls = []
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_SOURCE", "postgres")
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_DB_USER", "costing_reader")
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_DB_PASSWORD", "secret")
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "pull_logistics_approvals",
+        lambda **kwargs: pull_calls.append(kwargs)
+        or {
+            "ok": True,
+            "data_source": "postgres",
+            "items": [],
+            "transport_modes": [],
+        },
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "save_sea_approvals_to_erp",
+        lambda _result: {"ok": True, "message": "ok"},
+    )
+    monkeypatch.setattr(import_oa_logistics, "_log_scheduled_pull_summary", lambda _summary: None)
+
+    result = import_oa_logistics.pull_latest_logistics_approvals_to_erp(
+        start="2026-01-01",
+        end="2026-09-04",
+        access_token="browser-token-must-not-be-needed",
+    )
+
+    assert result["ok"] is True
+    assert result.get("skipped") is not True
+    assert result["data_source"] == "postgres"
+    assert pull_calls[0]["access_token"] == ""
+
+
+def test_manual_pull_preserves_failed_save_summary(monkeypatch) -> None:
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_SOURCE", "postgres")
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_DB_USER", "costing_reader")
+    monkeypatch.setenv("OVERSEAS_COSTING_OA_DB_PASSWORD", "secret")
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "pull_logistics_approvals",
+        lambda **_kwargs: {
+            "ok": True,
+            "data_source": "postgres",
+            "items": [],
+            "transport_modes": [],
+        },
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "save_sea_approvals_to_erp",
+        lambda _result: {
+            "ok": False,
+            "failed_count": 1,
+            "failed_items": [{"batch_name": "BATCH-1", "failed_stages": ["recalculate_sync"]}],
+            "message": "one failed",
+        },
+    )
+    monkeypatch.setattr(import_oa_logistics, "_log_scheduled_pull_summary", lambda _summary: None)
+
+    result = import_oa_logistics.pull_latest_logistics_approvals_to_erp(
+        start="2026-01-01",
+        end="2026-09-04",
+    )
+
+    assert result["ok"] is False
+    assert result["save"]["failed_count"] == 1
+    assert result["save"]["failed_items"][0]["batch_name"] == "BATCH-1"

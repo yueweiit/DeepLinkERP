@@ -1783,10 +1783,29 @@ def recalculate_batch(
     if not resolved_version_name:
         return {"ok": False, "batch_name": batch_doc_name, "message": "当前批次没有可重算版本。"}
 
+    batch = _frappe.db.get_value(
+        "Overseas Cost Batch",
+        batch_doc_name,
+        ["name", "source_approval_status", "extra_json"],
+        as_dict=True,
+    ) or {}
+    items = _get_items(batch_doc_name, resolved_version_name)
+    from overseas_costing.services.batch_service import _build_invalid_business_state
+
+    invalid_business = _build_invalid_business_state(batch, items)
+    if invalid_business.get("invalid"):
+        return {
+            "ok": False,
+            "batch_name": batch_doc_name,
+            "version_name": resolved_version_name,
+            "invalid_business": True,
+            "invalid_business_scope": invalid_business.get("scope") or "",
+            "message": invalid_business.get("message") or "当前批次存在已排除审批，不能重新计算。",
+        }
+
     version_context = _get_version_context(resolved_version_name)
     fx_rmb_to_mxn = _to_float(version_context.get("fx_rmb_to_mxn"), default=DEFAULT_FX_RMB_TO_MXN) or DEFAULT_FX_RMB_TO_MXN
     fx_usd_to_rmb = _to_float(version_context.get("fx_usd_to_rmb")) or None
-    items = _get_items(batch_doc_name, resolved_version_name)
     rules = _get_rules(batch_doc_name, resolved_version_name)
     candidate_rules = [rule for rule in rules if _is_rule_enabled(rule) and _to_float(rule.get("amount"))]
     if not candidate_rules:

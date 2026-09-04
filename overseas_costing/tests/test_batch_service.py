@@ -843,12 +843,20 @@ def test_mixed_purchase_approvals_allow_only_verified_valid_purchase_rows() -> N
         rules=rules,
         resolved_version_name="VERSION-001",
     )
+    unknown = _build_calculation_confirmation_readiness(
+        batch=batch,
+        items=[{**valid_item, "dingtalk_instance_id": "PROC-UNKNOWN"}],
+        rules=rules,
+        resolved_version_name="VERSION-001",
+    )
 
     assert safe["ready"] is True
     assert safe["checks"]["has_invalid_business_approval"] is False
     assert contaminated["ready"] is False
     assert contaminated["checks"]["has_invalid_business_approval"] is True
     assert contaminated["invalid_business"]["scope"] == "linked_purchase_approval"
+    assert unknown["ready"] is False
+    assert unknown["checks"]["has_invalid_business_approval"] is True
 
 
 def test_build_batch_source_status_exposes_invalid_linked_purchase_approval() -> None:

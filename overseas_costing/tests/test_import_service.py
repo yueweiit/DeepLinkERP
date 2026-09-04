@@ -95,6 +95,26 @@ def test_import_purchase_expense_oa_returns_preview_and_dingtalk_payload() -> No
     assert "purchase_currency" in result["writeback_targets"]
 
 
+def test_import_purchase_expense_oa_rejects_client_rows_in_frappe(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", object())
+    monkeypatch.setattr(
+        import_service,
+        "_run_item_writeback",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("untrusted client rows must not be written")),
+    )
+
+    result = import_service.import_purchase_expense_oa(
+        batch_name="BATCH-001",
+        source_instance_id="PROC-REJECTED",
+        detail_rows_json='[{"物品编码Código":"MAT-FAKE","单价Precio":1}]',
+    )
+
+    assert result["ok"] is False
+    assert result["untrusted_source"] is True
+
+
 def test_resolve_attachment_user_id_prefers_configured_active_user(monkeypatch) -> None:
     from overseas_costing.services.import_service import _resolve_attachment_user_id
 
@@ -111,6 +131,36 @@ def test_confirm_logistics_quote_candidate_requires_frappe_environment() -> None
 
     assert result["ok"] is False
     assert result["dry_run"] is True
+
+
+def test_confirm_logistics_quote_candidate_blocks_invalid_batch_before_writes(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", object())
+    monkeypatch.setattr(import_service, "_resolve_batch_name", lambda _name: "BATCH-DOC")
+    monkeypatch.setattr(import_service, "_resolve_version_name", lambda *_args: "VER-001")
+    monkeypatch.setattr(
+        import_service,
+        "_invalid_batch_cost_write_response",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "invalid_business": True,
+            "message": "已拒绝审批不能写入成本",
+        },
+    )
+    monkeypatch.setattr(
+        import_service,
+        "_get_batch_trace_row",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("invalid batch must stop before writes")),
+    )
+
+    result = import_service.confirm_logistics_quote_candidate(
+        batch_name="BATCH-001",
+        candidate_index=0,
+    )
+
+    assert result["ok"] is False
+    assert result["invalid_business"] is True
 
 
 def test_save_manual_logistics_quote_requires_frappe_environment() -> None:
@@ -235,6 +285,60 @@ def test_excluded_approval_attachment_cannot_be_recognized_or_manually_classifie
     assert confirmed["audit_only"] is True
 
 
+def test_legacy_excluded_attachment_without_marker_uses_batch_trace_policy(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeAttachmentDoc:
+        file_name = "legacy-rejected.xlsx"
+        file_url = "/private/files/legacy-rejected.xlsx"
+        batch = "BATCH-001"
+        version = "VER-001"
+        source_type = "OA"
+        attachment_type = "Packing List"
+        parse_status = "Parsed"
+        parse_result_json = json.dumps({
+            "process_instance_id": "PROC-REJECTED",
+            "file_id": "FILE-OLD",
+        })
+        mapped_result_json = "{}"
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            assert doctype == "Overseas Cost Batch"
+            assert name == "BATCH-001"
+            assert as_dict is True
+            return {
+                "source_instance_id": "PROC-MAIN",
+                "source_approval_status": "COMPLETED",
+                "extra_json": json.dumps({"linked_purchase_approvals": [
+                    {
+                        "source_instance_id": "PROC-REJECTED",
+                        "approval_status": "REJECTED",
+                    }
+                ]}),
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_doc(*_args):
+            return FakeAttachmentDoc()
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        attachment_parse_service,
+        "preview_source_document",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy excluded attachment must not be parsed")),
+    )
+
+    result = preview_oa_source_attachment("ATT-LEGACY-REJECTED")
+
+    assert result["ok"] is False
+    assert result["audit_only"] is True
+
+
 def test_confirm_oa_source_attachment_type_requires_frappe_environment() -> None:
     result = confirm_oa_source_attachment_type(
         attachment_name="ATTACHMENT-001",
@@ -266,10 +370,14 @@ def test_build_attachment_price_provenance_uses_attachment_metadata(monkeypatch)
         def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
             assert doctype == "Overseas Cost Attachment"
             assert name_or_filters == "ATT-PRICE-001"
-            assert fields == ["name", "file_name", "file_url", "source_doc_no", "parse_result_json"]
+            assert fields == [
+                "name", "batch", "source_type", "file_name", "file_url", "source_doc_no", "parse_result_json"
+            ]
             assert as_dict is True
             return {
                 "name": "ATT-PRICE-001",
+                "batch": "BATCH-001",
+                "source_type": "OA",
                 "file_name": "5月指环扣双清-未关联采购单.xlsx",
                 "file_url": "/private/files/5月指环扣双清-未关联采购单.xlsx",
                 "source_doc_no": "202605270001",
@@ -472,6 +580,7 @@ def test_resolve_packing_list_conflict_adopts_attachment_for_current_item_only(m
 
     monkeypatch.setattr(import_service, "frappe", FakeFrappe)
     monkeypatch.setattr(import_service, "preview_packing_list_attachment", fake_preview)
+    monkeypatch.setattr(import_service, "_invalid_batch_cost_write_response", lambda *_args: None)
 
     result = import_service.resolve_packing_list_conflict_row(
         batch_name="BATCH-001",
@@ -479,6 +588,7 @@ def test_resolve_packing_list_conflict_adopts_attachment_for_current_item_only(m
         target_item_name="ITEM-001",
         resolution_action="use_attachment",
         recalculate_after_writeback=False,
+        trusted_server_payload=True,
     )
 
     assert result["ok"] is True
@@ -607,6 +717,7 @@ def test_preview_linked_purchase_expense_oa_matches_without_writing(monkeypatch)
 
     result = preview_linked_purchase_expense_oa(
         batch_name="FSCU8486789",
+        trusted_server_payload=True,
         purchase_summaries_json=(
             '[{"source_approval_no":"202604150041000081318","source_instance_id":"PROC-PURCHASE-001",'
             '"purchase_currency":"人民币RMB","mapped_preview_items":['
@@ -705,6 +816,163 @@ def test_preview_packing_list_rejects_audit_only_excluded_attachment(monkeypatch
     assert result["audit_only"] is True
 
 
+def test_preview_packing_list_rejects_legacy_excluded_attachment_from_batch_trace(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            assert doctype == "Overseas Cost Attachment"
+            assert name == "ATT-LEGACY-EXCLUDED"
+            return {
+                "batch": "BATCH-001",
+                "parse_result_json": json.dumps({"process_instance_id": "PROC-PUR-REFUSED"}),
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "_approval_reference_is_excluded", lambda *_args: True)
+    monkeypatch.setattr(
+        import_service,
+        "_build_packing_preview_items",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy audit-only file must not be parsed")),
+    )
+
+    result = import_service.preview_packing_list_attachment(
+        batch_name="BATCH-001",
+        attachment_name="ATT-LEGACY-EXCLUDED",
+    )
+
+    assert result["ok"] is False
+    assert result["audit_only"] is True
+
+
+def test_preview_linked_purchase_rejects_untrusted_client_summaries_in_frappe(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", object())
+
+    result = import_service.preview_linked_purchase_expense_oa(
+        batch_name="BATCH-001",
+        purchase_summaries_json=json.dumps([
+            {
+                "source_instance_id": "PROC-REJECTED",
+                "approval_status": "COMPLETED",
+                "mapped_preview_items": [{"material_code": "MAT-FAKE", "unit_price": 1}],
+            }
+        ]),
+    )
+
+    assert result["ok"] is False
+    assert result["untrusted_source"] is True
+
+
+def test_preview_linked_purchase_rejects_client_env_path_in_frappe(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", object())
+    monkeypatch.setattr(
+        import_service,
+        "_resolve_dingtalk_env_file",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("client path must not be inspected")),
+    )
+
+    result = import_service.preview_linked_purchase_expense_oa(
+        batch_name="BATCH-001",
+        env_file="/etc/passwd",
+    )
+
+    assert result["ok"] is False
+    assert result["untrusted_source"] is True
+
+
+def test_preview_packing_rejects_browser_rows_even_with_attachment_id(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", object())
+    monkeypatch.setattr(import_service, "_packing_attachment_is_audit_only", lambda *_args: False)
+    monkeypatch.setattr(
+        import_service,
+        "_build_packing_preview_items",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("browser rows must not be parsed")),
+    )
+
+    result = import_service.preview_packing_list_attachment(
+        batch_name="BATCH-001",
+        attachment_name="ATT-001",
+        sheet_rows_json='[{"物料编码":"MAT-FAKE"}]',
+    )
+
+    assert result["ok"] is False
+    assert result["untrusted_source"] is True
+
+
+def test_apply_linked_purchase_blocks_invalid_batch_before_item_write(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", object())
+    monkeypatch.setattr(import_service, "preview_linked_purchase_expense_oa", lambda **_kwargs: {
+        "ok": True,
+        "batch_doc_name": "BATCH-DOC",
+        "version_name": "VER-001",
+        "writeback_preview": {"matched_rows": [{"target_item_name": "ITEM-001"}]},
+    })
+    monkeypatch.setattr(
+        import_service,
+        "_invalid_batch_cost_write_response",
+        lambda *_args, **_kwargs: {"ok": False, "invalid_business": True, "message": "invalid"},
+    )
+    monkeypatch.setattr(
+        import_service,
+        "_update_item_fields",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("invalid batch must not write items")),
+    )
+
+    result = import_service.apply_linked_purchase_expense_fillable_fields(batch_name="BATCH-001")
+
+    assert result["ok"] is False
+    assert result["invalid_business"] is True
+
+
+def test_apply_packing_blocks_invalid_batch_before_item_write(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "frappe", object())
+    monkeypatch.setattr(import_service, "preview_packing_list_attachment", lambda **_kwargs: {
+        "ok": True,
+        "batch_doc_name": "BATCH-DOC",
+        "version_name": "VER-001",
+        "writeback_preview": {"matched_rows": [{"target_item_name": "ITEM-001"}]},
+    })
+    monkeypatch.setattr(
+        import_service,
+        "_invalid_batch_cost_write_response",
+        lambda *_args, **_kwargs: {"ok": False, "invalid_business": True, "message": "invalid"},
+    )
+    monkeypatch.setattr(
+        import_service,
+        "_update_item_fields",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("invalid batch must not write items")),
+    )
+
+    result = import_service.apply_packing_list_fillable_fields(
+        batch_name="BATCH-001",
+        attachment_name="ATT-001",
+        trusted_server_payload=True,
+        preview_result={
+            "ok": True,
+            "batch_doc_name": "BATCH-DOC",
+            "version_name": "VER-001",
+            "writeback_preview": {"matched_rows": [{"target_item_name": "ITEM-001"}]},
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["invalid_business"] is True
+
+
 def test_pull_linked_purchase_summaries_includes_running(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
     from overseas_costing.services import import_service
@@ -753,6 +1021,33 @@ def test_pull_linked_purchase_summaries_includes_running(monkeypatch) -> None:
     assert captured["include_running"] is True
     assert result[0]["approval_status"] == "RUNNING"
     assert result[0]["mapped_preview_items"][0]["unit_price"] == 1.23
+
+
+def test_pull_linked_purchase_summaries_postgres_does_not_request_api_token(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    monkeypatch.setattr(import_service, "_resolve_dingtalk_env_file", lambda _env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "resolve_approval_source_mode", lambda: "postgres")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "get_access_token",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("postgres mode must not request an API token")),
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "pull_linked_purchase_approval_details",
+        lambda **kwargs: [{
+            "source_instance_id": kwargs["linked_approvals"][0]["source_instance_id"],
+            "mapped_preview_items": [],
+        }],
+    )
+
+    result = import_service._pull_purchase_summaries_from_dingtalk(
+        linked_approvals=[{"source_instance_id": "PROC-PURCHASE-001"}],
+    )
+
+    assert result[0]["source_instance_id"] == "PROC-PURCHASE-001"
 
 
 def test_pull_linked_purchase_summaries_passes_runtime_credentials(monkeypatch) -> None:
@@ -852,6 +1147,7 @@ def test_preview_linked_purchase_expense_splits_aggregated_price_by_material_cod
 
     result = preview_linked_purchase_expense_oa(
         batch_name="BATCH-DOC",
+        trusted_server_payload=True,
         purchase_summaries_json=(
             '[{"source_approval_no":"202606220952000179521","source_instance_id":"PROC-PURCHASE-RUNNING",'
             '"purchase_currency":"人民币RMB","mapped_preview_items":['
@@ -1001,6 +1297,7 @@ def test_apply_linked_purchase_expense_fillable_fields_writes_matched_conflicts(
 
     result = apply_linked_purchase_expense_fillable_fields(
         batch_name="FSCU8486789",
+        trusted_server_payload=True,
         purchase_summaries_json=(
             '[{"source_approval_no":"202604150041000081318","source_instance_id":"PROC-PURCHASE-001",'
             '"purchase_currency":"人民币RMB","mapped_preview_items":['
@@ -1127,6 +1424,7 @@ def test_apply_linked_purchase_expense_aggregates_duplicate_target_rows(monkeypa
 
     result = apply_linked_purchase_expense_fillable_fields(
         batch_name="FSCU8486789",
+        trusted_server_payload=True,
         purchase_summaries_json=(
             '[{"source_approval_no":"202604300000000596348","source_instance_id":"PROC-PURCHASE-001",'
                 '"purchase_currency":"美元Dólar","mapped_preview_items":['
@@ -2475,11 +2773,13 @@ def test_apply_packing_list_fillable_fields_fills_safe_fields_and_leaves_conflic
         batch_name="BATCH-PACKING",
         attachment_name="packing.xlsx",
         sheet_rows_json=rows_json,
+        trusted_server_payload=True,
     )
     result = apply_packing_list_fillable_fields(
         batch_name="BATCH-PACKING",
         attachment_name="ATT-PACKING",
         sheet_rows_json=rows_json,
+        trusted_server_payload=True,
     )
 
     assert preview["writeback_preview"]["fillable_row_count"] == 2
@@ -2626,11 +2926,13 @@ def test_apply_packing_list_duplicate_rows_matches_by_quantity(monkeypatch) -> N
         batch_name="BATCH-PACKING",
         attachment_name="packing.xlsx",
         sheet_rows_json=rows_json,
+        trusted_server_payload=True,
     )
     result = apply_packing_list_fillable_fields(
         batch_name="BATCH-PACKING",
         attachment_name="ATT-PACKING",
         sheet_rows_json=rows_json,
+        trusted_server_payload=True,
     )
 
     assert preview["writeback_preview"]["matched_count"] == 2
@@ -2784,6 +3086,7 @@ def test_apply_packing_list_auto_creates_unmatched_items_once(monkeypatch) -> No
         sheet_rows_json=rows_json,
         recalculate_after_writeback=False,
         auto_create_unmatched_items=True,
+        trusted_server_payload=True,
     )
     second_result = apply_packing_list_fillable_fields(
         batch_name="BATCH-PACKING",
@@ -2791,6 +3094,7 @@ def test_apply_packing_list_auto_creates_unmatched_items_once(monkeypatch) -> No
         sheet_rows_json=rows_json,
         recalculate_after_writeback=False,
         auto_create_unmatched_items=True,
+        trusted_server_payload=True,
     )
 
     assert first_result["created_count"] == 1
