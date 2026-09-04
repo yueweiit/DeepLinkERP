@@ -24,6 +24,13 @@
   }
 }
 
+.body-sidebar-container .sidebar-header > .sidebar-item-icon > .ocw-workspace-sidebar-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 /* Frappe Desk viewport fit */
 .ocw-desk-fullwidth .container,
 .ocw-desk-fullwidth .page-head .container,

@@ -35,7 +35,7 @@ def test_module_rail_is_not_confused_with_workspace_sidebar() -> None:
     shell = (PARTS / "10-shell.js").read_text(encoding="utf-8")
 
     ensure_block = bootstrap.split("function ensureDeskModuleSidebar", 1)[1].split(
-        "frappe.pages[\"overseas-cost-workbench\"].on_page_load", 1
+        "function syncWorkspaceSidebarHeaderIcon", 1
     )[0]
     assert '$(".body-sidebar-container' not in ensure_block
     assert ".custom-filters-right-sidebar-container" in ensure_block
@@ -43,6 +43,20 @@ def test_module_rail_is_not_confused_with_workspace_sidebar() -> None:
     assert ".custom-filters-right-sidebar-container" not in hide_block
     on_show = bootstrap.split('frappe.pages["overseas-cost-workbench"].on_page_show', 1)[1]
     assert "applyModuleSidebarPreference()" in on_show
+
+
+def test_workspace_header_reuses_authorized_desktop_icon_and_restores_original() -> None:
+    bootstrap = (PARTS / "00-bootstrap.js").read_text(encoding="utf-8")
+    shell = (PARTS / "10-shell.js").read_text(encoding="utf-8")
+    stylesheet = (PARTS / "20-desk-layout.css").read_text(encoding="utf-8")
+
+    assert "function syncWorkspaceSidebarHeaderIcon" in bootstrap
+    assert "frappe.boot.desktop_icons" in bootstrap
+    assert ".body-sidebar-container .sidebar-header > .sidebar-item-icon" in bootstrap
+    assert "desktopIcon.logo_url || desktopIcon.icon_image" in bootstrap
+    assert "ocw-workspace-sidebar-icon" in bootstrap
+    assert "_workspaceSidebarIconSnapshot" in shell
+    assert ".ocw-workspace-sidebar-icon" in stylesheet
 
 
 def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_copy() -> None:

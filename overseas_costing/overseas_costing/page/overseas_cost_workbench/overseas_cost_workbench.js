@@ -7,6 +7,7 @@ function hideDeskChromeWhenReady(workbench) {
     if (!$(workbench.wrapper).is(":visible")) return;
     workbench.hideDeskChrome();
     ensureDeskModuleSidebar(workbench);
+    syncWorkspaceSidebarHeaderIcon(workbench);
   }, 300);
 }
 
@@ -30,11 +31,36 @@ function ensureDeskModuleSidebar(workbench) {
   }
 }
 
+function syncWorkspaceSidebarHeaderIcon(workbench) {
+  const desktopIcon = (frappe.boot.desktop_icons || []).find(
+    (icon) => icon && icon.hidden != 1 && icon.label === "海外成本核算"
+  );
+  const iconSource = desktopIcon && (desktopIcon.logo_url || desktopIcon.icon_image);
+  const $target = $(".body-sidebar-container .sidebar-header > .sidebar-item-icon").first();
+  if (!iconSource || !$target.length) return;
+
+  if (!workbench._workspaceSidebarIconSnapshot) {
+    workbench._workspaceSidebarIconSnapshot = {
+      element: $target.get(0),
+      html: $target.html(),
+    };
+  }
+
+  $target.empty().append(
+    $("<img>", {
+      class: "ocw-workspace-sidebar-icon",
+      src: iconSource,
+      alt: "",
+    })
+  );
+}
+
 frappe.pages["overseas-cost-workbench"].on_page_load = function (wrapper) {
   const workbench = new OverseasCostWorkbench(wrapper);
   frappe.pages["overseas-cost-workbench"].workbench = workbench;
   workbench.init();
   ensureDeskModuleSidebar(workbench);
+  syncWorkspaceSidebarHeaderIcon(workbench);
   hideDeskChromeWhenReady(workbench);
   // 离开工作台时恢复桌面外壳（侧栏 / 顶部标签栏 / 右侧栏），避免影响其它页面。
   $(wrapper).on("hide", function () {
@@ -46,6 +72,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   const workbench = frappe.pages["overseas-cost-workbench"].workbench;
   if (!workbench) return;
   ensureDeskModuleSidebar(workbench);
+  syncWorkspaceSidebarHeaderIcon(workbench);
   hideDeskChromeWhenReady(workbench);
   workbench.applyDeskLayout();
   workbench.applyModuleSidebarPreference();
@@ -512,6 +539,13 @@ class OverseasCostWorkbench {
       snapshot.element.style.visibility = snapshot.visibility;
       snapshot.element.style.opacity = snapshot.opacity;
       this._erpModuleSidebarSnapshot = null;
+    }
+    if (this._workspaceSidebarIconSnapshot) {
+      const snapshot = this._workspaceSidebarIconSnapshot;
+      if (snapshot.element && snapshot.element.isConnected) {
+        $(snapshot.element).html(snapshot.html);
+      }
+      this._workspaceSidebarIconSnapshot = null;
     }
     this.resetDeskLayoutClasses();
   }

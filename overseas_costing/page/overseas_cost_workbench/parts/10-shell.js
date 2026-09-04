@@ -159,6 +159,13 @@ class OverseasCostWorkbench {
       snapshot.element.style.opacity = snapshot.opacity;
       this._erpModuleSidebarSnapshot = null;
     }
+    if (this._workspaceSidebarIconSnapshot) {
+      const snapshot = this._workspaceSidebarIconSnapshot;
+      if (snapshot.element && snapshot.element.isConnected) {
+        $(snapshot.element).html(snapshot.html);
+      }
+      this._workspaceSidebarIconSnapshot = null;
+    }
     this.resetDeskLayoutClasses();
   }
 
