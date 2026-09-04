@@ -38,7 +38,11 @@ def batch_update_items(batch_name: str, updates: str, version_name: str | None =
     }
 
 
-def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
+def recalculate_batch(
+    batch_name: str,
+    version_name: str | None = None,
+    commit_after_recalculate: bool = True,
+) -> dict:
     summary_snapshot = version_service.build_empty_summary_snapshot()
     audit_service.build_audit_stub("RECALCULATE", {"batch_name": batch_name})
     return {
@@ -1754,7 +1758,11 @@ def delete_batch(batch_name: str, remark: str | None = None) -> dict:
     }
 
 
-def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
+def recalculate_batch(
+    batch_name: str,
+    version_name: str | None = None,
+    commit_after_recalculate: bool = True,
+) -> dict:
     if _frappe is None:
         summary_snapshot = version_service.build_empty_summary_snapshot()
         audit_service.build_audit_stub("RECALCULATE", {"batch_name": batch_name})
@@ -1849,7 +1857,8 @@ def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
         action_type="RECALCULATE",
         action_remark=f"重算完成，{allocation_source}规则数 {summary_snapshot['rule_count']}，明细数 {summary_snapshot['item_count']}",
     )
-    _frappe.db.commit()
+    if commit_after_recalculate:
+        _frappe.db.commit()
 
     ai_message = ai_allocation.get("message") or ai_allocation.get("reason") or ""
     if ai_allocation.get("ok"):

@@ -103,8 +103,10 @@ def test_apply_uses_one_preview_commit_and_recalculation(monkeypatch) -> None:
         "version_name": "VERSION-1",
         "batch_modified": "BATCH-MOD",
         "version_modified": "VERSION-MOD",
+        "valid": True,
     })
-    calls = {"preview": 0, "apply": [], "resolve": [], "recalculate": 0, "commit": 0, "rollback": 0}
+    events = []
+    calls = {"preview": 0, "apply": [], "resolve": [], "recalculate": [], "commit": 0, "rollback": 0}
     preview = {"ok": True, "batch_doc_name": "BATCH-1", "version_name": "VERSION-1", "writeback_preview": {}}
 
     def fake_preview(**_kwargs):
@@ -122,8 +124,13 @@ def test_apply_uses_one_preview_commit_and_recalculation(monkeypatch) -> None:
     monkeypatch.setattr(service.import_service, "preview_packing_list_attachment", fake_preview)
     monkeypatch.setattr(service.import_service, "apply_packing_list_fillable_fields", fake_apply)
     monkeypatch.setattr(service.import_service, "resolve_packing_list_conflict_row", fake_resolve)
-    monkeypatch.setattr(service.import_service, "_recalculate_after_writeback", lambda **_kwargs: calls.__setitem__("recalculate", calls["recalculate"] + 1) or {"action": "recalculated", "ok": True})
-    monkeypatch.setattr(service, "_commit", lambda: calls.__setitem__("commit", calls["commit"] + 1))
+    def fake_recalculate(**kwargs):
+        events.append("recalculate")
+        calls["recalculate"].append(kwargs)
+        return {"action": "recalculated", "ok": True}
+
+    monkeypatch.setattr(service.import_service, "_recalculate_after_writeback", fake_recalculate)
+    monkeypatch.setattr(service, "_commit", lambda: events.append("commit") or calls.__setitem__("commit", calls["commit"] + 1))
     monkeypatch.setattr(service, "_rollback", lambda: calls.__setitem__("rollback", calls["rollback"] + 1))
     revision = service._encode_revision(
         "comment", "a" * 64, "a" * 64,
@@ -141,10 +148,89 @@ def test_apply_uses_one_preview_commit_and_recalculation(monkeypatch) -> None:
     assert calls["preview"] == 1
     assert calls["commit"] == 1
     assert calls["rollback"] == 0
-    assert calls["recalculate"] == 1
+    assert len(calls["recalculate"]) == 1
+    assert calls["recalculate"][0]["commit_after_recalculate"] is False
+    assert events == ["recalculate", "commit"]
     assert calls["apply"][0]["preview_result"] is preview
     assert calls["apply"][0]["commit_after_writeback"] is False
     assert calls["apply"][0]["recalculate_after_writeback"] is False
     assert calls["resolve"][0]["preview_result"] is preview
     assert calls["resolve"][0]["commit_after_writeback"] is False
     assert calls["resolve"][0]["recalculate_after_writeback"] is False
+
+
+def test_apply_rolls_back_all_changes_when_recalculation_fails(monkeypatch) -> None:
+    from overseas_costing.services import packing_source_service as service
+
+    comment = {"source_id": "c" * 64, "remark": "MBA101283 1PCS，重量2.5kg"}
+    monkeypatch.setattr(service, "_revision_signing_key", lambda: b"test-secret")
+    monkeypatch.setattr(service, "_find_comment_source", lambda *_args: comment)
+    monkeypatch.setattr(service, "_source_context", lambda *_args: {
+        "version_name": "VERSION-1", "batch_modified": "BATCH-MOD", "version_modified": "VERSION-MOD", "valid": True,
+    })
+    monkeypatch.setattr(service.import_service, "preview_packing_list_attachment", lambda **_kwargs: {
+        "ok": True, "batch_doc_name": "BATCH-1", "version_name": "VERSION-1", "writeback_preview": {},
+    })
+    monkeypatch.setattr(service.import_service, "apply_packing_list_fillable_fields", lambda **_kwargs: {
+        "ok": True, "updated_count": 1, "created_count": 0, "batch_doc_name": "BATCH-1", "version_name": "VERSION-1",
+    })
+    monkeypatch.setattr(service.import_service, "_recalculate_after_writeback", lambda **_kwargs: {
+        "action": "failed", "ok": False, "message": "boom",
+    })
+    calls = {"commit": 0, "rollback": 0}
+    monkeypatch.setattr(service, "_commit", lambda: calls.__setitem__("commit", calls["commit"] + 1))
+    monkeypatch.setattr(service, "_rollback", lambda: calls.__setitem__("rollback", calls["rollback"] + 1))
+    revision = service._encode_revision(
+        "comment", "c" * 64, "c" * 64,
+        batch_name="BATCH-1", version_name="VERSION-1",
+        batch_modified="BATCH-MOD", version_modified="VERSION-MOD",
+    )
+
+    result = service.apply_packing_source("BATCH-1", revision, {})
+
+    assert result["ok"] is False
+    assert result["recalculate_result"]["action"] == "failed"
+    assert calls == {"commit": 0, "rollback": 1}
+
+
+def test_source_context_rejects_version_from_another_batch(monkeypatch) -> None:
+    from overseas_costing.services import packing_source_service as service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields=None, as_dict=False):
+            if doctype == "Overseas Cost Batch":
+                return {"name": "BATCH-1", "current_version": "VERSION-1", "modified": "BATCH-MOD"}
+            return {"name": "VERSION-1", "batch": "BATCH-2", "modified": "VERSION-MOD"}
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+
+    assert service._source_context("BATCH-1", "VERSION-1")["valid"] is False
+
+
+def test_comment_conflict_resolutions_round_trip_in_batch_extra_json(monkeypatch) -> None:
+    from overseas_costing.services import packing_source_service as service
+
+    stored = {"extra_json": json.dumps({"existing": {"keep": True}})}
+
+    class FakeDB:
+        @staticmethod
+        def get_value(_doctype, _name, _field):
+            return stored["extra_json"]
+
+        @staticmethod
+        def set_value(_doctype, _name, _field, value, **_kwargs):
+            stored["extra_json"] = value
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+    resolution = {"target_item_name": "ITEM-1", "action": "keep_system"}
+
+    assert service._save_comment_resolutions("BATCH-1", "COMMENT-1", [resolution]) is True
+    assert service._comment_resolutions("BATCH-1", "COMMENT-1") == [resolution]
+    assert json.loads(stored["extra_json"])["existing"] == {"keep": True}

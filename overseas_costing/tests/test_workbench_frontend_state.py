@@ -41,6 +41,8 @@ def test_module_rail_is_not_confused_with_workspace_sidebar() -> None:
     assert ".custom-filters-right-sidebar-container" in ensure_block
     hide_block = shell.split("hideDeskChrome()", 1)[1].split("restoreDeskChrome()", 1)[0]
     assert ".custom-filters-right-sidebar-container" not in hide_block
+    on_show = bootstrap.split('frappe.pages["overseas-cost-workbench"].on_page_show', 1)[1]
+    assert "applyModuleSidebarPreference()" in on_show
 
 
 def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_copy() -> None:

@@ -101,20 +101,124 @@ def _source_context(batch_name: str, version_name: str | None = None) -> dict:
             "version_name": str(version_name or ""),
             "batch_modified": "",
             "version_modified": "",
+            "valid": True,
         }
     batch = frappe.db.get_value(
         "Overseas Cost Batch",
         batch_name,
-        ["current_version", "modified"],
+        ["name", "current_version", "modified"],
         as_dict=True,
     ) or {}
     resolved_version = str(version_name or batch.get("current_version") or "")
-    version_modified = frappe.db.get_value("Overseas Cost Version", resolved_version, "modified") if resolved_version else ""
+    version = (
+        frappe.db.get_value(
+            "Overseas Cost Version",
+            resolved_version,
+            ["name", "batch", "modified"],
+            as_dict=True,
+        )
+        if resolved_version
+        else {}
+    ) or {}
+    batch_doc_name = str(batch.get("name") or "")
+    current_version = str(batch.get("current_version") or "")
     return {
         "version_name": resolved_version,
         "batch_modified": str(batch.get("modified") or ""),
-        "version_modified": str(version_modified or ""),
+        "version_modified": str(version.get("modified") or ""),
+        "valid": bool(
+            batch_doc_name
+            and resolved_version
+            and resolved_version == current_version
+            and str(version.get("name") or resolved_version) == resolved_version
+            and str(version.get("batch") or "") == batch_doc_name
+        ),
     }
+
+
+def _lock_packing_scope(batch_name: str, version_name: str, source_kind: str, source_id: str) -> None:
+    """Serialize preview validation and writeback for one batch/version."""
+
+    sql = getattr(getattr(frappe, "db", None), "sql", None) if frappe is not None else None
+    if not callable(sql):
+        return
+    sql(
+        "SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
+        (batch_name,),
+    )
+    sql(
+        "SELECT name FROM `tabOverseas Cost Version` WHERE name=%s AND batch=%s FOR UPDATE",
+        (version_name, batch_name),
+    )
+    sql(
+        "SELECT name FROM `tabOverseas Cost Item` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
+        (batch_name, version_name),
+    )
+    if source_kind == "attachment":
+        sql(
+            "SELECT name FROM `tabOverseas Cost Attachment` WHERE name=%s AND batch=%s FOR UPDATE",
+            (source_id, batch_name),
+        )
+
+
+COMMENT_RESOLUTION_KEY = "dingtalk_packing_comment_resolutions"
+
+
+def _comment_resolutions(batch_name: str, source_id: str) -> list[dict]:
+    if frappe is None:
+        return []
+    raw = frappe.db.get_value("Overseas Cost Batch", batch_name, "extra_json") or ""
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) and raw else (raw if isinstance(raw, dict) else {})
+    except (TypeError, ValueError):
+        payload = {}
+    grouped = payload.get(COMMENT_RESOLUTION_KEY) if isinstance(payload, dict) else {}
+    history = grouped.get(source_id) if isinstance(grouped, dict) else []
+    return [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
+
+
+def _save_comment_resolutions(batch_name: str, source_id: str, resolutions: list[dict]) -> bool:
+    if frappe is None or not resolutions:
+        return False
+    raw = frappe.db.get_value("Overseas Cost Batch", batch_name, "extra_json") or ""
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) and raw else (raw if isinstance(raw, dict) else {})
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    grouped = payload.get(COMMENT_RESOLUTION_KEY)
+    if not isinstance(grouped, dict):
+        grouped = {}
+    history = grouped.get(source_id)
+    if not isinstance(history, list):
+        history = []
+    grouped[source_id] = [*history, *resolutions][-50:]
+    payload[COMMENT_RESOLUTION_KEY] = grouped
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        batch_name,
+        "extra_json",
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        update_modified=True,
+    )
+    return True
+
+
+def _decorate_comment_resolutions(result: dict, history: list[dict]) -> None:
+    if not history:
+        result["conflict_resolutions"] = []
+        return
+    latest = {}
+    for item in history:
+        target = str(item.get("target_item_name") or "")
+        if target:
+            latest[target] = item
+    for row in (result.get("writeback_preview") or {}).get("matched_rows") or []:
+        resolution = latest.get(str(row.get("target_item_name") or ""))
+        if resolution:
+            row["conflict_resolution"] = resolution
+    result["conflict_resolutions"] = history
 
 
 def _commit() -> None:
@@ -192,6 +296,8 @@ def preview_packing_source(
     kind = str(source_kind or "").strip().lower()
     resolved_source_id = str(source_id or "").strip()
     context = _source_context(batch_name, version_name)
+    if not context.get("valid"):
+        return {"ok": False, "source_changed": True, "message": "当前版本不属于该批次或已不是当前版本，请刷新后重试。"}
     if kind == "attachment":
         source = _attachment_source(batch_name, resolved_source_id)
         if not source:
@@ -221,6 +327,7 @@ def preview_packing_source(
         if not parsed.get("is_candidate") or not parsed.get("rows"):
             return {"ok": False, "message": "该评论没有足够的装箱数量或物料信息，不能生成写入预览。"}
         result = import_service.preview_packing_list_attachment(**kwargs)
+        _decorate_comment_resolutions(result, _comment_resolutions(batch_name, resolved_source_id))
         result["comment_preview"] = {key: value for key, value in parsed.items() if key != "source_text"}
         result["source_snapshot"] = {
             "instance_id": source.get("instance_id") or "",
@@ -262,8 +369,11 @@ def apply_packing_source(
     revision_version = str(revision.get("version") or "")
     if revision_batch != str(batch_name) or (version_name and str(version_name) != revision_version):
         return {"ok": False, "source_changed": True, "message": "装箱预览不属于当前批次或版本，请重新预览。"}
+    _lock_packing_scope(batch_name, revision_version, kind, source_id)
     context = _source_context(batch_name, revision_version)
     if (
+        not context.get("valid")
+        or
         context["version_name"] != revision_version
         or context["batch_modified"] != str(revision.get("batch_modified") or "")
         or context["version_modified"] != str(revision.get("version_modified") or "")
@@ -329,20 +439,36 @@ def apply_packing_source(
                 _rollback()
                 return {"ok": False, "message": result.get("message") or "装箱冲突处理失败，未保存任何更改。", "conflict_result": result}
             conflict_results.append(result)
+        if kind == "comment" and conflict_results:
+            saved = _save_comment_resolutions(
+                batch_name,
+                source_id,
+                [result.get("resolution") for result in conflict_results if isinstance(result.get("resolution"), dict)],
+            )
+            for result in conflict_results:
+                result["resolution_saved"] = saved
+        changed = bool(
+            apply_result.get("updated_count")
+            or apply_result.get("created_count")
+            or any(result.get("changed_field_count") for result in conflict_results)
+        )
+        recalculate_result = import_service._recalculate_after_writeback(
+            batch_doc_name=apply_result.get("batch_doc_name") or batch_name,
+            version_name=apply_result.get("version_name") or revision_version,
+            enabled=changed,
+            commit_after_recalculate=False,
+        )
+        if recalculate_result.get("action") == "failed" or recalculate_result.get("ok") is False:
+            _rollback()
+            return {
+                "ok": False,
+                "message": recalculate_result.get("message") or "装箱字段重算失败，全部更改已回滚。",
+                "recalculate_result": recalculate_result,
+            }
         _commit()
     except Exception:
         _rollback()
         raise
-    changed = bool(
-        apply_result.get("updated_count")
-        or apply_result.get("created_count")
-        or any(result.get("changed_field_count") for result in conflict_results)
-    )
-    recalculate_result = import_service._recalculate_after_writeback(
-        batch_doc_name=apply_result.get("batch_doc_name") or batch_name,
-        version_name=apply_result.get("version_name") or revision_version,
-        enabled=changed,
-    )
     return {
         **apply_result,
         "source_kind": kind,

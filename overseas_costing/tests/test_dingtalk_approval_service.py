@@ -82,3 +82,50 @@ def test_batch_detail_normalizes_main_linked_comments_and_archives(monkeypatch) 
     assert result["linked_purchase_approvals"][0]["instance_id"] == "PROC-BUY"
     assert result["source_lag_seconds"] == 9
     assert "raw_payload" not in result["main_approval"]
+
+
+def test_materialize_rechecks_existing_attachment_while_batch_is_locked(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    sql_calls = []
+
+    class FakeDB:
+        @staticmethod
+        def sql(query, params):
+            sql_calls.append((query, params))
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [{
+                "name": "ATT-EXISTING",
+                "parse_result_json": json.dumps({
+                    "process_instance_id": "PROC-MAIN",
+                    "file_id": "FILE-1",
+                }),
+            }]
+
+        @staticmethod
+        def get_doc(*_args, **_kwargs):
+            raise AssertionError("duplicate attachment must not be inserted")
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+    monkeypatch.setattr(service, "get_batch_dingtalk_approval_detail", lambda _batch: {
+        "ok": True,
+        "main_approval": {
+            "instance_id": "PROC-MAIN",
+            "attachments": [{
+                "file_id": "FILE-1",
+                "attachment_name": "",
+                "archive_status": "archived",
+            }],
+        },
+        "linked_purchase_approvals": [],
+    })
+
+    result = service.materialize_batch_dingtalk_attachment("BATCH-1", "PROC-MAIN", "FILE-1")
+
+    assert result == {"ok": True, "attachment_name": "ATT-EXISTING", "created": False}
+    assert "FOR UPDATE" in sql_calls[0][0]

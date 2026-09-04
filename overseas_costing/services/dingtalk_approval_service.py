@@ -136,9 +136,9 @@ def _timeline(payload: dict, instance_id: str) -> list[dict]:
 
 
 def _local_attachment_map(batch_name: str) -> dict[tuple[str, str], dict]:
-    if frappe is None or not hasattr(frappe, "get_all"):
+    if frappe is None or not hasattr(frappe, "get_list"):
         return {}
-    rows = frappe.get_all(
+    rows = frappe.get_list(
         "Overseas Cost Attachment",
         filters={"batch": batch_name, "source_type": "OA"},
         fields=["name", "file_name", "file_url", "modified", "parse_result_json"],
@@ -298,6 +298,26 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
         return {"ok": True, "attachment_name": source["attachment_name"], "created": False}
     if str(source.get("archive_status") or "") != "archived":
         return {"ok": False, "message": source.get("failure_reason") or "附件尚未归档，暂不能下载。"}
+
+    sql = getattr(getattr(frappe, "db", None), "sql", None)
+    if callable(sql):
+        sql(
+            "SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
+            (batch_name,),
+        )
+    existing_rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters={"batch": batch_name, "source_type": "OA"},
+        fields=["name", "parse_result_json"],
+        limit_page_length=1000,
+    )
+    for row in existing_rows:
+        snapshot = _json_dict(row.get("parse_result_json"))
+        if (
+            str(snapshot.get("process_instance_id") or "") == str(process_instance_id or "")
+            and str(snapshot.get("file_id") or "") == str(file_id or "")
+        ):
+            return {"ok": True, "attachment_name": row.get("name"), "created": False}
 
     batch = frappe.db.get_value("Overseas Cost Batch", batch_name, ["name", "current_version"], as_dict=True) or {}
     parse_snapshot = {

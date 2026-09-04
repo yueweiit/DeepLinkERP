@@ -4133,6 +4133,7 @@ def _recalculate_after_writeback(
     batch_doc_name: str | None,
     version_name: str | None,
     enabled: bool = True,
+    commit_after_recalculate: bool = True,
 ) -> dict:
     if not enabled:
         return {"action": "skipped", "reason": "调用方关闭自动重算。"}
@@ -4141,7 +4142,10 @@ def _recalculate_after_writeback(
     try:
         from overseas_costing.services.calculate_service import recalculate_batch
 
-        result = recalculate_batch(batch_name=batch_doc_name, version_name=version_name)
+        recalculate_kwargs = {"batch_name": batch_doc_name, "version_name": version_name}
+        if not commit_after_recalculate:
+            recalculate_kwargs["commit_after_recalculate"] = False
+        result = recalculate_batch(**recalculate_kwargs)
         return {
             "action": "recalculated" if result.get("ok", True) else "failed",
             "ok": bool(result.get("ok", True)),
@@ -5400,10 +5404,6 @@ def apply_packing_list_fillable_fields(
         if not target_item_name:
             skipped_rows.append({"row": row, "reason": "缺少目标物料行"})
             continue
-        if row.get("has_conflict"):
-            skipped_rows.append({"row": row, "reason": "存在差异，需人工确认"})
-            continue
-
         field_updates = {
             change.get("field_name"): change.get("new_value")
             for change in business_changes

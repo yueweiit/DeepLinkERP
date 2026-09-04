@@ -2207,7 +2207,7 @@ def test_preview_packing_list_attachment_resolves_file_url_by_keyword(monkeypatc
     assert result["mapped_preview_items"][0]["actual_shipped_qty"] == 5000
 
 
-def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None:
+def test_apply_packing_list_fillable_fields_fills_safe_fields_and_leaves_conflicts(monkeypatch) -> None:
     from overseas_costing.services import import_service
 
     class FakeItemDoc:
@@ -2248,7 +2248,7 @@ def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None
             spec_model="磨砂",
             actual_shipped_qty=200,
             gross_weight_kg=10,
-            volume_m3=0.2,
+            volume_m3=0,
             volume_weight_kg=0,
             chargeable_weight_kg=0,
         ),
@@ -2338,20 +2338,21 @@ def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None
         sheet_rows_json=rows_json,
     )
 
-    assert preview["writeback_preview"]["fillable_row_count"] == 1
+    assert preview["writeback_preview"]["fillable_row_count"] == 2
     assert preview["writeback_preview"]["conflict_row_count"] == 1
     assert result["ok"] is True
-    assert result["updated_count"] == 1
+    assert result["updated_count"] == 2
     assert items["ITEM-001"].actual_shipped_qty == 400
     assert items["ITEM-001"].gross_weight_kg == 32.5
     assert items["ITEM-001"].volume_m3 == 0.21
     assert items["ITEM-002"].actual_shipped_qty == 200
     assert items["ITEM-002"].gross_weight_kg == 10
+    assert items["ITEM-002"].volume_m3 == 0.22
     assert batch_updates[("Overseas Cost Batch", "BATCH-PACKING", "status")] == "Dirty"
     assert batch_updates[("Overseas Cost Attachment", "ATT-PACKING", "parse_status")] == "Parsed"
     assert result["attachment_marked_parsed"] is True
     assert commit_count["value"] == 1
-    assert len(audit_payloads) == 3
+    assert len(audit_payloads) == 4
     assert recalculate_calls == [{"batch_name": "BATCH-PACKING", "version_name": "VER-PACKING"}]
     assert result["recalculate_result"]["action"] == "recalculated"
     assert result["recalculate_result"]["summary_snapshot"] == {"total_gross_weight_kg": 32.5}
