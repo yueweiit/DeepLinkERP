@@ -26,6 +26,26 @@ docker compose -f "$COMPOSE_FILE" exec -T backend \
 docker compose -f "$COMPOSE_FILE" exec -T backend \
     bench --site "$SITE_NAME" clear-website-cache
 
+echo "== Verify overseas costing application release =="
+docker compose -f "$COMPOSE_FILE" exec -T backend python3 - <<'PY'
+from pathlib import Path
+
+from overseas_costing.api import workbench
+
+if not hasattr(workbench, "get_batch_dingtalk_approval_detail"):
+    raise SystemExit("backend is missing get_batch_dingtalk_approval_detail")
+
+page_script = Path(
+    "/home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/"
+    "overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js"
+)
+if not page_script.is_file():
+    raise SystemExit(f"workbench page script is missing: {page_script}")
+if "renderDingtalkApprovalTab" not in page_script.read_text(encoding="utf-8"):
+    raise SystemExit("workbench page script is missing renderDingtalkApprovalTab")
+print("OK overseas costing approval API and workbench page markers")
+PY
+
 echo "== Verify assets.json and frontend files =="
 docker compose -f "$COMPOSE_FILE" exec -T frontend \
     env ASSETS_DIR="$ASSETS_DIR" python3 - <<'PY'

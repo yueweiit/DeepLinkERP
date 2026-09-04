@@ -33,3 +33,11 @@ def test_asset_script_is_uploaded_and_executed_as_a_remote_file():
     assert "scp -o BatchMode=yes -o StrictHostKeyChecking=yes" in deploy_block
     assert "bash '$remote_asset_script'" in deploy_block
     assert "rm -f '$remote_asset_script'" in deploy_block
+
+
+def test_asset_script_rejects_stale_overseas_costing_release():
+    script_path = WORKFLOW_PATH.parents[1] / "scripts" / "sync_and_verify_assets.sh"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert "get_batch_dingtalk_approval_detail" in script
+    assert "renderDingtalkApprovalTab" in script

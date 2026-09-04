@@ -75,6 +75,20 @@ jobs:
         run: |
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && python3 - <<'"'"'PY'"'"'
+          import json
+
+          with open("apps.json", encoding="utf-8") as handle:
+              entries = json.load(handle)
+          for entry in entries:
+              app_name = str(entry.get("app_name") or entry.get("name") or "")
+              branch = str(entry.get("branch") or "")
+              url = str(entry.get("url") or "")
+              if app_name == "overseas_costing" or "overseas" in url.lower():
+                  print({"app_name": app_name, "branch": branch})
+          PY'
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
             'cd /home/yuewei/ERPNext-Docker/frappe_docker && git pull --ff-only && ./upgrade_bench.sh && ./migrate_site.sh deeplinkerp.com'
 
       - name: Synchronize and verify frontend assets
