@@ -1211,6 +1211,7 @@ def test_approval_decision_combines_process_status_and_result() -> None:
     assert resolve_approval_decision("COMPLETED", "agree")["effective_status"] == "COMPLETED"
     assert resolve_approval_decision("RUNNING", "agree")["effective_status"] == "RUNNING"
     assert is_completed_approval_status("COMPLETED", result="refuse") is False
+    assert is_completed_approval_status("", result="refuse") is False
 
 
 def test_pull_purchase_expense_approvals_reads_process_details(monkeypatch) -> None:

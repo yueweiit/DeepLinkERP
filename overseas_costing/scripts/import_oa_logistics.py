@@ -3038,10 +3038,10 @@ def is_completed_approval_status(
     """判断审批是否已完成；空状态默认放行以兼容部分旧接口响应。"""
 
     normalized = _clean(status).upper()
-    if not normalized:
-        return allow_empty
     if is_hidden_approval_status(normalized, result):
         return False
+    if not normalized:
+        return allow_empty
     return any(_clean(completed).upper() in normalized for completed in COMPLETED_APPROVAL_STATUSES)
 
 

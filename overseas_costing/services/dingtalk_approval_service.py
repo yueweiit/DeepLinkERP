@@ -260,12 +260,20 @@ def _attachment_item(row: dict, local: dict | None, actors: dict | None = None) 
     if failure_code == "userNotExist" or "userNotExist" in failure_reason:
         failure_reason = "钉钉下载授权返回 userNotExist，尚不能判断文件是否删除。"
     comment_user_id = str(row.get("comment_user_id") or "")
-    comment_identity = _actor_identity(
-        corp_id=str(row.get("corp_id") or ""),
-        user_id=comment_user_id,
-        provided_name=str(row.get("comment_user_name") or ""),
-        actors=actors,
-    )
+    comment_user_name = str(row.get("comment_user_name") or "")
+    if comment_user_id or comment_user_name:
+        comment_identity = _actor_identity(
+            corp_id=str(row.get("corp_id") or ""),
+            user_id=comment_user_id,
+            provided_name=comment_user_name,
+            actors=actors,
+        )
+    else:
+        comment_identity = {
+            "user_name": "",
+            "user_name_source": "",
+            "user_name_unresolved": False,
+        }
     return {
         "attachment_name": (local or {}).get("name") or "",
         "file_id": str(row.get("file_id") or ""),

@@ -77,6 +77,7 @@ def test_batch_detail_normalizes_main_linked_comments_and_archives(monkeypatch) 
     assert source.calls == [["PROC-MAIN", "PROC-BUY"]]
     assert result["main_approval"]["form_fields"] == [{"label": "物流方式", "value": "海运"}]
     assert result["main_approval"]["attachments"][0]["archive_method"] == "legacy_file_url"
+    assert result["main_approval"]["attachments"][0]["comment_user_name"] == ""
     assert result["main_approval"]["timeline"][0]["packing_candidate"] is True
     assert len(result["main_approval"]["timeline"][0]["source_id"]) == 64
     assert result["linked_purchase_approvals"][0]["instance_id"] == "PROC-BUY"
@@ -275,6 +276,43 @@ def test_materialize_rechecks_existing_attachment_while_batch_is_locked(monkeypa
 
     assert result == {"ok": True, "attachment_name": "ATT-EXISTING", "created": False}
     assert "FOR UPDATE" in sql_calls[0][0]
+
+
+def test_materialize_allows_download_from_excluded_approval_audit(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [{
+                "name": "ATT-EXCLUDED",
+                "parse_result_json": json.dumps({
+                    "process_instance_id": "PROC-REFUSED",
+                    "file_id": "FILE-REFUSED",
+                }),
+            }]
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+    monkeypatch.setattr(service, "get_batch_dingtalk_approval_detail", lambda _batch: {
+        "ok": True,
+        "main_approval": {"instance_id": "PROC-MAIN", "attachments": []},
+        "linked_purchase_approvals": [],
+        "excluded_linked_purchase_approvals": [{
+            "instance_id": "PROC-REFUSED",
+            "excluded": True,
+            "attachments": [{
+                "file_id": "FILE-REFUSED",
+                "attachment_name": "ATT-EXCLUDED",
+                "archive_status": "archived",
+            }],
+        }],
+    })
+
+    result = service.materialize_batch_dingtalk_attachment(
+        "BATCH-1", "PROC-REFUSED", "FILE-REFUSED"
+    )
+
+    assert result == {"ok": True, "attachment_name": "ATT-EXCLUDED", "created": False}
 
 
 def test_materialize_allows_attachment_from_excluded_linked_approval(monkeypatch) -> None:
