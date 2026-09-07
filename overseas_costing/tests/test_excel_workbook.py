@@ -8,7 +8,7 @@ openpyxl = pytest.importorskip("openpyxl")
 
 from overseas_costing.services.import_service import import_yuewei_excel_file
 from overseas_costing.utils.excel_blocks import select_excel_blocks, summarize_excel_blocks
-from overseas_costing.utils.excel_workbook import parse_yuewei_excel_workbook, parse_yuewei_sheet
+from overseas_costing.utils.excel_workbook import parse_yuewei_excel_workbook, parse_yuewei_sheet, read_packing_grid
 
 
 def _build_sample_workbook():
@@ -207,6 +207,43 @@ def _parse_sample_blocks() -> tuple[dict, list[dict]]:
         return meta, blocks
     finally:
         workbook.close()
+
+
+def test_read_packing_grid_preserves_real_merge_ranges(tmp_path) -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "装箱单"
+    sheet.append(["物料编码", "总毛重", "总体积"])
+    sheet.append(["FL001", 100, 0.5])
+    sheet.append(["FL002", None, None])
+    sheet.merge_cells("B2:B3")
+    sheet.merge_cells("C2:C3")
+    path = tmp_path / "merged.xlsx"
+    workbook.save(path)
+    workbook.close()
+
+    grid = read_packing_grid(str(path), sheet_name="装箱单", require_exact_sheet=True)
+
+    assert grid["sheet_name"] == "装箱单"
+    assert grid["merge_ranges_available"] is True
+    assert grid["merge_ranges"] == [
+        {
+            "start_row": 2,
+            "end_row": 3,
+            "start_column": 2,
+            "end_column": 2,
+            "evidence_kind": "xlsx_merge",
+        },
+        {
+            "start_row": 2,
+            "end_row": 3,
+            "start_column": 3,
+            "end_column": 3,
+            "evidence_kind": "xlsx_merge",
+        },
+    ]
+    assert grid["cells"][1][1]["raw_value"] == 100
+    assert grid["cells"][2][1]["raw_value"] is None
 
 
 def test_parse_yuewei_excel_workbook_expands_merged_batch_fields() -> None:

@@ -14,6 +14,8 @@ try:
 except Exception:  # pragma: no cover - 只在真实解析 xlsx 时才需要报错
     load_workbook = None
 
+from overseas_costing.services.packing_grid import Cell, MergeRange, PackingSheetNotFound, dataclass_dict
+
 
 MAX_EXCEL_COLUMN = "BE"
 
@@ -76,6 +78,101 @@ BLOCK_COLUMN_MAP = {
     "projectCollection": "BD",
     "transportMode": "BE",
 }
+
+
+def read_packing_grid(
+    file_path: str | Path,
+    *,
+    sheet_name: str | None,
+    require_exact_sheet: bool,
+) -> dict[str, Any]:
+    """读取用户选定的工作表，保留公式、缓存值和真实合并范围。"""
+
+    if load_workbook is None:
+        raise RuntimeError("解析 .xlsx 需要安装 openpyxl，请先安装后再导入真实 Excel。")
+
+    path = Path(file_path).expanduser()
+    formula_workbook = load_workbook(path, data_only=False, read_only=False)
+    value_workbook = load_workbook(path, data_only=True, read_only=False)
+    try:
+        requested_sheet = (sheet_name or "").strip()
+        if require_exact_sheet:
+            if not requested_sheet:
+                raise PackingSheetNotFound("必须选择一个明确的工作表。")
+            if requested_sheet not in formula_workbook.sheetnames:
+                available = "、".join(formula_workbook.sheetnames)
+                raise PackingSheetNotFound(
+                    f"工作簿中不存在工作表：{requested_sheet}。当前文件包含：{available}。"
+                )
+            selected_sheet = requested_sheet
+        else:
+            selected_sheet, _, _ = _select_sheet(formula_workbook, sheet_name)
+
+        formula_sheet = formula_workbook[selected_sheet]
+        value_sheet = value_workbook[selected_sheet]
+        cells: list[list[dict[str, Any]]] = []
+        for row_number in range(1, formula_sheet.max_row + 1):
+            row: list[dict[str, Any]] = []
+            for column_number in range(1, formula_sheet.max_column + 1):
+                formula_value = formula_sheet.cell(row_number, column_number).value
+                formula = formula_value if isinstance(formula_value, str) and formula_value.startswith("=") else None
+                raw_value = value_sheet.cell(row_number, column_number).value if formula else formula_value
+                display_value = _packing_display_value(raw_value)
+                row.append(
+                    dataclass_dict(
+                        Cell(
+                            raw_value=raw_value,
+                            display_value=display_value,
+                            formula=formula,
+                            row=row_number,
+                            column=column_number,
+                        )
+                    )
+                )
+            cells.append(row)
+
+        merge_ranges = sorted(
+            (
+                dataclass_dict(
+                    MergeRange(
+                        start_row=merged.min_row,
+                        end_row=merged.max_row,
+                        start_column=merged.min_col,
+                        end_column=merged.max_col,
+                        evidence_kind="xlsx_merge",
+                    )
+                )
+                for merged in formula_sheet.merged_cells.ranges
+            ),
+            key=lambda item: (
+                item["start_row"],
+                item["start_column"],
+                item["end_row"],
+                item["end_column"],
+            ),
+        )
+        return {
+            "schema_version": 1,
+            "source_kind": "manual_attachment",
+            "source_file": path.name,
+            "sheet_name": selected_sheet,
+            "range_address": f"A1:{formula_sheet.cell(formula_sheet.max_row, formula_sheet.max_column).coordinate}",
+            "cells": cells,
+            "merge_ranges_available": True,
+            "merge_ranges": merge_ranges,
+            "available_sheets": list(formula_workbook.sheetnames),
+        }
+    finally:
+        formula_workbook.close()
+        value_workbook.close()
+
+
+def _packing_display_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    return str(value)
 
 
 def col_to_index(column: str) -> int:
