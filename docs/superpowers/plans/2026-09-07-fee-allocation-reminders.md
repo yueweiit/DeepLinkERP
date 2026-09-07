@@ -619,11 +619,11 @@ git commit -m 'feat: add persistent fee worklist'
 - Modify: `overseas_costing/scripts/seed_workbench_sample.py`
 - Create: `overseas_costing/tests/test_fee_workflow_acceptance.py`
 
-- [ ] **Step 1: 建立脱敏样本和端到端断言**
+- [x] **Step 1: 建立脱敏样本和端到端断言**
 
 样本覆盖全批共同费、生产物料专属费、直接费、暂估转实际、同金额性质变化、凭证失效、金额/范围变化及确认费用已齐。断言每笔分摊守恒、范围外为零、完成记录按输入哈希失效、ERP 字段不参与费用待办关闭。
 
-- [ ] **Step 2: 运行完整相关测试**
+- [x] **Step 2: 运行完整相关测试**
 
 ```bash
 python -m pytest -q \
@@ -642,7 +642,7 @@ python -m pytest -q \
 
 Expected: PASS without real DingTalk/ERP calls.
 
-- [ ] **Step 3: 验证镜像和提交**
+- [x] **Step 3: 验证镜像和提交**
 
 ```bash
 cmp overseas_costing/doctype/overseas_cost_allocation_rule/overseas_cost_allocation_rule.json overseas_costing/overseas_costing/doctype/overseas_cost_allocation_rule/overseas_cost_allocation_rule.json

@@ -19,6 +19,7 @@ SAMPLE_BATCH_NOS = (
     "LOCAL-SAMPLE-SEA-184-3",
     "LOCAL-SAMPLE-CALCULATED-4",
     "LOCAL-SAMPLE-MATERIAL-GRID-5",
+    "LOCAL-SAMPLE-FEE-WORKFLOW-6",
 )
 
 
@@ -186,7 +187,11 @@ def build_material_grid_acceptance_sample() -> dict:
         "rules": [
             {
                 "rule_code": "LOCAL-FREIGHT-BY-GOODS",
+                "logical_fee_key": "LOCAL-FREIGHT-BY-GOODS",
                 "expense_category": "本地验收国际运费",
+                "amount_status": "ESTIMATED",
+                "scope_type": "ALL_ITEMS",
+                "scope_value_json": "[]",
                 "allocation_basis": "goods_value",
                 "basis_field": "goods_value",
                 "currency": "RMB",
@@ -209,6 +214,198 @@ def build_material_grid_acceptance_sample() -> dict:
                 }
             ],
             "totals": {"gross_weight_kg": "612", "volume_m3": "1.5337"},
+        },
+    }
+
+
+def build_fee_workflow_acceptance_sample() -> dict:
+    """构建不读取真实附件、OA 或 ERP 的费用工作流验收批次。"""
+
+    items = [
+        {
+            "stable_line_key": "P-1",
+            "material_code": "LOCAL-PRODUCTION-RAW-1",
+            "product_name": "本地验收生产原料 A",
+            "quantity": 10,
+            "actual_shipped_qty": "",
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+            "purchase_uom": "桶",
+            "shipped_uom": "桶",
+            "unit_price": 10,
+            "purchase_currency": "RMB",
+            "goods_value": 100,
+            "gross_weight_kg": 10,
+            "volume_m3": 1,
+            "chargeable_weight_kg": 20,
+            "project_collection": "LOCAL-生产项目",
+        },
+        {
+            "stable_line_key": "P-2",
+            "material_code": "LOCAL-PRODUCTION-RAW-2",
+            "product_name": "本地验收生产原料 B",
+            "quantity": 20,
+            "actual_shipped_qty": "",
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+            "purchase_uom": "桶",
+            "shipped_uom": "桶",
+            "unit_price": 10,
+            "purchase_currency": "RMB",
+            "goods_value": 200,
+            "gross_weight_kg": 20,
+            "volume_m3": 2,
+            "chargeable_weight_kg": 40,
+            "project_collection": "LOCAL-生产项目",
+        },
+        {
+            "stable_line_key": "E-1",
+            "material_code": "LOCAL-ECOMMERCE-GOODS-1",
+            "product_name": "本地验收电商商品 C",
+            "quantity": 30,
+            "actual_shipped_qty": "",
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+            "purchase_uom": "件",
+            "shipped_uom": "件",
+            "unit_price": 10,
+            "purchase_currency": "RMB",
+            "goods_value": 300,
+            "gross_weight_kg": 30,
+            "volume_m3": 3,
+            "chargeable_weight_kg": 60,
+            "project_collection": "LOCAL-电商项目",
+        },
+    ]
+    fees = [
+        {
+            "logical_fee_key": "FREIGHT",
+            "rule_code": "FREIGHT",
+            "expense_category": "国际海运费",
+            "amount_status": "ESTIMATED",
+            "amount": "600",
+            "currency": "USD",
+            "scope_type": "ALL_ITEMS",
+            "scope_item_keys": [],
+            "scope_value_json": "[]",
+            "allocation_basis": "goods_value",
+            "required_evidence_role": "freight_invoice",
+            "remark": "本地虚构暂估运费",
+            "is_enabled": 1,
+            "is_active": 1,
+        },
+        {
+            "logical_fee_key": "PRODUCTION-EXTRA",
+            "rule_code": "PRODUCTION-EXTRA",
+            "expense_category": "生产物料专属加工费",
+            "amount_status": "ACTUAL",
+            "amount": "90",
+            "currency": "RMB",
+            "scope_type": "ITEMS",
+            "scope_item_keys": ["P-1", "P-2"],
+            "scope_value_json": '["P-1","P-2"]',
+            "allocation_basis": "goods_value",
+            "required_evidence_role": "expense_invoice",
+            "remark": "只归属两条生产原料",
+            "is_enabled": 1,
+            "is_active": 1,
+        },
+        {
+            "logical_fee_key": "ECOMMERCE-DIRECT",
+            "rule_code": "ECOMMERCE-DIRECT",
+            "expense_category": "电商单物料直接费",
+            "amount_status": "ACTUAL",
+            "amount": "45",
+            "currency": "RMB",
+            "scope_type": "DIRECT_ITEM",
+            "scope_item_keys": ["E-1"],
+            "scope_value_json": '["E-1"]',
+            "allocation_basis": "goods_value",
+            "required_evidence_role": "payment_voucher",
+            "remark": "只归属电商商品 C",
+            "is_enabled": 1,
+            "is_active": 1,
+        },
+        {
+            "logical_fee_key": "IMPORT-TAX",
+            "rule_code": "IMPORT-TAX",
+            "expense_category": "进口税费",
+            "amount_status": "ACTUAL",
+            "amount": "180",
+            "currency": "MXN",
+            "scope_type": "ALL_ITEMS",
+            "scope_item_keys": [],
+            "scope_value_json": "[]",
+            "allocation_basis": "goods_value",
+            "required_evidence_role": "tax_certificate",
+            "remark": "本地虚构实际税费",
+            "is_enabled": 1,
+            "is_active": 1,
+        },
+        {
+            "logical_fee_key": "PORT-EXTRA",
+            "rule_code": "PORT-EXTRA",
+            "expense_category": "港杂费",
+            "amount_status": "MISSING",
+            "amount": "",
+            "currency": "MXN",
+            "scope_type": "ALL_ITEMS",
+            "scope_item_keys": [],
+            "scope_value_json": "[]",
+            "allocation_basis": "gross_weight",
+            "required_evidence_role": "expense_invoice",
+            "remark": "本地验收未知金额",
+            "is_enabled": 1,
+            "is_active": 1,
+        },
+        {
+            "logical_fee_key": "WAREHOUSE",
+            "rule_code": "WAREHOUSE",
+            "expense_category": "仓储费",
+            "amount_status": "NOT_INCURRED",
+            "amount": "",
+            "currency": "RMB",
+            "scope_type": "ALL_ITEMS",
+            "scope_item_keys": [],
+            "scope_value_json": "[]",
+            "allocation_basis": "goods_value",
+            "required_evidence_role": "",
+            "remark": "本批未发生仓储费",
+            "is_enabled": 1,
+            "is_active": 1,
+        },
+    ]
+    lifecycle = [
+        {"lifecycle_case": "estimate_to_actual_same_amount", "fee_key": "FREIGHT", "before": "ESTIMATED", "after": "ACTUAL", "amount": "600"},
+        {"lifecycle_case": "amount_change", "fee_key": "IMPORT-TAX", "before": "180", "after": "195"},
+        {"lifecycle_case": "scope_change", "fee_key": "PRODUCTION-EXTRA", "before": ["P-1", "P-2"], "after": ["P-2"]},
+        {"lifecycle_case": "evidence_invalidated", "fee_key": "IMPORT-TAX", "before": "VALID", "after": "INVALID"},
+    ]
+    return {
+        "scenario": "fee_workflow_acceptance",
+        "batch": {
+            "batch_no": SAMPLE_BATCH_NOS[5],
+            "waybill_no": "LOCAL-WAYBILL-FEE-06",
+            "transport_mode": "SEA",
+            "business_type": "SEA_STANDARD",
+            "subsidiary_code": "YUEWEI-MX",
+            "source_type": "manual",
+            "status": "Calculated",
+            "confirm_status": "Pending",
+            "writeback_status": "Success",
+            "item_count": len(items),
+            "total_goods_value": 600,
+            "estimated_total_cost_rmb": 915,
+            "actual_total_cost_rmb": 0,
+            "source_remark": "仅供本地费用待办验收，ERP 成功不关闭费用待办",
+            "extra_json": {"local_acceptance": True, "live_integrations": False},
+        },
+        "items": items,
+        "fees": fees,
+        "rules": fees,
+        "lifecycle": lifecycle,
+        "fx": {"fx_usd_to_rmb": "7.1", "fx_rmb_to_mxn": "2.4"},
+        "summary_snapshot": {
+            "fee_statuses": [
+                {"fee_key": "PRODUCTION-EXTRA", "allocation_state": "NOT_ALLOCATED", "input_hash": "LOCAL-STALE-FEE-HASH"}
+            ]
         },
     }
 
@@ -262,6 +459,7 @@ def build_sample_payloads() -> list[dict]:
         _sample(SAMPLE_BATCH_NOS[2], "pending_calculation", 184, 29),
         _sample(SAMPLE_BATCH_NOS[3], "calculated", 8, 30),
         build_material_grid_acceptance_sample(),
+        build_fee_workflow_acceptance_sample(),
     ]
 
 
@@ -272,6 +470,8 @@ def _delete_existing_sample(batch_no: str) -> None:
     for doctype in (
         "Overseas Cost Usage Log",
         "Overseas Cost Audit Log",
+        "Overseas Cost Fee Completion",
+        "Overseas Cost Fee Evidence",
         "Overseas Cost Attachment",
         "Overseas Cost Allocation Rule",
         "Overseas Cost Item",
@@ -290,7 +490,9 @@ def seed() -> dict:
 
     samples = build_sample_payloads()
     for sample in samples:
-        batch_values = sample["batch"]
+        batch_values = dict(sample["batch"])
+        if isinstance(batch_values.get("extra_json"), dict):
+            batch_values["extra_json"] = json.dumps(batch_values["extra_json"], ensure_ascii=False)
         batch_no = batch_values["batch_no"]
         if batch_no not in SAMPLE_BATCH_NOS:
             raise RuntimeError(f"拒绝生成未登记的样本批次：{batch_no}")
@@ -305,11 +507,14 @@ def seed() -> dict:
                 "status": "Active",
                 "is_current": 1,
                 "source_type": "Manual",
+                "fx_usd_to_rmb": (sample.get("fx") or {}).get("fx_usd_to_rmb"),
+                "fx_rmb_to_mxn": (sample.get("fx") or {}).get("fx_rmb_to_mxn"),
+                "summary_snapshot_json": json.dumps(sample.get("summary_snapshot") or {}, ensure_ascii=False),
                 "remark": "本地工作台验收样本",
             }
         ).insert(ignore_permissions=True)
         for index, values in enumerate(sample["items"], start=1):
-            item_values = {key: value for key, value in values.items() if key != "acceptance_tag"}
+            item_values = {key: value for key, value in values.items() if key not in {"acceptance_tag", "scope_item_keys"}}
             frappe.get_doc(
                 {
                     "doctype": "Overseas Cost Item",
@@ -321,12 +526,13 @@ def seed() -> dict:
                 }
             ).insert(ignore_permissions=True)
         for values in sample.get("rules") or []:
+            rule_values = {key: value for key, value in values.items() if key != "scope_item_keys"}
             frappe.get_doc(
                 {
                     "doctype": "Overseas Cost Allocation Rule",
                     "batch": batch_doc.name,
                     "version": version_doc.name,
-                    **values,
+                    **rule_values,
                 }
             ).insert(ignore_permissions=True)
         frappe.db.set_value(
