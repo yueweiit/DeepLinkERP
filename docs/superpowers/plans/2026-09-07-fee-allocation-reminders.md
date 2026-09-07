@@ -310,7 +310,7 @@ git commit -m 'feat: allocate fees within explicit item scopes'
 - Create: `overseas_costing/tests/test_fee_status_service.py`
 - Modify: `overseas_costing/tests/test_calculate_service.py`
 
-- [ ] **Step 1: 写失败测试，锁定并存待办和关闭条件**
+- [x] **Step 1: 写失败测试，锁定并存待办和关闭条件**
 
 ```python
 def test_estimated_allocated_fee_keeps_actual_and_evidence_todos() -> None:
@@ -356,13 +356,13 @@ def test_invalidated_final_evidence_reopens_completion_without_forcing_recalc() 
     assert "RECALCULATE_REQUIRED" not in {t["code"] for t in result["todos"]}
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_status_service.py`
 
 Expected: FAIL because `fee_status_service` is absent.
 
-- [ ] **Step 3: 实现状态输出和输入哈希**
+- [x] **Step 3: 实现状态输出和输入哈希**
 
 每笔费用输出固定结构：
 
@@ -384,7 +384,7 @@ Expected: FAIL because `fee_status_service` is absent.
 
 计算完成时再对规范化物料成本行、采用费用状态、汇率修订和数量修订生成 `cost_result_hash`，保存到当前 `Overseas Cost Version`。同一输入必须得到同一哈希；任一采用金额、范围、依据、汇率、有效数量或行成本变化必须得到新哈希。后续 ERP 创建与更新只引用这个持久化结果哈希，不接受客户端自报哈希。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_status_service.py overseas_costing/tests/test_calculate_service.py`
 

@@ -16,6 +16,7 @@ from overseas_costing.services import (
     allocation_service,
     audit_service,
     fee_allocation_service,
+    fee_status_service,
     material_input_service,
     source_priority_service,
     version_service,
@@ -980,6 +981,32 @@ def calculate_item_rows(
         "blocking": blocking,
         "source_priority_policy": source_priority_service.get_source_priority_policy(),
     }
+    fx_context = {
+        "fx_rmb_to_mxn": fx_rmb_to_mxn,
+        "fx_usd_to_rmb": fx_usd_to_rmb,
+    }
+    fee_statuses = []
+    for entry in fee_allocations:
+        fee_input_hash = fee_status_service.build_fee_input_hash(
+            entry["rule"],
+            items=rows,
+            fx_context=fx_context,
+        )
+        fee_statuses.append(
+            fee_status_service.build_fee_status(
+                fee=entry["rule"],
+                allocation=entry["allocation"],
+                evidence=[],
+                calculation={"input_hash": fee_input_hash, "fee_input_hash": fee_input_hash},
+            )
+        )
+    summary["fee_statuses"] = fee_statuses
+    summary["fee_work"] = fee_status_service.summarize_fee_statuses(fee_statuses)
+    summary["cost_result_hash"] = fee_status_service.build_cost_result_hash(
+        calculated_rows,
+        fee_statuses,
+        fx_context,
+    )
     summary["calculation_review"] = _build_calculation_review(calculated_rows, summary, enabled_rules)
     return calculated_rows, summary
 
@@ -1960,6 +1987,7 @@ def recalculate_batch(
         {
             "summary_snapshot_json": _json_dumps(summary_snapshot),
             "rule_snapshot_json": _json_dumps(rules_for_calculation),
+            "cost_result_hash": summary_snapshot.get("cost_result_hash") or "",
             "calculated_at": _now(),
         },
         update_modified=True,

@@ -295,6 +295,48 @@ def test_calculate_item_rows_respects_fee_scope_and_keeps_rule_provenance() -> N
     assert allocated["denominator"] == 100
 
 
+def test_calculation_exposes_stable_fee_work_and_cost_result_hash() -> None:
+    items = [
+        {
+            "stable_line_key": "ITEM-1",
+            "unit_price": 10,
+            "quantity": 10,
+            "goods_value": 100,
+            "gross_weight_kg": 10,
+            "actual_shipped_qty_source_revision": "Q1",
+        }
+    ]
+    rules = [
+        {
+            "logical_fee_key": "FREIGHT",
+            "rule_code": "freight",
+            "amount_status": "ESTIMATED",
+            "required_evidence_role": "freight_invoice",
+            "amount": 50,
+            "currency": "RMB",
+            "allocation_basis": "gross_weight",
+            "is_enabled": 1,
+        }
+    ]
+
+    first_rows, first_summary = calculate_item_rows(items, rules, fx_rmb_to_mxn=2.6)
+    _same_rows, same_summary = calculate_item_rows(items, rules, fx_rmb_to_mxn=2.6)
+    _changed_rows, changed_summary = calculate_item_rows(
+        items,
+        [{**rules[0], "amount": 51, "amount_revision": "A2"}],
+        fx_rmb_to_mxn=2.6,
+    )
+
+    assert first_summary["cost_result_hash"] == same_summary["cost_result_hash"]
+    assert changed_summary["cost_result_hash"] != first_summary["cost_result_hash"]
+    assert first_summary["fee_work"]["affected_fee_count"] == 1
+    assert {row["code"] for row in first_summary["fee_statuses"][0]["todos"]} == {
+        "ACTUAL_AMOUNT_REQUIRED",
+        "EVIDENCE_REQUIRED",
+    }
+    assert first_rows[0]["total_cost_rmb"] == 150
+
+
 def test_calculate_item_rows_uses_direct_tax_fields_as_customs_cost() -> None:
     rows, summary = calculate_item_rows(
         [
