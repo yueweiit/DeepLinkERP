@@ -176,6 +176,20 @@ def test_normalize_fee_payload_rejects_invalid_currency(currency) -> None:
         )
 
 
+def test_normalize_fee_payload_defaults_missing_currency_to_rmb() -> None:
+    result = normalize_fee_payload(
+        {
+            "logical_fee_key": "FREIGHT",
+            "amount": "100",
+            "amount_status": "ACTUAL",
+            "scope_type": "ALL_ITEMS",
+            "allocation_basis": "gross_weight",
+        }
+    )
+
+    assert result["currency"] == "RMB"
+
+
 def test_normalize_fee_payload_uppercases_any_three_letter_currency() -> None:
     result = normalize_fee_payload(
         {

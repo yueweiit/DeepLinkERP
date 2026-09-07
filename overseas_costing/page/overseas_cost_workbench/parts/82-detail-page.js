@@ -538,7 +538,23 @@
     if (this.detailState.editToken) return true;
     const batch = this.getDetailBatch();
     if (!batch || !batch.name) return false;
-    const result = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name }, true);
+    const batchName = String(batch.name);
+    const acquireId = Number(this.editSessionAcquireId || 0) + 1;
+    this.editSessionAcquireId = acquireId;
+    const result = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batchName }, true);
+    if (String(this.detailState.batchName || "") !== batchName || this.editSessionAcquireId !== acquireId) {
+      if (result?.ok && result.edit_token) {
+        try {
+          await this.call("overseas_costing.api.edit_session.release", {
+            batch_name: batchName,
+            edit_token: result.edit_token,
+          });
+        } catch (error) {
+          console.warn("[overseas-cost-workbench] 旧批次编辑租约释放失败，将在过期后自动释放", error);
+        }
+      }
+      return false;
+    }
     if (!result || !result.ok) {
       this.detailState.readonly = true;
       const lockedBy = (result && result.locked_by) || "其他用户";

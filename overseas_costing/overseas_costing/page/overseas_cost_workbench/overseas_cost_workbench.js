@@ -9276,8 +9276,15 @@ class OverseasCostWorkbench {
     });
     this.$root.on("blur", "[data-mf-fee-input]", (event) => {
       const $input = $(event.currentTarget);
-      const state = this.ensureMaterialFeeState();
       const feeKey = typeof $input.attr === "function" ? String($input.attr("data-fee-key") || "") : "";
+      const $related = event.relatedTarget ? $(event.relatedTarget) : null;
+      if (
+        $related
+        && typeof $related.attr === "function"
+        && $related.attr("data-mf-fee-input")
+        && String($related.attr("data-fee-key") || "") === feeKey
+      ) return;
+      const state = this.ensureMaterialFeeState();
       const field = typeof $input.attr === "function" ? String($input.attr("data-mf-fee-input") || "") : "";
       if (state.focusedFeeInput?.feeKey === feeKey && state.focusedFeeInput?.field === field) {
         state.focusedFeeInput = null;
@@ -9336,22 +9343,24 @@ class OverseasCostWorkbench {
         || this.materialFeeState !== state
         || this.detailState.batchName !== batchName
         || this.detailState.tab !== "documents"
-      ) return;
+      ) return false;
       this.applyMaterialFeeHeaderSnapshot(detail, batchName);
       state.materials = materials;
       state.fees = fees;
       state.preview = preview;
       state.loading = false;
       this.renderMaterialFeeWorkspace();
+      return true;
     } catch (error) {
       if (
         requestId !== state.requestId
         || this.materialFeeState !== state
         || this.detailState.batchName !== batchName
         || this.detailState.tab !== "documents"
-      ) return;
+      ) return false;
       state.loading = false;
       this.renderDetailTabError("资料与费用", error);
+      return false;
     }
   }
 
@@ -9769,7 +9778,7 @@ class OverseasCostWorkbench {
 
   materialFeeEditSessionInvalid(error) {
     const message = String(this.normalizeErrorMessage ? this.normalizeErrorMessage(error) : error?.message || error || "");
-    return /(?:编辑权|租约|token).*(?:失效|过期|无效|不存在)|(?:失效|过期|无效).*(?:编辑权|租约|token)/i.test(message);
+    return /(?:编辑权|编辑会话|租约|token).*(?:失效|过期|无效|不存在)|(?:失效|过期|无效).*(?:编辑权|编辑会话|租约|token)|当前批次正在被.*编辑/i.test(message);
   }
 
   updateMaterialFeeDraftFromInput($input) {
@@ -9907,17 +9916,20 @@ class OverseasCostWorkbench {
       this.updateMaterialFeeExpectedModified(result);
       this.detailState.dirty = false;
       delete this.ensureMaterialFeeState().feeDrafts?.[feeKey];
-      if (this.detailState.tab !== "documents" || saveState.requestId !== fullRequestId) return;
-      $amount.attr("data-original-value", amount).attr("data-mf-force-actual", "0");
-      $currency.val(currency).attr("data-original-value", currency);
-      $cell.data("saving", false).removeClass("is-saving");
-      $inputs.prop("disabled", false);
-      const refreshed = await this.refreshMaterialFeeData();
+      if (this.detailState.tab !== "documents") return;
+      if (saveState.requestId === fullRequestId && !saveState.loading) {
+        $amount.attr("data-original-value", amount).attr("data-mf-force-actual", "0");
+        $currency.val(currency).attr("data-original-value", currency);
+        $cell.data("saving", false).removeClass("is-saving");
+        $inputs.prop("disabled", false);
+      }
+      const loaded = await this.loadMaterialFeeWorkspace({ quiet: true });
       if (
-        !refreshed
+        !loaded
         || this.detailState.batchName !== batchName
         || this.detailState.tab !== "documents"
         || this.materialFeeState !== saveState
+        || saveState.loading
       ) return;
       frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
     } catch (error) {
@@ -11665,7 +11677,23 @@ class OverseasCostWorkbench {
     if (this.detailState.editToken) return true;
     const batch = this.getDetailBatch();
     if (!batch || !batch.name) return false;
-    const result = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name }, true);
+    const batchName = String(batch.name);
+    const acquireId = Number(this.editSessionAcquireId || 0) + 1;
+    this.editSessionAcquireId = acquireId;
+    const result = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batchName }, true);
+    if (String(this.detailState.batchName || "") !== batchName || this.editSessionAcquireId !== acquireId) {
+      if (result?.ok && result.edit_token) {
+        try {
+          await this.call("overseas_costing.api.edit_session.release", {
+            batch_name: batchName,
+            edit_token: result.edit_token,
+          });
+        } catch (error) {
+          console.warn("[overseas-cost-workbench] 旧批次编辑租约释放失败，将在过期后自动释放", error);
+        }
+      }
+      return false;
+    }
     if (!result || !result.ok) {
       this.detailState.readonly = true;
       const lockedBy = (result && result.locked_by) || "其他用户";

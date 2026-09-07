@@ -349,7 +349,11 @@ def normalize_fee_payload(payload) -> dict:
     elif raw.get("amount") not in (None, ""):
         amount = _decimal_text(raw.get("amount"))
 
-    currency = str(raw.get("currency") if raw.get("currency") is not None else "").strip().upper()
+    currency = (
+        "RMB"
+        if "currency" not in raw
+        else str(raw.get("currency") if raw.get("currency") is not None else "").strip().upper()
+    )
     if not re.fullmatch(r"[A-Z]{3}", currency):
         raise ValueError("币种必须是三位英文字母代码。")
 
