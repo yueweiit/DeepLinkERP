@@ -58,10 +58,75 @@ def after_migrate() -> None:
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
+    mark_legacy_erp_links_unverified()
     ensure_workspace()
     ensure_workspace_sidebar()
     ensure_desktop_icon()
     clear_permission_cache()
+
+
+def _json_object(value) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def build_legacy_erp_migration_update(batch: dict) -> dict:
+    """Mark old writeback evidence as unverified without inferring any new business fact."""
+
+    extra = _json_object((batch or {}).get("extra_json"))
+    if str((batch or {}).get("writeback_status") or "").lower() != "success":
+        return {"changed": False, "extra_json": json.dumps(extra, ensure_ascii=False, separators=(",", ":"))}
+    migration = extra.get("erp_sync_migration")
+    if isinstance(migration, dict) and migration.get("legacy_link_status"):
+        return {"changed": False, "extra_json": json.dumps(extra, ensure_ascii=False, separators=(",", ":"))}
+    extra["erp_sync_migration"] = {
+        "version": 1,
+        "legacy_link_status": "UNVERIFIED",
+        "legacy_target_document": str((batch or {}).get("erp_target_doc") or ""),
+        "source_writeback_status": str((batch or {}).get("writeback_status") or ""),
+    }
+    return {"changed": True, "extra_json": json.dumps(extra, ensure_ascii=False, separators=(",", ":"))}
+
+
+def mark_legacy_erp_links_unverified(*, frappe_module=None) -> dict:
+    """Record local migration state only; never read credentials or call a remote ERP."""
+
+    if frappe_module is None:
+        try:
+            import frappe as frappe_module
+        except Exception:
+            return {"ok": False, "message": "当前未连接 Frappe。"}
+    if not frappe_module.db.exists("DocType", "Overseas Cost ERP Document Link"):
+        return {"ok": True, "scanned": 0, "changed": 0, "message": "ERP 同步账本尚未安装。"}
+    rows = frappe_module.get_all(
+        "Overseas Cost Batch",
+        filters={"writeback_status": "Success"},
+        fields=["name", "writeback_status", "erp_target_doc", "extra_json"],
+        limit_page_length=0,
+    )
+    changed = 0
+    for row in rows:
+        if frappe_module.db.exists("Overseas Cost ERP Document Link", {"batch": row.get("name")}):
+            continue
+        update = build_legacy_erp_migration_update(row)
+        if not update["changed"]:
+            continue
+        frappe_module.db.set_value(
+            "Overseas Cost Batch",
+            row.get("name"),
+            "extra_json",
+            update["extra_json"],
+            update_modified=False,
+        )
+        changed += 1
+    if changed:
+        frappe_module.db.commit()
+    return {"ok": True, "scanned": len(rows), "changed": changed}
 
 
 def _normalize_language_code(value: object) -> str:

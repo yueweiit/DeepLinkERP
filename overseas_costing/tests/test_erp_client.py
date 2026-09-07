@@ -425,3 +425,48 @@ def test_normalize_currency_accepts_historical_chinese_labels() -> None:
     assert erp_client._normalize_currency("人民币RMB") == "CNY"
     assert erp_client._normalize_currency("美元 USD") == "USD"
     assert erp_client._normalize_currency("墨西哥比索MXN") == "MXN"
+
+
+def test_legacy_candidate_lookup_is_read_only_and_returns_stable_rows(monkeypatch) -> None:
+    calls = []
+
+    def fake_request(_config, *, method, url, body=None):
+        calls.append((method, url, body))
+        if "?fields=" in url:
+            return {"data": [{"name": "PO-OLD-1"}]}
+        return {
+            "data": {
+                "name": "PO-OLD-1",
+                "docstatus": 0,
+                "custom_overseas_business_key": "LEGACY-BK",
+                "custom_overseas_cost_result_hash": "H1",
+                "items": [{
+                    "name": "POI-1",
+                    "custom_overseas_stable_line_key": "L1",
+                    "qty": 2,
+                    "custom_overseas_original_amount": 16,
+                    "custom_overseas_comprehensive_amount": 20,
+                }],
+            }
+        }
+
+    monkeypatch.setattr(erp_client, "_request_json", fake_request)
+    result = erp_client.lookup_legacy_purchase_candidates(
+        {"batch_no": "B-OLD"},
+        {"base_url": "https://erp.example/api/resource", "authorization": "secret", "timeout": 1},
+    )
+
+    assert result[0]["business_key"] == "LEGACY-BK"
+    assert result[0]["items"][0] == {
+        "stable_line_key": "L1",
+        "quantity": 2,
+        "remote_row": "POI-1",
+        "goods_value": 16,
+        "total_cost_rmb": 20,
+        "total_unit_rmb": 0,
+        "freight_alloc_rmb": 0,
+        "clearance_alloc_rmb": 0,
+        "tax_alloc_rmb": 0,
+        "amount_status": "",
+    }
+    assert calls and all(method == "GET" and body is None for method, _url, body in calls)

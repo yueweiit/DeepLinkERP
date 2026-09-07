@@ -550,6 +550,56 @@ def lookup_purchase_by_business_key(payload: dict, config: dict) -> dict:
     return {"found": bool(name), "name": name}
 
 
+def lookup_legacy_purchase_candidates(payload: dict, config: dict) -> list[dict]:
+    """Read at most three old purchase documents by batch number; never mutate ERP."""
+
+    batch_no = str(payload.get("batch_no") or payload.get("batch_name") or "").strip()
+    if not batch_no:
+        return []
+    filters = [["custom_overseas_batch_no", "=", batch_no]]
+    list_url = (
+        f"{_build_doctype_url(config, 'Purchase Order')}"
+        f"?fields={quote(json.dumps(['name'], ensure_ascii=False), safe='')}"
+        f"&filters={quote(json.dumps(filters, ensure_ascii=False), safe='')}"
+        "&limit_page_length=3"
+    )
+    rows = (_request_json(config, method="GET", url=list_url).get("data") or [])
+    candidates = []
+    for row in rows[:3]:
+        name = str((row or {}).get("name") or "")
+        if not name:
+            continue
+        document = (_request_json(
+            config,
+            method="GET",
+            url=_build_doctype_url(config, "Purchase Order", name),
+        ).get("data") or {})
+        candidates.append(
+            {
+                "name": str(document.get("name") or name),
+                "docstatus": int(document.get("docstatus") or 0),
+                "business_key": str(document.get("custom_overseas_business_key") or ""),
+                "cost_result_hash": str(document.get("custom_overseas_cost_result_hash") or ""),
+                "items": [
+                    {
+                        "stable_line_key": str(item.get("custom_overseas_stable_line_key") or ""),
+                        "quantity": item.get("qty") or 0,
+                        "remote_row": str(item.get("name") or ""),
+                        "goods_value": item.get("custom_overseas_original_amount") or 0,
+                        "total_cost_rmb": item.get("custom_overseas_comprehensive_amount") or 0,
+                        "total_unit_rmb": item.get("custom_overseas_comprehensive_unit_price") or 0,
+                        "freight_alloc_rmb": item.get("custom_overseas_freight_alloc_amount") or 0,
+                        "clearance_alloc_rmb": item.get("custom_overseas_clearance_alloc_amount") or 0,
+                        "tax_alloc_rmb": item.get("custom_overseas_tax_alloc_amount") or 0,
+                        "amount_status": str(item.get("custom_overseas_amount_status") or document.get("custom_overseas_amount_status") or ""),
+                    }
+                    for item in document.get("items") or []
+                ],
+            }
+        )
+    return candidates
+
+
 def create_purchase(payload: dict, config: dict) -> dict:
     """Create a draft purchase in one explicitly selected ERP site."""
 

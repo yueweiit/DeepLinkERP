@@ -218,6 +218,138 @@ def verify_legacy_document_candidates(candidates: list[dict], expected_items: li
     return {"status": "VERIFIED", "remote_document": str(candidate.get("name") or "")}
 
 
+def reconcile_legacy_document_candidates(
+    *, batch: str, site_code: str, expected_items: list[dict], candidates: list[dict], store
+) -> dict:
+    """Persist links only after a caller's read-only lookup yields one exact candidate."""
+
+    verification = verify_legacy_document_candidates(candidates, expected_items)
+    if verification.get("status") != "VERIFIED":
+        return verification
+    candidate = candidates[0]
+    remote_by_key = {
+        str(row.get("stable_line_key") or ""): row
+        for row in candidate.get("items") or []
+        if row.get("stable_line_key")
+    }
+    business_key = str(candidate.get("business_key") or f"legacy:{batch}:{site_code}:{candidate.get('name') or ''}")
+    snapshot_items = []
+    for expected in expected_items or []:
+        key = str(expected.get("stable_line_key") or "")
+        remote = remote_by_key.get(key) or {}
+        quantity = remote.get("quantity") or expected.get("quantity") or 0
+        snapshot_items.append(
+            {
+                **expected,
+                **remote,
+                "stable_line_key": key,
+                "source_quantity": quantity,
+                "quantity": quantity,
+                "goods_value": remote.get("goods_value") or 0,
+                "total_cost_rmb": remote.get("total_cost_rmb") or 0,
+                "total_unit_rmb": remote.get("total_unit_rmb") or 0,
+                "freight_alloc_rmb": remote.get("freight_alloc_rmb") or 0,
+                "clearance_alloc_rmb": remote.get("clearance_alloc_rmb") or 0,
+                "tax_alloc_rmb": remote.get("tax_alloc_rmb") or 0,
+            }
+        )
+    verify_payload = {
+        "batch_no": str(batch or ""),
+        "site_code": str(site_code or ""),
+        "subsidiary_code": str((expected_items[0] if expected_items else {}).get("subsidiary_code") or ""),
+        "business_key": business_key,
+        "amount_status": str(candidate.get("amount_status") or "ACTUAL"),
+        "items": snapshot_items,
+    }
+    legacy_cost_hash = str(candidate.get("cost_result_hash") or f"LEGACY-{payload_hash(verify_payload)}")
+    prepared = prepare_sync_request(
+        store.requests,
+        operation="VERIFY",
+        batch=batch,
+        version="",
+        cost_result_hash=legacy_cost_hash,
+        site_code=site_code,
+        business_key=business_key,
+        payload=verify_payload,
+        intent_key=f"legacy-verify:{candidate.get('name') or ''}",
+    )
+    request = prepared["request"]
+    if prepared["action"] == "EXECUTE":
+        store.save_request(request)
+        request = transition_request(request, "RUNNING")
+        store.save_request(request)
+        request = transition_request(request, "SUCCESS", safe_response={"read_only_verified": True})
+        store.save_request(request)
+    for expected in expected_items or []:
+        key = str(expected.get("stable_line_key") or "")
+        remote = remote_by_key.get(key) or {}
+        store.save_link(
+            {
+                "batch": str(batch or ""),
+                "stable_line_key": key,
+                "site_code": str(site_code or ""),
+                "business_key": business_key,
+                "remote_doctype": "Purchase Order",
+                "remote_document": str(candidate.get("name") or ""),
+                "remote_row": str(remote.get("remote_row") or remote.get("name") or ""),
+                "remote_docstatus": int(candidate.get("docstatus") or 0),
+                "status": "VERIFIED",
+                "last_cost_result_hash": legacy_cost_hash,
+                "last_payload_hash": "",
+            }
+        )
+    store.commit()
+    return {**verification, "linked_item_count": len(expected_items or []), "business_key": business_key}
+
+
+def verify_legacy_site_links_read_only(
+    *, batch: str, preview: dict, site_configs, client, store
+) -> dict:
+    """Perform GET-only legacy discovery and persist only exact local links."""
+
+    config_by_site = _config_map(site_configs)
+    linked_sites = {str(row.get("site_code") or "") for row in store.links or []}
+    outcomes = []
+    for site in (preview or {}).get("sites") or []:
+        site_code = str(site.get("site_code") or "")
+        if not site_code or site_code in linked_sites:
+            continue
+        expected_items = []
+        for group in site.get("groups") or []:
+            for item in group.get("items") or []:
+                expected_items.append(
+                    {
+                        **item,
+                        "stable_line_key": str(item.get("stable_line_key") or ""),
+                        "quantity": item.get("effective_shipped_qty")
+                        or item.get("actual_shipped_qty")
+                        or item.get("quantity")
+                        or 0,
+                    }
+                )
+        config = config_by_site.get(site_code)
+        if not config:
+            outcomes.append({"site_code": site_code, "status": "MANUAL_REQUIRED", "code": "ERP_SITE_CONFIG_REQUIRED"})
+            continue
+        try:
+            candidates = client.lookup_legacy_purchase_candidates(
+                {"batch_no": batch, "expected_items": expected_items}, config
+            )
+        except Exception as exc:
+            outcomes.append({"site_code": site_code, "status": "MANUAL_REQUIRED", "code": type(exc).__name__})
+            continue
+        outcome = reconcile_legacy_document_candidates(
+            batch=batch,
+            site_code=site_code,
+            expected_items=expected_items,
+            candidates=candidates,
+            store=store,
+        )
+        outcomes.append({"site_code": site_code, **outcome})
+    status = "VERIFIED" if outcomes and all(row.get("status") == "VERIFIED" for row in outcomes) else "MANUAL_REQUIRED"
+    return {"status": status, "sites": outcomes, "read_only_remote": True}
+
+
 class InMemorySyncStore:
     """Small transaction-shaped store used by deterministic orchestration tests."""
 
@@ -1055,17 +1187,59 @@ def _enriched_links(store: FrappeSyncStore) -> list[dict]:
 
 
 def preview_erp_updates(*, batch_name: str, from_hash: str, to_hash: str) -> dict:
+    from overseas_costing.services import erp_client
+
     preview_result = preview_erp_sync(batch_name)
     push = preview_result.get("erp_push") or {}
     if str(push.get("cost_result_hash") or "") != str(to_hash or ""):
         return {"ok": False, "code": "COST_RESULT_STALE"}
     store = FrappeSyncStore(batch_name)
+    extra_json = frappe.db.get_value("Overseas Cost Batch", batch_name, "extra_json") or "{}"
+    migration = (_json_object(extra_json).get("erp_sync_migration") or {})
+    legacy_verification = None
+    if not store.links and str(migration.get("legacy_link_status") or "").upper() == "UNVERIFIED":
+        legacy_verification = verify_legacy_site_links_read_only(
+            batch=batch_name,
+            preview=push.get("preview") or {},
+            site_configs=_site_configs(push.get("referenced_sites") or []),
+            client=erp_client,
+            store=store,
+        )
+        if legacy_verification.get("status") != "VERIFIED":
+            return {
+                "ok": False,
+                "ready": False,
+                "status": "MANUAL_REQUIRED",
+                "code": "LEGACY_LINK_MANUAL_REQUIRED",
+                "legacy_verification": legacy_verification,
+                "blocking": [
+                    {
+                        "code": row.get("code") or "LEGACY_LINK_MANUAL_REQUIRED",
+                        "site_code": row.get("site_code") or "",
+                        "message": "历史 ERP 单据无法唯一安全匹配，需人工处理。",
+                    }
+                    for row in legacy_verification.get("sites") or []
+                ],
+                "sites": [],
+            }
+        extra = _json_object(extra_json)
+        extra.setdefault("erp_sync_migration", {})["legacy_link_status"] = "VERIFIED"
+        frappe.db.set_value(
+            "Overseas Cost Batch",
+            batch_name,
+            "extra_json",
+            _canonical(extra),
+            update_modified=False,
+        )
+        frappe.db.commit()
     result = preview_cost_updates(
         old_links=_enriched_links(store),
         new_items=_current_cost_items(push),
         from_hash=from_hash,
         to_hash=to_hash,
     )
+    if legacy_verification is not None:
+        result["legacy_verification"] = legacy_verification
     result["preview_revision"] = _hash(result)
     return {"ok": result.get("ready", False), **result}
 

@@ -39,6 +39,7 @@ import frappe
 from minio.error import S3Error
 
 from overseas_costing.api import packing_api
+from overseas_costing.api import erp_sync
 from overseas_costing.api import workbench
 from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
 
@@ -46,6 +47,8 @@ if not hasattr(workbench, "get_batch_dingtalk_approval_detail"):
     raise SystemExit("backend is missing get_batch_dingtalk_approval_detail")
 if not hasattr(packing_api, "preview_freight_comparison"):
     raise SystemExit("backend is missing packing_api.preview_freight_comparison")
+if not hasattr(erp_sync, "preview_erp_sync"):
+    raise SystemExit("backend is missing multi-site ERP sync API")
 
 page_script = Path(
     "/home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/"
@@ -56,16 +59,65 @@ if not page_script.is_file():
 if "renderDingtalkApprovalTab" not in page_script.read_text(encoding="utf-8"):
     raise SystemExit("workbench page script is missing renderDingtalkApprovalTab")
 page_source = page_script.read_text(encoding="utf-8")
-for marker in ("openPackingFlowDialog", "独立试算，不修改正式费用"):
+for marker in ("openPackingFlowDialog", "独立试算，不修改正式费用", "renderErpSitePanel", "按站点推送预览"):
     if marker not in page_source:
         raise SystemExit(f"workbench page script is missing {marker}")
 
 frappe.init(site=os.environ["SITE_NAME"], sites_path="/home/frappe/frappe-bench/sites")
 frappe.connect()
 try:
-    for doctype in ("Overseas Packing Snapshot", "Overseas Freight Comparison"):
+    for doctype in (
+        "Overseas Packing Snapshot",
+        "Overseas Freight Comparison",
+        "Overseas Cost ERP Site",
+        "Overseas Cost Project Route",
+        "Overseas Cost ERP Document Link",
+        "Overseas Cost ERP Sync Request",
+    ):
         if not frappe.db.exists("DocType", doctype):
             raise SystemExit(f"missing DocType after migrate: {doctype}")
+
+    # NO REAL ERP WRITE: deployment verification reads only safe site metadata.
+    erp_sites = frappe.get_all(
+        "Overseas Cost ERP Site",
+        fields=["site_code", "label", "enabled", "capability_status", "cost_update_mode"],
+        order_by="site_code asc",
+        limit_page_length=1000,
+    )
+    for site in erp_sites:
+        capability = str(site.get("capability_status") or "UNVERIFIED").upper()
+        update_mode = str(site.get("cost_update_mode") or "DISABLED").upper()
+        if update_mode == "DRAFT_PURCHASE_ORDER" and capability != "VERIFIED":
+            raise SystemExit(f"unverified ERP site is write-enabled: {site.get('site_code')}")
+        print(
+            "ERP SITE",
+            site.get("site_code"),
+            capability,
+            update_mode,
+        )
+    required_remote_fields = {
+        "Purchase Order": {
+            "custom_overseas_business_key",
+            "custom_overseas_cost_result_hash",
+            "custom_overseas_amount_status",
+            "custom_overseas_total_cost_rmb",
+        },
+        "Purchase Order Item": {
+            "custom_overseas_stable_line_key",
+            "custom_overseas_comprehensive_amount",
+            "custom_overseas_amount_status",
+        },
+    }
+    for doctype, required_fields in required_remote_fields.items():
+        meta = frappe.get_meta(doctype)
+        available = {field.fieldname for field in meta.fields}
+        missing = sorted(required_fields - available)
+        if missing:
+            raise SystemExit(f"{doctype} missing ERP sync fields: {missing}")
+    business_key = frappe.get_meta("Purchase Order").get_field("custom_overseas_business_key")
+    if not business_key or not int(business_key.unique or 0):
+        raise SystemExit("Purchase Order business key is not unique")
+    print("ERP FIELD CONTRACT OK: stable key, draft cost fields and readback markers are installed")
 
     clients = get_packing_runtime_clients()
     views = (

@@ -13,6 +13,11 @@ bench --site development.localhost execute \
 bench --site development.localhost execute \
   overseas_costing.scripts.test_purchase_order_writeback.cleanup --kwargs \
   '{"test_batch_no":"ERPTEST-HPCU5155607-20260901103000"}'
+
+多站点执行前先输出受控计划：
+bench --site development.localhost execute \
+  overseas_costing.scripts.test_purchase_order_writeback.preview_controlled_multisite \
+  --kwargs '{"batch_no":"HPCU5155607","test_batch_no":"ERPTEST-HPCU5155607-20260907"}'
 """
 
 from __future__ import annotations
@@ -53,6 +58,63 @@ ITEM_FIELDS = [
     "custom_overseas_business_entity",
     "custom_overseas_cost_center",
 ]
+
+
+def validate_controlled_test_scope(*, site_name: str, test_batch_no: str) -> dict:
+    """Fail closed unless the caller explicitly names the local sandbox and test prefix."""
+
+    normalized_site = str(site_name or "").strip()
+    normalized_batch = str(test_batch_no or "").strip()
+    if normalized_site != "development.localhost":
+        raise ValueError("受控草稿联调只允许 development.localhost。")
+    if not normalized_batch.startswith("ERPTEST-"):
+        raise ValueError("测试批次必须使用 ERPTEST- 前缀。")
+    return {"ok": True, "site_name": normalized_site, "test_batch_no": normalized_batch, "write_scope": "DRAFT_ONLY"}
+
+
+def build_controlled_multisite_plan(*, batch_no: str, test_batch_no: str, stable_line_keys: list[str]) -> dict:
+    """Return the complete two-site plan before any local draft is created."""
+
+    validate_controlled_test_scope(site_name="development.localhost", test_batch_no=test_batch_no)
+    keys = [str(value or "").strip() for value in stable_line_keys or [] if str(value or "").strip()]
+    sites = [
+        {"site_code": "ERPTEST-PROD", "subsidiary_code": "ERPTEST_PROD_CO", "stable_line_keys": keys[::2]},
+        {"site_code": "ERPTEST-ECOM", "subsidiary_code": "ERPTEST_ECOM_CO", "stable_line_keys": keys[1::2]},
+    ]
+    return {
+        "ok": bool(keys),
+        "source_batch_no": str(batch_no or ""),
+        "test_batch_no": str(test_batch_no or ""),
+        "site_name": "development.localhost",
+        "write_enabled": False,
+        "required_confirmation": True,
+        "sites": sites,
+        "checks": [
+            "两个逻辑站点只创建 ERPTEST- 物料和草稿采购单",
+            "相同请求重放不重复建单，部分失败只重试失败站点",
+            "暂估转实际只更新成本字段，回读确认数量不变",
+        ],
+        "next_action": "核对候选和目标后，在明确的本地草稿执行命令中再次确认。",
+    }
+
+
+def preview_controlled_multisite(batch_no: str, test_batch_no: str) -> dict:
+    """Read the source and print the two-site draft plan; this function performs no writes."""
+
+    validate_controlled_test_scope(site_name=_current_site_name(), test_batch_no=test_batch_no)
+    source = _load_source_payload(str(batch_no or "").strip(), None)
+    if not source.get("ok"):
+        return source
+    keys = [str(row.get("stable_line_key") or "") for row in (source.get("payload") or {}).get("items") or []]
+    return build_controlled_multisite_plan(
+        batch_no=batch_no,
+        test_batch_no=test_batch_no,
+        stable_line_keys=keys,
+    )
+
+
+def _current_site_name() -> str:
+    return str(getattr(getattr(frappe, "local", None), "site", "") or "")
 
 
 def run_hpcu5155607(test_batch_no: str | None = None, reuse_existing: bool = True) -> dict:
@@ -161,6 +223,7 @@ def _run_source_batch(
     if not test_batch_no and reuse_existing:
         test_batch_no = _find_latest_test_batch_no(f"ERPTEST-{source_batch_no}-")
     test_batch_no = test_batch_no or f"ERPTEST-{source_batch_no}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    validate_controlled_test_scope(site_name=_current_site_name(), test_batch_no=test_batch_no)
     config = _resolve_local_config(test_batch_no)
     payload = _build_test_payload(source["payload"], test_batch_no, config)
 
@@ -249,8 +312,10 @@ def cleanup(test_batch_no: str) -> dict:
     """清理明确指定的一次 ERPTEST 本地测试，不影响正式采购订单和物料。"""
 
     test_batch_no = str(test_batch_no or "").strip()
-    if not test_batch_no.startswith(TEST_PREFIX):
-        return {"ok": False, "message": f"只允许清理 {TEST_PREFIX} 前缀的测试批次。"}
+    try:
+        validate_controlled_test_scope(site_name=_current_site_name(), test_batch_no=test_batch_no)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}
 
     orders = frappe.get_all(
         "Purchase Order",

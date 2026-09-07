@@ -819,15 +819,15 @@ git commit -m 'feat: add multi-site ERP synchronization UI'
 - Create: `overseas_costing/tests/test_erp_sync_acceptance.py`
 - Modify: `.github/scripts/sync_and_verify_assets.sh`
 
-- [ ] **Step 1: 写历史迁移失败测试**
+- [x] **Step 1: 写历史迁移失败测试**
 
 断言已推送历史批次不会自动标费用完成或当前已同步；历史相等数量不变成默认；旧单据唯一匹配才建 VERIFIED link；多版本/多单据不发送写入；迁移本身零 HTTP 写请求。
 
-- [ ] **Step 2: 实现幂等迁移**
+- [x] **Step 2: 实现幂等迁移**
 
 `after_migrate()` 只补站点/路由 DocType 元数据和本地历史候选状态，不读取 Password、不发远端请求。旧批次标 `legacy_link_status=UNVERIFIED`；真正关联在用户打开更新预览时执行只读核验。
 
-- [ ] **Step 3: 运行离线全回归**
+- [x] **Step 3: 运行离线全回归**
 
 ```bash
 python -m pytest -q \
@@ -847,19 +847,19 @@ python -m pytest -q \
 
 Expected: PASS with fake HTTP only.
 
-- [ ] **Step 4: 在本地 Frappe 草稿目标受控联调**
+- [ ] **Step 4: 在本地 Frappe 草稿目标受控联调**（本机无 `development.localhost` 专用站点，保持未执行写入）
 
 扩展 `test_purchase_order_writeback.py`，只能操作 `ERPTEST-` 前缀 Item/草稿 Purchase Order。执行前列出候选和将创建的目标；验证两个逻辑站点、稳定 link、重复请求、部分失败、暂估转实际仅更新成本字段及数量不变；清理仅删除本次测试前缀草稿。
 
 本地通过后，输出一份逐站点部署检查：字段规范版本、业务键唯一查询能力、草稿行更新能力、凭据最小权限和回读能力。没有完成该站点检查，不得把它设为可写。
 
-- [ ] **Step 5: 设置真实站点写入审批门槛**
+- [x] **Step 5: 设置真实站点写入审批门槛**
 
 如果用户尚未明确给出测试站点和测试批次，到此停止真实写联调并报告：离线及本地草稿结果、只读能力摘要、每站点 `cost_update_mode` 建议。不得自行选择生产单据。
 
 获得明确范围后，先只读核验，再预览完整请求；用户再次确认目标后只执行一笔测试创建/更新并立即回读。不提交单据、不改变库存、不扩大凭据权限。失败保留真实状态，不用新单绕过。
 
-- [ ] **Step 6: 验证部署检查并提交**
+- [x] **Step 6: 验证部署检查并提交**
 
 ```bash
 python overseas_costing/scripts/build_workbench_assets.py

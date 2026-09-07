@@ -75,8 +75,10 @@ def test_route_apply_and_retry_are_write_operations(monkeypatch) -> None:
     )
     monkeypatch.setattr(api.erp_sync_service, "apply_bulk_route", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(api.erp_sync_service, "retry_erp_request", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(api.erp_sync_service, "preview_erp_updates", lambda **kwargs: {"ok": True})
 
     api.apply_bulk_route("BATCH", "REV", "EDIT", "MOD")
     api.retry_erp_request("BATCH", "REQ-1")
+    api.preview_erp_updates("BATCH", "H1", "H2")
 
-    assert calls == [("BATCH", "write"), ("BATCH", "retry")]
+    assert calls == [("BATCH", "write"), ("BATCH", "retry"), ("BATCH", "write")]

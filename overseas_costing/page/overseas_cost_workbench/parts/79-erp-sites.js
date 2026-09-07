@@ -24,7 +24,7 @@
     const blockers = push.blocking || [];
     const canCreate = OverseasCostWorkbenchState.erpCreateCanStart(push);
     const retryable = OverseasCostWorkbenchState.erpRetryableSites(work);
-    const updateRequired = (work.sites || []).some((site) => String(site.state || "") === "UPDATE_REQUIRED");
+    const updateRequired = (work.sites || []).some((site) => ["UPDATE_REQUIRED", "MANUAL_REQUIRED"].includes(String(site.state || ""))) || String(work.legacy_link_status || "") === "UNVERIFIED";
     const siteCards = siteCodes.map((siteCode) => {
       const sitePreview = previewSites.find((site) => String(site.site_code || "") === siteCode) || {};
       const siteWork = workBySite[siteCode] || { site_code: siteCode, state: "CREATE_REQUIRED" };
@@ -59,7 +59,7 @@
         <div class="ocw-erp-panel-actions">
           <button class="ocw-outline-btn" type="button" data-action="erp-bulk-route">整批归属</button>
           <button class="ocw-primary-btn" type="button" data-action="erp-create-preview">按站点推送预览</button>
-          ${updateRequired ? `<button class="ocw-outline-btn" type="button" data-action="erp-update-preview">预览实际费用更新</button>` : ""}
+          ${updateRequired ? `<button class="ocw-outline-btn" type="button" data-action="erp-update-preview">${String(work.legacy_link_status || "") === "UNVERIFIED" ? "只读核验历史单据" : "预览实际费用更新"}</button>` : ""}
         </div>
         ${blockers.length ? `<div class="ocw-erp-blockers"><strong>当前可预览成本，但不能推送 ERP</strong>${blockers.map((row) => `<span>${this.escape(row.message || row.code || "请补齐资料")}</span>`).join("")}</div>` : ""}
         ${siteCards ? `<div class="ocw-erp-site-grid">${siteCards}</div>` : `<div class="ocw-erp-site-empty"><strong>尚未形成站点分组</strong><span>先在物料表补齐项目归属，或使用“整批归属”预览变更。</span></div>`}
@@ -186,10 +186,11 @@
     const push = this.detailState.erpPush || {};
     const work = this.detailState.erpWork || {};
     const hashes = [...new Set((work.sites || []).map((site) => String(site.last_hash || "")).filter(Boolean))];
-    if (hashes.length !== 1) throw new Error(hashes.length ? "各站点当前成本版本不一致，需人工处理。" : "尚无可更新的 ERP 历史结果。");
+    const legacyUnverified = String(work.legacy_link_status || "") === "UNVERIFIED";
+    if (hashes.length !== 1 && !legacyUnverified) throw new Error(hashes.length ? "各站点当前成本版本不一致，需人工处理。" : "尚无可更新的 ERP 历史结果。");
     const preview = await this.call("overseas_costing.api.erp_sync.preview_erp_updates", {
       batch_name: batch.name,
-      from_hash: hashes[0],
+      from_hash: legacyUnverified ? "" : hashes[0],
       to_hash: push.cost_result_hash,
     });
     const dialog = new frappe.ui.Dialog({

@@ -202,7 +202,12 @@ def _build_multi_site_erp_detail_state(
 
 
 def _build_erp_work_detail_state(
-    *, current_hash: str, site_codes: list[str], links: list[dict], requests: list[dict]
+    *,
+    current_hash: str,
+    site_codes: list[str],
+    links: list[dict],
+    requests: list[dict],
+    legacy_link_status: str = "",
 ) -> dict:
     from overseas_costing.services import fee_status_service
 
@@ -232,6 +237,8 @@ def _build_erp_work_detail_state(
         last_hash = next(iter(link_hashes)) if len(link_hashes) == 1 else ""
         request_status = str(latest_request.get("status") or "").upper()
         status = request_status or ("SUCCESS" if all_links_success else "PENDING")
+        if not site_links and not site_requests and str(legacy_link_status or "").upper() == "UNVERIFIED":
+            status = "MANUAL_REQUIRED"
         if len(link_hashes) > 1 and not request_status:
             status = "FAILED"
         site_inputs.append(
@@ -248,6 +255,7 @@ def _build_erp_work_detail_state(
             }
         )
     summary = fee_status_service.build_erp_work_summary(current_hash=current_hash, sites=site_inputs)
+    summary["legacy_link_status"] = str(legacy_link_status or "")
     summary["legacy_writeback_status"] = "Success" if summary["overall"] == "SYNCED" else "Pending"
     summary["legacy_writeback_message"] = (
         "所有 ERP 站点已同步当前成本结果。"
@@ -1336,6 +1344,7 @@ def _attach_batch_erp_work(items: list[dict]) -> list[dict]:
         return items
     for item in items:
         batch_name = str(item.get("name") or "")
+        migration = _load_json(item.get("extra_json")).get("erp_sync_migration") or {}
         erp_work = _build_erp_work_detail_state(
             current_hash=str(item.get("cost_result_hash") or ""),
             site_codes=[
@@ -1345,6 +1354,7 @@ def _attach_batch_erp_work(items: list[dict]) -> list[dict]:
             ],
             links=[row for row in links if str(row.get("batch") or "") == batch_name],
             requests=[row for row in requests if str(row.get("batch") or "") == batch_name],
+            legacy_link_status=str(migration.get("legacy_link_status") or ""),
         )
         item["erp_work"] = erp_work
         if erp_work.get("sites"):
@@ -1897,11 +1907,13 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     except Exception:
         erp_links = []
         erp_requests = []
+    migration = _load_json(header.get("extra_json")).get("erp_sync_migration") or {}
     erp_work = _build_erp_work_detail_state(
         current_hash=str(version.get("cost_result_hash") or ""),
         site_codes=erp_push.get("referenced_sites") or [],
         links=erp_links,
         requests=erp_requests,
+        legacy_link_status=str(migration.get("legacy_link_status") or ""),
     )
     if erp_work.get("sites"):
         header["writeback_status"] = erp_work["legacy_writeback_status"]

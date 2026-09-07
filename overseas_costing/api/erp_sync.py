@@ -88,7 +88,8 @@ def start_erp_create(batch_name, cost_result_hash, request_key):
 
 @frappe.whitelist()
 def preview_erp_updates(batch_name, from_hash, to_hash):
-    batch_name = require_erp_sync_permission(batch_name, "read")
+    # 历史批次在此操作中可能根据 GET-only 远端核验建立本地 link，因此要求写权限。
+    batch_name = require_erp_sync_permission(batch_name, "write")
     return erp_sync_service.preview_erp_updates(
         batch_name=batch_name,
         from_hash=_text(from_hash, maximum=128),
