@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from overseas_costing.services.material_input_service import (
+    build_shipping_quantity_updates,
     build_material_requirements,
     ensure_stable_line_key,
     resolve_effective_quantity,
@@ -148,6 +149,31 @@ def test_missing_project_warns_for_push_but_not_cost_preview() -> None:
     assert project["gate"] == "erp_push"
     assert result["summary"]["blocking_for_calculation"] == 0
     assert result["summary"]["blocking_for_erp"] == 1
+
+
+def test_shipping_quantity_updates_keep_default_and_manual_modes_distinct() -> None:
+    default_updates = build_shipping_quantity_updates(
+        {"quantity": 34, "purchase_uom": "桶", "actual_shipped_qty": 32},
+        mode="DEFAULT_PURCHASE",
+        value="",
+        uom="",
+    )
+    manual_updates = build_shipping_quantity_updates(
+        {"quantity": 34, "purchase_uom": "桶"},
+        mode="MANUAL_CONFIRMED",
+        value="32",
+        uom="桶",
+    )
+
+    assert default_updates == {
+        "actual_shipped_qty": None,
+        "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+        "actual_shipped_qty_source_revision": "",
+        "shipped_uom": "桶",
+        "cost_output_uom": "桶",
+    }
+    assert manual_updates["actual_shipped_qty"] == "32"
+    assert manual_updates["actual_shipped_qty_mode"] == "MANUAL_CONFIRMED"
 
 
 def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:

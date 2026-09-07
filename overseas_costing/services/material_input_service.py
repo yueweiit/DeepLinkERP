@@ -5,6 +5,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Callable, Dict, Optional
 from uuid import uuid4
 
+try:
+    import frappe
+except Exception:  # pragma: no cover - pure tests do not require Frappe
+    frappe = None
+
 
 VALID_QTY_MODES = frozenset(
     {
@@ -247,4 +252,120 @@ def build_material_requirements(items: list, rules: list) -> dict:
             "warnings": warning_count,
         },
         "by_item": by_item,
+    }
+
+
+def build_shipping_quantity_updates(
+    item: dict,
+    *,
+    mode: str,
+    value: object,
+    uom: str,
+    source_revision: str = "",
+) -> dict:
+    normalized_mode = str(mode or "").strip()
+    if normalized_mode not in {"DEFAULT_PURCHASE", "MANUAL_CONFIRMED"}:
+        raise ValueError("发货数量来源状态不合法。")
+    resolved_uom = str(uom or item.get("shipped_uom") or item.get("purchase_uom") or item.get("unit") or "").strip()
+    if not resolved_uom:
+        raise ValueError("请填写发货单位。")
+
+    if normalized_mode == "DEFAULT_PURCHASE":
+        if _positive_decimal(item.get("quantity")) is None:
+            raise ValueError("采购数量缺失，不能设为采购数量默认。")
+        quantity = None
+        revision = ""
+    else:
+        quantity_value = _positive_decimal(value)
+        if quantity_value is None:
+            raise ValueError("手工确认的发货数量必须大于 0。")
+        quantity = format(quantity_value, "f")
+        revision = str(source_revision or "")
+
+    return {
+        "actual_shipped_qty": quantity,
+        "actual_shipped_qty_mode": normalized_mode,
+        "actual_shipped_qty_source_revision": revision,
+        "shipped_uom": resolved_uom,
+        "cost_output_uom": resolved_uom,
+    }
+
+
+def set_shipping_quantity(
+    batch_name: str,
+    item_name: str,
+    mode: str,
+    value: object,
+    uom: str,
+    edit_token: str,
+    expected_modified: str,
+) -> dict:
+    """Atomically update quantity, provenance and output unit for one item."""
+
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "batch_name": batch_name,
+            "item_name": item_name,
+            "updates": build_shipping_quantity_updates(
+                {"quantity": value, "purchase_uom": uom},
+                mode=mode,
+                value=value,
+                uom=uom,
+            ),
+        }
+
+    from overseas_costing.services import batch_service, edit_session_service, import_service
+
+    resolved_batch = batch_service._resolve_batch_name(str(batch_name or ""))
+    if not resolved_batch:
+        raise ValueError(f"未找到批次：{batch_name}")
+    edit_session_service.assert_batch_write(
+        resolved_batch,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+    )
+    item = frappe.db.get_value(
+        "Overseas Cost Item",
+        str(item_name or ""),
+        [
+            "name",
+            "batch",
+            "version",
+            "row_no",
+            "quantity",
+            "unit",
+            "purchase_uom",
+            "shipped_uom",
+            "actual_shipped_qty",
+        ],
+        as_dict=True,
+    ) or {}
+    if str(item.get("batch") or "") != resolved_batch:
+        raise ValueError("物料行不属于当前批次。")
+    current_version = str(frappe.db.get_value("Overseas Cost Batch", resolved_batch, "current_version") or "")
+    if str(item.get("version") or "") != current_version:
+        raise RuntimeError("物料行不属于当前版本，请刷新后重试。")
+
+    updates = build_shipping_quantity_updates(item, mode=mode, value=value, uom=uom)
+    changed = import_service._update_item_fields(
+        item_name=str(item["name"]),
+        batch_doc_name=resolved_batch,
+        version_name=current_version,
+        row_no=item.get("row_no"),
+        field_updates=updates,
+        action_remark="设置采购数量默认发货" if mode == "DEFAULT_PURCHASE" else "人工确认发货数量",
+    )
+    if changed:
+        import_service._mark_batch_dirty(resolved_batch)
+        frappe.db.commit()
+    return {
+        "ok": True,
+        "batch_name": resolved_batch,
+        "version_name": current_version,
+        "item_name": str(item["name"]),
+        "changed_field_count": len(changed),
+        "updates": updates,
+        "batch_modified": frappe.db.get_value("Overseas Cost Batch", resolved_batch, "modified"),
     }

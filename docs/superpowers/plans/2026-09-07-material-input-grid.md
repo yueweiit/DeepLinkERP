@@ -432,7 +432,7 @@ git commit -m 'feat: preview and apply material field imports'
 - Create: `overseas_costing/tests/test_materials_api.py`
 - Modify: `overseas_costing/services/access_control.py`
 
-- [ ] **Step 1: 写 API 权限失败测试**
+- [x] **Step 1: 写 API 权限失败测试**
 
 锁定接口：
 
@@ -445,17 +445,17 @@ set_shipping_quantity(batch_name, item_name, mode, value, uom, edit_token, expec
 
 测试无批次读取权限不返回来源存在性；写接口要求物料/批次权限、有效编辑租约、请求体大小限制及匹配批次的签名预览。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_materials_api.py overseas_costing/tests/test_access_control.py`
 
 Expected: FAIL because `api.materials` is absent.
 
-- [ ] **Step 3: 实现薄 API 层**
+- [x] **Step 3: 实现薄 API 层**
 
 API 只做输入归一化、权限校验和调用 service；不在 API 里解析 Excel 或计算红格。`choices_json` 限制条数和字节数，`source_id` 不接受任意服务器路径或 URL。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_materials_api.py overseas_costing/tests/test_access_control.py`
 
