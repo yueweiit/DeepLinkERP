@@ -346,3 +346,105 @@ class FrappePackingSnapshotRepository:
 
     def rollback(self) -> None:
         frappe.db.rollback()
+
+
+def get_current_packing_snapshot(batch_name: str) -> dict[str, Any] | None:
+    if frappe is None:
+        raise RuntimeError("当前环境未连接 Frappe。")
+    name = frappe.db.get_value(
+        "Overseas Packing Snapshot",
+        {"batch": str(batch_name), "status": "Confirmed", "is_current": 1},
+        "name",
+    )
+    if not name:
+        return None
+    return _public_snapshot(frappe.get_doc("Overseas Packing Snapshot", name))
+
+
+def list_packing_sources(batch_name: str) -> dict[str, Any]:
+    """返回受控来源 ID；不返回服务器路径、对象键、原始审批 JSON 或任何凭据。"""
+
+    if frappe is None:
+        raise RuntimeError("当前环境未连接 Frappe。")
+    attachment_rows = frappe.get_list(
+        "Overseas Cost Attachment",
+        filters={"batch": str(batch_name)},
+        fields=["name", "source_type", "oa_attachment_origin", "attachment_type", "file_name", "file_url", "modified"],
+        limit_page_length=1000,
+    )
+    manual = []
+    approval = []
+    for row in attachment_rows:
+        item = {
+            "source_id": row.get("name"),
+            "source_label": row.get("file_name") or row.get("name"),
+            "source_updated_at": row.get("modified"),
+            "available": bool(row.get("file_url")),
+            "attachment_type": row.get("attachment_type") or "",
+        }
+        if str(row.get("source_type") or "").upper() == "OA":
+            approval.append(
+                {
+                    **item,
+                    "source_kind": "approval_attachment",
+                    "origin": row.get("oa_attachment_origin") or "Form",
+                }
+            )
+        else:
+            manual.append({**item, "source_kind": "manual_attachment"})
+
+    detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name))
+    comments = []
+    for approval_row in [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]:
+        if not isinstance(approval_row, dict) or approval_row.get("excluded"):
+            continue
+        for timeline in approval_row.get("timeline") or []:
+            if not isinstance(timeline, dict) or not timeline.get("packing_candidate") or not timeline.get("source_id"):
+                continue
+            comments.append(
+                {
+                    "source_kind": "approval_comment",
+                    "source_id": timeline.get("source_id"),
+                    "source_label": f"评论 · {timeline.get('user_name') or timeline.get('user_id') or '未知人员'}",
+                    "source_updated_at": timeline.get("operation_time"),
+                    "instance_id": approval_row.get("instance_id") or "",
+                    "available": True,
+                    "remark_preview": str(timeline.get("remark") or "")[:160],
+                }
+            )
+
+    wiki = []
+    wiki_error = ""
+    try:
+        from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
+
+        clients = get_packing_runtime_clients()
+        for workbook in clients.catalog.list_workbooks():
+            sheets = clients.catalog.list_sheets(str(workbook.get("workbook_id") or ""), limit=500)
+            wiki.append(
+                {
+                    "workbook_id": workbook.get("workbook_id"),
+                    "year": workbook.get("year"),
+                    "label": workbook.get("label"),
+                    "updated_at": workbook.get("updated_at"),
+                    "sheets": [
+                        {
+                            "source_kind": "wiki_sheet",
+                            "source_id": f"{sheet.get('workbook_id')}:{sheet.get('sheet_id')}",
+                            "source_label": sheet.get("sheet_name"),
+                            "source_updated_at": sheet.get("source_updated_at"),
+                            "indexed_at": sheet.get("indexed_at"),
+                            "available": True,
+                        }
+                        for sheet in sheets
+                    ],
+                }
+            )
+    except Exception:
+        wiki_error = "知识库装箱表缓存暂不可用，请稍后重试。"
+    return {
+        "manual_attachments": manual,
+        "approval_sources": [*approval, *comments],
+        "wiki_workbooks": wiki,
+        "wiki_error": wiki_error,
+    }

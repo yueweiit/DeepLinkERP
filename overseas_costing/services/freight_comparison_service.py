@@ -220,6 +220,63 @@ def public_comparison(comparison: Any, *, current_snapshot_name: str | None) -> 
     return result
 
 
+def preview_freight_comparison(
+    batch_name: str,
+    snapshot_revision: str,
+    quote: dict[str, Any],
+    *,
+    repository: Any | None = None,
+) -> dict[str, Any]:
+    repo = repository or FrappeFreightComparisonRepository()
+    snapshot = repo.get_snapshot(str(batch_name), str(snapshot_revision))
+    if not snapshot or _record(snapshot, "status") not in {"Confirmed", "Superseded"}:
+        return {"ok": False, "message": "未找到对应的已确认装箱快照。"}
+    result = compare_freight(
+        gross_weight_kg=_record(snapshot, "total_gross_weight_kg"),
+        volume_m3=_record(snapshot, "total_volume_m3"),
+        currency=str(quote.get("currency") or ""),
+        scope_confirmed=bool(quote.get("scope_confirmed")),
+        weight=quote.get("weight") if isinstance(quote.get("weight"), dict) else {},
+        volume=quote.get("volume") if isinstance(quote.get("volume"), dict) else {},
+    )
+    return {"ok": True, "packing_snapshot": _record(snapshot, "name"), "calculation": result}
+
+
+def list_freight_comparisons(batch_name: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    if frappe is None:
+        raise RuntimeError("当前环境未连接 Frappe。")
+    current_name = frappe.db.get_value(
+        "Overseas Packing Snapshot",
+        {"batch": str(batch_name), "status": "Confirmed", "is_current": 1},
+        "name",
+    )
+    rows = frappe.get_list(
+        "Overseas Freight Comparison",
+        filters={"batch": str(batch_name)},
+        fields=[
+            "name",
+            "batch",
+            "packing_snapshot",
+            "request_id",
+            "snapshot_revision",
+            "currency",
+            "scope_confirmed",
+            "gross_weight_kg",
+            "volume_m3",
+            "weight_total",
+            "volume_total",
+            "recommended_basis",
+            "difference_amount",
+            "savings_percent",
+            "quote_remark",
+            "creation",
+        ],
+        order_by="creation desc",
+        limit_page_length=max(1, min(int(limit), 200)),
+    )
+    return [public_comparison(row, current_snapshot_name=current_name) for row in rows]
+
+
 def _number(
     value: Any,
     label: str,

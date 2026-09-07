@@ -62,6 +62,22 @@ def require_attachment_permission(attachment_name: str, ptype: str = "read") -> 
     return normalized_name
 
 
+def require_packing_workflow_permission(batch_reference: str, operation: str) -> str:
+    """统一装箱弹窗各步骤的批次权限；刷新、确认和保存试算均属于写操作。"""
+
+    permissions = {
+        "read": "read",
+        "preview": "read",
+        "refresh": "write",
+        "confirm": "write",
+        "compare": "write",
+    }
+    normalized = str(operation or "").strip().lower()
+    if normalized not in permissions:
+        raise ValueError("装箱工作流操作类型不合法。")
+    return require_batch_permission(batch_reference, permissions[normalized])
+
+
 def validate_api_access() -> None:
     """Frappe auth hook：覆盖整个 overseas_costing.api 命名空间。"""
 

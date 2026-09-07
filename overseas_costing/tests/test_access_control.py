@@ -84,6 +84,24 @@ def test_require_batch_permission_resolves_reference_and_checks_document(monkeyp
     assert calls == ["role", ("Overseas Cost Batch", "write", "BATCH-DOC")]
 
 
+@pytest.mark.parametrize(
+    ("operation", "ptype"),
+    [("read", "read"), ("refresh", "write"), ("confirm", "write"), ("compare", "write")],
+)
+def test_packing_workflow_permission_maps_actions_to_batch_permission(monkeypatch, operation, ptype) -> None:
+    from overseas_costing.services import access_control
+
+    calls = []
+    monkeypatch.setattr(
+        access_control,
+        "require_batch_permission",
+        lambda batch, requested: calls.append((batch, requested)) or "BATCH-DOC",
+    )
+
+    assert access_control.require_packing_workflow_permission("BATCH-NO", operation) == "BATCH-DOC"
+    assert calls == [("BATCH-NO", ptype)]
+
+
 def test_packing_preview_api_uses_server_attachment_path_not_client_rows() -> None:
     api_source = (Path(__file__).resolve().parents[1] / "api" / "import_api.py").read_text(encoding="utf-8")
     block = api_source.split("def preview_packing_list_attachment(", 1)[1].split("@frappe.whitelist()", 1)[0]
