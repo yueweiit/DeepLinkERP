@@ -8,6 +8,13 @@ from typing import Any
 
 
 HEADER_ALIASES = {
+    "source_doc_no": (
+        "对应钉钉采购订单号",
+        "采购审批号",
+        "采购订单号",
+        "sourceapprovalno",
+        "purchaseapprovalno",
+    ),
     "material_code": ("品目编码", "物料编码", "itemcode", "item code", "sku", "货号"),
     "product_name": ("中文品名", "产品名称", "物料名称", "品名", "productname"),
     "quantity": ("总个数", "总数量", "数量", "quantity", "qty"),
@@ -57,6 +64,10 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
         material_rows.append(
             {
                 "source_row": row_number,
+                "source_line_no": row_number,
+                "source_doc_no": _string_value(
+                    _cell_raw(cells, row_number, columns.get("source_doc_no"))
+                ),
                 "material_code": material_code,
                 "product_name": product_name,
                 "quantity": _decimal_text(_decimal_cell(cells, row_number, columns.get("quantity"))),

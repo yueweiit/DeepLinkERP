@@ -194,6 +194,38 @@ def test_source_line_disambiguates_duplicate_sku_in_same_approval() -> None:
     assert result["rows"][0]["target_stable_line_key"] == "L2"
 
 
+def test_provided_approval_and_source_line_never_fall_back_to_sku_only() -> None:
+    existing = [
+        {
+            "name": "I1",
+            "stable_line_key": "L1",
+            "material_code": "M1",
+            "source_doc_no": "PO1",
+            "excel_row_no": 4,
+        }
+    ]
+    wrong_approval = build_material_import_preview(
+        existing,
+        [{"source_row": 9, "material_code": "M1", "source_doc_no": "PO-X"}],
+        {"kind": "manual_xlsx"},
+    )
+    wrong_line = build_material_import_preview(
+        existing,
+        [
+            {
+                "source_row": 9,
+                "source_line_no": 99,
+                "material_code": "M1",
+                "source_doc_no": "PO1",
+            }
+        ],
+        {"kind": "manual_xlsx"},
+    )
+
+    assert wrong_approval["rows"][0]["match_status"] == "unmatched"
+    assert wrong_line["rows"][0]["match_status"] == "unmatched"
+
+
 def test_preview_classifies_supplements_conflicts_and_unmatched_rows() -> None:
     result = build_material_import_preview(
         existing=[
@@ -260,6 +292,16 @@ def test_excel_supplement_never_overwrites_oa_purchase_facts() -> None:
 
     assert changes == [
         {"field": "gross_weight_kg", "old": "", "new": 735.6, "conflict": False}
+    ]
+
+
+def test_frappe_default_zero_is_empty_for_positive_supplement_fields() -> None:
+    assert build_field_changes(
+        existing={"gross_weight_kg": 0.0, "volume_m3": 0},
+        incoming={"gross_weight_kg": 735.6, "volume_m3": 1.5337},
+    ) == [
+        {"field": "gross_weight_kg", "old": 0.0, "new": 735.6, "conflict": False},
+        {"field": "volume_m3", "old": 0, "new": 1.5337, "conflict": False},
     ]
 
 

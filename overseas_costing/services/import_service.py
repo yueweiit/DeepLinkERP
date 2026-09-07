@@ -3298,6 +3298,22 @@ def _prepare_imported_item_values(
     return values
 
 
+def _protect_existing_shipping_values(values: dict, *, source_actual_present: bool) -> dict:
+    """Keep confirmed shipping facts when a normal source refresh omits them."""
+
+    protected = dict(values or {})
+    if not source_actual_present:
+        for fieldname in (
+            "actual_shipped_qty",
+            "actual_shipped_qty_mode",
+            "actual_shipped_qty_source_revision",
+            "shipped_uom",
+            "cost_output_uom",
+        ):
+            protected.pop(fieldname, None)
+    return protected
+
+
 def _upsert_excel_items(
     *,
     batch_doc_name: str,
@@ -3339,14 +3355,10 @@ def _upsert_excel_items(
             "name",
         )
         if existing_name:
-            if not source_actual_present:
-                for fieldname in (
-                    "actual_shipped_qty_mode",
-                    "actual_shipped_qty_source_revision",
-                    "shipped_uom",
-                    "cost_output_uom",
-                ):
-                    values.pop(fieldname, None)
+            values = _protect_existing_shipping_values(
+                values,
+                source_actual_present=source_actual_present,
+            )
             filtered_values = _filter_doctype_values("Overseas Cost Item", values)
             if _item_values_changed(existing_name, filtered_values):
                 frappe.db.set_value(

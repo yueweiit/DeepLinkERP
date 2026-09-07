@@ -96,6 +96,8 @@ def test_xlsx_merges_create_six_package_groups_without_double_counting(tmp_path)
     assert preview["totals"]["volume_m3"]["value"] == "8.7403305"
     assert preview["totals"]["net_weight_kg"]["kind"] == "calculated_detail_sum"
     assert preview["totals"]["net_weight_kg"]["value"] == "3492"
+    assert preview["material_rows"][0]["source_doc_no"] == "202609050001"
+    assert preview["material_rows"][0]["source_line_no"] == 2
     assert preview["groups"][2]["row_numbers"] == [4, 5]
     assert preview["groups"][2]["gross_weight_kg"]["count_once"] is True
     assert preview["groups"][2]["needs_confirmation"] is False

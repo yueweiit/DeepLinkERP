@@ -40,6 +40,15 @@ MATERIAL_IMPORT_FIELDS = (
     "project_collection",
 )
 MATERIAL_SOURCE_FIELDS = MATERIAL_PURCHASE_FACT_FIELDS + MATERIAL_IMPORT_FIELDS
+POSITIVE_SUPPLEMENT_FIELDS = frozenset(
+    {
+        "actual_shipped_qty",
+        "gross_weight_kg",
+        "volume_m3",
+        "volume_weight_kg",
+        "chargeable_weight_kg",
+    }
+)
 
 SOURCE_KIND_ALIASES = {
     "manual_xlsx": "manual_attachment",
@@ -88,6 +97,12 @@ def build_field_changes(existing: dict, incoming: dict) -> list:
         new_value = incoming.get(fieldname)
         if new_value in (None, ""):
             continue
+        if fieldname in POSITIVE_SUPPLEMENT_FIELDS:
+            try:
+                if Decimal(str(new_value)) <= 0:
+                    continue
+            except (InvalidOperation, TypeError, ValueError):
+                continue
         old_value = existing.get(fieldname)
         if _equal(old_value, new_value):
             continue
@@ -96,7 +111,13 @@ def build_field_changes(existing: dict, incoming: dict) -> list:
                 "field": fieldname,
                 "old": old_value,
                 "new": new_value,
-                "conflict": old_value not in (None, ""),
+                "conflict": (
+                    old_value not in (None, "")
+                    and not (
+                        fieldname in POSITIVE_SUPPLEMENT_FIELDS
+                        and _equal(old_value, 0)
+                    )
+                ),
             }
         )
     return changes
@@ -142,6 +163,8 @@ def _match_candidates(existing: list, incoming: dict) -> list:
         ]
         if source_matches:
             candidates = source_matches
+        else:
+            return []
     source_line_no = _normalized(
         incoming.get("source_line_no")
         or incoming.get("purchase_source_row")
@@ -155,6 +178,7 @@ def _match_candidates(existing: list, incoming: dict) -> list:
         ]
         if line_matches:
             return line_matches
+        return []
     return candidates
 
 

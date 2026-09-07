@@ -20,6 +20,7 @@ from overseas_costing.services.import_service import (
     _build_attachment_price_provenance,
     _build_packing_unmatched_item_values,
     _prepare_imported_item_values,
+    _protect_existing_shipping_values,
     _build_source_document_manual_review,
     _diagnose_ambiguous_source_row,
     _diagnose_unmatched_source_row,
@@ -90,6 +91,22 @@ def test_imported_purchase_row_defaults_shipping_to_purchase_quantity() -> None:
     assert values["unit_price_uom"] == "桶"
     assert values["shipped_uom"] == "桶"
     assert values["actual_shipped_qty_source_revision"] == "OA-REV-1"
+
+
+def test_reimport_without_explicit_shipping_never_clears_confirmed_quantity() -> None:
+    values = _protect_existing_shipping_values(
+        {
+            "actual_shipped_qty": 0,
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+            "actual_shipped_qty_source_revision": "",
+            "shipped_uom": "件",
+            "cost_output_uom": "件",
+            "goods_value": 850,
+        },
+        source_actual_present=False,
+    )
+
+    assert values == {"goods_value": 850}
 
 
 def test_unmatched_row_diagnosis_explains_missing_code() -> None:

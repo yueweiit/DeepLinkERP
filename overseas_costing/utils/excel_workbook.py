@@ -94,10 +94,28 @@ def read_packing_grid(
         raise RuntimeError("解析 .xlsx 需要安装 openpyxl，请先安装后再导入真实 Excel。")
 
     path = Path(file_path).expanduser()
+    requested_sheet = (sheet_name or "").strip()
+    if require_exact_sheet and (max_rows is not None or max_columns is not None):
+        preflight_workbook = load_workbook(path, data_only=False, read_only=True)
+        try:
+            if not requested_sheet:
+                raise PackingSheetNotFound("必须选择一个明确的工作表。")
+            if requested_sheet not in preflight_workbook.sheetnames:
+                available = "、".join(preflight_workbook.sheetnames)
+                raise PackingSheetNotFound(
+                    f"工作簿中不存在工作表：{requested_sheet}。当前文件包含：{available}。"
+                )
+            preflight_sheet = preflight_workbook[requested_sheet]
+            if max_rows is not None and preflight_sheet.max_row > max_rows:
+                raise ValueError(f"Excel 最多支持 {max_rows} 行。")
+            if max_columns is not None and preflight_sheet.max_column > max_columns:
+                raise ValueError(f"Excel 最多支持 {max_columns} 列。")
+        finally:
+            preflight_workbook.close()
+
     formula_workbook = load_workbook(path, data_only=False, read_only=False)
     value_workbook = load_workbook(path, data_only=True, read_only=False)
     try:
-        requested_sheet = (sheet_name or "").strip()
         if require_exact_sheet:
             if not requested_sheet:
                 raise PackingSheetNotFound("必须选择一个明确的工作表。")
