@@ -132,7 +132,7 @@ git commit -m 'feat: model multi-site ERP synchronization'
 - Create: `overseas_costing/services/erp_routing_service.py`
 - Create: `overseas_costing/tests/test_erp_routing_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_mixed_container_routes_distinct_materials() -> None:
@@ -173,13 +173,13 @@ def test_bulk_assignment_requires_preview_when_existing_routes_differ() -> None:
     assert preview["changed_item_keys"] == ["E1"]
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_routing_service.py`
 
 Expected: FAIL because routing service is absent.
 
-- [ ] **Step 3: 实现纯路由函数**
+- [x] **Step 3: 实现纯路由函数**
 
 ```python
 from collections import defaultdict
@@ -231,7 +231,7 @@ def resolve_item_routes(items: list[dict], routes: list[dict]) -> dict:
 
 费用编辑器中的“按子公司承担”是选择快捷方式：服务端按当前路由预览属于该子公司的稳定物料行，确认后仍以 `scope_type=ITEMS`、显式稳定行键和 `scope_revision=route_revision` 保存。这样后续路由变化能准确使范围失效，不会把尚未匹配的物料默认为整柜共同承担。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_routing_service.py`
 
