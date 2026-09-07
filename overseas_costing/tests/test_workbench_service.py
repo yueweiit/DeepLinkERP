@@ -196,6 +196,50 @@ def test_item_page_queries_only_requested_slice(monkeypatch) -> None:
     assert calls[1][1]["limit_page_length"] == 50
 
 
+def test_item_page_attaches_server_material_requirements(monkeypatch) -> None:
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            if doctype == "Overseas Cost Allocation Rule":
+                return [
+                    {
+                        "name": "FREIGHT",
+                        "allocation_basis": "gross_weight",
+                        "is_enabled": 1,
+                    }
+                ]
+            if kwargs["fields"] == [{"COUNT": "name", "as": "total"}]:
+                return [{"total": 1}]
+            return [
+                {
+                    "name": "ITEM-1",
+                    "row_no": 1,
+                    "quantity": 2,
+                    "purchase_uom": "件",
+                    "shipped_uom": "件",
+                    "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+                    "goods_value": 16,
+                    "gross_weight_kg": "",
+                    "project_collection": "生产项目",
+                }
+            ]
+
+    monkeypatch.setattr(workbench_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda value: "BATCH-DOC")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda batch, version: "VER-1")
+    monkeypatch.setattr(batch_service, "_build_item_query_args", lambda *args, **kwargs: ({}, []))
+
+    result = workbench_service.get_batch_items_page("BATCH-001")
+
+    assert result["items"][0]["cell_requirements"]["gross_weight_kg"]["severity"] == "blocking"
+    assert result["requirements_summary"]["blocking_for_calculation"] == 1
+    rule_call = next(call for call in calls if call[0] == "Overseas Cost Allocation Rule")
+    assert rule_call[1]["filters"] == {"batch": "BATCH-DOC", "version": "VER-1"}
+
+
 @pytest.mark.parametrize(
     ("frappe_version", "expected_count_fields"),
     [
@@ -271,6 +315,8 @@ def test_item_page_calculates_last_page_for_partial_page(monkeypatch) -> None:
     class FakeFrappe:
         @staticmethod
         def get_all(doctype, **kwargs):
+            if doctype == "Overseas Cost Allocation Rule":
+                return []
             if kwargs["fields"] == [{"COUNT": "name", "as": "total"}]:
                 return [{"total": 101}]
             return [{"name": "ITEM-101", "row_no": 101}]
@@ -287,7 +333,9 @@ def test_item_page_calculates_last_page_for_partial_page(monkeypatch) -> None:
     assert result["total"] == 101
     assert result["page"] == 3
     assert result["page_count"] == 3
-    assert result["items"] == [{"name": "ITEM-101", "row_no": 101}]
+    assert result["items"][0]["name"] == "ITEM-101"
+    assert result["items"][0]["row_no"] == 101
+    assert result["items"][0]["cell_requirements"]["project_collection"]["gate"] == "erp_push"
 
 
 def test_locate_batch_item_uses_unfiltered_server_order(monkeypatch) -> None:

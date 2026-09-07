@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from overseas_costing.services.material_input_service import (
+    build_material_requirements,
     ensure_stable_line_key,
     resolve_effective_quantity,
     resolve_goods_value,
@@ -94,6 +95,59 @@ def test_goods_value_requires_matching_purchase_and_price_units() -> None:
     assert unresolved["blocking"][0]["code"] == "GOODS_VALUE_OR_UOM_CONVERSION_REQUIRED"
     assert resolved["amount"] == 15300
     assert resolved["source"] == "PRICE_X_PURCHASE_QTY"
+
+
+def test_required_cells_follow_active_fee_basis() -> None:
+    result = build_material_requirements(
+        [
+            {
+                "name": "I1",
+                "quantity": 10,
+                "purchase_uom": "件",
+                "shipped_uom": "件",
+                "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+                "goods_value": 100,
+                "gross_weight_kg": "",
+                "volume_m3": "",
+                "project_collection": "生产项目",
+            }
+        ],
+        [
+            {
+                "name": "F1",
+                "is_enabled": 1,
+                "allocation_basis": "gross_weight",
+                "scope_item_names": ["I1"],
+            }
+        ],
+    )
+
+    assert result["by_item"]["I1"]["gross_weight_kg"]["severity"] == "blocking"
+    assert result["by_item"]["I1"]["gross_weight_kg"]["gate"] == "calculation"
+    assert result["by_item"]["I1"]["volume_m3"]["severity"] == "optional"
+
+
+def test_missing_project_warns_for_push_but_not_cost_preview() -> None:
+    result = build_material_requirements(
+        [
+            {
+                "name": "I1",
+                "quantity": 2,
+                "purchase_uom": "件",
+                "shipped_uom": "件",
+                "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+                "goods_value": 16,
+                "project_collection": "",
+            }
+        ],
+        [],
+    )
+
+    project = result["by_item"]["I1"]["project_collection"]
+    assert project["severity"] == "blocking"
+    assert project["gate"] == "erp_push"
+    assert result["summary"]["blocking_for_calculation"] == 0
+    assert result["summary"]["blocking_for_erp"] == 1
 
 
 def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:

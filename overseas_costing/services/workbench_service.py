@@ -10,7 +10,7 @@ try:
 except Exception:  # pragma: no cover - 本地纯函数测试时保持可导入
     frappe = None
 
-from overseas_costing.services import batch_service
+from overseas_costing.services import batch_service, material_input_service
 
 
 ISSUE_ORDER = ("purchase", "logistics", "calculation", "erp_failed")
@@ -591,6 +591,11 @@ def get_batch_items_page(
             "page_length": query["page_length"],
             "page_count": 0,
             "field_group": query["group"],
+            "requirements_summary": {
+                "blocking_for_calculation": 0,
+                "blocking_for_erp": 0,
+                "warnings": 0,
+            },
         }
 
     batch_doc_name = batch_service._resolve_batch_name(batch_name)
@@ -607,7 +612,25 @@ def get_batch_items_page(
     )
     fieldnames = list(
         dict.fromkeys(
-            ["name", "row_no", "excel_row_no", "modified"]
+            [
+                "name",
+                "row_no",
+                "excel_row_no",
+                "modified",
+                "stable_line_key",
+                "unit",
+                "purchase_uom",
+                "unit_price_uom",
+                "actual_shipped_qty",
+                "actual_shipped_qty_mode",
+                "actual_shipped_qty_source_revision",
+                "shipped_uom",
+                "gross_weight_kg",
+                "volume_m3",
+                "volume_weight_kg",
+                "chargeable_weight_kg",
+                "project_collection",
+            ]
             + [column["fieldname"] for column in columns]
         )
     )
@@ -628,6 +651,16 @@ def get_batch_items_page(
         limit_start=(query["page"] - 1) * query["page_length"],
         limit_page_length=query["page_length"],
     )
+    rules = frappe.get_all(
+        "Overseas Cost Allocation Rule",
+        filters={"batch": batch_doc_name, "version": resolved_version},
+        fields=["name", "rule_code", "allocation_basis", "basis_field", "is_enabled"],
+        limit_page_length=1000,
+    )
+    requirement_state = material_input_service.build_material_requirements(items, rules)
+    for item in items:
+        item_key = str(item.get("stable_line_key") or item.get("name") or "")
+        item["cell_requirements"] = requirement_state["by_item"].get(item_key, {})
     return {
         "ok": True,
         "batch_name": batch_doc_name,
@@ -639,6 +672,7 @@ def get_batch_items_page(
         "page_length": query["page_length"],
         "page_count": (total + query["page_length"] - 1) // query["page_length"],
         "field_group": query["group"],
+        "requirements_summary": requirement_state["summary"],
     }
 
 

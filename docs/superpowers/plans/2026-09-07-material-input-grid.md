@@ -288,7 +288,7 @@ git commit -m 'fix: calculate costs from effective shipped quantities'
 - Modify: `overseas_costing/tests/test_material_input_service.py`
 - Modify: `overseas_costing/tests/test_workbench_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_required_cells_follow_active_fee_basis() -> None:
@@ -305,13 +305,13 @@ def test_missing_project_warns_for_push_but_not_cost_preview() -> None:
     assert result["by_item"]["I1"]["project_collection"]["gate"] == "erp_push"
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_material_input_service.py overseas_costing/tests/test_workbench_service.py`
 
 Expected: FAIL with missing `build_material_requirements`.
 
-- [ ] **Step 3: 实现单一缺项输出**
+- [x] **Step 3: 实现单一缺项输出**
 
 返回契约固定为：
 
@@ -333,7 +333,7 @@ Expected: FAIL with missing `build_material_requirements`.
 
 只要求适用费用所需字段；专属范围在第二阶段接入前可读取 `scope_item_names` 预览字段，但本阶段不持久化费用范围。项目/站点使用 `erp_push` gate；发货数量和采购金额使用 `calculation` gate。
 
-- [ ] **Step 4: 在物料查询中附加缺项并运行**
+- [x] **Step 4: 在物料查询中附加缺项并运行**
 
 `get_batch_items_page()` 一次读取当前版本规则，把 `cell_requirements` 附加到每行，并返回汇总；不要让浏览器重复推导。
 
@@ -341,7 +341,7 @@ Run: `python -m pytest -q overseas_costing/tests/test_material_input_service.py 
 
 Expected: PASS.
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add overseas_costing/services/material_input_service.py overseas_costing/services/workbench_service.py overseas_costing/tests/test_material_input_service.py overseas_costing/tests/test_workbench_service.py

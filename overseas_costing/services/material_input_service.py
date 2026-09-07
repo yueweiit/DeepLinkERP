@@ -1,5 +1,6 @@
 """物料录入的纯规则：稳定行、有效发货数量和单位来源。"""
 
+import json
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Dict, Optional
 from uuid import uuid4
@@ -13,6 +14,26 @@ VALID_QTY_MODES = frozenset(
         "LEGACY_UNVERIFIED",
     }
 )
+
+MATERIAL_FIELDS = {
+    "actual_shipped_qty": "发货数量",
+    "shipped_uom": "发货单位",
+    "goods_value": "采购货值",
+    "gross_weight_kg": "毛重",
+    "volume_m3": "体积",
+    "chargeable_weight_kg": "计费重",
+    "project_collection": "项目归属",
+}
+
+BASIS_FIELDS = {
+    "goods_value": "goods_value",
+    "gross_weight": "gross_weight_kg",
+    "gross_weight_kg": "gross_weight_kg",
+    "volume": "volume_m3",
+    "volume_m3": "volume_m3",
+    "chargeable_weight": "chargeable_weight_kg",
+    "chargeable_weight_kg": "chargeable_weight_kg",
+}
 
 
 def _positive_decimal(value: object) -> Optional[Decimal]:
@@ -96,4 +117,134 @@ def resolve_goods_value(item: dict) -> Dict[str, object]:
                 "field": "goods_value",
             }
         ],
+    }
+
+
+def _optional_requirement(fieldname: str) -> dict:
+    return {
+        "severity": "optional",
+        "gate": "none",
+        "code": "OPTIONAL",
+        "message": f"{MATERIAL_FIELDS[fieldname]}当前不是必填项",
+    }
+
+
+def _blocking_requirement(fieldname: str, gate: str, code: str, message: str) -> dict:
+    return {
+        "severity": "blocking",
+        "gate": gate,
+        "code": code,
+        "message": message,
+    }
+
+
+def _scope_item_names(rule: dict) -> set:
+    value = rule.get("scope_item_names")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            value = []
+    return {str(name).strip() for name in (value or []) if str(name).strip()}
+
+
+def _rule_applies(rule: dict, item: dict, item_key: str) -> bool:
+    names = _scope_item_names(rule)
+    if not names:
+        return True
+    identities = {
+        item_key,
+        str(item.get("name") or "").strip(),
+        str(item.get("stable_line_key") or "").strip(),
+    }
+    return bool(names.intersection(identities))
+
+
+def _has_basis_value(item: dict, fieldname: str) -> bool:
+    if fieldname == "goods_value":
+        return not resolve_goods_value(item)["blocking"]
+    if fieldname == "chargeable_weight_kg":
+        return any(
+            _positive_decimal(item.get(candidate)) is not None
+            for candidate in ("chargeable_weight_kg", "gross_weight_kg", "volume_weight_kg")
+        )
+    return _positive_decimal(item.get(fieldname)) is not None
+
+
+def build_material_requirements(items: list, rules: list) -> dict:
+    """Build per-cell requirements for the current costing and ERP gates."""
+
+    by_item = {}
+    calculation_count = 0
+    erp_count = 0
+    warning_count = 0
+
+    for index, item in enumerate(items or [], start=1):
+        item_key = str(item.get("stable_line_key") or item.get("name") or index)
+        requirements = {
+            fieldname: _optional_requirement(fieldname)
+            for fieldname in MATERIAL_FIELDS
+        }
+
+        quantity_state = resolve_effective_quantity(item)
+        for issue in quantity_state["blocking"]:
+            fieldname = issue["field"]
+            requirements[fieldname] = _blocking_requirement(
+                fieldname,
+                "calculation",
+                issue["code"],
+                f"请补充{MATERIAL_FIELDS[fieldname]}",
+            )
+
+        goods_state = resolve_goods_value(item)
+        for issue in goods_state["blocking"]:
+            requirements["goods_value"] = _blocking_requirement(
+                "goods_value",
+                "calculation",
+                issue["code"],
+                "请补总货值，或补齐采购数量、单价及一致的计价单位",
+            )
+
+        if not str(item.get("project_collection") or "").strip():
+            requirements["project_collection"] = _blocking_requirement(
+                "project_collection",
+                "erp_push",
+                "PROJECT_ROUTE_REQUIRED",
+                "成本可先预览，推送 ERP 前请补项目归属",
+            )
+
+        for rule in rules or []:
+            if not bool(rule.get("is_enabled", rule.get("is_active", 1))):
+                continue
+            if not _rule_applies(rule, item, item_key):
+                continue
+            basis = str(rule.get("allocation_basis") or rule.get("basis_field") or "goods_value")
+            fieldname = BASIS_FIELDS.get(basis)
+            if not fieldname or _has_basis_value(item, fieldname):
+                continue
+            rule_name = str(rule.get("name") or rule.get("rule_code") or "当前费用")
+            requirements[fieldname] = _blocking_requirement(
+                fieldname,
+                "calculation",
+                f"{basis.upper()}_REQUIRED_BY_{rule_name}",
+                f"费用 {rule_name} 按{MATERIAL_FIELDS[fieldname]}分摊，请补{MATERIAL_FIELDS[fieldname]}",
+            )
+
+        for requirement in requirements.values():
+            if requirement["severity"] == "warning":
+                warning_count += 1
+            elif requirement["severity"] == "blocking":
+                if requirement["gate"] == "erp_push":
+                    erp_count += 1
+                else:
+                    calculation_count += 1
+        by_item[item_key] = requirements
+
+    return {
+        "summary": {
+            "blocking_for_calculation": calculation_count,
+            "blocking_for_erp": erp_count,
+            "warnings": warning_count,
+        },
+        "by_item": by_item,
     }
