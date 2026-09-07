@@ -25,6 +25,10 @@ PUSH_MODE_STANDARD = "standard_purchase"
 PUSH_MODE_GENERIC = "generic_resource"
 
 
+class AmbiguousRemoteBusinessKey(RuntimeError):
+    """Raised when one stable business key resolves to multiple remote documents."""
+
+
 if frappe is not None:
     whitelist = frappe.whitelist
 else:  # pragma: no cover - 本地单测无 Frappe 时保持可导入
@@ -176,40 +180,23 @@ def _push_generic_resource(payload: dict, config: dict) -> dict:
 
 def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
     try:
-        purchase_order_name = _find_existing_purchase_order(payload, config)
-        item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
-
-        if purchase_order_name:
-            return {
-                "ok": True,
-                "status": "Success",
-                "config_ready": True,
-                "erp_target_doc": purchase_order_name,
-                "message": f"DeepLinkERP 已存在采购订单 {purchase_order_name}，本次未重复创建。",
-                "request": _redact_request_config(config),
-                "response": {
-                    "purchase_order": {"name": purchase_order_name, "deduplicated": True},
-                    "items": item_results,
-                },
-            }
-
-        po_body = _build_purchase_order_body(payload, config)
-        url = _build_doctype_url(config, "Purchase Order")
-        request = _build_request(config, url=url, method="POST", body=po_body)
-        with urlopen(request, timeout=config["timeout"]) as response:
-            response_text = response.read().decode("utf-8", errors="ignore")
-            response_body = _load_json_response(response_text)
-            target_doc = _extract_target_doc(response_body)
-            return {
-                "ok": True,
-                "status": "Success",
-                "config_ready": True,
-                "http_status": getattr(response, "status", 200),
-                "erp_target_doc": target_doc,
-                "message": f"已推送到 DeepLinkERP：物料 {len(item_results)} 条，采购订单 {target_doc or '已创建'}。",
-                "request": _redact_request_config(config),
-                "response": {"purchase_order": response_body, "items": item_results},
-            }
+        stable_payload = dict(payload or {})
+        if not stable_payload.get("business_key"):
+            batch_key = stable_payload.get("batch_no") or stable_payload.get("batch_name") or ""
+            stable_payload["business_key"] = f"legacy:{batch_key}"
+        result = create_purchase(stable_payload, config)
+        target_doc = result.get("erp_target_doc") or ""
+        return {
+            **result,
+            "status": "Success",
+            "config_ready": True,
+            "message": (
+                f"DeepLinkERP 已存在采购订单 {target_doc}，本次未重复创建。"
+                if result.get("status") == "EXISTS"
+                else f"已推送到 DeepLinkERP：采购订单 {target_doc or '已创建'}。"
+            ),
+            "request": _redact_request_config(config),
+        }
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
         response_body = _load_json_response(detail)
@@ -442,6 +429,12 @@ def _build_request(config: dict, url: str, method: str, body: dict | None = None
     )
 
 
+def _request_json(config: dict, *, method: str, url: str, body: dict | None = None) -> dict:
+    request = _build_request(config, url=url, method=method, body=body)
+    with urlopen(request, timeout=config.get("timeout") or DEFAULT_TIMEOUT) as response:
+        return _load_json_response(response.read().decode("utf-8", errors="ignore"))
+
+
 def _connection_check_urls(config: dict) -> list[str]:
     if config.get("push_mode") == PUSH_MODE_STANDARD:
         return [
@@ -530,6 +523,72 @@ def _find_existing_purchase_order(payload: dict, config: dict) -> str:
     return ""
 
 
+def _find_existing_purchase_order_by_business_key(payload: dict, config: dict) -> str:
+    business_key = str(payload.get("business_key") or "").strip()
+    if not business_key:
+        raise ValueError("business_key is required")
+    filters = [["custom_overseas_business_key", "=", business_key]]
+    url = (
+        f"{_build_doctype_url(config, 'Purchase Order')}"
+        f"?fields={quote(json.dumps(['name'], ensure_ascii=False), safe='')}"
+        f"&filters={quote(json.dumps(filters, ensure_ascii=False), safe='')}"
+        "&limit_page_length=2"
+    )
+    try:
+        data = (_request_json(config, method="GET", url=url).get("data") or [])
+    except HTTPError as exc:
+        if exc.code == 417:
+            return ""
+        raise
+    if len(data) > 1:
+        raise AmbiguousRemoteBusinessKey(business_key)
+    return str((data[0] if data else {}).get("name") or "")
+
+
+def lookup_purchase_by_business_key(payload: dict, config: dict) -> dict:
+    name = _find_existing_purchase_order_by_business_key(payload, config)
+    return {"found": bool(name), "name": name}
+
+
+def create_purchase(payload: dict, config: dict) -> dict:
+    """Create a draft purchase in one explicitly selected ERP site."""
+
+    existing = lookup_purchase_by_business_key(payload, config)
+    if existing.get("found"):
+        return {
+            "ok": True,
+            "status": "EXISTS",
+            "erp_target_doc": str(existing.get("name") or ""),
+            "response": {"purchase_order": {"name": existing.get("name"), "deduplicated": True}, "items": []},
+        }
+    item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
+    response = _request_json(
+        config,
+        method="POST",
+        url=_build_doctype_url(config, "Purchase Order"),
+        body=_build_purchase_order_body(payload, config),
+    )
+    return {
+        "ok": True,
+        "status": "CREATED",
+        "erp_target_doc": _extract_target_doc(response),
+        "response": {"purchase_order": response, "items": item_results},
+    }
+
+
+def read_purchase_state(link: dict, config: dict) -> dict:
+    return _request_json(
+        config,
+        method="GET",
+        url=_build_doctype_url(config, link["remote_doctype"], link["remote_document"]),
+    )
+
+
+def update_purchase_cost(payload: dict, link: dict, config: dict) -> dict:
+    del payload, link, config
+    return {"ok": False, "status": "MANUAL_REQUIRED", "code": "UPDATE_MODE_UNAVAILABLE"}
+
+
 def _ensure_item(item: dict, payload: dict, config: dict) -> dict:
     item_code = str(item.get("material_code") or "").strip()
     if not item_code:
@@ -537,18 +596,20 @@ def _ensure_item(item: dict, payload: dict, config: dict) -> dict:
 
     body = _build_item_body(item, payload, config)
     exists = _resource_exists(config, "Item", item_code)
-    method = "PUT" if exists else "POST"
-    url = _build_doctype_url(config, "Item", item_code) if exists else _build_doctype_url(config, "Item")
-    request = _build_request(config, url=url, method=method, body=body)
-    with urlopen(request, timeout=config["timeout"]) as response:
-        response_body = _load_json_response(response.read().decode("utf-8", errors="ignore"))
-        return {
-            "ok": True,
-            "item_code": item_code,
-            "action": "updated" if exists else "created",
-            "http_status": getattr(response, "status", 200),
-            "response": response_body,
-        }
+    if exists:
+        return {"ok": True, "item_code": item_code, "action": "existing", "response": {}}
+    response_body = _request_json(
+        config,
+        method="POST",
+        url=_build_doctype_url(config, "Item"),
+        body=body,
+    )
+    return {
+        "ok": True,
+        "item_code": item_code,
+        "action": "created",
+        "response": response_body,
+    }
 
 
 def _resource_exists(config: dict, doctype: str, docname: str) -> bool:
@@ -597,6 +658,11 @@ def _build_purchase_order_body(payload: dict, config: dict) -> dict:
         "currency": currency,
         "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
+        "custom_overseas_business_key": payload.get("business_key") or "",
+        "custom_overseas_cost_result_hash": payload.get("cost_result_hash") or "",
+        "custom_overseas_amount_status": payload.get("amount_status") or (
+            "ESTIMATED" if payload.get("estimated_fee_keys") else "ACTUAL"
+        ),
         "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
         "custom_overseas_total_cost_rmb": payload.get("total_cost_rmb") or 0,
         "custom_overseas_supplier_source": supplier_source,
@@ -656,6 +722,7 @@ def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule
         "custom_overseas_tax_alloc_amount": tax_amount,
         "custom_overseas_batch_no": payload.get("batch_no") or payload.get("batch_name") or "",
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
+        "custom_overseas_stable_line_key": item.get("stable_line_key") or "",
         "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
         "custom_overseas_cost_center": config.get("cost_center") or payload.get("cost_center") or "",
     }

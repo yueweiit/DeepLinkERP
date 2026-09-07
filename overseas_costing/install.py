@@ -336,24 +336,10 @@ def _get_next_desktop_icon_idx(frappe) -> int:
         return 1
 
 
-def ensure_erpnext_standard_fields() -> dict:
-    """给 ERPNext 标准单据补海外成本展示字段。
+def build_erpnext_standard_field_spec() -> dict:
+    """Return the portable field contract required on every target ERP site."""
 
-    只新增展示/追溯字段，不改库存估值、入库成本和总账逻辑。
-    """
-
-    try:
-        import frappe
-        from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-    except Exception:
-        return {"ok": False, "message": "当前未连接 Frappe 或 Custom Field 工具不可用。"}
-
-    required_doctypes = ("Item", "Purchase Order", "Purchase Order Item")
-    missing_doctypes = [doctype for doctype in required_doctypes if not frappe.db.exists("DocType", doctype)]
-    if missing_doctypes:
-        return {"ok": False, "message": "ERPNext 标准 DocType 不存在，已跳过自定义字段。", "missing": missing_doctypes}
-
-    custom_fields = {
+    return {
         "Item": [
             {
                 "fieldname": "custom_overseas_batch_no",
@@ -406,10 +392,30 @@ def ensure_erpnext_standard_fields() -> dict:
                 "insert_after": "custom_overseas_batch_no",
             },
             {
+                "fieldname": "custom_overseas_business_key",
+                "label": "海外成本稳定业务键",
+                "fieldtype": "Data",
+                "unique": 1,
+                "insert_after": "custom_overseas_cost_version",
+            },
+            {
+                "fieldname": "custom_overseas_cost_result_hash",
+                "label": "海外成本结果哈希",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_business_key",
+            },
+            {
+                "fieldname": "custom_overseas_amount_status",
+                "label": "海外成本金额性质",
+                "fieldtype": "Select",
+                "options": "ESTIMATED\nACTUAL",
+                "insert_after": "custom_overseas_cost_result_hash",
+            },
+            {
                 "fieldname": "custom_overseas_business_entity",
                 "label": "业务主体/子公司",
                 "fieldtype": "Data",
-                "insert_after": "custom_overseas_cost_version",
+                "insert_after": "custom_overseas_amount_status",
             },
             {
                 "fieldname": "custom_overseas_supplier_source",
@@ -486,10 +492,16 @@ def ensure_erpnext_standard_fields() -> dict:
                 "insert_after": "custom_overseas_batch_no",
             },
             {
+                "fieldname": "custom_overseas_stable_line_key",
+                "label": "海外成本稳定物料行",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_cost_version",
+            },
+            {
                 "fieldname": "custom_overseas_business_entity",
                 "label": "业务主体/子公司",
                 "fieldtype": "Data",
-                "insert_after": "custom_overseas_cost_version",
+                "insert_after": "custom_overseas_stable_line_key",
             },
             {
                 "fieldname": "custom_overseas_cost_center",
@@ -499,6 +511,26 @@ def ensure_erpnext_standard_fields() -> dict:
             },
         ],
     }
+
+
+def ensure_erpnext_standard_fields() -> dict:
+    """给 ERPNext 标准单据补海外成本展示字段。
+
+    只新增展示/追溯字段，不改库存估值、入库成本和总账逻辑。
+    """
+
+    try:
+        import frappe
+        from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+    except Exception:
+        return {"ok": False, "message": "当前未连接 Frappe 或 Custom Field 工具不可用。"}
+
+    required_doctypes = ("Item", "Purchase Order", "Purchase Order Item")
+    missing_doctypes = [doctype for doctype in required_doctypes if not frappe.db.exists("DocType", doctype)]
+    if missing_doctypes:
+        return {"ok": False, "message": "ERPNext 标准 DocType 不存在，已跳过自定义字段。", "missing": missing_doctypes}
+
+    custom_fields = build_erpnext_standard_field_spec()
     try:
         create_custom_fields(custom_fields, ignore_validate=True)
     except TypeError:

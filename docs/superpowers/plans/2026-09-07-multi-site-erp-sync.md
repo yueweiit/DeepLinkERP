@@ -392,7 +392,7 @@ git commit -m 'feat: track idempotent ERP sync requests'
 - Create: `overseas_costing/tests/test_erp_capability_service.py`
 - Create: `overseas_costing/tests/test_install.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_existing_purchase_order_is_checked_before_any_item_write(monkeypatch) -> None:
@@ -427,13 +427,13 @@ def test_erpnext_custom_fields_include_stable_business_links() -> None:
     assert "custom_overseas_stable_line_key" in {row["fieldname"] for row in fields["Purchase Order Item"]}
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_client.py overseas_costing/tests/test_erp_capability_service.py overseas_costing/tests/test_install.py`
 
 Expected: FAIL because current standard flow calls `_ensure_item` before returning a deduplicated Purchase Order and loads one global configuration.
 
-- [ ] **Step 3: 重构客户端入口**
+- [x] **Step 3: 重构客户端入口**
 
 ```python
 class AmbiguousRemoteBusinessKey(RuntimeError):
@@ -505,11 +505,11 @@ def update_purchase_cost(payload: dict, link: dict, config: dict) -> dict:
 
 这些字段不是只在综合成本应用所在站点创建：每个配置为目标的 ERP 站点都必须部署同一字段规范，或由该站点的受控适配器提供等价、可唯一查询的字段。能力核验按站点逐一确认，任何一个目标站点缺字段只阻断该站点，不把其他站点伪装成成功。
 
-- [ ] **Step 4: 实现只读能力核验**
+- [x] **Step 4: 实现只读能力核验**
 
 核验只读取站点连通性、Purchase Order 元数据、所需自定义字段和目标单据状态；输出 `VERIFIED/FAILED` 及缺失能力列表，不修改远端。`cost_update_mode` 仍由管理员根据受控写验证明确启用，不能仅凭元数据自动切成可写。
 
-- [ ] **Step 5: 运行并提交**
+- [x] **Step 5: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_client.py overseas_costing/tests/test_erp_capability_service.py overseas_costing/tests/test_install.py`
 

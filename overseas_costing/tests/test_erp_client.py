@@ -7,6 +7,63 @@ from urllib.error import HTTPError
 from overseas_costing.services import erp_client
 
 
+def test_existing_purchase_order_is_checked_before_any_item_write(monkeypatch) -> None:
+    writes = []
+    monkeypatch.setattr(
+        erp_client,
+        "lookup_purchase_by_business_key",
+        lambda payload, config: {"found": True, "name": "PO-1"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        erp_client,
+        "_ensure_item",
+        lambda item, payload, config: writes.append(item),
+    )
+
+    result = erp_client.create_purchase(
+        {"business_key": "BK1", "items": [{"material_code": "M1"}]},
+        {"base_url": "https://erp.invalid/api/resource", "authorization": "token hidden", "timeout": 1},
+    )
+
+    assert result["status"] == "EXISTS"
+    assert result["erp_target_doc"] == "PO-1"
+    assert writes == []
+
+
+def test_read_purchase_state_uses_the_explicit_site_config(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        erp_client,
+        "_request_json",
+        lambda config, **kwargs: calls.append((config, kwargs)) or {"data": {"name": "PO-1"}},
+        raising=False,
+    )
+    config = {"base_url": "https://site-one/api/resource", "authorization": "token hidden", "timeout": 3}
+
+    result = erp_client.read_purchase_state(
+        {"remote_doctype": "Purchase Order", "remote_document": "PO-1"},
+        config,
+    )
+
+    assert result["data"]["name"] == "PO-1"
+    assert calls[0][0] is config
+
+
+def test_cost_update_defaults_to_manual_required() -> None:
+    result = erp_client.update_purchase_cost(
+        {"cost_result_hash": "H2"},
+        {"remote_doctype": "Purchase Order", "remote_document": "PO-1"},
+        {"cost_update_mode": "DISABLED"},
+    )
+
+    assert result == {
+        "ok": False,
+        "status": "MANUAL_REQUIRED",
+        "code": "UPDATE_MODE_UNAVAILABLE",
+    }
+
+
 def test_get_erp_push_config_prefers_single_settings(monkeypatch) -> None:
     class FakeSettings:
         def get(self, fieldname, default=None):
