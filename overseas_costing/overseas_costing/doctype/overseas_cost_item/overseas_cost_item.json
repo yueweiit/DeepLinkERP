@@ -13,16 +13,25 @@
     "version",
     "row_no",
     "excel_row_no",
+    "stable_line_key",
     "material_code",
     "product_name",
     "product_name_es",
     "spec_model",
     "unit",
+    "purchase_uom",
     "recipient",
     "unit_price",
+    "unit_price_uom",
     "purchase_currency",
     "quantity",
     "actual_shipped_qty",
+    "actual_shipped_qty_mode",
+    "actual_shipped_qty_source_revision",
+    "shipped_uom",
+    "cost_output_uom",
+    "erp_stock_uom",
+    "shipped_to_erp_factor",
     "goods_value",
     "import_name",
     "hs_code",
@@ -139,6 +148,13 @@
       "label": "Excel行号"
     },
     {
+      "fieldname": "stable_line_key",
+      "fieldtype": "Data",
+      "label": "稳定物料行标识",
+      "read_only": 1,
+      "unique": 0
+    },
+    {
       "fieldname": "material_code",
       "fieldtype": "Data",
       "label": "物料编码",
@@ -166,6 +182,11 @@
       "label": "单位"
     },
     {
+      "fieldname": "purchase_uom",
+      "fieldtype": "Data",
+      "label": "采购单位"
+    },
+    {
       "fieldname": "recipient",
       "fieldtype": "Data",
       "label": "收件人"
@@ -174,6 +195,11 @@
       "fieldname": "unit_price",
       "fieldtype": "Currency",
       "label": "单价"
+    },
+    {
+      "fieldname": "unit_price_uom",
+      "fieldtype": "Data",
+      "label": "采购单价计价单位"
     },
     {
       "fieldname": "purchase_currency",
@@ -189,6 +215,38 @@
       "fieldname": "actual_shipped_qty",
       "fieldtype": "Float",
       "label": "实际发货数量"
+    },
+    {
+      "fieldname": "actual_shipped_qty_mode",
+      "fieldtype": "Select",
+      "label": "发货数量来源状态",
+      "options": "DEFAULT_PURCHASE\nEXPLICIT_SOURCE\nMANUAL_CONFIRMED\nLEGACY_UNVERIFIED"
+    },
+    {
+      "fieldname": "actual_shipped_qty_source_revision",
+      "fieldtype": "Data",
+      "label": "发货数量来源修订"
+    },
+    {
+      "fieldname": "shipped_uom",
+      "fieldtype": "Data",
+      "label": "发货单位"
+    },
+    {
+      "fieldname": "cost_output_uom",
+      "fieldtype": "Data",
+      "label": "综合成本输出单位",
+      "read_only": 1
+    },
+    {
+      "fieldname": "erp_stock_uom",
+      "fieldtype": "Data",
+      "label": "ERP库存单位"
+    },
+    {
+      "fieldname": "shipped_to_erp_factor",
+      "fieldtype": "Float",
+      "label": "发货单位到ERP库存单位换算"
     },
     {
       "fieldname": "goods_value",

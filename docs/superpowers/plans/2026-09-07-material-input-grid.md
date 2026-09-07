@@ -35,7 +35,7 @@
 - Create: `overseas_costing/services/material_input_service.py`
 - Create: `overseas_costing/tests/test_material_input_service.py`
 
-- [ ] **Step 1: 写失败测试，锁定默认值和历史值语义**
+- [x] **Step 1: 写失败测试，锁定默认值和历史值语义**
 
 ```python
 from overseas_costing.services.material_input_service import resolve_effective_quantity
@@ -81,13 +81,13 @@ def test_legacy_equal_values_are_not_reclassified_as_default() -> None:
     assert result["is_default"] is False
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_material_input_service.py`
 
 Expected: FAIL because `material_input_service` does not exist.
 
-- [ ] **Step 3: 增加显式字段，保持历史数据不猜测**
+- [x] **Step 3: 增加显式字段，保持历史数据不猜测**
 
 在两份镜像 JSON 的 `field_order` 和 `fields` 中加入相同定义：
 
@@ -145,7 +145,7 @@ Expected: FAIL because `material_input_service` does not exist.
 
 新建业务行生成不可变 `stable_line_key`；同一业务行克隆到新成本版本时保留该键，新增的同 SKU 独立行必须生成新键。已有行首次迁移只补稳定键；`actual_shipped_qty` 有值的行标记 `LEGACY_UNVERIFIED`，没有值的行标记 `DEFAULT_PURCHASE`，不得因数值恰好相等推断为默认。`cost_output_uom` 由有效发货单位解析结果回填，只读展示并随单位修订重算。
 
-- [ ] **Step 4: 实现纯解析器**
+- [x] **Step 4: 实现纯解析器**
 
 ```python
 from decimal import Decimal, InvalidOperation
@@ -184,7 +184,7 @@ def resolve_effective_quantity(item: dict) -> dict:
     }
 ```
 
-- [ ] **Step 5: 运行测试并提交**
+- [x] **Step 5: 运行测试并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_material_input_service.py`
 

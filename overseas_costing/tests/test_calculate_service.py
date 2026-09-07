@@ -3,6 +3,7 @@
 import json
 
 from overseas_costing.services.calculate_service import (
+    _build_new_item_values,
     batch_update_items,
     calculate_item_rows,
     confirm_actual_shipped_qty_from_quantity,
@@ -12,6 +13,40 @@ from overseas_costing.services.calculate_service import (
     recalculate_batch,
     update_item_field,
 )
+
+
+def test_new_manual_item_defaults_shipping_quantity_to_purchase_quantity() -> None:
+    values = _build_new_item_values(
+        "BATCH-1",
+        "VERSION-1",
+        {"material_code": "M1", "quantity": 34, "unit": "桶", "unit_price": 25},
+        row_no=1,
+    )
+
+    assert values["stable_line_key"]
+    assert values["purchase_uom"] == "桶"
+    assert values["shipped_uom"] == "桶"
+    assert values["cost_output_uom"] == "桶"
+    assert values["actual_shipped_qty_mode"] == "DEFAULT_PURCHASE"
+    assert values.get("actual_shipped_qty") in (None, "")
+
+
+def test_new_manual_item_keeps_explicit_shipping_quantity() -> None:
+    values = _build_new_item_values(
+        "BATCH-1",
+        "VERSION-1",
+        {
+            "material_code": "M1",
+            "quantity": 34,
+            "unit": "桶",
+            "actual_shipped_qty": 32,
+            "shipped_uom": "桶",
+        },
+        row_no=1,
+    )
+
+    assert values["actual_shipped_qty"] == 32
+    assert values["actual_shipped_qty_mode"] == "MANUAL_CONFIRMED"
 
 
 def test_recalculate_batch_rejects_invalid_main_approval_before_writing(monkeypatch) -> None:
