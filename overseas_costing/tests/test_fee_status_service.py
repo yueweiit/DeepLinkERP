@@ -4,8 +4,73 @@ from overseas_costing.services.fee_status_service import (
     build_cost_result_hash,
     build_fee_input_hash,
     build_fee_status,
+    build_erp_work_state,
+    build_erp_work_summary,
     summarize_fee_statuses,
 )
+
+
+def test_current_result_closes_only_successful_site_todo() -> None:
+    work = build_erp_work_state(
+        current_hash="H2",
+        sites=[
+            {"site_code": "PROD", "last_cost_result_hash": "H2", "status": "SUCCESS"},
+            {"site_code": "ECOM", "last_cost_result_hash": "H1", "status": "SUCCESS"},
+        ],
+    )
+
+    assert work["PROD"]["todo"] is None
+    assert work["ECOM"]["todo"]["code"] == "ERP_UPDATE_REQUIRED"
+    summary = build_erp_work_summary(current_hash="H2", sites=list(work.values()))
+    assert summary["overall"] == "PARTIAL"
+
+
+def test_old_receipt_and_business_change_do_not_close_current_erp_todo() -> None:
+    work = build_erp_work_state(
+        current_hash="H2",
+        sites=[
+            {
+                "site_code": "PROD",
+                "last_cost_result_hash": "H1",
+                "request_cost_result_hash": "H1",
+                "status": "SUCCESS",
+            },
+            {
+                "site_code": "ECOM",
+                "last_cost_result_hash": "H1",
+                "status": "SUCCESS",
+                "business_change_required": True,
+            },
+        ],
+    )
+
+    assert work["PROD"]["state"] == "UPDATE_REQUIRED"
+    assert work["ECOM"]["state"] == "BUSINESS_CHANGE_REQUIRED"
+    assert work["ECOM"]["todo"]["code"] == "ERP_BUSINESS_CHANGE_REQUIRED"
+
+
+def test_erp_receipt_fields_do_not_change_fee_todos() -> None:
+    fee = {
+        "logical_fee_key": "FREIGHT",
+        "amount": "100",
+        "currency": "CNY",
+        "amount_status": "ESTIMATED",
+        "required_evidence_role": "invoice",
+        "erp_status": "SUCCESS",
+        "last_cost_result_hash": "H2",
+    }
+
+    result = build_fee_status(
+        fee=fee,
+        allocation={"status": "ALLOCATED"},
+        evidence=[],
+        calculation={"input_hash": "F1", "fee_input_hash": "F1"},
+    )
+
+    assert {todo["code"] for todo in result["todos"]} == {
+        "ACTUAL_AMOUNT_REQUIRED",
+        "EVIDENCE_REQUIRED",
+    }
 
 
 def test_estimated_allocated_fee_keeps_actual_and_evidence_todos() -> None:

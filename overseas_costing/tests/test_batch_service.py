@@ -13,6 +13,7 @@ from overseas_costing.services.batch_service import (
     _build_calculation_confirmation_readiness,
     _build_erp_push_payload,
     _build_multi_site_erp_detail_state,
+    _build_erp_work_detail_state,
     _build_export_xlsx_content,
     _build_writeback_readiness,
     _build_writeback_field_gaps,
@@ -36,6 +37,25 @@ from overseas_costing.services.batch_service import (
     is_hidden_approval_status,
     writeback_to_erp,
 )
+
+
+def test_batch_erp_work_is_aggregated_per_site_not_from_legacy_flag() -> None:
+    result = _build_erp_work_detail_state(
+        current_hash="H2",
+        site_codes=["PROD", "ECOM"],
+        links=[
+            {"site_code": "PROD", "last_cost_result_hash": "H2", "status": "SUCCESS", "remote_document": "PO-P"},
+            {"site_code": "ECOM", "last_cost_result_hash": "H1", "status": "SUCCESS", "remote_document": "PO-E"},
+        ],
+        requests=[],
+    )
+
+    assert result["overall"] == "PARTIAL"
+    assert {row["site_code"]: row["state"] for row in result["sites"]} == {
+        "PROD": "SYNCED",
+        "ECOM": "UPDATE_REQUIRED",
+    }
+    assert result["legacy_writeback_status"] == "Pending"
 
 
 def test_multi_site_erp_detail_state_exposes_safe_config_and_preview() -> None:
@@ -358,6 +378,7 @@ def test_get_batch_list_defaults_to_recent_days_with_classic_samples(monkeypatch
     monkeypatch.setattr(batch_service, "_recent_start", lambda recent_days: "2026-07-15 00:00:00")
     monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
     monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
+    monkeypatch.setattr(batch_service, "_attach_batch_erp_work", lambda items: items)
 
     result = get_batch_list({"transport_mode": "", "recent_days": 30})
 

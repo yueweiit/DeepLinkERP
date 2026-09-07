@@ -132,6 +132,7 @@ def classify_batch(batch: dict, stats: dict) -> dict:
     ).lower()
     status = str(batch.get("status") or "").lower()
     writeback = str(batch.get("writeback_status") or "").lower()
+    erp_overall = str((batch.get("erp_work") or {}).get("overall") or "").upper()
     fee_work = (
         stats.get("fee_status")
         or batch.get("fee_work")
@@ -154,7 +155,7 @@ def classify_batch(batch: dict, stats: dict) -> dict:
         batch.get("actual_total_cost_rmb") or batch.get("estimated_total_cost_rmb")
     ) <= 0:
         issues.append("calculation")
-    if "fail" in writeback:
+    if (erp_overall and erp_overall != "SYNCED") or (not erp_overall and "fail" in writeback):
         issues.append("erp_failed")
     primary = next((code for code in ISSUE_ORDER if code in issues), "ready")
     action = {
@@ -183,10 +184,19 @@ def filter_batches_for_task(rows: list[dict], task: str) -> list[dict]:
         return [
             row
             for row in rows
-            if str(row.get("writeback_status") or "").lower() in {"pending", "failed"}
+            if (
+                bool(row.get("erp_work"))
+                and str((row.get("erp_work") or {}).get("overall") or "").upper() != "SYNCED"
+            )
             or (
-                str(row.get("confirm_status") or "").lower() == "confirmed"
-                and str(row.get("writeback_status") or "").lower() != "success"
+                not row.get("erp_work")
+                and (
+                    str(row.get("writeback_status") or "").lower() in {"pending", "failed"}
+                    or (
+                        str(row.get("confirm_status") or "").lower() == "confirmed"
+                        and str(row.get("writeback_status") or "").lower() != "success"
+                    )
+                )
             )
         ]
     return list(rows)

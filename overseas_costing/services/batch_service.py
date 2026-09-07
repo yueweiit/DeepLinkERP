@@ -201,6 +201,61 @@ def _build_multi_site_erp_detail_state(
     return state
 
 
+def _build_erp_work_detail_state(
+    *, current_hash: str, site_codes: list[str], links: list[dict], requests: list[dict]
+) -> dict:
+    from overseas_costing.services import fee_status_service
+
+    all_sites = sorted(
+        {str(value or "") for value in site_codes or [] if value}
+        | {str(row.get("site_code") or "") for row in links or [] if row.get("site_code")}
+        | {str(row.get("site_code") or "") for row in requests or [] if row.get("site_code")}
+    )
+    site_inputs = []
+    for site_code in all_sites:
+        site_links = [row for row in links or [] if str(row.get("site_code") or "") == site_code]
+        site_requests = [row for row in requests or [] if str(row.get("site_code") or "") == site_code]
+        current_requests = [
+            row
+            for row in site_requests
+            if str(row.get("cost_result_hash") or "") == str(current_hash or "")
+        ]
+        latest_request = current_requests[0] if current_requests else (site_requests[0] if site_requests else {})
+        link_hashes = {
+            str(row.get("last_cost_result_hash") or "")
+            for row in site_links
+            if row.get("last_cost_result_hash")
+        }
+        all_links_success = bool(site_links) and all(
+            str(row.get("status") or "").upper() in {"SUCCESS", "VERIFIED"} for row in site_links
+        )
+        last_hash = next(iter(link_hashes)) if len(link_hashes) == 1 else ""
+        request_status = str(latest_request.get("status") or "").upper()
+        status = request_status or ("SUCCESS" if all_links_success else "PENDING")
+        if len(link_hashes) > 1 and not request_status:
+            status = "FAILED"
+        site_inputs.append(
+            {
+                "site_code": site_code,
+                "status": status,
+                "last_cost_result_hash": last_hash,
+                "request_cost_result_hash": latest_request.get("cost_result_hash") or "",
+                "business_change_required": str(latest_request.get("error_code") or "") == "BUSINESS_CHANGE_REQUIRED",
+                "remote_documents": sorted(
+                    {str(row.get("remote_document") or "") for row in site_links if row.get("remote_document")}
+                ),
+            }
+        )
+    summary = fee_status_service.build_erp_work_summary(current_hash=current_hash, sites=site_inputs)
+    summary["legacy_writeback_status"] = "Success" if summary["overall"] == "SYNCED" else "Pending"
+    summary["legacy_writeback_message"] = (
+        "所有 ERP 站点已同步当前成本结果。"
+        if summary["overall"] == "SYNCED"
+        else "ERP 站点尚未全部同步，请按站点处理待办。"
+    )
+    return summary
+
+
 def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     source_meta = _get_batch_source_meta(batch_name)
     return {
@@ -1234,7 +1289,7 @@ def _attach_batch_calculation_snapshot(items: list[dict]) -> list[dict]:
     versions = frappe.get_all(
         "Overseas Cost Version",
         filters={"name": ["in", version_names]},
-        fields=["name", "summary_snapshot_json", "rule_snapshot_json", "calculated_at"],
+        fields=["name", "summary_snapshot_json", "rule_snapshot_json", "calculated_at", "cost_result_hash"],
         limit_page_length=len(version_names),
     )
     versions_by_name = {version["name"]: version for version in versions}
@@ -1247,6 +1302,53 @@ def _attach_batch_calculation_snapshot(items: list[dict]) -> list[dict]:
         item["ai_allocation"] = summary.get("ai_allocation") or {}
         item["allocation_rule_snapshot"] = rules if isinstance(rules, list) else []
         item["calculated_at"] = version.get("calculated_at")
+        item["cost_result_hash"] = version.get("cost_result_hash") or ""
+    return items
+
+
+def _attach_batch_erp_work(items: list[dict]) -> list[dict]:
+    if not items or frappe is None:
+        return items
+    batch_names = [str(row.get("name") or "") for row in items if row.get("name")]
+    try:
+        route_rows = frappe.get_all(
+            "Overseas Cost Item",
+            filters={"batch": ["in", batch_names]},
+            fields=["batch", "erp_site_code"],
+            limit_page_length=0,
+        )
+        links = frappe.get_all(
+            "Overseas Cost ERP Document Link",
+            filters={"batch": ["in", batch_names]},
+            fields=["batch", "site_code", "status", "last_cost_result_hash", "remote_document"],
+            order_by="modified desc",
+            limit_page_length=0,
+        )
+        requests = frappe.get_all(
+            "Overseas Cost ERP Sync Request",
+            filters={"batch": ["in", batch_names]},
+            fields=["batch", "site_code", "status", "cost_result_hash", "error_code"],
+            order_by="modified desc",
+            limit_page_length=0,
+        )
+    except Exception:
+        return items
+    for item in items:
+        batch_name = str(item.get("name") or "")
+        erp_work = _build_erp_work_detail_state(
+            current_hash=str(item.get("cost_result_hash") or ""),
+            site_codes=[
+                str(row.get("erp_site_code") or "")
+                for row in route_rows
+                if str(row.get("batch") or "") == batch_name and row.get("erp_site_code")
+            ],
+            links=[row for row in links if str(row.get("batch") or "") == batch_name],
+            requests=[row for row in requests if str(row.get("batch") or "") == batch_name],
+        )
+        item["erp_work"] = erp_work
+        if erp_work.get("sites"):
+            item["writeback_status"] = erp_work["legacy_writeback_status"]
+            item["writeback_message"] = erp_work["legacy_writeback_message"]
     return items
 
 
@@ -1578,6 +1680,7 @@ def get_batch_list(filters: dict) -> dict:
         ]
     items = _attach_batch_source_status(items)
     items = _attach_batch_calculation_snapshot(items)
+    items = _attach_batch_erp_work(items)
     for item in items:
         item.pop("extra_json", None)
     return {
@@ -1750,6 +1853,58 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         fee_work=fee_work,
         site_configs=safe_site_configs,
     )
+    erp_links = []
+    erp_requests = []
+    try:
+        erp_links = frappe.get_all(
+            "Overseas Cost ERP Document Link",
+            filters={"batch": batch_doc_name},
+            fields=[
+                "site_code",
+                "stable_line_key",
+                "business_key",
+                "remote_doctype",
+                "remote_document",
+                "remote_row",
+                "remote_docstatus",
+                "status",
+                "last_cost_result_hash",
+                "last_payload_hash",
+                "verified_at",
+            ],
+            order_by="modified desc",
+            limit_page_length=10000,
+        )
+        erp_requests = frappe.get_all(
+            "Overseas Cost ERP Sync Request",
+            filters={"batch": batch_doc_name},
+            fields=[
+                "request_id",
+                "operation",
+                "site_code",
+                "business_key",
+                "cost_result_hash",
+                "payload_hash",
+                "status",
+                "error_code",
+                "error_message",
+                "finished_at",
+            ],
+            order_by="modified desc",
+            limit_page_length=10000,
+        )
+    except Exception:
+        erp_links = []
+        erp_requests = []
+    erp_work = _build_erp_work_detail_state(
+        current_hash=str(version.get("cost_result_hash") or ""),
+        site_codes=erp_push.get("referenced_sites") or [],
+        links=erp_links,
+        requests=erp_requests,
+    )
+    if erp_work.get("sites"):
+        header["writeback_status"] = erp_work["legacy_writeback_status"]
+        header["writeback_message"] = erp_work["legacy_writeback_message"]
     header.pop("extra_json", None)
 
     return {
@@ -1764,6 +1919,7 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         "allocation_rules": rules,
         "erp_push": erp_push,
         "erp_preview": erp_push.get("preview") or {},
+        "erp_work": erp_work,
     }
 
 

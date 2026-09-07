@@ -202,6 +202,73 @@ def summarize_fee_statuses(statuses: list[dict]) -> dict:
     }
 
 
+def build_erp_work_state(*, current_hash: str, sites: list[dict]) -> dict[str, dict]:
+    """Build independent ERP work items without reading or changing fee completion."""
+
+    work = {}
+    for source in sites or []:
+        site = dict(source)
+        site_code = str(site.get("site_code") or "")
+        status = str(site.get("status") or "").upper()
+        last_hash = str(site.get("last_cost_result_hash") or site.get("last_hash") or "")
+        request_hash = str(site.get("request_cost_result_hash") or "")
+        if site.get("business_change_required") or status == "BUSINESS_CHANGE_REQUIRED":
+            state = "BUSINESS_CHANGE_REQUIRED"
+            todo = {
+                "code": "ERP_BUSINESS_CHANGE_REQUIRED",
+                "action": "resolve_business_change",
+                "label": "物料、数量或站点已变更，需按业务变更处理",
+            }
+        elif status == "MANUAL_REQUIRED":
+            state = "MANUAL_REQUIRED"
+            todo = {"code": "ERP_MANUAL_REQUIRED", "action": "view_manual_steps", "label": "需人工完成 ERP 成本更新"}
+        elif status == "UNCERTAIN" and request_hash == str(current_hash or ""):
+            state = "UNCERTAIN"
+            todo = {"code": "ERP_VERIFY_REQUIRED", "action": "verify_remote", "label": "ERP 结果不确定，需先回读核对"}
+        elif status == "FAILED" and (not request_hash or request_hash == str(current_hash or "")):
+            state = "FAILED"
+            todo = {"code": "ERP_RETRY_REQUIRED", "action": "retry", "label": "ERP 同步失败，可安全重试"}
+        elif last_hash and last_hash == str(current_hash or "") and status == "SUCCESS":
+            state = "SYNCED"
+            todo = None
+        elif last_hash:
+            state = "UPDATE_REQUIRED"
+            todo = {"code": "ERP_UPDATE_REQUIRED", "action": "preview_update", "label": "ERP 成本落后于当前结果"}
+        else:
+            state = "CREATE_REQUIRED"
+            todo = {"code": "ERP_CREATE_REQUIRED", "action": "preview_create", "label": "尚未推送到该 ERP 站点"}
+        work[site_code] = {
+            **site,
+            "site_code": site_code,
+            "state": state,
+            "cost_result_hash": str(current_hash or "") if state == "SYNCED" else "",
+            "last_hash": last_hash,
+            "todo": todo,
+        }
+    return work
+
+
+def build_erp_work_summary(*, current_hash: str, sites: list[dict]) -> dict:
+    rows = list(build_erp_work_state(current_hash=current_hash, sites=sites).values())
+    synced = sum(row.get("state") == "SYNCED" for row in rows)
+    if rows and synced == len(rows):
+        overall = "SYNCED"
+    elif synced:
+        overall = "PARTIAL"
+    elif any(row.get("state") == "BUSINESS_CHANGE_REQUIRED" for row in rows):
+        overall = "BLOCKED"
+    elif any(row.get("state") in {"FAILED", "UNCERTAIN", "MANUAL_REQUIRED"} for row in rows):
+        overall = "FAILED"
+    else:
+        overall = "PENDING"
+    return {
+        "overall": overall,
+        "current_hash": str(current_hash or ""),
+        "sites": rows,
+        "todo_count": sum(bool(row.get("todo")) for row in rows),
+    }
+
+
 def build_cost_result_hash(
     items: list[dict],
     fee_statuses: list[dict],

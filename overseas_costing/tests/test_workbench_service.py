@@ -200,6 +200,25 @@ def test_erp_task_only_keeps_pending_or_failed_writeback() -> None:
     assert [row["name"] for row in filter_batches_for_task(rows, "erp")] == ["PENDING", "FAILED", "READY"]
 
 
+def test_erp_task_uses_site_work_instead_of_successful_legacy_projection() -> None:
+    rows = [
+        {
+            "name": "PARTIAL",
+            "writeback_status": "Success",
+            "confirm_status": "Confirmed",
+            "erp_work": {"overall": "PARTIAL"},
+        },
+        {
+            "name": "SYNCED",
+            "writeback_status": "Pending",
+            "confirm_status": "Confirmed",
+            "erp_work": {"overall": "SYNCED"},
+        },
+    ]
+
+    assert [row["name"] for row in filter_batches_for_task(rows, "erp")] == ["PARTIAL"]
+
+
 def test_logistics_group_keeps_two_fixed_columns() -> None:
     fields = [column["fieldname"] for column in select_item_columns(EXCEL_COLUMNS, "logistics")]
     assert fields[:2] == ["material_code", "product_name"]

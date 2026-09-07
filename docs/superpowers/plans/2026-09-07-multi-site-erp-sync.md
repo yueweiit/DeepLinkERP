@@ -665,7 +665,7 @@ git commit -m 'feat: update provisional ERP costs safely'
 - Modify: `overseas_costing/tests/test_workbench_service.py`
 - Modify: `overseas_costing/tests/test_batch_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_current_result_closes_only_successful_site_todo() -> None:
@@ -682,13 +682,13 @@ def test_current_result_closes_only_successful_site_todo() -> None:
 
 同时断言费用待办与 ERP 回执无关；旧 H1 的迟到回执不能关闭 H2；路由/数量业务变更显示独立冲突。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_status_service.py overseas_costing/tests/test_workbench_service.py overseas_costing/tests/test_batch_service.py`
 
 Expected: FAIL because only a batch-level writeback status exists.
 
-- [ ] **Step 3: 实现站点状态摘要**
+- [x] **Step 3: 实现站点状态摘要**
 
 详情返回：
 
@@ -705,7 +705,7 @@ Expected: FAIL because only a batch-level writeback status exists.
 
 批次级旧字段仅作兼容投影：全部站点当前结果成功才为 Success；有成功有失败为 Pending/部分成功文案。费用最终确认和凭证状态不读取该投影。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_status_service.py overseas_costing/tests/test_workbench_service.py overseas_costing/tests/test_batch_service.py`
 
