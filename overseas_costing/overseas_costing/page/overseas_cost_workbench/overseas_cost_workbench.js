@@ -10788,7 +10788,7 @@ class OverseasCostWorkbench {
         </div>
         <aside class="ocw-packing-preview-summary">
           <h3>整票汇总</h3>
-          <dl><div><dt>物料行</dt><dd>${this.escape(String(preview.material_row_count || 0))}</dd></div><div><dt>包装组</dt><dd>${this.escape(String(preview.package_count || 0))}</dd></div><div><dt>整票毛重</dt><dd>${this.escape(this.packingMetricValue(totals.gross_weight_kg))} kg</dd></div><div><dt>整票体积</dt><dd>${this.escape(this.packingMetricValue(totals.volume_m3))} m³</dd></div><div><dt>整票净重</dt><dd>${this.escape(this.packingMetricValue(totals.net_weight_kg))} kg</dd></div></dl>
+          <dl><div><dt>物料行</dt><dd>${this.escape(String(preview.material_row_count || 0))}</dd></div><div><dt>包装组</dt><dd>${this.escape(String(preview.package_group_count || (preview.groups || []).length || 0))}</dd></div><div><dt>包装件数</dt><dd>${this.escape(String(preview.package_count || 0))}</dd></div><div><dt>整票毛重</dt><dd>${this.escape(this.packingMetricValue(totals.gross_weight_kg))} kg</dd></div><div><dt>整票体积</dt><dd>${this.escape(this.packingMetricValue(totals.volume_m3))} m³</dd></div><div><dt>整票净重</dt><dd>${this.escape(this.packingMetricValue(totals.net_weight_kg))} kg</dd></div></dl>
           ${blockers.length ? `<div class="ocw-packing-blockers"><strong>仍需确认</strong>${blockers.map((item) => `<span>${this.escape(item.message || item.code)}</span>`).join("")}</div>` : `<div class="ocw-packing-ready">汇总值已可用</div>`}
           <div class="ocw-packing-draft-note">保存草稿只保存当前浏览器中的分组选择，不会确认数据。</div>
         </aside>

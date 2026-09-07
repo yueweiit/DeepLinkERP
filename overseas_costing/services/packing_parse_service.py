@@ -86,6 +86,8 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
             )
 
     totals = _build_totals(cells, groups, columns, total_row)
+    package_total = _build_package_total(cells, groups, columns, total_row)
+    totals["package_count"] = package_total
     needs_confirmation = any(group["needs_confirmation"] for group in groups)
     if needs_confirmation and not any(item["code"] == "conflicting_merge_ranges" for item in blocking):
         blocking.append(
@@ -106,7 +108,8 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
         },
         "header_row": header_row,
         "material_row_count": len(material_rows),
-        "package_count": len(groups),
+        "package_group_count": len(groups),
+        "package_count": int(Decimal(package_total["value"])) if package_total.get("value") is not None else len(groups),
         "material_rows": material_rows,
         "groups": groups,
         "totals": totals,
@@ -317,11 +320,41 @@ def _build_totals(
     return result
 
 
+def _build_package_total(
+    cells: list[list[dict[str, Any]]],
+    groups: list[dict[str, Any]],
+    columns: dict[str, int],
+    total_row: int | None,
+) -> dict[str, Any]:
+    calculated_values = [
+        _to_decimal(group["package_count"].get("value"))
+        for group in groups
+        if group.get("package_count")
+        and group["package_count"].get("value") is not None
+        and group["package_count"].get("count_once")
+    ]
+    calculated = sum((value for value in calculated_values if value is not None), Decimal("0")) if calculated_values else None
+    declared = _decimal_cell(cells, total_row, columns.get("package_count")) if total_row else None
+    value = declared if declared is not None else calculated
+    if value is not None and (value < 0 or value != value.to_integral_value()):
+        value = None
+    return {
+        "value": _decimal_text(value),
+        "unit": "piece",
+        "kind": "source_total" if declared is not None else "calculated_group_sum" if calculated is not None else "group_count_fallback",
+        "source_range": f"package_count:{total_row}" if declared is not None else None,
+        "precision": 0 if value is not None else None,
+        "declared_value": _decimal_text(declared),
+        "calculated_value": _decimal_text(calculated),
+    }
+
+
 def _empty_preview(grid: dict[str, Any], code: str, message: str) -> dict[str, Any]:
     return {
         "ok": False,
         "source": {"source_kind": grid.get("source_kind"), "sheet_name": grid.get("sheet_name")},
         "material_row_count": 0,
+        "package_group_count": 0,
         "package_count": 0,
         "material_rows": [],
         "groups": [],
@@ -402,4 +435,3 @@ def _is_repeated_header(row: list[dict[str, Any]], columns: dict[str, int]) -> b
     material_cell = _cell_raw([row], 1, columns.get("material_code"))
     normalized = _normalize_header(material_cell)
     return any(_normalize_header(alias) in normalized for alias in HEADER_ALIASES["material_code"])
-

@@ -215,7 +215,8 @@ def _apply_resolutions(preview: dict[str, Any], resolutions: dict[str, Any]) -> 
             unresolved.append(group.get("group_id"))
             resolved_groups.append(group)
     resolved["groups"] = resolved_groups
-    resolved["package_count"] = len(resolved_groups)
+    resolved["package_group_count"] = len(resolved_groups)
+    _recompute_resolved_totals(resolved)
     validation = resolved.setdefault("validation", {})
     blocking = [
         item
@@ -232,6 +233,42 @@ def _apply_resolutions(preview: dict[str, Any], resolutions: dict[str, Any]) -> 
     validation["blocking"] = blocking
     validation["needs_group_confirmation"] = bool(unresolved)
     return resolved
+
+
+def _recompute_resolved_totals(preview: dict[str, Any]) -> None:
+    """用用户已确认的 count_once 包装组重新汇总，但保留表内整票声明值。"""
+
+    groups = preview.get("groups") or []
+    totals = preview.setdefault("totals", {})
+    for field in ("net_weight_kg", "gross_weight_kg", "volume_m3"):
+        values = [
+            _decimal((group.get(field) or {}).get("value"))
+            for group in groups
+            if (group.get(field) or {}).get("count_once")
+        ]
+        calculated = sum((value for value in values if value is not None), Decimal("0")) if any(value is not None for value in values) else None
+        total = totals.setdefault(field, {})
+        total["calculated_value"] = _decimal_text(calculated)
+        if field == "net_weight_kg" or total.get("kind") != "source_total":
+            total["value"] = _decimal_text(calculated)
+            total["kind"] = "calculated_detail_sum"
+
+    package_values = [
+        _decimal((group.get("package_count") or {}).get("value"))
+        for group in groups
+        if (group.get("package_count") or {}).get("count_once")
+    ]
+    package_calculated = sum(
+        (value for value in package_values if value is not None), Decimal("0")
+    ) if any(value is not None for value in package_values) else None
+    package_total = totals.setdefault("package_count", {})
+    package_total["calculated_value"] = _decimal_text(package_calculated)
+    if package_total.get("kind") != "source_total" and package_calculated is not None:
+        package_total["value"] = _decimal_text(package_calculated)
+        package_total["kind"] = "calculated_group_sum"
+    resolved_package_count = _decimal(package_total.get("value"))
+    if resolved_package_count is not None and resolved_package_count == resolved_package_count.to_integral_value():
+        preview["package_count"] = int(resolved_package_count)
 
 
 def _parse_resolutions(value: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -401,12 +438,14 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
     attachment_rows = frappe.get_list(
         "Overseas Cost Attachment",
         filters={"batch": str(batch_name)},
-        fields=["name", "source_type", "oa_attachment_origin", "attachment_type", "file_name", "file_url", "modified"],
+        fields=["name", "batch", "source_type", "oa_attachment_origin", "attachment_type", "file_name", "file_url", "modified", "parse_result_json"],
         limit_page_length=1000,
     )
     manual = []
     approval = []
     for row in attachment_rows:
+        if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
+            continue
         sheets = _attachment_sheet_names(row)
         item = {
             "source_id": row.get("name"),

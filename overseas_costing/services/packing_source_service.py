@@ -455,6 +455,7 @@ def _comment_snapshot_preview(parsed: dict) -> dict:
         "ok": False,
         "source": {"source_kind": "approval_comment"},
         "material_row_count": len(rows),
+        "package_group_count": 1,
         "package_count": 1,
         "material_rows": rows,
         "groups": [group],

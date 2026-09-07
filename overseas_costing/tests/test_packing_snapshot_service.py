@@ -213,7 +213,8 @@ def test_user_can_split_a_suggested_shared_group_without_double_counting() -> No
 
     assert resolved["validation"]["blocking"] == []
     assert resolved["validation"]["needs_group_confirmation"] is False
-    assert resolved["package_count"] == 2
+    assert resolved["package_group_count"] == 2
+    assert resolved["package_count"] == 6
     assert [group["row_numbers"] for group in resolved["groups"]] == [[2], [3]]
     assert resolved["groups"][0]["gross_weight_kg"]["value"] == "4197.4"
     assert resolved["groups"][1]["gross_weight_kg"]["value"] is None

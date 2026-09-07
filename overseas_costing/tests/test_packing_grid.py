@@ -283,3 +283,35 @@ def test_second_horizontal_header_does_not_duplicate_material_rows(tmp_path) -> 
 
     assert preview["material_row_count"] == 1
     assert preview["material_rows"][0]["material_code"] == "FL001"
+
+
+def test_package_piece_total_is_distinct_from_package_group_count() -> None:
+    rows = [["物料编码", "数量", "总毛重", "总体积", "件数"]]
+    for index in range(1, 25):
+        rows.append(
+            [
+                f"ITEM-{index:02d}",
+                1,
+                1000 if index < 24 else 2360.08,
+                2 if index < 24 else 9.33429,
+                15 if index < 24 else 23,
+            ]
+        )
+    rows.append(["合计", None, 25360.08, 55.33429, 368])
+    snapshot = {
+        "schemaVersion": 1,
+        "sheetName": "8.15日货柜",
+        "rangeAddress": "A1:E26",
+        "values": rows,
+        "displayValues": [["" if value is None else str(value) for value in row] for row in rows],
+        "formulas": [["", "", "", "", ""] for _row in rows],
+        "mergeRangesAvailable": False,
+    }
+
+    preview = parse_packing_grid(build_grid_from_dingtalk_snapshot(snapshot))
+
+    assert preview["material_row_count"] == 24
+    assert preview["package_group_count"] == 24
+    assert preview["package_count"] == 368
+    assert preview["totals"]["gross_weight_kg"]["value"] == "25360.08"
+    assert preview["totals"]["volume_m3"]["value"] == "55.33429"
