@@ -28,7 +28,8 @@ docker compose -f "$COMPOSE_FILE" exec -T backend \
 
 echo "== Verify overseas costing application release =="
 docker compose -f "$COMPOSE_FILE" exec -T backend \
-    env SITE_NAME="$SITE_NAME" /home/frappe/frappe-bench/env/bin/python - <<'PY'
+    env FRAPPE_STREAM_LOGGING=1 SITE_NAME="$SITE_NAME" \
+    /home/frappe/frappe-bench/env/bin/python - <<'PY'
 import os
 import uuid
 from io import BytesIO

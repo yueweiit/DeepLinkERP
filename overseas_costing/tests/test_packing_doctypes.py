@@ -16,6 +16,18 @@ def _fields(meta: dict) -> dict[str, dict]:
     return {field["fieldname"]: field for field in meta["fields"]}
 
 
+def test_packing_doctypes_are_present_in_frappe_module_tree() -> None:
+    """生产 bench migrate 只扫描模块目录，不能只保留顶层兼容副本。"""
+
+    for name in ("overseas_packing_snapshot", "overseas_freight_comparison"):
+        source_directory = ROOT / "doctype" / name
+        module_directory = ROOT / "overseas_costing" / "doctype" / name
+        for filename in ("__init__.py", f"{name}.json", f"{name}.py"):
+            assert (module_directory / filename).read_bytes() == (
+                source_directory / filename
+            ).read_bytes()
+
+
 def test_packing_snapshot_metadata_is_traceable_and_immutable() -> None:
     meta = _doctype("overseas_packing_snapshot")
     fields = _fields(meta)
