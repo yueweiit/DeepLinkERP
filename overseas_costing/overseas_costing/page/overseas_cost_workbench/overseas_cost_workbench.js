@@ -362,7 +362,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
       sourceId: "",
       sheetName: "",
       preview: null,
-      resolutions: { groups: {} },
+      resolutions: { groups: {}, totals: {} },
       snapshot: null,
       quote: null,
       calculation: null,
@@ -389,19 +389,33 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   function packingFlowCanCompare(preview, resolutions = {}) {
     if (!preview) return false;
     const totals = preview.totals || {};
-    const gross = Number((totals.gross_weight_kg || {}).value);
-    const volume = Number((totals.volume_m3 || {}).value);
+    const totalDecisions = resolutions.totals || {};
+    const resolvedTotalValue = (field) => {
+      const total = totals[field] || {};
+      const decision = (totalDecisions[field] || {}).action;
+      if (decision === "use_declared") return total.declared_value;
+      if (decision === "use_calculated") return total.calculated_value;
+      return total.value;
+    };
+    const gross = Number(resolvedTotalValue("gross_weight_kg"));
+    const volume = Number(resolvedTotalValue("volume_m3"));
     if (!(gross > 0) || !(volume > 0)) return false;
     const groups = resolutions.groups || {};
     const unresolved = (preview.groups || []).some((group) => {
       if (!group || !group.needs_confirmation) return false;
       const decision = groups[String(group.group_id || "")] || {};
-      return !["confirm_shared", "link", "shared", "split"].includes(String(decision.action || decision));
+      return !["confirm_shared", "link", "shared", "split", "partition"].includes(String(decision.action || decision));
     });
     if (unresolved) return false;
-    return !((preview.validation || {}).blocking || []).some(
-      (item) => item && item.code !== "group_confirmation_required"
-    );
+    return !((preview.validation || {}).blocking || []).some((item) => {
+      if (!item || item.code === "group_confirmation_required") return false;
+      if (item.code === "conflicting_merge_ranges" && !unresolved) return false;
+      if (item.code === "total_mismatch") {
+        const decision = totalDecisions[String(item.field || "")] || {};
+        return !["use_declared", "use_calculated"].includes(String(decision.action || decision));
+      }
+      return true;
+    });
   }
 
   function applyPackingPreview(state, preview) {
@@ -410,7 +424,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
       ...(state || createPackingFlowState()),
       step: nextPreview ? 2 : 1,
       preview: nextPreview,
-      resolutions: { groups: {} },
+      resolutions: { groups: {}, totals: {} },
       snapshot: null,
       quote: null,
       calculation: null,
@@ -428,6 +442,46 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
         groups: {
           ...((current.resolutions || {}).groups || {}),
           [String(groupId || "")]: { action: String(action || "") },
+        },
+      },
+    };
+    next.canCompare = packingFlowCanCompare(next.preview, next.resolutions);
+    return next;
+  }
+
+  function resolvePackageGroupRows(state, groupId, allRows, selectedRows) {
+    const rows = Array.from(new Set((allRows || []).map(Number))).filter(Number.isFinite);
+    const selected = Array.from(new Set((selectedRows || []).map(Number))).filter((row) => rows.includes(row));
+    if (!selected.length || selected.length === rows.length) {
+      return resolvePackageGroup(state, groupId, selected.length === rows.length ? "confirm_shared" : "");
+    }
+    const selectedSet = new Set(selected);
+    const partitions = [selected, ...rows.filter((row) => !selectedSet.has(row)).map((row) => [row])];
+    const current = state || createPackingFlowState();
+    const next = {
+      ...current,
+      resolutions: {
+        ...(current.resolutions || {}),
+        groups: {
+          ...((current.resolutions || {}).groups || {}),
+          [String(groupId || "")]: { action: "partition", partitions },
+        },
+      },
+    };
+    next.canCompare = packingFlowCanCompare(next.preview, next.resolutions);
+    return next;
+  }
+
+  function resolvePackingTotal(state, field, action) {
+    const current = state || createPackingFlowState();
+    const next = {
+      ...current,
+      resolutions: {
+        ...(current.resolutions || {}),
+        groups: { ...((current.resolutions || {}).groups || {}) },
+        totals: {
+          ...((current.resolutions || {}).totals || {}),
+          [String(field || "")]: { action: String(action || "") },
         },
       },
     };
@@ -463,6 +517,16 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
     };
   }
 
+  function freightQuoteIsReady(quote) {
+    if (!quote || quote.scope_confirmed !== true || !String(quote.quote_remark || "").trim()) return false;
+    if (!/^[A-Z]{3}$/.test(String(quote.currency || ""))) return false;
+    return [quote.weight && quote.weight.unit_price, quote.volume && quote.volume.unit_price].every((value) => {
+      if (value === undefined || value === null || String(value).trim() === "") return false;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0;
+    });
+  }
+
   return {
     parseWorkbenchState,
     buildWorkbenchUrl,
@@ -484,7 +548,10 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
     selectPackingSource,
     applyPackingPreview,
     resolvePackageGroup,
+    resolvePackageGroupRows,
+    resolvePackingTotal,
     buildFreightQuotePayload,
+    freightQuoteIsReady,
     packingFlowCanCompare,
     MONETARY_FIELDS,
     TRANSPORT_MODE_ALIASES,
@@ -10669,6 +10736,20 @@ class OverseasCostWorkbench {
         dialog.packingFlowState = OverseasCostWorkbenchState.selectPackingSource(
           dialog.packingFlowState, requestedKind, requestedId, sheetName
         );
+      } else {
+        try {
+          const draft = JSON.parse(window.localStorage.getItem(`ocw-packing-draft:${batch.name}`) || "null");
+          const source = draft && this.findPackingFlowSource(result, draft.sourceKind, draft.sourceId);
+          if (source) {
+            dialog.packingDraft = draft;
+            dialog.packingSourceTab = draft.sourceKind === "wiki_sheet" ? "wiki" : draft.sourceKind.startsWith("approval_") ? "approval" : "local";
+            dialog.packingFlowState = OverseasCostWorkbenchState.selectPackingSource(
+              dialog.packingFlowState, draft.sourceKind, draft.sourceId, draft.sheetName || ""
+            );
+          }
+        } catch (_error) {
+          dialog.packingDraft = null;
+        }
       }
     } catch (error) {
       dialog.packingFlowError = this.normalizeErrorMessage(error);
@@ -10789,7 +10870,7 @@ class OverseasCostWorkbench {
         <aside class="ocw-packing-preview-summary">
           <h3>整票汇总</h3>
           <dl><div><dt>物料行</dt><dd>${this.escape(String(preview.material_row_count || 0))}</dd></div><div><dt>包装组</dt><dd>${this.escape(String(preview.package_group_count || (preview.groups || []).length || 0))}</dd></div><div><dt>包装件数</dt><dd>${this.escape(String(preview.package_count || 0))}</dd></div><div><dt>整票毛重</dt><dd>${this.escape(this.packingMetricValue(totals.gross_weight_kg))} kg</dd></div><div><dt>整票体积</dt><dd>${this.escape(this.packingMetricValue(totals.volume_m3))} m³</dd></div><div><dt>整票净重</dt><dd>${this.escape(this.packingMetricValue(totals.net_weight_kg))} kg</dd></div></dl>
-          ${blockers.length ? `<div class="ocw-packing-blockers"><strong>仍需确认</strong>${blockers.map((item) => `<span>${this.escape(item.message || item.code)}</span>`).join("")}</div>` : `<div class="ocw-packing-ready">汇总值已可用</div>`}
+          ${blockers.length ? `<div class="ocw-packing-blockers"><strong>仍需确认</strong>${blockers.map((item) => item.code === "total_mismatch" ? this.renderPackingTotalDecision(item, state) : `<span>${this.escape(item.message || item.code)}</span>`).join("")}</div>` : `<div class="ocw-packing-ready">汇总值已可用</div>`}
           <div class="ocw-packing-draft-note">保存草稿只保存当前浏览器中的分组选择，不会确认数据。</div>
         </aside>
         <footer class="ocw-packing-flow-footer full"><button class="ocw-outline-btn" type="button" data-action="packing-save-draft">保存草稿</button><button class="ocw-primary-btn" type="button" data-action="packing-confirm-snapshot" ${state.canCompare ? "" : "disabled"}>下一步：比较运费</button></footer>
@@ -10805,8 +10886,14 @@ class OverseasCostWorkbench {
       <header><div><strong>${this.escape(group.group_id || "包装组")}</strong><span>${this.escape((group.row_numbers || []).join("、"))} 行</span></div>${(group.row_numbers || []).length > 1 ? `<b>共享箱级数据</b>` : ""}</header>
       <div class="ocw-packing-group-metrics"><span>毛重 <strong>${this.escape(this.packingMetricValue(group.gross_weight_kg))} kg</strong></span><span>体积 <strong>${this.escape(this.packingMetricValue(group.volume_m3))} m³</strong></span><span>净重 <strong>${this.escape(this.packingMetricValue(group.net_weight_kg))} kg</strong></span><span>件数 <strong>${this.escape(this.packingMetricValue(group.package_count))}</strong></span></div>
       <div class="ocw-packing-group-rows">${rows.map((row) => `<div><span>${this.escape(String(row.source_row || ""))}</span><strong>${this.escape(row.material_code || "未填编码")}</strong><em>${this.escape(row.product_name || "--")}</em><small>${this.escape(row.quantity || "--")} ${this.escape(row.unit || "")}</small></div>`).join("")}</div>
-      ${group.needs_confirmation ? `<div class="ocw-packing-group-decision"><span>${resolved ? `已选：${decision.action === "split" ? "拆分为独立包装组" : "关联到上一包装组"}` : this.escape(group.suggestion_reason || "请确认空白单元格是否为合并包装数据")}</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-resolve-group" data-group-id="${this.escape(group.group_id)}" data-resolution="confirm_shared">关联到上一包装组</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-resolve-group" data-group-id="${this.escape(group.group_id)}" data-resolution="split">拆分为独立包装组</button></div></div>` : ""}
+      ${group.needs_confirmation ? `<div class="ocw-packing-group-decision"><span>${resolved ? `已选：${decision.action === "split" ? "拆分为独立包装组" : decision.action === "partition" ? "按指定行分组" : "确认为共享包装组"}` : this.escape(group.suggestion_reason || "请确认空白单元格是否为合并包装数据")}</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-resolve-group" data-group-id="${this.escape(group.group_id)}" data-resolution="confirm_shared">整组共享</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-resolve-group" data-group-id="${this.escape(group.group_id)}" data-resolution="split">全部拆分</button></div>${(group.row_numbers || []).length >= 3 ? `<fieldset class="ocw-packing-row-partition" data-group-id="${this.escape(group.group_id)}" data-group-rows="${this.escape(JSON.stringify(group.row_numbers || []))}"><legend>或勾选应共享箱级数据的行</legend>${(group.row_numbers || []).map((rowNumber) => `<label><input type="checkbox" data-packing-partition-row value="${this.escape(String(rowNumber))}"><span>第 ${this.escape(String(rowNumber))} 行</span></label>`).join("")}<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-apply-partition">按勾选行建立共享组</button></fieldset>` : ""}</div>` : ""}
     </article>`;
+  }
+
+  renderPackingTotalDecision(item, state) {
+    const labels = { net_weight_kg: "净重", gross_weight_kg: "毛重", volume_m3: "体积" };
+    const decision = (((state.resolutions || {}).totals || {})[item.field] || {}).action;
+    return `<div class="ocw-packing-total-decision"><span>${this.escape(item.message || "合计与明细不一致")}</span><small>已选：${this.escape(decision === "use_declared" ? "表内合计" : decision === "use_calculated" ? "明细加总" : "尚未选择")}</small><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-resolve-total" data-total-field="${this.escape(item.field)}" data-resolution="use_declared">选择表内合计 ${this.escape(item.declared_value || "--")}</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-resolve-total" data-total-field="${this.escape(item.field)}" data-resolution="use_calculated">选择明细加总 ${this.escape(item.calculated_value || "--")}</button></div><em>${this.escape(labels[item.field] || item.field || "汇总")}口径会写入确认快照</em></div>`;
   }
 
   packingMetricValue(metric) {
@@ -10842,7 +10929,8 @@ class OverseasCostWorkbench {
     const display = result.display || {};
     const labels = { weight: "按重量", volume: "按体积", equal: "两者相同" };
     const recommendation = result.recommended_basis ? labels[result.recommended_basis] : "尚未确认同一报价范围";
-    return `<div class="ocw-packing-result"><header><span>建议方式</span><strong>${this.escape(recommendation)}</strong></header><div class="ocw-packing-result-totals"><div><span>按重量总运费</span><strong>${this.escape(display.currency || "")} ${this.escape(display.weight_total || "--")}</strong></div><div><span>按体积总运费</span><strong>${this.escape(display.currency || "")} ${this.escape(display.volume_total || "--")}</strong></div></div><div class="ocw-packing-saving"><span>差额 ${this.escape(display.currency || "")} ${this.escape(display.difference_amount || "--")}</span><strong>最高可节省 ${this.escape(display.savings_percent || "--")}</strong></div>${this.renderPackingTrace("重量计算", result.weight)}${this.renderPackingTrace("体积计算", result.volume)}<button class="ocw-primary-btn" type="button" data-action="packing-save-comparison">保存比较结果</button><p>保存后仅形成可追溯试算历史，不会自动采用任一方案。</p></div>`;
+    const savingsMessage = result.scope_confirmed ? `最高可节省 ${this.escape(display.savings_percent || "--")}` : "仅显示差额，确认同一报价范围后才给建议";
+    return `<div class="ocw-packing-result"><header><span>建议方式</span><strong>${this.escape(recommendation)}</strong></header><div class="ocw-packing-result-totals"><div><span>按重量总运费</span><strong>${this.escape(display.currency || "")} ${this.escape(display.weight_total || "--")}</strong></div><div><span>按体积总运费</span><strong>${this.escape(display.currency || "")} ${this.escape(display.volume_total || "--")}</strong></div></div><div class="ocw-packing-saving"><span>差额 ${this.escape(display.currency || "")} ${this.escape(display.difference_amount || "--")}</span><strong>${savingsMessage}</strong></div>${this.renderPackingTrace("重量计算", result.weight)}${this.renderPackingTrace("体积计算", result.volume)}<button class="ocw-primary-btn" type="button" data-action="packing-save-comparison">保存比较结果</button><p>保存后仅形成可追溯试算历史，不会自动采用任一方案。</p></div>`;
   }
 
   renderPackingTrace(label, trace = {}) {
@@ -10868,12 +10956,28 @@ class OverseasCostWorkbench {
       })
       .on("click.ocwPackingFlow", "[data-action='packing-preview-source']", () => this.previewPackingFlowSource(dialog, batch).catch((error) => this.showPackingFlowError(dialog, batch, error)))
       .on("click.ocwPackingFlow", "[data-action='packing-back-source']", () => {
-        dialog.packingFlowState = { ...dialog.packingFlowState, step: 1, preview: null, resolutions: { groups: {} }, canCompare: false };
+        dialog.packingFlowState = { ...dialog.packingFlowState, step: 1, preview: null, resolutions: { groups: {}, totals: {} }, canCompare: false };
         this.renderPackingFlow(dialog, batch);
       })
       .on("click.ocwPackingFlow", "[data-action='packing-resolve-group']", (event) => {
         const $button = $(event.currentTarget);
         dialog.packingFlowState = OverseasCostWorkbenchState.resolvePackageGroup(dialog.packingFlowState, $button.attr("data-group-id"), $button.attr("data-resolution"));
+        this.renderPackingFlow(dialog, batch);
+      })
+      .on("click.ocwPackingFlow", "[data-action='packing-apply-partition']", (event) => {
+        const $field = $(event.currentTarget).closest("[data-group-rows]");
+        const rows = JSON.parse($field.attr("data-group-rows") || "[]");
+        const selectedRows = $field.find("[data-packing-partition-row]:checked").map((_, element) => Number($(element).val())).get();
+        dialog.packingFlowState = OverseasCostWorkbenchState.resolvePackageGroupRows(
+          dialog.packingFlowState, $field.attr("data-group-id"), rows, selectedRows
+        );
+        this.renderPackingFlow(dialog, batch);
+      })
+      .on("click.ocwPackingFlow", "[data-action='packing-resolve-total']", (event) => {
+        const $button = $(event.currentTarget);
+        dialog.packingFlowState = OverseasCostWorkbenchState.resolvePackingTotal(
+          dialog.packingFlowState, $button.attr("data-total-field"), $button.attr("data-resolution")
+        );
         this.renderPackingFlow(dialog, batch);
       })
       .on("click.ocwPackingFlow", "[data-action='packing-save-draft']", () => this.savePackingFlowDraft(dialog, batch))
@@ -10908,6 +11012,15 @@ class OverseasCostWorkbench {
     }, true);
     dialog.packingFlowError = "";
     dialog.packingFlowState = OverseasCostWorkbenchState.applyPackingPreview(state, result);
+    if (dialog.packingDraft && dialog.packingDraft.sourceRevision === result.source_revision) {
+      const resolutions = dialog.packingDraft.resolutions || { groups: {}, totals: {} };
+      dialog.packingFlowState = {
+        ...dialog.packingFlowState,
+        resolutions,
+        canCompare: OverseasCostWorkbenchState.packingFlowCanCompare(result, resolutions),
+      };
+      frappe.show_alert({ message: "已恢复当前浏览器中的装箱确认草稿", indicator: "blue" });
+    }
     this.renderPackingFlow(dialog, batch);
   }
 
@@ -10949,6 +11062,9 @@ class OverseasCostWorkbench {
   async calculatePackingFreight(dialog, batch) {
     const state = dialog.packingFlowState;
     const quote = OverseasCostWorkbenchState.buildFreightQuotePayload(state, this.packingFlowQuoteFields(dialog));
+    if (!OverseasCostWorkbenchState.freightQuoteIsReady(quote)) {
+      throw new Error("请填写两套单价和报价备注，并确认服务范围、时效和附加条件一致。");
+    }
     const result = await this.call("overseas_costing.api.packing_api.preview_freight_comparison", {
       batch_name: batch.name,
       snapshot_revision: state.snapshot.idempotency_key,
@@ -10962,6 +11078,7 @@ class OverseasCostWorkbench {
   async savePackingFreightComparison(dialog, batch) {
     const state = dialog.packingFlowState;
     if (!state.quote || !state.calculation) throw new Error("请先计算比较结果。");
+    if (!OverseasCostWorkbenchState.freightQuoteIsReady(state.quote)) throw new Error("当前报价信息不完整，请重新计算。");
     const result = await this.call("overseas_costing.api.packing_api.save_freight_comparison", {
       batch_name: batch.name,
       snapshot_revision: state.snapshot.idempotency_key,

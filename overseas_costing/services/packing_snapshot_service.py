@@ -95,6 +95,19 @@ def confirm_packing_snapshot(
         if not actual_hash or actual_hash != expected_hash:
             repo.rollback()
             return {"ok": False, "source_changed": True, "message": "装箱来源已更新，请重新预览后确认。"}
+        idempotency_key = _idempotency_key(batch_name, source_revision)
+        existing = repo.get_by_idempotency_key(idempotency_key)
+        if existing:
+            stored_resolutions = _parse_resolutions(_record_value(existing, "resolutions_json"))
+            repo.rollback()
+            if _json(stored_resolutions) != _json(resolutions):
+                return {
+                    "ok": False,
+                    "source_changed": False,
+                    "resolution_conflict": True,
+                    "message": "该来源版本已经确认，不能用另一组决定覆盖。请刷新来源后重新预览。",
+                }
+            return {"ok": True, "idempotent": True, "snapshot": _public_snapshot(existing)}
         preview = _apply_resolutions(trusted.get("preview") or {}, resolutions)
         blocking = (preview.get("validation") or {}).get("blocking") or []
         if blocking:
@@ -110,11 +123,6 @@ def confirm_packing_snapshot(
         if gross is None or volume is None:
             repo.rollback()
             return {"ok": False, "message": "比较运费前必须确认整票毛重和总体积。"}
-        idempotency_key = _idempotency_key(batch_name, source_revision, resolutions)
-        existing = repo.get_by_idempotency_key(idempotency_key)
-        if existing:
-            repo.rollback()
-            return {"ok": True, "idempotent": True, "snapshot": _public_snapshot(existing)}
         current = repo.get_current(str(batch_name))
         if current:
             repo.supersede(current)
@@ -190,38 +198,29 @@ def _apply_resolutions(preview: dict[str, Any], resolutions: dict[str, Any]) -> 
                     group[field]["count_once"] = True
             group.setdefault("evidence", []).append({"kind": "user_confirmed_shared"})
             resolved_groups.append(group)
-        elif action == "split":
+        elif action in {"split", "partition"}:
             rows = list(group.get("row_numbers") or [])
-            for index, row_number in enumerate(rows):
-                singleton = copy.deepcopy(group)
-                singleton["group_id"] = f"{group.get('group_id')}-row-{row_number}"
-                singleton["row_numbers"] = [row_number]
-                singleton["needs_confirmation"] = False
-                singleton["suggestion_reason"] = None
-                singleton.setdefault("evidence", []).append(
-                    {"kind": "user_split", "source_group_id": group.get("group_id")}
-                )
-                if index:
-                    for field in ("net_weight_kg", "gross_weight_kg", "volume_m3", "package_count"):
-                        if isinstance(singleton.get(field), dict):
-                            singleton[field]["value"] = None
-                            singleton[field]["count_once"] = False
-                    for metric in (singleton.get("dimensions") or {}).values():
-                        if isinstance(metric, dict):
-                            metric["value"] = None
-                            metric["count_once"] = False
-                resolved_groups.append(singleton)
+            partitions = [[row] for row in rows] if action == "split" else (decision or {}).get("partitions")
+            normalized = _validate_partitions(rows, partitions)
+            if normalized:
+                resolved_groups.extend(_partition_group(group, normalized, action))
+            else:
+                unresolved.append(group.get("group_id"))
+                resolved_groups.append(group)
         else:
             unresolved.append(group.get("group_id"))
             resolved_groups.append(group)
     resolved["groups"] = resolved_groups
     resolved["package_group_count"] = len(resolved_groups)
     _recompute_resolved_totals(resolved)
+    resolved_total_fields = _apply_total_resolutions(resolved, resolutions)
     validation = resolved.setdefault("validation", {})
     blocking = [
         item
         for item in (validation.get("blocking") or [])
-        if item.get("code") not in {"group_confirmation_required"}
+        if item.get("code") != "group_confirmation_required"
+        and not (item.get("code") == "conflicting_merge_ranges" and not unresolved)
+        and not (item.get("code") == "total_mismatch" and item.get("field") in resolved_total_fields)
     ]
     if unresolved:
         blocking.append(
@@ -233,6 +232,85 @@ def _apply_resolutions(preview: dict[str, Any], resolutions: dict[str, Any]) -> 
     validation["blocking"] = blocking
     validation["needs_group_confirmation"] = bool(unresolved)
     return resolved
+
+
+def _validate_partitions(rows: list[int], partitions: Any) -> list[list[int]] | None:
+    if not isinstance(partitions, list) or not partitions:
+        return None
+    normalized = []
+    for partition in partitions:
+        if not isinstance(partition, list) or not partition:
+            return None
+        try:
+            values = [int(row) for row in partition]
+        except (TypeError, ValueError):
+            return None
+        if len(values) != len(set(values)):
+            return None
+        normalized.append(values)
+    flattened = [row for partition in normalized for row in partition]
+    return normalized if len(flattened) == len(set(flattened)) and sorted(flattened) == sorted(rows) else None
+
+
+def _partition_group(group: dict[str, Any], partitions: list[list[int]], action: str) -> list[dict[str, Any]]:
+    result = []
+    for index, partition in enumerate(partitions, start=1):
+        subgroup = copy.deepcopy(group)
+        subgroup["group_id"] = f"{group.get('group_id')}-part-{index}"
+        subgroup["row_numbers"] = partition
+        subgroup["needs_confirmation"] = False
+        subgroup["suggestion_reason"] = None
+        subgroup["merge_conflict"] = False
+        subgroup.setdefault("evidence", []).append(
+            {"kind": f"user_{action}", "source_group_id": group.get("group_id"), "rows": partition}
+        )
+        metrics = [
+            subgroup.get("net_weight_kg"),
+            subgroup.get("gross_weight_kg"),
+            subgroup.get("volume_m3"),
+            subgroup.get("package_count"),
+            *((subgroup.get("dimensions") or {}).values()),
+        ]
+        for metric in metrics:
+            if not isinstance(metric, dict):
+                continue
+            source_row = metric.get("source_row")
+            owns_value = source_row in partition if source_row is not None else index == 1
+            if owns_value and metric.get("value") is not None:
+                metric["count_once"] = True
+            else:
+                metric["value"] = None
+                metric["count_once"] = False
+                metric["source_row"] = None
+        result.append(subgroup)
+    return result
+
+
+def _apply_total_resolutions(preview: dict[str, Any], resolutions: dict[str, Any]) -> set[str]:
+    decisions = resolutions.get("totals") if isinstance(resolutions.get("totals"), dict) else {}
+    resolved_fields: set[str] = set()
+    for field, total in (preview.get("totals") or {}).items():
+        declared = _decimal((total or {}).get("declared_value"))
+        calculated = _decimal((total or {}).get("calculated_value"))
+        if declared is None or calculated is None:
+            continue
+        tolerance = max(Decimal("0.01"), abs(declared) * Decimal("0.001"))
+        if abs(declared - calculated) <= tolerance:
+            resolved_fields.add(field)
+    for field, decision in decisions.items():
+        total = (preview.get("totals") or {}).get(field)
+        if not isinstance(total, dict):
+            continue
+        action = str((decision or {}).get("action") or "") if isinstance(decision, dict) else str(decision or "")
+        if action == "use_declared" and total.get("declared_value") is not None:
+            total["value"] = total["declared_value"]
+            total["kind"] = "user_selected_source_total"
+            resolved_fields.add(field)
+        elif action == "use_calculated" and total.get("calculated_value") is not None:
+            total["value"] = total["calculated_value"]
+            total["kind"] = "user_selected_calculated"
+            resolved_fields.add(field)
+    return resolved_fields
 
 
 def _recompute_resolved_totals(preview: dict[str, Any]) -> None:
@@ -284,10 +362,8 @@ def _parse_resolutions(value: str | dict[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def _idempotency_key(batch_name: str, source_revision: str, resolutions: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        f"{batch_name}|{source_revision}|{_json(resolutions)}".encode("utf-8")
-    ).hexdigest()
+def _idempotency_key(batch_name: str, source_revision: str) -> str:
+    return hashlib.sha256(f"{batch_name}|{source_revision}".encode("utf-8")).hexdigest()
 
 
 def _public_source(source: dict[str, Any]) -> dict[str, Any]:

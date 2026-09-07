@@ -30,9 +30,12 @@ echo "== Verify overseas costing application release =="
 docker compose -f "$COMPOSE_FILE" exec -T backend \
     env SITE_NAME="$SITE_NAME" /home/frappe/frappe-bench/env/bin/python - <<'PY'
 import os
+import uuid
+from io import BytesIO
 from pathlib import Path
 
 import frappe
+from minio.error import S3Error
 
 from overseas_costing.api import packing_api
 from overseas_costing.api import workbench
@@ -119,13 +122,38 @@ try:
                 has_privilege = next(iter(privilege_row.values())) if hasattr(privilege_row, "values") else privilege_row[0]
                 if has_privilege:
                     raise SystemExit(f"costing_job_submitter has direct table privilege: {table}")
+                cursor.execute(
+                    "SELECT has_table_privilege('costing_reader', %s, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')",
+                    (f"costing_read.{table}",),
+                )
+                reader_row = cursor.fetchone()
+                reader_can_write = next(iter(reader_row.values())) if hasattr(reader_row, "values") else reader_row[0]
+                if reader_can_write:
+                    raise SystemExit(f"costing_reader has write privilege: {table}")
 
-    # 只读列出最多一个对象，验证 Bucket 与读凭据，不进行写入。
+    # 先验证可读，再用唯一零字节 canary 验证读账号确实被拒绝写入。
     next(iter(clients.archive.client.list_objects(clients.archive.bucket, recursive=False)), None)
+    canary_key = f"permission-smoke/{uuid.uuid4().hex}.canary"
+    try:
+        clients.archive.client.put_object(
+            clients.archive.bucket,
+            canary_key,
+            BytesIO(b""),
+            0,
+            content_type="application/octet-stream",
+        )
+    except S3Error as error:
+        if error.code not in {"AccessDenied", "MethodNotAllowed"}:
+            raise SystemExit(f"unexpected MinIO write check failure: {error.code}") from error
+    else:
+        try:
+            clients.archive.client.remove_object(clients.archive.bucket, canary_key)
+        finally:
+            raise SystemExit("MinIO reader unexpectedly accepted a write")
 finally:
     frappe.destroy()
 
-print("OK approval, packing API, DocTypes, PostgreSQL grants/views and read-only MinIO")
+print("OK approval, packing API, DocTypes, PostgreSQL read-only grants/views and MinIO read-only enforcement")
 PY
 
 echo "== Verify assets.json and frontend files =="

@@ -217,4 +217,97 @@ def test_user_can_split_a_suggested_shared_group_without_double_counting() -> No
     assert resolved["package_count"] == 6
     assert [group["row_numbers"] for group in resolved["groups"]] == [[2], [3]]
     assert resolved["groups"][0]["gross_weight_kg"]["value"] == "4197.4"
+    assert resolved["groups"][0]["gross_weight_kg"]["count_once"] is True
     assert resolved["groups"][1]["gross_weight_kg"]["value"] is None
+
+
+def test_resolved_merge_conflict_blocker_is_removed() -> None:
+    preview = _preview(needs_confirmation=True)
+    preview["groups"][0]["merge_conflict"] = True
+    preview["validation"]["blocking"].insert(
+        0, {"code": "conflicting_merge_ranges", "message": "合并范围冲突"}
+    )
+
+    resolved = service._apply_resolutions(
+        preview,
+        {"groups": {"package-1": {"action": "confirm_shared"}}},
+    )
+
+    assert resolved["validation"]["blocking"] == []
+
+
+def test_user_can_partition_three_rows_and_metric_stays_with_source_row() -> None:
+    preview = _preview(needs_confirmation=True)
+    preview["groups"][0]["row_numbers"] = [2, 3, 4]
+    for field in ("gross_weight_kg", "volume_m3", "net_weight_kg", "package_count"):
+        preview["groups"][0][field]["source_row"] = 2
+
+    resolved = service._apply_resolutions(
+        preview,
+        {
+            "groups": {
+                "package-1": {
+                    "action": "partition",
+                    "partitions": [[2, 3], [4]],
+                }
+            }
+        },
+    )
+
+    assert [group["row_numbers"] for group in resolved["groups"]] == [[2, 3], [4]]
+    assert resolved["groups"][0]["gross_weight_kg"]["value"] == "4197.4"
+    assert resolved["groups"][0]["gross_weight_kg"]["count_once"] is True
+    assert resolved["groups"][1]["gross_weight_kg"]["value"] is None
+    assert resolved["validation"]["blocking"] == []
+
+
+def test_total_mismatch_requires_explicit_basis_resolution() -> None:
+    preview = _preview()
+    preview["totals"]["gross_weight_kg"].update(
+        {"value": "999", "declared_value": "999", "calculated_value": "4197.4", "kind": "source_total"}
+    )
+    preview["validation"]["blocking"] = [
+        {"code": "total_mismatch", "field": "gross_weight_kg", "message": "合计不一致"}
+    ]
+
+    unresolved = service._apply_resolutions(preview, {})
+    assert unresolved["validation"]["blocking"][0]["code"] == "total_mismatch"
+
+    resolved = service._apply_resolutions(
+        preview,
+        {"totals": {"gross_weight_kg": {"action": "use_calculated"}}},
+    )
+    assert resolved["totals"]["gross_weight_kg"]["value"] == "4197.4"
+    assert resolved["totals"]["gross_weight_kg"]["kind"] == "user_selected_calculated"
+    assert resolved["validation"]["blocking"] == []
+
+
+def test_same_source_revision_cannot_be_reconfirmed_with_different_decisions(monkeypatch) -> None:
+    monkeypatch.setattr(service.packing_source_service, "_revision_signing_key", lambda: b"secret")
+    repository = FakeRepository()
+    resolver = lambda **_kwargs: {
+        "source_hash": "9" * 64,
+        "source": {"source_kind": "wiki_sheet", "source_id": "WB:st-1", "source_label": "油漆"},
+        "preview": _preview(needs_confirmation=True),
+    }
+    preview = service.preview_packing_source_v2("BATCH-1", "wiki_sheet", "WB:st-1", resolver=resolver)
+
+    first = service.confirm_packing_snapshot(
+        "BATCH-1",
+        preview["source_revision"],
+        {"groups": {"package-1": {"action": "confirm_shared"}}},
+        repository=repository,
+        resolver=resolver,
+    )
+    second = service.confirm_packing_snapshot(
+        "BATCH-1",
+        preview["source_revision"],
+        {"groups": {"package-1": {"action": "split"}}},
+        repository=repository,
+        resolver=resolver,
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["resolution_conflict"] is True
+    assert len(repository.saved) == 1

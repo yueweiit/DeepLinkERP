@@ -154,8 +154,11 @@ class FakeRepository:
     def lock_batch(self, batch_name):
         assert batch_name == "BATCH-1"
 
-    def get_by_request_id(self, request_id):
-        return next((row for row in self.saved if row["request_id"] == request_id), None)
+    def get_by_request_id(self, batch_name, request_id):
+        return next(
+            (row for row in self.saved if row["batch"] == batch_name and row["request_id"] == request_id),
+            None,
+        )
 
     def get_snapshot(self, batch_name, revision):
         if batch_name == "BATCH-1" and revision == self.snapshot["idempotency_key"]:
@@ -212,3 +215,61 @@ def test_old_comparison_is_marked_when_newer_snapshot_is_current() -> None:
 
     public = public_comparison(result["comparison"], current_snapshot_name=repository.current_name)
     assert public["based_on_superseded_snapshot"] is True
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off", False, 0])
+def test_false_like_scope_values_never_enable_recommendation(value) -> None:
+    result = compare_freight(
+        gross_weight_kg="100",
+        volume_m3="1",
+        currency="CNY",
+        scope_confirmed=value,
+        weight={"unit_price": "1"},
+        volume={"unit_price": "200"},
+    )
+
+    assert result["scope_confirmed"] is False
+    assert result["recommended_basis"] is None
+
+
+def test_idempotency_lookup_is_scoped_to_batch() -> None:
+    repository = FakeRepository()
+    repository.saved.append(
+        {
+            "name": "FOREIGN",
+            "batch": "BATCH-OTHER",
+            "request_id": "a" * 64,
+            "packing_snapshot": "OTHER-SNAPSHOT",
+        }
+    )
+
+    result = save_freight_comparison(
+        "BATCH-1", "snapshot-revision-1", "a" * 64, _quote(), repository=repository
+    )
+
+    assert result["idempotent"] is False
+    assert result["comparison"]["batch"] == "BATCH-1"
+
+
+def test_public_comparison_keeps_full_quote_and_calculation_audit_fields() -> None:
+    repository = FakeRepository()
+    result = save_freight_comparison(
+        "BATCH-1", "snapshot-revision-1", "b" * 64, _quote(), repository=repository
+    )
+    comparison = result["comparison"]
+
+    for field in (
+        "weight_unit_price",
+        "weight_min_quantity",
+        "weight_rounding_increment",
+        "weight_min_base_freight",
+        "weight_surcharge",
+        "volume_unit_price",
+        "volume_min_quantity",
+        "volume_rounding_increment",
+        "volume_min_base_freight",
+        "volume_surcharge",
+        "input_json",
+        "calculation_json",
+    ):
+        assert field in comparison

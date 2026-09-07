@@ -86,6 +86,7 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
             )
 
     totals = _build_totals(cells, groups, columns, total_row)
+    blocking.extend(_total_mismatch_blockers(totals))
     package_total = _build_package_total(cells, groups, columns, total_row)
     totals["package_count"] = package_total
     needs_confirmation = any(group["needs_confirmation"] for group in groups)
@@ -126,10 +127,14 @@ def _find_header(cells: list[list[dict[str, Any]]]) -> tuple[int, dict[str, int]
         normalized = {index: _normalize_header(cell.get("raw_value") or cell.get("display_value")) for index, cell in enumerate(row, start=1)}
         columns: dict[str, int] = {}
         for field, aliases in HEADER_ALIASES.items():
-            for column, header in normalized.items():
-                if header and any(_normalize_header(alias) in header for alias in aliases):
-                    columns[field] = column
-                    break
+            candidates = [
+                (_header_match_score(field, header, aliases), -column, column)
+                for column, header in normalized.items()
+                if header
+            ]
+            score, _position, column = max(candidates, default=(0, 0, 0))
+            if score > 0:
+                columns[field] = column
         if "material_code" in columns and ("quantity" in columns or "product_name" in columns):
             originals = {
                 index: str(cell.get("display_value") or cell.get("raw_value") or "").strip()
@@ -318,6 +323,45 @@ def _build_totals(
             "calculated_value": _decimal_text(calculated),
         }
     return result
+
+
+def _total_mismatch_blockers(totals: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """表内合计和明细加总不一致时，不猜用哪个，交给用户确认。"""
+
+    blockers = []
+    labels = {"net_weight_kg": "净重", "gross_weight_kg": "毛重", "volume_m3": "体积"}
+    for field, label in labels.items():
+        total = totals.get(field) or {}
+        declared = _to_decimal(total.get("declared_value"))
+        calculated = _to_decimal(total.get("calculated_value"))
+        if declared is None or calculated is None:
+            continue
+        tolerance = max(Decimal("0.01"), abs(declared) * Decimal("0.001"))
+        if abs(declared - calculated) <= tolerance:
+            continue
+        blockers.append(
+            {
+                "code": "total_mismatch",
+                "field": field,
+                "declared_value": _decimal_text(declared),
+                "calculated_value": _decimal_text(calculated),
+                "message": f"表内{label}合计 {declared} 与明细加总 {calculated} 不一致，请选择比较口径。",
+            }
+        )
+    return blockers
+
+
+def _header_match_score(field: str, header: str, aliases: tuple[str, ...]) -> int:
+    matches = [_normalize_header(alias) for alias in aliases if _normalize_header(alias) in header]
+    if not matches:
+        return 0
+    score = max(100 if alias == header else 50 + len(alias) for alias in matches)
+    if field in {"net_weight_kg", "gross_weight_kg", "volume_m3"}:
+        if any(marker in header for marker in ("总", "total")):
+            score += 100
+        if any(marker in header for marker in ("每件", "单件", "perpiece", "perunit", "unit")):
+            score -= 100
+    return score
 
 
 def _build_package_total(

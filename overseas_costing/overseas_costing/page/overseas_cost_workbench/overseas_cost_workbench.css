@@ -6746,6 +6746,50 @@ input[type="range"].ocw-result-scrollbar:disabled {
   margin: 8px 0 0;
 }
 
+.ocw-packing-row-partition,
+.ocw-packing-total-decision {
+  background: #fffaf0;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.ocw-packing-row-partition legend {
+  color: #7c2d12;
+  font-size: 12px;
+  margin-bottom: 7px;
+}
+
+.ocw-packing-row-partition label {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  margin: 0 12px 8px 0;
+}
+
+.ocw-packing-row-partition button {
+  display: block;
+}
+
+.ocw-packing-total-decision {
+  display: grid;
+  gap: 7px;
+}
+
+.ocw-packing-total-decision > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ocw-packing-total-decision small,
+.ocw-packing-total-decision em {
+  color: #7c5b35;
+  font-size: 11px;
+  font-style: normal;
+}
+
 @media (max-width: 900px) {
   .ocw-packing-flow-dialog .modal-dialog {
     margin: 8px;

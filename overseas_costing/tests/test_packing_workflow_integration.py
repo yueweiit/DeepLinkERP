@@ -136,8 +136,11 @@ class _FreightRepository:
             return self.snapshot
         return None
 
-    def get_by_request_id(self, request_id):
-        return next((row for row in self.saved if row["request_id"] == request_id), None)
+    def get_by_request_id(self, batch, request_id):
+        return next(
+            (row for row in self.saved if row["batch"] == batch and row["request_id"] == request_id),
+            None,
+        )
 
     def get_current_snapshot_name(self, _batch):
         return self.snapshot["name"]
@@ -279,6 +282,7 @@ def test_deployment_smoke_checks_the_complete_packing_runtime() -> None:
         "packing_refresh_status_v1",
         "costing_job_submitter",
         "list_objects",
+        "put_object",
     ):
         assert marker in script
 

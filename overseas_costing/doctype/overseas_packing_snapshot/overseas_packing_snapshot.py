@@ -28,4 +28,3 @@ class OverseasPackingSnapshot(Document):
         if allow_packing_supersede and changed <= allowed_changes and self.status == "Superseded" and not self.is_current:
             return
         frappe.throw("不能修改已确认的装箱快照；请确认新来源并生成新版本。")
-

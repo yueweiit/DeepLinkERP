@@ -315,3 +315,50 @@ def test_package_piece_total_is_distinct_from_package_group_count() -> None:
     assert preview["package_count"] == 368
     assert preview["totals"]["gross_weight_kg"]["value"] == "25360.08"
     assert preview["totals"]["volume_m3"]["value"] == "55.33429"
+
+
+def test_total_physical_columns_win_over_earlier_per_piece_columns() -> None:
+    snapshot = {
+        "schemaVersion": 1,
+        "sheetName": "总量列优先",
+        "rangeAddress": "A1:G3",
+        "values": [
+            ["物料编码", "数量", "每件净重", "每件毛重", "每件CBM", "总净重", "总毛重", "总体积"],
+            ["ITEM-1", 10, 4, 6, 0.3, 40, 60, 3],
+            ["合计", None, None, None, None, 40, 60, 3],
+        ],
+        "displayValues": [],
+        "formulas": [],
+        "mergeRangesAvailable": False,
+    }
+    snapshot["rangeAddress"] = "A1:H3"
+    preview = parse_packing_grid(build_grid_from_dingtalk_snapshot(snapshot))
+
+    assert preview["totals"]["net_weight_kg"]["value"] == "40"
+    assert preview["totals"]["gross_weight_kg"]["value"] == "60"
+    assert preview["totals"]["volume_m3"]["value"] == "3"
+
+
+def test_declared_total_mismatch_is_blocking_until_user_chooses_basis() -> None:
+    snapshot = {
+        "schemaVersion": 1,
+        "sheetName": "合计差异",
+        "rangeAddress": "A1:D4",
+        "values": [
+            ["物料编码", "数量", "总毛重", "总体积"],
+            ["ITEM-1", 1, 10, 1],
+            ["ITEM-2", 1, 20, 2],
+            ["合计", None, 999, 99],
+        ],
+        "displayValues": [],
+        "formulas": [],
+        "mergeRangesAvailable": False,
+    }
+
+    preview = parse_packing_grid(build_grid_from_dingtalk_snapshot(snapshot))
+
+    assert preview["ok"] is False
+    assert {item["field"] for item in preview["validation"]["blocking"] if item["code"] == "total_mismatch"} == {
+        "gross_weight_kg",
+        "volume_m3",
+    }

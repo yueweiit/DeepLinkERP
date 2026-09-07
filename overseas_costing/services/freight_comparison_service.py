@@ -29,7 +29,7 @@ def compare_freight(
     gross_weight_kg: Any,
     volume_m3: Any,
     currency: str,
-    scope_confirmed: bool,
+    scope_confirmed: Any,
     weight: dict[str, Any],
     volume: dict[str, Any],
 ) -> dict[str, Any]:
@@ -50,8 +50,9 @@ def compare_freight(
     difference = abs(weight_total - volume_total)
     higher = max(weight_total, volume_total)
     savings = difference / higher * Decimal("100") if higher else Decimal("0")
+    confirmed = _strict_bool(scope_confirmed)
     recommended = None
-    if scope_confirmed:
+    if confirmed:
         if weight_total < volume_total:
             recommended = "weight"
         elif volume_total < weight_total:
@@ -62,8 +63,8 @@ def compare_freight(
     precision = CURRENCY_PRECISION.get(normalized_currency, 2)
     return {
         "currency": normalized_currency,
-        "scope_confirmed": bool(scope_confirmed),
-        "scope_status": "confirmed" if scope_confirmed else "unconfirmed",
+        "scope_confirmed": confirmed,
+        "scope_status": "confirmed" if confirmed else "unconfirmed",
         "gross_weight_kg": _text(gross),
         "volume_m3": _text(cubic),
         "weight": weight_result,
@@ -121,7 +122,7 @@ def save_freight_comparison(
     repo = repository or FrappeFreightComparisonRepository()
     repo.lock_batch(str(batch_name))
     try:
-        existing = repo.get_by_request_id(request_id)
+        existing = repo.get_by_request_id(str(batch_name), request_id)
         if existing:
             current_name = repo.get_current_snapshot_name(str(batch_name))
             repo.rollback()
@@ -138,7 +139,7 @@ def save_freight_comparison(
             gross_weight_kg=_record(snapshot, "total_gross_weight_kg"),
             volume_m3=_record(snapshot, "total_volume_m3"),
             currency=str(quote.get("currency") or ""),
-            scope_confirmed=bool(quote.get("scope_confirmed")),
+            scope_confirmed=_strict_bool(quote.get("scope_confirmed")),
             weight=quote.get("weight") if isinstance(quote.get("weight"), dict) else {},
             volume=quote.get("volume") if isinstance(quote.get("volume"), dict) else {},
         )
@@ -205,12 +206,24 @@ def public_comparison(comparison: Any, *, current_snapshot_name: str | None) -> 
         "scope_confirmed",
         "gross_weight_kg",
         "volume_m3",
+        "weight_unit_price",
+        "weight_min_quantity",
+        "weight_rounding_increment",
+        "weight_min_base_freight",
+        "weight_surcharge",
         "weight_total",
+        "volume_unit_price",
+        "volume_min_quantity",
+        "volume_rounding_increment",
+        "volume_min_base_freight",
+        "volume_surcharge",
         "volume_total",
         "recommended_basis",
         "difference_amount",
         "savings_percent",
         "quote_remark",
+        "input_json",
+        "calculation_json",
         "creation",
     )
     result = {field: _record(comparison, field) for field in allowed if _record(comparison, field) is not None}
@@ -235,7 +248,7 @@ def preview_freight_comparison(
         gross_weight_kg=_record(snapshot, "total_gross_weight_kg"),
         volume_m3=_record(snapshot, "total_volume_m3"),
         currency=str(quote.get("currency") or ""),
-        scope_confirmed=bool(quote.get("scope_confirmed")),
+        scope_confirmed=_strict_bool(quote.get("scope_confirmed")),
         weight=quote.get("weight") if isinstance(quote.get("weight"), dict) else {},
         volume=quote.get("volume") if isinstance(quote.get("volume"), dict) else {},
     )
@@ -263,12 +276,24 @@ def list_freight_comparisons(batch_name: str, *, limit: int = 100) -> list[dict[
             "scope_confirmed",
             "gross_weight_kg",
             "volume_m3",
+            "weight_unit_price",
+            "weight_min_quantity",
+            "weight_rounding_increment",
+            "weight_min_base_freight",
+            "weight_surcharge",
             "weight_total",
+            "volume_unit_price",
+            "volume_min_quantity",
+            "volume_rounding_increment",
+            "volume_min_base_freight",
+            "volume_surcharge",
             "volume_total",
             "recommended_basis",
             "difference_amount",
             "savings_percent",
             "quote_remark",
+            "input_json",
+            "calculation_json",
             "creation",
         ],
         order_by="creation desc",
@@ -295,6 +320,21 @@ def _number(
     if not result.is_finite() or result < 0 or (positive and result <= 0):
         raise ValueError(f"{label} 必须是有效的非负数字。")
     return result
+
+
+def _strict_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (1, "1"):
+        return True
+    if value in (0, None, "", "0"):
+        return False
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "yes", "on"}:
+        return True
+    if normalized in {"false", "no", "off"}:
+        return False
+    raise ValueError("报价范围确认值无效。")
 
 
 def _text(value: Decimal) -> str:
@@ -331,8 +371,10 @@ class FrappeFreightComparisonRepository:
         if not rows:
             raise ValueError("未找到当前批次。")
 
-    def get_by_request_id(self, request_id: str) -> Any:
-        name = frappe.db.get_value("Overseas Freight Comparison", {"request_id": request_id}, "name")
+    def get_by_request_id(self, batch_name: str, request_id: str) -> Any:
+        name = frappe.db.get_value(
+            "Overseas Freight Comparison", {"batch": batch_name, "request_id": request_id}, "name"
+        )
         return frappe.get_doc("Overseas Freight Comparison", name) if name else None
 
     def get_snapshot(self, batch_name: str, revision: str) -> Any:

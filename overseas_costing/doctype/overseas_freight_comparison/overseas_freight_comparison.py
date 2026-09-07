@@ -14,4 +14,3 @@ class OverseasFreightComparison(Document):
     def before_save(self) -> None:
         if self.get_doc_before_save():
             frappe.throw("不能修改已保存的运费试算；请基于当前报价另存一条比较记录。")
-

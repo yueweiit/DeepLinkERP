@@ -281,7 +281,7 @@
       sourceId: "",
       sheetName: "",
       preview: null,
-      resolutions: { groups: {} },
+      resolutions: { groups: {}, totals: {} },
       snapshot: null,
       quote: null,
       calculation: null,
@@ -308,19 +308,33 @@
   function packingFlowCanCompare(preview, resolutions = {}) {
     if (!preview) return false;
     const totals = preview.totals || {};
-    const gross = Number((totals.gross_weight_kg || {}).value);
-    const volume = Number((totals.volume_m3 || {}).value);
+    const totalDecisions = resolutions.totals || {};
+    const resolvedTotalValue = (field) => {
+      const total = totals[field] || {};
+      const decision = (totalDecisions[field] || {}).action;
+      if (decision === "use_declared") return total.declared_value;
+      if (decision === "use_calculated") return total.calculated_value;
+      return total.value;
+    };
+    const gross = Number(resolvedTotalValue("gross_weight_kg"));
+    const volume = Number(resolvedTotalValue("volume_m3"));
     if (!(gross > 0) || !(volume > 0)) return false;
     const groups = resolutions.groups || {};
     const unresolved = (preview.groups || []).some((group) => {
       if (!group || !group.needs_confirmation) return false;
       const decision = groups[String(group.group_id || "")] || {};
-      return !["confirm_shared", "link", "shared", "split"].includes(String(decision.action || decision));
+      return !["confirm_shared", "link", "shared", "split", "partition"].includes(String(decision.action || decision));
     });
     if (unresolved) return false;
-    return !((preview.validation || {}).blocking || []).some(
-      (item) => item && item.code !== "group_confirmation_required"
-    );
+    return !((preview.validation || {}).blocking || []).some((item) => {
+      if (!item || item.code === "group_confirmation_required") return false;
+      if (item.code === "conflicting_merge_ranges" && !unresolved) return false;
+      if (item.code === "total_mismatch") {
+        const decision = totalDecisions[String(item.field || "")] || {};
+        return !["use_declared", "use_calculated"].includes(String(decision.action || decision));
+      }
+      return true;
+    });
   }
 
   function applyPackingPreview(state, preview) {
@@ -329,7 +343,7 @@
       ...(state || createPackingFlowState()),
       step: nextPreview ? 2 : 1,
       preview: nextPreview,
-      resolutions: { groups: {} },
+      resolutions: { groups: {}, totals: {} },
       snapshot: null,
       quote: null,
       calculation: null,
@@ -347,6 +361,46 @@
         groups: {
           ...((current.resolutions || {}).groups || {}),
           [String(groupId || "")]: { action: String(action || "") },
+        },
+      },
+    };
+    next.canCompare = packingFlowCanCompare(next.preview, next.resolutions);
+    return next;
+  }
+
+  function resolvePackageGroupRows(state, groupId, allRows, selectedRows) {
+    const rows = Array.from(new Set((allRows || []).map(Number))).filter(Number.isFinite);
+    const selected = Array.from(new Set((selectedRows || []).map(Number))).filter((row) => rows.includes(row));
+    if (!selected.length || selected.length === rows.length) {
+      return resolvePackageGroup(state, groupId, selected.length === rows.length ? "confirm_shared" : "");
+    }
+    const selectedSet = new Set(selected);
+    const partitions = [selected, ...rows.filter((row) => !selectedSet.has(row)).map((row) => [row])];
+    const current = state || createPackingFlowState();
+    const next = {
+      ...current,
+      resolutions: {
+        ...(current.resolutions || {}),
+        groups: {
+          ...((current.resolutions || {}).groups || {}),
+          [String(groupId || "")]: { action: "partition", partitions },
+        },
+      },
+    };
+    next.canCompare = packingFlowCanCompare(next.preview, next.resolutions);
+    return next;
+  }
+
+  function resolvePackingTotal(state, field, action) {
+    const current = state || createPackingFlowState();
+    const next = {
+      ...current,
+      resolutions: {
+        ...(current.resolutions || {}),
+        groups: { ...((current.resolutions || {}).groups || {}) },
+        totals: {
+          ...((current.resolutions || {}).totals || {}),
+          [String(field || "")]: { action: String(action || "") },
         },
       },
     };
@@ -382,6 +436,16 @@
     };
   }
 
+  function freightQuoteIsReady(quote) {
+    if (!quote || quote.scope_confirmed !== true || !String(quote.quote_remark || "").trim()) return false;
+    if (!/^[A-Z]{3}$/.test(String(quote.currency || ""))) return false;
+    return [quote.weight && quote.weight.unit_price, quote.volume && quote.volume.unit_price].every((value) => {
+      if (value === undefined || value === null || String(value).trim() === "") return false;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0;
+    });
+  }
+
   return {
     parseWorkbenchState,
     buildWorkbenchUrl,
@@ -403,7 +467,10 @@
     selectPackingSource,
     applyPackingPreview,
     resolvePackageGroup,
+    resolvePackageGroupRows,
+    resolvePackingTotal,
     buildFreightQuotePayload,
+    freightQuoteIsReady,
     packingFlowCanCompare,
     MONETARY_FIELDS,
     TRANSPORT_MODE_ALIASES,

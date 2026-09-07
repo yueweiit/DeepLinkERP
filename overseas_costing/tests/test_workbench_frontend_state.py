@@ -108,6 +108,35 @@ def test_packing_flow_requires_group_resolution_before_step_three() -> None:
     assert result == {"before": False, "after": True, "action": "confirm_shared"}
 
 
+def test_packing_flow_requires_total_basis_and_supports_explicit_row_partition() -> None:
+    result = _state_result(
+        "let state=s.selectPackingSource(s.createPackingFlowState(),'wiki_sheet','WB:ST-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'rev-1',groups:[{group_id:'G-1',row_numbers:[2,3,4],needs_confirmation:true}],validation:{blocking:[{code:'group_confirmation_required'},{code:'total_mismatch',field:'gross_weight_kg'}]},totals:{gross_weight_kg:{value:'0',declared_value:'0',calculated_value:'10'},volume_m3:{value:'2'}}});"
+        "state=s.resolvePackageGroupRows(state,'G-1',[2,3,4],[2,3]);"
+        "const before=state.canCompare;"
+        "state=s.resolvePackingTotal(state,'gross_weight_kg','use_calculated');"
+        "console.log(JSON.stringify({before,after:state.canCompare,group:state.resolutions.groups['G-1'],total:state.resolutions.totals.gross_weight_kg}));"
+    )
+
+    assert result == {
+        "before": False,
+        "after": True,
+        "group": {"action": "partition", "partitions": [[2, 3], [4]]},
+        "total": {"action": "use_calculated"},
+    }
+
+
+def test_freight_quote_requires_scope_confirmation_and_remark() -> None:
+    result = _state_result(
+        "const base={currency:'USD',weight_unit_price:'1',volume_unit_price:'2'};"
+        "const missing=s.buildFreightQuotePayload(null,base);"
+        "const ready=s.buildFreightQuotePayload(null,{...base,scope_confirmed:true,quote_remark:'same route'});"
+        "console.log(JSON.stringify({missing:s.freightQuoteIsReady(missing),ready:s.freightQuoteIsReady(ready)}));"
+    )
+
+    assert result == {"missing": False, "ready": True}
+
+
 def test_packing_flow_refresh_replaces_preview_and_quote_has_no_formal_cost_action() -> None:
     result = _state_result(
         "let state=s.selectPackingSource(s.createPackingFlowState(),'wiki_sheet','WB:ST-1');"
@@ -148,10 +177,13 @@ def test_packing_flow_static_ui_contract() -> None:
         "下一步：比较运费",
         "独立试算，不修改正式费用",
         "保存比较结果",
+        "选择表内合计",
+        "选择明细加总",
     ):
         assert label in flow
     assert "获取装箱单" in documents
     assert "openPackingFlowDialog" in flow
+    assert "localStorage.getItem" in flow
     assert ".ocw-packing-flow" in stylesheet
 
 
