@@ -21,6 +21,9 @@ from overseas_costing.services.batch_service import (
     _normalize_limit,
     _resolve_batch_business_type,
     _resolve_batch_subsidiary_code,
+    build_calculation_confirmation_state,
+    build_cost_preview_state,
+    build_erp_push_state,
     check_writeback_ready,
     create_batch,
     get_audit_logs,
@@ -31,6 +34,43 @@ from overseas_costing.services.batch_service import (
     is_hidden_approval_status,
     writeback_to_erp,
 )
+
+
+def test_named_gate_builders_expose_distinct_cost_and_erp_states() -> None:
+    batch = {
+        "status": "Calculated",
+        "confirm_status": "Confirmed",
+        "current_version": "V1",
+        "subsidiary_code": "",
+        "item_count": 1,
+        "actual_total_cost_rmb": 20,
+    }
+    items = [
+        {
+            "name": "I1",
+            "material_code": "M1",
+            "product_name": "原料",
+            "quantity": 2,
+            "purchase_uom": "件",
+            "shipped_uom": "件",
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+            "unit_price": 8,
+            "unit_price_uom": "件",
+            "purchase_currency": "RMB",
+            "goods_value": 16,
+            "total_unit_rmb": 10,
+            "project_collection": "",
+        }
+    ]
+    rules = [
+        {"expense_category": "国际运费", "amount": 1},
+        {"expense_category": "清关费", "amount": 1},
+        {"expense_category": "关税", "amount": 1},
+    ]
+
+    assert build_cost_preview_state(batch, items, rules, "V1")["ready"] is True
+    assert build_calculation_confirmation_state(batch, items, rules, "V1")["ready"] is True
+    assert build_erp_push_state(batch, items, rules, "V1")["ready"] is False
 
 
 def test_resolve_batch_subsidiary_code_falls_back_to_saved_dingtalk_entity() -> None:
@@ -677,6 +717,7 @@ def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
                 "purchase_currency": "RMB",
                 "goods_value": 16,
                 "total_unit_rmb": 12.5,
+                "project_collection": "生产项目",
             }
         ],
     )
@@ -685,6 +726,85 @@ def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
     assert result["blocking_reasons"] == []
     assert result["checks"]["has_items"] is True
     assert result["checks"]["items_have_unit_price"] is True
+
+
+def test_cost_preview_does_not_require_project_or_subsidiary() -> None:
+    result = _build_calculation_confirmation_readiness(
+        batch={
+            "status": "Calculated",
+            "current_version": "V1",
+            "subsidiary_code": "",
+            "item_count": 1,
+            "estimated_total_cost_rmb": 36,
+        },
+        items=[
+            {
+                "name": "I1",
+                "stable_line_key": "L1",
+                "material_code": "M1",
+                "product_name": "原料",
+                "quantity": 2,
+                "actual_shipped_qty": "",
+                "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+                "purchase_uom": "件",
+                "shipped_uom": "件",
+                "unit_price": 8,
+                "unit_price_uom": "件",
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "freight_alloc_rmb": 6,
+                "mexico_customs_mxn": 10,
+                "import_tax_total": 4,
+                "total_unit_rmb": 18,
+                "project_collection": "",
+            }
+        ],
+        rules=[
+            {"expense_category": "国际运费", "amount": 6},
+            {"expense_category": "清关费", "amount": 10},
+            {"expense_category": "关税", "amount": 4},
+        ],
+        resolved_version_name="V1",
+    )
+
+    assert result["ready"] is True
+    assert "当前批次缺少归属业务主体。" not in result["blocking_reasons"]
+
+
+def test_erp_readiness_still_requires_project_route_fields() -> None:
+    result = _build_writeback_readiness(
+        batch={
+            "status": "Calculated",
+            "confirm_status": "Confirmed",
+            "current_version": "V1",
+            "subsidiary_code": "MX01",
+            "item_count": 1,
+            "actual_total_cost_rmb": 36,
+        },
+        items=[
+            {
+                "name": "I1",
+                "stable_line_key": "L1",
+                "material_code": "M1",
+                "product_name": "原料",
+                "quantity": 2,
+                "actual_shipped_qty": "",
+                "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+                "purchase_uom": "件",
+                "shipped_uom": "件",
+                "unit_price": 8,
+                "unit_price_uom": "件",
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "total_unit_rmb": 18,
+                "project_collection": "",
+            }
+        ],
+        resolved_version_name="V1",
+    )
+
+    assert result["ready"] is False
+    assert result["item_issue_counts"]["project_collection"] == 1
 
 
 def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
@@ -934,7 +1054,7 @@ def test_build_batch_source_status_explains_missing_and_pending_purchase_approva
     assert "尚未同步" in pending["purchase_approval_sync_message"]
 
 
-def test_build_calculation_confirmation_readiness_requires_subsidiary_and_fee_pools() -> None:
+def test_build_calculation_confirmation_readiness_requires_fee_pools_not_subsidiary() -> None:
     result = _build_calculation_confirmation_readiness(
         batch={
             "status": "Calculated",
@@ -964,9 +1084,9 @@ def test_build_calculation_confirmation_readiness_requires_subsidiary_and_fee_po
     assert result["ready"] is False
     assert result["checks"]["has_subsidiary_code"] is False
     assert result["checks"]["has_international_freight"] is False
-    assert "当前批次缺少归属业务主体。" in result["blocking_reasons"]
+    assert "当前批次缺少归属业务主体。" not in result["blocking_reasons"]
     assert "当前批次缺少国际运费费用池或分摊结果。" in result["blocking_reasons"]
-    assert any(gap["fieldname"] == "subsidiary_code" for gap in result["field_gaps"]["batch"])
+    assert not any(gap["fieldname"] == "subsidiary_code" for gap in result["field_gaps"]["batch"])
     assert any(gap["fieldname"] == "国际运费" for gap in result["field_gaps"]["rules"])
 
 
@@ -1193,6 +1313,33 @@ def test_build_erp_push_payload_contains_core_fields_and_expense_details() -> No
     clearance_tax = payload["items"][0]["expense_detail"]["clearance_and_tax"]
     assert clearance_tax["clearance_alloc_rmb"] == 2
     assert clearance_tax["tax_alloc_rmb"] == 1
+
+
+def test_erp_payload_uses_same_default_shipping_quantity_as_costing() -> None:
+    payload = _build_erp_push_payload(
+        batch={"name": "B1", "subsidiary_code": "MX01"},
+        version={"name": "V1"},
+        readiness={"total_cost_rmb": 20},
+        rules=[],
+        items=[
+            {
+                "stable_line_key": "L1",
+                "material_code": "M1",
+                "quantity": 2,
+                "actual_shipped_qty": "",
+                "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+                "purchase_uom": "件",
+                "shipped_uom": "件",
+                "unit_price": 8,
+                "goods_value": 16,
+                "total_cost_rmb": 20,
+                "total_unit_rmb": 10,
+            }
+        ],
+    )
+
+    assert payload["items"][0]["outbound_quantity"] == 2
+    assert payload["items"][0]["shipping_quantity_mode"] == "DEFAULT_PURCHASE"
 
 
 def test_writeback_to_erp_records_failed_attempt_when_config_missing(monkeypatch) -> None:

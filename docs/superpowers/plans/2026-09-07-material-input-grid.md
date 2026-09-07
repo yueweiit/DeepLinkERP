@@ -473,7 +473,7 @@ git commit -m 'feat: expose secure material grid APIs'
 - Modify: `overseas_costing/services/batch_service.py`
 - Modify: `overseas_costing/tests/test_batch_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_cost_preview_does_not_require_project_or_subsidiary() -> None:
@@ -517,17 +517,17 @@ def test_erp_readiness_still_requires_route_fields() -> None:
     assert result["ready"] is False
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_batch_service.py`
 
 Expected: FAIL because calculation confirmation currently reuses ERP-oriented item checks.
 
-- [ ] **Step 3: 拆分门槛实现**
+- [x] **Step 3: 拆分门槛实现**
 
 将规则拆为 `build_cost_preview_state`、`build_calculation_confirmation_state` 和 `build_erp_push_state`。前两者消费 `material_input_service` 的 calculation gate；ERP 状态额外消费 route gate。继续阻断被拒绝/撤销/终止审批，不能通过拆分删除业务有效性校验。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_batch_service.py overseas_costing/tests/test_calculate_service.py`
 

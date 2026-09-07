@@ -185,7 +185,7 @@ def writeback_to_erp(batch_name: str, version_name: str) -> dict:
 
 import json as _json
 
-from overseas_costing.services import erp_client
+from overseas_costing.services import erp_client, material_input_service
 from overseas_costing.utils.field_mapper import normalize_business_type, normalize_transport_mode
 
 EXCEL_COLUMNS = [
@@ -2136,6 +2136,10 @@ WRITEBACK_REQUIRED_ITEM_FIELDS = (
     ("total_unit_rmb", "综合物品单价RMB", "positive_number", "重新试算生成"),
 )
 
+ERP_ROUTE_REQUIRED_ITEM_FIELDS = (
+    ("project_collection", "项目归属", "text", "OA 物料项目 / 手工归属"),
+)
+
 ERP_PAYLOAD_ITEM_FIELDS = list(
     dict.fromkeys(
         [
@@ -2343,16 +2347,26 @@ def _resolve_payload_supplier(items: list[dict]) -> str:
     return suppliers[0] if len(suppliers) == 1 else ""
 
 
-def _build_writeback_item_quality(items: list[dict]) -> dict:
-    issue_counts = {fieldname: 0 for fieldname, _label, _rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS}
+def _build_writeback_item_quality(items: list[dict], *, require_route: bool = True) -> dict:
+    required_fields = [*WRITEBACK_REQUIRED_ITEM_FIELDS]
+    if require_route:
+        required_fields.extend(ERP_ROUTE_REQUIRED_ITEM_FIELDS)
+    issue_counts = {fieldname: 0 for fieldname, _label, _rule, _source in required_fields}
     issue_examples = []
 
     for index, item in enumerate(items, start=1):
         item_missing_labels = []
         item_missing_fieldnames = []
-        for fieldname, label, rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS:
+        for fieldname, label, rule, _source in required_fields:
             value = item.get(fieldname)
-            has_issue = _is_blank(value) if rule == "text" else _as_float(value) <= 0
+            if fieldname == "actual_shipped_qty":
+                quantity_state = material_input_service.resolve_effective_quantity(item)
+                has_issue = any(
+                    issue.get("code") == "SHIPPED_QTY_REQUIRED"
+                    for issue in quantity_state["blocking"]
+                )
+            else:
+                has_issue = _is_blank(value) if rule == "text" else _as_float(value) <= 0
             if has_issue:
                 issue_counts[fieldname] += 1
                 item_missing_labels.append(label)
@@ -2376,7 +2390,7 @@ def _build_writeback_item_quality(items: list[dict]) -> dict:
     }
     blocking_reasons = [
         f"有 {count} 条 SKU 缺少或未填有效的{label}。"
-        for fieldname, label, _rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS
+        for fieldname, label, _rule, _source in required_fields
         if (count := issue_counts[fieldname]) > 0
     ]
 
@@ -2388,14 +2402,24 @@ def _build_writeback_item_quality(items: list[dict]) -> dict:
     }
 
 
-def _build_writeback_field_gaps(batch: dict, items: list[dict], rules: list[dict], resolved_version_name: str | None) -> dict:
-    item_quality = _build_writeback_item_quality(items)
+def _build_writeback_field_gaps(
+    batch: dict,
+    items: list[dict],
+    rules: list[dict],
+    resolved_version_name: str | None,
+    *,
+    require_route: bool = True,
+) -> dict:
+    required_fields = [*WRITEBACK_REQUIRED_ITEM_FIELDS]
+    if require_route:
+        required_fields.extend(ERP_ROUTE_REQUIRED_ITEM_FIELDS)
+    item_quality = _build_writeback_item_quality(items, require_route=require_route)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
     estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
     total_cost = actual_total_cost or estimated_total_cost
 
     batch_gaps = []
-    if not _resolve_batch_subsidiary_code(batch):
+    if require_route and not _resolve_batch_subsidiary_code(batch):
         batch_gaps.append(
             {
                 "scope": "batch",
@@ -2450,7 +2474,7 @@ def _build_writeback_field_gaps(batch: dict, items: list[dict], rules: list[dict
             )
 
     item_gaps = []
-    for fieldname, label, rule, source in WRITEBACK_REQUIRED_ITEM_FIELDS:
+    for fieldname, label, rule, source in required_fields:
         count = item_quality["issue_counts"].get(fieldname, 0)
         if count <= 0:
             continue
@@ -2485,8 +2509,14 @@ def _build_calculation_confirmation_readiness(
     rules: list[dict],
     resolved_version_name: str | None,
 ) -> dict:
-    item_quality = _build_writeback_item_quality(items)
-    field_gaps = _build_writeback_field_gaps(batch, items, rules, resolved_version_name)
+    item_quality = _build_writeback_item_quality(items, require_route=False)
+    field_gaps = _build_writeback_field_gaps(
+        batch,
+        items,
+        rules,
+        resolved_version_name,
+        require_route=False,
+    )
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
     estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
     total_cost = actual_total_cost or estimated_total_cost
@@ -2541,8 +2571,6 @@ def _build_calculation_confirmation_readiness(
         blocking_reasons.append(invalid_business_state.get("message") or "当前批次存在已拒绝/撤销/终止审批，不进入综合成本确认或 ERP 推送。")
     if not checks["has_current_version"]:
         blocking_reasons.append("当前批次没有当前版本。")
-    if not checks["has_subsidiary_code"]:
-        blocking_reasons.append("当前批次缺少归属业务主体。")
     if checks["has_dirty_data"]:
         blocking_reasons.append("当前批次存在未重新计算的数据。")
     if not checks["has_items"]:
@@ -2586,7 +2614,7 @@ def _build_writeback_readiness(
     resolved_version_name: str | None,
     rules: list[dict] | None = None,
 ) -> dict:
-    item_quality = _build_writeback_item_quality(items)
+    item_quality = _build_writeback_item_quality(items, require_route=True)
     field_gaps = _build_writeback_field_gaps(batch, items, rules or [], resolved_version_name)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
     estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
@@ -2646,6 +2674,69 @@ def _build_writeback_readiness(
     }
 
 
+def build_cost_preview_state(
+    batch: dict,
+    items: list[dict],
+    rules: list[dict],
+    resolved_version_name: str | None,
+) -> dict:
+    """Gate a cost preview on calculation inputs, never on ERP routing."""
+
+    requirements = material_input_service.build_material_requirements(items, rules)
+    invalid_business = _build_invalid_business_state(batch, items)
+    blocking_reasons = []
+    if invalid_business.get("invalid"):
+        blocking_reasons.append(
+            invalid_business.get("message")
+            or "当前批次存在已拒绝/撤销/终止审批，不能预览成本。"
+        )
+    if not (resolved_version_name or batch.get("current_version")):
+        blocking_reasons.append("当前批次没有当前版本。")
+    if not items:
+        blocking_reasons.append("当前批次没有 SKU 明细。")
+    if requirements["summary"]["blocking_for_calculation"]:
+        blocking_reasons.append(
+            f"物料仍有 {requirements['summary']['blocking_for_calculation']} 个核算必填格未补齐。"
+        )
+    return {
+        "gate": "cost_preview",
+        "ready": not blocking_reasons,
+        "blocking_reasons": blocking_reasons,
+        "requirements": requirements,
+        "invalid_business": invalid_business,
+    }
+
+
+def build_calculation_confirmation_state(
+    batch: dict,
+    items: list[dict],
+    rules: list[dict],
+    resolved_version_name: str | None,
+) -> dict:
+    result = _build_calculation_confirmation_readiness(
+        batch,
+        items,
+        rules,
+        resolved_version_name,
+    )
+    return {**result, "gate": "calculation_confirmation"}
+
+
+def build_erp_push_state(
+    batch: dict,
+    items: list[dict],
+    rules: list[dict],
+    resolved_version_name: str | None,
+) -> dict:
+    result = _build_writeback_readiness(
+        batch,
+        items,
+        resolved_version_name,
+        rules,
+    )
+    return {**result, "gate": "erp_push"}
+
+
 def _build_erp_push_payload(
     batch: dict,
     version: dict,
@@ -2658,8 +2749,10 @@ def _build_erp_push_payload(
     payload_items = []
     for item in items:
         formula = _build_cost_formula(item)
+        quantity_state = material_input_service.resolve_effective_quantity(item)
         payload_items.append(
             {
+                "stable_line_key": item.get("stable_line_key") or "",
                 "subsidiary_code": subsidiary_code,
                 "business_type": batch.get("business_type") or "",
                 "material_code": item.get("material_code") or "",
@@ -2668,7 +2761,9 @@ def _build_erp_push_payload(
                 "original_unit_price": formula["original_unit_price"],
                 "purchase_currency": item.get("purchase_currency") or "",
                 "comprehensive_unit_price": formula["comprehensive_unit_price"],
-                "outbound_quantity": _round_payload_amount(item.get("actual_shipped_qty")),
+                "outbound_quantity": _round_payload_amount(quantity_state["quantity"]),
+                "shipping_quantity_mode": quantity_state["mode"],
+                "shipping_uom": quantity_state["uom"],
                 "source_quantity": _round_payload_amount(item.get("quantity")),
                 "cost_formula": formula,
                 "expense_detail": _item_expense_detail(item, formula),
