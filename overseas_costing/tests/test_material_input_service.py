@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 
 from overseas_costing.services.material_input_service import (
+    build_shipping_quantity_updates,
     ensure_stable_line_key,
+    normalize_grid_page,
+    present_material_row,
     resolve_effective_quantity,
 )
 
@@ -94,6 +97,45 @@ def test_invalid_quantity_and_missing_unit_are_both_reported() -> None:
 def test_stable_line_key_is_preserved_or_created_once() -> None:
     assert ensure_stable_line_key({"stable_line_key": "  LINE-1  "}) == "LINE-1"
     assert ensure_stable_line_key({}, key_factory=lambda: "LINE-2") == "LINE-2"
+
+
+def test_legacy_rows_with_duplicate_sku_keep_distinct_row_identity() -> None:
+    first = present_material_row({"name": "ITEM-1", "material_code": "SKU-1", "quantity": 2})
+    second = present_material_row({"name": "ITEM-2", "material_code": "SKU-1", "quantity": 3})
+
+    assert first["stable_line_key"] == "legacy:ITEM-1"
+    assert second["stable_line_key"] == "legacy:ITEM-2"
+    assert first["stable_line_key"] != second["stable_line_key"]
+
+
+def test_grid_pagination_is_bounded_without_silently_skipping_page() -> None:
+    assert normalize_grid_page("2", "999") == (2, 200)
+    assert normalize_grid_page("bad", "bad") == (1, 100)
+
+
+def test_shipping_quantity_updates_keep_default_and_manual_modes_distinct() -> None:
+    default_updates = build_shipping_quantity_updates(
+        {"quantity": 34, "purchase_uom": "桶", "actual_shipped_qty": 32},
+        mode="DEFAULT_PURCHASE",
+        value="",
+        uom="",
+    )
+    manual_updates = build_shipping_quantity_updates(
+        {"quantity": 34, "purchase_uom": "桶"},
+        mode="MANUAL_CONFIRMED",
+        value="32",
+        uom="桶",
+    )
+
+    assert default_updates == {
+        "actual_shipped_qty": None,
+        "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+        "actual_shipped_qty_source_revision": "",
+        "shipped_uom": "桶",
+        "cost_output_uom": "桶",
+    }
+    assert manual_updates["actual_shipped_qty"] == "32"
+    assert manual_updates["actual_shipped_qty_mode"] == "MANUAL_CONFIRMED"
 
 
 def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:
