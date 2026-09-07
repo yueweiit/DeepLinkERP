@@ -725,7 +725,7 @@ git commit -m 'feat: track ERP work by destination site'
 - Create: `overseas_costing/tests/test_erp_sync_api.py`
 - Modify: `overseas_costing/tests/test_access_control.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 锁定接口：
 
@@ -743,17 +743,17 @@ retry_erp_request(batch_name, request_id)
 
 测试普通用户看不到 URL/token；发送需要写权限、已确认快照和服务器生成 payload；`accepted_site_codes` 只能来自最新预览；重试只能重试 FAILED/UNCERTAIN 经查询确认未成功的原请求。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_api.py overseas_costing/tests/test_access_control.py`
 
 Expected: FAIL because `api.erp_sync` is absent.
 
-- [ ] **Step 3: 实现薄 API 及旧入口代理**
+- [x] **Step 3: 实现薄 API 及旧入口代理**
 
 旧 `preview_erp_payload` 和 `writeback_to_erp` 在功能开关启用后调用新 service；若批次只能解析为一个站点，也仍写新请求和 link。禁止旧 API 继续绕过行级路由/幂等校验。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_api.py overseas_costing/tests/test_access_control.py overseas_costing/tests/test_batch_service.py`
 

@@ -88,6 +88,16 @@ def require_fee_workflow_permission(batch_reference: str, operation: str) -> str
     return require_batch_permission(batch_reference, permissions[normalized])
 
 
+def require_erp_sync_permission(batch_reference: str, operation: str) -> str:
+    """ERP previews are readable; route changes, sends and retries require batch write access."""
+
+    permissions = {"read": "read", "write": "write", "retry": "write"}
+    normalized = str(operation or "").strip().lower()
+    if normalized not in permissions:
+        raise ValueError("ERP 同步操作类型不合法。")
+    return require_batch_permission(batch_reference, permissions[normalized])
+
+
 def validate_api_access() -> None:
     """Frappe auth hook：覆盖整个 overseas_costing.api 命名空间。"""
 

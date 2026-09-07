@@ -6,6 +6,11 @@ import hashlib
 import json
 from decimal import Decimal, InvalidOperation
 
+try:
+    import frappe
+except Exception:  # pragma: no cover - pure tests run without Frappe
+    frappe = None
+
 
 ALLOWED_TRANSITIONS = {
     "PENDING": {"RUNNING", "SUPERSEDED"},
@@ -212,6 +217,98 @@ class InMemorySyncStore:
 
     def commit(self) -> None:
         self.commit_count += 1
+
+
+def _json_object(value) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+class FrappeSyncStore(InMemorySyncStore):
+    """Persist each synchronization state independently in Frappe."""
+
+    REQUEST_FIELDS = (
+        "request_id", "operation", "batch", "version", "cost_result_hash", "site_code",
+        "business_key", "payload_hash", "status", "attempt_count", "safe_payload_json",
+        "safe_response_json", "error_code", "error_message", "started_at", "finished_at",
+    )
+    LINK_FIELDS = (
+        "name", "batch", "stable_line_key", "site_code", "business_key", "remote_doctype",
+        "remote_document", "remote_row", "remote_docstatus", "status", "last_cost_result_hash",
+        "last_payload_hash", "verified_at", "remark",
+    )
+
+    def __init__(self, batch: str):
+        if frappe is None:
+            raise RuntimeError("当前未连接 Frappe。")
+        request_rows = frappe.get_all(
+            "Overseas Cost ERP Sync Request",
+            filters={"batch": batch},
+            fields=list(self.REQUEST_FIELDS),
+            order_by="modified desc",
+            limit_page_length=10000,
+        )
+        requests = []
+        for row in request_rows:
+            requests.append(
+                {
+                    **row,
+                    "safe_payload": _json_object(row.get("safe_payload_json")),
+                    "safe_response": _json_object(row.get("safe_response_json")),
+                }
+            )
+        links = frappe.get_all(
+            "Overseas Cost ERP Document Link",
+            filters={"batch": batch},
+            fields=list(self.LINK_FIELDS),
+            order_by="modified desc",
+            limit_page_length=10000,
+        )
+        super().__init__(requests=requests, links=links)
+
+    def save_request(self, request: dict) -> None:
+        super().save_request(request)
+        values = {
+            key: request.get(key)
+            for key in self.REQUEST_FIELDS
+            if key not in {"safe_payload_json", "safe_response_json"}
+        }
+        values["safe_payload_json"] = _canonical(redact_secrets(request.get("safe_payload") or {}))
+        values["safe_response_json"] = _canonical(redact_secrets(request.get("safe_response") or {}))
+        response = request.get("safe_response") or {}
+        values["error_code"] = request.get("error_code") or response.get("code") or ""
+        values["error_message"] = request.get("error_message") or response.get("message") or ""
+        existing = frappe.db.exists("Overseas Cost ERP Sync Request", request["request_id"])
+        if existing:
+            frappe.db.set_value("Overseas Cost ERP Sync Request", existing, values)
+        else:
+            frappe.get_doc({"doctype": "Overseas Cost ERP Sync Request", **values}).insert(ignore_permissions=True)
+
+    def save_link(self, link: dict) -> None:
+        super().save_link(link)
+        values = {key: link.get(key) for key in self.LINK_FIELDS if key != "name"}
+        existing = link.get("name") or frappe.db.exists(
+            "Overseas Cost ERP Document Link",
+            {
+                "batch": link.get("batch"),
+                "site_code": link.get("site_code"),
+                "stable_line_key": link.get("stable_line_key"),
+                "business_key": link.get("business_key"),
+            },
+        )
+        if existing:
+            frappe.db.set_value("Overseas Cost ERP Document Link", existing, values)
+        else:
+            frappe.get_doc({"doctype": "Overseas Cost ERP Document Link", **values}).insert(ignore_permissions=True)
+
+    def commit(self) -> None:
+        super().commit()
+        frappe.db.commit()
 
 
 def _config_map(site_configs) -> dict[str, dict]:
@@ -558,6 +655,7 @@ def execute_cost_updates(
     intent_key: str,
     client,
     store,
+    accepted_site_codes: list[str] | None = None,
 ) -> dict:
     """Apply only cost deltas; equivalent sites advance their links without remote writes."""
 
@@ -584,8 +682,11 @@ def execute_cost_updates(
 
     config_by_site = _config_map(site_configs)
     results = []
+    accepted = set(accepted_site_codes or [])
     for site in preview.get("sites") or []:
         site_code = str(site.get("site_code") or "")
+        if accepted and site_code not in accepted:
+            continue
         for change in site.get("items") or []:
             key = str(change.get("stable_line_key") or "")
             old_link = old_by_key[key]
@@ -666,3 +767,320 @@ def execute_cost_updates(
         "groups": results,
         "preview": preview,
     }
+
+
+def _require_frappe() -> None:
+    if frappe is None:
+        raise RuntimeError("当前未连接 Frappe。")
+
+
+def _resolved_version(batch_name: str, version_name: str | None = None) -> str:
+    from overseas_costing.services import batch_service
+
+    return str(batch_service._resolve_version_name(batch_name, version_name) or "")
+
+
+def _route_items(batch_name: str, version_name: str | None = None) -> tuple[str, list[dict]]:
+    _require_frappe()
+    version = _resolved_version(batch_name, version_name)
+    filters = {"batch": batch_name}
+    if version:
+        filters["version"] = version
+    rows = frappe.get_all(
+        "Overseas Cost Item",
+        filters=filters,
+        fields=[
+            "name", "stable_line_key", "project_collection", "subsidiary_code", "erp_site_code",
+            "route_status", "route_revision",
+        ],
+        order_by="row_no asc",
+        limit_page_length=10000,
+    )
+    return version, rows
+
+
+def get_route_preview(batch_name: str, version_name: str | None = None) -> dict:
+    from overseas_costing.services import erp_routing_service
+
+    version, items = _route_items(batch_name, version_name)
+    routes = frappe.get_all(
+        "Overseas Cost Project Route",
+        fields=["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision"],
+        limit_page_length=10000,
+    )
+    normalized_routes = [
+        {**row, "site_code": row.get("erp_site") or "", "route_revision": row.get("revision") or ""}
+        for row in routes
+    ]
+    result = erp_routing_service.resolve_item_routes(items, normalized_routes)
+    return {"ok": True, "batch_name": batch_name, "version_name": version, **result}
+
+
+def preview_bulk_route(batch_name: str, target_site_code: str) -> dict:
+    from overseas_costing.services import erp_routing_service
+
+    _version, items = _route_items(batch_name)
+    site = frappe.db.get_value(
+        "Overseas Cost ERP Site",
+        {"site_code": target_site_code},
+        ["site_code", "subsidiary_code", "label", "enabled", "capability_status"],
+        as_dict=True,
+    )
+    if not site or not int(site.get("enabled", 1) or 0):
+        raise ValueError("ERP_SITE_NOT_AVAILABLE")
+    result = erp_routing_service.preview_bulk_route(
+        items,
+        target_site=str(site.get("site_code") or target_site_code),
+        target_subsidiary=str(site.get("subsidiary_code") or ""),
+    )
+    result["preview_revision"] = f"{target_site_code}:{result['preview_revision']}"
+    result["site"] = {
+        "site_code": site.get("site_code") or "",
+        "label": site.get("label") or "",
+        "subsidiary_code": site.get("subsidiary_code") or "",
+        "capability_status": site.get("capability_status") or "UNVERIFIED",
+    }
+    return {"ok": True, "batch_name": batch_name, **result}
+
+
+def apply_bulk_route(
+    *, batch_name: str, preview_revision: str, edit_token: str, expected_modified: str
+) -> dict:
+    from overseas_costing.services import batch_service, edit_session_service, erp_routing_service
+
+    if ":" not in str(preview_revision or ""):
+        raise ValueError("ROUTE_PREVIEW_EXPIRED")
+    target_site, expected_revision = str(preview_revision).split(":", 1)
+    preview = preview_bulk_route(batch_name, target_site)
+    actual_revision = str(preview.get("preview_revision") or "").split(":", 1)[-1]
+    if actual_revision != expected_revision:
+        raise RuntimeError("ROUTE_PREVIEW_STALE")
+    edit_session_service.assert_batch_write(
+        batch_name,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+    )
+    _version, items = _route_items(batch_name)
+    preview_body = erp_routing_service.preview_bulk_route(
+        items,
+        target_site=target_site,
+        target_subsidiary=str((preview.get("site") or {}).get("subsidiary_code") or ""),
+    )
+    names_by_key = {str(row.get("stable_line_key") or row.get("name") or ""): row.get("name") for row in items}
+    for stable_key, updates in preview_body.get("updates", {}).items():
+        item_name = names_by_key.get(stable_key)
+        if not item_name:
+            continue
+        frappe.db.set_value(
+            "Overseas Cost Item",
+            item_name,
+            {**updates, "route_revision": expected_revision, "manual_override_flag": 1},
+        )
+    batch_service._insert_batch_audit_log(
+        batch_name,
+        _resolved_version(batch_name),
+        "ERP_ROUTE_OVERRIDE",
+        "erp_site_code",
+        new_value=target_site,
+        action_remark=f"整批归属 {target_site}，变更 {len(preview_body.get('changed_item_keys') or [])} 行。",
+    )
+    frappe.db.commit()
+    return {"ok": True, "changed_item_keys": preview_body.get("changed_item_keys") or [], "route_revision": expected_revision}
+
+
+def preview_erp_sync(batch_name: str, version_name: str | None = None) -> dict:
+    from overseas_costing.services import batch_service
+
+    detail = batch_service.get_batch_detail(batch_name, version_name)
+    if not detail.get("ok"):
+        return detail
+    return {
+        "ok": True,
+        "batch_name": detail.get("batch_name") or batch_name,
+        "version_name": detail.get("version_name") or version_name,
+        "erp_push": detail.get("erp_push") or {},
+        "erp_work": detail.get("erp_work") or {},
+    }
+
+
+def _site_configs(site_codes: list[str]) -> dict[str, dict]:
+    _require_frappe()
+    rows = frappe.get_all(
+        "Overseas Cost ERP Site",
+        filters={"site_code": ["in", site_codes]},
+        fields=[
+            "name", "site_code", "subsidiary_code", "enabled", "base_url", "push_mode", "company",
+            "default_supplier", "cost_center", "default_currency", "stock_uom", "cost_update_mode",
+            "capability_status",
+        ],
+        limit_page_length=len(site_codes) or 1,
+    )
+    configs = {}
+    for row in rows:
+        document = frappe.get_doc("Overseas Cost ERP Site", row.get("name") or row.get("site_code"))
+        authorization = document.get_password("authorization", raise_exception=False)
+        base_url = str(row.get("base_url") or "").rstrip("/")
+        if base_url and "/api/resource" not in base_url:
+            base_url = f"{base_url}/api/resource"
+        configs[str(row.get("site_code") or "")] = {
+            **row,
+            "base_url": base_url,
+            "authorization": authorization,
+            "push_mode": "standard_purchase",
+            "supplier": row.get("default_supplier") or "",
+            "item_group": "All Item Groups",
+            "timeout": 20,
+        }
+    return configs
+
+
+def start_erp_create(*, batch_name: str, cost_result_hash: str, request_key: str) -> dict:
+    from overseas_costing.services import erp_client
+
+    preview_result = preview_erp_sync(batch_name)
+    push = preview_result.get("erp_push") or {}
+    if str(push.get("cost_result_hash") or "") != str(cost_result_hash or ""):
+        return {"ok": False, "code": "COST_RESULT_STALE", "message": "成本结果已变更，请重新预览。"}
+    if not push.get("ready"):
+        return {"ok": False, "code": "ERP_PUSH_BLOCKED", "blocking": push.get("blocking") or []}
+    site_codes = list(push.get("referenced_sites") or [])
+    configs = _site_configs(site_codes)
+    if any(str(config.get("capability_status") or "").upper() != "VERIFIED" for config in configs.values()):
+        return {"ok": False, "code": "ERP_SITE_UNVERIFIED"}
+    store = FrappeSyncStore(batch_name)
+    result = execute_site_pushes(
+        batch=batch_name,
+        version=str(preview_result.get("version_name") or ""),
+        cost_result_hash=cost_result_hash,
+        preview=push.get("preview") or {},
+        site_configs=configs,
+        intent_key=request_key,
+        client=erp_client,
+        store=store,
+    )
+    return {"ok": result.get("status") == "SUCCESS", **result}
+
+
+def _current_cost_items(push: dict) -> list[dict]:
+    rows = []
+    for site in (push.get("preview") or {}).get("sites") or []:
+        for group in site.get("groups") or []:
+            for item in group.get("items") or []:
+                rows.append(
+                    {
+                        **item,
+                        "site_code": site.get("site_code") or "",
+                        "erp_site_code": site.get("site_code") or "",
+                        "amount_status": "ESTIMATED" if item.get("estimated_fee_keys") else "ACTUAL",
+                        "cost_result_hash": push.get("cost_result_hash") or "",
+                    }
+                )
+    return rows
+
+
+def _enriched_links(store: FrappeSyncStore) -> list[dict]:
+    enriched = []
+    for link in store.links:
+        saved_payload = {}
+        for request in store.requests:
+            if (
+                str(request.get("business_key") or "") == str(link.get("business_key") or "")
+                and str(request.get("status") or "").upper() == "SUCCESS"
+            ):
+                saved_payload = request.get("safe_payload") or {}
+                break
+        item = next(
+            (
+                row for row in saved_payload.get("items") or []
+                if str(row.get("stable_line_key") or "") == str(link.get("stable_line_key") or "")
+            ),
+            {},
+        )
+        formula = item.get("cost_formula") or {}
+        logistics = (item.get("expense_detail") or {}).get("logistics") or {}
+        customs = (item.get("expense_detail") or {}).get("clearance_and_tax") or {}
+        enriched.append(
+            {
+                **link,
+                "subsidiary_code": saved_payload.get("subsidiary_code") or "",
+                "quantity": item.get("source_quantity") or formula.get("quantity") or 0,
+                "goods_value": item.get("goods_value") or formula.get("goods_value") or 0,
+                "total_cost_rmb": item.get("total_cost_rmb") or formula.get("total_cost") or 0,
+                "total_unit_rmb": item.get("total_unit_rmb") or formula.get("comprehensive_unit_price") or 0,
+                "freight_alloc_rmb": item.get("freight_alloc_rmb") or logistics.get("freight_alloc_rmb") or 0,
+                "clearance_alloc_rmb": item.get("clearance_alloc_rmb") or customs.get("clearance_alloc_rmb") or 0,
+                "tax_alloc_rmb": item.get("tax_alloc_rmb") or customs.get("tax_alloc_rmb") or 0,
+                "amount_status": saved_payload.get("amount_status") or "ACTUAL",
+            }
+        )
+    return enriched
+
+
+def preview_erp_updates(*, batch_name: str, from_hash: str, to_hash: str) -> dict:
+    preview_result = preview_erp_sync(batch_name)
+    push = preview_result.get("erp_push") or {}
+    if str(push.get("cost_result_hash") or "") != str(to_hash or ""):
+        return {"ok": False, "code": "COST_RESULT_STALE"}
+    store = FrappeSyncStore(batch_name)
+    result = preview_cost_updates(
+        old_links=_enriched_links(store),
+        new_items=_current_cost_items(push),
+        from_hash=from_hash,
+        to_hash=to_hash,
+    )
+    result["preview_revision"] = _hash(result)
+    return {"ok": result.get("ready", False), **result}
+
+
+def start_erp_updates(
+    *, batch_name: str, to_hash: str, accepted_site_codes: list[str], request_key: str
+) -> dict:
+    from overseas_costing.services import erp_client
+
+    store = FrappeSyncStore(batch_name)
+    old_links = _enriched_links(store)
+    old_hashes = sorted({str(row.get("last_cost_result_hash") or "") for row in old_links if row.get("last_cost_result_hash")})
+    from_hash = old_hashes[0] if len(old_hashes) == 1 else ""
+    preview = preview_erp_updates(batch_name=batch_name, from_hash=from_hash, to_hash=to_hash)
+    allowed_sites = {str(row.get("site_code") or "") for row in preview.get("sites") or []}
+    accepted = set(accepted_site_codes or [])
+    if not accepted or not accepted <= allowed_sites:
+        return {"ok": False, "code": "SITE_SELECTION_STALE", "allowed_site_codes": sorted(allowed_sites)}
+    push = (preview_erp_sync(batch_name).get("erp_push") or {})
+    new_items = _current_cost_items(push)
+    configs = _site_configs(sorted(accepted))
+    result = execute_cost_updates(
+        batch=batch_name,
+        version="",
+        from_hash=from_hash,
+        to_hash=to_hash,
+        new_items=new_items,
+        site_configs=configs,
+        intent_key=request_key,
+        client=erp_client,
+        store=store,
+        accepted_site_codes=sorted(accepted),
+    )
+    return {"ok": result.get("status") == "SUCCESS", **result}
+
+
+def get_erp_sync_status(batch_name: str) -> dict:
+    result = preview_erp_sync(batch_name)
+    return {"ok": result.get("ok", False), "batch_name": batch_name, "erp_work": result.get("erp_work") or {}}
+
+
+def retry_erp_request(*, batch_name: str, request_id: str) -> dict:
+    store = FrappeSyncStore(batch_name)
+    request = next((row for row in store.requests if str(row.get("request_id") or "") == str(request_id or "")), None)
+    if not request:
+        return {"ok": False, "code": "ERP_REQUEST_NOT_FOUND"}
+    if str(request.get("status") or "").upper() not in {"FAILED", "UNCERTAIN"}:
+        return {"ok": False, "code": "ERP_REQUEST_NOT_RETRYABLE"}
+    retry_key = f"retry:{request_id}:{int(request.get('attempt_count') or 0) + 1}"
+    if str(request.get("operation") or "") == "CREATE":
+        return start_erp_create(
+            batch_name=batch_name,
+            cost_result_hash=str(request.get("cost_result_hash") or ""),
+            request_key=retry_key,
+        )
+    return {"ok": False, "status": "MANUAL_REQUIRED", "code": "UPDATE_RETRY_PREVIEW_REQUIRED"}

@@ -117,6 +117,24 @@ def test_fee_workflow_permission_maps_actions_to_batch_permission(monkeypatch, o
     assert calls == [("BATCH-NO", ptype)]
 
 
+@pytest.mark.parametrize(
+    ("operation", "ptype"),
+    [("read", "read"), ("write", "write"), ("retry", "write")],
+)
+def test_erp_sync_permission_maps_actions_to_batch_permission(monkeypatch, operation, ptype) -> None:
+    from overseas_costing.services import access_control
+
+    calls = []
+    monkeypatch.setattr(
+        access_control,
+        "require_batch_permission",
+        lambda batch, requested: calls.append((batch, requested)) or "BATCH-DOC",
+    )
+
+    assert access_control.require_erp_sync_permission("BATCH-NO", operation) == "BATCH-DOC"
+    assert calls == [("BATCH-NO", ptype)]
+
+
 def test_packing_preview_api_uses_server_attachment_path_not_client_rows() -> None:
     api_source = (Path(__file__).resolve().parents[1] / "api" / "import_api.py").read_text(encoding="utf-8")
     block = api_source.split("def preview_packing_list_attachment(", 1)[1].split("@frappe.whitelist()", 1)[0]
