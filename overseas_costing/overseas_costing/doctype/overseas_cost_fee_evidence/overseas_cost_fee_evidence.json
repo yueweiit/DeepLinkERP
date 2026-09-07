@@ -23,7 +23,7 @@
     {"fieldname": "batch", "fieldtype": "Link", "label": "所属批次", "options": "Overseas Cost Batch", "reqd": 1, "in_list_view": 1},
     {"fieldname": "version", "fieldtype": "Link", "label": "所属版本", "options": "Overseas Cost Version", "reqd": 1},
     {"fieldname": "fee_rule", "fieldtype": "Link", "label": "费用规则", "options": "Overseas Cost Allocation Rule", "reqd": 1, "in_list_view": 1},
-    {"fieldname": "attachment", "fieldtype": "Link", "label": "凭证附件", "options": "Overseas Cost Attachment", "reqd": 1},
+    {"fieldname": "attachment", "fieldtype": "Link", "label": "凭证附件", "options": "Overseas Cost Attachment"},
     {"fieldname": "evidence_role", "fieldtype": "Data", "label": "凭证角色", "reqd": 1, "in_list_view": 1},
     {"fieldname": "validation_status", "fieldtype": "Select", "label": "校验状态", "options": "PENDING\nVALID\nINVALID\nUNLINKED", "default": "PENDING", "reqd": 1, "in_list_view": 1},
     {"fieldname": "source_revision", "fieldtype": "Data", "label": "来源修订", "read_only": 1},

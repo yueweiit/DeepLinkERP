@@ -794,6 +794,7 @@ def calculate_item_rows(
     *,
     fx_rmb_to_mxn: float = DEFAULT_FX_RMB_TO_MXN,
     fx_usd_to_rmb: float | None = None,
+    fee_evidence_by_rule: dict[str, list[dict]] | None = None,
 ) -> tuple[list[dict], dict]:
     """Pure calculation helper used by Frappe service and local tests."""
 
@@ -996,7 +997,10 @@ def calculate_item_rows(
             fee_status_service.build_fee_status(
                 fee=entry["rule"],
                 allocation=entry["allocation"],
-                evidence=[],
+                evidence=(fee_evidence_by_rule or {}).get(
+                    str(entry["rule"].get("name") or entry["rule"].get("logical_fee_key") or ""),
+                    [],
+                ),
                 calculation={"input_hash": fee_input_hash, "fee_input_hash": fee_input_hash},
             )
         )
@@ -1944,11 +1948,21 @@ def recalculate_batch(
         },
     )
     rules_for_calculation = ai_allocation.get("rules") or candidate_rules
+    evidence_rows = _frappe.get_all(
+        "Overseas Cost Fee Evidence",
+        filters={"batch": batch_doc_name, "version": resolved_version_name},
+        fields=["fee_rule", "evidence_role", "validation_status", "source_revision"],
+        limit_page_length=5000,
+    )
+    evidence_by_rule: dict[str, list[dict]] = {}
+    for evidence in evidence_rows:
+        evidence_by_rule.setdefault(str(evidence.get("fee_rule") or ""), []).append(evidence)
     calculated_rows, summary_snapshot = calculate_item_rows(
         items,
         rules_for_calculation,
         fx_rmb_to_mxn=fx_rmb_to_mxn,
         fx_usd_to_rmb=fx_usd_to_rmb,
+        fee_evidence_by_rule=evidence_by_rule,
     )
     summary_snapshot["ai_allocation"] = {
         "ok": bool(ai_allocation.get("ok")),

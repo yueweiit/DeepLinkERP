@@ -840,7 +840,13 @@ def delete_tax_certificate_parse_records(
             "message": "当前没有可删除的完税凭证解析记录。",
         }
 
+    from overseas_costing.services import fee_service
+
     for name in target_names:
+        fee_service.invalidate_fee_completion_for_evidence(
+            name,
+            reason=f"完税凭证 {name} 已删除。",
+        )
         frappe.delete_doc("Overseas Cost Attachment", name, ignore_permissions=True)
     frappe.db.commit()
     skipped_count = len(skipped_items)
@@ -923,6 +929,13 @@ def resolve_tax_certificate_reconciliation(
     mapped_result["message"] = resolution["resolution"]["message"]
 
     remark_text = _manual_resolution_remark(row.get("remark"), resolution["resolution"])
+    from overseas_costing.services import fee_service
+
+    fee_service.invalidate_fee_completion_for_evidence(
+        record_name,
+        reason=f"完税凭证 {record_name} 的差异处理状态已变更。",
+        unlink=False,
+    )
     frappe.db.set_value(
         "Overseas Cost Attachment",
         record_name,

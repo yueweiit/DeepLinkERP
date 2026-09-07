@@ -404,7 +404,7 @@ git commit -m 'feat: compute persistent fee work states'
 - Modify: `overseas_costing/services/import_service.py`
 - Create: `overseas_costing/tests/test_fee_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖：同一 `logical_fee_key` 暂估转实际只更新一笔；OA/账单/付款凭证候选不自动重复新增；费用金额/范围/依据变化使批次 Dirty 并使旧完成记录 INVALIDATED；只补普通附件不使计算失效；必需最终凭证删除/解除/无效会使最终确认失效并重开待办；无有效金额、存在待分摊或待重算时拒绝“确认费用已齐”。
 
@@ -415,13 +415,13 @@ def test_confirm_complete_rejects_estimated_fee() -> None:
     assert result["blocking"][0]["code"] == "ACTUAL_AMOUNT_REQUIRED"
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_service.py`
 
 Expected: FAIL because lifecycle transaction methods are absent.
 
-- [ ] **Step 3: 实现写事务**
+- [x] **Step 3: 实现写事务**
 
 公开 service 方法：
 
@@ -434,11 +434,11 @@ confirm_all_fees_complete(batch_name, version_name, expected_input_hash, edit_to
 
 所有方法锁定批次、复核审批有效性、权限、版本和编辑租约。`save_fee` 更新金额时生成新 `amount_revision`；实际值替换同逻辑费用的暂估采用值而不是叠加。`NOT_INCURRED/INCLUDED` 必须有原因，`INCLUDED` 必须引用另一费用键或本批采购金额。
 
-- [ ] **Step 4: 统一附件删除/撤销通知**
+- [x] **Step 4: 统一附件删除/撤销通知**
 
 现有附件删除和税费核对状态变更调用 `invalidate_fee_completion_for_evidence()`。它不删历史完成记录；插入失效时间、原因和操作者。只有采用金额发生变化才标记 Dirty，单纯证据失效只重开凭证/最终确认状态。
 
-- [ ] **Step 5: 运行并提交**
+- [x] **Step 5: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_service.py overseas_costing/tests/test_import_service.py overseas_costing/tests/test_calculate_service.py`
 

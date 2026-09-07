@@ -1145,6 +1145,12 @@ def delete_manual_document_attachment(attachment_name: str) -> dict:
         return {"ok": False, "attachment_name": resolved_attachment_name, "message": "只能删除人工上传资料记录。"}
 
     rollback_result = _rollback_manual_document_attachment_parse_effects(attachment_doc)
+    from overseas_costing.services import fee_service
+
+    fee_service.invalidate_fee_completion_for_evidence(
+        resolved_attachment_name,
+        reason=f"费用凭证附件 {resolved_attachment_name} 已删除。",
+    )
     frappe.delete_doc("Overseas Cost Attachment", resolved_attachment_name, ignore_permissions=True)
     frappe.db.commit()
     rollback_message = ""
