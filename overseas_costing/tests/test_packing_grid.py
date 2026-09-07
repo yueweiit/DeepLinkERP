@@ -136,6 +136,36 @@ def test_dingtalk_raw_number_wins_over_formatted_display_value() -> None:
     assert preview["totals"]["volume_m3"]["value"] == "8.7403305"
 
 
+def test_dingtalk_chunked_snapshot_is_reassembled_in_row_order() -> None:
+    grid = build_grid_from_dingtalk_snapshot(
+        {
+            "schemaVersion": 1,
+            "sheetName": "分块",
+            "rangeAddress": "A1:D3",
+            "mergeRangesAvailable": False,
+            "chunks": [
+                {
+                    "rangeAddress": "A3:D3",
+                    "values": [["合计", None, 30, 0.2]],
+                    "displayValues": [["合计", "", "30", "0.2"]],
+                    "formulas": [["", "", "", ""]],
+                },
+                {
+                    "rangeAddress": "A1:D2",
+                    "values": [["物料编码", "数量", "总毛重", "总体积"], ["FL001", 1, 30, 0.2]],
+                    "displayValues": [["物料编码", "数量", "总毛重", "总体积"], ["FL001", "1", "30", "0.2"]],
+                    "formulas": [["", "", "", ""], ["", "", "", ""]],
+                },
+            ],
+        }
+    )
+
+    preview = parse_packing_grid(grid)
+
+    assert preview["material_row_count"] == 1
+    assert preview["totals"]["gross_weight_kg"]["value"] == "30"
+
+
 def test_snapshot_blanks_can_only_suggest_groups_until_user_confirms() -> None:
     grid = build_grid_from_dingtalk_snapshot(
         {

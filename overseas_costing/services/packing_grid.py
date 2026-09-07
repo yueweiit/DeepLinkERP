@@ -72,6 +72,13 @@ def build_grid_from_dingtalk_snapshot(snapshot: dict[str, Any]) -> dict[str, Any
     values = snapshot.get("values") or []
     display_values = snapshot.get("displayValues", snapshot.get("display_values")) or []
     formulas = snapshot.get("formulas") or []
+    if not values and snapshot.get("chunks"):
+        chunks = sorted(snapshot.get("chunks") or [], key=_chunk_start_row)
+        values = [row for chunk in chunks for row in (chunk.get("values") or [])]
+        display_values = [
+            row for chunk in chunks for row in (chunk.get("displayValues", chunk.get("display_values")) or [])
+        ]
+        formulas = [row for chunk in chunks for row in (chunk.get("formulas") or [])]
     row_count = max(len(values), len(display_values), len(formulas))
     column_count = max(
         [len(row) for matrix in (values, display_values, formulas) for row in matrix] or [0]
@@ -115,6 +122,14 @@ def build_grid_from_dingtalk_snapshot(snapshot: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _chunk_start_row(chunk: Any) -> int:
+    if not isinstance(chunk, dict):
+        return 0
+    address = str(chunk.get("rangeAddress", chunk.get("range_address")) or "")
+    match = __import__("re").search(r"[A-Za-z]+(\d+)", address)
+    return int(match.group(1)) if match else 0
+
+
 def _matrix_value(matrix: list[list[Any]], row: int, column: int) -> Any:
     if row >= len(matrix) or column >= len(matrix[row]):
         return None
@@ -133,4 +148,3 @@ def _normalize_merge_range(item: Any, default_evidence: str) -> dict[str, Any]:
             evidence_kind=str(item.get("evidence_kind", item.get("evidenceKind")) or default_evidence),
         )
     )
-
