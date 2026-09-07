@@ -550,23 +550,23 @@ git commit -m 'refactor: separate costing and ERP readiness gates'
 - Modify: `overseas_costing/tests/test_workbench_frontend_state.py`
 - Modify generated files via: `overseas_costing/scripts/build_workbench_assets.py`
 
-- [ ] **Step 1: 写前端状态失败测试**
+- [x] **Step 1: 写前端状态失败测试**
 
 用 Node 执行 UMD helper，验证：默认数量显示“采购数量默认”；红格数量随 server requirements 更新；Tab 移到下一可编辑格；多格粘贴不会修改稳定行 ID；Excel 预览必须确认 Sheet/映射/冲突后才能采用；没有装箱来源时仍显示 OA/人工补充入口。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py`
 
 Expected: FAIL because the new grid state and markup markers are absent.
 
-- [ ] **Step 3: 实现表格和导入预览**
+- [x] **Step 3: 实现表格和导入预览**
 
 详情页默认业务顺序为：费用与凭证、物料与装箱数据、核算结果。保留顶层来源/凭证/审计入口，但不再用九张同级文件卡表达完成度。表格从 API 的 `cell_requirements` 渲染：`blocking` 红色、`erp_push` 红色并写“推送前补”、`optional` 中性；每格提供文字或 `aria-label` 原因。
 
 导入采用三步状态：选择来源及 Sheet、确认字段映射和匹配、确认字段差异。浏览器不解析后直接写数据库；文件先注册为私有 File，再由服务端预览。
 
-- [ ] **Step 4: 生成两份页面资源并运行测试**
+- [x] **Step 4: 生成两份页面资源并运行测试**
 
 ```bash
 python overseas_costing/scripts/build_workbench_assets.py
@@ -575,7 +575,7 @@ python -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py over
 
 Expected: PASS and the two generated JS copies plus two CSS copies are byte-identical.
 
-- [ ] **Step 5: 本地浏览器验收**
+- [x] **Step 5: 本地浏览器验收**
 
 在 `development.localhost` 只使用本地样本验证：仅 OA 无装箱单、默认数量、手工数量冲突、Excel 两个 Sheet、重复 SKU、共享箱候选、按货值/毛重切换、红格定位、键盘与粘贴。确认未调用真实 ERP。
 

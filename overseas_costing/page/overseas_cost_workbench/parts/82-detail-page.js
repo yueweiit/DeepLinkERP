@@ -215,11 +215,11 @@
         </section>
         <nav class="ocw-detail-tabs" aria-label="批次详情分类">
           ${[
-            ["overview", "总览"],
-            ["dingtalk", "钉钉审批"],
-            ["documents", "资料与费用"],
-            ["items", "SKU 明细"],
-            ["vouchers", "凭证核对"],
+            ["documents", "费用与凭证"],
+            ["items", "物料与装箱"],
+            ["overview", "成本结果"],
+            ["dingtalk", "OA 来源"],
+            ["vouchers", "完税核对"],
             ["audit", "操作记录"],
           ].map(([key, label]) => `<button class="${this.detailState.tab === key ? "is-active" : ""}" type="button" data-action="switch-detail-tab" data-tab="${key}">${label}</button>`).join("")}
         </nav>
@@ -271,7 +271,7 @@
     }
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
-        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>
+        <div class="ocw-detail-section-head"><div><span>综合单价预览</span><h2>成本结果与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看 OA 来源</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>
         ${this.renderBatchDrawerOverview(batch, [])}
       </div>
     `);
@@ -286,7 +286,7 @@
     const resolvedType = this.detectManualDocumentLogisticsType(batch);
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
-      <div class="ocw-detail-section-head"><div><span>异常处理</span><h2>资料与费用</h2></div><button class="ocw-outline-btn" type="button" data-action="detail-repull">重拉本批次</button></div>
+      <div class="ocw-detail-section-head"><div><span>第一步 · 先确认本批次费用是否齐全</span><h2>费用与凭证</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="detail-voucher">完税凭证核对</button><button class="ocw-outline-btn" type="button" data-action="detail-repull">重拉本批次</button></div></div>
       <div data-area="manual-documents">${this.renderManualDocumentPanel(batch, resolvedType, [])}</div>
     `);
     try {
@@ -358,16 +358,7 @@
     const requestId = ++this.detailState.skuRequestId;
     this.renderDetailTabLoading("正在读取 SKU 当前页");
     try {
-      const result = await this.call("overseas_costing.api.workbench.get_batch_items_page", {
-        batch_name: batch.name,
-        version_name: this.detailState.versionName || batch.current_version || null,
-        keyword: sku.keyword || "",
-        page: sku.page,
-        page_length: sku.pageLength,
-        field_group: sku.fieldGroup,
-        sort_by: sku.sortBy,
-        sort_order: sku.sortOrder,
-      });
+      const result = await this.fetchMaterialGrid(batch, sku);
       if (requestId !== this.detailState.skuRequestId || this.detailState.batchName !== batch.name) return;
       if (!result || !result.ok) throw new Error((result && result.message) || "SKU 明细加载失败");
       if (!(result.items || []).length && sku.page > 1 && Number(result.total || 0) > 0) {
@@ -384,44 +375,7 @@
   }
 
   renderSkuDetailTab(result = {}) {
-    const sku = this.detailState.sku;
-    const columns = result.columns || [];
-    const items = result.items || [];
-    const groups = [
-      ["basic", "基础信息"], ["purchase", "采购数据"], ["logistics", "物流费用"],
-      ["tax", "税费"], ["total", "综合成本"], ["all", "全部字段"],
-    ];
-    const header = columns.map((column, index) => {
-      const sortable = ["material_code", "product_name", "quantity", "goods_value", "total_cost_rmb", "total_unit_rmb"].includes(column.fieldname);
-      const sortMark = sku.sortBy === column.fieldname ? (sku.sortOrder === "asc" ? " ↑" : " ↓") : "";
-      return `<th class="${index < 2 ? `ocw-sku-sticky ocw-sku-sticky-${index}` : ""}" title="${this.escape(`${column.excel_col} ${column.label}`)}">${sortable ? `<button type="button" data-action="sku-sort" data-sort-by="${this.escape(column.fieldname)}">` : ""}<span>${this.escape(column.excel_col)}</span>${this.escape(column.label)}${sortMark}${sortable ? "</button>" : ""}</th>`;
-    }).join("");
-    const body = items.map((row) => `<tr>${columns.map((column, index) => this.renderSkuPageCell(row, column, index)).join("")}</tr>`).join("");
-    this.$root.find("[data-area='detail-content']").html(`
-      <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2></div><strong>共 ${Number(result.total || 0)} 行</strong></div>
-      <div class="ocw-sku-toolbar">
-        <label><span>搜索当前批次 SKU</span><input class="form-control" type="search" data-role="sku-keyword" value="${this.escape(sku.keyword)}" placeholder="物料编码或产品名称" /></label>
-        <div class="ocw-sku-groups" role="group" aria-label="SKU 字段分组">${groups.map(([key, label]) => `<button class="${sku.fieldGroup === key ? "is-active" : ""}" type="button" data-action="sku-group" data-field-group="${key}">${label}</button>`).join("")}</div>
-      </div>
-      <div class="ocw-sku-table-shell">
-        <div class="ocw-sku-table-wrap" data-role="sku-table-scroll">
-          <table class="ocw-sku-table"><thead><tr>${header}</tr></thead><tbody>${body || `<tr><td colspan="${Math.max(columns.length, 1)}"><div class="ocw-detail-empty">当前条件下没有 SKU</div></td></tr>`}</tbody></table>
-        </div>
-        <div class="ocw-sku-scroll-controls">
-          <button type="button" data-action="sku-scroll" data-direction="-1" aria-label="向左滚动 SKU 表">◀</button>
-          <input class="ocw-sku-scrollbar" type="range" min="0" max="0" step="1" value="0" data-role="sku-scrollbar" aria-label="SKU 明细水平滚动条" disabled />
-          <button type="button" data-action="sku-scroll" data-direction="1" aria-label="向右滚动 SKU 表">▶</button>
-          <span>当前 ${this.escape(groups.find(([key]) => key === sku.fieldGroup)?.[1] || "基础信息")} · 全部 A–BE</span>
-        </div>
-      </div>
-      <div class="ocw-sku-pagination">
-        <span>每页 ${sku.pageLength} 行</span>
-        <button class="ocw-outline-btn" type="button" data-action="sku-page" data-page="${Number(result.page || 1) - 1}" ${Number(result.page || 1) <= 1 ? "disabled" : ""}>上一页</button>
-        <strong>第 ${Number(result.page || 1)} / ${Math.max(Number(result.page_count || 0), 1)} 页</strong>
-        <button class="ocw-outline-btn" type="button" data-action="sku-page" data-page="${Number(result.page || 1) + 1}" ${Number(result.page || 1) >= Number(result.page_count || 0) ? "disabled" : ""}>下一页</button>
-      </div>
-    `);
-    requestAnimationFrame(() => this.bindSkuScrollControls());
+    return this.renderMaterialGrid(result);
   }
 
   renderSkuPageCell(row, column, index) {

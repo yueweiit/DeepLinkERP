@@ -76,7 +76,7 @@
       SEA: [
         { code: "sea_approval_attachment", label: "国际物流 OA 附件", required: false, oaSource: true, attachmentType: "Other", purpose: "系统优先从钉钉读取；缺失或需复核时再补传" },
         { code: "sea_customs_declaration", label: "报关资料", required: true, attachmentType: "Customs Declaration", purpose: "报关单号、海关编码、申报品名、申报数量" },
-        { code: "sea_packing_list", label: "装箱单", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规" },
+        { code: "sea_packing_list", label: "装箱单（有则导入）", required: false, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规；没有时可用 OA 和人工补充" },
         { code: "sea_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "货值、币种、发票金额，用于和采购支出 OA 核对" },
         { code: "sea_bill_of_lading", label: "提单/运单", required: true, attachmentType: "Logistics Bill", purpose: "提单号、柜号、船期、承运信息" },
         { code: "sea_forwarder_bill", label: "货代账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "海运费、港杂费、货代服务费、杂费" },
@@ -87,7 +87,7 @@
       AIR: [
         { code: "air_approval_attachment", label: "国际物流 OA 附件", required: false, oaSource: true, attachmentType: "Other", purpose: "系统优先从钉钉读取；缺失或需复核时再补传" },
         { code: "air_waybill", label: "空运运单", required: true, attachmentType: "Logistics Bill", purpose: "主单/分单、航班、实际重量、计费重量" },
-        { code: "air_packing_list", label: "装箱单", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规" },
+        { code: "air_packing_list", label: "装箱单（有则导入）", required: false, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规；没有时可用 OA 和人工补充" },
         { code: "air_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "货值、币种、发票金额，用于和采购支出 OA 核对" },
         { code: "air_customs_declaration", label: "报关资料", required: true, attachmentType: "Customs Declaration", purpose: "报关单号、海关编码、申报品名" },
         { code: "air_forwarder_bill", label: "货代账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "空运费、燃油附加费、服务费、杂费" },
@@ -98,7 +98,7 @@
       EXPRESS: [
         { code: "express_approval_attachment", label: "国际物流 OA 附件", required: false, oaSource: true, attachmentType: "Other", purpose: "系统优先从钉钉读取；缺失或需复核时再补传" },
         { code: "express_waybill", label: "快递面单/运单", required: true, attachmentType: "Logistics Bill", purpose: "运单号、重量、收发件信息" },
-        { code: "express_goods_list", label: "货品明细/装箱资料", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积" },
+        { code: "express_goods_list", label: "货品明细/装箱资料（有则导入）", required: false, attachmentType: "Packing List", purpose: "物料、数量、重量、体积；没有时可用 OA 和人工补充" },
         { code: "express_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "货值、币种、发票金额，用于和采购支出 OA 核对" },
         { code: "express_bill", label: "快递账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "快递费、双清费用、服务费" },
         { code: "express_clearance_fee", label: "清关费用资料（如有）", required: false, attachmentType: "Other", purpose: "快递或双清产生清关费用时提供" },
@@ -108,6 +108,18 @@
       ],
     };
     return plans[logisticsType] || [];
+  }
+
+  manualDocumentDisplayPlan(plan = []) {
+    const priority = (slot) => {
+      const code = String(slot.code || "");
+      if (slot.oaSource) return 0;
+      if (["forwarder", "clearance", "tax_certificate", "payment", "bill"].some((part) => code.includes(part))) return 1;
+      if (["commercial_invoice", "customs_declaration"].some((part) => code.includes(part))) return 2;
+      if (["packing_list", "goods_list", "waybill"].some((part) => code.includes(part))) return 3;
+      return 4;
+    };
+    return (plan || []).map((slot, index) => ({ slot, index })).sort((left, right) => priority(left.slot) - priority(right.slot) || left.index - right.index).map(({ slot }) => slot);
   }
 
   renderManualDocumentPanel(batch, _logisticsType = "", items = [], focus = {}) {
@@ -172,7 +184,7 @@
             : ""
         }
         <div class="ocw-manual-doc-grid">
-          ${this.renderManualDocumentCards(plan, bySlot, logisticsType, batch, { ...focus, slotCodes: focusSlotCodes })}
+          ${this.renderManualDocumentCards(this.manualDocumentDisplayPlan(plan), bySlot, logisticsType, batch, { ...focus, slotCodes: focusSlotCodes })}
         </div>
         ${historyHtml}
       </div>

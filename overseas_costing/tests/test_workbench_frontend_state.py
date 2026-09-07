@@ -297,3 +297,108 @@ def test_batch_source_provenance_fields_are_not_editable_by_cost_users() -> None
 
     for fieldname in ("source_type", "source_data_id", "source_approval_no", "source_instance_id", "extra_json"):
         assert fields[fieldname]["permlevel"] == 1
+
+
+def test_material_grid_default_quantity_has_explicit_source_label() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify(s.materialQuantityView({"
+        "quantity:'34',purchase_uom:'桶',actual_shipped_qty:'',"
+        "actual_shipped_qty_mode:'DEFAULT_PURCHASE',shipped_uom:'桶'})));"
+    )
+
+    assert result == {
+        "value": "34",
+        "uom": "桶",
+        "mode": "DEFAULT_PURCHASE",
+        "sourceLabel": "采购数量默认",
+        "isDefault": True,
+    }
+
+
+def test_material_grid_counts_only_server_supplied_requirements() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify(s.summarizeMaterialRequirements(["
+        "{cell_requirements:{goods_value:{severity:'blocking',gate:'calculation'},project_collection:{severity:'blocking',gate:'erp_push'}}},"
+        "{cell_requirements:{gross_weight_kg:{severity:'optional',gate:'none'},project_collection:{severity:'blocking',gate:'erp_push'}}}"
+        "])));"
+    )
+
+    assert result == {"calculation": 1, "erpPush": 2, "warnings": 0}
+
+
+def test_material_grid_tab_moves_to_next_editable_cell() -> None:
+    result = _state_result(
+        "const cells=[{fieldname:'stable_line_key',editable:false},{fieldname:'quantity',editable:true},{fieldname:'total_cost_rmb',editable:false},{fieldname:'actual_shipped_qty',editable:true}];"
+        "console.log(JSON.stringify({forward:s.nextMaterialEditableCell(cells,1,false),backward:s.nextMaterialEditableCell(cells,3,true)}));"
+    )
+
+    assert result == {"forward": 3, "backward": 1}
+
+
+def test_material_grid_paste_cannot_modify_stable_line_id() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify(s.buildMaterialPasteUpdates("
+        "[{fieldname:'stable_line_key',editable:true},{fieldname:'actual_shipped_qty',editable:true},{fieldname:'total_cost_rmb',editable:false}],"
+        "['attacker-key','32','999']"
+        ")));"
+    )
+
+    assert result == [{"fieldname": "actual_shipped_qty", "value": "32"}]
+
+
+def test_material_import_requires_sheet_mapping_and_conflict_decisions() -> None:
+    result = _state_result(
+        "const preview={sheet:{selected:'2026海运'},mapping:[{source:'品目编码',target:'material_code'}],rows:[{source_row:2,match_status:'matched',changes:[{field:'quantity',conflict:true}]}]};"
+        "const missing=s.materialImportCanApply(preview,{mappingConfirmed:false,choices:{fields:{}}});"
+        "const ready=s.materialImportCanApply(preview,{mappingConfirmed:true,choices:{fields:{'2':{quantity:'use_source'}}}});"
+        "console.log(JSON.stringify({missing,ready}));"
+    )
+
+    assert result == {"missing": False, "ready": True}
+
+
+def test_material_import_allows_non_workbook_oa_source_without_sheet() -> None:
+    result = _state_result(
+        "const preview={source:{kind:'approval_comment'},sheet:{selected:'',available:[]},mapping:[{source:'actual_shipped_qty',target:'actual_shipped_qty'}],rows:[{source_row:1,match_status:'matched',changes:[{field:'actual_shipped_qty',conflict:false}]}]};"
+        "console.log(JSON.stringify({ready:s.materialImportCanApply(preview,{mappingConfirmed:true,choices:{matches:{},fields:{}}})}));"
+    )
+
+    assert result == {"ready": True}
+
+
+def test_material_grid_static_ui_keeps_oa_manual_fallback_without_packing_plan() -> None:
+    grid = (PARTS / "77-material-grid.js").read_text(encoding="utf-8")
+    detail = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
+    stylesheet = (PARTS / "48-material-grid.css").read_text(encoding="utf-8")
+
+    for label in (
+        "费用与凭证",
+        "物料与装箱",
+        "成本结果",
+        "采购数量默认",
+        "推送前补",
+        "从 Excel 补充",
+        "第 1 步：选择资料和 Sheet",
+        "第 2 步：确认列映射和行匹配",
+        "第 3 步：确认差异和冲突",
+        "没有装箱计划也可以继续",
+        "从 OA 附件补充",
+        "人工补填",
+    ):
+        assert label in grid
+    assert detail.index('["documents", "费用与凭证"]') < detail.index('["items", "物料与装箱"]')
+    assert "overseas_costing.api.materials.get_material_grid" in grid
+    assert "overseas_costing.api.materials.preview_material_import" in grid
+    assert "overseas_costing.api.materials.apply_material_import" in grid
+    assert "stable_line_key" in grid
+    assert ".ocw-material-cell.is-calculation-blocking" in stylesheet
+    assert ".ocw-material-cell.is-erp-blocking" in stylesheet
+
+
+def test_packing_plan_is_contextual_input_not_globally_required_document() -> None:
+    documents = (PARTS / "65-manual-documents.js").read_text(encoding="utf-8")
+
+    for code in ("sea_packing_list", "air_packing_list", "express_goods_list"):
+        definition = documents.split(f'code: "{code}"', 1)[1].split("}", 1)[0]
+        assert "required: false" in definition
+        assert "有则导入" in definition

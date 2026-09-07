@@ -625,6 +625,7 @@ def get_batch_items_page(
                 "actual_shipped_qty_mode",
                 "actual_shipped_qty_source_revision",
                 "shipped_uom",
+                "cost_output_uom",
                 "gross_weight_kg",
                 "volume_m3",
                 "volume_weight_kg",

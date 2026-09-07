@@ -446,6 +446,76 @@
     });
   }
 
+  function materialQuantityView(item = {}) {
+    const mode = String(item.actual_shipped_qty_mode || "LEGACY_UNVERIFIED");
+    const isDefault = mode === "DEFAULT_PURCHASE";
+    const sourceLabels = {
+      DEFAULT_PURCHASE: "采购数量默认",
+      EXPLICIT_SOURCE: "资料已确认",
+      MANUAL_CONFIRMED: "人工已确认",
+      LEGACY_UNVERIFIED: "历史值待确认",
+    };
+    return {
+      value: String(isDefault ? (item.quantity ?? "") : (item.actual_shipped_qty ?? "")),
+      uom: String(item.shipped_uom || item.purchase_uom || item.unit || ""),
+      mode,
+      sourceLabel: sourceLabels[mode] || "来源待确认",
+      isDefault,
+    };
+  }
+
+  function summarizeMaterialRequirements(items = []) {
+    return (items || []).reduce(
+      (summary, item) => {
+        Object.values((item && item.cell_requirements) || {}).forEach((requirement) => {
+          if (!requirement) return;
+          if (requirement.severity === "warning") summary.warnings += 1;
+          if (requirement.severity !== "blocking") return;
+          if (requirement.gate === "erp_push") summary.erpPush += 1;
+          else summary.calculation += 1;
+        });
+        return summary;
+      },
+      { calculation: 0, erpPush: 0, warnings: 0 }
+    );
+  }
+
+  function nextMaterialEditableCell(cells = [], currentIndex = -1, reverse = false) {
+    const direction = reverse ? -1 : 1;
+    for (let index = Number(currentIndex) + direction; index >= 0 && index < cells.length; index += direction) {
+      if (cells[index] && cells[index].editable) return index;
+    }
+    return -1;
+  }
+
+  function buildMaterialPasteUpdates(columns = [], values = []) {
+    const protectedFields = new Set(["name", "stable_line_key", "row_no", "total_cost_rmb", "total_unit_rmb", "cost_output_uom"]);
+    return (columns || []).flatMap((column, index) => {
+      const fieldname = String((column && column.fieldname) || "");
+      if (!fieldname || !column.editable || protectedFields.has(fieldname) || values[index] === undefined) return [];
+      return [{ fieldname, value: String(values[index] ?? "").trim() }];
+    });
+  }
+
+  function materialImportCanApply(preview, workflow = {}) {
+    if (!preview) return false;
+    const sourceKind = String((preview.source || {}).kind || "");
+    const workbookSource = sourceKind !== "approval_comment";
+    if (workbookSource && !String((preview.sheet || {}).selected || "").trim()) return false;
+    if (!workflow.mappingConfirmed || !(preview.mapping || []).length) return false;
+    const choices = workflow.choices || {};
+    const matches = choices.matches || {};
+    const fields = choices.fields || {};
+    return !(preview.rows || []).some((row) => {
+      const sourceRow = String(row.source_row ?? "");
+      if (row.match_status === "choice_required" && !String(matches[sourceRow] || "").trim()) return true;
+      return (row.changes || []).some((change) => {
+        if (!change.conflict) return false;
+        return !["use_source", "keep_current"].includes(String((fields[sourceRow] || {})[change.field] || ""));
+      });
+    });
+  }
+
   return {
     parseWorkbenchState,
     buildWorkbenchUrl,
@@ -472,6 +542,11 @@
     buildFreightQuotePayload,
     freightQuoteIsReady,
     packingFlowCanCompare,
+    materialQuantityView,
+    summarizeMaterialRequirements,
+    nextMaterialEditableCell,
+    buildMaterialPasteUpdates,
+    materialImportCanApply,
     MONETARY_FIELDS,
     TRANSPORT_MODE_ALIASES,
     VOUCHER_VALIDATION_MONETARY_FIELDS,

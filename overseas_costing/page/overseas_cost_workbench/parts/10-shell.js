@@ -566,6 +566,12 @@ class OverseasCostWorkbench {
       this.startCellEdit($cell, event, autoOpenSelect);
     });
     this.$root.on("keydown", ".ocw-cell-editor", (event) => {
+      if (event.key === "Tab" && $(event.currentTarget).closest(".ocw-material-grid").length) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        this.commitMaterialCellAndMove($(event.currentTarget).closest("td"), event.shiftKey);
+        return;
+      }
       if (event.key === "Enter") {
         event.preventDefault();
         event.stopImmediatePropagation();

@@ -194,6 +194,7 @@ def test_item_page_queries_only_requested_slice(monkeypatch) -> None:
     assert calls[1][1]["or_filters"] == calls[0][1]["or_filters"]
     assert calls[1][1]["limit_start"] == 50
     assert calls[1][1]["limit_page_length"] == 50
+    assert "cost_output_uom" in calls[1][1]["fields"]
 
 
 def test_item_page_attaches_server_material_requirements(monkeypatch) -> None:

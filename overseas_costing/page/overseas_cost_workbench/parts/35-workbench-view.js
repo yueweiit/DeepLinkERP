@@ -257,7 +257,27 @@
     this.$root.on("click", "[data-action='detail-category']", () => this.openCategoryPreviewDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-dingtalk']", () => this.openDingtalkOrder(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-repull']", () => this.repullGapDingtalk(this.detailState.batchName));
-    this.$root.on("click", "[data-action='detail-excel']", () => this.openBatchExcelSupplementDialog(this.detailState.batchName));
+    this.$root.on("click", "[data-action='detail-excel']", () => this.openMaterialImportDialog("local").catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='material-import']", (event) =>
+      this.openMaterialImportDialog($(event.currentTarget).attr("data-source-tab") || "local").catch((error) => this.showError(error))
+    );
+    this.$root.on("click", "[data-action='edit-shipping-quantity']", (event) => {
+      event.stopPropagation();
+      try {
+        this.openShippingQuantityDialog($(event.currentTarget).attr("data-item-name"));
+      } catch (error) {
+        this.showError(error);
+      }
+    });
+    this.$root.on("click", "[data-action='material-focus-first-gap']", () => this.focusFirstMaterialGap());
+    this.$root.on("paste", "[data-role='material-grid']", (event) => this.handleMaterialGridPaste(event));
+    this.$root.on("input", "[data-role='material-keyword']", (event) => {
+      const keyword = String($(event.currentTarget).val() || "").trim().toLowerCase();
+      this.$root.find(".ocw-material-grid tbody tr[data-material-row]").each((_, row) => {
+        const $row = $(row);
+        $row.toggle(!keyword || $row.text().toLowerCase().includes(keyword));
+      });
+    });
     this.$root.on("click", "[data-action='open-voucher-record']", (event) =>
       this.openTaxCertificateRecordDialog($(event.currentTarget).attr("data-record-name"))
     );
