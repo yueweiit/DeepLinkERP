@@ -169,9 +169,11 @@ def test_packing_flow_static_ui_contract() -> None:
     for label in (
         "本地上传",
         "钉钉审批附件/评论",
-        "知识库年度表",
+        "装箱计划表",
         "刷新列表",
         "刷新资料",
+        "系统推荐",
+        "预览这张装箱计划",
         "共享箱级数据",
         "保存草稿",
         "下一步：比较运费",
@@ -184,7 +186,15 @@ def test_packing_flow_static_ui_contract() -> None:
     assert "获取装箱单" in documents
     assert "openPackingFlowDialog" in flow
     assert "localStorage.getItem" in flow
+    assert 'dialog.packingSourceTab = options.sourceTab || "wiki"' in flow
+    assert flow.index('["wiki", "装箱计划表"]') < flow.index('["approval", "钉钉审批附件/评论"]')
+    assert flow.index('["approval", "钉钉审批附件/评论"]') < flow.index('["local", "本地上传"]')
+    assert "selectRecommendedPackingSource" in flow
+    assert "recommendation_reasons" in flow
+    assert "知识库年度表" not in flow
     assert ".ocw-packing-flow" in stylesheet
+    assert ".ocw-packing-recommendation" in stylesheet
+    assert "position: sticky" in stylesheet
 
 
 def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:

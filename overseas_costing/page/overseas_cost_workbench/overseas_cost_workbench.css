@@ -6252,6 +6252,14 @@ input[type="range"].ocw-result-scrollbar:disabled {
   padding: 24px;
 }
 
+.ocw-packing-source-step {
+  display: grid;
+  grid-template-rows: auto auto minmax(220px, 1fr) auto;
+  height: min(650px, calc(100vh - 300px));
+  min-height: 430px;
+  padding-bottom: 0;
+}
+
 .ocw-packing-flow-error {
   background: #fff4f2;
   border-bottom: 1px solid #f4cbc3;
@@ -6308,9 +6316,9 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-packing-source-list {
   display: grid;
   gap: 12px;
-  max-height: 430px;
-  min-height: 330px;
+  min-height: 0;
   overflow: auto;
+  padding: 2px 4px 12px 0;
 }
 
 .ocw-packing-source-card,
@@ -6399,15 +6407,56 @@ input[type="range"].ocw-result-scrollbar:disabled {
   border-bottom: 1px solid #edf1f4;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(260px, 1fr) auto 150px;
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, 0.8fr) auto 150px;
   padding: 8px 0;
   width: 100%;
 }
 
+.ocw-packing-wiki-sheet.is-recommended {
+  background: #f4f9ff;
+  border: 1px solid #9ecdf5;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.ocw-packing-recommendation {
+  display: grid;
+  gap: 3px;
+}
+
+.ocw-packing-recommendation strong {
+  color: #076fbe;
+  font-size: 12px;
+}
+
+.ocw-packing-recommendation span {
+  color: #536571;
+  font-size: 11px;
+}
+
+.ocw-packing-no-recommendation {
+  background: #fffaf0;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+}
+
+.ocw-packing-no-recommendation span {
+  color: #7c5b35;
+  font-size: 12px;
+}
+
 .ocw-packing-flow-footer {
+  background: #fff;
   border-top: 1px solid #e3eaf0;
-  margin-top: 18px;
-  padding-top: 16px;
+  bottom: 0;
+  box-shadow: 0 -8px 16px rgba(15, 45, 68, 0.06);
+  margin: 0 -24px;
+  padding: 14px 24px;
+  position: sticky;
+  z-index: 4;
 }
 
 .ocw-packing-flow-footer.full {
@@ -6842,12 +6891,26 @@ input[type="range"].ocw-result-scrollbar:disabled {
     grid-template-columns: 1fr auto;
   }
 
+  .ocw-packing-recommendation {
+    grid-column: 1 / -1;
+  }
+
   .ocw-packing-history-row dl {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .ocw-packing-wiki-sheet small {
     grid-column: 1 / -1;
+  }
+
+  .ocw-packing-source-step {
+    height: calc(100vh - 230px);
+    min-height: 360px;
+  }
+
+  .ocw-packing-flow-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

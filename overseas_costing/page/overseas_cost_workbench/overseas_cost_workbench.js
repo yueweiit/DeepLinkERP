@@ -10677,7 +10677,7 @@ class OverseasCostWorkbench {
     dialog.packingFlowOptions = { ...options };
     dialog.packingFlowSources = null;
     dialog.packingFlowError = "";
-    dialog.packingSourceTab = options.sourceTab || "local";
+    dialog.packingSourceTab = options.sourceTab || "wiki";
     dialog.show();
     dialog.$wrapper.addClass("ocw-packing-flow-dialog");
     this.bindPackingFlowEvents(dialog, batch);
@@ -10750,6 +10750,9 @@ class OverseasCostWorkbench {
         } catch (_error) {
           dialog.packingDraft = null;
         }
+        if (!dialog.packingFlowState.sourceId) {
+          this.selectRecommendedPackingSource(dialog, result);
+        }
       }
     } catch (error) {
       dialog.packingFlowError = this.normalizeErrorMessage(error);
@@ -10764,6 +10767,21 @@ class OverseasCostWorkbench {
       ...(sources.wiki_workbooks || []).flatMap((workbook) => workbook.sheets || []),
     ];
     return rows.find((row) => row.source_kind === sourceKind && String(row.source_id) === String(sourceId)) || null;
+  }
+
+  selectRecommendedPackingSource(dialog, sources = {}) {
+    const recommended = (sources.wiki_workbooks || [])
+      .flatMap((workbook) => workbook.sheets || [])
+      .find((sheet) => sheet.is_recommended);
+    if (!recommended) return false;
+    dialog.packingSourceTab = "wiki";
+    dialog.packingFlowState = OverseasCostWorkbenchState.selectPackingSource(
+      dialog.packingFlowState,
+      "wiki_sheet",
+      recommended.source_id,
+      ""
+    );
+    return true;
   }
 
   renderPackingFlow(dialog, batch) {
@@ -10785,11 +10803,11 @@ class OverseasCostWorkbench {
   renderPackingSourceStep(dialog) {
     const sources = dialog.packingFlowSources || {};
     const state = dialog.packingFlowState;
-    const tab = dialog.packingSourceTab || "local";
+    const tab = dialog.packingSourceTab || "wiki";
     const tabs = [
-      ["local", "本地上传"],
+      ["wiki", "装箱计划表"],
       ["approval", "钉钉审批附件/评论"],
-      ["wiki", "知识库年度表"],
+      ["local", "本地上传"],
     ];
     let content = "";
     if (tab === "local") content = this.renderPackingLocalSources(sources.manual_attachments || [], state);
@@ -10806,7 +10824,7 @@ class OverseasCostWorkbench {
         <div class="ocw-packing-source-list">${content}</div>
         <footer class="ocw-packing-flow-footer">
           <span>${state.sourceId ? `已选：${this.escape(this.packingSourceLabel(dialog, state))}${state.sheetName ? ` / ${this.escape(state.sheetName)}` : ""}` : "请选择一个明确来源"}</span>
-          <button class="ocw-primary-btn" type="button" data-action="packing-preview-source" ${state.sourceId && (state.sourceKind === "approval_comment" || state.sourceKind === "wiki_sheet" || state.sheetName) ? "" : "disabled"}>预览装箱数据</button>
+          <button class="ocw-primary-btn" type="button" data-action="packing-preview-source" ${state.sourceId && (state.sourceKind === "approval_comment" || state.sourceKind === "wiki_sheet" || state.sheetName) ? "" : "disabled"}>预览这张装箱计划</button>
         </footer>
       </section>
     `;
@@ -10846,14 +10864,31 @@ class OverseasCostWorkbench {
   }
 
   renderPackingWikiSources(workbooks, state, error = "") {
-    if (error) return `<div class="ocw-detail-empty is-error"><strong>知识库缓存暂不可用</strong><span>${this.escape(error)}</span></div>`;
-    if (!workbooks.length) return `<div class="ocw-detail-empty"><strong>尚未建立年度表缓存</strong><span>点击“刷新列表”由服务器应用身份更新，无需登录个人钉钉。</span></div>`;
-    return workbooks.map((workbook) => `
+    if (error) return `<div class="ocw-detail-empty is-error"><strong>装箱计划表缓存暂不可用</strong><span>${this.escape(error)}</span></div>`;
+    if (!workbooks.length) return `<div class="ocw-detail-empty"><strong>尚未建立装箱计划表缓存</strong><span>点击“刷新列表”由服务器应用身份更新，无需登录个人钉钉。</span></div>`;
+    const hasRecommendation = workbooks.some((workbook) => (workbook.sheets || []).some((sheet) => sheet.is_recommended));
+    return `${hasRecommendation ? "" : `<div class="ocw-packing-no-recommendation"><strong>暂无可靠推荐</strong><span>请按日期或名称手动选择一张装箱计划。</span></div>`}${workbooks.map((workbook) => `
       <article class="ocw-packing-workbook">
-        <header><div><span>${this.escape(String(workbook.year || "年度表"))}</span><strong>${this.escape(workbook.label || workbook.workbook_id)}</strong></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-refresh-list" data-workbook-id="${this.escape(workbook.workbook_id)}">刷新列表</button></header>
+        <header><div><span>${this.escape(String(workbook.year || "装箱计划表"))}</span><strong>${this.escape(workbook.label || workbook.workbook_id)}</strong></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-refresh-list" data-workbook-id="${this.escape(workbook.workbook_id)}">刷新列表</button></header>
         <label class="ocw-packing-sheet-search"><span>查找 Sheet</span><input type="search" placeholder="输入装箱单、日期或品类" data-action="packing-filter-sheets"></label>
-        <div class="ocw-packing-wiki-sheets">${(workbook.sheets || []).map((sheet) => `<div class="ocw-packing-wiki-sheet" data-sheet-search="${this.escape(String(sheet.source_label || "").toLowerCase())}">${this.renderPackingSourceChoice(sheet, state, "Sheet", sheet.source_label)}<button class="ocw-link-btn" type="button" data-action="packing-refresh-sheet" data-workbook-id="${this.escape(workbook.workbook_id)}" data-sheet-id="${this.escape(String(sheet.source_id || "").split(":").slice(1).join(":"))}">刷新资料</button><small>${this.escape(this.formatDateTimeMinute(sheet.source_updated_at) || sheet.source_updated_at || "待刷新")}</small></div>`).join("") || `<div class="ocw-packing-source-disabled">列表中暂无 Sheet</div>`}</div>
-      </article>`).join("");
+        <div class="ocw-packing-wiki-sheets">${(workbook.sheets || []).map((sheet) => `<div class="ocw-packing-wiki-sheet ${sheet.is_recommended ? "is-recommended" : ""}" data-sheet-search="${this.escape(String(sheet.source_label || "").toLowerCase())}">${this.renderPackingSourceChoice(sheet, state, sheet.is_recommended ? "系统推荐" : "Sheet", sheet.source_label)}${this.renderPackingRecommendation(sheet)}<button class="ocw-link-btn" type="button" data-action="packing-refresh-sheet" data-workbook-id="${this.escape(workbook.workbook_id)}" data-sheet-id="${this.escape(String(sheet.source_id || "").split(":").slice(1).join(":"))}">刷新资料</button><small>${this.escape(this.packingSnapshotStatus(sheet))}</small></div>`).join("") || `<div class="ocw-packing-source-disabled">列表中暂无 Sheet</div>`}</div>
+      </article>`).join("")}`;
+  }
+
+  renderPackingRecommendation(sheet) {
+    if (!sheet.is_recommended) return "";
+    const confidence = { high: "高置信度", medium: "中置信度", low: "低置信度" }[sheet.recommendation_confidence] || "待确认";
+    const reasons = (sheet.recommendation_reasons || []).slice(0, 3);
+    return `<div class="ocw-packing-recommendation"><strong>系统推荐 · ${this.escape(confidence)}</strong>${reasons.map((reason) => `<span>${this.escape(reason)}</span>`).join("")}</div>`;
+  }
+
+  packingSnapshotStatus(sheet) {
+    const updatedAt = sheet.snapshot_updated_at || sheet.source_updated_at;
+    const updatedLabel = this.formatDateTimeMinute(updatedAt) || updatedAt || "";
+    if (sheet.snapshot_status === "ready") return updatedLabel ? `已刷新 ${updatedLabel}` : "已刷新";
+    if (sheet.snapshot_status === "unreadable") return "缓存不可读取，请刷新资料";
+    if (sheet.snapshot_status === "not_cached") return "待刷新";
+    return updatedLabel || "待刷新";
   }
 
   renderPackingPreviewStep(dialog) {
