@@ -248,6 +248,8 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
     version = version_name or frappe.db.get_value("Overseas Cost Batch", batch_name, "current_version")
     if not version:
         raise ValueError("当前批次没有可用成本版本。")
+    if frappe.db.get_value("Overseas Cost Version", version, "batch") != batch_name:
+        raise ValueError("成本版本不属于当前批次。")
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or "SEA"
     raw_items = frappe.get_all(
         "Overseas Cost Item",

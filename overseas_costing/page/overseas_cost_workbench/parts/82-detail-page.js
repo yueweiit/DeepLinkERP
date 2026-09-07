@@ -282,18 +282,7 @@
   }
 
   async renderDocumentsDetailTab() {
-    const batch = this.getDetailBatch();
-    const resolvedType = this.detectManualDocumentLogisticsType(batch);
-    const $content = this.$root.find("[data-area='detail-content']");
-    $content.html(`
-      <div class="ocw-detail-section-head"><div><span>异常处理</span><h2>资料与费用</h2></div><button class="ocw-outline-btn" type="button" data-action="detail-repull">重拉本批次</button></div>
-      <div data-area="manual-documents">${this.renderManualDocumentPanel(batch, resolvedType, [])}</div>
-    `);
-    try {
-      await this.loadManualDocumentAttachments(batch, this.detailDocumentAdapter(), resolvedType);
-    } catch (error) {
-      this.showError(error);
-    }
+    return this.loadMaterialFeeWorkspace();
   }
 
   async renderVoucherDetailTab() {

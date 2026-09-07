@@ -170,7 +170,22 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) ->
             if not template_by_key[key].get("virtual"):
                 duplicate_names.setdefault(key, []).append(str(row.get("name") or ""))
                 continue
-            template_by_key[key] = {**template_by_key[key], **row, "virtual": False}
+            template = template_by_key[key]
+            merged = {**template, **row, "virtual": False}
+            for fieldname in (
+                "rule_code",
+                "currency",
+                "allocation_basis",
+                "basis_field",
+                "scope_type",
+                "scope_value_json",
+                "required_evidence_role",
+            ):
+                if row.get(fieldname) in (None, ""):
+                    merged[fieldname] = template.get(fieldname)
+            if row.get("amount_status") in (None, ""):
+                merged["amount_status"] = fee_allocation_service.amount_status(row)
+            template_by_key[key] = merged
         else:
             extras.append(row)
     rows = [template_by_key[row["logical_fee_key"]] for row in templates]
@@ -509,12 +524,14 @@ def save_fee(
     if merged["cost_inputs_changed"]:
         frappe.db.set_value("Overseas Cost Batch", batch_name, "status", "Dirty", update_modified=True)
     frappe.db.commit()
+    batch_modified = frappe.db.get_value("Overseas Cost Batch", batch_name, "modified")
     return {
         "ok": True,
         "action": merged["action"],
         "rule_name": rule_name,
         "fee": fee,
         "cost_inputs_changed": merged["cost_inputs_changed"],
+        "batch_modified": batch_modified,
         "message": "费用已保存，原逻辑费用记录已替换更新。",
     }
 
@@ -565,7 +582,13 @@ def link_fee_evidence(
         "name",
     )
     if existing:
-        return {"ok": True, "action": "existing", "evidence_name": existing, "message": "该凭证已关联，未重复新增。"}
+        return {
+            "ok": True,
+            "action": "existing",
+            "evidence_name": existing,
+            "batch_modified": frappe.db.get_value("Overseas Cost Batch", batch_name, "modified"),
+            "message": "该凭证已关联，未重复新增。",
+        }
     doc = frappe.get_doc(
         {
             "doctype": "Overseas Cost Fee Evidence",
@@ -579,7 +602,13 @@ def link_fee_evidence(
         }
     ).insert(ignore_permissions=True)
     frappe.db.commit()
-    return {"ok": True, "action": "created", "evidence_name": doc.name, "message": "凭证已关联，等待校验。"}
+    return {
+        "ok": True,
+        "action": "created",
+        "evidence_name": doc.name,
+        "batch_modified": frappe.db.get_value("Overseas Cost Batch", batch_name, "modified"),
+        "message": "凭证已关联，等待校验。",
+    }
 
 
 def set_fee_evidence_status(
@@ -612,7 +641,41 @@ def set_fee_evidence_status(
     }
     frappe.db.set_value("Overseas Cost Fee Evidence", evidence_name, values, update_modified=True)
     frappe.db.commit()
-    return {"ok": True, "evidence_name": evidence_name, "status": normalized, "message": "凭证状态已更新。"}
+    return {
+        "ok": True,
+        "evidence_name": evidence_name,
+        "status": normalized,
+        "batch_modified": frappe.db.get_value("Overseas Cost Batch", batch_name, "modified"),
+        "message": "凭证状态已更新。",
+    }
+
+
+def unlink_fee_evidence_for_attachment(attachment: str, *, reason: str = "附件已删除。") -> dict:
+    """Keep evidence history after its file record is removed."""
+
+    if frappe is None:
+        return {"ok": True, "dry_run": True, "affected_count": 0}
+    rows = frappe.get_all(
+        "Overseas Cost Fee Evidence",
+        filters={"attachment": str(attachment or "")},
+        fields=["name"],
+        limit_page_length=5000,
+    )
+    for row in rows:
+        frappe.db.set_value(
+            "Overseas Cost Fee Evidence",
+            row["name"],
+            {
+                "attachment": "",
+                "validation_status": "UNLINKED",
+                "source_revision": str(attachment or ""),
+                "validated_by": _session_user(),
+                "validated_at": _now(),
+                "remark": str(reason or "").strip(),
+            },
+            update_modified=True,
+        )
+    return {"ok": True, "affected_count": len(rows)}
 
 
 def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
@@ -647,6 +710,8 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     version = version_name or frappe.db.get_value("Overseas Cost Batch", batch_name, "current_version")
     if not version:
         raise ValueError("当前批次没有可用成本版本。")
+    if frappe.db.get_value("Overseas Cost Version", version, "batch") != batch_name:
+        raise ValueError("成本版本不属于当前批次。")
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or "SEA"
     rules = compose_fee_worklist_rows(_query_rules(batch_name, version), transport_mode)
     raw_items = frappe.get_all(

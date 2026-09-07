@@ -266,6 +266,53 @@ def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> 
     assert "processInstanceId && fileId" in approval_page
 
 
+def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() -> None:
+    detail_page = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
+    workspace = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    stylesheet = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    documents_block = detail_page.split("async renderDocumentsDetailTab()", 1)[1].split(
+        "async renderVoucherDetailTab()", 1
+    )[0]
+
+    assert "loadMaterialFeeWorkspace" in documents_block
+    assert "renderManualDocumentPanel" not in documents_block
+    for label in (
+        "费用与凭证",
+        "预览综合单价",
+        "物料与装箱数据",
+        "只看缺项",
+        "展开辅助列",
+        "导入 Excel 补资料",
+        "查看资料来源",
+        "详细待办",
+        "SKU 综合单价试算",
+    ):
+        assert label in workspace
+    for endpoint in (
+        "overseas_costing.api.materials.get_material_grid",
+        "overseas_costing.api.materials.set_shipping_quantity",
+        "overseas_costing.api.materials.preview_material_import",
+        "overseas_costing.api.materials.apply_material_import",
+        "overseas_costing.api.calculate.update_item_field",
+        "overseas_costing.api.calculate.batch_update_items",
+        "overseas_costing.api.fees.get_fee_worklist",
+        "overseas_costing.api.fees.save_fee",
+        "overseas_costing.api.fees.link_fee_evidence",
+        "overseas_costing.api.fees.set_fee_evidence_status",
+        "overseas_costing.api.calculate.preview_comprehensive_cost",
+        "overseas_costing.api.import_api.preview_oa_source_attachment",
+    ):
+        assert endpoint in workspace
+    assert "带入费用表" in workspace
+    assert "本次未识别出金额，可手工补录" in workspace
+    assert "writeback" not in workspace.lower()
+    assert "recalculate" not in workspace.lower()
+    assert ".ocw-mf-workspace" in stylesheet
+    assert ".ocw-mf-cell.is-missing" in stylesheet
+    assert ".ocw-mf-cell.is-default" in stylesheet
+    assert ".ocw-mf-cell.is-save-error" in stylesheet
+
+
 def test_recalculate_ui_blocks_invalid_approval_batches() -> None:
     calculation = (PARTS / "30-calculation-erp.js").read_text(encoding="utf-8")
     table = (PARTS / "75-table-and-list.js").read_text(encoding="utf-8")

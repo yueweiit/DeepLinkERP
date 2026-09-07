@@ -100,6 +100,22 @@ def test_invalid_final_evidence_keeps_the_evidence_todo_open() -> None:
     assert {todo["code"] for todo in result["todos"]} == {"EVIDENCE_REQUIRED"}
 
 
+def test_not_incurred_or_included_fee_does_not_require_evidence() -> None:
+    for amount_status in ("NOT_INCURRED", "INCLUDED"):
+        result = build_fee_status(
+            fee={
+                "logical_fee_key": "FEE",
+                "amount_status": amount_status,
+                "required_evidence_role": "expense_invoice",
+            },
+            allocation={"status": "NOT_COUNTED"},
+            evidence=[],
+        )
+
+        assert result["evidence_state"] == "NOT_REQUIRED"
+        assert result["todos"] == []
+
+
 def test_fee_input_hash_is_stable_and_changes_with_cost_inputs() -> None:
     fee = {
         "logical_fee_key": "FREIGHT",

@@ -396,6 +396,24 @@ def test_update_item_field_dry_run_allows_editable_field_and_coerces_numeric_val
     assert result["manual_override_reason"] == "修正装箱单数量"
 
 
+def test_shipping_quantity_edit_requires_positive_value_and_records_manual_provenance() -> None:
+    invalid = update_item_field(
+        item_name="ITEM-1",
+        fieldname="actual_shipped_qty",
+        value="0",
+    )
+    valid = update_item_field(
+        item_name="ITEM-1",
+        fieldname="actual_shipped_qty",
+        value="12",
+    )
+
+    assert invalid["ok"] is False
+    assert "大于 0" in invalid["message"]
+    assert valid["ok"] is True
+    assert valid["companion_updates"]["actual_shipped_qty_mode"] == "MANUAL_CONFIRMED"
+
+
 def test_update_item_field_dry_run_rejects_calculated_field_without_reason() -> None:
     result = update_item_field(
         item_name="ITEM-1",

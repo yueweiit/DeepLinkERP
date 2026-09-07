@@ -1225,6 +1225,7 @@ def update_item_field(
     edit_token: str | None = None,
     expected_modified: str | None = None,
     _skip_edit_check: bool = False,
+    _skip_commit: bool = False,
 ) -> dict:
     edit_remark = _normalize_edit_remark(remark, manual_override_reason)
     is_allowed, validation_message, edit_mode = _validate_edit_field(fieldname, edit_remark)
@@ -1254,6 +1255,24 @@ def update_item_field(
             "message": str(exc),
         }
 
+    companion_updates = {}
+    if fieldname == "actual_shipped_qty":
+        if _to_float(coerced_value) <= 0:
+            return {
+                "ok": False,
+                "changed": False,
+                "dry_run": _frappe is None,
+                "item_name": item_name,
+                "fieldname": fieldname,
+                "version_name": version_name,
+                "edit_mode": edit_mode,
+                "message": "实际发货数量必须大于 0。",
+            }
+        companion_updates = {
+            "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+            "actual_shipped_qty_source_revision": _now(),
+        }
+
     if _frappe is None:
         audit_service.build_audit_stub("EDIT", {"item_name": item_name, "fieldname": fieldname})
         return {
@@ -1265,6 +1284,7 @@ def update_item_field(
             "value": coerced_value,
             "version_name": version_name,
             "manual_override_reason": edit_remark,
+            "companion_updates": companion_updates,
             "edit_mode": edit_mode,
             "message": "当前未连接 Frappe，已返回编辑预览。",
         }
@@ -1293,6 +1313,20 @@ def update_item_field(
         }
 
     setattr(item_doc, fieldname, coerced_value)
+    if fieldname == "actual_shipped_qty":
+        shipping_uom = str(
+            getattr(item_doc, "shipped_uom", "")
+            or getattr(item_doc, "purchase_uom", "")
+            or getattr(item_doc, "unit", "")
+            or ""
+        ).strip()
+        if shipping_uom:
+            companion_updates.update({"shipped_uom": shipping_uom, "cost_output_uom": shipping_uom})
+        for companion_field, companion_value in companion_updates.items():
+            setattr(item_doc, companion_field, companion_value)
+    elif fieldname == "shipped_uom" and str(coerced_value or "").strip():
+        companion_updates["cost_output_uom"] = str(coerced_value).strip()
+        setattr(item_doc, "cost_output_uom", companion_updates["cost_output_uom"])
     if fieldname != "manual_override_flag":
         item_doc.manual_override_flag = 1
     if edit_remark and fieldname != "manual_override_reason":
@@ -1309,7 +1343,8 @@ def update_item_field(
         new_value=coerced_value,
         action_remark=f"单字段编辑：{edit_remark}" if edit_remark else "单字段编辑",
     )
-    _frappe.db.commit()
+    if not _skip_commit:
+        _frappe.db.commit()
     batch_modified = _frappe.db.get_value("Overseas Cost Batch", item_doc.batch, "modified")
     return {
         "ok": True,
@@ -1320,6 +1355,7 @@ def update_item_field(
         "value": coerced_value,
         "version_name": version_name or item_doc.version,
         "manual_override_reason": edit_remark,
+        "companion_updates": companion_updates,
         "edit_mode": edit_mode,
         "batch_modified": batch_modified,
         "message": "字段已更新，批次已标记为 Dirty。",
@@ -1420,6 +1456,7 @@ def batch_update_items(
             version_name=version_name,
             remark=edit_remark,
             _skip_edit_check=True,
+            _skip_commit=True,
         )
         results.append(result)
         if not result.get("ok"):
@@ -1429,7 +1466,21 @@ def batch_update_items(
         else:
             skipped_count += 1
 
-    if changed_count or skipped_count or error_count:
+    if error_count:
+        _frappe.db.rollback()
+        return {
+            "ok": False,
+            "batch_name": batch_doc_name,
+            "version_name": version_name,
+            "changed_count": 0,
+            "rolled_back_count": changed_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "results": results,
+            "message": "批量字段更新存在错误，已整体回滚。",
+        }
+
+    if changed_count or skipped_count:
         _insert_audit_log(
             batch_doc_name=batch_doc_name,
             version_name=version_name,
@@ -1439,14 +1490,15 @@ def batch_update_items(
         _frappe.db.commit()
 
     return {
-        "ok": error_count == 0,
+        "ok": True,
         "batch_name": batch_doc_name,
         "version_name": version_name,
         "changed_count": changed_count,
         "skipped_count": skipped_count,
         "error_count": error_count,
         "results": results,
-        "message": "批量字段更新完成。" if error_count == 0 else "批量字段更新部分失败，请查看 results。",
+        "batch_modified": _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified"),
+        "message": "批量字段更新完成。",
     }
 
 
@@ -1743,6 +1795,7 @@ def delete_batch(batch_name: str, remark: str | None = None) -> dict:
 
     delete_plan = [
         ("Overseas Cost Audit Log", "audit_log_count"),
+        ("Overseas Cost Fee Evidence", "fee_evidence_count"),
         ("Overseas Cost Attachment", "attachment_count"),
         ("Overseas Cost Allocation Rule", "rule_count"),
         ("Overseas Cost Item", "item_count"),

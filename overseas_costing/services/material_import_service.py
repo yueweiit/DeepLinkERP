@@ -639,12 +639,14 @@ def apply_material_import(
             repo.commit()
         else:
             repo.rollback()
+        refreshed_context = repo.get_context(context["batch"])
         return {
             "ok": True,
             "updated_count": len(pending_updates),
             "changed_field_count": sum(len(updates) for _target, updates, _row in pending_updates),
             "batch_name": context["batch"],
             "version_name": context["version"],
+            "batch_modified": refreshed_context.get("batch_modified") or context.get("batch_modified"),
         }
     except Exception:
         repo.rollback()

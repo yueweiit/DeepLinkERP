@@ -18,6 +18,9 @@ from overseas_costing.services import calculate_service, cost_preview_service
 from overseas_costing.services.access_control import require_batch_permission, require_doctype_permission
 
 
+MAX_BATCH_UPDATES_BYTES = 2_000_000
+
+
 @frappe.whitelist()
 def update_item_field(
     item_name: str,
@@ -55,7 +58,9 @@ def batch_update_items(
 ) -> dict:
     """批量更新批次明细字段。"""
 
-    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
+    batch_name = require_batch_permission(batch_name, "write")
+    if len(str(updates or "").encode("utf-8")) > MAX_BATCH_UPDATES_BYTES:
+        raise ValueError("批量单元格更新参数过大。")
     return calculate_service.batch_update_items(
         batch_name=batch_name,
         updates=updates,

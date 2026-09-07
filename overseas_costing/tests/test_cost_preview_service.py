@@ -2,6 +2,9 @@
 
 from copy import deepcopy
 
+import pytest
+
+from overseas_costing.services import cost_preview_service
 from overseas_costing.services.cost_preview_service import preview_comprehensive_cost_data
 
 
@@ -144,3 +147,20 @@ def test_preview_does_not_mutate_input_or_block_on_missing_project() -> None:
     assert result["summary"]["is_complete"] is True
     assert (items, fees) == before
     assert all("project_collection" not in reason.get("field", "") for reason in result["incomplete_reasons"])
+
+
+def test_preview_rejects_a_version_from_another_batch(monkeypatch) -> None:
+    class FakeDb:
+        @staticmethod
+        def get_value(doctype, name, fieldname, **_kwargs):
+            if doctype == "Overseas Cost Version" and fieldname == "batch":
+                return "OTHER-BATCH"
+            return None
+
+    class FakeFrappe:
+        db = FakeDb()
+
+    monkeypatch.setattr(cost_preview_service, "frappe", FakeFrappe())
+
+    with pytest.raises(ValueError, match="不属于当前批次"):
+        cost_preview_service.preview_comprehensive_cost("BATCH-1", "VERSION-OTHER")

@@ -1,0 +1,730 @@
+  ensureMaterialFeeState() {
+    const batchName = String(this.detailState.batchName || "");
+    if (!this.materialFeeState || this.materialFeeState.batchName !== batchName) {
+      this.materialFeeState = {
+        batchName,
+        page: 1,
+        pageLength: 200,
+        onlyMissing: false,
+        showAuxiliary: false,
+        loading: false,
+        requestId: 0,
+        materials: null,
+        fees: null,
+        preview: null,
+      };
+    }
+    return this.materialFeeState;
+  }
+
+  bindMaterialFeeWorkspaceEvents() {
+    this.$root.on("click", "[data-action='mf-reload']", () => this.loadMaterialFeeWorkspace());
+    this.$root.on("click", "[data-action='mf-toggle-missing']", () => {
+      const state = this.ensureMaterialFeeState();
+      state.onlyMissing = !state.onlyMissing;
+      this.renderMaterialFeeWorkspace();
+    });
+    this.$root.on("click", "[data-action='mf-toggle-aux']", () => {
+      const state = this.ensureMaterialFeeState();
+      state.showAuxiliary = !state.showAuxiliary;
+      this.renderMaterialFeeWorkspace();
+    });
+    this.$root.on("click", "[data-action='mf-material-page']", (event) => {
+      const state = this.ensureMaterialFeeState();
+      state.page = Math.max(1, Number($(event.currentTarget).attr("data-page") || 1));
+      this.loadMaterialFeeWorkspace();
+    });
+    this.$root.on("click", "[data-action='mf-edit-fee']", (event) => {
+      this.openMaterialFeeDialog($(event.currentTarget).attr("data-fee-key"));
+    });
+    this.$root.on("click", "[data-action='mf-link-evidence']", (event) => {
+      this.openMaterialFeeEvidenceDialog($(event.currentTarget).attr("data-fee-key"));
+    });
+    this.$root.on("click", "[data-action='mf-evidence-status']", (event) => {
+      const $button = $(event.currentTarget);
+      this.setMaterialFeeEvidenceStatus(
+        $button.attr("data-evidence-name"),
+        $button.attr("data-status")
+      ).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-preview-cost']", () => {
+      this.refreshMaterialFeeCostPreview(true).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-show-sources']", () => this.openMaterialFeeSourcesDialog());
+    this.$root.on("click", "[data-action='mf-import-xlsx']", () => this.openMaterialXlsxUploader());
+    this.$root.on("focus", "[data-mf-cell-input]", (event) => {
+      $(event.currentTarget).closest(".ocw-mf-cell").removeClass("is-save-error").attr("title", "");
+    });
+    this.$root.on("keydown", "[data-mf-cell-input]", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      event.currentTarget.blur();
+    });
+    this.$root.on("blur", "[data-mf-cell-input]", (event) => {
+      this.saveMaterialFeeCell($(event.currentTarget)).catch((error) => this.showError(error));
+    });
+    this.$root.on("paste", "[data-mf-cell-input]", (event) => {
+      const clipboard = event.originalEvent?.clipboardData?.getData("text/plain") || "";
+      if (!clipboard.includes("\t") && !clipboard.includes("\n") && !clipboard.includes("\r")) return;
+      event.preventDefault();
+      this.previewMaterialPaste($(event.currentTarget), clipboard);
+    });
+  }
+
+  async loadMaterialFeeWorkspace(options = {}) {
+    const state = this.ensureMaterialFeeState();
+    const batch = this.getDetailBatch();
+    const requestId = ++state.requestId;
+    state.loading = true;
+    if (!options.quiet) this.renderDetailTabLoading("正在读取费用、凭证和物料表");
+    try {
+      const [materials, fees, preview] = await Promise.all([
+        this.call("overseas_costing.api.materials.get_material_grid", {
+          batch_name: batch.name,
+          version_name: this.detailState.versionName || batch.current_version || null,
+          page: state.page,
+          page_length: state.pageLength,
+        }),
+        this.call("overseas_costing.api.fees.get_fee_worklist", {
+          batch_name: batch.name,
+          version_name: this.detailState.versionName || batch.current_version || null,
+        }),
+        this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
+          batch_name: batch.name,
+          version_name: this.detailState.versionName || batch.current_version || null,
+        }),
+      ]);
+      if (requestId !== state.requestId || this.detailState.tab !== "documents") return;
+      state.materials = materials;
+      state.fees = fees;
+      state.preview = preview;
+      state.loading = false;
+      this.renderMaterialFeeWorkspace();
+    } catch (error) {
+      if (requestId !== state.requestId || this.detailState.tab !== "documents") return;
+      state.loading = false;
+      this.renderDetailTabError("资料与费用", error);
+    }
+  }
+
+  materialFeeBasisLabel(value) {
+    return {
+      goods_value: "采购货值",
+      gross_weight: "毛重",
+      volume: "体积",
+      chargeable_weight: "计费重",
+    }[String(value || "")] || String(value || "--");
+  }
+
+  materialFeeAmountStatus(value) {
+    return {
+      MISSING: { label: "待补", tone: "danger" },
+      ESTIMATED: { label: "暂估", tone: "warn" },
+      ACTUAL: { label: "实际", tone: "ok" },
+      NOT_INCURRED: { label: "未发生", tone: "neutral" },
+      INCLUDED: { label: "已包含", tone: "neutral" },
+    }[String(value || "MISSING").toUpperCase()] || { label: String(value || "待补"), tone: "danger" };
+  }
+
+  materialFeeEvidenceLabel(value) {
+    return {
+      VALID: { label: "已核对", tone: "ok" },
+      PENDING: { label: "待核对", tone: "warn" },
+      INVALID: { label: "需重补", tone: "danger" },
+      MISSING: { label: "待补", tone: "danger" },
+      NOT_REQUIRED: { label: "无需凭证", tone: "neutral" },
+    }[String(value || "MISSING").toUpperCase()] || { label: String(value || "待补"), tone: "danger" };
+  }
+
+  renderMaterialFeeWorkspace() {
+    const state = this.ensureMaterialFeeState();
+    if (!state.materials || !state.fees || !state.preview) return;
+    const materialSummary = state.materials || {};
+    const feeSummary = state.fees.summary || {};
+    const evidencePending = Number(feeSummary.missing_evidence_fee_count || 0) + Number(feeSummary.pending_evidence_fee_count || 0);
+    const previewSummary = state.preview.summary || {};
+    const $content = this.$root.find("[data-area='detail-content']");
+    $content.html(`
+      <div class="ocw-mf-workspace">
+        <div class="ocw-detail-section-head ocw-mf-page-head">
+          <div><span>资料与费用</span><h2>综合成本资料工作区</h2><p>没有装箱计划也可以先用 OA 资料预览；正式推送前再补齐红色缺项和未定费用。</p></div>
+          <div class="ocw-detail-section-actions">
+            <button class="ocw-outline-btn" type="button" data-action="mf-show-sources">查看资料来源</button>
+            <button class="ocw-outline-btn" type="button" data-action="mf-reload">刷新</button>
+          </div>
+        </div>
+        <div class="ocw-mf-alert-strip" aria-label="当前待办摘要">
+          ${this.renderMaterialFeeMetric("计算红格", materialSummary.missing_cell_count || 0, "danger")}
+          ${this.renderMaterialFeeMetric("费用未定", feeSummary.missing_amount_fee_count || 0, "danger")}
+          ${this.renderMaterialFeeMetric("凭证待补", evidencePending, evidencePending ? "warn" : "ok")}
+          ${this.renderMaterialFeeMetric("暂估待核", feeSummary.estimated_fee_count || 0, Number(feeSummary.estimated_fee_count || 0) ? "warn" : "ok")}
+        </div>
+        <section class="ocw-mf-section ocw-mf-fee-section">
+          <div class="ocw-mf-section-title"><div><span>01</span><h3>费用与凭证</h3><p>五类费用会按运输方式显示；只有修改并保存后才会入库。</p></div></div>
+          <div class="ocw-mf-fee-layout">
+            <div class="ocw-mf-fee-table-wrap">${this.renderMaterialFeeTable(state.fees.fees || state.fees.items || [])}</div>
+            <aside class="ocw-mf-preview-card">
+              <span>当前试算</span>
+              <strong>RMB ${this.escape(previewSummary.total_cost_rmb || "0.00")}</strong>
+              <small>${previewSummary.is_complete ? "已纳入的资料可完整试算" : `非完整成本 · ${Number(previewSummary.excluded_fee_count || 0)} 笔未计入`}</small>
+              <dl>
+                <div><dt>采购金额</dt><dd>${this.escape(previewSummary.purchase_goods_value_rmb || "0.00")}</dd></div>
+                <div><dt>直接费用</dt><dd>${this.escape(previewSummary.direct_fees_rmb || "0.00")}</dd></div>
+                <div><dt>分摊费用</dt><dd>${this.escape(previewSummary.allocated_fees_rmb || "0.00")}</dd></div>
+              </dl>
+              <button class="ocw-primary-btn" type="button" data-action="mf-preview-cost">预览综合单价</button>
+              <em>只读试算，不创建成本版本，不改变 ERP 状态。</em>
+            </aside>
+          </div>
+        </section>
+        <section class="ocw-mf-section ocw-mf-material-section">
+          <div class="ocw-mf-section-title ocw-mf-material-title">
+            <div><span>02</span><h3>物料与装箱数据</h3><p>采购事实保持只读；蓝色发货数量表示默认等于采购数量，红格可直接补录。</p></div>
+            <div class="ocw-mf-material-actions">
+              <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
+              <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
+              <button class="ocw-primary-btn" type="button" data-action="mf-import-xlsx">导入 Excel 补资料</button>
+            </div>
+          </div>
+          ${this.renderMaterialFeeGrid()}
+        </section>
+        ${this.renderMaterialFeeTodos()}
+        ${this.renderMaterialFeeCostTable()}
+      </div>
+    `);
+  }
+
+  renderMaterialFeeMetric(label, value, tone) {
+    const number = Number(value || 0);
+    return `<div class="ocw-mf-metric is-${this.escape(tone)}"><span>${this.escape(label)}</span><strong>${this.escape(String(number))}</strong><em>${number ? "待处理" : "已清零"}</em></div>`;
+  }
+
+  renderMaterialFeeTable(fees) {
+    if (!fees.length) return `<div class="ocw-detail-empty"><strong>暂无费用清单</strong></div>`;
+    return `
+      <table class="ocw-mf-fee-table">
+        <thead><tr><th>费用项目</th><th>状态</th><th>原币金额</th><th>分摊依据</th><th>凭证</th><th>操作</th></tr></thead>
+        <tbody>${fees.map((fee) => this.renderMaterialFeeRow(fee)).join("")}</tbody>
+      </table>
+    `;
+  }
+
+  renderMaterialFeeRow(fee) {
+    const amountInfo = this.materialFeeAmountStatus(fee.amount_state || fee.amount_status);
+    const evidenceInfo = this.materialFeeEvidenceLabel(fee.evidence_state);
+    const allocation = fee.allocation || {};
+    const allocationBlocked = ["ESTIMATED", "ACTUAL"].includes(String(fee.amount_state || fee.amount_status || "")) && allocation.status !== "ALLOCATED";
+    const scopeLabel = String(fee.scope_type || "ALL_ITEMS") === "ALL_ITEMS" ? "全批物料" : String(fee.scope_type) === "DIRECT_ITEM" ? "指定单行" : "指定物料";
+    const amount = String(fee.amount_state || fee.amount_status || "MISSING") === "MISSING" ? "" : fee.amount;
+    const evidence = fee.evidence || [];
+    return `
+      <tr class="${fee.legacy_unmapped || fee.requires_review ? "is-review" : ""}">
+        <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "--")}</strong><small>${fee.virtual ? "默认项 · 未入库" : fee.legacy_unmapped ? "历史费用 · 请核对" : "已保存"}</small></td>
+        <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span></td>
+        <td><strong>${amount === "" || amount === null || amount === undefined ? "--" : `${this.escape(fee.currency || "RMB")} ${this.escape(this.formatValue(amount))}`}</strong></td>
+        <td><span class="${allocationBlocked ? "ocw-mf-inline-error" : ""}">${this.escape(this.materialFeeBasisLabel(fee.allocation_basis || fee.basis_field))}</span><small>${allocationBlocked ? "当前依据缺失，未自动改规则" : scopeLabel}</small></td>
+        <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidence.length ? `${evidence.length} 份已关联` : "可上传或关联已有资料"}</small></td>
+        <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">编辑</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联凭证</button></div>
+          <details class="ocw-mf-row-details"><summary>范围与凭证详情</summary><div><span>适用：${this.escape(scopeLabel)}</span>${evidence.length ? evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · ${this.escape(row.validation_status || "PENDING")} <button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="VALID">确认有效</button><button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="INVALID">标记无效</button></span>`).join("") : "<span>暂无关联凭证</span>"}</div></details>
+        </td>
+      </tr>
+    `;
+  }
+
+  materialFeeGridColumns() {
+    const state = this.ensureMaterialFeeState();
+    const columns = [
+      { field: "row_no", label: "行", readonly: true },
+      { field: "source_doc_no", label: "采购审批号", readonly: true },
+      { field: "material_code", label: "物料编码", readonly: true },
+      { field: "product_name", label: "物料名称", readonly: true },
+      { field: "quantity", label: "采购数量", readonly: true, numeric: true },
+      { field: "actual_shipped_qty", label: "发货数量", numeric: true },
+      { field: "shipped_uom", label: "发货单位" },
+      { field: "goods_value", label: "采购货值", readonly: true, numeric: true },
+      { field: "gross_weight_kg", label: "毛重 kg", numeric: true },
+      { field: "volume_m3", label: "体积 m³", numeric: true },
+      { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true },
+      { field: "project_collection", label: "项目归属" },
+    ];
+    if (state.showAuxiliary) {
+      columns.push(
+        { field: "unit_price", label: "采购单价", readonly: true, numeric: true },
+        { field: "unit_price_uom", label: "计价单位", readonly: true },
+        { field: "purchase_currency", label: "采购币种", readonly: true },
+        { field: "supplier", label: "供应商", readonly: true },
+        { field: "source_file_name", label: "来源文件", readonly: true }
+      );
+    }
+    return columns;
+  }
+
+  renderMaterialFeeGrid() {
+    const state = this.ensureMaterialFeeState();
+    const materialData = state.materials || {};
+    const columns = this.materialFeeGridColumns();
+    let items = materialData.items || [];
+    if (state.onlyMissing) items = items.filter((row) => (row.requirements?.missing_fields || []).length);
+    const page = Number(materialData.page || state.page || 1);
+    const pageCount = Math.max(1, Number(materialData.page_count || 1));
+    return `
+      <div class="ocw-mf-grid-shell">
+        <div class="ocw-mf-grid-note"><span>单格离开或按 Enter 自动保存</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
+        <div class="ocw-mf-grid-scroll">
+          <table class="ocw-mf-grid-table">
+            <thead><tr>${columns.map((column) => `<th>${this.escape(column.label)}</th>`).join("")}</tr></thead>
+            <tbody>${items.length ? items.map((item, index) => this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
+          </table>
+        </div>
+        <div class="ocw-mf-grid-footer"><span>共 ${Number(materialData.total || 0)} 行 · 当前第 ${page}/${pageCount} 页</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page + 1}" ${page >= pageCount ? "disabled" : ""}>下一页</button></div></div>
+      </div>
+    `;
+  }
+
+  renderMaterialFeeGridRow(item, columns, rowIndex) {
+    const missingFields = new Set(item.requirements?.missing_fields || []);
+    return `<tr data-mf-row-index="${rowIndex}" data-item-name="${this.escape(item.name || "")}">${columns.map((column, columnIndex) => this.renderMaterialFeeGridCell(item, column, missingFields, columnIndex)).join("")}</tr>`;
+  }
+
+  renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
+    let value = item[column.field];
+    const shippingField = ["actual_shipped_qty", "shipped_uom"].includes(column.field);
+    if (column.field === "actual_shipped_qty") value = item.effective_shipping_quantity;
+    if (column.field === "shipped_uom") value = item.effective_shipping_uom;
+    const isMissing = missingFields.has(column.field);
+    const isDefault = shippingField && item.effective_shipping?.is_default;
+    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : ""].filter(Boolean).join(" ");
+    const reason = (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
+    if (column.readonly) {
+      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><span>${this.escape(this.formatValue(value || "--"))}</span></td>`;
+    }
+    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(value ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />${isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}</td>`;
+  }
+
+  findMaterialFeeItem(itemName) {
+    return (this.ensureMaterialFeeState().materials?.items || []).find((row) => String(row.name) === String(itemName));
+  }
+
+  updateMaterialFeeExpectedModified(result) {
+    const modified = result?.batch_modified;
+    if (!modified) return;
+    this.detailState.expectedModified = modified;
+    if (this.detailState.header) this.detailState.header.modified = modified;
+  }
+
+  async saveMaterialFeeCell($input) {
+    if (!$input.length || $input.data("saving")) return;
+    const original = String($input.attr("data-original-value") ?? "");
+    const value = String($input.val() ?? "").trim();
+    if (value === original) return;
+    const itemName = $input.attr("data-item-name");
+    const fieldname = $input.attr("data-fieldname");
+    const item = this.findMaterialFeeItem(itemName);
+    if (!item || !(await this.ensureEditSession())) return;
+    const $cell = $input.closest(".ocw-mf-cell");
+    $input.data("saving", true).prop("disabled", true);
+    $cell.addClass("is-saving").removeClass("is-save-error");
+    try {
+      let result;
+      if (["actual_shipped_qty", "shipped_uom"].includes(fieldname)) {
+        const editingQuantity = fieldname === "actual_shipped_qty";
+        const currentMode = String(item.effective_shipping?.mode || "DEFAULT_PURCHASE");
+        const mode = editingQuantity || currentMode !== "DEFAULT_PURCHASE" ? "MANUAL_CONFIRMED" : "DEFAULT_PURCHASE";
+        const quantity = editingQuantity ? value : item.effective_shipping_quantity;
+        const uom = fieldname === "shipped_uom" ? value : item.effective_shipping_uom;
+        result = await this.call("overseas_costing.api.materials.set_shipping_quantity", {
+          batch_name: this.detailState.batchName,
+          item_name: itemName,
+          mode,
+          value: quantity,
+          uom,
+          edit_token: this.detailState.editToken,
+          expected_modified: this.detailState.expectedModified,
+        });
+      } else {
+        result = await this.call("overseas_costing.api.calculate.update_item_field", {
+          item_name: itemName,
+          fieldname,
+          value,
+          version_name: this.detailState.versionName || null,
+          remark: "资料与费用页单格自动保存",
+          edit_token: this.detailState.editToken,
+          expected_modified: this.detailState.expectedModified,
+        });
+      }
+      if (!result || !result.ok) throw new Error(result?.message || "保存失败");
+      this.updateMaterialFeeExpectedModified(result);
+      this.detailState.dirty = false;
+      frappe.show_alert({ message: "已保存", indicator: "green" });
+      await this.loadMaterialFeeWorkspace({ quiet: true });
+    } catch (error) {
+      $input.data("saving", false).prop("disabled", false);
+      $cell.removeClass("is-saving").addClass("is-save-error").attr("title", `${this.normalizeErrorMessage(error)}；当前输入已保留，请重试。`);
+      frappe.show_alert({ message: "保存失败，当前值已保留", indicator: "red" });
+    }
+  }
+
+  previewMaterialPaste($startInput, text) {
+    const rows = String(text || "").replace(/\r/g, "").split("\n").filter((row, index, list) => row || index < list.length - 1).map((row) => row.split("\t"));
+    const $table = $startInput.closest("table");
+    const $startRow = $startInput.closest("tr");
+    const visibleRows = $table.find("tbody tr[data-item-name]").toArray();
+    const startRowIndex = visibleRows.indexOf($startRow.get(0));
+    const editableColumns = this.materialFeeGridColumns().filter((column) => !column.readonly);
+    const startField = $startInput.attr("data-fieldname");
+    const startColumnIndex = editableColumns.findIndex((column) => column.field === startField);
+    const updates = [];
+    rows.forEach((values, rowOffset) => {
+      const targetRow = visibleRows[startRowIndex + rowOffset];
+      if (!targetRow) return;
+      const itemName = $(targetRow).attr("data-item-name");
+      values.forEach((value, columnOffset) => {
+        const column = editableColumns[startColumnIndex + columnOffset];
+        if (!column) return;
+        const current = this.findMaterialFeeItem(itemName)?.[column.field];
+        const effectiveCurrent = column.field === "actual_shipped_qty" ? this.findMaterialFeeItem(itemName)?.effective_shipping_quantity : column.field === "shipped_uom" ? this.findMaterialFeeItem(itemName)?.effective_shipping_uom : current;
+        if (String(value).trim() === String(effectiveCurrent ?? "").trim()) return;
+        updates.push({ item_name: itemName, fieldname: column.field, value: String(value).trim(), old_value: effectiveCurrent, label: column.label });
+      });
+    });
+    if (!updates.length) {
+      frappe.show_alert({ message: "粘贴内容没有可更新的单元格", indicator: "blue" });
+      return;
+    }
+    const dialog = new frappe.ui.Dialog({
+      title: "预览多格粘贴",
+      fields: [{ fieldtype: "HTML", fieldname: "preview", options: `<div class="ocw-mf-paste-preview"><div class="ocw-mf-dialog-note">即将更新 ${updates.length} 个单元格；确认后整批提交，任一行失败都会整体回滚。</div><table><thead><tr><th>物料</th><th>字段</th><th>当前值</th><th>新值</th></tr></thead><tbody>${updates.slice(0, 500).map((row) => `<tr><td>${this.escape(this.findMaterialFeeItem(row.item_name)?.material_code || row.item_name)}</td><td>${this.escape(row.label)}</td><td>${this.escape(this.formatValue(row.old_value ?? "--"))}</td><td>${this.escape(row.value || "--")}</td></tr>`).join("")}</tbody></table></div>` }],
+      primary_action_label: "确认整批保存",
+      primary_action: () => this.applyMaterialPaste(dialog, updates),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-mf-dialog");
+  }
+
+  async applyMaterialPaste(dialog, updates) {
+    if (!(await this.ensureEditSession())) return;
+    const result = await this.call("overseas_costing.api.calculate.batch_update_items", {
+      batch_name: this.detailState.batchName,
+      version_name: this.detailState.versionName || null,
+      updates: JSON.stringify(updates.map(({ item_name, fieldname, value }) => ({ item_name, fieldname, value, remark: "资料与费用页多格粘贴" }))),
+      remark: "资料与费用页多格粘贴",
+      edit_token: this.detailState.editToken,
+      expected_modified: this.detailState.expectedModified,
+    }, true);
+    if (!result || !result.ok) throw new Error(result?.message || "多格粘贴保存失败");
+    this.updateMaterialFeeExpectedModified(result);
+    dialog.hide();
+    frappe.show_alert({ message: `已更新 ${result.changed_count || 0} 个单元格`, indicator: "green" });
+    await this.loadMaterialFeeWorkspace({ quiet: true });
+  }
+
+  findMaterialFee(feeKey) {
+    const fees = this.ensureMaterialFeeState().fees?.fees || this.ensureMaterialFeeState().fees?.items || [];
+    return fees.find((row) => String(row.logical_fee_key || row.fee_key) === String(feeKey));
+  }
+
+  openMaterialFeeDialog(feeKey, candidate = null) {
+    const fee = this.findMaterialFee(feeKey);
+    if (!fee) return;
+    let selectedKeys = [];
+    try { selectedKeys = JSON.parse(fee.scope_value_json || "[]"); } catch (_error) { selectedKeys = []; }
+    const materials = this.ensureMaterialFeeState().materials?.items || [];
+    const otherFees = (this.ensureMaterialFeeState().fees?.fees || []).filter((row) => row.logical_fee_key !== fee.logical_fee_key);
+    const dialog = new frappe.ui.Dialog({
+      title: `编辑费用：${fee.expense_category || fee.logical_fee_key}`,
+      fields: [
+        ...(candidate ? [{ fieldtype: "HTML", fieldname: "candidate_note", options: `<div class="ocw-mf-dialog-note">已带入凭证识别候选 ${this.escape(candidate.currency || "")} ${this.escape(candidate.amount || "")}。请仍由你确认金额状态；系统不会自动认定为实际费用。</div>` }] : []),
+        { fieldtype: "Select", fieldname: "amount_status", label: "金额状态", reqd: 1, options: "MISSING\nESTIMATED\nACTUAL\nNOT_INCURRED\nINCLUDED", default: fee.amount_state || fee.amount_status || "MISSING" },
+        { fieldtype: "Data", fieldname: "amount", label: "原币金额", default: candidate?.amount || fee.amount || "" },
+        { fieldtype: "Data", fieldname: "currency", label: "币种", reqd: 1, default: candidate?.currency || fee.currency || "RMB" },
+        { fieldtype: "Select", fieldname: "allocation_basis", label: "分摊依据", reqd: 1, options: "goods_value\ngross_weight\nvolume\nchargeable_weight", default: fee.allocation_basis || fee.basis_field || "goods_value" },
+        { fieldtype: "Select", fieldname: "scope_type", label: "适用范围", reqd: 1, options: "ALL_ITEMS\nITEMS\nDIRECT_ITEM", default: fee.scope_type || "ALL_ITEMS" },
+        { fieldtype: "HTML", fieldname: "scope_items", options: `<div class="ocw-mf-scope-picker"><strong>限定到指定物料时勾选</strong>${materials.map((item) => `<label><input type="checkbox" data-mf-scope-key="${this.escape(item.stable_line_key || "")}" ${selectedKeys.includes(item.stable_line_key) ? "checked" : ""}/><span>${this.escape(item.material_code || "--")} · ${this.escape(item.product_name || "--")} · 行 ${this.escape(item.row_no || "--")}</span></label>`).join("")}</div>` },
+        { fieldtype: "Select", fieldname: "included_in_fee_key", label: "已包含于", options: ["", "purchase_goods_value", ...otherFees.map((row) => row.logical_fee_key)].join("\n"), default: fee.included_in_fee_key || "" },
+        { fieldtype: "Small Text", fieldname: "remark", label: "备注 / 未发生或已包含原因", default: fee.remark || "" },
+      ],
+      primary_action_label: "保存费用",
+      primary_action: () => this.saveMaterialFeeDialog(dialog, fee),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-mf-dialog");
+  }
+
+  async saveMaterialFeeDialog(dialog, fee) {
+    const values = dialog.get_values();
+    if (!values || !(await this.ensureEditSession())) return;
+    const scopeKeys = dialog.$wrapper.find("[data-mf-scope-key]:checked").toArray().map((node) => $(node).attr("data-mf-scope-key"));
+    const payload = {
+      logical_fee_key: fee.logical_fee_key,
+      rule_code: fee.rule_code || fee.logical_fee_key,
+      expense_category: fee.expense_category,
+      amount_status: values.amount_status,
+      amount: values.amount,
+      currency: values.currency,
+      allocation_basis: values.allocation_basis,
+      scope_type: values.scope_type,
+      scope_value_json: values.scope_type === "ALL_ITEMS" ? [] : scopeKeys,
+      required_evidence_role: fee.required_evidence_role || "",
+      included_in_fee_key: values.included_in_fee_key,
+      priority_no: fee.priority_no || 0,
+      remark: values.remark,
+      is_active: 1,
+      is_enabled: 1,
+    };
+    const result = await this.call("overseas_costing.api.fees.save_fee", {
+      batch_name: this.detailState.batchName,
+      version_name: this.detailState.versionName,
+      fee_payload: JSON.stringify(payload),
+      edit_token: this.detailState.editToken,
+      expected_modified: this.detailState.expectedModified,
+    }, true);
+    if (!result || !result.ok) throw new Error(result?.message || "费用保存失败");
+    this.updateMaterialFeeExpectedModified(result);
+    dialog.hide();
+    frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
+    await this.loadMaterialFeeWorkspace({ quiet: true });
+  }
+
+  openMaterialFeeEvidenceDialog(feeKey) {
+    const fee = this.findMaterialFee(feeKey);
+    if (!fee) return;
+    if (!fee.name) {
+      frappe.show_alert({ message: "请先编辑并保存这笔费用，再关联凭证。", indicator: "orange" });
+      return;
+    }
+    const candidates = this.ensureMaterialFeeState().fees?.evidence_candidates || [];
+    const linked = new Set((fee.evidence || []).map((row) => row.attachment));
+    const dialog = new frappe.ui.Dialog({
+      title: `关联凭证：${fee.expense_category || fee.logical_fee_key}`,
+      fields: [{ fieldtype: "HTML", fieldname: "evidence", options: `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">一个凭证可关联多笔费用，一笔费用也可关联多个凭证。附件识别金额只是候选，不会自动修改费用。</div>${candidates.length ? candidates.map((candidate) => `<label class="ocw-mf-evidence-option"><input type="checkbox" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}" ${linked.has(candidate.attachment) ? "checked disabled" : ""}/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong><small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}</small>${candidate.amount_candidates?.length ? `<em>识别候选：${candidate.amount_candidates.map((row) => `${this.escape(row.currency || "")} ${this.escape(row.amount)} <button type="button" data-mf-use-candidate="1" data-candidate-amount="${this.escape(row.amount || "")}" data-candidate-currency="${this.escape(row.currency || fee.currency || "RMB")}">带入费用表</button>`).join("、")}</em>` : ""}</span></label>`).join("") : `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`}<button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并关联</button></div>` }],
+      primary_action_label: "关联所选凭证",
+      primary_action: () => this.linkSelectedMaterialFeeEvidence(dialog, fee),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-mf-dialog");
+    dialog.$wrapper.on("click", "[data-action='mf-upload-evidence']", () => {
+      this.uploadMaterialFeeEvidence(dialog, fee);
+    });
+    dialog.$wrapper.on("click", "[data-mf-use-candidate]", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const $button = $(event.currentTarget);
+      dialog.hide();
+      this.openMaterialFeeDialog(fee.logical_fee_key, {
+        amount: $button.attr("data-candidate-amount"),
+        currency: $button.attr("data-candidate-currency"),
+      });
+    });
+  }
+
+  async linkSelectedMaterialFeeEvidence(dialog, fee) {
+    if (!(await this.ensureEditSession())) return;
+    const attachments = dialog.$wrapper.find("[data-mf-evidence-attachment]:checked:not(:disabled)").toArray().map((node) => $(node).attr("data-mf-evidence-attachment"));
+    if (!attachments.length) {
+      frappe.show_alert({ message: "请选择至少一份未关联凭证", indicator: "orange" });
+      return;
+    }
+    for (const attachment of attachments) {
+      const result = await this.call("overseas_costing.api.fees.link_fee_evidence", {
+        batch_name: this.detailState.batchName,
+        fee_rule: fee.name,
+        attachment,
+        evidence_role: fee.required_evidence_role || "expense_invoice",
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+      });
+      if (!result || !result.ok) throw new Error(result?.message || "凭证关联失败");
+      this.updateMaterialFeeExpectedModified(result);
+    }
+    dialog.hide();
+    frappe.show_alert({ message: `已关联 ${attachments.length} 份凭证`, indicator: "green" });
+    await this.loadMaterialFeeWorkspace({ quiet: true });
+  }
+
+  uploadMaterialFeeEvidence(dialog, fee) {
+    const batch = this.getDetailBatch();
+    this.openManualDocumentUploader(batch, this.detailDocumentAdapter(), this.detectManualDocumentLogisticsType(batch), {
+      code: `fee_evidence_${fee.logical_fee_key}`,
+      label: `${fee.expense_category || fee.logical_fee_key}凭证`,
+      attachmentType: "Other",
+      required: false,
+    }, async (registered) => {
+      const attachment = registered?.attachment?.name;
+      if (!attachment || !(await this.ensureEditSession())) return;
+      let recognitionOk = false;
+      try {
+        const recognition = await this.call(
+          "overseas_costing.api.import_api.preview_oa_source_attachment",
+          { attachment_name: attachment },
+          true
+        );
+        recognitionOk = Boolean(recognition?.ok);
+      } catch (_error) {
+        // 识别失败不影响凭证关联，用户仍可以手填费用。
+      }
+      const result = await this.call("overseas_costing.api.fees.link_fee_evidence", {
+        batch_name: this.detailState.batchName,
+        fee_rule: fee.name,
+        attachment,
+        evidence_role: fee.required_evidence_role || "expense_invoice",
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+      });
+      if (!result || !result.ok) throw new Error(result?.message || "凭证关联失败");
+      this.updateMaterialFeeExpectedModified(result);
+      dialog.hide();
+      await this.loadMaterialFeeWorkspace({ quiet: true });
+      frappe.show_alert({
+        message: recognitionOk
+          ? "凭证已关联，识别金额已作为候选，等待人工确认"
+          : "凭证已关联；本次未识别出金额，可手工补录",
+        indicator: recognitionOk ? "green" : "orange",
+      });
+    });
+  }
+
+  async setMaterialFeeEvidenceStatus(evidenceName, status) {
+    if (!evidenceName || !(await this.ensureEditSession())) return;
+    const result = await this.call("overseas_costing.api.fees.set_fee_evidence_status", {
+      batch_name: this.detailState.batchName,
+      evidence_name: evidenceName,
+      status,
+      remark: status === "VALID" ? "费用页人工确认凭证有效" : "费用页人工标记凭证无效",
+      edit_token: this.detailState.editToken,
+      expected_modified: this.detailState.expectedModified,
+    });
+    if (!result || !result.ok) throw new Error(result?.message || "凭证状态更新失败");
+    this.updateMaterialFeeExpectedModified(result);
+    await this.loadMaterialFeeWorkspace({ quiet: true });
+  }
+
+  async refreshMaterialFeeCostPreview(scrollToResult = false) {
+    const state = this.ensureMaterialFeeState();
+    state.preview = await this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
+      batch_name: this.detailState.batchName,
+      version_name: this.detailState.versionName || null,
+    });
+    this.renderMaterialFeeWorkspace();
+    if (scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  renderMaterialFeeTodos() {
+    const state = this.ensureMaterialFeeState();
+    const todos = [];
+    (state.fees?.fees || state.fees?.items || []).forEach((fee) => (fee.todos || []).forEach((todo) => todos.push(`${fee.expense_category || fee.logical_fee_key}：${todo.label}`)));
+    (state.materials?.items || []).forEach((item) => (item.requirements?.missing_fields || []).forEach((field) => todos.push(`${item.material_code || item.name}：缺少 ${this.materialFeeGridColumns().find((column) => column.field === field)?.label || field}`)));
+    (state.preview?.incomplete_reasons || []).forEach((row) => {
+      const text = row.message || row.reason_code;
+      if (text && !todos.includes(text)) todos.push(text);
+    });
+    return `<details class="ocw-mf-section ocw-mf-todos"><summary><span><strong>详细待办</strong><em>${todos.length} 项</em></span><small>默认收起，需要时展开查看</small></summary><div>${todos.length ? `<ul>${todos.slice(0, 100).map((todo) => `<li>${this.escape(todo)}</li>`).join("")}</ul>` : `<div class="ocw-detail-empty"><strong>当前没有待办</strong></div>`}</div></details>`;
+  }
+
+  renderMaterialFeeCostTable() {
+    const preview = this.ensureMaterialFeeState().preview || {};
+    const items = preview.items || [];
+    return `<section class="ocw-mf-section ocw-mf-cost-section"><div class="ocw-mf-section-title"><div><span>03</span><h3>SKU 综合单价试算</h3><p>只读预览；未计入费用会单独列出，不会把未知金额当作 0。</p></div><span class="ocw-mf-completeness ${preview.summary?.is_complete ? "is-complete" : "is-partial"}">${preview.summary?.is_complete ? "完整成本" : "非完整成本"}</span></div><div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>采购货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>${preview.excluded_fees?.length ? `<div class="ocw-mf-excluded"><strong>未计入费用</strong>${preview.excluded_fees.map((fee) => `<span>${this.escape(fee.expense_category || fee.fee_key || "--")} · ${this.escape(fee.reason_code || "--")}</span>`).join("")}</div>` : ""}</section>`;
+  }
+
+  openMaterialFeeSourcesDialog() {
+    const state = this.ensureMaterialFeeState();
+    const candidates = state.fees?.evidence_candidates || [];
+    const dialog = new frappe.ui.Dialog({
+      title: "查看资料来源",
+      fields: [{ fieldtype: "HTML", fieldname: "sources", options: `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note">OA 采购数量、金额和物料身份作为来源事实保留。装箱计划是可选补充：没有时可先用采购数量作为默认发货数量。</div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉 OA</button><button class="ocw-primary-btn" type="button" data-action="mf-import-xlsx">导入 Excel 补资料</button></div><div class="ocw-mf-source-list">${candidates.length ? candidates.map((row) => `<div><span><strong>${this.escape(row.file_name || row.attachment || "--")}</strong><small>${this.escape(row.source_type || "附件")} · ${this.escape(row.attachment_type || "未分类")} · ${this.escape(row.parse_status || "Draft")}</small></span>${row.file_url ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-mf-preview-source="1" data-file-url="${this.escape(row.file_url)}" data-file-name="${this.escape(row.file_name || "")}">预览</button>` : ""}</div>`).join("") : `<div class="ocw-detail-empty"><strong>暂无附件资料</strong></div>`}</div></div>` }],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-mf-dialog");
+    dialog.$wrapper.on("click", "[data-mf-preview-source]", (event) => {
+      const $button = $(event.currentTarget);
+      this.openOaAttachmentFilePreviewDialog($button.attr("data-file-url"), $button.attr("data-file-name"));
+    });
+    dialog.$wrapper.on("click", "[data-action='view-dingtalk-approval']", () => {
+      dialog.hide();
+      this.switchDetailTab("dingtalk");
+    });
+    dialog.$wrapper.on("click", "[data-action='mf-import-xlsx']", () => {
+      dialog.hide();
+      this.openMaterialXlsxUploader();
+    });
+  }
+
+  openMaterialXlsxUploader() {
+    const batch = this.getDetailBatch();
+    if (!frappe.ui.FileUploader) return this.showPendingFeature("当前无法打开上传器，请刷新后重试。");
+    this.ensureEditSession().then((ready) => {
+      if (!ready) return;
+      new frappe.ui.FileUploader({
+        allow_multiple: false,
+        restrictions: { allowed_file_types: [".xlsx"], max_file_size: 20 * 1024 * 1024 },
+        on_success: (fileDoc) => {
+          const uploaded = Array.isArray(fileDoc) ? fileDoc[0] : fileDoc;
+          const fileName = String(uploaded?.file_name || uploaded?.name || "");
+          if (!fileName.toLowerCase().endsWith(".xlsx")) {
+            this.showPendingFeature("物料导入仅支持 .xlsx 文件。");
+            return;
+          }
+          this.registerManualDocumentAttachment(batch, this.detailDocumentAdapter(), this.detectManualDocumentLogisticsType(batch), {
+            code: "material_import_xlsx",
+            label: "物料与装箱 Excel",
+            attachmentType: "Packing List",
+            required: false,
+          }, uploaded).then((registered) => {
+            const attachment = registered?.attachment?.name;
+            if (attachment) this.previewMaterialXlsxImport(attachment);
+          }).catch((error) => this.showError(error));
+        },
+      });
+      [0, 100, 300].forEach((delay) => window.setTimeout(() => this.localizeFrappeFileUploader("物料与装箱 Excel"), delay));
+    }).catch((error) => this.showError(error));
+  }
+
+  async previewMaterialXlsxImport(attachmentName, sheetName = "") {
+    const result = await this.call("overseas_costing.api.materials.preview_material_import", {
+      batch_name: this.detailState.batchName,
+      source_kind: "manual_xlsx",
+      source_id: attachmentName,
+      sheet_name: sheetName || null,
+    }, true);
+    if (!result || !result.ok) throw new Error(result?.message || "Excel 预览失败");
+    this.openMaterialImportPreviewDialog(result);
+  }
+
+  openMaterialImportPreviewDialog(preview) {
+    const rows = preview.rows || [];
+    const dialog = new frappe.ui.Dialog({
+      title: "Excel 导入预览",
+      fields: [{ fieldtype: "HTML", fieldname: "preview", options: `<div class="ocw-mf-import-preview"><div class="ocw-mf-import-summary"><span>可补充 <strong>${preview.summary?.supplement || 0}</strong></span><span>冲突 <strong>${preview.summary?.conflict || 0}</strong></span><span>未匹配 <strong>${preview.summary?.unmatched || 0}</strong></span><span>不会新增未知行</span></div><div class="ocw-mf-import-table"><table><thead><tr><th>源行</th><th>分类</th><th>物料</th><th>字段变化 / 处理</th></tr></thead><tbody>${rows.map((row) => `<tr class="is-${this.escape(row.classification || "unmatched")}"><td>${this.escape(row.source_row || "--")}</td><td>${this.escape({ supplement: "可补充", conflict: "冲突", unmatched: "未匹配", no_change: "无变化" }[row.classification] || row.classification || "--")}</td><td>${this.escape(row.incoming?.material_code || "--")}${row.match_status === "choice_required" ? `<select data-mf-match-row="${this.escape(row.source_row)}"><option value="">请选择原行</option>${(row.candidates || []).map((candidate) => `<option value="${this.escape(candidate.stable_line_key || "")}">行 ${this.escape(candidate.row_no || "--")} · ${this.escape(candidate.material_code || "--")}</option>`).join("")}</select>` : ""}</td><td>${(row.changes || []).length ? row.changes.map((change) => `<div><span>${this.escape(change.field)}：${this.escape(this.formatValue(change.old ?? "--"))} → ${this.escape(this.formatValue(change.new ?? "--"))}</span>${change.conflict ? `<select data-mf-conflict-row="${this.escape(row.source_row)}" data-fieldname="${this.escape(change.field)}"><option value="keep_current">保留当前值</option><option value="use_source">采用 Excel</option></select>` : ""}</div>`).join("") : "--"}</td></tr>`).join("")}</tbody></table></div><div class="ocw-mf-dialog-note">仅补充发货数量、单位、重量、体积、计费重和项目归属；OA 采购事实不被覆盖。</div></div>` }],
+      primary_action_label: "确认整体导入",
+      primary_action: () => this.applyMaterialXlsxImport(dialog, preview),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-mf-dialog ocw-mf-import-dialog");
+  }
+
+  async applyMaterialXlsxImport(dialog, preview) {
+    if (!(await this.ensureEditSession())) return;
+    const choices = { fields: {}, matches: {} };
+    dialog.$wrapper.find("[data-mf-conflict-row]").each((_, node) => {
+      const row = $(node).attr("data-mf-conflict-row");
+      choices.fields[row] = choices.fields[row] || {};
+      choices.fields[row][$(node).attr("data-fieldname")] = $(node).val();
+    });
+    dialog.$wrapper.find("[data-mf-match-row]").each((_, node) => {
+      choices.matches[$(node).attr("data-mf-match-row")] = $(node).val();
+    });
+    const result = await this.call("overseas_costing.api.materials.apply_material_import", {
+      batch_name: this.detailState.batchName,
+      preview_revision: preview.preview_revision,
+      choices_json: JSON.stringify(choices),
+      edit_token: this.detailState.editToken,
+      expected_modified: this.detailState.expectedModified,
+    }, true);
+    if (!result || !result.ok) throw new Error(result?.message || result?.code || "Excel 导入失败");
+    this.updateMaterialFeeExpectedModified(result);
+    dialog.hide();
+    frappe.show_alert({ message: `已更新 ${result.updated_count || 0} 行、${result.changed_field_count || 0} 个字段`, indicator: "green" });
+    await this.loadMaterialFeeWorkspace({ quiet: true });
+  }

@@ -425,6 +425,7 @@ class OverseasCostWorkbench {
 
   bindEvents() {
     if (this.bindRedesignEvents) this.bindRedesignEvents();
+    if (this.bindMaterialFeeWorkspaceEvents) this.bindMaterialFeeWorkspaceEvents();
     this.$root.on("click", "[data-batch-name]", (event) => {
       // 新工作台由显式的详情导航设置批次上下文；这里仅保留旧壳层的隐式选中兼容。
       if (this.$root.hasClass("ocw-redesign")) return;

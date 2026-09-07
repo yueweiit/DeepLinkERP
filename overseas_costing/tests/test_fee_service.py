@@ -2,6 +2,7 @@
 
 import pytest
 
+from overseas_costing.services import fee_service
 from overseas_costing.services.fee_service import (
     build_default_fee_templates,
     build_evidence_candidates,
@@ -67,6 +68,8 @@ def test_saved_historical_fee_replaces_virtual_template_without_writing_defaults
     freight = next(row for row in rows if row["logical_fee_key"] == "international_sea_freight")
     assert freight["name"] == "RULE-1"
     assert freight["amount"] == "123.45"
+    assert freight["amount_status"] == "ESTIMATED"
+    assert freight["required_evidence_role"] == "freight_invoice"
     assert freight["virtual"] is False
     legacy = next(row for row in rows if row["name"] == "RULE-LEGACY")
     assert legacy["legacy_unmapped"] is True
@@ -194,3 +197,44 @@ def test_attachment_candidates_are_deduplicated_but_not_turned_into_fees() -> No
         {"attachment": "ATT-2", "evidence_role": "payment", "source_revision": "R1"},
     ]
     assert all("logical_fee_key" not in row for row in result)
+
+
+def test_deleted_attachment_unlinks_evidence_without_creating_completion_state(monkeypatch) -> None:
+    writes = []
+
+    class FakeDb:
+        @staticmethod
+        def set_value(doctype, name, values, update_modified=False):
+            writes.append((doctype, name, values, update_modified))
+
+    class FakeFrappe:
+        db = FakeDb()
+
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [{"name": "EVID-1"}, {"name": "EVID-2"}]
+
+    monkeypatch.setattr(fee_service, "frappe", FakeFrappe())
+
+    result = fee_service.unlink_fee_evidence_for_attachment("ATT-1", reason="附件已删除")
+
+    assert result["affected_count"] == 2
+    assert all(row[2]["validation_status"] == "UNLINKED" for row in writes)
+    assert all(row[2]["attachment"] == "" for row in writes)
+
+
+def test_fee_worklist_rejects_a_version_from_another_batch(monkeypatch) -> None:
+    class FakeDb:
+        @staticmethod
+        def get_value(doctype, name, fieldname, **_kwargs):
+            if doctype == "Overseas Cost Version" and fieldname == "batch":
+                return "OTHER-BATCH"
+            return None
+
+    class FakeFrappe:
+        db = FakeDb()
+
+    monkeypatch.setattr(fee_service, "frappe", FakeFrappe())
+
+    with pytest.raises(ValueError, match="不属于当前批次"):
+        fee_service.get_fee_worklist("BATCH-1", "VERSION-OTHER")

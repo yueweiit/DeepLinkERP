@@ -121,7 +121,9 @@ def build_fee_status(
         if not required_role or str(row.get("evidence_role") or "") == required_role
     ]
     validation_states = {str(row.get("validation_status") or "PENDING").upper() for row in matching_evidence}
-    if not required_role:
+    if amount_state in {"NOT_INCURRED", "INCLUDED"}:
+        evidence_state = "NOT_REQUIRED"
+    elif not required_role:
         evidence_state = "NOT_REQUIRED"
     elif "VALID" in validation_states:
         evidence_state = "VALID"
