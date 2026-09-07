@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from overseas_costing.services.material_input_service import (
+    analyze_material_requirements,
     build_shipping_quantity_updates,
     ensure_stable_line_key,
     normalize_grid_page,
@@ -157,3 +158,72 @@ def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:
     } <= fields.keys()
     assert fields["stable_line_key"]["read_only"] == 1
     assert fields["cost_output_uom"]["read_only"] == 1
+
+
+def test_material_requirements_mark_only_active_contextual_missing_cells() -> None:
+    result = analyze_material_requirements(
+        [
+            {
+                "name": "ITEM-1",
+                "stable_line_key": "A",
+                "quantity": "10",
+                "purchase_uom": "件",
+                "goods_value": "100",
+                "volume_m3": "",
+                "gross_weight_kg": "",
+                "project_collection": "",
+            },
+            {
+                "name": "ITEM-2",
+                "stable_line_key": "B",
+                "quantity": "5",
+                "purchase_uom": "件",
+                "goods_value": "50",
+                "volume_m3": "2",
+                "gross_weight_kg": "",
+                "project_collection": "",
+            },
+        ],
+        [
+            {
+                "logical_fee_key": "freight",
+                "amount_status": "ACTUAL",
+                "amount": "20",
+                "scope_type": "ALL_ITEMS",
+                "allocation_basis": "volume",
+            },
+            {
+                "logical_fee_key": "delivery",
+                "amount_status": "MISSING",
+                "scope_type": "ALL_ITEMS",
+                "allocation_basis": "gross_weight",
+            },
+        ],
+    )
+
+    assert result["missing_cell_count"] == 1
+    assert result["rows"]["A"]["missing_fields"] == ["volume_m3"]
+    assert result["rows"]["B"]["missing_fields"] == []
+    assert all("project_collection" not in row["missing_fields"] for row in result["rows"].values())
+
+
+def test_material_requirements_respect_fee_item_scope() -> None:
+    result = analyze_material_requirements(
+        [
+            {"name": "ITEM-1", "stable_line_key": "A", "quantity": 1, "purchase_uom": "件", "goods_value": 10},
+            {"name": "ITEM-2", "stable_line_key": "B", "quantity": 1, "purchase_uom": "件", "goods_value": 10},
+        ],
+        [
+            {
+                "logical_fee_key": "delivery",
+                "amount_status": "ACTUAL",
+                "amount": 20,
+                "scope_type": "ITEMS",
+                "scope_item_keys": ["B"],
+                "allocation_basis": "gross_weight",
+            }
+        ],
+    )
+
+    assert result["rows"]["A"]["missing_fields"] == []
+    assert result["rows"]["B"]["missing_fields"] == ["gross_weight_kg"]

@@ -49,7 +49,38 @@ def test_missing_amount_is_not_counted_as_zero_unallocated_money() -> None:
 
     assert result["missing_amount_fee_count"] == 1
     assert result["unallocated_by_currency"] == {"CNY": "80"}
+    assert result["unallocated_fee_count"] == 1
     assert result["affected_fee_count"] == 2
+
+
+def test_summary_exposes_evidence_and_estimate_counts_for_page_header() -> None:
+    result = summarize_fee_statuses(
+        [
+            {
+                "fee_key": "F1",
+                "amount_state": "ESTIMATED",
+                "evidence_state": "MISSING",
+                "currency": "USD",
+                "amount": "20",
+                "todos": [
+                    {"code": "ACTUAL_AMOUNT_REQUIRED"},
+                    {"code": "EVIDENCE_REQUIRED"},
+                ],
+            },
+            {
+                "fee_key": "F2",
+                "amount_state": "ACTUAL",
+                "evidence_state": "PENDING",
+                "currency": "RMB",
+                "amount": "10",
+                "todos": [{"code": "EVIDENCE_VALIDATION_REQUIRED"}],
+            },
+        ]
+    )
+
+    assert result["estimated_fee_count"] == 1
+    assert result["missing_evidence_fee_count"] == 1
+    assert result["pending_evidence_fee_count"] == 1
 
 
 def test_invalid_final_evidence_keeps_the_evidence_todo_open() -> None:

@@ -183,6 +183,20 @@ def summarize_fee_statuses(statuses: list[dict]) -> dict:
         "estimated_fee_count": sum(
             1 for status in statuses or [] if status.get("amount_state") == "ESTIMATED"
         ),
+        "unallocated_fee_count": sum(
+            1
+            for status in statuses or []
+            if any(
+                str(todo.get("code") or "") == "ALLOCATION_REQUIRED"
+                for todo in status.get("todos") or []
+            )
+        ),
+        "missing_evidence_fee_count": sum(
+            1 for status in statuses or [] if status.get("evidence_state") in {"MISSING", "INVALID"}
+        ),
+        "pending_evidence_fee_count": sum(
+            1 for status in statuses or [] if status.get("evidence_state") == "PENDING"
+        ),
         "unallocated_by_currency": {
             currency: _decimal_text(amount) for currency, amount in sorted(unallocated.items())
         },

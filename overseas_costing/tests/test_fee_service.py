@@ -1,35 +1,97 @@
-"""费用修改、凭证关联和最终确认事务测试。"""
+"""费用修改、默认清单和凭证关联事务测试。"""
 
 import pytest
 
 from overseas_costing.services.fee_service import (
+    build_default_fee_templates,
+    build_evidence_candidates,
+    compose_fee_worklist_rows,
     deduplicate_evidence_candidates,
-    invalidate_fee_completion_for_evidence,
+    map_historical_fee_key,
     merge_logical_fee,
     normalize_fee_payload,
-    validate_fee_completion,
 )
 
 
-def _estimated_fee_status() -> dict:
-    return {
-        "fee_key": "FREIGHT",
-        "amount_state": "ESTIMATED",
-        "todos": [
+def test_default_fee_templates_change_only_the_transport_specific_pair() -> None:
+    sea = build_default_fee_templates("SEA")
+    air = build_default_fee_templates("AIR")
+    express = build_default_fee_templates("EXPRESS")
+
+    assert [row["expense_category"] for row in sea] == [
+        "国际海运费",
+        "港杂/货代附加费",
+        "清关费",
+        "进口税费",
+        "目的地配送费",
+    ]
+    assert [row["allocation_basis"] for row in sea] == [
+        "volume",
+        "volume",
+        "goods_value",
+        "goods_value",
+        "gross_weight",
+    ]
+    assert air[0]["expense_category"] == "国际空运费"
+    assert air[0]["allocation_basis"] == "chargeable_weight"
+    assert express[0]["expense_category"] == "国际快递费"
+    assert all(row["virtual"] for row in sea + air + express)
+
+
+def test_historical_fee_names_map_in_memory_without_guessing_unknown_names() -> None:
+    assert map_historical_fee_key({"expense_category": "国际海运费"}, "SEA") == "international_sea_freight"
+    assert map_historical_fee_key({"rule_code": "清关费"}, "SEA") == "customs_clearance_fee"
+    assert map_historical_fee_key({"expense_category": "历史特殊费用"}, "SEA") == ""
+
+
+def test_saved_historical_fee_replaces_virtual_template_without_writing_defaults() -> None:
+    rows = compose_fee_worklist_rows(
+        [
             {
-                "code": "ACTUAL_AMOUNT_REQUIRED",
-                "severity": "warning",
-                "action": "enter_actual",
-            }
+                "name": "RULE-1",
+                "expense_category": "国际海运费",
+                "amount": "123.45",
+                "currency": "USD",
+            },
+            {
+                "name": "RULE-LEGACY",
+                "expense_category": "历史特殊费用",
+                "amount": "20",
+                "currency": "RMB",
+            },
         ],
-    }
+        "SEA",
+    )
+
+    assert len([row for row in rows if row["logical_fee_key"] == "international_sea_freight"]) == 1
+    freight = next(row for row in rows if row["logical_fee_key"] == "international_sea_freight")
+    assert freight["name"] == "RULE-1"
+    assert freight["amount"] == "123.45"
+    assert freight["virtual"] is False
+    legacy = next(row for row in rows if row["name"] == "RULE-LEGACY")
+    assert legacy["legacy_unmapped"] is True
+    assert legacy["logical_fee_key"] == "legacy:RULE-LEGACY"
 
 
-def test_confirm_complete_rejects_estimated_fee() -> None:
-    result = validate_fee_completion([_estimated_fee_status()])
+def test_parsed_amounts_are_candidates_only_and_never_become_fee_rows() -> None:
+    attachments = [
+        {
+            "name": "ATT-1",
+            "file_name": "freight.pdf",
+            "source_type": "Voucher",
+            "parse_status": "Parsed",
+            "parse_result_json": '{"classification":{"code":"logistics_quote"},"field_candidates":{"amount_candidate":321.50,"currency":"USD"}}',
+            "mapped_result_json": "{}",
+        }
+    ]
 
-    assert result["ok"] is False
-    assert result["blocking"][0]["code"] == "ACTUAL_AMOUNT_REQUIRED"
+    candidates = build_evidence_candidates(attachments)
+
+    assert candidates[0]["attachment"] == "ATT-1"
+    assert candidates[0]["amount_candidates"] == [
+        {"amount": "321.5", "currency": "USD", "path": "field_candidates.amount_candidate"}
+    ]
+    assert "logical_fee_key" not in candidates[0]
 
 
 def test_estimate_to_actual_updates_one_logical_fee_instead_of_adding() -> None:
@@ -132,77 +194,3 @@ def test_attachment_candidates_are_deduplicated_but_not_turned_into_fees() -> No
         {"attachment": "ATT-2", "evidence_role": "payment", "source_revision": "R1"},
     ]
     assert all("logical_fee_key" not in row for row in result)
-
-
-def test_invalid_final_evidence_appends_invalidation_without_dirtying_batch(monkeypatch) -> None:
-    from overseas_costing.services import fee_service
-
-    writes = []
-    inserted = []
-
-    class FakeDB:
-        @staticmethod
-        def set_value(doctype, name, values, update_modified=True):
-            writes.append((doctype, name, values, update_modified))
-
-        @staticmethod
-        def get_value(doctype, filters, fieldname):
-            assert doctype == "Overseas Cost Fee Completion"
-            assert fieldname == "name"
-            return None
-
-    class InsertedDoc:
-        name = "INVALIDATION-1"
-
-        def insert(self, **_kwargs):
-            inserted.append(self)
-            return self
-
-    class FakeFrappe:
-        db = FakeDB()
-        session = type("Session", (), {"user": "finance@example.com"})()
-
-        @staticmethod
-        def get_all(doctype, **_kwargs):
-            if doctype == "Overseas Cost Fee Evidence":
-                return [
-                    {
-                        "name": "EVIDENCE-1",
-                        "batch": "BATCH-1",
-                        "version": "VERSION-1",
-                        "validation_status": "VALID",
-                    }
-                ]
-            assert doctype == "Overseas Cost Fee Completion"
-            return [{"name": "CONFIRM-1", "input_hash": "H1", "creation": "2026-09-07"}]
-
-        @staticmethod
-        def get_doc(values):
-            assert values["status"] == "INVALIDATED"
-            return InsertedDoc()
-
-    monkeypatch.setattr(fee_service, "frappe", FakeFrappe)
-
-    result = invalidate_fee_completion_for_evidence("ATT-1", reason="凭证删除")
-
-    assert result["affected_evidence_count"] == 1
-    assert result["invalidated_count"] == 1
-    assert writes[0][0] == "Overseas Cost Fee Evidence"
-    assert writes[0][2]["validation_status"] == "UNLINKED"
-    assert not any(doctype == "Overseas Cost Batch" for doctype, *_rest in writes)
-    assert len(inserted) == 1
-
-def test_completion_accepts_only_when_every_todo_is_closed() -> None:
-    result = validate_fee_completion(
-        [
-            {
-                "fee_key": "FREIGHT",
-                "amount_state": "ACTUAL",
-                "allocation_state": "ALLOCATED",
-                "evidence_state": "VALID",
-                "todos": [],
-            }
-        ]
-    )
-
-    assert result == {"ok": True, "blocking": []}

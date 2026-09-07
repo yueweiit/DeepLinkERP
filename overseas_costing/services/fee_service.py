@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from copy import deepcopy
@@ -53,6 +52,223 @@ COST_INPUT_FIELDS = (
     "included_in_fee_key",
     "is_enabled",
 )
+
+TRANSPORT_FEE_PAIRS = {
+    "SEA": (
+        ("international_sea_freight", "国际海运费", "volume", "freight_invoice"),
+        ("sea_port_forwarder_surcharge", "港杂/货代附加费", "volume", "expense_invoice"),
+    ),
+    "AIR": (
+        ("international_air_freight", "国际空运费", "chargeable_weight", "freight_invoice"),
+        ("air_forwarder_surcharge", "空运附加费", "chargeable_weight", "expense_invoice"),
+    ),
+    "EXPRESS": (
+        ("international_express_fee", "国际快递费", "chargeable_weight", "freight_invoice"),
+        ("express_surcharge", "快递附加费", "chargeable_weight", "expense_invoice"),
+    ),
+}
+COMMON_FEE_TEMPLATES = (
+    ("customs_clearance_fee", "清关费", "goods_value", "customs_declaration"),
+    ("import_tax", "进口税费", "goods_value", "tax_certificate"),
+    ("destination_delivery", "目的地配送费", "gross_weight", "expense_invoice"),
+)
+
+
+def _normalized_fee_name(value: object) -> str:
+    return "".join(str(value or "").strip().casefold().replace("／", "/").split())
+
+
+def build_default_fee_templates(transport_mode: str) -> list[dict]:
+    mode = str(transport_mode or "SEA").strip().upper()
+    if mode not in TRANSPORT_FEE_PAIRS:
+        mode = "SEA"
+    rows = [*TRANSPORT_FEE_PAIRS[mode], *COMMON_FEE_TEMPLATES]
+    return [
+        {
+            "name": "",
+            "logical_fee_key": key,
+            "rule_code": key,
+            "expense_category": label,
+            "amount_status": "MISSING",
+            "amount": "",
+            "currency": "RMB",
+            "allocation_basis": basis,
+            "basis_field": basis,
+            "scope_type": "ALL_ITEMS",
+            "scope_value_json": "[]",
+            "required_evidence_role": evidence_role,
+            "included_in_fee_key": "",
+            "priority_no": index,
+            "remark": "",
+            "is_active": 1,
+            "is_enabled": 1,
+            "virtual": True,
+        }
+        for index, (key, label, basis, evidence_role) in enumerate(rows, start=1)
+    ]
+
+
+def map_historical_fee_key(fee: dict, transport_mode: str) -> str:
+    explicit = str(fee.get("logical_fee_key") or "").strip()
+    if explicit:
+        return explicit
+    aliases = {}
+    for row in build_default_fee_templates(transport_mode):
+        key = row["logical_fee_key"]
+        aliases[_normalized_fee_name(row["expense_category"])] = key
+        aliases[_normalized_fee_name(key)] = key
+    aliases.update(
+        {
+            "oceanfreight": "international_sea_freight",
+            "seafreight": "international_sea_freight",
+            "airfreight": "international_air_freight",
+            "expressfreight": "international_express_fee",
+            "customsclearance": "customs_clearance_fee",
+            "importduty": "import_tax",
+            "delivery": "destination_delivery",
+        }
+    )
+    for candidate in (fee.get("expense_category"), fee.get("rule_code")):
+        matched = aliases.get(_normalized_fee_name(candidate))
+        if matched:
+            return matched
+    return ""
+
+
+def _decorate_historical_rules(rules: list[dict], transport_mode: str) -> list[dict]:
+    """Add read-time logical identities without rewriting historical rows."""
+
+    decorated = []
+    for raw in rules or []:
+        row = dict(raw or {})
+        original_key = str(row.get("logical_fee_key") or "").strip()
+        mapped_key = map_historical_fee_key(row, transport_mode)
+        if mapped_key:
+            row["logical_fee_key"] = mapped_key
+            row["historical_name_mapped"] = not bool(original_key)
+            row["legacy_unmapped"] = False
+        else:
+            identity = str(row.get("name") or row.get("rule_code") or "unidentified").strip()
+            row["logical_fee_key"] = original_key or f"legacy:{identity}"
+            row["historical_name_mapped"] = False
+            row["legacy_unmapped"] = True
+        row["virtual"] = False
+        decorated.append(row)
+    return decorated
+
+
+def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) -> list[dict]:
+    """Overlay persisted fees on the five read-only defaults for this transport."""
+
+    templates = build_default_fee_templates(transport_mode)
+    template_by_key = {row["logical_fee_key"]: dict(row) for row in templates}
+    extras = []
+    duplicate_names: dict[str, list[str]] = {}
+    for row in _decorate_historical_rules(existing_fees, transport_mode):
+        key = str(row.get("logical_fee_key") or "")
+        if key in template_by_key:
+            if not template_by_key[key].get("virtual"):
+                duplicate_names.setdefault(key, []).append(str(row.get("name") or ""))
+                continue
+            template_by_key[key] = {**template_by_key[key], **row, "virtual": False}
+        else:
+            extras.append(row)
+    rows = [template_by_key[row["logical_fee_key"]] for row in templates]
+    for row in rows:
+        names = duplicate_names.get(str(row.get("logical_fee_key") or ""), [])
+        if names:
+            row["duplicate_rule_names"] = names
+            row["requires_review"] = True
+    rows.extend(extras)
+    return rows
+
+
+def _safe_json_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        loaded = json.loads(value or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _candidate_currency(payload: dict) -> str:
+    for key, value in payload.items():
+        if str(key).strip().casefold() in {"currency", "currency_code", "币种"}:
+            currency = str(value or "").strip().upper()
+            if currency:
+                return "RMB" if currency == "CNY" else currency
+    for value in payload.values():
+        if isinstance(value, dict):
+            nested = _candidate_currency(value)
+            if nested:
+                return nested
+    return ""
+
+
+def _extract_amount_candidates(payload: dict) -> list[dict]:
+    currency = _candidate_currency(payload)
+    result = []
+    seen = set()
+
+    def walk(value, path: str = "", depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                normalized_key = str(key).strip().casefold()
+                is_amount_key = any(
+                    marker in normalized_key
+                    for marker in ("amount", "total", "fee", "tax", "金额", "费用", "税费")
+                )
+                if is_amount_key and not isinstance(child, (dict, list, tuple, bool)):
+                    try:
+                        amount = Decimal(str(child))
+                    except (InvalidOperation, TypeError, ValueError):
+                        amount = None
+                    if amount is not None and amount.is_finite() and amount >= 0:
+                        candidate = (
+                            format(amount.normalize(), "f"),
+                            currency,
+                            child_path,
+                        )
+                        if candidate not in seen:
+                            seen.add(candidate)
+                            result.append(
+                                {"amount": candidate[0], "currency": currency, "path": child_path}
+                            )
+                walk(child, child_path, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                walk(child, f"{path}[{index}]", depth + 1)
+
+    walk(payload)
+    return result[:30]
+
+
+def build_evidence_candidates(attachments: list[dict]) -> list[dict]:
+    """Expose parser values as candidates only; never synthesize fee records."""
+
+    result = []
+    for attachment in attachments or []:
+        parsed = _safe_json_dict(attachment.get("parse_result_json"))
+        mapped = _safe_json_dict(attachment.get("mapped_result_json"))
+        classification = parsed.get("classification") if isinstance(parsed.get("classification"), dict) else {}
+        result.append(
+            {
+                "attachment": str(attachment.get("name") or ""),
+                "file_name": str(attachment.get("file_name") or ""),
+                "file_url": str(attachment.get("file_url") or ""),
+                "source_type": str(attachment.get("source_type") or ""),
+                "attachment_type": str(attachment.get("attachment_type") or ""),
+                "parse_status": str(attachment.get("parse_status") or "Draft"),
+                "classification": classification,
+                "amount_candidates": _extract_amount_candidates({**parsed, **mapped}),
+            }
+        )
+    return result
 
 
 def _load_dict(value) -> dict:
@@ -201,31 +417,6 @@ def deduplicate_evidence_candidates(candidates: list[dict]) -> list[dict]:
     return result
 
 
-def validate_fee_completion(statuses: list[dict]) -> dict:
-    blocking = []
-    if not statuses:
-        blocking.append({"code": "NO_FEES_DEFINED", "fee_key": "", "label": "尚未建立费用清单"})
-    for status in statuses or []:
-        for todo in status.get("todos") or []:
-            blocking.append({"fee_key": status.get("fee_key") or "", **todo})
-    return {"ok": not blocking, "blocking": blocking}
-
-
-def build_completion_input_hash(statuses: list[dict]) -> str:
-    payload = [
-        {
-            "fee_key": row.get("fee_key") or "",
-            "input_hash": row.get("input_hash") or "",
-            "amount_state": row.get("amount_state") or "",
-            "allocation_state": row.get("allocation_state") or "",
-            "evidence_state": row.get("evidence_state") or "",
-        }
-        for row in sorted(statuses or [], key=lambda value: str(value.get("fee_key") or ""))
-    ]
-    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 def _now():
     if frappe is not None:
         try:
@@ -302,7 +493,8 @@ def save_fee(
         return {"ok": True, "dry_run": True, **merged}
 
     _assert_write_context(batch_name, version_name, edit_token, expected_modified)
-    existing = _query_rules(batch_name, version_name)
+    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or "SEA"
+    existing = _decorate_historical_rules(_query_rules(batch_name, version_name), transport_mode)
     merged = merge_logical_fee(existing, payload, revision=_revision())
     fee = merged["fee"]
     values = {key: fee.get(key) for key in (*FEE_FIELDS, "amount_revision", "scope_revision")}
@@ -315,11 +507,6 @@ def save_fee(
             ignore_permissions=True
         ).name
     if merged["cost_inputs_changed"]:
-        invalidate_fee_completion(
-            batch_name,
-            version_name,
-            reason=f"费用 {payload['logical_fee_key']} 的金额、性质、范围或分摊依据已变化。",
-        )
         frappe.db.set_value("Overseas Cost Batch", batch_name, "status", "Dirty", update_modified=True)
     frappe.db.commit()
     return {
@@ -424,142 +611,80 @@ def set_fee_evidence_status(
         "validated_at": _now(),
     }
     frappe.db.set_value("Overseas Cost Fee Evidence", evidence_name, values, update_modified=True)
-    if normalized in {"INVALID", "UNLINKED"}:
-        invalidate_fee_completion(
-            batch_name,
-            row.get("version"),
-            reason=f"最终凭证 {evidence_name} 已标记为 {normalized}。",
-        )
     frappe.db.commit()
     return {"ok": True, "evidence_name": evidence_name, "status": normalized, "message": "凭证状态已更新。"}
 
 
-def invalidate_fee_completion(batch_name: str, version_name: str, *, reason: str) -> dict:
-    if frappe is None:
-        return {"ok": True, "dry_run": True, "invalidated_count": 0}
-    confirmations = frappe.get_all(
-        "Overseas Cost Fee Completion",
-        filters={"batch": batch_name, "version": version_name, "status": "CONFIRMED"},
-        fields=["name", "input_hash", "creation"],
-        order_by="creation desc",
-        limit_page_length=1,
-    )
-    if not confirmations:
-        return {"ok": True, "invalidated_count": 0}
-    confirmation = confirmations[0]
-    existing = frappe.db.get_value(
-        "Overseas Cost Fee Completion",
-        {
-            "batch": batch_name,
-            "version": version_name,
-            "input_hash": confirmation.get("input_hash"),
-            "status": "INVALIDATED",
-        },
-        "name",
-    )
-    if existing:
-        return {"ok": True, "invalidated_count": 0, "invalidation_name": existing}
-    doc = frappe.get_doc(
-        {
-            "doctype": "Overseas Cost Fee Completion",
-            "batch": batch_name,
-            "version": version_name,
-            "input_hash": confirmation.get("input_hash"),
-            "status": "INVALIDATED",
-            "invalidated_by": _session_user(),
-            "invalidated_at": _now(),
-            "invalidation_reason": str(reason or "").strip(),
-        }
-    ).insert(ignore_permissions=True)
-    return {"ok": True, "invalidated_count": 1, "invalidation_name": doc.name}
-
-
-def invalidate_fee_completion_for_evidence(
-    attachment: str,
-    *,
-    reason: str = "最终凭证已删除或撤销。",
-    unlink: bool = True,
-) -> dict:
-    if frappe is None or not hasattr(frappe, "get_all"):
-        return {"ok": True, "dry_run": frappe is None, "affected_evidence_count": 0, "invalidated_count": 0}
-    rows = frappe.get_all(
-        "Overseas Cost Fee Evidence",
-        filters={"attachment": attachment},
-        fields=["name", "batch", "version", "validation_status"],
-        limit_page_length=1000,
-    )
-    invalidated_count = 0
-    for row in rows:
-        if unlink:
-            frappe.db.set_value(
-                "Overseas Cost Fee Evidence",
-                row["name"],
-                {
-                    "attachment": "",
-                    "validation_status": "UNLINKED",
-                    "source_revision": str(attachment),
-                    "validated_by": _session_user(),
-                    "validated_at": _now(),
-                    "remark": str(reason or "").strip(),
-                },
-                update_modified=True,
-            )
-        invalidated_count += invalidate_fee_completion(
-            row.get("batch"),
-            row.get("version"),
-            reason=reason,
-        ).get("invalidated_count", 0)
-    return {
-        "ok": True,
-        "affected_evidence_count": len(rows),
-        "invalidated_count": invalidated_count,
-    }
-
-
 def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     if frappe is None:
+        rows = compose_fee_worklist_rows([], "SEA")
+        statuses = []
+        for row in rows:
+            allocation = fee_allocation_service.allocate_fee(row, [])
+            statuses.append(
+                {
+                    **row,
+                    **fee_status_service.build_fee_status(
+                        fee=row,
+                        allocation=allocation,
+                        evidence=[],
+                    ),
+                    "allocation": allocation,
+                    "evidence": [],
+                }
+            )
         return {
             "ok": True,
             "dry_run": True,
             "batch_name": batch_name,
             "version_name": version_name,
-            "items": [],
-            "summary": fee_status_service.summarize_fee_statuses([]),
-            "input_hash": build_completion_input_hash([]),
-            "completion_status": "INCOMPLETE",
+            "transport_mode": "SEA",
+            "fees": statuses,
+            "items": statuses,
+            "summary": fee_status_service.summarize_fee_statuses(statuses),
+            "evidence_candidates": [],
         }
     version = version_name or frappe.db.get_value("Overseas Cost Batch", batch_name, "current_version")
-    rules = _query_rules(batch_name, version)
-    items = frappe.get_all(
+    if not version:
+        raise ValueError("当前批次没有可用成本版本。")
+    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or "SEA"
+    rules = compose_fee_worklist_rows(_query_rules(batch_name, version), transport_mode)
+    raw_items = frappe.get_all(
         "Overseas Cost Item",
         filters={"batch": batch_name, "version": version},
         fields=[
             "name",
             "stable_line_key",
+            "row_no",
+            "material_code",
+            "product_name",
+            "unit",
+            "purchase_uom",
+            "unit_price_uom",
             "quantity",
             "actual_shipped_qty",
+            "actual_shipped_qty_mode",
             "actual_shipped_qty_source_revision",
+            "shipped_uom",
             "goods_value",
             "gross_weight_kg",
             "volume_m3",
             "volume_weight_kg",
             "chargeable_weight_kg",
+            "project_collection",
         ],
+        order_by="row_no asc, name asc",
         limit_page_length=10000,
     )
+    from overseas_costing.services.material_input_service import present_material_row
+
+    items = [present_material_row(row) for row in raw_items]
     version_row = frappe.db.get_value(
         "Overseas Cost Version",
         version,
-        ["fx_usd_to_rmb", "fx_rmb_to_mxn", "summary_snapshot_json"],
+        ["fx_usd_to_rmb", "fx_rmb_to_mxn"],
         as_dict=True,
     ) or {}
-    try:
-        snapshot = json.loads(version_row.get("summary_snapshot_json") or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        snapshot = {}
-    saved_statuses = {
-        str(row.get("fee_key") or ""): row for row in snapshot.get("fee_statuses") or []
-    }
     evidence_rows = frappe.get_all(
         "Overseas Cost Fee Evidence",
         filters={"batch": batch_name, "version": version},
@@ -584,68 +709,42 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     }
     statuses = []
     for rule in rules:
-        key = str(rule.get("logical_fee_key") or rule.get("rule_code") or "")
+        allocation = fee_allocation_service.allocate_fee(rule, items)
         current_hash = fee_status_service.build_fee_input_hash(rule, items=items, fx_context=fx_context)
-        saved = saved_statuses.get(key) or {}
-        statuses.append(
-            fee_status_service.build_fee_status(
+        evidence = evidence_by_rule.get(str(rule.get("name") or ""), [])
+        status = fee_status_service.build_fee_status(
                 fee=rule,
-                allocation={"status": saved.get("allocation_state") or "NOT_ALLOCATED"},
-                evidence=evidence_by_rule.get(str(rule.get("name") or ""), []),
-                calculation={"input_hash": current_hash, "fee_input_hash": saved.get("input_hash") or ""},
-            )
+                allocation=allocation,
+                evidence=evidence,
+                calculation={"input_hash": current_hash},
         )
-    completion_hash = build_completion_input_hash(statuses)
-    events = frappe.get_all(
-        "Overseas Cost Fee Completion",
-        filters={"batch": batch_name, "version": version, "input_hash": completion_hash},
-        fields=["name", "status", "creation", "confirmed_by", "confirmed_at", "invalidation_reason"],
-        order_by="creation asc",
+        statuses.append({**rule, **status, "allocation": allocation, "evidence": evidence})
+
+    attachments = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters={"batch": batch_name},
+        fields=[
+            "name",
+            "version",
+            "source_type",
+            "attachment_type",
+            "file_name",
+            "file_url",
+            "parse_status",
+            "parse_result_json",
+            "mapped_result_json",
+        ],
+        order_by="modified desc",
         limit_page_length=1000,
     )
-    completion_status = "INCOMPLETE"
-    if events:
-        completion_status = "COMPLETE" if events[-1].get("status") == "CONFIRMED" else "INVALIDATED"
     summary = fee_status_service.summarize_fee_statuses(statuses)
-    summary["completion_status"] = completion_status
     return {
         "ok": True,
         "batch_name": batch_name,
         "version_name": version,
+        "transport_mode": transport_mode,
+        "fees": statuses,
         "items": statuses,
         "summary": summary,
-        "input_hash": completion_hash,
-        "completion_status": completion_status,
-        "completion_events": events,
+        "evidence_candidates": build_evidence_candidates(attachments),
     }
-
-
-def confirm_all_fees_complete(
-    batch_name: str,
-    version_name: str,
-    expected_input_hash: str,
-    edit_token: str | None = None,
-    expected_modified: str | None = None,
-) -> dict:
-    if frappe is None:
-        return {"ok": False, "dry_run": True, "message": "当前未连接 Frappe，不会伪造费用完成确认。"}
-    _assert_write_context(batch_name, version_name, edit_token, expected_modified)
-    work = get_fee_worklist(batch_name, version_name)
-    validation = validate_fee_completion(work["items"])
-    if not validation["ok"]:
-        return {"ok": False, **validation, "message": "费用仍有未完成项，不能确认已齐。"}
-    if str(expected_input_hash or "") != work["input_hash"]:
-        return {"ok": False, "stale": True, "message": "费用输入已变化，请刷新后重新确认。"}
-    doc = frappe.get_doc(
-        {
-            "doctype": "Overseas Cost Fee Completion",
-            "batch": batch_name,
-            "version": version_name,
-            "input_hash": work["input_hash"],
-            "status": "CONFIRMED",
-            "confirmed_by": _session_user(),
-            "confirmed_at": _now(),
-        }
-    ).insert(ignore_permissions=True)
-    frappe.db.commit()
-    return {"ok": True, "completion_name": doc.name, "input_hash": work["input_hash"], "message": "已确认本批费用完整。"}

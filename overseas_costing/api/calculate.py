@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import frappe
 
-from overseas_costing.services import calculate_service
-from overseas_costing.services.access_control import require_doctype_permission
+from overseas_costing.services import calculate_service, cost_preview_service
+from overseas_costing.services.access_control import require_batch_permission, require_doctype_permission
 
 
 @frappe.whitelist()
@@ -178,4 +178,15 @@ def switch_version(batch_name: str, target_version_name: str) -> dict:
     return calculate_service.switch_version(
         batch_name=batch_name,
         target_version_name=target_version_name,
+    )
+
+
+@frappe.whitelist()
+def preview_comprehensive_cost(batch_name: str, version_name: str | None = None) -> dict:
+    """只读试算，不创建成本版本、不改写正式结果或 ERP 状态。"""
+
+    batch_name = require_batch_permission(batch_name, "read")
+    return cost_preview_service.preview_comprehensive_cost(
+        batch_name,
+        str(version_name or "") or None,
     )

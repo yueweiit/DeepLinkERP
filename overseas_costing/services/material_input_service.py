@@ -155,6 +155,66 @@ def present_material_row(item: dict) -> dict:
     return row
 
 
+def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
+    """Derive red cells from current fee bases; project ownership is informational."""
+
+    from overseas_costing.services import fee_allocation_service
+
+    presented = [present_material_row(dict(row or {})) for row in (items or [])]
+    row_states = {}
+    for row in presented:
+        key = str(row.get("stable_line_key") or row.get("name") or "")
+        reasons: dict[str, list[dict]] = {}
+        for blocking in (row.get("effective_shipping") or {}).get("blocking") or []:
+            reasons.setdefault(str(blocking.get("field") or "actual_shipped_qty"), []).append(blocking)
+        if _positive_decimal(row.get("goods_value")) is None:
+            reasons.setdefault("goods_value", []).append(
+                {"code": "GOODS_VALUE_REQUIRED", "message": "缺少采购货值。"}
+            )
+        row_states[key] = {"missing_fields": [], "field_reasons": reasons}
+
+    basis_fields = {
+        "goods_value": "goods_value",
+        "gross_weight": "gross_weight_kg",
+        "volume": "volume_m3",
+        "chargeable_weight": "chargeable_weight_kg",
+    }
+    for fee in fees or []:
+        if not fee_allocation_service.is_counted_fee(fee):
+            continue
+        if str(fee.get("scope_type") or "ALL_ITEMS").upper() == "DIRECT_ITEM":
+            continue
+        basis = str(fee.get("allocation_basis") or fee.get("basis_field") or "goods_value")
+        fieldname = basis_fields.get(basis)
+        if not fieldname:
+            continue
+        fee_key = str(fee.get("logical_fee_key") or fee.get("rule_code") or "")
+        for row in fee_allocation_service.resolve_eligible_items(fee, presented):
+            if _positive_decimal(row.get(fieldname)) is not None:
+                continue
+            key = str(row.get("stable_line_key") or row.get("name") or "")
+            state = row_states.get(key)
+            if state is None:
+                continue
+            state["field_reasons"].setdefault(fieldname, []).append(
+                {
+                    "code": "ALLOCATION_BASIS_REQUIRED",
+                    "fee_key": fee_key,
+                    "message": f"费用 {fee_key or '--'} 需要该分摊依据。",
+                }
+            )
+
+    missing_cell_count = 0
+    for state in row_states.values():
+        state["missing_fields"] = sorted(state["field_reasons"])
+        missing_cell_count += len(state["missing_fields"])
+    return {
+        "rows": row_states,
+        "missing_cell_count": missing_cell_count,
+        "affected_row_count": sum(1 for state in row_states.values() if state["missing_fields"]),
+    }
+
+
 def get_material_grid(
     batch_name: str,
     version_name: str | None = None,
@@ -197,6 +257,28 @@ def get_material_grid(
         limit_page_length=normalized_length,
     )
     items = [present_material_row(item) for item in raw_items]
+    all_items = items
+    if total > len(items):
+        all_items = [
+            present_material_row(item)
+            for item in frappe.get_all(
+                "Overseas Cost Item",
+                filters=filters,
+                fields=list(GRID_FIELDS),
+                order_by="row_no asc, name asc",
+                limit_page_length=10000,
+            )
+        ]
+    from overseas_costing.services import fee_service
+
+    transport_mode = frappe.db.get_value("Overseas Cost Batch", resolved_batch, "transport_mode") or "SEA"
+    fees = fee_service.compose_fee_worklist_rows(
+        fee_service._query_rules(resolved_batch, resolved_version),
+        transport_mode,
+    )
+    requirements = analyze_material_requirements(all_items, fees)
+    for item in items:
+        item["requirements"] = requirements["rows"].get(item["stable_line_key"], {})
     return {
         "ok": True,
         "batch_name": resolved_batch,
@@ -206,10 +288,8 @@ def get_material_grid(
         "page": normalized_page,
         "page_length": normalized_length,
         "page_count": (total + normalized_length - 1) // normalized_length,
-        "missing_cell_count": sum(
-            len(item["effective_shipping"]["blocking"])
-            for item in items
-        ),
+        "missing_cell_count": requirements["missing_cell_count"],
+        "affected_row_count": requirements["affected_row_count"],
     }
 def build_shipping_quantity_updates(
     item: dict,
