@@ -326,7 +326,7 @@ git commit -m 'feat: preview ERP payloads by site'
 - Create: `overseas_costing/services/erp_sync_service.py`
 - Create: `overseas_costing/tests/test_erp_sync_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖相同 `request_id` 返回同一结果、相同 payload 新请求不重复创建、旧回执不覆盖新版本、超时为 UNCERTAIN 且重试前查询、历史多单据歧义为 MANUAL_REQUIRED、成本版本变化不生成新采购业务键。
 
@@ -336,13 +336,13 @@ def test_cost_version_is_not_part_of_purchase_business_identity() -> None:
            purchase_business_key(batch="B1", site="S1", group="G1", version="V2")
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_service.py`
 
 Expected: FAIL because sync ledger service is absent.
 
-- [ ] **Step 3: 实现状态机和哈希**
+- [x] **Step 3: 实现状态机和哈希**
 
 ```python
 import hashlib
@@ -366,11 +366,11 @@ ALLOWED_TRANSITIONS = {
 
 `business_key = sha256(batch + site + supplier/currency/uom group + stable line keys)`；不包含成本版本。`request_id` 包含操作、站点、业务键、成本结果哈希和随机客户端意图键。所有比较采用保存的 payload hash，不依赖 UI 当前对象。
 
-- [ ] **Step 4: 定义历史关联核验**
+- [x] **Step 4: 定义历史关联核验**
 
 旧批次没有新关联时，先按批次业务标识只读查远端单据和行。唯一且物料/数量吻合才写 VERIFIED link；零条表示首次创建候选；多条、多个版本订单或行不匹配返回 `MANUAL_REQUIRED`。不得把“没有新格式 link”直接当首次推送。
 
-- [ ] **Step 5: 运行并提交**
+- [x] **Step 5: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_service.py`
 
