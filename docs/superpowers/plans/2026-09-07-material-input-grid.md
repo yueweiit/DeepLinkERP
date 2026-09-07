@@ -204,7 +204,7 @@ git commit -m 'feat: model effective shipped quantities'
 - Modify: `overseas_costing/tests/test_calculate_service.py`
 - Modify: `overseas_costing/tests/test_material_input_service.py`
 
-- [ ] **Step 1: 写失败测试，覆盖按 kg 计价、按桶发货及部分发货**
+- [x] **Step 1: 写失败测试，覆盖按 kg 计价、按桶发货及部分发货**
 
 ```python
 def test_explicit_goods_value_can_produce_per_shipped_uom_cost() -> None:
@@ -236,13 +236,13 @@ def test_incompatible_units_do_not_multiply_price_by_shipping_quantity() -> None
     assert summary["blocking"][0]["code"] == "GOODS_VALUE_OR_UOM_CONVERSION_REQUIRED"
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_calculate_service.py overseas_costing/tests/test_material_input_service.py`
 
 Expected: FAIL because calculation currently uses `quantity` for both goods amount and unit denominator.
 
-- [ ] **Step 3: 实现明确的采购金额与输出分母解析**
+- [x] **Step 3: 实现明确的采购金额与输出分母解析**
 
 在 `material_input_service.py` 增加：
 
@@ -264,7 +264,7 @@ def resolve_goods_value(item: dict) -> dict:
 
 `calculate_item_rows()` 对每行调用 `resolve_goods_value()` 和 `resolve_effective_quantity()`；行成本为本批采购金额加该行直接及分摊费用，`total_unit_rmb` 只除以该行有效发货数量。把结构化阻断原因放进汇总和行 `derived_json`，不得将缺失解析为零后宣称有效。
 
-- [ ] **Step 4: 更新旧测试的输入语义并运行**
+- [x] **Step 4: 更新旧测试的输入语义并运行**
 
 为依赖旧 `quantity` 语义的测试显式增加同单位或 `goods_value`。不要仅修改断言来保留错误行为。
 
@@ -272,7 +272,7 @@ Run: `python -m pytest -q overseas_costing/tests/test_calculate_service.py overs
 
 Expected: PASS.
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add overseas_costing/services/material_input_service.py overseas_costing/services/calculate_service.py overseas_costing/tests/test_material_input_service.py overseas_costing/tests/test_calculate_service.py overseas_costing/tests/test_batch_service.py

@@ -6,6 +6,7 @@ from pathlib import Path
 from overseas_costing.services.material_input_service import (
     ensure_stable_line_key,
     resolve_effective_quantity,
+    resolve_goods_value,
 )
 
 
@@ -79,6 +80,20 @@ def test_invalid_quantity_and_missing_unit_are_both_reported() -> None:
 def test_stable_line_key_is_preserved_or_created_once() -> None:
     assert ensure_stable_line_key({"stable_line_key": "  LINE-1  "}) == "LINE-1"
     assert ensure_stable_line_key({}, key_factory=lambda: "LINE-2") == "LINE-2"
+
+
+def test_goods_value_requires_matching_purchase_and_price_units() -> None:
+    unresolved = resolve_goods_value(
+        {"quantity": 34, "purchase_uom": "桶", "unit_price": 25, "unit_price_uom": "kg"}
+    )
+    resolved = resolve_goods_value(
+        {"quantity": 612, "purchase_uom": "kg", "unit_price": 25, "unit_price_uom": "kg"}
+    )
+
+    assert unresolved["amount"] == 0
+    assert unresolved["blocking"][0]["code"] == "GOODS_VALUE_OR_UOM_CONVERSION_REQUIRED"
+    assert resolved["amount"] == 15300
+    assert resolved["source"] == "PRICE_X_PURCHASE_QTY"
 
 
 def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:

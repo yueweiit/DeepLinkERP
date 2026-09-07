@@ -4,6 +4,7 @@ import json
 
 from overseas_costing.services.calculate_service import (
     _build_new_item_values,
+    ITEM_QUERY_FIELDS,
     batch_update_items,
     calculate_item_rows,
     confirm_actual_shipped_qty_from_quantity,
@@ -47,6 +48,62 @@ def test_new_manual_item_keeps_explicit_shipping_quantity() -> None:
 
     assert values["actual_shipped_qty"] == 32
     assert values["actual_shipped_qty_mode"] == "MANUAL_CONFIRMED"
+
+
+def test_explicit_goods_value_can_produce_per_shipped_uom_cost() -> None:
+    rows, summary = calculate_item_rows(
+        [
+            {
+                "quantity": 612,
+                "purchase_uom": "kg",
+                "unit_price": 25,
+                "unit_price_uom": "kg",
+                "goods_value": 15300,
+                "actual_shipped_qty": 34,
+                "actual_shipped_qty_mode": "EXPLICIT_SOURCE",
+                "shipped_uom": "桶",
+            }
+        ],
+        [],
+    )
+
+    assert rows[0]["goods_value"] == 15300
+    assert rows[0]["total_unit_rmb"] == 450
+    assert rows[0]["cost_output_uom"] == "桶"
+    assert summary["blocking"] == []
+
+
+def test_incompatible_units_do_not_multiply_price_by_shipping_quantity() -> None:
+    rows, summary = calculate_item_rows(
+        [
+            {
+                "quantity": 34,
+                "purchase_uom": "桶",
+                "unit_price": 25,
+                "unit_price_uom": "kg",
+                "goods_value": "",
+                "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+                "shipped_uom": "桶",
+            }
+        ],
+        [],
+    )
+
+    assert rows[0]["goods_value"] == 0
+    assert summary["blocking"][0]["code"] == "GOODS_VALUE_OR_UOM_CONVERSION_REQUIRED"
+
+
+def test_recalculation_query_loads_quantity_and_unit_provenance() -> None:
+    assert {
+        "stable_line_key",
+        "unit",
+        "purchase_uom",
+        "unit_price_uom",
+        "actual_shipped_qty",
+        "actual_shipped_qty_mode",
+        "actual_shipped_qty_source_revision",
+        "shipped_uom",
+    } <= set(ITEM_QUERY_FIELDS)
 
 
 def test_recalculate_batch_rejects_invalid_main_approval_before_writing(monkeypatch) -> None:
@@ -137,6 +194,9 @@ def test_calculate_item_rows_allocates_by_goods_value_and_weight() -> None:
             "name": "ITEM-1",
             "unit_price": 10,
             "quantity": 10,
+            "purchase_uom": "件",
+            "shipped_uom": "件",
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
             "goods_value": 100,
             "gross_weight_kg": 20,
             "mexico_customs_rmb": 10,
@@ -145,6 +205,9 @@ def test_calculate_item_rows_allocates_by_goods_value_and_weight() -> None:
             "name": "ITEM-2",
             "unit_price": 5,
             "quantity": 20,
+            "purchase_uom": "件",
+            "shipped_uom": "件",
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
             "goods_value": 100,
             "gross_weight_kg": 30,
             "mexico_customs_rmb": 10,
@@ -193,6 +256,9 @@ def test_calculate_item_rows_uses_direct_tax_fields_as_customs_cost() -> None:
                 "name": "ITEM-1",
                 "unit_price": 10,
                 "quantity": 5,
+                "purchase_uom": "件",
+                "shipped_uom": "件",
+                "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
                 "goods_value": 50,
                 "gross_weight_kg": 8,
                 "import_tax_total": 26,

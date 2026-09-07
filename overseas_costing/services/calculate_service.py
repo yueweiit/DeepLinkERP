@@ -278,6 +278,7 @@ SELECT_ITEM_ALIASES = {
     },
 }
 DEFAULT_CALC_FIELDS = [
+    "cost_output_uom",
     "goods_value",
     "goods_value_ratio",
     "weight_ratio",
@@ -294,9 +295,17 @@ ITEM_QUERY_FIELDS = [
     "batch",
     "version",
     "row_no",
+    "stable_line_key",
     "material_code",
     "product_name",
     "spec_model",
+    "unit",
+    "purchase_uom",
+    "unit_price_uom",
+    "shipped_uom",
+    "actual_shipped_qty",
+    "actual_shipped_qty_mode",
+    "actual_shipped_qty_source_revision",
     "transport_mode",
     "unit_price",
     "quantity",
@@ -787,11 +796,29 @@ def calculate_item_rows(
     """Pure calculation helper used by Frappe service and local tests."""
 
     rows = [_deepcopy(item) for item in items]
+    material_states = {}
+    blocking = []
     for row in rows:
-        quantity = _to_float(row.get("quantity"))
-        unit_price = _to_float(row.get("unit_price"))
-        if row.get("goods_value") in (None, "") and quantity and unit_price:
-            row["goods_value"] = quantity * unit_price
+        if "actual_shipped_qty_mode" not in row:
+            row["actual_shipped_qty_mode"] = (
+                "LEGACY_UNVERIFIED" if _to_float(row.get("actual_shipped_qty")) > 0 else "DEFAULT_PURCHASE"
+            )
+        quantity_state = material_input_service.resolve_effective_quantity(row)
+        goods_value_state = material_input_service.resolve_goods_value(row)
+        row["goods_value"] = float(goods_value_state["amount"])
+        row["cost_output_uom"] = quantity_state["uom"]
+        row_key = str(row.get("stable_line_key") or row.get("name") or row.get("row_no") or "")
+        row_blocking = [*goods_value_state["blocking"], *quantity_state["blocking"]]
+        for issue in row_blocking:
+            blocking.append({**issue, "item": row_key})
+        material_states[id(row)] = {
+            "quantity": quantity_state,
+            "goods_value": {
+                **goods_value_state,
+                "amount": format(goods_value_state["amount"], "f"),
+            },
+            "blocking": row_blocking,
+        }
 
     enabled_rules = [rule for rule in (rules or []) if _is_rule_enabled(rule) and _to_float(rule.get("amount"))]
     if not enabled_rules:
@@ -824,7 +851,8 @@ def calculate_item_rows(
 
     for row in rows:
         goods_value = _to_float(row.get("goods_value"))
-        quantity = _to_float(row.get("quantity"))
+        material_state = material_states[id(row)]
+        quantity = _to_float(material_state["quantity"]["quantity"])
         mexico_customs_rmb, mexico_customs_mxn, customs_detail = _direct_customs_amounts(
             row,
             fx_rmb_to_mxn,
@@ -895,6 +923,7 @@ def calculate_item_rows(
                         "chargeable_weight_kg": _round_money(_chargeable_weight_value(row), 6),
                         "fx_rmb_to_mxn": fx_rmb_to_mxn,
                         "fx_usd_to_rmb": fx_usd_to_rmb,
+                        "material_input": material_state,
                         "allocated_rules": allocated_rules,
                         "allocated_other_rmb": _round_money(allocated_other_rmb, 6),
                         "mexico_customs_rmb": _round_money(mexico_customs_rmb, 6),
@@ -922,6 +951,7 @@ def calculate_item_rows(
         "fee_pool_rmb": _round_money(total_fee_pool_rmb, 6),
         "item_count": len(rows),
         "rule_count": len(enabled_rules),
+        "blocking": blocking,
         "source_priority_policy": source_priority_service.get_source_priority_policy(),
     }
     summary["calculation_review"] = _build_calculation_review(calculated_rows, summary, enabled_rules)
@@ -965,6 +995,10 @@ def _build_calculation_review(
 
     reasons: list[str] = []
     blocking = False
+    material_blocking = summary_snapshot.get("blocking") or []
+    if material_blocking:
+        blocking = True
+        reasons.append(f"物料录入仍有 {len(material_blocking)} 个核算必填项未解决")
     if item_count <= 0:
         blocking = True
         reasons.append("当前没有物料明细，不能试算综合成本")

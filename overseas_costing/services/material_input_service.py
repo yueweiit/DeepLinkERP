@@ -62,3 +62,38 @@ def resolve_effective_quantity(item: dict) -> Dict[str, object]:
         "is_default": mode == "DEFAULT_PURCHASE",
         "blocking": blocking,
     }
+
+
+def resolve_goods_value(item: dict) -> Dict[str, object]:
+    """Resolve purchase value without multiplying quantities in incompatible units."""
+
+    explicit = _positive_decimal(item.get("goods_value"))
+    if explicit is not None:
+        return {"amount": explicit, "source": "EXPLICIT_AMOUNT", "blocking": []}
+
+    price = _positive_decimal(item.get("unit_price"))
+    purchase_quantity = _positive_decimal(item.get("quantity"))
+    price_uom = str(item.get("unit_price_uom") or "").strip()
+    purchase_uom = str(item.get("purchase_uom") or item.get("unit") or "").strip()
+    if (
+        price is not None
+        and purchase_quantity is not None
+        and price_uom
+        and price_uom == purchase_uom
+    ):
+        return {
+            "amount": price * purchase_quantity,
+            "source": "PRICE_X_PURCHASE_QTY",
+            "blocking": [],
+        }
+
+    return {
+        "amount": Decimal("0"),
+        "source": "UNRESOLVED",
+        "blocking": [
+            {
+                "code": "GOODS_VALUE_OR_UOM_CONVERSION_REQUIRED",
+                "field": "goods_value",
+            }
+        ],
+    }
