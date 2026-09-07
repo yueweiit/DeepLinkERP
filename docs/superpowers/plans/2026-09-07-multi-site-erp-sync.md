@@ -251,7 +251,7 @@ git commit -m 'feat: resolve material routes by ERP site'
 - Create: `overseas_costing/tests/test_erp_payload_grouping.py`
 - Modify: `overseas_costing/tests/test_batch_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_common_fee_is_not_duplicated_across_sites() -> None:
@@ -283,13 +283,13 @@ def test_first_push_blocks_entire_batch_if_one_item_has_no_route() -> None:
     assert result["blocking"][0]["code"] == "ITEM_ROUTE_REQUIRED"
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_payload_grouping.py overseas_costing/tests/test_batch_service.py`
 
 Expected: FAIL because current payload copies one batch subsidiary to all items and performs one push.
 
-- [ ] **Step 3: 实现分组**
+- [x] **Step 3: 实现分组**
 
 先按 `site_code`，再按目标端必要的供应商、币种及单位约束分组；分组只组织已确认的逐行金额，不重新分摊：
 
@@ -304,11 +304,11 @@ group_key = (
 
 预览返回每站点的物料、数量、采购金额、直接/分摊费用、综合金额、暂估费用键、阻断项及分组数。站点金额之和必须与成本快照一致；整柜共同费不得复制为每站点整额。
 
-- [ ] **Step 4: 拆分门槛**
+- [x] **Step 4: 拆分门槛**
 
 `build_erp_push_state()` 要求：本批成本结果已确认且未失效、所有待推送行路由及 ERP 单位齐、每个站点安全配置存在。费用可以仍为明确暂估；金额空白或分摊无效不能通过。被拒绝/撤销/终止审批继续阻断。
 
-- [ ] **Step 5: 运行并提交**
+- [x] **Step 5: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_payload_grouping.py overseas_costing/tests/test_batch_service.py`
 

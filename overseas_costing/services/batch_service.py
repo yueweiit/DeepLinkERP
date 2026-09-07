@@ -98,6 +98,109 @@ def get_batch_list(filters: dict) -> dict:
     }
 
 
+SAFE_ERP_SITE_FIELDS = (
+    "site_code",
+    "label",
+    "subsidiary_code",
+    "enabled",
+    "capability_status",
+    "cost_update_mode",
+)
+
+ERP_DETAIL_ITEM_FIELDS = (
+    "name",
+    "stable_line_key",
+    "material_code",
+    "product_name",
+    "project_collection",
+    "subsidiary_code",
+    "erp_site_code",
+    "route_status",
+    "route_revision",
+    "supplier",
+    "purchase_currency",
+    "purchase_uom",
+    "erp_stock_uom",
+    "quantity",
+    "actual_shipped_qty",
+    "goods_value",
+    "total_cost_rmb",
+    "total_unit_rmb",
+)
+
+
+def _safe_erp_site_summary(site: dict) -> dict:
+    """Return only site metadata intended for cost-workbench users."""
+
+    return {
+        "site_code": str(site.get("site_code") or ""),
+        "label": str(site.get("label") or site.get("site_code") or ""),
+        "subsidiary_code": str(site.get("subsidiary_code") or ""),
+        "enabled": int(site.get("enabled", 1) or 0),
+        "capability_status": str(site.get("capability_status") or "UNVERIFIED").upper(),
+        "cost_update_mode": str(site.get("cost_update_mode") or "DISABLED").upper(),
+    }
+
+
+def _build_multi_site_erp_detail_state(
+    *,
+    header: dict,
+    version: dict,
+    items: list[dict],
+    fee_work: dict | None,
+    site_configs: list[dict] | dict | None,
+) -> dict:
+    """Build the detail-page ERP gate from persisted row-level cost facts."""
+
+    from overseas_costing.services import erp_routing_service
+
+    safe_sites = [
+        _safe_erp_site_summary(row)
+        for row in (
+            site_configs.values() if isinstance(site_configs, dict) else (site_configs or [])
+        )
+    ]
+    fee_statuses = list((fee_work or {}).get("items") or [])
+    estimated_fee_keys = sorted(
+        str(row.get("fee_key") or "")
+        for row in fee_statuses
+        if str(row.get("amount_state") or "").upper() == "ESTIMATED" and row.get("fee_key")
+    )
+    normalized_items = []
+    for source in items or []:
+        row = {key: source.get(key) for key in ERP_DETAIL_ITEM_FIELDS}
+        actual_quantity = _as_float(row.get("actual_shipped_qty"))
+        row["effective_shipped_qty"] = actual_quantity if actual_quantity > 0 else _as_float(row.get("quantity"))
+        row["allocated_fee_rmb"] = max(
+            _as_float(row.get("total_cost_rmb")) - _as_float(row.get("goods_value")),
+            0.0,
+        )
+        row["estimated_fee_keys"] = estimated_fee_keys
+        normalized_items.append(row)
+
+    invalid_state = _build_invalid_business_state(header, items)
+    is_current_version = not header.get("current_version") or str(header.get("current_version")) == str(version.get("name") or "")
+    confirmed = (
+        str(header.get("confirm_status") or "").lower() == "confirmed"
+        and bool(str(version.get("cost_result_hash") or "").strip())
+        and is_current_version
+    )
+    state = erp_routing_service.build_erp_push_state(
+        {
+            "status": "CONFIRMED" if confirmed else "INVALIDATED",
+            "cost_result_hash": version.get("cost_result_hash") or "",
+            "invalid_business": bool(invalid_state.get("invalid")),
+            "invalid_business_reason": invalid_state.get("message") or "",
+            "items": normalized_items,
+            "fee_statuses": fee_statuses,
+            "site_configs": safe_sites,
+        }
+    )
+    state["site_configs"] = safe_sites
+    state["cost_result_hash"] = str(version.get("cost_result_hash") or "")
+    return state
+
+
 def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     source_meta = _get_batch_source_meta(batch_name)
     return {
@@ -1521,6 +1624,8 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         "source_approval_no",
         "source_instance_id",
         "source_dingtalk_url",
+        "source_approval_status",
+        "extra_json",
         "status",
         "current_version",
         "confirm_status",
@@ -1610,6 +1715,43 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     except Exception:
         pass
 
+    erp_items = []
+    if resolved_version_name:
+        item_fields = [
+            fieldname
+            for fieldname in ERP_DETAIL_ITEM_FIELDS
+            if _db_has_column("Overseas Cost Item", fieldname)
+        ]
+        try:
+            erp_items = frappe.get_all(
+                "Overseas Cost Item",
+                filters={"batch": batch_doc_name, "version": resolved_version_name},
+                fields=item_fields,
+                order_by="row_no asc",
+                limit_page_length=10000,
+            )
+        except Exception:
+            erp_items = []
+
+    safe_site_configs = []
+    try:
+        safe_site_configs = frappe.get_all(
+            "Overseas Cost ERP Site",
+            fields=list(SAFE_ERP_SITE_FIELDS),
+            order_by="site_code asc",
+            limit_page_length=1000,
+        )
+    except Exception:
+        safe_site_configs = []
+    erp_push = _build_multi_site_erp_detail_state(
+        header=header,
+        version=version,
+        items=erp_items,
+        fee_work=fee_work,
+        site_configs=safe_site_configs,
+    )
+    header.pop("extra_json", None)
+
     return {
         "ok": True,
         "message": "批次详情已返回。",
@@ -1620,6 +1762,8 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         "summary": summary,
         "fee_work": fee_work,
         "allocation_rules": rules,
+        "erp_push": erp_push,
+        "erp_preview": erp_push.get("preview") or {},
     }
 
 

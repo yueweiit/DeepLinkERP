@@ -12,6 +12,7 @@ from overseas_costing.services.batch_service import (
     _build_batch_source_status,
     _build_calculation_confirmation_readiness,
     _build_erp_push_payload,
+    _build_multi_site_erp_detail_state,
     _build_export_xlsx_content,
     _build_writeback_readiness,
     _build_writeback_field_gaps,
@@ -35,6 +36,50 @@ from overseas_costing.services.batch_service import (
     is_hidden_approval_status,
     writeback_to_erp,
 )
+
+
+def test_multi_site_erp_detail_state_exposes_safe_config_and_preview() -> None:
+    state = _build_multi_site_erp_detail_state(
+        header={"name": "B1", "confirm_status": "Confirmed"},
+        version={"name": "V1", "cost_result_hash": "H1"},
+        items=[{
+            "name": "I1",
+            "stable_line_key": "L1",
+            "route_status": "RESOLVED",
+            "erp_site_code": "PROD",
+            "subsidiary_code": "PROD_CO",
+            "supplier": "S1",
+            "purchase_currency": "RMB",
+            "erp_stock_uom": "kg",
+            "quantity": 2,
+            "goods_value": 16,
+            "total_cost_rmb": 20,
+        }],
+        fee_work={"items": []},
+        site_configs=[{
+            "site_code": "PROD",
+            "label": "生产 ERP",
+            "subsidiary_code": "PROD_CO",
+            "enabled": 1,
+            "capability_status": "VERIFIED",
+            "base_url": "https://secret.example",
+            "authorization": "Bearer secret",
+        }],
+    )
+
+    assert state["ready"] is True
+    assert state["preview"]["site_count"] == 1
+    assert state["preview"]["sites"][0]["groups"][0]["allocated_fee_rmb"] == "4.00"
+    assert state["site_configs"] == [{
+        "site_code": "PROD",
+        "label": "生产 ERP",
+        "subsidiary_code": "PROD_CO",
+        "enabled": 1,
+        "capability_status": "VERIFIED",
+        "cost_update_mode": "DISABLED",
+    }]
+    assert "base_url" not in json.dumps(state, ensure_ascii=False)
+    assert "authorization" not in json.dumps(state, ensure_ascii=False)
 
 
 def test_fee_work_snapshot_keeps_counts_and_currency_buckets_separate() -> None:
