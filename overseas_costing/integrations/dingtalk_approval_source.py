@@ -38,6 +38,32 @@ class ApprovalSourceConfig:
     sslmode: str | None = None
 
 
+def postgres_connection_kwargs(
+    config: ApprovalSourceConfig,
+    *,
+    application_name: str,
+    read_only: bool,
+) -> dict[str, Any]:
+    """集中构造 PostgreSQL 连接参数，避免刷新账号误继承只读或查询账号失去只读。"""
+
+    options = "-c statement_timeout=10000"
+    if read_only:
+        options = READ_ONLY_OPTIONS
+    kwargs: dict[str, Any] = {
+        "host": config.host,
+        "port": config.port,
+        "dbname": config.database,
+        "user": config.user,
+        "password": config.password,
+        "connect_timeout": config.connect_timeout,
+        "application_name": application_name,
+        "options": options,
+    }
+    if config.sslmode:
+        kwargs["sslmode"] = config.sslmode
+    return kwargs
+
+
 def _parse_boundary(value: str | date | datetime, *, end: bool) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -96,19 +122,13 @@ class PostgresApprovalSource:
         return psycopg.connect(row_factory=dict_row, **kwargs)
 
     def _connection(self):
-        kwargs: dict[str, Any] = {
-            "host": self.config.host,
-            "port": self.config.port,
-            "dbname": self.config.database,
-            "user": self.config.user,
-            "password": self.config.password,
-            "connect_timeout": self.config.connect_timeout,
-            "application_name": "overseas_costing",
-            "options": READ_ONLY_OPTIONS,
-        }
-        if self.config.sslmode:
-            kwargs["sslmode"] = self.config.sslmode
-        return self.connect(**kwargs)
+        return self.connect(
+            **postgres_connection_kwargs(
+                self.config,
+                application_name="overseas_costing",
+                read_only=True,
+            )
+        )
 
     @staticmethod
     def _raw_payload(row: Mapping[str, Any]) -> dict[str, Any]:

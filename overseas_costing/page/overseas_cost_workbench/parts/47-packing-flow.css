@@ -1,0 +1,805 @@
+.ocw-packing-flow-dialog {
+  --ocw-brand: #0b8cf0;
+  --ocw-brand-dark: #076fbe;
+  --ocw-brand-soft: #eaf5ff;
+}
+
+.ocw-packing-flow-dialog .modal-dialog {
+  width: min(1380px, calc(100vw - 32px));
+  max-width: min(1380px, calc(100vw - 32px));
+}
+
+.ocw-packing-flow-dialog .modal-body {
+  padding: 0;
+}
+
+.ocw-packing-flow {
+  color: #1d2b36;
+  min-height: 620px;
+}
+
+.ocw-packing-flow button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ocw-packing-card-comparison {
+  align-items: center;
+  background: #f4f9fd;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 8px;
+  padding: 8px 10px;
+}
+
+.ocw-packing-card-comparison small {
+  color: #647680;
+}
+
+.ocw-packing-card-comparison button {
+  margin-left: auto;
+}
+
+.ocw-packing-flow-head {
+  align-items: center;
+  background: linear-gradient(135deg, #f7fbff 0%, #eef7ff 100%);
+  border-bottom: 1px solid #dbe8f2;
+  display: flex;
+  gap: 32px;
+  justify-content: space-between;
+  padding: 18px 24px;
+}
+
+.ocw-packing-flow-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.ocw-packing-flow-head > div span,
+.ocw-packing-source-card span,
+.ocw-packing-workbook header span {
+  color: #71828f;
+  font-size: 12px;
+}
+
+.ocw-packing-flow-head > div strong {
+  font-size: 17px;
+}
+
+.ocw-packing-flow-head ol {
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ocw-packing-flow-head li {
+  align-items: center;
+  color: #71828f;
+  display: flex;
+  gap: 8px;
+  min-width: 145px;
+}
+
+.ocw-packing-flow-head li::after {
+  background: #cfdae3;
+  content: "";
+  height: 1px;
+  margin-left: 4px;
+  width: 24px;
+}
+
+.ocw-packing-flow-head li:last-child::after {
+  display: none;
+}
+
+.ocw-packing-flow-head li b {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #c9d7e2;
+  border-radius: 50%;
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  width: 28px;
+}
+
+.ocw-packing-flow-head li.active,
+.ocw-packing-flow-head li.done {
+  color: #076fbe;
+  font-weight: 700;
+}
+
+.ocw-packing-flow-head li.active b,
+.ocw-packing-flow-head li.done b {
+  background: #0b8cf0;
+  border-color: #0b8cf0;
+  color: #fff;
+}
+
+.ocw-packing-flow-loading,
+.ocw-packing-flow-error,
+.ocw-packing-source-step,
+.ocw-packing-preview-step,
+.ocw-packing-freight-step {
+  padding: 24px;
+}
+
+.ocw-packing-source-step {
+  display: grid;
+  grid-template-rows: auto auto minmax(220px, 1fr) auto;
+  height: min(650px, calc(100vh - 300px));
+  min-height: 430px;
+  padding-bottom: 0;
+}
+
+.ocw-packing-flow-error {
+  background: #fff4f2;
+  border-bottom: 1px solid #f4cbc3;
+  color: #b42318;
+  display: grid;
+  gap: 4px;
+}
+
+.ocw-packing-source-tabs {
+  background: #eef3f7;
+  border-radius: 12px;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 4px;
+}
+
+.ocw-packing-source-tabs button {
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  color: #536571;
+  font-weight: 700;
+  padding: 12px;
+}
+
+.ocw-packing-source-tabs button.active {
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(15, 45, 68, 0.12);
+  color: #076fbe;
+}
+
+.ocw-packing-source-toolbar,
+.ocw-packing-preview-title,
+.ocw-packing-workbook header,
+.ocw-packing-flow-footer,
+.ocw-packing-group header,
+.ocw-packing-quote-actions {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.ocw-packing-source-toolbar {
+  margin: 18px 0 12px;
+}
+
+.ocw-packing-source-toolbar p {
+  color: #647680;
+  margin: 0;
+}
+
+.ocw-packing-source-list {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 4px 12px 0;
+}
+
+.ocw-packing-source-card,
+.ocw-packing-workbook,
+.ocw-packing-group,
+.ocw-packing-preview-summary,
+.ocw-packing-quote-panel,
+.ocw-packing-result-panel {
+  background: #fff;
+  border: 1px solid #d8e3eb;
+  border-radius: 12px;
+}
+
+.ocw-packing-source-card {
+  align-items: center;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(300px, 1.5fr);
+  padding: 14px 16px;
+}
+
+.ocw-packing-source-card > div:first-child,
+.ocw-packing-workbook header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.ocw-packing-source-card.disabled {
+  opacity: 0.62;
+}
+
+.ocw-packing-sheet-choices,
+.ocw-packing-wiki-sheets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ocw-packing-source-choice {
+  background: #f8fbfd;
+  border: 1px solid #cfdde7;
+  border-radius: 9px;
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+  padding: 9px 12px;
+  text-align: left;
+}
+
+.ocw-packing-source-choice.selected {
+  background: #eaf5ff;
+  border-color: #0b8cf0;
+  box-shadow: 0 0 0 2px rgba(11, 140, 240, 0.12);
+}
+
+.ocw-packing-source-choice span {
+  color: #0b79cf;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.ocw-packing-workbook {
+  padding: 16px;
+}
+
+.ocw-packing-sheet-search {
+  display: grid;
+  gap: 5px;
+  margin: 14px 0;
+}
+
+.ocw-packing-sheet-search input,
+.ocw-packing-quote-panel input,
+.ocw-packing-quote-panel select,
+.ocw-packing-quote-panel textarea {
+  background: #f8fafc;
+  border: 1px solid #cfdce6;
+  border-radius: 8px;
+  min-height: 38px;
+  padding: 8px 10px;
+}
+
+.ocw-packing-wiki-sheet {
+  align-items: center;
+  border-bottom: 1px solid #edf1f4;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, 0.8fr) auto 150px;
+  padding: 8px 0;
+  width: 100%;
+}
+
+.ocw-packing-wiki-sheet.is-recommended {
+  background: #f4f9ff;
+  border: 1px solid #9ecdf5;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.ocw-packing-recommendation {
+  display: grid;
+  gap: 3px;
+}
+
+.ocw-packing-recommendation strong {
+  color: #076fbe;
+  font-size: 12px;
+}
+
+.ocw-packing-recommendation span {
+  color: #536571;
+  font-size: 11px;
+}
+
+.ocw-packing-sheet-meta {
+  display: grid;
+  gap: 3px;
+}
+
+.ocw-packing-sheet-meta small:first-child {
+  color: #536571;
+  font-weight: 600;
+}
+
+.ocw-packing-no-recommendation {
+  background: #fffaf0;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+}
+
+.ocw-packing-no-recommendation span {
+  color: #7c5b35;
+  font-size: 12px;
+}
+
+.ocw-packing-flow-footer {
+  background: #fff;
+  border-top: 1px solid #e3eaf0;
+  bottom: 0;
+  box-shadow: 0 -8px 16px rgba(15, 45, 68, 0.06);
+  margin: 0 -24px;
+  padding: 14px 24px;
+  position: sticky;
+  z-index: 4;
+}
+
+.ocw-packing-flow-footer.full {
+  grid-column: 1 / -1;
+}
+
+.ocw-packing-preview-step {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) 300px;
+}
+
+.ocw-packing-preview-title {
+  margin-bottom: 14px;
+}
+
+.ocw-packing-preview-title > div {
+  display: grid;
+}
+
+.ocw-packing-groups {
+  display: grid;
+  gap: 12px;
+  max-height: 520px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.ocw-packing-group {
+  overflow: hidden;
+}
+
+.ocw-packing-group.needs-confirmation {
+  border-color: #f5a524;
+}
+
+.ocw-packing-group header {
+  background: #f7fafc;
+  padding: 10px 14px;
+}
+
+.ocw-packing-group header div {
+  display: flex;
+  gap: 10px;
+}
+
+.ocw-packing-group header b {
+  background: #eaf5ff;
+  border-radius: 999px;
+  color: #076fbe;
+  font-size: 12px;
+  padding: 4px 9px;
+}
+
+.ocw-packing-group-metrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 12px 14px;
+}
+
+.ocw-packing-group-metrics span {
+  color: #647680;
+  display: grid;
+  font-size: 12px;
+}
+
+.ocw-packing-group-metrics strong {
+  color: #23343f;
+  font-size: 14px;
+}
+
+.ocw-packing-group-rows > div {
+  align-items: center;
+  border-top: 1px solid #edf2f5;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 32px 130px minmax(180px, 1fr) 120px;
+  padding: 9px 14px;
+}
+
+.ocw-packing-group-rows em {
+  font-style: normal;
+}
+
+.ocw-packing-group-decision {
+  align-items: center;
+  background: #fff8e8;
+  border-top: 1px solid #f5d899;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.ocw-packing-group-decision > div {
+  display: flex;
+  gap: 8px;
+}
+
+.ocw-packing-preview-summary {
+  align-self: start;
+  padding: 18px;
+  position: sticky;
+  top: 0;
+}
+
+.ocw-packing-preview-summary h3 {
+  margin: 0 0 12px;
+}
+
+.ocw-packing-preview-summary dl,
+.ocw-packing-result dl {
+  margin: 0;
+}
+
+.ocw-packing-preview-summary dl > div,
+.ocw-packing-result dl > div {
+  align-items: center;
+  border-bottom: 1px solid #edf2f5;
+  display: flex;
+  justify-content: space-between;
+  padding: 9px 0;
+}
+
+.ocw-packing-blockers,
+.ocw-packing-ready,
+.ocw-packing-draft-note {
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 10px;
+}
+
+.ocw-packing-blockers {
+  background: #fff3df;
+  color: #8a4b08;
+}
+
+.ocw-packing-ready {
+  background: #eaf8f0;
+  color: #067647;
+}
+
+.ocw-packing-draft-note {
+  background: #f4f7f9;
+  color: #647680;
+  font-size: 12px;
+}
+
+.ocw-packing-freight-step {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+}
+
+.ocw-packing-quote-panel,
+.ocw-packing-result-panel {
+  padding: 18px;
+}
+
+.ocw-packing-independent-note {
+  background: #fff8e8;
+  border: 1px solid #f4d486;
+  border-radius: 10px;
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+}
+
+.ocw-packing-confirmed-totals,
+.ocw-packing-result-totals {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 14px 0;
+}
+
+.ocw-packing-confirmed-totals > div,
+.ocw-packing-result-totals > div {
+  background: #f6f9fb;
+  border-radius: 9px;
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+}
+
+.ocw-packing-confirmed-totals strong,
+.ocw-packing-result-totals strong {
+  font-size: 18px;
+}
+
+.ocw-packing-quote-common,
+.ocw-packing-basis-inputs {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 14px 0;
+}
+
+.ocw-packing-quote-panel label,
+.ocw-packing-basis-inputs fieldset details label {
+  display: grid;
+  gap: 5px;
+}
+
+.ocw-packing-quote-common label.check {
+  align-items: center;
+  display: flex;
+}
+
+.ocw-packing-quote-common label.check input {
+  min-height: auto;
+}
+
+.ocw-packing-basis-inputs fieldset {
+  border: 1px solid #dce6ed;
+  border-radius: 10px;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.ocw-packing-basis-inputs legend {
+  font-size: 15px;
+  font-weight: 700;
+  padding: 0 6px;
+}
+
+.ocw-packing-basis-inputs details {
+  border-top: 1px solid #e7edf1;
+  display: grid;
+  gap: 9px;
+  padding-top: 10px;
+}
+
+.ocw-packing-basis-inputs details[open] summary {
+  margin-bottom: 10px;
+}
+
+.ocw-packing-quote-remark textarea {
+  min-height: 74px;
+  resize: vertical;
+}
+
+.ocw-packing-quote-actions {
+  margin-top: 14px;
+}
+
+.ocw-packing-result header {
+  background: #eaf5ff;
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+}
+
+.ocw-packing-result header strong {
+  color: #076fbe;
+  font-size: 22px;
+}
+
+.ocw-packing-saving {
+  background: #eaf8f0;
+  border-radius: 9px;
+  color: #067647;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+
+.ocw-packing-trace {
+  border-top: 1px solid #e5ebef;
+  padding: 10px 0;
+}
+
+.ocw-packing-result > button {
+  margin-top: 14px;
+  width: 100%;
+}
+
+.ocw-packing-result > p {
+  color: #647680;
+  font-size: 12px;
+  margin: 8px 0 0;
+  text-align: center;
+}
+
+.ocw-packing-history {
+  display: grid;
+  gap: 12px;
+  max-height: 620px;
+  overflow: auto;
+}
+
+.ocw-packing-history-row {
+  border: 1px solid #dbe5ec;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.ocw-packing-history-row > div {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.ocw-packing-history-row dl {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 12px 0;
+}
+
+.ocw-packing-history-row dl > div {
+  background: #f6f9fb;
+  border-radius: 8px;
+  display: grid;
+  padding: 8px;
+}
+
+.ocw-packing-history-row dt {
+  color: #647680;
+  font-size: 12px;
+}
+
+.ocw-packing-history-row em {
+  color: #b54708;
+  font-size: 12px;
+}
+
+.ocw-packing-history-row p {
+  color: #536571;
+  margin: 8px 0 0;
+}
+
+.ocw-packing-row-partition,
+.ocw-packing-total-decision {
+  background: #fffaf0;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.ocw-packing-row-partition legend {
+  color: #7c2d12;
+  font-size: 12px;
+  margin-bottom: 7px;
+}
+
+.ocw-packing-row-partition label {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  margin: 0 12px 8px 0;
+}
+
+.ocw-packing-row-partition button {
+  display: block;
+}
+
+.ocw-packing-total-decision {
+  display: grid;
+  gap: 7px;
+}
+
+.ocw-packing-total-decision > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ocw-packing-total-decision small,
+.ocw-packing-total-decision em {
+  color: #7c5b35;
+  font-size: 11px;
+  font-style: normal;
+}
+
+@media (max-width: 900px) {
+  .ocw-packing-flow-dialog .modal-dialog {
+    margin: 8px;
+    max-width: calc(100vw - 16px);
+    width: calc(100vw - 16px);
+  }
+
+  .ocw-packing-flow-head,
+  .ocw-packing-source-toolbar,
+  .ocw-packing-group-decision {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ocw-packing-flow-head ol {
+    overflow-x: auto;
+    width: 100%;
+  }
+
+  .ocw-packing-flow-head li {
+    min-width: 118px;
+  }
+
+  .ocw-packing-source-tabs,
+  .ocw-packing-source-card,
+  .ocw-packing-preview-step,
+  .ocw-packing-freight-step,
+  .ocw-packing-quote-common,
+  .ocw-packing-basis-inputs {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-packing-preview-summary {
+    position: static;
+  }
+
+  .ocw-packing-group-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ocw-packing-group-rows > div {
+    grid-template-columns: 28px 100px minmax(0, 1fr);
+  }
+
+  .ocw-packing-group-rows small {
+    grid-column: 2 / -1;
+  }
+
+  .ocw-packing-wiki-sheet {
+    grid-template-columns: 1fr auto;
+  }
+
+  .ocw-packing-recommendation {
+    grid-column: 1 / -1;
+  }
+
+  .ocw-packing-history-row dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ocw-packing-wiki-sheet small {
+    grid-column: 1 / -1;
+  }
+
+  .ocw-packing-sheet-meta {
+    grid-column: 1 / -1;
+  }
+
+  .ocw-packing-source-step {
+    height: calc(100vh - 230px);
+    min-height: 360px;
+  }
+
+  .ocw-packing-flow-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

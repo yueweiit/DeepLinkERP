@@ -36,7 +36,7 @@
       "fieldname": "action_type",
       "fieldtype": "Select",
       "label": "动作类型",
-      "options": "IMPORT\nEDIT\nBATCH_EDIT\nRECALCULATE\nCREATE_VERSION\nSWITCH_VERSION\nUPLOAD_ATTACHMENT\nWRITEBACK",
+      "options": "IMPORT\nEDIT\nBATCH_EDIT\nRECALCULATE\nCREATE_VERSION\nSWITCH_VERSION\nUPLOAD_ATTACHMENT\nPACKING_CONFIRM\nFREIGHT_COMPARE\nWRITEBACK",
       "reqd": 1,
       "in_list_view": 1
     },

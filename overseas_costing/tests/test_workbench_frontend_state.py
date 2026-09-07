@@ -78,6 +78,135 @@ def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_co
     assert stylesheet == (deployed / "overseas_cost_workbench.css").read_text(encoding="utf-8")
 
 
+def test_packing_flow_source_switch_clears_unconfirmed_preview() -> None:
+    result = _state_result(
+        "let state=s.createPackingFlowState();"
+        "state=s.selectPackingSource(state,'manual_attachment','ATT-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'old',groups:[],validation:{blocking:[]},totals:{gross_weight_kg:{value:'10'},volume_m3:{value:'2'}}});"
+        "state=s.selectPackingSource(state,'wiki_sheet','WB:ST-1');"
+        "console.log(JSON.stringify({kind:state.sourceKind,id:state.sourceId,preview:state.preview,snapshot:state.snapshot,step:state.step}));"
+    )
+
+    assert result == {
+        "kind": "wiki_sheet",
+        "id": "WB:ST-1",
+        "preview": None,
+        "snapshot": None,
+        "step": 1,
+    }
+
+
+def test_packing_flow_requires_group_resolution_before_step_three() -> None:
+    result = _state_result(
+        "let state=s.selectPackingSource(s.createPackingFlowState(),'wiki_sheet','WB:ST-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'rev-1',groups:[{group_id:'G-1',needs_confirmation:true}],validation:{blocking:[{code:'group_confirmation_required'}]},totals:{gross_weight_kg:{value:'10'},volume_m3:{value:'2'}}});"
+        "const before=state.canCompare;"
+        "state=s.resolvePackageGroup(state,'G-1','confirm_shared');"
+        "console.log(JSON.stringify({before,after:state.canCompare,action:state.resolutions.groups['G-1'].action}));"
+    )
+
+    assert result == {"before": False, "after": True, "action": "confirm_shared"}
+
+
+def test_packing_flow_requires_total_basis_and_supports_explicit_row_partition() -> None:
+    result = _state_result(
+        "let state=s.selectPackingSource(s.createPackingFlowState(),'wiki_sheet','WB:ST-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'rev-1',groups:[{group_id:'G-1',row_numbers:[2,3,4],needs_confirmation:true}],validation:{blocking:[{code:'group_confirmation_required'},{code:'total_mismatch',field:'gross_weight_kg'}]},totals:{gross_weight_kg:{value:'0',declared_value:'0',calculated_value:'10'},volume_m3:{value:'2'}}});"
+        "state=s.resolvePackageGroupRows(state,'G-1',[2,3,4],[2,3]);"
+        "const before=state.canCompare;"
+        "state=s.resolvePackingTotal(state,'gross_weight_kg','use_calculated');"
+        "console.log(JSON.stringify({before,after:state.canCompare,group:state.resolutions.groups['G-1'],total:state.resolutions.totals.gross_weight_kg}));"
+    )
+
+    assert result == {
+        "before": False,
+        "after": True,
+        "group": {"action": "partition", "partitions": [[2, 3], [4]]},
+        "total": {"action": "use_calculated"},
+    }
+
+
+def test_freight_quote_requires_scope_confirmation_and_remark() -> None:
+    result = _state_result(
+        "const base={currency:'USD',weight_unit_price:'1',volume_unit_price:'2'};"
+        "const missing=s.buildFreightQuotePayload(null,base);"
+        "const ready=s.buildFreightQuotePayload(null,{...base,scope_confirmed:true,quote_remark:'same route'});"
+        "console.log(JSON.stringify({missing:s.freightQuoteIsReady(missing),ready:s.freightQuoteIsReady(ready)}));"
+    )
+
+    assert result == {"missing": False, "ready": True}
+
+
+def test_packing_flow_refresh_replaces_preview_and_quote_has_no_formal_cost_action() -> None:
+    result = _state_result(
+        "let state=s.selectPackingSource(s.createPackingFlowState(),'wiki_sheet','WB:ST-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'old',groups:[{group_id:'OLD'}],material_rows:[{material_code:'OLD'}],validation:{blocking:[]},totals:{gross_weight_kg:{value:'10'},volume_m3:{value:'2'}}});"
+        "state=s.applyPackingPreview(state,{source_revision:'new',groups:[{group_id:'NEW'}],material_rows:[{material_code:'NEW'}],validation:{blocking:[]},totals:{gross_weight_kg:{value:'20'},volume_m3:{value:'3'}}});"
+        "const quote=s.buildFreightQuotePayload(state,{currency:'usd',scope_confirmed:true,weight_unit_price:'1.2',volume_unit_price:'500',weight_surcharge:'10',volume_surcharge:'20',quote_remark:'test'});"
+        "console.log(JSON.stringify({revision:state.preview.source_revision,groups:state.preview.groups.map(x=>x.group_id),rows:state.preview.material_rows.map(x=>x.material_code),quote,hasAction:Object.prototype.hasOwnProperty.call(quote,'action')}));"
+    )
+
+    assert result == {
+        "revision": "new",
+        "groups": ["NEW"],
+        "rows": ["NEW"],
+        "quote": {
+            "currency": "USD",
+            "scope_confirmed": True,
+            "weight": {"unit_price": "1.2", "surcharge": "10"},
+            "volume": {"unit_price": "500", "surcharge": "20"},
+            "quote_remark": "test",
+        },
+        "hasAction": False,
+    }
+
+
+def test_packing_flow_static_ui_contract() -> None:
+    flow = (PARTS / "86-packing-flow.js").read_text(encoding="utf-8")
+    documents = (PARTS / "65-manual-documents.js").read_text(encoding="utf-8")
+    stylesheet = (PARTS / "47-packing-flow.css").read_text(encoding="utf-8")
+    source_service = (ROOT / "services" / "packing_source_service.py").read_text(encoding="utf-8")
+
+    for label in (
+        "本地上传",
+        "钉钉审批附件/评论",
+        "装箱计划表",
+        "刷新列表",
+        "刷新资料",
+        "系统推荐",
+        "预览这张装箱计划",
+        "共享箱级数据",
+        "保存草稿",
+        "下一步：比较运费",
+        "独立试算，不修改正式费用",
+        "保存比较结果",
+        "选择表内合计",
+        "选择明细加总",
+    ):
+        assert label in flow
+    assert "获取装箱单" in documents
+    assert "openPackingFlowDialog" in flow
+    assert "localStorage.getItem" in flow
+    assert 'dialog.packingSourceTab = options.sourceTab || "wiki"' in flow
+    assert flow.index('["wiki", "装箱计划表"]') < flow.index('["approval", "钉钉审批附件/评论"]')
+    assert flow.index('["approval", "钉钉审批附件/评论"]') < flow.index('["local", "本地上传"]')
+    assert "selectRecommendedPackingSource" in flow
+    assert "auto_select_recommended" in flow
+    assert "recommendation_reasons" in flow
+    assert "business_date" in flow
+    assert "知识库年度表" not in flow
+    assert "需要刷新的年度表" not in flow
+    assert "钉钉知识库刷新失败" not in flow
+    assert "知识库 Sheet" not in source_service
+    assert ".ocw-packing-flow" in stylesheet
+    assert ".ocw-packing-recommendation" in stylesheet
+    assert "position: sticky" in stylesheet
+    dialog_rule = stylesheet.split(".ocw-packing-flow-dialog {", 1)[1].split("}", 1)[0]
+    assert "--ocw-brand: #0b8cf0" in dialog_rule
+    assert "--ocw-brand-dark: #076fbe" in dialog_rule
+    assert "--ocw-brand-soft: #eaf5ff" in dialog_rule
+
+
 def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
     redesign = (PARTS / "25-workbench-redesign.css").read_text(encoding="utf-8").lower()
     detail = (PARTS / "45-detail-page.css").read_text(encoding="utf-8").lower()

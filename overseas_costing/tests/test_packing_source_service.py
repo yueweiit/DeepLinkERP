@@ -2,6 +2,25 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "expected"),
+    [
+        ("manual_attachment", "manual_attachment"),
+        ("attachment", "approval_attachment"),
+        ("approval_attachment", "approval_attachment"),
+        ("comment", "approval_comment"),
+        ("approval_comment", "approval_comment"),
+        ("wiki_sheet", "wiki_sheet"),
+    ],
+)
+def test_normalize_packing_source_kind_keeps_legacy_aliases(source_kind, expected) -> None:
+    from overseas_costing.services import packing_source_service as service
+
+    assert service.normalize_packing_source_kind(source_kind) == expected
+
 
 def test_comment_source_preview_rechecks_hash_and_delegates_to_existing_preview(monkeypatch) -> None:
     from overseas_costing.services import packing_source_service as service

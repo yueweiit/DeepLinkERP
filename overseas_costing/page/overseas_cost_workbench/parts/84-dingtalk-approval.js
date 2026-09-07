@@ -210,24 +210,7 @@
   }
 
   async openDingtalkPackingSourcePicker() {
-    const detail = await this.loadDingtalkApprovalDetail();
-    const candidates = this.dingtalkPackingCandidates(detail);
-    const dialog = new frappe.ui.Dialog({
-      title: "从钉钉获取装箱单",
-      size: "large",
-      fields: [{ fieldtype: "HTML", fieldname: "sources", options: `
-        <div class="ocw-purchase-target"><span>当前批次</span><strong>${this.escape(detail.batch_name || "--")}</strong><em>可选表单附件、评论附件或纯评论文字；选择后先预览，不会直接写入。</em></div>
-        <div class="ocw-dingtalk-source-picker">${candidates.length ? candidates.map((item) => `<button type="button" data-action="pick-dingtalk-packing-source" data-source-kind="${item.kind}" data-source-id="${this.escape(item.id)}" data-process-instance-id="${this.escape(item.instanceId || "")}" data-file-id="${this.escape(item.fileId || "")}"><strong>${this.escape(item.label || "--")}</strong><span>${this.escape(item.meta)}</span></button>`).join("") : `<div class="ocw-detail-empty"><strong>未找到装箱候选</strong><span>系统会识别装箱单、装箱计划、packing list、发货/装柜/物品清单，以及包含数量重量的评论。</span></div>`}</div>
-      ` }],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
-    });
-    dialog.show();
-    dialog.$wrapper.on("click.ocwDingtalkPackingPicker", "[data-action='pick-dingtalk-packing-source']", (event) => {
-      const $button = $(event.currentTarget);
-      dialog.hide();
-      this.openDingtalkPackingPreview($button.attr("data-source-kind"), $button.attr("data-source-id"), $button.attr("data-process-instance-id"), $button.attr("data-file-id")).catch((error) => this.showError(error));
-    });
+    return this.openPackingFlowDialog({ sourceTab: "approval" });
   }
 
   async openDingtalkPackingPreview(sourceKind, sourceId, processInstanceId = "", fileId = "") {
