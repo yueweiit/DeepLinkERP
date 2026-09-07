@@ -1140,10 +1140,49 @@ def _attach_batch_calculation_snapshot(items: list[dict]) -> list[dict]:
         summary = _load_json(version.get("summary_snapshot_json"))
         rules = _load_json(version.get("rule_snapshot_json"))
         item["summary_snapshot"] = summary
+        item["fee_work"] = _fee_work_from_summary_snapshot(summary)
         item["ai_allocation"] = summary.get("ai_allocation") or {}
         item["allocation_rule_snapshot"] = rules if isinstance(rules, list) else []
         item["calculated_at"] = version.get("calculated_at")
     return items
+
+
+def _fee_work_from_summary_snapshot(summary: dict | None) -> dict:
+    snapshot = summary if isinstance(summary, dict) else {}
+    statuses = snapshot.get("fee_statuses")
+    statuses = statuses if isinstance(statuses, list) else []
+    base = snapshot.get("fee_work")
+    base = base if isinstance(base, dict) else {}
+    todo_count = sum(len(row.get("todos") or []) for row in statuses)
+    if not statuses:
+        todo_count = int(_as_float(base.get("todo_count")))
+    evidence_codes = {"EVIDENCE_REQUIRED", "EVIDENCE_VALIDATION_REQUIRED", "ACTUAL_CONFIRMATION_INVALID"}
+    evidence_todo_count = sum(
+        1
+        for row in statuses
+        for todo in row.get("todos") or []
+        if todo.get("code") in evidence_codes
+    )
+    recalculate_fee_count = sum(
+        1
+        for row in statuses
+        if any(todo.get("code") == "RECALCULATE_REQUIRED" for todo in row.get("todos") or [])
+    )
+    completion_status = str(base.get("completion_status") or "").upper()
+    if not completion_status:
+        completion_status = "COMPLETE" if base.get("is_complete") and statuses else "INCOMPLETE"
+    return {
+        "affected_fee_count": int(_as_float(base.get("affected_fee_count"))),
+        "missing_amount_fee_count": int(_as_float(base.get("missing_amount_fee_count"))),
+        "estimated_fee_count": int(_as_float(base.get("estimated_fee_count"))),
+        "unallocated_by_currency": dict(base.get("unallocated_by_currency") or {}),
+        "estimated_by_currency": dict(base.get("estimated_by_currency") or {}),
+        "todo_count": todo_count,
+        "evidence_todo_count": evidence_todo_count,
+        "recalculate_fee_count": recalculate_fee_count,
+        "completion_status": completion_status,
+        "items": statuses,
+    }
 
 
 def _to_bool(value) -> bool:
@@ -1523,6 +1562,7 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
                 "fx_rmb_to_mxn",
                 "calculated_at",
                 "summary_snapshot_json",
+                "cost_result_hash",
             ],
             as_dict=True,
         ) or {}
@@ -1533,10 +1573,42 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         rules = frappe.get_all(
             "Overseas Cost Allocation Rule",
             filters={"batch": batch_doc_name, "version": resolved_version_name},
-            fields=["name", "rule_code", "expense_category", "allocation_basis", "currency", "amount", "remark", "is_enabled"],
+            fields=[
+                "name",
+                "rule_code",
+                "logical_fee_key",
+                "expense_category",
+                "amount_status",
+                "allocation_basis",
+                "currency",
+                "amount",
+                "scope_type",
+                "scope_value_json",
+                "scope_revision",
+                "amount_revision",
+                "required_evidence_role",
+                "included_in_fee_key",
+                "remark",
+                "is_enabled",
+            ],
             order_by="priority_no asc, modified asc",
             limit_page_length=1000,
         )
+
+    fee_work = _fee_work_from_summary_snapshot(summary)
+    try:
+        from overseas_costing.services import fee_service
+
+        live_fee_work = fee_service.get_fee_worklist(batch_doc_name, resolved_version_name)
+        if live_fee_work.get("ok"):
+            fee_work = {
+                **live_fee_work.get("summary", {}),
+                "items": live_fee_work.get("items", []),
+                "input_hash": live_fee_work.get("input_hash") or "",
+                "completion_status": live_fee_work.get("completion_status") or "INCOMPLETE",
+            }
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -1546,6 +1618,7 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         "header": header,
         "version": version,
         "summary": summary,
+        "fee_work": fee_work,
         "allocation_rules": rules,
     }
 

@@ -13,7 +13,7 @@ except Exception:  # pragma: no cover - 本地纯函数测试时保持可导入
 from overseas_costing.services import batch_service, material_input_service
 
 
-ISSUE_ORDER = ("purchase", "logistics", "calculation", "erp_failed")
+ISSUE_ORDER = ("fees_incomplete", "purchase", "logistics", "calculation", "erp_failed")
 FIELD_GROUPS = {
     "basic": ("A", "H"),
     "purchase": ("I", "P"),
@@ -132,7 +132,15 @@ def classify_batch(batch: dict, stats: dict) -> dict:
     ).lower()
     status = str(batch.get("status") or "").lower()
     writeback = str(batch.get("writeback_status") or "").lower()
+    fee_work = (
+        stats.get("fee_status")
+        or batch.get("fee_work")
+        or (batch.get("summary_snapshot") or {}).get("fee_work")
+        or {}
+    )
     issues = []
+    if int(_as_float(fee_work.get("affected_fee_count"))) > 0:
+        issues.append("fees_incomplete")
     if (
         approval_state in {"missing", "pending", "excluded"}
         or not batch.get("subsidiary_code")
@@ -150,6 +158,7 @@ def classify_batch(batch: dict, stats: dict) -> dict:
         issues.append("erp_failed")
     primary = next((code for code in ISSUE_ORDER if code in issues), "ready")
     action = {
+        "fees_incomplete": "fees",
         "purchase": "supplement",
         "logistics": "supplement",
         "calculation": "recalculate",
@@ -168,6 +177,8 @@ def filter_batches_for_task(rows: list[dict], task: str) -> list[dict]:
             for row in rows
             if _as_float(row.get("actual_total_cost_rmb") or row.get("estimated_total_cost_rmb")) > 0
         ]
+    if task == "fees":
+        return [row for row in rows if "fees_incomplete" in row.get("issue_codes", [])]
     if task == "erp":
         return [
             row
@@ -179,6 +190,23 @@ def filter_batches_for_task(rows: list[dict], task: str) -> list[dict]:
             )
         ]
     return list(rows)
+
+
+def summarize_batches(rows: list[dict]) -> dict:
+    counts = {
+        "purchase": 0,
+        "logistics": 0,
+        "calculation": 0,
+        "erp_failed": 0,
+        "fees_incomplete": 0,
+        "fee_todos": 0,
+    }
+    for row in rows or []:
+        for code in row.get("issue_codes") or []:
+            if code in counts:
+                counts[code] += 1
+        counts["fee_todos"] += int(_as_float((row.get("fee_work") or {}).get("todo_count")))
+    return counts
 
 
 def select_item_columns(columns: list[dict], group: str) -> list[dict]:
@@ -559,10 +587,7 @@ def get_workbench_batches(
 
 
 def get_workbench_summary(filters: dict | None = None) -> dict:
-    counts = {"purchase": 0, "logistics": 0, "calculation": 0, "erp_failed": 0}
-    for row in _classified_batches(filters):
-        for code in row["issue_codes"]:
-            counts[code] += 1
+    counts = summarize_batches(_classified_batches(filters))
     return {"ok": True, "counts": counts}
 
 

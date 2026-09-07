@@ -458,7 +458,7 @@ git commit -m 'feat: manage fee evidence and final confirmation'
 - Modify: `overseas_costing/tests/test_workbench_service.py`
 - Modify: `overseas_costing/tests/test_batch_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_pushed_batch_remains_pending_when_fee_is_estimated() -> None:
@@ -489,13 +489,13 @@ def test_workbench_summary_does_not_sum_fee_todo_labels_as_fee_count() -> None:
     assert summary["fee_todos"] == 3
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_workbench_service.py overseas_costing/tests/test_batch_service.py`
 
 Expected: FAIL because workbench classification currently only knows purchase/logistics/calculation/ERP failure.
 
-- [ ] **Step 3: 加入结构化摘要**
+- [x] **Step 3: 加入结构化摘要**
 
 批次列表每行返回：
 
@@ -513,7 +513,7 @@ Expected: FAIL because workbench classification currently only knows purchase/lo
 
 `filter_batches_for_task()` 增加 `fees` 筛选，但保留 `pending/cost/erp` 兼容。详情同时返回逐费用待办和可定位稳定键；不同币种不直接相加。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_workbench_service.py overseas_costing/tests/test_batch_service.py`
 

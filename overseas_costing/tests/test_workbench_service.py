@@ -16,6 +16,7 @@ from overseas_costing.services.workbench_service import (
     normalize_page,
     operation_error,
     select_item_columns,
+    summarize_batches,
 )
 from overseas_costing.services.batch_service import EXCEL_COLUMNS
 
@@ -67,6 +68,64 @@ def test_classify_batch_marks_calculated_batch_ready_for_cost_review() -> None:
     assert result["issue_codes"] == []
     assert result["primary_issue"] == "ready"
     assert result["primary_action"] == "view"
+
+
+def test_pushed_batch_remains_pending_when_fee_is_estimated() -> None:
+    row = classify_batch(
+        {
+            "writeback_status": "Success",
+            "status": "Calculated",
+            "estimated_total_cost_rmb": 100,
+            "subsidiary_code": "MX",
+            "source_status": {"purchase_approval_sync_state": "valid"},
+        },
+        {
+            "item_count": 2,
+            "missing_purchase_count": 0,
+            "missing_logistics_count": 0,
+            "fee_status": {"estimated_fee_count": 1, "affected_fee_count": 1},
+        },
+    )
+
+    assert "fees_incomplete" in row["issue_codes"]
+    assert row["primary_issue"] == "fees_incomplete"
+
+
+def test_workbench_summary_does_not_sum_fee_todo_labels_as_fee_count() -> None:
+    summary = summarize_batches(
+        [
+            {
+                "name": "B1",
+                "issue_codes": ["fees_incomplete"],
+                "fee_work": {
+                    "affected_fee_count": 1,
+                    "todo_count": 3,
+                    "items": [
+                        {
+                            "fee_key": "TAX",
+                            "todos": [
+                                {"code": "ACTUAL_AMOUNT_REQUIRED"},
+                                {"code": "EVIDENCE_REQUIRED"},
+                                {"code": "RECALCULATE_REQUIRED"},
+                            ],
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+
+    assert summary["fees_incomplete"] == 1
+    assert summary["fee_todos"] == 3
+
+
+def test_fee_task_keeps_only_batches_with_incomplete_fees() -> None:
+    rows = [
+        {"name": "FEE", "issue_codes": ["fees_incomplete"]},
+        {"name": "ERP", "issue_codes": ["erp_failed"]},
+    ]
+
+    assert [row["name"] for row in filter_batches_for_task(rows, "fees")] == ["FEE"]
 
 
 def test_classified_batches_hides_only_invalid_main_approval(monkeypatch) -> None:

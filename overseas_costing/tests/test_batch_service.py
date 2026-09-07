@@ -16,6 +16,7 @@ from overseas_costing.services.batch_service import (
     _build_writeback_readiness,
     _build_writeback_field_gaps,
     _export_cell_value,
+    _fee_work_from_summary_snapshot,
     _load_erp_push_context,
     _normalize_item_query_filters,
     _normalize_limit,
@@ -34,6 +35,37 @@ from overseas_costing.services.batch_service import (
     is_hidden_approval_status,
     writeback_to_erp,
 )
+
+
+def test_fee_work_snapshot_keeps_counts_and_currency_buckets_separate() -> None:
+    result = _fee_work_from_summary_snapshot(
+        {
+            "fee_statuses": [
+                {"fee_key": "FREIGHT", "todos": [{"code": "ACTUAL_AMOUNT_REQUIRED"}]},
+                {
+                    "fee_key": "TAX",
+                    "todos": [
+                        {"code": "EVIDENCE_REQUIRED"},
+                        {"code": "RECALCULATE_REQUIRED"},
+                    ],
+                },
+            ],
+            "fee_work": {
+                "affected_fee_count": 2,
+                "missing_amount_fee_count": 0,
+                "estimated_fee_count": 1,
+                "unallocated_by_currency": {"CNY": "80", "MXN": "200"},
+                "completion_status": "INCOMPLETE",
+            },
+        }
+    )
+
+    assert result["affected_fee_count"] == 2
+    assert result["todo_count"] == 3
+    assert result["evidence_todo_count"] == 1
+    assert result["recalculate_fee_count"] == 1
+    assert result["unallocated_by_currency"] == {"CNY": "80", "MXN": "200"}
+    assert result["completion_status"] == "INCOMPLETE"
 
 
 def test_named_gate_builders_expose_distinct_cost_and_erp_states() -> None:
