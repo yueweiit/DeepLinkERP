@@ -402,3 +402,67 @@ def test_packing_plan_is_contextual_input_not_globally_required_document() -> No
         definition = documents.split(f'code: "{code}"', 1)[1].split("}", 1)[0]
         assert "required: false" in definition
         assert "有则导入" in definition
+
+
+def test_fee_task_and_fee_issue_have_stable_url_state() -> None:
+    result = _state_result(
+        "const parsed=s.parseWorkbenchState('http://localhost/app?screen=detail&batch=B-1&task=fees&tab=documents&issue=fee%3ATAX');"
+        "console.log(JSON.stringify({task:parsed.task,tab:parsed.tab,focus:s.feeFocusFromIssue(parsed.issue),action:s.primaryActionForIssue('fees_incomplete'),actionTab:s.detailTabForAction('fees')}));"
+    )
+
+    assert result == {
+        "task": "fees",
+        "tab": "documents",
+        "focus": "TAX",
+        "action": {"action": "fees", "label": "处理费用"},
+        "actionTab": "documents",
+    }
+
+
+def test_fee_work_summary_counts_fees_and_todos_separately() -> None:
+    result = _state_result(
+        "const work={items:[{logical_fee_key:'TAX',todos:[{code:'AMOUNT_REQUIRED'},{code:'ALLOCATION_REQUIRED'},{code:'EVIDENCE_REQUIRED'}]}],summary:{erp_status:'Success'}};"
+        "console.log(JSON.stringify(s.summarizeFeeWork(work)));"
+    )
+
+    assert result == {"affectedFeeCount": 1, "todoCount": 3, "isComplete": False}
+
+
+def test_fee_todo_labels_are_distinct_and_actionable() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify(['AMOUNT_REQUIRED','ALLOCATION_REQUIRED','ACTUAL_AMOUNT_REQUIRED','EVIDENCE_REQUIRED','RECALCULATE_REQUIRED'].map((code)=>s.feeTodoPresentation(code))));"
+    )
+
+    assert [item["label"] for item in result] == ["金额待补", "待分摊", "暂估待实际", "凭证待补", "待重算"]
+    assert all(item["action"] for item in result)
+
+
+def test_erp_success_does_not_hide_fee_todos() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify(s.summarizeFeeWork({summary:{erp_status:'Success'},items:[{logical_fee_key:'FREIGHT',todos:[{code:'ACTUAL_AMOUNT_REQUIRED'}]}]})));"
+    )
+
+    assert result == {"affectedFeeCount": 1, "todoCount": 1, "isComplete": False}
+
+
+def test_fee_worklist_is_first_and_exposes_visible_states() -> None:
+    fee_worklist = (PARTS / "78-fee-worklist.js").read_text(encoding="utf-8")
+    detail = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
+    view = (PARTS / "35-workbench-view.js").read_text(encoding="utf-8")
+    vouchers = (PARTS / "40-vouchers.js").read_text(encoding="utf-8")
+    stylesheet = (PARTS / "49-fee-worklist.css").read_text(encoding="utf-8")
+
+    assert detail.index('data-area="fee-worklist"') < detail.index('data-area="manual-documents"')
+    assert "renderFeeWorklist" in detail
+    assert "成本处理" in detail
+    assert "ERP 同步" in detail
+    assert "fees_incomplete" in view
+    for label in ("只看待办", "全部费用"):
+        assert label in fee_worklist
+    assert "overseas_costing.api.fees.get_fee_worklist" in fee_worklist
+    assert "overseas_costing.api.fees.save_fee" in fee_worklist
+    assert "overseas_costing.api.fees.link_fee_evidence" in fee_worklist
+    assert "overseas_costing.api.fees.confirm_all_fees_complete" in fee_worklist
+    assert "refreshFeeWorkAfterVoucherChange" in vouchers
+    assert ".ocw-fee-row.is-error" in stylesheet
+    assert ".ocw-fee-row.is-warning" in stylesheet

@@ -3,7 +3,7 @@
   root.OverseasCostWorkbenchState = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window, function () {
-  const TASKS = new Set(["pending", "cost", "erp"]);
+  const TASKS = new Set(["pending", "fees", "cost", "erp"]);
   const TABS = new Set(["overview", "dingtalk", "documents", "items", "vouchers", "audit"]);
   const TRANSPORT_MODE_ALIASES = Object.freeze({
     SEA: "SEA",
@@ -176,6 +176,7 @@
 
   function primaryActionForIssue(issue) {
     const actions = {
+      fees_incomplete: { action: "fees", label: "处理费用" },
       purchase: { action: "supplement", label: "补资料" },
       logistics: { action: "supplement", label: "补资料" },
       calculation: { action: "recalculate", label: "重新计算" },
@@ -186,9 +187,39 @@
   }
 
   function detailTabForAction(action) {
-    if (action === "supplement") return "documents";
+    if (["fees", "supplement"].includes(action)) return "documents";
     if (action === "erp_retry") return "overview";
     return "items";
+  }
+
+  function feeFocusFromIssue(issue) {
+    const value = String(issue || "");
+    if (!value.startsWith("fee:")) return "";
+    try {
+      return decodeURIComponent(value.slice(4));
+    } catch (_error) {
+      return value.slice(4);
+    }
+  }
+
+  function feeTodoPresentation(code) {
+    const definitions = {
+      AMOUNT_REQUIRED: { label: "金额待补", action: "enter_amount", tone: "error", icon: "!" },
+      ALLOCATION_REQUIRED: { label: "待分摊", action: "fix_allocation", tone: "error", icon: "!" },
+      ACTUAL_AMOUNT_REQUIRED: { label: "暂估待实际", action: "enter_actual", tone: "warning", icon: "~" },
+      EVIDENCE_REQUIRED: { label: "凭证待补", action: "link_evidence", tone: "warning", icon: "▣" },
+      EVIDENCE_VALIDATION_REQUIRED: { label: "凭证待校验", action: "validate_evidence", tone: "warning", icon: "▣" },
+      ACTUAL_CONFIRMATION_INVALID: { label: "费用待重新确认", action: "review_completion", tone: "warning", icon: "↻" },
+      RECALCULATE_REQUIRED: { label: "待重算", action: "recalculate", tone: "error", icon: "↻" },
+    };
+    return definitions[String(code || "")] || { label: String(code || "待处理"), action: "review", tone: "warning", icon: "!" };
+  }
+
+  function summarizeFeeWork(work = {}) {
+    const items = Array.isArray(work.items) ? work.items : [];
+    const affectedFeeCount = items.filter((item) => Array.isArray(item.todos) && item.todos.length).length;
+    const todoCount = items.reduce((total, item) => total + (Array.isArray(item.todos) ? item.todos.length : 0), 0);
+    return { affectedFeeCount, todoCount, isComplete: affectedFeeCount === 0 };
   }
 
   function formatNumber(value) {
@@ -522,6 +553,9 @@
     columnsForGroup,
     primaryActionForIssue,
     detailTabForAction,
+    feeFocusFromIssue,
+    feeTodoPresentation,
+    summarizeFeeWork,
     detailTabResource,
     syncModuleSidebar,
     formatNumber,

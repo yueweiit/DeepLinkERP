@@ -192,6 +192,7 @@
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const action = $(event.currentTarget).attr("data-primary-action");
       if (action === "supplement") return this.openBatchDetail(batchName, "documents");
+      if (action === "fees") return this.openBatchDetail(batchName, "documents");
       if (action === "recalculate") return this.recalculate(batchName);
       return this.openBatchDetail(batchName, OverseasCostWorkbenchState.detailTabForAction(action));
     });
@@ -248,6 +249,7 @@
     this.$root.on("click", "[data-action='detail-primary']", (event) => {
       const action = $(event.currentTarget).attr("data-primary-action");
       if (action === "supplement") return this.switchDetailTab("documents");
+      if (action === "fees") return this.switchDetailTab("documents");
       if (action === "recalculate") return this.recalculate(this.detailState.batchName);
       return this.switchDetailTab(OverseasCostWorkbenchState.detailTabForAction(action));
     });
@@ -270,6 +272,20 @@
       }
     });
     this.$root.on("click", "[data-action='material-focus-first-gap']", () => this.focusFirstMaterialGap());
+    this.$root.on("click", "[data-action='fee-retry']", () => this.loadFeeWorklist().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='fee-toggle-all']", () => {
+      this.detailState.showAllFees = !this.detailState.showAllFees;
+      this.$root.find("[data-area='fee-worklist']").html(this.renderFeeWorklist(this.detailState.feeWork || {}));
+    });
+    this.$root.on("click", "[data-action='fee-add']", () => this.openFeeEditor().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='fee-edit']", (event) => this.openFeeEditor($(event.currentTarget).attr("data-fee-key")).catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='fee-link-evidence']", (event) => this.openFeeEvidenceDialog($(event.currentTarget).attr("data-fee-key")));
+    this.$root.on("click", "[data-action='fee-todo-action']", (event) => {
+      const $button = $(event.currentTarget);
+      this.handleFeeTodoAction($button.attr("data-fee-key"), $button.attr("data-fee-action")).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='fee-confirm-complete']", () => this.confirmFeeWorkComplete().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='fee-focus']", (event) => this.focusFeeWorkItem($(event.currentTarget).attr("data-fee-key")));
     this.$root.on("paste", "[data-role='material-grid']", (event) => this.handleMaterialGridPaste(event));
     this.$root.on("input", "[data-role='material-keyword']", (event) => {
       const keyword = String($(event.currentTarget).val() || "").trim().toLowerCase();
@@ -468,6 +484,7 @@
   renderTaskTabs() {
     const tasks = [
       { key: "pending", label: "待处理", hint: "优先处理资料与计算异常" },
+      { key: "fees", label: "费用待办", hint: "追踪未分摊、暂估与凭证" },
       { key: "cost", label: "成本核对", hint: "核对已生成成本的批次" },
       { key: "erp", label: "ERP 队列", hint: "处理待推送与失败记录" },
     ];
@@ -482,6 +499,7 @@
 
   renderExceptionSummary() {
     const cards = [
+      { key: "fees_incomplete", label: "费用未完成", tone: "red" },
       { key: "purchase", label: "采购资料待补", tone: "red" },
       { key: "logistics", label: "物流资料待补", tone: "orange" },
       { key: "calculation", label: "待重新计算", tone: "blue" },
@@ -533,6 +551,7 @@
 
   issueLabel(issue) {
     return {
+      fees_incomplete: "费用未完成",
       purchase: "采购资料不完整",
       logistics: "物流资料不完整",
       calculation: "成本待计算",
@@ -862,7 +881,7 @@
     $batchList.toggleClass("has-expanded-preview", Boolean(this.resultPreviewState?.batchName));
     $batchList.html(`
       <div class="ocw-list-head">
-        <div><h2>${this.viewState.task === "pending" ? "异常批次" : this.viewState.task === "erp" ? "ERP 处理队列" : "成本核对批次"}</h2><span>${this.workbenchTotal} 个结果</span></div>
+        <div><h2>${this.viewState.task === "pending" ? "异常批次" : this.viewState.task === "fees" ? "费用待办批次" : this.viewState.task === "erp" ? "ERP 处理队列" : "成本核对批次"}</h2><span>${this.workbenchTotal} 个结果</span></div>
         <span>点击批次号或“查看详情”进入全宽详情</span>
       </div>
       <div class="ocw-batch-grid ocw-batch-grid-head" aria-hidden="true">

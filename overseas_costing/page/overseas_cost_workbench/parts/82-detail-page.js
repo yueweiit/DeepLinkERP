@@ -4,6 +4,8 @@
   }
 
   inferDetailIssue(batch = {}) {
+    const feeWork = this.detailState?.feeWork || batch.fee_work || {};
+    if (OverseasCostWorkbenchState.summarizeFeeWork(feeWork).affectedFeeCount > 0) return "fees_incomplete";
     if (batch.primary_issue) return batch.primary_issue;
     const writeback = String(batch.writeback_status || "").toLowerCase();
     const status = String(batch.status || "").toLowerCase();
@@ -66,6 +68,7 @@
         current_version: result.version_name || (result.header || {}).current_version || "",
         summary_snapshot: result.summary || {},
         allocation_rule_snapshot: result.allocation_rules || [],
+        fee_work: result.fee_work || {},
       };
       const index = this.batches.findIndex((row) => row.name === merged.name);
       if (index >= 0) this.batches[index] = merged;
@@ -74,6 +77,7 @@
       this.detailState.versionName = result.version_name || merged.current_version || "";
       this.detailState.header = merged;
       this.detailState.detail = result;
+      this.detailState.feeWork = result.fee_work || null;
       this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
       this.detailState.dirty = false;
       this.activeBatchName = merged.name;
@@ -97,6 +101,9 @@
     this.detailState.batchName = "";
     this.detailState.header = null;
     this.detailState.detail = null;
+    this.detailState.feeWork = null;
+    this.detailState.showAllFees = false;
+    this.detailState.feeScopeCache = null;
     this.detailState.dingtalkApproval = null;
     this.exportPinnedBatchName = "";
     this.dataCheckBatchName = "";
@@ -133,11 +140,13 @@
       current_version: result.version_name || (result.header || {}).current_version || this.detailState.versionName || "",
       summary_snapshot: result.summary || {},
       allocation_rule_snapshot: result.allocation_rules || [],
+      fee_work: result.fee_work || {},
     };
     const index = this.batches.findIndex((row) => row.name === batchName);
     if (index >= 0) this.batches[index] = merged;
     this.detailState.header = merged;
     this.detailState.detail = result;
+    this.detailState.feeWork = result.fee_work || this.detailState.feeWork;
     this.detailState.versionName = merged.current_version;
     this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
     this.renderDetailShell();
@@ -178,6 +187,7 @@
     const sourceStatus = batch.source_status || {};
     const documentStatus = this.sourceStatusLabel(sourceStatus, batch);
     const erpInfo = this.erpWritebackStatusInfo(batch);
+    const feeSummary = OverseasCostWorkbenchState.summarizeFeeWork(this.detailState.feeWork || batch.fee_work || {});
     const updatedAt = batch.modified || (this.detailState.detail?.version || {}).calculated_at || batch.writeback_time || "--";
     this.$root.find("[data-area='detail-screen']").html(`
       <div class="ocw-detail-page">
@@ -207,9 +217,10 @@
         </header>
         <section class="ocw-detail-statusbar">
           ${this.detailStatusChip("当前问题", this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
+          ${this.detailStatusChip("费用", feeSummary.todoCount ? `${feeSummary.affectedFeeCount} 笔 / ${feeSummary.todoCount} 项待办` : "已完成", feeSummary.todoCount ? "warn" : "ok")}
           ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
-          ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
-          ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
+          ${this.detailStatusChip("成本处理", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
+          ${this.detailStatusChip("ERP 同步", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
           ${this.detailStatusChip("最后更新", this.formatDateTimeMinute(updatedAt) || updatedAt, "neutral")}
           <span class="ocw-edit-lease-status" data-area="edit-lease-status">浏览模式 · 开始修改时自动申请编辑权</span>
         </section>
@@ -287,13 +298,15 @@
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
       <div class="ocw-detail-section-head"><div><span>第一步 · 先确认本批次费用是否齐全</span><h2>费用与凭证</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="detail-voucher">完税凭证核对</button><button class="ocw-outline-btn" type="button" data-action="detail-repull">重拉本批次</button></div></div>
+      <div data-area="fee-worklist">${this.renderFeeWorklist(this.detailState.feeWork || batch.fee_work || {}, { loading: true })}</div>
+      <div class="ocw-detail-section-head ocw-supplement-documents-head"><div><span>来源原件与补充资料</span><h2>资料附件</h2></div><span>OA 已能拉到的无需重复上传</span></div>
       <div data-area="manual-documents">${this.renderManualDocumentPanel(batch, resolvedType, [])}</div>
     `);
-    try {
-      await this.loadManualDocumentAttachments(batch, this.detailDocumentAdapter(), resolvedType);
-    } catch (error) {
-      this.showError(error);
-    }
+    const results = await Promise.allSettled([
+      this.loadFeeWorklist(),
+      this.loadManualDocumentAttachments(batch, this.detailDocumentAdapter(), resolvedType),
+    ]);
+    results.filter((result) => result.status === "rejected").forEach((result) => this.showError(result.reason));
   }
 
   async renderVoucherDetailTab() {

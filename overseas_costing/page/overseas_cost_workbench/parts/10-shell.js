@@ -93,6 +93,10 @@ class OverseasCostWorkbench {
       requestId: 0,
       skuRequestId: 0,
       refreshRequestId: 0,
+      feeRequestId: 0,
+      feeWork: null,
+      showAllFees: false,
+      feeScopeCache: null,
       dingtalkRequestId: 0,
       dingtalkApproval: null,
     };

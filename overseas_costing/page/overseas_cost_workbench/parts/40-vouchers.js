@@ -234,6 +234,7 @@
     });
     if (result.batch_name) {
       await this.refreshBatch(result.batch_name).catch((error) => this.showError(error));
+      await this.refreshFeeWorkAfterVoucherChange(result.batch_name);
     }
     try {
       await this.loadTaxCertificateRecords(dialog);
@@ -330,6 +331,7 @@
         frappe.show_alert({ message: result.message || "对比记录已删除。", indicator: "green" });
         await this.loadTaxCertificateRecords(dialog);
         await this.refreshBatch(batchName).catch((error) => this.showError(error));
+        await this.refreshFeeWorkAfterVoucherChange(batchName);
       }
     );
   }
@@ -578,6 +580,7 @@
       if (this.activeVoucherParseDialog && this.activeVoucherParseDialog.$wrapper && this.activeVoucherParseDialog.$wrapper.is(":visible")) {
         this.loadTaxCertificateRecords(this.activeVoucherParseDialog).catch((error) => this.showError(error));
       }
+      await this.refreshFeeWorkAfterVoucherChange(result.batch_name || result.batch?.name || this.detailState?.batchName || "");
       frappe.show_alert({ message: "处理结果已保存。", indicator: "green" });
     };
     frappe.confirm("确认保存这次完税凭证差异处理结果？", doSave);

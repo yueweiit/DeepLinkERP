@@ -578,23 +578,23 @@ git commit -m 'feat: expose secure fee work APIs'
 - Modify: `overseas_costing/tests/test_workbench_frontend_state.py`
 - Modify generated files via: `overseas_costing/scripts/build_workbench_assets.py`
 
-- [ ] **Step 1: 写前端失败测试**
+- [x] **Step 1: 写前端失败测试**
 
 验证批次列表显示“费用未完成”；详情头部分开显示成本处理/ERP 同步；费用区位于物料区之前；金额待补、待分摊、暂估待实际、凭证待补、待重算分别有文案和定位动作；已推送 Success 不隐藏费用待办；一笔费用三个标签仍显示“一笔费用、三项待办”。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py`
 
 Expected: FAIL because fee worklist markers and state helpers are absent.
 
-- [ ] **Step 3: 实现费用列表与操作**
+- [x] **Step 3: 实现费用列表与操作**
 
 费用行按异常优先，支持切换全部；普通操作直接编辑金额/性质/依据，少见“费用归属”默认收起并选择相关物料。凭证入口打开已有附件选择/上传，再确认关联角色。未发生/已包含要求原因；确认费用已齐先展示仍会阻断的项目。
 
 颜色规则：缺失/无效为红，暂估为橙，已完成为中性或成功色；每个状态有文字和图标标签，不能只用颜色。顶部点击定位到费用稳定键，焦点和 URL issue 参数保持可恢复。
 
-- [ ] **Step 4: 生成资源并运行测试**
+- [x] **Step 4: 生成资源并运行测试**
 
 ```bash
 python overseas_costing/scripts/build_workbench_assets.py
@@ -603,7 +603,7 @@ python -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py over
 
 Expected: PASS and source/deployed assets match.
 
-- [ ] **Step 5: 浏览器验收并提交**
+- [x] **Step 5: 浏览器验收并提交**
 
 用本地样本验证：未知金额、明确未发生、暂估已分摊、实际已分摊但缺凭证、一个费用多待办、费用变化重开、最终凭证失效、ERP 显示成功但费用仍提醒。不得上传或改动真实业务文件。
 

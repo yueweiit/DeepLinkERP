@@ -1,0 +1,141 @@
+.ocw-fee-worklist {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.ocw-fee-worklist.is-loading {
+  min-height: 140px;
+  place-items: center;
+  color: #526071;
+}
+
+.ocw-fee-summary {
+  display: grid;
+  grid-template-columns: 1.25fr .9fr .9fr auto;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #dbe4ee;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.ocw-fee-summary > div:not(.ocw-fee-summary-actions) {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+}
+
+.ocw-fee-summary span,
+.ocw-fee-summary small {
+  color: #657386;
+}
+
+.ocw-fee-summary strong {
+  color: #172235;
+  font-size: 16px;
+}
+
+.ocw-fee-summary strong.is-danger { color: #b42318; }
+.ocw-fee-summary strong.is-complete { color: #067647; }
+
+.ocw-fee-summary-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ocw-fee-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  color: #657386;
+  font-size: 12px;
+}
+
+.ocw-fee-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.ocw-fee-legend i { width: 8px; height: 8px; border-radius: 50%; }
+.ocw-fee-legend i.is-error { background: #d92d20; }
+.ocw-fee-legend i.is-warning { background: #f79009; }
+.ocw-fee-legend i.is-ok { background: #12b76a; }
+
+.ocw-fee-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ocw-fee-row {
+  display: grid;
+  grid-template-columns: minmax(220px, .85fr) minmax(280px, 1.4fr) auto;
+  gap: 12px 18px;
+  align-items: center;
+  padding: 14px 16px 12px;
+  border: 1px solid #dbe4ee;
+  border-left-width: 5px;
+  border-radius: 10px;
+  background: #fff;
+  transition: box-shadow .18s ease, border-color .18s ease;
+}
+
+.ocw-fee-row.is-error { border-left-color: #d92d20; background: #fffafa; }
+.ocw-fee-row.is-warning { border-left-color: #f79009; background: #fffcf5; }
+.ocw-fee-row.is-ok { border-left-color: #12b76a; }
+.ocw-fee-row.is-focused { border-color: #1570ef; box-shadow: 0 0 0 4px rgba(21, 112, 239, .13); }
+
+.ocw-fee-main,
+.ocw-fee-title,
+.ocw-fee-amount,
+.ocw-fee-todos,
+.ocw-fee-row-actions {
+  display: flex;
+  align-items: center;
+}
+
+.ocw-fee-main { justify-content: space-between; gap: 16px; }
+.ocw-fee-title { align-items: flex-start; flex-direction: column; gap: 2px; min-width: 0; }
+.ocw-fee-title span { color: #667085; font-size: 11px; letter-spacing: .03em; }
+.ocw-fee-title h3 { margin: 0; color: #172235; font-size: 15px; }
+.ocw-fee-amount { align-items: flex-end; flex-direction: column; gap: 2px; white-space: nowrap; }
+.ocw-fee-amount span { font-size: 11px; }
+.ocw-fee-amount span.is-error { color: #b42318; }
+.ocw-fee-amount span.is-warning { color: #b54708; }
+.ocw-fee-amount span.is-ok { color: #067647; }
+
+.ocw-fee-todos { flex-wrap: wrap; gap: 7px; }
+.ocw-fee-todo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+}
+.ocw-fee-todo.is-error { border-color: #fecdca; color: #b42318; background: #fef3f2; }
+.ocw-fee-todo.is-warning { border-color: #fedf89; color: #b54708; background: #fffaeb; }
+.ocw-fee-todo b { font-size: 12px; }
+.ocw-fee-done { color: #067647; font-size: 12px; }
+.ocw-fee-row-actions { justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+
+.ocw-fee-scope {
+  grid-column: 1 / -1;
+  padding-top: 8px;
+  border-top: 1px dashed #e5eaf0;
+  color: #667085;
+  font-size: 12px;
+}
+.ocw-fee-scope summary { width: max-content; cursor: pointer; color: #475467; }
+.ocw-fee-scope[open] { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.ocw-fee-scope[open] summary { width: 100%; }
+.ocw-fee-evidence-tip { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 8px; background: #f2f4f7; color: #475467; }
+
+@media (max-width: 1100px) {
+  .ocw-fee-summary { grid-template-columns: 1fr 1fr; }
+  .ocw-fee-row { grid-template-columns: 1fr; }
+  .ocw-fee-row-actions { justify-content: flex-start; }
+  .ocw-fee-scope { grid-column: auto; }
+}
