@@ -78,6 +78,83 @@ def test_generated_workbench_assets_include_dingtalk_parts_and_match_deployed_co
     assert stylesheet == (deployed / "overseas_cost_workbench.css").read_text(encoding="utf-8")
 
 
+def test_packing_flow_source_switch_clears_unconfirmed_preview() -> None:
+    result = _state_result(
+        "let state=s.createPackingFlowState();"
+        "state=s.selectPackingSource(state,'manual_attachment','ATT-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'old',groups:[],validation:{blocking:[]},totals:{gross_weight_kg:{value:'10'},volume_m3:{value:'2'}}});"
+        "state=s.selectPackingSource(state,'wiki_sheet','WB:ST-1');"
+        "console.log(JSON.stringify({kind:state.sourceKind,id:state.sourceId,preview:state.preview,snapshot:state.snapshot,step:state.step}));"
+    )
+
+    assert result == {
+        "kind": "wiki_sheet",
+        "id": "WB:ST-1",
+        "preview": None,
+        "snapshot": None,
+        "step": 1,
+    }
+
+
+def test_packing_flow_requires_group_resolution_before_step_three() -> None:
+    result = _state_result(
+        "let state=s.selectPackingSource(s.createPackingFlowState(),'wiki_sheet','WB:ST-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'rev-1',groups:[{group_id:'G-1',needs_confirmation:true}],validation:{blocking:[{code:'group_confirmation_required'}]},totals:{gross_weight_kg:{value:'10'},volume_m3:{value:'2'}}});"
+        "const before=state.canCompare;"
+        "state=s.resolvePackageGroup(state,'G-1','confirm_shared');"
+        "console.log(JSON.stringify({before,after:state.canCompare,action:state.resolutions.groups['G-1'].action}));"
+    )
+
+    assert result == {"before": False, "after": True, "action": "confirm_shared"}
+
+
+def test_packing_flow_refresh_replaces_preview_and_quote_has_no_formal_cost_action() -> None:
+    result = _state_result(
+        "let state=s.selectPackingSource(s.createPackingFlowState(),'wiki_sheet','WB:ST-1');"
+        "state=s.applyPackingPreview(state,{source_revision:'old',groups:[{group_id:'OLD'}],material_rows:[{material_code:'OLD'}],validation:{blocking:[]},totals:{gross_weight_kg:{value:'10'},volume_m3:{value:'2'}}});"
+        "state=s.applyPackingPreview(state,{source_revision:'new',groups:[{group_id:'NEW'}],material_rows:[{material_code:'NEW'}],validation:{blocking:[]},totals:{gross_weight_kg:{value:'20'},volume_m3:{value:'3'}}});"
+        "const quote=s.buildFreightQuotePayload(state,{currency:'usd',scope_confirmed:true,weight_unit_price:'1.2',volume_unit_price:'500',weight_surcharge:'10',volume_surcharge:'20',quote_remark:'test'});"
+        "console.log(JSON.stringify({revision:state.preview.source_revision,groups:state.preview.groups.map(x=>x.group_id),rows:state.preview.material_rows.map(x=>x.material_code),quote,hasAction:Object.prototype.hasOwnProperty.call(quote,'action')}));"
+    )
+
+    assert result == {
+        "revision": "new",
+        "groups": ["NEW"],
+        "rows": ["NEW"],
+        "quote": {
+            "currency": "USD",
+            "scope_confirmed": True,
+            "weight": {"unit_price": "1.2", "surcharge": "10"},
+            "volume": {"unit_price": "500", "surcharge": "20"},
+            "quote_remark": "test",
+        },
+        "hasAction": False,
+    }
+
+
+def test_packing_flow_static_ui_contract() -> None:
+    flow = (PARTS / "86-packing-flow.js").read_text(encoding="utf-8")
+    documents = (PARTS / "65-manual-documents.js").read_text(encoding="utf-8")
+    stylesheet = (PARTS / "47-packing-flow.css").read_text(encoding="utf-8")
+
+    for label in (
+        "本地上传",
+        "钉钉审批附件/评论",
+        "知识库年度表",
+        "刷新列表",
+        "刷新资料",
+        "共享箱级数据",
+        "保存草稿",
+        "下一步：比较运费",
+        "独立试算，不修改正式费用",
+        "保存比较结果",
+    ):
+        assert label in flow
+    assert "获取装箱单" in documents
+    assert "openPackingFlowDialog" in flow
+    assert ".ocw-packing-flow" in stylesheet
+
+
 def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
     redesign = (PARTS / "25-workbench-redesign.css").read_text(encoding="utf-8").lower()
     detail = (PARTS / "45-detail-page.css").read_text(encoding="utf-8").lower()

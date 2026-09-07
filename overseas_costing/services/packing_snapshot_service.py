@@ -10,6 +10,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 try:
+    from openpyxl import load_workbook
+except Exception:  # pragma: no cover - 仅在读取本地 Excel Sheet 名时需要
+    load_workbook = None
+
+try:
     import frappe
 except Exception:  # pragma: no cover
     frappe = None
@@ -171,8 +176,10 @@ def _apply_resolutions(preview: dict[str, Any], resolutions: dict[str, Any]) -> 
     resolved = copy.deepcopy(preview)
     group_resolutions = resolutions.get("groups") if isinstance(resolutions.get("groups"), dict) else {}
     unresolved = []
+    resolved_groups = []
     for group in resolved.get("groups") or []:
         if not group.get("needs_confirmation"):
+            resolved_groups.append(group)
             continue
         decision = group_resolutions.get(str(group.get("group_id") or ""))
         action = str((decision or {}).get("action") or "") if isinstance(decision, dict) else str(decision or "")
@@ -182,8 +189,33 @@ def _apply_resolutions(preview: dict[str, Any], resolutions: dict[str, Any]) -> 
                 if isinstance(group.get(field), dict) and group[field].get("value") is not None:
                     group[field]["count_once"] = True
             group.setdefault("evidence", []).append({"kind": "user_confirmed_shared"})
+            resolved_groups.append(group)
+        elif action == "split":
+            rows = list(group.get("row_numbers") or [])
+            for index, row_number in enumerate(rows):
+                singleton = copy.deepcopy(group)
+                singleton["group_id"] = f"{group.get('group_id')}-row-{row_number}"
+                singleton["row_numbers"] = [row_number]
+                singleton["needs_confirmation"] = False
+                singleton["suggestion_reason"] = None
+                singleton.setdefault("evidence", []).append(
+                    {"kind": "user_split", "source_group_id": group.get("group_id")}
+                )
+                if index:
+                    for field in ("net_weight_kg", "gross_weight_kg", "volume_m3", "package_count"):
+                        if isinstance(singleton.get(field), dict):
+                            singleton[field]["value"] = None
+                            singleton[field]["count_once"] = False
+                    for metric in (singleton.get("dimensions") or {}).values():
+                        if isinstance(metric, dict):
+                            metric["value"] = None
+                            metric["count_once"] = False
+                resolved_groups.append(singleton)
         else:
             unresolved.append(group.get("group_id"))
+            resolved_groups.append(group)
+    resolved["groups"] = resolved_groups
+    resolved["package_count"] = len(resolved_groups)
     validation = resolved.setdefault("validation", {})
     blocking = [
         item
@@ -375,12 +407,14 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
     manual = []
     approval = []
     for row in attachment_rows:
+        sheets = _attachment_sheet_names(row)
         item = {
             "source_id": row.get("name"),
             "source_label": row.get("file_name") or row.get("name"),
             "source_updated_at": row.get("modified"),
             "available": bool(row.get("file_url")),
             "attachment_type": row.get("attachment_type") or "",
+            "sheets": sheets,
         }
         if str(row.get("source_type") or "").upper() == "OA":
             approval.append(
@@ -448,3 +482,21 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
         "wiki_workbooks": wiki,
         "wiki_error": wiki_error,
     }
+
+
+def _attachment_sheet_names(row: dict[str, Any]) -> list[str]:
+    """只返回工作表名，不向浏览器暴露站点路径。"""
+
+    file_url = str(row.get("file_url") or "").strip()
+    file_name = str(row.get("file_name") or file_url).lower()
+    if not file_url or not file_name.endswith((".xlsx", ".xlsm")) or load_workbook is None:
+        return []
+    try:
+        path = packing_source_service.import_service._resolve_excel_file_path(file_url=file_url)
+        workbook = load_workbook(path, read_only=True, data_only=False)
+        try:
+            return [str(name)[:200] for name in workbook.sheetnames]
+        finally:
+            workbook.close()
+    except (FileNotFoundError, ValueError, OSError):
+        return []

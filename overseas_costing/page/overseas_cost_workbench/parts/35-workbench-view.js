@@ -207,6 +207,12 @@
     this.$root.on("click", "[data-action='open-dingtalk-packing-picker']", () =>
       this.openDingtalkPackingSourcePicker().catch((error) => this.showError(error))
     );
+    this.$root.on("click", "[data-action='open-packing-flow']", () =>
+      this.openPackingFlowDialog().catch((error) => this.showError(error))
+    );
+    this.$root.on("click", "[data-action='open-packing-comparison-history']", () =>
+      this.openPackingComparisonHistory().catch((error) => this.showError(error))
+    );
     this.$root.on("click", "[data-action='download-dingtalk-attachment']", (event) => {
       const $button = $(event.currentTarget);
       this.downloadDingtalkAttachmentFromDetail(
@@ -227,11 +233,9 @@
     });
     this.$root.on("click", "[data-action='use-dingtalk-packing-source']", (event) => {
       const $button = $(event.currentTarget);
-      this.openDingtalkPackingPreview(
-        $button.attr("data-source-kind"),
-        $button.attr("data-source-id"),
-        $button.attr("data-process-instance-id"),
-        $button.attr("data-file-id")
+      this.openPackingFlowFromDingtalk(
+        $button.attr("data-source-kind"), $button.attr("data-source-id"),
+        $button.attr("data-process-instance-id"), $button.attr("data-file-id")
       ).catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='toggle-detail-tools']", (event) => {

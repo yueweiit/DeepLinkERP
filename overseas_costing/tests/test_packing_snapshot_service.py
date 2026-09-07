@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 
+from openpyxl import Workbook
+
 import pytest
 
 from overseas_costing.services import packing_snapshot_service as service
@@ -189,3 +191,29 @@ def test_confirmation_rechecks_source_hash_and_rejects_stale_preview(monkeypatch
     assert result["ok"] is False
     assert result["source_changed"] is True
 
+
+def test_attachment_sheet_names_are_read_server_side_without_exposing_path(tmp_path) -> None:
+    path = tmp_path / "packing.xlsx"
+    workbook = Workbook()
+    workbook.active.title = "民打印-packing list2026.9.05"
+    workbook.create_sheet("油漆-packing list2026.9.05")
+    workbook.save(path)
+
+    result = service._attachment_sheet_names({"file_url": str(path)})
+
+    assert result == ["民打印-packing list2026.9.05", "油漆-packing list2026.9.05"]
+    assert str(path) not in repr(result)
+
+
+def test_user_can_split_a_suggested_shared_group_without_double_counting() -> None:
+    resolved = service._apply_resolutions(
+        _preview(needs_confirmation=True),
+        {"groups": {"package-1": {"action": "split"}}},
+    )
+
+    assert resolved["validation"]["blocking"] == []
+    assert resolved["validation"]["needs_group_confirmation"] is False
+    assert resolved["package_count"] == 2
+    assert [group["row_numbers"] for group in resolved["groups"]] == [[2], [3]]
+    assert resolved["groups"][0]["gross_weight_kg"]["value"] == "4197.4"
+    assert resolved["groups"][1]["gross_weight_kg"]["value"] is None

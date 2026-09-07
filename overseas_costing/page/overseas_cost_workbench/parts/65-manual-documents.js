@@ -240,12 +240,14 @@
               <span class="ocw-manual-doc-status-badge ${this.escape(status.className)}">${this.escape(status.label)}</span>
               ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${this.escape(status.note || (slot.oaSource ? "优先从钉钉读取" : "缺了再补传"))}</em>`}
             </div>
+            ${slot.attachmentType === "Packing List" && this.renderPackingComparisonCardStatus ? this.renderPackingComparisonCardStatus(batch) : ""}
             <div class="ocw-manual-doc-actions">
               ${slot.oaSource ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button>` : ""}
-              ${slot.attachmentType === "Packing List" ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-dingtalk-packing-picker">从钉钉获取</button>` : ""}
-              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">
-                ${attachment ? "重传" : "上传"}
-              </button>
+              ${
+                slot.attachmentType === "Packing List"
+                  ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="open-packing-flow">获取装箱单</button>`
+                  : `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">${attachment ? "重传" : "上传"}</button>`
+              }
               <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="manual-fill-gap" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}" data-gap-fieldname="${this.escape(focus.fieldname || "")}" data-gap-label="${this.escape(focus.label || slot.label)}">人工补填</button>
               ${
                 attachment && attachment.file_url
@@ -304,6 +306,18 @@
       },
       true
     );
+    if (logisticsType) {
+      try {
+        const comparisons = await this.call("overseas_costing.api.packing_api.list_freight_comparisons", {
+          batch_name: batch.name,
+        }, false);
+        this.packingComparisonHistoryByBatch = this.packingComparisonHistoryByBatch || {};
+        this.packingComparisonHistoryByBatch[batch.name] = Array.isArray(comparisons) ? comparisons : [];
+      } catch (_error) {
+        this.packingComparisonHistoryByBatch = this.packingComparisonHistoryByBatch || {};
+        this.packingComparisonHistoryByBatch[batch.name] = [];
+      }
+    }
     if (!result || !result.ok) {
       $target.html(`
         <div class="ocw-purchase-empty">
@@ -326,7 +340,7 @@
     }
   }
 
-  openManualDocumentUploader(batch, dialog, _logisticsType, slot) {
+  openManualDocumentUploader(batch, dialog, _logisticsType, slot, onRegistered = null) {
     const logisticsType = this.detectManualDocumentLogisticsType(batch);
     if (!logisticsType) {
       this.showPendingFeature("运输方式未识别，无法确定资料清单。");
@@ -344,7 +358,12 @@
       allow_multiple: false,
       on_success: (fileDoc) => {
         const uploaded = Array.isArray(fileDoc) ? fileDoc[0] : fileDoc;
-        this.registerManualDocumentAttachment(batch, dialog, logisticsType, slot, uploaded).catch((error) => this.showError(error));
+        this.registerManualDocumentAttachment(batch, dialog, logisticsType, slot, uploaded)
+          .then((result) => {
+            if (result && typeof onRegistered === "function") return onRegistered(result);
+            return null;
+          })
+          .catch((error) => this.showError(error));
       },
     });
     [0, 80, 200, 500, 1000, 2000].forEach((delay) => {
@@ -520,9 +539,12 @@
       return;
     }
     frappe.show_alert({ message: result.message || "资料已上传", indicator: "green" });
-    await this.loadManualDocumentAttachments(batch, dialog, logisticsType, {
-      slotCodes: Array.isArray(slot.focusSlotCodes) ? slot.focusSlotCodes : [],
-    });
+    if (dialog && dialog.$wrapper && dialog.$wrapper.find("[data-area='manual-documents']").length) {
+      await this.loadManualDocumentAttachments(batch, dialog, logisticsType, {
+        slotCodes: Array.isArray(slot.focusSlotCodes) ? slot.focusSlotCodes : [],
+      });
+    }
+    return result;
   }
 
   openManualGapFillDialog(batch, gap = {}, sourceDialog = null) {

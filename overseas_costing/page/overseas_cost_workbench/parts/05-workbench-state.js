@@ -274,6 +274,114 @@
     return true;
   }
 
+  function createPackingFlowState() {
+    return {
+      step: 1,
+      sourceKind: "",
+      sourceId: "",
+      sheetName: "",
+      preview: null,
+      resolutions: { groups: {} },
+      snapshot: null,
+      quote: null,
+      calculation: null,
+      canCompare: false,
+    };
+  }
+
+  function selectPackingSource(state, sourceKind, sourceId, sheetName = "") {
+    const current = state || createPackingFlowState();
+    const kind = String(sourceKind || "");
+    const id = String(sourceId || "");
+    const sheet = String(sheetName || "");
+    if (current.sourceKind === kind && current.sourceId === id && current.sheetName === sheet) {
+      return { ...current };
+    }
+    return {
+      ...createPackingFlowState(),
+      sourceKind: kind,
+      sourceId: id,
+      sheetName: sheet,
+    };
+  }
+
+  function packingFlowCanCompare(preview, resolutions = {}) {
+    if (!preview) return false;
+    const totals = preview.totals || {};
+    const gross = Number((totals.gross_weight_kg || {}).value);
+    const volume = Number((totals.volume_m3 || {}).value);
+    if (!(gross > 0) || !(volume > 0)) return false;
+    const groups = resolutions.groups || {};
+    const unresolved = (preview.groups || []).some((group) => {
+      if (!group || !group.needs_confirmation) return false;
+      const decision = groups[String(group.group_id || "")] || {};
+      return !["confirm_shared", "link", "shared", "split"].includes(String(decision.action || decision));
+    });
+    if (unresolved) return false;
+    return !((preview.validation || {}).blocking || []).some(
+      (item) => item && item.code !== "group_confirmation_required"
+    );
+  }
+
+  function applyPackingPreview(state, preview) {
+    const nextPreview = preview ? JSON.parse(JSON.stringify(preview)) : null;
+    const next = {
+      ...(state || createPackingFlowState()),
+      step: nextPreview ? 2 : 1,
+      preview: nextPreview,
+      resolutions: { groups: {} },
+      snapshot: null,
+      quote: null,
+      calculation: null,
+    };
+    next.canCompare = packingFlowCanCompare(next.preview, next.resolutions);
+    return next;
+  }
+
+  function resolvePackageGroup(state, groupId, action) {
+    const current = state || createPackingFlowState();
+    const next = {
+      ...current,
+      resolutions: {
+        ...(current.resolutions || {}),
+        groups: {
+          ...((current.resolutions || {}).groups || {}),
+          [String(groupId || "")]: { action: String(action || "") },
+        },
+      },
+    };
+    next.canCompare = packingFlowCanCompare(next.preview, next.resolutions);
+    return next;
+  }
+
+  function buildFreightQuotePayload(_state, fields = {}) {
+    const optional = (value) => {
+      const text = String(value ?? "").trim();
+      return text === "" ? undefined : text;
+    };
+    const basis = (prefix) => {
+      const result = {};
+      [
+        ["unit_price", `${prefix}_unit_price`],
+        ["surcharge", `${prefix}_surcharge`],
+        ["min_quantity", `${prefix}_min_quantity`],
+        ["rounding_increment", `${prefix}_rounding_increment`],
+        ["min_base_freight", `${prefix}_min_base_freight`],
+      ].forEach(([key, fieldname]) => {
+        const value = optional(fields[fieldname]);
+        if (value !== undefined) result[key] = value;
+      });
+      return result;
+    };
+    return {
+      currency: String(fields.currency || "").trim().toUpperCase(),
+      scope_confirmed: Boolean(fields.scope_confirmed),
+      weight: basis("weight"),
+      volume: basis("volume"),
+      quote_remark: String(fields.quote_remark || "").trim(),
+    };
+  }
+
   return {
     parseWorkbenchState,
     buildWorkbenchUrl,
@@ -291,6 +399,12 @@
     normalizeTransportMode,
     resolveManualDocumentLogisticsType,
     partitionManualDocumentAttachments,
+    createPackingFlowState,
+    selectPackingSource,
+    applyPackingPreview,
+    resolvePackageGroup,
+    buildFreightQuotePayload,
+    packingFlowCanCompare,
     MONETARY_FIELDS,
     TRANSPORT_MODE_ALIASES,
     VOUCHER_VALIDATION_MONETARY_FIELDS,
