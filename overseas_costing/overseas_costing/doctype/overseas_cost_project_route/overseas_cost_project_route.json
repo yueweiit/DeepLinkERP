@@ -1,0 +1,22 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Project Route",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "project_collection",
+  "track_changes": 1,
+  "field_order": ["project_collection", "subsidiary_code", "erp_site", "enabled", "valid_from", "valid_to", "revision", "remark"],
+  "fields": [
+    {"fieldname": "project_collection", "fieldtype": "Data", "label": "项目归集", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "subsidiary_code", "fieldtype": "Data", "label": "子公司编码", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "erp_site", "fieldtype": "Link", "label": "ERP 站点", "options": "Overseas Cost ERP Site", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "enabled", "fieldtype": "Check", "label": "启用", "default": 1},
+    {"fieldname": "valid_from", "fieldtype": "Date", "label": "生效日"},
+    {"fieldname": "valid_to", "fieldtype": "Date", "label": "失效日"},
+    {"fieldname": "revision", "fieldtype": "Data", "label": "路由修订", "read_only": 1},
+    {"fieldname": "remark", "fieldtype": "Small Text", "label": "备注"}
+  ],
+  "permissions": [
+    {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1, "share": 1, "print": 1, "email": 1, "export": 1}
+  ]
+}

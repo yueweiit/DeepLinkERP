@@ -103,6 +103,10 @@
     "profit_margin",
     "profit_status",
     "project_collection",
+    "subsidiary_code",
+    "erp_site_code",
+    "route_status",
+    "route_revision",
     "supplier",
     "transport_mode",
     "source_type",
@@ -623,6 +627,32 @@
       "fieldname": "project_collection",
       "fieldtype": "Data",
       "label": "项目归集"
+    },
+    {
+      "fieldname": "subsidiary_code",
+      "fieldtype": "Data",
+      "label": "子公司编码",
+      "read_only": 1
+    },
+    {
+      "fieldname": "erp_site_code",
+      "fieldtype": "Data",
+      "label": "ERP 站点编码",
+      "read_only": 1
+    },
+    {
+      "fieldname": "route_status",
+      "fieldtype": "Select",
+      "label": "ERP 路由状态",
+      "options": "UNRESOLVED\nRESOLVED\nOVERRIDDEN\nCONFLICT",
+      "default": "UNRESOLVED",
+      "read_only": 1
+    },
+    {
+      "fieldname": "route_revision",
+      "fieldtype": "Data",
+      "label": "ERP 路由修订",
+      "read_only": 1
     },
     {
       "fieldname": "supplier",

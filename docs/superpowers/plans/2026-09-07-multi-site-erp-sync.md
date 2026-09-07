@@ -64,7 +64,7 @@
 - Modify: `overseas_costing/overseas_costing/doctype/overseas_cost_item/overseas_cost_item.json`
 - Create: `overseas_costing/tests/test_erp_sync_doctypes.py`
 
-- [ ] **Step 1: 写失败测试，锁定字段和权限**
+- [x] **Step 1: 写失败测试，锁定字段和权限**
 
 ```python
 import json
@@ -92,29 +92,29 @@ def test_sync_request_has_unique_idempotency_key() -> None:
     assert fields["request_id"]["unique"] == 1
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_doctypes.py`
 
 Expected: FAIL because the DocTypes are absent.
 
-- [ ] **Step 3: 定义站点和路由**
+- [x] **Step 3: 定义站点和路由**
 
 `Overseas Cost ERP Site` 字段：`site_code`（唯一）、`label`、`subsidiary_code`、`enabled`、`base_url`、`authorization`（Password）、`push_mode`、`company`、`default_supplier`、`cost_center`、`default_currency`、`stock_uom`、`cost_update_mode`（DISABLED/MANUAL/DRAFT_PURCHASE_ORDER）、`capability_status`（UNVERIFIED/VERIFIED/FAILED）、`capability_checked_at`、`capability_summary_json`。普通核算用户只能通过安全摘要 API 看站点代码/名称/能力状态。
 
 `Overseas Cost Project Route` 字段：`project_collection`、`subsidiary_code`、`erp_site`、`enabled`、`valid_from/to`、`revision`、`remark`。服务必须检测同一项目同一时点的多条有效映射，不按排序取第一条。
 
-- [ ] **Step 4: 定义稳定关联和请求账本**
+- [x] **Step 4: 定义稳定关联和请求账本**
 
 `ERP Document Link` 保存 `batch`、`stable_line_key`、`site_code`、`business_key`、`remote_doctype`、`remote_document`、`remote_row`、`remote_docstatus`、`status`、`last_cost_result_hash`、`last_payload_hash`、`verified_at`。
 
 `ERP Sync Request` 保存 `request_id`、`operation`（CREATE/UPDATE_COST/VERIFY）、`batch`、`version`、`cost_result_hash`、`site_code`、`payload_hash`、`status`（PENDING/RUNNING/SUCCESS/FAILED/UNCERTAIN/MANUAL_REQUIRED/SUPERSEDED）、`attempt_count`、`safe_payload_json`、`safe_response_json`、`error_code/message`、`started_at/finished_at`。JSON 只存脱敏内容。
 
-- [ ] **Step 5: 扩展物料行路由字段**
+- [x] **Step 5: 扩展物料行路由字段**
 
 两份 Item JSON 增加 `subsidiary_code`、`erp_site_code`、`route_status`（UNRESOLVED/RESOLVED/OVERRIDDEN/CONFLICT）、`route_revision`。项目来源事实仍使用 `project_collection`；批量归属写明确 override 和审计，不改项目原值。
 
-- [ ] **Step 6: 运行并提交**
+- [x] **Step 6: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_doctypes.py`
 
