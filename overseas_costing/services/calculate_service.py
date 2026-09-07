@@ -12,7 +12,13 @@
 
 from __future__ import annotations
 
-from overseas_costing.services import allocation_service, audit_service, source_priority_service, version_service
+from overseas_costing.services import (
+    allocation_service,
+    audit_service,
+    material_input_service,
+    source_priority_service,
+    version_service,
+)
 
 
 def update_item_field(item_name: str, fieldname: str, value: str, version_name: str | None = None) -> dict:
@@ -106,11 +112,14 @@ EDITABLE_ITEM_FIELDS = frozenset(
         "product_name_es",
         "spec_model",
         "unit",
+        "purchase_uom",
         "recipient",
         "unit_price",
+        "unit_price_uom",
         "purchase_currency",
         "quantity",
         "actual_shipped_qty",
+        "shipped_uom",
         "goods_value",
         "import_name",
         "hs_code",
@@ -477,6 +486,7 @@ def _build_new_item_values(batch_doc_name: str, version_name: str, payload: dict
         "doctype": "Overseas Cost Item",
         "batch": batch_doc_name,
         "version": version_name,
+        "stable_line_key": material_input_service.ensure_stable_line_key({}),
     }
     if row_no is not None:
         values["row_no"] = row_no
@@ -488,6 +498,15 @@ def _build_new_item_values(batch_doc_name: str, version_name: str, payload: dict
 
     quantity = _to_float(values.get("quantity"), default=0.0)
     unit_price = _to_float(values.get("unit_price"), default=0.0)
+    purchase_uom = str(values.get("purchase_uom") or values.get("unit") or "").strip()
+    shipped_uom = str(values.get("shipped_uom") or purchase_uom).strip()
+    values["purchase_uom"] = purchase_uom
+    values["shipped_uom"] = shipped_uom
+    values["cost_output_uom"] = shipped_uom
+    if _to_float(values.get("actual_shipped_qty"), default=0.0) > 0:
+        values["actual_shipped_qty_mode"] = "MANUAL_CONFIRMED"
+    else:
+        values["actual_shipped_qty_mode"] = "DEFAULT_PURCHASE"
     if values.get("goods_value") in (None, "") and quantity and unit_price:
         values["goods_value"] = quantity * unit_price
     values.setdefault("transport_mode", "SEA")
