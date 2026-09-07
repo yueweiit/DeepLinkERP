@@ -446,3 +446,223 @@ def execute_site_pushes(
         "groups": group_results,
         "site_count": len({row.get("site_code") for row in group_results}),
     }
+
+
+COST_COMPARE_FIELDS = (
+    "goods_value",
+    "total_cost_rmb",
+    "total_unit_rmb",
+    "freight_alloc_rmb",
+    "clearance_alloc_rmb",
+    "tax_alloc_rmb",
+)
+
+
+def _site(row: dict) -> str:
+    return str(row.get("site_code") or row.get("erp_site_code") or "")
+
+
+def preview_cost_updates(
+    *, old_links: list[dict], new_items: list[dict], from_hash: str, to_hash: str
+) -> dict:
+    """Compare immutable cost snapshots without turning business changes into cost updates."""
+
+    old_by_key = {str(row.get("stable_line_key") or ""): row for row in old_links or []}
+    new_by_key = {str(row.get("stable_line_key") or ""): row for row in new_items or []}
+    blocking = []
+    if set(old_by_key) != set(new_by_key):
+        blocking.append(
+            {
+                "code": "BUSINESS_CHANGE_REQUIRED",
+                "reason": "MATERIAL_SET_CHANGED",
+                "old_item_keys": sorted(old_by_key),
+                "new_item_keys": sorted(new_by_key),
+            }
+        )
+
+    changes_by_site: dict[str, list[dict]] = {}
+    noop_sites = set()
+    for key in sorted(set(old_by_key) & set(new_by_key)):
+        old = old_by_key[key]
+        new = new_by_key[key]
+        old_quantity = _decimal(old.get("quantity") or old.get("effective_shipped_qty"))
+        new_quantity = _decimal(new.get("effective_shipped_qty") or new.get("quantity"))
+        if (
+            _site(old) != _site(new)
+            or str(old.get("subsidiary_code") or "") != str(new.get("subsidiary_code") or "")
+            or old_quantity != new_quantity
+        ):
+            blocking.append(
+                {
+                    "code": "BUSINESS_CHANGE_REQUIRED",
+                    "reason": "ROUTE_OR_QUANTITY_CHANGED",
+                    "stable_line_key": key,
+                }
+            )
+            continue
+        changed_fields = [
+            fieldname
+            for fieldname in COST_COMPARE_FIELDS
+            if _decimal(old.get(fieldname)) != _decimal(new.get(fieldname))
+        ]
+        if str(old.get("amount_status") or "") != str(new.get("amount_status") or ""):
+            changed_fields.append("amount_status")
+        site_code = _site(new)
+        if changed_fields:
+            changes_by_site.setdefault(site_code, []).append(
+                {
+                    "stable_line_key": key,
+                    "remote_document": old.get("remote_document") or "",
+                    "remote_row": old.get("remote_row") or "",
+                    "quantity": str(new_quantity),
+                    "old": {fieldname: old.get(fieldname) for fieldname in (*COST_COMPARE_FIELDS, "amount_status")},
+                    "new": {fieldname: new.get(fieldname) for fieldname in (*COST_COMPARE_FIELDS, "amount_status")},
+                    "changed_fields": changed_fields,
+                }
+            )
+        else:
+            noop_sites.add(site_code)
+    changed_sites = set(changes_by_site)
+    return {
+        "ready": not blocking,
+        "from_hash": str(from_hash or ""),
+        "to_hash": str(to_hash or ""),
+        "blocking": blocking,
+        "sites": [
+            {"site_code": site_code, "operation": "UPDATE_COST", "items": changes_by_site[site_code]}
+            for site_code in sorted(changes_by_site)
+        ],
+        "noop_site_codes": sorted(noop_sites - changed_sites),
+    }
+
+
+def _update_link_cost_snapshot(link: dict, item: dict, *, cost_hash: str) -> dict:
+    return {
+        **link,
+        **{fieldname: item.get(fieldname) for fieldname in COST_COMPARE_FIELDS},
+        "quantity": item.get("effective_shipped_qty") or item.get("quantity") or 0,
+        "amount_status": item.get("amount_status") or "",
+        "last_cost_result_hash": cost_hash,
+        "status": "SUCCESS",
+    }
+
+
+def execute_cost_updates(
+    *,
+    batch: str,
+    version: str,
+    from_hash: str,
+    to_hash: str,
+    new_items: list[dict],
+    site_configs,
+    intent_key: str,
+    client,
+    store,
+) -> dict:
+    """Apply only cost deltas; equivalent sites advance their links without remote writes."""
+
+    old_links = list(store.links)
+    preview = preview_cost_updates(
+        old_links=old_links,
+        new_items=new_items,
+        from_hash=from_hash,
+        to_hash=to_hash,
+    )
+    if not preview.get("ready"):
+        return {"status": "BLOCKED", "groups": [], "preview": preview}
+    old_by_key = {str(row.get("stable_line_key") or ""): row for row in old_links}
+    new_by_key = {str(row.get("stable_line_key") or ""): row for row in new_items or []}
+    changed_keys = {
+        str(item.get("stable_line_key") or "")
+        for site in preview.get("sites") or []
+        for item in site.get("items") or []
+    }
+    for key in sorted(set(new_by_key) - changed_keys):
+        store.save_link(_update_link_cost_snapshot(old_by_key[key], new_by_key[key], cost_hash=to_hash))
+    if set(new_by_key) - changed_keys:
+        store.commit()
+
+    config_by_site = _config_map(site_configs)
+    results = []
+    for site in preview.get("sites") or []:
+        site_code = str(site.get("site_code") or "")
+        for change in site.get("items") or []:
+            key = str(change.get("stable_line_key") or "")
+            old_link = old_by_key[key]
+            new_item = {**new_by_key[key], "cost_result_hash": to_hash}
+            same_document_items = [
+                row
+                for item_key, row in new_by_key.items()
+                if str(old_by_key[item_key].get("remote_document") or "")
+                == str(old_link.get("remote_document") or "")
+            ]
+            document_total = sum((_decimal(row.get("total_cost_rmb")) for row in same_document_items), Decimal("0"))
+            amount_status = (
+                "ACTUAL"
+                if same_document_items
+                and all(str(row.get("amount_status") or "").upper() == "ACTUAL" for row in same_document_items)
+                else "ESTIMATED"
+            )
+            payload = {
+                "batch_no": batch,
+                "version_name": version,
+                "version_code": version,
+                "cost_result_hash": to_hash,
+                "business_key": old_link.get("business_key") or "",
+                "document_total_cost_rmb": format(document_total, "f"),
+                "amount_status": amount_status,
+                "items": [new_item],
+            }
+            prepared = prepare_sync_request(
+                store.requests,
+                operation="UPDATE_COST",
+                batch=batch,
+                version=version,
+                cost_result_hash=to_hash,
+                site_code=site_code,
+                business_key=str(old_link.get("business_key") or ""),
+                payload=payload,
+                intent_key=intent_key,
+            )
+            if prepared["action"] in {"REPLAY", "NOOP"} and str(prepared["request"].get("status") or "") == "SUCCESS":
+                store.save_link(_update_link_cost_snapshot(old_link, new_item, cost_hash=to_hash))
+                results.append({"site_code": site_code, "stable_line_key": key, "status": "SUCCESS", "noop": True})
+                continue
+            request = prepared["request"]
+            store.save_request(request)
+            store.commit()
+            running = transition_request(request, "RUNNING")
+            store.save_request(running)
+            store.commit()
+            config = config_by_site.get(site_code)
+            if not config:
+                response = {"status": "FAILED", "code": "ERP_SITE_CONFIG_REQUIRED"}
+            else:
+                try:
+                    response = client.update_purchase_cost(payload, old_link, config)
+                except (TimeoutError, ConnectionError) as exc:
+                    response = {"status": "UNCERTAIN", "code": type(exc).__name__}
+                except Exception as exc:
+                    response = {"status": "FAILED", "code": type(exc).__name__}
+            completed = apply_sync_response(
+                running,
+                response,
+                latest_cost_result_hash=to_hash,
+            )["request"]
+            store.save_request(completed)
+            if completed.get("status") == "SUCCESS":
+                store.save_link(_update_link_cost_snapshot(old_link, new_item, cost_hash=to_hash))
+            store.commit()
+            results.append(
+                {
+                    "site_code": site_code,
+                    "stable_line_key": key,
+                    "request_id": completed.get("request_id") or "",
+                    "status": completed.get("status") or "FAILED",
+                }
+            )
+    return {
+        "status": _summary_status(results) if results else "SUCCESS",
+        "groups": results,
+        "preview": preview,
+    }

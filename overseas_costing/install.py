@@ -498,10 +498,23 @@ def build_erpnext_standard_field_spec() -> dict:
                 "insert_after": "custom_overseas_cost_version",
             },
             {
+                "fieldname": "custom_overseas_cost_result_hash",
+                "label": "海外成本结果哈希",
+                "fieldtype": "Data",
+                "insert_after": "custom_overseas_stable_line_key",
+            },
+            {
+                "fieldname": "custom_overseas_amount_status",
+                "label": "海外成本金额性质",
+                "fieldtype": "Select",
+                "options": "ESTIMATED\nACTUAL",
+                "insert_after": "custom_overseas_cost_result_hash",
+            },
+            {
                 "fieldname": "custom_overseas_business_entity",
                 "label": "业务主体/子公司",
                 "fieldtype": "Data",
-                "insert_after": "custom_overseas_stable_line_key",
+                "insert_after": "custom_overseas_amount_status",
             },
             {
                 "fieldname": "custom_overseas_cost_center",

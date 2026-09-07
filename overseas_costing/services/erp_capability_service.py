@@ -18,6 +18,10 @@ REQUIRED_ERP_FIELDS = {
     "Purchase Order Item": frozenset({"custom_overseas_stable_line_key"}),
 }
 
+REQUIRED_DRAFT_UPDATE_FIELDS = frozenset(
+    {"custom_overseas_cost_result_hash", "custom_overseas_amount_status"}
+)
+
 SAFE_SITE_FIELDS = (
     "site_code",
     "label",
@@ -74,6 +78,8 @@ def verify_site_capabilities(config: dict, *, metadata_loader=None) -> dict:
     missing = []
     errors = []
     for doctype, required in REQUIRED_ERP_FIELDS.items():
+        if doctype == "Purchase Order Item" and str(config.get("cost_update_mode") or "").upper() == "DRAFT_PURCHASE_ORDER":
+            required = required | REQUIRED_DRAFT_UPDATE_FIELDS
         try:
             present = _fieldnames(loader(doctype, config))
         except Exception as exc:

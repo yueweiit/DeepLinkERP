@@ -562,7 +562,7 @@ git commit -m 'feat: push cost results to multiple ERP sites'
 - Modify: `overseas_costing/services/erp_client.py`
 - Create: `overseas_costing/tests/test_erp_cost_update.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖：暂估到实际金额变化；数值相同但性质从暂估转实际；只影响生产站点；更新不改变数量；DRAFT_PURCHASE_ORDER 只更新允许的成本字段及版本标记；已提交/已收货/不支持模式返回 MANUAL_REQUIRED；旧成本版本成功回执不能清新版本待办。
 
@@ -625,17 +625,17 @@ def test_cost_update_payload_never_changes_quantity() -> None:
     assert body["custom_overseas_comprehensive_amount"] == "17000"
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_cost_update.py`
 
 Expected: FAIL because the current code deduplicates by batch plus cost version and has no update path.
 
-- [ ] **Step 3: 构造站点差异**
+- [x] **Step 3: 构造站点差异**
 
 `preview_cost_updates(batch, from_hash, to_hash)` 返回每站点/单据/行的旧新单价、金额、暂估性质、数量和变更字段。只有金额或报文性质变化的站点产生 UPDATE_COST；完全等价结果写 NOOP 关联。若物料集合、数量、子公司或站点变化，返回 `BUSINESS_CHANGE_REQUIRED`，不生成更新请求。
 
-- [ ] **Step 4: 实现失败关闭的更新模式**
+- [x] **Step 4: 实现失败关闭的更新模式**
 
 - `DISABLED`：拒绝暂估推送功能开关并说明站点无后续更新路径。
 - `MANUAL`：允许业务明确选择暂估首次推送，但后续差异导出为人工待办，系统不声称已同步。
@@ -643,7 +643,7 @@ Expected: FAIL because the current code deduplicates by batch plus cost version 
 
 其他单据状态全部 `MANUAL_REQUIRED`。不自动取消/复制采购订单。
 
-- [ ] **Step 5: 运行并提交**
+- [x] **Step 5: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_cost_update.py overseas_costing/tests/test_erp_sync_service.py overseas_costing/tests/test_erp_client.py`
 

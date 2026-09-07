@@ -584,9 +584,77 @@ def read_purchase_state(link: dict, config: dict) -> dict:
     )
 
 
+def build_draft_purchase_cost_update(old_link: dict, new_cost: dict) -> dict:
+    try:
+        old_quantity = float(old_link.get("quantity") or 0)
+        new_quantity = float(new_cost.get("effective_shipped_qty") or new_cost.get("quantity") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("BUSINESS_CHANGE_REQUIRED")
+    if old_quantity != new_quantity:
+        raise ValueError("BUSINESS_CHANGE_REQUIRED")
+    return {
+        "custom_overseas_original_amount": new_cost.get("goods_value") or 0,
+        "custom_overseas_comprehensive_amount": new_cost.get("total_cost_rmb") or 0,
+        "custom_overseas_comprehensive_unit_price": new_cost.get("total_unit_rmb") or 0,
+        "custom_overseas_freight_alloc_amount": new_cost.get("freight_alloc_rmb") or 0,
+        "custom_overseas_clearance_alloc_amount": new_cost.get("clearance_alloc_rmb") or 0,
+        "custom_overseas_tax_alloc_amount": new_cost.get("tax_alloc_rmb") or 0,
+        "custom_overseas_cost_result_hash": new_cost.get("cost_result_hash") or "",
+        "custom_overseas_amount_status": new_cost.get("amount_status") or "",
+    }
+
+
 def update_purchase_cost(payload: dict, link: dict, config: dict) -> dict:
-    del payload, link, config
-    return {"ok": False, "status": "MANUAL_REQUIRED", "code": "UPDATE_MODE_UNAVAILABLE"}
+    mode = str(config.get("cost_update_mode") or "DISABLED").upper()
+    if mode == "DISABLED":
+        return {"ok": False, "status": "MANUAL_REQUIRED", "code": "UPDATE_MODE_UNAVAILABLE"}
+    if mode != "DRAFT_PURCHASE_ORDER":
+        return {"ok": False, "status": "MANUAL_REQUIRED", "code": "MANUAL_COST_UPDATE_REQUIRED"}
+    current = read_purchase_state(link, config).get("data") or {}
+    if int(current.get("docstatus") or 0) != 0:
+        return {"ok": False, "status": "MANUAL_REQUIRED", "code": "DOCUMENT_NOT_DRAFT"}
+    if float(current.get("per_received") or 0) > 0:
+        return {"ok": False, "status": "MANUAL_REQUIRED", "code": "DOCUMENT_HAS_RECEIPTS"}
+    stable_key = str(link.get("stable_line_key") or "")
+    new_cost = next(
+        (row for row in payload.get("items") or [] if str(row.get("stable_line_key") or "") == stable_key),
+        None,
+    )
+    if not new_cost:
+        return {"ok": False, "status": "MANUAL_REQUIRED", "code": "UPDATE_ITEM_NOT_FOUND"}
+    remote_matches = [
+        row
+        for row in current.get("items") or []
+        if str(row.get("custom_overseas_stable_line_key") or "") == stable_key
+        or (link.get("remote_row") and str(row.get("name") or "") == str(link.get("remote_row")))
+    ]
+    if len(remote_matches) != 1:
+        return {"ok": False, "status": "MANUAL_REQUIRED", "code": "REMOTE_LINE_NOT_UNIQUE"}
+    remote_row = remote_matches[0]
+    item_body = build_draft_purchase_cost_update(
+        {**link, "quantity": remote_row.get("qty")},
+        new_cost,
+    )
+    item_response = _request_json(
+        config,
+        method="PUT",
+        url=_build_doctype_url(config, "Purchase Order Item", remote_row.get("name") or link.get("remote_row")),
+        body=item_body,
+    )
+    amount_status = payload.get("amount_status") or new_cost.get("amount_status") or ""
+    header_body = {
+        "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
+        "custom_overseas_cost_result_hash": payload.get("cost_result_hash") or new_cost.get("cost_result_hash") or "",
+        "custom_overseas_total_cost_rmb": payload.get("document_total_cost_rmb") or payload.get("total_cost_rmb") or 0,
+        "custom_overseas_amount_status": amount_status,
+    }
+    header_response = _request_json(
+        config,
+        method="PUT",
+        url=_build_doctype_url(config, link["remote_doctype"], link["remote_document"]),
+        body=header_body,
+    )
+    return {"ok": True, "status": "UPDATED", "item": item_response, "header": header_response}
 
 
 def _ensure_item(item: dict, payload: dict, config: dict) -> dict:
