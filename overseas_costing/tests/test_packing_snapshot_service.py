@@ -450,3 +450,24 @@ def test_list_sources_recommends_cached_sheet_without_submitting_refresh(monkeyp
     broken = next(item for item in sheets if item["source_id"] == "WB-2026:st-broken")
     assert broken["snapshot_status"] == "unreadable"
     assert result["wiki_error"] == ""
+
+
+def test_recommended_workbook_is_globally_pinned_without_reordering_its_sheets() -> None:
+    workbooks = [
+        {"workbook_id": "WB-2026", "sheets": [{"source_id": "WB-2026:new"}]},
+        {
+            "workbook_id": "WB-2025",
+            "sheets": [
+                {"source_id": "WB-2025:recommended", "is_recommended": True},
+                {"source_id": "WB-2025:other"},
+            ],
+        },
+    ]
+
+    result = service._pin_recommended_workbook(workbooks)
+
+    assert [row["workbook_id"] for row in result] == ["WB-2025", "WB-2026"]
+    assert [row["source_id"] for row in result[0]["sheets"]] == [
+        "WB-2025:recommended",
+        "WB-2025:other",
+    ]

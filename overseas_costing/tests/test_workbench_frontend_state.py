@@ -165,6 +165,7 @@ def test_packing_flow_static_ui_contract() -> None:
     flow = (PARTS / "86-packing-flow.js").read_text(encoding="utf-8")
     documents = (PARTS / "65-manual-documents.js").read_text(encoding="utf-8")
     stylesheet = (PARTS / "47-packing-flow.css").read_text(encoding="utf-8")
+    source_service = (ROOT / "services" / "packing_source_service.py").read_text(encoding="utf-8")
 
     for label in (
         "本地上传",
@@ -190,8 +191,13 @@ def test_packing_flow_static_ui_contract() -> None:
     assert flow.index('["wiki", "装箱计划表"]') < flow.index('["approval", "钉钉审批附件/评论"]')
     assert flow.index('["approval", "钉钉审批附件/评论"]') < flow.index('["local", "本地上传"]')
     assert "selectRecommendedPackingSource" in flow
+    assert "auto_select_recommended" in flow
     assert "recommendation_reasons" in flow
+    assert "business_date" in flow
     assert "知识库年度表" not in flow
+    assert "需要刷新的年度表" not in flow
+    assert "钉钉知识库刷新失败" not in flow
+    assert "知识库 Sheet" not in source_service
     assert ".ocw-packing-flow" in stylesheet
     assert ".ocw-packing-recommendation" in stylesheet
     assert "position: sticky" in stylesheet

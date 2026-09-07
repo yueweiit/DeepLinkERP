@@ -114,7 +114,11 @@ def recommend_packing_sheets(
         matched = sorted(batch_codes & summary_codes)
         missing = sorted(batch_codes - summary_codes)
         extra = sorted(summary_codes - batch_codes)
-        reference_matches = sorted(batch_references & summary_references)
+        label_reference_text = _normalize_reference(item.get("source_label") or item.get("sheet_name"))
+        named_reference_matches = {
+            value for value in batch_references if len(value) >= 4 and value in label_reference_text
+        }
+        reference_matches = sorted((batch_references & summary_references) | named_reference_matches)
         business_date = parse_sheet_business_date(
             str(item.get("source_label") or item.get("sheet_name") or ""),
             item.get("workbook_year") or item.get("year"),
@@ -168,6 +172,7 @@ def recommend_packing_sheets(
                 "missing_item_codes": missing,
                 "extra_item_codes": extra,
                 "is_recommended": False,
+                "auto_select_recommended": False,
                 "_reference_match_count": len(reference_matches),
                 "_coverage": coverage,
             }
@@ -187,6 +192,10 @@ def recommend_packing_sheets(
             ),
         )
         winner["is_recommended"] = True
+        winner["auto_select_recommended"] = bool(
+            winner.get("recommendation_confidence") in {"high", "medium"}
+            and winner.get("snapshot_status") == "ready"
+        )
 
     for item in scored:
         item.pop("_reference_match_count", None)

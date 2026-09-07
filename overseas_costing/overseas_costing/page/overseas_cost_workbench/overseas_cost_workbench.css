@@ -6434,6 +6434,16 @@ input[type="range"].ocw-result-scrollbar:disabled {
   font-size: 11px;
 }
 
+.ocw-packing-sheet-meta {
+  display: grid;
+  gap: 3px;
+}
+
+.ocw-packing-sheet-meta small:first-child {
+  color: #536571;
+  font-weight: 600;
+}
+
 .ocw-packing-no-recommendation {
   background: #fffaf0;
   border: 1px solid #fed7aa;
@@ -6900,6 +6910,10 @@ input[type="range"].ocw-result-scrollbar:disabled {
   }
 
   .ocw-packing-wiki-sheet small {
+    grid-column: 1 / -1;
+  }
+
+  .ocw-packing-sheet-meta {
     grid-column: 1 / -1;
   }
 

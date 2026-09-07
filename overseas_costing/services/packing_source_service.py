@@ -393,16 +393,16 @@ def resolve_trusted_packing_source(
 
     workbook_id, separator, sheet_id = resolved_source_id.partition(":")
     if not separator or not workbook_id or not sheet_id:
-        raise ValueError("知识库 Sheet 来源 ID 不合法。")
+        raise ValueError("装箱计划表 Sheet 来源 ID 不合法。")
     from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
 
     clients = get_packing_runtime_clients()
     manifest = clients.catalog.get_latest_snapshot(workbook_id, sheet_id)
     if not manifest:
-        raise ValueError("知识库 Sheet 尚无可用缓存，请先刷新资料。")
+        raise ValueError("装箱计划表 Sheet 尚无可用缓存，请先刷新资料。")
     payload = clients.archive.download(manifest)
     if str(payload.get("workbookId") or "") != workbook_id or str(payload.get("sheetId") or "") != sheet_id:
-        raise ValueError("知识库快照与所选 Sheet 不一致。")
+        raise ValueError("装箱计划表快照与所选 Sheet 不一致。")
     grid = build_grid_from_dingtalk_snapshot(payload)
     source_hash = str(manifest.get("content_sha256") or "").strip().lower()
     if not source_hash:

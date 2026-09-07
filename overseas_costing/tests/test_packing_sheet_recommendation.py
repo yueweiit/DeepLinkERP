@@ -99,6 +99,7 @@ def test_recommendation_prefers_full_sku_match_but_exposes_extra_material() -> N
     recommended = result[0]
     assert recommended["source_id"] == "WB:st-ring"
     assert recommended["is_recommended"] is True
+    assert recommended["auto_select_recommended"] is True
     assert recommended["recommendation_confidence"] == "high"
     assert recommended["matched_item_codes"] == ["FL000427", "FL000428", "FL000429", "FL000430", "FL003377"]
     assert recommended["missing_item_codes"] == []
@@ -121,7 +122,57 @@ def test_date_only_candidate_is_low_confidence_and_unknown_candidate_is_not_forc
     )
 
     assert dated[0]["is_recommended"] is True
+    assert dated[0]["auto_select_recommended"] is False
     assert dated[0]["recommendation_confidence"] == "low"
     assert dated[0]["snapshot_status"] == "not_cached"
     assert unknown[0]["is_recommended"] is False
+    assert unknown[0]["auto_select_recommended"] is False
     assert unknown[0]["recommendation_confidence"] == "none"
+
+
+def test_uncached_sheet_name_can_match_approval_number_without_being_auto_selected() -> None:
+    result = recommend_packing_sheets(
+        [
+            {
+                "source_id": "WB:po-123",
+                "source_label": "PO-123 装箱计划",
+                "workbook_year": 2026,
+                "snapshot_status": "not_cached",
+            }
+        ],
+        batch_context={
+            "item_codes": ["SKU-1"],
+            "references": ["PO-123"],
+            "keywords": [],
+            "reference_date": None,
+        },
+        snapshot_summaries={},
+    )
+
+    assert result[0]["is_recommended"] is True
+    assert result[0]["recommendation_confidence"] == "low"
+    assert result[0]["auto_select_recommended"] is False
+    assert "匹配 1 个审批或订单编号" in result[0]["recommendation_reasons"]
+
+
+def test_unreadable_snapshot_is_never_auto_selected() -> None:
+    result = recommend_packing_sheets(
+        [
+            {
+                "source_id": "WB:broken",
+                "source_label": "指环扣-packing list2026.9.05",
+                "workbook_year": 2026,
+                "snapshot_status": "unreadable",
+            }
+        ],
+        batch_context={
+            "item_codes": ["SKU-1"],
+            "references": [],
+            "keywords": ["指环扣"],
+            "reference_date": "2026-09-03",
+        },
+        snapshot_summaries={},
+    )
+
+    assert result[0]["is_recommended"] is True
+    assert result[0]["auto_select_recommended"] is False

@@ -111,7 +111,7 @@
   selectRecommendedPackingSource(dialog, sources = {}) {
     const recommended = (sources.wiki_workbooks || [])
       .flatMap((workbook) => workbook.sheets || [])
-      .find((sheet) => sheet.is_recommended);
+      .find((sheet) => sheet.auto_select_recommended);
     if (!recommended) return false;
     dialog.packingSourceTab = "wiki";
     dialog.packingFlowState = OverseasCostWorkbenchState.selectPackingSource(
@@ -205,12 +205,12 @@
   renderPackingWikiSources(workbooks, state, error = "") {
     if (error) return `<div class="ocw-detail-empty is-error"><strong>装箱计划表缓存暂不可用</strong><span>${this.escape(error)}</span></div>`;
     if (!workbooks.length) return `<div class="ocw-detail-empty"><strong>尚未建立装箱计划表缓存</strong><span>点击“刷新列表”由服务器应用身份更新，无需登录个人钉钉。</span></div>`;
-    const hasRecommendation = workbooks.some((workbook) => (workbook.sheets || []).some((sheet) => sheet.is_recommended));
-    return `${hasRecommendation ? "" : `<div class="ocw-packing-no-recommendation"><strong>暂无可靠推荐</strong><span>请按日期或名称手动选择一张装箱计划。</span></div>`}${workbooks.map((workbook) => `
+    const hasReliableRecommendation = workbooks.some((workbook) => (workbook.sheets || []).some((sheet) => sheet.auto_select_recommended));
+    return `${hasReliableRecommendation ? "" : `<div class="ocw-packing-no-recommendation"><strong>暂无可靠推荐</strong><span>低置信候选不会自动选中，请按日期或名称手动确认。</span></div>`}${workbooks.map((workbook) => `
       <article class="ocw-packing-workbook">
         <header><div><span>${this.escape(String(workbook.year || "装箱计划表"))}</span><strong>${this.escape(workbook.label || workbook.workbook_id)}</strong></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="packing-refresh-list" data-workbook-id="${this.escape(workbook.workbook_id)}">刷新列表</button></header>
         <label class="ocw-packing-sheet-search"><span>查找 Sheet</span><input type="search" placeholder="输入装箱单、日期或品类" data-action="packing-filter-sheets"></label>
-        <div class="ocw-packing-wiki-sheets">${(workbook.sheets || []).map((sheet) => `<div class="ocw-packing-wiki-sheet ${sheet.is_recommended ? "is-recommended" : ""}" data-sheet-search="${this.escape(String(sheet.source_label || "").toLowerCase())}">${this.renderPackingSourceChoice(sheet, state, sheet.is_recommended ? "系统推荐" : "Sheet", sheet.source_label)}${this.renderPackingRecommendation(sheet)}<button class="ocw-link-btn" type="button" data-action="packing-refresh-sheet" data-workbook-id="${this.escape(workbook.workbook_id)}" data-sheet-id="${this.escape(String(sheet.source_id || "").split(":").slice(1).join(":"))}">刷新资料</button><small>${this.escape(this.packingSnapshotStatus(sheet))}</small></div>`).join("") || `<div class="ocw-packing-source-disabled">列表中暂无 Sheet</div>`}</div>
+        <div class="ocw-packing-wiki-sheets">${(workbook.sheets || []).map((sheet) => `<div class="ocw-packing-wiki-sheet ${sheet.is_recommended ? "is-recommended" : ""}" data-sheet-search="${this.escape(String(sheet.source_label || "").toLowerCase())}">${this.renderPackingSourceChoice(sheet, state, sheet.is_recommended ? "系统推荐" : "Sheet", sheet.source_label)}${this.renderPackingRecommendation(sheet)}<button class="ocw-link-btn" type="button" data-action="packing-refresh-sheet" data-workbook-id="${this.escape(workbook.workbook_id)}" data-sheet-id="${this.escape(String(sheet.source_id || "").split(":").slice(1).join(":"))}">刷新资料</button><div class="ocw-packing-sheet-meta"><small>装箱日期 ${this.escape(sheet.business_date || "未识别")}</small><small>${this.escape(this.packingSnapshotStatus(sheet))}</small></div></div>`).join("") || `<div class="ocw-packing-source-disabled">列表中暂无 Sheet</div>`}</div>
       </article>`).join("")}`;
   }
 
@@ -483,7 +483,7 @@
   async refreshPackingWorkbook(dialog, batch, workbookId = "") {
     const workbooks = (dialog.packingFlowSources || {}).wiki_workbooks || [];
     const id = workbookId || (workbooks.length === 1 ? workbooks[0].workbook_id : "");
-    if (!id) throw new Error("请先选择需要刷新的年度表。");
+    if (!id) throw new Error("请先选择需要刷新的装箱计划表。");
     const requestId = this.packingFlowRequestId();
     await this.call("overseas_costing.api.packing_api.request_packing_workbook_refresh", {
       batch_name: batch.name, workbook_id: id, request_id: requestId,
@@ -507,7 +507,7 @@
         batch_name: batch.name, request_id: requestId,
       }, false);
       if (status && status.status === "success") return status;
-      if (status && status.status === "failed") throw new Error(status.error_message || "钉钉知识库刷新失败。");
+      if (status && status.status === "failed") throw new Error(status.error_message || "装箱计划表刷新失败。");
       await new Promise((resolve) => window.setTimeout(resolve, 1500));
     }
     throw new Error("刷新仍在队列中，请稍后再点击刷新资料。");

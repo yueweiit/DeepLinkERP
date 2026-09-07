@@ -634,7 +634,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
                     if candidate.get("source_id") == row.get("source_id")
                 )
             )
-        wiki = workbook_rows
+        wiki = _pin_recommended_workbook(workbook_rows)
     except Exception:
         wiki_error = "装箱计划表缓存暂不可用，请稍后重试。"
     return {
@@ -724,6 +724,17 @@ def _packing_snapshot_summaries(clients: Any, workbook_id: str) -> dict[str, dic
             state["snapshot_status"] = "unreadable"
         result[source_id] = state
     return result
+
+
+def _pin_recommended_workbook(workbooks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """多年度表时把包含全局推荐项的工作簿整体置顶。"""
+
+    return sorted(
+        workbooks,
+        key=lambda workbook: (
+            0 if any(sheet.get("is_recommended") for sheet in workbook.get("sheets") or []) else 1,
+        ),
+    )
 
 
 def _attachment_sheet_names(row: dict[str, Any]) -> list[str]:
