@@ -21,6 +21,7 @@ def push_to_mes(stock_entry_name):
     将已提交的 Stock Entry 发料结果回写到 MES。
     """
     stock_entry = frappe.get_doc("Stock Entry", stock_entry_name)
+    stock_entry.check_permission("read")
     if not is_mes_integration_enabled(stock_entry.get("company")):
         throw_mes_integration_disabled(stock_entry.get("company"))
 
@@ -65,6 +66,7 @@ def push_to_mes(stock_entry_name):
     try:
         response = post_issue_confirm(payload, request_url)
         validate_issue_confirm_response(response, payload)
+        stock_entry.check_permission("write")
         stock_entry.db_set("custom_mes_status", "Pushed")
 
         update_mes_log(
@@ -312,10 +314,12 @@ def reset_mes_status(stock_entry_name):
     重置库存转移单的 MES Status 为 Unpushed（当已推送的订单被修改时）
     """
     stock_entry = frappe.get_doc("Stock Entry", stock_entry_name)
+    stock_entry.check_permission("read")
     if not is_mes_integration_enabled(stock_entry.get("company")):
         throw_mes_integration_disabled(stock_entry.get("company"))
 
     if stock_entry.get("custom_mes_status") == "Pushed":
+        stock_entry.check_permission("write")
         stock_entry.db_set("custom_mes_status", "Unpushed")
         frappe.logger().info(f"库存转移单 {stock_entry_name} 已修改，MES 状态重置为 Unpushed")
 
@@ -376,6 +380,7 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None, submit=False)
 
     stock_entry_data = stock_entry_data.copy()
     sales_order_doc = get_sales_order_by_reference(payload, stock_entry_data, required=True)
+    sales_order_doc.check_permission("read")
 
     stock_entry_type = stock_entry_data.get("stock_entry_type")
     validate_mes_receipt_stock_entry_type(stock_entry_type)
@@ -473,7 +478,7 @@ def get_sales_order_by_reference(payload, stock_entry_data, required=True):
             )
         )
 
-    sales_order_names = frappe.get_all(
+    sales_order_names = frappe.get_list(
         "Sales Order",
         filters={"custom_crm_order_no": sales_order_reference},
         pluck="name",
@@ -844,15 +849,19 @@ def is_mes_receipt_stock_entry(stock_entry):
 DEFAULT_RECEIPT_STATUS_DOCUMENT_TYPE = "stock_entry"
 MES_RECEIPT_STATUS_EVENT = "Stock Entry Receipt Status Callback"
 VALID_RECEIPT_STATUS_RESPONSE_STATUSES = {"processed"}
+MES_RECEIPT_STATUS_QUEUE = "short"
+MES_RECEIPT_STATUS_TIMEOUT = 300
 
 
 def notify_mes_stock_entry_status(stock_entry, method=None):
     """
     Stock Entry on_submit / on_cancel hook handler.
 
-    Calls the MES status callback for finished/semi-finished goods receipt
-    Stock Entries. Any MES-side failure is logged but never blocks the ERP
-    document transaction.
+    Queue the MES status callback after the Stock Entry transaction commits.
+
+    Capturing the event docstatus prevents a queued submit callback from being
+    changed into a cancellation callback if the document is cancelled before
+    the worker starts. Any queue failure is logged and does not block ERP.
     """
     if not is_mes_integration_enabled(stock_entry.get("company")):
         return
@@ -860,15 +869,61 @@ def notify_mes_stock_entry_status(stock_entry, method=None):
     if not is_mes_receipt_stock_entry(stock_entry):
         return
 
+    event_docstatus = {
+        "on_submit": 1,
+        "on_cancel": 2,
+    }.get(method, cint(stock_entry.docstatus))
+    frappe.db.after_commit.add(
+        lambda: enqueue_mes_stock_entry_status_callback(
+            stock_entry.name, event_docstatus
+        )
+    )
+
+
+def enqueue_mes_stock_entry_status_callback(stock_entry_name, docstatus):
+    """Enqueue one receipt status event after its ERP transaction commits."""
     try:
-        push_stock_entry_status_to_mes(stock_entry)
+        frappe.enqueue(
+            "mes_integration.mes_integration.stock_entry.push_stock_entry_status_to_mes_job",
+            queue=MES_RECEIPT_STATUS_QUEUE,
+            timeout=MES_RECEIPT_STATUS_TIMEOUT,
+            job_id=f"mes-stock-entry-status:{stock_entry_name}:{docstatus}",
+            deduplicate=True,
+            stock_entry_name=stock_entry_name,
+            docstatus=docstatus,
+        )
     except Exception:
-        # The failure has already been recorded in MES Integration Log.
-        # Do not re-raise so the ERP submit/cancel transaction completes.
-        pass
+        frappe.log_error(
+            title="Failed to enqueue MES Stock Entry status callback",
+            message=frappe.get_traceback(),
+        )
 
 
-def push_stock_entry_status_to_mes(stock_entry, erp_status=None, message=None):
+def push_stock_entry_status_to_mes_job(stock_entry_name, docstatus):
+    """Push a committed receipt status and retry callback failures."""
+    stock_entry = frappe.get_doc("Stock Entry", stock_entry_name)
+    if not is_mes_integration_enabled(stock_entry.get("company")):
+        return None
+
+    try:
+        return push_stock_entry_status_to_mes(stock_entry, docstatus=docstatus)
+    except frappe.RetryBackgroundJobError:
+        raise
+    except Exception as exc:
+        # Frappe retries this exception up to its normal background-job limit.
+        # Commit the integration-log failure before handing control back to RQ.
+        try:
+            frappe.db.commit()
+        except Exception:
+            pass
+        raise frappe.RetryBackgroundJobError(
+            f"MES Stock Entry status callback failed for {stock_entry_name}"
+        ) from exc
+
+
+def push_stock_entry_status_to_mes(
+    stock_entry, erp_status=None, message=None, docstatus=None
+):
     """
     Push a finished/semi-finished goods receipt Stock Entry status to MES.
 
@@ -878,7 +933,10 @@ def push_stock_entry_status_to_mes(stock_entry, erp_status=None, message=None):
         frappe.throw(frappe._("只有成品/半成品入库单支持 MES 状态回写"))
 
     payload = build_stock_entry_status_payload(
-        stock_entry, erp_status=erp_status, message=message
+        stock_entry,
+        erp_status=erp_status,
+        message=message,
+        docstatus=docstatus,
     )
 
     mes_log = create_mes_log(
@@ -932,10 +990,8 @@ def retry_push_stock_entry_status_to_mes(stock_entry_name):
     """
     Manually re-trigger the MES status callback for a receipt Stock Entry.
     """
-    if not frappe.has_permission("Stock Entry", "read"):
-        frappe.throw(frappe._("缺少 Stock Entry 读取权限"), frappe.PermissionError)
-
     stock_entry = frappe.get_doc("Stock Entry", stock_entry_name)
+    stock_entry.check_permission("read")
 
     if not is_mes_integration_enabled(stock_entry.get("company")):
         throw_mes_integration_disabled(stock_entry.get("company"))
@@ -944,10 +1000,13 @@ def retry_push_stock_entry_status_to_mes(stock_entry_name):
     return push_stock_entry_status_to_mes(stock_entry)
 
 
-def build_stock_entry_status_payload(stock_entry, erp_status=None, message=None):
+def build_stock_entry_status_payload(
+    stock_entry, erp_status=None, message=None, docstatus=None
+):
+    payload_docstatus = stock_entry.docstatus if docstatus is None else cint(docstatus)
     if erp_status is None or message is None:
         mapped_status, mapped_message = map_stock_entry_docstatus_to_erp_status(
-            stock_entry.docstatus, stock_entry.name
+            payload_docstatus, stock_entry.name
         )
         erp_status = erp_status or mapped_status
         message = message or mapped_message
@@ -956,7 +1015,7 @@ def build_stock_entry_status_payload(stock_entry, erp_status=None, message=None)
         "documentType": DEFAULT_RECEIPT_STATUS_DOCUMENT_TYPE,
         "erpStockEntryName": stock_entry.name,
         "documentNo": stock_entry.name,
-        "docstatus": stock_entry.docstatus,
+        "docstatus": payload_docstatus,
         "erpStatus": erp_status,
         "message": message,
     }

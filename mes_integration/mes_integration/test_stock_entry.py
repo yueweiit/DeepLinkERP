@@ -4,9 +4,12 @@ import frappe
 from frappe.tests import UnitTestCase
 
 from mes_integration.mes_integration.stock_entry import (
+	build_stock_entry_status_payload,
 	create_and_submit_stock_entry_from_mes,
+	enqueue_mes_stock_entry_status_callback,
 	get_sales_order_by_reference,
 	is_mes_receipt_stock_entry,
+	notify_mes_stock_entry_status,
 	set_mes_stock_entry_sales_order,
 	validate_mes_receipt_stock_entry_type,
 )
@@ -99,7 +102,7 @@ class TestMESStockEntry(UnitTestCase):
 			"mes_integration.mes_integration.stock_entry.frappe.db.has_column",
 			return_value=True,
 		), patch(
-			"mes_integration.mes_integration.stock_entry.frappe.get_all",
+			"mes_integration.mes_integration.stock_entry.frappe.get_list",
 			return_value=[sales_order.name],
 		), patch(
 			"mes_integration.mes_integration.stock_entry.frappe.get_doc",
@@ -123,3 +126,56 @@ class TestMESStockEntry(UnitTestCase):
 			set_mes_stock_entry_sales_order(stock_entry_data, sales_order)
 
 		self.assertEqual(stock_entry_data["custom_sales_order"], sales_order.name)
+
+	def test_receipt_status_is_enqueued_after_commit(self):
+		stock_entry = frappe._dict(
+			name="MAT-STE-2026-00001",
+			company="Test Company",
+			docstatus=1,
+		)
+
+		with (
+			patch(
+				"mes_integration.mes_integration.stock_entry.is_mes_integration_enabled",
+				return_value=True,
+			),
+			patch(
+				"mes_integration.mes_integration.stock_entry.is_mes_receipt_stock_entry",
+				return_value=True,
+			),
+			patch.object(type(frappe.db.after_commit), "add") as add_callback,
+			patch(
+				"mes_integration.mes_integration.stock_entry.enqueue_mes_stock_entry_status_callback"
+			) as enqueue_callback,
+		):
+			notify_mes_stock_entry_status(stock_entry, "on_submit")
+			add_callback.assert_called_once()
+			add_callback.call_args.args[0]()
+
+		enqueue_callback.assert_called_once_with(stock_entry.name, 1)
+
+	def test_receipt_status_payload_uses_event_docstatus(self):
+		stock_entry = frappe._dict(
+			name="MAT-STE-2026-00001",
+			docstatus=2,
+			custom_stock_entry_no="MES-RECEIPT-001",
+		)
+
+		payload = build_stock_entry_status_payload(stock_entry, docstatus=1)
+
+		self.assertEqual(payload["docstatus"], 1)
+		self.assertEqual(payload["erpStatus"], "submitted")
+
+	def test_receipt_status_enqueue_has_stable_deduplication_key(self):
+		with patch("mes_integration.mes_integration.stock_entry.frappe.enqueue") as enqueue:
+			enqueue_mes_stock_entry_status_callback("MAT-STE-2026-00001", 2)
+
+		enqueue.assert_called_once_with(
+			"mes_integration.mes_integration.stock_entry.push_stock_entry_status_to_mes_job",
+			queue="short",
+			timeout=300,
+			job_id="mes-stock-entry-status:MAT-STE-2026-00001:2",
+			deduplicate=True,
+			stock_entry_name="MAT-STE-2026-00001",
+			docstatus=2,
+		)

@@ -95,10 +95,8 @@ def push_sales_order_status_doc_to_mes(
 
 @frappe.whitelist()
 def retry_push_sales_order_status_to_mes(sales_order_name):
-    if not frappe.has_permission("Sales Order", "read"):
-        frappe.throw(_("缺少 Sales Order 读取权限"), frappe.PermissionError)
-
     sales_order = frappe.get_doc("Sales Order", sales_order_name)
+    sales_order.check_permission("read")
     if not is_mes_integration_enabled(sales_order.get("company")):
         throw_mes_integration_disabled(sales_order.get("company"))
 

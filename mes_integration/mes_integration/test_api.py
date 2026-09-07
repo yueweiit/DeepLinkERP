@@ -19,17 +19,17 @@ class TestMESAPI(UnitTestCase):
 			}
 		]
 
+		def get_list(doctype, *args, **kwargs):
+			if doctype == "Bin":
+				return bin_rows
+			return ["ITEM-WITH-STOCK", "ITEM-WITHOUT-STOCK"]
+
 		with (
 			patch(
 				"mes_integration.mes_integration.stock_entry.validate_mes_api_user"
 			),
 			patch.object(frappe, "has_permission", return_value=True),
-			patch.object(frappe, "get_list", return_value=bin_rows),
-			patch.object(
-				frappe,
-				"get_all",
-				return_value=["ITEM-WITH-STOCK", "ITEM-WITHOUT-STOCK"],
-			),
+			patch.object(frappe, "get_list", side_effect=get_list),
 		):
 			result = get_batch_bin_rows(
 				["ITEM-WITH-STOCK", "ITEM-WITHOUT-STOCK", "ITEM-UNKNOWN"]

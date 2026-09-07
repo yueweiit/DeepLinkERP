@@ -1142,13 +1142,16 @@ def get_item_warehouse_actual_qty(item_code, warehouse):
     if not item_code or not warehouse:
         return 0
 
-    return flt(
-        frappe.db.get_value(
-            "Bin",
-            {"item_code": item_code, "warehouse": warehouse},
-            "actual_qty",
-        )
+    if not frappe.has_permission("Bin", "read"):
+        frappe.throw(_("当前用户缺少 Bin 的读取权限"), frappe.PermissionError)
+
+    rows = frappe.get_list(
+        "Bin",
+        filters={"item_code": item_code, "warehouse": warehouse},
+        fields=["actual_qty"],
+        limit_page_length=1,
     )
+    return flt(rows[0].get("actual_qty")) if rows else 0
 
 
 @frappe.whitelist()
@@ -1156,6 +1159,9 @@ def get_issue_dialog_default_uoms(item_codes=None):
     """Return configured MES default issue UOMs for the Material Request issue dialog."""
     from erpnext.stock.get_item_details import get_conversion_factor
     from mes_integration.mes_integration.stock_entry import parse_json_if_needed
+
+    if not frappe.has_permission("Item", "read"):
+        frappe.throw(_("当前用户缺少 Item 的读取权限"), frappe.PermissionError)
 
     if not frappe.db.has_column("Item", "custom_mes_issue_uom"):
         return {"default_uoms": {}, "warnings": []}
@@ -1168,7 +1174,7 @@ def get_issue_dialog_default_uoms(item_codes=None):
     if not item_codes:
         return {"default_uoms": {}, "warnings": []}
 
-    items = frappe.get_all(
+    items = frappe.get_list(
         "Item",
         filters={"name": ["in", item_codes]},
         fields=["name", "custom_mes_issue_uom"],
@@ -1208,9 +1214,9 @@ def issue_and_push_to_dlm_from_dialog(material_request_name, items=None):
     """Create, submit and push a Stock Entry from editable Material Request issue rows."""
     from mes_integration.mes_integration.stock_entry import push_to_mes
 
-    lock_material_request_for_issue(material_request_name)
-
     mr = frappe.get_doc("Material Request", material_request_name)
+    mr.check_permission("read")
+    lock_material_request_for_issue(material_request_name)
     if not is_mes_integration_enabled(mr.get("company")):
         throw_mes_integration_disabled(mr.get("company"))
     validate_material_request_can_issue_to_dlm(mr)
@@ -1519,6 +1525,8 @@ def submit_issue_and_push_to_dlm(material_request_name):
     返回 partial 状态提示用户手动推送。
     """
     mr = frappe.get_doc("Material Request", material_request_name)
+    mr.check_permission("read")
+    mr.check_permission("submit")
     if not is_mes_integration_enabled(mr.get("company")):
         throw_mes_integration_disabled(mr.get("company"))
 
@@ -1578,6 +1586,7 @@ def batch_issue_and_push_to_dlm(material_requests=None, items=None):
         try:
             frappe.db.savepoint(savepoint)
             mr = frappe.get_doc("Material Request", name)
+            mr.check_permission("read")
             validate_batch_issue_material_request(mr)
             issue_rows = grouped_items.get(mr.name) if isinstance(grouped_items, dict) else None
             result = issue_and_push_to_dlm_from_dialog(mr.name, issue_rows or build_batch_issue_rows(mr))

@@ -53,6 +53,8 @@ MES 重试请求时应传递稳定的 `X-Idempotency-Key`，或在请求数据�
 
 ### MES 入库接口
 
+MES 系统页面地址通过站点配置 `mes_portal_url` 提供，配置后可从制造工作区打开 MES 页面。
+
 MES 可调用以下接口创建入库 Stock Entry：
 
     POST /api/method/mes_integration.api.create_stock_entry

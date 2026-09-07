@@ -5,30 +5,38 @@ frappe.pages["mes-portal"].on_page_load = function (wrapper) {
 		single_column: true,
 	});
 
-	const mes_url = "https://lemos-case.com/mes";
+	const mes_url = frappe.boot.mes_portal_url;
 
-	page.set_primary_action(__("新窗口打开"), () => {
-		window.open(mes_url, "_blank", "noopener");
-	});
+	if (mes_url) {
+		page.set_primary_action(__("新窗口打开"), () => {
+			window.open(mes_url, "_blank", "noopener");
+		});
+	}
 
-	$(page.body).html(`
+	const $portal = $(`
 		<div class="mes-portal-wrapper">
 			<div class="mes-portal-fallback">
 				<div>
 					<div class="mes-portal-fallback-title">${__("正在加载 MES 系统")}</div>
 					<div class="mes-portal-fallback-text">
-						${__("如果页面无法显示，请使用右上角按钮在新窗口打开。")}
+						${__("如果页面无法显示，请检查 MES 门户地址配置。")}
 					</div>
 				</div>
 			</div>
-			<iframe
-				class="mes-portal-frame"
-				src="${mes_url}"
-				title="${__("MES 系统")}"
-				allowfullscreen>
-			</iframe>
 		</div>
 	`);
+
+	if (mes_url) {
+		$("<iframe>", {
+			class: "mes-portal-frame",
+			title: __("MES 系统"),
+			allowfullscreen: true,
+		}).attr("src", mes_url).appendTo($portal);
+	} else {
+		$portal.find(".mes-portal-fallback-title").text(__("MES 门户地址未配置"));
+	}
+
+	$(page.body).empty().append($portal);
 
 	$(`<style>
 		.mes-portal-wrapper {

@@ -680,13 +680,6 @@ function show_mes_push_error(frm, r) {
 		return;
 	}
 
-	if (r && r._server_messages) {
-		if (frm) {
-			frm._mes_push_error_shown = true;
-		}
-		return;
-	}
-
 	if (frm) {
 		frm._mes_push_error_shown = true;
 	}

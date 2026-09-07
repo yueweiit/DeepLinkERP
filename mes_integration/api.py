@@ -94,7 +94,7 @@ def get_batch_bin_rows(item_codes=None):
     )
 
     existing_item_codes = set(
-        frappe.get_all(
+        frappe.get_list(
             "Item",
             filters={"name": ["in", requested_item_codes]},
             pluck="name",

@@ -7,15 +7,34 @@ from frappe.utils import flt, now
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from erpnext.stock.doctype.item.item import get_item_defaults
 
-from crm_integration.crm_integration.sales_order import (
-    CRM_STATUS_PRODUCTION_PROGRESS_REPORTED,
-    DELIVERABLE,
-    PENDING_FINAL_PAYMENT,
-    PENDING_PRODUCTION,
-    PARTIALLY_DELIVERED,
-    enqueue_sales_order_status_to_crm,
-    set_process_status,
-)
+try:
+    from crm_integration.crm_integration.sales_order import (
+        CRM_STATUS_PRODUCTION_PROGRESS_REPORTED,
+        DELIVERABLE,
+        PENDING_FINAL_PAYMENT,
+        PENDING_PRODUCTION,
+        PARTIALLY_DELIVERED,
+        enqueue_sales_order_status_to_crm,
+        set_process_status,
+    )
+except ModuleNotFoundError as exc:
+    if not exc.name or not exc.name.startswith("crm_integration"):
+        raise
+
+    CRM_INTEGRATION_AVAILABLE = False
+    CRM_STATUS_PRODUCTION_PROGRESS_REPORTED = "PRODUCTION_PROGRESS_REPORTED"
+    DELIVERABLE = "Deliverable"
+    PENDING_FINAL_PAYMENT = "Pending Final Payment"
+    PENDING_PRODUCTION = "Pending Production"
+    PARTIALLY_DELIVERED = "Partially Delivered"
+
+    def enqueue_sales_order_status_to_crm(*args, **kwargs):
+        return None
+
+    def set_process_status(*args, **kwargs):
+        return None
+else:
+    CRM_INTEGRATION_AVAILABLE = True
 from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
 from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
 from mes_integration.mes_integration.stock_entry import (
@@ -34,6 +53,8 @@ def create_draft_delivery_note_from_mes(data=None):
 
     if not isinstance(payload, dict):
         frappe.throw(_("缺少请求数据或数据格式不正确"))
+
+    ensure_crm_integration_available()
 
     sales_order_name = payload.get("sales_order")
     company = frappe.db.get_value("Sales Order", sales_order_name, "company") if sales_order_name else None
@@ -90,6 +111,9 @@ def create_draft_delivery_note_from_mes(data=None):
 
 
 def enqueue_crm_production_progress_event(payload, delivery_note):
+    if not CRM_INTEGRATION_AVAILABLE:
+        return
+
     try:
         items = get_crm_production_progress_items(payload.get("items"))
         enqueue_sales_order_status_to_crm(
@@ -137,6 +161,8 @@ def get_crm_production_progress_remark(delivery_note_name, items):
 
 
 def create_draft_delivery_note(payload):
+    ensure_crm_integration_available()
+
     sales_order_name = payload.get("sales_order")
     if not sales_order_name:
         frappe.throw(_("缺少销售订单编号 sales_order"))
@@ -145,6 +171,7 @@ def create_draft_delivery_note(payload):
         frappe.throw(_("未找到销售订单 {0}").format(sales_order_name))
 
     sales_order = frappe.get_doc("Sales Order", sales_order_name)
+    sales_order.check_permission("read")
     validate_sales_order_for_mes_delivery_note(sales_order)
 
     items = payload.get("items")
@@ -372,14 +399,14 @@ DELIVERY_NOTE_STATUS_DOCUMENT_TYPE = "delivery_note"
 
 
 def set_delivery_readiness_status(doc, method=None):
-    if not is_mes_integration_enabled(doc.get("company")):
+    if not CRM_INTEGRATION_AVAILABLE or not is_mes_integration_enabled(doc.get("company")):
         return
 
     doc.custom_delivery_readiness_status = get_delivery_readiness_status(doc)
 
 
 def set_delivered_readiness_status(doc, method=None):
-    if not is_mes_integration_enabled(doc.get("company")):
+    if not CRM_INTEGRATION_AVAILABLE or not is_mes_integration_enabled(doc.get("company")):
         return
 
     status = get_delivery_readiness_status(doc)
@@ -388,7 +415,7 @@ def set_delivered_readiness_status(doc, method=None):
 
 
 def clear_delivery_readiness_status(doc, method=None):
-    if not is_mes_integration_enabled(doc.get("company")):
+    if not CRM_INTEGRATION_AVAILABLE or not is_mes_integration_enabled(doc.get("company")):
         return
 
     if frappe.db.has_column("Delivery Note", "custom_delivery_readiness_status"):
@@ -396,6 +423,9 @@ def clear_delivery_readiness_status(doc, method=None):
 
 
 def get_delivery_readiness_status(doc):
+    if not CRM_INTEGRATION_AVAILABLE:
+        return None
+
     statuses = get_linked_sales_order_process_statuses(doc)
     if not statuses:
         return None
@@ -432,6 +462,9 @@ def get_linked_sales_order_process_statuses(doc):
 
 
 def update_delivery_readiness_status_for_sales_orders(sales_orders):
+    if not CRM_INTEGRATION_AVAILABLE:
+        return
+
     if isinstance(sales_orders, str):
         sales_orders = [sales_orders]
 
@@ -476,6 +509,9 @@ def enqueue_delivery_note_status_callback(delivery_note_name):
 
 
 def push_delivery_note_status_to_mes(delivery_note_name):
+    if not CRM_INTEGRATION_AVAILABLE:
+        return []
+
     delivery_note = frappe.get_doc("Delivery Note", delivery_note_name)
     if not is_mes_integration_enabled(delivery_note.get("company")):
         return []
@@ -543,10 +579,10 @@ def push_delivery_note_sales_order_status_to_mes(delivery_note, sales_order_name
 
 @frappe.whitelist()
 def retry_push_delivery_note_status_to_mes(delivery_note_name):
-    if not frappe.has_permission("Delivery Note", "read"):
-        frappe.throw(_("缺少 Delivery Note 读取权限"), frappe.PermissionError)
+    ensure_crm_integration_available()
 
     delivery_note = frappe.get_doc("Delivery Note", delivery_note_name)
+    delivery_note.check_permission("read")
     if not is_mes_integration_enabled(delivery_note.get("company")):
         throw_mes_integration_disabled(delivery_note.get("company"))
 
@@ -649,6 +685,11 @@ def validate_mes_delivery_note_permissions():
             _("当前用户缺少 {0} 的 {1} 权限").format("Delivery Note", "create"),
             frappe.PermissionError,
         )
+
+
+def ensure_crm_integration_available():
+    if not CRM_INTEGRATION_AVAILABLE:
+        frappe.throw(_("MES 销售出库流程需要安装 crm_integration 应用。"))
 
 
 def parse_json_if_needed(value):
