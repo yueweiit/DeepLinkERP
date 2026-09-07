@@ -49,7 +49,7 @@
 - Create: `overseas_costing/overseas_costing/doctype/overseas_cost_fee_completion/overseas_cost_fee_completion.json`
 - Create: `overseas_costing/tests/test_fee_doctypes.py`
 
-- [ ] **Step 1: 写失败测试，锁定字段和镜像一致性**
+- [x] **Step 1: 写失败测试，锁定字段和镜像一致性**
 
 ```python
 import json
@@ -84,13 +84,13 @@ def test_cost_version_persists_immutable_result_hash() -> None:
     assert "cost_result_hash" in fields
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_doctypes.py`
 
 Expected: FAIL because the fields and DocTypes are absent.
 
-- [ ] **Step 3: 扩展分摊规则字段**
+- [x] **Step 3: 扩展分摊规则字段**
 
 两份规则 JSON 增加：
 
@@ -146,13 +146,13 @@ Expected: FAIL because the fields and DocTypes are absent.
 
 `logical_fee_key` 在同一批次业务中稳定，暂估转实际更新同一费用而非新增叠加。历史规则的金额为空时迁移为 `MISSING`；金额存在但没有可验证的最终凭证或费用完成记录时迁移为 `ESTIMATED`；只有有效最终凭证或完成记录能够证明时才标 `ACTUAL`，不得靠金额大小或旧状态名称猜测。
 
-- [ ] **Step 4: 创建证据和完成记录**
+- [x] **Step 4: 创建证据和完成记录**
 
 `Overseas Cost Fee Evidence` 至少包含 `batch`、`version`、`fee_rule`、`attachment`、`evidence_role`、`validation_status`（PENDING/VALID/INVALID/UNLINKED）、`source_revision`、`validated_by/at`、`remark`。
 
 `Overseas Cost Fee Completion` 至少包含 `batch`、`version`、`input_hash`、`status`（CONFIRMED/INVALIDATED）、`confirmed_by/at`、`invalidated_by/at`、`invalidation_reason`。禁止覆盖原确认行。
 
-- [ ] **Step 5: 运行并提交**
+- [x] **Step 5: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_doctypes.py`
 

@@ -11,11 +11,19 @@
     "batch",
     "version",
     "rule_code",
+    "logical_fee_key",
     "expense_category",
+    "amount_status",
     "allocation_basis",
     "basis_field",
+    "scope_type",
+    "scope_value_json",
+    "scope_revision",
     "currency",
     "amount",
+    "amount_revision",
+    "required_evidence_role",
+    "included_in_fee_key",
     "priority_no",
     "remark",
     "is_enabled",
@@ -44,10 +52,23 @@
       "in_list_view": 1
     },
     {
+      "fieldname": "logical_fee_key",
+      "fieldtype": "Data",
+      "label": "逻辑费用标识",
+      "reqd": 1
+    },
+    {
       "fieldname": "expense_category",
       "fieldtype": "Data",
       "label": "费用类别",
       "in_list_view": 1
+    },
+    {
+      "fieldname": "amount_status",
+      "fieldtype": "Select",
+      "label": "金额状态",
+      "options": "MISSING\nESTIMATED\nACTUAL\nNOT_INCURRED\nINCLUDED",
+      "default": "MISSING"
     },
     {
       "fieldname": "allocation_basis",
@@ -62,6 +83,23 @@
       "label": "分摊基数字段"
     },
     {
+      "fieldname": "scope_type",
+      "fieldtype": "Select",
+      "label": "费用适用范围",
+      "options": "ALL_ITEMS\nITEMS\nDIRECT_ITEM",
+      "default": "ALL_ITEMS"
+    },
+    {
+      "fieldname": "scope_value_json",
+      "fieldtype": "Long Text",
+      "label": "费用范围JSON"
+    },
+    {
+      "fieldname": "scope_revision",
+      "fieldtype": "Data",
+      "label": "费用范围修订"
+    },
+    {
       "fieldname": "currency",
       "fieldtype": "Data",
       "label": "币种"
@@ -70,6 +108,21 @@
       "fieldname": "amount",
       "fieldtype": "Currency",
       "label": "金额"
+    },
+    {
+      "fieldname": "amount_revision",
+      "fieldtype": "Data",
+      "label": "金额修订"
+    },
+    {
+      "fieldname": "required_evidence_role",
+      "fieldtype": "Data",
+      "label": "必需最终凭证角色"
+    },
+    {
+      "fieldname": "included_in_fee_key",
+      "fieldtype": "Data",
+      "label": "已包含于费用"
     },
     {
       "fieldname": "priority_no",

@@ -1,0 +1,36 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Fee Completion",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "input_hash",
+  "track_changes": 1,
+  "sort_field": "creation",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version",
+    "input_hash",
+    "status",
+    "confirmed_by",
+    "confirmed_at",
+    "invalidated_by",
+    "invalidated_at",
+    "invalidation_reason"
+  ],
+  "fields": [
+    {"fieldname": "batch", "fieldtype": "Link", "label": "所属批次", "options": "Overseas Cost Batch", "reqd": 1, "in_list_view": 1, "read_only": 1},
+    {"fieldname": "version", "fieldtype": "Link", "label": "所属版本", "options": "Overseas Cost Version", "reqd": 1, "read_only": 1},
+    {"fieldname": "input_hash", "fieldtype": "Data", "label": "费用输入哈希", "reqd": 1, "read_only": 1, "in_list_view": 1},
+    {"fieldname": "status", "fieldtype": "Select", "label": "完结状态", "options": "CONFIRMED\nINVALIDATED", "reqd": 1, "read_only": 1, "in_list_view": 1},
+    {"fieldname": "confirmed_by", "fieldtype": "Link", "label": "确认人", "options": "User", "read_only": 1},
+    {"fieldname": "confirmed_at", "fieldtype": "Datetime", "label": "确认时间", "read_only": 1},
+    {"fieldname": "invalidated_by", "fieldtype": "Link", "label": "失效人", "options": "User", "read_only": 1},
+    {"fieldname": "invalidated_at", "fieldtype": "Datetime", "label": "失效时间", "read_only": 1},
+    {"fieldname": "invalidation_reason", "fieldtype": "Small Text", "label": "失效原因", "read_only": 1}
+  ],
+  "permissions": [
+    {"role": "System Manager", "read": 1, "create": 1, "print": 1, "export": 1},
+    {"role": "海外成本核算用户", "read": 1, "create": 1, "print": 1, "export": 1, "report": 1}
+  ]
+}

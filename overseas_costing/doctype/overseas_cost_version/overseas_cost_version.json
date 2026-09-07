@@ -19,6 +19,7 @@
     "calculated_at",
     "rule_snapshot_json",
     "summary_snapshot_json",
+    "cost_result_hash",
     "remark",
     "created_by_name"
   ],
@@ -91,6 +92,12 @@
       "fieldname": "summary_snapshot_json",
       "fieldtype": "Long Text",
       "label": "摘要快照JSON"
+    },
+    {
+      "fieldname": "cost_result_hash",
+      "fieldtype": "Data",
+      "label": "成本结果哈希",
+      "read_only": 1
     },
     {
       "fieldname": "remark",
