@@ -109,6 +109,24 @@ def test_exact_sheet_selection_never_silently_falls_back(tmp_path) -> None:
         read_packing_grid(str(path), sheet_name="错误页签", require_exact_sheet=True)
 
 
+def test_material_import_grid_limits_rows_and_columns_before_iteration(tmp_path) -> None:
+    path = tmp_path / "wide.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.cell(2, 121, "too wide")
+    workbook.save(path)
+    workbook.close()
+
+    with pytest.raises(ValueError, match="120"):
+        read_packing_grid(
+            str(path),
+            sheet_name=sheet.title,
+            require_exact_sheet=True,
+            max_rows=1000,
+            max_columns=120,
+        )
+
+
 def test_dingtalk_raw_number_wins_over_formatted_display_value() -> None:
     grid = build_grid_from_dingtalk_snapshot(
         {

@@ -85,6 +85,8 @@ def read_packing_grid(
     *,
     sheet_name: str | None,
     require_exact_sheet: bool,
+    max_rows: int | None = None,
+    max_columns: int | None = None,
 ) -> dict[str, Any]:
     """读取用户选定的工作表，保留公式、缓存值和真实合并范围。"""
 
@@ -110,6 +112,10 @@ def read_packing_grid(
 
         formula_sheet = formula_workbook[selected_sheet]
         value_sheet = value_workbook[selected_sheet]
+        if max_rows is not None and formula_sheet.max_row > max_rows:
+            raise ValueError(f"Excel 最多支持 {max_rows} 行。")
+        if max_columns is not None and formula_sheet.max_column > max_columns:
+            raise ValueError(f"Excel 最多支持 {max_columns} 列。")
         cells: list[list[dict[str, Any]]] = []
         for row_number in range(1, formula_sheet.max_row + 1):
             row: list[dict[str, Any]] = []

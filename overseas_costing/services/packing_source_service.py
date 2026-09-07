@@ -316,6 +316,7 @@ def resolve_trusted_packing_source(
     source_kind: str,
     source_id: str,
     sheet_name: str | None = None,
+    strict_material_xlsx: bool = False,
 ) -> dict:
     """重新从服务器可信存储解析来源，浏览器不能提供正文、路径、总数或工作簿 URL。"""
 
@@ -338,10 +339,19 @@ def resolve_trusted_packing_source(
             raise ValueError("装箱附件尚未保存到系统。")
         selected_sheet = str(sheet_name or "").strip()
         path = import_service._resolve_excel_file_path(file_url=file_url)
+        if strict_material_xlsx:
+            from overseas_costing.services.material_import_service import validate_material_workbook_metadata
+
+            validate_material_workbook_metadata(
+                str(source.get("file_name") or path.name),
+                path.stat().st_size,
+            )
         grid = read_packing_grid(
             str(path),
             sheet_name=selected_sheet,
             require_exact_sheet=True,
+            max_rows=1000 if strict_material_xlsx else None,
+            max_columns=120 if strict_material_xlsx else None,
         )
         source_hash = hashlib.sha256(
             f"{_attachment_hash(source)}|{selected_sheet}".encode("utf-8")

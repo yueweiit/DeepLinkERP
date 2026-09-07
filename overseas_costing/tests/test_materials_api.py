@@ -33,6 +33,36 @@ def test_grid_checks_read_permission_before_query(monkeypatch) -> None:
     assert calls == [("BATCH-NO", "read")]
 
 
+def test_preview_checks_permission_and_rejects_paths_or_urls(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    monkeypatch.setattr(api, "require_batch_permission", lambda _batch, _ptype: "BATCH-DOC")
+    monkeypatch.setattr(
+        api.material_import_service,
+        "preview_material_import",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not inspect path")),
+    )
+
+    with pytest.raises(ValueError, match="受控 ID"):
+        api.preview_material_import("BATCH", "manual_xlsx", "/tmp/packing.xlsx", "Sheet1")
+    with pytest.raises(ValueError, match="受控 ID"):
+        api.preview_material_import("BATCH", "manual_xlsx", "https://example.test/a.xlsx", "Sheet1")
+
+
+def test_apply_limits_choices_payload_and_requires_write_permission(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "require_batch_permission",
+        lambda batch, ptype: calls.append((batch, ptype)) or "BATCH-DOC",
+    )
+
+    with pytest.raises(ValueError, match="过大"):
+        api.apply_material_import("BATCH", "token", "x" * 200_000, "EDIT", "MOD")
+
+    assert calls == [("BATCH", "write")]
+
+
 def test_set_shipping_quantity_uses_write_permission_and_whitelisted_mode(monkeypatch) -> None:
     api = _load_api(monkeypatch)
     monkeypatch.setattr(api, "require_batch_permission", lambda _batch, _ptype: "BATCH-DOC")
