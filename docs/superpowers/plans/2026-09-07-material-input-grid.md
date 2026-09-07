@@ -579,7 +579,7 @@ Expected: PASS and the two generated JS copies plus two CSS copies are byte-iden
 
 在 `development.localhost` 只使用本地样本验证：仅 OA 无装箱单、默认数量、手工数量冲突、Excel 两个 Sheet、重复 SKU、共享箱候选、按货值/毛重切换、红格定位、键盘与粘贴。确认未调用真实 ERP。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add overseas_costing/page/overseas_cost_workbench/parts/77-material-grid.js overseas_costing/page/overseas_cost_workbench/parts/48-material-grid.css overseas_costing/page/overseas_cost_workbench/parts/05-workbench-state.js overseas_costing/page/overseas_cost_workbench/parts/82-detail-page.js overseas_costing/page/overseas_cost_workbench/parts/65-manual-documents.js overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.css overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.css overseas_costing/tests/test_workbench_frontend_state.py
@@ -593,11 +593,11 @@ git commit -m 'feat: add spreadsheet material input workflow'
 - Modify: `overseas_costing/scripts/seed_workbench_sample.py`
 - Create: `overseas_costing/tests/test_material_grid_acceptance.py`
 
-- [ ] **Step 1: 增加不含真实业务数据的验收样本**
+- [x] **Step 1: 增加不含真实业务数据的验收样本**
 
 样本覆盖：只有 OA、采购默认发货、明确不同发货量、按 kg 计价按桶出货、重复 SKU、共享箱、缺毛重但按货值可算、缺项目可预览。
 
-- [ ] **Step 2: 运行完整相关测试**
+- [x] **Step 2: 运行完整相关测试**
 
 ```bash
 python -m pytest -q \
@@ -615,7 +615,7 @@ python -m pytest -q \
 
 Expected: PASS with no test accessing a real DingTalk or ERP endpoint.
 
-- [ ] **Step 3: 验证 DocType 镜像和资源镜像**
+- [x] **Step 3: 验证 DocType 镜像和资源镜像**
 
 ```bash
 cmp overseas_costing/doctype/overseas_cost_item/overseas_cost_item.json overseas_costing/overseas_costing/doctype/overseas_cost_item/overseas_cost_item.json
@@ -626,7 +626,7 @@ git diff --check
 
 Expected: all commands exit 0.
 
-- [ ] **Step 4: 提交验收样本**
+- [x] **Step 4: 提交验收样本**
 
 ```bash
 git add overseas_costing/scripts/seed_workbench_sample.py overseas_costing/tests/test_material_grid_acceptance.py
