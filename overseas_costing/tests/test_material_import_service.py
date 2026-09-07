@@ -26,6 +26,8 @@ class FakeRepository:
                 "name": "I1",
                 "stable_line_key": "L1",
                 "material_code": "M1",
+                "source_doc_no": "PO1",
+                "excel_row_no": 9,
                 "actual_shipped_qty": 17,
                 "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
                 "shipped_uom": "桶",
@@ -85,6 +87,8 @@ def _resolver_with_quantity(quantity=15, source_hash="a" * 64):
                 "material_rows": [
                     {
                         "source_row": 9,
+                        "source_line_no": 9,
+                        "source_doc_no": "PO1",
                         "material_code": "M1",
                         "quantity": quantity,
                         "unit": "桶",
@@ -108,17 +112,21 @@ def test_preview_keeps_duplicate_sku_rows_and_requires_line_choice() -> None:
                 "stable_line_key": "L1",
                 "material_code": "FL000103",
                 "source_doc_no": "PO1",
+                "excel_row_no": 9,
             },
             {
                 "name": "I2",
                 "stable_line_key": "L2",
                 "material_code": "FL000103",
-                "source_doc_no": "PO2",
+                "source_doc_no": "PO1",
+                "excel_row_no": 9,
             },
         ],
         incoming=[
             {
                 "source_row": 9,
+                "source_line_no": 9,
+                "source_doc_no": "PO1",
                 "material_code": "FL000103",
                 "actual_shipped_qty": 15,
             }
@@ -136,11 +144,11 @@ def test_preview_keeps_duplicate_sku_rows_and_requires_line_choice() -> None:
 def test_source_document_disambiguates_duplicate_sku_rows() -> None:
     result = build_material_import_preview(
         existing=[
-            {"name": "I1", "stable_line_key": "L1", "material_code": "M1", "source_doc_no": "PO1"},
-            {"name": "I2", "stable_line_key": "L2", "material_code": "M1", "source_doc_no": "PO2"},
+            {"name": "I1", "stable_line_key": "L1", "material_code": "M1", "source_doc_no": "PO1", "excel_row_no": 2},
+            {"name": "I2", "stable_line_key": "L2", "material_code": "M1", "source_doc_no": "PO2", "excel_row_no": 3},
         ],
         incoming=[
-            {"source_row": 2, "material_code": "M1", "source_doc_no": "PO2", "actual_shipped_qty": 9}
+            {"source_row": 3, "source_line_no": 3, "material_code": "M1", "source_doc_no": "PO2", "actual_shipped_qty": 9}
         ],
         source={"kind": "manual_xlsx", "revision": "R1"},
     )
@@ -151,8 +159,8 @@ def test_source_document_disambiguates_duplicate_sku_rows() -> None:
 
 def test_legacy_target_without_stored_key_uses_database_row_identity() -> None:
     result = build_material_import_preview(
-        existing=[{"name": "I1", "stable_line_key": "", "material_code": "M1"}],
-        incoming=[{"source_row": 2, "material_code": "M1", "actual_shipped_qty": 9}],
+        existing=[{"name": "I1", "stable_line_key": "", "material_code": "M1", "source_doc_no": "PO1", "excel_row_no": 2}],
+        incoming=[{"source_row": 2, "source_line_no": 2, "source_doc_no": "PO1", "material_code": "M1", "actual_shipped_qty": 9}],
         source={"kind": "manual_xlsx"},
     )
 
@@ -206,7 +214,7 @@ def test_provided_approval_and_source_line_never_fall_back_to_sku_only() -> None
     ]
     wrong_approval = build_material_import_preview(
         existing,
-        [{"source_row": 9, "material_code": "M1", "source_doc_no": "PO-X"}],
+        [{"source_row": 9, "source_line_no": 4, "material_code": "M1", "source_doc_no": "PO-X"}],
         {"kind": "manual_xlsx"},
     )
     wrong_line = build_material_import_preview(
@@ -225,17 +233,24 @@ def test_provided_approval_and_source_line_never_fall_back_to_sku_only() -> None
     assert wrong_approval["rows"][0]["match_status"] == "unmatched"
     assert wrong_line["rows"][0]["match_status"] == "unmatched"
 
+    missing_identity = build_material_import_preview(
+        existing,
+        [{"source_row": 4, "source_line_no": 4, "material_code": "M1"}],
+        {"kind": "manual_xlsx"},
+    )
+    assert missing_identity["rows"][0]["match_status"] == "unmatched"
+
 
 def test_preview_classifies_supplements_conflicts_and_unmatched_rows() -> None:
     result = build_material_import_preview(
         existing=[
-            {"name": "I1", "stable_line_key": "L1", "material_code": "M1", "gross_weight_kg": ""},
-            {"name": "I2", "stable_line_key": "L2", "material_code": "M2", "gross_weight_kg": 10},
+            {"name": "I1", "stable_line_key": "L1", "material_code": "M1", "source_doc_no": "PO1", "excel_row_no": 2, "gross_weight_kg": ""},
+            {"name": "I2", "stable_line_key": "L2", "material_code": "M2", "source_doc_no": "PO2", "excel_row_no": 3, "gross_weight_kg": 10},
         ],
         incoming=[
-            {"source_row": 2, "material_code": "M1", "gross_weight_kg": 8},
-            {"source_row": 3, "material_code": "M2", "gross_weight_kg": 12},
-            {"source_row": 4, "material_code": "UNKNOWN", "gross_weight_kg": 5},
+            {"source_row": 2, "source_line_no": 2, "source_doc_no": "PO1", "material_code": "M1", "gross_weight_kg": 8},
+            {"source_row": 3, "source_line_no": 3, "source_doc_no": "PO2", "material_code": "M2", "gross_weight_kg": 12},
+            {"source_row": 4, "source_line_no": 4, "source_doc_no": "PO-X", "material_code": "UNKNOWN", "gross_weight_kg": 5},
         ],
         source={"kind": "manual_xlsx"},
     )

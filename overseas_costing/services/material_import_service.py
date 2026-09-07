@@ -151,35 +151,30 @@ def _match_candidates(existing: list, incoming: dict) -> list:
     material_code = _normalized(incoming.get("material_code"))
     if not material_code:
         return []
-    candidates = [
-        item for item in existing
-        if _normalized(item.get("material_code")) == material_code
-    ]
     source_doc_no = _normalized(incoming.get("source_doc_no"))
-    if source_doc_no:
-        source_matches = [
-            item for item in candidates
-            if _normalized(item.get("source_doc_no")) == source_doc_no
-        ]
-        if source_matches:
-            candidates = source_matches
-        else:
-            return []
     source_line_no = _normalized(
         incoming.get("source_line_no")
         or incoming.get("purchase_source_row")
         or incoming.get("source_excel_row_no")
     )
-    if source_line_no:
-        line_matches = [
-            item
-            for item in candidates
-            if _normalized(item.get("excel_row_no") or item.get("source_line_no")) == source_line_no
-        ]
-        if line_matches:
-            return line_matches
+    if not source_doc_no or not source_line_no:
         return []
-    return candidates
+    candidates = [
+        item for item in existing
+        if _normalized(item.get("material_code")) == material_code
+    ]
+    source_matches = [
+        item for item in candidates
+        if _normalized(item.get("source_doc_no")) == source_doc_no
+    ]
+    if not source_matches:
+        return []
+    line_matches = [
+        item
+        for item in source_matches
+        if _normalized(item.get("excel_row_no") or item.get("source_line_no")) == source_line_no
+    ]
+    return line_matches
 
 
 def _canonical_hash(value: object) -> str:
