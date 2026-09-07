@@ -161,6 +161,51 @@ def test_same_amount_nature_change_still_reopens_cost_result() -> None:
     assert result["cost_inputs_changed"] is True
 
 
+@pytest.mark.parametrize("currency", [None, "", "US", "USDT", "U1D"])
+def test_normalize_fee_payload_rejects_invalid_currency(currency) -> None:
+    with pytest.raises(ValueError, match="币种"):
+        normalize_fee_payload(
+            {
+                "logical_fee_key": "FREIGHT",
+                "amount": "100",
+                "amount_status": "ACTUAL",
+                "currency": currency,
+                "scope_type": "ALL_ITEMS",
+                "allocation_basis": "gross_weight",
+            }
+        )
+
+
+def test_normalize_fee_payload_uppercases_any_three_letter_currency() -> None:
+    result = normalize_fee_payload(
+        {
+            "logical_fee_key": "FREIGHT",
+            "amount": "100",
+            "amount_status": "ACTUAL",
+            "currency": "eur",
+            "scope_type": "ALL_ITEMS",
+            "allocation_basis": "gross_weight",
+        }
+    )
+
+    assert result["currency"] == "EUR"
+
+
+@pytest.mark.parametrize("amount", ["NaN", "Infinity", "-Infinity"])
+def test_normalize_fee_payload_rejects_non_finite_amount(amount: str) -> None:
+    with pytest.raises(ValueError, match="金额"):
+        normalize_fee_payload(
+            {
+                "logical_fee_key": "FREIGHT",
+                "amount": amount,
+                "amount_status": "ACTUAL",
+                "currency": "RMB",
+                "scope_type": "ALL_ITEMS",
+                "allocation_basis": "gross_weight",
+            }
+        )
+
+
 def test_not_incurred_and_included_require_auditable_reason() -> None:
     with pytest.raises(ValueError, match="原因"):
         normalize_fee_payload(

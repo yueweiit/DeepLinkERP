@@ -9195,7 +9195,7 @@ class OverseasCostWorkbench {
   }
 
   ensureMaterialFeeState() {
-    const batchName = String(this.detailState.batchName || "");
+    const batchName = String(this.detailState?.batchName || "");
     if (!this.materialFeeState || this.materialFeeState.batchName !== batchName) {
       this.materialFeeState = {
         batchName,
@@ -9205,11 +9205,18 @@ class OverseasCostWorkbench {
         showAuxiliary: false,
         loading: false,
         requestId: 0,
+        feeRequestId: 0,
+        feeDrafts: {},
+        focusedFeeInput: null,
         materials: null,
         fees: null,
         preview: null,
       };
     }
+    if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
+    if (!Number.isFinite(this.materialFeeState.feeRequestId)) this.materialFeeState.feeRequestId = 0;
+    this.materialFeeState.feeDrafts = this.materialFeeState.feeDrafts || {};
+    if (this.materialFeeState.focusedFeeInput === undefined) this.materialFeeState.focusedFeeInput = null;
     return this.materialFeeState;
   }
 
@@ -9252,7 +9259,15 @@ class OverseasCostWorkbench {
       this.openWikiMaterialImportDialog().catch((error) => this.showError(error));
     });
     this.$root.on("focus", "[data-mf-fee-input]", (event) => {
-      $(event.currentTarget).closest(".ocw-mf-fee-amount-cell").removeClass("is-save-error").attr("title", "");
+      const $input = $(event.currentTarget);
+      const state = this.ensureMaterialFeeState();
+      state.focusedFeeInput = {
+        feeKey: String($input.attr("data-fee-key") || ""),
+        field: String($input.attr("data-mf-fee-input") || ""),
+      };
+    });
+    this.$root.on("input", "[data-mf-fee-input]", (event) => {
+      this.updateMaterialFeeDraftFromInput($(event.currentTarget));
     });
     this.$root.on("keydown", "[data-mf-fee-input]", (event) => {
       if (event.key !== "Enter") return;
@@ -9260,7 +9275,14 @@ class OverseasCostWorkbench {
       event.currentTarget.blur();
     });
     this.$root.on("blur", "[data-mf-fee-input]", (event) => {
-      this.saveMaterialFeeInlineAmount($(event.currentTarget)).catch((error) => this.showError(error));
+      const $input = $(event.currentTarget);
+      const state = this.ensureMaterialFeeState();
+      const feeKey = typeof $input.attr === "function" ? String($input.attr("data-fee-key") || "") : "";
+      const field = typeof $input.attr === "function" ? String($input.attr("data-mf-fee-input") || "") : "";
+      if (state.focusedFeeInput?.feeKey === feeKey && state.focusedFeeInput?.field === field) {
+        state.focusedFeeInput = null;
+      }
+      this.saveMaterialFeeInlineAmount($input).catch((error) => this.showError(error));
     });
     this.$root.on("focus", "[data-mf-cell-input]", (event) => {
       $(event.currentTarget).closest(".ocw-mf-cell").removeClass("is-save-error").attr("title", "");
@@ -9427,6 +9449,7 @@ class OverseasCostWorkbench {
         ${this.renderMaterialFeeCostTable()}
       </div>
     `);
+    this.restoreMaterialFeeInputFocus();
   }
 
   renderMaterialFeeMetric(label, value, tone) {
@@ -9451,20 +9474,27 @@ class OverseasCostWorkbench {
     const allocationBlocked = ["ESTIMATED", "ACTUAL"].includes(String(fee.amount_state || fee.amount_status || "")) && allocation.status !== "ALLOCATED";
     const scopeLabel = String(fee.scope_type || "ALL_ITEMS") === "ALL_ITEMS" ? "全批物料" : String(fee.scope_type) === "DIRECT_ITEM" ? "指定单行" : "指定物料";
     const amountStatus = String(fee.amount_state || fee.amount_status || "MISSING").toUpperCase();
-    const amount = fee.amount ?? "";
-    const currency = String(fee.currency || "RMB");
+    const feeKey = String(fee.logical_fee_key || fee.fee_key || "");
+    const draft = this.materialFeeState?.feeDrafts?.[feeKey] || null;
+    const amount = draft ? draft.amount : (fee.amount ?? "");
+    const currency = draft ? draft.currency : String(fee.currency || "RMB");
     const missingSavedAmount = amountStatus === "MISSING" && amount !== "";
+    const forceActual = Boolean(draft?.forceActual || missingSavedAmount);
+    const inlineError = String(draft?.error || "");
+    const errorId = this.materialFeeErrorId(feeKey);
+    const feeLabel = String(fee.expense_category || feeKey || "费用");
     const evidence = fee.evidence || [];
     return `
       <tr class="${fee.legacy_unmapped || fee.requires_review ? "is-review" : ""}">
         <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "--")}</strong><small>${fee.virtual ? "默认项 · 未入库" : fee.legacy_unmapped ? "历史费用 · 请核对" : "已保存"}</small></td>
         <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span></td>
-        <td class="ocw-mf-fee-amount-cell">
+        <td class="ocw-mf-fee-amount-cell ${inlineError ? "is-save-error" : ""}" ${inlineError ? `title="${this.escape(inlineError)}"` : ""}>
           <div class="ocw-mf-fee-inline-fields">
-            <input data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(fee.logical_fee_key || fee.fee_key || "")}" data-original-value="${this.escape(currency)}" value="${this.escape(currency)}" maxlength="3" pattern="[A-Za-z]{3}" autocomplete="off" spellcheck="false" aria-label="币种" />
-            <input data-mf-fee-input="amount" data-mf-fee-amount="1" data-fee-key="${this.escape(fee.logical_fee_key || fee.fee_key || "")}" data-original-value="${this.escape(amount)}" value="${this.escape(amount)}" ${missingSavedAmount ? 'data-mf-force-actual="1"' : ""} inputmode="decimal" aria-label="原币金额" />
+            <input data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.currency || "RMB")}" value="${this.escape(currency)}" maxlength="3" pattern="[A-Za-z]{3}" autocomplete="off" spellcheck="false" aria-label="${this.escape(feeLabel)}币种" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />
+            <input data-mf-fee-input="amount" data-mf-fee-amount="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.amount ?? "")}" value="${this.escape(amount)}" ${forceActual ? 'data-mf-force-actual="1"' : ""} inputmode="decimal" aria-label="${this.escape(feeLabel)}原币金额" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />
           </div>
           <small data-mf-fee-amount-hint="1">${missingSavedAmount ? "尚未计入 · 按 Enter 或离开后确认为实际" : "Enter 或失焦自动保存为实际"}</small>
+          <small id="${this.escape(errorId)}" class="ocw-mf-fee-inline-error-text ${inlineError ? "is-visible" : ""}" data-mf-fee-error="1">${this.escape(inlineError)}</small>
         </td>
         <td><span class="${allocationBlocked ? "ocw-mf-inline-error" : ""}">${this.escape(this.materialFeeBasisLabel(fee.allocation_basis || fee.basis_field))}</span><small>${allocationBlocked ? "暂未计入试算 · 当前依据缺失，未自动改规则" : scopeLabel}</small></td>
         <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidence.length ? `${evidence.length} 份已关联` : "可上传或关联已有资料"}</small></td>
@@ -9682,6 +9712,120 @@ class OverseasCostWorkbench {
     return fees.find((row) => String(row.logical_fee_key || row.fee_key) === String(feeKey));
   }
 
+  materialFeeErrorId(feeKey) {
+    const safeKey = String(feeKey || "fee").replace(/[^A-Za-z0-9_-]/g, (character) => `_${character.charCodeAt(0)}_`);
+    return `ocw-mf-fee-error-${safeKey}`;
+  }
+
+  restoreMaterialFeeInputFocus() {
+    const state = this.ensureMaterialFeeState();
+    const focused = state.focusedFeeInput;
+    if (!focused?.feeKey || !focused?.field) return;
+    let target = null;
+    this.$root.find("[data-mf-fee-input]").each((_, element) => {
+      if (target) return;
+      const $element = $(element);
+      if (
+        String($element.attr("data-fee-key") || "") === String(focused.feeKey)
+        && String($element.attr("data-mf-fee-input") || "") === String(focused.field)
+      ) target = element;
+    });
+    if (!target) return;
+    target.focus();
+    if (typeof target.setSelectionRange === "function") {
+      const position = String(target.value ?? "").length;
+      target.setSelectionRange(position, position);
+    }
+  }
+
+  clearMaterialFeeEditSession() {
+    if (!this.detailState) return;
+    const clearIntervalFn = globalThis.window?.clearInterval || globalThis.clearInterval;
+    if (this.detailState.renewTimer && clearIntervalFn) clearIntervalFn(this.detailState.renewTimer);
+    this.detailState.renewTimer = null;
+    this.detailState.editToken = "";
+    this.detailState.editExpiresAt = "";
+  }
+
+  materialFeeEditSessionExpired() {
+    if (!this.detailState?.editToken || !this.detailState?.editExpiresAt) return false;
+    const expiresAt = Date.parse(this.detailState.editExpiresAt);
+    return Number.isFinite(expiresAt) && expiresAt <= Date.now() + 1000;
+  }
+
+  async ensureMaterialFeeEditSession() {
+    if (this.materialFeeEditSessionExpired()) this.clearMaterialFeeEditSession();
+    if (this.detailState?.editToken) return true;
+    const state = this.ensureMaterialFeeState();
+    if (state.editSessionPromise) return state.editSessionPromise;
+    const promise = (async () => Boolean(await this.ensureEditSession()))();
+    state.editSessionPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (state.editSessionPromise === promise) state.editSessionPromise = null;
+    }
+  }
+
+  materialFeeEditSessionInvalid(error) {
+    const message = String(this.normalizeErrorMessage ? this.normalizeErrorMessage(error) : error?.message || error || "");
+    return /(?:编辑权|租约|token).*(?:失效|过期|无效|不存在)|(?:失效|过期|无效).*(?:编辑权|租约|token)/i.test(message);
+  }
+
+  updateMaterialFeeDraftFromInput($input) {
+    if (!$input?.length) return null;
+    const $cell = $input.closest(".ocw-mf-fee-amount-cell");
+    const $amount = $cell.find("[data-mf-fee-amount]");
+    const $currency = $cell.find("[data-mf-fee-currency]");
+    const feeKey = String($input.attr("data-fee-key") || "");
+    const state = this.ensureMaterialFeeState();
+    state.feeDrafts = state.feeDrafts || {};
+    const previous = state.feeDrafts[feeKey] || {};
+    const rawCurrency = String($currency.val() ?? "");
+    const currency = rawCurrency.toUpperCase();
+    if (currency !== rawCurrency) $currency.val(currency);
+    const draft = {
+      ...previous,
+      amount: String($amount.val() ?? ""),
+      currency,
+      forceActual: previous.forceActual || $amount.attr("data-mf-force-actual") === "1",
+      touched: true,
+    };
+    state.feeDrafts[feeKey] = draft;
+    if (draft.error) {
+      const validationError = this.validateMaterialFeeInlineDraft(draft);
+      this.setMaterialFeeInlineError($cell, feeKey, validationError);
+    }
+    return draft;
+  }
+
+  validateMaterialFeeInlineDraft(draft) {
+    const amountText = String(draft?.amount ?? "").trim();
+    if (!amountText) return "费用金额不能为空。";
+    const amount = Number(amountText);
+    if (!Number.isFinite(amount)) return "费用金额必须是有限数值。";
+    if (amount < 0) return "费用金额不能小于 0。";
+    const currency = String(draft?.currency ?? "");
+    if (!currency) return "费用币种不能为空。";
+    if (!/^[A-Z]{3}$/.test(currency)) return "费用币种必须是三位英文字母代码。";
+    return "";
+  }
+
+  setMaterialFeeInlineError($cell, feeKey, message) {
+    const errorMessage = String(message || "");
+    const state = this.ensureMaterialFeeState();
+    state.feeDrafts = state.feeDrafts || {};
+    const draft = state.feeDrafts[feeKey] || { amount: "", currency: "", touched: true };
+    draft.error = errorMessage;
+    state.feeDrafts[feeKey] = draft;
+    const errorId = this.materialFeeErrorId(feeKey);
+    const $inputs = $cell.find("[data-mf-fee-input]");
+    $cell.toggleClass ? $cell.toggleClass("is-save-error", Boolean(errorMessage)) : (errorMessage ? $cell.addClass("is-save-error") : $cell.removeClass("is-save-error"));
+    $cell.attr("title", errorMessage);
+    $inputs.attr("aria-invalid", errorMessage ? "true" : "false").attr("aria-describedby", errorId);
+    $cell.find("[data-mf-fee-error]").text(errorMessage).toggleClass("is-visible", Boolean(errorMessage));
+  }
+
   materialFeeSavePayload(fee, overrides = {}) {
     const feeKey = fee.logical_fee_key || fee.fee_key || "";
     return {
@@ -9709,28 +9853,44 @@ class OverseasCostWorkbench {
     if ($cell.data("saving")) return;
     const $amount = $cell.find("[data-mf-fee-amount]");
     const $currency = $cell.find("[data-mf-fee-currency]");
-    const amount = String($amount.val() ?? "").trim();
-    const currency = String($currency.val() || "RMB").trim().toUpperCase();
+    const feeKey = String($input.attr("data-fee-key") || "");
+    const draft = this.updateMaterialFeeDraftFromInput($input);
+    const amount = String(draft?.amount ?? "").trim();
+    const currency = String(draft?.currency ?? "");
     const originalAmount = String($amount.attr("data-original-value") ?? "").trim();
-    const originalCurrency = String($currency.attr("data-original-value") || "RMB").trim().toUpperCase();
-    const forceActual = $input.attr("data-mf-fee-input") === "amount" && $amount.attr("data-mf-force-actual") === "1";
-    if (!amount || (!forceActual && amount === originalAmount && currency === originalCurrency)) return;
-    const fee = this.findMaterialFee($input.attr("data-fee-key"));
-    if (!fee) return;
+    const originalCurrency = String($currency.attr("data-original-value") ?? "").trim().toUpperCase();
+    const forceActual = Boolean(draft?.forceActual);
+    const validationError = this.validateMaterialFeeInlineDraft(draft);
+    if (validationError) {
+      this.setMaterialFeeInlineError($cell, feeKey, validationError);
+      return;
+    }
+    this.setMaterialFeeInlineError($cell, feeKey, "");
+    if (!forceActual && amount === originalAmount && currency === originalCurrency) {
+      delete this.ensureMaterialFeeState().feeDrafts?.[feeKey];
+      return;
+    }
+    if (!this.findMaterialFee(feeKey)) return;
     const batchName = String(this.detailState.batchName || "");
     const versionName = this.detailState.versionName;
+    const saveState = this.ensureMaterialFeeState();
+    const fullRequestId = saveState.requestId;
 
     const $inputs = $cell.find("[data-mf-fee-input]");
     $cell.data("saving", true).addClass("is-saving").removeClass("is-save-error").attr("title", "");
     $inputs.prop("disabled", true);
     try {
-      if (!(await this.ensureEditSession())) throw new Error("未能获取编辑权，费用未保存");
-      if (this.detailState.batchName !== batchName) {
-        $cell.data("saving", false).removeClass("is-saving");
-        $inputs.prop("disabled", false);
-        return;
-      }
-      const payload = this.materialFeeSavePayload(fee, {
+      if (!(await this.ensureMaterialFeeEditSession())) throw new Error("未能获取编辑权，费用未保存");
+      if (
+        this.detailState.batchName !== batchName
+        || this.detailState.tab !== "documents"
+        || this.materialFeeState !== saveState
+        || saveState.requestId !== fullRequestId
+      ) return;
+      const latestFee = this.findMaterialFee(feeKey);
+      if (!latestFee) throw new Error("费用项已变更，请刷新后重试");
+      const expectedModified = this.detailState.expectedModified;
+      const payload = this.materialFeeSavePayload(latestFee, {
         amount_status: "ACTUAL",
         amount,
         currency,
@@ -9740,43 +9900,66 @@ class OverseasCostWorkbench {
         version_name: versionName,
         fee_payload: JSON.stringify(payload),
         edit_token: this.detailState.editToken,
-        expected_modified: this.detailState.expectedModified,
+        expected_modified: expectedModified,
       });
       if (!result || !result.ok) throw new Error(result?.message || "费用保存失败");
-      if (this.detailState.batchName !== batchName) {
-        $cell.data("saving", false).removeClass("is-saving");
-        $inputs.prop("disabled", false);
-        return;
-      }
+      if (this.detailState.batchName !== batchName || this.materialFeeState !== saveState) return;
       this.updateMaterialFeeExpectedModified(result);
       this.detailState.dirty = false;
-      await this.refreshMaterialFeeData();
+      delete this.ensureMaterialFeeState().feeDrafts?.[feeKey];
+      if (this.detailState.tab !== "documents" || saveState.requestId !== fullRequestId) return;
       $amount.attr("data-original-value", amount).attr("data-mf-force-actual", "0");
       $currency.val(currency).attr("data-original-value", currency);
       $cell.data("saving", false).removeClass("is-saving");
       $inputs.prop("disabled", false);
+      const refreshed = await this.refreshMaterialFeeData();
+      if (
+        !refreshed
+        || this.detailState.batchName !== batchName
+        || this.detailState.tab !== "documents"
+        || this.materialFeeState !== saveState
+      ) return;
       frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
     } catch (error) {
-      if (this.detailState.batchName !== batchName) {
-        $cell.data("saving", false).removeClass("is-saving");
-        $inputs.prop("disabled", false);
+      const originalMessage = this.normalizeErrorMessage(error);
+      if (this.detailState.batchName !== batchName || this.materialFeeState !== saveState) return;
+      if (this.materialFeeEditSessionInvalid(error)) this.clearMaterialFeeEditSession();
+      const initialErrorMessage = `${originalMessage}；当前输入已保留；请再次按 Enter 或失焦重试，必要时使用页面刷新`;
+      if (this.detailState.tab !== "documents" || saveState.requestId !== fullRequestId) {
+        saveState.feeDrafts = saveState.feeDrafts || {};
+        saveState.feeDrafts[feeKey] = {
+          ...(saveState.feeDrafts[feeKey] || draft),
+          error: initialErrorMessage,
+          touched: true,
+        };
+        if (this.detailState.tab === "documents") this.renderMaterialFeeWorkspace();
         return;
       }
-      const originalMessage = this.normalizeErrorMessage(error);
-      $cell.removeClass("is-saving").addClass("is-save-error");
+      const failureState = this.ensureMaterialFeeState();
+      failureState.feeDrafts = failureState.feeDrafts || {};
+      failureState.feeDrafts[feeKey] = { ...draft, error: initialErrorMessage, touched: true };
+      $cell.removeClass("is-saving");
       $inputs.prop("disabled", false);
+      this.setMaterialFeeInlineError($cell, feeKey, initialErrorMessage);
       let recovered = false;
       try {
         recovered = await this.recoverMaterialFeeReadonlyState(batchName);
       } catch (_recoveryError) {
         recovered = false;
       }
+      if (
+        this.detailState.batchName !== batchName
+        || this.detailState.tab !== "documents"
+        || this.materialFeeState !== saveState
+        || saveState.requestId !== fullRequestId
+      ) return;
       $cell.data("saving", false).addClass("is-save-error");
       const recoveryMessage = recovered
         ? "已同步最新数据，请再次按 Enter 或失焦重试"
         : "最新状态同步失败，请使用页面刷新后重试";
-      $cell.attr("title", `${originalMessage}；当前输入已保留；${recoveryMessage}。`);
-      frappe.show_alert({ message: `${originalMessage}；当前输入已保留；${recoveryMessage}`, indicator: "red" });
+      const finalErrorMessage = `${originalMessage}；当前输入已保留；${recoveryMessage}。`;
+      this.setMaterialFeeInlineError($cell, feeKey, finalErrorMessage);
+      frappe.show_alert({ message: finalErrorMessage, indicator: "red" });
     }
   }
 
@@ -9784,7 +9967,8 @@ class OverseasCostWorkbench {
     const state = this.ensureMaterialFeeState();
     const expectedBatchName = String(batchName || "");
     const versionName = this.detailState.versionName || null;
-    const requestId = ++state.requestId;
+    const fullRequestId = state.requestId;
+    const requestId = ++state.feeRequestId;
     const [detail, fees, preview] = await Promise.all([
       this.call("overseas_costing.api.batch.get_batch_detail", {
         batch_name: expectedBatchName,
@@ -9802,7 +9986,9 @@ class OverseasCostWorkbench {
     if (
       this.detailState.batchName !== expectedBatchName
       || this.materialFeeState !== state
-      || requestId !== state.requestId
+      || requestId !== state.feeRequestId
+      || fullRequestId !== state.requestId
+      || this.detailState.tab !== "documents"
     ) return false;
     this.applyMaterialFeeHeaderSnapshot(detail, expectedBatchName);
     state.fees = fees;
@@ -9813,7 +9999,8 @@ class OverseasCostWorkbench {
   async refreshMaterialFeeData() {
     const state = this.ensureMaterialFeeState();
     const batchName = String(this.detailState.batchName || "");
-    const requestId = ++state.requestId;
+    const fullRequestId = state.requestId;
+    const requestId = ++state.feeRequestId;
     const [fees, preview] = await Promise.all([
       this.call("overseas_costing.api.fees.get_fee_worklist", {
         batch_name: batchName,
@@ -9827,11 +10014,13 @@ class OverseasCostWorkbench {
     if (
       this.detailState.batchName !== batchName
       || this.materialFeeState !== state
-      || requestId !== state.requestId
+      || requestId !== state.feeRequestId
+      || fullRequestId !== state.requestId
+      || this.detailState.tab !== "documents"
     ) return false;
     state.fees = fees;
     state.preview = preview;
-    if (this.detailState.tab === "documents") this.renderMaterialFeeWorkspace();
+    this.renderMaterialFeeWorkspace();
     return true;
   }
 

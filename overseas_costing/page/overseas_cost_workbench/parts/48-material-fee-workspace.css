@@ -169,6 +169,8 @@
 }
 .ocw-mf-fee-amount-cell.is-save-error input { border-color: #d92d20; }
 .ocw-mf-fee-amount-cell.is-save-error small { color: #b42318; }
+.ocw-mf-fee-inline-error-text { display: none !important; margin-top: 5px; color: #b42318; line-height: 1.35; }
+.ocw-mf-fee-inline-error-text.is-visible { display: block !important; }
 
 .ocw-mf-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .ocw-mf-row-actions button,

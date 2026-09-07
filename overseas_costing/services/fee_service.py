@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from copy import deepcopy
 from datetime import datetime
@@ -300,6 +301,8 @@ def _decimal_text(value) -> str:
         number = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError("费用金额格式不正确。") from exc
+    if not number.is_finite():
+        raise ValueError("费用金额必须是有限数值。")
     if number < 0:
         raise ValueError("费用金额不能小于 0。")
     return format(number.normalize(), "f")
@@ -346,6 +349,10 @@ def normalize_fee_payload(payload) -> dict:
     elif raw.get("amount") not in (None, ""):
         amount = _decimal_text(raw.get("amount"))
 
+    currency = str(raw.get("currency") if raw.get("currency") is not None else "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise ValueError("币种必须是三位英文字母代码。")
+
     normalized = {key: raw[key] for key in FEE_FIELDS if key in raw}
     normalized.update(
         {
@@ -353,7 +360,7 @@ def normalize_fee_payload(payload) -> dict:
             "rule_code": str(raw.get("rule_code") or fee_key).strip(),
             "amount_status": status,
             "amount": amount,
-            "currency": str(raw.get("currency") or "RMB").strip().upper(),
+            "currency": currency,
             "allocation_basis": basis,
             "basis_field": basis,
             "scope_type": scope_type,

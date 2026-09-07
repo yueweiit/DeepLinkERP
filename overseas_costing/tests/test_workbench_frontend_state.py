@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PARTS = ROOT / "page" / "overseas_cost_workbench" / "parts"
@@ -43,10 +45,18 @@ def _fee_workspace_result(script: str) -> dict:
 
 
 FEE_INPUT_FIXTURE = r"""
-function makeFeeInput({amount, currency, originalAmount, originalCurrency, forceActual=false}) {
+function makeFeeInput({amount, currency, originalAmount, originalCurrency, forceActual=false, feeKey='international_sea_freight'}) {
   const classes = new Set();
   const data = {};
   const attrs = {title: ''};
+  const errorElement = {
+    length: 1,
+    value: '',
+    hidden: true,
+    text(next) { if (arguments.length > 0) { this.value = next; return this; } return this.value; },
+    attr(name, next) { if (arguments.length > 1) { this[name] = next; return this; } return this[name]; },
+    toggleClass(name, enabled) { if (name === 'is-visible') this.hidden = !enabled; return this; },
+  };
   const amountInput = makeInput('amount', amount, originalAmount);
   const currencyInput = makeInput('currency', currency, originalCurrency);
   function makeInput(kind, value, original) {
@@ -56,7 +66,7 @@ function makeFeeInput({amount, currency, originalAmount, originalCurrency, force
       value,
       disabled: false,
       attrs: {
-        'data-fee-key': 'international_sea_freight',
+        'data-fee-key': feeKey,
         'data-mf-fee-input': kind,
         'data-original-value': original,
         ...(kind === 'amount' && forceActual ? {'data-mf-force-actual': '1'} : {}),
@@ -70,6 +80,7 @@ function makeFeeInput({amount, currency, originalAmount, originalCurrency, force
   }
   const collection = {
     prop(name, next) { amountInput.prop(name, next); currencyInput.prop(name, next); return this; },
+    attr(name, next) { amountInput.attr(name, next); currencyInput.attr(name, next); return this; },
   };
   const cell = {
     data(name, next) { if (arguments.length > 1) { data[name] = next; return this; } return data[name]; },
@@ -80,12 +91,13 @@ function makeFeeInput({amount, currency, originalAmount, originalCurrency, force
     find(selector) {
       if (selector === '[data-mf-fee-amount]') return amountInput;
       if (selector === '[data-mf-fee-currency]') return currencyInput;
+      if (selector === '[data-mf-fee-error]') return errorElement;
       return collection;
     },
   };
   amountInput.cell = cell;
   currencyInput.cell = cell;
-  return {amountInput, currencyInput, cell, classes, attrs};
+  return {amountInput, currencyInput, errorElement, cell, classes, attrs};
 }
 """
 
@@ -470,6 +482,24 @@ def test_fee_workspace_enter_and_blur_share_inline_save_path() -> None:
     assert result == {"prevented": True, "blurred": True, "saves": 1}
 
 
+def test_fee_workspace_blur_clears_focus_target_until_another_fee_input_focuses() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);const handlers={};"
+        "workspace.detailState={batchName:'B-1'};workspace.materialFeeState={batchName:'B-1',feeDrafts:{},focusedFeeInput:null};"
+        "workspace.$root={on:(event,selector,handler)=>{handlers[`${event} ${selector}`]=handler}};"
+        "workspace.loadMaterialFeeWorkspace=()=>{};workspace.renderMaterialFeeWorkspace=()=>{};workspace.openMaterialFeeDialog=()=>{};"
+        "workspace.openMaterialFeeEvidenceDialog=()=>{};workspace.setMaterialFeeEvidenceStatus=async()=>{};workspace.refreshMaterialFeeCostPreview=async()=>{};"
+        "workspace.openMaterialFeeSourcesDialog=()=>{};workspace.openMaterialXlsxUploader=()=>{};workspace.saveMaterialFeeCell=async()=>{};"
+        "workspace.previewMaterialPaste=()=>{};workspace.saveMaterialFeeInlineAmount=async()=>{};"
+        "const input={attrs:{'data-fee-key':'fee-a','data-mf-fee-input':'amount'},attr(name){return this.attrs[name]}};global.$=(value)=>value;"
+        "workspace.bindMaterialFeeWorkspaceEvents();handlers['focus [data-mf-fee-input]']({currentTarget:input});"
+        "const afterFocus={...workspace.materialFeeState.focusedFeeInput};handlers['blur [data-mf-fee-input]']({currentTarget:input});"
+        "console.log(JSON.stringify({afterFocus,afterBlur:workspace.materialFeeState.focusedFeeInput}));"
+    )
+
+    assert result == {"afterFocus": {"feeKey": "fee-a", "field": "amount"}, "afterBlur": None}
+
+
 def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_preview() -> None:
     result = _fee_workspace_result(
         FEE_INPUT_FIXTURE
@@ -522,6 +552,141 @@ def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_pre
     assert result["alerts"][-1]["indicator"] == "green"
 
 
+@pytest.mark.parametrize(
+    ("amount", "currency", "message_fragment"),
+    [
+        ("", "RMB", "金额"),
+        ("-1", "RMB", "金额"),
+        ("Infinity", "RMB", "金额"),
+        ("2400", "", "币种"),
+        ("2400", "US", "币种"),
+        ("2400", "U1D", "币种"),
+    ],
+)
+def test_fee_workspace_invalid_inline_value_stays_visible_without_writing(
+    amount: str, currency: str, message_fragment: str
+) -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "const fee={logical_fee_key:'international_sea_freight',expense_category:'\\u56fd\\u9645\\u6d77\\u8fd0\\u8d39',"
+        "amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},requestId:0};workspace.ensureEditSession=async()=>true;"
+        "workspace.renderMaterialFeeWorkspace=()=>{};workspace.normalizeErrorMessage=(error)=>error.message;let writeCalls=0;"
+        "workspace.call=async(endpoint)=>{if(endpoint.endsWith('save_fee'))writeCalls+=1;return endpoint.endsWith('get_fee_worklist')?{fees:[fee]}:{ok:true,batch_modified:'m2',summary:{}}};"
+        f"const fixture=makeFeeInput({{amount:{json.dumps(amount)},currency:{json.dumps(currency)},originalAmount:'2000',originalCurrency:'RMB'}});"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
+        "const draft=workspace.materialFeeState.feeDrafts?.international_sea_freight||{};"
+        "console.log(JSON.stringify({writeCalls,amount:fixture.amountInput.val(),currency:fixture.currencyInput.val(),"
+        "draft,errorText:fixture.errorElement.text(),red:fixture.cell.hasClass('is-save-error'),"
+        "amountInvalid:fixture.amountInput.attr('aria-invalid'),currencyInvalid:fixture.currencyInput.attr('aria-invalid'),"
+        "describedBy:fixture.amountInput.attr('aria-describedby')}));"
+    )
+
+    assert result["writeCalls"] == 0
+    assert result["amount"] == amount
+    assert result["currency"] == currency
+    assert result["draft"]["amount"] == amount
+    assert result["draft"]["currency"] == currency
+    assert message_fragment in result["draft"]["error"]
+    assert message_fragment in result["errorText"]
+    assert result["red"] is True
+    assert result["amountInvalid"] == "true"
+    assert result["currencyInvalid"] == "true"
+    assert result["describedBy"]
+
+
+def test_fee_workspace_missing_saved_amount_currency_blur_also_submits_actual() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "const fee={logical_fee_key:'international_sea_freight',expense_category:'\\u56fd\\u9645\\u6d77\\u8fd0\\u8d39',"
+        "amount_status:'MISSING',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},requestId:0};workspace.ensureEditSession=async()=>true;"
+        "workspace.renderMaterialFeeWorkspace=()=>{};let payload=null;workspace.call=async(endpoint,args)=>{"
+        "if(endpoint.endsWith('save_fee')){payload=JSON.parse(args.fee_payload);return {ok:true,batch_modified:'m2'}}"
+        "if(endpoint.endsWith('get_fee_worklist'))return {fees:[{...fee,amount_status:'ACTUAL'}]};return {summary:{}}};"
+        "const fixture=makeFeeInput({amount:'2000',currency:'RMB',originalAmount:'2000',originalCurrency:'RMB',forceActual:true});"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.currencyInput);"
+        "console.log(JSON.stringify({payload}));"
+    )
+
+    assert result["payload"]["amount_status"] == "ACTUAL"
+    assert result["payload"]["amount"] == "2000"
+    assert result["payload"]["currency"] == "RMB"
+
+
+def test_fee_workspace_unchanged_actual_blur_does_not_leave_stale_draft() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B-1'};"
+        "const fee={logical_fee_key:'fee-a',expense_category:'A 费用',amount_status:'ACTUAL',amount:'100',currency:'RMB'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},feeDrafts:{},requestId:0,feeRequestId:0};let calls=0;"
+        "workspace.call=async()=>{calls+=1};const fixture=makeFeeInput({amount:'100',currency:'RMB',originalAmount:'100',originalCurrency:'RMB',feeKey:'fee-a'});"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
+        "console.log(JSON.stringify({calls,draft:workspace.materialFeeState.feeDrafts['fee-a']||null}));"
+    )
+
+    assert result == {"calls": 0, "draft": None}
+
+
+def test_fee_workspace_render_restores_draft_error_and_accessible_labels() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);workspace.escape=(value)=>String(value??'').replaceAll('&','&amp;').replaceAll('\\\"','&quot;');"
+        "workspace.materialFeeState={feeDrafts:{'legacy:weird/key':{amount:'2400.5',currency:'EUR',error:'\\u5e76\\u53d1\\u51b2\\u7a81'}}};"
+        "const html=workspace.renderMaterialFeeRow({logical_fee_key:'legacy:weird/key',expense_category:'\\u7279\\u6b8a\\u8d39\\u7528',"
+        "amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',allocation:{status:'ALLOCATED'},evidence:[]});"
+        "console.log(JSON.stringify({draftAmount:html.includes('value=\\\"2400.5\\\"'),draftCurrency:html.includes('value=\\\"EUR\\\"'),"
+        "inlineError:html.includes('\\u5e76\\u53d1\\u51b2\\u7a81'),invalid:html.includes('aria-invalid=\\\"true\\\"'),"
+        "safeId:html.includes('ocw-mf-fee-error-legacy_58_weird_47_key'),amountLabel:html.includes('aria-label=\\\"特殊费用原币金额\\\"'),"
+        "currencyLabel:html.includes('aria-label=\\\"特殊费用币种\\\"')}));"
+    )
+
+    assert result == {
+        "draftAmount": True,
+        "draftCurrency": True,
+        "inlineError": True,
+        "invalid": True,
+        "safeId": True,
+        "amountLabel": True,
+        "currencyLabel": True,
+    }
+
+
+def test_fee_workspace_save_one_row_preserves_other_draft_and_restores_focus() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "const feeA={logical_fee_key:'fee-a',expense_category:'A 费用',amount_status:'ACTUAL',amount:'100',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]',allocation:{status:'ALLOCATED'},evidence:[]};"
+        "const feeB={...feeA,logical_fee_key:'fee-b',expense_category:'B 费用',amount:'200'};"
+        "workspace.materialFeeState={batchName:'B-1',page:1,pageLength:200,fees:{fees:[feeA,feeB],summary:{}},materials:{items:[]},preview:{summary:{}},requestId:0,feeRequestId:0,feeDrafts:{},focusedFeeInput:null};"
+        "workspace.ensureEditSession=async()=>true;workspace.escape=(value)=>String(value??'');workspace.formatValue=(value)=>String(value??'');"
+        "workspace.renderMaterialFeeGrid=()=>'';workspace.renderMaterialFeeTodos=()=>'';workspace.renderMaterialFeeCostTable=()=>'';"
+        "let html='';const content={html:(value)=>{html=value}};let focusCalls=0;const focusTarget={"
+        "attr:(name)=>name==='data-fee-key'?'fee-b':name==='data-mf-fee-input'?'amount':'',"
+        "focus:()=>{focusCalls+=1},value:'250',setSelectionRange:()=>{}};"
+        "const allInputs={each:(callback)=>{callback(0,focusTarget)}};workspace.$root={find:(selector)=>selector===\"[data-area='detail-content']\"?content:selector==='[data-mf-fee-input]'?allInputs:{length:0}};global.$=(value)=>value;"
+        "let resolveSave;workspace.call=async(endpoint)=>{if(endpoint.endsWith('save_fee'))return await new Promise((resolve)=>{resolveSave=resolve});"
+        "if(endpoint.endsWith('get_fee_worklist'))return {fees:[feeA,feeB],summary:{}};return {summary:{}}};"
+        "const fixtureA=makeFeeInput({amount:'150',currency:'RMB',originalAmount:'100',originalCurrency:'RMB',feeKey:'fee-a'});"
+        "const fixtureB=makeFeeInput({amount:'250',currency:'USD',originalAmount:'200',originalCurrency:'RMB',feeKey:'fee-b'});"
+        "const saving=workspace.saveMaterialFeeInlineAmount(fixtureA.amountInput);await new Promise((resolve)=>setImmediate(resolve));"
+        "workspace.updateMaterialFeeDraftFromInput(fixtureB.amountInput);workspace.materialFeeState.focusedFeeInput={feeKey:'fee-b',field:'amount'};"
+        "resolveSave({ok:true,batch_modified:'m2'});await saving;"
+        "console.log(JSON.stringify({draftA:workspace.materialFeeState.feeDrafts['fee-a']||null,draftB:workspace.materialFeeState.feeDrafts['fee-b']||null,"
+        "focusCalls,bRendered:html.includes('data-fee-key=\\\"fee-b\\\"')&&html.includes('value=\\\"250\\\"')&&html.includes('value=\\\"USD\\\"')}));"
+    )
+
+    assert result["draftA"] is None
+    assert result["draftB"]["amount"] == "250"
+    assert result["draftB"]["currency"] == "USD"
+    assert result["focusCalls"] == 1
+    assert result["bRendered"] is True
+
+
 def test_fee_workspace_inline_save_failure_preserves_value_and_allows_retry() -> None:
     result = _fee_workspace_result(
         FEE_INPUT_FIXTURE
@@ -536,7 +701,8 @@ def test_fee_workspace_inline_save_failure_preserves_value_and_allows_retry() ->
         "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
         "console.log(JSON.stringify({amount:fixture.amountInput.val(),currency:fixture.currencyInput.val(),"
         "disabled:fixture.amountInput.disabled||fixture.currencyInput.disabled,saving:fixture.cell.data('saving'),"
-        "error:fixture.cell.hasClass('is-save-error'),title:fixture.attrs.title,alerts:global.alerts,endpoints}));"
+        "error:fixture.cell.hasClass('is-save-error'),title:fixture.attrs.title,errorText:fixture.errorElement.text(),"
+        "amountInvalid:fixture.amountInput.attr('aria-invalid'),describedBy:fixture.amountInput.attr('aria-describedby'),alerts:global.alerts,endpoints}));"
     )
 
     assert result["amount"] == "2400"
@@ -546,6 +712,10 @@ def test_fee_workspace_inline_save_failure_preserves_value_and_allows_retry() ->
     assert result["error"] is True
     assert "\u5e76\u53d1\u51b2\u7a81" in result["title"]
     assert "\u9875\u9762\u5237\u65b0" in result["title"]
+    assert "\u5e76\u53d1\u51b2\u7a81" in result["errorText"]
+    assert "\u9875\u9762\u5237\u65b0" in result["errorText"]
+    assert result["amountInvalid"] == "true"
+    assert result["describedBy"]
     assert result["endpoints"] == [
         "overseas_costing.api.fees.save_fee",
         "overseas_costing.api.batch.get_batch_detail",
@@ -716,7 +886,7 @@ def test_fee_workspace_save_response_does_not_mutate_a_new_batch() -> None:
         "expectedModified": "n1",
         "headerModified": "n1",
         "endpoints": ["overseas_costing.api.fees.save_fee"],
-        "disabled": False,
+        "disabled": True,
     }
 
 
@@ -736,11 +906,42 @@ def test_fee_workspace_load_does_not_apply_previous_batch_results() -> None:
     assert result == {"renders": 0, "expectedModified": "m1", "materials": None}
 
 
+def test_fee_workspace_local_recovery_does_not_cancel_full_reload() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',expectedModified:'m1',header:{name:'B-1',modified:'m1'}};"
+        "workspace.materialFeeState={batchName:'B-1',page:1,pageLength:200,loading:false,requestId:0,feeRequestId:0,"
+        "feeDrafts:{'fee-a':{amount:'2400',currency:'USD',error:'\\u5e76\\u53d1\\u51b2\\u7a81',touched:true}},materials:null,fees:null,preview:null};"
+        "workspace.getDetailBatch=()=>({name:'B-1',current_version:'V-1'});workspace.renderDetailTabLoading=()=>{};let renders=0;"
+        "workspace.renderMaterialFeeWorkspace=()=>{renders+=1};let releaseFull;const fullGate=new Promise((resolve)=>{releaseFull=resolve});"
+        "let detailCalls=0,feeCalls=0,previewCalls=0;workspace.call=async(endpoint)=>{"
+        "if(endpoint.endsWith('get_batch_detail')){detailCalls+=1;if(detailCalls===1){await fullGate;return {ok:true,header:{modified:'m3'}}}return {ok:true,header:{modified:'m2'}}}"
+        "if(endpoint.endsWith('get_material_grid')){await fullGate;return {items:[{name:'FULL'}]}}"
+        "if(endpoint.endsWith('get_fee_worklist')){feeCalls+=1;if(feeCalls===1){await fullGate;return {fees:[{logical_fee_key:'fee-full'}]}}return {fees:[{logical_fee_key:'fee-recovery'}]}}"
+        "previewCalls+=1;if(previewCalls===1){await fullGate;return {summary:{source:'full'}}}return {summary:{source:'recovery'}}};"
+        "const full=workspace.loadMaterialFeeWorkspace();await new Promise((resolve)=>setImmediate(resolve));"
+        "const recovered=await workspace.recoverMaterialFeeReadonlyState('B-1');releaseFull();await full;"
+        "console.log(JSON.stringify({recovered,loading:workspace.materialFeeState.loading,renders,requestId:workspace.materialFeeState.requestId,"
+        "feeRequestId:workspace.materialFeeState.feeRequestId,expectedModified:workspace.detailState.expectedModified,"
+        "materials:workspace.materialFeeState.materials,draft:workspace.materialFeeState.feeDrafts['fee-a']}));"
+    )
+
+    assert result["recovered"] is True
+    assert result["loading"] is False
+    assert result["renders"] == 1
+    assert result["requestId"] == 1
+    assert result["feeRequestId"] == 1
+    assert result["expectedModified"] == "m3"
+    assert result["materials"] == {"items": [{"name": "FULL"}]}
+    assert result["draft"]["amount"] == "2400"
+    assert result["draft"]["error"] == "并发冲突"
+
+
 def test_fee_workspace_duplicate_blur_is_ignored_while_inline_save_is_pending() -> None:
     result = _fee_workspace_result(
         FEE_INPUT_FIXTURE
         + "const workspace=Object.create(Harness.prototype);"
-        "workspace.detailState={batchName:'B-1',versionName:'V-1',editToken:'token-1',expectedModified:'m1'};"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1'};"
         "workspace.materialFeeState={batchName:'B-1',fees:{fees:[{logical_fee_key:'international_sea_freight',"
         "expense_category:'\u56fd\u9645\u6d77\u8fd0\u8d39',amount_status:'ACTUAL',amount:'2000',currency:'RMB',"
         "allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'}]}};"
@@ -755,6 +956,116 @@ def test_fee_workspace_duplicate_blur_is_ignored_while_inline_save_is_pending() 
     )
 
     assert result == {"saveCalls": 1}
+
+
+def test_fee_workspace_edit_session_acquire_is_single_flight() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B-1',editToken:'',editExpiresAt:''};"
+        "workspace.materialFeeState={batchName:'B-1',feeDrafts:{},requestId:0,feeRequestId:0};let acquireCalls=0,release;"
+        "workspace.ensureEditSession=async()=>{acquireCalls+=1;await new Promise((resolve)=>{release=resolve});workspace.detailState.editToken='token-1';return true};"
+        "const first=workspace.ensureMaterialFeeEditSession();const second=workspace.ensureMaterialFeeEditSession();"
+        "await new Promise((resolve)=>setImmediate(resolve));release();const results=await Promise.all([first,second]);"
+        "console.log(JSON.stringify({acquireCalls,results,token:workspace.detailState.editToken}));"
+    )
+
+    assert result == {"acquireCalls": 1, "results": [True, True], "token": "token-1"}
+
+
+def test_fee_workspace_builds_save_payload_from_latest_fee_after_lease() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'',editExpiresAt:'',expectedModified:'m1',header:{modified:'m1'}};"
+        "const oldFee={logical_fee_key:'fee-a',rule_code:'OLD',expense_category:'A 费用',amount_status:'ACTUAL',amount:'100',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]',remark:'old'};"
+        "const newFee={...oldFee,rule_code:'NEW',allocation_basis:'gross_weight',scope_type:'ITEMS',scope_value_json:'[\\\"LINE-2\\\"]',remark:'new'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[oldFee]},feeDrafts:{},requestId:0,feeRequestId:0};"
+        "let releaseLease;workspace.ensureEditSession=async()=>{await new Promise((resolve)=>{releaseLease=resolve});workspace.detailState.editToken='token-2';return true};"
+        "workspace.refreshMaterialFeeData=async()=>true;let saveArgs=null;workspace.call=async(endpoint,args)=>{if(endpoint.endsWith('save_fee')){saveArgs=args;return {ok:true,batch_modified:'m3'}}};"
+        "const fixture=makeFeeInput({amount:'150',currency:'USD',originalAmount:'100',originalCurrency:'RMB',feeKey:'fee-a'});"
+        "const saving=workspace.saveMaterialFeeInlineAmount(fixture.amountInput);await new Promise((resolve)=>setImmediate(resolve));"
+        "workspace.materialFeeState.fees={fees:[newFee]};workspace.detailState.expectedModified='m2';workspace.detailState.header.modified='m2';releaseLease();await saving;"
+        "console.log(JSON.stringify({expectedModified:saveArgs.expected_modified,token:saveArgs.edit_token,payload:JSON.parse(saveArgs.fee_payload)}));"
+    )
+
+    assert result["expectedModified"] == "m2"
+    assert result["token"] == "token-2"
+    assert result["payload"]["rule_code"] == "NEW"
+    assert result["payload"]["allocation_basis"] == "gross_weight"
+    assert result["payload"]["scope_type"] == "ITEMS"
+    assert result["payload"]["scope_value_json"] == '["LINE-2"]'
+    assert result["payload"]["remark"] == "new"
+
+
+def test_fee_workspace_expired_or_invalid_lease_reacquires_on_next_explicit_save() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'expired-token',editExpiresAt:'2000-01-01T00:00:00Z',expectedModified:'m1',header:{modified:'m1'}};"
+        "const fee={logical_fee_key:'fee-a',expense_category:'A 费用',amount_status:'ACTUAL',amount:'100',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},feeDrafts:{},requestId:0,feeRequestId:0};"
+        "let acquireCalls=0;const tokensAtAcquire=[];workspace.ensureEditSession=async()=>{acquireCalls+=1;tokensAtAcquire.push(workspace.detailState.editToken);workspace.detailState.editToken=`fresh-${acquireCalls}`;workspace.detailState.editExpiresAt='2099-01-01T00:00:00Z';return true};"
+        "workspace.normalizeErrorMessage=(error)=>error.message;workspace.recoverMaterialFeeReadonlyState=async()=>true;workspace.refreshMaterialFeeData=async()=>true;"
+        "let saveCalls=0;workspace.call=async()=>{saveCalls+=1;if(saveCalls===1)throw new Error('编辑权 token 已失效');return {ok:true,batch_modified:'m2'}};"
+        "const fixture=makeFeeInput({amount:'150',currency:'RMB',originalAmount:'100',originalCurrency:'RMB',feeKey:'fee-a'});"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);const afterFirst={saveCalls,acquireCalls,token:workspace.detailState.editToken};"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
+        "console.log(JSON.stringify({tokensAtAcquire,afterFirst,saveCalls,acquireCalls,finalToken:workspace.detailState.editToken}));"
+    )
+
+    assert result["tokensAtAcquire"] == ["", ""]
+    assert result["afterFirst"] == {"saveCalls": 1, "acquireCalls": 1, "token": ""}
+    assert result["saveCalls"] == 2
+    assert result["acquireCalls"] == 2
+    assert result["finalToken"] == "fresh-2"
+
+
+@pytest.mark.parametrize("stale_phase", ["lease", "success", "save", "recovery"])
+@pytest.mark.parametrize("stale_reason", ["tab", "full_reload"])
+def test_fee_workspace_stale_failure_does_not_touch_detached_input_or_toast(
+    stale_phase: str, stale_reason: str
+) -> None:
+    switch_statement = (
+        "workspace.detailState.tab='vouchers';"
+        if stale_reason == "tab"
+        else "workspace.materialFeeState.requestId+=1;"
+    )
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + f"const stalePhase={json.dumps(stale_phase)};const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:stalePhase==='lease'?'':'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "const fee={logical_fee_key:'fee-a',expense_category:'A 费用',amount_status:'ACTUAL',amount:'100',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},feeDrafts:{},requestId:0,feeRequestId:0};"
+        "workspace.normalizeErrorMessage=(error)=>error.message;let resolveSave,rejectSave,releaseRecovery,releaseLease;"
+        "workspace.ensureEditSession=async()=>{if(stalePhase!=='lease')return true;await new Promise((resolve)=>{releaseLease=resolve});workspace.detailState.editToken='token-1';return true};"
+        "workspace.call=async()=>{if(stalePhase==='recovery')throw new Error('并发冲突');"
+        "if(stalePhase==='save'||stalePhase==='success')return await new Promise((resolve,reject)=>{resolveSave=resolve;rejectSave=reject});return {ok:true,batch_modified:'m2'}};"
+        "workspace.refreshMaterialFeeData=async()=>true;"
+        "let recoverCalls=0;workspace.recoverMaterialFeeReadonlyState=async()=>{recoverCalls+=1;if(stalePhase==='save')return false;"
+        "return await new Promise((resolve)=>{releaseRecovery=resolve})};let renders=0;workspace.renderMaterialFeeWorkspace=()=>{renders+=1};"
+        "const fixture=makeFeeInput({amount:'150',currency:'USD',originalAmount:'100',originalCurrency:'RMB',feeKey:'fee-a'});"
+        "let stale=false,postStaleMutations=0;for(const [target,names] of [[fixture.cell,['data','addClass','removeClass','attr']],[fixture.amountInput,['prop','attr']],[fixture.currencyInput,['prop','attr']]]){"
+        "for(const name of names){const original=target[name].bind(target);target[name]=(...args)=>{if(stale)postStaleMutations+=1;return original(...args)}}}"
+        "const saving=workspace.saveMaterialFeeInlineAmount(fixture.amountInput);await new Promise((resolve)=>setImmediate(resolve));"
+        + switch_statement
+        + "stale=true;if(stalePhase==='lease')releaseLease();else if(stalePhase==='success')resolveSave({ok:true,batch_modified:'m2'});"
+        "else if(stalePhase==='save')rejectSave(new Error('并发冲突'));else releaseRecovery(false);"
+        "await saving;const draft=workspace.materialFeeState.feeDrafts['fee-a']||null;"
+        "console.log(JSON.stringify({postStaleMutations,recoverCalls,renders,alerts:global.alerts,draft,tab:workspace.detailState.tab,requestId:workspace.materialFeeState.requestId}));"
+    )
+
+    assert result["postStaleMutations"] == 0
+    assert result["recoverCalls"] == (1 if stale_phase == "recovery" else 0)
+    assert result["alerts"] == []
+    if stale_phase == "success":
+        assert result["draft"] is None
+    else:
+        assert result["draft"]["amount"] == "150"
+        assert result["draft"]["currency"] == "USD"
+    if stale_phase == "lease":
+        assert not result["draft"].get("error")
+    elif stale_phase != "success":
+        assert "并发冲突" in result["draft"]["error"]
+    assert result["renders"] == (1 if stale_phase == "save" and stale_reason == "full_reload" else 0)
 
 
 def test_fee_workspace_allocation_failure_is_explicitly_excluded_from_preview() -> None:
