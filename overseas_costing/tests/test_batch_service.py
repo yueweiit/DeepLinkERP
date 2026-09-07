@@ -58,6 +58,20 @@ def test_batch_erp_work_is_aggregated_per_site_not_from_legacy_flag() -> None:
     assert result["legacy_writeback_status"] == "Pending"
 
 
+def test_batch_erp_work_exposes_only_the_latest_site_request_id_for_retry() -> None:
+    result = _build_erp_work_detail_state(
+        current_hash="H2",
+        site_codes=["ECOM"],
+        links=[],
+        requests=[
+            {"site_code": "ECOM", "cost_result_hash": "H2", "status": "FAILED", "request_id": "REQ-NEW"},
+            {"site_code": "ECOM", "cost_result_hash": "H1", "status": "FAILED", "request_id": "REQ-OLD"},
+        ],
+    )
+
+    assert result["sites"][0]["request_id"] == "REQ-NEW"
+
+
 def test_multi_site_erp_detail_state_exposes_safe_config_and_preview() -> None:
     state = _build_multi_site_erp_detail_state(
         header={"name": "B1", "confirm_status": "Confirmed"},

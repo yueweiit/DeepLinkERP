@@ -238,6 +238,7 @@ def _build_erp_work_detail_state(
             {
                 "site_code": site_code,
                 "status": status,
+                "request_id": latest_request.get("request_id") or "",
                 "last_cost_result_hash": last_hash,
                 "request_cost_result_hash": latest_request.get("cost_result_hash") or "",
                 "business_change_required": str(latest_request.get("error_code") or "") == "BUSINESS_CHANGE_REQUIRED",

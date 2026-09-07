@@ -16,6 +16,8 @@
       { fieldname: "volume_m3", label: "体积 m³", group: "发货与装箱", editable: true },
       { fieldname: "chargeable_weight_kg", label: "计费重 kg", group: "发货与装箱", editable: true },
       { fieldname: "project_collection", label: "项目归属", group: "ERP 路由", editable: true },
+      { fieldname: "subsidiary_code", label: "子公司", group: "ERP 路由", editable: false, route: true },
+      { fieldname: "erp_site_code", label: "ERP 站点", group: "ERP 路由", editable: false, route: true },
       { fieldname: "total_unit_rmb", label: "综合单价 RMB", group: "成本结果", editable: false },
       { fieldname: "cost_output_uom", label: "成本单位", group: "成本结果", editable: false },
     ];
@@ -96,8 +98,9 @@
 
   renderMaterialGridCell(row, column, rowIndex, columnIndex) {
     const requirement = ((row || {}).cell_requirements || {})[column.fieldname] || null;
+    const routeView = column.route ? OverseasCostWorkbenchState.erpRoutePresentation(row) : null;
     const isCalculationBlocking = requirement && requirement.severity === "blocking" && requirement.gate !== "erp_push";
-    const isErpBlocking = requirement && requirement.severity === "blocking" && requirement.gate === "erp_push";
+    const isErpBlocking = (requirement && requirement.severity === "blocking" && requirement.gate === "erp_push") || Boolean(routeView?.needsRoute);
     const classes = [
       "ocw-material-cell",
       columnIndex < 3 ? `is-sticky sticky-${columnIndex}` : "",
@@ -115,10 +118,15 @@
       display = `<button type="button" class="ocw-material-quantity-btn" data-action="edit-shipping-quantity" data-item-name="${this.escape(row.name || "")}"><strong>${this.escape(this.formatNumber(quantity.value) || "—")}</strong><span>${this.escape(quantity.uom)}</span></button>`;
       sourceBadge = `<em class="ocw-material-source ${quantity.isDefault ? "is-default" : ""}">${this.escape(quantity.sourceLabel)}</em>`;
     }
+    if (column.route) {
+      const route = routeView;
+      rawValue = column.fieldname === "subsidiary_code" ? route.subsidiaryCode : route.siteCode;
+      display = `<div class="ocw-material-route is-${route.tone}"><strong>${this.escape(rawValue || "待补")}</strong><small>${this.escape(route.needsRoute ? route.label : (row.route_status === "OVERRIDDEN" ? "整批人工归属" : "按项目解析"))}</small></div>`;
+    }
     const issueBadge = isCalculationBlocking
       ? `<em class="ocw-material-issue is-calculation">${this.escape(requirement.message || "成本预览前请补充")}</em>`
       : isErpBlocking
-        ? `<em class="ocw-material-issue is-erp">推送前补</em>`
+        ? `<em class="ocw-material-issue is-erp">${this.escape(requirement?.message || "推送前补")}</em>`
         : "";
     const editable = Boolean(column.editable);
     const genericEditable = editable && !column.quantity;

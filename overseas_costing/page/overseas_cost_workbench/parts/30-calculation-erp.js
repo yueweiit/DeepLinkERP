@@ -384,6 +384,11 @@
   }
 
   async previewErpPayload(batchName = "") {
+    if (typeof this.openErpCreatePreview === "function") {
+      const work = this.detailState.erpWork || {};
+      if ((work.sites || []).some((site) => String(site.state || "") === "UPDATE_REQUIRED")) return this.openErpUpdatePreview();
+      return this.openErpCreatePreview(batchName);
+    }
     const batch = this.findBatch(batchName || this.drawerBatchName);
     if (!batch) return;
     try {
@@ -408,6 +413,10 @@
   }
 
   writebackToErp(batchName = "") {
+    if (typeof this.openErpCreatePreview === "function") {
+      this.previewErpPayload(batchName).catch((error) => this.showError(error));
+      return;
+    }
     const batch = this.findBatch(batchName || this.drawerBatchName);
     if (!batch) return;
     frappe.confirm("确认将已校验的综合单价推送到 DeepLinkERP？失败后可保留日志并重试。", () => {

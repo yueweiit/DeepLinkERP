@@ -466,3 +466,102 @@ def test_fee_worklist_is_first_and_exposes_visible_states() -> None:
     assert "refreshFeeWorkAfterVoucherChange" in vouchers
     assert ".ocw-fee-row.is-error" in stylesheet
     assert ".ocw-fee-row.is-warning" in stylesheet
+
+
+def test_erp_site_state_never_presents_manual_work_as_success() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify({"
+        "synced:s.erpWorkPresentation({overall:'SYNCED'}),"
+        "manual:s.erpWorkPresentation({overall:'MANUAL_REQUIRED'}),"
+        "partial:s.erpWorkPresentation({overall:'PARTIAL'})"
+        "}));"
+    )
+
+    assert result == {
+        "synced": {"label": "已同步", "tone": "ok"},
+        "manual": {"label": "需人工处理", "tone": "danger"},
+        "partial": {"label": "部分完成", "tone": "warn"},
+    }
+
+
+def test_erp_push_blocks_missing_route_but_keeps_cost_preview_available() -> None:
+    result = _state_result(
+        "const route=s.erpRoutePresentation({project_collection:'',route_status:'UNRESOLVED',erp_site_code:''});"
+        "console.log(JSON.stringify({route,costPreview:true,canPush:s.erpCreateCanStart({ready:false,blocking:[{code:'ITEM_ROUTE_REQUIRED'}],preview:{sites:[]}})}));"
+    )
+
+    assert result == {
+        "route": {
+            "siteCode": "",
+            "subsidiaryCode": "",
+            "label": "待补项目归属",
+            "tone": "danger",
+            "needsRoute": True,
+        },
+        "costPreview": True,
+        "canPush": False,
+    }
+
+
+def test_erp_retry_targets_only_failed_or_uncertain_sites() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify(s.erpRetryableSites({sites:["
+        "{site_code:'PROD',state:'SYNCED',request_id:'R1'},"
+        "{site_code:'ECOM',state:'FAILED',request_id:'R2'},"
+        "{site_code:'SHOP',state:'UNCERTAIN',request_id:'R3'},"
+        "{site_code:'LEGACY',state:'MANUAL_REQUIRED',request_id:'R4'}"
+        "]})));"
+    )
+
+    assert result == [
+        {"siteCode": "ECOM", "requestId": "R2"},
+        {"siteCode": "SHOP", "requestId": "R3"},
+    ]
+
+
+def test_erp_update_selection_is_limited_to_current_preview() -> None:
+    result = _state_result(
+        "console.log(JSON.stringify(s.erpUpdateSelection("
+        "{sites:[{site_code:'PROD'},{site_code:'ECOM'}]},"
+        "['PROD','REMOVED','PROD']"
+        ")));"
+    )
+
+    assert result == ["PROD"]
+
+
+def test_multi_site_erp_ui_exposes_route_preview_site_totals_and_safe_actions() -> None:
+    erp_sites = (PARTS / "79-erp-sites.js").read_text(encoding="utf-8")
+    detail = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
+    calculation = (PARTS / "30-calculation-erp.js").read_text(encoding="utf-8")
+    grid = (PARTS / "77-material-grid.js").read_text(encoding="utf-8")
+    stylesheet = (PARTS / "51-erp-sites.css").read_text(encoding="utf-8")
+
+    for label in (
+        "整批归属",
+        "按站点推送预览",
+        "暂估费用",
+        "只重试失败站点",
+        "旧金额",
+        "新金额",
+        "需人工处理",
+        "费用待办仍需单独处理",
+    ):
+        assert label in erp_sites
+    for endpoint in (
+        "preview_bulk_route",
+        "apply_bulk_route",
+        "preview_erp_sync",
+        "start_erp_create",
+        "preview_erp_updates",
+        "start_erp_updates",
+        "get_erp_sync_status",
+        "retry_erp_request",
+    ):
+        assert f"overseas_costing.api.erp_sync.{endpoint}" in erp_sites
+    assert "renderErpSitePanel" in detail
+    assert "openErpCreatePreview" in calculation
+    assert "subsidiary_code" in grid
+    assert "erp_site_code" in grid
+    assert ".ocw-erp-site-panel" in stylesheet
+    assert ".ocw-erp-site-status.is-danger" in stylesheet

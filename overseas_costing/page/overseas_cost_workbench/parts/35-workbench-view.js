@@ -254,6 +254,14 @@
       return this.switchDetailTab(OverseasCostWorkbenchState.detailTabForAction(action));
     });
     this.$root.on("click", "[data-action='detail-recalculate']", () => this.recalculate(this.detailState.batchName));
+    this.$root.on("click", "[data-action='erp-bulk-route']", () => this.openBulkErpRouteDialog().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='erp-create-preview']", () => this.openErpCreatePreview().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='erp-update-preview']", () => this.openErpUpdatePreview().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='erp-retry-site']", (event) => {
+      const $button = $(event.currentTarget);
+      this.retryErpSite($button.attr("data-request-id"), $button.attr("data-site-code")).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='erp-open-fees']", () => this.switchDetailTab("documents"));
     this.$root.on("click", "[data-action='detail-export']", () => this.exportDrawerBatch().catch((error) => this.showError(error)));
     this.$root.on("click", "[data-action='detail-voucher']", () => this.openFileParseDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-category']", () => this.openCategoryPreviewDialog(this.detailState.batchName));

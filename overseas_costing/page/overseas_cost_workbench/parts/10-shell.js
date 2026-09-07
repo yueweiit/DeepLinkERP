@@ -95,6 +95,8 @@ class OverseasCostWorkbench {
       refreshRequestId: 0,
       feeRequestId: 0,
       feeWork: null,
+      erpPush: null,
+      erpWork: null,
       showAllFees: false,
       feeScopeCache: null,
       dingtalkRequestId: 0,

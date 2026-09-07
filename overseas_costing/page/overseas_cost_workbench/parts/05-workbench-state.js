@@ -547,6 +547,57 @@
     });
   }
 
+  function erpWorkPresentation(work = {}) {
+    const overall = String(work.overall || work.state || work.status || "PENDING").toUpperCase();
+    const presentations = {
+      SYNCED: { label: "已同步", tone: "ok" },
+      SUCCESS: { label: "已同步", tone: "ok" },
+      PARTIAL: { label: "部分完成", tone: "warn" },
+      UPDATE_REQUIRED: { label: "待更新成本", tone: "warn" },
+      CREATE_REQUIRED: { label: "待首次推送", tone: "neutral" },
+      BUSINESS_CHANGE_REQUIRED: { label: "需业务变更", tone: "danger" },
+      FAILED: { label: "推送失败", tone: "danger" },
+      UNCERTAIN: { label: "远端结果待核对", tone: "danger" },
+      MANUAL_REQUIRED: { label: "需人工处理", tone: "danger" },
+      BLOCKED: { label: "推送已阻断", tone: "danger" },
+      PENDING: { label: "待推送", tone: "neutral" },
+      NOT_STARTED: { label: "待推送", tone: "neutral" },
+    };
+    return presentations[overall] || { label: "待核对", tone: "neutral" };
+  }
+
+  function erpRoutePresentation(item = {}) {
+    const siteCode = String(item.erp_site_code || item.site_code || "").trim();
+    const subsidiaryCode = String(item.subsidiary_code || "").trim();
+    const status = String(item.route_status || "UNRESOLVED").toUpperCase();
+    const needsRoute = !siteCode || !["RESOLVED", "OVERRIDDEN"].includes(status);
+    return {
+      siteCode,
+      subsidiaryCode,
+      label: needsRoute ? "待补项目归属" : `${subsidiaryCode ? `${subsidiaryCode} · ` : ""}${siteCode}`,
+      tone: needsRoute ? "danger" : status === "OVERRIDDEN" ? "warn" : "ok",
+      needsRoute,
+    };
+  }
+
+  function erpCreateCanStart(push = {}) {
+    return Boolean(push.ready && ((push.preview || {}).sites || []).length && !(push.blocking || []).length);
+  }
+
+  function erpRetryableSites(work = {}) {
+    return (work.sites || []).flatMap((site) => {
+      const state = String(site.state || site.status || "").toUpperCase();
+      const requestId = String(site.request_id || "").trim();
+      if (!["FAILED", "UNCERTAIN"].includes(state) || !requestId) return [];
+      return [{ siteCode: String(site.site_code || ""), requestId }];
+    });
+  }
+
+  function erpUpdateSelection(preview = {}, selected = []) {
+    const allowed = new Set((preview.sites || []).map((site) => String(site.site_code || "")).filter(Boolean));
+    return [...new Set((selected || []).map((value) => String(value || "")).filter((value) => allowed.has(value)))];
+  }
+
   return {
     parseWorkbenchState,
     buildWorkbenchUrl,
@@ -581,6 +632,11 @@
     nextMaterialEditableCell,
     buildMaterialPasteUpdates,
     materialImportCanApply,
+    erpWorkPresentation,
+    erpRoutePresentation,
+    erpCreateCanStart,
+    erpRetryableSites,
+    erpUpdateSelection,
     MONETARY_FIELDS,
     TRANSPORT_MODE_ALIASES,
     VOUCHER_VALIDATION_MONETARY_FIELDS,

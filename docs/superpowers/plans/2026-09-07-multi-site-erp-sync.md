@@ -776,23 +776,23 @@ git commit -m 'feat: expose secure multi-site ERP sync APIs'
 - Modify: `overseas_costing/tests/test_workbench_frontend_state.py`
 - Modify generated files via: `overseas_costing/scripts/build_workbench_assets.py`
 
-- [ ] **Step 1: 写前端失败测试**
+- [x] **Step 1: 写前端失败测试**
 
 验证整柜生产/电商快捷归属先显示差异；混装按行显示站点；缺路由仍可预览成本但禁用推送；推送预览按站点列数量/金额/暂估项；部分成功只重试失败站点；更新预览展示旧新金额；MANUAL_REQUIRED 不出现“更新成功”；费用待办不因站点成功消失。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py`
 
 Expected: FAIL because site UI state and markers are absent.
 
-- [ ] **Step 3: 实现站点界面**
+- [x] **Step 3: 实现站点界面**
 
 在物料表项目列旁显示子公司/站点；详情顶部 ERP 芯片显示总体状态，展开后按站点列当前结果哈希、目标单据、状态和操作。推送按钮先打开冻结预览；暂估费用逐项标注。更新按钮先显示新旧差异，用户只能选择本次预览中可更新站点。
 
 失败或超时显示远端单据查询结果和下一步；不把重复点击变成新业务。页面只轮询当前请求的状态，有新输入版本时停止旧轮询并刷新。
 
-- [ ] **Step 4: 生成资源并运行测试**
+- [x] **Step 4: 生成资源并运行测试**
 
 ```bash
 python overseas_costing/scripts/build_workbench_assets.py
@@ -801,7 +801,7 @@ python -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py over
 
 Expected: PASS and source/deployed assets match.
 
-- [ ] **Step 5: 本地浏览器验收并提交**
+- [x] **Step 5: 本地浏览器验收并提交**
 
 用假 ERP 或 `development.localhost` 草稿目标验证：整柜生产、整柜电商、混装、未知项目、部分失败、迟到回执、暂估待实际、实际差异、手工处理站点。不得连接真实业务站点。
 

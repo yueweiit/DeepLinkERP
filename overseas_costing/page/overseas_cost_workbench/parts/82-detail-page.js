@@ -10,11 +10,13 @@
     const writeback = String(batch.writeback_status || "").toLowerCase();
     const status = String(batch.status || "").toLowerCase();
     const sourceStatus = batch.source_status || {};
+    const erpOverall = String((this.detailState?.erpWork || batch.erp_work || {}).overall || "").toUpperCase();
     const cost = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
     if (!batch.subsidiary_code || ["missing", "pending", "invalid"].includes(String(sourceStatus.purchase_approval_sync_state || "").toLowerCase())) {
       return "purchase";
     }
     if (["draft", "dirty", "writeback failed"].includes(status) || cost <= 0) return "calculation";
+    if (erpOverall && erpOverall !== "SYNCED") return "erp_failed";
     if (writeback.includes("fail")) return "erp_failed";
     return "ready";
   }
@@ -78,6 +80,8 @@
       this.detailState.header = merged;
       this.detailState.detail = result;
       this.detailState.feeWork = result.fee_work || null;
+      this.detailState.erpPush = result.erp_push || null;
+      this.detailState.erpWork = result.erp_work || null;
       this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
       this.detailState.dirty = false;
       this.activeBatchName = merged.name;
@@ -102,6 +106,8 @@
     this.detailState.header = null;
     this.detailState.detail = null;
     this.detailState.feeWork = null;
+    this.detailState.erpPush = null;
+    this.detailState.erpWork = null;
     this.detailState.showAllFees = false;
     this.detailState.feeScopeCache = null;
     this.detailState.dingtalkApproval = null;
@@ -147,6 +153,8 @@
     this.detailState.header = merged;
     this.detailState.detail = result;
     this.detailState.feeWork = result.fee_work || this.detailState.feeWork;
+    this.detailState.erpPush = result.erp_push || this.detailState.erpPush;
+    this.detailState.erpWork = result.erp_work || this.detailState.erpWork;
     this.detailState.versionName = merged.current_version;
     this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
     this.renderDetailShell();
@@ -186,7 +194,7 @@
     const logistics = batch.waybill_no || batch.container_no || batch.sea_bill_no || "未填写物流单号";
     const sourceStatus = batch.source_status || {};
     const documentStatus = this.sourceStatusLabel(sourceStatus, batch);
-    const erpInfo = this.erpWritebackStatusInfo(batch);
+    const erpInfo = OverseasCostWorkbenchState.erpWorkPresentation(this.detailState.erpWork || batch.erp_work || {});
     const feeSummary = OverseasCostWorkbenchState.summarizeFeeWork(this.detailState.feeWork || batch.fee_work || {});
     const updatedAt = batch.modified || (this.detailState.detail?.version || {}).calculated_at || batch.writeback_time || "--";
     this.$root.find("[data-area='detail-screen']").html(`
@@ -220,7 +228,7 @@
           ${this.detailStatusChip("费用", feeSummary.todoCount ? `${feeSummary.affectedFeeCount} 笔 / ${feeSummary.todoCount} 项待办` : "已完成", feeSummary.todoCount ? "warn" : "ok")}
           ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
           ${this.detailStatusChip("成本处理", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
-          ${this.detailStatusChip("ERP 同步", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
+          ${this.detailStatusChip("ERP 同步", erpInfo.label, erpInfo.tone === "danger" ? "warn" : erpInfo.tone)}
           ${this.detailStatusChip("最后更新", this.formatDateTimeMinute(updatedAt) || updatedAt, "neutral")}
           <span class="ocw-edit-lease-status" data-area="edit-lease-status">浏览模式 · 开始修改时自动申请编辑权</span>
         </section>
@@ -284,6 +292,7 @@
       <div class="ocw-detail-overview">
         <div class="ocw-detail-section-head"><div><span>综合单价预览</span><h2>成本结果与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看 OA 来源</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>
         ${this.renderBatchDrawerOverview(batch, [])}
+        ${this.renderErpSitePanel(batch)}
       </div>
     `);
   }

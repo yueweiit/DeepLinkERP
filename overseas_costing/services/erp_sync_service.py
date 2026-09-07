@@ -46,6 +46,32 @@ def purchase_business_key(*, batch: str, site: str, group, version: str = "") ->
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
+def filter_retry_preview(preview: dict, *, batch: str, version: str, request: dict) -> dict:
+    """Freeze a retry to the one site/group represented by the failed request."""
+
+    requested_site = str(request.get("site_code") or "")
+    requested_business_key = str(request.get("business_key") or "")
+    sites = []
+    for site in (preview or {}).get("sites") or []:
+        site_code = str(site.get("site_code") or "")
+        if site_code != requested_site:
+            continue
+        groups = [
+            group
+            for group in site.get("groups") or []
+            if purchase_business_key(
+                batch=batch,
+                site=site_code,
+                group=group.get("group_key") or "",
+                version=version,
+            )
+            == requested_business_key
+        ]
+        if groups:
+            sites.append({**site, "groups": groups, "group_count": len(groups)})
+    return {**(preview or {}), "sites": sites, "site_count": len(sites), "group_count": sum(len(site["groups"]) for site in sites)}
+
+
 def build_request_id(
     *, operation: str, site_code: str, business_key: str, cost_result_hash: str, intent_key: str
 ) -> str:
@@ -813,7 +839,19 @@ def get_route_preview(batch_name: str, version_name: str | None = None) -> dict:
         for row in routes
     ]
     result = erp_routing_service.resolve_item_routes(items, normalized_routes)
-    return {"ok": True, "batch_name": batch_name, "version_name": version, **result}
+    site_options = frappe.get_all(
+        "Overseas Cost ERP Site",
+        fields=["site_code", "label", "subsidiary_code", "enabled", "capability_status"],
+        order_by="site_code asc",
+        limit_page_length=1000,
+    )
+    return {
+        "ok": True,
+        "batch_name": batch_name,
+        "version_name": version,
+        "site_options": site_options,
+        **result,
+    }
 
 
 def preview_bulk_route(batch_name: str, target_site_code: str) -> dict:
@@ -1078,9 +1116,28 @@ def retry_erp_request(*, batch_name: str, request_id: str) -> dict:
         return {"ok": False, "code": "ERP_REQUEST_NOT_RETRYABLE"}
     retry_key = f"retry:{request_id}:{int(request.get('attempt_count') or 0) + 1}"
     if str(request.get("operation") or "") == "CREATE":
-        return start_erp_create(
-            batch_name=batch_name,
-            cost_result_hash=str(request.get("cost_result_hash") or ""),
-            request_key=retry_key,
+        from overseas_costing.services import erp_client
+
+        preview_result = preview_erp_sync(batch_name)
+        push = preview_result.get("erp_push") or {}
+        request_hash = str(request.get("cost_result_hash") or "")
+        if request_hash != str(push.get("cost_result_hash") or ""):
+            return {"ok": False, "code": "COST_RESULT_STALE", "message": "成本结果已变更，请重新预览。"}
+        version = str(preview_result.get("version_name") or request.get("version") or "")
+        retry_preview = filter_retry_preview(
+            push.get("preview") or {}, batch=batch_name, version=version, request=request
         )
+        if not retry_preview.get("sites"):
+            return {"ok": False, "status": "MANUAL_REQUIRED", "code": "RETRY_GROUP_STALE"}
+        result = execute_site_pushes(
+            batch=batch_name,
+            version=version,
+            cost_result_hash=request_hash,
+            preview=retry_preview,
+            site_configs=_site_configs([str(request.get("site_code") or "")]),
+            intent_key=retry_key,
+            client=erp_client,
+            store=store,
+        )
+        return {"ok": result.get("status") == "SUCCESS", **result}
     return {"ok": False, "status": "MANUAL_REQUIRED", "code": "UPDATE_RETRY_PREVIEW_REQUIRED"}

@@ -666,6 +666,10 @@ def get_batch_items_page(
                 "volume_weight_kg",
                 "chargeable_weight_kg",
                 "project_collection",
+                "subsidiary_code",
+                "erp_site_code",
+                "route_status",
+                "route_revision",
             ]
             + [column["fieldname"] for column in columns]
         )

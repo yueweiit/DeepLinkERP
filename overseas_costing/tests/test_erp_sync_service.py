@@ -4,6 +4,7 @@ from overseas_costing.services.erp_sync_service import (
     InMemorySyncStore,
     apply_sync_response,
     execute_site_pushes,
+    filter_retry_preview,
     plan_uncertain_retry,
     prepare_sync_request,
     purchase_business_key,
@@ -216,3 +217,21 @@ def test_site_pushes_keep_partial_success_and_retry_only_failed_group() -> None:
     )
     assert repeated["status"] == "SUCCESS"
     assert client.calls == []
+
+
+def test_retry_preview_contains_only_the_requested_failed_site_group() -> None:
+    preview = {
+        "sites": [
+            {"site_code": "PROD", "groups": [{"group_key": "G-PROD"}]},
+            {"site_code": "ECOM", "groups": [{"group_key": "G-ECOM"}, {"group_key": "G-OTHER"}]},
+        ]
+    }
+    request = {
+        "site_code": "ECOM",
+        "business_key": purchase_business_key(batch="B1", site="ECOM", group="G-ECOM", version="V1"),
+    }
+
+    result = filter_retry_preview(preview, batch="B1", version="V2", request=request)
+
+    assert [site["site_code"] for site in result["sites"]] == ["ECOM"]
+    assert [group["group_key"] for group in result["sites"][0]["groups"]] == ["G-ECOM"]
