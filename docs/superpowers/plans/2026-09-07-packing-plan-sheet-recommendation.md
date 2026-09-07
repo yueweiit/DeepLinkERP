@@ -39,7 +39,7 @@
 Run:
 
 ```bash
-python -m pytest -q overseas_costing/tests/test_packing_sheet_recommendation.py
+python3 -m pytest -q overseas_costing/tests/test_packing_sheet_recommendation.py
 ```
 
 Expected: FAIL because `packing_sheet_recommendation` does not exist.
@@ -133,7 +133,7 @@ SELECT ...
 - [ ] **Step 2: 运行聚焦测试并确认 RED**
 
 ```bash
-python -m pytest -q overseas_costing/tests/test_dingtalk_packing_source.py
+python3 -m pytest -q overseas_costing/tests/test_dingtalk_packing_source.py
 ```
 
 Expected: FAIL because `list_latest_snapshots` is absent.
@@ -155,7 +155,7 @@ Expected: FAIL because `list_latest_snapshots` is absent.
 - [ ] **Step 5: 运行集成测试并确认 RED**
 
 ```bash
-python -m pytest -q overseas_costing/tests/test_packing_snapshot_service.py
+python3 -m pytest -q overseas_costing/tests/test_packing_snapshot_service.py
 ```
 
 Expected: FAIL on missing recommendation fields.
@@ -176,7 +176,7 @@ def _packing_snapshot_summaries(clients: Any, workbook_id: str) -> dict[str, dic
 - [ ] **Step 7: 运行 Task 2 两组测试并提交**
 
 ```bash
-python -m pytest -q overseas_costing/tests/test_dingtalk_packing_source.py overseas_costing/tests/test_packing_snapshot_service.py
+python3 -m pytest -q overseas_costing/tests/test_dingtalk_packing_source.py overseas_costing/tests/test_packing_snapshot_service.py
 git add overseas_costing/integrations/dingtalk_packing_source.py overseas_costing/services/packing_snapshot_service.py overseas_costing/tests/test_dingtalk_packing_source.py overseas_costing/tests/test_packing_snapshot_service.py
 git commit -m 'feat: recommend cached packing plan sheets'
 ```
@@ -206,7 +206,7 @@ Expected: all selected tests PASS.
 - [ ] **Step 2: 运行测试并确认 RED**
 
 ```bash
-python -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py::test_packing_flow_static_ui_contract
+python3 -m pytest -q overseas_costing/tests/test_workbench_frontend_state.py::test_packing_flow_static_ui_contract
 ```
 
 Expected: FAIL because the old default, order and wording remain.
@@ -236,8 +236,8 @@ Run the Task 3 test command. Expected: PASS.
 - [ ] **Step 6: 重新生成页面资源并检查无漂移**
 
 ```bash
-python overseas_costing/scripts/build_workbench_assets.py
-python overseas_costing/scripts/build_workbench_assets.py --check
+python3 overseas_costing/scripts/build_workbench_assets.py
+python3 overseas_costing/scripts/build_workbench_assets.py --check
 ```
 
 Expected: build succeeds; `--check` reports generated assets are current.
@@ -258,7 +258,7 @@ git commit -m 'feat: prioritize recommended packing plan sheets'
 - [ ] **Step 1: 运行装箱相关回归**
 
 ```bash
-python -m pytest -q overseas_costing/tests/test_packing_sheet_recommendation.py overseas_costing/tests/test_dingtalk_packing_source.py overseas_costing/tests/test_packing_snapshot_service.py overseas_costing/tests/test_packing_grid.py overseas_costing/tests/test_packing_parse_service.py overseas_costing/tests/test_packing_workflow_integration.py overseas_costing/tests/test_workbench_frontend_state.py
+python3 -m pytest -q overseas_costing/tests/test_packing_sheet_recommendation.py overseas_costing/tests/test_dingtalk_packing_source.py overseas_costing/tests/test_packing_snapshot_service.py overseas_costing/tests/test_packing_grid.py overseas_costing/tests/test_packing_source_service.py overseas_costing/tests/test_packing_api.py overseas_costing/tests/test_packing_workflow_integration.py overseas_costing/tests/test_workbench_frontend_state.py
 ```
 
 Expected: all selected tests PASS.
@@ -266,9 +266,9 @@ Expected: all selected tests PASS.
 - [ ] **Step 2: 运行全量测试和语法检查**
 
 ```bash
-python -m pytest -q overseas_costing/tests
-python -m compileall -q overseas_costing
-python overseas_costing/scripts/build_workbench_assets.py --check
+python3 -m pytest -q overseas_costing/tests
+python3 -m compileall -q overseas_costing
+python3 overseas_costing/scripts/build_workbench_assets.py --check
 git diff --check
 ```
 
@@ -291,4 +291,3 @@ git log --oneline --max-count=5
 ```
 
 Expected: 工作树干净；仅包含设计和本实施计划规定的提交，不含 `.env`、SSH 私钥、服务器备份或其他密钥。
-
