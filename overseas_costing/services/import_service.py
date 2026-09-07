@@ -215,6 +215,7 @@ NUMERIC_ITEM_FIELDS = {
     "mexico_misc_mxn",
     "mexico_inland_misc_rmb",
     "china_to_mexico_freight_rmb",
+    "net_weight_kg",
     "gross_weight_kg",
     "volume_m3",
     "volume_weight_kg",

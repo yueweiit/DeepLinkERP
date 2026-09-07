@@ -283,6 +283,9 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
         "只看缺项",
         "展开辅助列",
         "导入 Excel 补资料",
+        "从装箱计划表获取",
+        "确认写入物料表",
+        "净重 kg",
         "查看资料来源",
         "详细待办",
         "SKU 综合单价试算",
@@ -293,6 +296,8 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
         "overseas_costing.api.materials.set_shipping_quantity",
         "overseas_costing.api.materials.preview_material_import",
         "overseas_costing.api.materials.apply_material_import",
+        "overseas_costing.api.packing_api.list_packing_sources",
+        "overseas_costing.api.packing_api.request_packing_sheet_refresh",
         "overseas_costing.api.calculate.update_item_field",
         "overseas_costing.api.calculate.batch_update_items",
         "overseas_costing.api.fees.get_fee_worklist",
@@ -304,6 +309,21 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
     ):
         assert endpoint in workspace
     assert "带入费用表" in workspace
+    assert "openWikiMaterialImportDialog" in workspace
+    assert "previewWikiMaterialImport" in workspace
+    assert "data-mf-wiki-source" in workspace
+    assert "shared_groups" in workspace
+    assert "confirmation_groups" in workspace
+    assert "out_of_batch" in workspace
+    assert "source_fields" in workspace
+    assert "merged_source_fields" in workspace
+    assert "MERGED_PREVIEW_CONFIRMATION_REQUIRED" in workspace
+    assert "已生成合并后的最终预览，请核对后确认写入" in workspace
+    assert "group_confirmations" in workspace
+    assert "allocations" in workspace
+    assert "source_validation" in workspace
+    assert "data-mf-source-validation" in workspace
+    assert "DUPLICATE_TARGET_SELECTION" in workspace
     assert "本次未识别出金额，可手工补录" in workspace
     assert "writeback" not in workspace.lower()
     assert "recalculate" not in workspace.lower()

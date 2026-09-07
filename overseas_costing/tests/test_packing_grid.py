@@ -359,6 +359,29 @@ def test_total_physical_columns_win_over_earlier_per_piece_columns() -> None:
     assert preview["totals"]["volume_m3"]["value"] == "3"
 
 
+def test_material_rows_capture_project_and_only_explicit_chargeable_weight() -> None:
+    snapshot = {
+        "schemaVersion": 1,
+        "sheetName": "明确计费重",
+        "rangeAddress": "A1:I3",
+        "values": [
+            ["物料编码", "数量", "单位", "总净重", "总毛重", "总体积", "计费重KG", "项目归属", "备注"],
+            ["ITEM-1", 10, "件", 40, 60, 3, 72, "指环扣", "有明确计费重"],
+            ["ITEM-2", 5, "件", 20, 30, 1, None, "油漆", "不得按体积推导"],
+        ],
+        "displayValues": [],
+        "formulas": [],
+        "mergeRangesAvailable": False,
+    }
+
+    preview = parse_packing_grid(build_grid_from_dingtalk_snapshot(snapshot))
+
+    assert preview["material_rows"][0]["project_collection"] == "指环扣"
+    assert preview["material_rows"][0]["chargeable_weight_kg"] == "72"
+    assert preview["material_rows"][1]["project_collection"] == "油漆"
+    assert preview["material_rows"][1]["chargeable_weight_kg"] is None
+
+
 def test_declared_total_mismatch_is_blocking_until_user_chooses_basis() -> None:
     snapshot = {
         "schemaVersion": 1,

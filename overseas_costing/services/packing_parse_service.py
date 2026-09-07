@@ -25,6 +25,8 @@ HEADER_ALIASES = {
     "net_weight_kg": ("总净重", "净重nw", "netweight", "净重"),
     "gross_weight_kg": ("总毛重", "毛重gw", "grossweight", "毛重"),
     "volume_m3": ("总体积", "totalcapacity", "volumem3", "volume", "cbm", "体积"),
+    "chargeable_weight_kg": ("计费重kg", "计费重量kg", "计费重", "chargeableweight"),
+    "project_collection": ("项目归属", "项目归集", "所属项目", "projectcollection", "project"),
     "package_count": ("件数numberofpieces", "包装件数", "箱数", "件数"),
 }
 
@@ -72,6 +74,12 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
                 "product_name": product_name,
                 "quantity": _decimal_text(_decimal_cell(cells, row_number, columns.get("quantity"))),
                 "unit": _string_value(_cell_raw(cells, row_number, columns.get("unit"))),
+                "chargeable_weight_kg": _decimal_text(
+                    _decimal_cell(cells, row_number, columns.get("chargeable_weight_kg"))
+                ),
+                "project_collection": _string_value(
+                    _cell_raw(cells, row_number, columns.get("project_collection"))
+                ),
                 "raw_fields": {
                     header: dict(cells[row_number - 1][column - 1])
                     for column, header in original_headers.items()

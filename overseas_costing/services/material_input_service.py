@@ -43,6 +43,7 @@ GRID_FIELDS = (
     "shipped_uom",
     "cost_output_uom",
     "goods_value",
+    "net_weight_kg",
     "gross_weight_kg",
     "volume_m3",
     "volume_weight_kg",

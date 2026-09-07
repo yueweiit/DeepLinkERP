@@ -77,6 +77,7 @@
     "mexico_misc_mxn",
     "mexico_inland_misc_rmb",
     "china_to_mexico_freight_rmb",
+    "net_weight_kg",
     "gross_weight_kg",
     "volume_m3",
     "volume_weight_kg",
@@ -473,6 +474,11 @@
       "fieldname": "china_to_mexico_freight_rmb",
       "fieldtype": "Currency",
       "label": "中国到墨西哥运费RMB"
+    },
+    {
+      "fieldname": "net_weight_kg",
+      "fieldtype": "Float",
+      "label": "货重净重KG"
     },
     {
       "fieldname": "gross_weight_kg",

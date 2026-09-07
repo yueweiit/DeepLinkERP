@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from overseas_costing.services.material_input_service import (
+    GRID_FIELDS,
     analyze_material_requirements,
     build_shipping_quantity_updates,
     ensure_stable_line_key,
@@ -155,9 +156,12 @@ def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:
         "cost_output_uom",
         "actual_shipped_qty_mode",
         "actual_shipped_qty_source_revision",
+        "net_weight_kg",
     } <= fields.keys()
     assert fields["stable_line_key"]["read_only"] == 1
     assert fields["cost_output_uom"]["read_only"] == 1
+    assert fields["net_weight_kg"]["fieldtype"] == "Float"
+    assert "net_weight_kg" in GRID_FIELDS
 
 
 def test_material_requirements_mark_only_active_contextual_missing_cells() -> None:
