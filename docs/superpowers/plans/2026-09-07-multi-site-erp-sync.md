@@ -529,21 +529,21 @@ git commit -m 'refactor: isolate ERP clients by site'
 - Modify: `overseas_costing/tests/test_erp_sync_service.py`
 - Modify: `overseas_costing/tests/test_erp_client.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 一个生产站点成功、电商站点失败时，断言生产 link 和 SUCCESS 请求已保存、电商为 FAILED；重试只包含电商；批次汇总为 PARTIAL；再次点击不会重复创建生产采购单；任何站点都不会收到全柜费用总额。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_service.py overseas_costing/tests/test_erp_client.py`
 
 Expected: FAIL because orchestration is not implemented.
 
-- [ ] **Step 3: 实现分站点执行**
+- [x] **Step 3: 实现分站点执行**
 
 为每个站点/单据分组先写 PENDING 请求并提交本地事务，再执行 HTTP。每个结果独立事务落账；成功后保存远端单据及行关联，并回读业务键、数量和成本字段核对。失败不回滚已成功站点，汇总从子请求计算，不把批次 `writeback_status=Success` 当真相源。
 
-- [ ] **Step 4: 运行并提交**
+- [x] **Step 4: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_erp_sync_service.py overseas_costing/tests/test_erp_client.py`
 

@@ -185,3 +185,264 @@ def verify_legacy_document_candidates(candidates: list[dict], expected_items: li
     if _item_quantities(candidate.get("items") or []) != _item_quantities(expected_items):
         return {"status": "MANUAL_REQUIRED", "code": "LEGACY_LINE_MISMATCH"}
     return {"status": "VERIFIED", "remote_document": str(candidate.get("name") or "")}
+
+
+class InMemorySyncStore:
+    """Small transaction-shaped store used by deterministic orchestration tests."""
+
+    def __init__(self, requests: list[dict] | None = None, links: list[dict] | None = None):
+        self.requests = list(requests or [])
+        self.links = list(links or [])
+        self.commit_count = 0
+
+    def save_request(self, request: dict) -> None:
+        for index, current in enumerate(self.requests):
+            if current.get("request_id") == request.get("request_id"):
+                self.requests[index] = dict(request)
+                return
+        self.requests.append(dict(request))
+
+    def save_link(self, link: dict) -> None:
+        identity = (link.get("site_code"), link.get("stable_line_key"), link.get("business_key"))
+        for index, current in enumerate(self.links):
+            if (current.get("site_code"), current.get("stable_line_key"), current.get("business_key")) == identity:
+                self.links[index] = dict(link)
+                return
+        self.links.append(dict(link))
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+
+def _config_map(site_configs) -> dict[str, dict]:
+    if isinstance(site_configs, dict):
+        return {str(key): dict(value or {}) for key, value in site_configs.items()}
+    return {
+        str(row.get("site_code") or ""): dict(row)
+        for row in (site_configs or [])
+        if row.get("site_code")
+    }
+
+
+def _purchase_item(row: dict, group: dict) -> dict:
+    quantity = row.get("effective_shipped_qty")
+    if quantity in (None, ""):
+        quantity = row.get("actual_shipped_qty") or row.get("quantity") or 0
+    goods = row.get("goods_value") or 0
+    total = row.get("total_cost_rmb") or 0
+    return {
+        **row,
+        "stable_line_key": str(row.get("stable_line_key") or ""),
+        "source_quantity": quantity,
+        "purchase_currency": row.get("purchase_currency") or group.get("currency") or "CNY",
+        "original_unit_price": row.get("unit_price") or 0,
+        "comprehensive_unit_price": row.get("total_unit_rmb") or 0,
+        "cost_formula": {
+            "quantity": quantity,
+            "goods_value": goods,
+            "total_cost": total,
+            "original_unit_price": row.get("unit_price") or 0,
+            "comprehensive_unit_price": row.get("total_unit_rmb") or 0,
+        },
+    }
+
+
+def _group_payload(
+    *, batch: str, version: str, cost_result_hash: str, site: dict, group: dict, business_key: str
+) -> dict:
+    items = [_purchase_item(row, group) for row in group.get("items") or []]
+    return {
+        "batch_no": batch,
+        "version_name": version,
+        "cost_result_hash": cost_result_hash,
+        "business_key": business_key,
+        "site_code": site.get("site_code") or "",
+        "subsidiary_code": (site.get("subsidiary_codes") or [""])[0],
+        "supplier": group.get("supplier") or "",
+        "currency": group.get("currency") or "CNY",
+        "stock_uom": group.get("stock_uom") or "",
+        "fee_total_rmb": group.get("allocated_fee_rmb") or "0.00",
+        "total_cost_rmb": group.get("total_cost_rmb") or "0.00",
+        "estimated_fee_keys": list(group.get("estimated_fee_keys") or []),
+        "amount_status": "ESTIMATED" if group.get("estimated_fee_keys") else "ACTUAL",
+        "items": items,
+    }
+
+
+def verify_remote_purchase_state(payload: dict, remote_state: dict) -> dict:
+    data = (remote_state or {}).get("data") if isinstance(remote_state, dict) else None
+    if not isinstance(data, dict):
+        data = remote_state if isinstance(remote_state, dict) else {}
+    if str(data.get("custom_overseas_business_key") or "") != str(payload.get("business_key") or ""):
+        return {"ok": False, "code": "REMOTE_BUSINESS_KEY_MISMATCH"}
+    remote_by_key = {
+        str(row.get("custom_overseas_stable_line_key") or ""): row
+        for row in data.get("items") or []
+        if row.get("custom_overseas_stable_line_key")
+    }
+    for row in payload.get("items") or []:
+        key = str(row.get("stable_line_key") or "")
+        remote = remote_by_key.get(key)
+        if not remote:
+            return {"ok": False, "code": "REMOTE_LINE_MISSING", "stable_line_key": key}
+        if _decimal(remote.get("qty")) != _decimal(row.get("source_quantity")):
+            return {"ok": False, "code": "REMOTE_QUANTITY_MISMATCH", "stable_line_key": key}
+        remote_cost = _decimal(remote.get("custom_overseas_comprehensive_amount")).quantize(Decimal("0.01"))
+        expected_cost = _decimal((row.get("cost_formula") or {}).get("total_cost")).quantize(Decimal("0.01"))
+        if remote_cost != expected_cost:
+            return {"ok": False, "code": "REMOTE_COST_MISMATCH", "stable_line_key": key}
+    return {"ok": True, "data": data, "remote_items": remote_by_key}
+
+
+def _synced_links(store, *, site_code: str, business_key: str, stable_keys: list[str], cost_hash: str) -> bool:
+    linked = {
+        str(row.get("stable_line_key") or "")
+        for row in store.links
+        if str(row.get("site_code") or "") == site_code
+        and str(row.get("business_key") or "") == business_key
+        and str(row.get("last_cost_result_hash") or "") == cost_hash
+        and str(row.get("status") or "").upper() == "SUCCESS"
+    }
+    return bool(stable_keys) and set(stable_keys) <= linked
+
+
+def _summary_status(groups: list[dict]) -> str:
+    statuses = [str(row.get("status") or "") for row in groups]
+    success_count = sum(status == "SUCCESS" for status in statuses)
+    if statuses and success_count == len(statuses):
+        return "SUCCESS"
+    if success_count:
+        return "PARTIAL"
+    return "FAILED"
+
+
+def execute_site_pushes(
+    *,
+    batch: str,
+    version: str,
+    cost_result_hash: str,
+    preview: dict,
+    site_configs,
+    intent_key: str,
+    client,
+    store,
+) -> dict:
+    """Execute each site/group independently and retain successful siblings on failure."""
+
+    config_by_site = _config_map(site_configs)
+    group_results = []
+    for site in preview.get("sites") or []:
+        site_code = str(site.get("site_code") or "")
+        for group in site.get("groups") or []:
+            group_key = group.get("group_key") or {
+                "supplier": group.get("supplier"),
+                "currency": group.get("currency"),
+                "stock_uom": group.get("stock_uom"),
+                "stable_line_keys": sorted(
+                    str(row.get("stable_line_key") or "") for row in group.get("items") or []
+                ),
+            }
+            business_key = purchase_business_key(batch=batch, site=site_code, group=group_key)
+            stable_keys = [str(row.get("stable_line_key") or "") for row in group.get("items") or []]
+            if _synced_links(
+                store,
+                site_code=site_code,
+                business_key=business_key,
+                stable_keys=stable_keys,
+                cost_hash=cost_result_hash,
+            ):
+                group_results.append({"site_code": site_code, "business_key": business_key, "status": "SUCCESS", "noop": True})
+                continue
+
+            payload = _group_payload(
+                batch=batch,
+                version=version,
+                cost_result_hash=cost_result_hash,
+                site=site,
+                group=group,
+                business_key=business_key,
+            )
+            prepared = prepare_sync_request(
+                store.requests,
+                operation="CREATE",
+                batch=batch,
+                version=version,
+                cost_result_hash=cost_result_hash,
+                site_code=site_code,
+                business_key=business_key,
+                payload=payload,
+                intent_key=intent_key,
+            )
+            if prepared["action"] in {"REPLAY", "NOOP"} and str(prepared["request"].get("status") or "") == "SUCCESS":
+                group_results.append({"site_code": site_code, "business_key": business_key, "status": "SUCCESS", "noop": True})
+                continue
+            request = prepared["request"]
+            store.save_request(request)
+            store.commit()
+            running = transition_request(request, "RUNNING")
+            store.save_request(running)
+            store.commit()
+            config = config_by_site.get(site_code)
+            if not config:
+                response = {"status": "FAILED", "code": "ERP_SITE_CONFIG_REQUIRED"}
+            else:
+                try:
+                    response = client.create_purchase(payload, config)
+                except (TimeoutError, ConnectionError) as exc:
+                    response = {"status": "UNCERTAIN", "code": type(exc).__name__}
+                except Exception as exc:
+                    response = {"status": "FAILED", "code": type(exc).__name__}
+
+            verification = {}
+            if response.get("ok") and response.get("erp_target_doc") and config:
+                remote_document = str(response.get("erp_target_doc") or "")
+                try:
+                    remote_state = client.read_purchase_state(
+                        {"remote_doctype": "Purchase Order", "remote_document": remote_document},
+                        config,
+                    )
+                    verification = verify_remote_purchase_state(payload, remote_state)
+                except Exception as exc:
+                    verification = {"ok": False, "code": type(exc).__name__}
+                if not verification.get("ok"):
+                    response = {"status": "MANUAL_REQUIRED", **verification}
+                else:
+                    response = {**response, "status": "SUCCESS"}
+
+            applied = apply_sync_response(running, response, latest_cost_result_hash=cost_result_hash)
+            completed = applied["request"]
+            store.save_request(completed)
+            if completed.get("status") == "SUCCESS":
+                data = verification["data"]
+                remote_items = verification["remote_items"]
+                for key in stable_keys:
+                    remote_row = remote_items.get(key) or {}
+                    store.save_link(
+                        {
+                            "batch": batch,
+                            "stable_line_key": key,
+                            "site_code": site_code,
+                            "business_key": business_key,
+                            "remote_doctype": "Purchase Order",
+                            "remote_document": str(data.get("name") or response.get("erp_target_doc") or ""),
+                            "remote_row": str(remote_row.get("name") or ""),
+                            "remote_docstatus": int(data.get("docstatus") or 0),
+                            "status": "SUCCESS",
+                            "last_cost_result_hash": cost_result_hash,
+                            "last_payload_hash": completed.get("payload_hash") or "",
+                        }
+                    )
+            store.commit()
+            group_results.append(
+                {
+                    "site_code": site_code,
+                    "business_key": business_key,
+                    "request_id": completed.get("request_id") or "",
+                    "status": completed.get("status") or "FAILED",
+                }
+            )
+    return {
+        "status": _summary_status(group_results),
+        "groups": group_results,
+        "site_count": len({row.get("site_code") for row in group_results}),
+    }
