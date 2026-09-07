@@ -158,7 +158,9 @@ def recommend_packing_sheets(
             {
                 "display_source_name": "装箱计划表",
                 "business_date": business_date.isoformat() if business_date else None,
-                "snapshot_status": "ready" if has_snapshot else "not_cached",
+                "snapshot_status": (
+                    "ready" if has_snapshot else str(item.get("snapshot_status") or "not_cached")
+                ),
                 "recommendation_score": max(0, min(100, score)),
                 "recommendation_confidence": confidence,
                 "recommendation_reasons": reasons,
@@ -276,4 +278,3 @@ def _cell_value(cell: Any) -> str:
     else:
         value = cell
     return str(value).strip() if value not in (None, "") else ""
-

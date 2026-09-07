@@ -20,6 +20,10 @@ except Exception:  # pragma: no cover
     frappe = None
 
 from overseas_costing.services import packing_source_service
+from overseas_costing.services.packing_sheet_recommendation import (
+    recommend_packing_sheets,
+    summarize_packing_preview,
+)
 
 
 Resolver = Callable[..., dict[str, Any]]
@@ -568,35 +572,158 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
         from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
 
         clients = get_packing_runtime_clients()
+        batch_context = _packing_batch_context(str(batch_name), detail)
+        workbook_rows: list[dict[str, Any]] = []
+        all_sheet_rows: list[dict[str, Any]] = []
+        all_snapshot_states: dict[str, dict[str, Any]] = {}
         for workbook in clients.catalog.list_workbooks():
-            sheets = clients.catalog.list_sheets(str(workbook.get("workbook_id") or ""), limit=500)
-            wiki.append(
+            workbook_id = str(workbook.get("workbook_id") or "")
+            sheets = clients.catalog.list_sheets(workbook_id, limit=500)
+            snapshot_states = _packing_snapshot_summaries(clients, workbook_id)
+            all_snapshot_states.update(snapshot_states)
+            rendered_sheets = []
+            for sheet in sheets:
+                source_id = f"{sheet.get('workbook_id')}:{sheet.get('sheet_id')}"
+                snapshot_state = snapshot_states.get(source_id) or {}
+                rendered_sheets.append(
+                    {
+                        "source_kind": "wiki_sheet",
+                        "source_id": source_id,
+                        "source_label": sheet.get("sheet_name"),
+                        "source_updated_at": sheet.get("source_updated_at"),
+                        "indexed_at": sheet.get("indexed_at"),
+                        "workbook_id": sheet.get("workbook_id"),
+                        "workbook_year": sheet.get("year") or workbook.get("year"),
+                        "snapshot_updated_at": snapshot_state.get("snapshot_updated_at"),
+                        "snapshot_status": snapshot_state.get("snapshot_status") or "not_cached",
+                        "available": True,
+                    }
+                )
+            workbook_rows.append(
                 {
                     "workbook_id": workbook.get("workbook_id"),
                     "year": workbook.get("year"),
                     "label": workbook.get("label"),
                     "updated_at": workbook.get("updated_at"),
-                    "sheets": [
-                        {
-                            "source_kind": "wiki_sheet",
-                            "source_id": f"{sheet.get('workbook_id')}:{sheet.get('sheet_id')}",
-                            "source_label": sheet.get("sheet_name"),
-                            "source_updated_at": sheet.get("source_updated_at"),
-                            "indexed_at": sheet.get("indexed_at"),
-                            "available": True,
-                        }
-                        for sheet in sheets
-                    ],
+                    "sheets": rendered_sheets,
                 }
             )
+            all_sheet_rows.extend(rendered_sheets)
+
+        snapshot_summaries = {
+            source_id: state.get("summary") or {}
+            for source_id, state in all_snapshot_states.items()
+            if state.get("summary")
+        }
+        recommended = recommend_packing_sheets(
+            all_sheet_rows,
+            batch_context=batch_context,
+            snapshot_summaries=snapshot_summaries,
+        )
+        recommended_by_id = {str(row.get("source_id") or ""): row for row in recommended}
+        for workbook in workbook_rows:
+            workbook["sheets"] = [
+                recommended_by_id[str(row.get("source_id") or "")]
+                for row in workbook.get("sheets") or []
+                if str(row.get("source_id") or "") in recommended_by_id
+            ]
+            workbook["sheets"].sort(
+                key=lambda row: next(
+                    index
+                    for index, candidate in enumerate(recommended)
+                    if candidate.get("source_id") == row.get("source_id")
+                )
+            )
+        wiki = workbook_rows
     except Exception:
-        wiki_error = "知识库装箱表缓存暂不可用，请稍后重试。"
+        wiki_error = "装箱计划表缓存暂不可用，请稍后重试。"
     return {
         "manual_attachments": manual,
         "approval_sources": [*approval, *comments],
         "wiki_workbooks": wiki,
         "wiki_error": wiki_error,
     }
+
+
+def _packing_batch_context(batch_name: str, detail: dict[str, Any]) -> dict[str, Any]:
+    batch = frappe.db.get_value(
+        "Overseas Cost Batch",
+        batch_name,
+        [
+            "name",
+            "batch_no",
+            "waybill_no",
+            "source_approval_no",
+            "source_instance_id",
+            "project_collection",
+            "creation",
+        ],
+        as_dict=True,
+    ) or {}
+    items = frappe.get_list(
+        "Overseas Cost Item",
+        filters={"batch": str(batch.get("name") or batch_name)},
+        fields=["material_code", "product_name", "source_doc_no"],
+        limit_page_length=5000,
+    )
+    item_codes = {str(row.get("material_code") or "").strip() for row in items}
+    references = {
+        str(batch.get(field) or "").strip()
+        for field in ("batch_no", "waybill_no", "source_approval_no", "source_instance_id")
+    }
+    keywords = {str(batch.get("project_collection") or "").strip()}
+    for row in items:
+        references.add(str(row.get("source_doc_no") or "").strip())
+        keywords.add(str(row.get("product_name") or "").strip())
+    approvals = [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]
+    for approval in approvals:
+        if not isinstance(approval, dict) or approval.get("excluded"):
+            continue
+        references.update(
+            str(approval.get(field) or "").strip()
+            for field in ("business_id", "instance_id")
+        )
+        keywords.add(str(approval.get("title") or "").strip())
+        for field in approval.get("form_fields") or []:
+            if not isinstance(field, dict):
+                continue
+            value = str(field.get("value") or "").strip()
+            label = str(field.get("label") or "").lower()
+            if any(token in label for token in ("审批", "订单", "单号", "order", "物流")):
+                references.add(value)
+            elif 2 <= len(value) <= 80:
+                keywords.add(value)
+    creation = str(batch.get("creation") or "")
+    return {
+        "item_codes": sorted(value for value in item_codes if value),
+        "references": sorted(value for value in references if value),
+        "keywords": sorted(value for value in keywords if value),
+        "reference_date": creation[:10] if len(creation) >= 10 else None,
+    }
+
+
+def _packing_snapshot_summaries(clients: Any, workbook_id: str) -> dict[str, dict[str, Any]]:
+    """读取现有 MinIO 快照；任何单个对象失败都只影响对应 Sheet。"""
+
+    from overseas_costing.services.packing_grid import build_grid_from_dingtalk_snapshot
+    from overseas_costing.services.packing_parse_service import parse_packing_grid
+
+    result: dict[str, dict[str, Any]] = {}
+    for manifest in clients.catalog.list_latest_snapshots(workbook_id):
+        sheet_id = str(manifest.get("sheet_id") or "")
+        source_id = f"{workbook_id}:{sheet_id}"
+        state = {
+            "snapshot_status": "ready",
+            "snapshot_updated_at": manifest.get("created_at"),
+        }
+        try:
+            payload = clients.archive.download(manifest)
+            preview = parse_packing_grid(build_grid_from_dingtalk_snapshot(payload))
+            state["summary"] = summarize_packing_preview(preview)
+        except Exception:
+            state["snapshot_status"] = "unreadable"
+        result[source_id] = state
+    return result
 
 
 def _attachment_sheet_names(row: dict[str, Any]) -> list[str]:

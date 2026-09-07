@@ -134,6 +134,19 @@ class PackingSheetCatalog:
         )
         return rows[0] if rows else None
 
+    def list_latest_snapshots(self, workbook_id: str) -> list[dict[str, Any]]:
+        """一次取得工作簿内所有已缓存 Sheet 的最新只读清单。"""
+
+        return self._read(
+            """
+            SELECT *
+              FROM costing_read.packing_sheet_snapshots_v1
+             WHERE workbook_id = %s AND is_latest = TRUE
+             ORDER BY created_at DESC, id DESC
+            """,
+            (_validate_id(workbook_id, "工作簿 ID"),),
+        )
+
     def get_refresh_status(self, request_key: str) -> dict[str, Any] | None:
         rows = self._read(
             """

@@ -9,6 +9,7 @@ from openpyxl import Workbook
 import pytest
 
 from overseas_costing.services import packing_snapshot_service as service
+from overseas_costing.integrations import dingtalk_packing_source
 
 
 def _preview(*, needs_confirmation=False):
@@ -311,3 +312,141 @@ def test_same_source_revision_cannot_be_reconfirmed_with_different_decisions(mon
     assert second["ok"] is False
     assert second["resolution_conflict"] is True
     assert len(repository.saved) == 1
+
+
+def _dingtalk_sheet_snapshot(sheet_name, item_codes):
+    values = [["物料编码", "中文品名", "数量"]]
+    values.extend([[code, f"物料 {code}", 1] for code in item_codes])
+    return {
+        "schemaVersion": 1,
+        "sheetName": sheet_name,
+        "mergeRangesAvailable": False,
+        "values": values,
+        "displayValues": values,
+        "formulas": [[None for _cell in row] for row in values],
+    }
+
+
+def test_list_sources_recommends_cached_sheet_without_submitting_refresh(monkeypatch) -> None:
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            assert doctype == "Overseas Cost Batch"
+            assert name == "BATCH-1"
+            assert as_dict is True
+            return {
+                "name": "BATCH-1",
+                "batch_no": "202609032107000062462",
+                "waybill_no": "",
+                "source_approval_no": "LOG-001",
+                "source_instance_id": "MAIN-1",
+                "project_collection": "指环扣",
+                "creation": "2026-09-03 10:00:00",
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        def __init__(self):
+            self.item_queries = 0
+
+        def get_list(self, doctype, filters, fields, limit_page_length):
+            if doctype == "Overseas Cost Attachment":
+                return []
+            assert doctype == "Overseas Cost Item"
+            assert filters == {"batch": "BATCH-1"}
+            self.item_queries += 1
+            return [
+                {"material_code": code, "product_name": "指环扣", "source_doc_no": "PO-001"}
+                for code in ("FL000427", "FL000428", "FL000429", "FL000430", "FL003377")
+            ]
+
+    class FakeCatalog:
+        def __init__(self):
+            self.snapshot_queries = 0
+
+        @staticmethod
+        def list_workbooks():
+            return [{"workbook_id": "WB-2026", "year": 2026, "label": "2026 海运装箱计划"}]
+
+        @staticmethod
+        def list_sheets(_workbook_id, limit):
+            assert limit == 500
+            return [
+                {"workbook_id": "WB-2026", "sheet_id": "st-ring", "sheet_name": "指环扣-packing list2026.9.05"},
+                {"workbook_id": "WB-2026", "sheet_id": "st-broken", "sheet_name": "油漆-packing list2026.9.05"},
+            ]
+
+        def list_latest_snapshots(self, workbook_id):
+            assert workbook_id == "WB-2026"
+            self.snapshot_queries += 1
+            return [
+                {"sheet_id": "st-ring", "status": "ready", "created_at": "2026-09-07T10:00:00+08:00"},
+                {"sheet_id": "st-broken", "status": "ready", "created_at": "2026-09-07T09:00:00+08:00"},
+            ]
+
+    class FakeArchive:
+        def __init__(self):
+            self.downloads = []
+
+        def download(self, manifest):
+            self.downloads.append(manifest["sheet_id"])
+            if manifest["sheet_id"] == "st-broken":
+                raise ValueError("corrupt cached object")
+            return _dingtalk_sheet_snapshot(
+                "指环扣-packing list2026.9.05",
+                ["FL000427", "FL000428", "FL000429", "FL000430", "FL003377", "CW000224"],
+            )
+
+    fake_frappe = FakeFrappe()
+    fake_catalog = FakeCatalog()
+    fake_archive = FakeArchive()
+    clients = type("Clients", (), {"catalog": fake_catalog, "archive": fake_archive})()
+    detail_calls = []
+    detail = {
+        "ok": True,
+        "main_approval": {
+            "instance_id": "MAIN-1",
+            "business_id": "LOG-001",
+            "title": "指环扣国际物流",
+            "form_fields": [{"label": "采购审批号", "value": "PO-001"}],
+            "timeline": [],
+        },
+        "linked_purchase_approvals": [
+            {
+                "instance_id": "PURCHASE-1",
+                "business_id": "PO-001",
+                "title": "指环扣采购支出",
+                "form_fields": [],
+                "timeline": [],
+            }
+        ],
+        "excluded_linked_purchase_approvals": [
+            {"instance_id": "REJECTED-1", "business_id": "PO-REJECTED", "excluded": True}
+        ],
+    }
+
+    monkeypatch.setattr(service, "frappe", fake_frappe)
+    monkeypatch.setattr(
+        service.packing_source_service.dingtalk_approval_service,
+        "get_batch_dingtalk_approval_detail",
+        lambda batch_name: detail_calls.append(batch_name) or detail,
+    )
+    monkeypatch.setattr(dingtalk_packing_source, "get_packing_runtime_clients", lambda: clients)
+
+    result = service.list_packing_sources("BATCH-1")
+
+    assert detail_calls == ["BATCH-1"]
+    assert fake_frappe.item_queries == 1
+    assert fake_catalog.snapshot_queries == 1
+    assert fake_archive.downloads == ["st-ring", "st-broken"]
+    sheets = result["wiki_workbooks"][0]["sheets"]
+    assert sheets[0]["source_id"] == "WB-2026:st-ring"
+    assert sheets[0]["is_recommended"] is True
+    assert sheets[0]["recommendation_confidence"] == "high"
+    assert "匹配当前批次 5/5 个 SKU" in sheets[0]["recommendation_reasons"]
+    assert sheets[0]["extra_item_codes"] == ["CW000224"]
+    assert sheets[0]["snapshot_updated_at"] == "2026-09-07T10:00:00+08:00"
+    broken = next(item for item in sheets if item["source_id"] == "WB-2026:st-broken")
+    assert broken["snapshot_status"] == "unreadable"
+    assert result["wiki_error"] == ""

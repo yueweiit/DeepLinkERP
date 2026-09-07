@@ -88,6 +88,47 @@ def test_reader_lists_only_enabled_workbooks_and_live_sheets() -> None:
     assert all("default_transaction_read_only=on" in call["options"] for call in connect_calls)
 
 
+def test_reader_lists_latest_snapshot_manifests_in_one_parameterized_query() -> None:
+    cursor = FakeCursor(
+        rows=[
+            {
+                "id": 4,
+                "workbook_id": "WB-2026",
+                "sheet_id": "st-ring",
+                "status": "ready",
+                "is_latest": True,
+                "created_at": "2026-09-07T10:00:00+08:00",
+            },
+            {
+                "id": 3,
+                "workbook_id": "WB-2026",
+                "sheet_id": "st-paint",
+                "status": "ready",
+                "is_latest": True,
+                "created_at": "2026-09-07T09:00:00+08:00",
+            },
+        ]
+    )
+    catalog = PackingSheetCatalog(_config(), connect=lambda **_kwargs: FakeConnection(cursor))
+
+    rows = catalog.list_latest_snapshots("WB-2026")
+
+    assert [row["sheet_id"] for row in rows] == ["st-ring", "st-paint"]
+    assert len(cursor.calls) == 1
+    sql, params = cursor.calls[0]
+    assert "costing_read.packing_sheet_snapshots_v1" in sql
+    assert "is_latest = TRUE" in sql
+    assert "ORDER BY created_at DESC, id DESC" in sql
+    assert params == ("WB-2026",)
+
+
+def test_latest_snapshot_query_rejects_arbitrary_workbook_url() -> None:
+    catalog = PackingSheetCatalog(_config(), connect=lambda **_kwargs: None)
+
+    with pytest.raises(ValueError, match="工作簿 ID"):
+        catalog.list_latest_snapshots("https://alidocs.dingtalk.com/i/nodes/secret")
+
+
 def test_refresh_submitter_uses_separate_non_reader_connection_and_only_named_function() -> None:
     cursor = FakeCursor(one={"request_id": 77})
     calls = []
