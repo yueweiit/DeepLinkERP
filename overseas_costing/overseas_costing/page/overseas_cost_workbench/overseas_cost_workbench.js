@@ -9284,34 +9284,50 @@ class OverseasCostWorkbench {
   async loadMaterialFeeWorkspace(options = {}) {
     const state = this.ensureMaterialFeeState();
     const batch = this.getDetailBatch();
+    const batchName = String(batch.name || this.detailState.batchName || "");
     const requestId = ++state.requestId;
     state.loading = true;
     if (!options.quiet) this.renderDetailTabLoading("正在读取费用、凭证和物料表");
     try {
-      const [materials, fees, preview] = await Promise.all([
+      const [detail, materials, fees, preview] = await Promise.all([
+        this.call("overseas_costing.api.batch.get_batch_detail", {
+          batch_name: batchName,
+          version_name: this.detailState.versionName || batch.current_version || null,
+        }),
         this.call("overseas_costing.api.materials.get_material_grid", {
-          batch_name: batch.name,
+          batch_name: batchName,
           version_name: this.detailState.versionName || batch.current_version || null,
           page: state.page,
           page_length: state.pageLength,
         }),
         this.call("overseas_costing.api.fees.get_fee_worklist", {
-          batch_name: batch.name,
+          batch_name: batchName,
           version_name: this.detailState.versionName || batch.current_version || null,
         }),
         this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
-          batch_name: batch.name,
+          batch_name: batchName,
           version_name: this.detailState.versionName || batch.current_version || null,
         }),
       ]);
-      if (requestId !== state.requestId || this.detailState.tab !== "documents") return;
+      if (
+        requestId !== state.requestId
+        || this.materialFeeState !== state
+        || this.detailState.batchName !== batchName
+        || this.detailState.tab !== "documents"
+      ) return;
+      this.applyMaterialFeeHeaderSnapshot(detail, batchName);
       state.materials = materials;
       state.fees = fees;
       state.preview = preview;
       state.loading = false;
       this.renderMaterialFeeWorkspace();
     } catch (error) {
-      if (requestId !== state.requestId || this.detailState.tab !== "documents") return;
+      if (
+        requestId !== state.requestId
+        || this.materialFeeState !== state
+        || this.detailState.batchName !== batchName
+        || this.detailState.tab !== "documents"
+      ) return;
       state.loading = false;
       this.renderDetailTabError("资料与费用", error);
     }
@@ -9541,6 +9557,18 @@ class OverseasCostWorkbench {
     if (this.detailState.header) this.detailState.header.modified = modified;
   }
 
+  applyMaterialFeeHeaderSnapshot(detail, batchName) {
+    if (!detail || !detail.ok) throw new Error(detail?.message || "批次最新状态读取失败");
+    const header = {
+      ...(this.detailState.header || {}),
+      ...(detail.header || {}),
+      name: detail.batch_name || detail.header?.name || batchName,
+    };
+    this.detailState.header = header;
+    this.detailState.versionName = detail.version_name || header.current_version || this.detailState.versionName || "";
+    if (header.modified) this.detailState.expectedModified = header.modified;
+  }
+
   async saveMaterialFeeCell($input) {
     if (!$input.length || $input.data("saving")) return;
     const original = String($input.attr("data-original-value") ?? "");
@@ -9689,12 +9717,15 @@ class OverseasCostWorkbench {
     if (!amount || (!forceActual && amount === originalAmount && currency === originalCurrency)) return;
     const fee = this.findMaterialFee($input.attr("data-fee-key"));
     if (!fee) return;
+    const batchName = String(this.detailState.batchName || "");
+    const versionName = this.detailState.versionName;
 
     const $inputs = $cell.find("[data-mf-fee-input]");
     $cell.data("saving", true).addClass("is-saving").removeClass("is-save-error").attr("title", "");
     $inputs.prop("disabled", true);
     try {
-      if (!(await this.ensureEditSession())) {
+      if (!(await this.ensureEditSession())) throw new Error("未能获取编辑权，费用未保存");
+      if (this.detailState.batchName !== batchName) {
         $cell.data("saving", false).removeClass("is-saving");
         $inputs.prop("disabled", false);
         return;
@@ -9705,13 +9736,18 @@ class OverseasCostWorkbench {
         currency,
       });
       const result = await this.call("overseas_costing.api.fees.save_fee", {
-        batch_name: this.detailState.batchName,
-        version_name: this.detailState.versionName,
+        batch_name: batchName,
+        version_name: versionName,
         fee_payload: JSON.stringify(payload),
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
       });
       if (!result || !result.ok) throw new Error(result?.message || "费用保存失败");
+      if (this.detailState.batchName !== batchName) {
+        $cell.data("saving", false).removeClass("is-saving");
+        $inputs.prop("disabled", false);
+        return;
+      }
       this.updateMaterialFeeExpectedModified(result);
       this.detailState.dirty = false;
       await this.refreshMaterialFeeData();
@@ -9721,30 +9757,82 @@ class OverseasCostWorkbench {
       $inputs.prop("disabled", false);
       frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
     } catch (error) {
-      $cell.data("saving", false).removeClass("is-saving").addClass("is-save-error").attr(
-        "title",
-        `${this.normalizeErrorMessage(error)}；当前输入已保留，请刷新后重试。`
-      );
+      if (this.detailState.batchName !== batchName) {
+        $cell.data("saving", false).removeClass("is-saving");
+        $inputs.prop("disabled", false);
+        return;
+      }
+      const originalMessage = this.normalizeErrorMessage(error);
+      $cell.removeClass("is-saving").addClass("is-save-error");
       $inputs.prop("disabled", false);
-      frappe.show_alert({ message: "保存失败，当前输入已保留；请刷新后重试", indicator: "red" });
+      let recovered = false;
+      try {
+        recovered = await this.recoverMaterialFeeReadonlyState(batchName);
+      } catch (_recoveryError) {
+        recovered = false;
+      }
+      $cell.data("saving", false).addClass("is-save-error");
+      const recoveryMessage = recovered
+        ? "已同步最新数据，请再次按 Enter 或失焦重试"
+        : "最新状态同步失败，请使用页面刷新后重试";
+      $cell.attr("title", `${originalMessage}；当前输入已保留；${recoveryMessage}。`);
+      frappe.show_alert({ message: `${originalMessage}；当前输入已保留；${recoveryMessage}`, indicator: "red" });
     }
+  }
+
+  async recoverMaterialFeeReadonlyState(batchName) {
+    const state = this.ensureMaterialFeeState();
+    const expectedBatchName = String(batchName || "");
+    const versionName = this.detailState.versionName || null;
+    const requestId = ++state.requestId;
+    const [detail, fees, preview] = await Promise.all([
+      this.call("overseas_costing.api.batch.get_batch_detail", {
+        batch_name: expectedBatchName,
+        version_name: versionName,
+      }),
+      this.call("overseas_costing.api.fees.get_fee_worklist", {
+        batch_name: expectedBatchName,
+        version_name: versionName,
+      }),
+      this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
+        batch_name: expectedBatchName,
+        version_name: versionName,
+      }),
+    ]);
+    if (
+      this.detailState.batchName !== expectedBatchName
+      || this.materialFeeState !== state
+      || requestId !== state.requestId
+    ) return false;
+    this.applyMaterialFeeHeaderSnapshot(detail, expectedBatchName);
+    state.fees = fees;
+    state.preview = preview;
+    return true;
   }
 
   async refreshMaterialFeeData() {
     const state = this.ensureMaterialFeeState();
+    const batchName = String(this.detailState.batchName || "");
+    const requestId = ++state.requestId;
     const [fees, preview] = await Promise.all([
       this.call("overseas_costing.api.fees.get_fee_worklist", {
-        batch_name: this.detailState.batchName,
+        batch_name: batchName,
         version_name: this.detailState.versionName || null,
       }),
       this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
-        batch_name: this.detailState.batchName,
+        batch_name: batchName,
         version_name: this.detailState.versionName || null,
       }),
     ]);
+    if (
+      this.detailState.batchName !== batchName
+      || this.materialFeeState !== state
+      || requestId !== state.requestId
+    ) return false;
     state.fees = fees;
     state.preview = preview;
-    this.renderMaterialFeeWorkspace();
+    if (this.detailState.tab === "documents") this.renderMaterialFeeWorkspace();
+    return true;
   }
 
   openMaterialFeeDialog(feeKey, candidate = null) {

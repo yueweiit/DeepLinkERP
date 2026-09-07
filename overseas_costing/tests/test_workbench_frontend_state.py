@@ -474,12 +474,12 @@ def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_pre
     result = _fee_workspace_result(
         FEE_INPUT_FIXTURE
         + "const workspace=Object.create(Harness.prototype);"
-        "workspace.detailState={batchName:'B-1',versionName:'V-1',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
         "const fee={logical_fee_key:'international_sea_freight',rule_code:'sea-freight',expense_category:'\u56fd\u9645\u6d77\u8fd0\u8d39',"
         "amount_status:'MISSING',amount:'2000',currency:'RMB',allocation_basis:'volume',basis_field:'volume',"
         "scope_type:'ITEMS',scope_value_json:'[\"LINE-1\"]',required_evidence_role:'freight_invoice',"
         "included_in_fee_key:'',priority_no:3,remark:'keep me',is_active:1,is_enabled:1};"
-        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]}};workspace.ensureEditSession=async()=>true;"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},requestId:0};workspace.ensureEditSession=async()=>true;"
         "workspace.escape=(value)=>String(value ?? '');workspace.normalizeErrorMessage=(error)=>error.message;"
         "workspace.renderMaterialFeeWorkspace=()=>{};const calls=[];workspace.call=async(endpoint,args)=>{calls.push({endpoint,args});"
         "if(endpoint.endsWith('save_fee'))return {ok:true,batch_modified:'m2',message:'saved'};"
@@ -526,17 +526,17 @@ def test_fee_workspace_inline_save_failure_preserves_value_and_allows_retry() ->
     result = _fee_workspace_result(
         FEE_INPUT_FIXTURE
         + "const workspace=Object.create(Harness.prototype);"
-        "workspace.detailState={batchName:'B-1',versionName:'V-1',editToken:'token-1',expectedModified:'m1'};"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{name:'B-1',modified:'m1'}};"
         "workspace.materialFeeState={batchName:'B-1',fees:{fees:[{logical_fee_key:'international_sea_freight',"
         "expense_category:'\u56fd\u9645\u6d77\u8fd0\u8d39',amount_status:'ACTUAL',amount:'2000',currency:'RMB',"
-        "allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'}]}};"
+        "allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'}]},requestId:0};"
         "workspace.ensureEditSession=async()=>true;workspace.normalizeErrorMessage=(error)=>error.message;"
-        "workspace.call=async()=>{throw new Error('\u5e76\u53d1\u51b2\u7a81')};"
+        "const endpoints=[];workspace.call=async(endpoint)=>{endpoints.push(endpoint);throw new Error(endpoint.endsWith('save_fee')?'\u5e76\u53d1\u51b2\u7a81':'\u540c\u6b65\u5931\u8d25')};"
         "const fixture=makeFeeInput({amount:'2400',currency:'USD',originalAmount:'2000',originalCurrency:'RMB'});"
         "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
         "console.log(JSON.stringify({amount:fixture.amountInput.val(),currency:fixture.currencyInput.val(),"
         "disabled:fixture.amountInput.disabled||fixture.currencyInput.disabled,saving:fixture.cell.data('saving'),"
-        "error:fixture.cell.hasClass('is-save-error'),title:fixture.attrs.title,alerts:global.alerts}));"
+        "error:fixture.cell.hasClass('is-save-error'),title:fixture.attrs.title,alerts:global.alerts,endpoints}));"
     )
 
     assert result["amount"] == "2400"
@@ -544,8 +544,196 @@ def test_fee_workspace_inline_save_failure_preserves_value_and_allows_retry() ->
     assert result["disabled"] is False
     assert result["saving"] is False
     assert result["error"] is True
-    assert "\u5237\u65b0\u540e\u91cd\u8bd5" in result["title"]
+    assert "\u5e76\u53d1\u51b2\u7a81" in result["title"]
+    assert "\u9875\u9762\u5237\u65b0" in result["title"]
+    assert result["endpoints"] == [
+        "overseas_costing.api.fees.save_fee",
+        "overseas_costing.api.batch.get_batch_detail",
+        "overseas_costing.api.fees.get_fee_worklist",
+        "overseas_costing.api.calculate.preview_comprehensive_cost",
+    ]
     assert result["alerts"][-1]["indicator"] == "red"
+    assert "\u5e76\u53d1\u51b2\u7a81" in result["alerts"][-1]["message"]
+    assert "\u9875\u9762\u5237\u65b0" in result["alerts"][-1]["message"]
+
+
+def test_fee_workspace_conflict_refreshes_revision_and_latest_fee_before_explicit_retry() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{name:'B-1',modified:'m1'}};"
+        "const oldFee={logical_fee_key:'international_sea_freight',rule_code:'old-rule',expense_category:'\u56fd\u9645\u6d77\u8fd0\u8d39',"
+        "amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]',remark:'old'};"
+        "const latestFee={...oldFee,rule_code:'latest-rule',allocation_basis:'gross_weight',remark:'latest'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[oldFee]},preview:{summary:{}},requestId:0};"
+        "workspace.ensureEditSession=async()=>true;workspace.normalizeErrorMessage=(error)=>error.message;let renders=0;"
+        "workspace.renderMaterialFeeWorkspace=()=>{renders+=1};const saves=[];const endpoints=[];"
+        "workspace.call=async(endpoint,args)=>{endpoints.push(endpoint);"
+        "if(endpoint.endsWith('save_fee')){saves.push(args);if(saves.length===1)throw new Error('\u5e76\u53d1\u51b2\u7a81');"
+        "if(args.expected_modified!=='m2')throw new Error('\u4ecd\u4f7f\u7528\u65e7\u7248\u672c');return {ok:true,batch_modified:'m3',message:'saved'}}"
+        "if(endpoint.endsWith('get_batch_detail'))return {ok:true,batch_name:'B-1',version_name:'V-1',header:{name:'B-1',modified:'m2'}};"
+        "if(endpoint.endsWith('get_fee_worklist'))return {summary:{},fees:[latestFee]};"
+        "return {summary:{total_cost_rmb:'2400.00'}}};"
+        "const fixture=makeFeeInput({amount:'2400',currency:'USD',originalAmount:'2000',originalCurrency:'RMB'});"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
+        "const afterConflict={saveCount:saves.length,expectedModified:workspace.detailState.expectedModified,"
+        "headerModified:workspace.detailState.header.modified,fee:workspace.materialFeeState.fees.fees[0],"
+        "amount:fixture.amountInput.val(),currency:fixture.currencyInput.val(),red:fixture.cell.hasClass('is-save-error'),renders};"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
+        "console.log(JSON.stringify({afterConflict,saveCount:saves.length,secondExpected:saves[1]?.expected_modified,"
+        "secondPayload:JSON.parse(saves[1]?.fee_payload||'{}'),finalExpected:workspace.detailState.expectedModified,endpoints}));"
+    )
+
+    assert result["afterConflict"] == {
+        "saveCount": 1,
+        "expectedModified": "m2",
+        "headerModified": "m2",
+        "fee": {
+            "logical_fee_key": "international_sea_freight",
+            "rule_code": "latest-rule",
+            "expense_category": "\u56fd\u9645\u6d77\u8fd0\u8d39",
+            "amount_status": "ACTUAL",
+            "amount": "2000",
+            "currency": "RMB",
+            "allocation_basis": "gross_weight",
+            "scope_type": "ALL_ITEMS",
+            "scope_value_json": "[]",
+            "remark": "latest",
+        },
+        "amount": "2400",
+        "currency": "USD",
+        "red": True,
+        "renders": 0,
+    }
+    assert result["saveCount"] == 2
+    assert result["secondExpected"] == "m2"
+    assert result["secondPayload"]["amount"] == "2400"
+    assert result["secondPayload"]["currency"] == "USD"
+    assert result["secondPayload"]["rule_code"] == "latest-rule"
+    assert result["secondPayload"]["allocation_basis"] == "gross_weight"
+    assert result["secondPayload"]["remark"] == "latest"
+    assert result["finalExpected"] == "m3"
+
+
+def test_fee_workspace_edit_session_failure_is_visible_and_refreshes_readonly_state() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'',expectedModified:'m1',header:{name:'B-1',modified:'m1'}};"
+        "const fee={logical_fee_key:'international_sea_freight',expense_category:'\u56fd\u9645\u6d77\u8fd0\u8d39',amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},preview:{summary:{}},requestId:0};"
+        "workspace.ensureEditSession=async()=>false;workspace.normalizeErrorMessage=(error)=>error.message;const endpoints=[];"
+        "workspace.call=async(endpoint)=>{endpoints.push(endpoint);if(endpoint.endsWith('get_batch_detail'))return {ok:true,header:{modified:'m2'}};"
+        "if(endpoint.endsWith('get_fee_worklist'))return {fees:[fee]};return {summary:{}}};"
+        "const fixture=makeFeeInput({amount:'2400',currency:'RMB',originalAmount:'2000',originalCurrency:'RMB'});"
+        "await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);"
+        "console.log(JSON.stringify({red:fixture.cell.hasClass('is-save-error'),disabled:fixture.amountInput.disabled,"
+        "expectedModified:workspace.detailState.expectedModified,endpoints,alerts:global.alerts}));"
+    )
+
+    assert result["red"] is True
+    assert result["disabled"] is False
+    assert result["expectedModified"] == "m2"
+    assert "overseas_costing.api.fees.save_fee" not in result["endpoints"]
+    assert result["endpoints"] == [
+        "overseas_costing.api.batch.get_batch_detail",
+        "overseas_costing.api.fees.get_fee_worklist",
+        "overseas_costing.api.calculate.preview_comprehensive_cost",
+    ]
+    assert result["alerts"][-1]["indicator"] == "red"
+
+
+def test_fee_workspace_manual_reload_refreshes_batch_modified() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',expectedModified:'m1',header:{name:'B-1',modified:'m1'}};"
+        "workspace.materialFeeState={batchName:'B-1',page:1,pageLength:200,requestId:0};"
+        "workspace.getDetailBatch=()=>({name:'B-1',current_version:'V-1'});workspace.renderDetailTabLoading=()=>{};"
+        "let renders=0;workspace.renderMaterialFeeWorkspace=()=>{renders+=1};const endpoints=[];"
+        "workspace.call=async(endpoint)=>{endpoints.push(endpoint);if(endpoint.endsWith('get_batch_detail'))"
+        "return {ok:true,batch_name:'B-1',version_name:'V-1',header:{name:'B-1',modified:'m2',status:'Dirty'}};"
+        "if(endpoint.endsWith('get_material_grid'))return {items:[]};if(endpoint.endsWith('get_fee_worklist'))return {fees:[]};"
+        "return {summary:{}}};await workspace.loadMaterialFeeWorkspace();"
+        "console.log(JSON.stringify({expectedModified:workspace.detailState.expectedModified,"
+        "header:workspace.detailState.header,endpoints,renders}));"
+    )
+
+    assert result["expectedModified"] == "m2"
+    assert result["header"]["modified"] == "m2"
+    assert result["header"]["status"] == "Dirty"
+    assert result["endpoints"] == [
+        "overseas_costing.api.batch.get_batch_detail",
+        "overseas_costing.api.materials.get_material_grid",
+        "overseas_costing.api.fees.get_fee_worklist",
+        "overseas_costing.api.calculate.preview_comprehensive_cost",
+    ]
+    assert result["renders"] == 1
+
+
+def test_fee_workspace_save_does_not_render_after_switching_to_vouchers() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "const fee={logical_fee_key:'international_sea_freight',expense_category:'\u56fd\u9645\u6d77\u8fd0\u8d39',amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},preview:{summary:{}},requestId:0};"
+        "workspace.ensureEditSession=async()=>true;workspace.normalizeErrorMessage=(error)=>error.message;let renders=0;"
+        "workspace.renderMaterialFeeWorkspace=()=>{renders+=1};let resolveFees,resolvePreview;"
+        "workspace.call=async(endpoint)=>{if(endpoint.endsWith('save_fee'))return {ok:true,batch_modified:'m2'};"
+        "if(endpoint.endsWith('get_fee_worklist'))return await new Promise((resolve)=>{resolveFees=resolve});"
+        "return await new Promise((resolve)=>{resolvePreview=resolve})};"
+        "const fixture=makeFeeInput({amount:'2400',currency:'RMB',originalAmount:'2000',originalCurrency:'RMB'});"
+        "const saving=workspace.saveMaterialFeeInlineAmount(fixture.amountInput);await new Promise((resolve)=>setImmediate(resolve));"
+        "workspace.detailState.tab='vouchers';resolveFees({fees:[fee]});resolvePreview({summary:{total_cost_rmb:'2400.00'}});"
+        "await saving;console.log(JSON.stringify({renders,tab:workspace.detailState.tab}));"
+    )
+
+    assert result == {"renders": 0, "tab": "vouchers"}
+
+
+def test_fee_workspace_save_response_does_not_mutate_a_new_batch() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{name:'B-1',modified:'m1'}};"
+        "const fee={logical_fee_key:'international_sea_freight',expense_category:'\u56fd\u9645\u6d77\u8fd0\u8d39',amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},preview:{summary:{}},requestId:0};"
+        "workspace.ensureEditSession=async()=>true;workspace.normalizeErrorMessage=(error)=>error.message;let renders=0;"
+        "workspace.renderMaterialFeeWorkspace=()=>{renders+=1};let resolveSave;const endpoints=[];"
+        "workspace.call=async(endpoint)=>{endpoints.push(endpoint);if(endpoint.endsWith('save_fee'))"
+        "return await new Promise((resolve)=>{resolveSave=resolve});if(endpoint.endsWith('get_fee_worklist'))return {fees:[]};return {summary:{}}};"
+        "const fixture=makeFeeInput({amount:'2400',currency:'RMB',originalAmount:'2000',originalCurrency:'RMB'});"
+        "const saving=workspace.saveMaterialFeeInlineAmount(fixture.amountInput);await new Promise((resolve)=>setImmediate(resolve));"
+        "workspace.detailState={batchName:'B-2',versionName:'V-2',tab:'documents',editToken:'token-2',expectedModified:'n1',header:{name:'B-2',modified:'n1'}};"
+        "workspace.materialFeeState={batchName:'B-2',fees:{fees:[]},preview:{summary:{}},requestId:0};"
+        "resolveSave({ok:true,batch_modified:'m2'});await saving;"
+        "console.log(JSON.stringify({renders,expectedModified:workspace.detailState.expectedModified,"
+        "headerModified:workspace.detailState.header.modified,endpoints,disabled:fixture.amountInput.disabled}));"
+    )
+
+    assert result == {
+        "renders": 0,
+        "expectedModified": "n1",
+        "headerModified": "n1",
+        "endpoints": ["overseas_costing.api.fees.save_fee"],
+        "disabled": False,
+    }
+
+
+def test_fee_workspace_load_does_not_apply_previous_batch_results() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',expectedModified:'m1',header:{name:'B-1',modified:'m1'}};"
+        "workspace.materialFeeState={batchName:'B-1',page:1,pageLength:200,requestId:0};"
+        "workspace.getDetailBatch=()=>({name:'B-1',current_version:'V-1'});workspace.renderDetailTabLoading=()=>{};"
+        "let renders=0;workspace.renderMaterialFeeWorkspace=()=>{renders+=1};let release;const gate=new Promise((resolve)=>{release=resolve});"
+        "workspace.call=async(endpoint)=>{await gate;if(endpoint.endsWith('get_batch_detail'))return {ok:true,header:{modified:'m2'}};"
+        "if(endpoint.endsWith('get_material_grid'))return {items:[{name:'OLD'}]};if(endpoint.endsWith('get_fee_worklist'))return {fees:[]};return {summary:{}}};"
+        "const loading=workspace.loadMaterialFeeWorkspace();workspace.detailState.batchName='B-2';release();await loading;"
+        "console.log(JSON.stringify({renders,expectedModified:workspace.detailState.expectedModified,materials:workspace.materialFeeState.materials||null}));"
+    )
+
+    assert result == {"renders": 0, "expectedModified": "m1", "materials": None}
 
 
 def test_fee_workspace_duplicate_blur_is_ignored_while_inline_save_is_pending() -> None:
