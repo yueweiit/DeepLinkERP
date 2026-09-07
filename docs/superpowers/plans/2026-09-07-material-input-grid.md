@@ -358,7 +358,7 @@ git commit -m 'feat: expose contextual material requirements'
 - Create: `overseas_costing/tests/test_material_import_service.py`
 - Modify: `overseas_costing/tests/test_import_service.py`
 
-- [ ] **Step 1: 写失败测试，禁止只按 SKU 猜测及空值覆盖**
+- [x] **Step 1: 写失败测试，禁止只按 SKU 猜测及空值覆盖**
 
 ```python
 def test_preview_keeps_duplicate_sku_rows_and_requires_line_choice() -> None:
@@ -382,13 +382,13 @@ def test_blank_excel_shipping_quantity_never_clears_current_value() -> None:
     assert changes == []
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_material_import_service.py overseas_costing/tests/test_import_service.py`
 
 Expected: FAIL because the new preview service is absent and current supplement matching rejects duplicate SKU without a reviewable choice.
 
-- [ ] **Step 3: 定义预览令牌和字段差异契约**
+- [x] **Step 3: 定义预览令牌和字段差异契约**
 
 `preview_material_import(batch_name, source_kind, source_id, sheet_name)` 复用可信解析器并返回：
 
@@ -409,11 +409,11 @@ Expected: FAIL because the new preview service is absent and current supplement 
 
 令牌绑定批次、版本、来源哈希、选择的 Sheet 和预览结果哈希；服务端采用时重新解析可信来源。工作簿必须显式选 Sheet；评论等非工作簿来源不要求 Sheet。
 
-- [ ] **Step 4: 实现原子采用**
+- [x] **Step 4: 实现原子采用**
 
 `apply_material_import(batch_name, preview_revision, choices_json, edit_token, expected_modified)` 必须：校验权限/租约/版本；重新核对来源哈希；要求每个歧义行有明确稳定行选择；忽略来源空值；明确发货数量将模式写为 `EXPLICIT_SOURCE`；不清空费用、凭证或 OA 关联；统一审计后将批次标记 Dirty。共享包装值只通过已确认的包装组归属进入物料，不按重复行复制。
 
-- [ ] **Step 5: 运行回归并提交**
+- [x] **Step 5: 运行回归并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_material_import_service.py overseas_costing/tests/test_import_service.py overseas_costing/tests/test_packing_source_service.py`
 

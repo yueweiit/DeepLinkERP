@@ -26,7 +26,7 @@ try:
 except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导入
     frappe = None
 
-from overseas_costing.services import attachment_parse_service
+from overseas_costing.services import attachment_parse_service, material_input_service
 from overseas_costing.integrations.dingtalk_approval_source import (
     ArchiveIntegrityError,
     ArchiveNotReady,
@@ -3273,6 +3273,31 @@ def _resolve_or_create_excel_version(
     return frappe.get_doc(values).insert(ignore_permissions=True), "created"
 
 
+def _prepare_imported_item_values(
+    mapped_row: dict,
+    *,
+    source_revision: str = "",
+    include_stable_key: bool = False,
+) -> dict:
+    """Attach explicit quantity/unit provenance to a normalized imported row."""
+
+    values = dict(mapped_row or {})
+    unit = normalize_unit(values.get("purchase_uom") or values.get("unit")) or ""
+    shipped_uom = normalize_unit(values.get("shipped_uom") or unit) or ""
+    values["purchase_uom"] = unit
+    values["shipped_uom"] = shipped_uom
+    values["cost_output_uom"] = shipped_uom
+    if values.get("unit_price") not in (None, "") and not values.get("unit_price_uom"):
+        values["unit_price_uom"] = unit
+    values["actual_shipped_qty_mode"] = (
+        "EXPLICIT_SOURCE" if _to_float(values.get("actual_shipped_qty")) > 0 else "DEFAULT_PURCHASE"
+    )
+    values["actual_shipped_qty_source_revision"] = str(source_revision or "")
+    if include_stable_key:
+        values["stable_line_key"] = material_input_service.ensure_stable_line_key(values)
+    return values
+
+
 def _upsert_excel_items(
     *,
     batch_doc_name: str,
@@ -3285,6 +3310,7 @@ def _upsert_excel_items(
     updated_count = 0
     unchanged_count = 0
     for index, mapped_row in enumerate(mapped_rows):
+        source_actual_present = _to_float(mapped_row.get("actual_shipped_qty")) > 0
         mapped_row = _coerce_item_numeric_defaults(mapped_row)
         row_no = mapped_row.get("row_no") or index + 1
         quantity = _to_float(mapped_row.get("quantity"))
@@ -3293,7 +3319,15 @@ def _upsert_excel_items(
             mapped_row["goods_value"] = unit_price * quantity
 
         values = {
-            **mapped_row,
+            **_prepare_imported_item_values(
+                mapped_row,
+                source_revision=str(
+                    mapped_row.get("dingtalk_instance_id")
+                    or mapped_row.get("source_doc_no")
+                    or mapped_row.get("source_file_name")
+                    or ""
+                ),
+            ),
             "batch": batch_doc_name,
             "version": version_name,
             "row_no": row_no,
@@ -3305,6 +3339,14 @@ def _upsert_excel_items(
             "name",
         )
         if existing_name:
+            if not source_actual_present:
+                for fieldname in (
+                    "actual_shipped_qty_mode",
+                    "actual_shipped_qty_source_revision",
+                    "shipped_uom",
+                    "cost_output_uom",
+                ):
+                    values.pop(fieldname, None)
             filtered_values = _filter_doctype_values("Overseas Cost Item", values)
             if _item_values_changed(existing_name, filtered_values):
                 frappe.db.set_value(
@@ -3320,6 +3362,7 @@ def _upsert_excel_items(
             continue
 
         values["doctype"] = "Overseas Cost Item"
+        values["stable_line_key"] = material_input_service.ensure_stable_line_key(values)
         values = _filter_doctype_values("Overseas Cost Item", values, keep_doctype=True)
         upserted_items.append(frappe.get_doc(values).insert(ignore_permissions=True).name)
         created_count += 1
@@ -6031,19 +6074,26 @@ def _build_packing_unmatched_item_values(
         attachment_provenance.get("source_attachment_id"),
     )
     source_doc_no = _first_non_empty(mapped_row.get("source_doc_no"), attachment_provenance.get("source_doc_no"), source_file_name)
+    unit = normalize_unit(mapped_row.get("unit")) or ""
     values = {
         "doctype": "Overseas Cost Item",
         "batch": batch_doc_name,
         "version": version_name,
         "row_no": row_no,
+        "stable_line_key": material_input_service.ensure_stable_line_key({}),
         "excel_row_no": mapped_row.get("excel_row_no"),
         "material_code": mapped_row.get("material_code") or "",
         "product_name": mapped_row.get("product_name") or "",
         "product_name_es": mapped_row.get("product_name_es") or "",
         "spec_model": mapped_row.get("spec_model") or "",
-        "unit": normalize_unit(mapped_row.get("unit")) or "",
+        "unit": unit,
+        "purchase_uom": unit,
+        "unit_price_uom": unit if mapped_row.get("unit_price") not in (None, "") else "",
         "quantity": _to_float(actual_qty),
         "actual_shipped_qty": _to_float(actual_qty),
+        "actual_shipped_qty_mode": "EXPLICIT_SOURCE" if _to_float(actual_qty) > 0 else "DEFAULT_PURCHASE",
+        "shipped_uom": unit,
+        "cost_output_uom": unit,
         "unit_price": _to_float(mapped_row.get("unit_price")),
         "purchase_currency": mapped_row.get("purchase_currency") or "",
         "goods_value": _to_float(mapped_row.get("goods_value")),
