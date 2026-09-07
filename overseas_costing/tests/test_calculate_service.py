@@ -249,6 +249,52 @@ def test_calculate_item_rows_allocates_by_goods_value_and_weight() -> None:
     assert derived["allocated_rules"][1]["amount_rmb"] == 50
 
 
+def test_calculate_item_rows_respects_fee_scope_and_keeps_rule_provenance() -> None:
+    items = [
+        {
+            "stable_line_key": "PROD-1",
+            "unit_price": 10,
+            "quantity": 10,
+            "goods_value": 100,
+            "gross_weight_kg": 10,
+        },
+        {
+            "stable_line_key": "ECOM-1",
+            "unit_price": 10,
+            "quantity": 10,
+            "goods_value": 100,
+            "gross_weight_kg": 10,
+        },
+    ]
+    rules = [
+        {
+            "logical_fee_key": "PRODUCTION-EXTRA",
+            "rule_code": "production_extra",
+            "amount_status": "ACTUAL",
+            "amount": 60,
+            "currency": "RMB",
+            "scope_type": "ITEMS",
+            "scope_value_json": '["PROD-1"]',
+            "scope_revision": "S2",
+            "amount_revision": "A3",
+            "allocation_basis": "goods_value",
+            "is_enabled": 1,
+        }
+    ]
+
+    rows, summary = calculate_item_rows(items, rules)
+
+    assert rows[0]["total_cost_rmb"] == 160
+    assert rows[1]["total_cost_rmb"] == 100
+    assert summary["fee_pool_rmb"] == 60
+    assert summary["calculation_review"]["unallocated_fee_rmb"] == 0
+    allocated = json.loads(rows[0]["derived_json"])["allocated_rules"][0]
+    assert allocated["logical_fee_key"] == "PRODUCTION-EXTRA"
+    assert allocated["scope_revision"] == "S2"
+    assert allocated["amount_revision"] == "A3"
+    assert allocated["denominator"] == 100
+
+
 def test_calculate_item_rows_uses_direct_tax_fields_as_customs_cost() -> None:
     rows, summary = calculate_item_rows(
         [

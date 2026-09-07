@@ -172,7 +172,7 @@ git commit -m 'feat: model fee lifecycle and evidence'
 - Create: `overseas_costing/tests/test_fee_allocation_service.py`
 - Modify: `overseas_costing/tests/test_calculate_service.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_item_scoped_fee_excludes_unrelated_items() -> None:
@@ -204,13 +204,13 @@ def test_missing_basis_on_one_eligible_item_blocks_entire_fee() -> None:
     assert result["allocations"] == {}
 ```
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_allocation_service.py overseas_costing/tests/test_calculate_service.py`
 
 Expected: FAIL because current calculation builds one full-batch denominator for every rule.
 
-- [ ] **Step 3: 实现 Decimal 分摊器**
+- [x] **Step 3: 实现 Decimal 分摊器**
 
 核心接口：
 
@@ -286,11 +286,11 @@ def allocate_fee(fee: dict, items: list[dict], *, currency_precision: int = 2) -
 
 尾差按最小货币单位和 `stable_line_key` 稳定顺序分配。`MISSING/NOT_INCURRED/INCLUDED` 不进入费用池；`ESTIMATED/ACTUAL` 有效金额才计算。直接费用只允许一个物料行。
 
-- [ ] **Step 4: 替换 `calculate_item_rows()` 的全批规则循环**
+- [x] **Step 4: 替换 `calculate_item_rows()` 的全批规则循环**
 
 先为每笔规则得到逐行分摊，再汇总到物料；`derived_json.allocated_rules` 保存 `logical_fee_key`、范围哈希、金额修订、分母和舍入结果。任何适用物料缺依据时整笔费用保持待分摊，不把金额只摊给数据齐的物料。
 
-- [ ] **Step 5: 运行并提交**
+- [x] **Step 5: 运行并提交**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fee_allocation_service.py overseas_costing/tests/test_calculate_service.py`
 

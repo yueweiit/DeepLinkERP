@@ -15,6 +15,7 @@ from __future__ import annotations
 from overseas_costing.services import (
     allocation_service,
     audit_service,
+    fee_allocation_service,
     material_input_service,
     source_priority_service,
     version_service,
@@ -835,14 +836,32 @@ def calculate_item_rows(
         "chargeable_weight": total_chargeable_weight,
         "chargeable_weight_kg": total_chargeable_weight,
     }
-    total_fee_pool_rmb = sum(
-        _amount_to_rmb(
+    fee_allocations = []
+    fee_allocation_blocking = []
+    for rule in enabled_rules:
+        amount_rmb = _amount_to_rmb(
             _to_float(rule.get("amount")),
             rule.get("currency"),
             fx_rmb_to_mxn,
             fx_usd_to_rmb,
         )
-        for rule in enabled_rules
+        allocation = fee_allocation_service.allocate_fee(
+            {**rule, "amount": amount_rmb},
+            rows,
+            currency_precision=6,
+        )
+        fee_allocations.append({"rule": rule, "amount_rmb": amount_rmb, "allocation": allocation})
+        if allocation.get("status") == "BLOCKED":
+            fee_allocation_blocking.append(
+                {
+                    "fee_key": rule.get("logical_fee_key") or rule.get("rule_code") or "",
+                    "code": allocation.get("code") or "ALLOCATION_REQUIRED",
+                }
+            )
+    total_fee_pool_rmb = sum(
+        entry["amount_rmb"]
+        for entry in fee_allocations
+        if fee_allocation_service.is_counted_fee(entry["rule"])
     )
 
     total_cost_rmb = 0.0
@@ -865,17 +884,14 @@ def calculate_item_rows(
         freight_alloc_mxn = 0.0
         allocated_rules = []
 
-        for rule in enabled_rules:
+        row_key = str(row.get("stable_line_key") or row.get("name") or row.get("row_no") or row.get("idx") or "")
+        for fee_entry in fee_allocations:
+            rule = fee_entry["rule"]
+            allocation = fee_entry["allocation"]
             basis = rule.get("allocation_basis") or rule.get("basis_field") or "goods_value"
-            basis_total = basis_totals.get(basis, 0.0)
-            ratio = _basis_value(row, basis) / basis_total if basis_total else 0.0
-            amount_rmb = _amount_to_rmb(
-                _to_float(rule.get("amount")),
-                rule.get("currency"),
-                fx_rmb_to_mxn,
-                fx_usd_to_rmb,
-            )
-            allocated_rmb = amount_rmb * ratio
+            amount_rmb = fee_entry["amount_rmb"]
+            allocated_rmb = _to_float((allocation.get("allocations") or {}).get(row_key))
+            ratio = _safe_div(allocated_rmb, amount_rmb)
             allocated_mxn = allocated_rmb * fx_rmb_to_mxn
             rule_code = rule.get("rule_code") or rule.get("fee_key") or ""
 
@@ -889,12 +905,21 @@ def calculate_item_rows(
             allocated_rules.append(
                 {
                     "rule_code": rule_code,
+                    "logical_fee_key": rule.get("logical_fee_key") or rule_code,
                     "expense_category": rule.get("expense_category") or "",
+                    "amount_status": fee_allocation_service.amount_status(rule),
                     "amount": _round_money(_to_float(rule.get("amount")), 6),
                     "currency": _normalize_currency_code(rule.get("currency")),
                     "amount_rmb": _round_money(amount_rmb, 6),
                     "basis": basis,
                     "basis_label": rule.get("allocation_basis") or rule.get("basis_field") or basis,
+                    "allocation_status": allocation.get("status"),
+                    "allocation_code": allocation.get("code") or "",
+                    "scope_type": allocation.get("scope_type") or rule.get("scope_type") or "ALL_ITEMS",
+                    "scope_hash": allocation.get("scope_hash") or "",
+                    "scope_revision": rule.get("scope_revision") or "",
+                    "amount_revision": rule.get("amount_revision") or "",
+                    "denominator": _to_float(allocation.get("denominator")),
                     "ratio": ratio,
                     "allocated_rmb": _round_money(allocated_rmb, 6),
                     "allocated_mxn": _round_money(allocated_mxn, 6),
@@ -951,6 +976,7 @@ def calculate_item_rows(
         "fee_pool_rmb": _round_money(total_fee_pool_rmb, 6),
         "item_count": len(rows),
         "rule_count": len(enabled_rules),
+        "fee_allocation_blocking": fee_allocation_blocking,
         "blocking": blocking,
         "source_priority_policy": source_priority_service.get_source_priority_policy(),
     }
@@ -969,7 +995,9 @@ def _build_calculation_review(
     positive_rules = [
         rule
         for rule in rules
-        if _is_rule_enabled(rule) and (_to_float(rule.get("amount")) or _to_float(rule.get("amount_rmb")))
+        if _is_rule_enabled(rule)
+        and fee_allocation_service.is_counted_fee(rule)
+        and (_to_float(rule.get("amount")) or _to_float(rule.get("amount_rmb")))
     ]
     item_count = len(rows) or int(_to_float(summary_snapshot.get("item_count")))
     total_goods_value = _to_float(summary_snapshot.get("total_goods_value"))
@@ -999,6 +1027,10 @@ def _build_calculation_review(
     if material_blocking:
         blocking = True
         reasons.append(f"物料录入仍有 {len(material_blocking)} 个核算必填项未解决")
+    fee_allocation_blocking = summary_snapshot.get("fee_allocation_blocking") or []
+    if fee_allocation_blocking:
+        blocking = True
+        reasons.append(f"仍有 {len(fee_allocation_blocking)} 笔费用因适用范围或分摊依据不完整而未分摊")
     if item_count <= 0:
         blocking = True
         reasons.append("当前没有物料明细，不能试算综合成本")
@@ -1201,11 +1233,19 @@ def _get_rules(batch_doc_name: str, version_name: str) -> list[dict]:
         fields=[
             "name",
             "rule_code",
+            "logical_fee_key",
             "expense_category",
+            "amount_status",
             "allocation_basis",
             "basis_field",
+            "scope_type",
+            "scope_value_json",
+            "scope_revision",
             "currency",
             "amount",
+            "amount_revision",
+            "required_evidence_role",
+            "included_in_fee_key",
             "remark",
             "is_active",
             "is_enabled",
