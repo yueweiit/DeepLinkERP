@@ -78,6 +78,16 @@ def require_packing_workflow_permission(batch_reference: str, operation: str) ->
     return require_batch_permission(batch_reference, permissions[normalized])
 
 
+def require_fee_workflow_permission(batch_reference: str, operation: str) -> str:
+    """费用查看与修改始终以所属批次为权限边界。"""
+
+    permissions = {"read": "read", "write": "write"}
+    normalized = str(operation or "").strip().lower()
+    if normalized not in permissions:
+        raise ValueError("费用工作流操作类型不合法。")
+    return require_batch_permission(batch_reference, permissions[normalized])
+
+
 def validate_api_access() -> None:
     """Frappe auth hook：覆盖整个 overseas_costing.api 命名空间。"""
 

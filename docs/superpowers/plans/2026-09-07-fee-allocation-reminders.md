@@ -532,7 +532,7 @@ git commit -m 'feat: surface fee work across batches'
 - Create: `overseas_costing/tests/test_fees_api.py`
 - Modify: `overseas_costing/services/access_control.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 锁定接口：
 
@@ -546,19 +546,19 @@ confirm_all_fees_complete(batch_name, version_name, expected_input_hash, edit_to
 
 测试批次级读写权限、附件归属本批、字段白名单、JSON 大小和枚举；不能由客户端传 `confirmed_by`、状态哈希或已分摊金额。
 
-- [ ] **Step 2: 运行并确认失败**
+- [x] **Step 2: 运行并确认失败**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fees_api.py overseas_costing/tests/test_access_control.py`
 
 Expected: FAIL because `api.fees` is absent.
 
-- [ ] **Step 3: 实现薄 API 并运行**
+- [x] **Step 3: 实现薄 API 并运行**
 
 Run: `python -m pytest -q overseas_costing/tests/test_fees_api.py overseas_costing/tests/test_access_control.py`
 
 Expected: PASS; API delegates all state decisions to services.
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add overseas_costing/api/fees.py overseas_costing/services/access_control.py overseas_costing/tests/test_fees_api.py overseas_costing/tests/test_access_control.py
