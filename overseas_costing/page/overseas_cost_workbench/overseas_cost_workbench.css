@@ -6128,6 +6128,12 @@ input[type="range"].ocw-result-scrollbar:disabled {
   .ocw-dingtalk-attachment-row { align-items: flex-start; flex-direction: column; }
 }
 
+.ocw-packing-flow-dialog {
+  --ocw-brand: #0b8cf0;
+  --ocw-brand-dark: #076fbe;
+  --ocw-brand-soft: #eaf5ff;
+}
+
 .ocw-packing-flow-dialog .modal-dialog {
   width: min(1380px, calc(100vw - 32px));
   max-width: min(1380px, calc(100vw - 32px));

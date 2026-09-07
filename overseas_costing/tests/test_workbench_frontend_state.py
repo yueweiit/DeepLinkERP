@@ -201,6 +201,10 @@ def test_packing_flow_static_ui_contract() -> None:
     assert ".ocw-packing-flow" in stylesheet
     assert ".ocw-packing-recommendation" in stylesheet
     assert "position: sticky" in stylesheet
+    dialog_rule = stylesheet.split(".ocw-packing-flow-dialog {", 1)[1].split("}", 1)[0]
+    assert "--ocw-brand: #0b8cf0" in dialog_rule
+    assert "--ocw-brand-dark: #076fbe" in dialog_rule
+    assert "--ocw-brand-soft: #eaf5ff" in dialog_rule
 
 
 def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
