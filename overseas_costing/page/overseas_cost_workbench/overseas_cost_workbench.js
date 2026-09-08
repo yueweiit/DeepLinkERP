@@ -9288,6 +9288,7 @@ class OverseasCostWorkbench {
         materials: null,
         fees: null,
         preview: null,
+        aiFill: null,
       };
     }
     if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
@@ -9296,6 +9297,7 @@ class OverseasCostWorkbench {
     this.materialFeeState.pendingWrites = this.materialFeeState.pendingWrites || new Set();
     this.materialFeeState.materialSaveErrors = this.materialFeeState.materialSaveErrors || {};
     this.materialFeeState.materialDrafts = this.materialFeeState.materialDrafts || {};
+    this.materialFeeState.aiFill = this.materialFeeState.aiFill || null;
     if (!Number.isFinite(this.materialFeeState.inputRevision)) this.materialFeeState.inputRevision = 0;
     if (this.materialFeeState.focusedFeeInput === undefined) this.materialFeeState.focusedFeeInput = null;
     return this.materialFeeState;
@@ -9335,9 +9337,30 @@ class OverseasCostWorkbench {
       this.refreshMaterialFeeCostPreview(true).catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='mf-show-sources']", () => this.openMaterialFeeSourcesDialog());
-    this.$root.on("click", "[data-action='mf-import-xlsx']", () => this.openMaterialXlsxUploader());
     this.$root.on("click", "[data-action='mf-import-wiki']", () => {
       this.openWikiMaterialImportDialog().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-ai-fill']", () => {
+      this.startMaterialAIFill().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-ai-apply']", () => {
+      this.applyMaterialAIFill().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-ai-discard']", () => {
+      this.discardMaterialAIFill().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-ai-adopt-candidate']", (event) => {
+      const $button = $(event.currentTarget);
+      this.adoptMaterialAICandidate(
+        $button.attr("data-item-name"),
+        $button.attr("data-fieldname"),
+        Number($button.attr("data-candidate-index") || 0)
+      );
+    });
+    this.$root.on("click", "[data-action='mf-grid-scroll-left'], [data-action='mf-grid-scroll-right']", (event) => {
+      const direction = $(event.currentTarget).attr("data-action") === "mf-grid-scroll-left" ? -1 : 1;
+      const viewport = this.$root.find("[data-mf-grid-viewport]").get(0);
+      if (viewport) viewport.scrollBy({ left: direction * Math.max(240, viewport.clientWidth * 0.65), behavior: "smooth" });
     });
     this.$root.on("focus", "[data-mf-fee-input]", (event) => {
       const $input = $(event.currentTarget);
@@ -9518,6 +9541,7 @@ class OverseasCostWorkbench {
     const materialSummary = state.materials || {};
     const feeSummary = state.fees.summary || {};
     const evidencePending = Number(feeSummary.missing_evidence_fee_count || 0);
+    const aiActive = ["QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""));
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
       <div class="ocw-mf-workspace">
@@ -9541,10 +9565,12 @@ class OverseasCostWorkbench {
               <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
               <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
               <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
-              <button class="ocw-primary-btn" type="button" data-action="mf-import-xlsx">导入 Excel 补资料</button>
+              <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill" ${aiActive ? "disabled" : ""}>${aiActive ? (state.aiFill?.status === "READY" ? "AI 草稿待确认" : "AI 草稿处理中") : state.aiFill ? "重试 AI 填充" : "AI 填充装箱数据"}</button>
             </div>
           </div>
+          ${this.renderMaterialAIFillBanner()}
           ${this.renderMaterialFeeGrid()}
+          ${this.renderMaterialAIFillFooter()}
         </section>
         <section class="ocw-mf-section ocw-mf-fee-section">
           <div class="ocw-mf-section-title"><div><span>02</span><h3>费用与凭证</h3><p>录入金额后自动保存；凭证可稍后补充，系统会在 SKU 试算时统一分摊。</p></div></div>
@@ -9556,6 +9582,7 @@ class OverseasCostWorkbench {
         ${this.renderMaterialFeeTodos()}
       </div>
     `);
+    this.bindMaterialGridScrollControls();
     this.restoreMaterialFeeInputFocus();
   }
 
@@ -9634,27 +9661,27 @@ class OverseasCostWorkbench {
   materialFeeGridColumns() {
     const state = this.ensureMaterialFeeState();
     const columns = [
-      { field: "row_no", label: "行", readonly: true },
-      { field: "source_doc_no", label: "采购审批号", readonly: true },
-      { field: "material_code", label: "物料编码", readonly: true },
-      { field: "product_name", label: "物料名称", readonly: true },
-      { field: "quantity", label: "采购数量", readonly: true, numeric: true },
-      { field: "actual_shipped_qty", label: "发货数量", numeric: true },
-      { field: "shipped_uom", label: "发货单位" },
-      { field: "goods_value", label: "采购货值", readonly: true, numeric: true },
-      { field: "gross_weight_kg", label: "毛重 kg", numeric: true },
-      { field: "volume_m3", label: "体积 m³", numeric: true },
-      { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true },
-      { field: "project_collection", label: "项目归属" },
+      { field: "row_no", label: "行", readonly: true, width: 54 },
+      { field: "source_doc_no", label: "采购审批号", readonly: true, width: 220 },
+      { field: "material_code", label: "物料编码", readonly: true, width: 120 },
+      { field: "product_name", label: "物料名称", readonly: true, width: 260 },
+      { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
+      { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
+      { field: "shipped_uom", label: "发货单位", width: 130 },
+      { field: "goods_value", label: "采购货值", readonly: true, numeric: true, width: 140 },
+      { field: "gross_weight_kg", label: "毛重 kg", numeric: true, width: 130 },
+      { field: "volume_m3", label: "体积 m³", numeric: true, width: 130 },
+      { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true, width: 140 },
+      { field: "project_collection", label: "项目归属", width: 180 },
     ];
     if (state.showAuxiliary) {
       columns.push(
-        { field: "net_weight_kg", label: "净重 kg", numeric: true },
-        { field: "unit_price", label: "采购单价", readonly: true, numeric: true },
-        { field: "unit_price_uom", label: "计价单位", readonly: true },
-        { field: "purchase_currency", label: "采购币种", readonly: true },
-        { field: "supplier", label: "供应商", readonly: true },
-        { field: "source_file_name", label: "来源文件", readonly: true }
+        { field: "net_weight_kg", label: "净重 kg", numeric: true, width: 130 },
+        { field: "unit_price", label: "采购单价", readonly: true, numeric: true, width: 130 },
+        { field: "unit_price_uom", label: "计价单位", readonly: true, width: 120 },
+        { field: "purchase_currency", label: "采购币种", readonly: true, width: 110 },
+        { field: "supplier", label: "供应商", readonly: true, width: 220 },
+        { field: "source_file_name", label: "来源文件", readonly: true, width: 240 }
       );
     }
     return columns;
@@ -9668,15 +9695,18 @@ class OverseasCostWorkbench {
     if (state.onlyMissing) items = items.filter((row) => (row.requirements?.missing_fields || []).length);
     const page = Number(materialData.page || state.page || 1);
     const pageCount = Math.max(1, Number(materialData.page_count || 1));
+    const tableWidth = columns.reduce((sum, column) => sum + Number(column.width || 130), 0);
     return `
       <div class="ocw-mf-grid-shell">
-        <div class="ocw-mf-grid-note"><span>单格离开或按 Enter 自动保存</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
-        <div class="ocw-mf-grid-scroll">
-          <table class="ocw-mf-grid-table">
+        <div class="ocw-mf-grid-note"><span>${state.aiFill?.status === "READY" ? "AI 草稿中，单格修改只更新草稿" : "单格离开或按 Enter 自动保存"}</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
+        <div class="ocw-mf-grid-scroll" data-mf-grid-viewport>
+          <table class="ocw-mf-grid-table" style="width:${tableWidth}px;min-width:${tableWidth}px">
+            <colgroup>${columns.map((column) => `<col style="width:${Number(column.width || 130)}px">`).join("")}</colgroup>
             <thead><tr>${columns.map((column) => `<th>${this.escape(column.label)}</th>`).join("")}</tr></thead>
             <tbody>${items.length ? items.map((item, index) => this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
           </table>
         </div>
+        <div class="ocw-mf-grid-scroll-controls"><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-left" aria-label="向左滚动">‹</button><div class="ocw-mf-grid-scrollbar" data-mf-grid-scrollbar><div style="width:${tableWidth}px"></div></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-right" aria-label="向右滚动">›</button></div>
         <div class="ocw-mf-grid-footer"><span>共 ${Number(materialData.total || 0)} 行 · 当前第 ${page}/${pageCount} 页</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page + 1}" ${page >= pageCount ? "disabled" : ""}>下一页</button></div></div>
       </div>
     `;
@@ -9704,14 +9734,248 @@ class OverseasCostWorkbench {
     const originalValue = value;
     const draft = this.materialFeeState?.materialDrafts?.[`${item.name}:${column.field}`];
     if (draft && !column.readonly) value = draft.value;
+    const aiCell = this.materialAICell(item.name, column.field);
+    const aiUpdate = this.materialFeeState?.aiFill?.status === "READY" ? this.materialFeeState.aiFill.updates?.[`${item.name}:${column.field}`] : null;
+    if (!column.readonly && aiUpdate) value = aiUpdate.value;
     const isMissing = missingFields.has(column.field);
     const isDefault = shippingField && item.effective_shipping?.is_default;
-    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", draft?.error ? "is-save-error" : ""].filter(Boolean).join(" ");
+    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", draft?.error ? "is-save-error" : "", aiUpdate ? "is-ai-draft" : "", aiCell && !aiUpdate ? "has-ai-candidate" : ""].filter(Boolean).join(" ");
     const reason = draft?.error || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
-      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><span>${this.escape(this.formatValue(value || "--"))}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
+      const fullValue = this.formatValue(value || "--");
+      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
     }
-    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />${isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}</td>`;
+    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
+  }
+
+  materialAICell(itemName, fieldname) {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    if (fill?.status !== "READY") return null;
+    return fill.draft?.rows?.[String(itemName)]?.[String(fieldname)] || null;
+  }
+
+  renderMaterialAICandidates(itemName, fieldname, cell, hasDraft) {
+    const candidates = cell?.candidates || [];
+    if (!candidates.length || (hasDraft && cell.status === "AI_DRAFT")) return "";
+    return `<details class="ocw-mf-ai-candidates"><summary>${cell.status === "EXISTING_VALUE" ? "已有值 · 查看 AI" : `候选 ${candidates.length}`}</summary><div>${candidates.map((candidate, index) => `<article><span><b>${this.escape(this.formatValue(candidate.suggested_value))}</b><em>${Math.round(Number(candidate.confidence || 0) * 100)}%</em></span><p>${this.escape(candidate.reason || "待人工核对")}</p><p>${(candidate.source_refs || []).map((ref) => this.escape([ref.file, ref.sheet, ref.page ? `第 ${ref.page} 页` : "", ref.row ? `第 ${ref.row} 行` : "", ref.cell].filter(Boolean).join(" · "))).join("；") || "来源位置未标注"}</p><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-ai-adopt-candidate" data-item-name="${this.escape(itemName)}" data-fieldname="${this.escape(fieldname)}" data-candidate-index="${index}">采用此值</button></article>`).join("")}</div></details>`;
+  }
+
+  renderMaterialAIFillBanner() {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    if (!fill) return "";
+    const steps = ["读取资料", "解析/OCR", "DeepSeek 识别", "合并候选"];
+    const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
+    const warning = fill.ai_warning || fill.error_message || "";
+    const title = fill.status === "READY" ? "AI 装箱草稿已生成" : fill.status === "FAILED" ? "AI 填充失败" : fill.status === "STALE" ? "AI 草稿已过期" : "正在生成 AI 装箱草稿";
+    return `<div class="ocw-mf-ai-banner is-${this.escape(String(fill.status || "running").toLowerCase())}"><div><strong>${title}</strong><span>${this.escape(fill.progress_step || "读取资料")}</span></div><div class="ocw-mf-ai-progress" aria-label="AI 填充进度"><i style="width:${progress}%"></i></div><div class="ocw-mf-ai-steps">${steps.map((step) => `<span class="${step === fill.progress_step ? "active" : ""}">${step}</span>`).join("")}</div>${warning ? `<p>${this.escape(warning)}</p>` : ""}</div>`;
+  }
+
+  renderMaterialAIFillFooter() {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    if (fill?.status !== "READY") return "";
+    const updateCount = Object.keys(fill.updates || {}).length;
+    const candidateCount = Number(fill.draft?.candidate_count || 0);
+    const mutating = Boolean(fill.applying || fill.discarding);
+    return `<div class="ocw-mf-ai-footer"><span>AI 草稿 · 待保存 ${updateCount} 项${candidateCount ? ` · 共识别 ${candidateCount} 个字段候选` : ""}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${mutating ? "disabled" : ""}>${fill.discarding ? "正在放弃…" : "放弃 AI 草稿"}</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${mutating ? "disabled" : ""}>${fill.applying ? "正在保存…" : "确认保存"}</button></div></div>`;
+  }
+
+  bindMaterialGridScrollControls() {
+    const $viewport = this.$root.find("[data-mf-grid-viewport]");
+    const $scrollbar = this.$root.find("[data-mf-grid-scrollbar]");
+    if (!$viewport.length || !$scrollbar.length) return;
+    let syncing = false;
+    const sync = ($from, $to) => {
+      if (syncing) return;
+      syncing = true;
+      $to.scrollLeft($from.scrollLeft());
+      syncing = false;
+    };
+    $viewport.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => {
+      sync($viewport, $scrollbar);
+      const $shell = $viewport.closest(".ocw-mf-grid-shell");
+      const compact = $viewport.scrollLeft() > 8;
+      if ($shell.hasClass("is-horizontally-scrolled") !== compact) {
+        $shell.toggleClass("is-horizontally-scrolled", compact);
+        const widths = compact ? [54, 190, 110, 220] : [54, 220, 120, 260];
+        let delta = 0;
+        $viewport.find("col").slice(0, 4).each((index, column) => {
+          const previous = Number.parseFloat(column.style.width || 0);
+          column.style.width = `${widths[index]}px`;
+          delta += widths[index] - previous;
+        });
+        const table = $viewport.find("table").get(0);
+        const track = $scrollbar.children().get(0);
+        if (table && track && delta) {
+          const nextWidth = Math.max($viewport.width(), Number.parseFloat(table.style.width || table.scrollWidth) + delta);
+          table.style.width = `${nextWidth}px`;
+          table.style.minWidth = `${nextWidth}px`;
+          track.style.width = `${nextWidth}px`;
+        }
+      }
+    });
+    $scrollbar.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => sync($scrollbar, $viewport));
+  }
+
+  initializeMaterialAIDraft(status) {
+    const fill = {
+      ...status,
+      runId: status.run_id,
+      updates: {},
+      draft: status.draft || { rows: {} },
+    };
+    Object.entries(fill.draft.rows || {}).forEach(([itemName, fields]) => {
+      Object.entries(fields || {}).forEach(([fieldname, cell]) => {
+        if (cell?.status !== "AI_DRAFT" || !cell.can_auto_adopt) return;
+        fill.updates[`${itemName}:${fieldname}`] = {
+          item_name: itemName,
+          fieldname,
+          value: cell.value,
+          user_edited: false,
+        };
+      });
+    });
+    return fill;
+  }
+
+  async startMaterialAIFill() {
+    const state = this.ensureMaterialFeeState();
+    if (["QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""))) return;
+    state.aiFill = null;
+    if (!(await this.flushMaterialFeeInputs(state))) return;
+    if (!(await this.ensureEditSession())) return;
+    const batchName = this.detailState.batchName;
+    const versionName = this.detailState.versionName;
+    const started = await this.call("overseas_costing.api.materials.start_material_ai_fill", {
+      batch_name: batchName,
+      version_name: versionName,
+      edit_token: this.detailState.editToken,
+      expected_modified: this.detailState.expectedModified,
+    });
+    if (!started?.ok) throw new Error(started?.message || "AI 填充任务启动失败。 ");
+    state.aiFill = { runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5 };
+    this.renderMaterialFeeWorkspace();
+    await this.pollMaterialAIFill(state, batchName, versionName, started.run_id);
+  }
+
+  async pollMaterialAIFill(state, batchName, versionName, runId) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      if (this.materialFeeState !== state || this.detailState.batchName !== batchName || this.detailState.versionName !== versionName || this.detailState.tab !== "documents") return;
+      const status = await this.call("overseas_costing.api.materials.get_material_ai_fill_status", {
+        batch_name: batchName,
+        run_id: runId,
+      }, true);
+      if (!status?.ok) throw new Error(status?.message || "AI 填充状态读取失败。 ");
+      state.aiFill = status.status === "READY" ? this.initializeMaterialAIDraft(status) : { ...state.aiFill, ...status, runId };
+      this.renderMaterialFeeWorkspace();
+      if (["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    }
+    throw new Error("AI 填充处理超时，请稍后刷新后重试。 ");
+  }
+
+  updateMaterialAIDraftFromInput($input) {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    if (fill?.status !== "READY") return false;
+    const itemName = String($input.attr("data-item-name") || "");
+    const fieldname = String($input.attr("data-fieldname") || "");
+    const value = String($input.val() ?? "").trim();
+    const original = String($input.attr("data-original-value") ?? "").trim();
+    const key = `${itemName}:${fieldname}`;
+    if (value === original) delete fill.updates[key];
+    else fill.updates[key] = { item_name: itemName, fieldname, value, user_edited: true };
+    return true;
+  }
+
+  adoptMaterialAICandidate(itemName, fieldname, candidateIndex) {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    const cell = fill?.draft?.rows?.[String(itemName)]?.[String(fieldname)];
+    const candidate = cell?.candidates?.[candidateIndex];
+    if (!candidate) return;
+    fill.updates[`${itemName}:${fieldname}`] = {
+      item_name: String(itemName),
+      fieldname: String(fieldname),
+      value: candidate.suggested_value,
+      user_edited: true,
+    };
+    this.renderMaterialFeeWorkspace();
+  }
+
+  async applyMaterialAIFill() {
+    const state = this.ensureMaterialFeeState();
+    const fill = state.aiFill;
+    if (fill?.status !== "READY" || fill.applying || fill.discarding) return;
+    const batchName = String(this.detailState.batchName || "");
+    const versionName = String(this.detailState.versionName || "");
+    const isCurrent = () => this.materialFeeState === state
+      && state.aiFill === fill
+      && String(this.detailState.batchName || "") === batchName
+      && String(this.detailState.versionName || "") === versionName
+      && this.detailState.tab === "documents";
+    fill.applying = true;
+    this.renderMaterialFeeWorkspace();
+    try {
+      if (!(await this.ensureEditSession())) {
+        fill.applying = false;
+        if (isCurrent()) this.renderMaterialFeeWorkspace();
+        return;
+      }
+      if (!isCurrent()) return;
+      const result = await this.call("overseas_costing.api.materials.apply_material_ai_fill", {
+        batch_name: batchName,
+        run_id: fill.runId || fill.run_id,
+        updates_json: JSON.stringify(Object.values(fill.updates || {})),
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+      });
+      if (!isCurrent()) return;
+      if (!result?.ok && result?.stale) {
+        fill.applying = false;
+        fill.status = "STALE";
+        fill.error_message = result.message || "资料或物料数据已变化，请重新运行 AI 填充。";
+        this.renderMaterialFeeWorkspace();
+        return;
+      }
+      if (!result?.ok) throw new Error(result?.message || "AI 草稿保存失败。 ");
+      this.updateMaterialFeeExpectedModified(result);
+      state.aiFill = null;
+      frappe.show_alert({ message: result.message || "AI 装箱草稿已保存", indicator: "green" });
+      await this.loadMaterialFeeWorkspace({ quiet: true });
+    } catch (error) {
+      fill.applying = false;
+      if (!isCurrent()) return;
+      this.renderMaterialFeeWorkspace();
+      throw error;
+    }
+  }
+
+  async discardMaterialAIFill() {
+    const state = this.ensureMaterialFeeState();
+    const fill = state.aiFill;
+    if (!fill || fill.applying || fill.discarding) return;
+    const batchName = String(this.detailState.batchName || "");
+    const versionName = String(this.detailState.versionName || "");
+    const isCurrent = () => this.materialFeeState === state
+      && state.aiFill === fill
+      && String(this.detailState.batchName || "") === batchName
+      && String(this.detailState.versionName || "") === versionName
+      && this.detailState.tab === "documents";
+    fill.discarding = true;
+    this.renderMaterialFeeWorkspace();
+    try {
+      const result = await this.call("overseas_costing.api.materials.discard_material_ai_fill", {
+        batch_name: batchName,
+        run_id: fill.runId || fill.run_id,
+      });
+      if (!isCurrent()) return;
+      if (!result?.ok) throw new Error(result?.message || "AI 草稿放弃失败。 ");
+      state.aiFill = null;
+      await this.loadMaterialFeeWorkspace({ quiet: true });
+    } catch (error) {
+      fill.discarding = false;
+      if (!isCurrent()) return;
+      this.renderMaterialFeeWorkspace();
+      throw error;
+    }
   }
 
   findMaterialFeeItem(itemName) {
@@ -9746,6 +10010,10 @@ class OverseasCostWorkbench {
 
   updateMaterialDraftFromInput($input) {
     const state = this.ensureMaterialFeeState();
+    if (state.aiFill?.status === "READY") {
+      this.updateMaterialAIDraftFromInput($input);
+      return;
+    }
     const itemName = $input.attr("data-item-name");
     const fieldname = $input.attr("data-fieldname");
     const key = `${itemName}:${fieldname}`;
@@ -9763,6 +10031,14 @@ class OverseasCostWorkbench {
 
   async persistMaterialFeeCell($input) {
     if (!$input.length || $input.data("saving")) return;
+    if (this.ensureMaterialFeeState().aiFill?.status === "READY") {
+      this.updateMaterialAIDraftFromInput($input);
+      const $cell = $input.closest(".ocw-mf-cell");
+      const key = `${$input.attr("data-item-name")}:${$input.attr("data-fieldname")}`;
+      const isDraft = Boolean(this.ensureMaterialFeeState().aiFill?.updates?.[key]);
+      $cell.toggleClass("is-ai-draft", isDraft);
+      return;
+    }
     this.updateMaterialDraftFromInput($input);
     const original = String($input.attr("data-original-value") ?? "");
     const value = String($input.val() ?? "").trim();
@@ -9874,6 +10150,16 @@ class OverseasCostWorkbench {
   }
 
   async applyMaterialPaste(dialog, updates) {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    if (fill?.status === "READY") {
+      updates.forEach(({ item_name, fieldname, value }) => {
+        fill.updates[`${item_name}:${fieldname}`] = { item_name, fieldname, value, user_edited: true };
+      });
+      dialog.hide();
+      this.renderMaterialFeeWorkspace();
+      frappe.show_alert({ message: `已更新 ${updates.length} 个 AI 草稿单元格`, indicator: "blue" });
+      return;
+    }
     if (!(await this.ensureEditSession())) return;
     const result = await this.call("overseas_costing.api.calculate.batch_update_items", {
       batch_name: this.detailState.batchName,
@@ -10415,6 +10701,7 @@ class OverseasCostWorkbench {
   }
 
   async flushMaterialFeeInputs(state) {
+    if (["QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""))) throw new Error("请先确认保存或放弃 AI 草稿，再开始试算。 ");
     if (state.calculationWrite) await state.calculationWrite;
     while (state.pendingWrites.size) await Promise.all([...state.pendingWrites]);
     if (this.materialFeeState !== state || this.detailState.batchName !== state.batchName) return false;
@@ -10615,7 +10902,7 @@ class OverseasCostWorkbench {
     const candidates = state.fees?.evidence_candidates || [];
     const dialog = new frappe.ui.Dialog({
       title: "查看资料来源",
-      fields: [{ fieldtype: "HTML", fieldname: "sources", options: `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note">OA 采购数量、金额和物料身份作为来源事实保留。装箱计划是可选补充：没有时可先用采购数量作为默认发货数量。</div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉 OA</button><button class="ocw-primary-btn" type="button" data-action="mf-import-xlsx">导入 Excel 补资料</button></div><div class="ocw-mf-source-list">${candidates.length ? candidates.map((row) => `<div><span><strong>${this.escape(row.file_name || row.attachment || "--")}</strong><small>${this.escape(row.source_type || "附件")} · ${this.escape(row.attachment_type || "未分类")} · ${this.escape(row.parse_status || "Draft")}</small></span>${row.file_url ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-mf-preview-source="1" data-file-url="${this.escape(row.file_url)}" data-file-name="${this.escape(row.file_name || "")}">预览</button>` : ""}</div>`).join("") : `<div class="ocw-detail-empty"><strong>暂无附件资料</strong></div>`}</div></div>` }],
+      fields: [{ fieldtype: "HTML", fieldname: "sources", options: `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note">OA 采购数量、金额和物料身份作为来源事实保留。装箱资料可从物料表的“获取装箱资料”统一管理。</div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉 OA</button></div><div class="ocw-mf-source-list">${candidates.length ? candidates.map((row) => `<div><span><strong>${this.escape(row.file_name || row.attachment || "--")}</strong><small>${this.escape(row.source_type || "附件")} · ${this.escape(row.attachment_type || "未分类")} · ${this.escape(row.parse_status || "Draft")}</small></span>${row.file_url ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-mf-preview-source="1" data-file-url="${this.escape(row.file_url)}" data-file-name="${this.escape(row.file_name || "")}">预览</button>` : ""}</div>`).join("") : `<div class="ocw-detail-empty"><strong>暂无附件资料</strong></div>`}</div></div>` }],
       primary_action_label: "关闭",
       primary_action: () => dialog.hide(),
     });
@@ -10629,10 +10916,6 @@ class OverseasCostWorkbench {
       dialog.hide();
       this.switchDetailTab("dingtalk");
     });
-    dialog.$wrapper.on("click", "[data-action='mf-import-xlsx']", () => {
-      dialog.hide();
-      this.openMaterialXlsxUploader();
-    });
   }
 
   openMaterialXlsxUploader() {
@@ -10642,26 +10925,33 @@ class OverseasCostWorkbench {
       if (!ready) return;
       new frappe.ui.FileUploader({
         allow_multiple: false,
-        restrictions: { allowed_file_types: [".xlsx"], max_file_size: 20 * 1024 * 1024 },
+        restrictions: { allowed_file_types: [".xlsx", ".xlsm", ".xls", ".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".doc", ".docx"], max_file_size: 20 * 1024 * 1024 },
         on_success: (fileDoc) => {
           const uploaded = Array.isArray(fileDoc) ? fileDoc[0] : fileDoc;
           const fileName = String(uploaded?.file_name || uploaded?.name || "");
-          if (!fileName.toLowerCase().endsWith(".xlsx")) {
-            this.showPendingFeature("物料导入仅支持 .xlsx 文件。");
+          if (fileName.toLowerCase().endsWith(".xls")) {
+            this.showPendingFeature("暂不支持旧版 .xls，请先在 Excel 中另存为 .xlsx 后上传。");
             return;
           }
           this.registerManualDocumentAttachment(batch, this.detailDocumentAdapter(), this.detectManualDocumentLogisticsType(batch), {
-            code: "material_import_xlsx",
-            label: "物料与装箱 Excel",
+            code: "material_packing_document",
+            label: "本地上传装箱单",
             attachmentType: "Packing List",
             required: false,
           }, uploaded).then((registered) => {
             const attachment = registered?.attachment?.name;
-            if (attachment) this.openWikiMaterialImportDialog({ sourceTab: "local" }).then((sourceDialog) => this.previewMaterialAttachmentSource(sourceDialog, attachment)).catch((error) => this.showError(error));
+            if (!attachment) return;
+            this.openWikiMaterialImportDialog({ sourceTab: "local" }).then((sourceDialog) => {
+              if ([".xlsx", ".xlsm"].some((suffix) => fileName.toLowerCase().endsWith(suffix))) {
+                this.previewMaterialAttachmentSource(sourceDialog, attachment).catch((error) => this.showWikiMaterialSourceError(sourceDialog, error));
+              } else {
+                frappe.show_alert({ message: "装箱资料已加入，可点击 AI 填充装箱数据进行识别", indicator: "green" });
+              }
+            }).catch((error) => this.showError(error));
           }).catch((error) => this.showError(error));
         },
       });
-      [0, 100, 300].forEach((delay) => window.setTimeout(() => this.localizeFrappeFileUploader("物料与装箱 Excel"), delay));
+      [0, 100, 300].forEach((delay) => window.setTimeout(() => this.localizeFrappeFileUploader("本地上传装箱单"), delay));
     }).catch((error) => this.showError(error));
   }
 
@@ -10816,7 +11106,7 @@ class OverseasCostWorkbench {
   }
 
   renderMaterialSourceTabs(dialog) {
-    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["form", "钉钉表单附件"], ["comment", "评论附件与评论"], ["local", "本地上传"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
+    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["form", "钉钉表单附件"], ["comment", "评论附件与评论"], ["local", "本地上传装箱单"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
   }
 
   renderMaterialAttachmentSources(dialog) {
@@ -10827,11 +11117,11 @@ class OverseasCostWorkbench {
     });
     const cards = rows.map((row) => {
       const sheets = row.sheets?.length ? row.sheets : [""];
-      const unsupported = row.supported_for_material_import === false;
-      const status = unsupported ? "物料导入仅支持 .xlsx，请另存为 .xlsx 后上传" : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
-      return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${unsupported || dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
+      const semanticOnly = row.supported_for_material_import === false;
+      const status = semanticOnly ? (row.available ? "可供 AI 识别" : "选择 AI 填充后自动获取并识别") : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
+      return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${semanticOnly ? `<span>AI 资料</span>` : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
     }).join("");
-    return `<div class="ocw-mf-wiki-toolbar"><span>可使用物流审批及关联采购审批中的资料，先预览再确认写入。</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>${dialog.materialSourceTab === "local" ? `<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">上传 Excel</button>` : ""}</div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无可用资料</strong></div>`}</div>`;
+    return `<div class="ocw-mf-wiki-toolbar"><span>可使用物流审批及关联采购审批中的资料；表格可直接预览，文档和图片由 AI 识别。</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>${dialog.materialSourceTab === "local" ? `<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>` : ""}</div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无可用资料</strong></div>`}</div>`;
   }
 
   async previewMaterialAttachmentSource(dialog, sourceId, sheetName = "") {

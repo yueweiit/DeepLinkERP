@@ -68,10 +68,13 @@ MAX_MATERIAL_WORKBOOK_BYTES = 20 * 1024 * 1024
 
 
 def validate_material_workbook_metadata(file_name: str, file_size: object) -> None:
-    """Reject non-xlsx and oversized material workbooks before parsing."""
+    """Reject legacy/unsupported and oversized material workbooks before parsing."""
 
-    if not str(file_name or "").strip().lower().endswith(".xlsx"):
-        raise ValueError("物料 Excel 导入仅支持 .xlsx 文件。")
+    normalized_name = str(file_name or "").strip().lower()
+    if normalized_name.endswith(".xls"):
+        raise ValueError("暂不支持旧版 .xls，请先在 Excel 中另存为 .xlsx 后上传。")
+    if not normalized_name.endswith((".xlsx", ".xlsm")):
+        raise ValueError("装箱工作簿仅支持 .xlsx 或 .xlsm 文件。")
     try:
         normalized_size = int(file_size or 0)
     except (TypeError, ValueError):

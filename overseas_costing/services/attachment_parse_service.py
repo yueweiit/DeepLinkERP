@@ -48,6 +48,7 @@ OCR_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 WORD_DOCUMENT_SUFFIXES = {".doc", ".docx"}
 TEXT_DOCUMENT_SUFFIXES = {".txt"}
 DOCX_WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MAX_AI_EXTRACTED_TEXT_CHARS = 80_000
 
 
 def preview_source_document(
@@ -55,6 +56,7 @@ def preview_source_document(
     source_name: str | None = None,
     file_path: str | None = None,
     file_url: str | None = None,
+    include_text: bool = False,
 ) -> dict:
     """预览识别 OA 附件内容，只判断资料类型和字段候选，不写入成本字段。"""
 
@@ -90,7 +92,7 @@ def preview_source_document(
         if classification["code"] == "purchase_order"
         else {}
     )
-    return {
+    result = {
         "ok": True,
         "source_name": source_name or path.name,
         "file_path": str(path),
@@ -105,6 +107,9 @@ def preview_source_document(
         "can_write_purchase_price": classification["code"] == "purchase_order" and bool(purchase_order.get("line_items")),
         "message": "附件内容识别预览已生成，当前不会写入物料单价或货值。",
     }
+    if include_text:
+        result["text_content"] = _document_text_excerpt(text, limit=MAX_AI_EXTRACTED_TEXT_CHARS)
+    return result
 
 
 def classify_source_document_text(text: str | None, *, source_name: str | None = None) -> dict:

@@ -103,3 +103,53 @@ def test_merge_review_preview_preserves_read_permission_and_payload_limit(monkey
     assert checks == ["read"]
     with pytest.raises(ValueError, match="过大"):
         api.preview_material_import("B1", "wiki_sheet", "WB:ST", merge_reviews_json="x" * 100_001)
+
+
+def test_ai_fill_api_uses_read_for_status_and_write_for_mutations(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    checks = []
+    monkeypatch.setattr(
+        api,
+        "require_batch_permission",
+        lambda batch, ptype: checks.append((batch, ptype)) or "BATCH-DOC",
+    )
+    monkeypatch.setattr(
+        api.material_ai_fill_service,
+        "start_material_ai_fill",
+        lambda *args: {"ok": True, "args": args},
+    )
+    monkeypatch.setattr(
+        api.material_ai_fill_service,
+        "get_material_ai_fill_status",
+        lambda *args: {"ok": True, "args": args},
+    )
+    monkeypatch.setattr(
+        api.material_ai_fill_service,
+        "apply_material_ai_fill",
+        lambda *args: {"ok": True, "args": args},
+    )
+    monkeypatch.setattr(
+        api.material_ai_fill_service,
+        "discard_material_ai_fill",
+        lambda *args: {"ok": True, "args": args},
+    )
+
+    api.start_material_ai_fill("B", "V", "T", "M")
+    api.get_material_ai_fill_status("B", "R")
+    api.apply_material_ai_fill("B", "R", '[{"item_name":"I"}]', "T", "M")
+    api.discard_material_ai_fill("B", "R")
+    assert checks == [
+        ("B", "write"),
+        ("B", "read"),
+        ("B", "write"),
+        ("B", "write"),
+    ]
+
+
+def test_ai_apply_rejects_oversized_or_non_array_updates_before_service(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    monkeypatch.setattr(api, "require_batch_permission", lambda batch, _ptype: batch)
+    with pytest.raises(ValueError, match="过大"):
+        api.apply_material_ai_fill("B", "R", "x" * 1_100_000, "T", "M")
+    with pytest.raises(ValueError, match="数组"):
+        api.apply_material_ai_fill("B", "R", '{"item_name":"I"}', "T", "M")
