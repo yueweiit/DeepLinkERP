@@ -2462,7 +2462,7 @@ def _merge_ai_logistics_text_summary(base_summary: dict, ai_summary: dict) -> di
     return merged
 
 
-def extract_logistics_text_summary_from_approval(item: dict) -> dict:
+def extract_logistics_text_summary_from_approval(item: dict, *, allow_ai: bool = True) -> dict:
     """提取钉钉国际物流审批正文里的整票基础信息。"""
 
     form_fields = item.get("form_fields") or {}
@@ -2496,7 +2496,7 @@ def extract_logistics_text_summary_from_approval(item: dict) -> dict:
         "logistics_quote_evidence": first_quote.get("evidence_line"),
     }
     source_text = _build_logistics_ai_source_text(form_fields)
-    if _should_ai_parse_logistics_text(summary, source_text):
+    if allow_ai and _should_ai_parse_logistics_text(summary, source_text):
         summary = _merge_ai_logistics_text_summary(
             summary,
             _call_ai_logistics_text_summary(source_text, summary),

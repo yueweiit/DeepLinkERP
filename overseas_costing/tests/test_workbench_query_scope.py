@@ -122,3 +122,15 @@ def test_snapshot_enrichment_checks_batch_ownership_even_for_wrong_pointer(monke
         {'name': 'ALLOWED', 'current_version': 'WRONG-VERSION'}])
     assert queries[0]['filters']['batch'] == ['in', ['ALLOWED']]
     assert result[0]['summary_snapshot'] == {}
+
+
+def test_readonly_source_enrichment_never_triggers_ai_http(monkeypatch):
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+    monkeypatch.setattr(import_oa_logistics, '_should_ai_parse_logistics_text', lambda *args: True)
+    monkeypatch.setattr(import_oa_logistics, '_call_ai_logistics_text_summary',
+                        lambda *args: calls.append(args) or {})
+    result = service._logistics_text_summary({'form_fields': {'运输方式': '快递'}})
+    assert isinstance(result, dict)
+    assert calls == []

@@ -49,6 +49,8 @@
       }
       if (this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
         await this.refreshDetailSummary();
+      } else if (this.viewState?.screen === "workbench") {
+        await this.loadBatches();
       } else {
         await this.loadBatchItems(batch.name, batch.current_version, true);
         await this.loadAuditLogs(batch.name, batch.current_version);

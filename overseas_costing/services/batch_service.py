@@ -1005,7 +1005,7 @@ def _logistics_text_summary(trace: dict) -> dict:
         try:
             from overseas_costing.scripts.import_oa_logistics import extract_logistics_text_summary_from_approval
 
-            return _public_logistics_text_summary(extract_logistics_text_summary_from_approval(trace))
+            return _public_logistics_text_summary(extract_logistics_text_summary_from_approval(trace, allow_ai=False))
         except Exception:
             return {}
     return {}

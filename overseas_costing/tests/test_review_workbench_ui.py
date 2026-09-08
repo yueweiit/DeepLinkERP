@@ -11,7 +11,8 @@ def run_js(script):
     source = f"""
 const fs=require('fs');
 global.OverseasCostWorkbenchState=require({json.dumps(str(PARTS / '05-workbench-state.js'))});
-const View=Function('return class View {{'+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+fs.readFileSync({json.dumps(str(PARTS / '82-detail-page.js'))},'utf8')+'}}')();
+const calculation=fs.readFileSync({json.dumps(str(PARTS / '30-calculation-erp.js'))},'utf8').split('  setMainView(')[0];
+const View=Function('return class View {{'+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+fs.readFileSync({json.dumps(str(PARTS / '82-detail-page.js'))},'utf8')+calculation+'}}')();
 function makeView(task='cost') {{
  const v=new View(); v.viewState={{task,page:1,q:'',screen:'workbench'}};
  v.filters={{review_status:'pending',review_warning:'',issue:''}};
@@ -148,3 +149,31 @@ console.log(JSON.stringify({{url,parsed:OverseasCostWorkbenchState.parseWorkbenc
     assert result['requested']['start_date'] == start
     assert result['requested']['end_date'] == end
     assert result['page'] == 3
+
+
+def test_successful_list_recalculation_refreshes_authoritative_groups_and_cards():
+    result=run_js("""
+global.frappe={show_alert:()=>{}};
+const v=makeView('pending'), calls=[];
+const old={name:'B',current_version:'V',review_state:'processing',result_is_current:false};
+v.batches=[old];v.findBatch=()=>old;v.detailState={batchName:''};
+v.acceptSavedComprehensiveCost=()=>{};v.applyRecalculateSummary=()=>{};
+v.resetBatchResultPreview=()=>{};v.renderWorkbenchLoading=()=>{};v.renderWorkbench=()=>{};
+v.loadBatchItems=async()=>{};v.loadAuditLogs=async()=>{};v.renderTable=()=>{};
+v.renderRecalculateResult=()=>{};v.renderWorkbenchBatchList=()=>{};v.recordUsage=()=>{};
+v.showError=e=>{throw e};v.$root={attr:()=> 'workbench'};
+v.call=async(method)=>{calls.push(method);
+ if(method.endsWith('acquire')) return {ok:true,edit_token:'TOKEN',modified:'BEFORE'};
+ if(method.endsWith('recalculate_batch')) return {ok:true,saved:true,summary_snapshot:{total_cost_rmb:130}};
+ if(method.endsWith('get_batches')) return {ok:true,items:[],total:0,page:1};
+ if(method.endsWith('get_summary')) return {counts:{calculation:0},review_counts:{pending:1}};
+ return {ok:true};};
+await v.recalculate('B');
+console.log(JSON.stringify({calls,rows:v.batches,counts:v.exceptionCounts,review:v.reviewCounts}));
+""")
+    assert 'overseas_costing.api.workbench.get_batches' in result['calls']
+    assert 'overseas_costing.api.workbench.get_summary' in result['calls']
+    assert result['rows'] == []
+    assert result['counts']['calculation'] == 0
+    assert result['review']['pending'] == 1
+    assert result['calls'][-1] == 'overseas_costing.api.edit_session.release'
