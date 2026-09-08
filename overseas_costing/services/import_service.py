@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导�
     frappe = None
 
 from overseas_costing.services import attachment_parse_service, material_input_service
+from overseas_costing.services.transport_service import prepare_item_transport
 from overseas_costing.integrations.dingtalk_approval_source import (
     ArchiveIntegrityError,
     ArchiveNotReady,
@@ -233,7 +234,7 @@ NUMERIC_ITEM_FIELDS = {
 def import_main_excel(
     source_name: str,
     source_type: str = "excel",
-    transport_mode: str = "SEA",
+    transport_mode: str = "",
     source_sheet: str | None = None,
     project_collection: str | None = None,
     version_type: str = "Estimated",
@@ -385,7 +386,7 @@ def import_parsed_excel_blocks(
     result = import_main_excel(
         source_name=source_name,
         source_type="excel",
-        transport_mode="SEA",
+        transport_mode="",
         source_sheet=source_sheet,
         project_collection=project_collection,
         version_type=version_type,
@@ -3214,11 +3215,11 @@ def _resolve_or_create_excel_batch(
         "batch_no": batch_no,
         "customs_no": block.get("customsNo") or "",
         "waybill_no": waybill_no,
-        "transport_mode": normalize_transport_mode(block.get("transportMode") or transport_mode) or "SEA",
+        "transport_mode": normalize_transport_mode(block.get("transportMode") or transport_mode) or "",
         "business_type": normalize_business_type(
             block.get("businessType") or block.get("business_type") or block.get("transportMode"),
             transport_mode=block.get("transportMode") or transport_mode,
-        ) or normalize_business_type(transport_mode, transport_mode=transport_mode) or "SEA_STANDARD",
+        ) or normalize_business_type(transport_mode, transport_mode=transport_mode) or "",
         "project_collection": project_collection or block.get("projectCollection") or "",
         "source_type": "excel",
         "source_file_name": source_name,
@@ -3234,6 +3235,9 @@ def _resolve_or_create_excel_batch(
     }
 
     if existing_name:
+        for fieldname in ("transport_mode", "business_type"):
+            if not values[fieldname]:
+                values.pop(fieldname)
         frappe.db.set_value("Overseas Cost Batch", existing_name, values, update_modified=True)
         return frappe.get_doc("Overseas Cost Batch", existing_name), "updated"
 
@@ -3285,10 +3289,11 @@ def _prepare_imported_item_values(
     *,
     source_revision: str = "",
     include_stable_key: bool = False,
+    batch_transport_mode: str = "",
 ) -> dict:
     """Attach explicit quantity/unit provenance to a normalized imported row."""
 
-    values = dict(mapped_row or {})
+    values = prepare_item_transport(mapped_row, batch_transport_mode)
     unit = normalize_unit(values.get("purchase_uom") or values.get("unit")) or ""
     shipped_uom = normalize_unit(values.get("shipped_uom") or unit) or ""
     values["purchase_uom"] = unit
@@ -3332,6 +3337,7 @@ def _upsert_excel_items(
     created_count = 0
     updated_count = 0
     unchanged_count = 0
+    batch_transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "transport_mode") or ""
     for index, mapped_row in enumerate(mapped_rows):
         source_actual_present = _to_float(mapped_row.get("actual_shipped_qty")) > 0
         mapped_row = _coerce_item_numeric_defaults(mapped_row)
@@ -3344,6 +3350,7 @@ def _upsert_excel_items(
         values = {
             **_prepare_imported_item_values(
                 mapped_row,
+                batch_transport_mode=batch_transport_mode,
                 source_revision=str(
                     mapped_row.get("dingtalk_instance_id")
                     or mapped_row.get("source_doc_no")
@@ -3458,6 +3465,10 @@ def _upsert_default_allocation_rules(
             "is_enabled": 1,
         }
         if existing_name:
+            enabled = frappe.db.get_value("Overseas Cost Allocation Rule", existing_name, "is_enabled")
+            if enabled in (0, "0", False):
+                upserted_rules.append(existing_name)
+                continue
             frappe.db.set_value("Overseas Cost Allocation Rule", existing_name, values, update_modified=True)
             upserted_rules.append(existing_name)
             continue
@@ -6133,6 +6144,11 @@ def _build_packing_unmatched_item_values(
         "parse_status": "SUCCESS",
         "raw_excel_json": _json_dumps(mapped_row),
     }
+    batch_transport_mode = (
+        frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "transport_mode")
+        if frappe is not None else ""
+    )
+    values = prepare_item_transport(values, batch_transport_mode)
     return _filter_doctype_values("Overseas Cost Item", values, keep_doctype=True)
 
 

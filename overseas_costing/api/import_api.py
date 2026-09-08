@@ -48,7 +48,7 @@ def _verified_packing_attachment(
 def import_main_excel(
     source_name: str,
     source_type: str = "excel",
-    transport_mode: str = "SEA",
+    transport_mode: str = "",
     source_sheet: str | None = None,
     project_collection: str | None = None,
     version_type: str = "Estimated",

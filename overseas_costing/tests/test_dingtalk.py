@@ -2157,6 +2157,10 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
 
     class FakeDB:
         @staticmethod
+        def get_value(doctype, name, field):
+            return "EXPRESS"
+
+        @staticmethod
         def savepoint(name):
             assert name == "before_invalid_purchase_item_repair"
 
@@ -2229,6 +2233,7 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
     assert repaired["created_count"] == 1
     assert deleted_filters == [("Overseas Cost Item", {"batch": "BATCH-001", "version": "VER-001"})]
     assert inserted_items[0]["material_code"] == "MAT-MAIN"
+    assert inserted_items[0]["transport_mode"] == "EXPRESS"
     assert inserted_audits[0]["field_name"] == "invalid_purchase_item_repair"
     audit_new_value = json.loads(inserted_audits[0]["new_value"])
     assert audit_new_value["excluded_purchase_decisions"] == [{
@@ -2315,6 +2320,10 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
             return self
 
     class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, field):
+            return "AIR"
+
         @staticmethod
         def savepoint(name):
             events.append(("savepoint", name))
@@ -2472,6 +2481,11 @@ def test_sync_linked_purchase_fields_rebuilds_items_from_purchase_expense_rows(m
             return self
 
     class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, field):
+            assert (doctype, name, field) == ("Overseas Cost Batch", "BATCH-001", "transport_mode")
+            return "AIR"
+
         @staticmethod
         def delete(doctype, filters):
             deleted_filters.append((doctype, filters))

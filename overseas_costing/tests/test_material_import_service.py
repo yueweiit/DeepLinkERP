@@ -1020,13 +1020,14 @@ def test_trusted_preview_binds_batch_version_sheet_and_source_hash() -> None:
     assert claims["source_hash"] == "a" * 64
 
 
-def test_wiki_preview_uses_batch_projection_and_exposes_source_diagnostics() -> None:
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])
+def test_wiki_preview_uses_batch_projection_and_exposes_source_diagnostics(source_kind) -> None:
     repository = FakeRepository()
     repository.items[0].update({"material_code": "M1", "source_doc_no": ""})
 
     result = preview_material_import(
         "B1",
-        "wiki_sheet",
+        source_kind,
         "WB-1:ST-1",
         repository=repository,
         resolver=_wiki_resolver(),
@@ -1103,13 +1104,14 @@ def test_wiki_preview_drops_global_merge_blocker_when_candidate_is_only_out_of_b
     assert all(row["candidate_merge"] is True for row in preview["out_of_batch"])
 
 
-def test_wiki_preview_exposes_parser_blockers_and_requires_acknowledgement() -> None:
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])
+def test_wiki_preview_exposes_parser_blockers_and_requires_acknowledgement(source_kind) -> None:
     repository = FakeRepository()
     repository.items[0].update({"material_code": "M1", "source_doc_no": "", "actual_shipped_qty": 0})
 
     preview = preview_material_import(
         "B1",
-        "wiki_sheet",
+        source_kind,
         "WB-1:ST-1",
         repository=repository,
         resolver=_mismatch_wiki_resolver(),
@@ -1183,7 +1185,7 @@ def test_apply_requires_explicit_conflict_choice_and_sets_quantity_provenance() 
     )
     assert applied["ok"] is True
     assert repository.writes[0][0] == "I1"
-    assert repository.writes[0][1]["actual_shipped_qty"] == 15
+    assert repository.writes[0][1]["actual_shipped_qty"] == "15"
     assert repository.writes[0][1]["actual_shipped_qty_mode"] == "EXPLICIT_SOURCE"
     assert repository.writes[0][1]["actual_shipped_qty_source_revision"] == "a" * 64
     assert repository.commits == 1
@@ -1247,14 +1249,15 @@ def test_apply_rejects_batch_changed_after_preview_before_writing() -> None:
     assert repository.rollbacks == 1
 
 
-def test_apply_wiki_sheet_writes_only_current_batch_materials() -> None:
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])
+def test_apply_wiki_sheet_writes_only_current_batch_materials(source_kind) -> None:
     repository = FakeRepository()
     repository.items[0].update(
         {"material_code": "M1", "source_doc_no": "", "actual_shipped_qty": 0, "shipped_uom": ""}
     )
     preview = preview_material_import(
         "B1",
-        "wiki_sheet",
+        source_kind,
         "WB-1:ST-1",
         repository=repository,
         resolver=_wiki_resolver(),
@@ -1658,7 +1661,8 @@ def test_apply_repreviews_a_single_row_after_the_user_selects_its_target() -> No
     assert repository.writes[0][1]["actual_shipped_qty"] == "10"
 
 
-def test_apply_wiki_sheet_requires_allocations_that_match_shared_group_totals() -> None:
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])
+def test_apply_wiki_sheet_requires_allocations_that_match_shared_group_totals(source_kind) -> None:
     repository = FakeRepository()
     repository.items = [
         {"name": "I1", "stable_line_key": "L1", "material_code": "M1", "actual_shipped_qty": 0},
@@ -1666,7 +1670,7 @@ def test_apply_wiki_sheet_requires_allocations_that_match_shared_group_totals() 
     ]
     preview = preview_material_import(
         "B1",
-        "wiki_sheet",
+        source_kind,
         "WB-1:ST-SHARED",
         repository=repository,
         resolver=_shared_wiki_resolver(),
@@ -1705,7 +1709,7 @@ def test_apply_wiki_sheet_requires_allocations_that_match_shared_group_totals() 
         {
             "batch": "B1",
             "version": "V1",
-            "source_kind": "wiki_sheet",
+            "source_kind": source_kind,
             "source_id": "WB-1:ST-SHARED",
             "workbook_id": "WB-1",
             "sheet_id": "ST-SHARED",
@@ -1735,7 +1739,8 @@ def test_apply_wiki_sheet_requires_allocations_that_match_shared_group_totals() 
     ]
 
 
-def test_apply_wiki_sheet_rejects_incorrect_shared_group_allocation_without_writes() -> None:
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])
+def test_apply_wiki_sheet_rejects_incorrect_shared_group_allocation_without_writes(source_kind) -> None:
     repository = FakeRepository()
     repository.items = [
         {"name": "I1", "stable_line_key": "L1", "material_code": "M1", "actual_shipped_qty": 0},
@@ -1743,7 +1748,7 @@ def test_apply_wiki_sheet_rejects_incorrect_shared_group_allocation_without_writ
     ]
     preview = preview_material_import(
         "B1",
-        "wiki_sheet",
+        source_kind,
         "WB-1:ST-SHARED",
         repository=repository,
         resolver=_shared_wiki_resolver(),
@@ -1776,14 +1781,15 @@ def test_apply_wiki_sheet_rejects_incorrect_shared_group_allocation_without_writ
     assert repository.commits == 0
 
 
-def test_apply_wiki_sheet_requires_and_validates_conflicting_source_unit_choice() -> None:
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])
+def test_apply_wiki_sheet_requires_and_validates_conflicting_source_unit_choice(source_kind) -> None:
     repository = FakeRepository()
     repository.items[0].update(
         {"material_code": "M1", "source_doc_no": "", "actual_shipped_qty": 0, "shipped_uom": ""}
     )
     preview = preview_material_import(
         "B1",
-        "wiki_sheet",
+        source_kind,
         "WB-1:ST-UNIT",
         repository=repository,
         resolver=_unit_conflict_wiki_resolver(),
@@ -1819,14 +1825,15 @@ def test_apply_wiki_sheet_requires_and_validates_conflicting_source_unit_choice(
     assert repository.writes[0][1]["shipped_uom"] == "件"
 
 
-def test_apply_wiki_sheet_requires_confirmation_for_suggested_group() -> None:
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])
+def test_apply_wiki_sheet_requires_confirmation_for_suggested_group(source_kind) -> None:
     repository = FakeRepository()
     repository.items[0].update(
         {"material_code": "M1", "source_doc_no": "", "actual_shipped_qty": 0, "shipped_uom": ""}
     )
     preview = preview_material_import(
         "B1",
-        "wiki_sheet",
+        source_kind,
         "WB-1:ST-GROUP",
         repository=repository,
         resolver=_suggested_group_wiki_resolver(),
@@ -1861,3 +1868,138 @@ def test_apply_wiki_sheet_requires_confirmation_for_suggested_group() -> None:
     assert repository.writes[0][1]["net_weight_kg"] == "8"
     assert repository.writes[0][1]["gross_weight_kg"] == "10"
     assert repository.writes[0][1]["volume_m3"] == "0.03"
+
+
+@pytest.mark.parametrize("source_kind", ["approval_attachment", "manual_attachment"])
+def test_excel_pet_packing_rows_preserve_purchase_facts_and_aggregate_physical_values(tmp_path, source_kind):
+    from decimal import Decimal
+    from openpyxl import Workbook
+    from overseas_costing.services.packing_parse_service import parse_packing_grid
+    from overseas_costing.utils.excel_workbook import read_packing_grid
+
+    path = tmp_path / "pet-items.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "6月份宠物用品"
+    sheet.append(["物料编码", "中文品名", "数量", "单位", "总净重", "总毛重", "总体积", "件数"])
+    # Source quantity/gross/volume reproduce the pet packing regression. Net/package
+    # detail values below are controlled fixture values with the same batch totals.
+    data = [("CW000092", 1000, "64", "69", ".75", 5)]
+    for index, qty in enumerate([200, 50, 200, 50, 200, 40, 200, 50]):
+        data.append(("CW000023", qty, "48.1" if index % 2 == 0 else "9.62",
+                     "50.6" if index % 2 == 0 else "10.12", ".4725" if index % 2 == 0 else ".0945", 2))
+    data.extend([("CW000014", 2000, "115", "130", "1.794375", 10),
+                 ("CW000012", 2000, "55", "60", ".6", 5),
+                 ("CW000004", 2000, "408.8", "432", "2.1", 27)])
+    for code, qty, net, gross, volume, packages in data:
+        sheet.append([code, code, qty, "个", net, gross, volume, packages])
+    book.save(path)
+    grid = read_packing_grid(str(path), sheet_name=sheet.title, require_exact_sheet=True)
+    parsed = parse_packing_grid(grid)
+    repository = FakeRepository()
+    repository.items = [{"name": code, "material_code": code, "stable_line_key": code,
+                         "source_doc_no": "PURCHASE-1", "quantity": 1000,
+                         "goods_value": 12300, "actual_shipped_qty": 0}
+                        for code in dict.fromkeys(row[0] for row in data)]
+    def resolver(**_kwargs):
+        return {"source_hash": "e" * 64, "source": {"source_id": "ATT-1", "sheet_name": sheet.title},
+                "grid": grid, "preview": parsed}
+
+    preview = preview_material_import("B1", source_kind, "ATT-1", repository=repository,
+                                      resolver=resolver, signing_key=b"secret")
+    assert len(preview["rows"]) == 5
+    backpack = next(row for row in preview["rows"] if row["incoming"]["material_code"] == "CW000023")
+    assert backpack["source_rows"] == list(range(3, 11))
+    assert backpack["incoming"]["actual_shipped_qty"] == "990"
+    assert backpack["incoming"]["gross_weight_kg"] == "242.88"
+    assert backpack["incoming"]["volume_m3"] == "2.268"
+    assert all(row["state"] == "matched" for row in preview["source_grid"]["row_states"][1:])
+    assert preview["source_totals"] == {"net_weight_kg": "873.68", "gross_weight_kg": "933.88", "volume_m3": "7.512375", "package_count": "63"}
+    assert parsed["package_count"] == 63
+    result = apply_material_import("B1", preview["preview_revision"], {}, "EDIT-1", "BM1",
+                                   repository=repository, resolver=resolver, signing_key=b"secret")
+    assert result["ok"] is True
+    assert len(repository.writes) == 5
+    assert sum(Decimal(row[1]["gross_weight_kg"]) for row in repository.writes) == Decimal("933.88")
+    assert all("quantity" not in changes and "goods_value" not in changes for _, changes, _ in repository.writes)
+    assert next(row for row in repository.items if row["name"] == "CW000023")["goods_value"] == 12300
+
+
+@pytest.mark.parametrize("source_kind", ["approval_attachment", "manual_attachment"])
+def test_excel_projection_does_not_ignore_explicit_source_line_identity(source_kind):
+    repository = FakeRepository()
+    resolver = _resolver_with_quantity()
+    trusted = resolver()
+    trusted["preview"]["material_rows"][0].pop("source_line_no")
+    trusted["preview"]["material_rows"][0]["purchase_source_row"] = 99
+    preview = preview_material_import("B1", source_kind, "ATT-1", repository=repository,
+                                      resolver=lambda **_kwargs: trusted, signing_key=b"secret")
+    assert preview["rows"] == []
+    assert preview["out_of_batch"][0]["source_row"] == 9
+
+
+def test_excel_projection_preserves_distinct_explicit_purchase_targets():
+    repository = FakeRepository()
+    repository.items = [{"name": "I1", "stable_line_key": "L1", "material_code": "M1", "source_doc_no": "PO1", "excel_row_no": 3},
+                        {"name": "I2", "stable_line_key": "L2", "material_code": "M1", "source_doc_no": "PO1", "excel_row_no": 4}]
+    trusted = {"source_hash": "b" * 64, "source": {"source_id": "ATT1"}, "preview": {"material_rows": [
+        {"source_row": 20, "purchase_source_row": 3, "source_doc_no": "PO1", "material_code": "M1", "quantity": "10"},
+        {"source_row": 21, "purchase_source_row": 4, "source_doc_no": "PO1", "material_code": "M1", "quantity": "20"},
+    ]}}
+    preview = preview_material_import("B1", "approval_attachment", "ATT1", repository=repository,
+        resolver=lambda **kwargs: trusted, signing_key=b"secret")
+    assert [(row["target_stable_line_key"], row["incoming"]["actual_shipped_qty"]) for row in preview["rows"]] == [("L1", "10"), ("L2", "20")]
+
+
+@pytest.mark.parametrize("source_kind", ["wiki_sheet", "manual_attachment", "approval_attachment"])
+@pytest.mark.parametrize("same_target", [False, True])
+@pytest.mark.parametrize("shared_package", [False, True])
+def test_real_xlsx_ambiguous_same_sku_rows_remain_separate_until_target_choices(tmp_path, source_kind, same_target, shared_package):
+    from openpyxl import Workbook
+    from overseas_costing.services.packing_parse_service import parse_packing_grid
+    from overseas_costing.utils.excel_workbook import read_packing_grid
+
+    path = tmp_path / "multiple-purchase-targets.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "装箱资料"
+    sheet.append(["物料编码", "中文品名", "数量", "单位", "总净重", "总毛重", "总体积"])
+    sheet.append(["M1", "物料1", 10, "个", 8, 12, .1])
+    sheet.append(["M1", "物料1", 20, "个", 16, 24, .2])
+    if shared_package:
+        for column, total in [(5, 24), (6, 36), (7, .3)]:
+            sheet.cell(2, column, total)
+            sheet.merge_cells(start_row=2, end_row=3, start_column=column, end_column=column)
+    workbook.save(path)
+    workbook.close()
+    grid = read_packing_grid(path, sheet_name=sheet.title, require_exact_sheet=True)
+    repository = FakeRepository()
+    repository.items = [{"name": "I1", "stable_line_key": "L1", "material_code": "M1", "source_doc_no": "PO1"},
+                        {"name": "I2", "stable_line_key": "L2", "material_code": "M1", "source_doc_no": "PO2"}]
+    trusted = {"source_hash": "f" * 64, "source": {"source_id": "ATT1"}, "grid": grid,
+               "preview": parse_packing_grid(grid)}
+    resolver = lambda **kwargs: trusted
+    preview = preview_material_import("B1", source_kind, "ATT1", repository=repository,
+                                      resolver=resolver, signing_key=b"secret")
+    assert [row["source_row"] for row in preview["rows"]] == ["2", "3"]
+    assert [row["match_status"] for row in preview["rows"]] == ["choice_required", "choice_required"]
+    assert [row["incoming"]["actual_shipped_qty"] for row in preview["rows"]] == ["10", "20"]
+    choices = {"matches": {"2": "L1", "3": "L1" if same_target else "L2"}}
+    if shared_package:
+        group = preview["shared_groups"][0]
+        assert [participant["source_row"] for participant in group["participants"]] == [2, 3]
+        assert len({participant["source_key"] for participant in group["participants"]}) == 2
+        choices["allocations"] = {group["group_id"]: {
+            "|m1|row:2": {"net_weight_kg": "8", "gross_weight_kg": "12", "volume_m3": "0.1"},
+            "|m1|row:3": {"net_weight_kg": "16", "gross_weight_kg": "24", "volume_m3": "0.2"},
+        }}
+    result = apply_material_import("B1", preview["preview_revision"], choices, "EDIT-1", "BM1",
+                                   repository=repository, resolver=resolver, signing_key=b"secret")
+    assert result["code"] == "MERGED_PREVIEW_CONFIRMATION_REQUIRED"
+    assert repository.writes == []
+    choices["merged_preview_hash"] = result["merged_preview_hash"]
+    result = apply_material_import("B1", preview["preview_revision"], choices, "EDIT-1", "BM1",
+                                   repository=repository, resolver=resolver, signing_key=b"secret")
+    assert result["ok"] is True
+    assert [(name, changes["actual_shipped_qty"], changes["gross_weight_kg"]) for name, changes, _ in repository.writes] == (
+        [("I1", "30", "36")] if same_target else [("I1", "10", "12"), ("I2", "20", "24")])

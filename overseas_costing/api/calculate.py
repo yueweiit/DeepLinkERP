@@ -144,11 +144,13 @@ def delete_batch(batch_name: str, remark: str | None = None) -> dict:
 
 
 @frappe.whitelist()
-def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
+def recalculate_batch(batch_name: str, version_name: str | None = None,
+                      edit_token: str | None = None, expected_modified: str | None = None) -> dict:
     """触发整票重算。"""
 
-    require_doctype_permission("Overseas Cost Batch", "write", doc=batch_name)
-    return calculate_service.recalculate_batch(batch_name=batch_name, version_name=version_name)
+    batch_name = require_batch_permission(batch_name, "write")
+    return cost_preview_service.calculate_comprehensive_cost(batch_name, version_name,
+        edit_token=edit_token, expected_modified=expected_modified)
 
 
 @frappe.whitelist()
@@ -194,4 +196,15 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
     return cost_preview_service.preview_comprehensive_cost(
         batch_name,
         str(version_name or "") or None,
+    )
+
+
+@frappe.whitelist()
+def calculate_comprehensive_cost(batch_name: str, version_name: str | None = None,
+                                 edit_token: str | None = None, expected_modified: str | None = None) -> dict:
+    """保存当前未确认版本的统一试算，确认和 ERP 推送保持独立。"""
+    batch_name = require_batch_permission(batch_name, "write")
+    return cost_preview_service.calculate_comprehensive_cost(
+        batch_name=batch_name, version_name=str(version_name or "") or None,
+        edit_token=edit_token, expected_modified=expected_modified,
     )

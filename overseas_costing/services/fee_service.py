@@ -165,6 +165,8 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) ->
     extras = []
     duplicate_names: dict[str, list[str]] = {}
     for row in _decorate_historical_rules(existing_fees, transport_mode):
+        if row.get("is_enabled") in (0, False, "0"):
+            continue
         key = str(row.get("logical_fee_key") or "")
         if key in template_by_key:
             if not template_by_key[key].get("virtual"):

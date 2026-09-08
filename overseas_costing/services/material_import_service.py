@@ -62,6 +62,8 @@ SOURCE_KIND_ALIASES = {
     "wiki_sheet": "wiki_sheet",
 }
 
+EXCEL_PACKING_SOURCE_KINDS = frozenset({"wiki_sheet", "approval_attachment", "manual_attachment"})
+
 MAX_MATERIAL_WORKBOOK_BYTES = 20 * 1024 * 1024
 
 
@@ -180,7 +182,7 @@ def _match_candidates(existing: list, incoming: dict) -> list:
 
 
 def _match_wiki_candidates(existing: list, incoming: dict) -> list:
-    """Match a knowledge-base row without inventing missing purchase-line identity."""
+    """Match a packing row while respecting any explicit purchase-line identity."""
 
     trusted_target_key = str(incoming.get("_target_stable_line_key") or "").strip()
     if trusted_target_key:
@@ -188,6 +190,14 @@ def _match_wiki_candidates(existing: list, incoming: dict) -> list:
             item for item in existing
             if _stable_item_key(item) == trusted_target_key
         ]
+
+    if any(incoming.get(field) not in (None, "") for field in (
+        "stable_line_key", "purchase_source_row", "source_excel_row_no"
+    )):
+        explicit = dict(incoming)
+        if explicit.get("purchase_source_row") or explicit.get("source_excel_row_no"):
+            explicit["source_line_no"] = explicit.get("purchase_source_row") or explicit.get("source_excel_row_no")
+        return _match_candidates(existing, explicit)
 
     material_code = _normalized(incoming.get("material_code"))
     if not material_code:
@@ -225,7 +235,7 @@ def build_material_import_preview(existing: list, incoming: list, source: dict) 
         normalized_row.setdefault("source_row", index)
         candidates = (
             _match_wiki_candidates(existing or [], normalized_row)
-            if str((source or {}).get("kind") or "") == "wiki_sheet"
+            if str((source or {}).get("kind") or "") in EXCEL_PACKING_SOURCE_KINDS
             else _match_candidates(existing or [], normalized_row)
         )
         if len(candidates) == 1:
@@ -324,7 +334,10 @@ def _wiki_group_metrics(group: dict, *, allow_uncertain: bool = False) -> dict:
 
 
 def _wiki_source_key(row: dict) -> str:
-    return f"{_normalized(row.get('source_doc_no'))}|{_normalized(row.get('material_code'))}"
+    key = f"{_normalized(row.get('source_doc_no'))}|{_normalized(row.get('material_code'))}"
+    if row.get("_source_row_key"):
+        return f"{key}|row:{row['_source_row_key']}"
+    return f"{key}|{row['_source_target_key']}" if row.get("_source_target_key") else key
 
 
 def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict:
@@ -352,16 +365,23 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
                 }
             )
 
-    def aggregate_key(row: dict) -> tuple[str, str]:
+    def aggregate_key(row: dict) -> tuple[str, str, str, str]:
         material_code = _normalized(row.get("material_code"))
         source_doc_no = _normalized(row.get("source_doc_no"))
+        candidates = _match_wiki_candidates(existing or [], row)
         if not source_doc_no:
-            candidates = _match_wiki_candidates(existing or [], row)
             if len(candidates) == 1:
                 source_doc_no = _normalized(candidates[0].get("source_doc_no"))
-        return (source_doc_no, material_code)
+        sku_targets = [item for item in existing or []
+                       if _normalized(item.get("material_code")) == material_code
+                       and _normalized(item.get("source_doc_no")) == source_doc_no]
+        target_key = _stable_item_key(candidates[0]) if len(candidates) == 1 and len(sku_targets) > 1 else ""
+        # Ambiguous rows must remain independently selectable. Only a proven
+        # unique target makes it safe to sum different source lines here.
+        ambiguous_row = str(row.get("source_row") or "") if len(candidates) > 1 else ""
+        return (source_doc_no, material_code, target_key, ambiguous_row)
 
-    grouped_rows: dict[tuple[str, str], list[dict]] = {}
+    grouped_rows: dict[tuple[str, str, str, str], list[dict]] = {}
     for row in in_batch_rows:
         grouped_rows.setdefault(aggregate_key(row), []).append(row)
 
@@ -435,7 +455,10 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
             seen_keys.add(key)
             participants.append(
                 {
-                    "source_key": f"{key[0]}|{key[1]}",
+                    "source_key": f"{key[0]}|{key[1]}" + (
+                        f"|row:{key[3]}" if key[3] else f"|{key[2]}" if key[2] else ""
+                    ),
+                    **({"source_row": source_row.get("source_row")} if key[3] else {}),
                     "source_doc_no": str(source_row.get("source_doc_no") or ""),
                     "material_code": str(source_row.get("material_code") or ""),
                     "in_batch": bool(_match_wiki_candidates(existing or [], source_row)),
@@ -534,6 +557,11 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
             ),
             "material_code": str(rows[0].get("material_code") or ""),
         }
+        if key[2]:
+            result["_target_stable_line_key"] = key[2]
+            result["_source_target_key"] = key[2]
+        if key[3]:
+            result["_source_row_key"] = key[3]
         product_name = next((row.get("product_name") for row in rows if row.get("product_name")), "")
         if product_name:
             result["product_name"] = str(product_name)
@@ -1207,7 +1235,7 @@ class FrappeMaterialImportRepository:
 def _build_trusted_comparison(existing: list, kind: str, trusted: dict, source: dict) -> dict:
     parsed_preview = trusted.get("preview") or {}
     projection = None
-    if kind == "wiki_sheet":
+    if kind in EXCEL_PACKING_SOURCE_KINDS:
         projection = build_wiki_material_projection(existing, parsed_preview)
         incoming = projection["incoming"]
     else:
@@ -1287,11 +1315,11 @@ def _attach_source_grid(comparison: dict, trusted: dict, existing: list, kind: s
         state = {"source_row": number, "state": "header" if number == parsed.get("header_row") else "other",
                  "material_code": "", "target_stable_line_keys": []}
         if material:
-            candidates = (_match_wiki_candidates(existing, material) if kind == "wiki_sheet"
+            candidates = (_match_wiki_candidates(existing, material) if kind in EXCEL_PACKING_SOURCE_KINDS
                           else _match_candidates(existing, material))
             preview = preview_by_row.get(number) or {}
             state.update({"state": "matched" if len(candidates) == 1 else "choice_required" if candidates
-                          else "outside" if material.get("material_code") and kind == "wiki_sheet" else "unmatched",
+                          else "outside" if material.get("material_code") and kind in EXCEL_PACKING_SOURCE_KINDS else "unmatched",
                           "material_code": str(material.get("material_code") or ""),
                           "target_stable_line_keys": [_stable_item_key(item) for item in candidates],
                           "preview_source_row": preview.get("source_row"),
@@ -1492,14 +1520,14 @@ def apply_material_import(
                 comparison.get("source_validation") or {},
                 choices,
             )
-            if str(claims.get("kind") or "") == "wiki_sheet"
+            if str(claims.get("kind") or "") in EXCEL_PACKING_SOURCE_KINDS
             else None
         )
         if source_validation_error:
             repo.rollback()
             return source_validation_error
 
-        if str(claims.get("kind") or "") == "wiki_sheet":
+        if str(claims.get("kind") or "") in EXCEL_PACKING_SOURCE_KINDS:
             out_of_batch = list(comparison.get("out_of_batch") or [])
             source_grid = comparison.get("source_grid")
             merge_reviews = comparison.get("merge_reviews")

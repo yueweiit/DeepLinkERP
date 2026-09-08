@@ -511,7 +511,9 @@ def _build_new_item_values(batch_doc_name: str, version_name: str, payload: dict
         values["actual_shipped_qty_mode"] = "DEFAULT_PURCHASE"
     if values.get("goods_value") in (None, "") and quantity and unit_price:
         values["goods_value"] = quantity * unit_price
-    values.setdefault("transport_mode", "SEA")
+    from overseas_costing.services.transport_service import prepare_item_transport
+    mode = _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "transport_mode") if _frappe is not None else ""
+    values = prepare_item_transport(values, mode)
     values.setdefault("manual_override_flag", 1)
     values.setdefault("manual_override_reason", "手工新增物料")
     return values
@@ -1877,102 +1879,12 @@ def recalculate_batch(
             "message": invalid_business.get("message") or "当前批次存在已排除审批，不能重新计算。",
         }
 
-    version_context = _get_version_context(resolved_version_name)
-    fx_rmb_to_mxn = _to_float(version_context.get("fx_rmb_to_mxn"), default=DEFAULT_FX_RMB_TO_MXN) or DEFAULT_FX_RMB_TO_MXN
-    fx_usd_to_rmb = _to_float(version_context.get("fx_usd_to_rmb")) or None
-    rules = _get_rules(batch_doc_name, resolved_version_name)
-    candidate_rules = [rule for rule in rules if _is_rule_enabled(rule) and _to_float(rule.get("amount"))]
-    if not candidate_rules:
-        candidate_rules = _fallback_rules_from_items(items)
-    ai_allocation = allocation_service.suggest_allocation_rules_with_ai(
-        items=items,
-        candidate_rules=candidate_rules,
-        context={
-            "batch_name": batch_doc_name,
-            "version_name": resolved_version_name,
-            "transport_mode": items[0].get("transport_mode") if items else "",
-            "fx_rmb_to_mxn": fx_rmb_to_mxn,
-            "fx_usd_to_rmb": fx_usd_to_rmb,
-        },
-    )
-    rules_for_calculation = ai_allocation.get("rules") or candidate_rules
-    calculated_rows, summary_snapshot = calculate_item_rows(
-        items,
-        rules_for_calculation,
-        fx_rmb_to_mxn=fx_rmb_to_mxn,
-        fx_usd_to_rmb=fx_usd_to_rmb,
-    )
-    summary_snapshot["ai_allocation"] = {
-        "ok": bool(ai_allocation.get("ok")),
-        "action": ai_allocation.get("action") or "",
-        "source": ai_allocation.get("source") or "system",
-        "model": ai_allocation.get("model") or "",
-        "message": ai_allocation.get("message") or ai_allocation.get("reason") or "",
-        "rule_count": len(rules_for_calculation),
-    }
-    summary_snapshot["calculation_review"] = _build_calculation_review(
-        calculated_rows,
-        summary_snapshot,
-        rules_for_calculation,
-        ai_allocation,
-    )
+    from overseas_costing.services import cost_preview_service
 
-    for row in calculated_rows:
-        updates = {fieldname: row.get(fieldname) for fieldname in DEFAULT_CALC_FIELDS}
-        _frappe.db.set_value("Overseas Cost Item", row["name"], updates, update_modified=False)
-
-    _frappe.db.set_value(
-        "Overseas Cost Batch",
-        batch_doc_name,
-        {
-            "status": "Calculated",
-            "item_count": summary_snapshot["item_count"],
-            "total_goods_value": summary_snapshot["total_goods_value"],
-            "total_gross_weight_kg": summary_snapshot["total_gross_weight_kg"],
-            "estimated_total_cost_rmb": summary_snapshot["total_cost_rmb"],
-        },
-        update_modified=True,
+    return cost_preview_service.calculate_comprehensive_cost(
+        batch_doc_name, resolved_version_name, trusted=True,
+        commit_after_calculate=commit_after_recalculate,
     )
-    _frappe.db.set_value(
-        "Overseas Cost Version",
-        resolved_version_name,
-        {
-            "summary_snapshot_json": _json_dumps(summary_snapshot),
-            "rule_snapshot_json": _json_dumps(rules_for_calculation),
-            "calculated_at": _now(),
-        },
-        update_modified=True,
-    )
-    allocation_source = "AI基础分摊" if ai_allocation.get("ok") else "系统基础分摊"
-    _insert_audit_log(
-        batch_doc_name=batch_doc_name,
-        version_name=resolved_version_name,
-        action_type="RECALCULATE",
-        action_remark=f"重算完成，{allocation_source}规则数 {summary_snapshot['rule_count']}，明细数 {summary_snapshot['item_count']}",
-    )
-    if commit_after_recalculate:
-        _frappe.db.commit()
-
-    ai_message = ai_allocation.get("message") or ai_allocation.get("reason") or ""
-    if ai_allocation.get("ok"):
-        result_message = "整票重算完成，AI 已选择基础分摊口径并填入每行分摊金额。"
-    elif "没有可供 AI 判断的费用池" in ai_message:
-        result_message = "整票重算完成，当前没有可用费用池；已填入货值/重量比例和基础综合成本，费用分摊金额为 0。"
-    elif "未配置 AI 接口密钥" in ai_message:
-        result_message = "整票重算完成，AI 接口密钥未配置，已使用系统基础规则。"
-    elif ai_message:
-        result_message = f"整票重算完成，AI 未生成分摊口径：{ai_message}"
-    else:
-        result_message = "整票重算完成，AI 未生成分摊口径，已使用系统基础分摊规则。"
-
-    return {
-        "ok": True,
-        "batch_name": batch_doc_name,
-        "version_name": resolved_version_name,
-        "summary_snapshot": summary_snapshot,
-        "allocation_rules": rules_for_calculation,
-        "message": result_message,
-    }
 
 
 def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str) -> dict:
@@ -2044,15 +1956,20 @@ def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str
     }
 
 
+def _lock_version_lifecycle_batch(batch_doc_name: str) -> None:
+    # Saved calculation obtains these locks in the same batch -> version order.
+    _frappe.db.sql(
+        "SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
+        (batch_doc_name,),
+    )
+
+
 def create_version(batch_name: str, source_version_name: str, version_type: str) -> dict:
     if _frappe is None:
         audit_service.build_audit_stub("CREATE_VERSION", {"batch_name": batch_name, "version_type": version_type})
         return {
-            "ok": True,
-            "dry_run": True,
-            "batch_name": batch_name,
-            "source_version_name": source_version_name,
-            "version_type": version_type,
+            "ok": True, "dry_run": True, "batch_name": batch_name,
+            "source_version_name": source_version_name, "version_type": version_type,
             "message": "当前未连接 Frappe，已返回版本创建预览。",
         }
 
@@ -2060,66 +1977,80 @@ def create_version(batch_name: str, source_version_name: str, version_type: str)
     if not batch_doc_name:
         return {"ok": False, "message": f"未找到批次：{batch_name}"}
 
-    source_version = source_version_name or _resolve_version_name(batch_doc_name)
-    if not source_version:
-        return {"ok": False, "message": "没有可复制的源版本。"}
+    try:
+        _lock_version_lifecycle_batch(batch_doc_name)
+        source_version = source_version_name or _resolve_version_name(batch_doc_name)
+        if not source_version:
+            _frappe.db.rollback()
+            return {"ok": False, "message": "没有可复制的源版本。"}
+        _frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Version` WHERE name=%s AND batch=%s FOR UPDATE",
+            (source_version, batch_doc_name),
+        )
+        if _frappe.db.get_value("Overseas Cost Version", source_version, "batch") != batch_doc_name:
+            _frappe.db.rollback()
+            return {"ok": False, "message": "源版本不属于当前批次，无法复制。"}
 
-    version_code = f"{version_type}-{_now().replace(':', '').replace('-', '').replace(' ', '-')}"
-    source_doc = _frappe.get_doc("Overseas Cost Version", source_version)
-    new_version = _frappe.get_doc(
-        {
-            "doctype": "Overseas Cost Version",
-            "batch": batch_doc_name,
-            "version_code": version_code,
-            "version_type": version_type,
-            "status": "Active",
-            "is_current": 0,
-            "source_type": "Clone",
+        for doctype in ("Overseas Cost Item", "Overseas Cost Allocation Rule"):
+            _frappe.db.sql(
+                f"SELECT name FROM `tab{doctype}` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
+                (batch_doc_name, source_version),
+            )
+        version_code = f"{version_type}-{_now().replace(':', '').replace('-', '').replace(' ', '-')}"
+        source_doc = _frappe.get_doc("Overseas Cost Version", source_version)
+        new_version = _frappe.get_doc({
+            "doctype": "Overseas Cost Version", "batch": batch_doc_name,
+            "version_code": version_code, "version_type": version_type,
+            "status": "Active", "is_current": 0, "source_type": "Clone",
             "fx_usd_to_rmb": getattr(source_doc, "fx_usd_to_rmb", None),
             "fx_rmb_to_mxn": getattr(source_doc, "fx_rmb_to_mxn", None),
-            "rule_snapshot_json": getattr(source_doc, "rule_snapshot_json", None),
-            "summary_snapshot_json": getattr(source_doc, "summary_snapshot_json", None),
+            "rule_snapshot_json": None, "summary_snapshot_json": None, "calculated_at": None,
             "remark": f"Cloned from {source_version}",
-        }
-    ).insert(ignore_permissions=True)
+        }).insert(ignore_permissions=True)
 
-    for row in _frappe.get_all(
-        "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": source_version},
-        fields=["name"],
-        limit_page_length=10000,
-    ):
-        item_doc = _frappe.get_doc("Overseas Cost Item", row["name"])
-        new_item = _frappe.copy_doc(item_doc)
-        new_item.version = new_version.name
-        new_item.insert(ignore_permissions=True)
-
-    for row in _frappe.get_all(
-        "Overseas Cost Allocation Rule",
-        filters={"batch": batch_doc_name, "version": source_version},
-        fields=["name"],
-        limit_page_length=1000,
-    ):
-        rule_doc = _frappe.get_doc("Overseas Cost Allocation Rule", row["name"])
-        new_rule = _frappe.copy_doc(rule_doc)
-        new_rule.version = new_version.name
-        new_rule.insert(ignore_permissions=True)
-
-    _insert_audit_log(
-        batch_doc_name=batch_doc_name,
-        version_name=new_version.name,
-        action_type="CREATE_VERSION",
-        action_remark=f"从 {source_version} 复制生成 {version_type} 版本",
-    )
-    _frappe.db.commit()
+        for doctype, limit in (("Overseas Cost Item", 10000), ("Overseas Cost Allocation Rule", 1000)):
+            for row in _frappe.get_all(doctype, filters={"batch": batch_doc_name, "version": source_version},
+                                       fields=["name"], limit_page_length=limit):
+                copied = _frappe.copy_doc(_frappe.get_doc(doctype, row["name"]))
+                copied.batch = batch_doc_name
+                copied.version = new_version.name
+                copied.insert(ignore_permissions=True)
+        _frappe.db.set_value("Overseas Cost Batch", batch_doc_name, "version_count",
+            _frappe.db.count("Overseas Cost Version", {"batch": batch_doc_name}), update_modified=True)
+        _insert_audit_log(
+            batch_doc_name=batch_doc_name, version_name=new_version.name, action_type="CREATE_VERSION",
+            action_remark=f"从 {source_version} 复制生成 {version_type} 版本，须重新试算",
+        )
+        _frappe.db.commit()
+    except Exception:
+        _frappe.db.rollback()
+        raise
 
     return {
-        "ok": True,
-        "batch_name": batch_doc_name,
-        "source_version_name": source_version,
-        "version_name": new_version.name,
-        "version_type": version_type,
-        "message": "版本已创建。",
+        "ok": True, "batch_name": batch_doc_name, "source_version_name": source_version,
+        "version_name": new_version.name, "version_type": version_type, "message": "版本已创建。",
+    }
+
+
+def _batch_values_for_current_version(batch_doc_name: str, version: dict) -> dict:
+    historical = version.get("status") in {"Confirmed", "Archived"}
+    summary = _load_json_dict(version.get("summary_snapshot_json")) if historical else {}
+    total_cost = _to_float(summary.get("total_cost_rmb"))
+    return {
+        "current_version": version["name"],
+        # Active versions may have been edited since their snapshot; always
+        # require a fresh calculation after switching back to one.
+        "status": "Confirmed" if historical else "Dirty",
+        "confirm_status": "Confirmed" if historical else "Pending",
+        "is_locked": 1 if historical else 0,
+        "item_count": int(summary.get("item_count") or _frappe.db.count(
+            "Overseas Cost Item", {"batch": batch_doc_name, "version": version["name"]})),
+        "total_goods_value": _to_float(summary.get("total_goods_value")),
+        "total_gross_weight_kg": _to_float(summary.get("total_gross_weight_kg")),
+        "estimated_total_cost_rmb": total_cost,
+        "actual_total_cost_rmb": total_cost if version.get("version_type") in {"Actual", "Adjustment"} else 0,
+        "writeback_status": "Not Started", "writeback_time": None,
+        "writeback_message": "", "erp_target_doc": "",
     }
 
 
@@ -2127,47 +2058,49 @@ def switch_version(batch_name: str, target_version_name: str) -> dict:
     if _frappe is None:
         audit_service.build_audit_stub("SWITCH_VERSION", {"batch_name": batch_name, "target_version_name": target_version_name})
         return {
-            "ok": True,
-            "dry_run": True,
-            "batch_name": batch_name,
-            "target_version_name": target_version_name,
-            "message": "当前未连接 Frappe，已返回版本切换预览。",
+            "ok": True, "dry_run": True, "batch_name": batch_name,
+            "target_version_name": target_version_name, "message": "当前未连接 Frappe，已返回版本切换预览。",
         }
 
     batch_doc_name = _resolve_batch_name(batch_name)
     if not batch_doc_name:
         return {"ok": False, "message": f"未找到批次：{batch_name}"}
 
-    versions = _frappe.get_all(
-        "Overseas Cost Version",
-        filters={"batch": batch_doc_name},
-        fields=["name"],
-        limit_page_length=1000,
-    )
-    version_names = {row["name"] for row in versions}
-    if target_version_name not in version_names:
-        return {
-            "ok": False,
-            "batch_name": batch_doc_name,
-            "target_version_name": target_version_name,
-            "message": "目标版本不属于当前批次，无法切换。",
-        }
+    try:
+        _lock_version_lifecycle_batch(batch_doc_name)
+        _frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Version` WHERE batch=%s ORDER BY name FOR UPDATE",
+            (batch_doc_name,),
+        )
+        versions = _frappe.get_all(
+            "Overseas Cost Version", filters={"batch": batch_doc_name},
+            fields=["name", "status", "version_type", "summary_snapshot_json"], limit_page_length=1000,
+        )
+        target = next((row for row in versions if row["name"] == target_version_name), None)
+        if target is None:
+            _frappe.db.rollback()
+            return {"ok": False, "batch_name": batch_doc_name, "target_version_name": target_version_name,
+                    "message": "目标版本不属于当前批次，无法切换。"}
+        if _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "current_version") == target_version_name:
+            _frappe.db.commit()
+            return {"ok": True, "batch_name": batch_doc_name, "target_version_name": target_version_name,
+                    "unchanged": True, "message": "所选版本已是当前版本。"}
 
-    for row in versions:
-        _frappe.db.set_value("Overseas Cost Version", row["name"], "is_current", 1 if row["name"] == target_version_name else 0)
+        batch_values = _batch_values_for_current_version(batch_doc_name, target)
+        old_values = _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, list(batch_values), as_dict=True)
+        for row in versions:
+            _frappe.db.set_value("Overseas Cost Version", row["name"], "is_current",
+                1 if row["name"] == target_version_name else 0, update_modified=False)
+        _frappe.db.set_value("Overseas Cost Batch", batch_doc_name, batch_values, update_modified=True)
+        _insert_audit_log(
+            batch_doc_name=batch_doc_name, version_name=target_version_name, action_type="SWITCH_VERSION",
+            field_name="current_version", old_value=_json_dumps(old_values), new_value=_json_dumps(batch_values),
+            action_remark=f"切换当前版本为 {target_version_name}",
+        )
+        _frappe.db.commit()
+    except Exception:
+        _frappe.db.rollback()
+        raise
 
-    _frappe.db.set_value("Overseas Cost Batch", batch_doc_name, "current_version", target_version_name, update_modified=True)
-    _insert_audit_log(
-        batch_doc_name=batch_doc_name,
-        version_name=target_version_name,
-        action_type="SWITCH_VERSION",
-        action_remark=f"切换当前版本为 {target_version_name}",
-    )
-    _frappe.db.commit()
-
-    return {
-        "ok": True,
-        "batch_name": batch_doc_name,
-        "target_version_name": target_version_name,
-        "message": "当前版本已切换。",
-    }
+    return {"ok": True, "batch_name": batch_doc_name, "target_version_name": target_version_name,
+            "message": "当前版本已切换。"}

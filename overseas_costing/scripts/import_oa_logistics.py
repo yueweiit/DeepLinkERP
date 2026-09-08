@@ -3800,12 +3800,12 @@ def build_batch_values_from_approval(item: dict) -> dict:
     oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
     oa_attachments = item.get("oa_attachments") or oa_form_attachments
     attachment_count = len(oa_attachments) if oa_attachments else _count_dingtalk_attachments(form_fields)
-    transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or "SEA"
+    transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or ""
     transport_mode_raw = item.get("transport_mode_raw") or ""
     business_type = normalize_business_type(
         item.get("business_type") or transport_mode_raw,
         transport_mode=transport_mode,
-    ) or "SEA_STANDARD"
+    ) or ""
     subsidiary = extract_subsidiary_from_approval(item)
     values = {
         "batch_no": batch_no,
@@ -4062,7 +4062,11 @@ def _sync_oa_goods_items(
         }
 
     created_names: list[str] = []
+    from overseas_costing.services.transport_service import prepare_item_transport
+
+    batch_transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     for values in item_values:
+        values = prepare_item_transport(values, batch_transport_mode)
         doc_values = _filter_item_values(
             {
                 **values,
@@ -4170,7 +4174,14 @@ def _build_purchase_expense_item_doc_values(
             }
         ),
     }
-    return _filter_item_values(values)
+    from overseas_costing.services.transport_service import prepare_item_transport
+
+    batch_transport_mode = (
+        frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode")
+        if frappe is not None else approval_item.get("transport_mode") or approval_item.get("transport_mode_raw") or ""
+    )
+    values["transport_mode"] = row.get("transport_mode") or ""
+    return _filter_item_values(prepare_item_transport(values, batch_transport_mode))
 
 
 def _replace_items_with_purchase_expense_rows(
@@ -4389,7 +4400,11 @@ def _restore_main_logistics_items_after_excluded_purchases(
     created_names: list[str] = []
     try:
         frappe.db.delete("Overseas Cost Item", {"batch": batch_name, "version": version_name})
+        from overseas_costing.services.transport_service import prepare_item_transport
+
+        batch_transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
         for values in main_item_values:
+            values = prepare_item_transport(values, batch_transport_mode)
             doc_values = _filter_item_values(
                 {
                     **values,
@@ -4927,6 +4942,15 @@ def _sync_oa_logistics_allocation_rule(
             list(values.keys()),
             as_dict=True,
         ) or {}
+        if current.get("is_enabled") in (0, "0", False):
+            return {
+                "action": "retired",
+                "ok": True,
+                "rule_name": existing_name,
+                "created_count": 0,
+                "updated_count": 0,
+                "reason": "该 OA 物流规则已停用，同步保留停用状态。",
+            }
         if current and all(_values_match(current.get(fieldname), value) for fieldname, value in values.items()):
             return {
                 "action": "unchanged",

@@ -1648,12 +1648,25 @@ class OverseasCostWorkbench {
     }
     this.activeBatchName = batch.name;
     this.exportPinnedBatchName = batch.name;
+    let acquired = null;
     try {
+      const inDetail = this.detailState?.batchName === batch.name;
+      if (inDetail && this.materialFeeState?.batchName === batch.name) {
+        if (!(await this.flushMaterialFeeInputs(this.materialFeeState))) return;
+      }
+      if (inDetail) {
+        if (!(await this.ensureEditSession())) return;
+      } else {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "无法获取编辑权。");
+      }
       const result = await this.call(
         "overseas_costing.api.calculate.recalculate_batch",
         {
           batch_name: batch.name,
           version_name: batch.current_version,
+          edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+          expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
         true
       );
@@ -1661,6 +1674,7 @@ class OverseasCostWorkbench {
         throw new Error(result?.message || "重新试算被服务器拒绝，未修改批次数据。");
       }
       const summary = result.summary_snapshot || {};
+      if (result.saved) this.acceptSavedComprehensiveCost(result, batch.name);
       this.applyRecalculateSummary(batch.name, summary, result.allocation_rules || []);
       this.lastRecalculateResult = { batch_name: batch.name, summary };
       if (this.resetBatchResultPreview) {
@@ -1676,10 +1690,12 @@ class OverseasCostWorkbench {
         if (this.renderWorkbenchBatchList) this.renderWorkbenchBatchList();
       }
       this.recordUsage("RECALCULATE", { batch, remark: "重新试算批次成本" });
-      frappe.show_alert({ message: result.message || "重新试算完成", indicator: summary.ai_allocation?.ok ? "green" : "orange" });
+      frappe.show_alert({ message: result.message || "重新试算完成", indicator: "green" });
     } catch (error) {
       this.recordUsage("RECALCULATE", { batch, status: "Failed", remark: error.message || "重新试算失败" });
       this.showError(error);
+    } finally {
+      if (acquired?.edit_token) await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token });
     }
   }
 
@@ -4124,7 +4140,7 @@ class OverseasCostWorkbench {
     const reference = batch.batch_no || batch.source_approval_no || batch.name;
     const logisticsNo = batch.waybill_no || batch.customs_no || "未填写物流单号";
     const action = OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
-    const totalCost = batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
+    const totalCost = batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
     const expanded = this.resultPreviewState?.batchName === batch.name;
     return `
       <div class="ocw-workbench-record ${expanded ? "is-expanded" : ""}" data-batch-name="${this.escape(batch.name)}">
@@ -8630,8 +8646,9 @@ class OverseasCostWorkbench {
   }
 
   batchTotalCostNumber(batch, items, hasLoadedItems) {
+    if (batch.summary_snapshot?.calculation_schema === 2) return Number(batch.summary_snapshot.total_cost_rmb || 0);
     const loadedValue = hasLoadedItems ? this.sumRowsNumber(items, "total_cost_rmb") : 0;
-    const batchValue = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const batchValue = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     return this.isPositive(loadedValue) ? loadedValue : batchValue;
   }
 
@@ -9463,7 +9480,7 @@ class OverseasCostWorkbench {
             <div class="ocw-mf-material-actions">
               <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
               <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
-              <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">从装箱计划表获取</button>
+              <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
               <button class="ocw-primary-btn" type="button" data-action="mf-import-xlsx">导入 Excel 补资料</button>
             </div>
           </div>
@@ -9627,8 +9644,11 @@ class OverseasCostWorkbench {
       ...(this.detailState.header || {}),
       ...(detail.header || {}),
       name: detail.batch_name || detail.header?.name || batchName,
+      summary_snapshot: detail.summary || this.detailState.header?.summary_snapshot || {},
     };
     this.detailState.header = header;
+    const batchIndex = (this.batches || []).findIndex((row) => row.name === batchName);
+    if (batchIndex >= 0) this.batches[batchIndex] = { ...this.batches[batchIndex], ...header };
     this.detailState.versionName = detail.version_name || header.current_version || this.detailState.versionName || "";
     if (header.modified) this.detailState.expectedModified = header.modified;
   }
@@ -9933,7 +9953,14 @@ class OverseasCostWorkbench {
 
   async trackMaterialFeeWrite(operation) {
     const state = this.ensureMaterialFeeState();
-    const pending = operation();
+    const versionName = this.detailState.versionName;
+    const pending = (async () => {
+      if (state.calculationWrite) {
+        try { await state.calculationWrite; } catch (_error) { /* The trial reports its own failure. */ }
+        if (this.materialFeeState !== state || this.detailState.batchName !== state.batchName || this.detailState.versionName !== versionName) return false;
+      }
+      return operation();
+    })();
     state.pendingWrites.add(pending);
     try {
       return await pending;
@@ -10300,8 +10327,15 @@ class OverseasCostWorkbench {
   }
 
   async flushMaterialFeeInputs(state) {
+    if (state.calculationWrite) await state.calculationWrite;
     while (state.pendingWrites.size) await Promise.all([...state.pendingWrites]);
-    if (this.materialFeeState !== state || this.detailState.tab !== "documents") return false;
+    if (this.materialFeeState !== state || this.detailState.batchName !== state.batchName) return false;
+    if (this.detailState.tab !== "documents") {
+      if (Object.keys(state.materialDrafts).length || Object.keys(state.feeDrafts).length || Object.keys(state.materialSaveErrors).length) {
+        throw new Error("有资料与费用修改尚未保存，请返回资料与费用完成保存后再试算。");
+      }
+      return true;
+    }
     for (const key of Object.keys(state.materialDrafts)) {
       const draft = state.materialDrafts[key];
       if (draft.error) throw new Error(`请先处理物料输入：${draft.error}`);
@@ -10347,15 +10381,37 @@ class OverseasCostWorkbench {
     this.$root.find("[data-action='mf-preview-cost']").prop("disabled", true).text("计算中…");
     try {
       if (!(await this.flushMaterialFeeInputs(state)) || !isCurrent()) return false;
+      if (this.ensureEditSession && !(await this.ensureEditSession())) return false;
+      if (!isCurrent()) return false;
       const requestId = state.requestId;
       const feeRequestId = state.feeRequestId;
       const inputRevision = state.inputRevision;
-      const preview = await this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
-        batch_name: batchName,
-        version_name: versionName || null,
-      });
-      if (!isCurrent() || state.requestId !== requestId || state.feeRequestId !== feeRequestId || state.inputRevision !== inputRevision) return false;
-      if (!preview?.ok) throw new Error(preview?.message || "试算失败，请稍后重试。");
+      const isUnchangedView = () => isCurrent() && state.requestId === requestId
+        && state.feeRequestId === feeRequestId && state.inputRevision === inputRevision;
+      const calculationWrite = (async () => {
+        const result = await this.call("overseas_costing.api.calculate.calculate_comprehensive_cost", {
+          batch_name: batchName,
+          version_name: versionName || null,
+          edit_token: this.detailState.editToken,
+          expected_modified: this.detailState.expectedModified,
+        });
+        if (!result?.ok) throw new Error(result?.message || "试算失败，请稍后重试。");
+        // A saved trial changed the server revision even when its original view is stale.
+        if (result.saved) this.acceptSavedComprehensiveCost(result, batchName, {
+          versionName, preserveDirty: !isUnchangedView(),
+        });
+        return result;
+      })();
+      state.calculationWrite = calculationWrite;
+      let preview;
+      try {
+        preview = await calculationWrite;
+      } finally {
+        if (state.calculationWrite === calculationWrite) state.calculationWrite = null;
+      }
+      if (!isUnchangedView()) return false;
+      if (preview.saved && preview.batch_modified && this.detailState.expectedModified
+        && String(this.detailState.expectedModified) > String(preview.batch_modified)) return false;
       state.preview = preview;
       this.renderMaterialFeeWorkspace();
       if (scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -10365,6 +10421,29 @@ class OverseasCostWorkbench {
       state.previewRunning = false;
       if (isCurrent()) this.$root.find("[data-action='mf-preview-cost']").prop("disabled", false).text("开始试算");
     }
+  }
+
+  acceptSavedComprehensiveCost(result, batchName, { versionName = result.version_name, preserveDirty = false } = {}) {
+    const summary = result.summary_snapshot || {};
+    const updates = { status: "Calculated", modified: result.batch_modified,
+      estimated_total_cost_rmb: result.summary?.total_cost_rmb, summary_snapshot: summary,
+      item_count: summary.item_count, total_goods_value: summary.total_goods_value };
+    const index = (this.batches || []).findIndex((row) => row.name === batchName);
+    const hasNewerRevision = (modified) => Boolean(modified && result.batch_modified && String(modified) > String(result.batch_modified));
+    if (index >= 0 && (!versionName || !this.batches[index].current_version || this.batches[index].current_version === versionName)
+      && !hasNewerRevision(this.batches[index].modified)) {
+      this.batches[index] = { ...this.batches[index], ...updates };
+    }
+    if (this.detailState.batchName === batchName && (!versionName || this.detailState.versionName === versionName)
+      && !hasNewerRevision(this.detailState.expectedModified)) {
+      this.detailState.header = { ...(this.detailState.header || {}), ...updates };
+      this.detailState.expectedModified = result.batch_modified || this.detailState.expectedModified;
+      this.detailState.skuRequestId = (this.detailState.skuRequestId || 0) + 1;
+      this.detailState.skuResult = null;
+      if (!preserveDirty) this.detailState.dirty = false;
+      if (this.materialFeeState?.batchName === batchName) this.materialFeeState.preview = result;
+    }
+    if (this.resetBatchResultPreview) this.resetBatchResultPreview({ clearCache: true, render: false });
   }
 
   materialFeeExclusionReason(fee) {
@@ -10398,7 +10477,9 @@ class OverseasCostWorkbench {
 
   renderMaterialFeeCostTable() {
     const state = this.ensureMaterialFeeState();
-    const preview = state.preview || {};
+    const header = this.detailState.header || {};
+    const savedPreview = header.summary_snapshot?.comprehensive_cost;
+    const preview = savedPreview && state.preview?.read_only !== false ? savedPreview : state.preview || {};
     const summary = preview.summary || {};
     const items = preview.items || [];
     const hasUnsaved = Object.keys(state.feeDrafts).length || Object.keys(state.materialDrafts).length || Object.keys(state.materialSaveErrors).length;
@@ -10409,15 +10490,15 @@ class OverseasCostWorkbench {
     }).join("");
     return `<section class="ocw-mf-section ocw-mf-cost-section">
       <div class="ocw-mf-section-title">
-        <div><span>03</span><h3>SKU 综合单价试算</h3><p>系统按费用类型自动分摊，汇总为人民币；未计入费用会单独说明。</p></div>
+        <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p></div>
         <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${summary.is_complete ? "is-complete" : "is-partial"}">${summary.is_complete ? "完整成本" : "非完整成本"}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
       </div>
       <div class="ocw-mf-cost-summary">
-        <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
+        <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : header.status === "Dirty" ? "上次试算 · 结果待更新" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
         <dl><div><dt>采购金额</dt><dd>${this.escape(summary.purchase_goods_value_rmb || "0.00")}</dd></div><div><dt>直接费用</dt><dd>${this.escape(summary.direct_fees_rmb || "0.00")}</dd></div><div><dt>分摊费用</dt><dd>${this.escape(summary.allocated_fees_rmb || "0.00")}</dd></div><div><dt>已计入费用</dt><dd>${Number(summary.included_fee_count || 0)} 笔</dd></div></dl>
       </div>
       <p class="ocw-mf-trial-note">试算不生成正式成本版本；凭证待补单独保留，已知金额可先参与计算。${summary.estimated_fee_count ? `含 ${Number(summary.estimated_fee_count)} 笔暂估费用，需后续核实。` : ""}</p>
-      <div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>采购货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>
+      <div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>采购货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}${Number(item.shipping_quantity_difference) < 0 ? `<small class="ocw-mf-warning">少发 ${this.escape(String(-Number(item.shipping_quantity_difference)))} ${this.escape(item.shipping_unit_cost?.uom || "")}</small>` : ""}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>
       ${preview.excluded_fees?.length ? `<div class="ocw-mf-excluded"><strong>未计入费用</strong>${preview.excluded_fees.map((fee) => `<span>${this.escape(fee.expense_category || fee.fee_key || "费用")} · ${this.escape(this.materialFeeExclusionReason(fee))}</span>`).join("")}</div>` : ""}
       ${(preview.incomplete_reasons || []).filter((reason) => reason.item_key || reason.reason_code === "MATERIAL_ITEMS_REQUIRED").length ? `<div class="ocw-mf-excluded"><strong>物料待补</strong>${preview.incomplete_reasons.filter((reason) => reason.item_key || reason.reason_code === "MATERIAL_ITEMS_REQUIRED").map((reason) => `<span>${this.escape(items.find((item) => item.stable_line_key === reason.item_key)?.material_code || "")} ${this.escape(reason.message || "请补充物料资料")}</span>`).join("")}</div>` : ""}
       <details class="ocw-mf-allocation-notes"><summary>查看系统分摊说明</summary><p>海运与港杂优先按体积，空运与快递按计费重，配送按毛重，清关与税费按采购货值。适用物料的体积或重量不齐全时，整笔费用自动按完整的采购货值分摊。</p><ul>${allocationNotes || "<li>本次暂无已计入费用。</li>"}</ul></details>
@@ -10471,7 +10552,7 @@ class OverseasCostWorkbench {
             required: false,
           }, uploaded).then((registered) => {
             const attachment = registered?.attachment?.name;
-            if (attachment) this.previewMaterialXlsxImport(attachment);
+            if (attachment) this.openWikiMaterialImportDialog({ sourceTab: "local" }).then((sourceDialog) => this.previewMaterialAttachmentSource(sourceDialog, attachment)).catch((error) => this.showError(error));
           }).catch((error) => this.showError(error));
         },
       });
@@ -10479,9 +10560,9 @@ class OverseasCostWorkbench {
     }).catch((error) => this.showError(error));
   }
 
-  async openWikiMaterialImportDialog() {
+  async openWikiMaterialImportDialog(options = {}) {
     const dialog = new frappe.ui.Dialog({
-      title: "从装箱计划表获取",
+      title: "获取装箱资料",
       fields: [{
         fieldtype: "HTML",
         fieldname: "wiki_sources",
@@ -10489,6 +10570,10 @@ class OverseasCostWorkbench {
       }],
     });
     dialog.wikiMaterialSelectedSource = "";
+    dialog.materialBatchName = this.detailState.batchName;
+    dialog.materialVersionName = this.detailState.versionName;
+    dialog.materialSourceTab = options.sourceTab || "wiki";
+    dialog.materialAttachmentSources = [];
     dialog.wikiMaterialRefreshedSources = new Set();
     dialog.wikiMaterialWorkbooks = [];
     dialog.wikiMaterialBusy = "";
@@ -10503,6 +10588,22 @@ class OverseasCostWorkbench {
     });
     dialog.$wrapper
       .off(".ocwMfWiki")
+      .on("click.ocwMfWiki", "[data-mf-source-tab]", (event) => {
+        if (dialog.wikiMaterialBusy) return;
+        dialog.materialSourceTab = $(event.currentTarget).attr("data-mf-source-tab");
+        this.renderWikiMaterialSources(dialog);
+      })
+      .on("click.ocwMfWiki", "[data-mf-attachment-source]", (event) => {
+        const $button = $(event.currentTarget);
+        this.previewMaterialAttachmentSource(dialog, $button.attr("data-mf-attachment-source"), $button.attr("data-sheet-name") || "")
+          .catch((error) => this.showWikiMaterialSourceError(dialog, error));
+      })
+      .on("click.ocwMfWiki", "[data-action='mf-source-upload']", () => {
+        dialog.hide(); this.openMaterialXlsxUploader();
+      })
+      .on("click.ocwMfWiki", "[data-action='mf-source-reload']", () => {
+        this.loadWikiMaterialSources(dialog).catch((error) => this.showWikiMaterialSourceError(dialog, error));
+      })
       .on("click.ocwMfWiki", "[data-mf-wiki-source]", (event) => {
         dialog.wikiMaterialSelectedSource = $(event.currentTarget).attr("data-source-id") || "";
         this.renderWikiMaterialSources(dialog);
@@ -10531,6 +10632,7 @@ class OverseasCostWorkbench {
         dialog.hide();
       });
     await this.loadWikiMaterialSources(dialog);
+    return dialog;
   }
 
   async loadWikiMaterialSources(dialog, { preserveOnError = false } = {}) {
@@ -10538,6 +10640,7 @@ class OverseasCostWorkbench {
       batch_name: this.detailState.batchName,
     }, true);
     const nextWorkbooks = result?.wiki_workbooks || [];
+    dialog.materialAttachmentSources = [...(result?.approval_sources || []), ...(result?.manual_attachments || [])];
     if (
       preserveOnError
       && result?.wiki_error
@@ -10569,6 +10672,10 @@ class OverseasCostWorkbench {
 
   renderWikiMaterialSources(dialog) {
     const $target = dialog.$wrapper.find("[data-area='mf-wiki-sources']");
+    if (dialog.materialSourceTab && dialog.materialSourceTab !== "wiki") {
+      $target.html(this.renderMaterialSourceTabs(dialog) + this.renderMaterialAttachmentSources(dialog));
+      return;
+    }
     const sheets = dialog.wikiMaterialSources || [];
     const selectedId = String(dialog.wikiMaterialSelectedSource || "");
     const busy = String(dialog.wikiMaterialBusy || "");
@@ -10591,6 +10698,7 @@ class OverseasCostWorkbench {
       </article>`;
     }).join("");
     $target.html(`
+      ${this.renderMaterialSourceTabs(dialog)}
       <div class="ocw-mf-wiki-toolbar">
         <label class="ocw-mf-wiki-search"><span>查找 Sheet</span><input type="search" data-action="mf-wiki-filter" placeholder="输入装箱单、日期或品类"></label>
         <button class="ocw-outline-btn" type="button" data-action="mf-wiki-refresh-all" ${busy ? "disabled" : ""}>${busy === "global" ? this.escape(dialog.wikiMaterialProgress || "正在刷新…") : "刷新最新数据"}</button>
@@ -10600,6 +10708,75 @@ class OverseasCostWorkbench {
       <div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无可用 Sheet</strong><span>请先确认服务端装箱计划表同步状态。</span></div>`}</div>
       <footer class="ocw-mf-import-sticky-footer"><span>${selectedId ? `已选：${this.escape((sheets.find((sheet) => String(sheet.source_id) === selectedId) || {}).source_label || selectedId)}` : "请选择一个 Sheet"}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-wiki-cancel">取消</button></div></footer>
     `);
+  }
+
+  renderMaterialSourceTabs(dialog) {
+    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["form", "钉钉表单附件"], ["comment", "评论附件与评论"], ["local", "本地上传"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
+  }
+
+  renderMaterialAttachmentSources(dialog) {
+    const rows = (dialog.materialAttachmentSources || []).filter((row) => {
+      if (dialog.materialSourceTab === "local") return row.source_kind === "manual_attachment";
+      const comment = row.source_kind === "approval_comment" || row.origin === "Comment";
+      return dialog.materialSourceTab === "comment" ? comment : row.source_kind === "approval_attachment" && !comment;
+    });
+    const cards = rows.map((row) => {
+      const sheets = row.sheets?.length ? row.sheets : [""];
+      const unsupported = row.supported_for_material_import === false;
+      const status = unsupported ? "物料导入仅支持 .xlsx，请另存为 .xlsx 后上传" : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
+      return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${unsupported || dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
+    }).join("");
+    return `<div class="ocw-mf-wiki-toolbar"><span>可使用物流审批及关联采购审批中的资料，先预览再确认写入。</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>${dialog.materialSourceTab === "local" ? `<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">上传 Excel</button>` : ""}</div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无可用资料</strong></div>`}</div>`;
+  }
+
+  async previewMaterialAttachmentSource(dialog, sourceId, sheetName = "") {
+    if (dialog.wikiMaterialBusy) return;
+    let source = (dialog.materialAttachmentSources || []).find((row) => row.source_id === sourceId);
+    if (!source) throw new Error("资料来源已变化，请刷新来源列表。");
+    const isCurrent = () => !dialog.wikiMaterialClosed && this.detailState.batchName === dialog.materialBatchName && this.detailState.versionName === dialog.materialVersionName;
+    if (!isCurrent()) return;
+    dialog.wikiMaterialBusy = `attachment:${sourceId}`;
+    dialog.wikiMaterialOperationError = "";
+    this.renderWikiMaterialSources(dialog);
+    try {
+      let attachment = source.attachment_name || (String(source.source_id).startsWith("oa:") ? "" : source.source_id);
+      if (source.source_kind === "approval_attachment" && !source.available) {
+        if (!(await this.ensureEditSession()) || !isCurrent()) return;
+        if (!attachment) {
+          const prepared = await this.call("overseas_costing.api.import_api.prepare_dingtalk_archive_attachment", {
+            batch_name: dialog.materialBatchName, process_instance_id: source.process_instance_id, file_id: source.file_id,
+          });
+          if (!prepared?.ok || !prepared.attachment_name) throw new Error(prepared?.message || "无法准备钉钉附件。");
+          attachment = prepared.attachment_name;
+        }
+        if (!isCurrent()) return;
+        const downloaded = await this.call("overseas_costing.api.import_api.download_oa_form_attachment", { attachment_name: attachment });
+        if (!downloaded?.ok) throw new Error(downloaded?.message || "附件获取失败，请重试。");
+        if (!isCurrent()) return;
+        await this.loadWikiMaterialSources(dialog);
+        source = dialog.materialAttachmentSources.find((row) => row.attachment_name === attachment || row.source_id === attachment) || source;
+      }
+      if (!isCurrent()) return;
+      const sheets = source.sheets || [];
+      const selectedSheet = sheetName || (sheets.length === 1 ? sheets[0] : "");
+      if (source.source_kind !== "approval_comment" && !selectedSheet) {
+        if (!sheets.length) throw new Error("未读取到工作表，请检查文件或重新上传。");
+        dialog.wikiMaterialOperationError = "文件包含多个工作表，请选择要导入的工作表。";
+        return;
+      }
+      const preview = await this.call("overseas_costing.api.materials.preview_material_import", {
+        batch_name: dialog.materialBatchName, source_kind: source.source_kind,
+        source_id: attachment || source.source_id, sheet_name: selectedSheet || null,
+      });
+      if (!isCurrent()) return;
+      if (!preview?.ok) throw new Error(preview?.message || "装箱资料预览失败。");
+      dialog.wikiMaterialOpeningPreview = true;
+      dialog.hide();
+      this.openMaterialImportPreviewDialog(preview);
+    } finally {
+      dialog.wikiMaterialBusy = "";
+      if (isCurrent() && !dialog.wikiMaterialOpeningPreview) this.renderWikiMaterialSources(dialog);
+    }
   }
 
   showWikiMaterialSourceError(dialog, error) {
@@ -11277,9 +11454,9 @@ class OverseasCostWorkbench {
     const summary = batch.summary_snapshot || {};
     const itemCount = items.length || Number(batch.item_count || 0);
     const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
-    const totalCost = items.length
+    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
       ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+      : Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     const fields = [
       ["报关/来源单号", batch.customs_no || batch.source_approval_no || batch.batch_no || "--"],
       ["运单/柜号", batch.waybill_no || "--"],
@@ -11509,9 +11686,9 @@ class OverseasCostWorkbench {
   renderErpFlowPanel(batch, items) {
     const summary = batch.summary_snapshot || {};
     const itemCount = items.length || Number(batch.item_count || 0);
-    const totalCost = items.length
+    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
       ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0);
+      : Number((summary.calculation_schema === 2 ? summary.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb) || 0);
     const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
     const hasVersion = this.hasText(batch.current_version);
     const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
@@ -11641,7 +11818,7 @@ class OverseasCostWorkbench {
     const writeback = String(batch.writeback_status || "").toLowerCase();
     const status = String(batch.status || "").toLowerCase();
     const sourceStatus = batch.source_status || {};
-    const cost = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const cost = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     if (!batch.subsidiary_code || ["missing", "pending", "invalid"].includes(String(sourceStatus.purchase_approval_sync_state || "").toLowerCase())) {
       return "purchase";
     }
@@ -11839,7 +12016,7 @@ class OverseasCostWorkbench {
           </div>
         </header>
         <section class="ocw-detail-statusbar">
-          ${this.detailStatusChip("当前问题", this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
+          ${this.detailStatusChip("当前问题", batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
           ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
           ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
           ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
@@ -12020,7 +12197,7 @@ class OverseasCostWorkbench {
     }).join("");
     const body = items.map((row) => `<tr>${columns.map((column, index) => this.renderSkuPageCell(row, column, index)).join("")}</tr>`).join("");
     this.$root.find("[data-area='detail-content']").html(`
-      <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2></div><strong>共 ${Number(result.total || 0)} 行</strong></div>
+      <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2>${result.calculation_stale ? "<span>结果待更新，请先开始试算</span>" : ""}</div><strong>共 ${Number(result.total || 0)} 行</strong></div>
       <div class="ocw-sku-toolbar">
         <label><span>搜索当前批次 SKU</span><input class="form-control" type="search" data-role="sku-keyword" value="${this.escape(sku.keyword)}" placeholder="物料编码或产品名称" /></label>
         <div class="ocw-sku-groups" role="group" aria-label="SKU 字段分组">${groups.map(([key, label]) => `<button class="${sku.fieldGroup === key ? "is-active" : ""}" type="button" data-action="sku-group" data-field-group="${key}">${label}</button>`).join("")}</div>
@@ -12047,7 +12224,7 @@ class OverseasCostWorkbench {
   }
 
   renderSkuPageCell(row, column, index) {
-    const editable = this.isEditableColumn(column);
+    const editable = column.fieldname !== "transport_mode" && this.isEditableColumn(column);
     const rawValue = this.shouldShowEmptyZeroFee(column.fieldname, row[column.fieldname]) ? "" : this.normalizeEditorValue(row[column.fieldname]);
     const displayValue = this.formatCellValue(row[column.fieldname], column);
     const content = this.renderCell(row[column.fieldname], column);
@@ -13839,7 +14016,7 @@ class OverseasCostWorkbench {
     const freightAlloc = hasLoadedItems ? this.sumRowsNumber(loadedItems, "freight_alloc_rmb") : 0;
     const totalCost = hasLoadedItems
       ? this.sumRowsNumber(loadedItems, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+      : Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     const taxTotal = hasLoadedItems
       ? this.sumRowsNumber(loadedItems, "import_tax_total") ||
         this.sumRowsNumber(loadedItems, "mexico_customs_mxn") ||

@@ -677,8 +677,9 @@
   }
 
   batchTotalCostNumber(batch, items, hasLoadedItems) {
+    if (batch.summary_snapshot?.calculation_schema === 2) return Number(batch.summary_snapshot.total_cost_rmb || 0);
     const loadedValue = hasLoadedItems ? this.sumRowsNumber(items, "total_cost_rmb") : 0;
-    const batchValue = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const batchValue = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     return this.isPositive(loadedValue) ? loadedValue : batchValue;
   }
 

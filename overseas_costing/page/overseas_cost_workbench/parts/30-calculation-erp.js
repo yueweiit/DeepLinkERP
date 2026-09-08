@@ -15,12 +15,25 @@
     }
     this.activeBatchName = batch.name;
     this.exportPinnedBatchName = batch.name;
+    let acquired = null;
     try {
+      const inDetail = this.detailState?.batchName === batch.name;
+      if (inDetail && this.materialFeeState?.batchName === batch.name) {
+        if (!(await this.flushMaterialFeeInputs(this.materialFeeState))) return;
+      }
+      if (inDetail) {
+        if (!(await this.ensureEditSession())) return;
+      } else {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "无法获取编辑权。");
+      }
       const result = await this.call(
         "overseas_costing.api.calculate.recalculate_batch",
         {
           batch_name: batch.name,
           version_name: batch.current_version,
+          edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+          expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
         true
       );
@@ -28,6 +41,7 @@
         throw new Error(result?.message || "重新试算被服务器拒绝，未修改批次数据。");
       }
       const summary = result.summary_snapshot || {};
+      if (result.saved) this.acceptSavedComprehensiveCost(result, batch.name);
       this.applyRecalculateSummary(batch.name, summary, result.allocation_rules || []);
       this.lastRecalculateResult = { batch_name: batch.name, summary };
       if (this.resetBatchResultPreview) {
@@ -43,10 +57,12 @@
         if (this.renderWorkbenchBatchList) this.renderWorkbenchBatchList();
       }
       this.recordUsage("RECALCULATE", { batch, remark: "重新试算批次成本" });
-      frappe.show_alert({ message: result.message || "重新试算完成", indicator: summary.ai_allocation?.ok ? "green" : "orange" });
+      frappe.show_alert({ message: result.message || "重新试算完成", indicator: "green" });
     } catch (error) {
       this.recordUsage("RECALCULATE", { batch, status: "Failed", remark: error.message || "重新试算失败" });
       this.showError(error);
+    } finally {
+      if (acquired?.edit_token) await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token });
     }
   }
 

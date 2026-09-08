@@ -864,7 +864,7 @@
     const reference = batch.batch_no || batch.source_approval_no || batch.name;
     const logisticsNo = batch.waybill_no || batch.customs_no || "未填写物流单号";
     const action = OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
-    const totalCost = batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
+    const totalCost = batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
     const expanded = this.resultPreviewState?.batchName === batch.name;
     return `
       <div class="ocw-workbench-record ${expanded ? "is-expanded" : ""}" data-batch-name="${this.escape(batch.name)}">

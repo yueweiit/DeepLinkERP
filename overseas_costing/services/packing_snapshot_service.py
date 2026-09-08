@@ -523,26 +523,40 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
     )
     manual = []
     approval = []
+    approval_by_identity = {}
+    approval_by_name = {}
     for row in attachment_rows:
+        if not _is_excel_packing_attachment(row.get("file_name")):
+            continue
         if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
             continue
+        snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
+        archive = snapshot.get("archive") if isinstance(snapshot.get("archive"), dict) else {}
         sheets = _attachment_sheet_names(row)
         item = {
             "source_id": row.get("name"),
+            "attachment_name": row.get("name"),
             "source_label": row.get("file_name") or row.get("name"),
             "source_updated_at": row.get("modified"),
             "available": bool(row.get("file_url")),
+            "download_required": not bool(row.get("file_url")),
+            "supported_for_material_import": str(row.get("file_name") or "").lower().endswith(".xlsx"),
             "attachment_type": row.get("attachment_type") or "",
             "sheets": sheets,
         }
         if str(row.get("source_type") or "").upper() == "OA":
-            approval.append(
-                {
-                    **item,
-                    "source_kind": "approval_attachment",
-                    "origin": row.get("oa_attachment_origin") or "Form",
-                }
-            )
+            item.update({
+                "source_kind": "approval_attachment",
+                "origin": row.get("oa_attachment_origin") or snapshot.get("attachment_origin") or "Form",
+                "process_instance_id": str(snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""),
+                "file_id": str(snapshot.get("file_id") or ""),
+                "archive_status": archive.get("status") or ("archived" if item["available"] else "pending"),
+                "can_download": not item["available"] and (archive.get("status") == "archived" or bool(snapshot.get("file_id"))),
+            })
+            approval.append(item)
+            approval_by_name[str(row.get("name") or "")] = item
+            if item["process_instance_id"] and item["file_id"]:
+                approval_by_identity[(item["process_instance_id"], item["file_id"])] = item
         else:
             manual.append({**item, "source_kind": "manual_attachment"})
 
@@ -551,6 +565,44 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
     for approval_row in [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]:
         if not isinstance(approval_row, dict) or approval_row.get("excluded"):
             continue
+        for attachment in approval_row.get("attachments") or []:
+            if not isinstance(attachment, dict) or not _is_excel_packing_attachment(attachment.get("file_name")):
+                continue
+            instance_id = str(approval_row.get("instance_id") or "")
+            file_id = str(attachment.get("file_id") or "")
+            if not instance_id or not file_id:
+                continue
+            identity = (instance_id, file_id)
+            existing = approval_by_identity.get(identity) or approval_by_name.get(str(attachment.get("attachment_name") or ""))
+            available = bool((existing or {}).get("available"))
+            archive_status = str(attachment.get("archive_status") or "pending")
+            metadata = {
+                "process_instance_id": instance_id,
+                "file_id": file_id,
+                "origin": attachment.get("origin") or "Form",
+                "archive_status": archive_status,
+                "can_download": not available and archive_status == "archived",
+                "download_required": not available,
+            }
+            if existing:
+                existing.update(metadata)
+                approval_by_identity[identity] = existing
+                continue
+            source_id = "oa:" + hashlib.sha256(_json(list(identity)).encode("utf-8")).hexdigest()
+            item = {
+                **metadata,
+                "source_kind": "approval_attachment",
+                "source_id": source_id,
+                "attachment_name": "",
+                "source_label": attachment.get("file_name") or file_id,
+                "source_updated_at": attachment.get("source_updated_at") or attachment.get("comment_time") or detail.get("source_updated_at"),
+                "available": False,
+                "supported_for_material_import": str(attachment.get("file_name") or "").lower().endswith(".xlsx"),
+                "attachment_type": "",
+                "sheets": [],
+            }
+            approval.append(item)
+            approval_by_identity[identity] = item
         for timeline in approval_row.get("timeline") or []:
             if not isinstance(timeline, dict) or not timeline.get("packing_candidate") or not timeline.get("source_id"):
                 continue
@@ -643,6 +695,10 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
         "wiki_workbooks": wiki,
         "wiki_error": wiki_error,
     }
+
+
+def _is_excel_packing_attachment(file_name: Any) -> bool:
+    return str(file_name or "").strip().lower().endswith((".xlsx", ".xlsm"))
 
 
 def _packing_batch_context(batch_name: str, detail: dict[str, Any]) -> dict[str, Any]:

@@ -2147,6 +2147,8 @@ ERP_PAYLOAD_ITEM_FIELDS = list(
             "supplier",
             "quantity",
             "actual_shipped_qty",
+            "actual_shipped_qty_mode", "actual_shipped_qty_source_revision",
+            "unit", "purchase_uom", "shipped_uom", "derived_json",
             "unit_price",
             "purchase_currency",
             "goods_value",
@@ -2190,6 +2192,8 @@ ZERO_FEE_CONFIRMATION_MARKER = "OCW_ZERO_CONFIRMED"
 
 def _has_positive_rule(rules: list[dict], keywords: tuple[str, ...]) -> bool:
     for rule in rules:
+        if rule.get("is_enabled") in (0, False, "0") or rule.get("amount_status") == "MISSING":
+            continue
         text = " ".join(
             str(rule.get(fieldname) or "")
             for fieldname in ("rule_code", "expense_category", "remark")
@@ -2201,11 +2205,13 @@ def _has_positive_rule(rules: list[dict], keywords: tuple[str, ...]) -> bool:
 
 def _has_zero_confirmed_rule(rules: list[dict], keywords: tuple[str, ...]) -> bool:
     for rule in rules:
+        if rule.get("is_enabled") in (0, False, "0"):
+            continue
         text = " ".join(
             str(rule.get(fieldname) or "")
             for fieldname in ("rule_code", "expense_category", "remark")
         ).lower()
-        marker_hit = ZERO_FEE_CONFIRMATION_MARKER.lower() in text
+        marker_hit = ZERO_FEE_CONFIRMATION_MARKER.lower() in text or rule.get("amount_status") in {"ACTUAL", "NOT_INCURRED", "INCLUDED"}
         keyword_hit = any(keyword.lower() in text for keyword in keywords)
         if marker_hit and keyword_hit and _as_float(rule.get("amount")) == 0:
             return True
@@ -2273,6 +2279,16 @@ def _item_expense_detail(item: dict, formula: dict | None = None) -> dict:
     tax_alloc_rmb = min(tax_alloc_rmb, clearance_tax_total_rmb)
     clearance_alloc_rmb = max(clearance_tax_total_rmb - tax_alloc_rmb, 0.0)
 
+    saved = _saved_expense_classification(item)
+    if saved is not None:
+        clearance_alloc_rmb = saved["clearance"]
+        tax_alloc_rmb = saved["tax"]
+        import_tax_mxn = tax_alloc_rmb * fx_rmb_to_mxn
+        item = {**item, "import_tax_total": import_tax_mxn, "igi_amount": None, "iva_amount": None,
+                "mexico_customs_rmb": clearance_alloc_rmb,
+                "mexico_customs_mxn": clearance_alloc_rmb * fx_rmb_to_mxn if fx_rmb_to_mxn else None,
+                "mexico_customs_usd": None}
+
     return {
         "logistics": {
             "freight_alloc_rmb": _round_payload_amount(item.get("freight_alloc_rmb")),
@@ -2299,7 +2315,36 @@ def _item_expense_detail(item: dict, formula: dict | None = None) -> dict:
     }
 
 
+def _saved_expense_classification(item: dict):
+    meta = _load_json_value(item.get("derived_json"))
+    if meta.get("calculation_schema") != 2:
+        return None
+    freight = _as_float(item.get("freight_alloc_rmb"))
+    clearance = _as_float(meta.get("mexico_customs_rmb"))
+    tax = _as_float(meta.get("tax_allocated_rmb"))
+    extras = _as_float(meta.get("direct_fees_rmb")) + _as_float(meta.get("allocated_fees_rmb"))
+    return {"freight": freight, "clearance": clearance, "tax": tax,
+            "other": round(extras - freight - clearance - tax, 6)}
+
+
+def _effective_calculated_item(item):
+    if _load_json_value(item.get("derived_json")).get("calculation_schema") != 2:
+        return item
+    from overseas_costing.services.material_input_service import present_material_row
+    effective = present_material_row(item).get("effective_shipping") or {}
+    return {**item, "actual_shipped_qty": effective.get("quantity")}
+
+
 def _build_expense_pool_summary(rules: list[dict], items: list[dict]) -> dict:
+    normalized_items = []
+    for item in items:
+        if _saved_expense_classification(item) is not None:
+            detail = _item_expense_detail(item)["clearance_and_tax"]
+            item = {**item, **{field: detail.get(field) for field in (
+                "mexico_customs_rmb", "mexico_customs_mxn", "mexico_customs_usd", "igi_amount", "iva_amount")},
+                    "import_tax_total": detail["import_tax_total_mxn"]}
+        normalized_items.append(item)
+    items = normalized_items
     rule_pools = [
         {
             "rule_code": rule.get("rule_code") or "",
@@ -2311,7 +2356,7 @@ def _build_expense_pool_summary(rules: list[dict], items: list[dict]) -> dict:
             "remark": rule.get("remark") or "",
         }
         for rule in rules
-        if _as_float(rule.get("amount")) > 0
+        if _as_float(rule.get("amount")) > 0 and rule.get("is_enabled") not in (0, False, "0")
     ]
     item_allocations = {
         "logistics_allocated_rmb": _round_payload_amount(_sum_item_fields(items, ("freight_alloc_rmb",))),
@@ -2348,6 +2393,7 @@ def _build_writeback_item_quality(items: list[dict]) -> dict:
     issue_examples = []
 
     for index, item in enumerate(items, start=1):
+        item = _effective_calculated_item(item)
         item_missing_labels = []
         item_missing_fieldnames = []
         for fieldname, label, rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS:
@@ -2392,7 +2438,7 @@ def _build_writeback_field_gaps(batch: dict, items: list[dict], rules: list[dict
     item_quality = _build_writeback_item_quality(items)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
     estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
-    total_cost = actual_total_cost or estimated_total_cost
+    total_cost = _current_cost_total(batch)
 
     batch_gaps = []
     if not _resolve_batch_subsidiary_code(batch):
@@ -2436,6 +2482,8 @@ def _build_writeback_field_gaps(batch: dict, items: list[dict], rules: list[dict
         (("tariff", "duty", "tax", "关税", "税费", "igi", "iva"), "关税", "完税凭证 / 税费资料"),
     ]
     for keywords, label, source_hint in pool_needles:
+        if (batch.get("summary_snapshot") or {}).get("calculation_schema") == 2:
+            break
         has_pool = _has_fee_pool_or_zero_confirmation(rules, keywords)
         if not has_pool:
             rule_gaps.append(
@@ -2479,12 +2527,66 @@ def _build_writeback_field_gaps(batch: dict, items: list[dict], rules: list[dict
     }
 
 
+def _current_cost_total(batch: dict) -> float:
+    snapshot = batch.get("summary_snapshot") or {}
+    if snapshot.get("calculation_schema") == 2:
+        return _as_float(snapshot.get("total_cost_rmb"))
+    return _as_float(batch.get("actual_total_cost_rmb") or batch.get("estimated_total_cost_rmb"))
+
+
+def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback=False):
+    snapshot = batch["summary_snapshot"]
+    result = snapshot.get("comprehensive_cost") or {}
+    gaps = _build_writeback_field_gaps(batch, items, rules, version_name)
+    quality = _build_writeback_item_quality(items)
+    invalid = _build_invalid_business_state(batch, items)
+    missing = []
+    if invalid.get("invalid"):
+        missing.append(invalid.get("message") or "当前批次审批已被排除。")
+    if not _resolve_batch_subsidiary_code(batch):
+        missing.append("当前批次缺少归属业务主体。")
+    dirty = batch.get("status") == "Dirty"
+    if dirty:
+        missing.append("当前批次结果待更新，请重新试算。")
+    if not items:
+        missing.append("当前批次没有 SKU 明细。")
+    if _current_cost_total(batch) <= 0:
+        missing.append("当前批次没有有效综合成本结果。")
+    for reason in result.get("incomplete_reasons") or []:
+        label = next((r.get("expense_category") for r in result.get("excluded_fees", []) if r.get("fee_key") == reason.get("fee_key")), "")
+        message = (label + "：" if label else "") + (reason.get("message") or "计算资料不完整。")
+        if message not in missing:
+            missing.append(message)
+        if label:
+            gaps["rules"].append({"scope": "rule", "fieldname": reason.get("fee_key"), "label": label,
+                                  "missing_count": 1, "suggestion": message, "source_hint": "资料与费用"})
+    missing.extend(quality["blocking_reasons"])
+    if for_writeback and batch.get("confirm_status") != "Confirmed":
+        missing.append("当前批次还没有确认。")
+    known = {fee.get("fee_key") for key in ("included_fees", "ignored_fees") for fee in result.get(key, [])}
+    checks = {"batch_exists": True, "has_current_version": bool(version_name),
+              "has_subsidiary_code": bool(_resolve_batch_subsidiary_code(batch)), "has_dirty_data": dirty,
+              "has_invalid_business_approval": bool(invalid.get("invalid")), "has_items": bool(items),
+              "has_total_cost": _current_cost_total(batch) > 0,
+              "has_international_freight": any(str(k).startswith("international_") for k in known),
+              "has_clearance_fee": "customs_clearance_fee" in known, "has_tariff": "import_tax" in known,
+              "is_confirmed": batch.get("confirm_status") == "Confirmed", **quality["checks"]}
+    gaps["missing_total"] = sum(len(gaps[key]) for key in ("batch", "rules", "items"))
+    return {"ready": not missing, "checks": checks, "blocking_reasons": missing, "warning_reasons": [],
+            "field_gaps": gaps, "item_issue_counts": quality["issue_counts"], "item_issue_examples": quality["issue_examples"],
+            "invalid_business": invalid, "item_count": len(items), "total_cost_rmb": _current_cost_total(batch),
+            "expense_pools": _build_expense_pool_summary([r for r in rules if r.get("is_enabled") not in (0, False, "0")], items),
+            "message": "校验通过。" if not missing else "；".join(missing)}
+
+
 def _build_calculation_confirmation_readiness(
     batch: dict,
     items: list[dict],
     rules: list[dict],
     resolved_version_name: str | None,
 ) -> dict:
+    if (batch.get("summary_snapshot") or {}).get("calculation_schema") == 2:
+        return _comprehensive_readiness(batch, items, rules, resolved_version_name)
     item_quality = _build_writeback_item_quality(items)
     field_gaps = _build_writeback_field_gaps(batch, items, rules, resolved_version_name)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
@@ -2586,6 +2688,8 @@ def _build_writeback_readiness(
     resolved_version_name: str | None,
     rules: list[dict] | None = None,
 ) -> dict:
+    if (batch.get("summary_snapshot") or {}).get("calculation_schema") == 2:
+        return _comprehensive_readiness(batch, items, rules or [], resolved_version_name, for_writeback=True)
     item_quality = _build_writeback_item_quality(items)
     field_gaps = _build_writeback_field_gaps(batch, items, rules or [], resolved_version_name)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
@@ -2657,6 +2761,7 @@ def _build_erp_push_payload(
     supplier = _resolve_payload_supplier(items)
     payload_items = []
     for item in items:
+        item = _effective_calculated_item(item)
         formula = _build_cost_formula(item)
         payload_items.append(
             {
@@ -2788,7 +2893,7 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
                 "basis_field",
                 "currency",
                 "amount",
-                "remark",
+                "remark", "amount_status", "is_enabled", "logical_fee_key",
             ],
             order_by="priority_no asc, modified asc",
             limit_page_length=1000,
@@ -2797,6 +2902,8 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
             rules = _load_json_value(version.get("rule_snapshot_json"))
             if not isinstance(rules, list):
                 rules = []
+
+    batch["summary_snapshot"] = _load_json(version.get("summary_snapshot_json"))
 
     item_filters = {"batch": batch_doc_name}
     if resolved_version_name:

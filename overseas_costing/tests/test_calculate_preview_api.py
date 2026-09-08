@@ -27,3 +27,17 @@ def test_preview_uses_batch_read_permission_and_read_only_service(monkeypatch) -
 
     assert result == {"batch": "BATCH-DOC", "version": "VER-1", "read_only": True}
     assert calls == [("BATCH-NO", "read")]
+
+
+def test_saved_trial_requires_write_permission_and_forwards_edit_context(monkeypatch):
+    fake_frappe = ModuleType("frappe")
+    fake_frappe.whitelist = lambda: (lambda function: function)
+    monkeypatch.setitem(sys.modules, "frappe", fake_frappe)
+    sys.modules.pop("overseas_costing.api.calculate", None)
+    api = importlib.import_module("overseas_costing.api.calculate")
+    calls = []
+    monkeypatch.setattr(api, "require_batch_permission", lambda b, p: calls.append((b, p)) or "B")
+    monkeypatch.setattr(api.cost_preview_service, "calculate_comprehensive_cost", lambda **kwargs: kwargs)
+    result = api.calculate_comprehensive_cost("NO", "V", "TOKEN", "M")
+    assert calls == [("NO", "write")]
+    assert result == dict(batch_name="B", version_name="V", edit_token="TOKEN", expected_modified="M")

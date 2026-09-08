@@ -20,6 +20,11 @@ from overseas_costing.services.workbench_service import (
 from overseas_costing.services.batch_service import EXCEL_COLUMNS
 
 
+@pytest.fixture(autouse=True)
+def sku_batch_context(monkeypatch):
+    monkeypatch.setattr(workbench_service, "_load_sku_batch_meta", lambda batch: {"transport_mode": "AIR", "current_version": "VER-1", "status": "Calculated"})
+
+
 def test_operation_error_exposes_stage_scope_reason_and_action() -> None:
     assert operation_error(
         "单批次补充",
@@ -287,7 +292,7 @@ def test_item_page_calculates_last_page_for_partial_page(monkeypatch) -> None:
     assert result["total"] == 101
     assert result["page"] == 3
     assert result["page_count"] == 3
-    assert result["items"] == [{"name": "ITEM-101", "row_no": 101}]
+    assert result["items"] == [{"name": "ITEM-101", "row_no": 101, "transport_mode": "AIR"}]
 
 
 def test_locate_batch_item_uses_unfiltered_server_order(monkeypatch) -> None:

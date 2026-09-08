@@ -471,3 +471,47 @@ def test_recommended_workbook_is_globally_pinned_without_reordering_its_sheets()
         "WB-2025:recommended",
         "WB-2025:other",
     ]
+
+
+def test_list_sources_includes_unsaved_approval_excel_files_and_safe_download_identity(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    local = [{"name": "ATT-1", "batch": "B1", "source_type": "OA", "file_name": "already.xlsx",
+              "file_url": "/private/files/already.xlsx", "attachment_type": "Other",
+              "parse_result_json": json.dumps({"instance_id": "MAIN", "file_id": "F1"})}]
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *args, **kwargs: local))
+    monkeypatch.setattr(service, "_attachment_sheet_names", lambda row: ["Sheet1"] if row.get("file_url") else [])
+    detail = {"main_approval": {"instance_id": "MAIN", "attachments": [
+        {"file_id": "F1", "process_instance_id": "MAIN", "file_name": "already.xlsx", "attachment_name": "", "archive_status": "archived"},
+        {"file_id": "F2", "process_instance_id": "MAIN", "file_name": "货物资料.xlsx", "origin": "Form", "archive_status": "archived", "packing_candidate": False,
+         "object_key": "private/secret", "raw_json": "secret"},
+        {"file_id": "PDF", "file_name": "packing.pdf", "archive_status": "archived"},
+    ]}, "linked_purchase_approvals": [{"instance_id": "PURCHASE", "attachments": [
+        {"file_id": "F3", "file_name": "采购附表.xlsx", "origin": "Comment", "archive_status": "pending"},
+        {"file_id": "F4", "file_name": "macro.xlsm", "origin": "Form", "archive_status": "archived"},
+    ]}], "excluded_linked_purchase_approvals": [{"instance_id": "REJECTED", "excluded": True, "attachments": [
+        {"file_id": "BAD", "file_name": "packing.xlsx", "archive_status": "archived"}]}]}
+    monkeypatch.setattr(service.packing_source_service.dingtalk_approval_service,
+                        "get_batch_dingtalk_approval_detail", lambda _batch: detail)
+    monkeypatch.setattr(dingtalk_packing_source, "get_packing_runtime_clients", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    result = service.list_packing_sources("B1")
+    sources = result["approval_sources"]
+    assert len(sources) == 4
+    assert len({row["source_id"] for row in sources}) == 4
+    by_file = {row["file_id"]: row for row in sources}
+    assert by_file["F1"]["source_id"] == "ATT-1"
+    assert by_file["F1"]["available"] is True
+    assert by_file["F2"]["attachment_name"] == ""
+    assert by_file["F2"]["process_instance_id"] == "MAIN"
+    assert by_file["F2"]["origin"] == "Form"
+    assert by_file["F2"]["can_download"] is True
+    assert by_file["F2"]["download_required"] is True
+    assert by_file["F2"]["archive_status"] == "archived"
+    assert by_file["F3"]["origin"] == "Comment"
+    assert by_file["F3"]["process_instance_id"] == "PURCHASE"
+    assert by_file["F3"]["can_download"] is False
+    assert by_file["F4"]["supported_for_material_import"] is False
+    assert "secret" not in repr(result)
+    assert "REJECTED" not in repr(result)

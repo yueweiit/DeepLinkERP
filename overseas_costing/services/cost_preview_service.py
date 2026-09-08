@@ -1,8 +1,10 @@
-"""只读综合成本试算：不创建版本、不改写 SKU 结果、不触发 ERP。"""
+"""综合成本统一计算；只读预览和保存试算共用同一分摊结果。"""
 
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import hashlib
+import json
 
 try:
     import frappe
@@ -98,6 +100,8 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
     estimated_fee_count = 0
     for raw_fee in fees or []:
         fee = dict(raw_fee or {})
+        if fee.get("is_enabled") in (0, False, "0"):
+            continue
         status = fee_allocation_service.amount_status(fee)
         identity = _fee_key(fee)
         common = {
@@ -168,11 +172,21 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
             }
         )
 
+    # Reconcile sub-cent purchase values once so persisted SKU totals conserve
+    # the rounded batch amount. Source goods values remain untouched.
+    rounded_goods = {key: Decimal(_money(costs["goods_value_rmb"])) for key, costs in item_costs.items()}
+    remainder = Decimal(_money(goods_total)) - sum(rounded_goods.values(), Decimal("0"))
+    direction = Decimal("0.01") if remainder > 0 else Decimal("-0.01")
+    ordered_keys = sorted(item_costs, key=lambda key: (
+        -(item_costs[key]["goods_value_rmb"] - rounded_goods[key]) if remainder > 0
+        else item_costs[key]["goods_value_rmb"] - rounded_goods[key], key))
+    for index in range(int(abs(remainder) / Decimal("0.01"))):
+        rounded_goods[ordered_keys[index % len(ordered_keys)]] += direction
     preview_items = []
     for row in presented_items:
         key = _item_key(row)
         costs = item_costs[key]
-        total = costs["goods_value_rmb"] + costs["direct_fees_rmb"] + costs["allocated_fees_rmb"]
+        total = rounded_goods[key] + costs["direct_fees_rmb"] + costs["allocated_fees_rmb"]
         effective = row.get("effective_shipping") or {}
         shipped_quantity = _decimal(effective.get("quantity"))
         shipped_uom = str(effective.get("uom") or "").strip()
@@ -210,13 +224,14 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
                 "stable_line_key": key,
                 "material_code": row.get("material_code") or "",
                 "product_name": row.get("product_name") or "",
-                "goods_value_rmb": _money(costs["goods_value_rmb"]),
+                "goods_value_rmb": _money(rounded_goods[key]),
                 "direct_fees_rmb": _money(costs["direct_fees_rmb"]),
                 "allocated_fees_rmb": _money(costs["allocated_fees_rmb"]),
                 "total_cost_rmb": _money(total),
                 "shipping_unit_cost": shipping_unit_cost,
                 "purchase_pricing_unit_cost": purchase_pricing_unit_cost,
                 "quantity_source_badge": row.get("quantity_source_badge") or "",
+                "shipping_quantity_difference": str(shipped_quantity - purchase_quantity) if shipped_quantity is not None and purchase_quantity is not None and shipped_uom == purchase_uom else None,
             }
         )
 
@@ -274,26 +289,7 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
     raw_items = frappe.get_all(
         "Overseas Cost Item",
         filters={"batch": batch_name, "version": version},
-        fields=[
-            "name",
-            "row_no",
-            "stable_line_key",
-            "material_code",
-            "product_name",
-            "unit",
-            "purchase_uom",
-            "unit_price_uom",
-            "quantity",
-            "actual_shipped_qty",
-            "actual_shipped_qty_mode",
-            "actual_shipped_qty_source_revision",
-            "shipped_uom",
-            "goods_value",
-            "gross_weight_kg",
-            "volume_m3",
-            "chargeable_weight_kg",
-            "project_collection",
-        ],
+        fields=COST_INPUT_FIELDS,
         order_by="row_no asc, name asc",
         limit_page_length=10000,
     )
@@ -320,3 +316,185 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
         }
     )
     return result
+
+
+def _json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def cost_input_hash(items, fees, fx_context, transport_mode) -> str:
+    return hashlib.sha256(_json([items, fees, fx_context, transport_mode]).encode()).hexdigest()
+
+
+def build_saved_cost_data(items: list[dict], fees: list[dict], fx_context: dict, transport_mode: str) -> dict:
+    """Project one preview into stored result fields without mutating source facts."""
+    result = preview_comprehensive_cost_data(items, fees, fx_context)
+    raw_by_key = {_item_key(present_material_row(row)): row for row in items}
+    fx = _decimal(fx_context.get("fx_rmb_to_mxn"))
+    fx = fx if fx is not None and fx > 0 else None
+    goods_total = Decimal(result["summary"]["purchase_goods_value_rmb"])
+    gross_total = sum((_decimal(row.get("gross_weight_kg")) or Decimal("0") for row in items), Decimal("0"))
+    updates = []
+    for row in result["items"]:
+        key = row["stable_line_key"]
+        raw = raw_by_key[key]
+        allocations = []
+        freight = customs = tax = other = Decimal("0")
+        for fee in result["included_fees"]:
+            amount = Decimal(fee.get("allocations", {}).get(key, "0"))
+            fee_key = fee["fee_key"]
+            if fee_key == "customs_clearance_fee":
+                customs += amount
+            elif fee_key == "import_tax":
+                tax += amount
+            elif fee_key.startswith("international_") or fee_key in {"sea_port_forwarder_surcharge", "air_forwarder_surcharge", "express_surcharge"}:
+                freight += amount
+            else:
+                other += amount
+            allocations.append({
+                "rule_code": fee_key, "expense_category": fee["expense_category"],
+                "amount_rmb": fee["amount_rmb"], "allocated_rmb": _money(amount),
+                "allocated_mxn": _money(amount * fx) if fx else None,
+                "basis": fee["allocation_basis"], "scope_type": fee["scope_type"],
+                "fallback_reason": fee["fallback_reason"],
+            })
+        extras = Decimal(row["direct_fees_rmb"]) + Decimal(row["allocated_fees_rmb"])
+        shipping = row.get("shipping_unit_cost")
+        effective = present_material_row(raw).get("effective_shipping") or {}
+        qty = _decimal(effective.get("quantity"))
+        derived = {
+            "calculation_schema": 2, "allocated_rules": allocations,
+            "fx_rmb_to_mxn": str(fx) if fx else None,
+            "fx_usd_to_rmb": fx_context.get("fx_usd_to_rmb"),
+            "mexico_customs_rmb": _money(customs),
+            "mexico_customs_mxn": _money(customs * fx) if fx else None,
+            "allocated_other_rmb": _money(tax + other),
+            "tax_allocated_rmb": _money(tax),
+            "direct_fees_rmb": row["direct_fees_rmb"],
+            "allocated_fees_rmb": row["allocated_fees_rmb"],
+            "shipping_unit_cost": shipping,
+            "purchase_pricing_unit_cost": row.get("purchase_pricing_unit_cost"),
+            "shipping_quantity": str(qty) if qty else None,
+            "purchase_quantity": raw.get("quantity"),
+        }
+        updates.append({
+            "name": raw["name"], "transport_mode": transport_mode,
+            "goods_value_ratio": _unit_money(Decimal(row["goods_value_rmb"]) / goods_total * 100) if goods_total else "0",
+            "weight_ratio": _unit_money((_decimal(raw.get("gross_weight_kg")) or Decimal("0")) / gross_total * 100) if gross_total else "0",
+            "freight_alloc_rmb": _money(freight),
+            "freight_alloc_mxn": _money(freight * fx) if fx else None,
+            "total_logistics_mxn": _money(extras * fx) if fx else None,
+            "alloc_price_mxn": _unit_money(extras * fx / qty) if fx and qty and qty > 0 else None,
+            "total_cost_rmb": row["total_cost_rmb"],
+            "total_unit_rmb": shipping["amount_rmb"] if shipping else None,
+            "derived_json": _json(derived),
+        })
+    summary = {
+        **result["summary"], "calculation_schema": 2,
+        "input_hash": cost_input_hash(items, fees, fx_context, transport_mode),
+        "total_goods_value": result["summary"]["purchase_goods_value_rmb"],
+        "total_gross_weight_kg": str(gross_total),
+        "total_volume_m3": str(sum((_decimal(row.get("volume_m3")) or Decimal("0") for row in items), Decimal("0"))),
+        "fee_pool_rmb": _money(Decimal(result["summary"]["direct_fees_rmb"]) + Decimal(result["summary"]["allocated_fees_rmb"])),
+        "item_count": len(items), "rule_count": len(result["included_fees"]),
+        "comprehensive_cost": result,
+    }
+    return {**result, "item_updates": updates, "summary_snapshot": summary}
+
+
+class FrappeCostRepository:
+    def lock_and_load(self, batch_name, version_name, *, edit_token, expected_modified, trusted=False):
+        from overseas_costing.services import batch_service, edit_session_service
+        name = batch_service._resolve_batch_name(batch_name)
+        if not name:
+            raise ValueError("未找到当前批次。")
+        if trusted:
+            edit_session_service._lock_row(name)
+        else:
+            edit_session_service.assert_batch_write(name, edit_token=edit_token, expected_modified=expected_modified)
+        batch = frappe.db.get_value("Overseas Cost Batch", name,
+            ["name", "current_version", "modified", "status", "confirm_status", "is_locked", "transport_mode", "source_approval_status", "extra_json"], as_dict=True)
+        version = version_name or batch.get("current_version")
+        frappe.db.sql("SELECT name FROM `tabOverseas Cost Version` WHERE name=%s AND batch=%s FOR UPDATE", (version, name))
+        version_row = frappe.db.get_value("Overseas Cost Version", version,
+            ["name", "batch", "status", "modified", "fx_usd_to_rmb", "fx_rmb_to_mxn"], as_dict=True) or {}
+        if version_row.get("batch") != name:
+            raise ValueError("成本版本不属于当前批次。")
+        for doctype in ("Overseas Cost Item", "Overseas Cost Allocation Rule"):
+            frappe.db.sql(f"SELECT name FROM `tab{doctype}` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE", (name, version))
+        items = frappe.get_all("Overseas Cost Item", filters={"batch": name, "version": version},
+            fields=COST_INPUT_FIELDS, order_by="row_no asc, name asc", limit_page_length=10000)
+        invalid = batch_service._build_invalid_business_state(batch, items)
+        if invalid.get("invalid"):
+            raise ValueError(invalid.get("message") or "当前批次审批已被排除，不能计算。")
+        mode = batch.get("transport_mode") or ""
+        if mode not in {"SEA", "AIR", "EXPRESS"}:
+            raise ValueError("请先确认批次运输方式。")
+        fees = fee_service.compose_fee_worklist_rows(fee_service._query_rules(name, version), mode)
+        fx = {key: version_row.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
+        context = {**batch, "batch": name, "version": version, "batch_modified": str(batch["modified"]),
+                   "version_modified": str(version_row["modified"]), "version_status": version_row["status"]}
+        return context, items, fees, fx
+
+    def assert_unchanged(self, context):
+        current = frappe.db.get_value("Overseas Cost Batch", context["batch"], ["modified", "current_version"], as_dict=True)
+        if str(current["modified"]) != context["batch_modified"] or current["current_version"] != context["version"]:
+            raise RuntimeError("试算期间批次数据已变化，请重新试算。")
+
+    def save(self, context, result):
+        from overseas_costing.services import calculate_service
+        now = frappe.utils.now()
+        snapshot = result["summary_snapshot"]
+        snapshot["calculated_at"] = now
+        for row in result["item_updates"]:
+            frappe.db.set_value("Overseas Cost Item", row["name"], {k: v for k, v in row.items() if k != "name"}, update_modified=False)
+        frappe.db.set_value("Overseas Cost Version", context["version"], {
+            "summary_snapshot_json": _json(snapshot), "rule_snapshot_json": _json(result["included_fees"]), "calculated_at": now,
+        }, update_modified=True)
+        frappe.db.set_value("Overseas Cost Batch", context["batch"], {
+            "status": "Calculated", "estimated_total_cost_rmb": snapshot["total_cost_rmb"],
+            "total_goods_value": snapshot["total_goods_value"], "total_gross_weight_kg": snapshot["total_gross_weight_kg"],
+            "item_count": snapshot["item_count"],
+        }, update_modified=True)
+        calculate_service._insert_audit_log(batch_doc_name=context["batch"], version_name=context["version"],
+            action_type="RECALCULATE", action_remark=f"统一试算已保存：RMB {snapshot['total_cost_rmb']}；输入 {snapshot['input_hash']}")
+        return str(frappe.db.get_value("Overseas Cost Batch", context["batch"], "modified"))
+
+    def commit(self):
+        frappe.db.commit()
+
+    def rollback(self):
+        frappe.db.rollback()
+
+
+COST_INPUT_FIELDS = [
+    "name", "row_no", "stable_line_key", "material_code", "product_name", "unit", "purchase_uom",
+    "unit_price_uom", "quantity", "actual_shipped_qty", "actual_shipped_qty_mode",
+    "actual_shipped_qty_source_revision", "shipped_uom", "goods_value", "gross_weight_kg", "volume_m3",
+    "volume_weight_kg", "chargeable_weight_kg", "project_collection", "dingtalk_instance_id", "source_type",
+]
+
+
+def calculate_comprehensive_cost(batch_name, version_name=None, *, edit_token=None, expected_modified=None,
+                                 repository=None, trusted=False, commit_after_calculate=True):
+    """Save a trial atomically; never confirms a version or sends an ERP request."""
+    repo = repository or FrappeCostRepository()
+    try:
+        context, items, fees, fx = repo.lock_and_load(batch_name, version_name, edit_token=edit_token,
+            expected_modified=expected_modified, trusted=trusted)
+        if context.get("current_version") != context["version"]:
+            raise ValueError("只能试算当前版本，请刷新批次。")
+        if context.get("version_status") in {"Confirmed", "Archived"} or context.get("confirm_status") == "Confirmed" or context.get("is_locked"):
+            raise PermissionError("已确认或归档版本不能覆盖，请先创建调整版本。")
+        result = build_saved_cost_data(items, fees, fx, context["transport_mode"])
+        repo.assert_unchanged(context)
+        modified = repo.save(context, result)
+        if commit_after_calculate:
+            repo.commit()
+        result.pop("item_updates", None)
+        return {**result, "ok": True, "saved": True, "read_only": False, "batch_name": context["batch"],
+                "version_name": context["version"], "batch_modified": modified,
+                "transport_mode": context["transport_mode"], "message": "试算完成，已同步总览与 SKU 明细。"}
+    except Exception:
+        repo.rollback()
+        raise

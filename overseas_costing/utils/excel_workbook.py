@@ -7,7 +7,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
-from overseas_costing.utils.field_mapper import normalize_unit
+from overseas_costing.utils.field_mapper import normalize_transport_mode, normalize_unit
 
 try:
     from openpyxl import load_workbook
@@ -432,7 +432,7 @@ def parse_sisa_warehouse_receipt_sheet(worksheet, source_sheet: str | None = Non
         "sourceTemplate": "sisa_warehouse_receipt",
         "sourceType": "PACKING_LIST",
         "sourceDocNo": block_id,
-        "transportMode": "海运",
+        "transportMode": _transport_from_sheet_name(source_sheet),
         "remark": "SiSA墨西哥专线进仓单产品清单",
         "items": [_build_attachment_item(row, source_sheet) for row in rows],
     }
@@ -724,7 +724,7 @@ def _read_sisa_warehouse_receipt_row(
         "piece_count": box_count,
         "gross_weight_kg": gross_weight_kg,
         "volume_m3": volume_m3,
-        "transport_mode": "海运",
+        "transport_mode": _transport_from_sheet_name(worksheet.title),
         "packing": f"{_format_number(box_count)}箱" if box_count else None,
         "source_remark": source_remark,
         "_box_no": box_no or f"未标箱号-{row_no}",
@@ -982,7 +982,7 @@ ATTACHMENT_HEADER_ALIASES = {
     "goods_value": ("总价", "总金额", "rmb"),
     "planned_ship_date": ("计划出货日期",),
     "source_remark": ("备注", "remarks"),
-    "export_mode": ("出口方式",),
+    "export_mode": ("出口方式", "运输方式", "物流方式", "transportmode", "shippingmode"),
     "project_collection": ("项目归属", "项目"),
 }
 
@@ -1217,12 +1217,16 @@ def _transport_from_sheet_name(source_sheet: str) -> str:
         return "空运"
     if "快递" in source_sheet:
         return "快递"
-    return "海运"
+    if "海运" in source_sheet:
+        return "海运"
+    # English mode names must be complete words, not product names such as chair.
+    match = re.search(r"\b(sea|air|express)\b", source_sheet, re.IGNORECASE)
+    return match.group(1).upper() if match else ""
 
 
 def _attachment_transport_mode(export_mode, source_sheet: str) -> str:
     text = str(export_mode or "").strip()
-    if any(keyword in text for keyword in ("海运", "空运", "快递", "express", "Express", "AIR", "Air", "air")):
+    if normalize_transport_mode(text):
         return text
     return _transport_from_sheet_name(source_sheet)
 

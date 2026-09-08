@@ -426,3 +426,25 @@ def test_declared_total_mismatch_is_blocking_until_user_chooses_basis() -> None:
         "gross_weight_kg",
         "volume_m3",
     }
+
+
+def test_unlabelled_full_column_sum_is_total_not_material(tmp_path):
+    path = tmp_path / "unlabelled-total.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["物料编码", "品名", "数量", "总毛重Gross weight kg", "总体积CBM"])
+    sheet.append(["M1", "商品", 10, 20, .3])
+    sheet.append(["M1", "商品", 20, 40, .6])
+    sheet.append([None, None, None, "=SUM(D2:D3)", "=SUM(E2:E3)"])
+    book.save(path)
+    parsed = parse_packing_grid(read_packing_grid(path, sheet_name="Sheet", require_exact_sheet=True))
+    assert len(parsed["material_rows"]) == 2
+    assert Decimal(parsed["totals"]["gross_weight_kg"]["value"]) == Decimal("60")
+    assert Decimal(parsed["totals"]["volume_m3"]["value"]) == Decimal(".9")
+
+
+def test_formula_with_product_identity_is_not_hidden_as_total():
+    from overseas_costing.services.packing_parse_service import _is_formula_total_row
+    row = [{"raw_value": "M1", "column": 1}, {"raw_value": 30, "formula": "=SUM(B2:B3)", "column": 2}]
+    assert not _is_formula_total_row(row, 1, 4)
+    assert not _is_formula_total_row([{"formula": "=SUM(D3:D4)", "column": 4}], 1, 5)

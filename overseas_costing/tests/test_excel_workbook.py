@@ -430,7 +430,8 @@ def test_parse_oa_attachment_detail_sheet_ignores_cost_calculation_rows() -> Non
         "item_count": 1,
         "batch_ids": ["202604150041000081318"],
     }
-    assert blocks[0]["transportMode"] == "海运"
+    # A fee label and customs declaration type do not prove item transport.
+    assert blocks[0]["transportMode"] == ""
     assert blocks[0]["items"][0][0] == "YL000098"
 
 

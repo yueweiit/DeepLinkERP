@@ -58,7 +58,7 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
     field_merges = [merge for merge in grid.get("merge_ranges") or []
                     if merge.get("start_column") == merge.get("end_column")]
     for row_number in range(header_row + 1, len(cells) + 1):
-        if _is_total_row(cells[row_number - 1]):
+        if _is_total_row(cells[row_number - 1]) or _is_formula_total_row(cells[row_number - 1], header_row, row_number):
             total_row = row_number
             break
         if _is_repeated_header(cells[row_number - 1], columns):
@@ -593,6 +593,29 @@ def _is_total_row(row: list[dict[str, Any]]) -> bool:
         if normalized in TOTAL_LABELS:
             return True
     return False
+
+
+def _is_formula_total_row(row, header_row, row_number):
+    """Recognize unlabeled Excel grand totals without hiding incomplete items.
+
+    Every populated cell must sum its own column over the complete preceding
+    data range. Rows containing an identity, ordinary value or partial subtotal
+    remain visible for normal matching/validation.
+    """
+    populated = [cell for cell in row if cell.get("raw_value") not in (None, "") or cell.get("formula")]
+    if not populated or row_number <= header_row + 1:
+        return False
+    for cell in populated:
+        formula = re.sub(r"\s+|\$", "", str(cell.get("formula") or "")).upper()
+        match = re.fullmatch(r"=?SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)", formula)
+        if not match or match[1] != match[3] or int(match[2]) != header_row + 1 or int(match[4]) != row_number - 1:
+            return False
+        column = 0
+        for char in match[1]:
+            column = column * 26 + ord(char) - ord("A") + 1
+        if column != cell.get("column"):
+            return False
+    return True
 
 
 def _is_repeated_header(row: list[dict[str, Any]], columns: dict[str, int]) -> bool:

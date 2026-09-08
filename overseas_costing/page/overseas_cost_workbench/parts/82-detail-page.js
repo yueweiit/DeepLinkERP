@@ -8,7 +8,7 @@
     const writeback = String(batch.writeback_status || "").toLowerCase();
     const status = String(batch.status || "").toLowerCase();
     const sourceStatus = batch.source_status || {};
-    const cost = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const cost = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     if (!batch.subsidiary_code || ["missing", "pending", "invalid"].includes(String(sourceStatus.purchase_approval_sync_state || "").toLowerCase())) {
       return "purchase";
     }
@@ -206,7 +206,7 @@
           </div>
         </header>
         <section class="ocw-detail-statusbar">
-          ${this.detailStatusChip("当前问题", this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
+          ${this.detailStatusChip("当前问题", batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
           ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
           ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
           ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
@@ -387,7 +387,7 @@
     }).join("");
     const body = items.map((row) => `<tr>${columns.map((column, index) => this.renderSkuPageCell(row, column, index)).join("")}</tr>`).join("");
     this.$root.find("[data-area='detail-content']").html(`
-      <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2></div><strong>共 ${Number(result.total || 0)} 行</strong></div>
+      <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2>${result.calculation_stale ? "<span>结果待更新，请先开始试算</span>" : ""}</div><strong>共 ${Number(result.total || 0)} 行</strong></div>
       <div class="ocw-sku-toolbar">
         <label><span>搜索当前批次 SKU</span><input class="form-control" type="search" data-role="sku-keyword" value="${this.escape(sku.keyword)}" placeholder="物料编码或产品名称" /></label>
         <div class="ocw-sku-groups" role="group" aria-label="SKU 字段分组">${groups.map(([key, label]) => `<button class="${sku.fieldGroup === key ? "is-active" : ""}" type="button" data-action="sku-group" data-field-group="${key}">${label}</button>`).join("")}</div>
@@ -414,7 +414,7 @@
   }
 
   renderSkuPageCell(row, column, index) {
-    const editable = this.isEditableColumn(column);
+    const editable = column.fieldname !== "transport_mode" && this.isEditableColumn(column);
     const rawValue = this.shouldShowEmptyZeroFee(column.fieldname, row[column.fieldname]) ? "" : this.normalizeEditorValue(row[column.fieldname]);
     const displayValue = this.formatCellValue(row[column.fieldname], column);
     const content = this.renderCell(row[column.fieldname], column);

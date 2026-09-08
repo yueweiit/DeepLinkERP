@@ -177,9 +177,9 @@
     const summary = batch.summary_snapshot || {};
     const itemCount = items.length || Number(batch.item_count || 0);
     const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
-    const totalCost = items.length
+    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
       ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+      : Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     const fields = [
       ["报关/来源单号", batch.customs_no || batch.source_approval_no || batch.batch_no || "--"],
       ["运单/柜号", batch.waybill_no || "--"],
@@ -409,9 +409,9 @@
   renderErpFlowPanel(batch, items) {
     const summary = batch.summary_snapshot || {};
     const itemCount = items.length || Number(batch.item_count || 0);
-    const totalCost = items.length
+    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
       ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0);
+      : Number((summary.calculation_schema === 2 ? summary.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb) || 0);
     const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
     const hasVersion = this.hasText(batch.current_version);
     const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");

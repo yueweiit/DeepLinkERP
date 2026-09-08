@@ -390,7 +390,7 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
         "只看缺项",
         "展开辅助列",
         "导入 Excel 补资料",
-        "从装箱计划表获取",
+        "获取装箱资料",
         "确认写入物料表",
         "净重 kg",
         "查看资料来源",
@@ -1313,6 +1313,49 @@ workspace.escape=(value)=>String(value??'');workspace.renderMaterialFeeWorkspace
 workspace.renders=0;workspace.calls=0;
 workspace.call=async()=>{workspace.calls++;return {ok:true,summary:{total_cost_rmb:'200.00'}}};
 """
+
+
+def test_trial_saves_current_version_and_updates_other_tabs():
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
+workspace.detailState.editToken='TOKEN';workspace.detailState.expectedModified='M1';
+workspace.ensureEditSession=async()=>true;
+workspace.batches=[{name:'B-1',estimated_total_cost_rmb:100}];
+let endpoint,args;workspace.call=async(e,a)=>{endpoint=e;args=a;return {ok:true,saved:true,batch_modified:'M2',summary:{total_cost_rmb:'64800.00'},summary_snapshot:{total_cost_rmb:'64800.00',calculation_schema:2}}};
+await workspace.refreshMaterialFeeCostPreview();
+console.log(JSON.stringify({endpoint,args,modified:workspace.detailState.expectedModified,batch:workspace.batches[0]}));
+""")
+    assert result["endpoint"].endswith(".calculate_comprehensive_cost")
+    assert result["args"]["edit_token"] == "TOKEN" and result["args"]["expected_modified"] == "M1"
+    assert result["modified"] == "M2"
+    assert float(result["batch"]["estimated_total_cost_rmb"]) == 64800
+    assert result["batch"]["status"] == "Calculated"
+
+
+def test_packing_attachment_prepares_downloads_then_previews_exact_sheet():
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B',versionName:'V'};
+workspace.ensureEditSession=async()=>true;workspace.renderWikiMaterialSources=()=>{};
+const source={source_id:'oa:source',source_kind:'approval_attachment',process_instance_id:'OA',file_id:'F',available:false};
+const dialog={materialBatchName:'B',materialVersionName:'V',materialAttachmentSources:[source],hide(){this.hidden=true}};
+workspace.loadWikiMaterialSources=async()=>{dialog.materialAttachmentSources=[{...source,source_id:'ATT',attachment_name:'ATT',available:true,sheets:['采购明细']}];return true};
+const calls=[];workspace.call=async(endpoint,args)=>{calls.push([endpoint,args]);if(endpoint.endsWith('prepare_dingtalk_archive_attachment'))return {ok:true,attachment_name:'ATT'};if(endpoint.endsWith('download_oa_form_attachment'))return {ok:true};return {ok:true,rows:[]}};
+workspace.openMaterialImportPreviewDialog=()=>{};
+await workspace.previewMaterialAttachmentSource(dialog,'oa:source');console.log(JSON.stringify(calls));
+""")
+    assert [call[0].split(".")[-1] for call in result] == ["prepare_dingtalk_archive_attachment", "download_oa_form_attachment", "preview_material_import"]
+    assert result[-1][1] == dict(batch_name="B", source_kind="approval_attachment", source_id="ATT", sheet_name="采购明细")
+
+
+def test_packing_attachment_failure_preserves_picker_for_retry():
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B',versionName:'V'};
+workspace.ensureEditSession=async()=>true;workspace.renderWikiMaterialSources=()=>{};
+const dialog={materialBatchName:'B',materialVersionName:'V',materialAttachmentSources:[{source_id:'ATT',attachment_name:'ATT',source_kind:'approval_attachment',available:false}],hide(){this.hidden=true}};
+workspace.call=async()=>({ok:false,message:'附件正在归档，请稍后重试。'});
+let error='';try{await workspace.previewMaterialAttachmentSource(dialog,'ATT')}catch(e){error=e.message}
+console.log(JSON.stringify({error,busy:dialog.wikiMaterialBusy,hidden:Boolean(dialog.hidden)}));
+""")
+    assert result == dict(error="附件正在归档，请稍后重试。", busy="", hidden=False)
 
 
 def test_trial_waits_for_pending_writes_and_ignores_duplicate_clicks():

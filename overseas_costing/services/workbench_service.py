@@ -257,6 +257,15 @@ def build_batch_result_preview_item(item: dict, *, calculated: bool) -> dict:
     if not calculated:
         return result
 
+    saved = batch_service._saved_expense_classification(item)
+    if saved is not None:
+        result.update({"freight_alloc_rmb": _round_result_amount(saved["freight"]),
+                       "tax_alloc_rmb": _round_result_amount(saved["tax"]),
+                       "clearance_alloc_rmb": _round_result_amount(saved["clearance"]),
+                       "unlisted_other_cost_rmb": _round_result_amount(saved["other"]),
+                       "total_unit_rmb": _round_result_amount(item.get("total_unit_rmb"))})
+        return result
+
     metadata = _load_result_preview_json(item.get("derived_json"))
     direct_customs = metadata.get("direct_customs")
     if not isinstance(direct_customs, dict):
@@ -371,6 +380,9 @@ def build_batch_result_preview_payload(
         for currency, amount in purchase_totals_by_currency.items()
     ]
     total_quantity = sum(_as_float(item.get("quantity")) for item in ordered_items)
+    saved_units = [_load_result_preview_json(item.get("derived_json")) for item in ordered_items]
+    if saved_units and all(meta.get("calculation_schema") == 2 for meta in saved_units):
+        total_quantity = sum(_as_float(meta.get("shipping_quantity")) for meta in saved_units)
     weighted_total_unit_rmb = None
     has_all_total_costs = all(item.get("total_cost_rmb") not in (None, "") for item in ordered_items)
     if calculated and total_quantity and has_all_total_costs:
@@ -566,6 +578,27 @@ def get_workbench_summary(filters: dict | None = None) -> dict:
     return {"ok": True, "counts": counts}
 
 
+def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
+    item = dict(row)
+    if transport_mode in {"SEA", "AIR", "EXPRESS"}:
+        item["transport_mode"] = transport_mode
+    derived = _load_result_preview_json(item.get("derived_json"))
+    if derived.get("calculation_schema") == 2:
+        shipping = derived.get("shipping_unit_cost") or {}
+        pricing = derived.get("purchase_pricing_unit_cost") or {}
+        item["shipping_unit_label"] = shipping.get("uom") or "单位待补"
+        item["purchase_pricing_unit_display"] = f"{pricing['amount_rmb']} / {pricing['uom']}" if pricing else "单位换算未明确"
+        item["calculated_customs_rmb"] = derived.get("mexico_customs_rmb")
+        item["calculated_tax_rmb"] = derived.get("tax_allocated_rmb")
+        item["calculated_direct_rmb"] = derived.get("direct_fees_rmb")
+        item["calculated_allocated_rmb"] = derived.get("allocated_fees_rmb")
+    return item
+
+
+def _load_sku_batch_meta(batch_name):
+    return frappe.db.get_value("Overseas Cost Batch", batch_name, ["transport_mode", "current_version", "status"], as_dict=True) or {}
+
+
 def get_batch_items_page(
     batch_name: str,
     version_name: str | None = None,
@@ -607,7 +640,7 @@ def get_batch_items_page(
     )
     fieldnames = list(
         dict.fromkeys(
-            ["name", "row_no", "excel_row_no", "modified"]
+            ["name", "row_no", "excel_row_no", "modified", "derived_json"]
             + [column["fieldname"] for column in columns]
         )
     )
@@ -628,6 +661,23 @@ def get_batch_items_page(
         limit_start=(query["page"] - 1) * query["page_length"],
         limit_page_length=query["page_length"],
     )
+    batch_meta = _load_sku_batch_meta(batch_doc_name)
+    mode = batch_meta.get("transport_mode") if resolved_version == batch_meta.get("current_version") else ""
+    items = [present_saved_sku_result(row, mode) for row in items]
+    columns = [dict(column) for column in columns]
+    if query["group"] in {"total", "all"}:
+        for column in columns:
+            if column["fieldname"] == "total_unit_rmb":
+                column["label"] = "每发货单位成本 RMB"
+        columns.extend([
+            {"excel_col": "", "fieldname": "shipping_unit_label", "label": "发货计价单位"},
+            {"excel_col": "", "fieldname": "purchase_pricing_unit_display", "label": "每采购计价单位成本 RMB"},
+        ])
+    if query["group"] in {"logistics", "tax", "total", "all"}:
+        columns.extend([
+            {"excel_col": "", "fieldname": "calculated_customs_rmb", "label": "本次清关费用 RMB"},
+            {"excel_col": "", "fieldname": "calculated_tax_rmb", "label": "本次进口税费 RMB"},
+        ])
     return {
         "ok": True,
         "batch_name": batch_doc_name,
@@ -639,6 +689,7 @@ def get_batch_items_page(
         "page_length": query["page_length"],
         "page_count": (total + query["page_length"] - 1) // query["page_length"],
         "field_group": query["group"],
+        "calculation_stale": batch_meta.get("status") == "Dirty",
     }
 
 
