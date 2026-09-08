@@ -74,6 +74,26 @@ def test_purchase_source_copy_distinguishes_logistics_source_from_missing_purcha
     source = (PARTS / "75-table-and-list.js").read_text(encoding="utf-8")
     assert "资料来自国际物流审批" in source
     assert "采购审批待关联" in source
+    status_source = (PARTS / "80-drawer-profit.js").read_text(encoding="utf-8")
+    status_method = status_source.split("\n  sourceStatusLabel(sourceStatus, batch)", 1)[1].split(
+        "purchaseApprovalStatusLabel", 1
+    )[0]
+    assert status_method.index("has_oa_logistics") < status_method.index("invalid_business")
+
+
+def test_workspace_restores_latest_background_review_and_inserts_replacements_in_grid() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    load_method = source.split("async loadMaterialFeeWorkspace", 1)[1].split(
+        "materialFeeBasisLabel", 1
+    )[0]
+    assert "get_source_ai_review_status" in load_method
+    assert 'run_id: ""' in load_method
+    assert "initializeMaterialAIDraft" in load_method
+    grid_method = source.split("renderMaterialFeeGrid()", 1)[1].split(
+        "approvalLinkNeedsReview", 1
+    )[0]
+    assert "materialReplacementRows" in grid_method
+    assert "renderMaterialReplacementGridRow" in grid_method
 
 
 def test_apply_does_not_reclassify_automatic_ai_values_as_manual_edits() -> None:

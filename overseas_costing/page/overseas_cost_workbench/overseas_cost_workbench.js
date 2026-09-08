@@ -8580,6 +8580,14 @@ class OverseasCostWorkbench {
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     const count = Number(sourceStatus.linked_purchase_count || 0);
     const reason = sourceStatus.invalid_business_reason || sourceStatus.purchase_approval_sync_message || "";
+    if ((state === "invalid" || state === "excluded" || sourceStatus.invalid_business) && sourceStatus.has_oa_logistics) {
+      return `
+        <div class="ocw-parent-metric ocw-purchase-approval-metric is-missing" title="${this.escape(reason)}">
+          <strong>资料来自国际物流审批</strong>
+          <small>关联采购审批已排除</small>
+        </div>
+      `;
+    }
     if (state === "invalid" || sourceStatus.invalid_business) {
       return `
         <div class="ocw-parent-metric ocw-purchase-approval-metric is-invalid" title="${this.escape(reason)}">
@@ -8619,9 +8627,10 @@ class OverseasCostWorkbench {
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     if (!sourceStatus.invalid_business && state !== "invalid") return "";
     const reason = sourceStatus.invalid_business_reason || sourceStatus.purchase_approval_sync_message || "关联采购审批已拒绝/撤销/终止，不进入核算和 ERP 推送。";
+    const linkedPurchaseExcluded = sourceStatus.invalid_business_scope === "linked_purchase_approval" && sourceStatus.has_oa_logistics;
     return `
       <div class="ocw-invalid-business-alert">
-        <strong>采购审批无效</strong>
+        <strong>${linkedPurchaseExcluded ? "关联采购审批已排除" : "采购审批无效"}</strong>
         <span>${this.escape(reason)}</span>
       </div>
     `;
@@ -9375,6 +9384,9 @@ class OverseasCostWorkbench {
     this.$root.on("input", "[data-mf-ai-edit]", (event) => {
       this.updateSourceAIReviewEdit($(event.currentTarget));
     });
+    this.$root.on("change", "select[data-mf-ai-edit]", (event) => {
+      this.updateSourceAIReviewEdit($(event.currentTarget));
+    });
     this.$root.on("click", "[data-action='mf-grid-scroll-left'], [data-action='mf-grid-scroll-right']", (event) => {
       const direction = $(event.currentTarget).attr("data-action") === "mf-grid-scroll-left" ? -1 : 1;
       const viewport = this.$root.find("[data-mf-grid-viewport]").get(0);
@@ -9455,7 +9467,8 @@ class OverseasCostWorkbench {
     state.loading = true;
     if (!options.quiet) this.renderDetailTabLoading("正在读取费用、凭证和物料表");
     try {
-      const [detail, materials, fees, preview] = await Promise.all([
+      const shouldRestoreAI = !state.aiFill;
+      const [detail, materials, fees, preview, latestAI] = await Promise.all([
         this.call("overseas_costing.api.batch.get_batch_detail", {
           batch_name: batchName,
           version_name: this.detailState.versionName || batch.current_version || null,
@@ -9474,6 +9487,13 @@ class OverseasCostWorkbench {
           batch_name: batchName,
           version_name: this.detailState.versionName || batch.current_version || null,
         }),
+        shouldRestoreAI
+          ? this.call("overseas_costing.api.materials.get_source_ai_review_status", {
+              batch_name: batchName,
+              version_name: this.detailState.versionName || batch.current_version || null,
+              run_id: "",
+            }, true)
+          : Promise.resolve(null),
       ]);
       if (
         requestId !== state.requestId
@@ -9485,8 +9505,23 @@ class OverseasCostWorkbench {
       state.materials = materials;
       state.fees = fees;
       state.preview = preview;
+      if (latestAI?.ok && latestAI.status && latestAI.status !== "NONE") {
+        state.aiClarification = latestAI.clarification_text || state.aiClarification || "";
+        state.aiFill = latestAI.status === "READY"
+          ? this.initializeMaterialAIDraft(latestAI)
+          : { ...latestAI, runId: latestAI.run_id };
+      }
       state.loading = false;
       this.renderMaterialFeeWorkspace();
+      if (["QUEUED", "RUNNING"].includes(String(state.aiFill?.status || "")) && !state.aiFill.polling) {
+        state.aiFill.polling = true;
+        this.pollMaterialAIFill(
+          state,
+          batchName,
+          this.detailState.versionName || batch.current_version || "",
+          state.aiFill.runId
+        ).catch((error) => this.showError(error));
+      }
       return true;
     } catch (error) {
       if (
@@ -9637,9 +9672,15 @@ class OverseasCostWorkbench {
     const scopeLabel = String(fee.scope_type || "ALL_ITEMS") === "ALL_ITEMS" ? "全批物料" : String(fee.scope_type) === "DIRECT_ITEM" ? "指定单行" : "指定物料";
     const amountStatus = String(fee.amount_state || fee.amount_status || "MISSING").toUpperCase();
     const feeKey = String(fee.logical_fee_key || fee.fee_key || "");
-    const draft = this.materialFeeState?.feeDrafts?.[feeKey] || null;
-    const amount = draft ? draft.amount : (fee.amount ?? "");
-    const currency = this.normalizeMaterialFeeCurrency(draft ? draft.currency : fee.currency || "RMB");
+    const aiFill = this.materialFeeState?.aiFill;
+    const aiFeeProposal = aiFill?.status === "READY"
+      ? (aiFill.proposals || []).find((proposal) => proposal.proposal_type === "fee_update" && String(proposal.payload?.logical_fee_key || "") === feeKey)
+      : null;
+    const aiFeeEdit = aiFeeProposal ? aiFill.edits?.[String(aiFeeProposal.proposal_id || "")] : null;
+    const aiFeeValues = aiFeeEdit || aiFeeProposal?.payload || null;
+    const draft = aiFeeProposal ? null : (this.materialFeeState?.feeDrafts?.[feeKey] || null);
+    const amount = aiFeeValues ? aiFeeValues.amount : draft ? draft.amount : (fee.amount ?? "");
+    const currency = this.normalizeMaterialFeeCurrency(aiFeeValues ? aiFeeValues.currency : draft ? draft.currency : fee.currency || "RMB");
     const currencyOptions = this.materialFeeCurrencyOptions();
     const supportedCurrency = currencyOptions.some((option) => option.value === currency);
     const savedPreview = this.materialFeeSavedCostPreview();
@@ -9649,7 +9690,7 @@ class OverseasCostWorkbench {
       && !Object.keys(this.materialFeeState?.materialSaveErrors || {}).length;
     const preview = (savedCurrent ? savedPreview : this.materialFeeState?.preview) || {};
     const excludedFee = (preview.excluded_fees || []).find((row) => row.fee_key === feeKey);
-    const inclusionLabel = draft ? "修改待保存" : (preview.included_fees || []).some((row) => row.fee_key === feeKey) ? (savedCurrent ? "已计入试算" : "可计入 · 待试算") : excludedFee ? this.materialFeeExclusionReason(excludedFee) : "";
+    const inclusionLabel = aiFeeProposal ? "AI 草稿 · 未保存" : draft ? "修改待保存" : (preview.included_fees || []).some((row) => row.fee_key === feeKey) ? (savedCurrent ? "已计入试算" : "可计入 · 待试算") : excludedFee ? this.materialFeeExclusionReason(excludedFee) : "";
     const missingSavedAmount = amountStatus === "MISSING" && amount !== "";
     const defaultZero = !draft && fee.virtual && fee.is_default_zero && amountStatus === "ESTIMATED";
     const mexicoEntry = fee.entry_responsibility === "MEXICO";
@@ -9659,15 +9700,18 @@ class OverseasCostWorkbench {
     const feeLabel = String(fee.expense_category || feeKey || "费用");
     const evidence = fee.evidence || [];
     return `
-      <tr class="${fee.legacy_unmapped || fee.requires_review ? "is-review" : ""}">
+      <tr class="${[fee.legacy_unmapped || fee.requires_review ? "is-review" : "", aiFeeProposal ? "is-ai-draft" : ""].filter(Boolean).join(" ")}">
         <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "--")}</strong><small>${fee.virtual ? "默认项 · 未入库" : fee.legacy_unmapped ? "历史费用 · 请核对" : "已保存"}</small>${mexicoEntry ? "<small>由墨西哥同事补充</small>" : ""}</td>
         <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span>${inclusionLabel ? `<small>${this.escape(inclusionLabel)}</small>` : ""}</td>
         <td class="ocw-mf-fee-amount-cell ${inlineError ? "is-save-error" : ""}" ${inlineError ? `title="${this.escape(inlineError)}"` : ""}>
           <div class="ocw-mf-fee-inline-fields">
-            <select data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(this.normalizeMaterialFeeCurrency(fee.currency || "RMB"))}" aria-label="${this.escape(feeLabel)}币种" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}">${supportedCurrency ? "" : `<option value="" selected disabled>请选择币种（原 ${this.escape(currency || "未设置")}）</option>`}${currencyOptions.map((option) => `<option value="${option.value}" ${option.value === currency ? "selected" : ""}>${option.label}</option>`).join("")}</select>
-            <input data-mf-fee-input="amount" data-mf-fee-amount="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.amount ?? "")}" value="${this.escape(amount)}" ${forceActual ? 'data-mf-force-actual="1"' : ""} inputmode="decimal" aria-label="${this.escape(feeLabel)}原币金额" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />
+            ${aiFeeProposal
+              ? `<select data-mf-ai-edit="1" data-proposal-id="${this.escape(aiFeeProposal.proposal_id || "")}" data-fieldname="currency" aria-label="AI 草稿 ${this.escape(feeLabel)}币种">${currencyOptions.map((option) => `<option value="${option.value}" ${option.value === currency ? "selected" : ""}>${option.label}</option>`).join("")}</select>
+                 <input data-mf-ai-edit="1" data-proposal-id="${this.escape(aiFeeProposal.proposal_id || "")}" data-fieldname="amount" value="${this.escape(amount)}" inputmode="decimal" aria-label="AI 草稿 ${this.escape(feeLabel)}原币金额" />`
+              : `<select data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(this.normalizeMaterialFeeCurrency(fee.currency || "RMB"))}" aria-label="${this.escape(feeLabel)}币种" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}">${supportedCurrency ? "" : `<option value="" selected disabled>请选择币种（原 ${this.escape(currency || "未设置")}）</option>`}${currencyOptions.map((option) => `<option value="${option.value}" ${option.value === currency ? "selected" : ""}>${option.label}</option>`).join("")}</select>
+                 <input data-mf-fee-input="amount" data-mf-fee-amount="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.amount ?? "")}" value="${this.escape(amount)}" ${forceActual ? 'data-mf-force-actual="1"' : ""} inputmode="decimal" aria-label="${this.escape(feeLabel)}原币金额" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />`}
           </div>
-          <small data-mf-fee-amount-hint="1">${defaultZero ? "默认暂估 0，待墨西哥确认" : missingSavedAmount ? "尚未计入 · 按 Enter 或离开后确认为实际" : "Enter 或失焦自动保存为实际"}</small>
+          <small data-mf-fee-amount-hint="1">${aiFeeProposal ? "AI 草稿 · 确认所选草稿后才会保存" : defaultZero ? "默认暂估 0，待墨西哥确认" : missingSavedAmount ? "尚未计入 · 按 Enter 或离开后确认为实际" : "Enter 或失焦自动保存为实际"}</small>
           <small id="${this.escape(errorId)}" class="ocw-mf-fee-inline-error-text ${inlineError ? "is-visible" : ""}" data-mf-fee-error="1">${this.escape(inlineError)}</small>
         </td>
         <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidence.length ? `${evidence.length} 份已关联` : "可上传或关联已有资料"}</small></td>
@@ -9712,7 +9756,8 @@ class OverseasCostWorkbench {
     const materialData = state.materials || {};
     const columns = this.materialFeeGridColumns();
     let items = materialData.items || [];
-    if (state.onlyMissing) items = items.filter((row) => (row.requirements?.missing_fields || []).length);
+    items = this.materialReplacementRows(items);
+    if (state.onlyMissing) items = items.filter((row) => row.__aiReplacement || (row.requirements?.missing_fields || []).length);
     const page = Number(materialData.page || state.page || 1);
     const pageCount = Math.max(1, Number(materialData.page_count || 1));
     const tableWidth = columns.reduce((sum, column) => sum + Number(column.width || 130), 0);
@@ -9723,13 +9768,71 @@ class OverseasCostWorkbench {
           <table class="ocw-mf-grid-table" style="width:${tableWidth}px;min-width:${tableWidth}px">
             <colgroup>${columns.map((column) => `<col style="width:${Number(column.width || 130)}px">`).join("")}</colgroup>
             <thead><tr>${columns.map((column) => `<th>${this.escape(column.label)}</th>`).join("")}</tr></thead>
-            <tbody>${items.length ? items.map((item, index) => this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
+            <tbody>${items.length ? items.map((item, index) => item.__aiReplacement ? this.renderMaterialReplacementGridRow(item, columns, index) : this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
           </table>
         </div>
         <div class="ocw-mf-grid-scroll-controls"><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-left" aria-label="向左滚动">‹</button><div class="ocw-mf-grid-scrollbar" data-mf-grid-scrollbar><div style="width:${tableWidth}px"></div></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-right" aria-label="向右滚动">›</button></div>
-        <div class="ocw-mf-grid-footer"><span>共 ${Number(materialData.total || 0)} 行 · 当前第 ${page}/${pageCount} 页</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page + 1}" ${page >= pageCount ? "disabled" : ""}>下一页</button></div></div>
+        <div class="ocw-mf-grid-footer"><span>共 ${items.length !== (materialData.items || []).length ? `${items.length} 行（含 AI 临时明细）` : `${Number(materialData.total || 0)} 行`} · 当前第 ${page}/${pageCount} 页</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page + 1}" ${page >= pageCount ? "disabled" : ""}>下一页</button></div></div>
       </div>
     `;
+  }
+
+  materialReplacementRows(items = []) {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    if (fill?.status !== "READY" || !fill.review_mode) return items;
+    const replacements = new Map();
+    (fill.proposals || []).filter((proposal) => proposal.proposal_type === "material_replace").forEach((proposal) => {
+      const proposalId = String(proposal.proposal_id || "");
+      const rows = fill.edits?.[proposalId]?.replacement_rows || proposal.payload?.replacement_rows || [];
+      if (!proposal.target_item_name || !rows.length) return;
+      replacements.set(String(proposal.target_item_name), { proposal, rows });
+    });
+    if (!replacements.size) return items;
+    return items.flatMap((item) => {
+      const replacement = replacements.get(String(item.name || ""));
+      if (!replacement) return [item];
+      return replacement.rows.map((row, rowIndex) => ({
+        ...item,
+        ...row,
+        name: `ai:${replacement.proposal.proposal_id}:${rowIndex}`,
+        row_no: `${item.row_no || ""}.${rowIndex + 1}`,
+        material_code: "待建档",
+        actual_shipped_qty: row.actual_shipped_qty ?? row.quantity,
+        shipped_uom: row.shipped_uom || row.purchase_uom || item.shipped_uom,
+        effective_shipping_quantity: row.actual_shipped_qty ?? row.quantity,
+        effective_shipping_uom: row.shipped_uom || row.purchase_uom || item.shipped_uom,
+        requirements: { missing_fields: [] },
+        __aiReplacement: {
+          proposalId: String(replacement.proposal.proposal_id || ""),
+          rowIndex,
+          originalItemName: String(item.name || ""),
+        },
+      }));
+    });
+  }
+
+  renderMaterialReplacementGridRow(item, columns, rowIndex) {
+    return `<tr class="is-ai-replacement" data-mf-row-index="${rowIndex}" data-item-name="${this.escape(item.name || "")}">${columns.map((column, columnIndex) => this.renderMaterialReplacementGridCell(item, column, columnIndex)).join("")}</tr>`;
+  }
+
+  renderMaterialReplacementGridCell(item, column, columnIndex) {
+    const meta = item.__aiReplacement || {};
+    const editable = new Set([
+      "product_name", "spec_model", "quantity", "purchase_uom", "unit_price",
+      "unit_price_uom", "purchase_currency", "goods_value", "actual_shipped_qty",
+      "shipped_uom", "net_weight_kg", "gross_weight_kg", "volume_m3",
+      "chargeable_weight_kg", "project_collection",
+    ]);
+    let fieldname = column.field;
+    let value = item[fieldname];
+    if (fieldname === "source_doc_no") value = item.source_doc_no || "原审批行";
+    if (fieldname === "material_code") value = "待建档";
+    if (fieldname === "actual_shipped_qty") value = item.actual_shipped_qty ?? item.quantity;
+    if (fieldname === "shipped_uom") value = item.shipped_uom || item.purchase_uom;
+    if (!editable.has(fieldname)) {
+      return `<td class="ocw-mf-cell is-readonly is-ai-replacement" data-mf-column-index="${columnIndex}" title="AI 临时明细，确认后替换原模糊物料行"><span>${this.escape(this.formatValue(value || "--"))}</span></td>`;
+    }
+    return `<td class="ocw-mf-cell is-ai-draft is-ai-replacement" data-mf-column-index="${columnIndex}"><input data-mf-ai-edit="1" data-proposal-id="${this.escape(meta.proposalId || "")}" data-row-index="${Number(meta.rowIndex || 0)}" data-fieldname="${this.escape(fieldname)}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="AI 临时明细 ${this.escape(column.label)}" /><small>AI 临时明细 · 可修改</small></td>`;
   }
 
   approvalLinkNeedsReview(link) {
@@ -12288,6 +12391,7 @@ class OverseasCostWorkbench {
   }
 
   sourceStatusLabel(sourceStatus, batch) {
+    if (sourceStatus.has_oa_logistics) return "资料来自国际物流审批";
     if (sourceStatus.invalid_business) return "采购审批无效";
     if (Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0) > 0) return "已有关联资料";
     if (batch.source_approval_no || batch.source_instance_id || batch.source_dingtalk_url) return "已关联钉钉审批单";
@@ -12300,6 +12404,7 @@ class OverseasCostWorkbench {
     const statuses = Array.isArray(sourceStatus.linked_purchase_approval_statuses)
       ? sourceStatus.linked_purchase_approval_statuses.filter(Boolean)
       : [];
+    if ((state === "invalid" || state === "excluded" || sourceStatus.invalid_business) && sourceStatus.has_oa_logistics) return "关联采购审批已排除";
     if (state === "invalid" || sourceStatus.invalid_business) return "采购审批无效";
     if (state === "pending") return count ? `${count} 条状态未同步` : "状态未同步";
     if (state === "missing") return "未关联采购审批";
@@ -15488,7 +15593,9 @@ class OverseasCostWorkbench {
     const itemCount = hasLoadedItems ? itemRows.length : Number(batch.item_count || 0);
     const approvalState = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
 
-    if (sourceStatus.invalid_business || approvalState === "invalid") reasons.push("采购审批无效");
+    if (sourceStatus.invalid_business || approvalState === "invalid" || approvalState === "excluded") {
+      reasons.push(sourceStatus.has_oa_logistics ? "关联采购审批已排除" : "采购审批无效");
+    }
     if (!this.hasText(batch.subsidiary_code)) reasons.push("缺业务主体");
     if (approvalState === "missing") reasons.push("未关联采购审批");
     if (approvalState === "pending") reasons.push("采购审批状态未同步");

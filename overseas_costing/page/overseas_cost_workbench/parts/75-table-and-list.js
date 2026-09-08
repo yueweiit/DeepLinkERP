@@ -548,6 +548,14 @@
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     const count = Number(sourceStatus.linked_purchase_count || 0);
     const reason = sourceStatus.invalid_business_reason || sourceStatus.purchase_approval_sync_message || "";
+    if ((state === "invalid" || state === "excluded" || sourceStatus.invalid_business) && sourceStatus.has_oa_logistics) {
+      return `
+        <div class="ocw-parent-metric ocw-purchase-approval-metric is-missing" title="${this.escape(reason)}">
+          <strong>资料来自国际物流审批</strong>
+          <small>关联采购审批已排除</small>
+        </div>
+      `;
+    }
     if (state === "invalid" || sourceStatus.invalid_business) {
       return `
         <div class="ocw-parent-metric ocw-purchase-approval-metric is-invalid" title="${this.escape(reason)}">
@@ -587,9 +595,10 @@
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     if (!sourceStatus.invalid_business && state !== "invalid") return "";
     const reason = sourceStatus.invalid_business_reason || sourceStatus.purchase_approval_sync_message || "关联采购审批已拒绝/撤销/终止，不进入核算和 ERP 推送。";
+    const linkedPurchaseExcluded = sourceStatus.invalid_business_scope === "linked_purchase_approval" && sourceStatus.has_oa_logistics;
     return `
       <div class="ocw-invalid-business-alert">
-        <strong>采购审批无效</strong>
+        <strong>${linkedPurchaseExcluded ? "关联采购审批已排除" : "采购审批无效"}</strong>
         <span>${this.escape(reason)}</span>
       </div>
     `;

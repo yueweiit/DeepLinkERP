@@ -17,6 +17,7 @@ from overseas_costing.services.material_ai_fill_service import (
     discard_material_ai_fill,
     execute_material_ai_fill,
     get_material_ai_fill_status,
+    get_source_ai_review_status,
     _projection_candidates,
     start_material_ai_fill,
     validate_apply_updates,
@@ -814,6 +815,45 @@ def test_status_and_discard_return_public_payload_without_mutating_materials() -
         "message": "AI 草稿已放弃，主表已恢复服务器当前值。",
     }
     assert repository.applied == []
+
+
+def test_latest_source_review_status_can_restore_background_draft() -> None:
+    repository = _LifecycleRepository()
+    repository.run.update(
+        {
+            "trigger_mode": "SOURCE_CHANGED",
+            "clarification_text": "两款各四个",
+            "source_completeness": "COMPLETE",
+            "candidates_json": '[{"proposal_id":"P1","proposal_type":"material_replace"}]',
+        }
+    )
+    repository.find_latest_review_run = lambda batch, version: repository.run
+
+    status = get_source_ai_review_status(
+        "B1", "", version_name="V1", repository=repository
+    )
+
+    assert status["run_id"] == "RUN-1"
+    assert status["status"] == "READY"
+    assert status["clarification_text"] == "两款各四个"
+    assert status["proposals"][0]["proposal_id"] == "P1"
+
+
+def test_material_replacement_does_not_treat_currency_as_price_uom() -> None:
+    values = material_ai_fill_service._normalize_review_item_values(
+        {
+            "product_name": "MagSafe Wallets",
+            "quantity": "4",
+            "purchase_uom": "个",
+            "unit_price": "1.68",
+            "unit_price_uom": "USD",
+            "purchase_currency": "USD",
+        },
+        fx_rates={"USD": "7.178751"},
+    )
+
+    assert values["unit_price_uom"] == "个"
+    assert values["goods_value"] == "48.24"
 
 
 def test_apply_rechecks_ready_state_after_acquiring_run_lock() -> None:

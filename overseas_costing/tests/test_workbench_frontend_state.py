@@ -653,6 +653,7 @@ def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_pre
         "overseas_costing.api.materials.get_material_grid",
         "overseas_costing.api.fees.get_fee_worklist",
         "overseas_costing.api.calculate.preview_comprehensive_cost",
+        "overseas_costing.api.materials.get_source_ai_review_status",
     ]
     assert result["payload"] == {
         "logical_fee_key": "international_sea_freight",
@@ -968,6 +969,7 @@ def test_fee_workspace_manual_reload_refreshes_batch_modified() -> None:
         "overseas_costing.api.materials.get_material_grid",
         "overseas_costing.api.fees.get_fee_worklist",
         "overseas_costing.api.calculate.preview_comprehensive_cost",
+        "overseas_costing.api.materials.get_source_ai_review_status",
     ]
     assert result["renders"] == 1
 
@@ -1082,12 +1084,12 @@ def test_fee_workspace_successful_save_invalidates_write_before_full_reload() ->
         "feeDrafts:{'fee-b':{amount:'88',currency:'EUR',error:'',touched:true}},materials:{items:[]},fees:{fees:[oldFee]},preview:{summary:{}}};"
         "workspace.getDetailBatch=()=>({name:'B-1',current_version:'V-1',modified:workspace.detailState.expectedModified});"
         "workspace.ensureEditSession=async()=>true;workspace.renderDetailTabLoading=()=>{};let renders=0;workspace.renderMaterialFeeWorkspace=()=>{renders+=1};"
-        "let releaseOld;const oldGate=new Promise((resolve)=>{releaseOld=resolve});const counts={detail:0,materials:0,fees:0,preview:0};let writes=0;"
+        "let releaseOld;const oldGate=new Promise((resolve)=>{releaseOld=resolve});const counts={detail:0,materials:0,fees:0,preview:0,ai:0};let writes=0;"
         "workspace.call=async(endpoint)=>{if(endpoint.endsWith('save_fee')){writes+=1;return {ok:true,batch_modified:'m2',message:'saved'}}"
-        "const kind=endpoint.endsWith('get_batch_detail')?'detail':endpoint.endsWith('get_material_grid')?'materials':endpoint.endsWith('get_fee_worklist')?'fees':'preview';"
+        "const kind=endpoint.endsWith('get_batch_detail')?'detail':endpoint.endsWith('get_material_grid')?'materials':endpoint.endsWith('get_fee_worklist')?'fees':endpoint.endsWith('get_source_ai_review_status')?'ai':'preview';"
         "counts[kind]+=1;const old=counts[kind]===1;if(old)await oldGate;"
         "if(kind==='detail')return {ok:true,batch_name:'B-1',version_name:'V-1',header:{name:'B-1',modified:old?'m1':'m2'}};"
-        "if(kind==='materials')return {items:[{name:old?'OLD':'NEW'}]};if(kind==='fees')return {fees:[old?oldFee:newFee],summary:{}};"
+        "if(kind==='materials')return {items:[{name:old?'OLD':'NEW'}]};if(kind==='fees')return {fees:[old?oldFee:newFee],summary:{}};if(kind==='ai')return {ok:true,status:'NONE'};"
         "return {summary:{total_cost_rmb:old?'100.00':'150.00'}}};"
         "const oldFull=workspace.loadMaterialFeeWorkspace();await new Promise((resolve)=>setImmediate(resolve));"
         "const fixture=makeFeeInput({amount:'150',currency:'USD',originalAmount:'100',originalCurrency:'RMB',feeKey:'fee-a'});"
@@ -1099,7 +1101,7 @@ def test_fee_workspace_successful_save_invalidates_write_before_full_reload() ->
     )
 
     assert result["writes"] == 1
-    assert result["counts"] == {"detail": 2, "materials": 2, "fees": 2, "preview": 2}
+    assert result["counts"] == {"detail": 2, "materials": 2, "fees": 2, "preview": 2, "ai": 2}
     assert result["requestId"] == 2
     assert result["loading"] is False
     assert result["expectedModified"] == "m2"

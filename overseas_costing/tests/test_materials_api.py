@@ -161,7 +161,7 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
     calls = []
     monkeypatch.setattr(api, "require_batch_permission", lambda batch, ptype: checks.append(ptype) or batch)
     monkeypatch.setattr(api.material_ai_fill_service, "start_source_ai_review", lambda *args, **kwargs: calls.append(("start", args, kwargs)) or {"ok": True})
-    monkeypatch.setattr(api.material_ai_fill_service, "get_source_ai_review_status", lambda *args: calls.append(("get", args)) or {"ok": True})
+    monkeypatch.setattr(api.material_ai_fill_service, "get_source_ai_review_status", lambda *args, **kwargs: calls.append(("get", args, kwargs)) or {"ok": True})
     monkeypatch.setattr(api.material_ai_fill_service, "apply_source_ai_review", lambda *args: calls.append(("apply", args)) or {"ok": True})
     monkeypatch.setattr(api.material_ai_fill_service, "discard_source_ai_review", lambda *args: calls.append(("discard", args)) or {"ok": True})
 

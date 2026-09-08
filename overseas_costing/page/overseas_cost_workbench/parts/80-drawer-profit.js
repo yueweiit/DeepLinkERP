@@ -495,6 +495,7 @@
   }
 
   sourceStatusLabel(sourceStatus, batch) {
+    if (sourceStatus.has_oa_logistics) return "资料来自国际物流审批";
     if (sourceStatus.invalid_business) return "采购审批无效";
     if (Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0) > 0) return "已有关联资料";
     if (batch.source_approval_no || batch.source_instance_id || batch.source_dingtalk_url) return "已关联钉钉审批单";
@@ -507,6 +508,7 @@
     const statuses = Array.isArray(sourceStatus.linked_purchase_approval_statuses)
       ? sourceStatus.linked_purchase_approval_statuses.filter(Boolean)
       : [];
+    if ((state === "invalid" || state === "excluded" || sourceStatus.invalid_business) && sourceStatus.has_oa_logistics) return "关联采购审批已排除";
     if (state === "invalid" || sourceStatus.invalid_business) return "采购审批无效";
     if (state === "pending") return count ? `${count} 条状态未同步` : "状态未同步";
     if (state === "missing") return "未关联采购审批";

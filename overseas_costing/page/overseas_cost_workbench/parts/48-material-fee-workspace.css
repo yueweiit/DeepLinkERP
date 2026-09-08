@@ -263,6 +263,11 @@
 .ocw-mf-cell.is-save-error::after { content: "保存失败·点击重试"; position: absolute; right: 3px; bottom: 1px; color: #b42318; font-size: 8px; pointer-events: none; }
 .ocw-mf-cell.is-ai-draft { background: #eaf5ff; box-shadow: inset 0 0 0 1px #65b5ee; }
 .ocw-mf-cell.is-ai-draft input { color: #076fbe; font-weight: 600; }
+.ocw-mf-grid-table tr.is-ai-replacement td { background: #f3f9ff; }
+.ocw-mf-grid-table tr.is-ai-replacement td:first-child { box-shadow: inset 3px 0 0 #2496ed; }
+.ocw-mf-cell.is-ai-replacement small { display: block; color: #1478bd; font-size: 10px; white-space: nowrap; }
+.ocw-mf-fee-table tr.is-ai-draft td { background: #f3f9ff; }
+.ocw-mf-fee-table tr.is-ai-draft td:first-child { box-shadow: inset 3px 0 0 #2496ed; }
 .ocw-mf-cell.has-ai-candidate { background: #fff8e7; box-shadow: inset 0 0 0 1px #f0c36b; }
 .ocw-mf-grid-empty { padding: 28px !important; color: var(--mf-muted); text-align: center; }
 .ocw-mf-grid-scroll-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 6px 10px 2px; background: #fff; }

@@ -592,6 +592,8 @@ def _normalize_review_item_values(
             normalized[fieldname] = str(value or "").strip()[:500]
     if not partial and not str(normalized.get("product_name") or "").strip():
         raise ValueError("临时物料明细必须填写物料名称。")
+    if str(normalized.get("unit_price_uom") or "").upper() in REVIEW_CURRENCIES:
+        normalized["unit_price_uom"] = str(normalized.get("purchase_uom") or "").strip()
     if not partial and all(
         not _is_blank(normalized.get(key))
         for key in ("quantity", "unit_price", "purchase_currency")
@@ -1056,11 +1058,31 @@ def get_material_ai_fill_status(
 
 
 def get_source_ai_review_status(
-    batch_name: str, run_id: str, *, repository: Any | None = None
+    batch_name: str,
+    run_id: str = "",
+    *,
+    version_name: str = "",
+    repository: Any | None = None,
 ) -> dict:
     repo = repository or FrappeMaterialAIFillRepository()
-    result = get_material_ai_fill_status(batch_name, run_id, repository=repo)
-    run = repo.get_run(str(run_id or ""))
+    selected_run_id = str(run_id or "").strip()
+    if not selected_run_id:
+        finder = getattr(repo, "find_latest_review_run", None)
+        latest = finder(str(batch_name or ""), str(version_name or "")) if callable(finder) else None
+        if not latest:
+            return {
+                "ok": True,
+                "run_id": "",
+                "batch_name": str(batch_name or ""),
+                "version_name": str(version_name or ""),
+                "status": "NONE",
+                "review_mode": True,
+                "proposals": [],
+                "draft": {},
+            }
+        selected_run_id = str(_record_value(latest, "name") or "")
+    result = get_material_ai_fill_status(batch_name, selected_run_id, repository=repo)
+    run = repo.get_run(selected_run_id)
     result.update(
         {
             "review_mode": True,
@@ -1408,6 +1430,14 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
                 # when they are not shaped like a packing list.
                 continue
         semantic_document["structured_rows"] = structured_rows[:2000]
+        if frappe is not None and attachment.get("source_id"):
+            frappe.db.set_value(
+                "Overseas Cost Attachment",
+                str(attachment.get("source_id")),
+                "parse_status",
+                "Parsed",
+                update_modified=True,
+            )
         return all_candidates, semantic_document
     parsed = attachment_parse_service.preview_source_document(
         source_name=file_name,
@@ -2100,6 +2130,23 @@ class FrappeMaterialAIFillRepository:
                 "input_fingerprint": input_fingerprint,
                 "status": ["in", list(ACTIVE_STATES)],
             },
+            fields=["name", "status"],
+            order_by="creation desc",
+            limit_page_length=1,
+        )
+        return rows[0] if rows else None
+
+    def find_latest_review_run(self, batch_name: str, version_name: str = ""):
+        filters = {
+            "batch": batch_name,
+            "status": ["in", list(ACTIVE_STATES)],
+            "proposal_version": [">", 0],
+        }
+        if version_name:
+            filters["version"] = version_name
+        rows = frappe.get_all(
+            "Overseas Cost Material AI Run",
+            filters=filters,
             fields=["name", "status"],
             order_by="creation desc",
             limit_page_length=1,
