@@ -385,7 +385,7 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
     assert "renderManualDocumentPanel" not in documents_block
     for label in (
         "费用与凭证",
-        "预览综合单价",
+        "开始试算",
         "物料与装箱数据",
         "只看缺项",
         "展开辅助列",
@@ -621,6 +621,7 @@ def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_pre
         ("2400", "", "币种"),
         ("2400", "US", "币种"),
         ("2400", "U1D", "币种"),
+        ("2400", "EUR", "币种"),
     ],
 )
 def test_fee_workspace_invalid_inline_value_stays_visible_without_writing(
@@ -695,10 +696,10 @@ def test_fee_workspace_unchanged_actual_blur_does_not_leave_stale_draft() -> Non
 def test_fee_workspace_render_restores_draft_error_and_accessible_labels() -> None:
     result = _fee_workspace_result(
         "const workspace=Object.create(Harness.prototype);workspace.escape=(value)=>String(value??'').replaceAll('&','&amp;').replaceAll('\\\"','&quot;');"
-        "workspace.materialFeeState={feeDrafts:{'legacy:weird/key':{amount:'2400.5',currency:'EUR',error:'\\u5e76\\u53d1\\u51b2\\u7a81'}}};"
+        "workspace.materialFeeState={feeDrafts:{'legacy:weird/key':{amount:'2400.5',currency:'USD',error:'\\u5e76\\u53d1\\u51b2\\u7a81'}}};"
         "const html=workspace.renderMaterialFeeRow({logical_fee_key:'legacy:weird/key',expense_category:'\\u7279\\u6b8a\\u8d39\\u7528',"
         "amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',allocation:{status:'ALLOCATED'},evidence:[]});"
-        "console.log(JSON.stringify({draftAmount:html.includes('value=\\\"2400.5\\\"'),draftCurrency:html.includes('value=\\\"EUR\\\"'),"
+        "console.log(JSON.stringify({draftAmount:html.includes('value=\\\"2400.5\\\"'),draftCurrency:html.includes('value=\\\"USD\\\"'),"
         "inlineError:html.includes('\\u5e76\\u53d1\\u51b2\\u7a81'),invalid:html.includes('aria-invalid=\\\"true\\\"'),"
         "safeId:html.includes('ocw-mf-fee-error-legacy_58_weird_47_key'),amountLabel:html.includes('aria-label=\\\"特殊费用原币金额\\\"'),"
         "currencyLabel:html.includes('aria-label=\\\"特殊费用币种\\\"')}));"
@@ -1211,17 +1212,19 @@ def test_fee_workspace_stale_failure_does_not_touch_detached_input_or_toast(
     assert result["renders"] == (1 if stale_phase == "save" and stale_reason == "full_reload" else 0)
 
 
-def test_fee_workspace_allocation_failure_is_explicitly_excluded_from_preview() -> None:
+def test_fee_workspace_exclusion_is_in_trial_result_without_an_allocation_column() -> None:
     result = _fee_workspace_result(
         "const workspace=Object.create(Harness.prototype);workspace.escape=(value)=>String(value ?? '');"
         "workspace.formatValue=(value)=>String(value);"
         "const row=workspace.renderMaterialFeeRow({logical_fee_key:'import_tax',expense_category:'\u8fdb\u53e3\u7a0e\u8d39',"
         "amount_status:'ESTIMATED',amount:'88',currency:'EUR',allocation_basis:'goods_value',"
         "scope_type:'ALL_ITEMS',allocation:{status:'MISSING_BASIS'},evidence:[]});"
-        "console.log(JSON.stringify({excluded:row.includes('\u6682\u672a\u8ba1\u5165\u8bd5\u7b97'),basis:row.includes('\u91c7\u8d2d\u8d27\u503c')}));"
+        "workspace.detailState={batchName:'B-1'};workspace.materialFeeState={batchName:'B-1',preview:{excluded_fees:[{expense_category:'进口税费',reason_code:'ALLOCATION_DENOMINATOR_ZERO'}]}};"
+        "const trial=workspace.renderMaterialFeeCostTable();"
+        "console.log(JSON.stringify({basis:row.includes('采购货值'),rawCode:trial.includes('ALLOCATION_DENOMINATOR_ZERO'),excluded:trial.includes('未计入费用'),chinese:trial.includes('采购货值')}));"
     )
 
-    assert result == {"excluded": True, "basis": True}
+    assert result == {"basis": False, "rawCode": False, "excluded": True, "chinese": True}
 
 
 def test_wiki_material_source_dialog_refreshes_globally_and_previews_each_sheet() -> None:
@@ -1274,3 +1277,186 @@ def test_batch_source_provenance_fields_are_not_editable_by_cost_users() -> None
 
     for fieldname in ("source_type", "source_data_id", "source_approval_no", "source_instance_id", "extra_json"):
         assert fields[fieldname]["permlevel"] == 1
+
+
+def test_fee_workspace_currency_is_a_three_option_select_and_dialog_has_no_basis():
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);
+workspace.detailState={batchName:'B-1'};
+const fee={logical_fee_key:'freight',amount_status:'ACTUAL',amount:0,currency:'CNY'};
+workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},materials:{items:[]}};
+workspace.escape=(value)=>String(value??'');
+const row=workspace.renderMaterialFeeRow(fee);
+let fields;global.frappe.ui={Dialog:class {constructor(options){fields=options.fields;this.$wrapper={addClass(){}}}show(){}}};
+workspace.openMaterialFeeDialog('freight');
+console.log(JSON.stringify({row,fields}));
+""")
+    assert '<select data-mf-fee-input="currency"' in result["row"]
+    assert result["row"].count("<option ") == 3
+    assert 'value="RMB" selected' in result["row"]
+    assert "人民币" in result["row"] and "比索" in result["row"] and "美金" in result["row"]
+    fields = {field["fieldname"]: field for field in result["fields"]}
+    assert "allocation_basis" not in fields
+    assert fields["currency"]["fieldtype"] == "Select"
+    assert [option["value"] for option in fields["currency"]["options"]] == ["RMB", "MXN", "USD"]
+    assert fields["currency"]["default"] == "RMB"
+    assert fields["amount"]["default"] == 0
+
+
+PREVIEW_WORKSPACE_FIXTURE = r"""
+const workspace=Object.create(Harness.prototype);
+workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents'};
+const state=workspace.ensureMaterialFeeState();state.preview={summary:{total_cost_rmb:'100.00'}};
+const button={disabled:false,label:'',prop(name,value){this[name]=value;return this},text(value){this.label=value;return this},attr(){return this}};
+workspace.$root={find(selector){if(selector.includes('mf-preview-cost'))return button;return {length:0,toArray:()=>[],each(){},get(){return null},filter(){return this},first(){return this}}}};
+workspace.escape=(value)=>String(value??'');workspace.renderMaterialFeeWorkspace=()=>{workspace.renders=(workspace.renders||0)+1};
+workspace.renders=0;workspace.calls=0;
+workspace.call=async()=>{workspace.calls++;return {ok:true,summary:{total_cost_rmb:'200.00'}}};
+"""
+
+
+def test_trial_waits_for_pending_writes_and_ignores_duplicate_clicks():
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
+let release;const writing=workspace.trackMaterialFeeWrite(()=>new Promise(resolve=>{release=resolve}));
+const first=workspace.refreshMaterialFeeCostPreview();
+await new Promise(resolve=>setImmediate(resolve));
+const before={calls:workspace.calls,disabled:button.disabled,label:button.label};
+await workspace.refreshMaterialFeeCostPreview();release();await writing;await first;
+console.log(JSON.stringify({before,calls:workspace.calls,preview:state.preview,disabled:button.disabled,running:state.previewRunning}));
+""")
+    assert result["before"] == {"calls": 0, "disabled": True, "label": "计算中…"}
+    assert result["calls"] == 1
+    assert result["preview"]["summary"]["total_cost_rmb"] == "200.00"
+    assert result["disabled"] is False and result["running"] is False
+
+
+@pytest.mark.parametrize("change", ["batch", "version", "tab", "reload", "input"])
+def test_trial_discards_response_if_context_or_inputs_changed(change):
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
+let release;workspace.call=()=>new Promise(resolve=>{release=resolve});
+const running=workspace.refreshMaterialFeeCostPreview();await new Promise(resolve=>setImmediate(resolve));
+""" + {
+        "batch": "workspace.detailState.batchName='B-2';workspace.materialFeeState={batchName:'B-2',preview:{summary:{total_cost_rmb:'999.00'}}};",
+        "version": "workspace.detailState.versionName='V-2';",
+        "tab": "workspace.detailState.tab='vouchers';",
+        "reload": "state.requestId++;",
+        "input": "state.inputRevision++;",
+    }[change] + r"""
+release({ok:true,summary:{total_cost_rmb:'200.00'}});await running;
+console.log(JSON.stringify({preview:workspace.materialFeeState.preview,renders:workspace.renders}));
+""")
+    assert result["preview"]["summary"]["total_cost_rmb"] == ("999.00" if change == "batch" else "100.00")
+    assert result["renders"] == 0
+
+
+@pytest.mark.parametrize("failure", ["draft", "material", "api"])
+def test_trial_does_not_replace_result_after_invalid_input_or_failed_request(failure):
+    setup = {
+        "draft": "state.feeDrafts={freight:{amount:'',currency:'RMB',error:'费用金额不能为空。'}};",
+        "material": "state.materialSaveErrors={'A:volume_m3':'保存失败'};",
+        "api": "workspace.call=async()=>{workspace.calls++;return {ok:false,message:'试算服务失败'}};",
+    }[failure]
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + setup + r"""
+let error='';try {await workspace.refreshMaterialFeeCostPreview()}catch(e){error=e.message}
+console.log(JSON.stringify({error,calls:workspace.calls,preview:state.preview,disabled:button.disabled}));
+""")
+    assert result["error"]
+    assert result["calls"] == (1 if failure == "api" else 0)
+    assert result["preview"]["summary"]["total_cost_rmb"] == "100.00"
+    assert result["disabled"] is False
+
+
+def test_unsupported_historical_currency_requires_explicit_selection_in_dialog():
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B-1'};workspace.escape=value=>String(value??'');
+workspace.materialFeeState={batchName:'B-1',fees:{fees:[{logical_fee_key:'old',amount:100,currency:'EUR'}]},materials:{items:[]}};
+let fields;global.frappe.ui={Dialog:class{constructor(options){fields=options.fields;this.$wrapper={addClass(){}}}show(){}}};
+workspace.openMaterialFeeDialog('old');console.log(JSON.stringify(fields.find(field=>field.fieldname==='currency')));
+""")
+    assert result["default"] == ""
+    assert [option["value"] for option in result["options"]] == ["", "RMB", "MXN", "USD"]
+    assert result["reqd"] == 1
+
+
+def test_trial_flushes_dirty_fee_before_reading_preview():
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
+state.fees={fees:[{logical_fee_key:'fee'}]};state.feeDrafts={fee:{amount:'20',currency:'RMB'}};
+const input={attr(){return 'fee'}};global.$=value=>value;const originalFind=workspace.$root.find;
+workspace.$root.find=selector=>selector==='[data-mf-fee-amount]'?{each(callback){callback(0,input)}}:originalFind(selector);
+const order=[];workspace.saveMaterialFeeInlineAmount=async()=>{order.push('save');delete state.feeDrafts.fee};workspace.call=async()=>{order.push('preview');return {ok:true,summary:{total_cost_rmb:'120.00'}}};
+await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({order,total:state.preview.summary.total_cost_rmb}));
+""")
+    assert result == {"order": ["save", "preview"], "total": "120.00"}
+
+
+MATERIAL_SAVE_FIXTURE = r"""
+const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',header:{modified:'m1'}};
+const state=workspace.ensureMaterialFeeState();state.materials={items:[{name:'A',volume_m3:'1'}]};workspace.normalizeErrorMessage=error=>error.message;
+workspace.ensureEditSession=async()=>true;workspace.loadMaterialFeeWorkspace=async()=>true;
+const cell={addClass(){return this},removeClass(){return this},attr(){return this}};
+const data={},input={length:1,value:'2',val(){return this.value},attr(name){return {'data-original-value':'1','data-item-name':'A','data-fieldname':'volume_m3'}[name]},data(name,value){if(arguments.length>1){data[name]=value;return this}return data[name]},prop(){return this},closest(){return cell}};
+workspace.call=async()=>({ok:true,batch_modified:'m2'});
+"""
+
+
+def test_material_save_denied_lease_is_not_safe_to_trial():
+    result = _fee_workspace_result(MATERIAL_SAVE_FIXTURE + r"""
+workspace.ensureEditSession=async()=>false;await workspace.saveMaterialFeeCell(input);
+console.log(JSON.stringify({errors:state.materialSaveErrors,pending:state.pendingWrites.size}));
+""")
+    assert result["errors"].get("A:volume_m3")
+    assert result["pending"] == 0
+
+
+def test_reverting_failed_material_input_to_saved_value_clears_trial_blocker():
+    result = _fee_workspace_result(MATERIAL_SAVE_FIXTURE + r"""
+state.materialSaveErrors={'A:volume_m3':'failed'};input.value='1';await workspace.saveMaterialFeeCell(input);
+console.log(JSON.stringify({errors:state.materialSaveErrors}));
+""")
+    assert result["errors"] == {}
+
+
+def test_material_save_response_does_not_update_another_batch():
+    result = _fee_workspace_result(MATERIAL_SAVE_FIXTURE + r"""
+let release;workspace.call=()=>new Promise(resolve=>{release=resolve});let reloads=0;workspace.loadMaterialFeeWorkspace=async()=>{reloads++;return true};
+const saving=workspace.saveMaterialFeeCell(input);await new Promise(resolve=>setImmediate(resolve));workspace.detailState={batchName:'B-2',tab:'documents',expectedModified:'other',header:{modified:'other'}};workspace.materialFeeState={batchName:'B-2'};
+release({ok:true,batch_modified:'m2'});await saving;console.log(JSON.stringify({modified:workspace.detailState.expectedModified,reloads}));
+""")
+    assert result == {"modified": "other", "reloads": 0}
+
+
+def test_material_grid_rerender_keeps_another_cells_unsaved_value():
+    result = _fee_workspace_result(MATERIAL_SAVE_FIXTURE + r"""
+workspace.escape=value=>String(value??'');workspace.formatValue=value=>String(value);workspace.materialFeeState.materialDrafts={};
+workspace.updateMaterialDraftFromInput(input);
+const html=workspace.renderMaterialFeeGridCell({name:'A',volume_m3:'1'}, {field:'volume_m3',label:'体积 m³',numeric:true},new Set(),1);
+console.log(JSON.stringify({value:html.includes('value="2"'),original:html.includes('data-original-value="1"'),draft:state.materialDrafts['A:volume_m3']}));
+""")
+    assert result["value"] is True and result["original"] is True
+    assert result["draft"]["value"] == "2"
+
+
+def test_trial_saves_material_draft_before_reading_cost():
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
+state.materialDrafts={'A:volume_m3':{itemName:'A',fieldname:'volume_m3',value:'2'}};
+const input={attr(name){return {'data-item-name':'A','data-fieldname':'volume_m3'}[name]}};global.$=value=>value;const originalFind=workspace.$root.find;
+workspace.$root.find=selector=>selector==='[data-mf-cell-input]'?{each(callback){callback(0,input)}}:originalFind(selector);
+const order=[];workspace.saveMaterialFeeCell=async()=>{order.push('save');delete state.materialDrafts['A:volume_m3']};workspace.call=async()=>{order.push('preview');return {ok:true,summary:{}}};
+await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({order}));
+""")
+    assert result["order"] == ["save", "preview"]
+
+
+def test_trial_stops_if_another_material_is_edited_while_flushing():
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
+state.materialDrafts={'B:volume_m3':{itemName:'B',fieldname:'volume_m3',value:'2'}};
+const input={attr(name){return {'data-item-name':'B','data-fieldname':'volume_m3'}[name]}};global.$=value=>value;const originalFind=workspace.$root.find;
+workspace.$root.find=selector=>selector==='[data-mf-cell-input]'?{each(callback){callback(0,input)}}:originalFind(selector);
+workspace.saveMaterialFeeCell=async()=>{delete state.materialDrafts['B:volume_m3'];state.materialDrafts['C:volume_m3']={itemName:'C',fieldname:'volume_m3',value:'9'}};
+let error='';try{await workspace.refreshMaterialFeeCostPreview()}catch(e){error=e.message}
+console.log(JSON.stringify({calls:workspace.calls,error,total:state.preview.summary.total_cost_rmb,draft:state.materialDrafts['C:volume_m3'].value}));
+""")
+    assert result["calls"] == 0
+    assert result["error"]
+    assert result["total"] == "100.00"
+    assert result["draft"] == "9"

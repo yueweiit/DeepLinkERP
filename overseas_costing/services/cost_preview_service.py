@@ -44,6 +44,10 @@ def convert_fee_amount_to_rmb(fee: dict, fx_context: dict) -> dict:
     if amount is None or amount < 0:
         return {"ok": False, "reason_code": "FEE_AMOUNT_INVALID"}
     currency = str(fee.get("currency") or "RMB").strip().upper()
+    if currency not in {"RMB", "CNY", "USD", "MXN"}:
+        return {"ok": False, "reason_code": "CURRENCY_UNSUPPORTED", "currency": currency}
+    if amount == 0:
+        return {"ok": True, "amount_rmb": amount, "rate": None}
     if currency in {"RMB", "CNY"}:
         return {"ok": True, "amount_rmb": amount, "rate": Decimal("1")}
     if currency == "USD":
@@ -63,6 +67,8 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
     presented_items = [present_material_row(dict(row or {})) for row in (items or [])]
     item_costs: dict[str, dict] = {}
     incomplete_reasons = []
+    if not presented_items:
+        incomplete_reasons.append({"reason_code": "MATERIAL_ITEMS_REQUIRED", "message": "当前批次没有物料，请先补充物料数据。"})
     goods_total = Decimal("0")
     for row in presented_items:
         key = _item_key(row)
@@ -111,13 +117,7 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
             excluded_fees.append({**common, "reason_code": "AMOUNT_STATUS_INVALID"})
             continue
 
-        converted = convert_fee_amount_to_rmb(fee, fx_context or {})
-        if not converted.get("ok"):
-            excluded_fees.append({**common, **converted})
-            continue
-        amount_rmb = converted["amount_rmb"]
-        allocation_fee = {**fee, "amount": format(amount_rmb, "f"), "currency": "RMB"}
-        allocation = fee_allocation_service.allocate_fee(allocation_fee, presented_items)
+        allocation = allocate_fee_in_rmb(fee, presented_items, fx_context or {})
         if allocation.get("status") != "ALLOCATED":
             excluded_fees.append(
                 {
@@ -128,6 +128,7 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
             )
             continue
 
+        amount_rmb = Decimal(allocation["amount"])
         is_direct = str(fee.get("scope_type") or "ALL_ITEMS").upper() == "DIRECT_ITEM"
         bucket = "direct_fees_rmb" if is_direct else "allocated_fees_rmb"
         for item_key, amount_text in (allocation.get("allocations") or {}).items():
@@ -152,6 +153,8 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
                 "amount_rmb": _money(amount_rmb),
                 "scope_type": str(fee.get("scope_type") or "ALL_ITEMS").upper(),
                 "allocation_basis": allocation.get("basis") or "",
+                "preferred_basis": allocation.get("preferred_basis") or "",
+                "fallback_reason": allocation.get("fallback_reason") or "",
                 "allocations": allocation.get("allocations") or {},
             }
         )
@@ -238,6 +241,23 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
         "ignored_fees": ignored_fees,
         "incomplete_reasons": incomplete_reasons,
     }
+
+
+def allocate_fee_in_rmb(fee: dict, items: list[dict], fx_context: dict) -> dict:
+    """Share currency validation and allocation between fee status and cost preview."""
+
+    if not fee_allocation_service.is_counted_fee(fee):
+        return fee_allocation_service.allocate_fee(fee, items)
+    converted = convert_fee_amount_to_rmb(fee, fx_context)
+    if not converted["ok"]:
+        return {
+            "status": "BLOCKED",
+            "code": converted["reason_code"],
+            "allocations": {},
+            "allocated_total": "0.00",
+        }
+    allocation_fee = {**fee, "amount": format(converted["amount_rmb"], "f"), "currency": "RMB"}
+    return {**fee_allocation_service.allocate_fee(allocation_fee, items), "currency": "RMB"}
 
 
 def preview_comprehensive_cost(batch_name: str, version_name: str | None = None) -> dict:
