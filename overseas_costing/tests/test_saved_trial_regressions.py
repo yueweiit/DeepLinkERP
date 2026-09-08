@@ -58,6 +58,56 @@ const saved={ok:true,saved:true,read_only:false,batch_name:'B',version_name:'V',
 """
 
 
+@pytest.mark.parametrize("legacy_total", ["27900.00", "0.00", None])
+def test_unsaved_preview_never_appears_as_a_saved_trial(legacy_total):
+    result = _frontend_result(FRONTEND_SETUP + f"""
+h.escape=value=>String(value ?? '');
+h.detailState.header={{status:'Dirty',summary_snapshot:{json.dumps({"total_cost_rmb": legacy_total} if legacy_total is not None else {})}}};
+state.preview={{read_only:true,summary:{{total_cost_rmb:'41941.38',included_fee_count:3}},
+  items:[{{material_code:'UNSAVED-SKU',total_cost_rmb:'39085.15'}}]}};
+console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
+""")
+    assert "41941.38" not in result
+    assert "UNSAVED-SKU" not in result
+    assert "上次试算" not in result
+    assert "开始试算" in result
+    if legacy_total is None:
+        assert "尚未试算" in result
+        assert "RMB 0.00" not in result
+    else:
+        assert f"RMB {legacy_total}" in result
+        assert "上次已保存成本" in result
+        assert "待重新试算" in result
+
+
+@pytest.mark.parametrize("status,label", [("Calculated", "当前试算总成本"), ("Dirty", "上次试算 · 结果待更新")])
+def test_saved_trial_display_keeps_canonical_result_when_readonly_preview_changes(status, label):
+    result = _frontend_result(FRONTEND_SETUP + f"""
+h.escape=value=>String(value ?? '');
+h.detailState.header={{status:{json.dumps(status)},summary_snapshot:{{calculation_schema:2,
+  comprehensive_cost:{{summary:{{total_cost_rmb:'41941.38'}},items:[{{material_code:'SAVED-SKU'}}]}}}}}};
+state.preview={{read_only:true,summary:{{total_cost_rmb:'99999.00'}},items:[{{material_code:'UNSAVED-SKU'}}]}};
+console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
+""")
+    assert "RMB 41941.38" in result and label in result
+    assert "SAVED-SKU" in result and "UNSAVED-SKU" not in result
+    assert "99999.00" not in result
+
+
+@pytest.mark.parametrize("saved_current", [False, True])
+def test_fee_inclusion_distinguishes_available_fees_from_saved_calculation(saved_current):
+    result = _frontend_result(FRONTEND_SETUP + f"""
+h.escape=value=>String(value ?? '');
+const preview={{read_only:true,included_fees:[{{fee_key:'import_tax'}}]}};
+state.preview=preview;
+h.detailState.header={json.dumps({"status": "Calculated" if saved_current else "Dirty"})};
+if({str(saved_current).lower()})h.detailState.header.summary_snapshot={{comprehensive_cost:preview}};
+console.log(JSON.stringify(h.renderMaterialFeeRow({{logical_fee_key:'import_tax',amount_status:'ACTUAL',amount:20000,currency:'MXN'}})));
+""")
+    assert ("已计入试算" in result) == saved_current
+    assert ("可计入 · 待试算" in result) != saved_current
+
+
 def test_overview_recalculate_runs_after_visiting_material_workspace():
     result = _frontend_result(FRONTEND_SETUP + """
 h.detailState.tab='overview';h.getActiveBatch=()=>h.batches[0];

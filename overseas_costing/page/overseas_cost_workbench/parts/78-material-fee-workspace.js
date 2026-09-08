@@ -312,8 +312,14 @@
     const currency = this.normalizeMaterialFeeCurrency(draft ? draft.currency : fee.currency || "RMB");
     const currencyOptions = this.materialFeeCurrencyOptions();
     const supportedCurrency = currencyOptions.some((option) => option.value === currency);
-    const preview = this.materialFeeState?.preview || {};
-    const inclusionLabel = draft ? "修改待保存" : (preview.included_fees || []).some((row) => row.fee_key === feeKey) ? "已计入试算" : (preview.excluded_fees || []).some((row) => row.fee_key === feeKey) ? "未计入 · 见试算区提示" : "";
+    const savedPreview = this.materialFeeSavedCostPreview();
+    const savedCurrent = savedPreview && this.detailState?.header?.status !== "Dirty"
+      && !Object.keys(this.materialFeeState?.feeDrafts || {}).length
+      && !Object.keys(this.materialFeeState?.materialDrafts || {}).length
+      && !Object.keys(this.materialFeeState?.materialSaveErrors || {}).length;
+    const preview = (savedCurrent ? savedPreview : this.materialFeeState?.preview) || {};
+    const excludedFee = (preview.excluded_fees || []).find((row) => row.fee_key === feeKey);
+    const inclusionLabel = draft ? "修改待保存" : (preview.included_fees || []).some((row) => row.fee_key === feeKey) ? (savedCurrent ? "已计入试算" : "可计入 · 待试算") : excludedFee ? this.materialFeeExclusionReason(excludedFee) : "";
     const missingSavedAmount = amountStatus === "MISSING" && amount !== "";
     const forceActual = Boolean(draft?.forceActual || missingSavedAmount);
     const inlineError = String(draft?.error || "");
@@ -1262,11 +1268,28 @@
     return `<details class="ocw-mf-section ocw-mf-todos"><summary><span><strong>详细待办</strong><em>${todos.length} 项</em></span><small>默认收起，需要时展开查看</small></summary><div>${todos.length ? `<ul>${todos.slice(0, 100).map((todo) => `<li>${this.escape(todo)}</li>`).join("")}</ul>` : `<div class="ocw-detail-empty"><strong>当前没有待办</strong></div>`}</div></details>`;
   }
 
+  materialFeeSavedCostPreview() {
+    // Only persisted results can be shared with the overview and SKU details.
+    return this.detailState?.header?.summary_snapshot?.comprehensive_cost
+      || (this.materialFeeState?.preview?.saved === true && this.materialFeeState.preview.read_only === false ? this.materialFeeState.preview : null);
+  }
+
   renderMaterialFeeCostTable() {
     const state = this.ensureMaterialFeeState();
     const header = this.detailState.header || {};
-    const savedPreview = header.summary_snapshot?.comprehensive_cost;
-    const preview = savedPreview && state.preview?.read_only !== false ? savedPreview : state.preview || {};
+    const preview = this.materialFeeSavedCostPreview();
+    const legacyTotal = header.summary_snapshot?.total_cost_rmb;
+    const hasLegacyTotal = legacyTotal !== undefined && legacyTotal !== null && legacyTotal !== "" && Number.isFinite(Number(legacyTotal));
+    const sectionTitle = `<div class="ocw-mf-section-title">
+      <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p></div>
+      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
+    </div>`;
+    if (!preview) {
+      return `<section class="ocw-mf-section ocw-mf-cost-section">${sectionTitle}
+        ${hasLegacyTotal ? `<div class="ocw-mf-cost-summary"><div class="ocw-mf-cost-total"><span>上次已保存成本 · 待重新试算</span><strong>RMB ${this.escape(Number(legacyTotal).toFixed(2))}</strong></div></div>` : ""}
+        <div class="ocw-detail-empty"><strong>${hasLegacyTotal ? "当前费用尚未汇总到已保存成本" : "尚未保存试算结果"}</strong><p>点击“开始试算”，按当前物料和费用更新总览、SKU 明细及本区结果。</p></div>
+      </section>`;
+    }
     const summary = preview.summary || {};
     const items = preview.items || [];
     const hasUnsaved = Object.keys(state.feeDrafts).length || Object.keys(state.materialDrafts).length || Object.keys(state.materialSaveErrors).length;
@@ -1276,10 +1299,7 @@
       return `<li><strong>${this.escape(fee.expense_category || fee.fee_key || "费用")}</strong><span>${this.escape(explanation)}</span><em>RMB ${this.escape(fee.amount_rmb || "0.00")}</em></li>`;
     }).join("");
     return `<section class="ocw-mf-section ocw-mf-cost-section">
-      <div class="ocw-mf-section-title">
-        <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p></div>
-        <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${summary.is_complete ? "is-complete" : "is-partial"}">${summary.is_complete ? "完整成本" : "非完整成本"}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
-      </div>
+      ${sectionTitle}
       <div class="ocw-mf-cost-summary">
         <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : header.status === "Dirty" ? "上次试算 · 结果待更新" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
         <dl><div><dt>采购金额</dt><dd>${this.escape(summary.purchase_goods_value_rmb || "0.00")}</dd></div><div><dt>直接费用</dt><dd>${this.escape(summary.direct_fees_rmb || "0.00")}</dd></div><div><dt>分摊费用</dt><dd>${this.escape(summary.allocated_fees_rmb || "0.00")}</dd></div><div><dt>已计入费用</dt><dd>${Number(summary.included_fee_count || 0)} 笔</dd></div></dl>

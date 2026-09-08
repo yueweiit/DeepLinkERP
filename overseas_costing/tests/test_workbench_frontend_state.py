@@ -1219,7 +1219,7 @@ def test_fee_workspace_exclusion_is_in_trial_result_without_an_allocation_column
         "const row=workspace.renderMaterialFeeRow({logical_fee_key:'import_tax',expense_category:'\u8fdb\u53e3\u7a0e\u8d39',"
         "amount_status:'ESTIMATED',amount:'88',currency:'EUR',allocation_basis:'goods_value',"
         "scope_type:'ALL_ITEMS',allocation:{status:'MISSING_BASIS'},evidence:[]});"
-        "workspace.detailState={batchName:'B-1'};workspace.materialFeeState={batchName:'B-1',preview:{excluded_fees:[{expense_category:'进口税费',reason_code:'ALLOCATION_DENOMINATOR_ZERO'}]}};"
+        "workspace.detailState={batchName:'B-1',header:{summary_snapshot:{comprehensive_cost:{excluded_fees:[{expense_category:'进口税费',reason_code:'ALLOCATION_DENOMINATOR_ZERO'}]}}}};workspace.materialFeeState={batchName:'B-1'};"
         "const trial=workspace.renderMaterialFeeCostTable();"
         "console.log(JSON.stringify({basis:row.includes('采购货值'),rawCode:trial.includes('ALLOCATION_DENOMINATOR_ZERO'),excluded:trial.includes('未计入费用'),chinese:trial.includes('采购货值')}));"
     )
