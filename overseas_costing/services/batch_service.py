@@ -1482,6 +1482,7 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         "source_approval_no",
         "source_instance_id",
         "source_dingtalk_url",
+        "source_approval_status", "source_attachment_count", "extra_json",
         "status",
         "current_version",
         "confirm_status",
@@ -1506,6 +1507,8 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     ) or {}
     header["business_type"] = _resolve_batch_business_type(header)
     header["subsidiary_code"] = _resolve_batch_subsidiary_code(header)
+    _attach_batch_source_status([header])
+    header.pop("extra_json", None)
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
     version = {}
     summary = {}

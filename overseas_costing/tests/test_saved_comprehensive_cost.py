@@ -180,3 +180,24 @@ def test_subcent_goods_rounding_conserves_saved_sku_and_summary_totals():
         fee["amount"] = 0
     saved = service.build_saved_cost_data(items, fees, fx, "AIR")
     assert sum(Decimal(row["total_cost_rmb"]) for row in saved["item_updates"]) == Decimal(saved["summary"]["total_cost_rmb"]) == Decimal("200.01")
+
+
+def test_batch_detail_loads_purchase_source_status_without_visiting_approval_tab(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from overseas_costing.services import batch_service
+    stored = dict(name="B", current_version="V", transport_mode="AIR", source_approval_status="COMPLETED",
+                  source_approval_no="OA", source_attachment_count=1,
+                  extra_json=json.dumps({"linked_purchase_approvals": [{"approval_no": "P1", "approval_status": "COMPLETED"}]}))
+    def get_value(doctype, name, fields, **kwargs):
+        data = stored if doctype == "Overseas Cost Batch" else dict(name="V", summary_snapshot_json="{}")
+        return {key:data.get(key) for key in fields}
+    monkeypatch.setattr(batch_service, "frappe", SimpleNamespace(db=SimpleNamespace(get_value=get_value), get_all=lambda *a, **kw: []))
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda name: "B")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *args: "V")
+    monkeypatch.setattr(batch_service, "_db_has_column", lambda *args: True)
+    result = batch_service.get_batch_detail("B")
+    status = result["header"]["source_status"]
+    assert status["purchase_approval_sync_state"] == "valid"
+    assert status["linked_purchase_count"] == 1 and status["linked_purchase_approval_statuses"] == ["COMPLETED"]
+    assert "extra_json" not in result["header"]
