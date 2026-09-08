@@ -106,6 +106,9 @@ def test_deepseek_preflight_disables_thinking_and_retries_empty_json_output() ->
     assert "DEEPSEEK_VISION_MODEL" in script
     assert "deepseek-v4-flash-vision-exp" in script
     assert '"type": "image_url"' in script
+    vision_payload = script.split("def _vision_request_payload", 1)[1].split("def _call", 1)[0]
+    assert '"thinking"' not in vision_payload
+    assert '"response_format"' not in vision_payload
 
 
 def test_asset_script_is_uploaded_and_executed_as_a_remote_file():

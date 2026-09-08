@@ -56,8 +56,6 @@ def _vision_request_payload(model: str) -> bytes:
                     ],
                 },
             ],
-            "thinking": {"type": "disabled"},
-            "response_format": {"type": "json_object"},
             "max_tokens": 128,
             "temperature": 0,
         },

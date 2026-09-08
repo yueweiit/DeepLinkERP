@@ -244,14 +244,21 @@ def _build_ai_messages(payload: dict) -> list[dict]:
     ]
 
 
-def _call_chat_completions(config: dict, messages: list[dict]) -> str:
+def _call_chat_completions(
+    config: dict,
+    messages: list[dict],
+    *,
+    response_json: bool = True,
+    disable_thinking: bool = True,
+) -> str:
     payload = {
         "model": config["model"],
         "temperature": 0.1,
-        "response_format": {"type": "json_object"},
         "messages": messages,
     }
-    if "deepseek" in str(config.get("base_url") or "").lower():
+    if response_json:
+        payload["response_format"] = {"type": "json_object"}
+    if disable_thinking and "deepseek" in str(config.get("base_url") or "").lower():
         payload["thinking"] = {"type": "disabled"}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
