@@ -67,7 +67,8 @@ rollback_release() {
       "cp '$remote_dir/$(basename "$config")' '/home/frappe/frappe-bench/sites/$site_name/site_config.json' && chown frappe:frappe '/home/frappe/frappe-bench/sites/$site_name/site_config.json' && chmod 640 '/home/frappe/frappe-bench/sites/$site_name/site_config.json'"
   fi
   docker exec "$backend_id" rm -rf "$remote_dir"
-  docker compose -f "$compose_file" up -d --force-recreate --wait
+  docker compose -f "$compose_file" up -d --force-recreate \
+    backend websocket queue-short queue-long scheduler frontend
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" clear-cache
 }

@@ -70,6 +70,15 @@ def test_failed_release_can_restore_image_database_files_and_site_config() -> No
     assert "--with-private-files" in release
     assert "site_config.json" in release
     assert "docker image tag \"$backup_image\" \"$base_image\"" in release
+    assert "backend websocket queue-short queue-long scheduler frontend" in release
+
+
+def test_login_smoke_waits_for_restarted_backend() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "--retry-all-errors" in workflow
+    assert "--retry-max-time 90" in workflow
+    assert "--retry-delay 5" in workflow
 
 
 def test_deepseek_preflight_reads_secret_from_environment_without_printing_it() -> None:

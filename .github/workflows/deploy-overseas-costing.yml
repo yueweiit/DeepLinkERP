@@ -186,7 +186,13 @@ jobs:
             "cd /home/yuewei/ERPNext-Docker/frappe_docker && bash '$remote_asset_script'; script_exit_code=\$?; rm -f '$remote_asset_script'; exit \$script_exit_code"
 
       - name: Check online login page
-        run: curl --fail --silent --show-error --retry 3 https://deeplinkerp.com/login >/dev/null
+        run: |
+          curl --fail --silent --show-error \
+            --retry 18 \
+            --retry-delay 5 \
+            --retry-max-time 90 \
+            --retry-all-errors \
+            https://deeplinkerp.com/login >/dev/null
 
       - name: Rollback failed material AI release
         if: failure()
