@@ -507,6 +507,21 @@ def test_express_default_zero_row_explains_mexico_confirmation_without_actual_ma
     assert 'data-mf-force-actual="1"' not in html
 
 
+def test_conflicting_fee_row_shows_saved_row_and_conflicts_without_edit_controls():
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);workspace.escape=(value)=>String(value ?? '');"
+        "const fee={name:'OA-ROW',logical_fee_key:'international_air_freight',expense_category:'国际空运费',"
+        "amount:20360,currency:'RMB',amount_status:'ESTIMATED',requires_review:true,"
+        "duplicate_rule_names:['OA-ROW','MANUAL-ROW'],evidence:[{name:'E1',evidence_role:'freight_invoice'}]};"
+        "console.log(JSON.stringify({html:workspace.renderMaterialFeeRow(fee)}));"
+    )
+    html = result['html']
+    assert '费用重复' in html and 'OA-ROW' in html and 'MANUAL-ROW' in html
+    assert '20360' in html and 'freight_invoice' in html
+    assert 'data-mf-fee-input' not in html and 'data-action="mf-edit-fee"' not in html
+    assert '已计入试算' not in html
+
+
 @pytest.mark.parametrize('amount,currency,key', [('', 'MXN', 'import_tax'), ('0', 'MXN', 'destination_delivery'), ('0', 'RMB', 'express_surcharge')])
 def test_untouched_mexico_fee_input_never_saves_or_reports_empty_error(amount, currency, key):
     result = _fee_workspace_result(FEE_INPUT_FIXTURE + f"""

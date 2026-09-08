@@ -37,8 +37,10 @@ def test_saved_fees_from_reported_case_are_all_counted_without_packing_data():
     for index, row in enumerate(items):
         row.update(goods_value=["60400", "26000"][index], volume_m3=0, gross_weight_kg=0)
     fees = build_default_fee_templates("SEA")
+    fees.insert(1, dict(name="SAVED-SURCHARGE", logical_fee_key="sea_port_forwarder_surcharge",
+                        expense_category="港杂/货代附加费", allocation_basis="volume", currency="RMB"))
     for fee, amount in zip(fees, ["2004", "3000", "1000", "0", "0"]):
-        fee.update(amount_status="ACTUAL", amount=amount)
+        fee.update(amount_status="ACTUAL", amount=amount, currency="RMB")
     before = deepcopy((items, fees))
     result = preview_comprehensive_cost_data(items, fees, {})
     assert result["summary"]["total_cost_rmb"] == "92404.00"

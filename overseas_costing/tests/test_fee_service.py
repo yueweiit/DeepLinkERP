@@ -34,12 +34,12 @@ def test_express_defaults_are_unconfirmed_zeros_and_mexican_currencies():
 
 
 @pytest.mark.parametrize('mode', ['SEA', 'AIR'])
-def test_non_express_defaults_keep_original_currencies_amounts_and_labels(mode):
+def test_non_express_defaults_apply_mexico_local_currency_and_delivery_estimate(mode):
     rows = build_default_fee_templates(mode)
-    assert all(row['currency'] == 'RMB' and row['amount'] == '' for row in rows)
-    assert all(row['amount_status'] == 'MISSING' for row in rows)
-    assert not any(row.get('is_default_zero') or row.get('entry_responsibility') for row in rows)
-    assert rows[-1]['expense_category'] == '目的地配送费'
+    assert rows[0]['currency'] == 'RMB' and rows[0]['amount'] == ''
+    assert all(row['currency'] == 'MXN' and row['entry_responsibility'] == 'MEXICO' for row in rows[1:])
+    assert all(row['amount_status'] == 'MISSING' for row in rows[:-1])
+    assert rows[-1]['expense_category'] == '当地配送费' and rows[-1]['amount'] == '0'
 
 
 @pytest.mark.parametrize('amount,status,currency', [('0', 'ACTUAL', 'USD'), ('50.25', 'ESTIMATED', 'RMB'), ('', 'MISSING', 'USD'), ('0', 'NOT_INCURRED', 'MXN')])
@@ -78,25 +78,23 @@ def test_non_express_local_fee_alias_does_not_merge_existing_distinct_fees(mode)
     saved = [{'name': 'DELIVERY', 'expense_category': '目的地配送费', 'amount': '100', 'amount_status': 'ACTUAL'},
              {'name': 'LOCAL', 'expense_category': '当地快递费', 'amount': '50', 'amount_status': 'ACTUAL'}]
     rows = compose_fee_worklist_rows(saved, mode)
-    assert len(rows) == 6
+    assert len(rows) == 5
     assert {row['name'] for row in rows if not row['virtual']} == {'DELIVERY', 'LOCAL'}
     assert not any(row.get('duplicate_rule_names') for row in rows)
 
 
-def test_default_fee_templates_change_only_the_transport_specific_pair() -> None:
+def test_default_fee_templates_follow_transport_specific_primary_and_shared_local_fees() -> None:
     sea = build_default_fee_templates("SEA")
     air = build_default_fee_templates("AIR")
     express = build_default_fee_templates("EXPRESS")
 
     assert [row["expense_category"] for row in sea] == [
         "国际海运费",
-        "港杂/货代附加费",
         "清关费",
         "进口税费",
-        "目的地配送费",
+        "当地配送费",
     ]
     assert [row["allocation_basis"] for row in sea] == [
-        "volume",
         "volume",
         "goods_value",
         "goods_value",

@@ -3738,6 +3738,8 @@ def confirm_logistics_quote_candidate(
     candidate_index: int | str,
     version_name: str | None = None,
     confirmation_note: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """人工确认 OA 物流报价候选后才写入整票物流费用分摊规则。"""
 
@@ -3765,7 +3767,9 @@ def confirm_logistics_quote_candidate(
     batch_row = _get_batch_trace_row(batch_doc_name)
     payload, trace, is_root_trace = _get_oa_trace_storage(batch_row.get("extra_json"))
     explicit_fee = trace.get("logistics_fee") if isinstance(trace.get("logistics_fee"), dict) else {}
-    if _to_float(explicit_fee.get("amount")) > 0:
+    from overseas_costing.scripts import import_oa_logistics
+
+    if import_oa_logistics._parse_money_amount(explicit_fee.get("amount"), allow_zero=True) is not None:
         return {"ok": False, "message": "该审批单已填写明确物流费用，不能再用报价候选覆盖。"}
 
     candidates = trace.get("logistics_quote_candidates")
@@ -3780,8 +3784,6 @@ def confirm_logistics_quote_candidate(
     if selected["amount"] <= 0:
         return {"ok": False, "message": "所选报价未包含有效金额，不能生成分摊规则。"}
 
-    from overseas_costing.scripts import import_oa_logistics
-
     carrier_label = selected["carrier"] or "未标注供应商"
     fee = {
         **selected,
@@ -3792,9 +3794,16 @@ def confirm_logistics_quote_candidate(
         batch_name=batch_doc_name,
         version_name=resolved_version_name,
         approval_item={"logistics_fee": fee},
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+        manual_entry=True,
     )
     if not rule_result.get("ok"):
         return {"ok": False, "message": rule_result.get("message") or "物流费用分摊规则保存失败。"}
+    if rule_result.get("action") in {"protected", "retired"}:
+        frappe.db.commit()
+        return {"ok": True, "batch_name": batch_doc_name, "version_name": resolved_version_name,
+                "rule_result": rule_result, "message": rule_result["message"]}
 
     old_confirmed = trace.get("confirmed_logistics_quote") if isinstance(trace.get("confirmed_logistics_quote"), dict) else {}
     operator = str(getattr(getattr(frappe, "session", None), "user", "") or "").strip()
@@ -3836,6 +3845,7 @@ def confirm_logistics_quote_candidate(
     return {
         "ok": True,
         "batch_name": batch_doc_name,
+        "batch_modified": str(frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified")),
         "version_name": resolved_version_name,
         "confirmed_quote": confirmed,
         "rule_result": rule_result,
@@ -3873,6 +3883,8 @@ def save_manual_logistics_quote(
     pre_delivery_date: str | None = None,
     destination: str | None = None,
     note: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """手工补录物流报价，写入整票物流费用分摊规则并保留来源痕迹。"""
 
@@ -3924,9 +3936,16 @@ def save_manual_logistics_quote(
         batch_name=batch_doc_name,
         version_name=resolved_version_name,
         approval_item={"logistics_fee": fee, "allocation_basis": normalized_basis},
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+        manual_entry=True,
     )
     if not rule_result.get("ok"):
         return {"ok": False, "message": rule_result.get("message") or "物流费用分摊规则保存失败。"}
+    if rule_result.get("action") in {"protected", "retired"}:
+        frappe.db.commit()
+        return {"ok": True, "batch_name": batch_doc_name, "version_name": resolved_version_name,
+                "rule_result": rule_result, "message": rule_result["message"]}
 
     batch_row = _get_batch_trace_row(batch_doc_name)
     payload, trace, is_root_trace = _get_oa_trace_storage(batch_row.get("extra_json"))
@@ -3970,6 +3989,7 @@ def save_manual_logistics_quote(
     return {
         "ok": True,
         "batch_name": batch_doc_name,
+        "batch_modified": str(frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified")),
         "version_name": resolved_version_name,
         "confirmed_quote": confirmed,
         "rule_result": rule_result,

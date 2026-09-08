@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - pure tests do not require Frappe
 
 from overseas_costing.services import fee_allocation_service, fee_service
 from overseas_costing.services.material_input_service import present_material_row
+from overseas_costing.services.transport_fee_service import assert_no_duplicate_fees, fee_is_active, mark_duplicate_fees
 
 
 def _decimal(value) -> Decimal | None:
@@ -98,19 +99,24 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
     excluded_fees = []
     ignored_fees = []
     estimated_fee_count = 0
-    for raw_fee in fees or []:
+    for raw_fee in mark_duplicate_fees(fees):
         fee = dict(raw_fee or {})
-        if fee.get("is_enabled") in (0, False, "0"):
+        if not fee_is_active(fee):
             continue
         status = fee_allocation_service.amount_status(fee)
         identity = _fee_key(fee)
         common = {
+            "rule_name": str(fee.get("name") or ""),
             "fee_key": identity,
             "expense_category": str(fee.get("expense_category") or ""),
             "amount_status": status,
             "currency": str(fee.get("currency") or "RMB").upper(),
             "amount": "" if fee.get("amount") in (None, "") else str(fee.get("amount")),
         }
+        if fee.get("duplicate_rule_names"):
+            excluded_fees.append({**common, "reason_code": "DUPLICATE_LOGICAL_FEE",
+                                  "duplicate_rule_names": fee["duplicate_rule_names"]})
+            continue
         if status == "MISSING":
             excluded_fees.append({**common, "reason_code": "AMOUNT_MISSING"})
             continue
@@ -285,7 +291,7 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
         raise ValueError("当前批次没有可用成本版本。")
     if frappe.db.get_value("Overseas Cost Version", version, "batch") != batch_name:
         raise ValueError("成本版本不属于当前批次。")
-    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or "SEA"
+    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     raw_items = frappe.get_all(
         "Overseas Cost Item",
         filters={"batch": batch_name, "version": version},
@@ -328,6 +334,9 @@ def cost_input_hash(items, fees, fx_context, transport_mode) -> str:
 
 def build_saved_cost_data(items: list[dict], fees: list[dict], fx_context: dict, transport_mode: str) -> dict:
     """Project one preview into stored result fields without mutating source facts."""
+    transport_mode = fee_service.resolve_transport_mode(transport_mode)
+    fees = fee_service._decorate_historical_rules(fees, transport_mode)
+    assert_no_duplicate_fees(fees)
     result = preview_comprehensive_cost_data(items, fees, fx_context)
     raw_by_key = {_item_key(present_material_row(row)): row for row in items}
     fx = _decimal(fx_context.get("fx_rmb_to_mxn"))
@@ -427,12 +436,12 @@ class FrappeCostRepository:
         invalid = batch_service._build_invalid_business_state(batch, items)
         if invalid.get("invalid"):
             raise ValueError(invalid.get("message") or "当前批次审批已被排除，不能计算。")
-        mode = batch.get("transport_mode") or ""
-        if mode not in {"SEA", "AIR", "EXPRESS"}:
+        mode = fee_service.resolve_transport_mode(batch.get("transport_mode"))
+        if not mode:
             raise ValueError("请先确认批次运输方式。")
         fees = fee_service.compose_fee_worklist_rows(fee_service._query_rules(name, version), mode)
         fx = {key: version_row.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
-        context = {**batch, "batch": name, "version": version, "batch_modified": str(batch["modified"]),
+        context = {**batch, "transport_mode": mode, "batch": name, "version": version, "batch_modified": str(batch["modified"]),
                    "version_modified": str(version_row["modified"]), "version_status": version_row["status"]}
         return context, items, fees, fx
 

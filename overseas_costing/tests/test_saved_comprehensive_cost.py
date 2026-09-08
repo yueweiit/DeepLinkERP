@@ -17,8 +17,12 @@ def inputs():
              quantity=7000, unit="个", purchase_uom="个", unit_price_uom="个", shipped_uom="个"),
     ]
     fees = fee_service.build_default_fee_templates("AIR")
+    # Keep the historical surcharge from this saved case; it is no longer a new default.
+    fees.insert(1, dict(name="SAVED-SURCHARGE", logical_fee_key="air_forwarder_surcharge",
+                        rule_code="air_forwarder_surcharge", expense_category="空运附加费",
+                        allocation_basis="chargeable_weight", scope_type="ALL_ITEMS", currency="RMB"))
     for fee, amount in zip(fees, [7000, 5000, 12000, 0, 0]):
-        fee.update(amount=amount, amount_status="ACTUAL", virtual=False)
+        fee.update(amount=amount, amount_status="ACTUAL", virtual=False, currency="RMB")
     return items, fees, dict(fx_rmb_to_mxn=2.5, fx_usd_to_rmb=7)
 
 

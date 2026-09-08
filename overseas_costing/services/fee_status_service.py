@@ -10,6 +10,7 @@ from overseas_costing.services import fee_allocation_service
 
 
 TODO_DEFINITIONS = {
+    "DUPLICATE_LOGICAL_FEE": ("error", "review_duplicate_fee", "费用重复，请核对并停用重复记录"),
     "AMOUNT_REQUIRED": ("error", "enter_amount", "补充费用金额"),
     "ACTUAL_AMOUNT_REQUIRED": ("warning", "enter_actual", "补充实际费用"),
     "ALLOCATION_REQUIRED": ("error", "fix_allocation", "完成费用分摊"),
@@ -141,11 +142,13 @@ def build_fee_status(
         evidence_state = "MISSING"
 
     todos = []
+    if fee.get("duplicate_rule_names") or (allocation or {}).get("code") == "DUPLICATE_LOGICAL_FEE":
+        todos.append(_todo("DUPLICATE_LOGICAL_FEE"))
     if amount_state == "MISSING":
         todos.append(_todo("AMOUNT_REQUIRED"))
     elif amount_state == "ESTIMATED":
         todos.append(_todo("ACTUAL_AMOUNT_REQUIRED"))
-    if amount_state in fee_allocation_service.COUNTED_AMOUNT_STATUSES and allocation_state != "ALLOCATED":
+    if amount_state in fee_allocation_service.COUNTED_AMOUNT_STATUSES and allocation_state != "ALLOCATED" and not fee.get("duplicate_rule_names"):
         code = (allocation or {}).get("code")
         todos.append(_todo(code if code in {"FX_RATE_MISSING", "CURRENCY_UNSUPPORTED", "FEE_AMOUNT_INVALID"} else "ALLOCATION_REQUIRED"))
     if evidence_state in {"MISSING", "INVALID"}:

@@ -10,17 +10,15 @@ import hashlib
 import json
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
+from overseas_costing.services.transport_fee_service import HISTORICAL_SURCHARGES, PRIMARY_FREIGHT
+
 
 COUNTED_AMOUNT_STATUSES = frozenset({"ESTIMATED", "ACTUAL"})
 NON_COUNTED_AMOUNT_STATUSES = frozenset({"MISSING", "NOT_INCURRED", "INCLUDED"})
 SUPPORTED_SCOPES = frozenset({"ALL_ITEMS", "ITEMS", "DIRECT_ITEM"})
 SYSTEM_ALLOCATION_BASES = {
-    "international_sea_freight": "volume",
-    "sea_port_forwarder_surcharge": "volume",
-    "international_air_freight": "chargeable_weight",
-    "air_forwarder_surcharge": "chargeable_weight",
-    "international_express_fee": "chargeable_weight",
-    "express_surcharge": "chargeable_weight",
+    **{key: basis for key, _label, basis in PRIMARY_FREIGHT.values()},
+    **{key: basis for key, _label, basis, _role in HISTORICAL_SURCHARGES},
     "customs_clearance_fee": "goods_value",
     "import_tax": "goods_value",
     "destination_delivery": "gross_weight",
@@ -182,6 +180,8 @@ def allocate_with_stable_remainder(
 
 
 def allocate_fee(fee: dict, items: list[dict], *, currency_precision: int = 2) -> dict:
+    if fee.get("duplicate_rule_names") or fee.get("conflict_code") == "DUPLICATE_LOGICAL_FEE":
+        return _blocked("DUPLICATE_LOGICAL_FEE", duplicate_rule_names=fee.get("duplicate_rule_names") or [])
     status = amount_status(fee)
     if status in NON_COUNTED_AMOUNT_STATUSES:
         return {

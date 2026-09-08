@@ -18,6 +18,16 @@ from overseas_costing.services import (
     fee_allocation_service,
     fee_status_service,
 )
+from overseas_costing.services.transport_fee_service import (
+    HISTORICAL_SURCHARGES,
+    PRIMARY_FREIGHT,
+    assert_no_duplicate_fees,
+    fee_is_active,
+    legacy_oa_freight_updates,
+    mark_duplicate_fees,
+    primary_freight_definition,
+    resolve_transport_mode,
+)
 
 
 AMOUNT_STATUSES = frozenset({"MISSING", "ESTIMATED", "ACTUAL", "NOT_INCURRED", "INCLUDED"})
@@ -53,20 +63,6 @@ COST_INPUT_FIELDS = (
     "is_enabled",
 )
 
-TRANSPORT_FEE_PAIRS = {
-    "SEA": (
-        ("international_sea_freight", "国际海运费", "volume", "freight_invoice"),
-        ("sea_port_forwarder_surcharge", "港杂/货代附加费", "volume", "expense_invoice"),
-    ),
-    "AIR": (
-        ("international_air_freight", "国际空运费", "chargeable_weight", "freight_invoice"),
-        ("air_forwarder_surcharge", "空运附加费", "chargeable_weight", "expense_invoice"),
-    ),
-    "EXPRESS": (
-        ("international_express_fee", "国际快递费", "chargeable_weight", "freight_invoice"),
-        ("express_surcharge", "快递附加费", "chargeable_weight", "expense_invoice"),
-    ),
-}
 COMMON_FEE_TEMPLATES = (
     ("customs_clearance_fee", "清关费", "goods_value", "customs_declaration"),
     ("import_tax", "进口税费", "goods_value", "tax_certificate"),
@@ -79,10 +75,11 @@ def _normalized_fee_name(value: object) -> str:
 
 
 def build_default_fee_templates(transport_mode: str) -> list[dict]:
-    mode = str(transport_mode or "SEA").strip().upper()
-    if mode not in TRANSPORT_FEE_PAIRS:
-        mode = "SEA"
-    rows = [*TRANSPORT_FEE_PAIRS[mode], *COMMON_FEE_TEMPLATES]
+    mode = resolve_transport_mode(transport_mode)
+    rows = [(*PRIMARY_FREIGHT[mode], "freight_invoice")] if mode else []
+    if mode == "EXPRESS":
+        rows.append(HISTORICAL_SURCHARGES[2])
+    rows.extend(COMMON_FEE_TEMPLATES)
     templates = [
         {
             "name": "",
@@ -106,19 +103,17 @@ def build_default_fee_templates(transport_mode: str) -> list[dict]:
         }
         for index, (key, label, basis, evidence_role) in enumerate(rows, start=1)
     ]
-    if mode == "EXPRESS":
-        for row in templates:
-            key = row["logical_fee_key"]
-            if key == "international_express_fee":
-                continue
+    for row in templates:
+        key = row["logical_fee_key"]
+        if key in {"customs_clearance_fee", "import_tax", "destination_delivery", "express_surcharge"}:
             row["entry_responsibility"] = "MEXICO"
-            if key in {"customs_clearance_fee", "import_tax", "destination_delivery"}:
-                row["currency"] = "MXN"
-            if key in {"express_surcharge", "destination_delivery"}:
-                # A display/preview default, not a persisted actual or no-charge declaration.
-                row.update(amount="0", amount_status="ESTIMATED", is_default_zero=True)
-            if key == "destination_delivery":
-                row["expense_category"] = "当地快递费"
+        if key in {"customs_clearance_fee", "import_tax", "destination_delivery"}:
+            row["currency"] = "MXN"
+        if key in {"express_surcharge", "destination_delivery"}:
+            # A display/preview default, not a persisted actual or no-charge declaration.
+            row.update(amount="0", amount_status="ESTIMATED", is_default_zero=True)
+        if key == "destination_delivery":
+            row["expense_category"] = "当地快递费" if mode == "EXPRESS" else "当地配送费"
     return templates
 
 
@@ -131,6 +126,9 @@ def map_historical_fee_key(fee: dict, transport_mode: str) -> str:
         key = row["logical_fee_key"]
         aliases[_normalized_fee_name(row["expense_category"])] = key
         aliases[_normalized_fee_name(key)] = key
+    for key, label, *_ in [*PRIMARY_FREIGHT.values(), *HISTORICAL_SURCHARGES]:
+        aliases[_normalized_fee_name(label)] = key
+        aliases[_normalized_fee_name(key)] = key
     aliases.update(
         {
             "oceanfreight": "international_sea_freight",
@@ -141,9 +139,15 @@ def map_historical_fee_key(fee: dict, transport_mode: str) -> str:
             "importduty": "import_tax",
             "delivery": "destination_delivery",
             "目的地配送费": "destination_delivery",
+            "当地配送费": "destination_delivery",
         }
     )
-    if str(transport_mode or "").strip().upper() == "EXPRESS":
+    mode = resolve_transport_mode(transport_mode)
+    if mode:
+        primary_key = primary_freight_definition(mode)["logical_fee_key"]
+        aliases["国际物流费用"] = primary_key
+        aliases["oa_logistics_freight"] = primary_key
+    if mode == "EXPRESS":
         aliases["当地快递费"] = "destination_delivery"
     for candidate in (fee.get("expense_category"), fee.get("rule_code")):
         matched = aliases.get(_normalized_fee_name(candidate))
@@ -158,6 +162,7 @@ def _decorate_historical_rules(rules: list[dict], transport_mode: str) -> list[d
     decorated = []
     for raw in rules or []:
         row = dict(raw or {})
+        row.update(legacy_oa_freight_updates(row, transport_mode))
         original_key = str(row.get("logical_fee_key") or "").strip()
         mapped_key = map_historical_fee_key(row, transport_mode)
         if mapped_key:
@@ -175,23 +180,24 @@ def _decorate_historical_rules(rules: list[dict], transport_mode: str) -> list[d
 
 
 def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) -> list[dict]:
-    """Overlay persisted fees on the five read-only defaults for this transport."""
+    """Overlay persisted fees; preserve all active conflicts and retired intent."""
 
     templates = build_default_fee_templates(transport_mode)
     template_by_key = {row["logical_fee_key"]: dict(row) for row in templates}
     extras = []
-    duplicate_names: dict[str, list[str]] = {}
-    for row in _decorate_historical_rules(existing_fees, transport_mode):
-        if row.get("is_enabled") in (0, False, "0"):
+    decorated = _decorate_historical_rules(existing_fees, transport_mode)
+    retired_keys = {row["logical_fee_key"] for row in decorated if not fee_is_active(row)}
+    for row in decorated:
+        if not fee_is_active(row):
             continue
         key = str(row.get("logical_fee_key") or "")
         if key in template_by_key:
             if not template_by_key[key].get("virtual"):
-                duplicate_names.setdefault(key, []).append(str(row.get("name") or ""))
+                extras.append(row)
                 continue
             template = template_by_key[key]
             merged = {**template, **row, "virtual": False, "is_default_zero": False}
-            if key == "destination_delivery" and template.get("entry_responsibility") == "MEXICO":
+            if key == "destination_delivery" or key in {value[0] for value in PRIMARY_FREIGHT.values()}:
                 merged["expense_category"] = template["expense_category"]
             for fieldname in (
                 "rule_code",
@@ -211,14 +217,10 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) ->
             template_by_key[key] = merged
         else:
             extras.append(row)
-    rows = [template_by_key[row["logical_fee_key"]] for row in templates]
-    for row in rows:
-        names = duplicate_names.get(str(row.get("logical_fee_key") or ""), [])
-        if names:
-            row["duplicate_rule_names"] = names
-            row["requires_review"] = True
+    rows = [template_by_key[row["logical_fee_key"]] for row in templates
+            if row["logical_fee_key"] not in retired_keys or not template_by_key[row["logical_fee_key"]].get("virtual")]
     rows.extend(extras)
-    return rows
+    return mark_duplicate_fees(rows)
 
 
 def _safe_json_dict(value) -> dict:
@@ -412,14 +414,17 @@ def _cost_value(record: dict, fieldname: str):
 
 
 def merge_logical_fee(existing_fees: list[dict], payload: dict, *, revision: str | None = None) -> dict:
+    assert_no_duplicate_fees(existing_fees)
     fees = deepcopy(existing_fees or [])
     fee_key = payload["logical_fee_key"]
-    existing_index = next(
-        (index for index, row in enumerate(fees) if str(row.get("logical_fee_key") or "") == fee_key),
-        None,
-    )
+    matches = [index for index, row in enumerate(fees) if str(row.get("logical_fee_key") or "") == fee_key]
+    existing_index = next((index for index in matches if fee_is_active(fees[index])), matches[0] if matches else None)
     previous = fees[existing_index] if existing_index is not None else {}
     merged = {**previous, **payload}
+    if previous and not fee_is_active(previous) and fee_is_active(merged):
+        raise ValueError("该费用已停用，请先核对历史记录，不能通过保存金额恢复启用。")
+    if previous.get("rule_code") == "oa_logistics_freight":
+        merged["rule_code"] = previous["rule_code"]
     cost_inputs_changed = existing_index is None or any(
         _cost_value(previous, fieldname) != _cost_value(merged, fieldname)
         for fieldname in COST_INPUT_FIELDS
@@ -543,10 +548,13 @@ def save_fee(
         return {"ok": True, "dry_run": True, **merged}
 
     _assert_write_context(batch_name, version_name, edit_token, expected_modified)
-    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or "SEA"
+    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     existing = _decorate_historical_rules(_query_rules(batch_name, version_name), transport_mode)
     merged = merge_logical_fee(existing, payload, revision=_revision())
     fee = merged["fee"]
+    if not str(fee.get("amount_revision") or "").startswith("manual:"):
+        fee["amount_revision"] = f"manual:{_revision()}"
+        merged["cost_inputs_changed"] = True
     values = {key: fee.get(key) for key in (*FEE_FIELDS, "amount_revision", "scope_revision")}
     values.update({"batch": batch_name, "version": version_name})
     if merged["action"] == "updated":
@@ -747,7 +755,7 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
         raise ValueError("当前批次没有可用成本版本。")
     if frappe.db.get_value("Overseas Cost Version", version, "batch") != batch_name:
         raise ValueError("成本版本不属于当前批次。")
-    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or "SEA"
+    transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     rules = compose_fee_worklist_rows(_query_rules(batch_name, version), transport_mode)
     raw_items = frappe.get_all(
         "Overseas Cost Item",

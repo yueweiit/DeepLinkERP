@@ -2641,6 +2641,9 @@ def test_sync_oa_logistics_allocation_rule_creates_rule_and_recalculates(monkeyp
         return {"ok": True, "summary_snapshot": {"total_cost_rmb": 1234}}
 
     monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "_oa_fee_sync_context", lambda *args, **kwargs: {"transport_mode": "SEA"})
+    monkeypatch.setattr(FakeFrappe, "get_all", lambda *args, **kwargs: [], raising=False)
+    monkeypatch.setattr(FakeFrappe.db, "set_value", lambda *args, **kwargs: None, raising=False)
     monkeypatch.setattr("overseas_costing.services.calculate_service.recalculate_batch", fake_recalculate_batch)
 
     rule_result = _sync_oa_logistics_allocation_rule(
@@ -2702,6 +2705,9 @@ def test_sync_express_single_quote_creates_freight_rule(monkeypatch) -> None:
             return FakeDoc(payload)
 
     monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "_oa_fee_sync_context", lambda *args, **kwargs: {"transport_mode": "EXPRESS"})
+    monkeypatch.setattr(FakeFrappe, "get_all", lambda *args, **kwargs: [], raising=False)
+    monkeypatch.setattr(FakeFrappe.db, "set_value", lambda *args, **kwargs: None, raising=False)
 
     rule_result = _sync_oa_logistics_allocation_rule(
         batch_name="202608131523000315085",
@@ -2728,7 +2734,7 @@ def test_sync_express_single_quote_creates_freight_rule(monkeypatch) -> None:
     assert rule_result["rule"]["amount"] == 3403.49434
     assert rule_result["rule"]["currency"] == "RMB"
     assert rule_result["rule"]["rule_code"] == "oa_logistics_freight"
-    assert inserted_rules[0]["expense_category"] == "国际物流费用"
+    assert inserted_rules[0]["expense_category"] == "国际快递费"
 
 
 def test_sync_oa_logistics_allocation_rule_blocks_invalid_batch_before_db_write(monkeypatch) -> None:

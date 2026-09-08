@@ -6385,6 +6385,30 @@ class OverseasCostWorkbench {
     return String(dialog.$wrapper.find(`[data-field='${fieldname}']`).val() || "").trim();
   }
 
+  async callLogisticsQuoteWrite(method, batch, payload) {
+    const inDetail = this.detailState?.batchName === batch.name;
+    let acquired = null;
+    try {
+      if (inDetail) {
+        if (!(await this.ensureEditSession())) throw new Error("未能获取编辑权，物流报价未保存。");
+      } else {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "未能获取编辑权，物流报价未保存。");
+      }
+      const result = await this.call(method, {
+        ...payload,
+        edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+        expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
+      }, true);
+      if (result?.batch_modified && this.detailState?.batchName === batch.name) {
+        this.detailState.expectedModified = result.batch_modified;
+      }
+      return result;
+    } finally {
+      if (acquired?.edit_token) await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token });
+    }
+  }
+
   async saveManualLogisticsQuote(batch, dialog) {
     if (!batch || this.isSavingManualLogisticsQuote) return;
     const payload = {
@@ -6413,7 +6437,7 @@ class OverseasCostWorkbench {
           <div class="ocw-confirm-copy">
             <h4>确认保存物流报价补录？</h4>
             <p>系统会把 ${this.escape(this.formatMoney(payload.amount))} ${this.escape(payload.currency)} 写入当前批次费用池，并立即重新试算。</p>
-            <div class="ocw-confirm-note">保存后仍可再次修改补录金额，修改记录会保留。</div>
+            <div class="ocw-confirm-note">已有人工保存费用时，新报价会保留供复核；调整金额请在费用清单中处理。</div>
           </div>
         `,
         () => resolve(true),
@@ -6426,7 +6450,7 @@ class OverseasCostWorkbench {
     const $button = dialog.$wrapper.find("[data-action='save-manual-logistics-quote']");
     $button.prop("disabled", true).text("保存中...");
     try {
-      const result = await this.call("overseas_costing.api.import_api.save_manual_logistics_quote", payload, true);
+      const result = await this.callLogisticsQuoteWrite("overseas_costing.api.import_api.save_manual_logistics_quote", batch, payload);
       if (!result || !result.ok) {
         throw new Error((result && result.message) || "物流报价补录保存失败");
       }
@@ -6459,7 +6483,7 @@ class OverseasCostWorkbench {
           <div class="ocw-confirm-copy">
             <h4>确认使用该物流报价？</h4>
             <p>将确认 ${this.escape(carrier)} 的 ${this.escape(amount)}，生成整票物流费用分摊规则并重新试算。</p>
-            <div class="ocw-confirm-note">确认后仍可改选其他候选，系统会保留每次确认记录。</div>
+            <div class="ocw-confirm-note">已有人工保存费用时，新报价会保留供复核；调整金额请在费用清单中处理。</div>
           </div>
         `,
         () => resolve(true),
@@ -6470,14 +6494,14 @@ class OverseasCostWorkbench {
 
     this.isConfirmingLogisticsQuote = true;
     try {
-      const result = await this.call(
+      const result = await this.callLogisticsQuoteWrite(
         "overseas_costing.api.import_api.confirm_logistics_quote_candidate",
+        batch,
         {
           batch_name: batch.name,
           version_name: batch.current_version || null,
           candidate_index: candidateIndex,
-        },
-        true
+        }
       );
       if (!result || !result.ok) {
         throw new Error((result && result.message) || "物流报价确认失败");
@@ -9515,6 +9539,16 @@ class OverseasCostWorkbench {
   }
 
   renderMaterialFeeRow(fee) {
+    if (fee.duplicate_rule_names?.length) {
+      const evidence = fee.evidence || [];
+      return `<tr class="is-review">
+        <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "费用")}</strong><small>记录：${this.escape(fee.name || "未命名")}</small></td>
+        <td><span class="ocw-mf-badge is-danger">费用重复 · 未计入</span><small>${this.escape(this.materialFeeAmountStatus(fee.amount_state || fee.amount_status).label)}</small></td>
+        <td>${this.escape(fee.currency || "RMB")} ${this.escape(fee.amount ?? "未填写")}<small>请先核对并停用重复记录，再保存或试算。</small></td>
+        <td>${evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · ${this.escape(row.attachment || row.name || "")}</span>`).join("") || "暂无关联凭证"}</td>
+        <td><strong>冲突记录</strong><small>${fee.duplicate_rule_names.map((name) => this.escape(name)).join("、")}</small></td>
+      </tr>`;
+    }
     const amountInfo = this.materialFeeAmountStatus(fee.amount_state || fee.amount_status);
     const evidenceInfo = this.materialFeeEvidenceLabel(fee.evidence_state);
     const scopeLabel = String(fee.scope_type || "ALL_ITEMS") === "ALL_ITEMS" ? "全批物料" : String(fee.scope_type) === "DIRECT_ITEM" ? "指定单行" : "指定物料";
@@ -10464,6 +10498,7 @@ class OverseasCostWorkbench {
       CURRENCY_UNSUPPORTED: "币种暂不支持，请选择人民币、比索或美金",
       FEE_AMOUNT_INVALID: "金额无效，请填写不小于 0 的有效金额",
       AMOUNT_STATUS_INVALID: "金额状态无效，请重新确认",
+      DUPLICATE_LOGICAL_FEE: "费用重复，请核对并停用重复记录",
       ALLOCATION_BASIS_INCOMPLETE: "体积或重量资料不完整，采购货值也未齐全，请补充资料后重试",
       ALLOCATION_DENOMINATOR_ZERO: "体积或重量尚未提供，采购货值也未齐全，请补充资料后重试",
       FEE_SCOPE_EMPTY: "没有可分摊的物料，请检查物料与适用范围",

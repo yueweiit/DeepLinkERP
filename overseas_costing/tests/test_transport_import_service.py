@@ -65,7 +65,9 @@ def test_disabled_oa_logistics_rule_is_not_revived_when_source_amount_changes(mo
             return {"is_enabled": 0, "amount": 100, "rule_code": "oa_logistics_freight"}
         def set_value(self, *args, **kwargs):
             writes.append(args)
-    monkeypatch.setattr(import_oa_logistics, "frappe", SimpleNamespace(db=DB()))
+    monkeypatch.setattr(import_oa_logistics, "frappe", SimpleNamespace(db=DB(), get_all=lambda *args, **kwargs: [
+        {"name": "RETIRED-RULE", "is_enabled": 0, "amount": 100, "rule_code": "oa_logistics_freight"}]))
+    monkeypatch.setattr(import_oa_logistics, "_oa_fee_sync_context", lambda *args, **kwargs: {"transport_mode": "AIR"})
     monkeypatch.setattr(import_service, "_invalid_batch_cost_write_response", lambda *args: None)
     monkeypatch.setattr(import_oa_logistics, "_insert_batch_audit_log", lambda **kwargs: None)
     for amount in (200, 300):
