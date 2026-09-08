@@ -15,8 +15,11 @@ from overseas_costing.services.transport_fee_service import fee_is_active
 
 
 ISSUE_ORDER = ("purchase", "logistics", "calculation", "erp_failed")
-PURCHASE_CODES = {"MATERIAL_ITEMS_REQUIRED", "GOODS_VALUE_MISSING", "PURCHASE_SOURCE_INVALID",
-                  "SUBSIDIARY_REQUIRED", "MATERIAL_CODE_REQUIRED", "PURCHASE_QUANTITY_REQUIRED"}
+PURCHASE_CODES = {"MATERIAL_ITEMS_REQUIRED", "GOODS_VALUE_MISSING", "PURCHASE_SOURCE_INVALID"}
+SAVED_ITEM_OUTPUT_FIELDS = (
+    "goods_value_ratio", "weight_ratio", "freight_alloc_rmb", "freight_alloc_mxn",
+    "total_logistics_mxn", "alloc_price_mxn", "total_cost_rmb", "total_unit_rmb", "derived_json",
+)
 ALLOCATION_CODES = {"SHIPPING_UNIT_REQUIRED", "ALLOCATION_BASIS_INCOMPLETE", "ALLOCATION_DENOMINATOR_ZERO",
                     "FEE_SCOPE_EMPTY", "FEE_SCOPE_INVALID", "DIRECT_ITEM_SCOPE_INVALID",
                     "STABLE_ITEM_KEY_REQUIRED", "STABLE_ITEM_KEY_DUPLICATED"}
@@ -24,9 +27,6 @@ FEE_CODES = {"AMOUNT_MISSING", "AMOUNT_STATUS_INVALID", "FEE_AMOUNT_INVALID", "D
              "FX_RATE_MISSING", "CURRENCY_UNSUPPORTED"}
 MESSAGES = {
     "PURCHASE_SOURCE_INVALID": "采购来源已失效或无法读取，请先核对采购资料。",
-    "SUBSIDIARY_REQUIRED": "请补充所属子公司。",
-    "MATERIAL_CODE_REQUIRED": "物料编码缺失，请补充采购资料。",
-    "PURCHASE_QUANTITY_REQUIRED": "采购数量缺失，请补充采购资料。",
     "TRANSPORT_MODE_REQUIRED": "请先确认批次运输方式。",
     "RESULT_NOT_SAVED": "尚未保存综合成本试算，请先重新计算。",
     "RESULT_LEGACY": "历史结果缺少可验证的计算快照，请重新计算。",
@@ -99,14 +99,24 @@ def _saved_result_matches(snapshot: dict, expected: dict, items: list[dict]) -> 
             return False
     if snapshot.get("item_count") != len(items):
         return False
-    expected_by_name = {row["name"]: row for row in expected["items"]}
+    expected_by_name = {row["name"]: row for row in expected.get("item_updates") or []}
     if len(expected_by_name) != len(items):
         return False
     for item in items:
         output = expected_by_name.get(item.get("name")) or {}
-        if not _same_amount(item.get("total_cost_rmb"), output.get("total_cost_rmb")):
-            return False
-        if _dict(item.get("derived_json")).get("calculation_schema") != 2:
+        for field in SAVED_ITEM_OUTPUT_FIELDS:
+            if field == "derived_json":
+                continue
+            if output.get(field) is None:
+                if item.get(field) is not None:
+                    return False
+            elif not _same_amount(item.get(field), output.get(field)):
+                return False
+        derived = _dict(item.get("derived_json"))
+        expected_derived = _dict(output.get("derived_json"))
+        # Validate the calculator's canonical allocation/display projection while
+        # permitting unrelated annotations in the same JSON document.
+        if {key: derived.get(key) for key in expected_derived} != expected_derived:
             return False
     return True
 
@@ -137,20 +147,17 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     canonical_fees = fee_service._decorate_historical_rules(composed, mode)
     fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
     current_hash = cost_preview_service.cost_input_hash(inputs, canonical_fees, fx, mode)
-    expected = cost_preview_service.preview_comprehensive_cost_data(inputs, canonical_fees, fx)
+    if any(fee.get("duplicate_rule_names") for fee in canonical_fees):
+        # The saver rejects duplicates. The preview retains them as blockers so
+        # the read-only workbench can still explain how to repair the batch.
+        expected = cost_preview_service.preview_comprehensive_cost_data(inputs, canonical_fees, fx)
+    else:
+        expected = cost_preview_service.build_saved_cost_data(inputs, composed, fx, mode)
 
-    if not batch.get("subsidiary_code"):
-        block("SUBSIDIARY_REQUIRED")
     if not mode:
         block("TRANSPORT_MODE_REQUIRED")
     if _source_invalid(_dict(batch.get("source_status")), inputs):
         block("PURCHASE_SOURCE_INVALID")
-    for row in inputs:
-        if not str(row.get("material_code") or "").strip():
-            block("MATERIAL_CODE_REQUIRED")
-        quantity = cost_preview_service._decimal(row.get("quantity"))
-        if quantity is None or quantity <= 0:
-            block("PURCHASE_QUANTITY_REQUIRED")
     keys = [present_material_row(row)["stable_line_key"] for row in inputs]
     if len(set(keys)) != len(keys):
         block("STABLE_ITEM_KEY_DUPLICATED")

@@ -214,3 +214,60 @@ def test_changed_inputs_report_staleness_without_claiming_saved_result_is_corrup
     context = saved_context()
     context["items"][0]["goods_value"] = 110.0
     assert codes(evaluate(context)) == {"RESULT_STALE"}
+
+
+@pytest.mark.parametrize("missing_context", ["purchase_quantity", "material_code", "subsidiary"])
+def test_complete_saved_allocation_does_not_require_unused_purchase_context(missing_context):
+    context = saved_context()
+    if missing_context == "purchase_quantity":
+        context["items"][0].update(quantity=None, actual_shipped_qty=10,
+                                   actual_shipped_qty_mode="EXPLICIT_SOURCE", shipped_uom="箱")
+    elif missing_context == "material_code":
+        context["items"][0]["material_code"] = None
+    else:
+        context["batch"]["subsidiary_code"] = None
+    save_result(context)
+    snapshot = json.loads(context["version"]["summary_snapshot_json"])
+    assert snapshot["comprehensive_cost"]["summary"]["is_complete"] is True
+    result = evaluate(context)
+    assert result["review_state"] == "ready"
+    assert result["result_is_current"] is True
+    assert result["review_blockers"] == []
+
+
+@pytest.mark.parametrize("tamper", ["missing_rules", "duplicate_rule", "rule_amount", "allocated_fees_rmb",
+    "direct_fees_rmb", "tax_allocated_rmb", "mexico_customs_rmb", "shipping_unit_cost", "purchase_pricing_unit_cost"])
+def test_persisted_sku_derived_allocation_and_display_must_match_saved_projection(tamper):
+    context = saved_context()
+    derived = json.loads(context["items"][0]["derived_json"])
+    if tamper == "missing_rules":
+        derived["allocated_rules"] = []
+    elif tamper == "duplicate_rule":
+        derived["allocated_rules"].append(deepcopy(derived["allocated_rules"][0]))
+    elif tamper == "rule_amount":
+        derived["allocated_rules"][0]["allocated_rmb"] = "999.00"
+    elif tamper in {"shipping_unit_cost", "purchase_pricing_unit_cost"}:
+        derived[tamper]["amount_rmb"] = "999.000000"
+    else:
+        derived[tamper] = "999.00"
+    context["items"][0]["derived_json"] = json.dumps(derived)
+    result = evaluate(context)
+    assert "SAVED_RESULT_INVALID" in codes(result)
+    assert result["review_state"] == "processing"
+    assert result["result_is_current"] is False
+
+
+@pytest.mark.parametrize("field", ["goods_value_ratio", "weight_ratio", "freight_alloc_rmb", "freight_alloc_mxn",
+    "total_logistics_mxn", "alloc_price_mxn", "total_unit_rmb"])
+def test_persisted_sku_numeric_cost_outputs_must_match_saved_projection(field):
+    context = saved_context()
+    context["items"][0][field] = "999.00"
+    assert "SAVED_RESULT_INVALID" in codes(evaluate(context))
+
+
+def test_unrelated_sku_derived_metadata_does_not_invalidate_saved_allocations():
+    context = saved_context()
+    derived = json.loads(context["items"][0]["derived_json"])
+    derived["packing_note"] = "Separate source annotation"
+    context["items"][0]["derived_json"] = json.dumps(derived)
+    assert evaluate(context)["review_state"] == "ready"

@@ -520,7 +520,7 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
                 fields=["name", "batch", "version_code", "status", "fx_usd_to_rmb", "fx_rmb_to_mxn",
                         "calculated_at", "summary_snapshot_json"], limit_page_length=0)
             item_rows = frappe.get_all("Overseas Cost Item", filters=filters,
-                fields=["batch", "version", *cost_preview_service.COST_INPUT_FIELDS, "total_cost_rmb", "derived_json"],
+                fields=["batch", "version", *cost_preview_service.COST_INPUT_FIELDS, *cost_review_service.SAVED_ITEM_OUTPUT_FIELDS],
                 order_by="row_no asc, name asc", limit_page_length=0)
             rule_rows = frappe.get_all("Overseas Cost Allocation Rule", filters=filters,
                 fields=fee_service._rule_fields(), order_by="priority_no asc, modified asc", limit_page_length=0)
