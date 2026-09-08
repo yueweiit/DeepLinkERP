@@ -10304,8 +10304,18 @@ class OverseasCostWorkbench {
       }],
     });
     dialog.wikiMaterialSelectedSource = "";
+    dialog.wikiMaterialRefreshedSources = new Set();
+    dialog.wikiMaterialWorkbooks = [];
+    dialog.wikiMaterialBusy = "";
+    dialog.wikiMaterialProgress = "";
+    dialog.wikiMaterialOperationError = "";
+    dialog.wikiMaterialClosed = false;
+    dialog.wikiMaterialOpeningPreview = false;
     dialog.show();
     dialog.$wrapper.addClass("ocw-mf-dialog ocw-mf-wiki-dialog");
+    dialog.$wrapper.on("hide.bs.modal.ocwMfWiki", () => {
+      if (!dialog.wikiMaterialOpeningPreview) dialog.wikiMaterialClosed = true;
+    });
     dialog.$wrapper
       .off(".ocwMfWiki")
       .on("click.ocwMfWiki", "[data-mf-wiki-source]", (event) => {
@@ -10318,23 +10328,43 @@ class OverseasCostWorkbench {
           $(node).toggle(!keyword || String($(node).attr("data-search") || "").includes(keyword));
         });
       })
-      .on("click.ocwMfWiki", "[data-action='mf-wiki-refresh']", (event) => {
+      .on("click.ocwMfWiki", "[data-action='mf-wiki-refresh-all']", () => {
+        this.refreshWikiMaterialCatalogs(dialog)
+          .catch((error) => this.showWikiMaterialSourceError(dialog, error));
+      })
+      .on("click.ocwMfWiki", "[data-action='mf-wiki-preview-card']", (event) => {
         const $button = $(event.currentTarget);
-        this.refreshWikiMaterialSource(dialog, $button.attr("data-workbook-id"), $button.attr("data-sheet-id"))
-          .catch((error) => this.showError(error));
+        this.previewFreshWikiMaterialImport(
+          dialog,
+          $button.attr("data-workbook-id"),
+          $button.attr("data-sheet-id"),
+          $button.attr("data-source-id"),
+        ).catch((error) => this.showWikiMaterialSourceError(dialog, error));
       })
-      .on("click.ocwMfWiki", "[data-action='mf-wiki-preview']", () => {
-        this.previewWikiMaterialImport(dialog).catch((error) => this.showError(error));
-      })
-      .on("click.ocwMfWiki", "[data-action='mf-wiki-cancel']", () => dialog.hide());
+      .on("click.ocwMfWiki", "[data-action='mf-wiki-cancel']", () => {
+        dialog.wikiMaterialClosed = true;
+        dialog.hide();
+      });
     await this.loadWikiMaterialSources(dialog);
   }
 
-  async loadWikiMaterialSources(dialog) {
+  async loadWikiMaterialSources(dialog, { preserveOnError = false } = {}) {
     const result = await this.call("overseas_costing.api.packing_api.list_packing_sources", {
       batch_name: this.detailState.batchName,
     }, true);
-    const sheets = (result?.wiki_workbooks || []).flatMap((workbook) =>
+    const nextWorkbooks = result?.wiki_workbooks || [];
+    if (
+      preserveOnError
+      && result?.wiki_error
+      && !nextWorkbooks.length
+      && (dialog.wikiMaterialSources || []).length
+    ) {
+      dialog.wikiMaterialError = result.wiki_error;
+      if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
+      return false;
+    }
+    dialog.wikiMaterialWorkbooks = nextWorkbooks;
+    const sheets = dialog.wikiMaterialWorkbooks.flatMap((workbook) =>
       (workbook.sheets || []).map((sheet) => ({ ...sheet, workbook_id: workbook.workbook_id, workbook_label: workbook.label }))
     );
     sheets.sort((left, right) => {
@@ -10348,13 +10378,15 @@ class OverseasCostWorkbench {
       const recommended = sheets.find((sheet) => sheet.auto_select_recommended) || sheets.find((sheet) => sheet.is_recommended) || sheets[0];
       dialog.wikiMaterialSelectedSource = recommended?.source_id || "";
     }
-    this.renderWikiMaterialSources(dialog);
+    if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
+    return true;
   }
 
   renderWikiMaterialSources(dialog) {
     const $target = dialog.$wrapper.find("[data-area='mf-wiki-sources']");
     const sheets = dialog.wikiMaterialSources || [];
     const selectedId = String(dialog.wikiMaterialSelectedSource || "");
+    const busy = String(dialog.wikiMaterialBusy || "");
     const cards = sheets.map((sheet) => {
       const selected = String(sheet.source_id || "") === selectedId;
       const sheetId = String(sheet.source_id || "").split(":").slice(1).join(":");
@@ -10370,19 +10402,68 @@ class OverseasCostWorkbench {
           <small>${this.escape(sheet.workbook_label || "装箱计划表")} · 装箱日期 ${this.escape(sheet.business_date || "未识别")}</small>
         </button>
         ${sheet.is_recommended ? `<div class="ocw-mf-wiki-reasons"><b>系统推荐 · ${this.escape(confidence)}</b>${(sheet.recommendation_reasons || []).slice(0, 3).map((reason) => `<span>${this.escape(reason)}</span>`).join("")}</div>` : ""}
-        <div class="ocw-mf-wiki-card-meta"><span>${this.escape(status)}</span><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-wiki-refresh" data-workbook-id="${this.escape(sheet.workbook_id || "")}" data-sheet-id="${this.escape(sheetId)}">刷新最新数据</button></div>
+        <div class="ocw-mf-wiki-card-meta"><span>${this.escape(status)}</span><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-wiki-preview-card" data-source-id="${this.escape(sheet.source_id || "")}" data-workbook-id="${this.escape(sheet.workbook_id || "")}" data-sheet-id="${this.escape(sheetId)}" ${busy ? "disabled" : ""}>${busy === `sheet:${sheet.source_id}` ? "正在刷新…" : "预览"}</button></div>
       </article>`;
     }).join("");
     $target.html(`
-      <div class="ocw-mf-dialog-note">系统只读取服务器已授权的钉钉装箱计划表。选择后先预览，不会直接改动物料数据。</div>
+      <div class="ocw-mf-wiki-toolbar">
+        <label class="ocw-mf-wiki-search"><span>查找 Sheet</span><input type="search" data-action="mf-wiki-filter" placeholder="输入装箱单、日期或品类"></label>
+        <button class="ocw-outline-btn" type="button" data-action="mf-wiki-refresh-all" ${busy ? "disabled" : ""}>${busy === "global" ? this.escape(dialog.wikiMaterialProgress || "正在刷新…") : "刷新最新数据"}</button>
+      </div>
       ${dialog.wikiMaterialError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialError)}</div>` : ""}
-      <label class="ocw-mf-wiki-search"><span>查找 Sheet</span><input type="search" data-action="mf-wiki-filter" placeholder="输入装箱单、日期或品类"></label>
+      ${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}
       <div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无可用 Sheet</strong><span>请先确认服务端装箱计划表同步状态。</span></div>`}</div>
-      <footer class="ocw-mf-import-sticky-footer"><span>${selectedId ? `已选：${this.escape((sheets.find((sheet) => String(sheet.source_id) === selectedId) || {}).source_label || selectedId)}` : "请选择一个 Sheet"}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-wiki-cancel">取消</button><button class="ocw-primary-btn" type="button" data-action="mf-wiki-preview" ${selectedId ? "" : "disabled"}>预览所选 Sheet</button></div></footer>
+      <footer class="ocw-mf-import-sticky-footer"><span>${selectedId ? `已选：${this.escape((sheets.find((sheet) => String(sheet.source_id) === selectedId) || {}).source_label || selectedId)}` : "请选择一个 Sheet"}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-wiki-cancel">取消</button></div></footer>
     `);
   }
 
-  async refreshWikiMaterialSource(dialog, workbookId, sheetId) {
+  showWikiMaterialSourceError(dialog, error) {
+    dialog.wikiMaterialBusy = "";
+    dialog.wikiMaterialProgress = "";
+    dialog.wikiMaterialOperationError = this.normalizeErrorMessage(error);
+    if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
+  }
+
+  async refreshWikiMaterialCatalogs(dialog) {
+    if (dialog.wikiMaterialBusy) return;
+    const workbooks = (dialog.wikiMaterialWorkbooks || []).filter((workbook) => workbook.workbook_id);
+    if (!workbooks.length) throw new Error("没有可刷新的装箱计划年度表。");
+    dialog.wikiMaterialBusy = "global";
+    dialog.wikiMaterialOperationError = "";
+    const failures = [];
+    let succeeded = 0;
+    try {
+      for (let index = 0; index < workbooks.length; index += 1) {
+        const workbook = workbooks[index];
+        dialog.wikiMaterialProgress = `正在刷新 ${index + 1}/${workbooks.length}`;
+        this.renderWikiMaterialSources(dialog);
+        const requestId = this.packingFlowRequestId();
+        try {
+          await this.call("overseas_costing.api.packing_api.request_packing_workbook_refresh", {
+            batch_name: this.detailState.batchName,
+            workbook_id: workbook.workbook_id,
+            request_id: requestId,
+          }, false);
+          await this.waitPackingRefresh(this.getDetailBatch(), requestId);
+          succeeded += 1;
+        } catch (error) {
+          failures.push(`${workbook.label || workbook.workbook_id}：${this.normalizeErrorMessage(error)}`);
+        }
+      }
+      const loaded = await this.loadWikiMaterialSources(dialog, { preserveOnError: true });
+      if (!loaded) throw new Error(dialog.wikiMaterialError || "刷新后的装箱计划目录读取失败。");
+      dialog.wikiMaterialOperationError = failures.length
+        ? `部分装箱计划表刷新失败（${failures.length}/${workbooks.length}）：${failures.join("；")}`
+        : "";
+      if (succeeded) frappe.show_alert({ message: `已刷新 ${succeeded} 个装箱计划年度表`, indicator: "green" });
+    } finally {
+      dialog.wikiMaterialBusy = "";
+      dialog.wikiMaterialProgress = "";
+      if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
+    }
+  }
+
+  async refreshWikiMaterialSource(dialog, workbookId, sheetId, sourceId) {
     if (!workbookId || !sheetId) throw new Error("无法识别需要刷新的装箱计划 Sheet。");
     const requestId = this.packingFlowRequestId();
     await this.call("overseas_costing.api.packing_api.request_packing_sheet_refresh", {
@@ -10391,14 +10472,36 @@ class OverseasCostWorkbench {
       sheet_id: sheetId,
       request_id: requestId,
     }, false);
-    frappe.show_alert({ message: "正在刷新钉钉装箱计划资料", indicator: "blue" });
     await this.waitPackingRefresh(this.getDetailBatch(), requestId);
-    await this.loadWikiMaterialSources(dialog);
-    frappe.show_alert({ message: "装箱计划资料已刷新", indicator: "green" });
+    dialog.wikiMaterialRefreshedSources.add(String(sourceId || `${workbookId}:${sheetId}`));
+    const loaded = await this.loadWikiMaterialSources(dialog, { preserveOnError: true });
+    if (!loaded) throw new Error(dialog.wikiMaterialError || "刷新后的 Sheet 目录读取失败。");
   }
 
-  async previewWikiMaterialImport(sourceDialog) {
-    const sourceId = String(sourceDialog.wikiMaterialSelectedSource || "");
+  async previewFreshWikiMaterialImport(dialog, workbookId, sheetId, sourceId) {
+    if (dialog.wikiMaterialBusy) return;
+    const normalizedSourceId = String(sourceId || "");
+    if (!normalizedSourceId) throw new Error("无法识别需要预览的装箱计划 Sheet。");
+    dialog.wikiMaterialSelectedSource = normalizedSourceId;
+    dialog.wikiMaterialBusy = `sheet:${normalizedSourceId}`;
+    dialog.wikiMaterialOperationError = "";
+    this.renderWikiMaterialSources(dialog);
+    try {
+      if (!dialog.wikiMaterialRefreshedSources.has(normalizedSourceId)) {
+        await this.refreshWikiMaterialSource(dialog, workbookId, sheetId, normalizedSourceId);
+      }
+      if (dialog.wikiMaterialClosed) return;
+      await this.previewWikiMaterialImport(dialog, normalizedSourceId);
+    } finally {
+      dialog.wikiMaterialBusy = "";
+      if (!dialog.wikiMaterialClosed && !dialog.wikiMaterialOpeningPreview) {
+        this.renderWikiMaterialSources(dialog);
+      }
+    }
+  }
+
+  async previewWikiMaterialImport(sourceDialog, requestedSourceId = "") {
+    const sourceId = String(requestedSourceId || sourceDialog.wikiMaterialSelectedSource || "");
     if (!sourceId) throw new Error("请先选择装箱计划 Sheet。");
     const result = await this.call("overseas_costing.api.materials.preview_material_import", {
       batch_name: this.detailState.batchName,
@@ -10407,6 +10510,8 @@ class OverseasCostWorkbench {
       sheet_name: null,
     }, true);
     if (!result || !result.ok) throw new Error(result?.message || "装箱计划表预览失败");
+    if (sourceDialog.wikiMaterialClosed) return;
+    sourceDialog.wikiMaterialOpeningPreview = true;
     sourceDialog.hide();
     this.openMaterialImportPreviewDialog(result);
   }
@@ -10465,11 +10570,12 @@ class OverseasCostWorkbench {
       return `<tr class="is-${this.escape(row.classification || "unmatched")}"><td>${this.escape((row.source_rows || [row.source_row]).join("、"))}</td><td><strong>${this.escape(incoming.material_code || "--")}</strong>${row.match_status === "choice_required" ? `<select data-mf-match-row="${this.escape(row.source_row)}"><option value="">请选择采购明细</option>${(row.candidates || []).map((candidate) => `<option value="${this.escape(candidate.stable_line_key || "")}">行 ${this.escape(candidate.row_no || "--")} · ${this.escape(candidate.source_doc_no || "未写审批号")}</option>`).join("")}</select>` : row.match_status === "unmatched" ? `<small>未匹配，不会写入</small>` : ""}</td><td><span>${this.escape(this.formatValue(incoming.actual_shipped_qty || "--"))} ${this.escape(incoming.shipped_uom || "")}</span><small>${this.escape(physicalLabels[row.physical_status] || "")}${row.physical_missing_rows?.length ? ` · 缺失行 ${this.escape(row.physical_missing_rows.join("、"))}` : ""}</small></td><td><span>净 ${this.escape(this.formatValue(incoming.net_weight_kg || "--"))} / 毛 ${this.escape(this.formatValue(incoming.gross_weight_kg || "--"))} kg</span><span>体积 ${this.escape(this.formatValue(incoming.volume_m3 || "--"))} m³</span><span>项目 ${this.escape(incoming.project_collection || "--")}</span></td><td>${sourceChoices}${(row.changes || []).map((change) => `<label><span>${this.escape(this.materialImportFieldLabel(change.field))}：${this.escape(this.formatValue(change.old ?? "--"))} → ${this.escape(this.formatValue(change.new ?? "--"))}</span>${change.conflict ? `<select data-mf-conflict-row="${this.escape(row.source_row)}" data-fieldname="${this.escape(change.field)}"><option value="keep_current">保留当前值</option><option value="use_source">采用装箱计划</option></select>` : ""}</label>`).join("") || "--"}${["allocation_required", "group_confirmation_required"].includes(row.physical_status) ? `<details><summary>已有物理量冲突规则</summary>${latentConflicts}</details>` : ""}</td></tr>`;
     }).join("");
     const sharedGroups = (preview.shared_groups || []).filter((group) => group.allocation_required !== false).map((group) => `<article class="ocw-mf-allocation-group"><header><div><strong>${this.escape(group.group_id)}</strong><span>来源行 ${this.escape((group.row_numbers || []).join("、"))}</span></div><small>整箱：净 ${this.escape(group.metrics?.net_weight_kg?.value || "--")} kg · 毛 ${this.escape(group.metrics?.gross_weight_kg?.value || "--")} kg · 体积 ${this.escape(group.metrics?.volume_m3?.value || "--")} m³</small></header><div>${(group.participants || []).map((participant) => `<div class="ocw-mf-allocation-row"><span><strong>${this.escape(participant.material_code || "未识别物料")}</strong><small>${participant.in_batch ? "将写入本批次" : "批次外，仅用于核对合计"}</small></span>${["net_weight_kg", "gross_weight_kg", "volume_m3"].map((fieldname) => `<label>${this.escape(this.materialImportFieldLabel(fieldname))}<input inputmode="decimal" data-mf-allocation="1" data-group-id="${this.escape(group.group_id)}" data-source-key="${this.escape(participant.source_key)}" data-fieldname="${fieldname}" placeholder="0"></label>`).join("")}</div>`).join("")}</div></article>`).join("");
-    const confirmationGroups = (preview.confirmation_groups || []).map((group) => `<label class="ocw-mf-group-confirm"><input type="checkbox" data-mf-group-confirmation="${this.escape(group.group_id)}"><span><strong>确认 ${this.escape(group.group_id)} 为同一包装组</strong><small>来源行 ${this.escape((group.row_numbers || []).join("、"))} · ${this.escape((group.material_codes || []).join("、"))}</small></span></label>`).join("");
-    const outside = (preview.out_of_batch || []).map((row) => `<li>第 ${this.escape(row.source_row || "--")} 行 · ${this.escape(row.material_code || "未识别物料")} · 数量 ${this.escape(row.quantity || "--")}</li>`).join("");
+    const confirmationGroups = (preview.confirmation_groups || []).map((group) => `<label class="ocw-mf-group-confirm"><input type="checkbox" data-mf-group-confirmation="${this.escape(group.group_id)}"><span><strong>确认 ${this.escape(group.group_id)} 为同一包装组</strong><small>来源行 ${this.escape((group.row_numbers || []).join("、"))} · 涉及 SKU ${this.escape((group.material_codes || []).join("、"))}</small><small>共享净重 ${this.escape(group.metrics?.net_weight_kg?.value || "--")} kg · 毛重 ${this.escape(group.metrics?.gross_weight_kg?.value || "--")} kg · 体积 ${this.escape(group.metrics?.volume_m3?.value || "--")} m³</small><small>判断依据：${this.escape(group.reason || "相邻物料行疑似共享箱级数据")}</small></span></label>`).join("");
+    const outside = (preview.out_of_batch || []).map((row) => `<li>第 ${this.escape(row.source_row || "--")} 行 · ${this.escape(row.material_code || "未识别物料")} · 数量 ${this.escape(row.quantity || "--")}${row.candidate_merge ? ` · 疑似合并组 ${this.escape((row.source_group_ids || []).join("、"))}` : ""}</li>`).join("");
+    const outsideGroups = (preview.out_of_batch_groups || []).map((group) => `<article class="ocw-mf-outside-group"><strong>批次外疑似合并组 ${this.escape(group.group_id || "--")}</strong><span>来源行 ${this.escape((group.row_numbers || []).join("、"))} · 物料 ${this.escape((group.material_codes || []).join("、") || "未识别")}</span><span>共享净重 ${this.escape(group.metrics?.net_weight_kg?.value || "--")} kg · 毛重 ${this.escape(group.metrics?.gross_weight_kg?.value || "--")} kg · 体积 ${this.escape(group.metrics?.volume_m3?.value || "--")} m³</span><small>${this.escape(group.reason || "相邻行疑似共享箱级数据")}</small></article>`).join("");
     const sourceValidation = preview.source_validation || {};
     const validationIssues = [...(sourceValidation.blocking || []), ...(sourceValidation.warnings || [])].map((issue) => `<label class="ocw-mf-source-validation ${issue.confirmation_required ? "is-blocking" : ""}">${issue.confirmation_required ? `<input type="checkbox" data-mf-source-validation="${this.escape(issue.confirmation_key || issue.code || "")}">` : ""}<span><strong>${issue.confirmation_required ? "需要确认" : "来源提示"}：${this.escape(issue.message || issue.code || "待核对")}</strong>${issue.confirmation_required ? "<small>勾选后表示已核对，仍按装箱明细写入。</small>" : ""}</span></label>`).join("");
-    return `<div class="ocw-mf-import-preview ocw-mf-wiki-import-preview"><div class="ocw-mf-dialog-note"><strong>${this.escape(preview.source?.label || preview.source?.sheet || "装箱计划表")}</strong><br>${preview.is_merged_preview ? "以下是选择采购明细后重新汇总的最终预览。" : ""}资料更新时间：${this.escape(this.formatDateTimeMinute(preview.source?.source_updated_at) || preview.source?.source_updated_at || "未提供")}。只有点击下方“确认写入物料表”才会修改数据。</div>${validationIssues ? `<section class="ocw-mf-source-validation-list"><h4>装箱计划表数据校验</h4>${validationIssues}</section>` : ""}<div class="ocw-mf-import-summary"><span>匹配 <strong>${preview.summary?.matched || 0}</strong></span><span>需选采购行 <strong>${preview.summary?.choice_required || 0}</strong></span><span>物理量不完整 <strong>${preview.summary?.physical_incomplete || 0}</strong></span><span>批次外 <strong>${preview.summary?.out_of_batch || 0}</strong></span></div><div class="ocw-mf-import-table"><table><thead><tr><th>来源行</th><th>物料与目标</th><th>发货数据</th><th>物理量</th><th>字段变化 / 处理</th></tr></thead><tbody>${rowHtml || `<tr><td colspan="5">没有匹配到当前批次物料</td></tr>`}</tbody></table></div>${sharedGroups ? `<section class="ocw-mf-allocation-section"><h4>跨 SKU 合箱分配</h4><p>填写每个物料的实际值；每列合计必须等于整箱来源值。</p>${sharedGroups}</section>` : ""}${confirmationGroups ? `<section class="ocw-mf-confirmation-section"><h4>候选合并组确认</h4>${confirmationGroups}</section>` : ""}${outside ? `<details class="ocw-mf-outside-list"><summary>批次外或未识别物料（不会导入）</summary><ul>${outside}</ul></details>` : ""}<footer class="ocw-mf-import-sticky-footer"><span>OA 采购数量、货值和物料身份不会被覆盖。</span><div><button class="ocw-outline-btn" type="button" data-action="mf-wiki-import-cancel">取消</button><button class="ocw-primary-btn" type="button" data-action="mf-wiki-import-confirm">确认写入物料表</button></div></footer></div>`;
+    return `<div class="ocw-mf-import-preview ocw-mf-wiki-import-preview"><div class="ocw-mf-dialog-note"><strong>${this.escape(preview.source?.label || preview.source?.sheet || "装箱计划表")}</strong><br>${preview.is_merged_preview ? "以下是选择采购明细后重新汇总的最终预览。" : ""}资料更新时间：${this.escape(this.formatDateTimeMinute(preview.source?.source_updated_at) || preview.source?.source_updated_at || "未提供")}。只有点击下方“确认写入物料表”才会修改数据。</div>${validationIssues ? `<section class="ocw-mf-source-validation-list"><h4>装箱计划表数据校验</h4>${validationIssues}</section>` : ""}<div class="ocw-mf-import-summary"><span>匹配 <strong>${preview.summary?.matched || 0}</strong></span><span>需选采购行 <strong>${preview.summary?.choice_required || 0}</strong></span><span>物理量不完整 <strong>${preview.summary?.physical_incomplete || 0}</strong></span><span>批次外 <strong>${preview.summary?.out_of_batch || 0}</strong></span></div><div class="ocw-mf-import-table"><table><thead><tr><th>来源行</th><th>物料与目标</th><th>发货数据</th><th>物理量</th><th>字段变化 / 处理</th></tr></thead><tbody>${rowHtml || `<tr><td colspan="5">没有匹配到当前批次物料</td></tr>`}</tbody></table></div>${sharedGroups ? `<section class="ocw-mf-allocation-section"><h4>跨 SKU 合箱分配</h4><p>填写每个物料的实际值；每列合计必须等于整箱来源值。</p>${sharedGroups}</section>` : ""}${confirmationGroups ? `<section class="ocw-mf-confirmation-section"><h4>候选合并组确认</h4>${confirmationGroups}</section>` : ""}${outside ? `<details class="ocw-mf-outside-list"><summary>批次外或未识别物料（不会导入）</summary>${outsideGroups ? `<div class="ocw-mf-outside-groups">${outsideGroups}</div>` : ""}<ul>${outside}</ul></details>` : ""}<footer class="ocw-mf-import-sticky-footer"><span>OA 采购数量、货值和物料身份不会被覆盖。</span><div><button class="ocw-outline-btn" type="button" data-action="mf-wiki-import-cancel">取消</button><button class="ocw-primary-btn" type="button" data-action="mf-wiki-import-confirm">确认写入物料表</button></div></footer></div>`;
   }
 
   async applyMaterialXlsxImport(dialog, preview) {

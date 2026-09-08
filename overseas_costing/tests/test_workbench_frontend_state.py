@@ -419,6 +419,9 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
     assert "shared_groups" in workspace
     assert "confirmation_groups" in workspace
     assert "out_of_batch" in workspace
+    assert "out_of_batch_groups" in workspace
+    assert "批次外疑似合并组" in workspace
+    assert "判断依据" in workspace
     assert "source_fields" in workspace
     assert "merged_source_fields" in workspace
     assert "MERGED_PREVIEW_CONFIRMATION_REQUIRED" in workspace
@@ -1215,6 +1218,24 @@ def test_fee_workspace_allocation_failure_is_explicitly_excluded_from_preview() 
     )
 
     assert result == {"excluded": True, "basis": True}
+
+
+def test_wiki_material_source_dialog_refreshes_globally_and_previews_each_sheet() -> None:
+    workspace = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+
+    assert "request_packing_workbook_refresh" in workspace
+    assert 'data-action="mf-wiki-refresh-all"' in workspace
+    assert 'data-action="mf-wiki-preview-card"' in workspace
+    assert "wikiMaterialRefreshedSources = new Set()" in workspace
+    assert "refreshWikiMaterialCatalogs" in workspace
+    assert "previewFreshWikiMaterialImport" in workspace
+    assert "wikiMaterialClosed" in workspace
+    assert "hide.bs.modal.ocwMfWiki" in workspace
+    assert "preserveOnError" in workspace
+    assert 'data-action="mf-wiki-refresh"' not in workspace
+    assert "系统只读取服务器已授权的钉钉装箱计划表" not in workspace
+    assert "预览所选 Sheet" not in workspace
+    assert "确认写入物料表" in workspace
 
 
 def test_recalculate_ui_blocks_invalid_approval_batches() -> None:

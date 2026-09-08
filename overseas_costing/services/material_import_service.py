@@ -369,6 +369,52 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
         for row_number in group.get("row_numbers") or []:
             groups_by_row.setdefault(int(row_number), []).append(group)
 
+    out_of_batch_groups = []
+    for group in groups:
+        if not bool(group.get("needs_confirmation")):
+            continue
+        group_rows = [
+            row_by_number.get(int(row_number))
+            for row_number in group.get("row_numbers") or []
+        ]
+        group_rows = [row for row in group_rows if row]
+        if not group_rows or any(_match_wiki_candidates(existing or [], row) for row in group_rows):
+            continue
+        group_id = str(group.get("group_id") or "")
+        out_of_batch_groups.append(
+            {
+                "group_id": group_id,
+                "row_numbers": list(group.get("row_numbers") or []),
+                "material_codes": sorted(
+                    {
+                        str(row.get("material_code") or "")
+                        for row in group_rows
+                        if str(row.get("material_code") or "")
+                    }
+                ),
+                "metrics": _wiki_group_metrics(group, allow_uncertain=True),
+                "reason": str(
+                    group.get("suggestion_reason")
+                    or "相邻行的箱级字段为空，疑似共享上方包装数据。"
+                ),
+            }
+        )
+
+    candidate_group_by_row: dict[int, list[dict]] = {}
+    for group in out_of_batch_groups:
+        for row_number in group.get("row_numbers") or []:
+            candidate_group_by_row.setdefault(int(row_number), []).append(group)
+    for row in out_of_batch:
+        source_row = row.get("source_row")
+        row_groups = (
+            candidate_group_by_row.get(int(source_row), [])
+            if str(source_row or "").isdigit()
+            else []
+        )
+        if row_groups:
+            row["source_group_ids"] = [group["group_id"] for group in row_groups]
+            row["candidate_merge"] = True
+
     shared_groups = []
     shared_group_ids = set()
     confirmation_groups = []
@@ -393,25 +439,30 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
                     "in_batch": bool(_match_wiki_candidates(existing or [], source_row)),
                 }
             )
+        candidate_metrics = _wiki_group_metrics(group, allow_uncertain=True)
+        if (
+            participants
+            and any(participant["in_batch"] for participant in participants)
+            and bool(group.get("needs_confirmation"))
+        ):
+            group_id = str(group.get("group_id") or "")
+            confirmation_group_ids.add(group_id)
+            group_metrics_by_id[group_id] = candidate_metrics
+            confirmation_groups.append(
+                {
+                    "group_id": group_id,
+                    "row_numbers": list(group.get("row_numbers") or []),
+                    "material_codes": [
+                        participant["material_code"] for participant in participants
+                    ],
+                    "metrics": candidate_metrics,
+                    "reason": str(
+                        group.get("suggestion_reason")
+                        or "相邻行的箱级字段为空，疑似共享上方包装数据。"
+                    ),
+                }
+            )
         if len(participants) <= 1:
-            candidate_metrics = _wiki_group_metrics(group, allow_uncertain=True)
-            if (
-                participants
-                and participants[0]["in_batch"]
-                and bool(group.get("needs_confirmation"))
-                and len(candidate_metrics) == 3
-            ):
-                group_id = str(group.get("group_id") or "")
-                confirmation_group_ids.add(group_id)
-                group_metrics_by_id[group_id] = candidate_metrics
-                confirmation_groups.append(
-                    {
-                        "group_id": group_id,
-                        "row_numbers": list(group.get("row_numbers") or []),
-                        "material_codes": [participants[0]["material_code"]],
-                        "metrics": candidate_metrics,
-                    }
-                )
             continue
         if not any(row["in_batch"] for row in participants):
             continue
@@ -429,6 +480,7 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
                 "participants": participants,
                 "metrics": metrics,
                 "needs_confirmation": bool(group.get("needs_confirmation")),
+                "reason": str(group.get("suggestion_reason") or ""),
                 "allocation_required": len(metrics) == 3,
             }
         )
@@ -544,6 +596,7 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
         "shared_groups": shared_groups,
         "confirmation_groups": confirmation_groups,
         "out_of_batch": out_of_batch,
+        "out_of_batch_groups": out_of_batch_groups,
     }
 
 
@@ -557,6 +610,27 @@ def _allocation_decimal(value: object) -> Optional[Decimal]:
 
 def apply_wiki_group_allocations(projection: dict, choices: dict) -> tuple[list, Optional[dict]]:
     """Validate exact shared-package totals and add allocations to projected SKU rows."""
+
+    group_confirmations = (
+        choices.get("group_confirmations")
+        if isinstance(choices.get("group_confirmations"), dict)
+        else {}
+    )
+    required_confirmation_ids = {
+        str(group.get("group_id") or "")
+        for group in projection.get("confirmation_groups") or []
+    }
+    missing_confirmations = sorted(
+        group_id
+        for group_id in required_confirmation_ids
+        if group_confirmations.get(group_id) is not True
+    )
+    if missing_confirmations:
+        return [], {
+            "ok": False,
+            "code": "GROUP_CONFIRMATION_REQUIRED",
+            "group_id": missing_confirmations[0],
+        }
 
     allocations = choices.get("allocations") if isinstance(choices.get("allocations"), dict) else {}
     allocated_by_source: dict[str, dict[str, Decimal]] = {}
@@ -602,19 +676,11 @@ def apply_wiki_group_allocations(projection: dict, choices: dict) -> tuple[list,
                 }
 
     resolved_rows = []
-    group_confirmations = (
-        choices.get("group_confirmations")
-        if isinstance(choices.get("group_confirmations"), dict)
-        else {}
-    )
     source_field_choices = (
         choices.get("source_fields")
         if isinstance(choices.get("source_fields"), dict)
         else {}
     )
-    required_confirmation_ids = {
-        str(group.get("group_id") or "") for group in projection.get("confirmation_groups") or []
-    }
     for original in projection.get("incoming") or []:
         row = dict(original)
         if row.get("physical_status") == "allocation_required":
@@ -1111,6 +1177,7 @@ def _build_trusted_comparison(existing: list, kind: str, trusted: dict, source: 
         comparison["shared_groups"] = projection["shared_groups"]
         comparison["confirmation_groups"] = projection["confirmation_groups"]
         comparison["out_of_batch"] = projection["out_of_batch"]
+        comparison["out_of_batch_groups"] = projection["out_of_batch_groups"]
         comparison["summary"]["shared_groups"] = len(projection["shared_groups"])
         comparison["summary"]["group_confirmation_required"] = len(projection["confirmation_groups"])
         comparison["summary"]["allocation_required"] = sum(
@@ -1121,6 +1188,14 @@ def _build_trusted_comparison(existing: list, kind: str, trusted: dict, source: 
         )
         comparison["summary"]["out_of_batch"] = len(projection["out_of_batch"])
     comparison["source_validation"] = _source_validation(parsed_preview)
+    if projection is not None and not (
+        projection["confirmation_groups"] or projection["shared_groups"]
+    ):
+        comparison["source_validation"]["blocking"] = [
+            issue
+            for issue in comparison["source_validation"]["blocking"]
+            if issue.get("code") != "group_confirmation_required"
+        ]
     comparison["summary"]["source_blockers"] = len(comparison["source_validation"]["blocking"])
     comparison["summary"]["source_warnings"] = len(comparison["source_validation"]["warnings"])
     comparison["preview_hash"] = _canonical_hash(

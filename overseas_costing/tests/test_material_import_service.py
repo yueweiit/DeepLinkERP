@@ -597,6 +597,81 @@ def test_wiki_projection_requires_manual_values_for_cross_sku_package_group() ->
     assert all("gross_weight_kg" not in row for row in projection["incoming"])
 
 
+def test_suggested_cross_sku_group_requires_confirmation_before_allocation_is_applied() -> None:
+    projection = build_wiki_material_projection(
+        existing=[
+            {"name": "I1", "stable_line_key": "L1", "material_code": "M1"},
+            {"name": "I2", "stable_line_key": "L2", "material_code": "M2"},
+        ],
+        parsed_preview={
+            "material_rows": [
+                {"source_row": 2, "material_code": "M1", "quantity": "10", "unit": "件"},
+                {"source_row": 3, "material_code": "M2", "quantity": "20", "unit": "件"},
+            ],
+            "groups": [
+                _packing_group(
+                    "package-1",
+                    [2, 3],
+                    net="25",
+                    gross="30",
+                    volume="0.12",
+                    needs_confirmation=True,
+                    count_once=False,
+                )
+            ],
+        },
+    )
+    allocations = {
+        "allocations": {
+            "package-1": {
+                "|m1": {"net_weight_kg": "10", "gross_weight_kg": "12", "volume_m3": "0.05"},
+                "|m2": {"net_weight_kg": "15", "gross_weight_kg": "18", "volume_m3": "0.07"},
+            }
+        }
+    }
+
+    assert projection["confirmation_groups"][0]["reason"]
+    blocked, error = apply_wiki_group_allocations(projection, allocations)
+    assert blocked == []
+    assert error == {"ok": False, "code": "GROUP_CONFIRMATION_REQUIRED", "group_id": "package-1"}
+
+    resolved, error = apply_wiki_group_allocations(
+        projection,
+        {**allocations, "group_confirmations": {"package-1": True}},
+    )
+    assert error is None
+    assert [row["gross_weight_kg"] for row in resolved] == ["12", "18"]
+
+
+def test_incomplete_suggested_group_still_requires_confirmation_for_quantity_only_import() -> None:
+    projection = build_wiki_material_projection(
+        existing=[{"name": "I1", "stable_line_key": "L1", "material_code": "M1"}],
+        parsed_preview={
+            "material_rows": [
+                {"source_row": 2, "material_code": "M1", "quantity": "6", "unit": "件"},
+                {"source_row": 3, "material_code": "M1", "quantity": "4", "unit": "件"},
+            ],
+            "groups": [
+                _packing_group(
+                    "package-1",
+                    [2, 3],
+                    net="8",
+                    gross=None,
+                    volume="0.03",
+                    needs_confirmation=True,
+                    count_once=False,
+                )
+            ],
+        },
+    )
+
+    assert projection["incoming"][0]["physical_status"] == "incomplete"
+    assert projection["confirmation_groups"][0]["group_id"] == "package-1"
+    blocked, error = apply_wiki_group_allocations(projection, {})
+    assert blocked == []
+    assert error == {"ok": False, "code": "GROUP_CONFIRMATION_REQUIRED", "group_id": "package-1"}
+
+
 def test_incomplete_cross_sku_group_does_not_block_quantity_only_import() -> None:
     projection = build_wiki_material_projection(
         existing=[
@@ -655,6 +730,66 @@ def test_wiki_projection_requires_confirmation_for_suggested_same_sku_group() ->
                 "gross_weight_kg": {"value": "10", "precision": 0},
                 "volume_m3": {"value": "0.03", "precision": 2},
             },
+            "reason": "相邻行的箱级字段为空，疑似共享上方包装数据。",
+        }
+    ]
+
+
+def test_out_of_batch_candidate_merge_is_explained_but_does_not_require_confirmation() -> None:
+    projection = build_wiki_material_projection(
+        existing=[{"name": "I1", "stable_line_key": "L1", "material_code": "M1"}],
+        parsed_preview={
+            "material_rows": [
+                {"source_row": 2, "material_code": "M1", "quantity": "5", "unit": "件"},
+                {"source_row": 8, "material_code": "OUTSIDE", "quantity": "6", "unit": "件"},
+                {"source_row": 9, "material_code": "OUTSIDE", "quantity": "4", "unit": "件"},
+            ],
+            "groups": [
+                _packing_group("package-in", [2], net="5", gross="6", volume="0.02"),
+                _packing_group(
+                    "package-out",
+                    [8, 9],
+                    net="8",
+                    gross="10",
+                    volume="0.03",
+                    needs_confirmation=True,
+                    count_once=False,
+                ),
+            ],
+        },
+    )
+
+    assert projection["confirmation_groups"] == []
+    assert projection["shared_groups"] == []
+    assert projection["out_of_batch"] == [
+        {
+            "source_row": 8,
+            "material_code": "OUTSIDE",
+            "source_doc_no": "",
+            "quantity": "6",
+            "source_group_ids": ["package-out"],
+            "candidate_merge": True,
+        },
+        {
+            "source_row": 9,
+            "material_code": "OUTSIDE",
+            "source_doc_no": "",
+            "quantity": "4",
+            "source_group_ids": ["package-out"],
+            "candidate_merge": True,
+        },
+    ]
+    assert projection["out_of_batch_groups"] == [
+        {
+            "group_id": "package-out",
+            "row_numbers": [8, 9],
+            "material_codes": ["OUTSIDE"],
+            "metrics": {
+                "net_weight_kg": {"value": "8", "precision": 0},
+                "gross_weight_kg": {"value": "10", "precision": 0},
+                "volume_m3": {"value": "0.03", "precision": 2},
+            },
+            "reason": "相邻行的箱级字段为空，疑似共享上方包装数据。",
         }
     ]
 
@@ -908,6 +1043,64 @@ def test_wiki_preview_uses_batch_projection_and_exposes_source_diagnostics() -> 
     ]
     assert result["summary"]["out_of_batch"] == 1
     assert result["source"]["source_updated_at"] == "2026-09-08 09:00:00"
+
+
+def test_wiki_preview_drops_global_merge_blocker_when_candidate_is_only_out_of_batch() -> None:
+    repository = FakeRepository()
+    repository.items[0].update({"material_code": "M1", "source_doc_no": ""})
+
+    def resolver(**_kwargs):
+        return {
+            "source_hash": "9" * 64,
+            "source": {
+                "source_kind": "wiki_sheet",
+                "source_id": "WB-1:ST-OUTSIDE",
+                "source_label": "2026装箱计划 / 批次外候选组",
+                "sheet_name": "批次外候选组",
+            },
+            "preview": {
+                "material_rows": [
+                    {"source_row": 2, "material_code": "M1", "quantity": "5", "unit": "件"},
+                    {"source_row": 8, "material_code": "OUTSIDE", "quantity": "6", "unit": "件"},
+                    {"source_row": 9, "material_code": "OUTSIDE", "quantity": "4", "unit": "件"},
+                ],
+                "groups": [
+                    _packing_group("package-in", [2], net="5", gross="6", volume="0.02"),
+                    _packing_group(
+                        "package-out",
+                        [8, 9],
+                        net="8",
+                        gross="10",
+                        volume="0.03",
+                        needs_confirmation=True,
+                        count_once=False,
+                    ),
+                ],
+                "validation": {
+                    "blocking": [
+                        {
+                            "code": "group_confirmation_required",
+                            "message": "第 8-9 行疑似来自同一合并包装组。",
+                        }
+                    ]
+                },
+            },
+        }
+
+    preview = preview_material_import(
+        "B1",
+        "wiki_sheet",
+        "WB-1:ST-OUTSIDE",
+        repository=repository,
+        resolver=resolver,
+        signing_key=b"secret",
+    )
+
+    assert preview["confirmation_groups"] == []
+    assert preview["shared_groups"] == []
+    assert preview["source_validation"]["blocking"] == []
+    assert preview["summary"]["source_blockers"] == 0
+    assert all(row["candidate_merge"] is True for row in preview["out_of_batch"])
 
 
 def test_wiki_preview_exposes_parser_blockers_and_requires_acknowledgement() -> None:
