@@ -1519,15 +1519,16 @@
   openMaterialImportPreviewDialog(preview) {
     const rows = preview.rows || [];
     const isWiki = preview.source?.kind === "wiki_sheet";
+    const isGrid = isWiki || Boolean(preview.source_grid?.cells?.length);
     const dialog = new frappe.ui.Dialog({
       title: isWiki ? "装箱计划表导入预览" : "Excel 导入预览",
-      fields: [{ fieldtype: "HTML", fieldname: "preview", options: isWiki ? this.renderWikiMaterialImportPreview(preview) : `<div class="ocw-mf-import-preview"><div class="ocw-mf-import-summary"><span>可补充 <strong>${preview.summary?.supplement || 0}</strong></span><span>冲突 <strong>${preview.summary?.conflict || 0}</strong></span><span>未匹配 <strong>${preview.summary?.unmatched || 0}</strong></span><span>不会新增未知行</span></div><div class="ocw-mf-import-table"><table><thead><tr><th>源行</th><th>分类</th><th>物料</th><th>字段变化 / 处理</th></tr></thead><tbody>${rows.map((row) => `<tr class="is-${this.escape(row.classification || "unmatched")}"><td>${this.escape(row.source_row || "--")}</td><td>${this.escape({ supplement: "可补充", conflict: "冲突", unmatched: "未匹配", no_change: "无变化" }[row.classification] || row.classification || "--")}</td><td>${this.escape(row.incoming?.material_code || "--")}${row.match_status === "choice_required" ? `<select data-mf-match-row="${this.escape(row.source_row)}"><option value="">请选择原行</option>${(row.candidates || []).map((candidate) => `<option value="${this.escape(candidate.stable_line_key || "")}">行 ${this.escape(candidate.row_no || "--")} · ${this.escape(candidate.material_code || "--")}</option>`).join("")}</select>` : ""}</td><td>${(row.changes || []).length ? row.changes.map((change) => `<div><span>${this.escape(change.field)}：${this.escape(this.formatValue(change.old ?? "--"))} → ${this.escape(this.formatValue(change.new ?? "--"))}</span>${change.conflict ? `<select data-mf-conflict-row="${this.escape(row.source_row)}" data-fieldname="${this.escape(change.field)}"><option value="keep_current">保留当前值</option><option value="use_source">采用 Excel</option></select>` : ""}</div>`).join("") : "--"}</td></tr>`).join("")}</tbody></table></div><div class="ocw-mf-dialog-note">仅补充发货数量、单位、重量、体积、计费重和项目归属；OA 采购事实不被覆盖。</div></div>` }],
-      primary_action_label: isWiki ? undefined : "确认整体导入",
-      primary_action: isWiki ? undefined : () => this.applyMaterialXlsxImport(dialog, preview),
+      fields: [{ fieldtype: "HTML", fieldname: "preview", options: isGrid ? this.renderWikiMaterialImportPreview(preview) : `<div class="ocw-mf-import-preview"><div class="ocw-mf-import-summary"><span>可补充 <strong>${preview.summary?.supplement || 0}</strong></span><span>冲突 <strong>${preview.summary?.conflict || 0}</strong></span><span>未匹配 <strong>${preview.summary?.unmatched || 0}</strong></span><span>不会新增未知行</span></div><div class="ocw-mf-import-table"><table><thead><tr><th>源行</th><th>分类</th><th>物料</th><th>字段变化 / 处理</th></tr></thead><tbody>${rows.map((row) => `<tr class="is-${this.escape(row.classification || "unmatched")}"><td>${this.escape(row.source_row || "--")}</td><td>${this.escape({ supplement: "可补充", conflict: "冲突", unmatched: "未匹配", no_change: "无变化" }[row.classification] || row.classification || "--")}</td><td>${this.escape(row.incoming?.material_code || "--")}${row.match_status === "choice_required" ? `<select data-mf-match-row="${this.escape(row.source_row)}"><option value="">请选择原行</option>${(row.candidates || []).map((candidate) => `<option value="${this.escape(candidate.stable_line_key || "")}">行 ${this.escape(candidate.row_no || "--")} · ${this.escape(candidate.material_code || "--")}</option>`).join("")}</select>` : ""}</td><td>${(row.changes || []).length ? row.changes.map((change) => `<div><span>${this.escape(change.field)}：${this.escape(this.formatValue(change.old ?? "--"))} → ${this.escape(this.formatValue(change.new ?? "--"))}</span>${change.conflict ? `<select data-mf-conflict-row="${this.escape(row.source_row)}" data-fieldname="${this.escape(change.field)}"><option value="keep_current">保留当前值</option><option value="use_source">采用 Excel</option></select>` : ""}</div>`).join("") : "--"}</td></tr>`).join("")}</tbody></table></div><div class="ocw-mf-dialog-note">仅补充发货数量、单位、重量、体积、计费重和项目归属；OA 采购事实不被覆盖。</div></div>` }],
+      primary_action_label: isGrid ? undefined : "确认整体导入",
+      primary_action: isGrid ? undefined : () => this.applyMaterialXlsxImport(dialog, preview),
     });
     dialog.show();
     dialog.$wrapper.addClass("ocw-mf-dialog ocw-mf-import-dialog");
-    if (isWiki) {
+    if (isGrid) {
       this.setupPackingSpreadsheetDialog(dialog, preview);
       dialog.$wrapper
         .on("click", "[data-action='mf-wiki-import-cancel']", () => dialog.hide())
@@ -1656,12 +1657,16 @@
       throw new Error(result?.message || messages[result?.code] || result?.code || "资料导入失败");
     }
     this.updateMaterialFeeExpectedModified(result);
+    if (dialog._pg) dialog._pg.allowClose = true;
     dialog.hide();
     frappe.show_alert({ message: `已更新 ${result.updated_count || 0} 行、${result.changed_field_count || 0} 个字段`, indicator: "green" });
     await this.loadMaterialFeeWorkspace({ quiet: true });
   }
 
   validateWikiMaterialAllocations(preview, choices) {
+    for (const group of preview.confirmation_groups || []) {
+      if (group.source_correction_required) return `第 ${(group.row_numbers || []).join("、")} 行的真实合并跨度矛盾，请修正原表后重新预览。`;
+    }
     for (const group of preview.shared_groups || []) {
       if (group.allocation_required === false) continue;
       const groupLabel = `第 ${(group.row_numbers || []).join("、")} 行共箱`;

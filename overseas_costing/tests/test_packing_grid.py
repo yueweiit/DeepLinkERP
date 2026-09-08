@@ -14,6 +14,27 @@ from overseas_costing.services.packing_parse_service import parse_packing_grid
 from overseas_costing.utils.excel_workbook import read_packing_grid
 
 
+@pytest.mark.parametrize('address', ['A100000000', 'ZZZZZ1', 'A0', 'A1garbage'])
+def test_sparse_snapshot_coordinates_are_rejected_before_allocation(address):
+    with pytest.raises(ValueError, match='范围|坐标|限制'):
+        build_grid_from_dingtalk_snapshot({'schemaVersion': 1, 'rangeAddress': address, 'values': [[1]]})
+
+
+def test_sparse_chunks_bound_the_combined_rectangle():
+    with pytest.raises(ValueError, match='限制'):
+        build_grid_from_dingtalk_snapshot({'schemaVersion': 1, 'chunks': [
+            {'rangeAddress': 'A10000', 'values': [[1]]},
+            {'rangeAddress': 'IV1', 'values': [[1]]},
+        ]})
+
+
+def test_true_merge_outside_snapshot_is_rejected():
+    with pytest.raises(ValueError, match='合并'):
+        build_grid_from_dingtalk_snapshot({'schemaVersion': 1, 'values': [[1]],
+            'mergeRangesAvailable': True, 'mergeRanges': [dict(startRow=1, endRow=100000000,
+                startColumn=1, endColumn=1)]})
+
+
 def _build_grouped_workbook(path):
     workbook = openpyxl.Workbook()
     sheet = workbook.active

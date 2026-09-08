@@ -458,6 +458,14 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
                         participant["material_code"] for participant in participants
                     ],
                     "metrics": candidate_metrics,
+                    **({"range_conflict": True,
+                    "source_correction_required": len({
+                        tuple(item.get("rows") or []) for item in group.get("evidence") or []
+                        if item.get("kind") not in {"manual_confirmed", "blank_continuation_suggestion"}
+                    }) > 1,
+                    "ranges": [{key: item[key] for key in ("start_row", "end_row", "start_column", "end_column")}
+                               for item in group.get("evidence") or [] if "start_row" in item],
+                    } if group.get("merge_conflict") else {}),
                     **({"coordinate_review_required": True} if group.get("coordinate_review_required") else {}),
                     "reason": str(
                         group.get("suggestion_reason")
@@ -639,6 +647,12 @@ def _allocation_decimal(value: object) -> Optional[Decimal]:
 
 def apply_wiki_group_allocations(projection: dict, choices: dict) -> tuple[list, Optional[dict]]:
     """Validate exact shared-package totals and add allocations to projected SKU rows."""
+
+    conflicts = [group for group in projection.get("confirmation_groups") or [] if group.get("range_conflict")]
+    if conflicts:
+        return [], {"ok": False,
+                    "code": "SOURCE_MERGE_CONFLICT" if conflicts[0].get("source_correction_required") else "MERGE_REVIEW_REQUIRED",
+                    "message": "合并跨度存在矛盾，请修正原表或调整人工核对范围后重新预览。"}
 
     coordinate_groups = [group for group in projection.get("confirmation_groups") or []
                          if group.get("coordinate_review_required")]
@@ -1300,6 +1314,13 @@ def _attach_source_grid(comparison: dict, trusted: dict, existing: list, kind: s
         "candidate_regions": candidate_regions, "row_states": states,
         "merge_reviews": comparison["merge_reviews"],
     }
+    for group in comparison.get("confirmation_groups") or []:
+        if group.get("source_correction_required"):
+            comparison.setdefault("source_validation", {"blocking": [], "warnings": []})["blocking"].append({
+                "code": "source_merge_conflict", "confirmation_required": False,
+                "message": f"第 {'、'.join(map(str, group['row_numbers']))} 行的真实合并跨度矛盾，请修正原表后重新预览。",
+                "ranges": group.get("ranges") or [],
+            })
     coordinate_groups = [group for group in comparison.get("confirmation_groups") or []
                          if group.get("coordinate_review_required")]
     if coordinate_groups:

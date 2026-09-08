@@ -158,6 +158,19 @@ def _find_header(cells: list[list[dict[str, Any]]]) -> tuple[int, dict[str, int]
         normalized = {index: _normalize_header(cell.get("raw_value") or cell.get("display_value")) for index, cell in enumerate(row, start=1)}
         columns: dict[str, int] = {}
         for field, aliases in HEADER_ALIASES.items():
+            # Annual sheets can include a second, partially populated export table
+            # to the right. An exact helper label must not eclipse the primary
+            # bilingual identity column containing the actual packing rows.
+            if field == "material_code":
+                candidates = [
+                    (sum(bool(_string_value(_cell_raw(cells, number, column)))
+                         for number in range(row_number + 1, len(cells) + 1)), -column, column)
+                    for column, header in normalized.items()
+                    if header and _header_match_score(field, header, aliases) > 0
+                ]
+                if candidates:
+                    columns[field] = max(candidates)[2]
+                continue
             candidates = [
                 (_header_match_score(field, header, aliases), -column, column)
                 for column, header in normalized.items()
@@ -211,6 +224,8 @@ def _source_field_cell(cells, row, column, merges):
 
 
 def _candidate_regions(grid, row_numbers, columns):
+    if grid.get("merge_ranges_available"):
+        return []
     cells = grid.get("cells") or []
     existing = [*(grid.get("merge_ranges") or []), *((grid.get("merge_reviews") or {}).get("ranges") or [])]
     result = []
@@ -461,7 +476,7 @@ def _header_match_score(field: str, header: str, aliases: tuple[str, ...]) -> in
     if not matches:
         return 0
     score = max(100 if alias == header else 50 + len(alias) for alias in matches)
-    if field in {"net_weight_kg", "gross_weight_kg", "volume_m3"}:
+    if field in {"quantity", "net_weight_kg", "gross_weight_kg", "volume_m3"}:
         if any(marker in header for marker in ("总", "total")):
             score += 100
         if any(marker in header for marker in ("每件", "单件", "perpiece", "perunit", "unit")):

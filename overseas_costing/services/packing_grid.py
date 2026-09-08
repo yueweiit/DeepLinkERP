@@ -9,6 +9,15 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+MAX_GRID_ROWS = 10_000
+MAX_GRID_COLUMNS = 256
+MAX_GRID_CELLS = 250_000
+
+
+def _check_grid_size(rows: int, columns: int) -> None:
+    if rows > MAX_GRID_ROWS or columns > MAX_GRID_COLUMNS or rows * columns > MAX_GRID_CELLS:
+        raise ValueError("来源范围超出预览限制（10000 行、256 列、250000 个单元格），请缩小工作表范围。")
+
 
 class PackingSheetNotFound(ValueError):
     """用户明确选择的工作表不存在。"""
@@ -81,6 +90,7 @@ def build_grid_from_dingtalk_snapshot(snapshot: dict[str, Any]) -> dict[str, Any
     column_count = max(
         [len(row) for matrix in (values, display_values, formulas) for row in matrix] or [0]
     )
+    _check_grid_size(row_count, column_count)
 
     cells: list[list[dict[str, Any]]] = []
     for row_index in range(row_count):
@@ -104,6 +114,10 @@ def build_grid_from_dingtalk_snapshot(snapshot: dict[str, Any]) -> dict[str, Any
 
     merge_ranges = snapshot.get("mergeRanges", snapshot.get("merge_ranges")) or []
     normalized_merges = [_normalize_merge_range(item, "dingtalk_merge") for item in merge_ranges]
+    for region in normalized_merges:
+        if not (1 <= region['start_row'] <= region['end_row'] <= row_count
+                and 1 <= region['start_column'] <= region['end_column'] <= column_count):
+            raise ValueError("来源合并范围超出实际快照，请刷新完整来源后重新预览。")
     merge_ranges_available = bool(
         snapshot.get("mergeRangesAvailable", snapshot.get("merge_ranges_available", False))
     )
@@ -132,16 +146,21 @@ def _snapshot_matrix(parts: list[dict[str, Any]], key: str, alias: str | None = 
     """Place ranges at their real worksheet coordinates, including chunk gaps."""
 
     result = []
+    widest = 0
     for part in parts:
         matrix = part.get(key, part.get(alias) if alias else None) or []
+        if not isinstance(matrix, list) or any(not isinstance(row, list) for row in matrix):
+            raise ValueError("来源范围必须是二维单元格数组。")
         address = str(part.get("rangeAddress", part.get("range_address")) or "A1").rsplit("!", 1)[-1]
-        match = re.match(r"\$?([A-Za-z]+)\$?([1-9][0-9]*)", address)
+        match = re.fullmatch(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})(?::\$?[A-Za-z]{1,3}\$?[1-9][0-9]{0,6})?", address)
         if not match:
             raise ValueError("来源单元格范围缺少有效工作表坐标。")
         column_number = 0
         for letter in match.group(1).upper():
             column_number = column_number * 26 + ord(letter) - ord("A") + 1
         row_offset, column_offset = int(match.group(2)) - 1, column_number - 1
+        widest = max(widest, column_offset + max((len(row) for row in matrix), default=0))
+        _check_grid_size(max(len(result), row_offset + max(1, len(matrix))), widest)
         for index, source_row in enumerate(matrix):
             row_index = row_offset + index
             while len(result) <= row_index:

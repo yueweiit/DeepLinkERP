@@ -21,6 +21,41 @@ SOURCE_HASH = "b" * 64
 HEADERS = ["物料编码", "采购订单号", "中文品名", "数量", "总净重", "总毛重", "总体积", "项目归属"]
 
 
+def test_primary_bilingual_code_and_total_quantity_win_over_partial_export_helpers():
+    grid = build_grid_from_dingtalk_snapshot({"schemaVersion":1,"sheetName":"packing",
+        "values":[["品目编码Item code", "总个数 The total number of", "中文品名", "总净重", "总毛重", "总体积", "物料编码", "数量"],
+                  ["M1", 96, "产品1", 8, 10, .3, "M1", 96],
+                  ["M1", 4, "产品1", 2, 3, .1, "M1", 4],
+                  ["OUT2", 5, "其他产品", 3, 4, .1, None, None]],
+        "mergeRangesAvailable":False})
+    parsed = parse_packing_grid(grid)
+    mapping = {c['field']:c['column'] for c in parsed['columns']}
+    assert mapping['material_code'] == 1
+    assert mapping['quantity'] == 2
+    assert [(r['material_code'], r['quantity']) for r in parsed['material_rows']] == [('M1','96'),('M1','4'),('OUT2','5')]
+
+
+def test_known_complete_merge_metadata_does_not_infer_unmerged_blanks():
+    parsed = parse_packing_grid(_grid(available=True))
+    assert parsed['candidate_regions'] == []
+
+
+def test_conflicting_cross_sku_source_ranges_cannot_be_bypassed_with_legacy_confirmation():
+    from overseas_costing.services.material_import_service import apply_wiki_group_allocations
+    grid = _grid(rows=[['M1','PO1','物料1',10,8,10,.3,''],
+                       ['M2','PO2','物料2',20,None,None,None,''],
+                       ['M3','PO3','物料3',30,4,None,.2,'']],
+                 merges=[_range(5,action=None),_range(6,action=None,end=4),_range(7,action=None)],available=True)
+    result = _preview(grid)
+    group = result['confirmation_groups'][0]
+    assert group['source_correction_required'] is True
+    blockers = result['source_validation']['blocking']
+    assert any(b['code']=='source_merge_conflict' and b['ranges'] for b in blockers)
+    projection = build_wiki_material_projection(FakeRepository().items, parse_packing_grid(grid))
+    rows, error = apply_wiki_group_allocations(projection, {'group_confirmations':{group['group_id']:True}})
+    assert rows == [] and error['code'] == 'SOURCE_MERGE_CONFLICT'
+
+
 def _grid(rows=None, merges=(), available=False):
     return build_grid_from_dingtalk_snapshot({
         "schemaVersion": 1,

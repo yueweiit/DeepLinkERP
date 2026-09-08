@@ -68,9 +68,12 @@
 
   setupPackingSpreadsheetDialog(dialog, preview) {
     dialog._ocwMaterialPreview = preview;
-    dialog._pg = {tab:"source",reviews:preview.merge_reviews?.ranges||[],busy:false,closed:false,selection:null};
+    dialog._pg = {tab:"source",reviews:preview.merge_reviews?.ranges||[],reviewHistory:[],busy:false,closed:false,selection:null};
     const w = dialog.$wrapper.addClass("pg-dialog");
-    w.on("hide.bs.modal.pg",()=>{dialog._pg.closed=true;$(document).off(".pgResize");});
+    w.on("hide.bs.modal.pg",event=>{
+      if(dialog._pg.writing&&!dialog._pg.allowClose){event.preventDefault();return;}
+      dialog._pg.closed=true;$(document).off(".pgResize");
+    });
     w.on("click","[data-pg-tab], [data-pg-next], [data-pg-back]",event=>this.switchPackingPreviewTab(dialog,event.currentTarget.hasAttribute("data-pg-next")?"result":event.currentTarget.getAttribute("data-pg-tab")||"source"));
     w.on("click","[data-pg-cell]",event=>this.selectPackingGridCell(dialog,event));
     w.on("keydown","[data-pg-cell]",event=>{
@@ -138,15 +141,28 @@
     if(dialog._pg.busy||dialog._pg.closed)return;
     const preview=dialog._ocwMaterialPreview;
     try {
-      let reviews=[...dialog._pg.reviews];
-      if(action==="undo")reviews.pop();
-      else {const range=this.parsePackingRange(dialog.$wrapper.find("[data-pg-range]").val());reviews=reviews.filter(item=>!["start_row","end_row","start_column","end_column"].every(key=>item[key]===range[key]));reviews.push({...range,action});}
+      const previousReviews = [...dialog._pg.reviews];
+      const history = dialog._pg.reviewHistory || [];
+      let reviews = [...previousReviews];
+      if (action === "undo") {
+        if (!history.length) throw new Error("本次会话还没有可撤销的核对。");
+        reviews = [...history[history.length - 1]];
+      } else {
+        const range = this.parsePackingRange(dialog.$wrapper.find("[data-pg-range]").val());
+        const selected = dialog._pg.selection;
+        const same = (a, b) => b && ["start_row", "end_row", "start_column", "end_column"].every(key => a[key] === b[key]);
+        // Editing a selected manual range replaces it; unrelated ranges remain
+        // and the server still rejects accidental overlap with other reviews.
+        reviews = reviews.filter(item => !same(item, range) && !(selected?.evidence_kind === "manual_confirmed" && same(item, selected)));
+        reviews.push({ ...range, action });
+      }
       dialog._pg.busy=true;this.updatePackingPreviewBlocker(dialog);
       dialog.$wrapper.find("[data-pg-review], [data-pg-undo]").prop("disabled",true);
       const result=await this.call("overseas_costing.api.materials.preview_material_import",{batch_name:preview.batch_name||this.detailState.batchName,source_kind:preview.source.kind,source_id:preview.source.id,sheet_name:preview.sheet?.selected||preview.source.sheet||null,merge_reviews_json:JSON.stringify({source_hash:preview.source.source_hash,ranges:reviews})},true);
       if(dialog._pg.closed)return;
       if(!result?.ok)throw new Error(result?.message||"核对失败，请重新预览。");
       dialog._ocwMaterialPreview=result;dialog._pg.reviews=result.merge_reviews?.ranges||reviews;dialog._pg.selection=null;
+      dialog._pg.reviewHistory = action === "undo" ? history.slice(0, -1) : [...history, previousReviews];
       // A reviewed range changes aggregation identities; require fresh field/allocation choices.
       dialog._ocwMaterialImportBaseChoices={};
       dialog.fields_dict.preview.$wrapper.html(this.renderWikiMaterialImportPreview(result));dialog._pg.busy=false;
@@ -168,14 +184,16 @@
     if(!dialog._pg||dialog._pg.closed)return;
     const issue=this.validateWikiMaterialAllocations(dialog._ocwMaterialPreview,this.collectMaterialImportChoices(dialog,dialog._ocwMaterialPreview));
     dialog.$wrapper.find("[data-action='mf-wiki-import-confirm']").prop("disabled",Boolean(issue)||dialog._pg.busy);
-    dialog.$wrapper.find("[data-pg-error]").text(dialog._pg.busy?"正在处理，请稍候…":dialog._pg.tab==="result"?issue||"核对结果后，点击确认写入":"");
+    dialog.$wrapper.find("[data-pg-error]").text(dialog._pg.writing?"正在确认写入，请稍候；此时不能取消。":dialog._pg.busy?"正在处理，请稍候…":dialog._pg.tab==="result"?issue||"核对结果后，点击确认写入":"");
   }
 
   async confirmPackingSpreadsheet(dialog) {
     if(dialog._pg.busy||dialog._pg.closed)return;
-    dialog._pg.busy=true;this.updatePackingPreviewBlocker(dialog);
+    dialog._pg.busy=true;dialog._pg.writing=true;dialog._pg.allowClose=false;
+    dialog.$wrapper.find("[data-action='mf-wiki-import-cancel'], .modal-header button").prop("disabled",true);
+    this.updatePackingPreviewBlocker(dialog);
     try {await this.applyMaterialImport(dialog,dialog._ocwMaterialPreview);}
-    catch(error){dialog._pg.busy=false;if(!dialog._pg.closed){this.updatePackingPreviewBlocker(dialog);dialog.$wrapper.find("[data-pg-error]").text(error.message||"导入失败，未完成写入");}return;}
-    finally {dialog._pg.busy=false;}
+    catch(error){dialog._pg.busy=false;dialog._pg.writing=false;if(!dialog._pg.closed){this.updatePackingPreviewBlocker(dialog);dialog.$wrapper.find("[data-pg-error]").text(error.message||"导入失败，未完成写入");}return;}
+    finally {dialog._pg.busy=false;dialog._pg.writing=false;dialog.$wrapper.find("[data-action='mf-wiki-import-cancel'], .modal-header button").prop("disabled",false);}
     this.updatePackingPreviewBlocker(dialog);
   }
