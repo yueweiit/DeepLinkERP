@@ -52,6 +52,7 @@ GRID_FIELDS = (
     "supplier",
     "source_type",
     "source_doc_no",
+    "dingtalk_instance_id",
     "source_file_name",
     "source_attachment_id",
     "parse_status",
@@ -258,7 +259,9 @@ def get_material_grid(
         limit_start=(normalized_page - 1) * normalized_length,
         limit_page_length=normalized_length,
     )
-    items = [present_material_row(item) for item in raw_items]
+    from overseas_costing.services.approval_link_service import attach_approval_links
+
+    items = attach_approval_links(resolved_batch, [present_material_row(item) for item in raw_items])
     all_items = items
     if total > len(items):
         all_items = [

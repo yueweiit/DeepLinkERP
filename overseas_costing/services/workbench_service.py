@@ -640,7 +640,7 @@ def get_batch_items_page(
     )
     fieldnames = list(
         dict.fromkeys(
-            ["name", "row_no", "excel_row_no", "modified", "derived_json"]
+            ["name", "row_no", "excel_row_no", "modified", "derived_json", "source_doc_no", "dingtalk_instance_id"]
             + [column["fieldname"] for column in columns]
         )
     )
@@ -663,8 +663,12 @@ def get_batch_items_page(
     )
     batch_meta = _load_sku_batch_meta(batch_doc_name)
     mode = batch_meta.get("transport_mode") if resolved_version == batch_meta.get("current_version") else ""
-    items = [present_saved_sku_result(row, mode) for row in items]
+    from overseas_costing.services.approval_link_service import attach_approval_links
+
+    items = attach_approval_links(batch_doc_name, [present_saved_sku_result(row, mode) for row in items])
     columns = [dict(column) for column in columns]
+    if query["group"] in {"basic", "all"}:
+        columns.append({"excel_col": "", "fieldname": "approval_link", "label": "采购审批来源", "read_only": 1})
     if query["group"] in {"total", "all"}:
         for column in columns:
             if column["fieldname"] == "total_unit_rmb":

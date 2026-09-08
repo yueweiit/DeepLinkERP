@@ -1157,7 +1157,7 @@ class FrappeMaterialImportRepository:
     def get_items(self, batch_name: str, version_name: str) -> list:
         fields = list(
             dict.fromkeys(
-                ["name", "row_no", "excel_row_no", "stable_line_key", "source_doc_no"]
+                ["name", "row_no", "excel_row_no", "stable_line_key", "source_doc_no", "dingtalk_instance_id"]
                 + list(MATERIAL_SOURCE_FIELDS)
                 + ["actual_shipped_qty_mode", "actual_shipped_qty_source_revision"]
             )
@@ -1395,8 +1395,9 @@ def preview_material_import(
         "sheet": selected_sheet,
         "source_updated_at": source.get("source_updated_at"),
     }
+    existing = repo.get_items(context["batch"], context["version"])
     comparison = _build_trusted_comparison(
-        repo.get_items(context["batch"], context["version"]),
+        existing,
         kind,
         trusted,
         source_descriptor,
@@ -1432,6 +1433,9 @@ def preview_material_import(
             "source_totals": _source_totals(trusted.get("preview") or {}),
         }
     )
+    from overseas_costing.services.approval_link_service import attach_preview_approval_links
+
+    attach_preview_approval_links(context["batch"], comparison, existing)
     return comparison
 
 
@@ -1601,6 +1605,9 @@ def apply_material_import(
                 != comparison["preview_hash"]
             ):
                 repo.rollback()
+                from overseas_costing.services.approval_link_service import attach_preview_approval_links
+
+                attach_preview_approval_links(context["batch"], comparison, existing)
                 return {
                     "ok": False,
                     "code": "MERGED_PREVIEW_CONFIRMATION_REQUIRED",

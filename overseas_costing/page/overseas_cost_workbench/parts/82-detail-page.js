@@ -385,7 +385,7 @@
       const sortMark = sku.sortBy === column.fieldname ? (sku.sortOrder === "asc" ? " ↑" : " ↓") : "";
       return `<th class="${index < 2 ? `ocw-sku-sticky ocw-sku-sticky-${index}` : ""}" title="${this.escape(`${column.excel_col} ${column.label}`)}">${sortable ? `<button type="button" data-action="sku-sort" data-sort-by="${this.escape(column.fieldname)}">` : ""}<span>${this.escape(column.excel_col)}</span>${this.escape(column.label)}${sortMark}${sortable ? "</button>" : ""}</th>`;
     }).join("");
-    const body = items.map((row) => `<tr>${columns.map((column, index) => this.renderSkuPageCell(row, column, index)).join("")}</tr>`).join("");
+    const body = items.map((row) => `<tr class="${this.approvalLinkNeedsReview(row.approval_link) ? "ocw-approval-row" : ""}">${columns.map((column, index) => this.renderSkuPageCell(row, column, index)).join("")}</tr>`).join("");
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2>${result.calculation_stale ? "<span>结果待更新，请先开始试算</span>" : ""}</div><strong>共 ${Number(result.total || 0)} 行</strong></div>
       <div class="ocw-sku-toolbar">
@@ -414,6 +414,9 @@
   }
 
   renderSkuPageCell(row, column, index) {
+    if (column.fieldname === "approval_link") {
+      return `<td class="ocw-readonly-cell" data-editable-cell="0">${this.renderApprovalLinkMarker(row.approval_link) || this.escape(row.approval_link?.approval_no || (row.approval_link?.status === "linked" ? "已关联" : "--"))}</td>`;
+    }
     const editable = column.fieldname !== "transport_mode" && this.isEditableColumn(column);
     const rawValue = this.shouldShowEmptyZeroFee(column.fieldname, row[column.fieldname]) ? "" : this.normalizeEditorValue(row[column.fieldname]);
     const displayValue = this.formatCellValue(row[column.fieldname], column);

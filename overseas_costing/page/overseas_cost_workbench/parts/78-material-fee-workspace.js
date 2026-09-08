@@ -409,9 +409,18 @@
     `;
   }
 
+  approvalLinkNeedsReview(link) {
+    return Boolean(link?.status && link.status !== "linked");
+  }
+
+  renderApprovalLinkMarker(link) {
+    if (!this.approvalLinkNeedsReview(link)) return "";
+    return `<details class="ocw-approval-marker"><summary>${this.escape(link.label || "采购审批待核实")}</summary><div><p>${this.escape(link.reason || "请核对采购审批来源。")}</p>${link.approval_no ? `<p>审批号：${this.escape(link.approval_no)}</p>` : ""}${link.instance_id ? `<p>审批实例：${this.escape(link.instance_id)}</p>` : ""}</div></details>`;
+  }
+
   renderMaterialFeeGridRow(item, columns, rowIndex) {
     const missingFields = new Set(item.requirements?.missing_fields || []);
-    return `<tr data-mf-row-index="${rowIndex}" data-item-name="${this.escape(item.name || "")}">${columns.map((column, columnIndex) => this.renderMaterialFeeGridCell(item, column, missingFields, columnIndex)).join("")}</tr>`;
+    return `<tr class="${this.approvalLinkNeedsReview(item.approval_link) ? "ocw-approval-row" : ""}" data-mf-row-index="${rowIndex}" data-item-name="${this.escape(item.name || "")}">${columns.map((column, columnIndex) => this.renderMaterialFeeGridCell(item, column, missingFields, columnIndex)).join("")}</tr>`;
   }
 
   renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
@@ -427,7 +436,7 @@
     const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", draft?.error ? "is-save-error" : ""].filter(Boolean).join(" ");
     const reason = draft?.error || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
-      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><span>${this.escape(this.formatValue(value || "--"))}</span></td>`;
+      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><span>${this.escape(this.formatValue(value || "--"))}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
     }
     return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />${isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}</td>`;
   }
