@@ -101,10 +101,11 @@ def _packing_group(
     }
 
 
-def test_material_excel_accepts_only_bounded_xlsx_files() -> None:
+def test_material_excel_accepts_bounded_modern_workbooks_and_explains_legacy_xls() -> None:
     assert validate_material_workbook_metadata("packing.xlsx", 1024) is None
-    with pytest.raises(ValueError, match="xlsx"):
-        validate_material_workbook_metadata("packing.xlsm", 1024)
+    assert validate_material_workbook_metadata("packing.xlsm", 1024) is None
+    with pytest.raises(ValueError, match="旧版 .xls"):
+        validate_material_workbook_metadata("packing.xls", 1024)
     with pytest.raises(ValueError, match="20 MB"):
         validate_material_workbook_metadata("packing.xlsx", 20 * 1024 * 1024 + 1)
 

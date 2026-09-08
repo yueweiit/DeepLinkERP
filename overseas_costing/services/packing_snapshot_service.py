@@ -526,7 +526,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
     approval_by_identity = {}
     approval_by_name = {}
     for row in attachment_rows:
-        if not _is_excel_packing_attachment(row.get("file_name")):
+        if not _is_material_ai_attachment(row.get("file_name")):
             continue
         if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
             continue
@@ -540,7 +540,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
             "source_updated_at": row.get("modified"),
             "available": bool(row.get("file_url")),
             "download_required": not bool(row.get("file_url")),
-            "supported_for_material_import": str(row.get("file_name") or "").lower().endswith(".xlsx"),
+            "supported_for_material_import": str(row.get("file_name") or "").lower().endswith((".xlsx", ".xlsm")),
             "attachment_type": row.get("attachment_type") or "",
             "sheets": sheets,
         }
@@ -566,7 +566,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
         if not isinstance(approval_row, dict) or approval_row.get("excluded"):
             continue
         for attachment in approval_row.get("attachments") or []:
-            if not isinstance(attachment, dict) or not _is_excel_packing_attachment(attachment.get("file_name")):
+            if not isinstance(attachment, dict) or not _is_material_ai_attachment(attachment.get("file_name")):
                 continue
             instance_id = str(approval_row.get("instance_id") or "")
             file_id = str(attachment.get("file_id") or "")
@@ -597,7 +597,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
                 "source_label": attachment.get("file_name") or file_id,
                 "source_updated_at": attachment.get("source_updated_at") or attachment.get("comment_time") or detail.get("source_updated_at"),
                 "available": False,
-                "supported_for_material_import": str(attachment.get("file_name") or "").lower().endswith(".xlsx"),
+                "supported_for_material_import": str(attachment.get("file_name") or "").lower().endswith((".xlsx", ".xlsm")),
                 "attachment_type": "",
                 "sheets": [],
             }
@@ -697,8 +697,161 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
     }
 
 
+MATERIAL_AI_DOCUMENT_SUFFIXES = (
+    ".xlsx",
+    ".xlsm",
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".doc",
+    ".docx",
+    ".txt",
+)
+
+
+def list_material_ai_sources(batch_name: str, version_name: str | None = None) -> list[dict[str, Any]]:
+    """Return a stable manifest of every trusted source the material AI task may read."""
+
+    if frappe is None:
+        raise RuntimeError("当前环境未连接 Frappe。")
+    packing = list_packing_sources(str(batch_name))
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def append_source(source: dict[str, Any], *, sheet_name: str = "") -> None:
+        kind = str(source.get("source_kind") or "")
+        source_id = str(source.get("source_id") or source.get("attachment_name") or "")
+        process_instance_id = str(source.get("process_instance_id") or "")
+        file_id = str(source.get("file_id") or "")
+        logical_source_id = (
+            f"oa:{process_instance_id}:{file_id}"
+            if process_instance_id and file_id
+            else source_id
+        )
+        key = (kind, logical_source_id, str(sheet_name or ""))
+        if not kind or not source_id or key in seen:
+            return
+        seen.add(key)
+        public = {
+            "source_kind": kind,
+            "source_id": source_id,
+            "logical_source_id": logical_source_id,
+            "source_label": str(source.get("source_label") or source.get("file_name") or source_id),
+            "file_name": str(source.get("file_name") or source.get("source_label") or ""),
+            "sheet_name": str(sheet_name or source.get("sheet_name") or ""),
+            "source_updated_at": str(source.get("source_updated_at") or source.get("modified") or ""),
+            "available": bool(source.get("available", True)),
+            "download_required": bool(source.get("download_required")),
+            "process_instance_id": str(source.get("process_instance_id") or ""),
+            "file_id": str(source.get("file_id") or ""),
+        }
+        hash_basis = {
+            "source_kind": kind,
+            "logical_source_id": logical_source_id,
+            "sheet_name": public["sheet_name"],
+            **({} if process_instance_id and file_id else {"source_updated_at": public["source_updated_at"]}),
+        }
+        public["source_hash"] = hashlib.sha256(_json(hash_basis).encode("utf-8")).hexdigest()
+        result.append(public)
+
+    try:
+        current_snapshot = get_current_packing_snapshot(str(batch_name)) or {}
+    except Exception:
+        current_snapshot = {}
+    current_wiki_source = (
+        str(current_snapshot.get("source_id") or "")
+        if str(current_snapshot.get("source_kind") or "") == "wiki_sheet"
+        else ""
+    )
+    for workbook in packing.get("wiki_workbooks") or []:
+        for sheet in workbook.get("sheets") or []:
+            source_id = str(sheet.get("source_id") or "")
+            reliably_recommended = bool(
+                sheet.get("is_recommended")
+                and str(sheet.get("recommendation_confidence") or "") in {"high", "medium"}
+                and str(sheet.get("snapshot_status") or "") == "ready"
+            )
+            if source_id == current_wiki_source or reliably_recommended:
+                append_source(sheet)
+    if current_wiki_source and not any(
+        row.get("source_kind") == "wiki_sheet" and row.get("source_id") == current_wiki_source
+        for row in result
+    ):
+        append_source(current_snapshot)
+    for source in packing.get("approval_sources") or []:
+        is_unmaterialized = str(source.get("source_id") or "").startswith("oa:") or not source.get("attachment_name")
+        if source.get("source_kind") != "approval_comment" and not is_unmaterialized:
+            continue
+        if source.get("source_kind") == "approval_comment" or not source.get("sheets"):
+            append_source(source)
+        else:
+            for sheet_name in source.get("sheets") or []:
+                append_source(source, sheet_name=str(sheet_name or ""))
+    attachment_rows = frappe.get_list(
+        "Overseas Cost Attachment",
+        filters={"batch": str(batch_name)},
+        fields=[
+            "name",
+            "version",
+            "source_type",
+            "oa_attachment_origin",
+            "file_name",
+            "file_url",
+            "modified",
+            "parse_result_json",
+        ],
+        limit_page_length=5000,
+    )
+    for row in attachment_rows:
+        if version_name and row.get("version") and str(row.get("version")) != str(version_name):
+            continue
+        file_name = str(row.get("file_name") or "")
+        if not file_name.lower().endswith(MATERIAL_AI_DOCUMENT_SUFFIXES):
+            continue
+        if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
+            continue
+        snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
+        source = {
+            "source_kind": (
+                "approval_attachment"
+                if str(row.get("source_type") or "").upper() == "OA"
+                else "manual_attachment"
+            ),
+            "source_id": row.get("name"),
+            "source_label": file_name or row.get("name"),
+            "file_name": file_name,
+            "source_updated_at": row.get("modified"),
+            "available": bool(row.get("file_url")),
+            "download_required": not bool(row.get("file_url")),
+            "process_instance_id": str(snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""),
+            "file_id": str(snapshot.get("file_id") or ""),
+        }
+        sheets = _attachment_sheet_names(row) if file_name.lower().endswith((".xlsx", ".xlsm")) else []
+        if sheets:
+            for sheet_name in sheets:
+                append_source(source, sheet_name=sheet_name)
+        else:
+            append_source(source)
+    return sorted(
+        result,
+        key=lambda row: (
+            str(row.get("source_kind") or ""),
+            str(row.get("source_id") or ""),
+            str(row.get("sheet_name") or ""),
+        ),
+    )
+
+
 def _is_excel_packing_attachment(file_name: Any) -> bool:
     return str(file_name or "").strip().lower().endswith((".xlsx", ".xlsm"))
+
+
+def _is_material_ai_attachment(file_name: Any) -> bool:
+    return str(file_name or "").strip().lower().endswith(MATERIAL_AI_DOCUMENT_SUFFIXES)
 
 
 def _packing_batch_context(batch_name: str, detail: dict[str, Any]) -> dict[str, Any]:

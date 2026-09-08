@@ -149,8 +149,12 @@
   border-radius: 12px;
   display: grid;
   gap: 4px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(180px, 1fr);
+  grid-template-columns: none;
+  overflow-x: auto;
   padding: 4px;
+  scrollbar-width: thin;
 }
 
 .ocw-packing-source-tabs button {
@@ -160,6 +164,7 @@
   color: #536571;
   font-weight: 700;
   padding: 12px;
+  white-space: nowrap;
 }
 
 .ocw-packing-source-tabs button.active {
@@ -748,7 +753,6 @@
     min-width: 118px;
   }
 
-  .ocw-packing-source-tabs,
   .ocw-packing-source-card,
   .ocw-packing-preview-step,
   .ocw-packing-freight-step,

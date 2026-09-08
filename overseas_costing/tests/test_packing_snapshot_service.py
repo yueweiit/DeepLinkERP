@@ -498,8 +498,8 @@ def test_list_sources_includes_unsaved_approval_excel_files_and_safe_download_id
 
     result = service.list_packing_sources("B1")
     sources = result["approval_sources"]
-    assert len(sources) == 4
-    assert len({row["source_id"] for row in sources}) == 4
+    assert len(sources) == 5
+    assert len({row["source_id"] for row in sources}) == 5
     by_file = {row["file_id"]: row for row in sources}
     assert by_file["F1"]["source_id"] == "ATT-1"
     assert by_file["F1"]["available"] is True
@@ -512,6 +512,87 @@ def test_list_sources_includes_unsaved_approval_excel_files_and_safe_download_id
     assert by_file["F3"]["origin"] == "Comment"
     assert by_file["F3"]["process_instance_id"] == "PURCHASE"
     assert by_file["F3"]["can_download"] is False
-    assert by_file["F4"]["supported_for_material_import"] is False
+    assert by_file["F4"]["supported_for_material_import"] is True
+    assert by_file["PDF"]["supported_for_material_import"] is False
     assert "secret" not in repr(result)
     assert "REJECTED" not in repr(result)
+
+
+def test_material_ai_source_manifest_uses_current_version_and_excludes_audit_only(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        service,
+        "list_packing_sources",
+        lambda _batch: {
+            "wiki_workbooks": [{"sheets": [
+                {
+                    "source_kind": "wiki_sheet",
+                    "source_id": "WB:S1",
+                    "source_label": "Sheet1",
+                    "is_recommended": True,
+                    "recommendation_confidence": "high",
+                    "snapshot_status": "ready",
+                },
+                {
+                    "source_kind": "wiki_sheet",
+                    "source_id": "WB:UNRELATED",
+                    "source_label": "历史 Sheet",
+                    "is_recommended": False,
+                    "recommendation_confidence": "none",
+                    "snapshot_status": "ready",
+                },
+            ]}],
+            "approval_sources": [
+                {
+                    "source_kind": "approval_attachment",
+                    "source_id": "oa:pending",
+                    "source_label": "待下载.pdf",
+                    "process_instance_id": "P1",
+                    "file_id": "F1",
+                    "available": False,
+                    "download_required": True,
+                }
+            ],
+        },
+    )
+    rows = [
+        {
+            "name": "CURRENT",
+            "version": "V1",
+            "source_type": "Manual",
+            "file_name": "packing.pdf",
+            "file_url": "/private/files/packing.pdf",
+            "modified": "2026-09-08",
+            "parse_result_json": "{}",
+        },
+        {
+            "name": "OLD",
+            "version": "V0",
+            "source_type": "Manual",
+            "file_name": "old.xlsx",
+            "file_url": "/private/files/old.xlsx",
+            "modified": "2026-09-01",
+            "parse_result_json": "{}",
+        },
+        {
+            "name": "REJECTED",
+            "version": "V1",
+            "source_type": "OA",
+            "file_name": "rejected.docx",
+            "file_url": "/private/files/rejected.docx",
+            "modified": "2026-09-08",
+            "parse_result_json": json.dumps({"approval_excluded": True, "cost_source_allowed": False}),
+        },
+    ]
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *_args, **_kwargs: rows))
+    monkeypatch.setattr(service, "_attachment_sheet_names", lambda _row: [])
+
+    result = service.list_material_ai_sources("B1", version_name="V1")
+
+    identities = {row["logical_source_id"] for row in result}
+    assert identities == {"WB:S1", "oa:P1:F1", "CURRENT"}
+    assert "OLD" not in repr(result)
+    assert "REJECTED" not in repr(result)
+    assert "UNRELATED" not in repr(result)
