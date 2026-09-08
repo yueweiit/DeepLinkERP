@@ -36,9 +36,14 @@ jobs:
 
   deploy:
     name: Deploy to DeepLinkERP
+    # The mirror runs CI only; both repositories otherwise rebuild the same host.
+    if: github.repository == 'yueweiit/DeepLinkERP'
     needs: test
     runs-on: ubuntu-latest
     environment: production
+    concurrency:
+      group: overseas-costing-production-deploy
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4

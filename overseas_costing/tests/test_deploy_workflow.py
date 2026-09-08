@@ -9,6 +9,15 @@ WORKFLOW_PATH = (
 )
 
 
+def test_only_production_repository_deploys_and_rebuilds_cannot_overlap():
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    assert "if: github.repository == 'yueweiit/DeepLinkERP'" in deploy
+    assert "group: overseas-costing-production-deploy" in deploy
+    assert "cancel-in-progress: false" in deploy
+    assert "github.repository" not in workflow.split("\n  deploy:\n", maxsplit=1)[0]
+
+
 def test_deploy_job_checks_out_repository_before_running_asset_script():
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy_block = workflow.split("\n  deploy:\n", maxsplit=1)[1]
