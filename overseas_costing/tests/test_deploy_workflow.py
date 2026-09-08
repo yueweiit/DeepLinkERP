@@ -41,6 +41,8 @@ def test_production_deploy_requires_deepseek_and_installs_document_runtime() -> 
     assert deploy.index("Preflight DeepSeek connection") < deploy.index("Upgrade and migrate ERP")
     assert "Rollback failed material AI release" in deploy
     assert "if: failure()" in deploy
+    assert "--kwargs '\"'\"'{\"check_connection\": True}'\"'\"'" in deploy
+    assert "--kwargs '\"'\"'{\"check_connection\": true}'\"'\"'" not in deploy
 
 
 def test_runtime_installer_backs_up_image_and_requires_ocr_tools() -> None:

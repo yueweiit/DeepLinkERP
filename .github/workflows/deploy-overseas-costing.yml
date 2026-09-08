@@ -170,7 +170,7 @@ jobs:
             "bash '$remote_config_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '$remote_key_file'; script_exit_code=\$?; rm -f '$remote_config_script' '$remote_key_file'; exit \$script_exit_code"
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.material_ai_fill_service.verify_material_ai_runtime --kwargs '"'"'{"check_connection": true}'"'"''
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.material_ai_fill_service.verify_material_ai_runtime --kwargs '"'"'{"check_connection": True}'"'"''
 
       - name: Synchronize and verify frontend assets
         env:
