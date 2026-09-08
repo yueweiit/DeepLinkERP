@@ -223,15 +223,23 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
       issue: String(url.searchParams.get("issue") || ""),
       businessType: String(url.searchParams.get("business_type") || ""),
       subsidiaryCode: String(url.searchParams.get("subsidiary_code") || ""),
+      hasDateRange: url.searchParams.has("start_date") || url.searchParams.has("end_date"),
       startDate: String(url.searchParams.get("start_date") || ""),
       endDate: String(url.searchParams.get("end_date") || ""),
       erpStatus: String(url.searchParams.get("erp_status") || ""),
+      reviewStatus: url.searchParams.get("review_status") === "confirmed" ? "confirmed" : "pending",
+      reviewWarning: ["estimated", "evidence_missing"].includes(url.searchParams.get("review_warning")) ? url.searchParams.get("review_warning") : "",
     };
   }
 
   function buildWorkbenchUrl(input, nextState) {
     const url = new URL(input, "http://localhost");
     Object.entries(nextState).forEach(([key, value]) => {
+      // An explicitly cleared boundary is different from first-load defaults.
+      if (["start_date", "end_date"].includes(key) && value === "") {
+        url.searchParams.set(key, "");
+        return;
+      }
       if (value === "" || value === null || value === undefined || value === false) {
         url.searchParams.delete(key);
       } else {
@@ -631,11 +639,16 @@ class OverseasCostWorkbench {
     this.filters.issue = this.viewState.issue;
     this.filters.business_type = this.viewState.businessType;
     this.filters.subsidiary_code = this.viewState.subsidiaryCode;
-    if (this.viewState.startDate) this.filters.start_date = this.viewState.startDate;
-    if (this.viewState.endDate) this.filters.end_date = this.viewState.endDate;
+    if (this.viewState.hasDateRange) {
+      this.filters.start_date = this.viewState.startDate;
+      this.filters.end_date = this.viewState.endDate;
+    }
     this.filters.erp_status = this.viewState.erpStatus;
+    this.filters.review_status = this.viewState.reviewStatus;
+    this.filters.review_warning = this.viewState.reviewWarning;
     this.workbenchTotal = 0;
     this.exceptionCounts = {};
+    this.reviewCounts = {};
     this.resultPreviewState = {
       batchName: "",
       page: 1,
@@ -3412,9 +3425,14 @@ class OverseasCostWorkbench {
     });
     this.$root.on("click", "[data-action='set-task']", (event) => {
       this.viewState.task = $(event.currentTarget).attr("data-task") || "pending";
+      this.filters.issue = "";
+      this.filters.review_warning = "";
       this.viewState.page = 1;
-      this.replaceViewState({ task: this.viewState.task, page: 1 });
+      this.replaceViewState({ task: this.viewState.task, issue: "", review_warning: "", page: 1 });
       this.loadBatches();
+    });
+    this.$root.on("click", "[data-action='set-review-filter']", (event) => {
+      this.setReviewFilter($(event.currentTarget).attr("data-review-filter"));
     });
     this.$root.on("click", "[data-action='set-issue']", (event) => {
       const issue = $(event.currentTarget).attr("data-issue") || "";
@@ -3432,6 +3450,7 @@ class OverseasCostWorkbench {
     this.$root.on("change", "[data-workbench-filter]", (event) => {
       const field = $(event.currentTarget).attr("data-workbench-filter");
       if (field === "q") return;
+      if (field === "review_status") return this.setReviewFilter($(event.currentTarget).val());
       this.filters[field] = $(event.currentTarget).val() || "";
     });
     this.$root.on("click", "[data-action='workbench-page']", (event) => {
@@ -3467,7 +3486,8 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='workbench-primary']", async (event) => {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const action = $(event.currentTarget).attr("data-primary-action");
-      if (action === "supplement") return this.openBatchDetail(batchName, "documents");
+      if (["supplement", "supplement_fees", "supplement_allocation"].includes(action)) return this.openBatchDetail(batchName, "documents");
+      if (action === "review") return this.openBatchDetail(batchName, "overview");
       if (action === "recalculate") return this.recalculate(batchName);
       return this.openBatchDetail(batchName, OverseasCostWorkbenchState.detailTabForAction(action));
     });
@@ -3626,6 +3646,8 @@ class OverseasCostWorkbench {
       end_date: this.filters.end_date || "",
       erp_status: this.filters.erp_status || "",
       calculation_status: this.filters.calculation_status || "",
+      review_status: this.filters.review_status || "pending",
+      review_warning: this.filters.review_warning || "",
       include_history: 1,
     };
   }
@@ -3639,6 +3661,8 @@ class OverseasCostWorkbench {
       start_date: this.filters.start_date || "",
       end_date: this.filters.end_date || "",
       erp_status: this.filters.erp_status || "",
+      review_status: this.filters.review_status || "pending",
+      review_warning: this.filters.review_warning || "",
       page: this.viewState.page || 1,
     });
   }
@@ -3647,6 +3671,16 @@ class OverseasCostWorkbench {
     this.viewState.page = 1;
     this.syncWorkbenchFiltersToUrl();
     await this.loadBatches();
+  }
+
+  async setReviewFilter(key) {
+    if (["pending", "confirmed"].includes(key)) {
+      this.filters.review_status = key;
+      this.filters.review_warning = "";
+    } else if (["estimated", "evidence_missing"].includes(key)) {
+      this.filters.review_warning = this.filters.review_warning === key ? "" : key;
+    } else return;
+    await this.applyFilters();
   }
 
   clearFilters() {
@@ -3659,6 +3693,8 @@ class OverseasCostWorkbench {
       erp_status: "",
       calculation_status: "",
       issue: "",
+      review_status: "pending",
+      review_warning: "",
     });
     this.viewState.q = "";
     this.viewState.page = 1;
@@ -3667,31 +3703,38 @@ class OverseasCostWorkbench {
   }
 
   async loadBatches() {
+    const requestId = this._workbenchRequestId = (this._workbenchRequestId || 0) + 1;
+    const task = this.viewState.task;
+    const filtersJson = JSON.stringify(this.workbenchFilters());
     this.resetBatchResultPreview({ clearCache: true, render: false });
     this.renderWorkbenchLoading();
     try {
       const [list, summary] = await Promise.all([
         this.call("overseas_costing.api.workbench.get_batches", {
-          filters_json: JSON.stringify(this.workbenchFilters()),
-          task: this.viewState.task,
+          filters_json: filtersJson,
+          task,
           page: this.viewState.page,
           page_length: 30,
         }),
         this.call("overseas_costing.api.workbench.get_summary", {
-          filters_json: JSON.stringify(this.workbenchFilters()),
+          filters_json: filtersJson,
+          task,
         }),
       ]);
+      if (requestId !== this._workbenchRequestId) return;
       if (!list.ok) throw new Error(list.message || "工作台批次加载失败");
       this.batches = list.items || [];
       this.visibleBatches = this.batches.slice();
       this.workbenchTotal = Number(list.total || 0);
       this.exceptionCounts = (summary && summary.counts) || {};
+      this.reviewCounts = (summary && summary.review_counts) || {};
       this.viewState.page = Number(list.page || this.viewState.page || 1);
       this.renderWorkbench();
       if (this.viewState.screen === "detail" && this.viewState.batch) {
         await this.openBatchDetail(this.viewState.batch, this.viewState.tab, { updateUrl: false });
       }
     } catch (error) {
+      if (requestId !== this._workbenchRequestId) return;
       this.renderWorkbenchError(error);
     }
   }
@@ -3724,7 +3767,7 @@ class OverseasCostWorkbench {
   renderTaskTabs() {
     const tasks = [
       { key: "pending", label: "待处理", hint: "优先处理资料与计算异常" },
-      { key: "cost", label: "成本核对", hint: "核对已生成成本的批次" },
+      { key: "cost", label: "成本核对", hint: "核对当前已完成分摊的结果" },
       { key: "erp", label: "ERP 队列", hint: "处理待推送与失败记录" },
     ];
     this.$root.find("[data-area='task-tabs']").html(
@@ -3737,6 +3780,19 @@ class OverseasCostWorkbench {
   }
 
   renderExceptionSummary() {
+    if (this.viewState.task === "cost") {
+      const cards = [
+        { key: "pending", label: "待核对", tone: "blue" },
+        { key: "confirmed", label: "已核对", tone: "purple" },
+        { key: "estimated", label: "含暂估", tone: "orange" },
+        { key: "evidence_missing", label: "待补凭证", tone: "red" },
+      ];
+      this.$root.find("[data-area='exception-summary']").html(cards.map(card => `
+        <button class="ocw-summary-card is-${card.tone} ${(this.filters.review_warning || this.filters.review_status || "pending") === card.key ? "is-active" : ""}" type="button" data-action="set-review-filter" data-review-filter="${card.key}">
+          <span>${card.label}</span><strong>${Number(this.reviewCounts?.[card.key] || 0)}</strong><small>${["estimated", "evidence_missing"].includes(card.key) ? "提示项，不阻断核对" : "点击筛选"}</small>
+        </button>`).join(""));
+      return;
+    }
     const cards = [
       { key: "purchase", label: "采购资料待补", tone: "red" },
       { key: "logistics", label: "物流资料待补", tone: "orange" },
@@ -3764,6 +3820,10 @@ class OverseasCostWorkbench {
         <button class="ocw-outline-btn" type="button" data-action="clear-filters">重置</button>
       </div>
       <div class="ocw-secondary-filter-row">
+        ${this.viewState.task === "cost" ? `<label><span>核对状态</span><select class="form-control" data-workbench-filter="review_status">
+          <option value="pending" ${this.filters.review_status !== "confirmed" ? "selected" : ""}>待核对</option>
+          <option value="confirmed" ${this.filters.review_status === "confirmed" ? "selected" : ""}>已核对</option>
+        </select></label>` : ""}
         <label><span>业务类型</span><select class="form-control" data-workbench-filter="business_type" data-filter="business_type">
           <option value="">全部业务类型</option>
           ${businessOptions.map((option) => {
@@ -3782,7 +3842,7 @@ class OverseasCostWorkbench {
           <option value="failed" ${this.filters.erp_status === "failed" ? "selected" : ""}>推送失败</option>
           <option value="success" ${this.filters.erp_status === "success" ? "selected" : ""}>推送成功</option>
         </select></label>
-        <span class="ocw-result-copy">共 ${this.workbenchTotal} 个批次${this.filters.issue ? " · 已按异常筛选" : ""}</span>
+        <span class="ocw-result-copy">共 ${this.workbenchTotal} 个批次${this.viewState.task === "cost" && this.filters.review_warning ? " · 已按核对提示筛选" : this.viewState.task === "pending" && this.filters.issue ? " · 已按异常筛选" : ""}</span>
       </div>
     `);
   }
@@ -4113,19 +4173,22 @@ class OverseasCostWorkbench {
 
   renderWorkbenchBatchList() {
     const pageCount = Math.ceil(this.workbenchTotal / 30);
+    const isReview = this.viewState.task === "cost";
+    const isHistory = isReview && this.filters.review_status === "confirmed";
+    const title = this.viewState.task === "pending" ? "待处理批次" : this.viewState.task === "erp" ? "ERP 处理队列" : isHistory ? "已核对批次" : "待核对批次";
     const rows = this.batches.map((batch) => this.renderWorkbenchBatchRow(batch)).join("");
     const $batchList = this.$root.find("[data-area='batch-list']");
     $batchList.toggleClass("has-expanded-preview", Boolean(this.resultPreviewState?.batchName));
     $batchList.html(`
       <div class="ocw-list-head">
-        <div><h2>${this.viewState.task === "pending" ? "异常批次" : this.viewState.task === "erp" ? "ERP 处理队列" : "成本核对批次"}</h2><span>${this.workbenchTotal} 个结果</span></div>
-        <span>点击批次号或“查看详情”进入全宽详情</span>
+        <div><h2>${title}</h2><span>${this.workbenchTotal} 个结果</span></div>
+        <span>${isReview ? "暂估与待补凭证仅作提示；最终确认仍须通过校验" : "点击批次号查看详情，按下一步处理阻断项"}</span>
       </div>
       <div class="ocw-batch-grid ocw-batch-grid-head" aria-hidden="true">
-        <span></span><span>批次 / 物流单号</span><span>业务类型 / SKU</span><span>当前问题</span><span>采购货值</span><span>综合成本</span><span>更新时间</span><span>下一步</span>
+        <span></span><span>批次 / 物流单号</span><span>业务类型 / SKU</span><span>${isReview ? "核对状态" : "当前问题"}</span><span>采购货值</span><span>综合成本</span><span>${isHistory ? "确认时间" : "更新时间"}</span><span>下一步</span>
       </div>
       <div class="ocw-batch-grid-body">
-        ${rows || `<div class="ocw-state-panel"><strong>当前条件下没有批次</strong><span>可清空筛选或切换任务视图。</span></div>`}
+        ${rows || `<div class="ocw-state-panel"><strong>当前条件下没有${title}</strong><span>${isReview && !isHistory ? "请先在待处理中补齐计算所需资料并完成试算；旧结果不会进入待核对。" : "可调整日期、清空筛选或切换任务视图。"}</span></div>`}
       </div>
       <div class="ocw-pagination">
         <button class="ocw-outline-btn" type="button" data-action="workbench-page" data-page="${this.viewState.page - 1}" ${this.viewState.page <= 1 ? "disabled" : ""}>上一页</button>
@@ -4139,8 +4202,12 @@ class OverseasCostWorkbench {
   renderWorkbenchBatchRow(batch) {
     const reference = batch.batch_no || batch.source_approval_no || batch.name;
     const logisticsNo = batch.waybill_no || batch.customs_no || "未填写物流单号";
-    const action = OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
+    const actionLabels = {review: "核对成本", supplement: "补资料", supplement_fees: "补费用", supplement_allocation: "补分摊数据", recalculate: "重新试算", view: "查看详情", erp_retry: "重试 ERP"};
+    const action = actionLabels[batch.primary_action] ? {action: batch.primary_action, label: actionLabels[batch.primary_action]} : OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
     const totalCost = batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
+    const reviewMessages = [...(batch.review_blockers || []), ...(batch.review_warnings || [])].map(row => row.message);
+    const rowStatus = batch.review_state === "confirmed" ? "已核对" : batch.review_state === "ready" ? "可核对" : this.issueLabel(batch.primary_issue);
+    const hasSavedResult = Boolean(batch.calculated_at || Number(totalCost || 0) > 0);
     const expanded = this.resultPreviewState?.batchName === batch.name;
     return `
       <div class="ocw-workbench-record ${expanded ? "is-expanded" : ""}" data-batch-name="${this.escape(batch.name)}">
@@ -4153,10 +4220,10 @@ class OverseasCostWorkbench {
             <span>${this.escape(logisticsNo)}</span>
           </div>
           <div><strong>${this.escape(this.businessTypeLabel(batch.business_type) || batch.transport_mode || "-")}</strong><span>${Number(batch.item_count || 0)} 个 SKU</span></div>
-          <div><strong class="ocw-issue is-${this.escape(batch.primary_issue)}">${this.escape(this.issueLabel(batch.primary_issue))}</strong><span>${this.escape((batch.issue_codes || []).map((code) => this.issueLabel(code)).join("、") || "资料可用")}</span></div>
+          <div><strong class="ocw-issue is-${this.escape(batch.primary_issue)}">${this.escape(rowStatus)}</strong><span>${this.escape(reviewMessages.join("；") || (batch.issue_codes || []).map((code) => this.issueLabel(code)).join("、") || "分摊结果可用")}</span></div>
           <div><strong>${this.escape(this.formatMoney(batch.total_goods_value || 0))}</strong><span>RMB</span></div>
-          <div><strong>${this.escape(this.formatMoney(totalCost || 0))}</strong><span>RMB</span></div>
-          <div><strong>${this.escape(this.formatDateTimeMinute(batch.modified) || "-")}</strong><span>${this.escape(batch.status || "")}</span></div>
+          <div><strong>${this.escape(this.formatMoney(totalCost || 0))}</strong><span>RMB${batch.result_is_current === false && hasSavedResult ? " · 上次结果，待更新" : ""}</span></div>
+          <div><strong>${this.escape(this.formatDateTimeMinute(batch.review_state === "confirmed" ? batch.reviewed_at : batch.modified) || "-")}</strong><span>${this.escape(batch.review_state === "confirmed" ? `确认版本 ${batch.reviewed_version || batch.current_version || "—"}` : batch.result_is_current === false ? "待重新试算" : batch.status || "")}</span></div>
           <div class="ocw-row-actions">
             <button class="ocw-primary-btn" type="button" data-action="workbench-primary" data-primary-action="${action.action}" data-batch-name="${this.escape(batch.name)}">${action.label}</button>
             <button class="ocw-outline-btn" type="button" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
@@ -4170,6 +4237,14 @@ class OverseasCostWorkbench {
   async handleWorkbenchPopState() {
     const previousDetailBatch = this.detailState.batchName;
     this.viewState = OverseasCostWorkbenchState.parseWorkbenchState(window.location.href);
+    const defaults = this.getDefaultPullDateRange();
+    Object.assign(this.filters, {
+      issue: this.viewState.issue, business_type: this.viewState.businessType,
+      subsidiary_code: this.viewState.subsidiaryCode, erp_status: this.viewState.erpStatus,
+      start_date: this.viewState.hasDateRange ? this.viewState.startDate : defaults.start_date,
+      end_date: this.viewState.hasDateRange ? this.viewState.endDate : defaults.end_date,
+      review_status: this.viewState.reviewStatus, review_warning: this.viewState.reviewWarning,
+    });
     if (this.viewState.screen === "detail" && this.viewState.batch) {
       await this.openBatchDetail(this.viewState.batch, this.viewState.tab, { updateUrl: false });
       return;
@@ -11915,6 +11990,9 @@ class OverseasCostWorkbench {
       this.showPendingFeature("缺少批次号，无法打开详情。");
       return;
     }
+    // Detail navigation supersedes any outstanding list/summary response,
+    // including browser history navigation while an edit is already open.
+    this._workbenchRequestId = (this._workbenchRequestId || 0) + 1;
     if (this.detailState.editToken && this.detailState.batchName && this.detailState.batchName !== normalizedName) {
       await this.releaseEditSession();
     }
