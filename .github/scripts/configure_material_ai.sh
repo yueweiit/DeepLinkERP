@@ -35,6 +35,8 @@ if not api_key:
 with config_path.open(encoding="utf-8") as handle:
     config = json.load(handle)
 config["overseas_cost_ai_api_key"] = api_key
+config.setdefault("overseas_cost_ai_model", "deepseek-v4-flash")
+config.setdefault("overseas_cost_ai_vision_model", "deepseek-v4-flash-vision-exp")
 fd, temporary = tempfile.mkstemp(prefix="site_config.", suffix=".json", dir=str(config_path.parent))
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:

@@ -713,6 +713,55 @@ MATERIAL_AI_DOCUMENT_SUFFIXES = (
 )
 
 
+def _list_approval_body_ai_sources(batch_name: str) -> list[dict[str, Any]]:
+    """Expose only the current logistics approval and its server-verified purchase links."""
+
+    from overseas_costing.services import dingtalk_approval_service
+
+    detail = dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
+    if not detail.get("ok"):
+        return []
+
+    def source(approval: dict, role: str) -> dict[str, Any] | None:
+        if not isinstance(approval, dict) or approval.get("excluded"):
+            return None
+        instance_id = str(approval.get("instance_id") or "").strip()
+        if not instance_id:
+            return None
+        fields = {
+            str(row.get("label") or ""): row.get("value")
+            for row in approval.get("form_fields") or []
+            if isinstance(row, dict) and str(row.get("label") or "").strip()
+        }
+        if not fields:
+            return None
+        title = str(approval.get("title") or ("国际物流审批" if role == "international_logistics" else "采购审批"))
+        return {
+            "source_kind": "approval_form",
+            "source_id": f"approval:{instance_id}:form",
+            "source_label": f"{title}正文",
+            "process_instance_id": instance_id,
+            "approval_role": role,
+            "form_fields": fields,
+            "source_updated_at": str(
+                approval.get("finish_time")
+                or approval.get("create_time")
+                or detail.get("source_updated_at")
+                or ""
+            ),
+        }
+
+    rows = []
+    main = source(detail.get("main_approval") or {}, "international_logistics")
+    if main:
+        rows.append(main)
+    for approval in detail.get("linked_purchase_approvals") or []:
+        linked = source(approval, "purchase")
+        if linked:
+            rows.append(linked)
+    return rows
+
+
 def list_material_ai_sources(batch_name: str, version_name: str | None = None) -> list[dict[str, Any]]:
     """Return a stable manifest of every trusted source the material AI task may read."""
 
@@ -748,12 +797,15 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
             "download_required": bool(source.get("download_required")),
             "process_instance_id": str(source.get("process_instance_id") or ""),
             "file_id": str(source.get("file_id") or ""),
+            "approval_role": str(source.get("approval_role") or ""),
+            "form_fields": source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {},
         }
         hash_basis = {
             "source_kind": kind,
             "logical_source_id": logical_source_id,
             "sheet_name": public["sheet_name"],
             **({} if process_instance_id and file_id else {"source_updated_at": public["source_updated_at"]}),
+            "content": public["form_fields"],
         }
         public["source_hash"] = hashlib.sha256(_json(hash_basis).encode("utf-8")).hexdigest()
         result.append(public)
@@ -770,18 +822,19 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
     for workbook in packing.get("wiki_workbooks") or []:
         for sheet in workbook.get("sheets") or []:
             source_id = str(sheet.get("source_id") or "")
-            reliably_recommended = bool(
-                sheet.get("is_recommended")
-                and str(sheet.get("recommendation_confidence") or "") in {"high", "medium"}
-                and str(sheet.get("snapshot_status") or "") == "ready"
-            )
-            if source_id == current_wiki_source or reliably_recommended:
+            if source_id == current_wiki_source:
                 append_source(sheet)
     if current_wiki_source and not any(
         row.get("source_kind") == "wiki_sheet" and row.get("source_id") == current_wiki_source
         for row in result
     ):
         append_source(current_snapshot)
+    try:
+        approval_body_sources = _list_approval_body_ai_sources(str(batch_name))
+    except Exception:
+        approval_body_sources = []
+    for source in approval_body_sources:
+        append_source(source)
     for source in packing.get("approval_sources") or []:
         is_unmaterialized = str(source.get("source_id") or "").startswith("oa:") or not source.get("attachment_name")
         if source.get("source_kind") != "approval_comment" and not is_unmaterialized:
@@ -815,6 +868,17 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
         if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
             continue
         snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
+        if str(row.get("source_type") or "").upper() == "OA":
+            allowed_instances = {
+                str(source.get("process_instance_id") or "")
+                for source in [*approval_body_sources, *(packing.get("approval_sources") or [])]
+                if str(source.get("process_instance_id") or "")
+            }
+            attachment_instance = str(
+                snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""
+            )
+            if not attachment_instance or attachment_instance not in allowed_instances:
+                continue
         source = {
             "source_kind": (
                 "approval_attachment"

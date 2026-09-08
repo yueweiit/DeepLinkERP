@@ -153,3 +153,24 @@ def test_ai_apply_rejects_oversized_or_non_array_updates_before_service(monkeypa
         api.apply_material_ai_fill("B", "R", "x" * 1_100_000, "T", "M")
     with pytest.raises(ValueError, match="数组"):
         api.apply_material_ai_fill("B", "R", '{"item_name":"I"}', "T", "M")
+
+
+def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_when_applying(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    checks = []
+    calls = []
+    monkeypatch.setattr(api, "require_batch_permission", lambda batch, ptype: checks.append(ptype) or batch)
+    monkeypatch.setattr(api.material_ai_fill_service, "start_source_ai_review", lambda *args, **kwargs: calls.append(("start", args, kwargs)) or {"ok": True})
+    monkeypatch.setattr(api.material_ai_fill_service, "get_source_ai_review_status", lambda *args: calls.append(("get", args)) or {"ok": True})
+    monkeypatch.setattr(api.material_ai_fill_service, "apply_source_ai_review", lambda *args: calls.append(("apply", args)) or {"ok": True})
+    monkeypatch.setattr(api.material_ai_fill_service, "discard_source_ai_review", lambda *args: calls.append(("discard", args)) or {"ok": True})
+
+    api.start_source_ai_review("B", "V", "两款是一套", 1)
+    api.get_source_ai_review_status("B", "R")
+    api.apply_source_ai_review("B", "R", '["P1"]', '{"P1":{}}', "TOKEN", "M1")
+    api.discard_source_ai_review("B", "R")
+
+    assert checks == ["write", "read", "write", "write"]
+    assert calls[0][1] == ("B", "V", "两款是一套")
+    assert calls[0][2] == {"force": True}
+    assert calls[2][1][2:4] == (["P1"], {"P1": {}})

@@ -1107,6 +1107,16 @@ def register_manual_document_attachment(
     if resolved_file_url:
         _attach_existing_file_to_attachment(resolved_file_url, doc.name)
     frappe.db.commit()
+    try:
+        from overseas_costing.services.material_ai_fill_service import schedule_source_ai_review
+
+        schedule_source_ai_review(
+            batch_doc_name,
+            resolved_version_name,
+            trigger_mode="LOCAL_UPLOAD",
+        )
+    except Exception:
+        pass
     return {
         "ok": True,
         "attachment": {

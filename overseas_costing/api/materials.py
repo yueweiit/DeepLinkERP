@@ -64,6 +64,25 @@ def _ai_updates_payload(value) -> list:
     return payload
 
 
+def _ai_review_payload(value, expected_type, label):
+    if isinstance(value, expected_type):
+        payload = value
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        encoded = str(value or ("[]" if expected_type is list else "{}"))
+        if len(encoded.encode("utf-8")) > MAX_AI_UPDATES_BYTES:
+            raise ValueError(f"{label}内容过大。")
+        try:
+            payload = json.loads(encoded)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{label}不是有效 JSON。") from error
+    if len(encoded.encode("utf-8")) > MAX_AI_UPDATES_BYTES:
+        raise ValueError(f"{label}内容过大。")
+    if not isinstance(payload, expected_type):
+        raise ValueError(f"{label}格式不正确。")
+    return payload
+
+
 @frappe.whitelist()
 def get_material_grid(batch_name, version_name=None, page=1, page_length=100):
     batch_name = require_batch_permission(batch_name, "read")
@@ -169,3 +188,39 @@ def discard_material_ai_fill(batch_name, run_id):
         batch_name,
         str(run_id or "")[:200],
     )
+
+
+@frappe.whitelist()
+def start_source_ai_review(batch_name, version_name, clarification_text=None, force=False):
+    batch_name = require_batch_permission(batch_name, "write")
+    return material_ai_fill_service.start_source_ai_review(
+        batch_name,
+        str(version_name or "")[:200],
+        str(clarification_text or "")[:4000],
+        force=str(force).strip().lower() in {"1", "true", "yes"},
+    )
+
+
+@frappe.whitelist()
+def get_source_ai_review_status(batch_name, run_id):
+    batch_name = require_batch_permission(batch_name, "read")
+    return material_ai_fill_service.get_source_ai_review_status(batch_name, str(run_id or "")[:200])
+
+
+@frappe.whitelist()
+def apply_source_ai_review(batch_name, run_id, selections_json, edits_json, edit_token, expected_modified):
+    batch_name = require_batch_permission(batch_name, "write")
+    return material_ai_fill_service.apply_source_ai_review(
+        batch_name,
+        str(run_id or "")[:200],
+        _ai_review_payload(selections_json, list, "AI 草稿选择"),
+        _ai_review_payload(edits_json, dict, "AI 草稿编辑"),
+        str(edit_token or "")[:200],
+        str(expected_modified or "")[:200],
+    )
+
+
+@frappe.whitelist()
+def discard_source_ai_review(batch_name, run_id):
+    batch_name = require_batch_permission(batch_name, "write")
+    return material_ai_fill_service.discard_source_ai_review(batch_name, str(run_id or "")[:200])

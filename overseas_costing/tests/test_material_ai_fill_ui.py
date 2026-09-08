@@ -11,7 +11,7 @@ def test_toolbar_has_one_upload_entry_and_ai_action_on_one_line() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     render = source.split("\n  renderMaterialFeeWorkspace() {", 1)[1].split("\n  renderMaterialFeeMetric", 1)[0]
     assert "获取装箱资料" in render
-    assert "AI 填充装箱数据" in render
+    assert "AI 分析资料" in render
     assert "导入 Excel 补资料" not in render
     assert "mf-import-xlsx" not in render
 
@@ -52,21 +52,28 @@ def test_material_grid_uses_sticky_readable_identity_columns_and_scroll_controls
 def test_ai_draft_ui_exposes_progress_candidates_and_explicit_apply_discard() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     for endpoint in (
-        "start_material_ai_fill",
-        "get_material_ai_fill_status",
-        "apply_material_ai_fill",
-        "discard_material_ai_fill",
+        "start_source_ai_review",
+        "get_source_ai_review_status",
+        "apply_source_ai_review",
+        "discard_source_ai_review",
     ):
         assert endpoint in source
     for step in ("读取资料", "解析/OCR", "DeepSeek 识别", "合并候选"):
         assert step in source
     assert "AI 草稿" in source
-    assert "确认保存" in source
-    assert "放弃 AI 草稿" in source
+    assert "告诉 AI 如何理解" in source
+    assert "确认所选草稿" in source
+    assert "放弃草稿" in source
     assert "data-action=\"mf-ai-adopt-candidate\"" in source
     assert ".is-ai-draft" in (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
     footer = source.split("renderMaterialAIFillFooter()", 2)[2].split("bindMaterialGridScrollControls", 1)[0]
     assert 'data-action="mf-ai-discard" ${mutating ? "disabled" : ""}' in footer
+
+
+def test_purchase_source_copy_distinguishes_logistics_source_from_missing_purchase_link() -> None:
+    source = (PARTS / "75-table-and-list.js").read_text(encoding="utf-8")
+    assert "资料来自国际物流审批" in source
+    assert "采购审批待关联" in source
 
 
 def test_apply_does_not_reclassify_automatic_ai_values_as_manual_edits() -> None:

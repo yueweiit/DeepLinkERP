@@ -103,6 +103,9 @@ def test_deepseek_preflight_disables_thinking_and_retries_empty_json_output() ->
     assert '"response_format": {"type": "json_object"}' in script
     assert '"max_tokens": 128' in script
     assert "MAX_ATTEMPTS = 3" in script
+    assert "DEEPSEEK_VISION_MODEL" in script
+    assert "deepseek-v4-flash-vision-exp" in script
+    assert '"type": "image_url"' in script
 
 
 def test_asset_script_is_uploaded_and_executed_as_a_remote_file():

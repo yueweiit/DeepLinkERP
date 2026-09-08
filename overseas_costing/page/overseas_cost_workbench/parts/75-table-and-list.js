@@ -567,8 +567,8 @@
     if (state === "missing" && sourceStatus.has_oa_logistics) {
       return `
         <div class="ocw-parent-metric ocw-purchase-approval-metric is-missing" title="${this.escape(reason)}">
-          <strong>未关联</strong>
-          <small>采购审批</small>
+          <strong>资料来自国际物流审批</strong>
+          <small>采购审批待关联</small>
         </div>
       `;
     }
@@ -599,7 +599,7 @@
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     if (state === "invalid") return this.renderInvalidBusinessAlert(sourceStatus);
     if (state !== "pending" && state !== "missing") return "";
-    const title = state === "pending" ? "采购审批状态未同步" : "未关联采购审批";
+    const title = state === "pending" ? "采购审批状态未同步" : "采购审批待关联";
     return `
       <div class="ocw-invalid-business-alert is-info">
         <strong>${title}</strong>

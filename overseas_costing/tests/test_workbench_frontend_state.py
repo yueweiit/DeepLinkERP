@@ -401,7 +401,7 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
             "只看缺项",
             "展开辅助列",
             "获取装箱资料",
-            "AI 填充装箱数据",
+            "AI 分析资料",
             "本地上传装箱单",
         "确认写入物料表",
         "净重 kg",

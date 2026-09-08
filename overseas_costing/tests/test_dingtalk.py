@@ -601,6 +601,30 @@ def test_extract_logistics_quote_candidates_reads_formula_amount_line() -> None:
     ]
 
 
+def test_extract_logistics_quote_candidates_reads_compact_dhl_quote_with_comma() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": "DHL报价，251元",
+            }
+        }
+    )
+
+    assert candidates == [
+        {
+            "carrier": "DHL",
+            "amount": 251.0,
+            "currency": "RMB",
+            "volume_m3": None,
+            "source_field": "物流报价Cotización de logística",
+            "source_value": "DHL报价，251元",
+            "evidence_line": "DHL报价，251元",
+            "evidence_line_no": 1,
+            "status": "待确认",
+        }
+    ]
+
+
 def test_extract_logistics_text_summary_reads_dhl_express_text_block() -> None:
     summary = extract_logistics_text_summary_from_approval(
         {

@@ -588,11 +588,26 @@ def test_material_ai_source_manifest_uses_current_version_and_excludes_audit_onl
     ]
     monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *_args, **_kwargs: rows))
     monkeypatch.setattr(service, "_attachment_sheet_names", lambda _row: [])
+    monkeypatch.setattr(
+        service,
+        "_list_approval_body_ai_sources",
+        lambda _batch: [
+            {
+                "source_kind": "approval_form",
+                "source_id": "approval:MAIN:form",
+                "source_label": "国际物流审批正文",
+                "process_instance_id": "MAIN",
+                "source_updated_at": "2026-09-08 09:31:00",
+                "approval_role": "international_logistics",
+            }
+        ],
+    )
 
     result = service.list_material_ai_sources("B1", version_name="V1")
 
     identities = {row["logical_source_id"] for row in result}
-    assert identities == {"WB:S1", "oa:P1:F1", "CURRENT"}
+    assert identities == {"approval:MAIN:form", "oa:P1:F1", "CURRENT"}
+    assert "WB:S1" not in identities
     assert "OLD" not in repr(result)
     assert "REJECTED" not in repr(result)
     assert "UNRELATED" not in repr(result)

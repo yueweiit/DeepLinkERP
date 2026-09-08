@@ -2273,6 +2273,28 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
         carrier_match = re.search(r"^\s*(?:\d+\s*[.、]?\s*)?(.+?)报价", line)
         if carrier_match:
             carrier = _clean(carrier_match.group(1)).strip("：:")
+        compact_quote = re.search(
+            r"^\s*(?:\d+\s*[.、]?\s*)?(?P<carrier>[^,，:：]{1,40}?)报价\s*[,，:：]?\s*"
+            r"(?P<amount>[-+]?\d[\d,]*(?:\.\d+)?)\s*"
+            r"(?P<currency>usd|美金|美元|rmb|cny|元|mxn|peso|比索)\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if compact_quote:
+            candidates.append(
+                {
+                    "carrier": _clean(compact_quote.group("carrier")),
+                    "amount": float(compact_quote.group("amount").replace(",", "")),
+                    "currency": _normalize_currency_code(compact_quote.group("currency")) or "RMB",
+                    "volume_m3": volume_m3,
+                    "source_field": source_field,
+                    "source_value": text,
+                    "evidence_line": line,
+                    "evidence_line_no": line_no,
+                    "status": "待确认",
+                }
+            )
+            continue
         direct_quote = _parse_direct_quote_line(line)
         if direct_quote:
             candidates.append(
