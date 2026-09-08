@@ -145,6 +145,8 @@
       startDate: String(url.searchParams.get("start_date") || ""),
       endDate: String(url.searchParams.get("end_date") || ""),
       erpStatus: String(url.searchParams.get("erp_status") || ""),
+      reviewStatus: url.searchParams.get("review_status") === "confirmed" ? "confirmed" : "pending",
+      reviewWarning: ["estimated", "evidence_missing"].includes(url.searchParams.get("review_warning")) ? url.searchParams.get("review_warning") : "",
     };
   }
 

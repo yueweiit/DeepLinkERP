@@ -1196,8 +1196,6 @@ def _build_default_batch_time_filters(filters: dict) -> tuple[list, list, int, b
     has_keyword = bool(str(filters.get("keyword") or "").strip())
     start_date = _date_filter_boundary(filters.get("start_date"))
     end_date = _date_filter_boundary(filters.get("end_date"), end_of_day=True)
-    if include_history or (has_keyword and not (start_date or end_date)):
-        return [], [], recent_days, False
     if start_date or end_date:
         date_filters = []
         if start_date:
@@ -1205,6 +1203,8 @@ def _build_default_batch_time_filters(filters: dict) -> tuple[list, list, int, b
         if end_date:
             date_filters.append(["source_created_at", "<=", end_date])
         return date_filters, [], recent_days, False
+    if include_history or has_keyword:
+        return [], [], recent_days, False
 
     return [["source_created_at", ">=", _recent_start(recent_days)]], _classic_history_or_filters(), recent_days, True
 
@@ -1221,12 +1221,13 @@ def _dedupe_batches(rows: list[dict]) -> list[dict]:
     return items
 
 
-def _keyword_item_batch_names(keyword: str) -> list[str]:
-    if not keyword:
+def _keyword_item_batch_names(keyword: str, authorized_names: list[str]) -> list[str]:
+    if not keyword or not authorized_names:
         return []
     like_keyword = f"%{keyword}%"
     rows = frappe.get_all(
         "Overseas Cost Item",
+        filters=[["batch", "in", authorized_names]],
         or_filters=[
             ["material_code", "like", like_keyword],
             ["product_name", "like", like_keyword],
@@ -1239,7 +1240,7 @@ def _keyword_item_batch_names(keyword: str) -> list[str]:
             ["source_doc_no", "like", like_keyword],
         ],
         fields=["batch"],
-        limit_page_length=200,
+        limit_page_length=0,
     )
     names: list[str] = []
     seen: set[str] = set()
@@ -1305,8 +1306,16 @@ def get_batch_list(filters: dict) -> dict:
             "total": 0,
         }
 
+    # First apply Frappe Role/User Permission/share rules. Internal source fields
+    # have higher permlevels and must not be interpreted as missing when get_list
+    # omits them. Every subsequent query is restricted to these readable IDs.
+    authorized_names = [row["name"] for row in frappe.get_list(
+        "Overseas Cost Batch", fields=["name"], filters=[], limit_page_length=0
+    )]
+    if not authorized_names:
+        return {"ok": True, "items": [], "total": 0, "filters": filters}
     transport_mode = _normalize_transport_filter(filters.get("transport_mode"))
-    db_filters = []
+    db_filters = [["name", "in", authorized_names]]
     if transport_mode:
         db_filters.append(["transport_mode", "=", transport_mode])
     has_business_type_column = _db_has_column("Overseas Cost Batch", "business_type")
@@ -1376,20 +1385,13 @@ def get_batch_list(filters: dict) -> dict:
             ["project_collection", "like", like_keyword],
         ]
 
-    # get_list 会应用当前用户的 Role/User Permission/共享规则；工作台不能用 get_all 绕过这些边界。
-    items = frappe.get_list("Overseas Cost Batch", **query_kwargs)
+    items = frappe.get_all("Overseas Cost Batch", **query_kwargs)
     if keyword:
-        item_batch_names = _keyword_item_batch_names(str(keyword).strip())
+        item_batch_names = _keyword_item_batch_names(str(keyword).strip(), authorized_names)
         if item_batch_names:
-            item_filters = []
-            if transport_mode:
-                item_filters.append(["transport_mode", "=", transport_mode])
-            if filters.get("business_type") and has_business_type_column:
-                item_filters.append(["business_type", "=", filters["business_type"]])
-            if filters.get("status"):
-                item_filters.append(["status", "=", filters["status"]])
+            item_filters = list(db_filters)
             item_filters.append(["name", "in", item_batch_names])
-            item_batches = frappe.get_list(
+            item_batches = frappe.get_all(
                 "Overseas Cost Batch",
                 filters=item_filters,
                 fields=fields,
@@ -1398,14 +1400,14 @@ def get_batch_list(filters: dict) -> dict:
             )
             items = _dedupe_batches(items + item_batches)
     if default_or_filters:
-        classic_filters = []
+        classic_filters = [["name", "in", authorized_names]]
         if transport_mode:
             classic_filters.append(["transport_mode", "=", transport_mode])
         if filters.get("business_type") and has_business_type_column:
             classic_filters.append(["business_type", "=", filters["business_type"]])
         if filters.get("status"):
             classic_filters.append(["status", "=", filters["status"]])
-        classic_items = frappe.get_list(
+        classic_items = frappe.get_all(
             "Overseas Cost Batch",
             filters=classic_filters,
             or_filters=default_or_filters,
@@ -1419,6 +1421,8 @@ def get_batch_list(filters: dict) -> dict:
         items = _dedupe_batches(items + classic_items)
         items.sort(key=lambda row: (str(row.get("source_created_at") or ""), str(row.get("modified") or "")), reverse=True)
 
+    # Keyword OR-branches are combined before paging and use one deterministic order.
+    items.sort(key=lambda row: (str(row.get("source_created_at") or ""), str(row.get("modified") or ""), str(row.get("name") or "")), reverse=True)
     classic_keys = set(CLASSIC_HISTORY_BATCH_KEYS)
     for item in items:
         item["business_type"] = _resolve_batch_business_type(item)
