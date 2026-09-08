@@ -1560,6 +1560,29 @@ def _vision_config() -> dict:
     return config
 
 
+def _extract_vision_observations_payload(content: str) -> list[dict]:
+    """Accept the object or array JSON shapes emitted by the vision model."""
+
+    text = str(content or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"```$", "", text).strip()
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"(?:\{.*\}|\[.*\])", text, flags=re.S)
+        if not match:
+            raise
+        loaded = json.loads(match.group(0))
+    if isinstance(loaded, dict):
+        observations = loaded.get("observations") or []
+    elif isinstance(loaded, list):
+        observations = loaded
+    else:
+        raise ValueError("视觉模型返回结果不是 JSON 对象或数组。")
+    return [row for row in observations if isinstance(row, dict)]
+
+
 def _call_vision_style_descriptions(documents: list[dict]) -> dict:
     """Describe workbook images for style matching; numeric facts remain forbidden."""
 
@@ -1603,15 +1626,13 @@ def _call_vision_style_descriptions(documents: list[dict]) -> dict:
             disable_thinking=False,
             temperature=None,
         )
-        parsed = allocation_service._extract_json_object(response)
+        parsed_observations = _extract_vision_observations_payload(response)
         allowed = {
             (str(row["document_id"]), _json(row["anchor"]))
             for row in images
         }
         observations = []
-        for row in parsed.get("observations") or []:
-            if not isinstance(row, dict):
-                continue
+        for row in parsed_observations:
             key = (str(row.get("document_id") or ""), _json(row.get("anchor") or {}))
             if key not in allowed:
                 continue

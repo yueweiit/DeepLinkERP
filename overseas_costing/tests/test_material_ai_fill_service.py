@@ -28,6 +28,7 @@ from overseas_costing.services.material_ai_fill_service import (
     start_source_ai_review,
     apply_source_ai_review,
     _read_excel_semantic_document,
+    _extract_vision_observations_payload,
 )
 
 
@@ -37,6 +38,18 @@ def test_material_ai_timestamps_are_mariadb_datetime_compatible(monkeypatch) -> 
     value = material_ai_fill_service._now()
 
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ('{"observations":[{"document_id":"DOC-1"}]}', [{"document_id": "DOC-1"}]),
+        ('[{"document_id":"DOC-1"}]', [{"document_id": "DOC-1"}]),
+        ('```json\n[{"document_id":"DOC-1"}]\n```', [{"document_id": "DOC-1"}]),
+    ],
+)
+def test_vision_observations_accept_object_and_array_json(content, expected) -> None:
+    assert _extract_vision_observations_payload(content) == expected
 
 
 def _items():
