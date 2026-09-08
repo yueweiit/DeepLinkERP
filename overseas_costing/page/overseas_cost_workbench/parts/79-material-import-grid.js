@@ -21,6 +21,19 @@
     return String(cell?.display_value ?? cell?.raw_value ?? "");
   }
 
+  packingSourceLink(row = {}) {
+    const status = row.match_status || row.state;
+    if (["unmatched", "outside"].includes(status)) return {status: "unmatched", label: row.match_label || "未匹配本批采购明细", reason: row.match_reason || "当前行未匹配到本批采购明细，请核对采购来源和物料编码。"};
+    if (status === "choice_required") return {status: "ambiguous", label: row.match_label || "采购明细匹配不唯一", reason: row.match_reason || "存在多个候选采购明细，请在导入结果中选择。"};
+    return null;
+  }
+
+  renderPackingApprovalMarkers(row = {}) {
+    const match = this.packingSourceLink(row);
+    const approval = row.approval_link || row.target?.approval_link;
+    return this.renderApprovalLinkMarker(match) + (match?.status === "ambiguous" && approval?.status === "ambiguous" ? "" : this.renderApprovalLinkMarker(approval));
+  }
+
   renderPackingSourceGrid(grid) {
     const e = (v) => this.escape(v ?? "");
     const cells = grid.cells || [];
@@ -29,8 +42,8 @@
     for (const [regions, map] of [[grid.merge_ranges || [], mergeMap], [grid.candidate_regions || [], candidateMap]]) {
       for (const range of regions) for (let r = range.start_row; r <= range.end_row; r++) for (let c = range.start_column; c <= range.end_column; c++) map.set(`${r}:${c}`, range);
     }
-    const states = new Map((grid.row_states || []).map((row) => [Number(row.source_row), row.state]));
-    return `<table class="pg-source-grid"><colgroup><col style="width:48px">${Array.from({length:columns}, (_, i) => `<col data-pg-col="${i+1}" style="width:${i<2?180:125}px">`).join("")}</colgroup><thead><tr><th></th>${Array.from({length:columns}, (_, i) => `<th>${this.packingColumnName(i+1)}<span class="pg-col-resize" data-pg-resize="${i+1}" role="separator" aria-label="调整 ${this.packingColumnName(i+1)} 列宽"></span></th>`).join("")}</tr></thead><tbody>${cells.map((row, i) => `<tr data-pg-source-row="${i+1}" class="${i+1===Number(grid.header_row||1)?"is-source-header":""} ${["outside","unmatched"].includes(states.get(i+1))?"is-outside":""}"><th scope="row">${i+1}</th>${Array.from({length:columns}, (_, j) => {
+    const states = new Map((grid.row_states || []).map((row) => [Number(row.source_row), row]));
+    return `<table class="pg-source-grid"><colgroup><col style="width:48px"><col style="width:190px">${Array.from({length:columns}, (_, i) => `<col data-pg-col="${i+1}" style="width:${i<2?180:125}px">`).join("")}</colgroup><thead><tr><th></th><th>来源状态</th>${Array.from({length:columns}, (_, i) => `<th>${this.packingColumnName(i+1)}<span class="pg-col-resize" data-pg-resize="${i+1}" role="separator" aria-label="调整 ${this.packingColumnName(i+1)} 列宽"></span></th>`).join("")}</tr></thead><tbody>${cells.map((row, i) => `<tr data-pg-source-row="${i+1}" class="${i+1===Number(grid.header_row||1)?"is-source-header":""} ${this.renderPackingApprovalMarkers(states.get(i+1)) ? "ocw-approval-row" : ""}"><th scope="row">${i+1}</th><td class="pg-approval-status">${this.renderPackingApprovalMarkers(states.get(i+1))}</td>${Array.from({length:columns}, (_, j) => {
       const key = `${i+1}:${j+1}`, merge = mergeMap.get(key), candidate = candidateMap.get(key);
       if (merge && (merge.start_row !== i+1 || merge.start_column !== j+1)) return "";
       return `<td tabindex="0" data-pg-cell="${key}" class="${merge?"is-merged":""} ${candidate?"is-candidate":""}" ${merge?`rowspan="${merge.end_row-merge.start_row+1}" colspan="${merge.end_column-merge.start_column+1}"`:""} title="${e(this.packingColumnName(j+1)+(i+1))}"><span>${e(this.packingCellText(row[j]))}</span></td>`;
@@ -54,7 +67,7 @@
     const labels = {complete:"可导入",incomplete:"物理量待补",allocation_required:"共箱待分配",group_confirmation_required:"合并待核对"};
     const rows = (preview.rows || []).map(row => {
       const sourceRows = row.source_rows || [row.source_row];
-      return `<tr><td><button type="button" class="pg-link" data-pg-locate="${e(sourceRows[0])}">${e(sourceRows.join("、"))}</button></td><td><strong>${e(row.incoming?.material_code)}</strong></td><td class="pg-name">${e(row.material_name || row.target?.material_name || row.incoming?.product_name || "")}</td><td>${e(row.target?.source_doc_no || row.incoming?.source_doc_no || "")}${row.match_status==="choice_required"?`<select data-mf-match-row="${e(row.source_row)}" aria-label="选择采购明细"><option value="">选择采购明细</option>${(row.candidates||[]).map(c=>`<option value="${e(c.stable_line_key)}">行 ${e(c.row_no)} · ${e(c.source_doc_no || "未写审批号")}</option>`).join("")}</select>`:""}</td>${fields.map(field=>this.renderPackingResultCell(preview,row,field)).join("")}<td>${e(labels[row.physical_status] || "待核对")}${row.physical_missing_rows?.length?`<small>原表第 ${e(row.physical_missing_rows.join("、"))} 行</small>`:""}</td></tr>`;
+      return `<tr class="${this.renderPackingApprovalMarkers(row) ? "ocw-approval-row" : ""}"><td><button type="button" class="pg-link" data-pg-locate="${e(sourceRows[0])}">${e(sourceRows.join("、"))}</button></td><td><strong>${e(row.incoming?.material_code)}</strong></td><td class="pg-name">${e(row.material_name || row.target?.material_name || row.incoming?.product_name || "")}</td><td>${e(row.target?.source_doc_no || row.incoming?.source_doc_no || "")}${this.renderPackingApprovalMarkers(row)}${row.match_status==="choice_required"?`<select data-mf-match-row="${e(row.source_row)}" aria-label="选择采购明细"><option value="">选择采购明细</option>${(row.candidates||[]).map(c=>`<option value="${e(c.stable_line_key)}">行 ${e(c.row_no)} · ${e(c.source_doc_no || "未写审批号")}</option>`).join("")}</select>`:""}</td>${fields.map(field=>this.renderPackingResultCell(preview,row,field)).join("")}<td>${e(labels[row.physical_status] || "待核对")}${row.physical_missing_rows?.length?`<small>原表第 ${e(row.physical_missing_rows.join("、"))} 行</small>`:""}</td></tr>`;
     }).join("");
     const allocations = (preview.shared_groups || []).filter(g=>g.allocation_required!==false).map(g=>`<section class="pg-allocation"><strong>原表第 ${e((g.row_numbers||[]).join("、"))} 行共箱 · 填写各物料实际值</strong><table><thead><tr><th>物料</th><th>净重 kg</th><th>毛重 kg</th><th>体积 m³</th></tr></thead><tbody>${(g.participants||[]).map(p=>`<tr><td>${e(p.material_code || "待匹配")}${p.in_batch?"":"（批次外）"}</td>${["net_weight_kg","gross_weight_kg","volume_m3"].map(f=>`<td><input inputmode="decimal" data-mf-allocation="1" data-group-id="${e(g.group_id)}" data-source-key="${e(p.source_key)}" data-fieldname="${f}" aria-label="${e(p.material_code)} ${e(this.materialImportFieldLabel(f))}" placeholder="填写实际值"></td>`).join("")}</tr>`).join("")}<tr class="pg-total"><td>各项合计须等于</td>${["net_weight_kg","gross_weight_kg","volume_m3"].map(f=>`<td>${e(g.metrics?.[f]?.value ?? "--")}</td>`).join("")}</tr></tbody></table></section>`).join("");
     const issues = [...(preview.source_validation?.blocking || []), ...(preview.source_validation?.warnings || [])].map(issue=>`<div class="pg-review-line">${issue.confirmation_required?`<label><input type="checkbox" data-mf-source-validation="${e(issue.confirmation_key||issue.code)}">已核对：</label>`:""}<span>${e(issue.message || "原表数据待核对")}</span>${issue.ranges?.[0]?`<button class="pg-link" type="button" data-pg-locate="${e(issue.ranges[0].start_row)}">定位原表</button>`:""}</div>`).join("");

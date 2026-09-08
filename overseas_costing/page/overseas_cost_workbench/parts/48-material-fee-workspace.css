@@ -405,3 +405,10 @@
 .ocw-mf-allocation-notes li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; padding: 8px 0; border-top: 1px solid #edf1f6; }
 .ocw-mf-allocation-notes li span { flex: 1; color: var(--mf-muted); }
 .ocw-mf-allocation-notes li em { font-style: normal; font-variant-numeric: tabular-nums; }
+/* Source warnings are advisory and must not mask editable calculation errors. */
+.ocw-approval-marker { margin-top: 5px; max-width: 260px; white-space: normal; font-size: 12px; color: #8a5700; text-align: left; }
+.ocw-approval-marker > summary { display: list-item; list-style-position: inside; width: fit-content; max-width: 100%; padding: 3px 7px; border: 1px solid #efd29a; border-radius: 5px; background: #fff2ce; color: #8a5700; font-weight: 500; cursor: pointer; overflow-wrap: anywhere; }
+.ocw-approval-marker > div { padding: 6px 0; overflow-wrap: anywhere; }
+.ocw-approval-marker p { margin: 3px 0; font-size: 12px; line-height: 1.5; }
+.ocw-mf-grid-table .ocw-approval-row > td:not(.is-missing):not(.is-save-error):not(.is-default),
+.ocw-sku-table .ocw-approval-row > td { background-color: #fffaf0; }

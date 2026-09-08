@@ -352,7 +352,15 @@ def test_merged_confirmation_response_retains_original_source_grid():
     result = apply_material_import("B1", preview["preview_revision"], {"matches": {"2": "L1"}}, "edit", "BM1",
         repository=repo, resolver=_resolver(grid), signing_key=b"key")
     assert result["code"] == "MERGED_PREVIEW_CONFIRMATION_REQUIRED"
-    assert result["merged_preview"]["source_grid"] == preview["source_grid"]
+    merged_grid = result["merged_preview"]["source_grid"]
+    dynamic_fields = {"approval_link", "match_status", "match_label", "match_reason"}
+    def raw_grid(value):
+        return {**value, "row_states": [{key: data for key, data in state.items()
+                                          if key not in dynamic_fields} for state in value["row_states"]]}
+    assert raw_grid(merged_grid) == raw_grid(preview["source_grid"])
+    assert preview["source_grid"]["row_states"][1]["match_status"] == "choice_required"
+    assert merged_grid["row_states"][1]["match_status"] == "matched"
+    assert merged_grid["row_states"][1]["approval_link"]["status"] == "unresolved"
     assert repo.writes == []
 
 

@@ -292,7 +292,10 @@ def test_item_page_calculates_last_page_for_partial_page(monkeypatch) -> None:
     assert result["total"] == 101
     assert result["page"] == 3
     assert result["page_count"] == 3
-    assert result["items"] == [{"name": "ITEM-101", "row_no": 101, "transport_mode": "AIR"}]
+    assert result["items"] == [{"name": "ITEM-101", "row_no": 101, "transport_mode": "AIR",
+                                "approval_link": {"status": "unlinked", "label": "未关联采购审批",
+                                                  "reason": "当前物料没有可用的采购审批标识。",
+                                                  "approval_no": "", "instance_id": ""}}]
 
 
 def test_locate_batch_item_uses_unfiltered_server_order(monkeypatch) -> None:

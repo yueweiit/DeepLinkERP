@@ -85,3 +85,7 @@
   .pg-footer > div { margin-left: auto; }
   .pg-range-editor .pg-secondary { padding: 5px 8px; min-height: 30px; font-size: 12px; }
 }
+.pg-source-grid .ocw-approval-row > td:not(.is-selected),
+.pg-result-grid .ocw-approval-row > td:not(.is-missing):not(.is-conflict):not(.is-incoming) { background: #fffaf0; color: #25364b; }
+.pg-source-grid .pg-approval-status { vertical-align: top; white-space: normal; }
+.pg-source-grid .pg-approval-status .ocw-approval-marker { font-size: 11px; }
