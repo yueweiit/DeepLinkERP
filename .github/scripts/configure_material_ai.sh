@@ -47,3 +47,6 @@ finally:
         os.unlink(temporary)
 '
 docker compose -f "$compose_file" restart backend queue-short queue-long scheduler >/dev/null
+# The runtime install recreates backend and can change its container IP. Nginx
+# resolves the upstream when it starts, so reload it after backend is available.
+docker compose -f "$compose_file" restart frontend >/dev/null

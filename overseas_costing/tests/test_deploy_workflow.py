@@ -58,6 +58,14 @@ def test_runtime_installer_backs_up_image_and_requires_ocr_tools() -> None:
     assert "chi_sim" in installer
     assert 'mode="${5:-install}"' in installer
     assert 'if [ "$mode" = "preflight" ]' in installer
+    assert installer.count('restart frontend') >= 2
+
+
+def test_material_ai_configuration_reloads_frontend_after_backend_restart() -> None:
+    scripts = WORKFLOW_PATH.parent.parent / "scripts"
+    configurator = (scripts / "configure_material_ai.sh").read_text(encoding="utf-8")
+
+    assert configurator.index("restart backend") < configurator.index("restart frontend")
 
 
 def test_failed_release_can_restore_image_database_files_and_site_config() -> None:

@@ -43,6 +43,7 @@ rollback_runtime() {
   docker image tag "$backup_image" "$base_image"
   docker compose -f "$compose_file" up -d --no-deps --force-recreate \
     backend queue-short queue-long scheduler
+  docker compose -f "$compose_file" restart frontend
 }
 trap rollback_runtime ERR
 
@@ -54,6 +55,7 @@ docker build \
 docker image tag "$runtime_image" "$base_image"
 docker compose -f "$compose_file" up -d --no-deps --force-recreate \
   backend queue-short queue-long scheduler
+docker compose -f "$compose_file" restart frontend
 verify_runtime_image "$base_image"
 
 trap - ERR
