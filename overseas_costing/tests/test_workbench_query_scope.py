@@ -92,3 +92,33 @@ def test_no_authorized_ids_means_no_internal_reads(monkeypatch):
     monkeypatch.setattr(service, 'frappe', Frappe)
     monkeypatch.setattr(service, '_db_has_column', lambda *args: True)
     assert service.get_batch_list({'keyword': 'SKU', 'include_history': 1})['items'] == []
+
+
+@pytest.mark.parametrize('source', [{}, {'extra_json': '{broken'}, {'extra_json': '[]'},
+                                    {'extra_json': '{"oa_logistics_trace": []}'}])
+def test_unreadable_source_is_not_reported_as_no_linked_approval(source):
+    status = service._build_batch_source_status({'source_type': 'oa_logistics', **source})
+    assert status['purchase_approval_sync_state'] == 'unreadable'
+    assert '无法读取' in status['purchase_approval_sync_message']
+
+
+def test_truly_empty_source_keeps_unlinked_status():
+    status = service._build_batch_source_status({'source_type': 'oa_logistics', 'extra_json': '{}'})
+    assert status['purchase_approval_sync_state'] == 'missing'
+
+
+def test_snapshot_enrichment_checks_batch_ownership_even_for_wrong_pointer(monkeypatch):
+    queries = []
+
+    class Frappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            queries.append(kwargs)
+            return [{'name': 'WRONG-VERSION', 'batch': 'OTHER',
+                     'summary_snapshot_json': '{"total_cost_rmb": 999}'}]
+
+    monkeypatch.setattr(service, 'frappe', Frappe)
+    result = service._attach_batch_calculation_snapshot([
+        {'name': 'ALLOWED', 'current_version': 'WRONG-VERSION'}])
+    assert queries[0]['filters']['batch'] == ['in', ['ALLOWED']]
+    assert result[0]['summary_snapshot'] == {}

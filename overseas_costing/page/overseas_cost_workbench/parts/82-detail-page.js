@@ -23,6 +23,9 @@
       this.showPendingFeature("缺少批次号，无法打开详情。");
       return;
     }
+    // Detail navigation supersedes any outstanding list/summary response,
+    // including browser history navigation while an edit is already open.
+    this._workbenchRequestId = (this._workbenchRequestId || 0) + 1;
     if (this.detailState.editToken && this.detailState.batchName && this.detailState.batchName !== normalizedName) {
       await this.releaseEditSession();
     }

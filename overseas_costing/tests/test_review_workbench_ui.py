@@ -9,7 +9,7 @@ def run_js(script):
     source = f"""
 const fs=require('fs');
 global.OverseasCostWorkbenchState=require({json.dumps(str(PARTS / '05-workbench-state.js'))});
-const View=Function('return class View {{'+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+'}}')();
+const View=Function('return class View {{'+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+fs.readFileSync({json.dumps(str(PARTS / '82-detail-page.js'))},'utf8')+'}}')();
 function makeView(task='cost') {{
  const v=new View(); v.viewState={{task,page:1,q:'',screen:'workbench'}};
  v.filters={{review_status:'pending',review_warning:'',issue:''}};
@@ -102,3 +102,27 @@ v.renderWorkbenchBatchList();console.log(JSON.stringify(v.html));
 """)
     text=''.join(html.values())
     assert '已核对批次' in text and '核对状态' in text and '确认时间' in text
+
+
+def test_detail_navigation_invalidates_pending_list_without_reopening_detail():
+    result=run_js("""
+const v=makeView('pending'), calls=[], renders=[];
+v.batches=[];v.detailState={batchName:'',requestId:0,refreshRequestId:0};
+v.resetBatchResultPreview=()=>{};v.renderWorkbenchLoading=()=>{};
+v.renderWorkbench=()=>renders.push('list');v.renderWorkbenchError=()=>renders.push('error');
+v.renderDetailLoading=()=>{};v.renderDetailShell=()=>renders.push('detail');
+v.renderDetailError=e=>{throw e};v.switchDetailTab=async()=>{};v.findBatch=()=>null;
+v.getDefaultPullDateRange=()=>({start_date:'2026-08-10',end_date:'2026-09-08'});
+v.$root={attr:()=>{},find:()=>({prop:()=>{}})};
+v.call=(method,args)=>method.includes('get_batch_detail')
+ ? (calls.push({method}),Promise.resolve({ok:true,batch_name:'DETAIL',header:{name:'DETAIL'}}))
+ : new Promise(resolve=>calls.push({method,resolve}));
+const oldList=v.loadBatches();
+global.window={location:{href:'/desk/x?task=cost&review_status=confirmed&screen=detail&batch=DETAIL&tab=overview&page=3',pathname:'/desk/x'}};
+await v.handleWorkbenchPopState();v.detailState.dirty=true;
+calls[0].resolve({ok:true,items:[{name:'PENDING-1'}],total:1,page:1});
+calls[1].resolve({counts:{}});await oldList;
+console.log(JSON.stringify({renders,dirty:v.detailState.dirty,page:v.viewState.page,
+ detailCalls:calls.filter(c=>c.method.includes('get_batch_detail')).length}));
+""")
+    assert result == {'renders': ['detail'], 'dirty': True, 'page': 3, 'detailCalls': 1}

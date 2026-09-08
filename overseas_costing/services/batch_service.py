@@ -773,6 +773,20 @@ def _get_oa_logistics_trace(extra_json) -> dict:
     return trace if isinstance(trace, dict) else payload
 
 
+def _source_trace_is_readable(batch: dict) -> bool:
+    """Distinguish unavailable/corrupt internal data from a genuinely empty trace."""
+    if "extra_json" not in batch:
+        return False
+    raw = batch.get("extra_json")
+    try:
+        payload = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return "oa_logistics_trace" not in payload or isinstance(payload["oa_logistics_trace"], dict)
+
+
 def _invalid_approval_text(row: dict) -> str:
     for fieldname in APPROVAL_STATUS_FIELDNAMES + APPROVAL_MESSAGE_FIELDNAMES:
         value = row.get(fieldname)
@@ -1040,6 +1054,8 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
     confirmed_quote = _quote_candidate_summary(confirmed_quote) if isinstance(confirmed_quote, dict) else {}
     logistics_text_summary = _logistics_text_summary(trace)
     purchase_status = _build_purchase_approval_status_summary(trace)
+    if has_oa_logistics and not _source_trace_is_readable(batch):
+        purchase_status.update(state="unreadable", message="采购来源信息无法读取，请刷新或联系管理员检查同步数据。")
     invalid_business_state = _build_invalid_business_state(batch)
 
     return {
@@ -1130,13 +1146,13 @@ def _attach_batch_calculation_snapshot(items: list[dict]) -> list[dict]:
 
     versions = frappe.get_all(
         "Overseas Cost Version",
-        filters={"name": ["in", version_names]},
-        fields=["name", "summary_snapshot_json", "rule_snapshot_json", "calculated_at"],
+        filters={"name": ["in", version_names], "batch": ["in", [item["name"] for item in items]]},
+        fields=["name", "batch", "summary_snapshot_json", "rule_snapshot_json", "calculated_at"],
         limit_page_length=len(version_names),
     )
-    versions_by_name = {version["name"]: version for version in versions}
+    versions_by_pair = {(version["batch"], version["name"]): version for version in versions}
     for item in items:
-        version = versions_by_name.get(item.get("current_version")) or {}
+        version = versions_by_pair.get((item.get("name"), item.get("current_version"))) or {}
         summary = _load_json(version.get("summary_snapshot_json"))
         rules = _load_json(version.get("rule_snapshot_json"))
         item["summary_snapshot"] = summary

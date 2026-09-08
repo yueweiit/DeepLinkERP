@@ -914,6 +914,7 @@ def test_build_batch_source_status_explains_missing_and_pending_purchase_approva
             "name": "BATCH-MISSING",
             "source_type": "oa_logistics",
             "source_approval_no": "LOGISTICS-001",
+            "extra_json": "{}",
         }
     )
     pending = _build_batch_source_status(
