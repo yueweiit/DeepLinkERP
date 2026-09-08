@@ -39,13 +39,13 @@ console.log(JSON.stringify({s,filters:v.workbenchFilters()}));
     assert result['filters']['review_warning']=='estimated'
 
 
-def test_cost_cards_and_review_selector_replace_pending_cards():
-    html=run_js("const v=makeView();v.renderExceptionSummary();v.renderWorkbenchSearch();console.log(JSON.stringify(v.html));")
-    text=''.join(html.values())
-    assert '待核对' in text and '已核对' in text
-    assert '含暂估' in text and '待补凭证' in text
-    assert '采购资料待补' not in text
-    assert 'data-workbench-filter="review_status"' in text
+def test_workbench_shell_has_no_summary_card_row_for_any_task():
+    source = (PARTS / '35-workbench-view.js').read_text(encoding='utf-8')
+    assert 'data-area="exception-summary"' not in source
+    assert 'ocw-summary-card' not in source
+    assert 'renderExceptionSummary' not in source
+    assert "data-action='set-review-filter'" not in source
+    assert "data-action='set-issue'" not in source
 
 
 def test_cost_row_uses_review_action_and_warning_cells():

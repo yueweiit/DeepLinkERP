@@ -25,7 +25,6 @@
             </div>
           </header>
           <nav class="ocw-task-tabs" data-area="task-tabs" aria-label="工作任务"></nav>
-          <section class="ocw-exception-summary" data-area="exception-summary" aria-label="异常摘要"></section>
           <section class="ocw-search-panel" data-area="search-panel"></section>
           <section class="ocw-batch-list-panel" data-area="batch-list"></section>
         </main>
@@ -140,16 +139,6 @@
       this.filters.review_warning = "";
       this.viewState.page = 1;
       this.replaceViewState({ task: this.viewState.task, issue: "", review_warning: "", page: 1 });
-      this.loadBatches();
-    });
-    this.$root.on("click", "[data-action='set-review-filter']", (event) => {
-      this.setReviewFilter($(event.currentTarget).attr("data-review-filter"));
-    });
-    this.$root.on("click", "[data-action='set-issue']", (event) => {
-      const issue = $(event.currentTarget).attr("data-issue") || "";
-      this.filters.issue = this.filters.issue === issue ? "" : issue;
-      this.viewState.page = 1;
-      this.replaceViewState({ issue: this.filters.issue, page: 1 });
       this.loadBatches();
     });
     this.$root.on("input", "[data-workbench-filter='q']", (event) => {
@@ -469,7 +458,6 @@
 
   renderWorkbench() {
     this.renderTaskTabs();
-    this.renderExceptionSummary();
     this.renderWorkbenchSearch();
     this.renderWorkbenchBatchList();
     this.$root.attr("data-screen", "workbench");
@@ -485,35 +473,6 @@
       tasks.map((task) => `
         <button class="ocw-task-tab ${this.viewState.task === task.key ? "is-active" : ""}" type="button" data-action="set-task" data-task="${task.key}">
           <strong>${task.label}</strong><span>${task.hint}</span>
-        </button>
-      `).join("")
-    );
-  }
-
-  renderExceptionSummary() {
-    if (this.viewState.task === "cost") {
-      const cards = [
-        { key: "pending", label: "待核对", tone: "blue" },
-        { key: "confirmed", label: "已核对", tone: "purple" },
-        { key: "estimated", label: "含暂估", tone: "orange" },
-        { key: "evidence_missing", label: "待补凭证", tone: "red" },
-      ];
-      this.$root.find("[data-area='exception-summary']").html(cards.map(card => `
-        <button class="ocw-summary-card is-${card.tone} ${(this.filters.review_warning || this.filters.review_status || "pending") === card.key ? "is-active" : ""}" type="button" data-action="set-review-filter" data-review-filter="${card.key}">
-          <span>${card.label}</span><strong>${Number(this.reviewCounts?.[card.key] || 0)}</strong><small>${["estimated", "evidence_missing"].includes(card.key) ? "提示项，不阻断核对" : "点击筛选"}</small>
-        </button>`).join(""));
-      return;
-    }
-    const cards = [
-      { key: "purchase", label: "采购资料待补", tone: "red" },
-      { key: "logistics", label: "物流资料待补", tone: "orange" },
-      { key: "calculation", label: "待重新计算", tone: "blue" },
-      { key: "erp_failed", label: "ERP 回写异常", tone: "purple" },
-    ];
-    this.$root.find("[data-area='exception-summary']").html(
-      cards.map((card) => `
-        <button class="ocw-summary-card is-${card.tone} ${this.filters.issue === card.key ? "is-active" : ""}" type="button" data-action="set-issue" data-issue="${card.key}">
-          <span>${card.label}</span><strong>${Number(this.exceptionCounts[card.key] || 0)}</strong><small>点击筛选</small>
         </button>
       `).join("")
     );
