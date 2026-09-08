@@ -7277,13 +7277,18 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-footer { position: sticky; z-index: 8; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid #9dcef1; background: rgba(244, 249, 255, 0.98); box-shadow: 0 -5px 12px rgba(16, 24, 40, 0.08); }
 .ocw-mf-ai-footer > span { color: #344054; font-size: 12px; }
 .ocw-mf-ai-footer > div { display: flex; gap: 8px; }
-.ocw-mf-ai-candidates { position: absolute; z-index: 10; right: 3px; bottom: 1px; }
-.ocw-mf-ai-candidates > summary { padding: 1px 4px; border-radius: 4px; background: #fff0bd; color: #8a5700; font-size: 8px; cursor: pointer; list-style: none; }
-.ocw-mf-ai-candidates[open] > div { position: absolute; right: 0; top: calc(100% + 4px); width: 280px; max-height: 260px; overflow: auto; padding: 8px; border: 1px solid #efd29a; border-radius: 7px; background: #fff; box-shadow: 0 8px 24px rgba(16, 24, 40, 0.18); }
-.ocw-mf-ai-candidates article { display: grid; gap: 5px; padding: 7px; border-bottom: 1px solid #edf1f6; }
-.ocw-mf-ai-candidates article > span { display: flex; justify-content: space-between; gap: 8px; }
-.ocw-mf-ai-candidates em { color: #8a5700; font-size: 10px; font-style: normal; }
-.ocw-mf-ai-candidates p { margin: 0; color: #667085; font-size: 10px; line-height: 1.4; }
+.ocw-mf-ai-candidate-trigger { position: absolute; z-index: 2; right: 3px; bottom: 1px; border: 0; border-radius: 4px; padding: 1px 4px; background: #fff0bd; color: #8a5700; font-size: 8px; line-height: 1.5; cursor: pointer; }
+.ocw-mf-ai-candidate-popover { position: fixed; z-index: 1065; display: grid; overflow: hidden; max-height: min(360px, calc(100vh - 20px)); border: 1px solid #efd29a; border-radius: 9px; background: #fff; box-shadow: 0 12px 32px rgba(16, 24, 40, 0.24); }
+.ocw-mf-ai-candidate-popover[hidden] { display: none; }
+.ocw-mf-ai-candidate-popover > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #edf1f6; background: #fffaf0; }
+.ocw-mf-ai-candidate-popover > header strong { color: #694100; font-size: 12px; }
+.ocw-mf-ai-candidate-popover > header button { border: 0; padding: 0 3px; background: transparent; color: #667085; font-size: 18px; line-height: 1; cursor: pointer; }
+.ocw-mf-ai-candidate-popover > div { overflow: auto; padding: 4px 8px 8px; }
+.ocw-mf-ai-candidate-popover article { display: grid; gap: 5px; padding: 8px 2px; border-bottom: 1px solid #edf1f6; }
+.ocw-mf-ai-candidate-popover article:last-child { border-bottom: 0; }
+.ocw-mf-ai-candidate-popover article > span { display: flex; justify-content: space-between; gap: 8px; }
+.ocw-mf-ai-candidate-popover em { color: #8a5700; font-size: 10px; font-style: normal; }
+.ocw-mf-ai-candidate-popover p { margin: 0; color: #667085; font-size: 10px; line-height: 1.4; }
 .ocw-mf-ai-progress-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid #8ecaf4; border-radius: 999px; padding: 5px 10px; background: #eef8ff; color: #076fbe; font-size: 11px; white-space: nowrap; cursor: pointer; }
 .ocw-mf-ai-progress-chip[hidden] { display: none; }
 .ocw-mf-ai-progress-chip i { width: 7px; height: 7px; border-radius: 50%; background: #0b8cf0; box-shadow: 0 0 0 4px rgba(11, 140, 240, 0.12); }
@@ -7297,7 +7302,7 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-progress-summary { display: flex; flex-wrap: wrap; gap: 7px; }
 .ocw-mf-ai-progress-summary span { padding: 4px 8px; border-radius: 999px; background: #eef6fd; color: #475467; font-size: 11px; }
 .ocw-mf-ai-progress-summary span.is-failed { background: #fff0ee; color: #b42318; }
-.ocw-mf-ai-source-progress { display: grid; gap: 8px; max-height: 48vh; overflow: auto; }
+.ocw-mf-ai-source-progress { display: grid; align-content: start; gap: 8px; min-height: 260px; max-height: min(48vh, 420px); overflow: auto; }
 .ocw-mf-ai-source-progress article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 10px 12px; border: 1px solid #e3e9f1; border-radius: 8px; background: #fff; }
 .ocw-mf-ai-source-progress article > i { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: #98a2b3; }
 .ocw-mf-ai-source-progress article.is-running > i { background: #0b8cf0; box-shadow: 0 0 0 4px rgba(11, 140, 240, 0.12); }

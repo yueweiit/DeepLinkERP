@@ -856,6 +856,11 @@ class _StartRepository:
     def find_reusable_run(self, batch_name, version_name, input_fingerprint):
         return self.existing
 
+    def find_running_run(self, batch_name, version_name):
+        if self.existing and self.existing.get("status") in {"QUEUED", "RUNNING"}:
+            return self.existing
+        return None
+
     def create_run(self, payload):
         self.created.append(dict(payload))
         return {**payload, "name": "RUN-1"}
@@ -895,6 +900,28 @@ def test_unified_start_fingerprints_clarification_and_does_not_require_edit_leas
     assert repository.created[0]["proposal_version"] == 1
 
 
+def test_unified_start_reuses_running_task_even_when_force_is_requested() -> None:
+    queued = []
+    repository = _StartRepository(
+        existing={"name": "RUN-ACTIVE", "status": "RUNNING", "progress_revision": 7}
+    )
+
+    result = start_source_ai_review(
+        "B1", "V1", "新的说明", force=True, repository=repository, enqueue=queued.append
+    )
+
+    assert result == {
+        "ok": True,
+        "run_id": "RUN-ACTIVE",
+        "status": "RUNNING",
+        "reused": True,
+        "reuse_reason": "RUNNING",
+        "progress_revision": 7,
+    }
+    assert queued == []
+    assert repository.created == []
+
+
 class _LifecycleRepository(_StartRepository):
     def __init__(self, status="READY"):
         super().__init__()
@@ -907,6 +934,7 @@ class _LifecycleRepository(_StartRepository):
             "status": status,
             "progress_step": "合并候选",
             "progress_percent": 100,
+            "progress_revision": 3,
             "input_fingerprint": build_input_fingerprint("B1", "V1", _items(), self.sources),
             "source_manifest_json": "[]",
             "candidates_json": "[]",
@@ -1102,6 +1130,84 @@ def test_status_and_discard_return_public_payload_without_mutating_materials() -
         "message": "AI 草稿已放弃，主表已恢复服务器当前值。",
     }
     assert repository.applied == []
+
+
+def test_status_can_return_unchanged_payload_without_large_draft() -> None:
+    repository = _LifecycleRepository(status="RUNNING")
+
+    status = get_material_ai_fill_status(
+        "B1", "RUN-1", after_revision=3, repository=repository
+    )
+
+    assert status == {
+        "ok": True,
+        "run_id": "RUN-1",
+        "batch_name": "B1",
+        "version_name": "V1",
+        "status": "RUNNING",
+        "progress_revision": 3,
+        "unchanged": True,
+    }
+
+
+def test_terminal_status_returns_complete_draft_even_at_same_revision() -> None:
+    repository = _LifecycleRepository(status="READY")
+
+    status = get_material_ai_fill_status(
+        "B1", "RUN-1", after_revision=3, repository=repository
+    )
+
+    assert status["unchanged"] is False
+    assert status["status"] == "READY"
+    assert status["draft"] == {"rows": {}}
+
+
+def test_worker_exits_when_another_worker_already_claimed_the_run(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.claim_run = lambda run_id, execution_token: None
+    repository.run["status"] = "RUNNING"
+    called = []
+    monkeypatch.setattr(service, "_read_source", lambda *_args: called.append(True))
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result == {"ok": True, "run_id": "RUN-1", "status": "RUNNING", "claimed": False}
+    assert called == []
+
+
+def test_worker_stops_writing_when_execution_token_is_replaced(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.claimed_token = ""
+    repository.claimed_saves = 0
+
+    def claim_run(_run_id, execution_token):
+        repository.claimed_token = execution_token
+        repository.run.update({"status": "RUNNING", "execution_token": execution_token})
+        return repository.run
+
+    def save_claimed_run(_run_id, execution_token, **updates):
+        repository.claimed_saves += 1
+        if repository.claimed_saves == 2:
+            repository.run.update({"status": "STALE", "execution_token": "new-owner"})
+            return None
+        assert execution_token == repository.claimed_token
+        repository.run.update(updates)
+        return repository.run
+
+    repository.claim_run = claim_run
+    repository.save_claimed_run = save_claimed_run
+    parsed = []
+    monkeypatch.setattr(service, "_read_source", lambda *_args: parsed.append(True))
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result == {"ok": True, "run_id": "RUN-1", "status": "STALE", "claimed": False}
+    assert parsed == []
+    assert repository.run["status"] == "STALE"
 
 
 def test_latest_source_review_status_can_restore_background_draft() -> None:

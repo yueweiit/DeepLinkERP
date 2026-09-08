@@ -9304,6 +9304,8 @@ class OverseasCostWorkbench {
         aiPendingReady: null,
         aiProgressDialog: null,
         aiProgressMinimized: false,
+        aiStartPromise: null,
+        activeAICandidate: null,
       };
     }
     if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
@@ -9333,6 +9335,7 @@ class OverseasCostWorkbench {
       this.renderMaterialFeeWorkspace();
     });
     this.$root.on("click", "[data-action='mf-material-page']", (event) => {
+      this.closeMaterialAICandidatePopover();
       const state = this.ensureMaterialFeeState();
       state.page = Math.max(1, Number($(event.currentTarget).attr("data-page") || 1));
       this.loadMaterialFeeWorkspace();
@@ -9359,11 +9362,11 @@ class OverseasCostWorkbench {
     });
     this.$root.on("click", "[data-action='mf-ai-fill']", () => {
       const fill = this.ensureMaterialFeeState().aiFill;
-      if (["QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
+      if (["STARTING", "QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
         this.openMaterialAIProgressDialog();
         return;
       }
-      this.startMaterialAIFill().catch((error) => this.showError(error));
+      this.startMaterialAIFill();
     });
     this.$root.on("click", "[data-action='mf-ai-progress-restore']", () => this.openMaterialAIProgressDialog());
     this.$root.on("click", "[data-action='mf-ai-apply']", () => {
@@ -9372,6 +9375,11 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='mf-ai-discard']", () => {
       this.discardMaterialAIFill().catch((error) => this.showError(error));
     });
+    this.$root.on("click", "[data-action='mf-ai-open-candidate']", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.openMaterialAICandidatePopover($(event.currentTarget));
+    });
     this.$root.on("click", "[data-action='mf-ai-adopt-candidate']", (event) => {
       const $button = $(event.currentTarget);
       this.adoptMaterialAICandidate(
@@ -9379,6 +9387,7 @@ class OverseasCostWorkbench {
         $button.attr("data-fieldname"),
         Number($button.attr("data-candidate-index") || 0)
       );
+      this.closeMaterialAICandidatePopover();
     });
     this.$root.on("click", "[data-action='mf-correct-purchase']", (event) => {
       const $button = $(event.currentTarget);
@@ -9405,6 +9414,7 @@ class OverseasCostWorkbench {
       this.updateSourceAIReviewEdit($(event.currentTarget));
     });
     this.$root.on("click", "[data-action='mf-grid-scroll-left'], [data-action='mf-grid-scroll-right']", (event) => {
+      this.closeMaterialAICandidatePopover();
       const direction = $(event.currentTarget).attr("data-action") === "mf-grid-scroll-left" ? -1 : 1;
       const viewport = this.$root.find("[data-mf-grid-viewport]").get(0);
       if (viewport) viewport.scrollBy({ left: direction * Math.max(240, viewport.clientWidth * 0.65), behavior: "smooth" });
@@ -9478,6 +9488,15 @@ class OverseasCostWorkbench {
       event.preventDefault();
       this.previewMaterialPaste($(event.currentTarget), clipboard);
     });
+    if (typeof document !== "undefined") {
+      $(document).off("click.ocwMfCandidate").on("click.ocwMfCandidate", (event) => {
+        if ($(event.target).closest("[data-mf-ai-candidate-popover], [data-action='mf-ai-open-candidate']").length) return;
+        this.closeMaterialAICandidatePopover();
+      });
+      $(document).off("keydown.ocwMfCandidate").on("keydown.ocwMfCandidate", (event) => {
+        if (event.key === "Escape") this.closeMaterialAICandidatePopover();
+      });
+    }
   }
 
   async loadMaterialFeeWorkspace(options = {}) {
@@ -9513,7 +9532,7 @@ class OverseasCostWorkbench {
               batch_name: batchName,
               version_name: this.detailState.versionName || batch.current_version || null,
               run_id: "",
-            }, true)
+            }, false)
           : Promise.resolve(null),
       ]);
       if (
@@ -9540,7 +9559,7 @@ class OverseasCostWorkbench {
           batchName,
           this.detailState.versionName || batch.current_version || "",
           state.aiFill.runId
-        ).catch((error) => this.showError(error));
+        ).catch((error) => this.failMaterialAIProgress(error, "AI 分析状态读取失败，正在等待重试。"));
       }
       return true;
     } catch (error) {
@@ -9611,10 +9630,11 @@ class OverseasCostWorkbench {
   renderMaterialFeeWorkspace() {
     const state = this.ensureMaterialFeeState();
     if (!state.materials || !state.fees || !state.preview) return;
+    this.closeMaterialAICandidatePopover();
     const materialSummary = state.materials || {};
     const feeSummary = state.fees.summary || {};
     const evidencePending = Number(feeSummary.missing_evidence_fee_count || 0);
-    const aiActive = ["QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""));
+    const aiActive = ["STARTING", "QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""));
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
       <div class="ocw-mf-workspace">
@@ -9645,6 +9665,7 @@ class OverseasCostWorkbench {
           <label class="ocw-mf-ai-clarification"><span>告诉 AI 如何理解</span><input data-mf-ai-clarification="1" value="${this.escape(state.aiClarification || "")}" maxlength="4000" placeholder="例如：两款是一套，共四套；每种数量相同" /></label>
           ${this.renderSourceAIReviewProposals()}
           ${this.renderMaterialFeeGrid()}
+          <div class="ocw-mf-ai-candidate-popover" data-mf-ai-candidate-popover="1" role="dialog" aria-label="AI 候选详情" hidden></div>
           ${this.renderMaterialAIFillFooter()}
         </section>
         <section class="ocw-mf-section ocw-mf-fee-section">
@@ -9937,7 +9958,47 @@ class OverseasCostWorkbench {
   renderMaterialAICandidates(itemName, fieldname, cell, hasDraft) {
     const candidates = cell?.candidates || [];
     if (!candidates.length || (hasDraft && cell.status === "AI_DRAFT")) return "";
-    return `<details class="ocw-mf-ai-candidates"><summary>${cell.status === "EXISTING_VALUE" ? "已有值 · 查看 AI" : `候选 ${candidates.length}`}</summary><div>${candidates.map((candidate, index) => `<article><span><b>${this.escape(this.formatValue(candidate.suggested_value))}</b><em>${Math.round(Number(candidate.confidence || 0) * 100)}%</em></span><p>${this.escape(candidate.reason || "待人工核对")}</p><p>${(candidate.source_refs || []).map((ref) => this.escape([ref.file, ref.sheet, ref.page ? `第 ${ref.page} 页` : "", ref.row ? `第 ${ref.row} 行` : "", ref.cell].filter(Boolean).join(" · "))).join("；") || "来源位置未标注"}</p><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-ai-adopt-candidate" data-item-name="${this.escape(itemName)}" data-fieldname="${this.escape(fieldname)}" data-candidate-index="${index}">采用此值</button></article>`).join("")}</div></details>`;
+    const label = cell.status === "EXISTING_VALUE" ? "已有值 · 查看 AI" : `候选 ${candidates.length}`;
+    return `<button type="button" class="ocw-mf-ai-candidate-trigger" data-action="mf-ai-open-candidate" data-item-name="${this.escape(itemName)}" data-fieldname="${this.escape(fieldname)}" aria-haspopup="dialog">${label}</button>`;
+  }
+
+  renderMaterialAICandidatePopoverContent(itemName, fieldname, cell) {
+    const candidates = cell?.candidates || [];
+    return `<header><strong>AI 候选详情</strong><button type="button" aria-label="关闭" data-action="mf-ai-close-candidate">×</button></header><div>${candidates.map((candidate, index) => `<article><span><b>${this.escape(this.formatValue(candidate.suggested_value))}</b><em>${Math.round(Number(candidate.confidence || 0) * 100)}%</em></span><p>${this.escape(candidate.reason || "待人工核对")}</p><p>${(candidate.source_refs || []).map((ref) => this.escape([ref.file, ref.sheet, ref.page ? `第 ${ref.page} 页` : "", ref.row ? `第 ${ref.row} 行` : "", ref.cell].filter(Boolean).join(" · "))).join("；") || "来源位置未标注"}</p><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-ai-adopt-candidate" data-item-name="${this.escape(itemName)}" data-fieldname="${this.escape(fieldname)}" data-candidate-index="${index}">采用此值</button></article>`).join("")}</div>`;
+  }
+
+  openMaterialAICandidatePopover($trigger) {
+    const itemName = String($trigger.attr("data-item-name") || "");
+    const fieldname = String($trigger.attr("data-fieldname") || "");
+    const cell = this.materialAICell(itemName, fieldname);
+    if (!cell?.candidates?.length) return;
+    const state = this.ensureMaterialFeeState();
+    state.activeAICandidate = { itemName, fieldname };
+    const $popover = this.$root.find("[data-mf-ai-candidate-popover]");
+    if (!$popover.length) return;
+    $popover.html(this.renderMaterialAICandidatePopoverContent(itemName, fieldname, cell)).prop("hidden", false);
+    $popover.off("click.ocwMfCandidateClose").on("click.ocwMfCandidateClose", "[data-action='mf-ai-close-candidate']", () => this.closeMaterialAICandidatePopover());
+    const trigger = $trigger.get(0);
+    const popover = $popover.get(0);
+    if (!trigger || !popover) return;
+    const triggerRect = trigger.getBoundingClientRect();
+    const viewportWidth = Number(window.innerWidth || document.documentElement.clientWidth || 0);
+    const viewportHeight = Number(window.innerHeight || document.documentElement.clientHeight || 0);
+    const margin = 10;
+    const width = Math.min(340, Math.max(260, viewportWidth - margin * 2));
+    $popover.css({ width: `${width}px`, left: `${Math.max(margin, Math.min(triggerRect.right - width, viewportWidth - width - margin))}px`, top: `${Math.min(viewportHeight - margin, triggerRect.bottom + 6)}px` });
+    const popoverHeight = popover.getBoundingClientRect().height;
+    const belowTop = triggerRect.bottom + 6;
+    const aboveTop = triggerRect.top - popoverHeight - 6;
+    const top = belowTop + popoverHeight <= viewportHeight - margin || aboveTop < margin ? belowTop : aboveTop;
+    $popover.css("top", `${Math.max(margin, Math.min(top, viewportHeight - popoverHeight - margin))}px`);
+  }
+
+  closeMaterialAICandidatePopover() {
+    const state = this.materialFeeState;
+    if (state) state.activeAICandidate = null;
+    const $popover = this.$root?.find?.("[data-mf-ai-candidate-popover]");
+    if ($popover?.length) $popover.prop("hidden", true).empty();
   }
 
   renderMaterialAIFillBanner() {
@@ -9965,7 +10026,7 @@ class OverseasCostWorkbench {
 
   renderMaterialAIProgressChip() {
     const fill = this.ensureMaterialFeeState().aiFill;
-    const active = ["QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""));
+    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""));
     const minimized = Boolean(this.ensureMaterialFeeState().aiProgressMinimized);
     const label = fill?.status === "READY"
       ? "AI 草稿待查看"
@@ -9982,32 +10043,79 @@ class OverseasCostWorkbench {
     const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
     const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
     const summary = fill.completion_summary || {};
-    const warning = String(fill.ai_warning || fill.error_message || "");
+    const warning = String(fill.connection_error || fill.ai_warning || fill.error_message || "");
     const ready = fill.status === "READY";
     const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
     const title = ready ? "AI 资料草稿已生成" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
     return `<div class="ocw-mf-ai-progress-dialog" data-mf-ai-progress-host="1">
-      <header><div><strong>${this.escape(title)}</strong><span>${this.escape(fill.progress_step || "等待读取资料")}</span></div><b>${progress}%</b></header>
-      <div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i style="width:${progress}%"></i></div>
+      <header><div><strong data-mf-ai-progress-title>${this.escape(title)}</strong><span data-mf-ai-progress-step>${this.escape(fill.progress_step || "等待读取资料")}</span></div><b data-mf-ai-progress-percent>${progress}%</b></header>
+      <div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i data-mf-ai-progress-bar style="width:${progress}%"></i></div>
       <div class="ocw-mf-ai-progress-summary">
-        <span>资料 ${Number(summary.source_count ?? sources.length)} 份</span>
-        <span>物料 ${Number(summary.material_proposal_count || 0)} 项</span>
-        <span>装箱 ${Number(summary.packing_proposal_count || 0)} 项</span>
-        <span>费用 ${Number(summary.fee_proposal_count || 0)} 项</span>
-        <span>默认选择 ${Number(summary.selected_count || 0)} 项</span>
-        ${Number(summary.failed_source_count || 0) ? `<span class="is-failed">失败 ${Number(summary.failed_source_count)} 份</span>` : ""}
+        <span data-mf-ai-summary="source_count">资料 ${Number(summary.source_count ?? sources.length)} 份</span>
+        <span data-mf-ai-summary="material_proposal_count">物料 ${Number(summary.material_proposal_count || 0)} 项</span>
+        <span data-mf-ai-summary="packing_proposal_count">装箱 ${Number(summary.packing_proposal_count || 0)} 项</span>
+        <span data-mf-ai-summary="fee_proposal_count">费用 ${Number(summary.fee_proposal_count || 0)} 项</span>
+        <span data-mf-ai-summary="selected_count">默认选择 ${Number(summary.selected_count || 0)} 项</span>
+        <span class="is-failed" data-mf-ai-summary="failed_source_count" ${Number(summary.failed_source_count || 0) ? "" : "hidden"}>失败 ${Number(summary.failed_source_count || 0)} 份</span>
       </div>
-      <div class="ocw-mf-ai-source-progress">${sources.length ? sources.map((source) => {
-        const status = this.materialAIProgressStatus(source.status);
-        const location = [source.sheet ? `Sheet ${source.sheet}` : "", Number(source.page_count || 0) ? `${Number(source.page_count)} 页` : "", Number(source.field_count || 0) ? `${Number(source.field_count)} 个字段` : ""].filter(Boolean).join(" · ");
-        return `<article class="is-${status.tone}"><i></i><div><strong>${this.escape(source.label || "未命名资料")}</strong><span>${this.escape([source.detail, location].filter(Boolean).join(" · ") || status.label)}</span>${source.error ? `<small>${this.escape(source.error)}</small>` : ""}</div><em>${status.label}</em></article>`;
-      }).join("") : `<div class="ocw-mf-ai-progress-empty">正在建立当前批次的资料清单…</div>`}</div>
-      ${warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(warning)}</div>` : ""}
+      <div class="ocw-mf-ai-source-progress" data-mf-ai-source-progress>${sources.map((source, index) => this.renderMaterialAIProgressSourceRow(source, index)).join("")}<div class="ocw-mf-ai-progress-empty" data-mf-ai-progress-empty ${sources.length ? "hidden" : ""}>正在建立当前批次的资料清单…</div></div>
+      <div class="ocw-mf-ai-progress-warning" data-mf-ai-progress-warning ${warning ? "" : "hidden"}>${this.escape(warning)}</div>
       <footer>
         <button class="ocw-outline-btn" type="button" data-action="mf-ai-minimize">最小化</button>
-        <div>${failed ? `<button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry">重新分析</button>` : ""}${ready ? `<button class="ocw-primary-btn" type="button" data-action="mf-ai-view-draft">查看草稿</button>` : ""}</div>
+        <div><button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry" ${failed ? "" : "hidden"}>重新分析</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-view-draft" ${ready ? "" : "hidden"}>查看草稿</button></div>
       </footer>
     </div>`;
+  }
+
+  materialAIProgressSourceKey(source, index) {
+    return [source?.source_kind, source?.source_id || source?.source_key || source?.id, source?.sheet, index].map((value) => String(value || "")).join(":");
+  }
+
+  materialAIProgressSourceView(source) {
+    const status = this.materialAIProgressStatus(source?.status);
+    const location = [source?.sheet ? `Sheet ${source.sheet}` : "", Number(source?.page_count || 0) ? `${Number(source.page_count)} 页` : "", Number(source?.field_count || 0) ? `${Number(source.field_count)} 个字段` : ""].filter(Boolean).join(" · ");
+    return {
+      status,
+      label: String(source?.label || "未命名资料"),
+      detail: [source?.detail, location].filter(Boolean).join(" · ") || status.label,
+      error: String(source?.error || ""),
+    };
+  }
+
+  renderMaterialAIProgressSourceRow(source, index) {
+    const key = this.materialAIProgressSourceKey(source, index);
+    const view = this.materialAIProgressSourceView(source);
+    return `<article class="is-${view.status.tone}" data-mf-ai-source-key="${this.escape(key)}"><i></i><div><strong data-mf-ai-source-label>${this.escape(view.label)}</strong><span data-mf-ai-source-detail>${this.escape(view.detail)}</span><small data-mf-ai-source-error ${view.error ? "" : "hidden"}>${this.escape(view.error)}</small></div><em data-mf-ai-source-status>${view.status.label}</em></article>`;
+  }
+
+  updateMaterialAIProgressSources($host, sources) {
+    const $list = $host.find("[data-mf-ai-source-progress]");
+    if (!$list.length) return;
+    const scrollTop = $list.scrollTop();
+    const remaining = new Map();
+    $list.children("[data-mf-ai-source-key]").each((_index, element) => {
+      const $row = $(element);
+      remaining.set(String($row.attr("data-mf-ai-source-key") || ""), $row);
+    });
+    sources.forEach((source, index) => {
+      const key = this.materialAIProgressSourceKey(source, index);
+      const view = this.materialAIProgressSourceView(source);
+      let $row = remaining.get(key);
+      if (!$row?.length) {
+        $list.find("[data-mf-ai-progress-empty]").before(this.renderMaterialAIProgressSourceRow(source, index));
+        $row = $list.children("[data-mf-ai-source-key]").last();
+      } else {
+        remaining.delete(key);
+      }
+      $row.attr("class", `is-${view.status.tone}`);
+      $row.find("[data-mf-ai-source-label]").text(view.label);
+      $row.find("[data-mf-ai-source-detail]").text(view.detail);
+      $row.find("[data-mf-ai-source-status]").text(view.status.label);
+      $row.find("[data-mf-ai-source-error]").text(view.error).prop("hidden", !view.error);
+    });
+    remaining.forEach(($row) => $row.remove());
+    $list.find("[data-mf-ai-progress-empty]").prop("hidden", Boolean(sources.length));
+    $list.scrollTop(scrollTop);
   }
 
   openMaterialAIProgressDialog() {
@@ -10035,7 +10143,7 @@ class OverseasCostWorkbench {
           state.aiProgressDialog = null;
           state.aiFill = null;
           state.aiPendingReady = null;
-          this.startMaterialAIFill({ force: true }).catch((error) => this.showError(error));
+          this.startMaterialAIFill({ force: true });
         }
       });
     } else {
@@ -10047,16 +10155,47 @@ class OverseasCostWorkbench {
   updateMaterialAIProgressSurface() {
     const state = this.ensureMaterialFeeState();
     const $chip = this.$root?.find?.("[data-mf-ai-progress-chip]");
-    if ($chip?.length) $chip.replaceWith(this.renderMaterialAIProgressChip());
+    const fill = state.aiFill || {};
+    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill.status || ""));
+    const chipLabel = fill.status === "READY" ? "AI 草稿待查看" : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : `AI ${Math.max(0, Math.min(100, Number(fill.progress_percent || 0)))}%`;
+    if ($chip?.length) {
+      $chip.prop("hidden", !(active && state.aiProgressMinimized));
+      $chip.find("span").text(chipLabel);
+    }
     const $button = this.$root?.find?.("[data-action='mf-ai-fill']");
     if ($button?.length) {
       const status = String(state.aiFill?.status || "");
-      $button.text(status === "READY" ? "查看 AI 结果" : ["QUEUED", "RUNNING"].includes(status) ? "查看分析进度" : state.aiFill ? "重新分析资料" : "AI 分析资料");
+      $button.text(status === "READY" ? "查看 AI 结果" : ["STARTING", "QUEUED", "RUNNING"].includes(status) ? "查看分析进度" : state.aiFill ? "重新分析资料" : "AI 分析资料");
     }
     const dialog = state.aiProgressDialog;
     if (dialog?.$wrapper?.length) {
       const $host = dialog.$wrapper.find("[data-mf-ai-progress-host]");
-      if ($host.length) $host.replaceWith(this.renderMaterialAIProgressDialogContent());
+      if (!$host.length) return;
+      const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
+      const ready = fill.status === "READY";
+      const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
+      const title = ready ? "AI 资料草稿已生成" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+      const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
+      const summary = fill.completion_summary || {};
+      const warning = String(fill.connection_error || fill.ai_warning || fill.error_message || "");
+      $host.find("[data-mf-ai-progress-title]").text(title);
+      $host.find("[data-mf-ai-progress-step]").text(fill.progress_step || "等待读取资料");
+      $host.find("[data-mf-ai-progress-percent]").text(`${progress}%`);
+      $host.find("[data-mf-ai-progress-bar]").css("width", `${progress}%`);
+      const labels = {
+        source_count: `资料 ${Number(summary.source_count ?? sources.length)} 份`,
+        material_proposal_count: `物料 ${Number(summary.material_proposal_count || 0)} 项`,
+        packing_proposal_count: `装箱 ${Number(summary.packing_proposal_count || 0)} 项`,
+        fee_proposal_count: `费用 ${Number(summary.fee_proposal_count || 0)} 项`,
+        selected_count: `默认选择 ${Number(summary.selected_count || 0)} 项`,
+        failed_source_count: `失败 ${Number(summary.failed_source_count || 0)} 份`,
+      };
+      Object.entries(labels).forEach(([key, label]) => $host.find(`[data-mf-ai-summary='${key}']`).text(label));
+      $host.find("[data-mf-ai-summary='failed_source_count']").prop("hidden", !Number(summary.failed_source_count || 0));
+      $host.find("[data-mf-ai-progress-warning]").text(warning).prop("hidden", !warning);
+      $host.find("[data-action='mf-ai-progress-retry']").prop("hidden", !failed);
+      $host.find("[data-action='mf-ai-view-draft']").prop("hidden", !ready);
+      this.updateMaterialAIProgressSources($host, sources);
     }
   }
 
@@ -10152,9 +10291,13 @@ class OverseasCostWorkbench {
       syncing = false;
     };
     $viewport.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => {
+      this.closeMaterialAICandidatePopover();
       sync($viewport, $scrollbar);
     });
-    $scrollbar.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => sync($scrollbar, $viewport));
+    $scrollbar.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => {
+      this.closeMaterialAICandidatePopover();
+      sync($scrollbar, $viewport);
+    });
   }
 
   initializeMaterialAIDraft(status) {
@@ -10194,47 +10337,122 @@ class OverseasCostWorkbench {
     return fill;
   }
 
-  async startMaterialAIFill(options = {}) {
-    const state = this.ensureMaterialFeeState();
-    const currentStatus = String(state.aiFill?.status || "");
-    if (["QUEUED", "RUNNING", "READY"].includes(currentStatus)) {
-      this.openMaterialAIProgressDialog();
-      return;
+  materialAIErrorMessage(error, fallback = "AI 分析暂时不可用，请稍后重试。") {
+    const message = String(error?.message || error || "").trim();
+    if (/QueryDeadlockError|changed since last read|\(1020\)/i.test(message)) {
+      return "任务状态正在同步，系统会自动重试。";
     }
-    state.aiFill = null;
-    if (!(await this.flushMaterialFeeInputs(state))) return;
-    const batchName = this.detailState.batchName;
-    const versionName = this.detailState.versionName;
-    const started = await this.call("overseas_costing.api.materials.start_source_ai_review", {
-      batch_name: batchName,
-      version_name: versionName,
-      clarification_text: state.aiClarification || "",
-      force: options.force === false ? 0 : 1,
-    });
-    if (!started?.ok) throw new Error(started?.message || "AI 分析任务启动失败。 ");
-    state.aiFill = { runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, source_progress: [] };
+    if (!message || /Traceback|frappe\.exceptions/i.test(message)) return fallback;
+    return message.slice(0, 500);
+  }
+
+  failMaterialAIProgress(error, fallback) {
+    const state = this.ensureMaterialFeeState();
+    state.aiFill = {
+      ...(state.aiFill || {}),
+      status: "FAILED",
+      progress_step: "连接失败",
+      error_message: this.materialAIErrorMessage(error, fallback),
+      connection_error: "",
+    };
+    this.openMaterialAIProgressDialog();
+    this.updateMaterialAIProgressSurface();
+  }
+
+  startMaterialAIFill(options = {}) {
+    const state = this.ensureMaterialFeeState();
+    if (state.aiStartPromise) {
+      this.openMaterialAIProgressDialog();
+      return state.aiStartPromise;
+    }
+    const currentStatus = String(state.aiFill?.status || "");
+    if (["STARTING", "QUEUED", "RUNNING", "READY"].includes(currentStatus)) {
+      this.openMaterialAIProgressDialog();
+      return Promise.resolve();
+    }
+    state.aiFill = { status: "STARTING", progress_step: "正在启动分析任务", progress_percent: 0, progress_revision: 0, source_progress: [] };
     state.aiPendingReady = null;
     state.aiProgressMinimized = false;
+    this.openMaterialAIProgressDialog();
+    const startPromise = this.runMaterialAIFillStart(state, options)
+      .catch((error) => this.failMaterialAIProgress(error, "AI 分析任务启动失败，请稍后重试。"))
+      .finally(() => {
+        if (state.aiStartPromise === startPromise) state.aiStartPromise = null;
+      });
+    state.aiStartPromise = startPromise;
+    return startPromise;
+  }
+
+  async runMaterialAIFillStart(state, options = {}) {
+    if (!(await this.flushMaterialFeeInputs(state))) {
+      state.aiFill = null;
+      if (state.aiProgressDialog) {
+        state.aiProgressDialog.hide();
+        state.aiProgressDialog = null;
+      }
+      this.updateMaterialAIProgressSurface();
+      return;
+    }
+    const batchName = this.detailState.batchName;
+    const versionName = this.detailState.versionName;
+    let started = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < 3 && !started; attempt += 1) {
+      try {
+        started = await this.call("overseas_costing.api.materials.start_source_ai_review", {
+          batch_name: batchName,
+          version_name: versionName,
+          clarification_text: state.aiClarification || "",
+          force: options.force === true && attempt === 0 ? 1 : 0,
+        }, false);
+      } catch (error) {
+        lastError = error;
+        state.aiFill = { ...state.aiFill, progress_step: "连接中断，正在重试", connection_error: this.materialAIErrorMessage(error, "启动请求暂时失败，正在自动重试。") };
+        this.updateMaterialAIProgressSurface();
+        if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 700 * (attempt + 1)));
+      }
+    }
+    if (!started && lastError) throw lastError;
+    if (!started?.ok) throw new Error(started?.message || "AI 分析任务启动失败。 ");
+    state.aiFill = { runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, progress_revision: Number(started.progress_revision || 0), source_progress: [], reused: Boolean(started.reused), reuse_reason: started.reuse_reason || "" };
+    state.aiPendingReady = null;
     this.openMaterialAIProgressDialog();
     this.updateMaterialAIProgressSurface();
     await this.pollMaterialAIFill(state, batchName, versionName, started.run_id);
   }
 
   async pollMaterialAIFill(state, batchName, versionName, runId) {
+    let failureCount = 0;
     for (let attempt = 0; attempt < 300; attempt += 1) {
       if (this.materialFeeState !== state || this.detailState.batchName !== batchName || this.detailState.versionName !== versionName || this.detailState.tab !== "documents") return;
-      const status = await this.call("overseas_costing.api.materials.get_source_ai_review_status", {
-        batch_name: batchName,
-        run_id: runId,
-      }, true);
-      if (!status?.ok) throw new Error(status?.message || "AI 分析状态读取失败。 ");
+      let status = null;
+      try {
+        status = await this.call("overseas_costing.api.materials.get_source_ai_review_status", {
+          batch_name: batchName,
+          run_id: runId,
+          after_revision: Number(state.aiFill?.progress_revision || 0),
+        }, false);
+        if (!status?.ok) throw new Error(status?.message || "AI 分析状态读取失败。 ");
+        failureCount = 0;
+      } catch (error) {
+        failureCount += 1;
+        state.aiFill = { ...state.aiFill, connection_error: this.materialAIErrorMessage(error, "状态连接暂时中断，正在自动重试。") };
+        this.updateMaterialAIProgressSurface();
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(5000, 800 * failureCount)));
+        continue;
+      }
+      if (status.unchanged) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1200));
+        continue;
+      }
       state.aiFill = { ...state.aiFill, ...status, runId, polling: true, draftVisible: false };
+      delete state.aiFill.connection_error;
       if (status.status === "READY") state.aiPendingReady = status;
       this.updateMaterialAIProgressSurface();
       if (["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
     }
-    throw new Error("AI 分析处理超时，请稍后刷新后重试。 ");
+    this.failMaterialAIProgress(new Error("AI 分析处理超时，请稍后重新分析。"));
   }
 
   updateMaterialAIDraftFromInput($input) {
@@ -11425,7 +11643,7 @@ class OverseasCostWorkbench {
                 this.previewMaterialAttachmentSource(sourceDialog, attachment).catch((error) => this.showWikiMaterialSourceError(sourceDialog, error));
               } else {
                 frappe.show_alert({ message: "装箱资料已加入，AI 将在后台分析", indicator: "green" });
-                this.startMaterialAIFill({ force: false }).catch((error) => this.showError(error));
+                this.startMaterialAIFill({ force: false });
               }
             }).catch((error) => this.showError(error));
           }).catch((error) => this.showError(error));
@@ -11909,7 +12127,7 @@ class OverseasCostWorkbench {
     dialog.hide();
     frappe.show_alert({ message: `已更新 ${result.updated_count || 0} 行、${result.changed_field_count || 0} 个字段`, indicator: "green" });
     await this.loadMaterialFeeWorkspace({ quiet: true });
-    this.startMaterialAIFill({ force: false }).catch((error) => this.showError(error));
+    this.startMaterialAIFill({ force: false });
   }
 
   validateWikiMaterialAllocations(preview, choices) {

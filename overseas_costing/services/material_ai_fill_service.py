@@ -11,6 +11,7 @@ import json
 import base64
 import os
 import re
+import secrets
 import shutil
 import subprocess
 from copy import deepcopy
@@ -56,6 +57,7 @@ NUMERIC_FIELDS = frozenset(
     }
 )
 ACTIVE_STATES = ("QUEUED", "RUNNING", "READY")
+RUNNING_STATES = ("QUEUED", "RUNNING")
 TERMINAL_STATES = ("APPLIED", "DISCARDED", "STALE", "FAILED")
 AUTO_ADOPT_CONFIDENCE = Decimal("0.90")
 MAX_UPDATES = 5000
@@ -1072,6 +1074,21 @@ def start_material_ai_fill(
     items = repo.get_items(context["batch"], context["version"])
     sources = repo.list_sources(context["batch"], context["version"])
     fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources)
+    running_finder = getattr(repo, "find_running_run", None)
+    running = (
+        running_finder(context["batch"], context["version"])
+        if callable(running_finder)
+        else None
+    )
+    if running:
+        if hasattr(repo, "commit"):
+            repo.commit()
+        return {
+            "ok": True,
+            "run_id": _record_value(running, "name"),
+            "status": _record_value(running, "status"),
+            "reused": True,
+        }
     existing = repo.find_reusable_run(context["batch"], context["version"], fingerprint)
     if existing:
         if hasattr(repo, "commit"):
@@ -1094,6 +1111,8 @@ def start_material_ai_fill(
             "source_progress_json": _json(build_source_progress(sources)),
             "progress_step": "等待读取资料",
             "progress_percent": 0,
+            "execution_token": "",
+            "progress_revision": 0,
         }
     )
     run_id = str(_record_value(created, "name") or "")
@@ -1138,6 +1157,23 @@ def start_source_ai_review(
     fingerprint = _source_review_fingerprint(
         context["batch"], context["version"], items, sources, clarification
     )
+    running_finder = getattr(repo, "find_running_run", None)
+    running = (
+        running_finder(context["batch"], context["version"])
+        if callable(running_finder)
+        else None
+    )
+    if running:
+        if hasattr(repo, "commit"):
+            repo.commit()
+        return {
+            "ok": True,
+            "run_id": _record_value(running, "name"),
+            "status": _record_value(running, "status"),
+            "reused": True,
+            "reuse_reason": "RUNNING",
+            "progress_revision": int(_record_value(running, "progress_revision", 0) or 0),
+        }
     existing = None if force else repo.find_reusable_run(
         context["batch"], context["version"], fingerprint
     )
@@ -1149,6 +1185,8 @@ def start_source_ai_review(
             "run_id": _record_value(existing, "name"),
             "status": _record_value(existing, "status"),
             "reused": True,
+            "reuse_reason": "SAME_INPUT",
+            "progress_revision": int(_record_value(existing, "progress_revision", 0) or 0),
         }
     if hasattr(repo, "supersede_active_runs"):
         repo.supersede_active_runs(context["batch"], context["version"])
@@ -1168,13 +1206,22 @@ def start_source_ai_review(
             "source_completeness": "PENDING",
             "progress_step": "等待读取资料",
             "progress_percent": 0,
+            "execution_token": "",
+            "progress_revision": 0,
         }
     )
     run_id = str(_record_value(created, "name") or "")
     (enqueue or _default_enqueue)(run_id)
     if hasattr(repo, "commit"):
         repo.commit()
-    return {"ok": True, "run_id": run_id, "status": "QUEUED", "reused": False}
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "status": "QUEUED",
+        "reused": False,
+        "reuse_reason": "",
+        "progress_revision": 0,
+    }
 
 
 def schedule_source_ai_review(
@@ -1224,11 +1271,28 @@ def get_material_ai_fill_status(
     batch_name: str,
     run_id: str,
     *,
+    after_revision: int | None = None,
     repository: Any | None = None,
 ) -> dict:
     repo = repository or FrappeMaterialAIFillRepository()
     run = repo.get_run(str(run_id or ""))
     _assert_run_batch(run, batch_name)
+    progress_revision = int(_record_value(run, "progress_revision", 0) or 0)
+    status_value = str(_record_value(run, "status") or "")
+    if (
+        after_revision is not None
+        and int(after_revision) == progress_revision
+        and status_value in RUNNING_STATES
+    ):
+        return {
+            "ok": True,
+            "run_id": str(_record_value(run, "name") or ""),
+            "batch_name": str(_record_value(run, "batch") or ""),
+            "version_name": str(_record_value(run, "version") or ""),
+            "status": status_value,
+            "progress_revision": progress_revision,
+            "unchanged": True,
+        }
     candidates = _load_json(_record_value(run, "candidates_json"), [])
     draft = _load_json(_record_value(run, "draft_json"), {})
     source_progress = _load_json(_record_value(run, "source_progress_json"), [])
@@ -1264,7 +1328,9 @@ def get_material_ai_fill_status(
         "run_id": str(_record_value(run, "name") or ""),
         "batch_name": str(_record_value(run, "batch") or ""),
         "version_name": str(_record_value(run, "version") or ""),
-        "status": str(_record_value(run, "status") or ""),
+        "status": status_value,
+        "progress_revision": progress_revision,
+        "unchanged": False,
         "progress_step": str(_record_value(run, "progress_step") or ""),
         "progress_percent": int(_record_value(run, "progress_percent", 0) or 0),
         "model": str(_record_value(run, "model") or ""),
@@ -1293,6 +1359,7 @@ def get_source_ai_review_status(
     run_id: str = "",
     *,
     version_name: str = "",
+    after_revision: int | None = None,
     repository: Any | None = None,
 ) -> dict:
     repo = repository or FrappeMaterialAIFillRepository()
@@ -1312,7 +1379,15 @@ def get_source_ai_review_status(
                 "draft": {},
             }
         selected_run_id = str(_record_value(latest, "name") or "")
-    result = get_material_ai_fill_status(batch_name, selected_run_id, repository=repo)
+    result = get_material_ai_fill_status(
+        batch_name,
+        selected_run_id,
+        after_revision=after_revision,
+        repository=repo,
+    )
+    if result.get("unchanged"):
+        result["review_mode"] = True
+        return result
     run = repo.get_run(selected_run_id)
     result.update(
         {
@@ -2057,20 +2132,50 @@ def _call_source_review_ai(
         }
 
 
+class _MaterialAIRunClaimLost(RuntimeError):
+    """Raised internally when a superseded worker no longer owns a run."""
+
+
 def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> dict:
     repo = repository or FrappeMaterialAIFillRepository()
     run = repo.get_run(str(run_id or ""))
     if str(_record_value(run, "status") or "") not in {"QUEUED", "RUNNING"}:
         return {"ok": True, "run_id": str(run_id), "status": str(_record_value(run, "status") or "")}
+    execution_token = secrets.token_urlsafe(24)
+    claim = getattr(repo, "claim_run", None)
+    save_claimed = getattr(repo, "save_claimed_run", None)
+    owns_claim = callable(claim)
+    if owns_claim:
+        run = claim(str(run_id), execution_token)
+        if not run:
+            current = repo.get_run(str(run_id))
+            return {
+                "ok": True,
+                "run_id": str(run_id),
+                "status": str(_record_value(current, "status") or ""),
+                "claimed": False,
+            }
+
+    def persist(**updates: Any) -> Any:
+        nonlocal run
+        if owns_claim and callable(save_claimed):
+            saved = save_claimed(str(run_id), execution_token, **updates)
+            if not saved:
+                raise _MaterialAIRunClaimLost()
+        else:
+            saved = repo.save_run(run, **updates)
+        run = saved or run
+        return run
+
     try:
-        repo.save_run(
-            run,
-            status="RUNNING",
-            progress_step="读取资料",
-            progress_percent=10,
-            started_at=_record_value(run, "started_at") or _now(),
-            error_message="",
-        )
+        if not owns_claim:
+            persist(
+                status="RUNNING",
+                progress_step="读取资料",
+                progress_percent=10,
+                started_at=_record_value(run, "started_at") or _now(),
+                error_message="",
+            )
         batch_name = str(_record_value(run, "batch") or "")
         version_name = str(_record_value(run, "version") or "")
         context = repo.get_context(batch_name, version_name)
@@ -2079,10 +2184,35 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         existing_fees = repo.get_fees(context["batch"], context["version"]) if hasattr(repo, "get_fees") else []
         unified_review = bool(_record_value(run, "proposal_version", 0))
         clarification_text = str(_record_value(run, "clarification_text") or "")
+
+        def requeue_latest_input() -> str:
+            if not unified_review:
+                return ""
+            try:
+                replacement = start_source_ai_review(
+                    context["batch"],
+                    context["version"],
+                    clarification_text,
+                    force=False,
+                    repository=repo,
+                    trigger_mode="INPUT_CHANGED",
+                )
+                return str(replacement.get("run_id") or "")
+            except Exception as schedule_error:
+                if frappe is not None:
+                    try:
+                        frappe.log_error(
+                            title="Overseas Cost Source AI Review Requeue Failed",
+                            message=str(schedule_error),
+                        )
+                    except Exception:
+                        pass
+                return ""
+
         for source in sources:
             source["batch"] = context["batch"]
         source_progress = build_source_progress(sources)
-        repo.save_run(run, source_progress_json=source_progress)
+        persist(source_progress_json=source_progress)
         current_fingerprint = (
             _source_review_fingerprint(
                 context["batch"], context["version"], items, sources, clarification_text
@@ -2091,16 +2221,19 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             else build_input_fingerprint(context["batch"], context["version"], items, sources)
         )
         if current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
-            repo.save_run(
-                run,
-                status="STALE",
+            persist(status="STALE",
                 progress_step="资料或版本已变化",
-                error_message="任务输入已变化，请重新运行 AI 填充。",
+                error_message="任务输入已变化，系统已按最新资料重新排队。",
                 completed_at=_now(),
             )
-            return {"ok": False, "run_id": str(run_id), "status": "STALE"}
+            return {
+                "ok": False,
+                "run_id": str(run_id),
+                "status": "STALE",
+                "replacement_run_id": requeue_latest_input(),
+            }
 
-        repo.save_run(run, progress_step="解析/OCR", progress_percent=35)
+        persist(progress_step="解析/OCR", progress_percent=35)
         deterministic: list[dict] = []
         deterministic_proposals: list[dict] = []
         documents: list[dict] = []
@@ -2111,9 +2244,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             _update_source_progress(
                 source_progress, source_index, status=reading_status, detail=reading_detail, error=""
             )
-            repo.save_run(
-                run,
-                progress_step=f"读取资料 · {source_progress[source_index]['label']}",
+            persist(progress_step=f"读取资料 · {source_progress[source_index]['label']}",
                 source_progress_json=source_progress,
             )
             try:
@@ -2174,16 +2305,14 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     }
                 )
 
-            repo.save_run(run, source_progress_json=source_progress)
+            persist(source_progress_json=source_progress)
 
         for index, entry in enumerate(source_progress):
             if entry.get("status") == "PARSED":
                 _update_source_progress(
                     source_progress, index, status="ANALYZING", detail="DeepSeek 正在分析"
                 )
-        repo.save_run(
-            run,
-            progress_step="DeepSeek 识别",
+        persist(progress_step="DeepSeek 识别",
             progress_percent=65,
             source_progress_json=source_progress,
         )
@@ -2225,9 +2354,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 detail="分析完成" if ai_result.get("ok") else "规则解析完成，AI 识别未完成",
                 candidate_count=max(int(entry.get("candidate_count") or 0), linked_count),
             )
-        repo.save_run(
-            run,
-            progress_step="合并候选",
+        persist(progress_step="合并候选",
             progress_percent=90,
             source_progress_json=source_progress,
         )
@@ -2267,19 +2394,20 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         if refreshed_fingerprint != current_fingerprint:
             before_manifest = _load_json(_record_value(run, "source_manifest_json"), [])
             if refreshed_items != items or not _materialization_only_source_change(before_manifest, refreshed_sources):
-                repo.save_run(
-                    run,
-                    status="STALE",
+                persist(status="STALE",
                     progress_step="资料或版本已变化",
-                    error_message="任务运行期间资料或物料数据已变化，请重新运行 AI 填充。",
+                    error_message="任务运行期间资料或物料数据已变化，系统已按最新资料重新排队。",
                     completed_at=_now(),
                 )
-                return {"ok": False, "run_id": str(run_id), "status": "STALE"}
+                return {
+                    "ok": False,
+                    "run_id": str(run_id),
+                    "status": "STALE",
+                    "replacement_run_id": requeue_latest_input(),
+                }
             current_fingerprint = refreshed_fingerprint
             sources = refreshed_sources
-        repo.save_run(
-            run,
-            status="READY",
+        persist(status="READY",
             progress_step="草稿已生成",
             progress_percent=100,
             model=ai_result.get("model") or "",
@@ -2296,13 +2424,19 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             completed_at=_now(),
         )
         return {"ok": True, "run_id": str(run_id), "status": "READY", "candidate_count": len(candidates)}
+    except _MaterialAIRunClaimLost:
+        current = repo.get_run(str(run_id))
+        return {
+            "ok": True,
+            "run_id": str(run_id),
+            "status": str(_record_value(current, "status") or ""),
+            "claimed": False,
+        }
     except Exception as exc:
         if hasattr(repo, "rollback"):
             repo.rollback()
         try:
-            repo.save_run(
-                run,
-                status="FAILED",
+            persist(status="FAILED",
                 progress_step="任务失败",
                 error_message=str(exc)[:2000],
                 completed_at=_now(),
@@ -2488,6 +2622,20 @@ class FrappeMaterialAIFillRepository:
         )
         return rows[0] if rows else None
 
+    def find_running_run(self, batch_name: str, version_name: str):
+        rows = frappe.get_all(
+            "Overseas Cost Material AI Run",
+            filters={
+                "batch": batch_name,
+                "version": version_name,
+                "status": ["in", list(RUNNING_STATES)],
+            },
+            fields=["name", "status", "progress_revision"],
+            order_by="creation desc",
+            limit_page_length=1,
+        )
+        return rows[0] if rows else None
+
     def find_latest_review_run(self, batch_name: str, version_name: str = ""):
         filters = {
             "batch": batch_name,
@@ -2530,6 +2678,13 @@ class FrappeMaterialAIFillRepository:
                     "progress_step": "已被新的分析任务取代",
                     "error_message": "用户已重新分析资料，此草稿不再可应用。",
                     "completed_at": _now(),
+                    "progress_revision": int(
+                        frappe.db.get_value(
+                            "Overseas Cost Material AI Run", name, "progress_revision"
+                        )
+                        or 0
+                    )
+                    + 1,
                 },
                 update_modified=True,
             )
@@ -2546,6 +2701,80 @@ class FrappeMaterialAIFillRepository:
         if not rows:
             raise ValueError("未找到 AI 装箱草稿任务。")
         return frappe.get_doc("Overseas Cost Material AI Run", run_id)
+
+    def claim_run(self, run_id: str, execution_token: str):
+        rows = frappe.db.sql(
+            """
+            SELECT name, status, execution_token, progress_revision, started_at
+            FROM `tabOverseas Cost Material AI Run`
+            WHERE name=%s
+            FOR UPDATE
+            """,
+            (run_id,),
+            as_dict=True,
+        )
+        if not rows:
+            frappe.db.rollback()
+            raise ValueError("未找到 AI 装箱草稿任务。")
+        current = rows[0]
+        current_status = str(current.get("status") or "")
+        legacy_running = current_status == "RUNNING" and not str(
+            current.get("execution_token") or ""
+        )
+        if current_status != "QUEUED" and not legacy_running:
+            frappe.db.commit()
+            return None
+        frappe.db.set_value(
+            "Overseas Cost Material AI Run",
+            run_id,
+            {
+                "status": "RUNNING",
+                "execution_token": str(execution_token or "")[:140],
+                "progress_step": "读取资料",
+                "progress_percent": 10,
+                "progress_revision": int(current.get("progress_revision") or 0) + 1,
+                "started_at": current.get("started_at") or _now(),
+                "error_message": "",
+            },
+            update_modified=True,
+        )
+        frappe.db.commit()
+        return self.get_run(run_id)
+
+    def save_claimed_run(self, run_id: str, execution_token: str, **updates: Any):
+        rows = frappe.db.sql(
+            """
+            SELECT name, status, execution_token, progress_revision
+            FROM `tabOverseas Cost Material AI Run`
+            WHERE name=%s
+            FOR UPDATE
+            """,
+            (run_id,),
+            as_dict=True,
+        )
+        if not rows:
+            frappe.db.rollback()
+            return None
+        current = rows[0]
+        if (
+            str(current.get("status") or "") != "RUNNING"
+            or str(current.get("execution_token") or "") != str(execution_token or "")
+        ):
+            frappe.db.commit()
+            return None
+        values = {
+            key: _json(value) if key.endswith("_json") and not isinstance(value, str) else value
+            for key, value in updates.items()
+        }
+        values["progress_revision"] = int(current.get("progress_revision") or 0) + 1
+        frappe.db.set_value(
+            "Overseas Cost Material AI Run",
+            run_id,
+            values,
+            update_modified=True,
+        )
+        frappe.db.commit()
+        return self.get_run(run_id)
 
     def discard_run(self, batch_name: str, run_id: str):
         run = self.lock_run(run_id)
@@ -2566,11 +2795,28 @@ class FrappeMaterialAIFillRepository:
         return run
 
     def save_run(self, run: Any, **updates: Any) -> Any:
-        for key, value in updates.items():
-            setattr(run, key, _json(value) if key.endswith("_json") and not isinstance(value, str) else value)
-        run.save(ignore_permissions=True)
+        run_id = str(_record_value(run, "name") or "")
+        rows = frappe.db.sql(
+            "SELECT name, progress_revision FROM `tabOverseas Cost Material AI Run` WHERE name=%s FOR UPDATE",
+            (run_id,),
+            as_dict=True,
+        )
+        if not rows:
+            frappe.db.rollback()
+            raise ValueError("未找到 AI 装箱草稿任务。")
+        values = {
+            key: _json(value) if key.endswith("_json") and not isinstance(value, str) else value
+            for key, value in updates.items()
+        }
+        values["progress_revision"] = int(rows[0].get("progress_revision") or 0) + 1
+        frappe.db.set_value(
+            "Overseas Cost Material AI Run",
+            run_id,
+            values,
+            update_modified=True,
+        )
         frappe.db.commit()
-        return run
+        return self.get_run(run_id)
 
     def apply_run(self, run: Any, updates: list[dict], audit: dict) -> dict:
         from overseas_costing.services import calculate_service, usage_service

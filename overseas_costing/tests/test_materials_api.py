@@ -121,7 +121,7 @@ def test_ai_fill_api_uses_read_for_status_and_write_for_mutations(monkeypatch) -
     monkeypatch.setattr(
         api.material_ai_fill_service,
         "get_material_ai_fill_status",
-        lambda *args: {"ok": True, "args": args},
+        lambda *args, **kwargs: {"ok": True, "args": args, "kwargs": kwargs},
     )
     monkeypatch.setattr(
         api.material_ai_fill_service,
@@ -166,7 +166,7 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
     monkeypatch.setattr(api.material_ai_fill_service, "discard_source_ai_review", lambda *args: calls.append(("discard", args)) or {"ok": True})
 
     api.start_source_ai_review("B", "V", "两款是一套", 1)
-    api.get_source_ai_review_status("B", "R")
+    api.get_source_ai_review_status("B", "R", None, "9")
     api.apply_source_ai_review(
         "B",
         "R",
@@ -181,5 +181,6 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
     assert checks == ["write", "read", "write", "write"]
     assert calls[0][1] == ("B", "V", "两款是一套")
     assert calls[0][2] == {"force": True}
+    assert calls[1][2]["after_revision"] == 9
     assert calls[2][1][2:4] == (["P1"], {"P1": {}})
     assert calls[2][1][6][0]["fieldname"] == "goods_value"

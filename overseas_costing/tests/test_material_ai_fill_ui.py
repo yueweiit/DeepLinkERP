@@ -78,6 +78,120 @@ def test_ai_poll_updates_progress_surface_without_rerendering_workspace() -> Non
     assert "aiPendingReady" in poll
 
 
+def test_ai_candidates_use_one_fixed_workspace_popover_instead_of_cell_details() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    renderer = source.split("renderMaterialAICandidates(itemName", 1)[1].split(
+        "renderMaterialAIFillBanner", 1
+    )[0]
+
+    assert "<details" not in renderer
+    assert 'data-action="mf-ai-open-candidate"' in renderer
+    assert 'data-mf-ai-candidate-popover="1"' in source
+    assert "openMaterialAICandidatePopover" in source
+    assert "closeMaterialAICandidatePopover" in source
+    assert ".ocw-mf-ai-candidate-popover" in css
+    assert "position: fixed" in css.split(".ocw-mf-ai-candidate-popover", 1)[1].split("}", 1)[0]
+    assert ".ocw-mf-ai-candidates[open]" not in css
+
+
+def test_ai_start_is_single_flight_and_normal_click_does_not_force_new_run() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();
+const state={aiFill:null,aiPendingReady:null,aiProgressDialog:null,aiProgressMinimized:false,aiClarification:'',pendingWrites:new Set(),materialDrafts:{},feeDrafts:{},inputRevision:0};
+workspace.materialFeeState=state;
+workspace.detailState={batchName:'B1',versionName:'V1',tab:'documents'};
+workspace.ensureMaterialFeeState=()=>state;
+workspace.flushMaterialFeeInputs=async()=>true;
+workspace.openMaterialAIProgressDialog=()=>{};
+workspace.updateMaterialAIProgressSurface=()=>{};
+workspace.pollMaterialAIFill=async()=>{};
+let callCount=0;
+let sentForce=null;
+let release;
+workspace.call=async(_method,args)=>{
+  callCount+=1;
+  sentForce=args.force;
+  await new Promise((resolve)=>{release=resolve});
+  return {ok:true,run_id:'R1',status:'QUEUED',progress_revision:0};
+};
+const first=workspace.startMaterialAIFill();
+const second=workspace.startMaterialAIFill();
+await new Promise((resolve)=>setTimeout(resolve,0));
+release();
+await Promise.all([first,second]);
+console.log(JSON.stringify({callCount,sentForce,status:state.aiFill.status,hasStartPromise:Boolean(state.aiStartPromise)}));
+""")
+    assert result == {
+        "callCount": 1,
+        "sentForce": 0,
+        "status": "QUEUED",
+        "hasStartPromise": False,
+    }
+
+
+def test_ai_poll_is_incremental_unfrozen_and_skips_unchanged_revision() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();
+const state={aiFill:{status:'RUNNING',progress_revision:4},aiPendingReady:null};
+workspace.materialFeeState=state;
+workspace.detailState={batchName:'B1',versionName:'V1',tab:'documents'};
+const calls=[];
+const replies=[
+  {ok:true,status:'RUNNING',progress_revision:4,unchanged:true},
+  {ok:true,status:'RUNNING',progress_revision:5,progress_percent:60},
+  {ok:true,status:'READY',progress_revision:6,progress_percent:100,run_id:'R1'},
+];
+workspace.call=async(method,args,freeze)=>{calls.push({args,freeze});return replies.shift();};
+let surfaceUpdates=0;
+workspace.updateMaterialAIProgressSurface=()=>{surfaceUpdates+=1};
+global.window={setTimeout:(resolve)=>resolve()};
+await workspace.pollMaterialAIFill(state,'B1','V1','R1');
+console.log(JSON.stringify({surfaceUpdates,calls,pending:state.aiPendingReady?.status}));
+""")
+    assert result["surfaceUpdates"] == 2
+    assert result["pending"] == "READY"
+    assert all(call["freeze"] is False for call in result["calls"])
+    assert result["calls"][0]["args"]["after_revision"] == 4
+    assert result["calls"][1]["args"]["after_revision"] == 4
+    assert result["calls"][2]["args"]["after_revision"] == 5
+
+
+def test_ai_poll_retries_transient_status_errors_inside_progress_surface() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();
+const state={aiFill:{status:'RUNNING',progress_revision:2},aiPendingReady:null};
+workspace.materialFeeState=state;
+workspace.detailState={batchName:'B1',versionName:'V1',tab:'documents'};
+let calls=0;
+workspace.call=async()=>{calls+=1;if(calls===1)throw new Error('network down');return {ok:true,status:'READY',progress_revision:3,progress_percent:100,run_id:'R1'};};
+let globalErrors=0;
+workspace.showError=()=>{globalErrors+=1};
+workspace.openMaterialAIProgressDialog=()=>{};
+let surfaceUpdates=0;
+workspace.updateMaterialAIProgressSurface=()=>{surfaceUpdates+=1};
+global.window={setTimeout:(resolve)=>resolve()};
+await workspace.pollMaterialAIFill(state,'B1','V1','R1');
+console.log(JSON.stringify({calls,globalErrors,surfaceUpdates,status:state.aiFill.status,connectionError:state.aiFill.connection_error||''}));
+""")
+    assert result == {
+        "calls": 2,
+        "globalErrors": 0,
+        "surfaceUpdates": 2,
+        "status": "READY",
+        "connectionError": "",
+    }
+
+
+def test_progress_surface_updates_existing_nodes_without_replacing_roots() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    updater = source.split("updateMaterialAIProgressSurface()", 2)[2].split(
+        "showMaterialAIReadyDraft", 1
+    )[0]
+    assert "replaceWith" not in updater
+    assert "updateMaterialAIProgressSources" in updater
+
+
 def test_ai_progress_uses_minimizable_dialog_and_explicit_view_draft() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")

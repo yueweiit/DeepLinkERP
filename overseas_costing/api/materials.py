@@ -161,11 +161,12 @@ def start_material_ai_fill(batch_name, version_name, edit_token, expected_modifi
 
 
 @frappe.whitelist()
-def get_material_ai_fill_status(batch_name, run_id):
+def get_material_ai_fill_status(batch_name, run_id, after_revision=None):
     batch_name = require_batch_permission(batch_name, "read")
     return material_ai_fill_service.get_material_ai_fill_status(
         batch_name,
         str(run_id or "")[:200],
+        after_revision=(int(after_revision) if str(after_revision or "").strip() else None),
     )
 
 
@@ -202,12 +203,13 @@ def start_source_ai_review(batch_name, version_name, clarification_text=None, fo
 
 
 @frappe.whitelist()
-def get_source_ai_review_status(batch_name, run_id=None, version_name=None):
+def get_source_ai_review_status(batch_name, run_id=None, version_name=None, after_revision=None):
     batch_name = require_batch_permission(batch_name, "read")
     return material_ai_fill_service.get_source_ai_review_status(
         batch_name,
         str(run_id or "")[:200],
         version_name=str(version_name or "")[:200],
+        after_revision=(int(after_revision) if str(after_revision or "").strip() else None),
     )
 
 
