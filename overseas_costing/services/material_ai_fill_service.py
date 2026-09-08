@@ -11,7 +11,7 @@ import json
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
@@ -1016,7 +1016,12 @@ def _session_user() -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    if frappe is not None:
+        try:
+            return frappe.utils.now()
+        except Exception:
+            pass
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class FrappeMaterialAIFillRepository:

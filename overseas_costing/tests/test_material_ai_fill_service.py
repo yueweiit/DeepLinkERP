@@ -1,9 +1,11 @@
 """物料 AI 草稿合并、校验和任务生命周期测试。"""
 
 import copy
+import re
 
 import pytest
 
+from overseas_costing.services import material_ai_fill_service
 from overseas_costing.services.material_ai_fill_service import (
     ALLOWED_FIELDS,
     _bind_ai_candidates_to_documents,
@@ -19,6 +21,14 @@ from overseas_costing.services.material_ai_fill_service import (
     start_material_ai_fill,
     validate_apply_updates,
 )
+
+
+def test_material_ai_timestamps_are_mariadb_datetime_compatible(monkeypatch) -> None:
+    monkeypatch.setattr(material_ai_fill_service, "frappe", None)
+
+    value = material_ai_fill_service._now()
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value)
 
 
 def _items():
