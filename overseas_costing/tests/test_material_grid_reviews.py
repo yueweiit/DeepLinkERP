@@ -113,6 +113,15 @@ def test_preview_exposes_unchanged_cells_candidates_and_row_mapping_without_writ
     assert repo.writes == [] and repo.commits == 0 and repo.import_audits == []
 
 
+def test_result_identity_uses_target_purchase_name_and_approval_number():
+    repo = FakeRepository()
+    repo.items[0]['product_name'] = '采购物料名称'
+    result = _preview(_grid(), repo=repo)
+    row = result['rows'][0]
+    assert row['target']['source_doc_no'] == 'PO1'
+    assert row['material_name'] == '采购物料名称'
+
+
 def test_real_xlsx_identity_quantity_and_physical_merges_count_once(tmp_path):
     openpyxl = pytest.importorskip("openpyxl")
     from overseas_costing.utils.excel_workbook import read_packing_grid

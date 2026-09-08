@@ -65,6 +65,13 @@ def test_grid_dialog_has_scoped_visible_buttons_and_internal_scroll():
     assert 'position: sticky' in css
 
 
+def test_grid_constrains_real_frappe_anonymous_body_wrapper_and_native_form():
+    css = (PARTS / '49-material-import-grid.css').read_text()
+    assert '.pg-dialog .modal-body > div' in css
+    assert '.pg-dialog .form-column > form' in css
+    assert 'min-width: 0' in css and 'min-height: 0' in css
+
+
 def test_uploaded_xlsx_with_true_grid_uses_same_two_tab_dialog():
     result = _fee_workspace_result('''
     const w=Object.create(Harness.prototype);let configured=0,options;

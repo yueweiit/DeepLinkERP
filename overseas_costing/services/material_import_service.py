@@ -267,8 +267,8 @@ def build_material_import_preview(existing: list, incoming: list, source: dict) 
                 "match_status": status,
                 "classification": classification,
                 "target_stable_line_key": target_key,
-                "target": {key: target.get(key) for key in ("name", "stable_line_key", *MATERIAL_SOURCE_FIELDS)},
-                "material_name": str(normalized_row.get("product_name") or target.get("product_name") or ""),
+                "target": {key: target.get(key) for key in ("name", "stable_line_key", "source_doc_no", *MATERIAL_SOURCE_FIELDS)},
+                "material_name": str(target.get("product_name") or normalized_row.get("product_name") or ""),
                 "candidates": [_candidate_view(item) for item in candidates],
                 "changes": changes,
                 "incoming": {
