@@ -166,22 +166,33 @@ class FrappeRepairRepository:
 
     def load(self, name, *, lock=False):
         f = self.frappe
-        if lock:
-            edit_session_service._lock_row(name)
         fields = ['name','batch_no','current_version','transport_mode','status','confirm_status','is_locked',
                   'modified','writeback_status','source_approval_status','extra_json',
                   'edit_lock_owner','edit_lock_expires_at']
-        batch = f.db.get_value('Overseas Cost Batch', name, fields, as_dict=True)
+        if lock:
+            # Locking SELECTs are current reads under production REPEATABLE-READ.
+            # A separate lock followed by get_value/get_all may reuse an older snapshot.
+            columns = ','.join(f'`{field}`' for field in fields)
+            batch_rows = f.db.sql(f'SELECT {columns} FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE',
+                                 (name,), as_dict=True)
+            batch = batch_rows[0] if batch_rows else None
+        else:
+            batch = f.db.get_value('Overseas Cost Batch', name, fields, as_dict=True)
         if not batch or not batch.get('current_version'):
             raise ValueError('批次不存在或没有当前版本。')
         version = batch['current_version']
         if lock:
-            f.db.sql('SELECT name FROM `tabOverseas Cost Version` WHERE name=%s AND batch=%s FOR UPDATE', (version,name))
-            for doctype in ('Overseas Cost Item','Overseas Cost Allocation Rule'):
-                f.db.sql(f'SELECT name FROM `tab{doctype}` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE', (name,version))
+            versions = f.db.sql('SELECT * FROM `tabOverseas Cost Version` WHERE name=%s AND batch=%s FOR UPDATE',
+                                (version,name), as_dict=True)
+            version_row = versions[0] if versions else {}
+        else:
+            version_row = f.db.get_value('Overseas Cost Version', version, ['*'], as_dict=True) or {}
         def rows(doctype):
+            if lock:
+                return f.db.sql(f'SELECT * FROM `tab{doctype}` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE',
+                                (name,version), as_dict=True)
             return f.get_all(doctype, filters={'batch':name,'version':version}, fields=['*'], order_by='name asc', limit_page_length=0)
-        return {'batch':dict(batch), 'version':dict(f.db.get_value('Overseas Cost Version', version, ['*'], as_dict=True) or {}),
+        return {'batch':dict(batch), 'version':dict(version_row),
                 'items':[dict(r) for r in rows('Overseas Cost Item')],
                 'rules':[dict(r) for r in rows('Overseas Cost Allocation Rule')]}
 
@@ -219,7 +230,7 @@ class FrappeRepairRepository:
             expected[change['rule_name']].update(values)
             f.db.set_value('Overseas Cost Allocation Rule', change['rule_name'], values, update_modified=True)
         f.db.set_value('Overseas Cost Batch', name, 'status', 'Dirty', update_modified=True)
-        after = self.load(name)
+        after = self.load(name, lock=True)
         if after['items'] != before['items'] or after['version'] != before['version']:
             raise RuntimeError('修复不得修改物料或成本结果。')
         if {r['name'] for r in after['rules']} != set(originals):

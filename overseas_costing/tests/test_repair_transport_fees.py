@@ -271,3 +271,35 @@ def test_real_retirement_save_preserves_primary_and_retired_money(mode):
         assert state['rules'][1][field]==data['rules'][1][field]
     assert state['rules'][1]['is_enabled']==0 and state['rules'][1]['is_active']==0
     assert len(audits)==1
+
+
+def test_locked_load_uses_current_reads_instead_of_repeatable_read_snapshot(monkeypatch):
+    data=snapshot(); data['rules'][0]['amount']='LATEST-MANUAL-VALUE'
+    queries=[]
+    def forbidden(*args,**kwargs):
+        raise AssertionError('ordinary reads can retain a pre-lock REPEATABLE-READ snapshot')
+    def sql(query,parameters,**kwargs):
+        queries.append(query)
+        assert 'FOR UPDATE' in query.upper()
+        for doctype,section in [('Overseas Cost Batch','batch'),('Overseas Cost Version','version'),
+                                ('Overseas Cost Item','items'),('Overseas Cost Allocation Rule','rules')]:
+            if f'`tab{doctype}`' in query:
+                value=data[section]
+                return deepcopy(value if isinstance(value,list) else [value])
+        raise AssertionError(query)
+    repo=service().FrappeRepairRepository.__new__(service().FrappeRepairRepository)
+    repo.frappe=SimpleNamespace(db=SimpleNamespace(sql=sql,get_value=forbidden),get_all=forbidden)
+    monkeypatch.setattr(service().edit_session_service,'_lock_row',lambda *args:None)
+    assert repo.load('B',lock=True)==data
+    assert len(queries)==4
+
+
+def test_real_save_rechecks_invariants_with_current_reads():
+    data=snapshot(); repo,state,_=real_save_repository(data)
+    load_calls=[]
+    def load(name,*,lock=False):
+        load_calls.append(lock)
+        return deepcopy(state)
+    repo.load=load
+    repo.save(data,service().plan_batch_repair(data))
+    assert load_calls==[True]
