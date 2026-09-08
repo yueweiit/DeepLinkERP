@@ -26,9 +26,9 @@ def get_batches(filters_json=None, task="pending", page=1, page_length=30) -> di
 
 
 @frappe.whitelist()
-def get_summary(filters_json=None) -> dict:
+def get_summary(filters_json=None, task="pending") -> dict:
     require_overseas_cost_access()
-    return workbench_service.get_workbench_summary(_filters(filters_json))
+    return workbench_service.get_workbench_summary(_filters(filters_json), task=task)
 
 
 @frappe.whitelist()

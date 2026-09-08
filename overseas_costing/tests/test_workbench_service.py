@@ -42,6 +42,25 @@ def test_operation_error_exposes_stage_scope_reason_and_action() -> None:
     }
 
 
+def test_summary_api_accepts_task_and_preserves_authorization_before_dispatch():
+    from types import SimpleNamespace
+
+    source = Path(workbench_service.__file__).parents[1] / "api" / "workbench.py"
+    node = next(node for node in ast.parse(source.read_text()).body
+                if isinstance(node, ast.FunctionDef) and node.name == "get_summary")
+    node.decorator_list = []
+    events = []
+    def summary(filters, task="pending"):
+        events.append((filters, task))
+        return {"ok": True, "review_counts": {}}
+    namespace = {"require_overseas_cost_access": lambda: events.append("authorized"),
+                 "_filters": lambda value: json.loads(value or "{}"),
+                 "workbench_service": SimpleNamespace(get_workbench_summary=summary)}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+    assert namespace["get_summary"]('{"review_status":"confirmed"}', task="cost")["ok"] is True
+    assert events == ["authorized", ({"review_status": "confirmed"}, "cost")]
+
+
 def test_classify_batch_prioritizes_missing_purchase_data() -> None:
     result = classify_batch(
         {
@@ -116,15 +135,6 @@ def test_classified_batches_hides_only_invalid_main_approval(monkeypatch) -> Non
             ]
         },
     )
-    monkeypatch.setattr(
-        workbench_service,
-        "_load_current_item_stats",
-        lambda names: {
-            name: {"item_count": 1, "missing_purchase_count": 0, "missing_logistics_count": 0}
-            for name in names
-        },
-    )
-
     visible = workbench_service._classified_batches()
 
     assert [row["name"] for row in visible] == ["VALID-WITH-INVALID-PURCHASE", "VALID"]
