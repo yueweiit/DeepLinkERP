@@ -142,6 +142,7 @@
       issue: String(url.searchParams.get("issue") || ""),
       businessType: String(url.searchParams.get("business_type") || ""),
       subsidiaryCode: String(url.searchParams.get("subsidiary_code") || ""),
+      hasDateRange: url.searchParams.has("start_date") || url.searchParams.has("end_date"),
       startDate: String(url.searchParams.get("start_date") || ""),
       endDate: String(url.searchParams.get("end_date") || ""),
       erpStatus: String(url.searchParams.get("erp_status") || ""),
@@ -153,6 +154,11 @@
   function buildWorkbenchUrl(input, nextState) {
     const url = new URL(input, "http://localhost");
     Object.entries(nextState).forEach(([key, value]) => {
+      // An explicitly cleared boundary is different from first-load defaults.
+      if (["start_date", "end_date"].includes(key) && value === "") {
+        url.searchParams.set(key, "");
+        return;
+      }
       if (value === "" || value === null || value === undefined || value === false) {
         url.searchParams.delete(key);
       } else {

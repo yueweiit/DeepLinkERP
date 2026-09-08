@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 PARTS = Path(__file__).resolve().parents[1] / 'page/overseas_cost_workbench/parts'
 
 
@@ -126,3 +128,23 @@ console.log(JSON.stringify({renders,dirty:v.detailState.dirty,page:v.viewState.p
  detailCalls:calls.filter(c=>c.method.includes('get_batch_detail')).length}));
 """)
     assert result == {'renders': ['detail'], 'dirty': True, 'page': 3, 'detailCalls': 1}
+
+
+@pytest.mark.parametrize('start,end', [('', ''), ('2026-01-01', ''), ('', '2026-09-08')])
+def test_explicitly_cleared_date_boundaries_survive_url_reload_and_history(start, end):
+    result=run_js(f"""
+const expected={{start_date:{json.dumps(start)},end_date:{json.dumps(end)}}};
+const url=OverseasCostWorkbenchState.buildWorkbenchUrl('/desk/x?task=cost&page=3',expected);
+const v=makeView();v.detailState={{batchName:'',requestId:0,skuRequestId:0,refreshRequestId:0}};
+global.window={{location:{{href:url}},history:{{state:{{}}}},scrollTo:()=>{{}}}};
+global.requestAnimationFrame=()=>{{}};
+v.getDefaultPullDateRange=()=>({{start_date:'2026-08-10',end_date:'2026-09-08'}});
+v.$root={{find:()=>({{prop:()=>{{}}}})}};let requested;
+v.loadBatches=async()=>{{requested=v.workbenchFilters()}};
+await v.handleWorkbenchPopState();
+console.log(JSON.stringify({{url,parsed:OverseasCostWorkbenchState.parseWorkbenchState(url),requested,page:v.viewState.page}}));
+""")
+    assert result['parsed']['hasDateRange'] is True
+    assert result['requested']['start_date'] == start
+    assert result['requested']['end_date'] == end
+    assert result['page'] == 3

@@ -69,8 +69,10 @@ class OverseasCostWorkbench {
     this.filters.issue = this.viewState.issue;
     this.filters.business_type = this.viewState.businessType;
     this.filters.subsidiary_code = this.viewState.subsidiaryCode;
-    if (this.viewState.startDate) this.filters.start_date = this.viewState.startDate;
-    if (this.viewState.endDate) this.filters.end_date = this.viewState.endDate;
+    if (this.viewState.hasDateRange) {
+      this.filters.start_date = this.viewState.startDate;
+      this.filters.end_date = this.viewState.endDate;
+    }
     this.filters.erp_status = this.viewState.erpStatus;
     this.filters.review_status = this.viewState.reviewStatus;
     this.filters.review_warning = this.viewState.reviewWarning;

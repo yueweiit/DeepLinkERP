@@ -952,8 +952,8 @@
     Object.assign(this.filters, {
       issue: this.viewState.issue, business_type: this.viewState.businessType,
       subsidiary_code: this.viewState.subsidiaryCode, erp_status: this.viewState.erpStatus,
-      start_date: this.viewState.startDate || defaults.start_date,
-      end_date: this.viewState.endDate || defaults.end_date,
+      start_date: this.viewState.hasDateRange ? this.viewState.startDate : defaults.start_date,
+      end_date: this.viewState.hasDateRange ? this.viewState.endDate : defaults.end_date,
       review_status: this.viewState.reviewStatus, review_warning: this.viewState.reviewWarning,
     });
     if (this.viewState.screen === "detail" && this.viewState.batch) {
