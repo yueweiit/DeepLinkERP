@@ -108,6 +108,20 @@ console.log(JSON.stringify(h.renderMaterialFeeRow({{logical_fee_key:'import_tax'
     assert ("可计入 · 待试算" in result) != saved_current
 
 
+def test_successful_trial_refreshes_header_before_rendering_result():
+    result = _frontend_result(FRONTEND_SETUP + """
+h.detailState.header.status='Dirty';
+const events=[];
+h.renderDetailShell=()=>events.push(['header',h.detailState.header.status,h.detailState.expectedModified]);
+h.updateEditLeaseStatus=()=>events.push(['lease',h.detailState.editToken]);
+h.renderMaterialFeeWorkspace=()=>events.push(['result',state.preview.summary.total_cost_rmb]);
+h.call=async()=>saved;
+await h.refreshMaterialFeeCostPreview();
+console.log(JSON.stringify(events));
+""")
+    assert result == [["header", "Calculated", "m2"], ["lease", "T"], ["result", "120"]]
+
+
 def test_overview_recalculate_runs_after_visiting_material_workspace():
     result = _frontend_result(FRONTEND_SETUP + """
 h.detailState.tab='overview';h.getActiveBatch=()=>h.batches[0];

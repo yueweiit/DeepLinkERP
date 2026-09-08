@@ -10422,6 +10422,8 @@ class OverseasCostWorkbench {
       if (preview.saved && preview.batch_modified && this.detailState.expectedModified
         && String(this.detailState.expectedModified) > String(preview.batch_modified)) return false;
       state.preview = preview;
+      this.renderDetailShell?.();
+      if (this.detailState.editToken) this.updateEditLeaseStatus?.();
       this.renderMaterialFeeWorkspace();
       if (scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
       frappe.show_alert({ message: "试算完成", indicator: "green" });
