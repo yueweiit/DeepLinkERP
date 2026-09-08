@@ -15,7 +15,7 @@
 **Files:**
 - Modify: `overseas_costing/tests/test_review_workbench_ui.py`
 
-- [ ] **Step 1: Replace the obsolete card-rendering test with an absence test**
+- [x] **Step 1: Replace the obsolete card-rendering test with an absence test**
 
 ```python
 def test_workbench_shell_has_no_summary_card_row_for_any_task():
@@ -27,7 +27,7 @@ def test_workbench_shell_has_no_summary_card_row_for_any_task():
     assert "data-action='set-issue'" not in source
 ```
 
-- [ ] **Step 2: Run the regression test and confirm it fails against the existing row**
+- [x] **Step 2: Run the regression test and confirm it fails against the existing row**
 
 Run: `python3 -m pytest -q overseas_costing/tests/test_review_workbench_ui.py::test_workbench_shell_has_no_summary_card_row_for_any_task`
 
@@ -40,7 +40,7 @@ Expected: FAIL because the current shell and renderer still contain the summary 
 - Modify: `overseas_costing/page/overseas_cost_workbench/parts/25-workbench-redesign.css`
 - Test: `overseas_costing/tests/test_review_workbench_ui.py`
 
-- [ ] **Step 1: Remove the summary section and card-only JavaScript**
+- [x] **Step 1: Remove the summary section and card-only JavaScript**
 
 Delete this shell element:
 
@@ -50,17 +50,17 @@ Delete this shell element:
 
 Delete the two click bindings whose selectors are `data-action='set-review-filter'` and `data-action='set-issue'`. Keep `setReviewFilter()` because the “核对状态” select still uses it. Remove the `this.renderExceptionSummary();` call from `renderWorkbench()` and delete the complete `renderExceptionSummary()` method.
 
-- [ ] **Step 2: Remove card-only CSS**
+- [x] **Step 2: Remove card-only CSS**
 
 Delete the `.ocw-exception-summary`, `.ocw-summary-card`, `.ocw-summary-card strong`, `.ocw-summary-card small`, `.ocw-summary-card.is-active`, and four tone rules from `25-workbench-redesign.css`. Delete its responsive `.ocw-exception-summary` grid override. Do not change `.ocw-profit-summary-card`, which belongs to a different detail view.
 
-- [ ] **Step 3: Run focused frontend tests**
+- [x] **Step 3: Run focused frontend tests**
 
 Run: `python3 -m pytest -q overseas_costing/tests/test_review_workbench_ui.py overseas_costing/tests/test_workbench_frontend_state.py`
 
 Expected: all tests PASS; task switching, URL state, filters, and request-race coverage remain green.
 
-- [ ] **Step 4: Commit source and test changes**
+- [x] **Step 4: Commit source and test changes**
 
 ```bash
 git add overseas_costing/tests/test_review_workbench_ui.py \
@@ -77,13 +77,13 @@ git commit -m "ui: remove redundant workbench summary cards"
 - Modify: `overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js`
 - Modify: `overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.css`
 
-- [ ] **Step 1: Generate both asset copies from source parts**
+- [x] **Step 1: Generate both asset copies from source parts**
 
 Run: `python3 overseas_costing/scripts/build_workbench_assets.py`
 
 Expected: the build reports matching JavaScript and CSS digests for both output locations.
 
-- [ ] **Step 2: Run complete verification**
+- [x] **Step 2: Run complete verification**
 
 Run: `python3 -m pytest -q`
 
@@ -97,7 +97,7 @@ Run: `git diff --check`
 
 Expected: all tests and syntax checks PASS with no whitespace errors.
 
-- [ ] **Step 3: Commit generated assets**
+- [x] **Step 3: Commit generated assets**
 
 ```bash
 git add overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js \
@@ -112,7 +112,7 @@ git commit -m "build: regenerate workbench assets without summary cards"
 **Files:**
 - No application source changes.
 
-- [ ] **Step 1: Push the verified branch through existing GitHub Actions**
+- [x] **Step 1: Push the verified branch through existing GitHub Actions**
 
 Run: `git push production HEAD:overseas_costing`
 
@@ -120,10 +120,10 @@ Run: `git push origin HEAD:overseas_costing`
 
 Expected: DeepLinkERP workflow tests and deployment succeed; mirror workflow tests succeed without a second production deployment.
 
-- [ ] **Step 2: Check all three production task tabs in an authenticated browser**
+- [x] **Step 2: Check all three production task tabs in an authenticated browser**
 
 Open “待处理”, “成本核对”, and “ERP 队列”. Confirm each task tab is followed directly by the search panel, no summary cards or empty summary space remain, and switching tasks changes only the list/filter context.
 
-- [ ] **Step 3: Confirm no business-data mutation**
+- [x] **Step 3: Confirm no business-data mutation**
 
 Use read-only API/browser checks only. Do not click recalculate, confirm, or ERP push actions. Confirm this release changed only frontend files and documentation; no batch amount, item, fee, or allocation record is written.
