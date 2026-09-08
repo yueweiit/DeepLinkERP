@@ -18,14 +18,26 @@ class FeeDB:
         self.version = dict(name="V", batch="B", status="Active")
         self.writes = []
         self.locks = []
+        self.items = []
+        self.snapshot_rows = None
+        self.before_parent_lock = None
 
     def sql(self, query, values, as_dict=False):
         assert "for update" in query.lower()
         self.locks.append(query)
         if "tabOverseas Cost Batch" in query:
-            return [dict(self.batch)]
+            if self.before_parent_lock:
+                self.before_parent_lock()
+                self.before_parent_lock = None
+            fields = [field.strip().strip("`") for field in query.lower().split("select", 1)[1].split("from", 1)[0].split(",")]
+            return [{field: self.batch.get(field) for field in fields}]
         if "tabOverseas Cost Version" in query:
             return [dict(self.version)]
+        if "tabOverseas Cost Item" in query:
+            return deepcopy(self.items)
+        if "tabOverseas Cost Allocation Rule" in query:
+            assert values == ("B", "V")
+            return deepcopy(self.rows)
         raise AssertionError(query)
 
     def get_value(self, doctype, key, fields, as_dict=False):
@@ -55,7 +67,7 @@ def install(monkeypatch, rows=None, mode="AIR"):
         assert doctype == "Overseas Cost Allocation Rule"
         assert kwargs["filters"] == {"batch": "B", "version": "V"}
         assert db.locks, "read fee rows only after locking their parent"
-        return deepcopy(db.rows)
+        return deepcopy(db.rows if db.snapshot_rows is None else db.snapshot_rows)
 
     def get_doc(values):
         def insert(**kwargs):
@@ -236,11 +248,9 @@ def test_quote_services_forward_owned_context_and_do_not_claim_protected_fee_was
     assert "生成" not in result["message"]
 
 
-def test_oa_sync_rechecks_invalid_source_after_taking_parent_lock(monkeypatch):
+def test_oa_sync_rechecks_current_invalid_source_after_taking_parent_lock(monkeypatch):
     db, _ = install(monkeypatch)
-    def check(*args):
-        return {"ok": False, "invalid_business": True, "message": "审批刚刚撤销"} if db.locks else None
-    monkeypatch.setattr(import_service, "_invalid_batch_cost_write_response", check)
+    db.before_parent_lock = lambda: db.batch.update(source_approval_status="TERMINATED")
     result = sync()
     assert not result["ok"] and result["invalid_business"]
     assert not db.writes
@@ -315,3 +325,72 @@ def test_manual_quote_service_without_tokens_cannot_write_even_without_an_active
     result = getattr(import_service, operation)(batch_name="B", **kwargs)
     assert not writes_after_sync
     assert not result["ok"] and "编辑会话" in result["message"]
+
+
+@pytest.mark.parametrize("change,action", [("new_manual", "protected"), ("actual", "protected"),
+                                         ("retired", "retired"), ("duplicate", "conflict")])
+def test_oa_sync_uses_current_fee_rows_after_waiting_for_parent_under_repeatable_read(monkeypatch, change, action):
+    old = [] if change == "new_manual" else [dict(name="OA", rule_code="oa_logistics_freight", amount=200,
+        amount_status="ESTIMATED", amount_revision="oa:old", allocation_basis="chargeable_weight")]
+    db, _ = install(monkeypatch, old)
+    # The preliminary ordinary source read establishes the old RR snapshot.
+    def old_source_check(*args):
+        if db.snapshot_rows is None:
+            db.snapshot_rows = deepcopy(db.rows)
+        return None
+    monkeypatch.setattr(import_service, "_invalid_batch_cost_write_response", old_source_check)
+    def another_transaction_commits_before_parent_lock_is_granted():
+        if change in {"new_manual", "duplicate"}:
+            db.rows.append(dict(name="MANUAL", logical_fee_key="international_air_freight", rule_code="manual",
+                                amount=333, amount_status="ACTUAL", amount_revision="manual:saved"))
+        elif change == "actual":
+            db.rows[0].update(amount=333, amount_status="ACTUAL", amount_revision="manual:saved")
+        else:
+            db.rows[0].update(is_enabled=0)
+    db.before_parent_lock = another_transaction_commits_before_parent_lock_is_granted
+    result = sync(500)
+    assert result["action"] == action
+    assert not db.writes
+    assert any("tabOverseas Cost Allocation Rule" in sql for sql in db.locks)
+
+
+def test_oa_sync_checks_current_item_provenance_after_parent_lock(monkeypatch):
+    db, _ = install(monkeypatch)
+    db.batch["extra_json"] = {"oa_logistics_trace": {"linked_purchase_approvals": [
+        {"source_instance_id": "VALID", "approval_status": "COMPLETED"},
+        {"source_instance_id": "REVOKED", "approval_status": "TERMINATED"}]}}
+    db.before_parent_lock = lambda: db.items.append(dict(name="NEW-BAD-ITEM", source_type="purchase_expense_oa", dingtalk_instance_id="REVOKED"))
+    result = sync()
+    assert not result["ok"] and result["invalid_business"]
+    assert not db.writes
+
+
+@pytest.mark.parametrize("basis", ["goods_value", "gross_weight", "volume", "chargeable_weight"])
+def test_manual_quote_basis_is_saved_and_used_by_preview_and_calculation(monkeypatch, basis):
+    from overseas_costing.services import cost_preview_service, fee_allocation_service
+    db, _ = install(monkeypatch)
+    db.batch.update(modified="2026-09-08 12:00:00", edit_lock_owner="Administrator", edit_lock_token="OWNED",
+                    edit_lock_expires_at=datetime.now() + timedelta(minutes=4))
+    db.commit = lambda: None
+    importer.frappe.utils = SimpleNamespace(now_datetime=datetime.now)
+    monkeypatch.setattr(import_service, "frappe", importer.frappe)
+    monkeypatch.setattr(import_service, "_resolve_batch_name", lambda name: "B")
+    monkeypatch.setattr(import_service, "_resolve_version_name", lambda *args: "V")
+    monkeypatch.setattr(import_service, "_get_batch_trace_row", lambda name: {"extra_json": {}})
+    monkeypatch.setattr(import_service, "_create_audit_log", lambda **kwargs: None)
+    monkeypatch.setattr(import_service, "_mark_batch_dirty", lambda *args: None)
+    monkeypatch.setattr(import_service, "_recalculate_after_writeback", lambda **kwargs: {"ok": True})
+    result = import_service.save_manual_logistics_quote(batch_name="B", amount=100, allocation_basis=basis,
+        edit_token="OWNED", expected_modified="2026-09-08 12:00:00")
+    assert result["ok"]
+    row = db.rows[0]
+    assert row["allocation_basis"] == row["basis_field"] == basis
+    assert fee_allocation_service.preferred_allocation_basis(row) == basis
+    items = [dict(name="I", stable_line_key="I", goods_value=100, quantity=1, unit="个", gross_weight_kg=10, volume_m3=2, chargeable_weight_kg=12),
+             dict(name="J", stable_line_key="J", goods_value=300, quantity=1, unit="个", gross_weight_kg=10, volume_m3=8, chargeable_weight_kg=4)]
+    fees = fee_service.compose_fee_worklist_rows([row], "AIR")
+    preview = cost_preview_service.preview_comprehensive_cost_data(items, fees, {})
+    saved = cost_preview_service.build_saved_cost_data(items, fees, {}, "AIR")
+    assert preview["included_fees"][0]["allocation_basis"] == saved["included_fees"][0]["allocation_basis"] == basis
+    expected = {"goods_value": "25.00", "gross_weight": "50.00", "volume": "20.00", "chargeable_weight": "75.00"}[basis]
+    assert preview["included_fees"][0]["allocations"]["I"] == saved["included_fees"][0]["allocations"]["I"] == expected

@@ -105,6 +105,11 @@ def basis_decimal(item: dict, basis: str) -> Decimal | None:
 
 def preferred_allocation_basis(fee: dict) -> str:
     key = str(fee.get("logical_fee_key") or fee.get("rule_code") or "")
+    saved_basis = str(fee.get("allocation_basis") or fee.get("basis_field") or "")
+    manual_revision = any(str(fee.get(field) or "") and not str(fee.get(field)).startswith("oa:")
+                          for field in ("amount_revision", "scope_revision"))
+    if manual_revision and saved_basis in {"goods_value", "gross_weight", "volume", "chargeable_weight"}:
+        return saved_basis
     return SYSTEM_ALLOCATION_BASES.get(key) or str(
         fee.get("allocation_basis") or fee.get("basis_field") or "goods_value"
     )

@@ -2642,7 +2642,7 @@ def test_sync_oa_logistics_allocation_rule_creates_rule_and_recalculates(monkeyp
 
     monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
     monkeypatch.setattr(import_oa_logistics, "_oa_fee_sync_context", lambda *args, **kwargs: {"transport_mode": "SEA"})
-    monkeypatch.setattr(FakeFrappe, "get_all", lambda *args, **kwargs: [], raising=False)
+    monkeypatch.setattr(FakeFrappe.db, "sql", lambda *args, **kwargs: [], raising=False)
     monkeypatch.setattr(FakeFrappe.db, "set_value", lambda *args, **kwargs: None, raising=False)
     monkeypatch.setattr("overseas_costing.services.calculate_service.recalculate_batch", fake_recalculate_batch)
 
@@ -2706,7 +2706,7 @@ def test_sync_express_single_quote_creates_freight_rule(monkeypatch) -> None:
 
     monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
     monkeypatch.setattr(import_oa_logistics, "_oa_fee_sync_context", lambda *args, **kwargs: {"transport_mode": "EXPRESS"})
-    monkeypatch.setattr(FakeFrappe, "get_all", lambda *args, **kwargs: [], raising=False)
+    monkeypatch.setattr(FakeFrappe.db, "sql", lambda *args, **kwargs: [], raising=False)
     monkeypatch.setattr(FakeFrappe.db, "set_value", lambda *args, **kwargs: None, raising=False)
 
     rule_result = _sync_oa_logistics_allocation_rule(

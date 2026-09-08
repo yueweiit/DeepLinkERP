@@ -4855,7 +4855,8 @@ def _oa_fee_sync_context(batch_name, version_name, *, edit_token=None, expected_
 
     rows = frappe.db.sql(
         """select name, current_version, transport_mode, status, confirm_status, is_locked,
-                  modified, edit_lock_owner, edit_lock_token, edit_lock_expires_at
+                  modified, edit_lock_owner, edit_lock_token, edit_lock_expires_at,
+                  source_approval_status, extra_json
              from `tabOverseas Cost Batch` where name = %s for update""",
         (batch_name,), as_dict=True)
     if not rows:
@@ -4932,7 +4933,7 @@ def _sync_oa_logistics_allocation_rule(
             "reason": "当前批次没有版本，无法生成物流费用分摊规则。",
         }
 
-    from overseas_costing.services import fee_service, import_service
+    from overseas_costing.services import batch_service, fee_service, import_service
 
     if frappe is not None:
         invalid_response = import_service._invalid_batch_cost_write_response(batch_name, version_name)
@@ -4940,9 +4941,16 @@ def _sync_oa_logistics_allocation_rule(
             return {**invalid_response, "action": "blocked", "created_count": 0, "updated_count": 0}
         try:
             batch = _oa_fee_sync_context(batch_name, version_name, edit_token=edit_token, expected_modified=expected_modified)
-            invalid_response = import_service._invalid_batch_cost_write_response(batch_name, version_name)
-            if invalid_response:
-                return {**invalid_response, "action": "blocked", "created_count": 0, "updated_count": 0}
+            # Under REPEATABLE READ ordinary queries still see a pre-lock
+            # snapshot. Validate the locked batch and current item provenance.
+            items = frappe.db.sql(
+                """select name, source_type, dingtalk_instance_id from `tabOverseas Cost Item`
+                    where batch = %s and version = %s order by name for update""",
+                (batch_name, version_name), as_dict=True)
+            invalid = batch_service._build_invalid_business_state(batch, items)
+            if invalid.get("invalid"):
+                return {"ok": False, "invalid_business": True, "invalid_business_scope": invalid.get("scope"),
+                        "message": invalid.get("message"), "action": "blocked", "created_count": 0, "updated_count": 0}
             mode = batch.get("transport_mode")
             definition = fee_service.primary_freight_definition(mode)
         except (ValueError, PermissionError, RuntimeError) as exc:
@@ -4958,6 +4966,9 @@ def _sync_oa_logistics_allocation_rule(
     amount = float(parsed_amount)
     currency = _normalize_currency_code(fee.get("currency")) or "RMB"
     allocation_basis = definition["allocation_basis"]
+    manual_basis = str(fee.get("allocation_basis") or approval_item.get("allocation_basis") or "").strip()
+    if manual_entry and manual_basis in fee_service.ALLOCATION_BASES:
+        allocation_basis = manual_basis
     values = {
         "batch": batch_name,
         "version": version_name,
@@ -4987,11 +4998,13 @@ def _sync_oa_logistics_allocation_rule(
             "fee": fee,
         }
 
-    rules = frappe.get_all(
-        "Overseas Cost Allocation Rule",
-        filters={"batch": batch_name, "version": version_name},
-        fields=fee_service._rule_fields(), limit_page_length=1000,
-    )
+    # Read protected/manual/retired rows from the current database state, not
+    # the transaction snapshot that may precede another user's committed save.
+    rule_fields = ", ".join(f"`{field}`" for field in fee_service._rule_fields())
+    rules = frappe.db.sql(
+        f"""select {rule_fields} from `tabOverseas Cost Allocation Rule`
+            where batch = %s and version = %s order by name for update""",
+        (batch_name, version_name), as_dict=True)
     candidates = [dict(row) for row in rules if row.get("rule_code") == "oa_logistics_freight"
                   or fee_service.map_historical_fee_key(row, mode) == definition["logical_fee_key"]]
     active = [row for row in candidates if fee_service.fee_is_active(row)]
