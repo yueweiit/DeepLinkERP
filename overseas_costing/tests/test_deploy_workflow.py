@@ -77,6 +77,15 @@ def test_deepseek_preflight_reads_secret_from_environment_without_printing_it() 
     assert "print(api_key)" not in script
 
 
+def test_deepseek_preflight_disables_thinking_and_retries_empty_json_output() -> None:
+    script = (WORKFLOW_PATH.parent.parent / "scripts" / "preflight_deepseek.py").read_text(encoding="utf-8")
+
+    assert '"thinking": {"type": "disabled"}' in script
+    assert '"response_format": {"type": "json_object"}' in script
+    assert '"max_tokens": 128' in script
+    assert "MAX_ATTEMPTS = 3" in script
+
+
 def test_asset_script_is_uploaded_and_executed_as_a_remote_file():
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy_block = workflow.split("\n  deploy:\n", maxsplit=1)[1]
