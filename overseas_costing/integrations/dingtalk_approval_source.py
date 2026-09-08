@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
@@ -15,6 +16,8 @@ from zoneinfo import ZoneInfo
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 READ_ONLY_OPTIONS = "-c default_transaction_read_only=on -c statement_timeout=10000"
+REPAIR_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:@/-]{1,256}$")
+REPAIR_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ArchiveIntegrityError(RuntimeError):
@@ -271,6 +274,80 @@ class PostgresApprovalSource:
         }
         return {instance_id: by_id[instance_id] for instance_id in unique_ids if instance_id in by_id}
 
+    def get_reference_coverage(
+        self,
+        instance_ids: Iterable[str],
+        business_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        """一次批量按实例 ID/审批编号核对来源，避免逐批查询。"""
+
+        unique_instances = list(dict.fromkeys(
+            str(value).strip() for value in instance_ids if str(value).strip()
+        ))
+        unique_business = list(dict.fromkeys(
+            str(value).strip() for value in business_ids if str(value).strip()
+        ))
+        if not unique_instances and not unique_business:
+            return {"rows": [], "by_instance": {}, "by_business": {}}
+        sql = """
+            SELECT corp_id, process_instance_id, business_id, process_code,
+                   status, result, create_time, finish_time, updated_at
+              FROM costing_read.approval_instances_v1
+             WHERE process_instance_id = ANY(%s)
+                OR business_id = ANY(%s)
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, (unique_instances, unique_business))
+                rows = [dict(row) for row in cursor.fetchall()]
+        by_instance = {
+            str(row.get("process_instance_id") or ""): row
+            for row in rows if row.get("process_instance_id")
+        }
+        by_business: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            business_id = str(row.get("business_id") or "").strip()
+            if business_id:
+                by_business.setdefault(business_id, []).append(row)
+        return {"rows": rows, "by_instance": by_instance, "by_business": by_business}
+
+    def get_repair_statuses(self, instance_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        unique_ids = list(dict.fromkeys(
+            str(value).strip() for value in instance_ids if str(value).strip()
+        ))
+        if not unique_ids:
+            return {}
+        sql = """
+            SELECT DISTINCT ON (process_instance_id) *
+              FROM costing_read.approval_repair_status_v1
+             WHERE process_instance_id = ANY(%s)
+             ORDER BY process_instance_id, requested_at DESC, id DESC
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, (unique_ids,))
+                rows = cursor.fetchall()
+        return {
+            str(row.get("process_instance_id") or ""): dict(row)
+            for row in rows if row.get("process_instance_id")
+        }
+
+    def get_process_context(self, process_code: str) -> dict[str, Any] | None:
+        """从已有白名单审批中解析企业上下文，不向浏览器暴露。"""
+
+        sql = """
+            SELECT corp_id, process_code
+              FROM costing_read.approval_instances_v1
+             WHERE process_code = %s
+             ORDER BY updated_at DESC
+             LIMIT 1
+        """
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, (str(process_code or "").strip(),))
+                rows = cursor.fetchall()
+        return dict(rows[0]) if rows else None
+
     def get_attachment_manifest(self, process_instance_id: str, file_id: str) -> dict[str, Any] | None:
         sql = """
             SELECT *
@@ -357,6 +434,83 @@ class PostgresApprovalSource:
             "data_source": "postgres",
             "fallback_used": False,
         }
+
+
+def _repair_identifier(value: str, label: str) -> str:
+    normalized = str(value or "").strip()
+    if not REPAIR_ID_PATTERN.fullmatch(normalized):
+        raise ValueError(f"{label}不合法。")
+    return normalized
+
+
+class ApprovalRepairSubmitter:
+    """只允许调用审批修复 SECURITY DEFINER 函数。"""
+
+    def __init__(
+        self,
+        config: ApprovalSourceConfig,
+        *,
+        connect: Callable[..., Any] | None = None,
+    ) -> None:
+        self.config = config
+        self.connect = connect or self._default_connect
+
+    @staticmethod
+    def _default_connect(**kwargs):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        return psycopg.connect(row_factory=dict_row, **kwargs)
+
+    def _connection(self):
+        return self.connect(**postgres_connection_kwargs(
+            self.config,
+            application_name="overseas_costing_approval_repair_submitter",
+            read_only=False,
+        ))
+
+    def request_repair(
+        self,
+        *,
+        corp_id: str,
+        process_instance_id: str,
+        expected_business_id: str,
+        expected_process_code: str,
+        expected_purpose: str,
+        request_key: str,
+        requested_by: str,
+        trigger_source: str,
+    ) -> int:
+        purpose = str(expected_purpose or "").strip()
+        if purpose not in {"international_logistics", "purchase_expense"}:
+            raise ValueError("审批修复用途不合法。")
+        trigger = str(trigger_source or "").strip()
+        if trigger not in {"costing_audit", "manual", "linked_purchase"}:
+            raise ValueError("审批修复触发来源不合法。")
+        key = str(request_key or "").strip().lower()
+        if not REPAIR_HASH_PATTERN.fullmatch(key):
+            raise ValueError("审批修复请求 ID 必须是 64 位小写 SHA-256。")
+        params = (
+            _repair_identifier(corp_id, "企业 ID"),
+            _repair_identifier(process_instance_id, "流程实例 ID"),
+            _repair_identifier(expected_business_id, "审批编号"),
+            _repair_identifier(expected_process_code, "流程模板"),
+            purpose,
+            key,
+            str(requested_by or "")[:200],
+            trigger,
+        )
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT costing_read.request_approval_repair(%s,%s,%s,%s,%s,%s,%s,%s) AS request_id",
+                    params,
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise RuntimeError("审批修复任务未返回请求 ID。")
+        value = next(iter(row.values())) if isinstance(row, Mapping) else row[0]
+        return int(value)
 
 
 class MinioArchiveClient:

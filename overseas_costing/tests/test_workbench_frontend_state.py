@@ -351,6 +351,17 @@ def test_dingtalk_timeline_renders_name_as_primary_and_id_as_secondary() -> None
     assert "renderDingtalkAttachments(approval.attachments || [], !approval.excluded)" in approval_page
 
 
+def test_dingtalk_missing_source_has_repair_action_and_never_claims_unlinked() -> None:
+    approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")
+    workbench_events = (PARTS / "35-workbench-view.js").read_text(encoding="utf-8")
+
+    assert "request_batch_dingtalk_approval_repair" in approval_page
+    assert "钉钉审批正在补同步" in approval_page
+    assert "物流审批尚未同步，暂无法判断关联采购审批" in approval_page
+    assert "data-action='repair-dingtalk-approval'" in approval_page
+    assert "[data-action='repair-dingtalk-approval']" in workbench_events
+
+
 def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> None:
     detail_page = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
     approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")

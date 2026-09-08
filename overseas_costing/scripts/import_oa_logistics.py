@@ -6098,7 +6098,7 @@ def sync_existing_linked_purchase_fields(limit: int | None = 200) -> dict:
     }
 
 
-def save_sea_approvals_to_erp(result: dict) -> dict:
+def save_sea_approvals_to_erp(result: dict, *, recalculate_after_sync: bool = True) -> dict:
     """保存国际物流 OA，生成批次，并自动补关联采购支出 OA 的采购字段。
 
     国际物流 OA 负责批次头、物料基础行、附件记录和采购支出关联。
@@ -6197,12 +6197,37 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
                 version_name=saved_row.get("version_name") or "",
                 approval_item=item,
             )
-            recalculate_sync = _recalculate_after_purchase_sync(
-                batch_name=saved_row["batch_name"],
-                version_name=saved_row.get("version_name") or "",
-                purchase_sync=purchase_sync,
-                logistics_fee_sync=logistics_fee_sync,
-            )
+            if recalculate_after_sync:
+                recalculate_sync = _recalculate_after_purchase_sync(
+                    batch_name=saved_row["batch_name"],
+                    version_name=saved_row.get("version_name") or "",
+                    purchase_sync=purchase_sync,
+                    logistics_fee_sync=logistics_fee_sync,
+                )
+            else:
+                purchase_changed = bool(
+                    purchase_sync.get("ok")
+                    and int(purchase_sync.get("updated_count") or 0) > 0
+                )
+                fee_changed = bool(
+                    logistics_fee_sync.get("ok")
+                    and logistics_fee_sync.get("action") in {"created", "updated"}
+                )
+                if purchase_changed or fee_changed:
+                    from overseas_costing.services.import_service import _mark_batch_dirty
+
+                    _mark_batch_dirty(saved_row["batch_name"])
+                    recalculate_sync = {
+                        "action": "marked_stale",
+                        "ok": True,
+                        "message": "补同步导致计算输入变化，已进入待重新试算，未自动计算。",
+                    }
+                else:
+                    recalculate_sync = {
+                        "action": "skipped",
+                        "ok": True,
+                        "reason": "补同步未改变采购事实或物流费用。",
+                    }
             _commit_oa_pull_progress()
             return saved_row, item_sync, attachment_sync, purchase_sync, logistics_fee_sync, recalculate_sync
 

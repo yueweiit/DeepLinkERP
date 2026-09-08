@@ -200,6 +200,9 @@
       this.switchDetailTab($(event.currentTarget).attr("data-tab"))
     );
     this.$root.on("click", "[data-action='view-dingtalk-approval']", () => this.switchDetailTab("dingtalk"));
+    this.$root.on("click", "[data-action='repair-dingtalk-approval']", (event) =>
+      this.requestDingtalkApprovalRepair($(event.currentTarget)).catch((error) => this.showError(error))
+    );
     this.$root.on("click", "[data-action='open-dingtalk-packing-picker']", () =>
       this.openDingtalkPackingSourcePicker().catch((error) => this.showError(error))
     );

@@ -3,7 +3,7 @@
     const result = await this.call("overseas_costing.api.workbench.get_batch_dingtalk_approval_detail", {
       batch_name: batch.name,
     });
-    if (!result || !result.ok) throw new Error((result && result.message) || "钉钉审批读取失败");
+    if (!result) throw new Error("钉钉审批读取失败");
     this.syncPurchaseApprovalStatusFromDingtalk(result);
     this.detailState.dingtalkApproval = result;
     return result;
@@ -12,10 +12,26 @@
   syncPurchaseApprovalStatusFromDingtalk(result = {}) {
     const approvals = Array.isArray(result.linked_purchase_approvals) ? result.linked_purchase_approvals : [];
     const excluded = Array.isArray(result.excluded_linked_purchase_approvals) ? result.excluded_linked_purchase_approvals : [];
-    if (!approvals.length && !excluded.length) return;
     const batch = this.getDetailBatch();
     const sourceStatus = { ...(batch.source_status || {}) };
     if (sourceStatus.invalid_business && sourceStatus.invalid_business_scope === "source_approval") return;
+    const linkState = String((result.source_state || {}).purchase_link_state || "").toLowerCase();
+    if (!approvals.length && !excluded.length) {
+      if (!linkState) return;
+      sourceStatus.linked_purchase_count = 0;
+      if (linkState === "none") {
+        sourceStatus.purchase_approval_sync_state = "missing";
+        sourceStatus.purchase_approval_sync_message = "物流审批已读取，其中确实没有关联采购审批。";
+      } else {
+        sourceStatus.purchase_approval_sync_state = linkState === "repairing" ? "pending" : "unknown";
+        sourceStatus.purchase_approval_sync_message = linkState === "repairing"
+          ? "已发现关联采购审批，相关正文正在补同步。"
+          : "物流审批尚未同步，暂无法判断关联采购审批。";
+      }
+      batch.source_status = sourceStatus;
+      if (this.detailState.header && this.detailState.header.name === batch.name) this.detailState.header.source_status = sourceStatus;
+      return;
+    }
     sourceStatus.linked_purchase_count = approvals.length + excluded.length;
     sourceStatus.excluded_purchase_count = excluded.length;
     sourceStatus.linked_purchase_approval_statuses = [...approvals, ...excluded]
@@ -48,6 +64,10 @@
     try {
       const result = await this.loadDingtalkApprovalDetail();
       if (this.detailState.dingtalkRequestId !== requestId || this.detailState.batchName !== requestedBatch || this.detailState.tab !== "dingtalk") return;
+      if (!result.ok) {
+        this.renderDingtalkSourceState(result);
+        return;
+      }
       const health = result.archive_health || {};
       this.$root.find("[data-area='detail-content']").html(`
         <div class="ocw-detail-section-head">
@@ -66,7 +86,7 @@
           <div class="ocw-detail-section-head"><div><span>关联流程</span><h3>采购审批</h3></div><span>${this.escape(String((result.linked_purchase_approvals || []).length))} 条</span></div>
           ${(result.linked_purchase_approvals || []).length
             ? result.linked_purchase_approvals.map((approval) => this.renderDingtalkApprovalCard(approval, "关联采购审批", true)).join("")
-            : `<div class="ocw-detail-empty"><strong>暂无关联采购审批</strong></div>`}
+            : this.renderDingtalkPurchaseLinkEmpty(result)}
         </section>
         ${(result.excluded_linked_purchase_approvals || []).length ? `
           <section class="ocw-dingtalk-linked is-excluded">
@@ -77,6 +97,62 @@
     } catch (error) {
       if (this.detailState.dingtalkRequestId !== requestId || this.detailState.batchName !== requestedBatch || this.detailState.tab !== "dingtalk") return;
       this.renderDetailTabError("钉钉审批", error);
+    }
+  }
+
+  renderDingtalkPurchaseLinkEmpty(result = {}) {
+    const state = String((result.source_state || {}).purchase_link_state || "unknown");
+    if (state === "none") return `<div class="ocw-detail-empty"><strong>未关联采购审批</strong><span>物流审批正文中没有关联控件或有效关联项。</span></div>`;
+    if (state === "repairing") return `<div class="ocw-detail-empty is-warning"><strong>已关联，采购审批待补同步</strong><span>${this.escape((result.missing_linked_instance_ids || []).join("、") || "后台将继续补齐关联流程。")}</span></div>`;
+    return `<div class="ocw-detail-empty is-warning"><strong>暂无法判断关联采购审批</strong><span>需先完成物流审批同步。</span></div>`;
+  }
+
+  renderDingtalkSourceState(result = {}) {
+    const state = result.source_state || {};
+    const code = String(state.code || "data_source_unavailable");
+    const repairing = code === "repairing";
+    const manual = code === "manual_required" || code === "source_mismatch" || code === "missing_instance_id";
+    const title = repairing
+      ? "钉钉审批正在补同步"
+      : (manual ? "钉钉审批需要人工核对" : "物流审批尚未同步，暂无法判断关联采购审批");
+    const failure = [state.failure_code, state.failure_reason].filter(Boolean).join("：");
+    const canRepair = Boolean(state.repairable) && !repairing;
+    this.$root.find("[data-area='detail-content']").html(`
+      <div class="ocw-detail-section-head">
+        <div><span>数据源·${this.escape(result.data_source || "postgres")}</span><h2>钉钉审批</h2></div>
+        <button class="ocw-outline-btn" type="button" data-action="detail-dingtalk">在钉钉中打开</button>
+      </div>
+      <div class="ocw-dingtalk-source-state ${manual ? "is-manual" : ""}">
+        <strong>${this.escape(title)}</strong>
+        <span>${this.escape(failure || result.message || "阿里云同步库暂无该审批正文。")}</span>
+        <small>当前不会把“尚未同步”误判为“未关联采购审批”。</small>
+        <div class="ocw-detail-section-actions">
+          ${canRepair ? `<button class="ocw-primary-btn" type="button" data-action='repair-dingtalk-approval'>${manual ? "重试补同步" : "补同步"}</button>` : ""}
+          <button class="ocw-outline-btn" type="button" data-action="retry-detail-tab">刷新状态</button>
+        </div>
+      </div>
+    `);
+  }
+
+  async requestDingtalkApprovalRepair($button = null) {
+    const batch = this.getDetailBatch();
+    if ($button) $button.prop("disabled", true).text("提交中…");
+    try {
+      const result = await this.call("overseas_costing.api.workbench.request_batch_dingtalk_approval_repair", {
+        batch_name: batch.name,
+      }, true);
+      if (!result || !result.ok) throw new Error((result && result.message) || "补同步任务提交失败");
+      frappe.show_alert({ message: result.message || "已加入补同步队列", indicator: "green" });
+      this.detailState.dingtalkApproval = {
+        ok: false,
+        batch_name: batch.name,
+        data_source: "postgres",
+        message: result.message,
+        source_state: { code: "repairing", repairable: true, purchase_link_state: "unknown" },
+      };
+      this.renderDingtalkSourceState(this.detailState.dingtalkApproval);
+    } finally {
+      if ($button) $button.prop("disabled", false).text("补同步");
     }
   }
 
