@@ -49,3 +49,12 @@
 
 - Based on production commit `6d51491e31` (includes concurrent fee, packing and linked-approval fixes).
 - Clean baseline: 855 tests passed.
+
+## Implementation and pre-release verification
+
+- Tasks 1 and 2 completed with red-green tests: the initial new behavior produced 9 expected failures, then passed after implementation.
+- Independent review found and verified two additional legacy edge cases. Four failing regressions were added, then fixed: saved blank/None currency retains the pre-existing RMB interpretation; the new local-delivery alias is restricted to EXPRESS to avoid merging SEA/AIR historical fees.
+- Full suite: 873 passed. Reviewer independently ran 137 related tests successfully. Python compile, generated JavaScript syntax, and `git diff --check` passed.
+- Frontend aggregate copies rebuilt using the existing script. No database schema or permission changes; no batch data migration.
+- Live pre-deploy example now contains three saved fees: international express 2502.920858 RMB estimated, customs 10000 MXN actual, import tax 20000 MXN actual. These saved amounts supersede empty defaults and must be preserved.
+- Live pre-deploy digests: 20 item rows `61e344cfc4b8cbf6d39898ac6b82add43cabe313699fcd7708fbccf187534d89`; 3 allocation rules `4f57cb85d68d6ac3fc7dcf83099259a2c662b6ee29cf974113652ab7224d0fc7`.

@@ -491,6 +491,45 @@ def test_fee_workspace_missing_saved_amount_is_visible_inline_and_keeps_more_set
     }
 
 
+def test_express_default_zero_row_explains_mexico_confirmation_without_actual_marker():
+    from overseas_costing.services.fee_service import build_default_fee_templates
+    fee = build_default_fee_templates('EXPRESS')[-1]
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);workspace.escape=(value)=>String(value ?? '');"
+        f"const fee={json.dumps(fee, ensure_ascii=False)};"
+        "console.log(JSON.stringify({html:workspace.renderMaterialFeeRow(fee)}));"
+    )
+    html = result['html']
+    assert '当地快递费' in html
+    assert 'value="MXN" selected' in html and 'value="0"' in html
+    assert '默认暂估 0，待墨西哥确认' in html
+    assert '由墨西哥同事补充' in html
+    assert 'data-mf-force-actual="1"' not in html
+
+
+@pytest.mark.parametrize('amount,currency,key', [('', 'MXN', 'import_tax'), ('0', 'MXN', 'destination_delivery'), ('0', 'RMB', 'express_surcharge')])
+def test_untouched_mexico_fee_input_never_saves_or_reports_empty_error(amount, currency, key):
+    result = _fee_workspace_result(FEE_INPUT_FIXTURE + f"""
+const workspace=Object.create(Harness.prototype);workspace.detailState={{batchName:'B-1'}};
+const state=workspace.ensureMaterialFeeState();
+const fixture=makeFeeInput({{amount:{json.dumps(amount)},originalAmount:{json.dumps(amount)},currency:{json.dumps(currency)},originalCurrency:{json.dumps(currency)},feeKey:{json.dumps(key)}}});
+let writes=0;workspace.call=async()=>{{writes++;throw new Error('Untouched input must not write')}};
+await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);
+console.log(JSON.stringify({{writes,error:fixture.errorElement.value,drafts:state.feeDrafts}}));
+""")
+    assert result == {'writes': 0, 'error': '', 'drafts': {}}
+
+
+def test_clearing_saved_mexico_fee_still_requires_an_amount():
+    result = _fee_workspace_result(FEE_INPUT_FIXTURE + """
+const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B-1'};
+const fixture=makeFeeInput({amount:'',originalAmount:'100',currency:'MXN',originalCurrency:'MXN',feeKey:'import_tax'});
+await workspace.saveMaterialFeeInlineAmount(fixture.amountInput);
+console.log(JSON.stringify({error:fixture.errorElement.value}));
+""")
+    assert '费用金额不能为空' in result['error']
+
+
 def test_fee_workspace_enter_and_blur_share_inline_save_path() -> None:
     result = _fee_workspace_result(
         "const workspace=Object.create(Harness.prototype);const handlers={};"

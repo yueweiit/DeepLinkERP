@@ -8,6 +8,28 @@ from overseas_costing.services import cost_preview_service
 from overseas_costing.services.cost_preview_service import preview_comprehensive_cost_data
 
 
+def test_express_default_zero_fees_count_as_estimates_without_fx_or_physical_values():
+    from overseas_costing.services.fee_service import build_default_fee_templates
+    fees = build_default_fee_templates('EXPRESS')
+    items = _items()
+    for row in items:
+        row.update(gross_weight_kg=0, volume_m3=0, chargeable_weight_kg=0)
+    before = deepcopy((items, fees))
+    result = preview_comprehensive_cost_data(items, fees, {})
+    assert {fee['fee_key'] for fee in result['included_fees']} == {'express_surcharge', 'destination_delivery'}
+    assert all(fee['amount_status'] == 'ESTIMATED' and fee['amount_rmb'] == '0.00' for fee in result['included_fees'])
+    assert {fee['fee_key'] for fee in result['excluded_fees']} == {'international_express_fee', 'customs_clearance_fee', 'import_tax'}
+    assert result['summary']['total_cost_rmb'] == '200.00'
+    assert result['summary']['estimated_fee_count'] == 2
+    assert result['summary']['is_complete'] is False
+    assert (items, fees) == before
+    delivery = next(fee for fee in fees if fee['logical_fee_key'] == 'destination_delivery')
+    delivery.update(amount='100', amount_status='ACTUAL')
+    result = preview_comprehensive_cost_data(items, fees, {})
+    blocked = next(fee for fee in result['excluded_fees'] if fee['fee_key'] == 'destination_delivery')
+    assert blocked['reason_code'] == 'FX_RATE_MISSING'
+
+
 def test_saved_fees_from_reported_case_are_all_counted_without_packing_data():
     from overseas_costing.services.fee_service import build_default_fee_templates
 

@@ -315,6 +315,8 @@
     const preview = this.materialFeeState?.preview || {};
     const inclusionLabel = draft ? "修改待保存" : (preview.included_fees || []).some((row) => row.fee_key === feeKey) ? "已计入试算" : (preview.excluded_fees || []).some((row) => row.fee_key === feeKey) ? "未计入 · 见试算区提示" : "";
     const missingSavedAmount = amountStatus === "MISSING" && amount !== "";
+    const defaultZero = !draft && fee.virtual && fee.is_default_zero && amountStatus === "ESTIMATED";
+    const mexicoEntry = fee.entry_responsibility === "MEXICO";
     const forceActual = Boolean(draft?.forceActual || missingSavedAmount);
     const inlineError = String(draft?.error || "");
     const errorId = this.materialFeeErrorId(feeKey);
@@ -322,14 +324,14 @@
     const evidence = fee.evidence || [];
     return `
       <tr class="${fee.legacy_unmapped || fee.requires_review ? "is-review" : ""}">
-        <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "--")}</strong><small>${fee.virtual ? "默认项 · 未入库" : fee.legacy_unmapped ? "历史费用 · 请核对" : "已保存"}</small></td>
+        <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "--")}</strong><small>${fee.virtual ? "默认项 · 未入库" : fee.legacy_unmapped ? "历史费用 · 请核对" : "已保存"}</small>${mexicoEntry ? "<small>由墨西哥同事补充</small>" : ""}</td>
         <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span>${inclusionLabel ? `<small>${this.escape(inclusionLabel)}</small>` : ""}</td>
         <td class="ocw-mf-fee-amount-cell ${inlineError ? "is-save-error" : ""}" ${inlineError ? `title="${this.escape(inlineError)}"` : ""}>
           <div class="ocw-mf-fee-inline-fields">
             <select data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(this.normalizeMaterialFeeCurrency(fee.currency || "RMB"))}" aria-label="${this.escape(feeLabel)}币种" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}">${supportedCurrency ? "" : `<option value="" selected disabled>请选择币种（原 ${this.escape(currency || "未设置")}）</option>`}${currencyOptions.map((option) => `<option value="${option.value}" ${option.value === currency ? "selected" : ""}>${option.label}</option>`).join("")}</select>
             <input data-mf-fee-input="amount" data-mf-fee-amount="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.amount ?? "")}" value="${this.escape(amount)}" ${forceActual ? 'data-mf-force-actual="1"' : ""} inputmode="decimal" aria-label="${this.escape(feeLabel)}原币金额" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />
           </div>
-          <small data-mf-fee-amount-hint="1">${missingSavedAmount ? "尚未计入 · 按 Enter 或离开后确认为实际" : "Enter 或失焦自动保存为实际"}</small>
+          <small data-mf-fee-amount-hint="1">${defaultZero ? "默认暂估 0，待墨西哥确认" : missingSavedAmount ? "尚未计入 · 按 Enter 或离开后确认为实际" : "Enter 或失焦自动保存为实际"}</small>
           <small id="${this.escape(errorId)}" class="ocw-mf-fee-inline-error-text ${inlineError ? "is-visible" : ""}" data-mf-fee-error="1">${this.escape(inlineError)}</small>
         </td>
         <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidence.length ? `${evidence.length} 份已关联` : "可上传或关联已有资料"}</small></td>
@@ -769,16 +771,17 @@
     const originalAmount = String($amount.attr("data-original-value") ?? "").trim();
     const originalCurrency = String($currency.attr("data-original-value") ?? "").trim().toUpperCase();
     const forceActual = Boolean(draft?.forceActual);
+    if (!forceActual && amount === originalAmount && currency === originalCurrency) {
+      this.setMaterialFeeInlineError($cell, feeKey, "");
+      delete this.ensureMaterialFeeState().feeDrafts?.[feeKey];
+      return;
+    }
     const validationError = this.validateMaterialFeeInlineDraft(draft);
     if (validationError) {
       this.setMaterialFeeInlineError($cell, feeKey, validationError);
       return;
     }
     this.setMaterialFeeInlineError($cell, feeKey, "");
-    if (!forceActual && amount === originalAmount && currency === originalCurrency) {
-      delete this.ensureMaterialFeeState().feeDrafts?.[feeKey];
-      return;
-    }
     if (!this.findMaterialFee(feeKey)) return;
     const batchName = String(this.detailState.batchName || "");
     const versionName = this.detailState.versionName;
