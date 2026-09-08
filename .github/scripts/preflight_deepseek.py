@@ -47,17 +47,14 @@ def _vision_request_payload(model: str) -> bytes:
         {
             "model": model,
             "messages": [
-                {"role": "system", "content": "Return one JSON object and do not call tools."},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Confirm that an image was received as JSON."},
+                        {"type": "text", "text": "What is in this image?"},
                         {"type": "image_url", "image_url": {"url": VISION_PIXEL}},
                     ],
                 },
             ],
-            "max_tokens": 128,
-            "temperature": 0,
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -72,6 +69,17 @@ def _call(base_url: str, api_key: str, body: bytes) -> dict:
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _http_error_detail(error: urllib.error.HTTPError) -> str:
+    try:
+        payload = json.loads(error.read().decode("utf-8", errors="replace"))
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(detail, dict):
+            return str(detail.get("message") or detail.get("code") or detail.get("type") or "")[:300]
+    except (OSError, TypeError, ValueError):
+        return ""
+    return ""
 
 
 def main() -> None:
@@ -96,7 +104,11 @@ def main() -> None:
     try:
         vision_result = _call(base_url, api_key, _vision_request_payload(vision_model))
     except urllib.error.HTTPError as error:
-        raise SystemExit(f"DeepSeek vision preflight failed with HTTP {error.code}") from error
+        detail = _http_error_detail(error)
+        raise SystemExit(
+            f"DeepSeek vision preflight failed with HTTP {error.code}"
+            + (f": {detail}" if detail else "")
+        ) from error
     except (OSError, ValueError) as error:
         raise SystemExit(f"DeepSeek vision preflight failed: {type(error).__name__}") from error
     vision_content = ((vision_result.get("choices") or [{}])[0].get("message") or {}).get("content")

@@ -1567,11 +1567,11 @@ def _call_vision_style_descriptions(documents: list[dict]) -> dict:
         response = allocation_service._call_chat_completions(
             config,
             [
-                {"role": "system", "content": "只做商品外观描述并返回 JSON，不调用工具。"},
                 {"role": "user", "content": content},
             ],
             response_json=False,
             disable_thinking=False,
+            temperature=None,
         )
         parsed = allocation_service._extract_json_object(response)
         allowed = {

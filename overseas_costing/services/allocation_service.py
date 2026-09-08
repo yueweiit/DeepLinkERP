@@ -250,12 +250,14 @@ def _call_chat_completions(
     *,
     response_json: bool = True,
     disable_thinking: bool = True,
+    temperature: float | None = 0.1,
 ) -> str:
     payload = {
         "model": config["model"],
-        "temperature": 0.1,
         "messages": messages,
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
     if response_json:
         payload["response_format"] = {"type": "json_object"}
     if disable_thinking and "deepseek" in str(config.get("base_url") or "").lower():
