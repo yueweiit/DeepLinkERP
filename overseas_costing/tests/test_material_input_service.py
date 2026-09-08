@@ -205,8 +205,8 @@ def test_material_requirements_mark_only_active_contextual_missing_cells() -> No
         ],
     )
 
-    assert result["missing_cell_count"] == 1
-    assert result["rows"]["A"]["missing_fields"] == ["volume_m3"]
+    assert result["missing_cell_count"] == 0
+    assert result["rows"]["A"]["missing_fields"] == []
     assert result["rows"]["B"]["missing_fields"] == []
     assert all("project_collection" not in row["missing_fields"] for row in result["rows"].values())
 
@@ -215,7 +215,7 @@ def test_material_requirements_respect_fee_item_scope() -> None:
     result = analyze_material_requirements(
         [
             {"name": "ITEM-1", "stable_line_key": "A", "quantity": 1, "purchase_uom": "件", "goods_value": 10},
-            {"name": "ITEM-2", "stable_line_key": "B", "quantity": 1, "purchase_uom": "件", "goods_value": 10},
+            {"name": "ITEM-2", "stable_line_key": "B", "quantity": 1, "purchase_uom": "件", "goods_value": ""},
         ],
         [
             {
@@ -230,4 +230,4 @@ def test_material_requirements_respect_fee_item_scope() -> None:
     )
 
     assert result["rows"]["A"]["missing_fields"] == []
-    assert result["rows"]["B"]["missing_fields"] == ["gross_weight_kg"]
+    assert result["rows"]["B"]["missing_fields"] == ["goods_value", "gross_weight_kg"]

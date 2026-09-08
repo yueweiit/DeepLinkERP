@@ -190,19 +190,26 @@ def test_normalize_fee_payload_defaults_missing_currency_to_rmb() -> None:
     assert result["currency"] == "RMB"
 
 
-def test_normalize_fee_payload_uppercases_any_three_letter_currency() -> None:
+@pytest.mark.parametrize(("currency", "expected"), [("rmb", "RMB"), ("cny", "RMB"), ("usd", "USD"), ("mxn", "MXN")])
+def test_normalize_fee_payload_normalizes_supported_currencies(currency, expected) -> None:
     result = normalize_fee_payload(
         {
             "logical_fee_key": "FREIGHT",
             "amount": "100",
             "amount_status": "ACTUAL",
-            "currency": "eur",
+            "currency": currency,
             "scope_type": "ALL_ITEMS",
             "allocation_basis": "gross_weight",
         }
     )
 
-    assert result["currency"] == "EUR"
+    assert result["currency"] == expected
+
+
+@pytest.mark.parametrize("currency", ["EUR", "GBP", "JPY"])
+def test_normalize_fee_payload_rejects_unsupported_currencies(currency):
+    with pytest.raises(ValueError, match="币种"):
+        normalize_fee_payload({"logical_fee_key": "freight", "amount_status": "ACTUAL", "amount": "100", "currency": currency})
 
 
 @pytest.mark.parametrize("amount", ["NaN", "Infinity", "-Infinity"])
@@ -297,3 +304,42 @@ def test_fee_worklist_rejects_a_version_from_another_batch(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="不属于当前批次"):
         fee_service.get_fee_worklist("BATCH-1", "VERSION-OTHER")
+
+
+@pytest.mark.parametrize(("amount", "expected"), [("10", "BLOCKED"), ("0", "ALLOCATED")])
+def test_worklist_and_preview_agree_when_foreign_currency_has_no_fx(monkeypatch, amount, expected):
+    from overseas_costing.services import cost_preview_service
+
+    items = [{"name": "A", "stable_line_key": "A", "goods_value": "100", "quantity": "1", "purchase_uom": "件"}]
+    rules = build_default_fee_templates("SEA")
+    for rule in rules:
+        rule.update(amount_status="NOT_INCURRED", remark="未发生", name=rule["logical_fee_key"])
+    rules[0].update(amount_status="ACTUAL", amount=amount, currency="USD")
+
+    class FakeDb:
+        @staticmethod
+        def get_value(doctype, name, fieldname, **kwargs):
+            if isinstance(fieldname, list):
+                return {}
+            return {"batch": "B", "current_version": "V", "transport_mode": "SEA"}.get(fieldname)
+
+    class FakeFrappe:
+        db = FakeDb()
+
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            return {
+                "Overseas Cost Item": items,
+                "Overseas Cost Fee Evidence": [{"name": "E", "fee_rule": rules[0]["name"], "evidence_role": "freight_invoice", "validation_status": "VALID"}],
+            }.get(doctype, [])
+
+    monkeypatch.setattr(fee_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(cost_preview_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(fee_service, "_query_rules", lambda *args: rules)
+    worklist = fee_service.get_fee_worklist("B", "V")
+    preview = cost_preview_service.preview_comprehensive_cost("B", "V")
+    assert worklist["fees"][0]["allocation_state"] == expected
+    assert worklist["summary"]["all_requirements_satisfied"] is (amount == "0")
+    assert preview["summary"]["included_fee_count"] == (1 if amount == "0" else 0)
+    if amount != "0":
+        assert worklist["fees"][0]["todos"][0]["code"] == preview["excluded_fees"][0]["reason_code"] == "FX_RATE_MISSING"

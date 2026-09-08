@@ -13,22 +13,28 @@ TODO_DEFINITIONS = {
     "AMOUNT_REQUIRED": ("error", "enter_amount", "补充费用金额"),
     "ACTUAL_AMOUNT_REQUIRED": ("warning", "enter_actual", "补充实际费用"),
     "ALLOCATION_REQUIRED": ("error", "fix_allocation", "完成费用分摊"),
+    "FX_RATE_MISSING": ("error", "enter_fx_rate", "补充批次汇率后试算"),
+    "CURRENCY_UNSUPPORTED": ("error", "enter_currency", "请选择人民币、比索或美金"),
+    "FEE_AMOUNT_INVALID": ("error", "enter_amount", "请修正费用金额"),
     "EVIDENCE_REQUIRED": ("warning", "link_evidence", "关联最终凭证"),
     "EVIDENCE_VALIDATION_REQUIRED": ("warning", "validate_evidence", "校验最终凭证"),
 }
 
 
-def _decimal(value) -> Decimal:
+def _decimal(value) -> Decimal | None:
     if value in (None, ""):
-        return Decimal("0")
+        return None
     try:
-        return Decimal(str(value))
+        number = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
-        return Decimal("0")
+        return None
+    return number if number.is_finite() else None
 
 
 def _decimal_text(value) -> str:
     number = _decimal(value)
+    if number is None:
+        return ""
     if number == 0:
         return "0"
     return format(number.normalize(), "f")
@@ -140,7 +146,8 @@ def build_fee_status(
     elif amount_state == "ESTIMATED":
         todos.append(_todo("ACTUAL_AMOUNT_REQUIRED"))
     if amount_state in fee_allocation_service.COUNTED_AMOUNT_STATUSES and allocation_state != "ALLOCATED":
-        todos.append(_todo("ALLOCATION_REQUIRED"))
+        code = (allocation or {}).get("code")
+        todos.append(_todo(code if code in {"FX_RATE_MISSING", "CURRENCY_UNSUPPORTED", "FEE_AMOUNT_INVALID"} else "ALLOCATION_REQUIRED"))
     if evidence_state in {"MISSING", "INVALID"}:
         todos.append(_todo("EVIDENCE_REQUIRED"))
     elif evidence_state == "PENDING":
@@ -169,9 +176,9 @@ def summarize_fee_statuses(statuses: list[dict]) -> dict:
         codes = {str(todo.get("code") or "") for todo in status.get("todos") or []}
         currency = str(status.get("currency") or "").upper() or "UNKNOWN"
         amount = _decimal(status.get("amount"))
-        if "ALLOCATION_REQUIRED" in codes and status.get("amount_state") in {"ESTIMATED", "ACTUAL"}:
+        if amount is not None and codes.intersection({"ALLOCATION_REQUIRED", "FX_RATE_MISSING", "CURRENCY_UNSUPPORTED"}) and status.get("amount_state") in {"ESTIMATED", "ACTUAL"}:
             unallocated[currency] = unallocated.get(currency, Decimal("0")) + amount
-        if status.get("amount_state") == "ESTIMATED":
+        if amount is not None and status.get("amount_state") == "ESTIMATED":
             estimated[currency] = estimated.get(currency, Decimal("0")) + amount
         todo_count += len(status.get("todos") or [])
 
@@ -189,7 +196,7 @@ def summarize_fee_statuses(statuses: list[dict]) -> dict:
             1
             for status in statuses or []
             if any(
-                str(todo.get("code") or "") == "ALLOCATION_REQUIRED"
+                str(todo.get("code") or "") in {"ALLOCATION_REQUIRED", "FX_RATE_MISSING", "CURRENCY_UNSUPPORTED", "FEE_AMOUNT_INVALID"}
                 for todo in status.get("todos") or []
             )
         ),

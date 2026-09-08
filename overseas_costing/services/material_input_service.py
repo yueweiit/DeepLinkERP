@@ -157,7 +157,7 @@ def present_material_row(item: dict) -> dict:
 
 
 def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
-    """Derive red cells from current fee bases; project ownership is informational."""
+    """Derive red cells from effective system bases; project ownership is informational."""
 
     from overseas_costing.services import fee_allocation_service
 
@@ -185,7 +185,8 @@ def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
             continue
         if str(fee.get("scope_type") or "ALL_ITEMS").upper() == "DIRECT_ITEM":
             continue
-        basis = str(fee.get("allocation_basis") or fee.get("basis_field") or "goods_value")
+        eligible = fee_allocation_service.resolve_eligible_items(fee, presented)
+        basis = fee_allocation_service.select_allocation_basis(fee, eligible)["basis"]
         fieldname = basis_fields.get(basis)
         if not fieldname:
             continue

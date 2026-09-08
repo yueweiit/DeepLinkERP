@@ -20,6 +20,10 @@
     if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
     if (!Number.isFinite(this.materialFeeState.feeRequestId)) this.materialFeeState.feeRequestId = 0;
     this.materialFeeState.feeDrafts = this.materialFeeState.feeDrafts || {};
+    this.materialFeeState.pendingWrites = this.materialFeeState.pendingWrites || new Set();
+    this.materialFeeState.materialSaveErrors = this.materialFeeState.materialSaveErrors || {};
+    this.materialFeeState.materialDrafts = this.materialFeeState.materialDrafts || {};
+    if (!Number.isFinite(this.materialFeeState.inputRevision)) this.materialFeeState.inputRevision = 0;
     if (this.materialFeeState.focusedFeeInput === undefined) this.materialFeeState.focusedFeeInput = null;
     return this.materialFeeState;
   }
@@ -73,6 +77,13 @@
     this.$root.on("input", "[data-mf-fee-input]", (event) => {
       this.updateMaterialFeeDraftFromInput($(event.currentTarget));
     });
+    this.$root.on("change", "select[data-mf-fee-currency]", (event) => {
+      this.updateMaterialFeeDraftFromInput($(event.currentTarget));
+      this.saveMaterialFeeInlineAmount($(event.currentTarget)).catch((error) => this.showError(error));
+    });
+    this.$root.on("input", "[data-mf-cell-input]", (event) => {
+      this.updateMaterialDraftFromInput($(event.currentTarget));
+    });
     this.$root.on("keydown", "[data-mf-fee-input]", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
@@ -96,6 +107,11 @@
       this.saveMaterialFeeInlineAmount($input).catch((error) => this.showError(error));
     });
     this.$root.on("focus", "[data-mf-cell-input]", (event) => {
+      const $input = $(event.currentTarget);
+      this.ensureMaterialFeeState().focusedMaterialInput = {
+        itemName: $input.attr("data-item-name"),
+        fieldname: $input.attr("data-fieldname"),
+      };
       $(event.currentTarget).closest(".ocw-mf-cell").removeClass("is-save-error").attr("title", "");
     });
     this.$root.on("keydown", "[data-mf-cell-input]", (event) => {
@@ -104,6 +120,9 @@
       event.currentTarget.blur();
     });
     this.$root.on("blur", "[data-mf-cell-input]", (event) => {
+      const $input = $(event.currentTarget);
+      const state = this.ensureMaterialFeeState();
+      if (state.focusedMaterialInput?.itemName === $input.attr("data-item-name") && state.focusedMaterialInput?.fieldname === $input.attr("data-fieldname")) state.focusedMaterialInput = null;
       this.saveMaterialFeeCell($(event.currentTarget)).catch((error) => this.showError(error));
     });
     this.$root.on("paste", "[data-mf-cell-input]", (event) => {
@@ -174,7 +193,22 @@
       gross_weight: "毛重",
       volume: "体积",
       chargeable_weight: "计费重",
+      direct: "指定物料直接承担",
+      zero_amount: "金额为 0，无需分摊",
     }[String(value || "")] || String(value || "--");
+  }
+
+  materialFeeCurrencyOptions() {
+    return [
+      { value: "RMB", label: "人民币（RMB）" },
+      { value: "MXN", label: "比索（MXN）" },
+      { value: "USD", label: "美金（USD）" },
+    ];
+  }
+
+  normalizeMaterialFeeCurrency(value) {
+    const currency = String(value ?? "RMB").trim().toUpperCase();
+    return currency === "CNY" ? "RMB" : currency;
   }
 
   materialFeeAmountStatus(value) {
@@ -211,7 +245,6 @@
     const materialSummary = state.materials || {};
     const feeSummary = state.fees.summary || {};
     const evidencePending = Number(feeSummary.missing_evidence_fee_count || 0);
-    const previewSummary = state.preview.summary || {};
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
       <div class="ocw-mf-workspace">
@@ -228,27 +261,9 @@
           ${this.renderMaterialFeeMetric("凭证待补", evidencePending, evidencePending ? "warn" : "ok")}
           ${this.renderMaterialFeeMetric("暂估待核", feeSummary.estimated_fee_count || 0, Number(feeSummary.estimated_fee_count || 0) ? "warn" : "ok")}
         </div>
-        <section class="ocw-mf-section ocw-mf-fee-section">
-          <div class="ocw-mf-section-title"><div><span>01</span><h3>费用与凭证</h3><p>五类费用会按运输方式显示；只有修改并保存后才会入库。</p></div></div>
-          <div class="ocw-mf-fee-layout">
-            <div class="ocw-mf-fee-table-wrap">${this.renderMaterialFeeTable(state.fees.fees || state.fees.items || [])}</div>
-            <aside class="ocw-mf-preview-card">
-              <span>当前试算</span>
-              <strong>RMB ${this.escape(previewSummary.total_cost_rmb || "0.00")}</strong>
-              <small>${previewSummary.is_complete ? "已纳入的资料可完整试算" : `非完整成本 · ${Number(previewSummary.excluded_fee_count || 0)} 笔未计入`}</small>
-              <dl>
-                <div><dt>采购金额</dt><dd>${this.escape(previewSummary.purchase_goods_value_rmb || "0.00")}</dd></div>
-                <div><dt>直接费用</dt><dd>${this.escape(previewSummary.direct_fees_rmb || "0.00")}</dd></div>
-                <div><dt>分摊费用</dt><dd>${this.escape(previewSummary.allocated_fees_rmb || "0.00")}</dd></div>
-              </dl>
-              <button class="ocw-primary-btn" type="button" data-action="mf-preview-cost">预览综合单价</button>
-              <em>只读试算，不创建成本版本，不改变 ERP 状态。</em>
-            </aside>
-          </div>
-        </section>
         <section class="ocw-mf-section ocw-mf-material-section">
           <div class="ocw-mf-section-title ocw-mf-material-title">
-            <div><span>02</span><h3>物料与装箱数据</h3><p>采购事实保持只读；蓝色发货数量表示默认等于采购数量，红格可直接补录。</p></div>
+            <div><span>01</span><h3>物料与装箱数据</h3><p>采购事实保持只读；蓝色发货数量表示默认等于采购数量，红格可直接补录。</p></div>
             <div class="ocw-mf-material-actions">
               <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
               <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
@@ -258,8 +273,14 @@
           </div>
           ${this.renderMaterialFeeGrid()}
         </section>
-        ${this.renderMaterialFeeTodos()}
+        <section class="ocw-mf-section ocw-mf-fee-section">
+          <div class="ocw-mf-section-title"><div><span>02</span><h3>费用与凭证</h3><p>录入金额后自动保存；凭证可稍后补充，系统会在 SKU 试算时统一分摊。</p></div></div>
+          <div class="ocw-mf-fee-layout">
+            <div class="ocw-mf-fee-table-wrap">${this.renderMaterialFeeTable(state.fees.fees || state.fees.items || [])}</div>
+          </div>
+        </section>
         ${this.renderMaterialFeeCostTable()}
+        ${this.renderMaterialFeeTodos()}
       </div>
     `);
     this.restoreMaterialFeeInputFocus();
@@ -274,7 +295,7 @@
     if (!fees.length) return `<div class="ocw-detail-empty"><strong>暂无费用清单</strong></div>`;
     return `
       <table class="ocw-mf-fee-table">
-        <thead><tr><th>费用项目</th><th>状态</th><th>原币金额</th><th>分摊依据</th><th>凭证</th><th>操作</th></tr></thead>
+        <thead><tr><th>费用项目</th><th>状态</th><th>原币金额</th><th>凭证</th><th>操作</th></tr></thead>
         <tbody>${fees.map((fee) => this.renderMaterialFeeRow(fee)).join("")}</tbody>
       </table>
     `;
@@ -283,14 +304,16 @@
   renderMaterialFeeRow(fee) {
     const amountInfo = this.materialFeeAmountStatus(fee.amount_state || fee.amount_status);
     const evidenceInfo = this.materialFeeEvidenceLabel(fee.evidence_state);
-    const allocation = fee.allocation || {};
-    const allocationBlocked = ["ESTIMATED", "ACTUAL"].includes(String(fee.amount_state || fee.amount_status || "")) && allocation.status !== "ALLOCATED";
     const scopeLabel = String(fee.scope_type || "ALL_ITEMS") === "ALL_ITEMS" ? "全批物料" : String(fee.scope_type) === "DIRECT_ITEM" ? "指定单行" : "指定物料";
     const amountStatus = String(fee.amount_state || fee.amount_status || "MISSING").toUpperCase();
     const feeKey = String(fee.logical_fee_key || fee.fee_key || "");
     const draft = this.materialFeeState?.feeDrafts?.[feeKey] || null;
     const amount = draft ? draft.amount : (fee.amount ?? "");
-    const currency = draft ? draft.currency : String(fee.currency || "RMB");
+    const currency = this.normalizeMaterialFeeCurrency(draft ? draft.currency : fee.currency || "RMB");
+    const currencyOptions = this.materialFeeCurrencyOptions();
+    const supportedCurrency = currencyOptions.some((option) => option.value === currency);
+    const preview = this.materialFeeState?.preview || {};
+    const inclusionLabel = draft ? "修改待保存" : (preview.included_fees || []).some((row) => row.fee_key === feeKey) ? "已计入试算" : (preview.excluded_fees || []).some((row) => row.fee_key === feeKey) ? "未计入 · 见试算区提示" : "";
     const missingSavedAmount = amountStatus === "MISSING" && amount !== "";
     const forceActual = Boolean(draft?.forceActual || missingSavedAmount);
     const inlineError = String(draft?.error || "");
@@ -300,16 +323,15 @@
     return `
       <tr class="${fee.legacy_unmapped || fee.requires_review ? "is-review" : ""}">
         <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "--")}</strong><small>${fee.virtual ? "默认项 · 未入库" : fee.legacy_unmapped ? "历史费用 · 请核对" : "已保存"}</small></td>
-        <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span></td>
+        <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span>${inclusionLabel ? `<small>${this.escape(inclusionLabel)}</small>` : ""}</td>
         <td class="ocw-mf-fee-amount-cell ${inlineError ? "is-save-error" : ""}" ${inlineError ? `title="${this.escape(inlineError)}"` : ""}>
           <div class="ocw-mf-fee-inline-fields">
-            <input data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.currency || "RMB")}" value="${this.escape(currency)}" maxlength="3" pattern="[A-Za-z]{3}" autocomplete="off" spellcheck="false" aria-label="${this.escape(feeLabel)}币种" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />
+            <select data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(this.normalizeMaterialFeeCurrency(fee.currency || "RMB"))}" aria-label="${this.escape(feeLabel)}币种" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}">${supportedCurrency ? "" : `<option value="" selected disabled>请选择币种（原 ${this.escape(currency || "未设置")}）</option>`}${currencyOptions.map((option) => `<option value="${option.value}" ${option.value === currency ? "selected" : ""}>${option.label}</option>`).join("")}</select>
             <input data-mf-fee-input="amount" data-mf-fee-amount="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.amount ?? "")}" value="${this.escape(amount)}" ${forceActual ? 'data-mf-force-actual="1"' : ""} inputmode="decimal" aria-label="${this.escape(feeLabel)}原币金额" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />
           </div>
           <small data-mf-fee-amount-hint="1">${missingSavedAmount ? "尚未计入 · 按 Enter 或离开后确认为实际" : "Enter 或失焦自动保存为实际"}</small>
           <small id="${this.escape(errorId)}" class="ocw-mf-fee-inline-error-text ${inlineError ? "is-visible" : ""}" data-mf-fee-error="1">${this.escape(inlineError)}</small>
         </td>
-        <td><span class="${allocationBlocked ? "ocw-mf-inline-error" : ""}">${this.escape(this.materialFeeBasisLabel(fee.allocation_basis || fee.basis_field))}</span><small>${allocationBlocked ? "暂未计入试算 · 当前依据缺失，未自动改规则" : scopeLabel}</small></td>
         <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidence.length ? `${evidence.length} 份已关联` : "可上传或关联已有资料"}</small></td>
         <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">更多设置</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联凭证</button></div>
           <details class="ocw-mf-row-details"><summary>范围与凭证详情</summary><div><span>适用：${this.escape(scopeLabel)}</span>${evidence.length ? evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · 终核状态：${this.escape(this.materialFeeEvidenceFinalLabel(row.validation_status))} <button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="VALID">确认有效</button><button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="INVALID">标记无效</button></span>`).join("") : "<span>暂无关联凭证</span>"}</div></details>
@@ -379,14 +401,17 @@
     const shippingField = ["actual_shipped_qty", "shipped_uom"].includes(column.field);
     if (column.field === "actual_shipped_qty") value = item.effective_shipping_quantity;
     if (column.field === "shipped_uom") value = item.effective_shipping_uom;
+    const originalValue = value;
+    const draft = this.materialFeeState?.materialDrafts?.[`${item.name}:${column.field}`];
+    if (draft && !column.readonly) value = draft.value;
     const isMissing = missingFields.has(column.field);
     const isDefault = shippingField && item.effective_shipping?.is_default;
-    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : ""].filter(Boolean).join(" ");
-    const reason = (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
+    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", draft?.error ? "is-save-error" : ""].filter(Boolean).join(" ");
+    const reason = draft?.error || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
       return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><span>${this.escape(this.formatValue(value || "--"))}</span></td>`;
     }
-    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(value ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />${isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}</td>`;
+    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}"><input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />${isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}</td>`;
   }
 
   findMaterialFeeItem(itemName) {
@@ -413,18 +438,54 @@
   }
 
   async saveMaterialFeeCell($input) {
-    if (!$input.length || $input.data("saving")) return;
-    const original = String($input.attr("data-original-value") ?? "");
-    const value = String($input.val() ?? "").trim();
-    if (value === original) return;
+    return this.trackMaterialFeeWrite(() => this.persistMaterialFeeCell($input));
+  }
+
+  updateMaterialDraftFromInput($input) {
+    const state = this.ensureMaterialFeeState();
     const itemName = $input.attr("data-item-name");
     const fieldname = $input.attr("data-fieldname");
-    const item = this.findMaterialFeeItem(itemName);
-    if (!item || !(await this.ensureEditSession())) return;
+    const key = `${itemName}:${fieldname}`;
+    const value = String($input.val() ?? "").trim();
+    const original = String($input.attr("data-original-value") ?? "").trim();
+    if (state.materialDrafts[key]?.value !== value) state.inputRevision += 1;
+    if (value === original) {
+      delete state.materialDrafts[key];
+      delete state.materialSaveErrors[key];
+    } else {
+      const previous = state.materialDrafts[key];
+      state.materialDrafts[key] = { itemName, fieldname, value, error: previous?.value === value ? previous.error : "" };
+    }
+  }
+
+  async persistMaterialFeeCell($input) {
+    if (!$input.length || $input.data("saving")) return;
+    this.updateMaterialDraftFromInput($input);
+    const original = String($input.attr("data-original-value") ?? "");
+    const value = String($input.val() ?? "").trim();
+    const itemName = $input.attr("data-item-name");
+    const fieldname = $input.attr("data-fieldname");
+    const saveState = this.ensureMaterialFeeState();
+    const errorKey = `${itemName}:${fieldname}`;
     const $cell = $input.closest(".ocw-mf-cell");
+    if (value === original) {
+      delete saveState.materialSaveErrors[errorKey];
+      $cell.removeClass("is-save-error").attr("title", "");
+      return;
+    }
+    const batchName = this.detailState.batchName;
+    const versionName = this.detailState.versionName;
+    const isCurrent = () => this.materialFeeState === saveState
+      && this.detailState.batchName === batchName
+      && this.detailState.versionName === versionName
+      && this.detailState.tab === "documents";
+    const item = this.findMaterialFeeItem(itemName);
     $input.data("saving", true).prop("disabled", true);
     $cell.addClass("is-saving").removeClass("is-save-error");
     try {
+      if (!item) throw new Error("物料行已变更，请刷新后重试。");
+      if (!(await this.ensureMaterialFeeEditSession())) throw new Error("未能获取编辑权，物料未保存。");
+      if (!isCurrent()) return;
       let result;
       if (["actual_shipped_qty", "shipped_uom"].includes(fieldname)) {
         const editingQuantity = fieldname === "actual_shipped_qty";
@@ -453,11 +514,17 @@
         });
       }
       if (!result || !result.ok) throw new Error(result?.message || "保存失败");
+      if (!isCurrent()) return;
+      delete saveState.materialSaveErrors[errorKey];
+      if (saveState.materialDrafts[errorKey]?.value === value) delete saveState.materialDrafts[errorKey];
       this.updateMaterialFeeExpectedModified(result);
       this.detailState.dirty = false;
       frappe.show_alert({ message: "已保存", indicator: "green" });
       await this.loadMaterialFeeWorkspace({ quiet: true });
     } catch (error) {
+      if (!isCurrent()) return;
+      saveState.materialSaveErrors[errorKey] = this.normalizeErrorMessage(error);
+      if (saveState.materialDrafts[errorKey]) saveState.materialDrafts[errorKey].error = this.normalizeErrorMessage(error);
       $input.data("saving", false).prop("disabled", false);
       $cell.removeClass("is-saving").addClass("is-save-error").attr("title", `${this.normalizeErrorMessage(error)}；当前输入已保留，请重试。`);
       frappe.show_alert({ message: "保存失败，当前值已保留", indicator: "red" });
@@ -533,12 +600,15 @@
   restoreMaterialFeeInputFocus() {
     const state = this.ensureMaterialFeeState();
     const focused = state.focusedFeeInput;
-    if (!focused?.feeKey || !focused?.field) return;
+    const material = state.focusedMaterialInput;
+    if ((!focused?.feeKey || !focused?.field) && !material?.itemName) return;
     let target = null;
-    this.$root.find("[data-mf-fee-input]").each((_, element) => {
+    this.$root.find(material?.itemName ? "[data-mf-cell-input]" : "[data-mf-fee-input]").each((_, element) => {
       if (target) return;
       const $element = $(element);
-      if (
+      if (material?.itemName) {
+        if ($element.attr("data-item-name") === material.itemName && $element.attr("data-fieldname") === material.fieldname) target = element;
+      } else if (
         String($element.attr("data-fee-key") || "") === String(focused.feeKey)
         && String($element.attr("data-mf-fee-input") || "") === String(focused.field)
       ) target = element;
@@ -595,7 +665,7 @@
     state.feeDrafts = state.feeDrafts || {};
     const previous = state.feeDrafts[feeKey] || {};
     const rawCurrency = String($currency.val() ?? "");
-    const currency = rawCurrency.toUpperCase();
+    const currency = this.normalizeMaterialFeeCurrency(rawCurrency);
     if (currency !== rawCurrency) $currency.val(currency);
     const draft = {
       ...previous,
@@ -605,6 +675,7 @@
       touched: true,
     };
     state.feeDrafts[feeKey] = draft;
+    if (previous.amount !== draft.amount || previous.currency !== draft.currency) state.inputRevision += 1;
     if (draft.error) {
       const validationError = this.validateMaterialFeeInlineDraft(draft);
       this.setMaterialFeeInlineError($cell, feeKey, validationError);
@@ -620,7 +691,7 @@
     if (amount < 0) return "费用金额不能小于 0。";
     const currency = String(draft?.currency ?? "");
     if (!currency) return "费用币种不能为空。";
-    if (!/^[A-Z]{3}$/.test(currency)) return "费用币种必须是三位英文字母代码。";
+    if (!this.materialFeeCurrencyOptions().some((option) => option.value === currency)) return "费用币种只能选择人民币、比索或美金。";
     return "";
   }
 
@@ -661,6 +732,21 @@
   }
 
   async saveMaterialFeeInlineAmount($input) {
+    return this.trackMaterialFeeWrite(() => this.persistMaterialFeeInlineAmount($input));
+  }
+
+  async trackMaterialFeeWrite(operation) {
+    const state = this.ensureMaterialFeeState();
+    const pending = operation();
+    state.pendingWrites.add(pending);
+    try {
+      return await pending;
+    } finally {
+      state.pendingWrites.delete(pending);
+    }
+  }
+
+  async persistMaterialFeeInlineAmount($input) {
     if (!$input.length) return;
     const $cell = $input.closest(".ocw-mf-fee-amount-cell");
     if ($cell.data("saving")) return;
@@ -847,14 +933,16 @@
     try { selectedKeys = JSON.parse(fee.scope_value_json || "[]"); } catch (_error) { selectedKeys = []; }
     const materials = this.ensureMaterialFeeState().materials?.items || [];
     const otherFees = (this.ensureMaterialFeeState().fees?.fees || []).filter((row) => row.logical_fee_key !== fee.logical_fee_key);
+    const currency = this.normalizeMaterialFeeCurrency(candidate?.currency || fee.currency || "RMB");
+    const currencies = this.materialFeeCurrencyOptions();
+    const supportedCurrency = currencies.some((option) => option.value === currency);
     const dialog = new frappe.ui.Dialog({
       title: `编辑费用：${fee.expense_category || fee.logical_fee_key}`,
       fields: [
         ...(candidate ? [{ fieldtype: "HTML", fieldname: "candidate_note", options: `<div class="ocw-mf-dialog-note">已带入凭证识别候选 ${this.escape(candidate.currency || "")} ${this.escape(candidate.amount || "")}。请仍由你确认金额状态；系统不会自动认定为实际费用。</div>` }] : []),
         { fieldtype: "Select", fieldname: "amount_status", label: "金额状态", reqd: 1, options: "MISSING\nESTIMATED\nACTUAL\nNOT_INCURRED\nINCLUDED", default: fee.amount_state || fee.amount_status || "MISSING" },
-        { fieldtype: "Data", fieldname: "amount", label: "原币金额", default: candidate?.amount || fee.amount || "" },
-        { fieldtype: "Data", fieldname: "currency", label: "币种", reqd: 1, default: candidate?.currency || fee.currency || "RMB" },
-        { fieldtype: "Select", fieldname: "allocation_basis", label: "分摊依据", reqd: 1, options: "goods_value\ngross_weight\nvolume\nchargeable_weight", default: fee.allocation_basis || fee.basis_field || "goods_value" },
+        { fieldtype: "Data", fieldname: "amount", label: "原币金额", default: candidate?.amount ?? fee.amount ?? "" },
+        { fieldtype: "Select", fieldname: "currency", label: "币种", reqd: 1, options: supportedCurrency ? currencies : [{ value: "", label: `请选择币种（原 ${currency}）` }, ...currencies], default: supportedCurrency ? currency : "" },
         { fieldtype: "Select", fieldname: "scope_type", label: "适用范围", reqd: 1, options: "ALL_ITEMS\nITEMS\nDIRECT_ITEM", default: fee.scope_type || "ALL_ITEMS" },
         { fieldtype: "HTML", fieldname: "scope_items", options: `<div class="ocw-mf-scope-picker"><strong>限定到指定物料时勾选</strong>${materials.map((item) => `<label><input type="checkbox" data-mf-scope-key="${this.escape(item.stable_line_key || "")}" ${selectedKeys.includes(item.stable_line_key) ? "checked" : ""}/><span>${this.escape(item.material_code || "--")} · ${this.escape(item.product_name || "--")} · 行 ${this.escape(item.row_no || "--")}</span></label>`).join("")}</div>` },
         { fieldtype: "Select", fieldname: "included_in_fee_key", label: "已包含于", options: ["", "purchase_goods_value", ...otherFees.map((row) => row.logical_fee_key)].join("\n"), default: fee.included_in_fee_key || "" },
@@ -878,7 +966,7 @@
       amount_status: values.amount_status,
       amount: values.amount,
       currency: values.currency,
-      allocation_basis: values.allocation_basis,
+      allocation_basis: fee.allocation_basis || fee.basis_field || "goods_value",
       scope_type: values.scope_type,
       scope_value_json: values.scope_type === "ALL_ITEMS" ? [] : scopeKeys,
       required_evidence_role: fee.required_evidence_role || "",
@@ -1015,14 +1103,89 @@
     await this.loadMaterialFeeWorkspace({ quiet: true });
   }
 
+  async flushMaterialFeeInputs(state) {
+    while (state.pendingWrites.size) await Promise.all([...state.pendingWrites]);
+    if (this.materialFeeState !== state || this.detailState.tab !== "documents") return false;
+    for (const key of Object.keys(state.materialDrafts)) {
+      const draft = state.materialDrafts[key];
+      if (draft.error) throw new Error(`请先处理物料输入：${draft.error}`);
+      let input = null;
+      this.$root.find("[data-mf-cell-input]").each((_, element) => {
+        if ($(element).attr("data-item-name") === draft.itemName && $(element).attr("data-fieldname") === draft.fieldname) input = element;
+      });
+      if (!input) throw new Error("有物料修改尚未保存，请返回对应物料行保存后再试算。");
+      await this.saveMaterialFeeCell($(input));
+      if (this.materialFeeState !== state || this.detailState.tab !== "documents") return false;
+      if (state.materialDrafts[key]) throw new Error(state.materialDrafts[key].error || "物料尚未保存，请重试后再试算。");
+    }
+    for (const feeKey of Object.keys(state.feeDrafts)) {
+      const draft = state.feeDrafts[feeKey];
+      const error = draft.error || this.validateMaterialFeeInlineDraft(draft);
+      if (error) throw new Error(`请先处理费用输入：${error}`);
+      let input = null;
+      this.$root.find("[data-mf-fee-amount]").each((_, element) => {
+        if (String($(element).attr("data-fee-key")) === feeKey) input = element;
+      });
+      if (!input) throw new Error("有费用修改尚未保存，请返回费用区保存后再试算。");
+      await this.saveMaterialFeeInlineAmount($(input));
+      if (this.materialFeeState !== state || this.detailState.tab !== "documents") return false;
+      if (state.feeDrafts[feeKey]) throw new Error(state.feeDrafts[feeKey].error || "费用尚未保存，请重试后再试算。");
+    }
+    if (Object.keys(state.materialSaveErrors).length) throw new Error("物料数据保存失败，请修正红色输入并保存后再试算。");
+    if (state.pendingWrites.size || Object.keys(state.materialDrafts).length || Object.keys(state.feeDrafts).length) {
+      throw new Error("试算准备期间有新的修改尚未保存，请完成录入后再次试算。");
+    }
+    return true;
+  }
+
   async refreshMaterialFeeCostPreview(scrollToResult = false) {
     const state = this.ensureMaterialFeeState();
-    state.preview = await this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
-      batch_name: this.detailState.batchName,
-      version_name: this.detailState.versionName || null,
-    });
-    this.renderMaterialFeeWorkspace();
-    if (scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (state.previewRunning) return false;
+    const batchName = this.detailState.batchName;
+    const versionName = this.detailState.versionName;
+    const isCurrent = () => this.materialFeeState === state
+      && this.detailState.batchName === batchName
+      && this.detailState.versionName === versionName
+      && this.detailState.tab === "documents";
+    state.previewRunning = true;
+    this.$root.find("[data-action='mf-preview-cost']").prop("disabled", true).text("计算中…");
+    try {
+      if (!(await this.flushMaterialFeeInputs(state)) || !isCurrent()) return false;
+      const requestId = state.requestId;
+      const feeRequestId = state.feeRequestId;
+      const inputRevision = state.inputRevision;
+      const preview = await this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
+        batch_name: batchName,
+        version_name: versionName || null,
+      });
+      if (!isCurrent() || state.requestId !== requestId || state.feeRequestId !== feeRequestId || state.inputRevision !== inputRevision) return false;
+      if (!preview?.ok) throw new Error(preview?.message || "试算失败，请稍后重试。");
+      state.preview = preview;
+      this.renderMaterialFeeWorkspace();
+      if (scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      frappe.show_alert({ message: "试算完成", indicator: "green" });
+      return true;
+    } finally {
+      state.previewRunning = false;
+      if (isCurrent()) this.$root.find("[data-action='mf-preview-cost']").prop("disabled", false).text("开始试算");
+    }
+  }
+
+  materialFeeExclusionReason(fee) {
+    return {
+      AMOUNT_MISSING: "金额尚未填写",
+      FX_RATE_MISSING: "缺少该币种的批次汇率，请先补充汇率",
+      CURRENCY_UNSUPPORTED: "币种暂不支持，请选择人民币、比索或美金",
+      FEE_AMOUNT_INVALID: "金额无效，请填写不小于 0 的有效金额",
+      AMOUNT_STATUS_INVALID: "金额状态无效，请重新确认",
+      ALLOCATION_BASIS_INCOMPLETE: "体积或重量资料不完整，采购货值也未齐全，请补充资料后重试",
+      ALLOCATION_DENOMINATOR_ZERO: "体积或重量尚未提供，采购货值也未齐全，请补充资料后重试",
+      FEE_SCOPE_EMPTY: "没有可分摊的物料，请检查物料与适用范围",
+      DIRECT_ITEM_SCOPE_INVALID: "直接费用需要指定一条有效物料",
+      FEE_SCOPE_INVALID: "费用适用范围无效，请重新选择",
+      STABLE_ITEM_KEY_REQUIRED: "物料标识缺失，请先核对物料数据",
+      STABLE_ITEM_KEY_DUPLICATED: "物料标识重复，请先核对物料数据",
+    }[fee.reason_code] || "费用资料尚不完整，请核对后重试";
   }
 
   renderMaterialFeeTodos() {
@@ -1038,9 +1201,31 @@
   }
 
   renderMaterialFeeCostTable() {
-    const preview = this.ensureMaterialFeeState().preview || {};
+    const state = this.ensureMaterialFeeState();
+    const preview = state.preview || {};
+    const summary = preview.summary || {};
     const items = preview.items || [];
-    return `<section class="ocw-mf-section ocw-mf-cost-section"><div class="ocw-mf-section-title"><div><span>03</span><h3>SKU 综合单价试算</h3><p>只读预览；未计入费用会单独列出，不会把未知金额当作 0。</p></div><span class="ocw-mf-completeness ${preview.summary?.is_complete ? "is-complete" : "is-partial"}">${preview.summary?.is_complete ? "完整成本" : "非完整成本"}</span></div><div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>采购货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>${preview.excluded_fees?.length ? `<div class="ocw-mf-excluded"><strong>未计入费用</strong>${preview.excluded_fees.map((fee) => `<span>${this.escape(fee.expense_category || fee.fee_key || "--")} · ${this.escape(fee.reason_code || "--")}</span>`).join("")}</div>` : ""}</section>`;
+    const hasUnsaved = Object.keys(state.feeDrafts).length || Object.keys(state.materialDrafts).length || Object.keys(state.materialSaveErrors).length;
+    const allocationNotes = (preview.included_fees || []).map((fee) => {
+      const method = this.materialFeeBasisLabel(fee.allocation_basis);
+      const explanation = fee.fallback_reason ? `${this.materialFeeBasisLabel(fee.preferred_basis)}数据不完整，已自动按采购货值分摊` : method;
+      return `<li><strong>${this.escape(fee.expense_category || fee.fee_key || "费用")}</strong><span>${this.escape(explanation)}</span><em>RMB ${this.escape(fee.amount_rmb || "0.00")}</em></li>`;
+    }).join("");
+    return `<section class="ocw-mf-section ocw-mf-cost-section">
+      <div class="ocw-mf-section-title">
+        <div><span>03</span><h3>SKU 综合单价试算</h3><p>系统按费用类型自动分摊，汇总为人民币；未计入费用会单独说明。</p></div>
+        <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${summary.is_complete ? "is-complete" : "is-partial"}">${summary.is_complete ? "完整成本" : "非完整成本"}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
+      </div>
+      <div class="ocw-mf-cost-summary">
+        <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
+        <dl><div><dt>采购金额</dt><dd>${this.escape(summary.purchase_goods_value_rmb || "0.00")}</dd></div><div><dt>直接费用</dt><dd>${this.escape(summary.direct_fees_rmb || "0.00")}</dd></div><div><dt>分摊费用</dt><dd>${this.escape(summary.allocated_fees_rmb || "0.00")}</dd></div><div><dt>已计入费用</dt><dd>${Number(summary.included_fee_count || 0)} 笔</dd></div></dl>
+      </div>
+      <p class="ocw-mf-trial-note">试算不生成正式成本版本；凭证待补单独保留，已知金额可先参与计算。${summary.estimated_fee_count ? `含 ${Number(summary.estimated_fee_count)} 笔暂估费用，需后续核实。` : ""}</p>
+      <div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>采购货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>
+      ${preview.excluded_fees?.length ? `<div class="ocw-mf-excluded"><strong>未计入费用</strong>${preview.excluded_fees.map((fee) => `<span>${this.escape(fee.expense_category || fee.fee_key || "费用")} · ${this.escape(this.materialFeeExclusionReason(fee))}</span>`).join("")}</div>` : ""}
+      ${(preview.incomplete_reasons || []).filter((reason) => reason.item_key || reason.reason_code === "MATERIAL_ITEMS_REQUIRED").length ? `<div class="ocw-mf-excluded"><strong>物料待补</strong>${preview.incomplete_reasons.filter((reason) => reason.item_key || reason.reason_code === "MATERIAL_ITEMS_REQUIRED").map((reason) => `<span>${this.escape(items.find((item) => item.stable_line_key === reason.item_key)?.material_code || "")} ${this.escape(reason.message || "请补充物料资料")}</span>`).join("")}</div>` : ""}
+      <details class="ocw-mf-allocation-notes"><summary>查看系统分摊说明</summary><p>海运与港杂优先按体积，空运与快递按计费重，配送按毛重，清关与税费按采购货值。适用物料的体积或重量不齐全时，整笔费用自动按完整的采购货值分摊。</p><ul>${allocationNotes || "<li>本次暂无已计入费用。</li>"}</ul></details>
+    </section>`;
   }
 
   openMaterialFeeSourcesDialog() {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from copy import deepcopy
 from datetime import datetime
@@ -354,8 +353,10 @@ def normalize_fee_payload(payload) -> dict:
         if "currency" not in raw
         else str(raw.get("currency") if raw.get("currency") is not None else "").strip().upper()
     )
-    if not re.fullmatch(r"[A-Z]{3}", currency):
-        raise ValueError("币种必须是三位英文字母代码。")
+    if currency == "CNY":
+        currency = "RMB"
+    if currency not in {"RMB", "MXN", "USD"}:
+        raise ValueError("费用币种只能选择人民币（RMB）、墨西哥比索（MXN）或美金（USD）。")
 
     normalized = {key: raw[key] for key in FEE_FIELDS if key in raw}
     normalized.update(
@@ -784,8 +785,10 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
         "fx_rmb_to_mxn": version_row.get("fx_rmb_to_mxn"),
     }
     statuses = []
+    from overseas_costing.services.cost_preview_service import allocate_fee_in_rmb
+
     for rule in rules:
-        allocation = fee_allocation_service.allocate_fee(rule, items)
+        allocation = allocate_fee_in_rmb(rule, items, fx_context)
         current_hash = fee_status_service.build_fee_input_hash(rule, items=items, fx_context=fx_context)
         evidence = evidence_by_rule.get(str(rule.get("name") or ""), [])
         status = fee_status_service.build_fee_status(

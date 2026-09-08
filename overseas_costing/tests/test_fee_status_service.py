@@ -146,3 +146,12 @@ def test_fee_input_hash_is_stable_and_changes_with_cost_inputs() -> None:
 
     assert first == same
     assert changed != first
+
+
+def test_invalid_historical_amounts_do_not_crash_or_pollute_summary():
+    from overseas_costing.services.fee_allocation_service import allocate_fee
+    for amount in ["NaN", "Infinity", "sNaN"]:
+        fee = {"logical_fee_key": "bad", "amount_status": "ACTUAL", "currency": "RMB", "amount": amount}
+        status = build_fee_status(fee=fee, allocation=allocate_fee(fee, []), evidence=[])
+        assert any(todo["code"] == "FEE_AMOUNT_INVALID" for todo in status["todos"])
+        assert summarize_fee_statuses([status])["unallocated_by_currency"] == {}
