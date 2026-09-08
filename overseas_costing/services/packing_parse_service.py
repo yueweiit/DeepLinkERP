@@ -6,6 +6,8 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from overseas_costing.services.packing_grid import range_contains, range_coordinates, ranges_overlap
+
 
 HEADER_ALIASES = {
     "source_doc_no": (
@@ -53,33 +55,39 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
 
     total_row = None
     material_rows: list[dict[str, Any]] = []
+    field_merges = [merge for merge in grid.get("merge_ranges") or []
+                    if merge.get("start_column") == merge.get("end_column")]
     for row_number in range(header_row + 1, len(cells) + 1):
         if _is_total_row(cells[row_number - 1]):
             total_row = row_number
             break
         if _is_repeated_header(cells[row_number - 1], columns):
             break
-        material_code = _string_value(_cell_raw(cells, row_number, columns.get("material_code")))
-        product_name = _string_value(_cell_raw(cells, row_number, columns.get("product_name")))
-        if not material_code and not product_name:
+        field_cells = {field: _source_field_cell(cells, row_number, column, field_merges)
+                       for field, column in columns.items()}
+        material_code = _string_value(field_cells.get("material_code", {}).get("raw_value"))
+        product_name = _string_value(field_cells.get("product_name", {}).get("raw_value"))
+        if not any(cell.get("raw_value") not in (None, "") or cell.get("formula") for cell in field_cells.values()):
             continue
         material_rows.append(
             {
                 "source_row": row_number,
                 "source_line_no": row_number,
                 "source_doc_no": _string_value(
-                    _cell_raw(cells, row_number, columns.get("source_doc_no"))
+                    field_cells.get("source_doc_no", {}).get("raw_value")
                 ),
                 "material_code": material_code,
                 "product_name": product_name,
-                "quantity": _decimal_text(_decimal_cell(cells, row_number, columns.get("quantity"))),
-                "unit": _string_value(_cell_raw(cells, row_number, columns.get("unit"))),
+                "quantity": _decimal_text(_to_decimal(field_cells.get("quantity", {}).get("raw_value"))),
+                "unit": _string_value(field_cells.get("unit", {}).get("raw_value")),
                 "chargeable_weight_kg": _decimal_text(
-                    _decimal_cell(cells, row_number, columns.get("chargeable_weight_kg"))
+                    _to_decimal(field_cells.get("chargeable_weight_kg", {}).get("raw_value"))
                 ),
                 "project_collection": _string_value(
-                    _cell_raw(cells, row_number, columns.get("project_collection"))
+                    field_cells.get("project_collection", {}).get("raw_value")
                 ),
+                "field_ranges": {field: _source_field_range(row_number, column, field_merges)
+                                 for field, column in columns.items()},
                 "raw_fields": {
                     header: dict(cells[row_number - 1][column - 1])
                     for column, header in original_headers.items()
@@ -90,7 +98,8 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
 
     row_numbers = [row["source_row"] for row in material_rows]
     merges = _physical_merges(grid, columns, set(row_numbers))
-    groups = _build_groups(cells, row_numbers, columns, merges, bool(grid.get("merge_ranges_available")))
+    groups = _build_groups(cells, row_numbers, columns, merges, bool(grid.get("merge_ranges_available")),
+                           grid.get("merge_reviews") or {}, material_rows)
     blocking = _group_blockers(cells, groups, columns)
     warnings: list[dict[str, str]] = []
 
@@ -127,6 +136,9 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
             "source_updated_at": grid.get("source_updated_at"),
         },
         "header_row": header_row,
+        "columns": [{"column": column, "field": field, "label": original_headers.get(column, "")}
+                    for field, column in sorted(columns.items(), key=lambda item: item[1])],
+        "candidate_regions": _candidate_regions(grid, row_numbers, columns),
         "material_row_count": len(material_rows),
         "package_group_count": len(groups),
         "package_count": int(Decimal(package_total["value"])) if package_total.get("value") is not None else len(groups),
@@ -185,12 +197,54 @@ def _physical_merges(
     return result
 
 
+def _source_field_range(row: int, column: int, merges: list[dict[str, Any]]) -> dict[str, Any]:
+    merge = next((item for item in merges if range_contains(item, row, column)), None)
+    if merge:
+        return {**range_coordinates(merge), "evidence_kind": merge.get("evidence_kind") or "xlsx_merge"}
+    return {"start_row": row, "end_row": row, "start_column": column, "end_column": column,
+            "evidence_kind": "direct_value"}
+
+
+def _source_field_cell(cells, row, column, merges):
+    region = _source_field_range(row, column, merges)
+    return _cell(cells, region["start_row"], column) or {}
+
+
+def _candidate_regions(grid, row_numbers, columns):
+    cells = grid.get("cells") or []
+    existing = [*(grid.get("merge_ranges") or []), *((grid.get("merge_reviews") or {}).get("ranges") or [])]
+    result = []
+    for field, column in columns.items():
+        start = None
+        previous = None
+        def finish(end):
+            if start is None or end is None or end <= start:
+                return
+            region = {"start_row": start, "end_row": end, "start_column": column, "end_column": column}
+            if any(ranges_overlap(region, known) for known in existing):
+                return
+            result.append({**region, "id": f"r{start}c{column}:r{end}c{column}", "field": field,
+                           "reason": "首行有原值，连续下方单元格为空；请按来源确认共享范围或保留各行空白。"})
+        for row in row_numbers:
+            if previous is not None and row != previous + 1:
+                finish(previous)
+                start = None
+            if not _cell_is_blank(cells, row, column):
+                finish(previous)
+                start = row
+            previous = row
+        finish(previous)
+    return sorted(result, key=lambda item: (item["start_row"], item["start_column"]))
+
+
 def _build_groups(
     cells: list[list[dict[str, Any]]],
     row_numbers: list[int],
     columns: dict[str, int],
     merges: list[dict[str, Any]],
     merge_ranges_available: bool,
+    merge_reviews: dict[str, Any] | None = None,
+    material_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     parent = {row: row for row in row_numbers}
 
@@ -210,11 +264,16 @@ def _build_groups(
             union(merge["rows"][0], row)
 
     suggestions: list[tuple[int, int]] = []
+    physical_columns = [columns[field] for field in PHYSICAL_FIELDS if field in columns]
+    rejected = [item for item in (merge_reviews or {}).get("ranges") or [] if item.get("action") == "separate"]
     if not merge_ranges_available:
         for previous, current in zip(row_numbers, row_numbers[1:]):
             if current != previous + 1:
                 continue
-            if all(_cell_is_blank(cells, current, columns.get(field)) for field in PHYSICAL_FIELDS):
+            unresolved_columns = [column for column in physical_columns
+                                  if not any(range_contains(merge, previous, column) and range_contains(merge, current, column) for merge in merges)
+                                  and not any(range_contains(item, previous, column) and range_contains(item, current, column) for item in rejected)]
+            if unresolved_columns and all(_cell_is_blank(cells, current, column) for column in physical_columns):
                 union(previous, current)
                 suggestions.append((previous, current))
 
@@ -230,6 +289,7 @@ def _build_groups(
                 "kind": merge.get("evidence_kind") or "xlsx_merge",
                 "field": merge["field"],
                 "rows": list(merge["rows"]),
+                **range_coordinates(merge),
             }
             for merge in merges
             if row_set.intersection(merge["rows"])
@@ -244,7 +304,10 @@ def _build_groups(
             for pair in suggested
         )
         merge_spans = {tuple(merge["rows"]) for merge in merges if row_set.intersection(merge["rows"])}
-        incompatible = len(merge_spans) > 1
+        identities = {((row.get("material_code") or "").casefold(), (row.get("source_doc_no") or "").casefold())
+                      for row in material_rows or [] if row.get("source_row") in row_set}
+        same_identity = len(identities) == 1 and bool(next(iter(identities))[0])
+        incompatible = len(merge_spans) > 1 and not same_identity
         needs_confirmation = incompatible or bool(suggested)
         result.append(
             {
@@ -260,6 +323,7 @@ def _build_groups(
                 "package_count": _metric(cells, rows, columns.get("package_count"), merges, "package_count"),
                 "evidence": evidence,
                 "needs_confirmation": needs_confirmation,
+                "coordinate_review_required": bool(suggested),
                 "suggestion_reason": "箱级字段为空且与上一物料连续" if suggested else None,
                 "merge_conflict": incompatible,
             }
@@ -274,13 +338,35 @@ def _metric(
     merges: list[dict[str, Any]],
     field: str,
 ) -> dict[str, Any]:
-    value = next((_decimal_cell(cells, row, column) for row in rows if _decimal_cell(cells, row, column) is not None), None)
-    explicit_merge = any(merge["field"] == field and set(merge["rows"]) == set(rows) for merge in merges)
+    field_merges = [merge for merge in merges if merge["field"] == field]
+    source_ranges = []
+    values = []
+    complete = bool(column)
+    seen = set()
+    for row in rows:
+        region = _source_field_range(row, column, field_merges) if column else None
+        key = tuple(region[name] for name in ("start_row", "end_row", "start_column", "end_column")) if region else (row,)
+        if key in seen:
+            continue
+        seen.add(key)
+        raw = _decimal_cell(cells, region["start_row"] if region else row, column)
+        if raw is None:
+            complete = False
+        else:
+            values.append(raw)
+        if region:
+            source_ranges.append({**region, "value": _decimal_text(raw)})
+    value = sum(values, Decimal("0")) if values else None
+    if field in {"length_m", "width_m", "height_m"}:
+        value = values[0] if values else None
+        complete = complete and len(set(values)) <= 1
+    source_merge = next((region for region in source_ranges if region["evidence_kind"] != "direct_value"), None)
     return {
         "value": _decimal_text(value),
-        "count_once": len(rows) == 1 or explicit_merge,
+        "count_once": complete,
         "source_row": next((row for row in rows if _decimal_cell(cells, row, column) is not None), None),
-        "evidence": "xlsx_merge" if explicit_merge else "direct_value" if value is not None else "missing",
+        "evidence": source_merge["evidence_kind"] if source_merge else "direct_value" if value is not None else "missing",
+        "source_ranges": source_ranges,
     }
 
 

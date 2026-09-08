@@ -257,6 +257,8 @@ def build_material_import_preview(existing: list, incoming: list, source: dict) 
                 "match_status": status,
                 "classification": classification,
                 "target_stable_line_key": target_key,
+                "target": {key: target.get(key) for key in ("name", "stable_line_key", *MATERIAL_SOURCE_FIELDS)},
+                "material_name": str(normalized_row.get("product_name") or target.get("product_name") or ""),
                 "candidates": [_candidate_view(item) for item in candidates],
                 "changes": changes,
                 "incoming": {
@@ -456,6 +458,7 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
                         participant["material_code"] for participant in participants
                     ],
                     "metrics": candidate_metrics,
+                    **({"coordinate_review_required": True} if group.get("coordinate_review_required") else {}),
                     "reason": str(
                         group.get("suggestion_reason")
                         or "相邻行的箱级字段为空，疑似共享上方包装数据。"
@@ -523,9 +526,12 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
             ),
             "material_code": str(rows[0].get("material_code") or ""),
         }
-        quantities = [_positive_decimal(row.get("quantity")) for row in rows]
-        if quantities and all(value is not None for value in quantities):
-            result["actual_shipped_qty"] = _decimal_text(sum(quantities, Decimal("0")))
+        product_name = next((row.get("product_name") for row in rows if row.get("product_name")), "")
+        if product_name:
+            result["product_name"] = str(product_name)
+        quantity = _sum_source_field(rows, "quantity", set(row_numbers))
+        if quantity is not None:
+            result["actual_shipped_qty"] = _decimal_text(quantity)
         units = [str(row.get("unit") or "").strip() for row in rows if str(row.get("unit") or "").strip()]
         normalized_units = {_normalized(value) for value in units}
         if len(normalized_units) == 1:
@@ -546,9 +552,9 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
             result.setdefault("source_conflicts", []).append(
                 {"field": "project_collection", "options": sorted(set(projects))}
             )
-        chargeable_values = [_positive_decimal(row.get("chargeable_weight_kg")) for row in rows]
-        if chargeable_values and all(value is not None for value in chargeable_values):
-            result["chargeable_weight_kg"] = _decimal_text(sum(chargeable_values, Decimal("0")))
+        chargeable = _sum_source_field(rows, "chargeable_weight_kg", set(row_numbers))
+        if chargeable is not None:
+            result["chargeable_weight_kg"] = _decimal_text(chargeable)
 
         incomplete_rows = []
         allocation_required = False
@@ -600,6 +606,29 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
     }
 
 
+def _sum_source_field(rows: list, field: str, row_numbers: set) -> Optional[Decimal]:
+    """Each proven source range contributes once; cross-SKU quantities stay unknown."""
+
+    seen = set()
+    total = Decimal("0")
+    for row in rows:
+        region = (row.get("field_ranges") or {}).get(field)
+        if region:
+            if any(number not in row_numbers for number in range(region["start_row"], region["end_row"] + 1)):
+                return None
+            key = tuple(region[name] for name in ("start_row", "end_row", "start_column", "end_column"))
+        else:
+            key = (row.get("source_row"), field)
+        if key in seen:
+            continue
+        seen.add(key)
+        value = _positive_decimal(row.get(field))
+        if value is None:
+            return None
+        total += value
+    return total if seen else None
+
+
 def _allocation_decimal(value: object) -> Optional[Decimal]:
     try:
         number = Decimal(str(value))
@@ -610,6 +639,13 @@ def _allocation_decimal(value: object) -> Optional[Decimal]:
 
 def apply_wiki_group_allocations(projection: dict, choices: dict) -> tuple[list, Optional[dict]]:
     """Validate exact shared-package totals and add allocations to projected SKU rows."""
+
+    coordinate_groups = [group for group in projection.get("confirmation_groups") or []
+                         if group.get("coordinate_review_required")]
+    if coordinate_groups:
+        return [], {"ok": False, "code": "MERGE_REVIEW_REQUIRED",
+                    "group_id": coordinate_groups[0].get("group_id"),
+                    "message": "请在来源表格中确认或拆分候选单元格范围，然后重新预览。"}
 
     group_confirmations = (
         choices.get("group_confirmations")
@@ -1188,6 +1224,7 @@ def _build_trusted_comparison(existing: list, kind: str, trusted: dict, source: 
         )
         comparison["summary"]["out_of_batch"] = len(projection["out_of_batch"])
     comparison["source_validation"] = _source_validation(parsed_preview)
+    _attach_source_grid(comparison, trusted, existing, kind)
     if projection is not None and not (
         projection["confirmation_groups"] or projection["shared_groups"]
     ):
@@ -1204,11 +1241,82 @@ def _build_trusted_comparison(existing: list, kind: str, trusted: dict, source: 
     return comparison
 
 
+def _review_trusted_grid(trusted: dict, reviews: object = None) -> dict:
+    from overseas_costing.services.packing_grid import review_packing_grid
+    from overseas_costing.services.packing_parse_service import parse_packing_grid
+
+    grid = trusted.get("grid")
+    if not isinstance(grid, dict):
+        if reviews not in (None, ""):
+            raise ValueError("当前来源没有可复核的原始单元格网格。")
+        return trusted
+    reviewed = review_packing_grid(grid, str(trusted.get("source_hash") or ""), reviews)
+    return {**trusted, "grid": reviewed, "preview": parse_packing_grid(reviewed),
+            "merge_reviews": reviewed["merge_reviews"]}
+
+
+def _attach_source_grid(comparison: dict, trusted: dict, existing: list, kind: str) -> None:
+    """Keep raw source cells and server-derived row links alongside every comparison."""
+
+    grid = trusted.get("grid")
+    if not isinstance(grid, dict):
+        return
+    parsed = trusted.get("preview") or {}
+    cells = grid.get("cells") or []
+    parsed_rows = {int(row["source_row"]): row for row in parsed.get("material_rows") or []}
+    preview_by_row = {int(number): row for row in comparison.get("rows") or []
+                      for number in (row.get("source_rows") or [row.get("source_row")])
+                      if str(number or "").isdigit()}
+    states = []
+    for number in range(1, len(cells) + 1):
+        material = parsed_rows.get(number)
+        state = {"source_row": number, "state": "header" if number == parsed.get("header_row") else "other",
+                 "material_code": "", "target_stable_line_keys": []}
+        if material:
+            candidates = (_match_wiki_candidates(existing, material) if kind == "wiki_sheet"
+                          else _match_candidates(existing, material))
+            preview = preview_by_row.get(number) or {}
+            state.update({"state": "matched" if len(candidates) == 1 else "choice_required" if candidates
+                          else "outside" if material.get("material_code") and kind == "wiki_sheet" else "unmatched",
+                          "material_code": str(material.get("material_code") or ""),
+                          "target_stable_line_keys": [_stable_item_key(item) for item in candidates],
+                          "preview_source_row": preview.get("source_row"),
+                          "field_ranges": material.get("field_ranges") or {}})
+        states.append(state)
+    candidate_regions = []
+    for original in parsed.get("candidate_regions") or []:
+        region = dict(original)
+        participants = [state for state in states if region["start_row"] <= state["source_row"] <= region["end_row"]]
+        region["outside_only"] = (any(state["state"] == "outside" for state in participants)
+                                  and all(state["state"] in {"outside", "unmatched"} for state in participants))
+        candidate_regions.append(region)
+    comparison["merge_reviews"] = trusted.get("merge_reviews") or {"source_hash": trusted.get("source_hash"), "ranges": []}
+    comparison["source_grid"] = {
+        "schema_version": 1, "source_hash": trusted.get("source_hash"),
+        "sheet_name": grid.get("sheet_name") or "", "range_address": grid.get("range_address"),
+        "header_row": parsed.get("header_row") or 0, "row_count": len(cells),
+        "column_count": max((len(row) for row in cells), default=0), "cells": cells,
+        "columns": parsed.get("columns") or [], "merge_ranges": grid.get("merge_ranges") or [],
+        "candidate_regions": candidate_regions, "row_states": states,
+        "merge_reviews": comparison["merge_reviews"],
+    }
+    coordinate_groups = [group for group in comparison.get("confirmation_groups") or []
+                         if group.get("coordinate_review_required")]
+    if coordinate_groups:
+        comparison.setdefault("source_validation", {"blocking": [], "warnings": []})["blocking"].append({
+            "code": "merge_review_required", "field": "", "confirmation_key": "merge_review_required",
+            "confirmation_required": False, "coordinate_review_required": True,
+            "message": "来源合并范围需要复核，请在来源表格确认或拆分对应单元格范围后重新预览。",
+            "ranges": [region for region in candidate_regions if not region["outside_only"]],
+        })
+
+
 def preview_material_import(
     batch_name: str,
     source_kind: str,
     source_id: str,
     sheet_name: Optional[str] = None,
+    merge_reviews_json: object = None,
     *,
     repository=None,
     resolver: Optional[Callable[..., dict]] = None,
@@ -1227,6 +1335,7 @@ def preview_material_import(
     source_hash = str(trusted.get("source_hash") or "")
     if len(source_hash) != 64:
         raise ValueError("可信物料来源缺少 SHA-256。")
+    trusted = _review_trusted_grid(trusted, merge_reviews_json)
     source = dict(trusted.get("source") or {})
     selected_sheet = str(source.get("sheet_name") or sheet_name or "")
     source_descriptor = {
@@ -1254,6 +1363,8 @@ def preview_material_import(
         "sheet": selected_sheet,
         "preview_hash": comparison["preview_hash"],
     }
+    if trusted.get("merge_reviews") is not None:
+        claims["merge_reviews"] = trusted["merge_reviews"]
     comparison.update(
         {
             "ok": True,
@@ -1335,6 +1446,7 @@ def apply_material_import(
         if str(trusted.get("source_hash") or "") != str(claims.get("source_hash") or ""):
             repo.rollback()
             return {"ok": False, "source_changed": True, "code": "SOURCE_CHANGED"}
+        trusted = _review_trusted_grid(trusted, claims.get("merge_reviews"))
 
         existing = repo.get_items(context["batch"], context["version"])
         source = dict(trusted.get("source") or {})
@@ -1368,6 +1480,8 @@ def apply_material_import(
 
         if str(claims.get("kind") or "") == "wiki_sheet":
             out_of_batch = list(comparison.get("out_of_batch") or [])
+            source_grid = comparison.get("source_grid")
+            merge_reviews = comparison.get("merge_reviews")
             projection = build_wiki_material_projection(existing, trusted.get("preview") or {})
             resolved_rows, allocation_error = apply_wiki_group_allocations(projection, choices)
             if allocation_error:
@@ -1419,6 +1533,9 @@ def apply_material_import(
                 row.get("physical_status") == "incomplete" for row in comparison["rows"]
             )
             comparison["out_of_batch"] = out_of_batch
+            if source_grid is not None:
+                comparison["source_grid"] = source_grid
+                comparison["merge_reviews"] = merge_reviews
             comparison["summary"]["out_of_batch"] = len(out_of_batch)
             comparison["is_merged_preview"] = True
             comparison["preview_hash"] = _canonical_hash(
@@ -1579,6 +1696,11 @@ def apply_material_import(
                         "source_hash": str(claims.get("source_hash") or ""),
                         "source_rows": audit_rows,
                         "source_groups": audit_groups,
+                        **({"merge_reviews": claims["merge_reviews"],
+                            "source_merge_ranges": [region for region in (trusted.get("grid") or {}).get("merge_ranges") or []
+                                                    if any(region["start_row"] <= row <= region["end_row"] for row in audit_rows)],
+                            "actor": str(getattr(getattr(frappe, "session", None), "user", "") or "")}
+                           if "merge_reviews" in claims else {}),
                         "manual_choices": {
                             key: dict(choices.get(key) or {})
                             if isinstance(choices.get(key), dict)

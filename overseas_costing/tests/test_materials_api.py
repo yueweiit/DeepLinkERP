@@ -88,3 +88,18 @@ def test_set_shipping_quantity_uses_write_permission_and_whitelisted_mode(monkey
     assert captured["mode"] == "MANUAL_CONFIRMED"
     with pytest.raises(ValueError, match="来源状态"):
         api.set_shipping_quantity("BATCH", "ITEM-1", "CLIENT_FAKE", "32", "桶", "EDIT", "MOD")
+
+
+def test_merge_review_preview_preserves_read_permission_and_payload_limit(monkeypatch):
+    api = _load_api(monkeypatch)
+    checks = []
+    captured = {}
+    monkeypatch.setattr(api, "require_batch_permission", lambda batch, ptype: checks.append(ptype) or batch)
+    monkeypatch.setattr(api.material_import_service, "preview_material_import",
+                        lambda *_args, **kwargs: captured.update(kwargs) or {"ok": True})
+    payload = {"source_hash": "a" * 64, "ranges": []}
+    assert api.preview_material_import("B1", "wiki_sheet", "WB:ST", merge_reviews_json=payload)["ok"]
+    assert captured["merge_reviews_json"] == payload
+    assert checks == ["read"]
+    with pytest.raises(ValueError, match="过大"):
+        api.preview_material_import("B1", "wiki_sheet", "WB:ST", merge_reviews_json="x" * 100_001)

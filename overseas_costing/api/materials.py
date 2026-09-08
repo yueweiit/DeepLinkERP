@@ -13,7 +13,7 @@ from overseas_costing.services.access_control import require_batch_permission
 USER_QUANTITY_MODES = {"DEFAULT_PURCHASE", "MANUAL_CONFIRMED"}
 MAX_CHOICES_BYTES = 100_000
 MAX_SOURCE_ID_LENGTH = 500
-MAX_PREVIEW_REVISION_LENGTH = 10_000
+MAX_PREVIEW_REVISION_LENGTH = 200_000
 
 
 def _choices_payload(value) -> dict:
@@ -56,13 +56,14 @@ def get_material_grid(batch_name, version_name=None, page=1, page_length=100):
 
 
 @frappe.whitelist()
-def preview_material_import(batch_name, source_kind, source_id, sheet_name=None):
+def preview_material_import(batch_name, source_kind, source_id, sheet_name=None, merge_reviews_json=None):
     batch_name = require_batch_permission(batch_name, "read")
     return material_import_service.preview_material_import(
         batch_name,
         str(source_kind or "")[:40],
         _trusted_source_id(source_id),
         sheet_name=str(sheet_name or "")[:200] or None,
+        **({"merge_reviews_json": _choices_payload(merge_reviews_json)} if merge_reviews_json is not None else {}),
     )
 
 

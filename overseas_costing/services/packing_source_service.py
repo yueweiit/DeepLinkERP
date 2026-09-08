@@ -365,6 +365,7 @@ def resolve_trusted_packing_source(
                 "sheet_name": selected_sheet,
                 "source_updated_at": str(source.get("modified") or ""),
             },
+            "grid": grid,
             "preview": parse_packing_grid(grid),
         }
 
@@ -430,6 +431,7 @@ def resolve_trusted_packing_source(
             "sheet_name": payload.get("sheetName") or "",
             "source_updated_at": payload.get("captureFinishedAt") or manifest.get("capture_finished_at"),
         },
+        "grid": grid,
         "preview": parse_packing_grid(grid),
     }
 

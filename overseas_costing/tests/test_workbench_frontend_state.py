@@ -24,13 +24,15 @@ def _state_result(script: str) -> dict:
 
 def _fee_workspace_result(script: str) -> dict:
     workspace_file = PARTS / "78-material-fee-workspace.js"
+    grid_file = PARTS / "79-material-import-grid.js"
     completed = subprocess.run(
         [
             "node",
             "-e",
             (
                 "const fs=require('fs');"
-                f"const source=fs.readFileSync({json.dumps(str(workspace_file))},'utf8');"
+                f"const gridFile={json.dumps(str(grid_file))};"
+                f"const source=fs.readFileSync({json.dumps(str(workspace_file))},'utf8')+(fs.existsSync(gridFile)?fs.readFileSync(gridFile,'utf8'):'');"
                 "const Harness=Function(`return class FeeWorkspaceHarness {${source}}`)();"
                 "global.frappe={show_alert:(value)=>global.alerts.push(value)};"
                 "global.alerts=[];"
@@ -373,6 +375,7 @@ def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> 
 def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() -> None:
     detail_page = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
     workspace = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    workspace += (PARTS / "79-material-import-grid.js").read_text(encoding="utf-8")
     stylesheet = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
     documents_block = detail_page.split("async renderDocumentsDetailTab()", 1)[1].split(
         "async renderVoucherDetailTab()", 1
@@ -418,10 +421,11 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
     assert "data-mf-wiki-source" in workspace
     assert "shared_groups" in workspace
     assert "confirmation_groups" in workspace
-    assert "out_of_batch" in workspace
-    assert "out_of_batch_groups" in workspace
-    assert "批次外疑似合并组" in workspace
-    assert "判断依据" in workspace
+    assert "row_states" in workspace
+    assert "candidate_regions" in workspace
+    assert "批次外与未匹配行" in workspace
+    assert "candidate?.reason" in workspace
+    assert "批次外疑似合并组" not in workspace
     assert "source_fields" in workspace
     assert "merged_source_fields" in workspace
     assert "MERGED_PREVIEW_CONFIRMATION_REQUIRED" in workspace
@@ -1222,6 +1226,7 @@ def test_fee_workspace_allocation_failure_is_explicitly_excluded_from_preview() 
 
 def test_wiki_material_source_dialog_refreshes_globally_and_previews_each_sheet() -> None:
     workspace = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    workspace += (PARTS / "79-material-import-grid.js").read_text(encoding="utf-8")
 
     assert "request_packing_workbook_refresh" in workspace
     assert 'data-action="mf-wiki-refresh-all"' in workspace
