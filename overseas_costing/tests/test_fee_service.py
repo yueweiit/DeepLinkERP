@@ -14,6 +14,75 @@ from overseas_costing.services.fee_service import (
 )
 
 
+def test_express_defaults_are_unconfirmed_zeros_and_mexican_currencies():
+    rows = {row['logical_fee_key']: row for row in build_default_fee_templates('EXPRESS')}
+    for key, currency in [('express_surcharge', 'RMB'), ('destination_delivery', 'MXN')]:
+        assert rows[key]['amount'] == '0'
+        assert rows[key]['amount_status'] == 'ESTIMATED'
+        assert rows[key]['currency'] == currency
+        assert rows[key]['is_default_zero'] is True
+    assert rows['destination_delivery']['expense_category'] == '当地快递费'
+    for key in ('customs_clearance_fee', 'import_tax'):
+        assert rows[key]['amount'] == ''
+        assert rows[key]['amount_status'] == 'MISSING'
+        assert rows[key]['currency'] == 'MXN'
+    for key in ('express_surcharge', 'destination_delivery', 'customs_clearance_fee', 'import_tax'):
+        assert rows[key]['entry_responsibility'] == 'MEXICO'
+        assert rows[key]['virtual'] is True
+    assert rows['international_express_fee']['currency'] == 'RMB'
+    assert not rows['international_express_fee'].get('entry_responsibility')
+
+
+@pytest.mark.parametrize('mode', ['SEA', 'AIR'])
+def test_non_express_defaults_keep_original_currencies_amounts_and_labels(mode):
+    rows = build_default_fee_templates(mode)
+    assert all(row['currency'] == 'RMB' and row['amount'] == '' for row in rows)
+    assert all(row['amount_status'] == 'MISSING' for row in rows)
+    assert not any(row.get('is_default_zero') or row.get('entry_responsibility') for row in rows)
+    assert rows[-1]['expense_category'] == '目的地配送费'
+
+
+@pytest.mark.parametrize('amount,status,currency', [('0', 'ACTUAL', 'USD'), ('50.25', 'ESTIMATED', 'RMB'), ('', 'MISSING', 'USD'), ('0', 'NOT_INCURRED', 'MXN')])
+def test_express_saved_fees_keep_user_values_and_do_not_inherit_default_zero(amount, status, currency):
+    from copy import deepcopy
+    saved = {'name': 'R-1', 'expense_category': '目的地配送费', 'amount': amount,
+             'amount_status': status, 'currency': currency, 'remark': '原始核对记录'}
+    before = deepcopy(saved)
+    rows = compose_fee_worklist_rows([saved], 'EXPRESS')
+    assert len(rows) == 5
+    row = next(row for row in rows if row['logical_fee_key'] == 'destination_delivery')
+    assert row['name'] == 'R-1' and row['expense_category'] == '当地快递费'
+    assert (row['amount'], row['amount_status'], row['currency'], row['remark']) == (amount, status, currency, saved['remark'])
+    assert row.get('is_default_zero') is False
+    assert row['entry_responsibility'] == 'MEXICO'
+    assert saved == before
+
+
+def test_both_delivery_names_map_to_one_express_fee_identity():
+    assert map_historical_fee_key({'expense_category': '目的地配送费'}, 'EXPRESS') == 'destination_delivery'
+    assert map_historical_fee_key({'expense_category': '当地快递费'}, 'EXPRESS') == 'destination_delivery'
+
+
+@pytest.mark.parametrize('currency', ['', None])
+def test_saved_missing_currency_keeps_legacy_rmb_fallback(currency):
+    saved = {'name': 'R-1', 'logical_fee_key': 'customs_clearance_fee',
+             'expense_category': '清关费', 'amount': '100', 'amount_status': 'ACTUAL', 'currency': currency}
+    rows = compose_fee_worklist_rows([saved], 'EXPRESS')
+    row = next(row for row in rows if row['name'] == 'R-1')
+    assert row['currency'] == 'RMB'
+    assert saved['currency'] == currency
+
+
+@pytest.mark.parametrize('mode', ['SEA', 'AIR'])
+def test_non_express_local_fee_alias_does_not_merge_existing_distinct_fees(mode):
+    saved = [{'name': 'DELIVERY', 'expense_category': '目的地配送费', 'amount': '100', 'amount_status': 'ACTUAL'},
+             {'name': 'LOCAL', 'expense_category': '当地快递费', 'amount': '50', 'amount_status': 'ACTUAL'}]
+    rows = compose_fee_worklist_rows(saved, mode)
+    assert len(rows) == 6
+    assert {row['name'] for row in rows if not row['virtual']} == {'DELIVERY', 'LOCAL'}
+    assert not any(row.get('duplicate_rule_names') for row in rows)
+
+
 def test_default_fee_templates_change_only_the_transport_specific_pair() -> None:
     sea = build_default_fee_templates("SEA")
     air = build_default_fee_templates("AIR")

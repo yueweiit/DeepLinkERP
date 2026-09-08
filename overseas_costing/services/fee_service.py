@@ -83,7 +83,7 @@ def build_default_fee_templates(transport_mode: str) -> list[dict]:
     if mode not in TRANSPORT_FEE_PAIRS:
         mode = "SEA"
     rows = [*TRANSPORT_FEE_PAIRS[mode], *COMMON_FEE_TEMPLATES]
-    return [
+    templates = [
         {
             "name": "",
             "logical_fee_key": key,
@@ -106,6 +106,20 @@ def build_default_fee_templates(transport_mode: str) -> list[dict]:
         }
         for index, (key, label, basis, evidence_role) in enumerate(rows, start=1)
     ]
+    if mode == "EXPRESS":
+        for row in templates:
+            key = row["logical_fee_key"]
+            if key == "international_express_fee":
+                continue
+            row["entry_responsibility"] = "MEXICO"
+            if key in {"customs_clearance_fee", "import_tax", "destination_delivery"}:
+                row["currency"] = "MXN"
+            if key in {"express_surcharge", "destination_delivery"}:
+                # A display/preview default, not a persisted actual or no-charge declaration.
+                row.update(amount="0", amount_status="ESTIMATED", is_default_zero=True)
+            if key == "destination_delivery":
+                row["expense_category"] = "当地快递费"
+    return templates
 
 
 def map_historical_fee_key(fee: dict, transport_mode: str) -> str:
@@ -126,8 +140,11 @@ def map_historical_fee_key(fee: dict, transport_mode: str) -> str:
             "customsclearance": "customs_clearance_fee",
             "importduty": "import_tax",
             "delivery": "destination_delivery",
+            "目的地配送费": "destination_delivery",
         }
     )
+    if str(transport_mode or "").strip().upper() == "EXPRESS":
+        aliases["当地快递费"] = "destination_delivery"
     for candidate in (fee.get("expense_category"), fee.get("rule_code")):
         matched = aliases.get(_normalized_fee_name(candidate))
         if matched:
@@ -173,7 +190,9 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) ->
                 duplicate_names.setdefault(key, []).append(str(row.get("name") or ""))
                 continue
             template = template_by_key[key]
-            merged = {**template, **row, "virtual": False}
+            merged = {**template, **row, "virtual": False, "is_default_zero": False}
+            if key == "destination_delivery" and template.get("entry_responsibility") == "MEXICO":
+                merged["expense_category"] = template["expense_category"]
             for fieldname in (
                 "rule_code",
                 "currency",
@@ -184,7 +203,9 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) ->
                 "required_evidence_role",
             ):
                 if row.get(fieldname) in (None, ""):
-                    merged[fieldname] = template.get(fieldname)
+                    # Preserve the historical RMB interpretation of saved blank currency.
+                    # MXN defaults apply only to new, virtual fee rows.
+                    merged[fieldname] = "RMB" if fieldname == "currency" else template.get(fieldname)
             if row.get("amount_status") in (None, ""):
                 merged["amount_status"] = fee_allocation_service.amount_status(row)
             template_by_key[key] = merged
