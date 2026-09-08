@@ -167,10 +167,19 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
 
     api.start_source_ai_review("B", "V", "两款是一套", 1)
     api.get_source_ai_review_status("B", "R")
-    api.apply_source_ai_review("B", "R", '["P1"]', '{"P1":{}}', "TOKEN", "M1")
+    api.apply_source_ai_review(
+        "B",
+        "R",
+        '["P1"]',
+        '{"P1":{}}',
+        "TOKEN",
+        "M1",
+        '[{"item_name":"I1","fieldname":"goods_value","value":"120"}]',
+    )
     api.discard_source_ai_review("B", "R")
 
     assert checks == ["write", "read", "write", "write"]
     assert calls[0][1] == ("B", "V", "两款是一套")
     assert calls[0][2] == {"force": True}
     assert calls[2][1][2:4] == (["P1"], {"P1": {}})
+    assert calls[2][1][6][0]["fieldname"] == "goods_value"

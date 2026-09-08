@@ -18,6 +18,10 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable
 
+from overseas_costing.services.material_value_semantics import (
+    is_effectively_missing as _is_effectively_missing,
+)
+
 try:
     import frappe
 except Exception:  # pragma: no cover - 纯测试环境不依赖 Frappe
@@ -75,6 +79,16 @@ REVIEW_ITEM_FIELDS = frozenset(
     }
 )
 REVIEW_REPLACEMENT_FIELDS = REVIEW_ITEM_FIELDS
+REVIEW_ITEM_UPDATE_FIELDS = frozenset(
+    {
+        "purchase_uom",
+        "unit_price",
+        "unit_price_uom",
+        "purchase_currency",
+        "goods_value",
+        *ALLOWED_FIELDS,
+    }
+)
 REVIEW_NUMERIC_FIELDS = frozenset(
     {
         "quantity",
@@ -96,6 +110,19 @@ REVIEW_FEE_KEYS = frozenset(
         "destination_delivery",
     }
 )
+MANUAL_REVIEW_FIELDS = frozenset(
+    {
+        *ALLOWED_FIELDS,
+        "goods_value",
+        "unit_price",
+        "purchase_currency",
+        "purchase_uom",
+        "unit_price_uom",
+    }
+)
+PURCHASE_CORRECTION_FIELDS = frozenset(
+    {"goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"}
+)
 
 
 def _json(value: Any) -> str:
@@ -104,6 +131,64 @@ def _json(value: Any) -> str:
 
 def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def build_source_progress(sources: list[dict]) -> list[dict]:
+    """Build a browser-safe per-source progress manifest without paths or contents."""
+
+    progress = []
+    for source in sources or []:
+        fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
+        progress.append(
+            {
+                "source_id": str(source.get("source_id") or "")[:500],
+                "source_kind": str(source.get("source_kind") or "")[:60],
+                "label": str(
+                    source.get("source_label")
+                    or source.get("file_name")
+                    or source.get("source_id")
+                    or "未命名资料"
+                )[:500],
+                "sheet": str(source.get("sheet_name") or "")[:200],
+                "status": "WAITING",
+                "detail": "等待读取",
+                "field_count": len(fields),
+                "page_count": 0,
+                "candidate_count": 0,
+                "error": "",
+            }
+        )
+    return progress
+
+
+def _source_document_counts(document: dict) -> tuple[int, int]:
+    field_count = len(document.get("form_fields") or {})
+    field_count += sum(
+        len(row.get("cells") or [])
+        for row in document.get("semantic_rows") or []
+        if isinstance(row, dict)
+    )
+    text = str(document.get("text") or "")
+    pages = {
+        int(value)
+        for value in re.findall(r"---\s*Page\s+(\d+)\s*---", text)
+        if str(value).isdigit()
+    }
+    return field_count, len(pages)
+
+
+def _update_source_progress(
+    progress: list[dict], index: int, *, status: str, detail: str = "", **values: Any
+) -> None:
+    if index < 0 or index >= len(progress):
+        return
+    progress[index].update(
+        {
+            "status": str(status or "WAITING")[:40],
+            "detail": str(detail or "")[:500],
+            **{key: value for key, value in values.items() if key in {"field_count", "page_count", "candidate_count", "error"}},
+        }
+    )
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -285,7 +370,7 @@ def _document_has_evidence(document: dict) -> bool:
 
 
 def build_material_ai_draft(items: list[dict], candidates: list[dict]) -> dict:
-    """将候选合并成主表草稿；已有值、冲突和低置信结果绝不自动覆盖。"""
+    """将候选合并成主表草稿；有效已有值、冲突和低置信结果绝不自动覆盖。"""
 
     rows = {str(item.get("name") or ""): {} for item in items or [] if item.get("name")}
     item_by_name = {str(item.get("name") or ""): item for item in items or [] if item.get("name")}
@@ -311,7 +396,7 @@ def build_material_ai_draft(items: list[dict], candidates: list[dict]) -> dict:
         merged_candidates = list(merged_by_value.values())
         source_refs = [ref for candidate in merged_candidates for ref in candidate.get("source_refs") or []]
         best_confidence = max((_confidence(value.get("confidence")) for value in merged_candidates), default=Decimal("0"))
-        if not _is_blank(existing):
+        if not _is_effectively_missing(fieldname, existing, item):
             status = "EXISTING_VALUE"
             value = existing
             can_auto = False
@@ -355,6 +440,11 @@ def _fingerprint_item(item: dict) -> dict:
             "product_name",
             "quantity",
             "purchase_uom",
+            "unit_price",
+            "unit_price_uom",
+            "purchase_currency",
+            "goods_value",
+            "actual_shipped_qty_mode",
             *ALLOWED_FIELDS,
         )
     }
@@ -613,6 +703,15 @@ def _normalize_review_item_values(
     return normalized
 
 
+def _normalize_review_item_update_values(values: Any) -> dict:
+    if not isinstance(values, dict):
+        raise ValueError("物料更新字段必须是对象。")
+    readonly = set(values) - REVIEW_ITEM_UPDATE_FIELDS
+    if readonly:
+        raise ValueError(f"物料更新不能修改只读字段：{sorted(readonly)[0]}。")
+    return _normalize_review_item_values(values, partial=True)
+
+
 def _normalize_fee_values(values: Any, *, partial: bool = False) -> dict:
     if not isinstance(values, dict):
         raise ValueError("费用提案字段必须是对象。")
@@ -693,7 +792,9 @@ def normalize_source_review_proposals(
                     continue
                 payload = {
                     "item_name": target,
-                    "fields": _normalize_review_item_values((raw.get("payload") or {}).get("fields") or {}, partial=True),
+                    "fields": _normalize_review_item_update_values(
+                        (raw.get("payload") or {}).get("fields") or {}
+                    ),
                 }
                 if not payload["fields"]:
                     continue
@@ -706,7 +807,7 @@ def normalize_source_review_proposals(
         if proposal_type == "item_update":
             target_item = items_by_name.get(target) or {}
             conflict = conflict or any(
-                not _is_blank(target_item.get(fieldname))
+                not _is_effectively_missing(fieldname, target_item.get(fieldname), target_item)
                 and _canonical_value(fieldname, target_item.get(fieldname))
                 != _canonical_value(fieldname, value)
                 for fieldname, value in payload.get("fields", {}).items()
@@ -745,6 +846,39 @@ def normalize_source_review_proposals(
                 "payload": payload,
             }
         )
+    conflict_members: set[int] = set()
+    item_values: dict[tuple[str, str], dict[str, set[int]]] = {}
+    fee_values: dict[str, dict[str, set[int]]] = {}
+    replacement_values: dict[str, dict[str, set[int]]] = {}
+    for index, proposal in enumerate(normalized):
+        proposal_type = proposal["proposal_type"]
+        target = str(proposal.get("target_item_name") or "")
+        if proposal_type == "item_update":
+            for fieldname, value in (proposal.get("payload") or {}).get("fields", {}).items():
+                key = (target, fieldname)
+                canonical = _canonical_value(fieldname, value)
+                item_values.setdefault(key, {}).setdefault(canonical, set()).add(index)
+        elif proposal_type == "fee_update":
+            payload = proposal.get("payload") or {}
+            fee_key = str(payload.get("logical_fee_key") or "")
+            canonical = _json(
+                {
+                    "amount": _canonical_value("amount", payload.get("amount")),
+                    "currency": str(payload.get("currency") or ""),
+                }
+            )
+            fee_values.setdefault(fee_key, {}).setdefault(canonical, set()).add(index)
+        elif proposal_type == "material_replace":
+            canonical = _json(proposal.get("payload") or {})
+            replacement_values.setdefault(target, {}).setdefault(canonical, set()).add(index)
+    for grouped in (*item_values.values(), *fee_values.values(), *replacement_values.values()):
+        if len(grouped) <= 1:
+            continue
+        for members in grouped.values():
+            conflict_members.update(members)
+    for index in conflict_members:
+        normalized[index]["conflict"] = True
+        normalized[index]["default_selected"] = False
     return normalized
 
 
@@ -789,12 +923,65 @@ def validate_source_review_application(
                     for row in proposal["payload"]["replacement_rows"]
                 ]
             elif proposal["proposal_type"] == "item_update":
-                proposal["payload"]["fields"].update(_normalize_review_item_values(proposal_edit, partial=True))
+                proposal["payload"]["fields"].update(
+                    _normalize_review_item_update_values(proposal_edit)
+                )
             else:
                 proposal["payload"].update(_normalize_fee_values(proposal_edit, partial=True))
                 proposal["payload"] = _normalize_fee_values(proposal["payload"])
         selected.append(proposal)
     return selected
+
+
+def validate_source_review_manual_updates(
+    updates: list[dict] | None, items: list[dict]
+) -> list[dict]:
+    """Validate grid edits that are independent from model proposals."""
+
+    if not isinstance(updates or [], list) or len(updates or []) > MAX_UPDATES:
+        raise ValueError("人工草稿更新格式不合法或数量过多。")
+    items_by_name = {str(row.get("name") or ""): row for row in items or []}
+    normalized = []
+    seen = set()
+    for raw in updates or []:
+        if not isinstance(raw, dict):
+            raise ValueError("人工草稿更新必须是对象。")
+        item_name = str(raw.get("item_name") or "").strip()
+        fieldname = str(raw.get("fieldname") or "").strip()
+        if item_name not in items_by_name:
+            raise ValueError(f"物料 {item_name or '--'} 不属于当前批次。")
+        if fieldname not in MANUAL_REVIEW_FIELDS:
+            raise ValueError(f"不允许人工修改字段：{fieldname or '--'}。")
+        values = _normalize_review_item_values(
+            {fieldname: raw.get("value")}, partial=True
+        )
+        if fieldname not in values:
+            raise ValueError(f"字段 {fieldname} 的值不合法。")
+        value = values[fieldname]
+        reason = str(raw.get("reason") or raw.get("manual_override_reason") or "").strip()[:1000]
+        item = items_by_name[item_name]
+        changed = _canonical_value(fieldname, item.get(fieldname)) != _canonical_value(fieldname, value)
+        if (
+            changed
+            and fieldname in PURCHASE_CORRECTION_FIELDS
+            and not _is_effectively_missing(fieldname, item.get(fieldname), item)
+            and not reason
+        ):
+            raise ValueError(f"{fieldname} 已有有效采购值，修改时必须填写修改原因。")
+        key = (item_name, fieldname)
+        if key in seen:
+            raise ValueError(f"物料 {item_name} 的字段 {fieldname} 重复提交。")
+        seen.add(key)
+        normalized.append(
+            {
+                "item_name": item_name,
+                "fieldname": fieldname,
+                "value": value,
+                "reason": reason,
+                "user_edited": True,
+            }
+        )
+    return normalized
 
 
 def build_approval_fee_proposals(
@@ -904,6 +1091,7 @@ def start_material_ai_fill(
             "input_fingerprint": fingerprint,
             "source_fingerprint": hashlib.sha256(_json(sources).encode("utf-8")).hexdigest(),
             "source_manifest_json": _json(sources),
+            "source_progress_json": _json(build_source_progress(sources)),
             "progress_step": "等待读取资料",
             "progress_percent": 0,
         }
@@ -973,6 +1161,7 @@ def start_source_ai_review(
             "input_fingerprint": fingerprint,
             "source_fingerprint": hashlib.sha256(_json(sources).encode("utf-8")).hexdigest(),
             "source_manifest_json": _json(sources),
+            "source_progress_json": _json(build_source_progress(sources)),
             "trigger_mode": str(trigger_mode or "MANUAL")[:40],
             "clarification_text": clarification,
             "proposal_version": 1,
@@ -1040,6 +1229,36 @@ def get_material_ai_fill_status(
     repo = repository or FrappeMaterialAIFillRepository()
     run = repo.get_run(str(run_id or ""))
     _assert_run_batch(run, batch_name)
+    candidates = _load_json(_record_value(run, "candidates_json"), [])
+    draft = _load_json(_record_value(run, "draft_json"), {})
+    source_progress = _load_json(_record_value(run, "source_progress_json"), [])
+    proposal_count = int(draft.get("proposal_count", len(candidates)) or 0)
+    selected_count = int(
+        draft.get(
+            "selected_count",
+            sum(1 for row in candidates if isinstance(row, dict) and row.get("default_selected")),
+        )
+        or 0
+    )
+    material_proposal_count = 0
+    packing_proposal_count = 0
+    fee_proposal_count = 0
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        proposal_type = str(candidate.get("proposal_type") or "")
+        if proposal_type == "material_replace":
+            material_proposal_count += 1
+        elif proposal_type == "fee_update":
+            fee_proposal_count += 1
+        elif proposal_type == "item_update":
+            fields = set(((candidate.get("payload") or {}).get("fields") or {}).keys())
+            if fields & PURCHASE_CORRECTION_FIELDS:
+                material_proposal_count += 1
+            if fields & set(ALLOWED_FIELDS):
+                packing_proposal_count += 1
+        else:
+            packing_proposal_count += 1
     return {
         "ok": True,
         "run_id": str(_record_value(run, "name") or ""),
@@ -1052,8 +1271,20 @@ def get_material_ai_fill_status(
         "ai_completed": bool(_record_value(run, "ai_completed", 0)),
         "ai_warning": str(_record_value(run, "ai_warning") or ""),
         "error_message": str(_record_value(run, "error_message") or ""),
-        "candidates": _load_json(_record_value(run, "candidates_json"), []),
-        "draft": _load_json(_record_value(run, "draft_json"), {}),
+        "candidates": candidates,
+        "draft": draft,
+        "source_progress": source_progress,
+        "completion_summary": {
+            "proposal_count": proposal_count,
+            "selected_count": selected_count,
+            "failed_source_count": sum(
+                1 for row in source_progress if str(row.get("status") or "") == "FAILED"
+            ),
+            "source_count": len(source_progress),
+            "material_proposal_count": material_proposal_count,
+            "packing_proposal_count": packing_proposal_count,
+            "fee_proposal_count": fee_proposal_count,
+        },
     }
 
 
@@ -1178,6 +1409,7 @@ def apply_source_ai_review(
     edits: dict | str,
     edit_token: str,
     expected_modified: str,
+    manual_updates: list[dict] | str | None = None,
     *,
     repository: Any | None = None,
 ) -> dict:
@@ -1215,11 +1447,25 @@ def apply_source_ai_review(
         items,
         fx_rates=context.get("fx_rates") or {},
     )
+    loaded_manual_updates = (
+        _load_json(manual_updates, []) if isinstance(manual_updates, str) else (manual_updates or [])
+    )
+    normalized_manual_updates = validate_source_review_manual_updates(
+        loaded_manual_updates, items
+    )
+    replaced_targets = {
+        str(proposal.get("target_item_name") or "")
+        for proposal in selected
+        if proposal.get("proposal_type") == "material_replace"
+    }
+    if any(update["item_name"] in replaced_targets for update in normalized_manual_updates):
+        raise ValueError("人工修改的物料行同时被拆分提案替换，请先完成拆分后再补充该行。")
     if not hasattr(repo, "apply_source_review"):
         raise RuntimeError("当前存储层尚未支持统一 AI 资料审核。")
     applied = repo.apply_source_review(
         run,
         selected,
+        normalized_manual_updates,
         {
             "batch": context["batch"],
             "version": context["version"],
@@ -1835,6 +2081,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         clarification_text = str(_record_value(run, "clarification_text") or "")
         for source in sources:
             source["batch"] = context["batch"]
+        source_progress = build_source_progress(sources)
+        repo.save_run(run, source_progress_json=source_progress)
         current_fingerprint = (
             _source_review_fingerprint(
                 context["batch"], context["version"], items, sources, clarification_text
@@ -1857,14 +2105,43 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         deterministic_proposals: list[dict] = []
         documents: list[dict] = []
         source_errors = []
-        for source in sources:
+        for source_index, source in enumerate(sources):
+            reading_status = "DOWNLOADING" if source.get("download_required") else "READING"
+            reading_detail = "正在归档并下载" if reading_status == "DOWNLOADING" else "正在读取"
+            _update_source_progress(
+                source_progress, source_index, status=reading_status, detail=reading_detail, error=""
+            )
+            repo.save_run(
+                run,
+                progress_step=f"读取资料 · {source_progress[source_index]['label']}",
+                source_progress_json=source_progress,
+            )
             try:
                 source_candidates, document = _read_source(items, source)
                 deterministic.extend(source_candidates)
-                if _document_has_evidence(document):
+                has_document_evidence = _document_has_evidence(document)
+                if has_document_evidence:
                     document = {**document, "document_id": f"DOC-{len(documents) + 1}"}
                     documents.append(document)
-                    if unified_review and source.get("source_kind") == "approval_form":
+                if has_document_evidence or source_candidates:
+                    field_count, page_count = _source_document_counts(document)
+                    detail = "已解析"
+                    if source.get("sheet_name"):
+                        detail = f"已解析工作表 {source.get('sheet_name')}"
+                    elif page_count:
+                        detail = f"已解析 {page_count} 页"
+                    elif field_count:
+                        detail = f"已读取 {field_count} 个字段"
+                    _update_source_progress(
+                        source_progress,
+                        source_index,
+                        status="PARSED",
+                        detail=detail,
+                        field_count=field_count,
+                        page_count=page_count,
+                        candidate_count=len(source_candidates),
+                    )
+                    if has_document_evidence and unified_review and source.get("source_kind") == "approval_form":
                         for proposal in build_approval_fee_proposals(
                             source,
                             transport_mode=str(context.get("transport_mode") or ""),
@@ -1874,7 +2151,22 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                             for ref in proposal.get("source_refs") or []:
                                 ref["document_id"] = document["document_id"]
                             deterministic_proposals.append(proposal)
+                else:
+                    _update_source_progress(
+                        source_progress,
+                        source_index,
+                        status="SKIPPED",
+                        detail="未发现可识别内容",
+                        candidate_count=len(source_candidates),
+                    )
             except Exception as exc:
+                _update_source_progress(
+                    source_progress,
+                    source_index,
+                    status="FAILED",
+                    detail="读取失败",
+                    error=str(exc)[:1000],
+                )
                 source_errors.append(
                     {
                         "source": source.get("source_label") or source.get("source_id"),
@@ -1882,7 +2174,19 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     }
                 )
 
-        repo.save_run(run, progress_step="DeepSeek 识别", progress_percent=65)
+            repo.save_run(run, source_progress_json=source_progress)
+
+        for index, entry in enumerate(source_progress):
+            if entry.get("status") == "PARSED":
+                _update_source_progress(
+                    source_progress, index, status="ANALYZING", detail="DeepSeek 正在分析"
+                )
+        repo.save_run(
+            run,
+            progress_step="DeepSeek 识别",
+            progress_percent=65,
+            source_progress_json=source_progress,
+        )
         if unified_review:
             ai_result = _call_source_review_ai(
                 items,
@@ -1900,7 +2204,33 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         else:
             ai_result = _call_material_ai(items, documents)
             candidates = normalize_candidates(deterministic + (ai_result.get("candidates") or []), items)
-        repo.save_run(run, progress_step="合并候选", progress_percent=90)
+        for index, entry in enumerate(source_progress):
+            if entry.get("status") != "ANALYZING":
+                continue
+            label = str(entry.get("label") or "")
+            sheet = str(entry.get("sheet") or "")
+            linked_count = sum(
+                1
+                for candidate in candidates
+                if any(
+                    str(ref.get("file") or "") == label
+                    and (not sheet or str(ref.get("sheet") or "") == sheet)
+                    for ref in candidate.get("source_refs") or []
+                )
+            )
+            _update_source_progress(
+                source_progress,
+                index,
+                status="COMPLETED",
+                detail="分析完成" if ai_result.get("ok") else "规则解析完成，AI 识别未完成",
+                candidate_count=max(int(entry.get("candidate_count") or 0), linked_count),
+            )
+        repo.save_run(
+            run,
+            progress_step="合并候选",
+            progress_percent=90,
+            source_progress_json=source_progress,
+        )
         warning_parts = [str(ai_result.get("warning") or "")]
         if not sources:
             warning_parts.append("当前批次没有可识别的装箱资料，请先获取或上传装箱资料。")
@@ -1959,6 +2289,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             input_fingerprint=current_fingerprint,
             source_fingerprint=hashlib.sha256(_json(sources).encode("utf-8")).hexdigest(),
             source_manifest_json=sources,
+            source_progress_json=source_progress,
             candidates_json=candidates,
             draft_json=draft,
             source_completeness="PARTIAL" if source_errors else "COMPLETE",
@@ -2310,7 +2641,9 @@ class FrappeMaterialAIFillRepository:
             frappe.db.rollback()
             raise
 
-    def apply_source_review(self, run: Any, proposals: list[dict], audit: dict) -> dict:
+    def apply_source_review(
+        self, run: Any, proposals: list[dict], manual_updates: list[dict], audit: dict
+    ) -> dict:
         """Apply selected purchase, packing and fee proposals in one database transaction."""
 
         from overseas_costing.services import calculate_service, fee_service, usage_service
@@ -2434,6 +2767,20 @@ class FrappeMaterialAIFillRepository:
                         ).insert(ignore_permissions=True)
                     changed += 1
 
+            for update in manual_updates:
+                result = calculate_service.update_item_field(
+                    update["item_name"],
+                    update["fieldname"],
+                    update.get("value"),
+                    version_name=audit["version"],
+                    remark=update.get("reason") or "AI 草稿内人工补充",
+                    _skip_edit_check=True,
+                    _skip_commit=True,
+                )
+                if not result.get("ok"):
+                    raise ValueError(str(result.get("message") or "人工草稿字段保存失败。"))
+                changed += 1 if result.get("changed") else 0
+
             after = {
                 "items": frappe.get_all(
                     "Overseas Cost Item",
@@ -2448,11 +2795,15 @@ class FrappeMaterialAIFillRepository:
                 action_type="OTHER",
                 batch_name=audit["batch"],
                 version_name=audit["version"],
-                remark=f"确认所选 AI 资料草稿，共应用 {len(proposals)} 个提案。",
+                remark=(
+                    f"确认所选 AI 资料草稿，共应用 {len(proposals)} 个提案，"
+                    f"保存 {len(manual_updates)} 个人工补充字段。"
+                ),
                 extra={
                     "run_id": str(_record_value(run, "name") or ""),
                     "input_fingerprint": audit["input_fingerprint"],
                     "proposal_ids": [row.get("proposal_id") for row in proposals],
+                    "manual_updates": manual_updates,
                     "before": before,
                     "after": after,
                     "created_items": created_items,

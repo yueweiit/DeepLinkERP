@@ -70,6 +70,37 @@ def test_ai_draft_ui_exposes_progress_candidates_and_explicit_apply_discard() ->
     assert 'data-action="mf-ai-discard" ${mutating ? "disabled" : ""}' in footer
 
 
+def test_ai_poll_updates_progress_surface_without_rerendering_workspace() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    poll = source.split("async pollMaterialAIFill", 1)[1].split("updateMaterialAIDraftFromInput", 1)[0]
+    assert "updateMaterialAIProgressSurface" in poll
+    assert "renderMaterialFeeWorkspace" not in poll
+    assert "aiPendingReady" in poll
+
+
+def test_ai_progress_uses_minimizable_dialog_and_explicit_view_draft() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    assert "openMaterialAIProgressDialog" in source
+    assert 'data-action="mf-ai-minimize"' in source
+    assert 'data-action="mf-ai-progress-restore"' in source
+    assert 'data-action="mf-ai-view-draft"' in source
+    assert "material_proposal_count" in source
+    assert "packing_proposal_count" in source
+    assert "fee_proposal_count" in source
+    assert "ocw-mf-ai-progress-dialog" in css
+    assert "ocw-mf-ai-progress-chip" in css
+
+
+def test_material_grid_keeps_static_widths_while_scrolling() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    scroll = source.split("bindMaterialGridScrollControls()", 2)[2].split("initializeMaterialAIDraft", 1)[0]
+    assert "is-horizontally-scrolled" not in scroll
+    assert "column.style.width" not in scroll
+    assert ".ocw-mf-grid-shell.is-horizontally-scrolled" not in css
+
+
 def test_purchase_source_copy_distinguishes_logistics_source_from_missing_purchase_link() -> None:
     source = (PARTS / "75-table-and-list.js").read_text(encoding="utf-8")
     assert "资料来自国际物流审批" in source
@@ -88,7 +119,12 @@ def test_workspace_restores_latest_background_review_and_inserts_replacements_in
     )[0]
     assert "get_source_ai_review_status" in load_method
     assert 'run_id: ""' in load_method
-    assert "initializeMaterialAIDraft" in load_method
+    assert "aiPendingReady" in load_method
+    assert "draftVisible: false" in load_method
+    view_method = source.split("showMaterialAIReadyDraft()", 2)[2].split(
+        "sourceAIReviewProposalLabel", 1
+    )[0]
+    assert "initializeMaterialAIDraft" in view_method
     grid_method = source.split("renderMaterialFeeGrid()", 1)[1].split(
         "approvalLinkNeedsReview", 1
     )[0]
@@ -102,6 +138,7 @@ def test_apply_does_not_reclassify_automatic_ai_values_as_manual_edits() -> None
     assert 'find("[data-mf-cell-input]").each' not in apply_method
     assert "result?.stale" in apply_method
     assert "const isCurrent" in apply_method
+    assert "manual_updates_json" in apply_method
     discard_method = source.split("async discardMaterialAIFill()", 1)[1].split("findMaterialFeeItem", 1)[0]
     assert "const isCurrent" in discard_method
     assert "fill.discarding = true" in discard_method
@@ -127,7 +164,7 @@ console.log(JSON.stringify(fill));
 def test_editing_main_grid_in_ai_mode_changes_only_local_draft() -> None:
     result = _fee_workspace_result(r"""
 const workspace=new Harness();
-const state={aiFill:{status:'READY',updates:{}},materialDrafts:{},inputRevision:0};
+const state={aiFill:{status:'READY',draftVisible:true,updates:{}},materialDrafts:{},inputRevision:0};
 workspace.ensureMaterialFeeState=()=>state;
 const input={attr(name){return {'data-item-name':'I1','data-fieldname':'volume_m3','data-original-value':''}[name]},val(){return '1.25'}};
 workspace.updateMaterialDraftFromInput(input);
@@ -136,3 +173,100 @@ console.log(JSON.stringify({ai:state.aiFill.updates,normal:state.materialDrafts}
     assert result["normal"] == {}
     assert result["ai"]["I1:volume_m3"]["value"] == "1.25"
     assert result["ai"]["I1:volume_m3"]["user_edited"] is True
+
+
+def test_ai_review_allows_manual_edit_without_matching_ai_proposal() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();
+const state={aiFill:{status:'READY',draftVisible:true,review_mode:true,updates:{},manualUpdates:{}},materialDrafts:{},inputRevision:0};
+workspace.ensureMaterialFeeState=()=>state;
+const input={attr(name){return {'data-item-name':'I1','data-fieldname':'goods_value','data-original-value':'--'}[name]},val(){return '120'}};
+workspace.updateMaterialDraftFromInput(input);
+console.log(JSON.stringify({updates:state.aiFill.updates,manual:state.aiFill.manualUpdates}));
+""")
+    assert result["updates"] == {}
+    assert result["manual"]["I1:goods_value"] == {
+        "item_name": "I1",
+        "fieldname": "goods_value",
+        "value": "120",
+        "reason": "",
+    }
+
+
+def test_purchase_value_columns_are_editable_but_purchase_identity_stays_readonly() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();workspace.detailState={};
+workspace.materialFeeState={batchName:'',showAuxiliary:true};
+const columns=workspace.materialFeeGridColumns();
+const mapped=Object.fromEntries(columns.map(column=>[column.field,Boolean(column.readonly)]));
+console.log(JSON.stringify(mapped));
+""")
+    assert result["goods_value"] is False
+    assert result["unit_price"] is False
+    assert result["unit_price_uom"] is False
+    assert result["purchase_currency"] is False
+    assert result["purchase_uom"] is False
+    assert result["source_doc_no"] is True
+    assert result["material_code"] is True
+    assert result["product_name"] is True
+    assert result["quantity"] is True
+
+
+def test_generic_grid_requires_reason_when_correcting_existing_purchase_value() -> None:
+    source = (PARTS / "100-crud-edit.js").read_text(encoding="utf-8")
+    commit = source.split("async commitCellEdit($cell)", 1)[1].split(
+        "requestEditConfirm(fieldLabel, newValue)", 1
+    )[0]
+    assert "purchaseCorrectionFields" in commit
+    assert "isPurchaseCorrection" in commit
+    assert "isSpecialOverride || isPurchaseCorrection" in commit
+
+
+def test_ready_result_does_not_change_grid_until_user_views_draft() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    replacements = source.split("materialReplacementRows(items = [])", 1)[1].split(
+        "renderMaterialReplacementGridRow", 1
+    )[0]
+    assert "!fill.draftVisible" in replacements
+    grid = source.split("renderMaterialFeeGrid()", 1)[1].split(
+        "materialReplacementRows(items = [])", 1
+    )[0]
+    assert 'state.aiFill?.draftVisible' in grid
+
+
+def test_polling_updates_only_progress_surface_until_ready() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();
+const state={aiFill:{status:'RUNNING'},aiPendingReady:null};
+workspace.materialFeeState=state;
+workspace.detailState={batchName:'B1',versionName:'V1',tab:'documents'};
+const replies=[{ok:true,status:'RUNNING',progress_percent:30},{ok:true,status:'READY',progress_percent:100,run_id:'R1'}];
+workspace.call=async()=>replies.shift();
+let surfaceUpdates=0;
+let workspaceRenders=0;
+workspace.updateMaterialAIProgressSurface=()=>{surfaceUpdates+=1};
+workspace.renderMaterialFeeWorkspace=()=>{workspaceRenders+=1};
+global.window={setTimeout:(resolve)=>resolve()};
+await workspace.pollMaterialAIFill(state,'B1','V1','R1');
+console.log(JSON.stringify({surfaceUpdates,workspaceRenders,pending:state.aiPendingReady?.status,draftVisible:state.aiFill.draftVisible}));
+""")
+    assert result == {
+        "surfaceUpdates": 2,
+        "workspaceRenders": 0,
+        "pending": "READY",
+        "draftVisible": False,
+    }
+
+
+def test_multicell_paste_uses_transactional_manual_ai_updates_and_protects_purchase_corrections() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    preview = source.split("previewMaterialPaste($startInput, text)", 1)[1].split(
+        "async applyMaterialPaste", 1
+    )[0]
+    apply = source.split("async applyMaterialPaste(dialog, updates)", 1)[1].split(
+        "findMaterialFee(feeKey)", 1
+    )[0]
+    assert "materialPurchaseCorrectionFields" in preview
+    assert "已有有效采购值" in preview
+    assert "updateMaterialAIDraftValue" in apply
+    assert "fill.updates[`${item_name}:${fieldname}`]" not in apply

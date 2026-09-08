@@ -212,7 +212,15 @@ def get_source_ai_review_status(batch_name, run_id=None, version_name=None):
 
 
 @frappe.whitelist()
-def apply_source_ai_review(batch_name, run_id, selections_json, edits_json, edit_token, expected_modified):
+def apply_source_ai_review(
+    batch_name,
+    run_id,
+    selections_json,
+    edits_json,
+    edit_token,
+    expected_modified,
+    manual_updates_json=None,
+):
     batch_name = require_batch_permission(batch_name, "write")
     return material_ai_fill_service.apply_source_ai_review(
         batch_name,
@@ -221,6 +229,7 @@ def apply_source_ai_review(batch_name, run_id, selections_json, edits_json, edit
         _ai_review_payload(edits_json, dict, "AI 草稿编辑"),
         str(edit_token or "")[:200],
         str(expected_modified or "")[:200],
+        _ai_review_payload(manual_updates_json, list, "人工草稿更新"),
     )
 
 

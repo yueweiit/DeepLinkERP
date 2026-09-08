@@ -29,6 +29,9 @@ from overseas_costing.services.material_ai_fill_service import (
     apply_source_ai_review,
     _read_excel_semantic_document,
     _extract_vision_observations_payload,
+    _is_effectively_missing,
+    build_source_progress,
+    validate_source_review_manual_updates,
 )
 
 
@@ -101,6 +104,113 @@ def _candidate(item_name, fieldname, value, confidence=0.96, source="装箱表.x
     }
 
 
+@pytest.mark.parametrize(
+    ("fieldname", "value", "item", "expected"),
+    [
+        ("goods_value", "--", {}, True),
+        ("gross_weight_kg", "/", {}, True),
+        ("volume_m3", "N/A", {}, True),
+        ("goods_value", 0, {}, True),
+        ("unit_price", "0.00", {}, True),
+        ("quantity", 0, {}, False),
+        ("actual_shipped_qty", 0, {"actual_shipped_qty_mode": "DEFAULT_PURCHASE"}, True),
+        ("actual_shipped_qty", 0, {"actual_shipped_qty_mode": "LEGACY_UNVERIFIED"}, True),
+        ("actual_shipped_qty", 0, {"actual_shipped_qty_mode": "MANUAL_CONFIRMED"}, False),
+        ("actual_shipped_qty", 0, {"actual_shipped_qty_mode": "EXPLICIT_SOURCE"}, False),
+        ("goods_value", 12, {}, False),
+    ],
+)
+def test_effective_missing_is_field_aware(fieldname, value, item, expected) -> None:
+    assert _is_effectively_missing(fieldname, value, item) is expected
+
+
+def test_source_progress_exposes_safe_document_metadata() -> None:
+    progress = build_source_progress(
+        [
+            {
+                "source_kind": "approval_form",
+                "source_id": "approval:PROC-1:form",
+                "source_label": "国际物流审批正文",
+                "form_fields": {"物流报价": "DHL报价，251元", "密码": "secret"},
+            },
+            {
+                "source_kind": "approval_attachment",
+                "source_id": "ATT-1",
+                "source_label": "采购明细.xlsx",
+                "sheet_name": "Sheet1",
+                "file_url": "/private/files/secret.xlsx",
+            },
+        ]
+    )
+
+    assert progress == [
+        {
+            "source_id": "approval:PROC-1:form",
+            "source_kind": "approval_form",
+            "label": "国际物流审批正文",
+            "sheet": "",
+            "status": "WAITING",
+            "detail": "等待读取",
+            "field_count": 2,
+            "page_count": 0,
+            "candidate_count": 0,
+            "error": "",
+        },
+        {
+            "source_id": "ATT-1",
+            "source_kind": "approval_attachment",
+            "label": "采购明细.xlsx",
+            "sheet": "Sheet1",
+            "status": "WAITING",
+            "detail": "等待读取",
+            "field_count": 0,
+            "page_count": 0,
+            "candidate_count": 0,
+            "error": "",
+        },
+    ]
+    assert "secret.xlsx" not in str(progress)
+
+
+def test_manual_review_updates_allow_missing_purchase_value_and_require_reason_for_existing_value() -> None:
+    items = _items()
+    items[0].update(goods_value="--", unit_price=0, purchase_currency="")
+    allowed = validate_source_review_manual_updates(
+        [
+            {"item_name": "ITEM-1", "fieldname": "goods_value", "value": "120"},
+            {"item_name": "ITEM-1", "fieldname": "purchase_currency", "value": "USD"},
+        ],
+        items,
+    )
+    assert allowed[0]["value"] == "120"
+    assert allowed[1]["value"] == "USD"
+
+    with pytest.raises(ValueError, match="修改原因"):
+        validate_source_review_manual_updates(
+            [{"item_name": "ITEM-2", "fieldname": "goods_value", "value": "16000"}],
+            items,
+        )
+
+    corrected = validate_source_review_manual_updates(
+        [
+            {
+                "item_name": "ITEM-2",
+                "fieldname": "goods_value",
+                "value": "16000",
+                "reason": "采购审批金额录入错误",
+            }
+        ],
+        items,
+    )
+    assert corrected[0]["reason"] == "采购审批金额录入错误"
+
+    with pytest.raises(ValueError, match="不允许人工修改"):
+        validate_source_review_manual_updates(
+            [{"item_name": "ITEM-1", "fieldname": "quantity", "value": "5"}],
+            items,
+        )
+
+
 def test_high_confidence_unique_blank_value_becomes_blue_draft() -> None:
     result = build_material_ai_draft(
         _items(),
@@ -111,6 +221,129 @@ def test_high_confidence_unique_blank_value_becomes_blue_draft() -> None:
     assert cell["status"] == "AI_DRAFT"
     assert cell["value"] == "990"
     assert cell["can_auto_adopt"] is True
+
+
+def test_high_confidence_candidate_replaces_effective_placeholder_without_conflict() -> None:
+    items = _items()
+    items[0].update(gross_weight_kg=0, actual_shipped_qty=0, actual_shipped_qty_mode="DEFAULT_PURCHASE")
+    result = build_material_ai_draft(
+        items,
+        [
+            _candidate("ITEM-1", "gross_weight_kg", "12.5"),
+            _candidate("ITEM-1", "actual_shipped_qty", "4"),
+        ],
+    )
+
+    assert result["rows"]["ITEM-1"]["gross_weight_kg"]["status"] == "AI_DRAFT"
+    assert result["rows"]["ITEM-1"]["actual_shipped_qty"]["status"] == "AI_DRAFT"
+
+
+def test_unified_review_defaults_placeholder_purchase_value_but_protects_real_value() -> None:
+    items = _items()
+    items[0]["goods_value"] = 0
+    documents = [
+        {
+            "document_id": "DOC-1",
+            "source_ref": {"source": "approval_form", "file": "采购审批正文"},
+            "form_fields": {"货值": "RMB 120"},
+        }
+    ]
+    proposals = [
+        {
+            "proposal_id": "P1",
+            "proposal_type": "item_update",
+            "target_item_name": "ITEM-1",
+            "confidence": 0.96,
+            "source_refs": [{"document_id": "DOC-1", "field": "货值"}],
+            "payload": {"fields": {"goods_value": "120"}},
+        },
+        {
+            "proposal_id": "P2",
+            "proposal_type": "item_update",
+            "target_item_name": "ITEM-2",
+            "confidence": 0.96,
+            "source_refs": [{"document_id": "DOC-1", "field": "货值"}],
+            "payload": {"fields": {"goods_value": "120"}},
+        },
+    ]
+
+    normalized = normalize_source_review_proposals(proposals, items, documents)
+
+    assert normalized[0]["conflict"] is False
+    assert normalized[0]["default_selected"] is True
+    assert normalized[1]["conflict"] is True
+    assert normalized[1]["default_selected"] is False
+
+
+def test_unified_review_marks_different_source_values_as_conflicting() -> None:
+    items = _items()
+    items[0]["goods_value"] = 0
+    documents = [
+        {
+            "document_id": "DOC-1",
+            "source_ref": {"source": "approval_form", "file": "审批正文"},
+            "form_fields": {"货值": "120"},
+        },
+        {
+            "document_id": "DOC-2",
+            "source_ref": {"source": "approval_attachment", "file": "报价.xlsx"},
+            "semantic_rows": [{"source_row": 2, "cells": [{"cell": "B2", "value": "130"}]}],
+        },
+    ]
+    proposals = [
+        {
+            "proposal_id": "P1",
+            "proposal_type": "item_update",
+            "target_item_name": "ITEM-1",
+            "confidence": 0.96,
+            "source_refs": [{"document_id": "DOC-1", "field": "货值"}],
+            "payload": {"fields": {"goods_value": "120"}},
+        },
+        {
+            "proposal_id": "P2",
+            "proposal_type": "item_update",
+            "target_item_name": "ITEM-1",
+            "confidence": 0.97,
+            "source_refs": [{"document_id": "DOC-2", "row": 2, "cell": "B2"}],
+            "payload": {"fields": {"goods_value": "130"}},
+        },
+    ]
+
+    normalized = normalize_source_review_proposals(proposals, items, documents)
+
+    assert len(normalized) == 2
+    assert all(row["conflict"] is True for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
+def test_item_update_cannot_modify_readonly_purchase_identity_or_quantity() -> None:
+    documents = [
+        {
+            "document_id": "DOC-1",
+            "source_ref": {"source": "approval_form", "file": "审批正文"},
+            "form_fields": {"数量": "8"},
+        }
+    ]
+    proposals = [
+        {
+            "proposal_id": "P1",
+            "proposal_type": "item_update",
+            "target_item_name": "ITEM-1",
+            "confidence": 0.99,
+            "source_refs": [{"document_id": "DOC-1", "field": "数量"}],
+            "payload": {"fields": {"quantity": "8"}},
+        },
+        {
+            "proposal_id": "P2",
+            "proposal_type": "item_update",
+            "target_item_name": "ITEM-1",
+            "confidence": 0.99,
+            "source_refs": [{"document_id": "DOC-1", "field": "数量"}],
+            "payload": {"fields": {"product_name": "替换名称"}},
+        },
+    ]
+
+    assert normalize_source_review_proposals(proposals, _items(), documents) == []
 
 
 def test_ai_candidate_requires_a_server_known_document_reference() -> None:
@@ -798,8 +1031,8 @@ def test_unified_apply_sends_only_selected_server_proposals_to_one_transaction()
         }
     )
     repository.source_applied = []
-    repository.apply_source_review = lambda run, selected, audit: (
-        repository.source_applied.append((selected, audit))
+    repository.apply_source_review = lambda run, selected, manual_updates, audit: (
+        repository.source_applied.append((selected, manual_updates, audit))
         or {"changed_count": len(selected), "batch_modified": "M2"}
     )
 
@@ -811,6 +1044,47 @@ def test_unified_apply_sends_only_selected_server_proposals_to_one_transaction()
     assert result["ok"] is True
     assert result["changed_count"] == 1
     assert repository.source_applied[0][0][0]["proposal_id"] == "P-FEE"
+    assert repository.source_applied[0][1] == []
+
+
+def test_unified_apply_sends_manual_grid_edits_through_same_transaction() -> None:
+    repository = _LifecycleRepository()
+    missing_items = _items()
+    missing_items[0]["goods_value"] = "--"
+    repository.get_items = lambda _batch, _version: copy.deepcopy(missing_items)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "clarification_text": "",
+            "candidates_json": [],
+            "input_fingerprint": material_ai_fill_service._source_review_fingerprint(
+                "B1", "V1", missing_items, repository.sources, ""
+            ),
+        }
+    )
+    repository.source_applied = []
+    repository.apply_source_review = lambda run, selected, manual_updates, audit: (
+        repository.source_applied.append((selected, manual_updates, audit))
+        or {"changed_count": len(selected) + len(manual_updates), "batch_modified": "M2"}
+    )
+
+    result = apply_source_ai_review(
+        "B1",
+        "RUN-1",
+        [],
+        {},
+        "TOKEN",
+        "M1",
+        manual_updates=[
+            {"item_name": "ITEM-1", "fieldname": "goods_value", "value": "120"}
+        ],
+        repository=repository,
+    )
+
+    assert result["ok"] is True
+    assert result["changed_count"] == 1
+    assert repository.source_applied[0][0] == []
+    assert repository.source_applied[0][1][0]["fieldname"] == "goods_value"
 
 
 def test_status_and_discard_return_public_payload_without_mutating_materials() -> None:
@@ -838,6 +1112,7 @@ def test_latest_source_review_status_can_restore_background_draft() -> None:
             "clarification_text": "两款各四个",
             "source_completeness": "COMPLETE",
             "candidates_json": '[{"proposal_id":"P1","proposal_type":"material_replace"}]',
+            "source_progress_json": '[{"source_id":"A","label":"采购明细.xlsx","status":"PARSED"}]',
         }
     )
     repository.find_latest_review_run = lambda batch, version: repository.run
@@ -850,6 +1125,16 @@ def test_latest_source_review_status_can_restore_background_draft() -> None:
     assert status["status"] == "READY"
     assert status["clarification_text"] == "两款各四个"
     assert status["proposals"][0]["proposal_id"] == "P1"
+    assert status["source_progress"][0]["status"] == "PARSED"
+    assert status["completion_summary"] == {
+        "proposal_count": 1,
+        "selected_count": 0,
+        "failed_source_count": 0,
+        "source_count": 1,
+        "material_proposal_count": 1,
+        "packing_proposal_count": 0,
+        "fee_proposal_count": 0,
+    }
 
 
 def test_material_replacement_does_not_treat_currency_as_price_uom() -> None:
@@ -916,6 +1201,8 @@ def test_worker_keeps_deterministic_candidates_when_deepseek_is_unavailable(monk
     assert "AI 识别未完成" in repository.run["ai_warning"]
     draft = repository.run["draft_json"]
     assert draft["rows"]["ITEM-1"]["gross_weight_kg"]["status"] == "AI_DRAFT"
+    assert repository.run["source_progress_json"][0]["status"] == "COMPLETED"
+    assert repository.run["source_progress_json"][0]["candidate_count"] == 1
     assert repository.rollbacks == 0
 
 

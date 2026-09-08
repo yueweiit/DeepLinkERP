@@ -19,6 +19,7 @@ from overseas_costing.services import (
     source_priority_service,
     version_service,
 )
+from overseas_costing.services.material_value_semantics import is_effectively_missing
 
 
 def update_item_field(item_name: str, fieldname: str, value: str, version_name: str | None = None) -> dict:
@@ -105,6 +106,9 @@ except Exception:  # pragma: no cover - local tests can import without Frappe
 from overseas_costing.utils.currency import round_money as _round_money
 
 DEFAULT_FX_RMB_TO_MXN = 2.6
+PURCHASE_CORRECTION_FIELDS = frozenset(
+    {"goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"}
+)
 EDITABLE_ITEM_FIELDS = frozenset(
     {
         "material_code",
@@ -1303,6 +1307,21 @@ def update_item_field(
             expected_modified=expected_modified,
         )
     old_value = getattr(item_doc, fieldname, None)
+    if (
+        fieldname in PURCHASE_CORRECTION_FIELDS
+        and not _edit_values_equal(fieldname, old_value, coerced_value)
+        and not is_effectively_missing(fieldname, old_value, item_doc.as_dict() if hasattr(item_doc, "as_dict") else vars(item_doc))
+        and not edit_remark
+    ):
+        return {
+            "ok": False,
+            "changed": False,
+            "item_name": item_name,
+            "fieldname": fieldname,
+            "version_name": version_name or item_doc.version,
+            "edit_mode": "reason_required",
+            "message": f"字段 {fieldname} 已有有效采购值，修改时必须填写修改原因。",
+        }
     if _edit_values_equal(fieldname, old_value, coerced_value):
         return {
             "ok": True,

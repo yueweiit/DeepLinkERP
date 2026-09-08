@@ -348,6 +348,17 @@
     const itemName = $cell.attr("data-item-name");
     const versionName = $cell.attr("data-version-name") || null;
     const isSpecialOverride = $cell.attr("data-special-override") === "1";
+    const purchaseCorrectionFields = new Set([
+      "goods_value",
+      "unit_price",
+      "purchase_currency",
+      "purchase_uom",
+      "unit_price_uom",
+    ]);
+    const oldValueIsMissing = typeof this.materialValueIsPlaceholder === "function"
+      ? this.materialValueIsPlaceholder(fieldname, oldValue, {})
+      : ["", "-", "--", "/", "\\", "N/A", "NA", "NULL", "无", "暂无"].includes(String(oldValue || "").trim().toUpperCase());
+    const isPurchaseCorrection = purchaseCorrectionFields.has(fieldname) && !oldValueIsMissing;
     const itemLabel = this.getLocalItemLabel(batchName, itemName);
 
     if (newValue === oldComparableValue) {
@@ -362,7 +373,7 @@
     }
 
     let remark = "";
-    if (isSpecialOverride) {
+    if (isSpecialOverride || isPurchaseCorrection) {
       remark = await this.requestEditRemark(fieldLabel);
       if (!remark) {
         this.cancelCellEdit($cell);

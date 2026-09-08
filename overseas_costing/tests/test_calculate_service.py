@@ -396,6 +396,45 @@ def test_update_item_field_dry_run_allows_editable_field_and_coerces_numeric_val
     assert result["manual_override_reason"] == "修正装箱单数量"
 
 
+def test_existing_purchase_value_requires_reason_before_server_save(monkeypatch) -> None:
+    from overseas_costing.services import calculate_service as service
+
+    class Item:
+        batch = "B1"
+        version = "V1"
+        row_no = 1
+        goods_value = 100
+
+        def save(self, **_kwargs):
+            raise AssertionError("missing correction reason must not save")
+
+    class DB:
+        @staticmethod
+        def set_value(*_args, **_kwargs):
+            raise AssertionError("missing correction reason must not mutate batch")
+
+    class FakeFrappe:
+        db = DB()
+
+        @staticmethod
+        def get_doc(doctype, name):
+            assert (doctype, name) == ("Overseas Cost Item", "ITEM-1")
+            return Item()
+
+    monkeypatch.setattr(service, "_frappe", FakeFrappe)
+
+    result = update_item_field(
+        "ITEM-1",
+        "goods_value",
+        "120",
+        _skip_edit_check=True,
+    )
+
+    assert result["ok"] is False
+    assert result["edit_mode"] == "reason_required"
+    assert "修改原因" in result["message"]
+
+
 def test_net_weight_is_an_editable_numeric_material_field() -> None:
     result = update_item_field(
         item_name="ITEM-1",

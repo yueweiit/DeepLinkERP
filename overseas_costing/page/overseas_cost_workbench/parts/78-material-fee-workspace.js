@@ -16,6 +16,9 @@
         fees: null,
         preview: null,
         aiFill: null,
+        aiPendingReady: null,
+        aiProgressDialog: null,
+        aiProgressMinimized: false,
       };
     }
     if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
@@ -25,6 +28,7 @@
     this.materialFeeState.materialSaveErrors = this.materialFeeState.materialSaveErrors || {};
     this.materialFeeState.materialDrafts = this.materialFeeState.materialDrafts || {};
     this.materialFeeState.aiFill = this.materialFeeState.aiFill || null;
+    this.materialFeeState.aiPendingReady = this.materialFeeState.aiPendingReady || null;
     if (this.materialFeeState.aiClarification === undefined) this.materialFeeState.aiClarification = "";
     if (!Number.isFinite(this.materialFeeState.inputRevision)) this.materialFeeState.inputRevision = 0;
     if (this.materialFeeState.focusedFeeInput === undefined) this.materialFeeState.focusedFeeInput = null;
@@ -69,8 +73,14 @@
       this.openWikiMaterialImportDialog().catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='mf-ai-fill']", () => {
+      const fill = this.ensureMaterialFeeState().aiFill;
+      if (["QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
+        this.openMaterialAIProgressDialog();
+        return;
+      }
       this.startMaterialAIFill().catch((error) => this.showError(error));
     });
+    this.$root.on("click", "[data-action='mf-ai-progress-restore']", () => this.openMaterialAIProgressDialog());
     this.$root.on("click", "[data-action='mf-ai-apply']", () => {
       this.applyMaterialAIFill().catch((error) => this.showError(error));
     });
@@ -85,6 +95,13 @@
         Number($button.attr("data-candidate-index") || 0)
       );
     });
+    this.$root.on("click", "[data-action='mf-correct-purchase']", (event) => {
+      const $button = $(event.currentTarget);
+      this.openMaterialPurchaseCorrectionDialog(
+        $button.attr("data-item-name"),
+        $button.attr("data-fieldname")
+      );
+    });
     this.$root.on("input", "[data-mf-ai-clarification]", (event) => {
       this.ensureMaterialFeeState().aiClarification = String($(event.currentTarget).val() || "").slice(0, 4000);
     });
@@ -94,7 +111,7 @@
       const proposalId = String($(event.currentTarget).attr("data-proposal-id") || "");
       if ($(event.currentTarget).prop("checked")) fill.selections.add(proposalId);
       else fill.selections.delete(proposalId);
-      this.renderMaterialFeeWorkspace();
+      this.renderMaterialFeeWorkspacePreservingPosition();
     });
     this.$root.on("input", "[data-mf-ai-edit]", (event) => {
       this.updateSourceAIReviewEdit($(event.currentTarget));
@@ -124,6 +141,10 @@
     });
     this.$root.on("input", "[data-mf-cell-input]", (event) => {
       this.updateMaterialDraftFromInput($(event.currentTarget));
+    });
+    this.$root.on("change", "select[data-mf-cell-input]", (event) => {
+      this.updateMaterialDraftFromInput($(event.currentTarget));
+      this.saveMaterialFeeCell($(event.currentTarget)).catch((error) => this.showError(error));
     });
     this.$root.on("keydown", "[data-mf-fee-input]", (event) => {
       if (event.key !== "Enter") return;
@@ -222,9 +243,8 @@
       state.preview = preview;
       if (latestAI?.ok && latestAI.status && latestAI.status !== "NONE") {
         state.aiClarification = latestAI.clarification_text || state.aiClarification || "";
-        state.aiFill = latestAI.status === "READY"
-          ? this.initializeMaterialAIDraft(latestAI)
-          : { ...latestAI, runId: latestAI.run_id };
+        state.aiFill = { ...latestAI, runId: latestAI.run_id, draftVisible: false };
+        state.aiPendingReady = latestAI.status === "READY" ? latestAI : null;
       }
       state.loading = false;
       this.renderMaterialFeeWorkspace();
@@ -328,16 +348,16 @@
         </div>
         <section class="ocw-mf-section ocw-mf-material-section">
           <div class="ocw-mf-section-title ocw-mf-material-title">
-            <div><span>01</span><h3>物料与装箱数据</h3><p>采购事实保持只读；蓝色发货数量表示默认等于采购数量，红格可直接补录。</p></div>
+            <div><span>01</span><h3>物料与装箱数据</h3><p>采购标识与数量保持只读；缺失的采购金额、币种和单位可直接补录，蓝色发货数量默认等于采购数量。</p></div>
             <div class="ocw-mf-material-actions">
               <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
               <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
               <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
-              <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill" ${aiActive ? "disabled" : ""}>${aiActive ? (state.aiFill?.status === "READY" ? "AI 草稿待确认" : "AI 分析中") : state.aiFill ? "重新分析资料" : "AI 分析资料"}</button>
+              ${this.renderMaterialAIProgressChip()}
+              <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (state.aiFill?.status === "READY" ? "查看 AI 结果" : "查看分析进度") : state.aiFill ? "重新分析资料" : "AI 分析资料"}</button>
             </div>
           </div>
           <label class="ocw-mf-ai-clarification"><span>告诉 AI 如何理解</span><input data-mf-ai-clarification="1" value="${this.escape(state.aiClarification || "")}" maxlength="4000" placeholder="例如：两款是一套，共四套；每种数量相同" /></label>
-          ${this.renderMaterialAIFillBanner()}
           ${this.renderSourceAIReviewProposals()}
           ${this.renderMaterialFeeGrid()}
           ${this.renderMaterialAIFillFooter()}
@@ -388,7 +408,7 @@
     const amountStatus = String(fee.amount_state || fee.amount_status || "MISSING").toUpperCase();
     const feeKey = String(fee.logical_fee_key || fee.fee_key || "");
     const aiFill = this.materialFeeState?.aiFill;
-    const aiFeeProposal = aiFill?.status === "READY"
+    const aiFeeProposal = aiFill?.status === "READY" && aiFill.draftVisible
       ? (aiFill.proposals || []).find((proposal) => proposal.proposal_type === "fee_update" && String(proposal.payload?.logical_fee_key || "") === feeKey)
       : null;
     const aiFeeEdit = aiFeeProposal ? aiFill.edits?.[String(aiFeeProposal.proposal_id || "")] : null;
@@ -439,6 +459,7 @@
 
   materialFeeGridColumns() {
     const state = this.ensureMaterialFeeState();
+    const compact = Boolean(globalThis.window?.matchMedia?.("(max-width: 1050px)")?.matches);
     const columns = [
       { field: "row_no", label: "行", readonly: true, width: 54 },
       { field: "source_doc_no", label: "采购审批号", readonly: true, width: 220 },
@@ -447,18 +468,20 @@
       { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
       { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
       { field: "shipped_uom", label: "发货单位", width: 130 },
-      { field: "goods_value", label: "采购货值", readonly: true, numeric: true, width: 140 },
+      { field: "goods_value", label: "采购货值 RMB", numeric: true, purchaseField: true, width: 150 },
       { field: "gross_weight_kg", label: "毛重 kg", numeric: true, width: 130 },
       { field: "volume_m3", label: "体积 m³", numeric: true, width: 130 },
       { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true, width: 140 },
       { field: "project_collection", label: "项目归属", width: 180 },
     ];
+    if (compact) [54, 190, 110, 220].forEach((width, index) => { columns[index].width = width; });
     if (state.showAuxiliary) {
       columns.push(
         { field: "net_weight_kg", label: "净重 kg", numeric: true, width: 130 },
-        { field: "unit_price", label: "采购单价", readonly: true, numeric: true, width: 130 },
-        { field: "unit_price_uom", label: "计价单位", readonly: true, width: 120 },
-        { field: "purchase_currency", label: "采购币种", readonly: true, width: 110 },
+        { field: "unit_price", label: "原币单价", numeric: true, purchaseField: true, width: 130 },
+        { field: "purchase_uom", label: "采购单位", purchaseField: true, width: 120 },
+        { field: "unit_price_uom", label: "计价单位", purchaseField: true, width: 120 },
+        { field: "purchase_currency", label: "采购币种", purchaseField: true, options: this.materialFeeCurrencyOptions(), width: 130 },
         { field: "supplier", label: "供应商", readonly: true, width: 220 },
         { field: "source_file_name", label: "来源文件", readonly: true, width: 240 }
       );
@@ -478,7 +501,7 @@
     const tableWidth = columns.reduce((sum, column) => sum + Number(column.width || 130), 0);
     return `
       <div class="ocw-mf-grid-shell">
-        <div class="ocw-mf-grid-note"><span>${state.aiFill?.status === "READY" ? "AI 草稿中，单格修改只更新草稿" : "单格离开或按 Enter 自动保存"}</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
+        <div class="ocw-mf-grid-note"><span>${state.aiFill?.status === "READY" && state.aiFill?.draftVisible ? "AI 草稿中，单格修改只更新草稿" : "单格离开或按 Enter 自动保存"}</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
         <div class="ocw-mf-grid-scroll" data-mf-grid-viewport>
           <table class="ocw-mf-grid-table" style="width:${tableWidth}px;min-width:${tableWidth}px">
             <colgroup>${columns.map((column) => `<col style="width:${Number(column.width || 130)}px">`).join("")}</colgroup>
@@ -494,7 +517,7 @@
 
   materialReplacementRows(items = []) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY" || !fill.review_mode) return items;
+    if (fill?.status !== "READY" || !fill.draftVisible || !fill.review_mode) return items;
     const replacements = new Map();
     (fill.proposals || []).filter((proposal) => proposal.proposal_type === "material_replace").forEach((proposal) => {
       const proposalId = String(proposal.proposal_id || "");
@@ -564,6 +587,23 @@
     return `<tr class="${this.approvalLinkNeedsReview(item.approval_link) ? "ocw-approval-row" : ""}" data-mf-row-index="${rowIndex}" data-item-name="${this.escape(item.name || "")}">${columns.map((column, columnIndex) => this.renderMaterialFeeGridCell(item, column, missingFields, columnIndex)).join("")}</tr>`;
   }
 
+  materialValueIsPlaceholder(fieldname, value, item = {}) {
+    if (value === null || value === undefined) return true;
+    const text = String(value).trim().replace(/\s+/g, " ").toLowerCase();
+    if (["", "-", "--", "/", "\\", "n/a", "na", "null", "none", "无", "暂无"].includes(text)) return true;
+    const zeroMissing = ["goods_value", "unit_price", "net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg"];
+    if (zeroMissing.includes(String(fieldname || "")) && Number(text) === 0) return true;
+    if (fieldname === "actual_shipped_qty" && Number(text) === 0) {
+      const mode = String(item.actual_shipped_qty_mode || item.effective_shipping?.mode || "").toUpperCase();
+      return !["MANUAL_CONFIRMED", "EXPLICIT_SOURCE"].includes(mode);
+    }
+    return false;
+  }
+
+  materialPurchaseCorrectionFields() {
+    return new Set(["goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"]);
+  }
+
   renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
     let value = item[column.field];
     const shippingField = ["actual_shipped_qty", "shipped_uom"].includes(column.field);
@@ -572,24 +612,40 @@
     const originalValue = value;
     const draft = this.materialFeeState?.materialDrafts?.[`${item.name}:${column.field}`];
     if (draft && !column.readonly) value = draft.value;
+    const aiFill = this.materialFeeState?.aiFill;
+    const aiVisible = aiFill?.status === "READY" && aiFill.draftVisible;
     const aiCell = this.materialAICell(item.name, column.field);
-    const aiUpdate = this.materialFeeState?.aiFill?.status === "READY" ? this.materialFeeState.aiFill.updates?.[`${item.name}:${column.field}`] : null;
+    const aiUpdate = aiVisible ? aiFill.updates?.[`${item.name}:${column.field}`] : null;
+    const manualUpdate = aiVisible ? aiFill.manualUpdates?.[`${item.name}:${column.field}`] : null;
     if (!column.readonly && aiUpdate) value = aiUpdate.value;
-    const reviewLocked = Boolean(this.materialFeeState?.aiFill?.review_mode && this.materialFeeState.aiFill.status === "READY" && !aiUpdate);
+    if (!column.readonly && manualUpdate) value = manualUpdate.value;
     const isMissing = missingFields.has(column.field);
     const isDefault = shippingField && item.effective_shipping?.is_default;
-    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", draft?.error ? "is-save-error" : "", aiUpdate ? "is-ai-draft" : "", aiCell && !aiUpdate ? "has-ai-candidate" : ""].filter(Boolean).join(" ");
+    const requiresCorrection = Boolean(
+      column.purchaseField
+      && !this.materialValueIsPlaceholder(column.field, originalValue, item)
+      && !draft
+      && !aiUpdate
+      && !manualUpdate
+    );
+    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", requiresCorrection ? "is-protected-purchase" : "", draft?.error ? "is-save-error" : "", aiUpdate || manualUpdate ? "is-ai-draft" : "", aiCell && !aiUpdate ? "has-ai-candidate" : ""].filter(Boolean).join(" ");
     const reason = draft?.error || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
-      const fullValue = this.formatValue(value || "--");
+      const fullValue = this.formatValue(value ?? "--");
       return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
     }
-    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reviewLocked ? "当前 AI 草稿只允许直接修改已建议的字段；其他字段可先放弃草稿后修改。" : reason)}"><input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} ${reviewLocked ? "disabled" : ""} aria-label="${this.escape(column.label)}" />${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
+    if (requiresCorrection) {
+      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="已有有效采购值；修正时需填写原因"><span>${this.escape(this.formatValue(value ?? "--"))}</span><button type="button" class="ocw-mf-purchase-correct" data-action="mf-correct-purchase" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}">修正</button>${this.renderMaterialAICandidates(item.name, column.field, aiCell, false)}</td>`;
+    }
+    const editor = Array.isArray(column.options)
+      ? `<select data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" aria-label="${this.escape(column.label)}"><option value="">请选择</option>${column.options.map((option) => `<option value="${this.escape(option.value)}" ${String(value || "") === String(option.value) ? "selected" : ""}>${this.escape(option.label)}</option>`).join("")}</select>`
+      : `<input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />`;
+    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}">${editor}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
   }
 
   materialAICell(itemName, fieldname) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY") return null;
+    if (fill?.status !== "READY" || !fill.draftVisible) return null;
     return fill.draft?.rows?.[String(itemName)]?.[String(fieldname)] || null;
   }
 
@@ -609,13 +665,138 @@
     return `<div class="ocw-mf-ai-banner is-${this.escape(String(fill.status || "running").toLowerCase())}"><div><strong>${title}</strong><span>${this.escape(fill.progress_step || "读取资料")}</span></div><div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i style="width:${progress}%"></i></div><div class="ocw-mf-ai-steps">${steps.map((step) => `<span class="${step === fill.progress_step ? "active" : ""}">${step}</span>`).join("")}</div>${warning ? `<p>${this.escape(warning)}</p>` : ""}</div>`;
   }
 
+  materialAIProgressStatus(value) {
+    return {
+      WAITING: { label: "等待", tone: "waiting" },
+      DOWNLOADING: { label: "下载中", tone: "running" },
+      READING: { label: "读取中", tone: "running" },
+      PARSED: { label: "已解析", tone: "parsed" },
+      ANALYZING: { label: "AI 分析中", tone: "running" },
+      COMPLETED: { label: "已完成", tone: "complete" },
+      FAILED: { label: "失败", tone: "failed" },
+      SKIPPED: { label: "跳过", tone: "skipped" },
+    }[String(value || "WAITING").toUpperCase()] || { label: String(value || "等待"), tone: "waiting" };
+  }
+
+  renderMaterialAIProgressChip() {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    const active = ["QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""));
+    const minimized = Boolean(this.ensureMaterialFeeState().aiProgressMinimized);
+    const label = fill?.status === "READY"
+      ? "AI 草稿待查看"
+      : fill?.status === "FAILED"
+        ? "AI 分析失败"
+        : fill?.status === "STALE"
+          ? "AI 草稿已过期"
+          : `AI ${Math.max(0, Math.min(100, Number(fill?.progress_percent || 0)))}%`;
+    return `<button class="ocw-mf-ai-progress-chip" type="button" data-action="mf-ai-progress-restore" data-mf-ai-progress-chip="1" ${active && minimized ? "" : "hidden"}><i></i><span>${this.escape(label)}</span></button>`;
+  }
+
+  renderMaterialAIProgressDialogContent() {
+    const fill = this.ensureMaterialFeeState().aiFill || {};
+    const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
+    const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
+    const summary = fill.completion_summary || {};
+    const warning = String(fill.ai_warning || fill.error_message || "");
+    const ready = fill.status === "READY";
+    const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
+    const title = ready ? "AI 资料草稿已生成" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+    return `<div class="ocw-mf-ai-progress-dialog" data-mf-ai-progress-host="1">
+      <header><div><strong>${this.escape(title)}</strong><span>${this.escape(fill.progress_step || "等待读取资料")}</span></div><b>${progress}%</b></header>
+      <div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i style="width:${progress}%"></i></div>
+      <div class="ocw-mf-ai-progress-summary">
+        <span>资料 ${Number(summary.source_count ?? sources.length)} 份</span>
+        <span>物料 ${Number(summary.material_proposal_count || 0)} 项</span>
+        <span>装箱 ${Number(summary.packing_proposal_count || 0)} 项</span>
+        <span>费用 ${Number(summary.fee_proposal_count || 0)} 项</span>
+        <span>默认选择 ${Number(summary.selected_count || 0)} 项</span>
+        ${Number(summary.failed_source_count || 0) ? `<span class="is-failed">失败 ${Number(summary.failed_source_count)} 份</span>` : ""}
+      </div>
+      <div class="ocw-mf-ai-source-progress">${sources.length ? sources.map((source) => {
+        const status = this.materialAIProgressStatus(source.status);
+        const location = [source.sheet ? `Sheet ${source.sheet}` : "", Number(source.page_count || 0) ? `${Number(source.page_count)} 页` : "", Number(source.field_count || 0) ? `${Number(source.field_count)} 个字段` : ""].filter(Boolean).join(" · ");
+        return `<article class="is-${status.tone}"><i></i><div><strong>${this.escape(source.label || "未命名资料")}</strong><span>${this.escape([source.detail, location].filter(Boolean).join(" · ") || status.label)}</span>${source.error ? `<small>${this.escape(source.error)}</small>` : ""}</div><em>${status.label}</em></article>`;
+      }).join("") : `<div class="ocw-mf-ai-progress-empty">正在建立当前批次的资料清单…</div>`}</div>
+      ${warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(warning)}</div>` : ""}
+      <footer>
+        <button class="ocw-outline-btn" type="button" data-action="mf-ai-minimize">最小化</button>
+        <div>${failed ? `<button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry">重新分析</button>` : ""}${ready ? `<button class="ocw-primary-btn" type="button" data-action="mf-ai-view-draft">查看草稿</button>` : ""}</div>
+      </footer>
+    </div>`;
+  }
+
+  openMaterialAIProgressDialog() {
+    const state = this.ensureMaterialFeeState();
+    if (!state.aiFill) return;
+    state.aiProgressMinimized = false;
+    if (!state.aiProgressDialog) {
+      const dialog = new frappe.ui.Dialog({
+        title: "AI 分析资料",
+        fields: [{ fieldtype: "HTML", fieldname: "progress_html", options: this.renderMaterialAIProgressDialogContent() }],
+      });
+      state.aiProgressDialog = dialog;
+      dialog.show();
+      dialog.$wrapper.addClass("ocw-mf-ai-progress-modal");
+      dialog.$wrapper.off("click.ocwAIProgress").on("click.ocwAIProgress", "[data-action]", (event) => {
+        const action = String($(event.currentTarget).attr("data-action") || "");
+        if (action === "mf-ai-minimize") {
+          state.aiProgressMinimized = true;
+          dialog.hide();
+          this.updateMaterialAIProgressSurface();
+        } else if (action === "mf-ai-view-draft") {
+          this.showMaterialAIReadyDraft();
+        } else if (action === "mf-ai-progress-retry") {
+          dialog.hide();
+          state.aiProgressDialog = null;
+          state.aiFill = null;
+          state.aiPendingReady = null;
+          this.startMaterialAIFill({ force: true }).catch((error) => this.showError(error));
+        }
+      });
+    } else {
+      state.aiProgressDialog.show();
+    }
+    this.updateMaterialAIProgressSurface();
+  }
+
+  updateMaterialAIProgressSurface() {
+    const state = this.ensureMaterialFeeState();
+    const $chip = this.$root?.find?.("[data-mf-ai-progress-chip]");
+    if ($chip?.length) $chip.replaceWith(this.renderMaterialAIProgressChip());
+    const $button = this.$root?.find?.("[data-action='mf-ai-fill']");
+    if ($button?.length) {
+      const status = String(state.aiFill?.status || "");
+      $button.text(status === "READY" ? "查看 AI 结果" : ["QUEUED", "RUNNING"].includes(status) ? "查看分析进度" : state.aiFill ? "重新分析资料" : "AI 分析资料");
+    }
+    const dialog = state.aiProgressDialog;
+    if (dialog?.$wrapper?.length) {
+      const $host = dialog.$wrapper.find("[data-mf-ai-progress-host]");
+      if ($host.length) $host.replaceWith(this.renderMaterialAIProgressDialogContent());
+    }
+  }
+
+  showMaterialAIReadyDraft() {
+    const state = this.ensureMaterialFeeState();
+    const ready = state.aiPendingReady || state.aiFill;
+    if (ready?.status !== "READY") return;
+    state.aiFill = this.initializeMaterialAIDraft({ ...ready, draftVisible: true });
+    state.aiFill.draftVisible = true;
+    state.aiPendingReady = null;
+    state.aiProgressMinimized = false;
+    if (state.aiProgressDialog) {
+      state.aiProgressDialog.hide();
+      state.aiProgressDialog = null;
+    }
+    this.renderMaterialFeeWorkspacePreservingPosition();
+  }
+
   sourceAIReviewProposalLabel(proposal) {
     return { material_replace: "拆分临时物料", item_update: "补充物料字段", fee_update: "补充费用" }[proposal?.proposal_type] || "资料候选";
   }
 
   renderSourceAIReviewProposals() {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY" || !Array.isArray(fill.proposals)) return "";
+    if (fill?.status !== "READY" || !fill.draftVisible || !Array.isArray(fill.proposals)) return "";
     if (!fill.proposals.length) return `<div class="ocw-mf-ai-proposals is-empty">当前资料没有形成可保存候选，请补充说明或资料后重新分析。</div>`;
     return `<div class="ocw-mf-ai-proposals">${fill.proposals.map((proposal) => {
       const selected = fill.selections?.has(String(proposal.proposal_id || ""));
@@ -667,8 +848,8 @@
 
   renderMaterialAIFillFooter() {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY") return "";
-    const updateCount = fill.selections?.size ?? Object.keys(fill.updates || {}).length;
+    if (fill?.status !== "READY" || !fill.draftVisible) return "";
+    const updateCount = (fill.selections?.size ?? 0) + Object.keys(fill.manualUpdates || {}).length;
     const candidateCount = Number(fill.draft?.proposal_count || fill.draft?.candidate_count || 0);
     const mutating = Boolean(fill.applying || fill.discarding);
     return `<div class="ocw-mf-ai-footer"><span>AI 草稿 · 已选择 ${updateCount} 项${candidateCount ? ` · 共 ${candidateCount} 个提案` : ""}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${mutating ? "disabled" : ""}>${fill.discarding ? "正在放弃…" : "放弃草稿"}</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${mutating || !updateCount ? "disabled" : ""}>${fill.applying ? "正在保存…" : "确认所选草稿"}</button></div></div>`;
@@ -687,26 +868,6 @@
     };
     $viewport.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => {
       sync($viewport, $scrollbar);
-      const $shell = $viewport.closest(".ocw-mf-grid-shell");
-      const compact = $viewport.scrollLeft() > 8;
-      if ($shell.hasClass("is-horizontally-scrolled") !== compact) {
-        $shell.toggleClass("is-horizontally-scrolled", compact);
-        const widths = compact ? [54, 190, 110, 220] : [54, 220, 120, 260];
-        let delta = 0;
-        $viewport.find("col").slice(0, 4).each((index, column) => {
-          const previous = Number.parseFloat(column.style.width || 0);
-          column.style.width = `${widths[index]}px`;
-          delta += widths[index] - previous;
-        });
-        const table = $viewport.find("table").get(0);
-        const track = $scrollbar.children().get(0);
-        if (table && track && delta) {
-          const nextWidth = Math.max($viewport.width(), Number.parseFloat(table.style.width || table.scrollWidth) + delta);
-          table.style.width = `${nextWidth}px`;
-          table.style.minWidth = `${nextWidth}px`;
-          track.style.width = `${nextWidth}px`;
-        }
-      }
     });
     $scrollbar.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => sync($scrollbar, $viewport));
   }
@@ -716,10 +877,12 @@
       ...status,
       runId: status.run_id,
       updates: {},
+      manualUpdates: {},
       draft: status.draft || { rows: {} },
       proposals: status.proposals || status.draft?.proposals || [],
       selections: new Set((status.proposals || status.draft?.proposals || []).filter((proposal) => proposal.default_selected).map((proposal) => String(proposal.proposal_id))),
       edits: {},
+      draftVisible: status.draftVisible !== false,
     };
     fill.proposals.filter((proposal) => proposal.proposal_type === "item_update" && proposal.default_selected).forEach((proposal) => {
       Object.entries(proposal.payload?.fields || {}).forEach(([fieldname, value]) => {
@@ -749,8 +912,10 @@
   async startMaterialAIFill(options = {}) {
     const state = this.ensureMaterialFeeState();
     const currentStatus = String(state.aiFill?.status || "");
-    if (["QUEUED", "RUNNING"].includes(currentStatus)) return;
-    if (currentStatus === "READY" && options.force !== false) return;
+    if (["QUEUED", "RUNNING", "READY"].includes(currentStatus)) {
+      this.openMaterialAIProgressDialog();
+      return;
+    }
     state.aiFill = null;
     if (!(await this.flushMaterialFeeInputs(state))) return;
     const batchName = this.detailState.batchName;
@@ -762,8 +927,11 @@
       force: options.force === false ? 0 : 1,
     });
     if (!started?.ok) throw new Error(started?.message || "AI 分析任务启动失败。 ");
-    state.aiFill = { runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5 };
-    this.renderMaterialFeeWorkspace();
+    state.aiFill = { runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, source_progress: [] };
+    state.aiPendingReady = null;
+    state.aiProgressMinimized = false;
+    this.openMaterialAIProgressDialog();
+    this.updateMaterialAIProgressSurface();
     await this.pollMaterialAIFill(state, batchName, versionName, started.run_id);
   }
 
@@ -775,8 +943,9 @@
         run_id: runId,
       }, true);
       if (!status?.ok) throw new Error(status?.message || "AI 分析状态读取失败。 ");
-      state.aiFill = status.status === "READY" ? this.initializeMaterialAIDraft(status) : { ...state.aiFill, ...status, runId };
-      this.renderMaterialFeeWorkspace();
+      state.aiFill = { ...state.aiFill, ...status, runId, polling: true, draftVisible: false };
+      if (status.status === "READY") state.aiPendingReady = status;
+      this.updateMaterialAIProgressSurface();
       if (["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
     }
@@ -784,12 +953,16 @@
   }
 
   updateMaterialAIDraftFromInput($input) {
-    const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY") return false;
     const itemName = String($input.attr("data-item-name") || "");
     const fieldname = String($input.attr("data-fieldname") || "");
     const value = String($input.val() ?? "").trim();
     const original = String($input.attr("data-original-value") ?? "").trim();
+    return this.updateMaterialAIDraftValue(itemName, fieldname, value, original);
+  }
+
+  updateMaterialAIDraftValue(itemName, fieldname, value, original = "") {
+    const fill = this.ensureMaterialFeeState().aiFill;
+    if (fill?.status !== "READY") return false;
     const key = `${itemName}:${fieldname}`;
     const proposalUpdate = fill.updates?.[key];
     if (fill.review_mode && proposalUpdate?.proposal_id) {
@@ -803,7 +976,20 @@
       fill.updates[key] = { ...proposalUpdate, value, user_edited: true };
       return true;
     }
-    if (fill.review_mode) return false;
+    if (fill.review_mode) {
+      fill.manualUpdates = fill.manualUpdates || {};
+      if (value === original) delete fill.manualUpdates[key];
+      else {
+        const previous = fill.manualUpdates[key] || {};
+        fill.manualUpdates[key] = {
+          item_name: itemName,
+          fieldname,
+          value,
+          reason: previous.reason || "",
+        };
+      }
+      return true;
+    }
     if (value === original) delete fill.updates[key];
     else fill.updates[key] = { item_name: itemName, fieldname, value, user_edited: true };
     return true;
@@ -820,7 +1006,7 @@
       value: candidate.suggested_value,
       user_edited: true,
     };
-    this.renderMaterialFeeWorkspace();
+    this.renderMaterialFeeWorkspacePreservingPosition();
   }
 
   async applyMaterialAIFill() {
@@ -848,6 +1034,7 @@
         run_id: fill.runId || fill.run_id,
         selections_json: JSON.stringify(Array.from(fill.selections || [])),
         edits_json: JSON.stringify(fill.edits || {}),
+        manual_updates_json: JSON.stringify(Object.values(fill.manualUpdates || {})),
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
       });
@@ -932,9 +1119,73 @@
     return this.trackMaterialFeeWrite(() => this.persistMaterialFeeCell($input));
   }
 
+  renderMaterialFeeWorkspacePreservingPosition() {
+    const viewport = this.$root.find("[data-mf-grid-viewport]").get(0);
+    const horizontal = viewport?.scrollLeft || 0;
+    const scrollY = Number(globalThis.window?.scrollY || 0);
+    this.renderMaterialFeeWorkspace();
+    const restore = () => {
+      const nextViewport = this.$root.find("[data-mf-grid-viewport]").get(0);
+      if (nextViewport) nextViewport.scrollLeft = horizontal;
+      if (globalThis.window?.scrollTo) globalThis.window.scrollTo({ top: scrollY, behavior: "instant" });
+    };
+    if (globalThis.window?.requestAnimationFrame) globalThis.window.requestAnimationFrame(restore);
+    else restore();
+  }
+
+  openMaterialPurchaseCorrectionDialog(itemName, fieldname) {
+    const item = this.findMaterialFeeItem(itemName);
+    if (!item) {
+      frappe.show_alert({ message: "物料行已变化，请刷新后重试", indicator: "red" });
+      return;
+    }
+    const column = this.materialFeeGridColumns().find((entry) => entry.field === fieldname) || { label: fieldname };
+    const valueField = column.options
+      ? { fieldtype: "Select", fieldname: "value", label: column.label, options: column.options.map((option) => option.value).join("\n"), default: item[fieldname] || "" }
+      : { fieldtype: column.numeric ? "Float" : "Data", fieldname: "value", label: column.label, default: item[fieldname] ?? "", reqd: 1 };
+    const dialog = new frappe.ui.Dialog({
+      title: `修正${column.label}`,
+      fields: [
+        valueField,
+        { fieldtype: "Small Text", fieldname: "reason", label: "修改原因", reqd: 1, description: "将记录原值、新值、原因和操作者。" },
+      ],
+      primary_action_label: "保存修正",
+      primary_action: async (values) => {
+        const value = String(values.value ?? "").trim();
+        const reason = String(values.reason || "").trim();
+        if (!reason) return;
+        const state = this.ensureMaterialFeeState();
+        const key = `${itemName}:${fieldname}`;
+        if (state.aiFill?.status === "READY" && state.aiFill.draftVisible) {
+          state.aiFill.manualUpdates = state.aiFill.manualUpdates || {};
+          state.aiFill.manualUpdates[key] = { item_name: itemName, fieldname, value, reason };
+          dialog.hide();
+          this.renderMaterialFeeWorkspacePreservingPosition();
+          return;
+        }
+        if (!(await this.ensureMaterialFeeEditSession())) return;
+        const result = await this.call("overseas_costing.api.calculate.update_item_field", {
+          item_name: itemName,
+          fieldname,
+          value,
+          version_name: this.detailState.versionName || null,
+          remark: reason,
+          edit_token: this.detailState.editToken,
+          expected_modified: this.detailState.expectedModified,
+        }, true);
+        if (!result?.ok) throw new Error(result?.message || "采购字段修正失败");
+        this.updateMaterialFeeExpectedModified(result);
+        dialog.hide();
+        frappe.show_alert({ message: "采购字段修正已保存", indicator: "green" });
+        await this.loadMaterialFeeWorkspace({ quiet: true });
+      },
+    });
+    dialog.show();
+  }
+
   updateMaterialDraftFromInput($input) {
     const state = this.ensureMaterialFeeState();
-    if (state.aiFill?.status === "READY") {
+    if (state.aiFill?.status === "READY" && state.aiFill.draftVisible) {
       this.updateMaterialAIDraftFromInput($input);
       return;
     }
@@ -955,11 +1206,12 @@
 
   async persistMaterialFeeCell($input) {
     if (!$input.length || $input.data("saving")) return;
-    if (this.ensureMaterialFeeState().aiFill?.status === "READY") {
+    if (this.ensureMaterialFeeState().aiFill?.status === "READY" && this.ensureMaterialFeeState().aiFill.draftVisible) {
       this.updateMaterialAIDraftFromInput($input);
       const $cell = $input.closest(".ocw-mf-cell");
       const key = `${$input.attr("data-item-name")}:${$input.attr("data-fieldname")}`;
-      const isDraft = Boolean(this.ensureMaterialFeeState().aiFill?.updates?.[key]);
+      const fill = this.ensureMaterialFeeState().aiFill;
+      const isDraft = Boolean(fill?.updates?.[key] || fill?.manualUpdates?.[key]);
       $cell.toggleClass("is-ai-draft", isDraft);
       return;
     }
@@ -1044,6 +1296,8 @@
     const startField = $startInput.attr("data-fieldname");
     const startColumnIndex = editableColumns.findIndex((column) => column.field === startField);
     const updates = [];
+    const protectedPurchaseCorrections = [];
+    const purchaseCorrectionFields = this.materialPurchaseCorrectionFields();
     rows.forEach((values, rowOffset) => {
       const targetRow = visibleRows[startRowIndex + rowOffset];
       if (!targetRow) return;
@@ -1054,9 +1308,20 @@
         const current = this.findMaterialFeeItem(itemName)?.[column.field];
         const effectiveCurrent = column.field === "actual_shipped_qty" ? this.findMaterialFeeItem(itemName)?.effective_shipping_quantity : column.field === "shipped_uom" ? this.findMaterialFeeItem(itemName)?.effective_shipping_uom : current;
         if (String(value).trim() === String(effectiveCurrent ?? "").trim()) return;
+        if (
+          purchaseCorrectionFields.has(column.field)
+          && !this.materialValueIsPlaceholder(column.field, effectiveCurrent, this.findMaterialFeeItem(itemName) || {})
+        ) {
+          protectedPurchaseCorrections.push({ item_name: itemName, fieldname: column.field });
+          return;
+        }
         updates.push({ item_name: itemName, fieldname: column.field, value: String(value).trim(), old_value: effectiveCurrent, label: column.label });
       });
     });
+    if (protectedPurchaseCorrections.length) {
+      frappe.show_alert({ message: "粘贴内容包含已有有效采购值，请在对应单元格使用“修正”并填写原因。", indicator: "orange" });
+      return;
+    }
     if (!updates.length) {
       frappe.show_alert({ message: "粘贴内容没有可更新的单元格", indicator: "blue" });
       return;
@@ -1075,9 +1340,14 @@
 
   async applyMaterialPaste(dialog, updates) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status === "READY") {
-      updates.forEach(({ item_name, fieldname, value }) => {
-        fill.updates[`${item_name}:${fieldname}`] = { item_name, fieldname, value, user_edited: true };
+    if (fill?.status === "READY" && fill.draftVisible) {
+      updates.forEach(({ item_name, fieldname, value, old_value }) => {
+        this.updateMaterialAIDraftValue(
+          String(item_name || ""),
+          String(fieldname || ""),
+          String(value ?? "").trim(),
+          String(old_value ?? "").trim()
+        );
       });
       dialog.hide();
       this.renderMaterialFeeWorkspace();
