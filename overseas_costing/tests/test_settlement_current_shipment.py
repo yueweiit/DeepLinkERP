@@ -275,3 +275,11 @@ def test_rebinding_preserves_explicit_zero_packing_evidence(setup):
     retained=l.get('item',created['name'])
     assert retained is not None and retained['actual_shipped_qty']==0
     assert 'settlement_cargo' not in json.loads(retained['extra_json'])
+
+
+def test_changed_final_material_cannot_reuse_old_material_purchase_price():
+    from overseas_costing.services.logistics_settlement.valuation import value_final_cargo
+    changed=cargo(material_code='B')
+    assert value_final_cargo(shipment(),changed,{})['amount_rmb'] is None
+    persisted=shipment(material_code='B',extra_json=json.dumps({'settlement_original_values':{'material_code':'A'}}))
+    assert value_final_cargo(persisted,changed,{})['amount_rmb'] is None

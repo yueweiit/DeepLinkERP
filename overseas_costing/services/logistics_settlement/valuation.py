@@ -16,6 +16,11 @@ def value_final_cargo(item, cargo, fx_context):
     if not purchase_source:
         fact = item
         purchase_source = item.get('source_doc_no')
+    purchase_identity = meta.get('settlement_original_values') or item
+    if fact is not item and fact.get('material_code'):
+        purchase_identity = fact
+    final_code = str(cargo.get('material_code') or '').strip().casefold()
+    purchase_code = str(purchase_identity.get('material_code') or '').strip().casefold()
     price = number(fact.get('unit_price'))
     qty = number(cargo.get('quantity'))
     currency = str(fact.get('purchase_currency') or '').strip().upper()
@@ -33,6 +38,8 @@ def value_final_cargo(item, cargo, fx_context):
         rate = str(Decimal('1') / Decimal(rate_mxn)) if rate_mxn is not None and Decimal(rate_mxn) > 0 else None
     if not purchase_source or price is None or Decimal(price) < 0:
         result['error'] = 'SETTLEMENT_PURCHASE_PRICE_EVIDENCE_REQUIRED'
+    elif final_code and purchase_code and final_code != purchase_code:
+        result['error'] = 'SETTLEMENT_PURCHASE_MATERIAL_MISMATCH'
     elif qty is None or Decimal(qty) <= 0 or not uom or price_uom != uom:
         result['error'] = 'SETTLEMENT_QUANTITY_OR_PRICE_UNIT_INVALID'
     elif currency not in {'RMB','USD','MXN'} or rate is None or Decimal(rate) <= 0:
