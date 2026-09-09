@@ -1328,3 +1328,218 @@ def test_settlement_evidence_cannot_be_selected_as_a_fee_total() -> None:
                 }
             ],
         )
+
+
+def test_end_to_end_mixed_customs_review_applies_only_confirmed_draft(monkeypatch) -> None:
+    class Repository:
+        def __init__(self):
+            self.attachment = {
+                "name": "ATT-MIXED",
+                "batch": "B1",
+                "version": "V1",
+                "file_name": "完税与清关结算.pdf",
+                "modified": "m1",
+                "file_url": "/files/mixed.pdf",
+                "parse_status": "Parsed",
+                "parse_result_json": {
+                    "parser": "mexico_tax_certificate_pedimento",
+                    "header": {"paid_total_mxn": "70"},
+                    "tax_totals": {"igi_mxn": "10", "iva_mxn": "20"},
+                    "service_fees": [
+                        {
+                            "code": "broker_service",
+                            "amount_mxn": "30",
+                            "source_evidence": {"page": 2, "text_line": 8},
+                        }
+                    ],
+                    "line_items": [
+                        {
+                            "row_no": 1,
+                            "hs_code": "90041000",
+                            "taxes": {
+                                "igi_amount_mxn": "10",
+                                "iva_amount_mxn": "20",
+                            },
+                            "source_evidence": {
+                                "igi_amount_mxn": {"page": 1, "text_line": 10},
+                                "iva_amount_mxn": {"page": 1, "text_line": 11},
+                            },
+                        }
+                    ],
+                    "source_evidence": {
+                        "header.paid_total_mxn": {"page": 2, "text_line": 12},
+                        "tax_totals.igi_mxn": {"page": 2, "text_line": 13},
+                        "tax_totals.iva_mxn": {"page": 2, "text_line": 14},
+                    },
+                    "validation": {"status": "passed"},
+                },
+                "mapped_result_json": {},
+            }
+            self.items = _items()
+            self.fees = {}
+            self.evidence = {"E1": {"name": "E1", "validation_status": "PENDING"}}
+            self.components = []
+            self.run = None
+            self.run_status = ""
+            self.batch_status = "Draft"
+            self.unclassified_difference_writes = 0
+            self.external_calls = []
+            self.commits = 0
+
+        def get_context(self, batch_name, version_name):
+            return {
+                "batch": batch_name,
+                "version": version_name,
+                "transport_mode": "AIR",
+                "fx_context": {"fx_rmb_to_mxn": "2"},
+            }
+
+        def lock_batch(self, _batch_name):
+            return None
+
+        def get_attachment(self, _batch_name, _attachment_name):
+            return self.attachment
+
+        def get_items(self, _batch_name, _version_name):
+            return self.items
+
+        def materialize_fee_rule(self, _batch, _version, logical_fee_key):
+            return self.fees.setdefault(
+                logical_fee_key,
+                {
+                    "name": f"F-{logical_fee_key}",
+                    "logical_fee_key": logical_fee_key,
+                    "amount_status": "MISSING",
+                    "amount": None,
+                    "currency": "RMB",
+                },
+            )
+
+        def find_running(self, *_args):
+            return None
+
+        def find_reusable(self, *_args):
+            return None
+
+        def find_or_create_pending_evidence(self, **_kwargs):
+            return "E1"
+
+        def create_run(self, values):
+            self.run = {"name": "RUN-E2E", **values}
+            self.run_status = values["status"]
+            return self.run
+
+        def get_run(self, _run_id):
+            return self.run
+
+        def claim_run(self, _run_id, token):
+            self.run.update(status="RUNNING", execution_token=token)
+            self.run_status = "RUNNING"
+            return self.run
+
+        def save_claimed(self, _run_id, token, **updates):
+            assert token == self.run["execution_token"]
+            self.run.update(updates)
+            self.run_status = self.run["status"]
+            return self.run
+
+        def save_attachment_parse(self, *_args):
+            raise AssertionError("existing deterministic parse should be reused")
+
+        def get_refund_candidates(self, *_args):
+            return []
+
+        def get_evidence_components(self, *_args):
+            return []
+
+        def lock_apply_context(self, _context, _run):
+            return self.run
+
+        def assert_batch_write(self, *_args, **_kwargs):
+            return None
+
+        def list_duplicate_evidence_candidates(self, *_args):
+            return []
+
+        def update_evidence(self, evidence_name, values):
+            self.evidence[evidence_name].update(values)
+
+        def save_fee_split(self, *, fee_row, **_kwargs):
+            fee = self.materialize_fee_rule("B1", "V1", fee_row["logical_fee_key"])
+            fee.update(
+                amount=fee_row["amount"],
+                currency=fee_row["currency"],
+                amount_status=fee_row.get("amount_status") or "ACTUAL",
+            )
+            return fee
+
+        def replace_components(self, *, components, **_kwargs):
+            self.components.extend(components)
+
+        def mark_batch_dirty(self, _batch_name):
+            self.batch_status = "Dirty"
+
+        def insert_review_audit(self, **_kwargs):
+            return None
+
+        def finish_run(self, _run_id, values):
+            self.run.update(values)
+            self.run_status = values["status"]
+
+        def get_batch_modified(self, _batch_name):
+            return "m2"
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            return None
+
+    repository = Repository()
+    monkeypatch.setattr(
+        service,
+        "_semantic_ai_review",
+        lambda *_args: {"ok": False, "warning": "DeepSeek unavailable", "model": ""},
+    )
+    queued = []
+
+    started = service.start_fee_evidence_review(
+        "B1",
+        "V1",
+        "import_tax",
+        "ATT-MIXED",
+        "tax_certificate",
+        repository=repository,
+        enqueue=queued.append,
+    )
+    assert queued == [started["run_id"]]
+    assert service.execute_fee_evidence_review(
+        started["run_id"], repository=repository
+    )["status"] == "READY"
+    draft = repository.run["draft_json"]
+    selections = [
+        row["proposal_id"]
+        for row in [
+            draft["evidence"],
+            *draft["fee_splits"],
+            *draft["components"],
+        ]
+        if row.get("default_selected")
+    ]
+    applied = service.apply_fee_evidence_review(
+        "B1",
+        started["run_id"],
+        selections,
+        {},
+        "EDIT",
+        "m1",
+        repository=repository,
+    )
+
+    assert applied["fee_count"] == 2
+    assert applied["component_count"] > 0
+    assert draft["unclassified_difference"] == "10.00"
+    assert repository.run_status == "APPLIED"
+    assert repository.batch_status == "Dirty"
+    assert repository.unclassified_difference_writes == 0
+    assert repository.external_calls == []
