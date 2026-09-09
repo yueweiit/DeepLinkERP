@@ -257,3 +257,82 @@ def test_formal_legacy_missing_snapshot_fx_blocks_before_ai(monkeypatch):
     result = service.recalculate_batch('B')
     assert result['ok'] is False
     assert writes == []
+
+
+def test_superseded_freight_rule_does_not_drop_uncovered_misc_fallback():
+    items = [item(mexico_misc_mxn=25)]
+    old = {'rule_code': 'oa_logistics_freight', 'amount': 500, 'currency': 'RMB', 'is_enabled': 1}
+    rows_without_old, summary_without_old = calculate(items, [final_rule()])
+    rows_with_old, summary_with_old = calculate(items, [old, final_rule()])
+    assert rows_with_old[0]['total_logistics_mxn'] == rows_without_old[0]['total_logistics_mxn'] == 25
+    assert summary_with_old['fee_pool_rmb'] == summary_without_old['fee_pool_rmb'] == 10
+
+
+@pytest.mark.parametrize('old_rules,expected_mxn', [
+    ([{'rule_code': 'mexico_misc_mxn', 'amount': 25, 'currency': 'MXN', 'is_enabled': 0}], 0),
+    ([{'rule_code': 'oa_logistics_freight', 'amount': 500, 'currency': 'RMB', 'is_enabled': 1}], 25),
+])
+def test_formal_recalculation_uses_and_snapshots_exact_selected_fee_pools(monkeypatch, old_rules, expected_mxn):
+    items = [item(mexico_misc_mxn=25)]
+    rules = [final_rule(), *old_rules]
+    preview_rows, preview_summary = calculate(items, rules)
+    writes = mock_formal_calculation(monkeypatch, rules)
+    monkeypatch.setattr(service, '_get_items', lambda *_: items)
+    result = service.recalculate_batch('B')
+    assert result['ok'] is True
+    assert result['summary_snapshot']['total_logistics_mxn'] == preview_summary['total_logistics_mxn'] == expected_mxn
+    item_update = next(args[2] for args, _ in writes if args[0] == 'Overseas Cost Item')
+    assert item_update['total_logistics_mxn'] == preview_rows[0]['total_logistics_mxn'] == expected_mxn
+    actual_rules = json.loads(item_update['derived_json'])['allocated_rules']
+    reported_codes = [rule['rule_code'] for rule in result['allocation_rules']]
+    assert [rule['rule_code'] for rule in actual_rules] == reported_codes
+    assert result['summary_snapshot']['rule_count'] == len(reported_codes)
+    version_update = next(args[2] for args, _ in writes if args[0] == 'Overseas Cost Version')
+    assert json.loads(version_update['rule_snapshot_json']) == result['allocation_rules']
+
+
+def test_explicit_disabled_rule_also_suppresses_legacy_item_fallback_without_final():
+    rows, _ = calculate([item(mexico_misc_mxn=25)], [
+        {'rule_code': 'mexico_misc_mxn', 'amount': 25, 'currency': 'MXN', 'is_enabled': 0},
+    ])
+    assert rows[0]['total_logistics_mxn'] == 0
+
+
+@pytest.mark.parametrize('scope', ['freight', 'freight,customs,tax'])
+def test_international_freight_or_ddp_does_not_imply_mexico_inland_coverage(scope):
+    rows, _ = calculate([item(mexico_inland_mxn=25)], [final_rule(0, covered_scopes=scope)])
+    assert rows[0]['total_logistics_mxn'] == 25
+
+
+@pytest.mark.parametrize('field,currency', [('mexico_inland_mxn', 'MXN'), ('mexico_inland_misc_rmb', 'RMB')])
+@pytest.mark.parametrize('explicit_old_rule', [False, True])
+def test_explicit_mexico_inland_coverage_replaces_inland_field_or_rule_only(field, currency, explicit_old_rule):
+    rules = [final_rule(0, covered_scopes='freight,customs,tax,mexico_inland')]
+    if explicit_old_rule:
+        rules.append({'rule_code': field, 'amount': 100, 'currency': currency, 'is_enabled': 1})
+    rows, summary = calculate([item(**{field: 100, 'mexico_misc_mxn': 25})], rules)
+    assert rows[0]['total_logistics_mxn'] == 25
+    assert summary['fee_pool_rmb'] == 10
+    assert 'mexico_inland' in summary['final_covered_scopes']
+
+
+def test_uncovered_inland_fallback_is_preserved_alongside_explicit_misc_rule():
+    rows, summary = calculate([item(mexico_inland_mxn=25, mexico_misc_mxn=70)], [
+        final_rule(),
+        {'rule_code': 'mexico_misc_mxn', 'amount': 50, 'currency': 'MXN', 'allocation_basis': 'gross_weight'},
+    ])
+    assert rows[0]['total_logistics_mxn'] == 75
+    assert summary['fee_pool_rmb'] == 30
+    actual_rules = json.loads(rows[0]['derived_json'])['allocated_rules']
+    assert [rule['rule_code'] for rule in actual_rules].count('mexico_misc_mxn') == 1
+
+
+@pytest.mark.parametrize('enabled,freight', [(1, 500), (0, 0)])
+def test_uncovered_fallback_does_not_duplicate_explicit_freight_under_another_code(enabled, freight):
+    rows, _ = calculate([item(china_to_mexico_freight_rmb=900, mexico_misc_mxn=25)], [
+        final_rule(0, covered_scopes='customs'),
+        {'rule_code': 'oa_logistics_freight', 'amount': 500, 'currency': 'RMB',
+         'allocation_basis': 'gross_weight', 'is_enabled': enabled},
+    ])
+    assert rows[0]['total_logistics_mxn'] == freight * 2.5 + 25
+    assert rows[0]['freight_alloc_rmb'] == freight

@@ -508,7 +508,7 @@ class CalculationValidationError(ValueError):
 
 
 MONEY_QUANTUM = Decimal("0.000001")
-FINAL_SCOPES = frozenset({"freight", "customs", "tax"})
+FINAL_SCOPES = frozenset({"freight", "customs", "tax", "mexico_inland"})
 _UNSET_FX = object()
 
 
@@ -564,6 +564,8 @@ def _rule_scopes(rule: dict) -> set[str]:
     if rule.get("covered_scopes"):
         return {scope.strip() for scope in str(rule["covered_scopes"]).split(",") if scope.strip()}
     code = str(rule.get("rule_code") or rule.get("fee_key") or "").lower()
+    if code.startswith("mexico_inland"):
+        return {"mexico_inland"}
     if "freight" in code or "ocean" in code:
         return {"freight"}
     if "customs" in code or "clearance" in code or code in CUSTOMS_SERVICE_FIELDS:
@@ -595,10 +597,6 @@ def _select_calculation_rules(items: list[dict], rules: list[dict]) -> tuple[lis
 
     legacy_rules = [rule for rule in rules if not _is_final_rule(rule) and _is_rule_enabled(rule)
                     and _to_float(rule.get("amount"))]
-    if not legacy_rules:
-        explicit_codes = {rule.get("rule_code") for rule in rules}
-        legacy_rules = [rule for rule in _fallback_rules_from_items(items)
-                        if not final_rules or rule.get("rule_code") not in explicit_codes]
     selected = []
     for rule in legacy_rules:
         scopes = _rule_scopes(rule)
@@ -607,6 +605,15 @@ def _select_calculation_rules(items: list[dict], rules: list[dict]) -> tuple[lis
                 raise CalculationValidationError("旧费用池与最终结算覆盖范围部分交叉，无法拆分整笔费用。")
             continue
         selected.append(rule)
+    if final_rules or not selected:
+        # Covered estimates cannot decide whether independent costs get a fallback.
+        # Keep every explicit code here, including disabled/zero rules, so those
+        # pools cannot be recreated from stale item fields.
+        explicit_codes = {rule.get("rule_code") or rule.get("fee_key") for rule in rules}
+        explicit_scopes = covered.union(*(_rule_scopes(rule) for rule in rules))
+        selected.extend(rule for rule in _fallback_rules_from_items(items)
+                        if rule.get("rule_code") not in explicit_codes
+                        and not (_rule_scopes(rule) & explicit_scopes))
     return selected + final_rules, covered
 
 
@@ -894,6 +901,22 @@ def calculate_item_rows(
     fx_usd_to_rmb: float | None = None,
 ) -> tuple[list[dict], dict]:
     """Pure calculation; invalid final source/currency/FX raises before results can be persisted."""
+    selected_rules, covered = _select_calculation_rules(items, rules or [])
+    return _calculate_selected_item_rows(
+        items, selected_rules, covered,
+        fx_rmb_to_mxn=fx_rmb_to_mxn, fx_usd_to_rmb=fx_usd_to_rmb,
+    )
+
+
+def _calculate_selected_item_rows(
+    items: list[dict],
+    enabled_rules: list[dict],
+    covered: set[str],
+    *,
+    fx_rmb_to_mxn=_UNSET_FX,
+    fx_usd_to_rmb: float | None = None,
+) -> tuple[list[dict], dict]:
+    """Calculate exactly the selected pools without recreating any fallback rules."""
     rows = [_deepcopy(item) for item in items]
     for row in rows:
         quantity = _decimal(row.get("quantity") or 0, "数量")
@@ -901,7 +924,6 @@ def calculate_item_rows(
         if row.get("goods_value") in (None, "") and quantity and unit_price:
             row["goods_value"] = float(_money(quantity * unit_price))
 
-    enabled_rules, covered = _select_calculation_rules(rows, rules or [])
     has_final = any(_is_final_rule(rule) for rule in enabled_rules)
     if fx_rmb_to_mxn is _UNSET_FX:
         fx_rmb_to_mxn = None if has_final else DEFAULT_FX_RMB_TO_MXN
@@ -1923,7 +1945,7 @@ def recalculate_batch(
     fx_rmb_to_mxn = version_context.get("fx_rmb_to_mxn")
     fx_usd_to_rmb = version_context.get("fx_usd_to_rmb")
     try:
-        candidate_rules, _covered = _select_calculation_rules(items, rules)
+        candidate_rules, covered = _select_calculation_rules(items, rules)
         # Validate before AI normalization, which otherwise defaults missing currency.
         _positive_fx(fx_rmb_to_mxn, "RMB/MXN")
         for rule in candidate_rules:
@@ -1943,8 +1965,8 @@ def recalculate_batch(
                 },
             )
         rules_for_calculation = ai_allocation.get("rules") or candidate_rules
-        calculated_rows, summary_snapshot = calculate_item_rows(
-            items, rules_for_calculation,
+        calculated_rows, summary_snapshot = _calculate_selected_item_rows(
+            items, rules_for_calculation, covered,
             fx_rmb_to_mxn=fx_rmb_to_mxn,
             fx_usd_to_rmb=fx_usd_to_rmb,
         )
