@@ -642,6 +642,19 @@ def summarize_evidence_ledger(evidence: list[dict], *, current_amount: Any, curr
         for row in (evidence or [])
         if str(row.get("validation_status") or "VALID").upper() == "VALID"
     ]
+    split_review_runs = {
+        str(row.get("review_run") or "")
+        for row in accepted_evidence
+        if str(row.get("evidence_role") or "") == "fee_split"
+        and row.get("review_run")
+    }
+    accepted_evidence = [
+        row
+        for row in accepted_evidence
+        if str(row.get("evidence_role") or "") == "fee_split"
+        or not row.get("review_run")
+        or str(row.get("review_run") or "") not in split_review_runs
+    ]
     for row in accepted_evidence:
         amount = _decimal(row.get("original_amount"))
         if amount is None:
@@ -1056,13 +1069,14 @@ def _session_user() -> str:
 
 def _attachment_fingerprint(attachment: dict) -> str:
     payload = {
-        "name": attachment.get("name"),
-        "modified": str(attachment.get("modified") or ""),
-        "file_url": attachment.get("file_url"),
+        "content_sha256": str(attachment.get("content_sha256") or ""),
         "parse_status": attachment.get("parse_status"),
         "parse_result_json": attachment.get("parse_result_json"),
         "mapped_result_json": attachment.get("mapped_result_json"),
     }
+    if not payload["content_sha256"]:
+        payload["file_name"] = str(attachment.get("file_name") or "").strip().lower()
+        payload["file_url"] = str(attachment.get("file_url") or "")
     return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -1123,6 +1137,8 @@ def _semantic_ai_review(parsed: dict, attachment: dict, items: list[dict]) -> di
     try:
         content = allocation_service._call_chat_completions(config, messages)
         raw = allocation_service._extract_json_object(content)
+        if not isinstance(raw, dict):
+            raise ValueError("DeepSeek 返回的语义结果不是 JSON 对象。")
     except Exception as exc:
         return {
             "ok": False,
@@ -1148,7 +1164,9 @@ def _semantic_ai_review(parsed: dict, attachment: dict, items: list[dict]) -> di
     item_names = {str(row.get("name") or "") for row in items}
     line_numbers = {str(row.get("row_no") or "") for row in safe_lines}
     matches = {}
-    for row_no, names in (raw.get("line_item_matches") or {}).items():
+    raw_matches = raw.get("line_item_matches")
+    raw_matches = raw_matches if isinstance(raw_matches, dict) else {}
+    for row_no, names in raw_matches.items():
         normalized = [str(name) for name in (names if isinstance(names, list) else []) if str(name) in item_names]
         if str(row_no) in line_numbers and normalized:
             matches[str(row_no)] = sorted(set(normalized))
@@ -1203,6 +1221,20 @@ class FrappeFeeEvidenceReviewRepository:
         ) or {}
         if str(row.get("batch") or "") != str(batch_name or ""):
             raise ValueError("凭证附件不属于当前批次。")
+        file_url = str(row.get("file_url") or "")
+        content_sha256 = ""
+        if file_url:
+            try:
+                file_name = frappe.db.get_value("File", {"file_url": file_url}, "name")
+                if file_name:
+                    file_doc = frappe.get_doc("File", file_name)
+                    content = file_doc.get_content()
+                    if isinstance(content, str):
+                        content = content.encode("utf-8")
+                    content_sha256 = hashlib.sha256(bytes(content or b"")).hexdigest()
+            except Exception:
+                content_sha256 = ""
+        row["content_sha256"] = content_sha256
         return row
 
     def get_items(self, batch_name: str, version_name: str) -> list[dict]:
@@ -1579,6 +1611,19 @@ class FrappeFeeEvidenceReviewRepository:
         frappe.db.set_value(
             "Overseas Cost Allocation Rule", rule_name, values, update_modified=True
         )
+        previous_status = str(previous.get("amount_status") or "MISSING")
+        if previous_status != status:
+            from overseas_costing.services.calculate_service import _insert_audit_log
+
+            _insert_audit_log(
+                batch_doc_name=context["batch"],
+                version_name=context["version"],
+                action_type="EDIT",
+                field_name=f"fee:{fee_key}:amount_status",
+                old_value=previous_status,
+                new_value=status,
+                action_remark="已人工确认凭证审核草稿",
+            )
         result = {**merged["fee"], "name": rule_name}
         link_name = frappe.db.get_value(
             "Overseas Cost Fee Evidence",
@@ -1589,30 +1634,41 @@ class FrappeFeeEvidenceReviewRepository:
             },
             "name",
         )
-        if not link_name and rule_name != str(evidence_values.get("fee_rule") or ""):
+        evidence_link_values = {
+            "batch": context["batch"],
+            "version": context["version"],
+            "fee_rule": rule_name,
+            "attachment": attachment["name"],
+            "evidence_role": "fee_split",
+            "validation_status": "VALID",
+            "evidence_type": evidence_values.get("evidence_type") or "OTHER",
+            "accounting_role": evidence_values.get("accounting_role") or "REFERENCE",
+            "currency": currency,
+            "original_amount": amount,
+            "direction": evidence_values.get("direction") or "DEBIT",
+            "is_final": 1 if _checked(evidence_values.get("is_final")) else 0,
+            "attachment_fingerprint": _attachment_fingerprint(attachment),
+            "parse_snapshot_json": _json(draft),
+            "confirmed_by": _session_user(),
+            "confirmed_at": _now(),
+            "validated_by": _session_user(),
+            "validated_at": _now(),
+            "review_run": run_id,
+        }
+        if not link_name:
             frappe.get_doc(
                 {
                     "doctype": "Overseas Cost Fee Evidence",
-                    "batch": context["batch"],
-                    "version": context["version"],
-                    "fee_rule": rule_name,
-                    "attachment": attachment["name"],
-                    "evidence_role": "fee_split",
-                    "validation_status": "VALID",
-                    "evidence_type": evidence_values.get("evidence_type") or "OTHER",
-                    "accounting_role": evidence_values.get("accounting_role")
-                    or "REFERENCE",
-                    "currency": currency,
-                    "original_amount": amount,
-                    "direction": evidence_values.get("direction") or "DEBIT",
-                    "is_final": 1 if _checked(evidence_values.get("is_final")) else 0,
-                    "attachment_fingerprint": _attachment_fingerprint(attachment),
-                    "parse_snapshot_json": _json(draft),
-                    "confirmed_by": _session_user(),
-                    "confirmed_at": _now(),
-                    "review_run": run_id,
+                    **evidence_link_values,
                 }
             ).insert(ignore_permissions=True)
+        else:
+            frappe.db.set_value(
+                "Overseas Cost Fee Evidence",
+                link_name,
+                evidence_link_values,
+                update_modified=True,
+            )
         return result
 
     def replace_components(
@@ -1632,6 +1688,25 @@ class FrappeFeeEvidenceReviewRepository:
             (evidence_name, logical_fee_key),
         )
         for row in components:
+            component_values = {
+                key: row.get(key)
+                for key in (
+                    "item",
+                    "stable_line_key",
+                    "component_type",
+                    "accounting_role",
+                    "cost_effect",
+                    "tax_code",
+                    "hs_code",
+                    "currency",
+                    "original_amount",
+                    "amount_rmb",
+                    "exchange_rate",
+                    "allocation_basis",
+                    "confidence",
+                    "reverses_component",
+                )
+            }
             frappe.get_doc(
                 {
                     "doctype": "Overseas Cost Fee SKU Component",
@@ -1641,7 +1716,7 @@ class FrappeFeeEvidenceReviewRepository:
                     "logical_fee_key": logical_fee_key,
                     "evidence": evidence_name,
                     "attachment": attachment_name,
-                    **row,
+                    **component_values,
                     "source_evidence_json": _json(row.get("source_evidence") or {}),
                     "status": "CONFIRMED",
                     "is_active": 1,

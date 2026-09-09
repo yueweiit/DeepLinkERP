@@ -581,7 +581,12 @@ def _has_valid_final_evidence(rule_name: str) -> bool:
     return bool(
         frappe.db.get_value(
             "Overseas Cost Fee Evidence",
-            {"fee_rule": rule_name, "validation_status": "VALID", "is_final": 1},
+            {
+                "fee_rule": rule_name,
+                "validation_status": "VALID",
+                "accounting_role": "FINAL_BILL",
+                "is_final": 1,
+            },
             "name",
         )
     )
@@ -933,11 +938,14 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
             "currency",
             "original_amount",
             "direction",
+            "related_evidence",
             "is_final",
             "attachment_fingerprint",
             "confirmed_by",
             "confirmed_at",
+            "review_run",
         ],
+        order_by="confirmed_at asc, creation asc",
         limit_page_length=5000,
     )
     evidence_by_rule: dict[str, list[dict]] = {}

@@ -174,6 +174,40 @@ def test_evidence_ledger_ignores_pending_and_invalid_evidence() -> None:
     assert summary["effective_status"] == "ESTIMATED"
 
 
+def test_fee_split_evidence_prevents_document_total_from_double_counting() -> None:
+    summary = service.summarize_evidence_ledger(
+        [
+            {
+                "name": "E-SPLIT",
+                "evidence_role": "fee_split",
+                "validation_status": "VALID",
+                "accounting_role": "FINAL_BILL",
+                "original_amount": "30",
+                "currency": "MXN",
+                "direction": "DEBIT",
+                "is_final": 1,
+                "review_run": "RUN-1",
+            },
+            {
+                "name": "E-TOTAL",
+                "evidence_role": "tax_certificate",
+                "validation_status": "VALID",
+                "accounting_role": "FINAL_BILL",
+                "original_amount": "70",
+                "currency": "MXN",
+                "direction": "DEBIT",
+                "is_final": 1,
+                "review_run": "RUN-1",
+            },
+        ],
+        current_amount="30",
+        current_status="ACTUAL",
+    )
+
+    assert summary["final_bill_by_currency"] == {"MXN": "30.00"}
+    assert summary["effective_amount"] == "30.00"
+
+
 def test_mixed_customs_document_separates_tax_clearance_and_unclassified_difference() -> None:
     parsed = {
         "parser": "mexico_tax_certificate_pedimento",
@@ -1071,6 +1105,37 @@ def test_execute_claim_loss_never_writes_with_a_new_owners_token() -> None:
     }
 
 
+def test_malformed_deepseek_match_shape_falls_back_without_losing_rule_result(
+    monkeypatch,
+) -> None:
+    from overseas_costing.services import allocation_service
+
+    monkeypatch.setattr(
+        allocation_service,
+        "_ai_config",
+        lambda: {"api_key": "test", "model": "deepseek-test"},
+    )
+    monkeypatch.setattr(
+        allocation_service,
+        "_call_chat_completions",
+        lambda *_args: '{"evidence_type":"REFUND","line_item_matches":[{"bad":true}]}',
+    )
+    monkeypatch.setattr(
+        allocation_service,
+        "_extract_json_object",
+        lambda _content: {
+            "evidence_type": "REFUND",
+            "line_item_matches": [{"bad": True}],
+        },
+    )
+
+    result = service._semantic_ai_review({}, {"file_name": "refund.pdf"}, _items())
+
+    assert result["ok"] is True
+    assert result["review"]["evidence_type"] == "REFUND"
+    assert result["review"]["line_item_matches"] == {}
+
+
 def test_incremental_status_omits_large_draft_while_running_and_unchanged() -> None:
     class Repository:
         def get_run(self, _run_id):
@@ -1125,6 +1190,32 @@ def test_duplicate_attachment_fingerprint_is_rejected() -> None:
     service.assert_no_duplicate_evidence(
         candidate,
         [{**existing[0], "attachment": "A-NEW"}],
+    )
+
+
+def test_attachment_fingerprint_uses_file_content_not_attachment_identity() -> None:
+    first = {
+        "name": "A1",
+        "file_name": "first.pdf",
+        "file_url": "/files/first.pdf",
+        "modified": "m1",
+        "content_sha256": "same-content",
+        "parse_result_json": {"total": "30"},
+        "mapped_result_json": {},
+    }
+    duplicate_upload = {
+        **first,
+        "name": "A2",
+        "file_name": "renamed.pdf",
+        "file_url": "/files/renamed.pdf",
+        "modified": "m2",
+    }
+
+    assert service._attachment_fingerprint(first) == service._attachment_fingerprint(
+        duplicate_upload
+    )
+    assert service._attachment_fingerprint(first) != service._attachment_fingerprint(
+        {**duplicate_upload, "content_sha256": "different-content"}
     )
 
 
