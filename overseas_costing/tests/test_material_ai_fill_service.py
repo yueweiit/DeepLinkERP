@@ -2289,3 +2289,30 @@ def test_unified_worker_requires_sheet_selection_when_multiple_sheets_produce_re
     progress = repository.run["source_progress_json"]
     assert {row["read_status"] for row in progress} == {"NEEDS_SELECTION"}
     assert all(len(row["sheet_options"]) == 2 for row in progress)
+
+
+@pytest.mark.parametrize('initial_status',['QUEUED','RUNNING'])
+def test_repository_discard_active_run_fences_late_worker_progress_and_completion(monkeypatch,initial_status):
+    from types import SimpleNamespace
+    service=material_ai_fill_service
+    values={'name':'R','batch':'B','status':initial_status,'execution_token':'worker','progress_revision':3}
+    class Run(SimpleNamespace):
+        def save(self,**kwargs):
+            values.update(vars(self))
+            return self
+    locked=[];writes=[]
+    def sql(query,args,**kwargs):
+        assert 'FOR UPDATE' in query
+        locked.append(query)
+        return [dict(values)]
+    def set_value(doctype,name,updates,**kwargs):
+        writes.append(updates);values.update(updates)
+    monkeypatch.setattr(service,'frappe',SimpleNamespace(db=SimpleNamespace(sql=sql,set_value=set_value,
+        commit=lambda:None,rollback=lambda:None),get_doc=lambda *a:Run(**values)))
+    repo=service.FrappeMaterialAIFillRepository()
+    assert repo.discard_run('B','R').status=='DISCARDED'
+    assert values['progress_revision']==4
+    assert repo.claim_run('R','late-worker') is None
+    assert repo.save_claimed_run('R','worker',status='RUNNING',progress_step='late') is None
+    assert repo.save_claimed_run('R','worker',status='READY',draft_json={}) is None
+    assert values['status']=='DISCARDED' and not writes and len(locked)==4

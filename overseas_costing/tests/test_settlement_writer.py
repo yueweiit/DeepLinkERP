@@ -142,6 +142,9 @@ def test_rebind_restores_retired_original_row_with_packing(setup):
 def test_resolve_checks_refreshes_status_without_duplicate_application(setup):
     from overseas_costing.services.logistics_settlement.writer import apply_binding, resolve_item_checks, item_review
     s,l,batch,version,item,rule,binding=setup
+    from overseas_costing.tests.test_settlement_document_writer import document
+    expense=s.get('source',binding['expense_id']); expense['documents']=[document()]
+    s.put('source',{'id':expense['id'],'data':dumps(expense)})
     apply_binding(s,l,binding['id'],'u')
     l.put('version',version['name'], {'fx_rmb_to_mxn':2.6})
     current=l.get('item',item['name'])

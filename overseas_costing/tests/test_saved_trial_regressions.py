@@ -94,6 +94,30 @@ console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
     assert "99999.00" not in result
 
 
+def test_changed_source_hides_complete_saved_result_as_history():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=value=>String(value ?? '');
+h.detailState.header={status:'Calculated',summary_snapshot:{comprehensive_cost:{summary:{is_complete:true,total_cost_rmb:'60'},items:[]}}};
+state.materials={calculation_stale:true};
+console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
+""")
+    assert '待重新试算' in html and '以下为历史结果' in html
+    assert '>完整成本<' not in html
+
+
+def test_cancel_ai_discards_run_and_closes_progress():
+    result = _frontend_result(FRONTEND_SETUP + """
+state.aiFill={runId:'RUN',status:'QUEUED'};
+let hidden=false,calls=[];state.aiProgressDialog={hide(){hidden=true}};
+h.call=async(endpoint,args)=>{calls.push([endpoint,args]);return {ok:true}};
+h.loadMaterialFeeWorkspace=async()=>{};
+await h.discardMaterialAIFill();
+console.log(JSON.stringify({hidden,calls,fill:state.aiFill}));
+""")
+    assert result['hidden'] and result['fill'] is None
+    assert result['calls'][0][0].endswith('.discard_source_ai_review')
+
+
 @pytest.mark.parametrize("saved_current", [False, True])
 def test_fee_inclusion_distinguishes_available_fees_from_saved_calculation(saved_current):
     result = _frontend_result(FRONTEND_SETUP + f"""

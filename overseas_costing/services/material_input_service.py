@@ -99,7 +99,7 @@ def resolve_effective_quantity(item: dict) -> Dict[str, object]:
         if not uom:
             blocking.append({'code':'SETTLEMENT_UOM_REQUIRED','field':'shipped_uom'})
         return {'quantity':format(quantity,'f') if quantity is not None else '', 'uom':uom,
-                'mode':'SETTLEMENT_FINAL', 'is_default':False, 'blocking':blocking,
+                'mode':'SETTLEMENT_FINAL' if cargo else 'SETTLEMENT_PENDING', 'is_default':False, 'blocking':blocking,
                 'source_revision':cargo.get('source_snapshot')}
 
     stored_mode = str(item.get("actual_shipped_qty_mode") or "").strip()
@@ -146,7 +146,8 @@ def normalize_grid_page(page: object, page_length: object) -> tuple[int, int]:
 def present_material_row(item: dict) -> dict:
     """Expose a stable row identity and lazy quantity provenance without backfilling."""
 
-    row = dict(item or {})
+    from overseas_costing.services.effective_source_values import project_source_values
+    row = project_source_values(item or {})
     stored_key = str(row.get("stable_line_key") or "").strip()
     item_name = str(row.get("name") or "").strip()
     row["stable_line_key"] = stored_key or (f"legacy:{item_name}" if item_name else "")
@@ -177,6 +178,12 @@ def present_material_row(item: dict) -> dict:
     valuation = shipment_value(row)
     row['shipment_value_rmb'] = valuation['amount_rmb']
     row['shipment_valuation'] = valuation
+    if (row.get('source_context') or {}).get('root_kind') == 'expense':
+        evidence = valuation.get('input_evidence') or {}
+        row['adopted_price'] = {'value':evidence.get('price'), 'currency':evidence.get('original_currency'),
+                                'unit':evidence.get('price_uom'), 'error':valuation.get('error'),
+                                'source_type':'expense' if valuation.get('method') == 'settlement_expense_unit_price' else 'commodity_purchase',
+                                'source':evidence.get('purchase_source'), 'evidence':evidence.get('price_evidence')}
     return row
 
 
@@ -192,7 +199,10 @@ def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
         reasons: dict[str, list[dict]] = {}
         for blocking in (row.get("effective_shipping") or {}).get("blocking") or []:
             reasons.setdefault(str(blocking.get("field") or "actual_shipped_qty"), []).append(blocking)
-        if _positive_decimal(row.get("shipment_value_rmb")) is None:
+        from overseas_costing.services.shipment_cost_service import number
+        current_value = number(row.get("shipment_value_rmb"))
+        explicit_zero = current_value == 0 and row["shipment_valuation"].get("method") == "settlement_expense_unit_price" and not row["shipment_valuation"].get("error")
+        if _positive_decimal(row.get("shipment_value_rmb")) is None and not explicit_zero:
             value_field = 'goods_value' if row['shipment_valuation']['method'] == 'LEGACY_PURCHASE' else 'shipment_value_rmb'
             reasons.setdefault(value_field, []).append(
                 {"code": row['shipment_valuation'].get('error') or "GOODS_VALUE_REQUIRED", "message": "本次发货货值缺失或已失效，请重新分析资料。"}
@@ -286,11 +296,13 @@ def get_material_grid(
     )
     from overseas_costing.services.approval_link_service import attach_approval_links
 
+    from overseas_costing.services.effective_source_values import project_batch_items, project_source_values
+    raw_items, source_context = project_batch_items(raw_items,resolved_batch,resolved_version)
     items = attach_approval_links(resolved_batch, [present_material_row(item) for item in raw_items])
     all_items = items
     if total > len(items):
         all_items = [
-            present_material_row(item)
+            present_material_row(project_source_values(item,source_context))
             for item in frappe.get_all(
                 "Overseas Cost Item",
                 filters=filters,
@@ -304,7 +316,7 @@ def get_material_grid(
     transport_mode = frappe.db.get_value("Overseas Cost Batch", resolved_batch, "transport_mode") or "SEA"
     fees = fee_service.compose_fee_worklist_rows(
         fee_service._query_rules(resolved_batch, resolved_version),
-        transport_mode,
+        transport_mode, **({"source_context":source_context} if source_context else {}),
     )
     requirements = analyze_material_requirements(all_items, fees)
     for item in items:
@@ -318,6 +330,7 @@ def get_material_grid(
         "page": normalized_page,
         "page_length": normalized_length,
         "page_count": (total + normalized_length - 1) // normalized_length,
+        "source_context": source_context,
         "missing_cell_count": requirements["missing_cell_count"],
         "affected_row_count": requirements["affected_row_count"],
     }

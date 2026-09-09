@@ -32,9 +32,6 @@ def plan_application(expense, items, rules, *, binding_id, coverage=None, negati
     if expense['currency'] not in {'RMB', 'USD', 'MXN'}:
         blocking.append('缺少或不支持的费用币种')
     blocking.extend(issue for issue in expense['issues'] if ('费用' in issue or '冲抵' in issue) and not (negative_confirmed and '负数或冲抵' in issue))
-    for rule in rules:
-        if rule.get('is_enabled', 1) and rule.get('is_active', 1) and row_scope(rule) & set(scopes) and row_scope(rule) - set(scopes):
-            blocking.append('已有费用覆盖范围交叉，不能部分停用整笔费用')
     fees = expense['fees'] or [{'line_key': 'total', 'label': '国际物流费用', 'amount': expense['amount'], 'currency': expense['currency']}]
     result_rules = []
     for fee in fees:
@@ -59,6 +56,7 @@ def plan_application(expense, items, rules, *, binding_id, coverage=None, negati
                 goods_pending.append('物料行归属不唯一：' + str(row.get('material_code') or row.get('product_name')))
                 continue
             values = {k: row.get(k) for k in ('material_code', 'product_name', 'spec_model', 'quantity', 'unit')}
+            values['merchandise_price'] = row.get('merchandise_price') or {'present':False}
             if matches:
                 item = matches[0]; used.add(item['name'])
                 if Decimal(str(item.get('quantity') or '0')) != Decimal(str(row['quantity'])):

@@ -1002,6 +1002,8 @@ def list_manual_document_attachments(
     )
     rows.extend(row for row in oa_rows if not row.get('version') or row['version'] == resolved_version)
 
+    from overseas_costing.services.effective_logistics_source import current_source_bundle, attachment_allowed
+    source_bundle = current_source_bundle(batch_doc_name,resolved_version)
     logistics_filter = str(logistics_type or "").strip().upper()
     items = []
     for row in rows:
@@ -1025,7 +1027,7 @@ def list_manual_document_attachments(
                 "slot_label": manual_meta.get("slot_label") or row.get("source_doc_no") or "",
                 "logistics_type": row_logistics_type,
                 "required": bool(manual_meta.get("required")),
-                "audit_only": bool(parse_result.get("approval_excluded") or parse_result.get("cost_source_allowed") is False or (row.get("source_type") == "OA" and not row.get("version"))),
+                "audit_only": bool((source_bundle and source_bundle["context"]["root_kind"] == "expense" and not attachment_allowed(row,source_bundle)) or parse_result.get("approval_excluded") or parse_result.get("cost_source_allowed") is False or (row.get("source_type") == "OA" and not row.get("version"))),
                 "manual_note": manual_meta.get("manual_note") or row.get("remark") or "",
                 "remark": row.get("remark") or "",
                 "creation": row.get("creation"),
@@ -5690,6 +5692,12 @@ def apply_packing_list_fillable_fields(
 ) -> dict:
     """确认补入装箱单/物流附件中可安全写入的物理属性与价格字段。"""
 
+    from overseas_costing.services.effective_logistics_source import current_source_bundle
+    bundle = current_source_bundle(batch_name, version_name, lock=True)
+    if bundle and bundle['context']['root_kind'] == 'expense':
+        return {'ok': False, 'code': 'EFFECTIVE_SOURCE_REQUIRED',
+                'message': '当前已采用采购支出来源，请在物料区使用“装箱填充”重新预览并确认，旧装箱预览不能写入。'}
+
     if frappe is not None and not trusted_server_payload:
         return {
             "ok": False,
@@ -6250,6 +6258,12 @@ def resolve_packing_list_conflict_row(
     trusted_server_payload: bool = False,
 ) -> dict:
     """按单条物料行处理装箱单差异：采用附件、保留系统或待核对。"""
+
+    from overseas_costing.services.effective_logistics_source import current_source_bundle
+    bundle = current_source_bundle(batch_name, version_name, lock=True)
+    if bundle and bundle['context']['root_kind'] == 'expense':
+        return {'ok': False, 'code': 'EFFECTIVE_SOURCE_REQUIRED',
+                'message': '当前已采用采购支出来源，请在物料区使用“装箱填充”重新预览并确认差异。'}
 
     actions = {
         "use_attachment": "采用附件值",

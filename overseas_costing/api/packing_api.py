@@ -48,9 +48,41 @@ def list_packing_sources(batch_name):
 
 
 @frappe.whitelist()
+def list_packing_attachment_sheets(batch_name, source_kind, source_id):
+    batch_name = require_packing_workflow_permission(batch_name, 'read')
+    from overseas_costing.services.packing_attachment_service import list_attachment_sheets
+    return list_attachment_sheets(batch_name, str(source_kind), str(source_id))
+
+
+@frappe.whitelist()
+def list_current_source_documents(batch_name, version_name=None):
+    """The same controlled manifest shown to AI, plus separately labelled history."""
+    batch_name = require_packing_workflow_permission(batch_name, 'read')
+    from overseas_costing.services.effective_source_values import batch_source_context
+    context = batch_source_context(batch_name,version_name)
+    sources = packing_snapshot_service.list_material_ai_sources(batch_name,version_name)
+    allowed = ('source_kind','source_id','source_label','file_name','sheet_name','approval_no','available',
+               'excluded','exclude_reason','source_context','actor_name','occurred_at',
+               'cache_refreshed_at','refresh_last_checked_at','refresh_last_success_at','refresh_error')
+    items = [{key:source.get(key) for key in allowed} for source in sources]
+    history = []
+    if context.get('root_kind') == 'expense':
+        from overseas_costing.services.effective_logistics_source import current_source_bundle, attachment_allowed
+        bundle = current_source_bundle(batch_name,version_name)
+        for row in frappe.get_all('Overseas Cost Attachment',filters={'batch':batch_name},
+                    fields=['name','version','source_type','source_doc_no','file_name','file_url','parse_result_json'],limit_page_length=0):
+            if not attachment_allowed(row,bundle):
+                history.append({key:row.get(key) for key in ('name','source_doc_no','file_name','file_url','version')}|{'historical':True})
+    return {'ok':True,'source_context':context,'items':items,'historical_items':history}
+
+
+@frappe.whitelist()
 def request_packing_workbook_refresh(batch_name, workbook_id, request_id):
-    require_packing_workflow_permission(batch_name, "refresh")
+    batch_name = require_packing_workflow_permission(batch_name, "refresh")
     request_key = _request_key(request_id)
+    current = _refresh_selected_wiki(batch_name, str(workbook_id), None, request_key)
+    if current is not None:
+        return current
     request_number = get_packing_runtime_clients().submitter.request_workbook_index_refresh(
         str(workbook_id), request_key, str(frappe.session.user)
     )
@@ -59,8 +91,11 @@ def request_packing_workbook_refresh(batch_name, workbook_id, request_id):
 
 @frappe.whitelist()
 def request_packing_sheet_refresh(batch_name, workbook_id, sheet_id, request_id):
-    require_packing_workflow_permission(batch_name, "refresh")
+    batch_name = require_packing_workflow_permission(batch_name, "refresh")
     request_key = _request_key(request_id)
+    current = _refresh_selected_wiki(batch_name, str(workbook_id), str(sheet_id), request_key)
+    if current is not None:
+        return current
     request_number = get_packing_runtime_clients().submitter.request_sheet_refresh(
         str(workbook_id), str(sheet_id), request_key, str(frappe.session.user)
     )
@@ -69,10 +104,50 @@ def request_packing_sheet_refresh(batch_name, workbook_id, sheet_id, request_id)
 
 @frappe.whitelist()
 def get_packing_refresh_status(batch_name, request_id):
-    require_packing_workflow_permission(batch_name, "read")
+    batch_name = require_packing_workflow_permission(batch_name, "read")
+    from overseas_costing.services.effective_logistics_source import current_source_bundle
+    bundle = current_source_bundle(batch_name)
+    if bundle and bundle['context']['root_kind'] == 'expense':
+        from overseas_costing.services.logistics_settlement.store import Store
+        from overseas_costing.services.logistics_settlement.model import digest
+        state = Store.frappe().get('state',digest('selected-wiki-refresh',batch_name,_request_key(request_id))) or {}
+        if state and state.get('source_context') != bundle['context']:
+            return {'status':'failed','error_message':'刷新期间采购支出来源已变化，请重新获取资料。'}
+        return {key:state.get(key) for key in ('status','error_message','source_ids','source_context')} if state else {'status':'not_found'}
     return get_packing_runtime_clients().catalog.get_refresh_status(_request_key(request_id)) or {
         "status": "not_found"
     }
+
+
+def _refresh_selected_wiki(batch_name, workbook_id, sheet_id, request_key):
+    """Explicitly copy only referenced archived sheets; ordinary polling stays local."""
+    from overseas_costing.services.effective_logistics_source import current_source_bundle, explicit_wiki_sources, require_readable
+    bundle = current_source_bundle(batch_name)
+    if not bundle or bundle['context']['root_kind'] != 'expense':
+        return None
+    require_readable(bundle['context'])
+    ids = sorted(source_id for source_id in explicit_wiki_sources(bundle['source'])
+                 if source_id.partition(':')[0] == workbook_id
+                 and (sheet_id is None or source_id.partition(':')[2] == sheet_id))
+    if not ids:
+        raise ValueError('该装箱表未被当前采购支出明确关联，不能刷新或采用。')
+    from overseas_costing.services.logistics_settlement.store import Store
+    from overseas_costing.services.logistics_settlement.model import digest,dumps
+    from overseas_costing.services.logistics_settlement.jobs import utcnow
+    from overseas_costing.services.packing_source_service import refresh_bound_wiki_snapshot
+    store = Store.frappe()
+    identity = digest('selected-wiki-refresh',batch_name,request_key)
+    previous = store.get('state',identity)
+    if previous:
+        if previous.get('source_ids') != ids or previous.get('source_context') != bundle['context']:
+            raise ValueError('刷新请求的来源已变化，请重新刷新。')
+        return {'ok':previous.get('status') == 'success','request_id':request_key,'request_key':request_key}
+    for source_id in ids:
+        refresh_bound_wiki_snapshot(batch_name,source_id)
+    current_context = current_source_bundle(batch_name)['context']
+    store.put('state',{'id':identity,'updated_at':utcnow(),'data':dumps({
+        'status':'success','source_ids':ids,'source_context':current_context})})
+    return {'ok':True,'request_id':request_key,'request_key':request_key,'status':'success'}
 
 
 @frappe.whitelist()

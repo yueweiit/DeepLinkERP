@@ -13,8 +13,9 @@
   settlementAdoption(data = {}) {
     if (data.historical) return data.binding ? "历史采用来源 · 仅供追溯" : "历史版本 · 尚未采用物流采购支出";
     if (!data.binding) return "未关联采购支出";
-    if (data.expense?.invalid || data.logistics?.invalid) return "来源已失效 · 暂停采用";
+    if (data.expense?.invalid) return "来源已失效 · 暂停采用";
     if (!data.expense?.approved) return "已关联 · 待审批通过";
+    if (data.source_context?.fingerprint && data.application?.source_context?.fingerprint !== data.source_context.fingerprint) return "已关联 · 当前资料待采用";
     return ({ applied: "费用已采用 · 以当前试算结果为准", applied_pending: "费用已采用 · 资料／汇率待核对",
       queued: "已关联 · 编辑结束后重试采用", invalid: "来源已失效 · 暂停采用", pending: "已关联 · 费用待采用" })[data.binding.application_status] || "已关联 · 费用待采用";
   }
@@ -216,13 +217,13 @@
     const signature = (source) => JSON.stringify((source.goods || []).map((row) => [row.material_code, row.product_name, row.spec_model, String(row.quantity ?? ""), row.unit]));
     return `<details class="ocw-settlement-comparison" open><summary>货物与来源核对 · ${!logistics.goods?.length || !expense.goods?.length ? "一方或双方货物尚未识别，请核对原单" : signature(logistics) === signature(expense) ? "识别字段一致" : "存在差异，采用前请核对"}</summary>
       <div class="ocw-settlement-source-grid">${[[logistics, labels.left || "国际物流货物"], [expense, labels.right || "采购支出货物"]].map(([source, title]) => `<div><h4>${this.escape(title)}</h4><div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table"><thead><tr><th>物料</th><th>品名</th><th>规格</th><th>数量</th><th>单位</th></tr></thead><tbody>${goods(source) || '<tr><td colspan="5">未识别货物行，需核对原单资料</td></tr>'}</tbody></table></div></div>`).join("")}</div>
-      <p class="ocw-settlement-hint">采购支出提供最终货物基础字段；毛重、体积与计费重仍来自装箱资料。货物变化后须核对装箱对应关系。</p></details>`;
+      <p class="ocw-settlement-hint">确认关联后，物料、数量、装箱资料和费用统一采用采购支出。商品单价缺失时才补充原商品采购价格。</p></details>`;
   }
 
   settlementChoiceFields(source = {}, currentCoverage = []) {
     const fields = [{ fieldtype: "Small Text", fieldname: "settlement_reason", label: "确认／更正依据", description: "冲突、更正和忽略须填写；普通候选可填写核对说明。" }];
     if (source.coverage === "unknown" || currentCoverage.length) {
-      fields.push({ fieldtype: "HTML", fieldname: "coverage_note", options: `<p class="ocw-settlement-notice">${currentCoverage.length ? "下方保留了原关联的覆盖范围；请对照当前原单重新核对，必要时取消旧范围。" : "费用覆盖范围不明确：请按原单选择。"}仅替换勾选范围内的已有费用，范围未确认时保留关联并等待采用。</p>` });
+      fields.push({ fieldtype: "HTML", fieldname: "coverage_note", options: `<p class="ocw-settlement-notice">${currentCoverage.length ? "下方保留了原关联的覆盖范围；请对照当前原单重新核对，必要时取消旧范围。" : "费用覆盖范围不明确：请按原单选择。"}当前费用统一采用采购支出；勾选项说明它的覆盖范围，未确认时保留关联并等待采用。</p>` });
       for (const [key, label] of this.settlementCoverageOptions()) fields.push({ fieldtype: "Check", fieldname: `coverage_${key}`, label, default: currentCoverage.includes(key) ? 1 : 0 });
     }
     const negative = (source.fees?.length ? source.fees : [{ amount: source.amount }]).some((row) => Number(row.amount) < 0);
@@ -247,7 +248,7 @@
     const state = this.settlementDialog(context.correction ? "更正关联 · 核对旧单与新单" : "确认采购支出关联", context.correction
       ? [{ fieldtype: "Small Text", fieldname: "settlement_reason", label: "更正依据", description: "更正后如费用范围或负数待核对，请在批次中继续处理。" }]
       : single ? this.settlementChoiceFields(candidate.expense) : []);
-    this.settlementBody(state, `<p class="ocw-settlement-hint">请核对审批、费用和货物。确认关联后，审批已通过且资料有效时才会尝试采用；装箱与汇率不足会继续提示待核对。</p>
+    this.settlementBody(state, `<p class="ocw-settlement-hint">请核对审批、费用和货物。确认后资料来源切为采购支出；正文、评论、附件及 AI 分析均使用该单。资料不全或审批未通过时保持待处理，旧物流资料仅供历史查看。</p>
       ${context.correction ? `<div class="ocw-settlement-notice">将替换当前关联，保留更正记录和已确认版本。请说明更正原因。</div>${this.renderSettlementSource(context.correction.expense, "当前关联（旧单）")}` : ""}
       ${candidates.map((row) => `<article class="ocw-settlement-review"><div class="ocw-settlement-source-grid">${this.renderSettlementSource(row.logistics, "国际物流审批")}${this.renderSettlementSource(row.expense, context.correction ? "拟关联（新单）" : "采购支出审批")}</div>
         <p>匹配依据：${this.escape(row.reason || row.method || "人工复核")} ${this.escape(JSON.stringify(row.evidence || []))}</p>
@@ -312,14 +313,16 @@
       if (!current()) return;
       if (!data.ok) throw new Error(data.message || "读取关联失败");
       if (this.materialFeeState?.batchName === batchName) this.materialFeeState.settlementData = data;
+      const currentSource = data.binding ? data.expense : data.logistics;
+      const sourceLabel = data.binding ? "采购支出" : "国际物流";
       const $strip = this.$root.find("[data-area='settlement-strip']");
-      $strip.html(`<div class="ocw-settlement-strip"><div><strong>物流采购支出</strong><span>${this.escape(this.settlementAdoption(data))}</span>
-        <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后采用最终物流采购支出的货物与费用")}</small></div>
+      $strip.html(`<div class="ocw-settlement-strip"><div><strong>${data.historical ? "此版本资料来源" : "当前资料来源"}：${sourceLabel}</strong><span>${this.escape(this.settlementAdoption(data))}</span>
+        <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后，装箱、SKU、运费及 AI 资料统一切换至采购支出")}</small></div>
         <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.historical ? "查看历史明细与费用" : data.binding ? "查看明细与费用" : "搜索／匹配采购支出"}</button>
-        ${data.binding ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开原单</button>${data.historical ? "" : '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>'}` : ""}</div></div>`);
+        ${currentSource?.open_url ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开${sourceLabel}原单</button>` : ""}${data.binding && !data.historical ? '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>' : ""}</div></div>`);
       $strip.off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-action]", (event) => {
         const action = $(event.currentTarget).attr("data-settlement-strip-action");
-        if (action === "source") { try { this.openSettlementSource(data.expense); } catch (error) { this.showError(error); } }
+        if (action === "source") { try { this.openSettlementSource(currentSource); } catch (error) { this.showError(error); } }
         else if (action === "correct") this.openSettlementSearch(batchName, data);
         else this.openBatchSettlementDialog(batchName, viewedVersion);
       });

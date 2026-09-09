@@ -500,7 +500,7 @@ def _matches_workbench_filters(row: dict, filters: dict) -> bool:
 
 
 def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
-    """Load only already-authorized batch IDs, with a fixed query count per chunk.
+    """Load authorized batch inputs in chunks and check each local source context.
 
     Exact (batch, current_version) grouping prevents foreign or historical rows
     from supplying readiness. Grouping columns never enter the cost input hash.
@@ -548,9 +548,11 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
             key = (batch["name"], batch.get("current_version"))
             version = by_version.get(key, {})
             version["reviewed_at"] = reviewed.get(key)
+            from overseas_costing.services.effective_source_values import batch_source_context
+            context = batch_source_context(batch['name'], batch.get('current_version'))
             result[batch["name"]] = cost_review_service.evaluate_review_readiness(
                 batch=batch, version=version, items=groups[0].get(key, []),
-                fees=groups[1].get(key, []), evidence=groups[2].get(key, []))
+                fees=groups[1].get(key, []), evidence=groups[2].get(key, []), source_context=context)
     return result
 
 
@@ -624,6 +626,16 @@ def get_workbench_summary(filters: dict | None = None, task: str = "pending") ->
 
 def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
     item = dict(row)
+    if (item.get('source_context') or {}).get('root_kind') == 'expense':
+        from overseas_costing.services.material_input_service import present_material_row
+        current = present_material_row(item)
+        price = current.get('adopted_price') or {}
+        item.update(quantity=current.get('effective_shipping_quantity'),
+                    actual_shipped_qty=current.get('effective_shipping_quantity'),
+                    unit=current.get('effective_shipping_uom'),
+                    packing_quantity=current.get('actual_shipped_qty'),
+                    unit_price=price.get('value'),purchase_currency=price.get('currency'),
+                    goods_value=current.get('shipment_value_rmb'),adopted_price=price)
     if transport_mode in {"SEA", "AIR", "EXPRESS"}:
         item["transport_mode"] = transport_mode
     derived = _load_result_preview_json(item.get("derived_json"))
@@ -684,7 +696,7 @@ def get_batch_items_page(
     )
     fieldnames = list(
         dict.fromkeys(
-            ["name", "row_no", "excel_row_no", "modified", "derived_json", "source_doc_no", "dingtalk_instance_id"]
+            ["name", "row_no", "excel_row_no", "modified", "derived_json", "extra_json", "source_doc_no", "dingtalk_instance_id"]
             + [column["fieldname"] for column in columns]
         )
     )
@@ -708,9 +720,15 @@ def get_batch_items_page(
     batch_meta = _load_sku_batch_meta(batch_doc_name)
     mode = batch_meta.get("transport_mode") if resolved_version == batch_meta.get("current_version") else ""
     from overseas_costing.services.approval_link_service import attach_approval_links
-
+    from overseas_costing.services.effective_source_values import project_batch_items
+    items, source_context = project_batch_items(items, batch_doc_name, resolved_version)
     items = attach_approval_links(batch_doc_name, [present_saved_sku_result(row, mode) for row in items])
     columns = [dict(column) for column in columns]
+    if source_context.get('root_kind') == 'expense':
+        labels = {'quantity':'采购支出采用数量','unit_price':'有效商品单价','goods_value':'当前发货货值 RMB'}
+        for column in columns:
+            if column['fieldname'] in labels:
+                column['label'] = labels[column['fieldname']]
     if query["group"] in {"basic", "all"}:
         columns.append({"excel_col": "", "fieldname": "approval_link", "label": "采购审批来源", "read_only": 1})
     if query["group"] in {"total", "all"}:
@@ -737,7 +755,8 @@ def get_batch_items_page(
         "page_length": query["page_length"],
         "page_count": (total + query["page_length"] - 1) // query["page_length"],
         "field_group": query["group"],
-        "calculation_stale": batch_meta.get("status") == "Dirty",
+        "source_context": source_context,
+        "calculation_stale": batch_meta.get("status") == "Dirty" or any(row.get('source_adoption_state') == 'historical_pending' for row in items),
     }
 
 

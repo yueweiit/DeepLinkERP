@@ -28,6 +28,16 @@ The script tests actual Frappe File and Attachment insertion, private file acces
 
 Parsed packing documents and their synthetic cached bytes are fixtures: this script does not validate XLSX extraction or contact object storage. The scheduled `resume_pending` queue inventory, cursor IDs and enable-control record are restricted to the new fixture using a Store wrapper, so concurrent browser QA batches are untouched. Target reads/writes, row locks, `apply_source`, File controllers and calculations all use real Frappe/MariaDB. No production implementation is patched by the test. A successful run finishes with `document_integration_complete`.
 
+## Unified expense XLSX adoption
+
+`run_unified_source_frappe_integration.py` uses the same isolated site/database guard. Unlike the synthetic document fixtures, it creates an actual private XLSX workbook and invokes the real source manifest, signed material preview, edit lease, complete-cargo review, atomic adoption and schema-2 calculation paths. It verifies selected expense quantity/weight, preservation of original purchase and packing facts, then changes the source comment and checks that the old preview cannot write any rows. The isolated site needs its own normal Frappe `encryption_key` for preview signatures. It makes no DeepSeek, OA, object-storage or ERP calls.
+
+```sh
+docker exec -e PYTHONPATH=/tmp/settlement-code -w /home/frappe/frappe-bench/sites overseas-cost-local-backend-1 /home/frappe/frappe-bench/env/bin/python /tmp/settlement-code/overseas_costing/tests/integration/run_unified_source_frappe_integration.py
+```
+
+The final fixture intentionally remains source-stale so the browser can verify that current fields are pending and the previous calculation is clearly marked as history.
+
 ## PostgreSQL source adapter contract
 
 `test_settlement_archive_postgres.py` is opt-in. It applies the actual upstream migration files using the upstream worktree's installed `node-pg-migrate`, then tests the costing adapter through real read-only psycopg connections and the `costing_reader` role. Set `SETTLEMENT_UPSTREAM_WORKTREE` when the upstream checkout is not the sibling `dingtalk-settlement-upstream` directory.

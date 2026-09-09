@@ -410,7 +410,7 @@ def _server_metadata_fields(value, fields=SERVER_ITEM_METADATA_FIELDS) -> dict:
             value = {}
     if not isinstance(value, dict):
         return {}
-    protected = set(fields) | {key for key in value if str(key).startswith('settlement_')}
+    protected = set(fields) | {key for key in value if (str(key).startswith('settlement_') or key == 'effective_logistics_source')}
     return {key: value[key] for key in protected if key in value}
 
 
@@ -1473,6 +1473,9 @@ def update_item_field(
         }
 
     item_doc = _frappe.get_doc("Overseas Cost Item", item_name)
+    from overseas_costing.services.effective_source_values import PHYSICAL_FIELDS, batch_source_context, project_source_values, physical_overlay_update
+    source_context = batch_source_context(item_doc.batch,item_doc.version,lock=True)
+    expense_physical = source_context.get('root_kind') == 'expense' and fieldname in PHYSICAL_FIELDS
     if not _skip_edit_check:
         from overseas_costing.services import edit_session_service
 
@@ -1482,6 +1485,8 @@ def update_item_field(
             expected_modified=expected_modified,
         )
     old_value = getattr(item_doc, fieldname, None)
+    if expense_physical:
+        old_value = project_source_values(item_doc.as_dict(),source_context).get(fieldname)
     if (fieldname in {'material_code', 'product_name', 'spec_model'}
             and 'settlement_cargo' in _server_metadata_fields(getattr(item_doc, 'extra_json', None))
             and not _edit_values_equal(fieldname, old_value, coerced_value)):
@@ -1531,8 +1536,26 @@ def update_item_field(
     except ValueError as exc:
         return {'ok': False, 'changed': False, 'item_name': item_name, 'fieldname': fieldname,
                 'version_name': version_name or item_doc.version, 'message': str(exc)}
-    setattr(item_doc, fieldname, coerced_value)
-    if fieldname == "actual_shipped_qty":
+    if expense_physical:
+        from overseas_costing.services.effective_logistics_source import resolve_source_context
+        current_context = resolve_source_context(item_doc.batch,item_doc.version,lock=True)
+        if current_context != source_context:
+            return {'ok':False,'changed':False,'message':'当前采购支出资料已变化，请重新读取资料'}
+        adopted_values = {fieldname:coerced_value, **companion_updates}
+        if fieldname == 'actual_shipped_qty':
+            from overseas_costing.services.shipment_cost_service import object_json
+            cargo = object_json(item_doc.extra_json).get('settlement_cargo') or {}
+            adopted_values['shipped_uom'] = cargo.get('unit') or ''
+        try:
+            overlay = physical_overlay_update(item_doc.as_dict(),source_context,adopted_values,
+                evidence={'kind':'confirmed_current_source', 'actor':_frappe.session.user,
+                          'remark':edit_remark,'source_context':source_context,'at':_now()})
+        except ValueError as exc:
+            return {'ok':False,'changed':False,'message':str(exc)}
+        item_doc.extra_json = _json.dumps(overlay,ensure_ascii=False,default=str)
+    else:
+        setattr(item_doc, fieldname, coerced_value)
+    if fieldname == "actual_shipped_qty" and not expense_physical:
         shipping_uom = str(
             getattr(item_doc, "shipped_uom", "")
             or getattr(item_doc, "purchase_uom", "")
@@ -1543,7 +1566,7 @@ def update_item_field(
             companion_updates.update({"shipped_uom": shipping_uom, "cost_output_uom": shipping_uom})
         for companion_field, companion_value in companion_updates.items():
             setattr(item_doc, companion_field, companion_value)
-    elif fieldname == "shipped_uom" and str(coerced_value or "").strip():
+    elif fieldname == "shipped_uom" and str(coerced_value or "").strip() and not expense_physical:
         companion_updates["cost_output_uom"] = str(coerced_value).strip()
         setattr(item_doc, "cost_output_uom", companion_updates["cost_output_uom"])
     if fieldname != "manual_override_flag":

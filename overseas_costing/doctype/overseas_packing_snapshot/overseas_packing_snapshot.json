@@ -9,6 +9,8 @@
   "sort_order": "DESC",
   "field_order": [
     "batch",
+    "cost_version",
+    "source_context_json",
     "version",
     "idempotency_key",
     "source_kind",
@@ -37,6 +39,8 @@
   ],
   "fields": [
     {"fieldname": "batch", "fieldtype": "Link", "label": "所属批次", "options": "Overseas Cost Batch", "reqd": 1, "in_list_view": 1, "read_only": 1},
+    {"fieldname": "cost_version", "fieldtype": "Link", "label": "成本版本", "options": "Overseas Cost Version", "read_only": 1},
+    {"fieldname": "source_context_json", "fieldtype": "Long Text", "label": "采用来源上下文", "read_only": 1},
     {"fieldname": "version", "fieldtype": "Int", "label": "快照版本", "reqd": 1, "read_only": 1, "in_list_view": 1},
     {"fieldname": "idempotency_key", "fieldtype": "Data", "label": "幂等键", "reqd": 1, "unique": 1, "read_only": 1},
     {"fieldname": "source_kind", "fieldtype": "Select", "label": "来源类型", "options": "manual_attachment\napproval_attachment\napproval_comment\nwiki_sheet", "reqd": 1, "read_only": 1, "in_list_view": 1},

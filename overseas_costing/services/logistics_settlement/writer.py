@@ -83,31 +83,74 @@ def pending(store, binding, status, issues):
     return binding
 
 
-def apply_binding(store, ledger, binding_id, actor):
+def prepare_source_switch(store, ledger, binding, expense, batch, actor):
+    """Install the source gate before any pending return; raw evidence stays intact."""
+    from overseas_costing.services.effective_logistics_source import context_for_source
+    version = ledger.get('version', batch['current_version'], lock=True)
+    context = context_for_source(expense, binding, version['name'], batch['name'])
+    current = row_meta(version).get('effective_logistics_source') or {}
+    if current.get('fingerprint') == context['fingerprint']:
+        return version, context
+    version = mutable_version(ledger, batch)
+    context = context_for_source(expense, binding, version['name'], batch['name'])
+    meta = row_meta(version)
+    if current:
+        meta.setdefault('effective_source_history', []).append(current)
+    meta['effective_logistics_source'] = context
+    ledger.put('version', version['name'], {'extra_json':dumps(meta), 'calculated_at':None,
+                                           'summary_snapshot_json':'{}', 'rule_snapshot_json':'[]'})
+    for item in ledger.rows('item', batch=batch['name'], version=version['name']):
+        item_meta = row_meta(item)
+        if item_meta.get('effective_logistics_source'):
+            item_meta.setdefault('settlement_source_history', []).append({k:v for k,v in item_meta.items()
+                if k in {'effective_logistics_source','settlement_cargo','settlement_physical','settlement_valuation',
+                         'settlement_packing_provenance','settlement_packing_candidates','packing_quantity'}})
+        item_meta.update(effective_logistics_source=context, settlement_cargo={}, settlement_physical={},
+                         settlement_packing_review=True)
+        item_meta.pop('settlement_valuation',None)
+        for key in ('settlement_packing_provenance','settlement_packing_candidates','packing_quantity'):
+            item_meta.pop(key,None)
+        ledger.put('item',item['name'],{'extra_json':dumps(item_meta), **{key:0 for key in DERIVED_FIELDS}})
+    for rule in ledger.rows('rule',batch=batch['name'],version=version['name']):
+        ledger.put('rule',rule['name'],{'is_enabled':0,'is_active':0,'is_final':0})
+    for component in ledger.rows('component',batch=batch['name'],version=version['name']):
+        ledger.put('component',component['name'],{'is_active':0})
+    ledger.put('batch',batch['name'],{'status':'Dirty','confirm_status':'Pending','is_locked':0})
+    binding.update(version=version['name'], application_status='pending')
+    save_binding(store,binding)
+    store.audit(binding['id'],'source_switch',actor,source_context=context,version=version['name'])
+    return ledger.get('version',version['name']), context
+
+
+def apply_binding(store, ledger, binding_id, actor, *, trusted_review_actor=None):
     with store.atomic():
         binding = store.get('binding', binding_id, lock=True)
         expense = store.get('source', binding['expense_id'], lock=True)
         logistics = store.get('source', binding['logistics_id'], lock=True)
-        if expense['invalid'] or logistics['invalid'] or expense['kind'] != 'expense':
-            return pending(store, binding, 'invalid', ['采购支出或国际物流已失效，历史结果保留，当前不能确认或推送'])
-        if not expense['approved']:
-            return pending(store, binding, 'pending', ['采购支出尚未审批通过'])
+        from .reviewed_cargo import resolve_reviewed_source
+        expense = resolve_reviewed_source(store, expense, binding)
         batch = application_context(store, ledger, binding)
         if not batch:
             return pending(store, binding, 'pending', ['国际物流尚未对应唯一成本批次'])
-        if locked(batch):
+        if locked(batch) and (not trusted_review_actor or batch.get('edit_lock_owner') != trusted_review_actor):
             return pending(store, binding, 'queued', ['批次正在编辑，已排队等待应用'])
-        # All entry points (manual confirmation, retry and background sync) use the
-        # same locally cached packing evidence. It may itself create an adjustment.
-        from .document_writer import sync_logistics_documents
-        has_documents = bool(logistics.get('documents') or store.find('document_sync', source_id=logistics['id'], limit=1))
-        if has_documents:
-            sync_logistics_documents(store, ledger, logistics, batch['name'], actor)
-            batch = ledger.get('batch', batch['name'], lock=True)
+        before = {'items':ledger.rows('item',batch=batch['name'],version=batch['current_version']),
+                  'rules':ledger.rows('rule',batch=batch['name'],version=batch['current_version']), 'batch':dict(batch)}
+        version, context = prepare_source_switch(store,ledger,binding,expense,batch,actor)
+        batch = ledger.get('batch',batch['name'],lock=True)
+        from .bound_wiki_service import pending_wiki_issues
+        wiki_issues = pending_wiki_issues(store, binding)
+        if wiki_issues:
+            return pending(store, binding, 'pending', wiki_issues)
+        if not expense or expense.get('invalid') or expense.get('kind') != 'expense':
+            return pending(store,binding,'invalid',['采购支出缺失或已失效，当前资料待处理'])
+        if not expense.get('approved'):
+            return pending(store,binding,'pending',['采购支出尚未审批通过'])
+        from .document_writer import sync_source_documents
         if (expense.get('coverage') == 'unknown' or binding.get('coverage')) and binding.get('coverage_cost_hash') != expense['cost_hash']:
             return pending(store, binding, 'pending', ['采购支出已变化，请重新核对费用覆盖范围'])
         negative_confirmed = bool(binding.get('negative_confirmed') and binding.get('negative_cost_hash') == expense['cost_hash'])
-        effective_hash = digest(expense['cost_hash'], binding['revision'], binding.get('coverage'), binding.get('negative_confirmed'))
+        effective_hash = digest(expense['cost_hash'], binding['revision'], binding.get('coverage'), binding.get('negative_confirmed'), context['fingerprint'])
         if binding.get('applied_hash') == effective_hash and binding.get('version') == batch['current_version']:
             return refresh_application_state(store, ledger, binding, expense)
         items = ledger.rows('item', batch=batch['name'], version=batch['current_version'])
@@ -115,11 +158,9 @@ def apply_binding(store, ledger, binding_id, actor):
         plan = plan_application(expense, items, rules, binding_id=binding_id, coverage=binding.get('coverage'), negative_confirmed=negative_confirmed)
         if not plan['ready']:
             return pending(store, binding, 'pending', plan['blocking'])
-        version = mutable_version(ledger, batch)
         items = ledger.rows('item', batch=batch['name'], version=version['name'])
         rules = ledger.rows('rule', batch=batch['name'], version=version['name'])
         plan = plan_application(expense, items, rules, binding_id=binding_id, coverage=binding.get('coverage'), negative_confirmed=negative_confirmed)
-        before = {'items': items, 'rules': rules, 'batch': batch}
         if not binding.get('baseline'):
             binding['baseline'] = before
         added_items = []
@@ -137,7 +178,8 @@ def apply_binding(store, ledger, binding_id, actor):
                 meta['settlement_packing_review'] = True
                 meta.setdefault('settlement_packing_quantity_at_change', item.get('actual_shipped_qty'))
             # Purchase quantity, pricing units/value and raw packing remain independent.
-            values = {k:v for k,v in update['values'].items() if k not in {'quantity','unit'}}
+            values = {k:v for k,v in update['values'].items() if k in {'material_code','product_name','spec_model'}}
+            meta['effective_logistics_source'] = context
             meta['settlement_cargo'] = cargo
             meta['settlement_valuation'] = value_final_cargo(item, cargo, {k:v for k,v in version.items() if k.startswith('fx_')})
             if meta['settlement_valuation']['error']:
@@ -150,10 +192,11 @@ def apply_binding(store, ledger, binding_id, actor):
             ledger.put('item', item['name'], values)
         for index, addition in enumerate(plan['goods_additions']):
             cargo = {**addition['values'], 'binding_id':binding_id, 'source_snapshot':expense['snapshot'], 'line_key':addition['line_key']}
-            values = {k:v for k,v in addition['values'].items() if k != 'quantity'}
+            values = {k:v for k,v in addition['values'].items() if k in {'material_code','product_name','spec_model','unit'}}
             meta = {'settlement_binding_id': binding_id, 'settlement_line_key': addition['line_key'],
                     'settlement_source_snapshot': expense['snapshot'], 'settlement_created': True, 'settlement_packing_review': True,
                     'settlement_cargo':cargo, 'settlement_purchase_value_review':True, 'settlement_applied_values':dict(values)}
+            meta['effective_logistics_source'] = context
             meta['settlement_valuation'] = value_final_cargo(values, cargo, {k:v for k,v in version.items() if k.startswith('fx_')})
             values.update(batch=batch['name'], version=version['name'], row_no=len(items)+index+1,
                           stable_line_key='settlement:'+digest(binding_id,addition['line_key'])[:32],
@@ -169,30 +212,26 @@ def apply_binding(store, ledger, binding_id, actor):
         for rule in rules:
             if rule['name'] in plan['disable_rules'] or rule.get('source_binding_id') == binding_id:
                 ledger.put('rule', rule['name'], {'is_enabled': 0, 'is_active': 0, **({'is_final': 0} if rule.get('source_binding_id') == binding_id else {})})
-        inherited = next((r for r in rules if r['name'] in plan['disable_rules'] and r.get('scope_value_json') and 'PROJECT_GROSS_WEIGHT' in str(r['scope_value_json'])), None)
-        inherited = inherited or next((r for r in rules if r['name'] in plan['disable_rules'] and r.get('allocation_basis')), {})
-        basis = inherited.get('allocation_basis') or 'goods_value'
-        suppressed_rules = set(plan['disable_rules']) | {r['name'] for r in rules if r.get('source_binding_id') == binding_id}
+        # Selected expense owns all current logistics fees and allocation facts.
+        inherited = {}
+        basis = 'goods_value'
         for component in ledger.rows('component',batch=batch['name'],version=version['name']):
-            if component.get('fee_rule') in suppressed_rules:
-                ledger.put('component',component['name'],{'is_active':0})
+            ledger.put('component',component['name'],{'is_active':0})
         for index, rule in enumerate(plan['rules']):
             # Include snapshot in the physical rule identity; prior rows remain auditable and disabled.
             ledger.create('rule', {**rule, 'batch': batch['name'], 'version': version['name'],
                                    'allocation_basis': basis, 'basis_field': inherited.get('basis_field') or basis, 'scope_type':'ALL_ITEMS',
                                    'scope_value_json':inherited.get('scope_value_json') or '[]', 'priority_no': index,
                                    'remark': '最终物流采购支出；费用范围：' + ','.join(plan['coverage'])})
-        if has_documents:
-            # Complete final cargo may add/change identities that were unmatched
-            # in the initial logistics entry. Replan before this atomic apply ends.
-            sync_logistics_documents(store, ledger, logistics, batch['name'], actor)
+        sync_source_documents(store, ledger, expense, batch['name'], actor, source_context=context, trusted_review_actor=trusted_review_actor)
         remaining = ledger.rows('item', batch=batch['name'], version=version['name'])
         issues = application_issues(ledger, version, expense, remaining, plan)
         application_id = digest(binding_id, expense['snapshot'], version['name'], effective_hash)
         store.insert('application', {'id': application_id, 'binding_id': binding_id,
                      'snapshot': digest(expense['snapshot'], effective_hash), 'version': version['name'], 'status': 'applied',
                      'data': dumps({'source_snapshot': expense['snapshot'], 'expense_id': expense['id'], 'cost_hash': expense['cost_hash'],
-                                   'effective_hash': effective_hash, 'actor': actor, 'before': before, 'plan': plan,
+                                   'effective_hash': effective_hash, 'actor': actor, 'before': before, 'plan': plan, 'source_context':context,
+                                   'review_id': expense.get('review_id'), 'adopted_goods': expense.get('goods') or [],
                                    'fx_evidence': {k: v for k, v in version.items() if k.startswith('fx_')},
                                    'added_items': added_items, 'applied_at': utcnow()})})
         binding.update(application_status='applied_pending' if issues else 'applied', issues=issues,
@@ -275,6 +314,11 @@ def has_material_supplements(item):
 
 def application_issues(ledger, version, expense, items, plan):
     issues = list(plan.get('goods_pending') or [])
+    from overseas_costing.services.effective_source_values import project_source_values, item_source_context
+    if any(item_source_context(i).get('root_kind') == 'expense'
+           and not any(project_source_values(i).get(key) is not None for key in ('gross_weight_kg','volume_m3','chargeable_weight_kg'))
+           for i in items):
+        issues.append('采购支出装箱资料待补，旧物流重量和体积不参与当前核算')
     if any(row_meta(i).get('settlement_packing_review') for i in items):
         issues.append('采购数量或物料变化，需核对原重量、体积及装箱数量')
     if any(row_meta(i).get('settlement_purchase_value_review') or (row_meta(i).get('settlement_valuation') or {}).get('error') for i in items):
@@ -293,6 +337,8 @@ def application_issues(ledger, version, expense, items, plan):
 
 
 def refresh_application_state(store, ledger, binding, expense):
+    from .reviewed_cargo import resolve_reviewed_source
+    expense = resolve_reviewed_source(store, expense, binding)
     application = store.get('application', binding.get('last_application', '')) or {}
     version = ledger.get('version', binding['version'])
     batch = ledger.get('batch', version['batch']) or {}
@@ -319,11 +365,15 @@ def refresh_application_state(store, ledger, binding, expense):
 def item_review(item):
     meta = row_meta(item)
     cargo = meta.get('settlement_cargo') or {}
+    from overseas_costing.services.effective_source_values import project_source_values
+    effective = project_source_values(item)
     return {'item_name': item['name'], 'revision': digest(item),
-            **{k: item.get(k) for k in GOODS_FIELDS + PACKING_FIELDS + ('unit_price', 'goods_value')},
+            **{k: effective.get(k) for k in GOODS_FIELDS + PACKING_FIELDS + ('unit_price', 'goods_value')},
+            'historical_packing':{k:item.get(k) for k in PACKING_FIELDS},
+            'source_context':meta.get('effective_logistics_source') or {},
             'quantity':cargo.get('quantity',item.get('quantity')), 'unit':cargo.get('unit',item.get('unit')),
             'purchase_quantity':item.get('quantity'),
-            'packing_quantity': item.get('actual_shipped_qty') if item.get('actual_shipped_qty') is not None else meta.get('packing_quantity') or meta.get('packing_list_quantity'),
+            'packing_quantity': effective.get('actual_shipped_qty'),
             'packing_pending': bool(meta.get('settlement_packing_review')),
             'goods_value_pending': bool(meta.get('settlement_purchase_value_review')),
             'packing_candidates': list((meta.get('settlement_packing_candidates') or {}).values())}
@@ -349,6 +399,11 @@ def resolve_item_checks(store, ledger, binding_id, expected_revision, selections
             if item_review(item)['revision'] != selection.get('expected_item_hash'):
                 raise ValueError('物料或装箱资料已变化，请刷新后核对')
             meta = row_meta(item)
+            if selection.get('packing_confirmed') is True and (meta.get('effective_logistics_source') or {}).get('root_kind') == 'expense':
+                from overseas_costing.services.effective_source_values import project_source_values
+                current_values = project_source_values(item)
+                if not any(current_values.get(key) is not None for key in ('gross_weight_kg','volume_m3','chargeable_weight_kg')):
+                    raise ValueError('采购支出尚无可采用的装箱资料，不能将旧重量确认为当前来源')
             for flag, check in [('settlement_packing_review', 'packing_confirmed'), ('settlement_purchase_value_review', 'goods_value_confirmed')]:
                 if selection.get(check) is True:
                     meta.pop(flag, None)
@@ -370,9 +425,11 @@ def validate_application_preview(store, ledger, binding, expected_snapshot, expe
 
 
 def resolve_document_checks(store, batch_name, version_name, selections, actor, reason, *, ledger):
-    from .document_writer import packing_state_hash
+    from .document_writer import source_packing_state_hash
     acknowledged = {s['item_name'] for s in selections if s.get('packing_confirmed') is True}
-    for candidate in store.find('document_sync', batch=batch_name, limit=1):
+    from overseas_costing.services.effective_logistics_source import resolve_source_context
+    context = resolve_source_context(batch_name,version_name,store=store,ledger=ledger)
+    for candidate in store.find('document_sync', batch=batch_name, source_id=context['root_source_id'], limit=1):
         state = store.get('document_sync', candidate['id'], lock=True)
         if state.get('version') != version_name or state['status'] == 'queued':
             continue
@@ -381,7 +438,7 @@ def resolve_document_checks(store, batch_name, version_name, selections, actor, 
         if remaining == state.get('reviews'):
             continue
         state.update(reviews=remaining, blocking=bool(remaining), status='review' if remaining else 'applied',
-                     items_hash=packing_state_hash(ledger.rows('item', batch=batch_name, version=version_name)),
+                     items_hash=source_packing_state_hash(ledger.rows('item', batch=batch_name, version=version_name), context),
                      issues=sorted({row.get('reason') or '装箱行待核对' for rows in remaining.values() for row in rows} | set(state.get('document_issues') or [])))
         store.put('document_sync', {key:state[key] for key in ('id','source_id','batch','status')} | {'data':dumps(state)})
         store.audit(state['source_id'],'verify_document_rows',actor,items=sorted(acknowledged),reason=reason,remaining=remaining)

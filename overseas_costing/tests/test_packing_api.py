@@ -111,6 +111,31 @@ def test_confirm_and_save_validate_json_size_and_request_id(monkeypatch) -> None
         api.preview_freight_comparison("BATCH", "snapshot", "x" * 30000)
 
 
+def test_bound_refresh_only_uses_explicit_sheets_and_polling_is_local(monkeypatch):
+    import sqlite3
+    from overseas_costing.services import effective_logistics_source,packing_source_service
+    from overseas_costing.services.logistics_settlement.store import Store
+    api=_load_api(monkeypatch)
+    store=Store.sqlite(sqlite3.connect(':memory:'));store.install()
+    context={'root_kind':'expense','available':True,'fingerprint':'current'}
+    bundle={'context':context,'source':{'raw':{'workbookId':'WB','sheetId':'S'}}}
+    monkeypatch.setattr(api,'require_packing_workflow_permission',lambda *a:'B')
+    monkeypatch.setattr(effective_logistics_source,'current_source_bundle',lambda *a:bundle)
+    monkeypatch.setattr(Store,'frappe',classmethod(lambda cls:store))
+    calls=[]
+    monkeypatch.setattr(packing_source_service,'refresh_bound_wiki_snapshot',lambda batch,source:calls.append((batch,source)))
+    monkeypatch.setattr(api,'get_packing_runtime_clients',lambda:pytest.fail('ordinary poll must not query upstream'))
+    result=api.request_packing_workbook_refresh('B','WB','a'*64)
+    assert result['ok'] and calls==[('B','WB:S')]
+    assert api.get_packing_refresh_status('B','a'*64)['status']=='success'
+    api.request_packing_sheet_refresh('B','WB','S','a'*64)
+    assert calls==[('B','WB:S')]
+    with pytest.raises(ValueError,match='未被当前'):
+        api.request_packing_sheet_refresh('B','WB','FOREIGN','b'*64)
+    context['fingerprint']='new'
+    assert api.get_packing_refresh_status('B','a'*64)['status']=='failed'
+
+
 def test_api_source_contains_all_minimal_endpoints_and_no_credential_response() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "api" / "packing_api.py"

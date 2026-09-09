@@ -59,6 +59,8 @@ def after_migrate() -> None:
 
     from overseas_costing.services.logistics_settlement.schema import install as install_settlement
     install_settlement()
+    from overseas_costing.services.logistics_settlement.policy_migration import register_after_migrate
+    register_after_migrate()
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()

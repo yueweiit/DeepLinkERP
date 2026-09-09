@@ -49,7 +49,7 @@ def source_parse_method(source: dict) -> str:
         return "SYSTEM_APPROVAL"
     file_name = _text(source.get("file_name") or source.get("source_label")).lower()
     suffix = PurePath(file_name).suffix
-    if kind == "wiki_sheet" or suffix in {".xlsx", ".xlsm"}:
+    if kind == "wiki_sheet" or suffix in {".xlsx", ".xlsm"} or (suffix == '.xls' and (source.get('source_context') or {}).get('root_kind')=='expense'):
         return "SYSTEM_EXCEL"
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}:
         return "AI_VISION"
@@ -68,6 +68,14 @@ def prepare_source_manifest(
     is created.
     """
 
+    raw_sources = list(raw_sources or [])
+    contexts = [row.get('source_context') or {} for row in raw_sources if (row.get('source_context') or {}).get('root_kind') == 'expense']
+    if contexts:
+        context = contexts[0]
+        if any((row.get('source_context') or {}).get('fingerprint') != context.get('fingerprint')
+               or row.get('process_instance_id') != context.get('instance_id')
+               or row.get('source_kind') == 'manual_attachment' for row in raw_sources):
+            raise ValueError('资料来源不属于同一当前采购支出，请刷新来源。')
     prepared: list[dict] = []
     by_id: dict[str, dict] = {}
     for raw in raw_sources or []:
@@ -132,6 +140,7 @@ def prepare_source_manifest(
 def source_progress_manifest(manifest: Iterable[dict]) -> list[dict]:
     """Return browser-safe source status rows without contents or locations."""
 
+    from overseas_costing.services.effective_logistics_source import public_context
     rows = []
     for source in manifest or []:
         read_status = _text(source.get("read_status"), 40) or "NO_RESULT"
@@ -146,6 +155,7 @@ def source_progress_manifest(manifest: Iterable[dict]) -> list[dict]:
                 "source_id": _text(source.get("source_id"), 500),
                 "parent_source_id": _text(source.get("parent_source_id"), 500),
                 "source_kind": _text(source.get("source_kind"), 60),
+                "source_context": public_context(source.get('source_context') or {}),
                 "label": _text(
                     source.get("source_label")
                     or source.get("file_name")

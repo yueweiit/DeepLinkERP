@@ -189,11 +189,13 @@ def _decorate_historical_rules(rules: list[dict], transport_mode: str) -> list[d
     return decorated
 
 
-def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str) -> list[dict]:
+def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str, *, source_context=None) -> list[dict]:
     """Overlay persisted fees; preserve all active conflicts and retired intent."""
 
     from overseas_costing.services.logistics_settlement.fee_policy import covered_scopes, row_scopes, select_fees, is_final
-    decorated = select_fees(_decorate_historical_rules(existing_fees, transport_mode))
+    decorated = select_fees(_decorate_historical_rules(existing_fees, transport_mode),source_context=source_context)
+    if source_context and source_context.get('root_kind') == 'expense':
+        return mark_duplicate_fees(decorated)
     covered = covered_scopes(decorated)
     templates = [row for row in build_default_fee_templates(transport_mode) if not row_scopes(row) & covered]
     template_by_key = {row["logical_fee_key"]: dict(row) for row in templates}
@@ -677,6 +679,10 @@ def save_fee(
         merged = merge_logical_fee([], payload, revision="DRY-RUN")
         return {"ok": True, "dry_run": True, **merged}
 
+    from overseas_costing.services.effective_source_values import batch_source_context
+    context = batch_source_context(batch_name, version_name, lock=True)
+    if context.get('root_kind') == 'expense':
+        raise ValueError('当前费用统一来自已匹配采购支出，请通过采购支出资料审核采用完整费用明细。')
     _assert_write_context(batch_name, version_name, edit_token, expected_modified)
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     existing = _decorate_historical_rules(_query_rules(batch_name, version_name), transport_mode)
@@ -927,7 +933,9 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     if frappe.db.get_value("Overseas Cost Version", version, "batch") != batch_name:
         raise ValueError("成本版本不属于当前批次。")
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
-    rules = compose_fee_worklist_rows(_query_rules(batch_name, version), transport_mode)
+    from overseas_costing.services.effective_source_values import batch_source_context, project_source_values
+    source_context = batch_source_context(batch_name,version)
+    rules = compose_fee_worklist_rows(_query_rules(batch_name, version), transport_mode,source_context=source_context)
     raw_items = frappe.get_all(
         "Overseas Cost Item",
         filters={"batch": batch_name, "version": version},
@@ -961,7 +969,7 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     )
     from overseas_costing.services.material_input_service import present_material_row
 
-    items = [present_material_row(row) for row in raw_items]
+    items = [present_material_row(project_source_values(row,source_context)) for row in raw_items]
     version_row = frappe.db.get_value(
         "Overseas Cost Version",
         version,
@@ -1051,6 +1059,17 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
         limit_page_length=1000,
     )
     summary = fee_status_service.summarize_fee_statuses(statuses)
+    candidates = build_evidence_candidates(attachments, version_name=version)
+    if source_context.get('root_kind') == 'expense':
+        from overseas_costing.services.effective_logistics_source import current_source_bundle, attachment_allowed
+        bundle = current_source_bundle(batch_name, version)
+        current_names = {row['name'] for row in attachments if bundle and attachment_allowed(row, bundle)}
+        for candidate in candidates:
+            if candidate['attachment'] not in current_names:
+                candidate.update(audit_only=True, amount_candidates=[])
+        if not statuses or not source_context.get('approved') or source_context.get('invalid') or not source_context.get('available'):
+            summary.update(all_requirements_satisfied=False, source_pending=True,
+                           source_message='当前采购支出费用尚未有效采用，请先核对采购支出资料。')
     return {
         "ok": True,
         "batch_name": batch_name,
@@ -1059,5 +1078,6 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
         "fees": statuses,
         "items": statuses,
         "summary": summary,
-        "evidence_candidates": build_evidence_candidates(attachments, version_name=version),
+        "evidence_candidates": candidates,
+        "source_context": source_context,
     }

@@ -25,7 +25,9 @@ def main():
     from overseas_costing.services.logistics_settlement.model import parse_source, dumps, digest
     from overseas_costing.services.logistics_settlement.matching import match_source, confirm_candidate
     from overseas_costing.services.logistics_settlement.writer import apply_binding, resolve_item_checks, item_review
-    from overseas_costing.services.logistics_settlement.document_writer import sync_logistics_documents
+    from overseas_costing.services.logistics_settlement.document_writer import sync_source_documents
+    from overseas_costing.services.effective_logistics_source import resolve_source_context
+    from overseas_costing.services.material_input_service import present_material_row
     from overseas_costing.services.calculate_service import recalculate_batch
 
     run = uuid.uuid4().hex[:10]
@@ -37,6 +39,8 @@ def main():
         'first_name': 'Local settlement reader', 'enabled': 1, 'send_welcome_email': 0,
         'roles': [{'role': '海外成本核算用户'}]}).insert(ignore_permissions=True)
 
+    source_physical = {}
+
     def raw_source(corp, kind, amount='0', documents=None, hour='00', currency='RMB'):
         fields = [{'name': '运输说明', 'value': '海运 MXT500174'}]
         if kind == 'expense':
@@ -46,6 +50,8 @@ def main():
                        {'name': '货物明细', 'componentType': 'TableField', 'value': [
                            {'rowId': 'a', 'rowValue': [{'name': '物料编码', 'value': 'A'},
                             {'name': '数量', 'value': '2'}, {'name': '单位', 'value': '件'}]}]}]
+        if kind == 'expense' and source_physical.get(corp):
+            fields[-1]['value'][0]['rowValue'] += [{'name':key,'value':value} for key,value in source_physical[corp].items()]
         return {'corp_id': corp, 'process_instance_id': corp + '-' + kind, 'process_code': kind,
                 'updated_at': '2026-09-09T' + hour + ':00:00+00:00', 'status': 'COMPLETED', 'result': 'agree',
                 'raw_payload': {'formComponentValues': fields}, 'settlement_documents': documents or [],
@@ -65,6 +71,9 @@ def main():
              'actual_shipped_qty': 0, 'unit_price': 10, 'goods_value': 20,
              'purchase_currency': 'RMB', 'purchase_uom': '件', 'unit_price_uom': '件', 'source_doc_no': 'LOCAL-PURCHASE', 'gross_weight_kg': 0, 'volume_m3': 0,
              'extra_json': dumps({'goods_value_source': 'purchase_approval'}), **physical})
+        if physical:
+            source_physical[corp] = {'装箱数量':physical.get('actual_shipped_qty',2),
+                                     '毛重':physical.get('gross_weight_kg',1)}
         logistics = ingest(raw_source(corp, 'logistics'))
         expense = ingest(raw_source(corp, 'expense', amount=amount, currency=currency))
         candidate = match_source(db, expense['id'])[0]
@@ -89,8 +98,17 @@ def main():
                            'rows': [{'position': 2, 'rowValue': [{'name': k, 'value': v} for k, v in fields.items()]}]}]}
 
     def sync(corp, batch, docs, hour='01'):
-        source = ingest(raw_source(corp, 'logistics', documents=docs, hour=hour))
-        return source, sync_logistics_documents(db, ledger, source, batch['name'], 'local-document-test')
+        source = ingest(raw_source(corp, 'expense', documents=docs, hour=hour))
+        binding = db.find('binding',expense_id=source['id'],limit=1)[0]
+        result = apply_binding(db,ledger,binding['id'],'local-document-test')
+        state_id = digest('expense_documents',source['id'],batch['name'])
+        state = db.get('document_sync',state_id) or {'id':state_id,'status':result['application_status'],
+            'version':ledger.get('batch',batch['name'])['current_version']}
+        return source, state
+
+    def replay(source, batch):
+        return sync_source_documents(db,ledger,source,batch['name'],'local-document-test',
+            source_context=resolve_source_context(batch['name'],store=db,ledger=ledger))
 
     def file_links(url):
         return frappe.get_all('File', filters={'file_url': url},
@@ -108,7 +126,7 @@ def main():
     source, state = sync(corp, batch, [doc])
     row = ledger.get('item', item['name'])
     assert [Decimal(str(row[k])) for k in ('quantity', 'unit_price', 'goods_value')] == [Decimal(2), Decimal(10), Decimal(20)]
-    assert [Decimal(str(row[k])) for k in ('actual_shipped_qty', 'gross_weight_kg', 'volume_m3')] == [Decimal(4), Decimal(8), Decimal(2)]
+    assert [Decimal(str(present_material_row(row)[k])) for k in ('actual_shipped_qty', 'gross_weight_kg', 'volume_m3')] == [Decimal(4), Decimal(8), Decimal(2)]
     meta = json.loads(row['extra_json'])
     assert meta['goods_value_source'] == 'purchase_approval' and meta['settlement_packing_review']
     assert meta['settlement_packing_provenance']['gross_weight_kg']['source_snapshot'] == source['snapshot']
@@ -136,7 +154,7 @@ def main():
     acknowledged_row = ledger.get('item', item['name'])
     assert recalculate_batch(batch['name'])['ok'] is True
     calculated_row = ledger.get('item', item['name'])
-    retry = sync_logistics_documents(db, ledger, source, batch['name'], 'local-document-test')
+    retry = replay(source,batch)
     assert retry['changed'] is False and not retry['blocking'], {'retry': retry,
         'calculation_changes': {k: [acknowledged_row.get(k), value] for k, value in calculated_row.items()
                                 if acknowledged_row.get(k) != value}}
@@ -155,7 +173,8 @@ def main():
     assert ledger.get('item', item['name']) == frozen_item
     assert ledger.get('attachment', attachments[0]['name']) == frozen_attachment
     current_item = ledger.rows('item', batch=batch['name'], version=changed_state['version'])[0]
-    assert Decimal(str(current_item['gross_weight_kg'])) == 8, 'Preserve conflicting physical value'
+    assert Decimal(str(present_material_row(current_item)['gross_weight_kg'])) == 9, 'Current expense replaces old adopted weights'
+    assert Decimal(str(current_item['gross_weight_kg'])) == 0, 'Raw original packing remains untouched'
     assert json.loads(current_item['extra_json'])['settlement_packing_review']
     current_attachments = ledger.rows('attachment', batch=batch['name'], version=changed_state['version'])
     assert len(current_attachments) == 1
@@ -166,7 +185,7 @@ def main():
         if link['attached_to_name']:
             assert frappe.get_doc('File', link['name']).has_permission('read', user=reader.name)
         assert not frappe.get_doc('File', link['name']).has_permission('read', user='Guest')
-    repeat = sync_logistics_documents(db, ledger, changed_source, batch['name'], 'local-document-test')
+    repeat = replay(changed_source,batch)
     assert repeat['changed'] is False and len(ledger.rows('version', batch=batch['name'])) == 2
     assert file_links(doc['file_url']) == shared_links
     apply_binding(db, ledger, binding['id'], 'local-document-test')
@@ -185,41 +204,41 @@ def main():
     old_links = file_links(doc['file_url'])
     ledger.put('version', version['name'], {'status': 'Confirmed'})
     ledger.put('batch', batch['name'], {'confirm_status': 'Confirmed'})
-    retired_raw = raw_source(corp, 'logistics', hour='02')
+    retired_raw = raw_source(corp, 'expense', hour='02')
     retired_raw['attachments'] = [{**doc['manifest'], 'retired_at': '2026-09-09T02:00:00+00:00'}]
     retired_source = ingest(retired_raw)
     runtime.apply_source(retired_source['id'])
     retired_state = db.get('document_sync', state['id'])
-    assert retired_state['blocking'] and retired_state['version'] != version['name']
+    assert retired_state['version'] != version['name']
     assert ledger.get('item', item['name']) == frozen_item
     assert ledger.get('attachment', frozen_attachment['name']) == frozen_attachment
     current_item = ledger.rows('item', batch=batch['name'], version=retired_state['version'])[0]
-    assert Decimal(str(current_item['gross_weight_kg'])) == 8
+    assert present_material_row(current_item)['gross_weight_kg'] is None
     assert json.loads(current_item['extra_json'])['settlement_packing_review']
-    current_attachment = ledger.rows('attachment', batch=batch['name'], version=retired_state['version'])[0]
-    parsed = json.loads(current_attachment['parse_result_json'])
-    assert parsed['settlement_document']['retired'] and not parsed['cost_source_allowed']
     assert all(link in file_links(doc['file_url']) for link in old_links)
     assert runtime.calculation_blockers(batch['name'], retired_state['version'])
-    acknowledge(binding, current_item['name'])
-    assert not db.get('document_sync', state['id'])['blocking']
-    assert not runtime.calculation_blockers(batch['name'], retired_state['version'])
+    try:
+        acknowledge(binding, current_item['name'])
+        raise AssertionError('Retired physical evidence cannot be acknowledged as current')
+    except ValueError as exc:
+        assert '尚无可采用' in str(exc)
     runtime.apply_source(retired_source['id'])
     assert len(ledger.rows('version', batch=batch['name'])) == 2
-    assert not db.get('document_sync', state['id'])['blocking']
+    assert db.get('binding',binding['id'])['application_status'] == 'applied_pending'
     db.commit()
-    report('retired_packing_frozen_history_and_review_ack', ok=True, batch=batch['name'])
+    report('retired_packing_frozen_history_and_no_fallback', ok=True, batch=batch['name'])
 
     corp, batch, version, item, binding = fixture('new-cargo')
     ledger.put('item', item['name'], {'material_code': 'OTHER'})
     doc = document('new-cargo', **{'装箱数量': '2'})
     source, state = sync(corp, batch, [doc])
-    assert state['blocking'] and Decimal(str(ledger.get('item', item['name'])['gross_weight_kg'])) == 0
+    assert not state['blocking']
+    assert ledger.get('item', item['name']) is None, 'Complete expense cargo retires unmatched old item with audit'
     apply_binding(db, ledger, binding['id'], 'local-document-test')
     current_items = ledger.rows('item', batch=batch['name'], version=version['name'])
     assert len(current_items) == 1 and current_items[0]['material_code'] == 'A'
-    assert Decimal(str(current_items[0]['gross_weight_kg'])) == 8
-    assert Decimal(str(current_items[0]['actual_shipped_qty'])) == 2
+    assert Decimal(str(present_material_row(current_items[0])['gross_weight_kg'])) == 8
+    assert Decimal(str(present_material_row(current_items[0])['actual_shipped_qty'])) == 2
     assert Decimal(str(current_items[0].get('unit_price') or 0)) == 0, 'Packing price must not become purchase price'
     assert not db.get('document_sync', state['id'])['blocking']
     db.commit()
@@ -260,7 +279,7 @@ def main():
     assert db.get('document_sync', state['id'])['status'] == 'applied'
     assert db.get('binding', binding['id'])['application_status'] == 'applied'
     assert len(ledger.rows('attachment', batch=batch['name'])) == 1
-    assert Decimal(str(ledger.get('item', item['name'])['gross_weight_kg'])) == 8
+    assert Decimal(str(present_material_row(ledger.get('item', item['name']))['gross_weight_kg'])) == 8
     assert not runtime.calculation_blockers(batch['name'], version['name'])
     db.commit()
     report('locked_document_and_binding_resume_pending', ok=True, batch=batch['name'], inventory_scope='new fixture only')
@@ -313,8 +332,16 @@ def main():
             'material_code': code, 'product_name': code, 'unit': '件', 'quantity': 2,
             'actual_shipped_qty': 2, 'unit_price': 10, 'goods_value': 20, 'gross_weight_kg': 1,
             'purchase_currency': 'RMB', 'purchase_uom': '件', 'unit_price_uom': '件', 'source_doc_no': 'LOCAL-PURCHASE'})
+    three = raw_source(corp,'expense',amount='1',currency='MXN',hour='01')
+    table = three['raw_payload']['formComponentValues'][-1]['value']
+    for code in ('B','C'):
+        row = deepcopy(table[0]); row['rowId'] = code
+        row['rowValue'][0]['value'] = code
+        table.append(row)
+    ingest(three)
     applied = apply_binding(db, ledger, binding['id'], 'local-document-test')
     assert applied['application_status'] == 'applied', applied
+    assert len(ledger.rows('item',batch=batch['name'],version=version['name'])) == 3
     calculated = recalculate_batch(batch['name'])
     rows = ledger.rows('item', batch=batch['name'], version=version['name'])
     assert sum(Decimal(str(row['freight_alloc_rmb'])) for row in rows) == Decimal('0.333333')

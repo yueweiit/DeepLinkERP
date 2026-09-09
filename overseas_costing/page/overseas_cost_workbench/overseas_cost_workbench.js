@@ -9718,6 +9718,7 @@ class OverseasCostWorkbench {
           </div>
         </div>
         <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
+        ${feeSummary.source_pending ? `<p class="ocw-mf-dialog-note">${this.escape(feeSummary.source_message)}</p>` : ""}
         <div class="ocw-mf-alert-strip" aria-label="当前待办摘要">
           ${this.renderMaterialFeeMetric("计算红格", materialSummary.missing_cell_count || 0, "danger")}
           ${this.renderMaterialFeeMetric("费用未定", feeSummary.missing_amount_fee_count || 0, "danger")}
@@ -10005,12 +10006,20 @@ class OverseasCostWorkbench {
 
   renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
     let value = item[column.field];
+    if (item.source_adoption_state === "historical_pending" && ["material_code", "product_name"].includes(column.field)) {
+      return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}"><span>${this.escape(value ?? "--")}</span><small>历史行 · 当前未采用</small></td>`;
+    }
+    if (item.adopted_price && ["unit_price", "purchase_currency", "unit_price_uom"].includes(column.field)) {
+      const price = item.adopted_price;
+      const current = { unit_price: price.value, purchase_currency: price.currency, unit_price_uom: price.unit }[column.field];
+      return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}"><span>${this.escape(current ?? "待补")}</span><small>${price.error ? "商品价待核对" : price.source_type === "expense" ? "采购支出商品价" : "原商品采购价"}</small></td>`;
+    }
     const shippingField = ["actual_shipped_qty", "shipped_uom"].includes(column.field);
     if (column.field === "actual_shipped_qty") value = item.effective_shipping_quantity;
     if (column.field === "shipped_uom") value = item.effective_shipping_uom;
     if (shippingField && item.settlement_cargo) {
       const rawPacking = [item.actual_shipped_qty ?? "未识别", item.shipped_uom || "单位待核对"].join(" ");
-      return `<td class="ocw-mf-cell is-readonly ocw-mf-settlement-quantity" data-mf-column-index="${columnIndex}"><span>${this.escape(this.formatValue(value ?? "--"))}</span><small>物流结算采用</small>${column.field === "actual_shipped_qty" ? `<small>装箱原值 ${this.escape(rawPacking)}</small>` : ""}</td>`;
+      return `<td class="ocw-mf-cell is-readonly ocw-mf-settlement-quantity" data-mf-column-index="${columnIndex}"><span>${this.escape(this.formatValue(value ?? "--"))}</span><small>${item.source_adoption_state === "historical_pending" ? "当前来源待补" : "采购支出采用"}</small>${column.field === "actual_shipped_qty" ? `<small>装箱原值 ${this.escape(rawPacking)}</small>` : ""}</td>`;
     }
     const originalValue = value;
     const draft = this.materialFeeState?.materialDrafts?.[`${item.name}:${column.field}`];
@@ -10039,7 +10048,7 @@ class OverseasCostWorkbench {
         const valuation = item.shipment_valuation || {};
         const sourceLabel = valuation.error ? "估值待核对" : ["packing_row_total", "packing_unit_price"].includes(valuation.method)
           ? "装箱货值已取得" : valuation.method === "purchase_unit_price" ? "采购单价 × 本次发货数"
-            : valuation.method === "LEGACY_PURCHASE" ? "历史采购口径" : "本次发货估值";
+            : valuation.method === "settlement_expense_unit_price" ? "采购支出商品价 × 当前数量" : valuation.method === "settlement_purchase_unit_price" ? "原商品采购价 × 当前数量" : valuation.method === "LEGACY_PURCHASE" ? "历史采购口径" : "本次发货估值";
         return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(valuation.error_detail || reason)}"><span>${this.escape(fullValue)}</span><small>${this.escape(sourceLabel)}</small></td>`;
       }
       return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
@@ -10168,7 +10177,7 @@ class OverseasCostWorkbench {
       </main>
       <footer class="ocw-mf-ai-dialog-footer">
         <button class="ocw-outline-btn" type="button" data-action="mf-ai-minimize">最小化</button>
-        <div><button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry" ${canRetry ? "" : "hidden"}>重试</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel">取消</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" disabled>确认填充</button></div>
+        <div><button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry" ${canRetry ? "" : "hidden"}>重试</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel">取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard">放弃任务</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" disabled>确认填充</button></div>
       </footer>
     </div>`;
   }
@@ -10183,7 +10192,7 @@ class OverseasCostWorkbench {
     return {
       status,
       label: String(source?.label || "未命名资料"),
-      detail: [source?.detail, location].filter(Boolean).join(" · ") || status.label,
+      detail: [source?.approval_no ? `审批 ${source.approval_no}` : "", source?.detail, location].filter(Boolean).join(" · ") || status.label,
       error: String(source?.error || ""),
     };
   }
@@ -10246,6 +10255,8 @@ class OverseasCostWorkbench {
           state.aiProgressMinimized = false;
           if (state.aiFill) state.aiFill.reviewDialogVisible = false;
           dialog.hide();
+        } else if (action === "mf-ai-discard") {
+          this.discardMaterialAIFill().catch((error) => this.showError(error));
         } else if (action === "mf-ai-change-sources") {
           this.restartMaterialAIWithSources(dialog).catch((error) => this.showError(error));
         } else if (action === "mf-ai-apply") {
@@ -10374,11 +10385,35 @@ class OverseasCostWorkbench {
       const rows = sources.filter((source) => String(source.read_status || "NO_RESULT") === status);
       if (!rows.length) return "";
       return `<section><h4>${this.materialAIReadStatusLabel({ read_status: status })}（${rows.length}）</h4>${rows.map((source) => {
-        const identity = [source.approval_no ? `审批 ${source.approval_no}` : "", source.sheet_name ? `Sheet ${source.sheet_name}` : "", source.actor_name || "", source.occurred_at || ""].filter(Boolean).join(" · ");
+        const identity = [source.approval_no || source.source_context?.instance_id ? `审批 ${source.approval_no || source.source_context.instance_id}` : "", source.sheet_name ? `Sheet ${source.sheet_name}` : "", source.actor_name || "", source.occurred_at || ""].filter(Boolean).join(" · ");
         const canToggle = !source.locked && source.selectable !== false;
         return `<label class="is-${String(status).toLowerCase()}"><input type="checkbox" data-mf-ai-source-select="1" value="${this.escape(source.source_id || "")}" ${source.selected ? "checked" : ""} ${canToggle ? "" : "disabled"}><span><strong>${this.escape(source.label || source.source_id || "未命名资料")}</strong><small>${this.escape(identity || this.materialAIReadStatusLabel(source))}</small>${source.error ? `<em>${this.escape(source.error)}</em>` : ""}<i>${Number(source.result_count || source.candidate_count || 0)} 个候选 · ${this.escape(source.parse_method || "NONE")}</i></span>${source.locked ? "<b>锁定纳入</b>" : ""}</label>`;
       }).join("")}</section>`;
     }).join("") || `<p>未找到可用资料来源。</p>`}</div></details>`;
+  }
+
+  renderCurrentSourceReviewControls(context = {}, cargo = null, { fees = false, values = {} } = {}) {
+    if (context.root_kind !== "expense") return "";
+    const cargoControl = cargo ? (cargo.complete
+      ? `<label class="ocw-mf-review-choice"><input type="checkbox" data-source-review-complete ${values.complete_cargo ? "checked" : ""}><span>已核对完整货物表（${Number(cargo.row_count || cargo.rows?.length || 0)} 行），采用为本票最终 SKU 和数量</span></label>`
+      : `<p class="ocw-mf-review-warning">${this.escape(cargo.reason || "货物清单完整性待核对，仅作为候选。")}</p>`) : "";
+    const cargoRows = (cargo?.rows || []).map(row => `<tr>${[
+      row.source_row, row.material_code, row.product_name,
+      row.quantity ?? row.actual_shipped_qty, row.unit || row.shipped_uom,
+      row.gross_weight_kg, row.volume_m3,
+    ].map(value => `<td>${this.escape(value ?? "--")}</td>`).join("")}</tr>`).join("");
+    const cargoTable = cargoRows ? `<p>本次来源货物清单（确认后按稳定行身份更新本票物料）</p><div style="max-height:260px;overflow:auto"><table class="table table-bordered"><thead><tr>${["原表行", "SKU", "品名", "数量", "单位", "毛重 kg", "体积 m³"].map(label => `<th>${label}</th>`).join("")}</tr></thead><tbody>${cargoRows}</tbody></table></div>` : "";
+    const feeControls = fees ? `<p>本次费用明细须与采购支出总额核对一致；请选择它实际覆盖的费用。</p>${this.settlementCoverageOptions().map(([key, label]) => `<label class="ocw-mf-review-choice"><input type="checkbox" data-source-review-coverage="${key}" ${(values.coverage || []).includes(key) ? "checked" : ""}><span>${this.escape(label)}</span></label>`).join("")}<label class="ocw-mf-review-choice"><input type="checkbox" data-source-review-negative ${values.negative_confirmed ? "checked" : ""}><span>已核对本次负数、折扣或冲抵（如有）</span></label>` : "";
+    return `<section class="ocw-mf-dialog-note" data-current-source-review><strong>采购支出资料采用</strong>${cargoTable}${cargoControl}${feeControls}<label>核对说明<input data-source-review-reason value="${this.escape(values.reason || "")}" placeholder="记录本次核对依据" maxlength="1000"></label></section>`;
+  }
+
+  collectCurrentSourceReviewControls($wrapper) {
+    return {
+      complete_cargo: $wrapper.find("[data-source-review-complete]").is(":checked"),
+      coverage: $wrapper.find("[data-source-review-coverage]:checked").map((_, node) => $(node).attr("data-source-review-coverage")).get(),
+      negative_confirmed: $wrapper.find("[data-source-review-negative]").is(":checked"),
+      reason: String($wrapper.find("[data-source-review-reason]").val() || "").trim(),
+    };
   }
 
   renderMaterialAIReviewDialogContent() {
@@ -10388,7 +10423,7 @@ class OverseasCostWorkbench {
     const physicalSummary = physical.itemCount
       ? `<div class="ocw-mf-ai-physical-summary"><b>明细 ${physical.itemCount} 条</b><b>净重 ${this.escape(physical.netWeight)} kg</b><b>毛重 ${this.escape(physical.grossWeight)} kg</b></div>`
       : "";
-    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>请核对物料和费用，确认后一次填充到当前批次。</span></div></header><main class="ocw-mf-ai-dialog-body">${physicalSummary}${fill.ai_warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(fill.ai_warning)}</div>` : ""}<div data-mf-ai-autofill-preview="1">${this.renderMaterialAIAutofillPreview(fill)}</div><details class="ocw-mf-ai-review-advanced"><summary>高级：来源与其他方案</summary><div>${this.renderMaterialAIReviewSources(fill)}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${fill.applying ? "disabled" : ""}>更换来源并重新生成</button>${this.renderSourceAIReviewProposals(true)}</div></details></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${fill.applying ? "disabled" : ""}>取消</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${fill.applying || !selectedCount ? "disabled" : ""}>${fill.applying ? "正在填充…" : "确认填充"}</button></div></footer></div>`;
+    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>请核对物料和费用，确认后一次填充到当前批次。</span></div></header><main class="ocw-mf-ai-dialog-body">${physicalSummary}${fill.ai_warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(fill.ai_warning)}</div>` : ""}<div data-mf-ai-autofill-preview="1">${this.renderMaterialAIAutofillPreview(fill)}</div>${this.renderCurrentSourceReviewControls(fill.source_context || fill.draft?.source_context || {}, fill.draft?.cargo_review, { fees: (fill.proposals || []).some(p => p.proposal_type === "fee_update"), values: fill.edits?._source_review || {} })}<details class="ocw-mf-ai-review-advanced"><summary>高级：来源与其他方案</summary><div>${this.renderMaterialAIReviewSources(fill)}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${fill.applying ? "disabled" : ""}>更换来源并重新生成</button>${this.renderSourceAIReviewProposals(true)}</div></details></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${fill.applying ? "disabled" : ""}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${fill.applying ? "disabled" : ""}>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${fill.applying || !selectedCount ? "disabled" : ""}>${fill.applying ? "正在填充…" : "确认填充"}</button></div></footer></div>`;
   }
 
   materialAIAutofillPreview(fill) {
@@ -10529,7 +10564,7 @@ class OverseasCostWorkbench {
         const source = (fill.source_progress || []).find((row) => String(row.label || "") === String(ref.file || "") && (!ref.sheet || String(row.sheet_name || row.sheet || "") === String(ref.sheet || ""))) || {};
         return [
           ref.file,
-          ref.approval_no ? `审批 ${ref.approval_no}` : source.approval_no ? `审批 ${source.approval_no}` : "",
+          ref.approval_no ? `审批 ${ref.approval_no}` : source.approval_no || source.source_context?.instance_id ? `审批 ${source.approval_no || source.source_context.instance_id}` : "",
           ref.sheet,
           ref.field,
           ref.row ? `第 ${ref.row} 行` : "",
@@ -10889,6 +10924,9 @@ class OverseasCostWorkbench {
       && String(this.detailState.batchName || "") === batchName
       && String(this.detailState.versionName || "") === versionName
       && this.detailState.tab === "documents";
+    if (state.aiProgressDialog?.$wrapper?.find("[data-current-source-review]").length) {
+      fill.edits = { ...(fill.edits || {}), _source_review: this.collectCurrentSourceReviewControls(state.aiProgressDialog.$wrapper) };
+    }
     fill.applying = true;
     this.renderMaterialAIReviewDialog();
     try {
@@ -10953,6 +10991,8 @@ class OverseasCostWorkbench {
       if (!isCurrent()) return;
       if (!result?.ok) throw new Error(result?.message || "AI 草稿放弃失败。 ");
       state.aiFill = null;
+      state.aiProgressDialog?.hide();
+      state.aiProgressDialog = null;
       await this.loadMaterialFeeWorkspace({ quiet: true });
     } catch (error) {
       fill.discarding = false;
@@ -11977,6 +12017,7 @@ class OverseasCostWorkbench {
       ...componentRows.map((row) => row.source_evidence || {}).filter((row) => Object.keys(row).length),
     ];
     return `<div class="ocw-mf-fee-review-draft">
+      ${this.renderCurrentSourceReviewControls(draft.source_context || {}, null, { fees: true })}
       <section class="${evidence.has_conflict || evidence.needs_review ? "is-warning" : ""}"><h4>凭证总额</h4>${this.renderFeeEvidenceReviewWarning(evidence)}<label class="ocw-mf-review-choice"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${evidenceId}" ${selected(evidence)}><span><strong>${this.escape(evidence.currency || "RMB")} ${this.escape(evidence.original_amount || "待人工补录")}</strong><small>${this.escape(evidence.reason || "请核对凭证类型和会计作用")}</small></span></label><div class="ocw-mf-review-fields"><label>凭证类型<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="evidence_type">${[["QUOTE","报价"],["PREPAYMENT","预付款／暂缴"],["FINAL_INVOICE","最终发票／结算单"],["TAX_CERTIFICATE","完税凭证"],["PAYMENT","付款流水"],["REFUND","退款／贷项"],["OTHER","其他"]].map(([value,label]) => `<option value="${value}" ${value === evidence.evidence_type ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>会计作用<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="accounting_role">${[["ESTIMATE","更新暂估"],["FINAL_BILL","最终账单"],["SETTLEMENT","付款／退款流水"],["REFERENCE","仅作参考"]].map(([value,label]) => `<option value="${value}" ${value === evidence.accounting_role ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>金额<input data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="original_amount" value="${this.escape(evidence.original_amount || "")}" inputmode="decimal"></label><label>币种<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="currency">${this.materialFeeCurrencyOptions().map((option) => `<option value="${option.value}" ${option.value === (evidence.currency || "RMB") ? "selected" : ""}>${option.label}</option>`).join("")}</select></label><label>方向<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="direction"><option value="DEBIT" ${evidence.direction !== "CREDIT" ? "selected" : ""}>付款／应付</option><option value="CREDIT" ${evidence.direction === "CREDIT" ? "selected" : ""}>退款／冲回</option></select></label><label>关联原付款<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="related_evidence"><option value="">无／待核对</option>${refundParents.map((row) => `<option value="${this.escape(row.name || "")}" ${String(row.name || "") === String(evidence.related_evidence || "") ? "selected" : ""}>${this.escape([row.currency, row.original_amount, row.attachment || row.name].filter(Boolean).join(" · "))}</option>`).join("")}</select></label><label class="is-checkbox"><input type="checkbox" data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="is_final" ${evidence.is_final ? "checked" : ""}> 已确认是最终凭证</label></div></section>
       <section><h4>费用拆分</h4>${feeRows.length ? feeRows.map((row) => `<label class="ocw-mf-review-choice ${row.has_conflict || row.needs_review ? "is-warning" : ""}"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}><span><strong>${this.escape(row.label || row.logical_fee_key)} · ${this.escape(row.currency)} <input data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount" value="${this.escape(row.amount || "")}" inputmode="decimal"></strong><small><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount_status">${statusOptions.map(([value,label]) => `<option value="${value}" ${value === (row.amount_status || evidence.suggested_amount_status) ? "selected" : ""}>${label}</option>`).join("")}</select></small>${this.renderFeeEvidenceReviewWarning(row)}</span></label>`).join("") : "<p>未识别出可安全拆分的金额，可保留凭证后人工补录。</p>"}</section>
       ${draft.missing_fx ? `<div class="ocw-mf-review-warning is-block">缺汇率：可保存原币事实，本次试算不会计入。</div>` : ""}
@@ -11990,6 +12031,9 @@ class OverseasCostWorkbench {
     const state = this.ensureMaterialFeeState();
     const review = state.feeEvidenceReview;
     if (review?.status !== "READY" || !(await this.ensureMaterialFeeEditSession())) return;
+    if (state.feeEvidenceReviewDialog?.$wrapper?.find("[data-current-source-review]").length) {
+      review.edits = { ...(review.edits || {}), _source_review: this.collectCurrentSourceReviewControls(state.feeEvidenceReviewDialog.$wrapper) };
+    }
     const result = await this.call("overseas_costing.api.fees.apply_fee_evidence_review", {
       batch_name: review.batchName || this.detailState.batchName,
       run_id: review.runId,
@@ -12202,7 +12246,8 @@ class OverseasCostWorkbench {
     const preview = this.materialFeeSavedCostPreview();
     const legacyTotal = header.summary_snapshot?.total_cost_rmb;
     const hasLegacyTotal = legacyTotal !== undefined && legacyTotal !== null && legacyTotal !== "" && Number.isFinite(Number(legacyTotal));
-    const staleCost = header.status === "Dirty" && Boolean(preview || hasLegacyTotal);
+    const sourcePending = state.materials?.calculation_stale || state.fees?.summary?.source_pending;
+    const staleCost = (header.status === "Dirty" || sourcePending) && Boolean(preview || hasLegacyTotal);
     const sectionTitle = `<div class="ocw-mf-section-title">
       <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p></div>
       <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
@@ -12238,46 +12283,47 @@ class OverseasCostWorkbench {
     </section>`;
   }
 
-  renderMaterialFeeSourcesContent(candidates = []) {
-    return `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note">OA 采购数量、金额和物料身份作为来源事实保留。装箱资料可从物料表的“获取装箱资料”统一管理。</div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉 OA</button></div><div class="ocw-mf-source-list">${candidates.length ? candidates.map((row) => `<div><span><strong>${this.escape(row.file_name || row.attachment || "--")}</strong><small>${this.escape(row.source_type || "附件")} · ${this.escape(row.attachment_type || "未分类")} · ${this.escape(row.parse_status || "Draft")}${row.source_type === "OA" ? ` · ${row.audit_only ? "审计留存，只读" : "归档只读"}` : ""}</small></span>${row.file_url ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-mf-preview-source="1" data-file-url="${this.escape(row.file_url)}" data-file-name="${this.escape(row.file_name || "")}">预览</button>` : ""}</div>`).join("") : `<div class="ocw-detail-empty"><strong>暂无附件资料</strong></div>`}</div></div>`;
+  renderMaterialFeeSourcesContent(candidates = [], context = {}, history = []) {
+    const label = context.root_kind === "expense" ? "采购支出" : "国际物流";
+    const rows = candidates.map((row) => `<div><span><strong>${this.escape(row.source_label || row.file_name || row.attachment || "资料")}</strong><small>${this.escape(row.approval_no || "")} · ${this.escape(row.source_kind || row.source_type || "附件")}${row.sheet_name ? ` · ${this.escape(row.sheet_name)}` : ""} · ${row.excluded || row.available === false ? this.escape(row.exclude_reason || "资料待处理") : "当前来源"}</small>${row.cache_refreshed_at ? `<small>本地缓存：${this.escape(row.cache_refreshed_at)}</small>` : ""}${row.refresh_error ? `<small>上次刷新失败，资料待核对：${this.escape(row.refresh_error)}</small>` : ""}</span></div>`).join("");
+    const old = history.map((row) => `<div><span><strong>${this.escape(row.file_name || "历史资料")}</strong><small>${this.escape(row.source_doc_no || "")} · 历史留存，不参与当前核算与 AI</small></span>${row.file_url ? `<button class="ocw-outline-btn ocw-mini-btn" data-mf-preview-source="1" data-file-url="${this.escape(row.file_url)}" data-file-name="${this.escape(row.file_name || "")}">查看历史附件</button>` : ""}</div>`).join("");
+    return `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note"><strong>当前资料来源：${label}</strong><p>装箱、物料、费用及 AI 使用以下同一份资料清单。${context.root_kind === "expense" ? "采购支出资料不足时保留待处理。" : "确认匹配采购支出后统一切换。"}</p></div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" data-action="view-current-source">打开当前原单</button></div><div class="ocw-mf-source-list">${rows || '<div class="ocw-detail-empty"><strong>当前来源资料待补</strong></div>'}</div>${old ? `<details><summary>历史资料（${history.length}）</summary><div class="ocw-mf-source-list">${old}</div></details>` : ""}</div>`;
   }
 
   openMaterialFeeSourcesDialog() {
     const state = this.ensureMaterialFeeState();
-    const candidates = state.fees?.evidence_candidates || [];
     const dialog = new frappe.ui.Dialog({
       title: "查看资料来源",
-      fields: [{ fieldtype: "HTML", fieldname: "sources", options: this.renderMaterialFeeSourcesContent(candidates) }],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
+      fields: [{ fieldtype: "HTML", fieldname: "sources", options: '<div class="ocw-detail-empty">正在读取当前来源…</div>' }],
+      primary_action_label: "关闭", primary_action: () => dialog.hide(),
     });
-    dialog.show();
-    dialog.$wrapper.addClass("ocw-mf-dialog");
+    dialog.show(); dialog.$wrapper.addClass("ocw-mf-dialog");
     dialog.$wrapper.on("click", "[data-mf-preview-source]", (event) => {
       const $button = $(event.currentTarget);
       this.openOaAttachmentFilePreviewDialog($button.attr("data-file-url"), $button.attr("data-file-name"));
     });
-    dialog.$wrapper.on("click", "[data-action='view-dingtalk-approval']", () => {
-      dialog.hide();
-      this.switchDetailTab("dingtalk");
+    dialog.$wrapper.on("click", "[data-action='view-current-source']", () => {
+      const data = state.settlementData;
+      const source = data?.binding ? data.expense : data?.logistics;
+      if (source?.open_url) this.openSettlementSource(source);
+      else if (data?.binding || dialog.sourceContext?.root_kind === "expense") {
+        frappe.show_alert({ message: "当前采购支出原单入口待补，请刷新关联资料。", indicator: "orange" });
+      } else { dialog.hide(); this.switchDetailTab("dingtalk"); }
     });
     const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName || null;
-    let open = true;
-    dialog.onhide = () => { open = false; };
-    this.call("overseas_costing.api.import_api.list_manual_document_attachments", {
-      batch_name: batchName, version_name: versionName, limit: 200,
+    let open = true; dialog.onhide = () => { open = false; };
+    const current = () => open && this.materialFeeState === state && this.detailState.batchName === batchName && (this.detailState.versionName || null) === versionName;
+    this.call("overseas_costing.api.packing_api.list_current_source_documents", {
+      batch_name: batchName, version_name: versionName,
     }, false).then((result) => {
-      if (!open || this.materialFeeState !== state || this.detailState.batchName !== batchName
-          || (this.detailState.versionName || null) !== versionName || !result?.ok) return;
-      const merged = new Map(candidates.map((row) => [row.attachment || row.name || row.file_url, row]));
-      for (const row of result.items || []) {
-        if (row.source_type !== "OA" && !row.audit_only) continue;
-        const key = row.name || row.attachment || row.file_url;
-        merged.set(key, { ...merged.get(key), ...row, attachment: key });
-      }
-      dialog.fields_dict.sources.$wrapper.html(this.renderMaterialFeeSourcesContent([...merged.values()]));
-    }).catch(() => {});
+      if (!current()) return;
+      if (!result?.ok) throw new Error(result?.message || "资料清单读取失败");
+      dialog.sourceContext = result.source_context || {};
+      dialog.fields_dict.sources.$wrapper.html(this.renderMaterialFeeSourcesContent(result.items || [], result.source_context || {}, result.historical_items || []));
+    }).catch((error) => {
+      if (current()) dialog.fields_dict.sources.$wrapper.html(`<div class="ocw-detail-empty is-error">${this.escape(error.message || "当前资料读取失败，请重试")}</div>`);
+    });
   }
 
   openMaterialXlsxUploader() {
@@ -12398,9 +12444,21 @@ class OverseasCostWorkbench {
       batch_name: this.detailState.batchName,
     }, true);
     const nextWorkbooks = result?.wiki_workbooks || [];
-    dialog.materialAttachmentSources = [...(result?.manual_attachments || [])];
+    const previousFingerprint = dialog.sourceContext?.fingerprint || "";
+    dialog.sourceContext = result?.source_context || {};
+    const sameSource = previousFingerprint === (dialog.sourceContext.fingerprint || "");
+    if (!sameSource) {
+      dialog.wikiMaterialSelectedSource = "";
+      dialog.wikiMaterialSources = [];
+      dialog.wikiMaterialWorkbooks = [];
+      dialog.wikiMaterialPreview = null;
+    }
+    dialog.materialAttachmentSources = dialog.sourceContext.root_kind === "expense"
+      ? [...(result?.approval_sources || [])].filter((row) => row.source_kind === "approval_attachment")
+      : [...(result?.manual_attachments || [])];
     if (
       preserveOnError
+      && sameSource
       && result?.wiki_error
       && !nextWorkbooks.length
       && (dialog.wikiMaterialSources || []).length
@@ -12469,18 +12527,19 @@ class OverseasCostWorkbench {
   }
 
   renderMaterialSourceTabs(dialog) {
-    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["local", "本地上传装箱单"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
+    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["local", dialog.sourceContext?.root_kind === "expense" ? "采购支出附件" : "本地上传装箱单"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
   }
 
   renderMaterialAttachmentSources(dialog) {
-    const rows = (dialog.materialAttachmentSources || []).filter((row) => row.source_kind === "manual_attachment");
+    const bound = dialog.sourceContext?.root_kind === "expense";
+    const rows = (dialog.materialAttachmentSources || []).filter((row) => row.source_kind === (bound ? "approval_attachment" : "manual_attachment"));
     const cards = rows.map((row) => {
       const sheets = row.sheets?.length ? row.sheets : [""];
       const semanticOnly = row.supported_for_material_import === false;
       const status = semanticOnly ? (row.available ? "可供 AI 识别" : "选择 AI 填充后自动获取并识别") : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
       return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${semanticOnly ? `<span>AI 资料</span>` : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
     }).join("");
-    return `<div class="ocw-mf-wiki-toolbar"><span>本页仅保留本地装箱单；钉钉正文、附件和评论会由“AI 分析资料”自动收集。</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button><button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button></div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无本地装箱单</strong></div>`}</div>`;
+    return `<div class="ocw-mf-wiki-toolbar"><span>${bound ? "当前资料来源：采购支出。正文、评论和附件也会纳入“AI 分析资料”。" : "本地装箱单；国际物流正文、附件和评论由 AI 自动收集。"}</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>${bound ? "" : '<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>'}</div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>${bound ? "采购支出装箱附件待补" : "暂无本地装箱单"}</strong></div>`}</div>`;
   }
 
   async previewMaterialAttachmentSource(dialog, sourceId, sheetName = "") {
@@ -12495,7 +12554,16 @@ class OverseasCostWorkbench {
     try {
       const attachment = source.attachment_name || source.source_id;
       if (!isCurrent()) return;
-      const sheets = source.sheets || [];
+      let sheets = source.sheets || [];
+      if (!sheets.length) {
+        const catalog = await this.call("overseas_costing.api.packing_api.list_packing_attachment_sheets", {
+          batch_name: dialog.materialBatchName, source_kind: source.source_kind, source_id: attachment,
+        });
+        if (!isCurrent()) return;
+        if (catalog.source_context?.fingerprint !== dialog.sourceContext?.fingerprint) throw new Error("当前来源已变化，请关闭并重新获取资料。");
+        sheets = catalog.sheets || [];
+        source.sheets = sheets;
+      }
       const selectedSheet = sheetName || (sheets.length === 1 ? sheets[0] : "");
       if (!selectedSheet) {
         if (!sheets.length) throw new Error("未读取到工作表，请检查文件或重新上传。");
@@ -12639,6 +12707,9 @@ class OverseasCostWorkbench {
     });
     dialog.show();
     dialog.$wrapper.addClass("ocw-mf-dialog ocw-mf-import-dialog");
+    if (!isGrid && preview.source_context?.root_kind === "expense") {
+      dialog.fields_dict.preview.$wrapper.prepend(this.renderCurrentSourceReviewControls(preview.source_context, preview.cargo_review));
+    }
     if (isGrid) {
       this.setupPackingSpreadsheetDialog(dialog, preview);
       dialog.$wrapper
@@ -12719,6 +12790,11 @@ class OverseasCostWorkbench {
 
   async applyMaterialImport(dialog, preview) {
     const choices = this.collectMaterialImportChoices(dialog, preview);
+    if (preview.source_context?.root_kind === "expense") {
+      const sourceReview = this.collectCurrentSourceReviewControls(dialog.$wrapper);
+      choices.confirm_complete_cargo = sourceReview.complete_cargo;
+      choices._source_review = sourceReview;
+    }
     const validationError = this.validateWikiMaterialAllocations(preview, choices);
     if (validationError) throw new Error(validationError);
     if (!(await this.ensureEditSession()) || dialog._pg?.closed) return;
@@ -12770,9 +12846,9 @@ class OverseasCostWorkbench {
     this.updateMaterialFeeExpectedModified(result);
     if (dialog._pg) dialog._pg.allowClose = true;
     dialog.hide();
-    frappe.show_alert({ message: `已更新 ${result.updated_count || 0} 行、${result.changed_field_count || 0} 个字段`, indicator: "green" });
+    frappe.show_alert({ message: result.review_saved ? `已采用采购支出货物清单，共 ${preview.cargo_review?.rows?.length || 0} 行` : `已更新 ${result.updated_count || 0} 行、${result.changed_field_count || 0} 个字段`, indicator: "green" });
     await this.loadMaterialFeeWorkspace({ quiet: true });
-    this.restartMaterialAIForChangedSources();
+    if (!result.review_saved) this.restartMaterialAIForChangedSources();
   }
 
   validateWikiMaterialAllocations(preview, choices) {
@@ -12892,7 +12968,7 @@ class OverseasCostWorkbench {
 
   renderPackingSpreadsheetPreview(preview) {
     const e = (v) => this.escape(v ?? "");
-    return `<div class="pg-preview"><header class="pg-heading"><div><strong>${e(preview.source?.label || "装箱计划表")}</strong><span>更新于 ${e(this.formatDateTimeMinute(preview.source?.source_updated_at)||"未提供")}</span></div><div class="pg-tabs" role="tablist"><button type="button" role="tab" data-pg-tab="source" aria-selected="true">原表</button><button type="button" role="tab" data-pg-tab="result" aria-selected="false">导入结果 <b>${preview.rows?.length||0}</b></button></div></header><section data-pg-panel="source" class="pg-source-panel"><div class="pg-tools"><label>查看 <select data-pg-filter><option value="all">全部原表行</option><option value="batch">本批次相关行</option><option value="outside">批次外与未匹配行</option></select></label><span>黄色边框：待核对 · 蓝色角标：已确认合并</span><button type="button" class="pg-secondary" data-pg-copy>复制选中区域</button></div><div class="pg-formula"><b data-pg-address>选择单元格</b><span data-pg-full-value>点击查看完整内容；Shift 点击选择区域</span><code data-pg-formula></code></div><div class="pg-grid-scroll" tabindex="0">${this.renderPackingSourceGrid(preview.source_grid||{})}</div><div class="pg-range-editor"><label>核对范围 <input data-pg-range placeholder="例如 B9:B18" aria-label="合并单元格范围"></label><button type="button" class="pg-secondary" data-pg-review="confirm">确认此范围合并</button><button type="button" class="pg-secondary" data-pg-review="separate">此范围未合并</button><button type="button" class="pg-link" data-pg-undo>撤销上次核对</button><span data-pg-review-status>点击待核对格查看范围与原因</span></div></section><section data-pg-panel="result" class="pg-result-panel" hidden><div class="pg-tools"><span>蓝色：将写入 · 黄色：差异可选择 · 红色：待补</span><span>匹配 ${preview.summary?.matched||0} · 物理量待补 ${preview.summary?.physical_incomplete||0}</span><button type="button" class="pg-link" data-pg-outside>查看批次外原表行</button></div><div class="pg-result-scroll">${this.renderPackingResultGrid(preview)}</div></section><footer class="pg-footer"><span data-pg-error role="status"></span><div><button type="button" class="pg-secondary" data-pg-back hidden>返回原表</button><button type="button" class="pg-secondary" data-action="mf-wiki-import-cancel">取消</button><button type="button" class="pg-primary" data-pg-next>查看导入结果</button><button type="button" class="pg-primary" data-action="mf-wiki-import-confirm" hidden>确认写入物料表</button></div></footer></div>`;
+    return `<div class="pg-preview"><header class="pg-heading"><div><strong>${e(preview.source?.label || "装箱计划表")}</strong><span>更新于 ${e(this.formatDateTimeMinute(preview.source?.source_updated_at)||"未提供")}</span></div><div class="pg-tabs" role="tablist"><button type="button" role="tab" data-pg-tab="source" aria-selected="true">原表</button><button type="button" role="tab" data-pg-tab="result" aria-selected="false">导入结果 <b>${preview.rows?.length||0}</b></button></div></header><section data-pg-panel="source" class="pg-source-panel"><div class="pg-tools"><label>查看 <select data-pg-filter><option value="all">全部原表行</option><option value="batch">本批次相关行</option><option value="outside">批次外与未匹配行</option></select></label><span>黄色边框：待核对 · 蓝色角标：已确认合并</span><button type="button" class="pg-secondary" data-pg-copy>复制选中区域</button></div><div class="pg-formula"><b data-pg-address>选择单元格</b><span data-pg-full-value>点击查看完整内容；Shift 点击选择区域</span><code data-pg-formula></code></div><div class="pg-grid-scroll" tabindex="0">${this.renderPackingSourceGrid(preview.source_grid||{})}</div><div class="pg-range-editor"><label>核对范围 <input data-pg-range placeholder="例如 B9:B18" aria-label="合并单元格范围"></label><button type="button" class="pg-secondary" data-pg-review="confirm">确认此范围合并</button><button type="button" class="pg-secondary" data-pg-review="separate">此范围未合并</button><button type="button" class="pg-link" data-pg-undo>撤销上次核对</button><span data-pg-review-status>点击待核对格查看范围与原因</span></div></section><section data-pg-panel="result" class="pg-result-panel" hidden>${this.renderCurrentSourceReviewControls(preview.source_context || {}, preview.cargo_review)}<div class="pg-tools"><span>蓝色：将写入 · 黄色：差异可选择 · 红色：待补</span><span>匹配 ${preview.summary?.matched||0} · 物理量待补 ${preview.summary?.physical_incomplete||0}</span><button type="button" class="pg-link" data-pg-outside>查看批次外原表行</button></div><div class="pg-result-scroll">${this.renderPackingResultGrid(preview)}</div></section><footer class="pg-footer"><span data-pg-error role="status"></span><div><button type="button" class="pg-secondary" data-pg-back hidden>返回原表</button><button type="button" class="pg-secondary" data-action="mf-wiki-import-cancel">取消</button><button type="button" class="pg-primary" data-pg-next>查看导入结果</button><button type="button" class="pg-primary" data-action="mf-wiki-import-confirm" hidden>确认写入物料表</button></div></footer></div>`;
   }
 
   setupPackingSpreadsheetDialog(dialog, preview) {
@@ -13773,7 +13849,7 @@ class OverseasCostWorkbench {
           </div>
         </header>
         <section class="ocw-detail-statusbar">
-          ${this.detailStatusChip("当前问题", batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
+          ${this.detailStatusChip("当前问题", batch.calculation_stale ? "来源已更新，待重新采用" : batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" && !batch.calculation_stale ? "ok" : "warn")}
           ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
           ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
           ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
@@ -14597,8 +14673,9 @@ class OverseasCostWorkbench {
   settlementAdoption(data = {}) {
     if (data.historical) return data.binding ? "历史采用来源 · 仅供追溯" : "历史版本 · 尚未采用物流采购支出";
     if (!data.binding) return "未关联采购支出";
-    if (data.expense?.invalid || data.logistics?.invalid) return "来源已失效 · 暂停采用";
+    if (data.expense?.invalid) return "来源已失效 · 暂停采用";
     if (!data.expense?.approved) return "已关联 · 待审批通过";
+    if (data.source_context?.fingerprint && data.application?.source_context?.fingerprint !== data.source_context.fingerprint) return "已关联 · 当前资料待采用";
     return ({ applied: "费用已采用 · 以当前试算结果为准", applied_pending: "费用已采用 · 资料／汇率待核对",
       queued: "已关联 · 编辑结束后重试采用", invalid: "来源已失效 · 暂停采用", pending: "已关联 · 费用待采用" })[data.binding.application_status] || "已关联 · 费用待采用";
   }
@@ -14800,13 +14877,13 @@ class OverseasCostWorkbench {
     const signature = (source) => JSON.stringify((source.goods || []).map((row) => [row.material_code, row.product_name, row.spec_model, String(row.quantity ?? ""), row.unit]));
     return `<details class="ocw-settlement-comparison" open><summary>货物与来源核对 · ${!logistics.goods?.length || !expense.goods?.length ? "一方或双方货物尚未识别，请核对原单" : signature(logistics) === signature(expense) ? "识别字段一致" : "存在差异，采用前请核对"}</summary>
       <div class="ocw-settlement-source-grid">${[[logistics, labels.left || "国际物流货物"], [expense, labels.right || "采购支出货物"]].map(([source, title]) => `<div><h4>${this.escape(title)}</h4><div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table"><thead><tr><th>物料</th><th>品名</th><th>规格</th><th>数量</th><th>单位</th></tr></thead><tbody>${goods(source) || '<tr><td colspan="5">未识别货物行，需核对原单资料</td></tr>'}</tbody></table></div></div>`).join("")}</div>
-      <p class="ocw-settlement-hint">采购支出提供最终货物基础字段；毛重、体积与计费重仍来自装箱资料。货物变化后须核对装箱对应关系。</p></details>`;
+      <p class="ocw-settlement-hint">确认关联后，物料、数量、装箱资料和费用统一采用采购支出。商品单价缺失时才补充原商品采购价格。</p></details>`;
   }
 
   settlementChoiceFields(source = {}, currentCoverage = []) {
     const fields = [{ fieldtype: "Small Text", fieldname: "settlement_reason", label: "确认／更正依据", description: "冲突、更正和忽略须填写；普通候选可填写核对说明。" }];
     if (source.coverage === "unknown" || currentCoverage.length) {
-      fields.push({ fieldtype: "HTML", fieldname: "coverage_note", options: `<p class="ocw-settlement-notice">${currentCoverage.length ? "下方保留了原关联的覆盖范围；请对照当前原单重新核对，必要时取消旧范围。" : "费用覆盖范围不明确：请按原单选择。"}仅替换勾选范围内的已有费用，范围未确认时保留关联并等待采用。</p>` });
+      fields.push({ fieldtype: "HTML", fieldname: "coverage_note", options: `<p class="ocw-settlement-notice">${currentCoverage.length ? "下方保留了原关联的覆盖范围；请对照当前原单重新核对，必要时取消旧范围。" : "费用覆盖范围不明确：请按原单选择。"}当前费用统一采用采购支出；勾选项说明它的覆盖范围，未确认时保留关联并等待采用。</p>` });
       for (const [key, label] of this.settlementCoverageOptions()) fields.push({ fieldtype: "Check", fieldname: `coverage_${key}`, label, default: currentCoverage.includes(key) ? 1 : 0 });
     }
     const negative = (source.fees?.length ? source.fees : [{ amount: source.amount }]).some((row) => Number(row.amount) < 0);
@@ -14831,7 +14908,7 @@ class OverseasCostWorkbench {
     const state = this.settlementDialog(context.correction ? "更正关联 · 核对旧单与新单" : "确认采购支出关联", context.correction
       ? [{ fieldtype: "Small Text", fieldname: "settlement_reason", label: "更正依据", description: "更正后如费用范围或负数待核对，请在批次中继续处理。" }]
       : single ? this.settlementChoiceFields(candidate.expense) : []);
-    this.settlementBody(state, `<p class="ocw-settlement-hint">请核对审批、费用和货物。确认关联后，审批已通过且资料有效时才会尝试采用；装箱与汇率不足会继续提示待核对。</p>
+    this.settlementBody(state, `<p class="ocw-settlement-hint">请核对审批、费用和货物。确认后资料来源切为采购支出；正文、评论、附件及 AI 分析均使用该单。资料不全或审批未通过时保持待处理，旧物流资料仅供历史查看。</p>
       ${context.correction ? `<div class="ocw-settlement-notice">将替换当前关联，保留更正记录和已确认版本。请说明更正原因。</div>${this.renderSettlementSource(context.correction.expense, "当前关联（旧单）")}` : ""}
       ${candidates.map((row) => `<article class="ocw-settlement-review"><div class="ocw-settlement-source-grid">${this.renderSettlementSource(row.logistics, "国际物流审批")}${this.renderSettlementSource(row.expense, context.correction ? "拟关联（新单）" : "采购支出审批")}</div>
         <p>匹配依据：${this.escape(row.reason || row.method || "人工复核")} ${this.escape(JSON.stringify(row.evidence || []))}</p>
@@ -14896,14 +14973,16 @@ class OverseasCostWorkbench {
       if (!current()) return;
       if (!data.ok) throw new Error(data.message || "读取关联失败");
       if (this.materialFeeState?.batchName === batchName) this.materialFeeState.settlementData = data;
+      const currentSource = data.binding ? data.expense : data.logistics;
+      const sourceLabel = data.binding ? "采购支出" : "国际物流";
       const $strip = this.$root.find("[data-area='settlement-strip']");
-      $strip.html(`<div class="ocw-settlement-strip"><div><strong>物流采购支出</strong><span>${this.escape(this.settlementAdoption(data))}</span>
-        <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后采用最终物流采购支出的货物与费用")}</small></div>
+      $strip.html(`<div class="ocw-settlement-strip"><div><strong>${data.historical ? "此版本资料来源" : "当前资料来源"}：${sourceLabel}</strong><span>${this.escape(this.settlementAdoption(data))}</span>
+        <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后，装箱、SKU、运费及 AI 资料统一切换至采购支出")}</small></div>
         <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.historical ? "查看历史明细与费用" : data.binding ? "查看明细与费用" : "搜索／匹配采购支出"}</button>
-        ${data.binding ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开原单</button>${data.historical ? "" : '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>'}` : ""}</div></div>`);
+        ${currentSource?.open_url ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开${sourceLabel}原单</button>` : ""}${data.binding && !data.historical ? '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>' : ""}</div></div>`);
       $strip.off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-action]", (event) => {
         const action = $(event.currentTarget).attr("data-settlement-strip-action");
-        if (action === "source") { try { this.openSettlementSource(data.expense); } catch (error) { this.showError(error); } }
+        if (action === "source") { try { this.openSettlementSource(currentSource); } catch (error) { this.showError(error); } }
         else if (action === "correct") this.openSettlementSearch(batchName, data);
         else this.openBatchSettlementDialog(batchName, viewedVersion);
       });

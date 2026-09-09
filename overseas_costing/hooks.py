@@ -32,6 +32,7 @@ scheduler_events = {
         "0 */6 * * *": [
             "overseas_costing.services.approval_repair_service.scheduled_audit_and_repair_dingtalk_approvals",
             "overseas_costing.services.logistics_settlement.runtime.scheduled_sync",
+            "overseas_costing.services.logistics_settlement.bound_wiki_service.scheduled_refresh_bound_wiki",
         ],
     },
 }

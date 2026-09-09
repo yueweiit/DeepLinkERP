@@ -20,7 +20,8 @@
     "rule_snapshot_json",
     "summary_snapshot_json",
     "remark",
-    "created_by_name"
+    "created_by_name",
+    "extra_json"
   ],
   "fields": [
     {
@@ -101,6 +102,14 @@
       "fieldname": "created_by_name",
       "fieldtype": "Data",
       "label": "创建人名称"
+    },
+    {
+      "fieldname": "extra_json",
+      "fieldtype": "Code",
+      "options": "JSON",
+      "label": "来源采用上下文",
+      "read_only": 1,
+      "hidden": 1
     }
   ],
   "permissions": [

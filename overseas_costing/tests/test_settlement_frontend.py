@@ -274,14 +274,14 @@ const calls=[];let resolve;let sourceHtml='';let active;
 w.call=(method,args)=>{calls.push({method,args});return new Promise(r=>resolve=r)};
 global.frappe={ui:{Dialog:class {constructor(options){this.options=options;this.fields_dict={sources:{$wrapper:{html:html=>sourceHtml=html}}};this.$wrapper={addClass:()=>{},on:()=>{}};active=this;}show(){}hide(){this.onhide?.();}}}};
 w.openMaterialFeeSourcesDialog();
-assert.equal(calls.length,1);assert.equal(calls[0].method,'overseas_costing.api.import_api.list_manual_document_attachments');
+assert.equal(calls.length,1);assert.equal(calls[0].method,'overseas_costing.api.packing_api.list_current_source_documents');
 assert.equal(calls[0].args.version_name,'V');
 active.hide();resolve({ok:true,items:[{name:'oa',source_type:'OA',file_name:'<archived>',file_url:'/private/files/a.xlsx'}]});
 await new Promise(r=>setImmediate(r));assert.equal(sourceHtml,'');
 w.materialFeeState=state;w.openMaterialFeeSourcesDialog();
-resolve({ok:true,items:[{name:'oa',source_type:'OA',audit_only:true,file_name:'<archived>',file_url:'/private/files/a.xlsx'}]});
+resolve({ok:true,source_context:{root_kind:'expense'},items:[{source_label:'当前支出正文',available:true}],historical_items:[{name:'oa',file_name:'<archived>',file_url:'/private/files/a.xlsx'}]});
 await new Promise(r=>setImmediate(r));
-assert(sourceHtml.includes('manual.xlsx'));assert(sourceHtml.includes('&lt;archived&gt;'));assert(sourceHtml.includes('审计留存，只读'));
+assert(!sourceHtml.includes('manual.xlsx'));assert(sourceHtml.includes('&lt;archived&gt;'));assert(sourceHtml.includes('历史留存，不参与当前核算与 AI'));assert(sourceHtml.includes('当前资料来源：采购支出'));
 assert(sourceHtml.includes('data-mf-preview-source'));assert(!sourceHtml.includes('delete-manual-document'));
 ''')
 
@@ -292,7 +292,7 @@ w.materialFeeState={};w.materialAICell=()=>null;w.renderMaterialAICandidates=()=
 const item={name:'A',actual_shipped_qty:4,shipped_uom:'箱',effective_shipping_quantity:6,effective_shipping_uom:'件',settlement_cargo:{quantity:6,unit:'件'}};
 const quantity=w.renderMaterialFeeGridCell(item,{field:'actual_shipped_qty',label:'发货数量'},new Set(),1);
 const unit=w.renderMaterialFeeGridCell(item,{field:'shipped_uom',label:'发货单位'},new Set(),2);
-assert(quantity.includes('物流结算采用'));assert(quantity.includes('6'));assert(quantity.includes('装箱原值 4 箱'));
+assert(quantity.includes('采购支出采用'));assert(quantity.includes('6'));assert(quantity.includes('装箱原值 4 箱'));
 assert(!quantity.includes('<input'));assert(!unit.includes('<input'));assert(unit.includes('件'));
 assert(w.renderMaterialFeeGridCell({...item,settlement_cargo:null},{field:'actual_shipped_qty',label:'发货数量'},new Set(),1).includes('<input'));
 ''')

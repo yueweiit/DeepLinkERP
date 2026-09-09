@@ -889,6 +889,20 @@ def _build_purchase_approval_status_summary(trace: dict) -> dict:
 
 
 def _build_invalid_business_state(batch: dict, items: list[dict] | None = None) -> dict:
+    from overseas_costing.services.effective_source_values import batch_source_context
+    context = batch_source_context(batch['name'],batch.get('current_version')) if batch.get('name') else {}
+    if context.get('root_kind') == 'expense':
+        if not context.get('available') or not context.get('approved') or context.get('invalid'):
+            return {'invalid':True,'scope':'logistics_expense','status':'pending',
+                    'message':'当前采购支出尚未有效采用或审批已失效，资料待处理。'}
+        # International logistics no longer determines the selected expense's validity.
+        batch = {**batch,'source_approval_status':None}
+        if items is None:
+            return {'invalid':False}
+        from overseas_costing.services.logistics_settlement.application import row_meta
+        items = [row for row in items if not ((row_meta(row).get('settlement_cargo') or {}).get('merchandise_price') or {}).get('present')]
+        if not items:
+            return {'invalid':False}
     source_status = batch.get("source_approval_status")
     if is_invalid_approval_status(source_status):
         return {
@@ -1560,6 +1574,16 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
             order_by="priority_no asc, modified asc",
             limit_page_length=1000,
         )
+
+    from .effective_logistics_source import current_source_bundle, json_dict
+    bundle = current_source_bundle(batch_doc_name, resolved_version_name)
+    if bundle and bundle['context']['root_kind'] == 'expense':
+        header['source_context'] = bundle['context']
+        adopted = json_dict((bundle.get('version') or {}).get('extra_json')).get('effective_logistics_source') or {}
+        header['calculation_stale'] = adopted.get('fingerprint') != bundle['context'].get('fingerprint')
+        if header['calculation_stale'] and resolved_version_name == header.get('current_version'):
+            # Read projection only; frozen records remain byte-for-byte intact.
+            header['status'] = 'Dirty'
 
     return {
         "ok": True,

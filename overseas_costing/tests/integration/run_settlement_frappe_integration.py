@@ -77,7 +77,9 @@ def main():
         if quantity is not None:
             fields.append({'name': '货物明细', 'componentType': 'TableField', 'value': [
                 {'rowId': 'a', 'rowValue': [{'name': '物料编码', 'value': 'A'},
-                                          {'name': '数量', 'value': str(quantity)}, {'name': '单位', 'value': '件'}]}]})
+                                          {'name': '数量', 'value': str(quantity)}, {'name': '单位', 'value': '件'},
+                                          {'name': '装箱数量', 'value': '2'}, {'name': '毛重', 'value': '4'},
+                                          {'name': '体积', 'value': '3'}]}]})
         return {'corp_id': corp, 'process_instance_id': instance, 'process_code': kind,
                 'updated_at': '2026-09-09T' + hour + ':00:00+00:00', 'status': 'COMPLETED', 'result': 'agree',
                 'raw_payload': {'formComponentValues': fields}}

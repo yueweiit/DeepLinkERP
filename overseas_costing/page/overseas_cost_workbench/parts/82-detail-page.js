@@ -209,7 +209,7 @@
           </div>
         </header>
         <section class="ocw-detail-statusbar">
-          ${this.detailStatusChip("当前问题", batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
+          ${this.detailStatusChip("当前问题", batch.calculation_stale ? "来源已更新，待重新采用" : batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" && !batch.calculation_stale ? "ok" : "warn")}
           ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
           ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
           ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}

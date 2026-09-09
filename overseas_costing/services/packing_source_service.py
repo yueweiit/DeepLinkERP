@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover
 
 from overseas_costing.services import dingtalk_approval_service, import_service
 from overseas_costing.services.packing_comment_service import parse_packing_comment
+from overseas_costing.services import effective_logistics_source as effective_source
 
 
 SOURCE_KIND_ALIASES = {
@@ -58,6 +59,7 @@ def _encode_revision(
     version_name: str = "",
     batch_modified: str = "",
     version_modified: str = "",
+    source_context: dict | None = None,
 ) -> str:
     payload = json.dumps(
         {
@@ -68,6 +70,7 @@ def _encode_revision(
             "version": version_name,
             "batch_modified": batch_modified,
             "version_modified": version_modified,
+            "source_context": source_context or {},
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -113,12 +116,14 @@ def _attachment_hash(row: dict) -> str:
 
 
 def _source_context(batch_name: str, version_name: str | None = None) -> dict:
+    effective = (effective_source.current_source_bundle(batch_name, version_name) or {}).get('context') or {}
     if frappe is None or not hasattr(frappe, "db"):
         return {
             "version_name": str(version_name or ""),
             "batch_modified": "",
             "version_modified": "",
             "valid": True,
+            "source_context": effective,
         }
     batch = frappe.db.get_value(
         "Overseas Cost Batch",
@@ -143,6 +148,7 @@ def _source_context(batch_name: str, version_name: str | None = None) -> dict:
         "version_name": resolved_version,
         "batch_modified": str(batch.get("modified") or ""),
         "version_modified": str(version.get("modified") or ""),
+        "source_context": effective,
         "valid": bool(
             batch_doc_name
             and resolved_version
@@ -156,6 +162,7 @@ def _source_context(batch_name: str, version_name: str | None = None) -> dict:
 def _lock_packing_scope(batch_name: str, version_name: str, source_kind: str, source_id: str) -> None:
     """Serialize preview validation and writeback for one batch/version."""
 
+    effective_source.current_source_bundle(batch_name, version_name, lock=True)
     sql = getattr(getattr(frappe, "db", None), "sql", None) if frappe is not None else None
     if not callable(sql):
         return
@@ -256,7 +263,7 @@ def _attachment_source(batch_name: str, source_id: str) -> dict:
     return frappe.db.get_value(
         "Overseas Cost Attachment",
         {"name": source_id, "batch": batch_name, "source_type": "OA"},
-        ["name", "batch", "file_name", "file_url", "modified", "parse_result_json"],
+        ["name", "batch", "version", "source_type", "file_name", "file_url", "modified", "parse_result_json"],
         as_dict=True,
     ) or {}
 
@@ -270,6 +277,7 @@ def _attachment_source_v2(batch_name: str, source_id: str) -> dict:
         [
             "name",
             "batch",
+            "version",
             "source_type",
             "file_name",
             "file_url",
@@ -295,7 +303,9 @@ def _attachment_is_audit_only(source: dict) -> bool:
 
 
 def _find_comment_source(batch_name: str, source_id: str) -> dict:
-    detail = dingtalk_approval_service.get_batch_dingtalk_approval_detail(batch_name)
+    bundle = effective_source.current_source_bundle(batch_name)
+    detail = (effective_source.approval_detail_for_bundle(bundle) if bundle and bundle['context']['root_kind'] == 'expense'
+              else dingtalk_approval_service.get_batch_dingtalk_approval_detail(batch_name))
     approvals = [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]
     for approval in approvals:
         if not isinstance(approval, dict) or approval.get("excluded"):
@@ -311,6 +321,152 @@ def _find_comment_source(batch_name: str, source_id: str) -> dict:
 
 
 def resolve_trusted_packing_source(
+    *, batch_name: str, source_kind: str, source_id: str, sheet_name: str | None = None,
+    strict_material_xlsx: bool = False,
+) -> dict:
+    bundle = effective_source.current_source_bundle(batch_name)
+    context = (bundle or {}).get('context') or {}
+    effective_source.require_readable(context)
+    trusted = _resolve_trusted_packing_source(batch_name=batch_name, source_kind=source_kind,
+        source_id=source_id, sheet_name=sheet_name, strict_material_xlsx=strict_material_xlsx)
+    latest = effective_source.current_source_bundle(batch_name)
+    if context != ((latest or {}).get('context') or {}):
+        raise ValueError('当前关联来源已变化，请重新预览。')
+    if context:
+        trusted['source_context'] = context
+        trusted['source_hash'] = hashlib.sha256(f"{trusted['source_hash']}|{context['fingerprint']}".encode()).hexdigest()
+    return trusted
+
+
+def resolve_packing_attachment_path(source,bundle=None):
+    """Keep bound XLS support inside the already-authorized attachment scope."""
+    if bundle and bundle['context']['root_kind']=='expense':
+        if not effective_source.attachment_allowed(source,bundle,for_analysis=True):
+            raise ValueError('附件不属于当前采购支出资料。')
+        if str(source.get('file_name') or '').lower().endswith('.xls'):
+            from .attachment_parse_service import _resolve_source_file_path
+            return _resolve_source_file_path(file_url=str(source.get('file_url') or ''))
+    return import_service._resolve_excel_file_path(file_url=str(source.get('file_url') or ''))
+
+
+def _read_archived_xls_grid(path, sheet_name, *, max_rows=1000,max_columns=120):
+    """Read a current locally archived binary workbook without converting/uploading."""
+    import xlrd
+    from .packing_grid import Cell, MergeRange, dataclass_dict
+    if path.stat().st_size > 20*1024*1024:
+        raise ValueError('归档工作簿超过 20 MB 限制。')
+    book=xlrd.open_workbook(str(path),formatting_info=True)
+    try:
+        if not sheet_name or sheet_name not in book.sheet_names():
+            raise ValueError('请选择归档工作簿中的准确工作表。')
+        sheet=book.sheet_by_name(sheet_name)
+        if sheet.nrows > max_rows or sheet.ncols > max_columns:
+            raise ValueError('归档工作表超过行列限制，请核对完整资料。')
+        cells=[]
+        for r in range(sheet.nrows):
+            row=[]
+            for c in range(sheet.ncols):
+                if sheet.cell_type(r,c)==xlrd.XL_CELL_ERROR:
+                    raise ValueError('归档工作表包含错误单元格，不能采用。')
+                row.append(dataclass_dict(Cell(raw_value=sheet.cell_value(r,c),display_value=None,formula=None,row=r+1,column=c+1)))
+            cells.append(row)
+        return {'schema_version':1,'source_kind':'approval_attachment','sheet_name':sheet_name,
+                'cells':cells,'merge_ranges_available':True,
+                'merge_ranges':[dataclass_dict(MergeRange(start_row=r1+1,end_row=r2,start_column=c1+1,end_column=c2,evidence_kind='xls_merge'))
+                                for r1,r2,c1,c2 in sheet.merged_cells], 'available_sheets':book.sheet_names()}
+    finally:
+        book.release_resources()
+
+
+def _bound_wiki_cache_key(context, source_id):
+    from .logistics_settlement.model import digest
+    return digest('bound_wiki_snapshot',context.get('policy_version'),context['root_source_id'],context['source_snapshot'],source_id)
+
+
+def load_bound_wiki_snapshot(context, source_id, *, store=None):
+    from .logistics_settlement.store import Store
+    from copy import deepcopy
+    cache=(store or Store.frappe()).get('state',_bound_wiki_cache_key(context,source_id)) or {}
+    saved=cache.get('source_context') or {}
+    if any(saved.get(key)!=context.get(key) for key in ('policy_version','root_source_id','source_snapshot','corp_id','instance_id')):
+        return None
+    return deepcopy(cache.get('trusted'))
+
+
+def wiki_refresh_status(context, source_id, *, store=None):
+    """Local-only refresh health; operational timestamps are not content identity."""
+    from .logistics_settlement.store import Store
+    from .logistics_settlement.model import digest
+    store=store or Store.frappe()
+    cache=store.get('state',_bound_wiki_cache_key(context,source_id)) or {}
+    saved=cache.get('source_context') or {}
+    if any(saved.get(key)!=context.get(key) for key in ('policy_version','root_source_id','source_snapshot','corp_id','instance_id')):
+        cache={}
+    health=store.get('state',digest('bound_wiki_refresh_health',context.get('binding_id'),source_id)) or {}
+    if any(health.get(key)!=context.get(key) for key in ('root_source_id','source_snapshot')):
+        health={}
+    return {'cache_refreshed_at':cache.get('updated_at') or '',
+            'refresh_last_checked_at':health.get('last_checked_at') or '',
+            'refresh_last_success_at':health.get('last_success_at') or cache.get('updated_at') or '',
+            'refresh_error':health.get('last_error') or ''}
+
+
+def refresh_bound_wiki_snapshot(batch_name, source_id, *, store=None, ledger=None, clients=None,actor='wiki-refresh'):
+    """Explicit refresh/background only. Queries/AI read the persisted local copy."""
+    from .logistics_settlement.store import Store
+    from .logistics_settlement.model import dumps
+    from .logistics_settlement.jobs import utcnow
+    from .packing_grid import build_grid_from_dingtalk_snapshot
+    from .packing_parse_service import parse_packing_grid
+    from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
+    from .logistics_settlement.ledger import FrappeLedger
+    store=store or Store.frappe()
+    ledger=ledger or FrappeLedger()
+    bundle=effective_source.load_source_bundle(batch_name,store=store,ledger=ledger)
+    context=bundle['context']
+    effective_source.require_readable(context)
+    if context['root_kind']!='expense' or source_id not in effective_source.explicit_wiki_sources(bundle['source']):
+        raise ValueError('装箱计划表不是当前采购支出明确关联的工作表。')
+    workbook, separator, sheet=source_id.partition(':')
+    if not separator or not workbook or not sheet:
+        raise ValueError('装箱计划表标识不完整。')
+    cache_key=_bound_wiki_cache_key(context,source_id)
+    observed=store.get('state',cache_key) or {}
+    observed_generation=int(observed.get('refresh_generation') or 0)
+    clients=clients or get_packing_runtime_clients()
+    manifest=clients.catalog.get_latest_snapshot(workbook,sheet) or {}
+    if not manifest.get('content_sha256') or str(manifest.get('corp_id') or '')!=context['corp_id']:
+        raise ValueError('当前工作表缺少本企业可验证归档，请先完成归档刷新。')
+    payload=clients.archive.download(manifest)
+    if str(payload.get('workbookId') or '')!=workbook or str(payload.get('sheetId') or '')!=sheet:
+        raise ValueError('归档内容不属于所选工作表。')
+    grid=build_grid_from_dingtalk_snapshot(payload)
+    trusted={'source_hash':str(manifest['content_sha256']), 'grid':grid,'preview':parse_packing_grid(grid),
+             'source':{'source_kind':'wiki_sheet','source_id':source_id,'workbook_id':workbook,'sheet_id':sheet,
+                       'source_label':str(payload.get('sheetName') or sheet),'sheet_name':str(payload.get('sheetName') or ''),
+                       'source_updated_at':payload.get('captureFinishedAt') or manifest.get('capture_finished_at')}}
+    with store.atomic():
+        current=effective_source.load_source_bundle(batch_name,store=store,ledger=ledger,lock=True)
+        cache=store.get('state',cache_key,lock=True) or {}
+        if int(cache.get('refresh_generation') or 0)!=observed_generation:
+            raise ValueError('已有更新的工作表刷新结果，请重新读取本地资料。')
+        if current['context']!=context or source_id not in effective_source.explicit_wiki_sources(current['source']):
+            raise ValueError('获取期间采购支出关联已变化，请重新获取。')
+        old_sha=(cache.get('trusted') or {}).get('source_hash')
+        changed=bool(old_sha and old_sha!=trusted['source_hash'])
+        store.put('state',{'id':cache_key,'updated_at':utcnow(),
+            'data':dumps({'source_context':context,'trusted':trusted,'archive_snapshot_id':manifest.get('id'),
+                          'refresh_generation':observed_generation+1})})
+        from .logistics_settlement.bound_wiki_service import record_refresh_health
+        record_refresh_health(store,current['binding'],current['source'],source_id)
+        if changed:
+            from .logistics_settlement.bound_wiki_service import mark_wiki_changed
+            binding=mark_wiki_changed(store,ledger,current,source_id,old_sha,trusted['source_hash'],actor)
+            context=effective_source.context_for_source(current['source'],binding,context['cost_version'],batch_name)
+    return {'ok':True,'source_id':source_id,'source_context':context,'source_hash':trusted['source_hash'],'changed':changed}
+
+
+def _resolve_trusted_packing_source(
     *,
     batch_name: str,
     source_kind: str,
@@ -328,25 +484,28 @@ def resolve_trusted_packing_source(
     resolved_source_id = str(source_id or "").strip()
     if kind in {"manual_attachment", "approval_attachment"}:
         source = _attachment_source_v2(batch_name, resolved_source_id)
+        effective_source.validate_packing_source(batch_name, kind, resolved_source_id, attachment=source)
         if not source:
             raise ValueError("未找到当前批次的装箱附件。")
         if kind == "approval_attachment" and str(source.get("source_type") or "").upper() != "OA":
             raise ValueError("所选附件不是当前批次的钉钉审批附件。")
-        if _attachment_is_audit_only(source):
+        bundle = effective_source.current_source_bundle(batch_name)
+        if _attachment_is_audit_only(source) and not (bundle and bundle['context']['root_kind'] == 'expense'):
             raise ValueError("该附件来自已排除审批，只能审计查看，不能作为装箱来源。")
         file_url = str(source.get("file_url") or "").strip()
         if not file_url:
             raise ValueError("装箱附件尚未保存到系统。")
         selected_sheet = str(sheet_name or "").strip()
-        path = import_service._resolve_excel_file_path(file_url=file_url)
-        if strict_material_xlsx:
+        path = resolve_packing_attachment_path(source,bundle)
+        bound_xls = bool(bundle and bundle['context']['root_kind']=='expense' and path.suffix.lower()=='.xls')
+        if strict_material_xlsx and not bound_xls:
             from overseas_costing.services.material_import_service import validate_material_workbook_metadata
 
             validate_material_workbook_metadata(
                 str(source.get("file_name") or path.name),
                 path.stat().st_size,
             )
-        grid = read_packing_grid(
+        grid = _read_archived_xls_grid(path,selected_sheet) if bound_xls else read_packing_grid(
             str(path),
             sheet_name=selected_sheet,
             require_exact_sheet=True,
@@ -370,6 +529,7 @@ def resolve_trusted_packing_source(
         }
 
     if kind == "approval_comment":
+        effective_source.validate_packing_source(batch_name, kind, resolved_source_id)
         source = _find_comment_source(batch_name, resolved_source_id)
         if not source:
             raise ValueError("未找到该钉钉评论，可能已重新同步。")
@@ -402,6 +562,13 @@ def resolve_trusted_packing_source(
             "preview": _comment_snapshot_preview(parsed),
         }
 
+    effective_source.validate_packing_source(batch_name, kind, resolved_source_id)
+    bundle=effective_source.current_source_bundle(batch_name)
+    if bundle and bundle['context']['root_kind']=='expense':
+        cached=load_bound_wiki_snapshot(bundle['context'],resolved_source_id)
+        if not cached:
+            raise ValueError('当前采购支出工作表尚未获取到本地，请先点击刷新或获取资料。')
+        return cached
     workbook_id, separator, sheet_id = resolved_source_id.partition(":")
     if not separator or not workbook_id or not sheet_id:
         raise ValueError("装箱计划表 Sheet 来源 ID 不合法。")
@@ -527,6 +694,7 @@ def preview_packing_source(
         return {"ok": False, "source_changed": True, "message": "当前版本不属于该批次或已不是当前版本，请刷新后重试。"}
     if kind == "attachment":
         source = _attachment_source(batch_name, resolved_source_id)
+        effective_source.validate_packing_source(batch_name, 'approval_attachment', resolved_source_id, attachment=source)
         if not source:
             return {"ok": False, "message": "未找到当前批次的钉钉附件。"}
         if _attachment_is_audit_only(source):
@@ -585,6 +753,7 @@ def preview_packing_source(
             version_name=str(result.get("version_name") or context["version_name"] or ""),
             batch_modified=context["batch_modified"],
             version_modified=context["version_modified"],
+            source_context=context.get('source_context') or {},
         ),
     }
 
@@ -611,6 +780,7 @@ def apply_packing_source(
         context["version_name"] != revision_version
         or context["batch_modified"] != str(revision.get("batch_modified") or "")
         or context["version_modified"] != str(revision.get("version_modified") or "")
+        or (context.get('source_context') or {}) != (revision.get('source_context') or {})
     ):
         return {"ok": False, "source_changed": True, "message": "批次数据已变化，请重新预览后确认。"}
     if kind == "attachment":

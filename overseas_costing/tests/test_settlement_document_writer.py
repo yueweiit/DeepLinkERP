@@ -235,6 +235,8 @@ def test_same_source_replans_after_final_goods_changes_item_identity(setup):
 def test_acknowledged_packing_hash_prevents_replay_from_reviving_conflicts(setup):
     from overseas_costing.services.logistics_settlement.writer import resolve_document_checks
     s, l, batch, version, item, *_ = setup
+    # This case covers the still-unmatched international-logistics workflow.
+    s.sql("DELETE FROM oc_ls_binding")
     src = logistics(s, [document()]); sync(s, l, src, batch)
     row = l.get('item', item['name']); meta = json.loads(row['extra_json']); meta.pop('settlement_packing_review', None)
     l.put('item', item['name'], {'extra_json': dumps(meta)})
@@ -256,6 +258,8 @@ def test_packing_state_hash_ignores_cost_calculation_and_timestamps(setup):
 def test_formal_recalculation_does_not_revive_acknowledged_packing_conflict(setup):
     from overseas_costing.services.logistics_settlement.writer import resolve_document_checks
     s, l, batch, version, item, *_ = setup
+    # This case covers the still-unmatched international-logistics workflow.
+    s.sql("DELETE FROM oc_ls_binding")
     l.put('item', item['name'], {'weight_ratio': 0})
     src = logistics(s, [document()])
     assert sync(s, l, src, batch)['blocking']
@@ -280,11 +284,16 @@ def test_expense_application_replans_previously_unmatched_local_packing(setup):
     src = logistics(s, [document()]); src['fingerprint'] = digest(src['fingerprint'], src['documents'])
     src = s.ingest(src)
     assert sync(s, l, src, batch)['blocking']
+    expense = s.get('source',binding['expense_id'])
+    expense.update(documents=[document()],fingerprint=digest(expense['fingerprint'],'expense-packing'))
+    expense = s.ingest(expense)
     apply_binding(s, l, binding['id'], 'u')
     target = next(row for row in l.rows('item', version=version['name']) if row['material_code'] == 'A')
-    assert target['gross_weight_kg'] == '8' and json.loads(target['extra_json'])['settlement_cargo']['quantity'] == '4'
+    from overseas_costing.services.material_input_service import present_material_row
+    assert present_material_row(target)['gross_weight_kg'] == '8' and json.loads(target['extra_json'])['settlement_cargo']['quantity'] == '4'
+    assert target.get('gross_weight_kg') in (None,0)
     assert target.get('quantity') in (None,0)
-    state = s.find('document_sync')[0]
+    state = s.find('document_sync',source_id=expense['id'])[0]
     assert all('未找到' not in row.get('reason', '') for rows in state['reviews'].values() for row in rows)
 
 

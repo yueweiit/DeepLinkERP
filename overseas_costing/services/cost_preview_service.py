@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - pure tests do not require Frappe
 
 from overseas_costing.services import fee_allocation_service, fee_service
 from overseas_costing.services.material_input_service import present_material_row
+from overseas_costing.services.effective_source_values import source_context_from_items, project_batch_items, batch_source_context
 from overseas_costing.services.transport_fee_service import assert_no_duplicate_fees, fee_is_active, mark_duplicate_fees
 from overseas_costing.services.logistics_settlement.fee_policy import (
     LEGACY_POOL_CURRENCIES, METADATA_FIELDS, is_final, row_scopes, select_fees, validate_final, supplement_legacy_fees,
@@ -273,7 +274,7 @@ def preview_comprehensive_cost_data(
 ) -> dict:
     """Calculate a transparent preview from caller-provided snapshots only."""
 
-    fees = supplement_legacy_fees(items, select_fees(fees, fx_context or {}))
+    fees = supplement_legacy_fees(items, select_fees(fees, fx_context or {}, source_context=source_context_from_items(items)))
     precision = 6 if any(is_final(fee) for fee in fees) else 2
     money = lambda value: _result_money(value, precision)
     presented_items = [present_material_row(dict(row or {})) for row in (items or [])]
@@ -285,7 +286,8 @@ def preview_comprehensive_cost_data(
     for row in presented_items:
         key = _item_key(row)
         goods_value = _decimal(row.get("shipment_value_rmb"))
-        if goods_value is None or goods_value <= 0:
+        explicit_zero = goods_value == 0 and row.get("shipment_valuation", {}).get("method") == "settlement_expense_unit_price" and not row.get("shipment_valuation", {}).get("error")
+        if goods_value is None or (goods_value <= 0 and not explicit_zero):
             incomplete_reasons.append(
                 {
                     "reason_code": row.get('shipment_valuation', {}).get('error') or "GOODS_VALUE_MISSING",
@@ -548,9 +550,10 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
         order_by="row_no asc, name asc",
         limit_page_length=10000,
     )
+    raw_items, source_context = project_batch_items(raw_items,batch_name,version)
     rules = fee_service.compose_fee_worklist_rows(
         fee_service._query_rules(batch_name, version),
-        transport_mode,
+        transport_mode, source_context=source_context,
     )
     version_row = frappe.db.get_value(
         "Overseas Cost Version",
@@ -616,12 +619,14 @@ def build_saved_cost_data(
 ) -> dict:
     """Project one preview into stored result fields without mutating source facts."""
     transport_mode = fee_service.resolve_transport_mode(transport_mode)
-    fees = supplement_legacy_fees(items, select_fees(fee_service._decorate_historical_rules(fees, transport_mode), fx_context))
+    fees = supplement_legacy_fees(items, select_fees(fee_service._decorate_historical_rules(fees, transport_mode), fx_context, source_context=source_context_from_items(items)))
     precision = 6 if any(is_final(fee) for fee in fees) else 2
     money = lambda value: _result_money(value, precision)
     assert_no_duplicate_fees(fees)
     result = preview_comprehensive_cost_data(items, fees, fx_context, fee_components=fee_components or [])
-    raw_by_key = {_item_key(present_material_row(row)): row for row in items}
+    original_items = items
+    items = [present_material_row(row) for row in items]
+    raw_by_key = {_item_key(row): row for row in items}
     fx = _decimal(fx_context.get("fx_rmb_to_mxn"))
     fx = fx if fx is not None and fx > 0 else None
     goods_total = Decimal(result["summary"]["purchase_goods_value_rmb"])
@@ -694,7 +699,7 @@ def build_saved_cost_data(
         })
     summary = {
         **result["summary"], "calculation_schema": 2,
-        "input_hash": cost_input_hash(items, fees, fx_context, transport_mode, fee_components or []),
+        "input_hash": cost_input_hash(original_items, fees, fx_context, transport_mode, fee_components or []),
         "total_goods_value": result["summary"]["purchase_goods_value_rmb"],
         "total_gross_weight_kg": str(gross_total),
         "total_volume_m3": str(sum((_decimal(row.get("volume_m3")) or Decimal("0") for row in items), Decimal("0"))),
@@ -737,7 +742,8 @@ class FrappeCostRepository:
         mode = fee_service.resolve_transport_mode(batch.get("transport_mode"))
         if not mode:
             raise ValueError("请先确认批次运输方式。")
-        fees = fee_service.compose_fee_worklist_rows(fee_service._query_rules(name, version), mode)
+        items, source_context = project_batch_items(items,name,version)
+        fees = fee_service.compose_fee_worklist_rows(fee_service._query_rules(name, version), mode,source_context=source_context)
         fx = {key: version_row.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
         context = {**batch, "transport_mode": mode, "batch": name, "version": version, "batch_modified": str(batch["modified"]),
                    "version_modified": str(version_row["modified"]), "version_status": version_row["status"]}

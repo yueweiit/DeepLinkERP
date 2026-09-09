@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - pure tests do not require Frappe
     frappe = None
 
 from overseas_costing.services import material_input_service, packing_source_service
+from overseas_costing.services import effective_logistics_source as effective_source
 
 
 MATERIAL_PURCHASE_FACT_FIELDS = (
@@ -1155,6 +1156,7 @@ class FrappeMaterialImportRepository:
             "version": version_name,
             "batch_modified": str(batch.get("modified") or ""),
             "version_modified": str(version.get("modified") or ""),
+            "source_context": (effective_source.current_source_bundle(resolved_batch, version_name) or {}).get('context') or {},
         }
 
     def get_items(self, batch_name: str, version_name: str) -> list:
@@ -1162,20 +1164,23 @@ class FrappeMaterialImportRepository:
             dict.fromkeys(
                 ["name", "row_no", "excel_row_no", "stable_line_key", "source_doc_no", "dingtalk_instance_id"]
                 + list(MATERIAL_SOURCE_FIELDS)
-                + ["actual_shipped_qty_mode", "actual_shipped_qty_source_revision"]
+                + ["actual_shipped_qty_mode", "actual_shipped_qty_source_revision", "extra_json", "unit"]
             )
         )
-        return frappe.get_all(
+        rows = frappe.get_all(
             "Overseas Cost Item",
             filters={"batch": batch_name, "version": version_name},
             fields=fields,
             order_by="row_no asc, name asc",
             limit_page_length=10000,
         )
+        bundle = effective_source.current_source_bundle(batch_name, version_name)
+        return effective_source.project_ai_items(rows, bundle)
 
     def assert_write(self, batch_name: str, edit_token: str, expected_modified: str) -> None:
         from overseas_costing.services import edit_session_service
 
+        effective_source.current_source_bundle(batch_name, lock=True)
         edit_session_service.assert_batch_write(
             batch_name,
             edit_token=edit_token,
@@ -1198,6 +1203,10 @@ class FrappeMaterialImportRepository:
     def update_item(self, item_name: str, updates: dict, audit_context: dict) -> None:
         from overseas_costing.services import import_service
 
+        bundle = effective_source.current_source_bundle(audit_context['batch'], audit_context['version'], lock=True)
+        if bundle and bundle['context']['root_kind'] == 'expense':
+            row = frappe.get_doc('Overseas Cost Item', item_name).as_dict()
+            updates = effective_source.physical_update_values(row, updates, bundle['context'], audit_context)
         import_service._update_item_fields(
             item_name=item_name,
             batch_doc_name=audit_context["batch"],
@@ -1209,6 +1218,15 @@ class FrappeMaterialImportRepository:
 
     def mark_dirty(self, batch_name: str) -> None:
         frappe.db.set_value("Overseas Cost Batch", batch_name, "status", "Dirty", update_modified=True)
+
+    def adopt_reviewed_cargo(self, context, review, choices):
+        from .logistics_settlement.reviewed_cargo import confirm_reviewed_cargo
+        from .logistics_settlement.store import Store
+        from .logistics_settlement.ledger import FrappeLedger
+        options = choices.get('_source_review') or choices
+        return confirm_reviewed_cargo(Store.frappe(),FrappeLedger(),context['batch'],context['source_context'],
+            review['rows'],review,choices.get('confirm_complete_cargo') is True,str(frappe.session.user),
+            coverage=options.get('coverage') or None,negative_confirmed=options.get('negative_confirmed') is True)
 
     def record_import_audit(self, payload: dict) -> None:
         from overseas_costing.services import usage_service
@@ -1415,6 +1433,7 @@ def preview_material_import(
         "source_hash": source_hash,
         "sheet": selected_sheet,
         "preview_hash": comparison["preview_hash"],
+        "source_context": context.get('source_context') or trusted.get('source_context') or {},
     }
     if trusted.get("merge_reviews") is not None:
         claims["merge_reviews"] = trusted["merge_reviews"]
@@ -1423,6 +1442,7 @@ def preview_material_import(
             "ok": True,
             "batch_name": context["batch"],
             "version_name": context["version"],
+            "source_context": context.get('source_context') or trusted.get('source_context') or {},
             "preview_revision": encode_material_preview_revision(claims, signing_key=signing_key),
             "sheet": {
                 "selected": selected_sheet,
@@ -1436,6 +1456,9 @@ def preview_material_import(
             "source_totals": _source_totals(trusted.get("preview") or {}),
         }
     )
+    if (context.get('source_context') or {}).get('root_kind') == 'expense':
+        from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
+        comparison['cargo_review'] = cargo_review_for_preview(trusted,context['source_context'])
     from overseas_costing.services.approval_link_service import attach_preview_approval_links
 
     attach_preview_approval_links(context["batch"], comparison, existing)
@@ -1486,6 +1509,10 @@ def apply_material_import(
     repo.lock(str(batch_name), str(claims.get("version") or ""))
     try:
         context = repo.get_context(str(batch_name))
+        effective_source.require_available(context.get('source_context') or {})
+        if (context.get('source_context') or {}) != (claims.get('source_context') or {}):
+            repo.rollback()
+            return {'ok': False, 'source_changed': True, 'code': 'EFFECTIVE_SOURCE_CHANGED'}
         if any(
             str(context.get(key) or "") != str(claims.get(key) or "")
             for key in ("batch", "version", "batch_modified", "version_modified")
@@ -1522,6 +1549,19 @@ def apply_material_import(
         if comparison["preview_hash"] != str(claims.get("preview_hash") or ""):
             repo.rollback()
             return {"ok": False, "source_changed": True, "code": "PREVIEW_CHANGED"}
+        if (context.get('source_context') or {}).get('root_kind') == 'expense' and (not existing or choices.get('confirm_complete_cargo')):
+            from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
+            review = cargo_review_for_preview(trusted,context['source_context'])
+            if not review['complete'] or choices.get('confirm_complete_cargo') is not True:
+                repo.rollback()
+                return {'ok':False,'code':'COMPLETE_CARGO_REVIEW_REQUIRED','candidate_only':True,
+                        'cargo_review':review,'message':review['reason']}
+            result = repo.adopt_reviewed_cargo(context,review,choices)
+            if result.get('review_saved'):
+                repo.commit()
+            else:
+                repo.rollback()
+            return result
         source_validation_error = (
             _source_validation_error(
                 comparison.get("source_validation") or {},

@@ -1415,6 +1415,19 @@ await workspace.previewMaterialAttachmentSource(dialog,'ATT');console.log(JSON.s
     assert result[0][1] == dict(batch_name="B", source_kind="manual_attachment", source_id="ATT", sheet_name="采购明细")
 
 
+def test_current_expense_attachment_loads_uncached_sheet_names_before_preview():
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B',versionName:'V'};
+workspace.renderWikiMaterialSources=()=>{};workspace.openMaterialImportPreviewDialog=()=>{};
+const source={source_id:'ATT',attachment_name:'ATT',source_kind:'approval_attachment',available:true,sheets:[]};
+const dialog={materialBatchName:'B',materialVersionName:'V',sourceContext:{fingerprint:'ctx'},materialAttachmentSources:[source],hide(){this.hidden=true}};
+const calls=[];workspace.call=async(endpoint,args)=>{calls.push([endpoint,args]);return endpoint.endsWith('list_packing_attachment_sheets')?{ok:true,sheets:['货物'],source_context:{fingerprint:'ctx'}}:{ok:true,rows:[]}};
+await workspace.previewMaterialAttachmentSource(dialog,'ATT');console.log(JSON.stringify(calls));
+""")
+    assert [call[0].split('.')[-1] for call in result] == ['list_packing_attachment_sheets','preview_material_import']
+    assert result[1][1]['sheet_name'] == '货物'
+
+
 def test_direct_source_picker_excludes_dingtalk_attachments():
     result = _fee_workspace_result(r"""
 const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B',versionName:'V'};

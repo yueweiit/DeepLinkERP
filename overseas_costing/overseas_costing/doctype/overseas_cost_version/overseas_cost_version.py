@@ -20,6 +20,10 @@ class OverseasCostVersion(Document):
     """海外成本版本单。"""
 
     def validate(self) -> None:
+        if not self.flags.get('ignore_permissions'):
+            from overseas_costing.services.calculate_service import assert_server_metadata_unchanged
+            previous = self.get_doc_before_save()
+            assert_server_metadata_unchanged(getattr(previous,'extra_json',None),getattr(self,'extra_json',None))
         require_value(self.batch, "所属批次")
         require_value(self.version_code, "版本编码")
         if self.version_type:

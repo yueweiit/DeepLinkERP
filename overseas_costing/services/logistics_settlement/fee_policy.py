@@ -64,12 +64,21 @@ def validate_final(fee, fx_context=None):
                 raise ValueError('最终费用汇率必须大于零')
 
 
-def select_fees(fees, fx_context=None):
+def select_fees(fees, fx_context=None, *, source_context=None):
     """Select once without reviving estimates, including when final zero is disabled.
 
     ``None`` performs structural validation for fee lists; a supplied FX mapping
     also requires all rates needed by the final RMB/MXN calculation.
     """
+    if source_context and source_context.get('root_kind') == 'expense':
+        if not source_context.get('available') or not source_context.get('approved') or source_context.get('invalid'):
+            return []
+        finals = [fee for fee in fees if is_final(fee)
+                  and fee.get('source_binding_id') == source_context.get('binding_id')
+                  and fee.get('source_snapshot') == source_context.get('source_snapshot')]
+        for fee in finals:
+            validate_final(fee,fx_context)
+        return finals
     finals = [fee for fee in fees if is_final(fee)]
     if not finals:
         return list(fees)
@@ -104,6 +113,9 @@ def assert_fee_edit_allowed(existing_fees, payload):
 
 def supplement_legacy_fees(items, fees):
     """Preserve identifiable old item pools only for a settlement-owned trial."""
+    from overseas_costing.services.effective_source_values import source_context_from_items
+    if source_context_from_items(items).get('root_kind') == 'expense':
+        return list(fees)
     if not any(is_final(fee) for fee in fees):
         return list(fees)
     explicit = [fee for fee in fees if not fee.get('virtual')]

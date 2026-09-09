@@ -122,7 +122,7 @@ def _saved_result_matches(snapshot: dict, expected: dict, items: list[dict]) -> 
 
 
 def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], fees: list[dict],
-                              evidence: list[dict] | None = None) -> dict:
+                              evidence: list[dict] | None = None, source_context: dict | None = None) -> dict:
     """Evaluate one authorized batch; fee rows must use the saved query's order.
 
     Project exactly the fields used by FrappeCostRepository, including nulls.
@@ -139,11 +139,23 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     def warn(code):
         warnings.setdefault(code, {"code": code, "message": MESSAGES[code]})
 
+    if source_context and source_context.get('root_kind') == 'expense':
+        from overseas_costing.services.effective_source_values import item_source_context
+        source_ready = (source_context.get('available') and source_context.get('approved')
+                        and not source_context.get('invalid') and bool(items)
+                        and all(item_source_context(item).get('fingerprint') == source_context.get('fingerprint')
+                                and _dict(item.get('extra_json')).get('settlement_cargo') for item in items))
+        if not source_ready:
+            block('SOURCE_ADOPTION_PENDING', '当前采购支出资料尚未有效采用，旧结果仅供追溯。')
+
     mode = fee_service.resolve_transport_mode(batch.get("transport_mode"))
     inputs = [{field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS} for row in items]
+    from overseas_costing.services.effective_source_values import project_source_values
+    inputs = [project_source_values(row,source_context if source_context else None) for row in inputs]
     inputs.sort(key=lambda row: (cost_preview_service._decimal(row.get("row_no")) or Decimal(0), str(row.get("name") or "")))
     raw_fees = [{field: row.get(field) for field in fee_service._rule_fields()} for row in fees]
-    composed = fee_service.compose_fee_worklist_rows(raw_fees, mode)
+    from overseas_costing.services.effective_source_values import source_context_from_items
+    composed = fee_service.compose_fee_worklist_rows(raw_fees, mode,source_context=source_context_from_items(inputs))
     canonical_fees = fee_service._decorate_historical_rules(composed, mode)
     fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
     current_hash = cost_preview_service.cost_input_hash(inputs, canonical_fees, fx, mode)
@@ -156,7 +168,10 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
 
     if not mode:
         block("TRANSPORT_MODE_REQUIRED")
-    if _source_invalid(_dict(batch.get("source_status")), inputs):
+    price_inputs = inputs
+    if source_context and source_context.get('root_kind') == 'expense':
+        price_inputs = [row for row in inputs if not ((_dict(row.get('extra_json')).get('settlement_cargo') or {}).get('merchandise_price') or {}).get('present')]
+    if price_inputs and _source_invalid(_dict(batch.get("source_status")), price_inputs):
         block("PURCHASE_SOURCE_INVALID")
     keys = [present_material_row(row)["stable_line_key"] for row in inputs]
     if len(set(keys)) != len(keys):
@@ -182,7 +197,7 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
             warn("EVIDENCE_MISSING")
 
     snapshot = _dict(version.get("summary_snapshot_json"))
-    result_current = True
+    result_current = 'SOURCE_ADOPTION_PENDING' not in blockers
     if not snapshot:
         block("RESULT_NOT_SAVED")
         result_current = False

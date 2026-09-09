@@ -20,6 +20,7 @@ except Exception:  # pragma: no cover
     frappe = None
 
 from overseas_costing.services import packing_source_service
+from overseas_costing.services import effective_logistics_source as effective_source
 from overseas_costing.services.packing_sheet_recommendation import (
     recommend_packing_sheets,
     summarize_packing_preview,
@@ -58,6 +59,8 @@ def preview_packing_source_v2(
         str(source.get("source_id") or source_id),
         source_hash,
         batch_name=str(batch_name),
+        version_name=str((trusted.get('source_context') or {}).get('cost_version') or ''),
+        source_context=trusted.get('source_context') or {},
     )
     return {
         **preview,
@@ -68,6 +71,7 @@ def preview_packing_source_v2(
         "source_id": source.get("source_id") or str(source_id),
         "source_hash": source_hash,
         "source_revision": revision,
+        "source_context": trusted.get('source_context') or {},
     }
 
 
@@ -96,6 +100,18 @@ def confirm_packing_snapshot(
             sheet_name=resolutions.get("sheet_name"),
         )
         actual_hash = str(trusted.get("source_hash") or "")
+        source_context = trusted.get('source_context') or {}
+        try:
+            effective_source.require_available(source_context)
+        except ValueError as exc:
+            repo.rollback()
+            return {'ok': False, 'analysis_only': True, 'message': str(exc)}
+        if (claims.get('source_context') or {}) != source_context:
+            repo.rollback()
+            return {'ok': False, 'source_changed': True, 'message': '采用来源已变化，请重新预览。'}
+        if claims.get('version') and claims['version'] != str(source_context.get('cost_version') or ''):
+            repo.rollback()
+            return {'ok': False, 'source_changed': True, 'message': '成本版本已变化，请重新预览。'}
         if not actual_hash or actual_hash != expected_hash:
             repo.rollback()
             return {"ok": False, "source_changed": True, "message": "装箱来源已更新，请重新预览后确认。"}
@@ -136,6 +152,8 @@ def confirm_packing_snapshot(
         totals = preview.get("totals") or {}
         values = {
             "batch": str(batch_name),
+            "cost_version": source_context.get('cost_version') or repo.current_version(str(batch_name)),
+            "source_context_json": _json(source_context),
             "version": next_version,
             "idempotency_key": idempotency_key,
             "source_kind": kind,
@@ -405,6 +423,8 @@ def _public_snapshot(snapshot: Any) -> dict[str, Any]:
         "total_volume_m3",
         "confirmed_by",
         "confirmed_at",
+        "cost_version",
+        "source_context_json",
     }
     if isinstance(snapshot, dict):
         return {key: snapshot.get(key) for key in allowed if key in snapshot}
@@ -449,6 +469,7 @@ class FrappePackingSnapshotRepository:
             raise RuntimeError("当前环境未连接 Frappe。")
 
     def lock_batch(self, batch_name: str) -> None:
+        effective_source.current_source_bundle(batch_name, lock=True)
         rows = frappe.db.sql(
             "SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
             (batch_name,),
@@ -497,7 +518,7 @@ class FrappePackingSnapshotRepository:
         frappe.db.rollback()
 
 
-def get_current_packing_snapshot(batch_name: str) -> dict[str, Any] | None:
+def get_current_packing_snapshot(batch_name: str, version_name: str | None = None) -> dict[str, Any] | None:
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
     name = frappe.db.get_value(
@@ -507,7 +528,14 @@ def get_current_packing_snapshot(batch_name: str) -> dict[str, Any] | None:
     )
     if not name:
         return None
-    return _public_snapshot(frappe.get_doc("Overseas Packing Snapshot", name))
+    snapshot = _public_snapshot(frappe.get_doc("Overseas Packing Snapshot", name))
+    bundle = effective_source.current_source_bundle(batch_name, version_name)
+    if bundle and (bundle['context']['root_kind'] == 'expense' or effective_source.json_dict(snapshot.get('source_context_json'))):
+        context = bundle['context']
+        saved = effective_source.json_dict(snapshot.get('source_context_json'))
+        if saved.get('fingerprint') != context['fingerprint'] or not context['approved'] or context['invalid'] or not context['available']:
+            return None
+    return snapshot
 
 
 def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None, include_wiki: bool = True) -> dict[str, Any]:
@@ -515,6 +543,16 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
+    bundle = effective_source.current_source_bundle(batch_name)
+    if bundle and bundle['context']['root_kind'] == 'expense':
+        sources = _bound_material_sources(batch_name, bundle)
+        # The picker receives descriptors, never raw form/comment content.
+        return {'approval_sources': [{k: v for k, v in row.items() if k not in {'form_fields', 'approval_decisions', 'comment_text'}}
+                    for row in sources if row['source_kind'] not in {'approval_form', 'wiki_sheet'}],
+                'manual_sources': [], 'manual_attachments': [],
+                'wiki_workbooks': [{'workbook_id': row['source_id'].split(':')[0], 'label': row['source_label'], 'sheets': [row]}
+                                   for row in sources if include_wiki and row['source_kind'] == 'wiki_sheet'],
+                'source_context': bundle['context']}
     attachment_rows = frappe.get_list(
         "Overseas Cost Attachment",
         filters={"batch": str(batch_name)},
@@ -765,7 +803,10 @@ def _list_approval_body_ai_sources(batch_name: str, *, detail: dict | None = Non
 
     from overseas_costing.services import dingtalk_approval_service
 
-    detail = detail if detail is not None else dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
+    if detail is None:
+        bundle = effective_source.current_source_bundle(batch_name)
+        detail = (effective_source.approval_detail_for_bundle(bundle) if bundle and bundle['context']['root_kind'] == 'expense'
+                  else dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {})
     if not detail.get("ok"):
         return []
 
@@ -818,7 +859,7 @@ def _list_approval_body_ai_sources(batch_name: str, *, detail: dict | None = Non
         }
 
     rows = []
-    main = source(detail.get("main_approval") or {}, "international_logistics")
+    main = source(detail.get("main_approval") or {}, "logistics_expense" if (detail.get('source_context') or {}).get('root_kind') == 'expense' else "international_logistics")
     if main:
         rows.append(main)
     for approval in detail.get("linked_purchase_approvals") or []:
@@ -837,6 +878,9 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
+    bundle = effective_source.current_source_bundle(batch_name, version_name)
+    if bundle and bundle['context']['root_kind'] == 'expense':
+        return _bound_material_sources(batch_name, bundle)
     detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
     packing = list_packing_sources(str(batch_name), approval_detail=detail, include_wiki=False)
     comment_index = {str(row.get("source_id") or ""): row for approval in
@@ -1080,6 +1124,73 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
     )
 
 
+def _bound_material_sources(batch_name, bundle):
+    context = bundle['context']
+    detail = effective_source.approval_detail_for_bundle(bundle)
+    approval = detail['main_approval']
+    result = _list_approval_body_ai_sources(batch_name, detail=detail)
+    for comment in approval.get('timeline') or []:
+        if comment.get('remark') and comment.get('source_id'):
+            result.append({'source_kind': 'approval_comment', 'source_id': comment['source_id'],
+                           'source_label': '采购支出评论', 'comment_text': comment['remark'],
+                           'process_instance_id': context['instance_id'], 'source_updated_at': comment.get('operation_time'),
+                           'approval_role': 'logistics_expense', 'excluded': approval['excluded']})
+    rows = frappe.get_list('Overseas Cost Attachment', filters={'batch': str(batch_name)},
+        fields=['name', 'version', 'source_type', 'file_name', 'file_url', 'modified', 'parse_result_json'], limit_page_length=5000)
+    materialized_documents = set()
+    for row in rows:
+        if not effective_source.attachment_allowed(row, bundle, for_analysis=True) or not _is_material_ai_attachment(row.get('file_name')):
+            continue
+        meta = effective_source.json_dict(row.get('parse_result_json'))
+        document = meta.get('settlement_document') or {}
+        materialized_documents.add(str(document.get('document_id') or ''))
+        cached = next((d for d in (bundle.get('source') or {}).get('documents') or []
+                       if str(d.get('id')) == str(document.get('document_id'))), {})
+        manifest = document.get('manifest') or {}
+        excel = str(row.get('file_name') or '').lower().endswith(('.xlsx','.xlsm','.xls'))
+        # Listing is local metadata only. Corrupt/unreadable bytes are handled by
+        # the individual preview/AI read, never by opening files in the catalogue.
+        sheets = sorted({str(t.get('title') or '') for t in cached.get('tables') or [] if t.get('title')}) if excel else []
+        failed = excel and cached.get('status') in {'failed','error','invalid'}
+        for sheet in sheets or ['']:
+            result.append({'source_kind': 'approval_attachment', 'source_id': row['name'], 'attachment_name': row['name'],
+                'logical_source_id': f"oa:{context['instance_id']}:{meta.get('file_id') or document.get('document_id')}",
+                'source_label': row.get('file_name') or row['name'], 'file_name': row.get('file_name'), 'sheet_name': sheet, 'sheets': sheets,
+                'process_instance_id': context['instance_id'], 'file_id': meta.get('file_id'),
+                'available': bool(row.get('file_url')) and not failed, 'can_download': False, 'download_required': False,
+                'source_updated_at': row.get('modified'), 'content_hash': manifest.get('sha256') or manifest.get('content_sha256') or document.get('fingerprint'),
+                'approval_role': 'logistics_expense', 'dedicated_packing': any(t.get('kind') == 'packing' for t in document.get('tables') or []),
+                'excluded': approval['excluded'] or failed,
+                'exclude_reason':'归档文件读取失败：'+'；'.join(map(str,cached.get('issues') or ['请核对当前资料'])) if failed else '',
+                'supported_for_material_import': excel and not failed})
+    for document in (bundle.get('source') or {}).get('documents') or []:
+        from .logistics_settlement.document_writer import document_retired
+        if str(document.get('id') or '') in materialized_documents or document_retired(document) or not _is_material_ai_attachment(document.get('file_name')):
+            continue
+        result.append({'source_kind': 'approval_attachment', 'source_id': f"pending:{document['id']}",
+            'process_instance_id': context['instance_id'], 'source_label': document.get('file_name'),
+            'file_name': document.get('file_name'), 'available': False, 'can_download': False,
+            'download_required': False, 'excluded': True, 'exclude_reason': '采购支出附件尚未完成本地归档或版本登记，请等待同步。',
+            'approval_role': 'logistics_expense', 'content_hash': document.get('fingerprint') or document['id']})
+    for source_id in sorted(effective_source.explicit_wiki_sources(bundle.get('source'))):
+        cached=packing_source_service.load_bound_wiki_snapshot(context,source_id)
+        result.append({'source_kind': 'wiki_sheet', 'source_id': source_id, 'source_label': '采购支出链接的装箱计划表',
+                       **packing_source_service.wiki_refresh_status(context,source_id),
+                       'process_instance_id': context['instance_id'], 'available': bool(cached) and not approval['excluded'],
+                       'content_hash':(cached or {}).get('source_hash'), 'source_updated_at':((cached or {}).get('source') or {}).get('source_updated_at'),
+                       'excluded':approval['excluded'] or not cached,
+                       'exclude_reason':'' if cached else '当前采购支出工作表尚未获取到本地，请点击刷新或获取资料。',
+                       'requires_refresh':not bool(cached)})
+    for row in result:
+        row['approval_no'] = (bundle.get('source') or {}).get('approval_no') or ''
+        row['source_context'] = context
+        row['analysis_only'] = bool(not context['approved'] or context['invalid'])
+        content = {key:value for key,value in row.items() if key not in {
+            'cache_refreshed_at','refresh_last_checked_at','refresh_last_success_at','refresh_error'}}
+        row['source_hash'] = hashlib.sha256(_json({'context': context, 'source': content}).encode()).hexdigest()
+    return result
+
+
 def _is_excel_packing_attachment(file_name: Any) -> bool:
     return str(file_name or "").strip().lower().endswith((".xlsx", ".xlsm"))
 
@@ -1188,6 +1299,14 @@ def _attachment_sheet_names(row: dict[str, Any]) -> list[str]:
 
     file_url = str(row.get("file_url") or "").strip()
     file_name = str(row.get("file_name") or file_url).lower()
+    if file_url and file_name.endswith('.xls'):
+        import xlrd
+        path = packing_source_service.import_service._resolve_excel_file_path(file_url=file_url)
+        book=xlrd.open_workbook(str(path),on_demand=True)
+        try:
+            return [str(name)[:200] for name in book.sheet_names()]
+        finally:
+            book.release_resources()
     if not file_url or not file_name.endswith((".xlsx", ".xlsm")) or load_workbook is None:
         return []
     try:

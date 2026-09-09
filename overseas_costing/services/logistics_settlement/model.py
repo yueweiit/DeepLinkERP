@@ -8,7 +8,7 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
-PARSER_VERSION = 'logistics-settlement-1'
+PARSER_VERSION = 'logistics-settlement-2'
 
 
 def dumps(value):
@@ -150,6 +150,28 @@ def pick(fields, *aliases):
     return None
 
 
+def merchandise_price(fields, *, source_table='', source_position=None):
+    # Only explicitly identified merchandise prices count. Generic billing rates
+    # in logistics tables are never an independent purchase price.
+    # Called only for positively classified cargo tables, never packing/billing.
+    aliases = ('商品单价', '货物单价', '采购单价', '单价', 'Precio', 'Precio unitario',
+               'Unit price', 'Precio unitario del producto', 'Merchandise unit price')
+    labels = {norm(alias) for alias in aliases} | {norm(cn+es) for cn in ('单价','商品单价','采购单价')
+              for es in ('Precio','Precio unitario','Precio unitario del producto')}
+    entries = [(key, value) for key, value in fields.items()
+               if norm(key) in labels
+               and value not in (None, '')]
+    if not entries:
+        return {'present': False}
+    price = number(entries[0][1])
+    return {'present': True, 'price': price,
+            'currency': currency(pick(fields, '商品币种', '采购币种', '币种', 'Moneda')),
+            'price_uom': pick(fields, '商品计价单位', '单价单位', '采购单位', '单位', 'Unidad') or '',
+            'ambiguous': len(entries) != 1 or price is None,
+            'evidence': {'source_table': source_table, 'source_position': source_position,
+                         'fields': [{'label': key, 'raw_value': value} for key, value in entries]}}
+
+
 def parse_source(row, *, logistics_codes):
     payload = decoded(row.get('raw_payload')) or {}
     comps = list(components(payload) or components(row)) + list(row.get('settlement_attachment_components') or [])
@@ -196,7 +218,7 @@ def parse_source(row, *, logistics_codes):
         if 'Relate' in str(c.get('componentType') or c.get('component_type')) or '关联' in str(c.get('name')) or 'asociar' in norm(c.get('name')):
             walk(c.get('value')); walk(c.get('extValue'))
     cur = currency(pick(fields, '币种', 'Moneda'))
-    amount = number(pick(fields, '本次申请金额', '申请金额', '支付金额', '总金额', 'Monto Total', '合计金额'))
+    amount = number(pick(fields, '本次申请金额', '申请金额', '支付金额', '总金额', 'Monto Total', '合计金额', '金额'))
     fees, goods, issues = [], [], []
     goods_table_validity = []
     fee_issues = list(row.get('settlement_fee_issues') or [])
@@ -225,6 +247,10 @@ def parse_source(row, *, logistics_codes):
             item = {'source_table': name, 'source_position': index + 1, 'raw': f}
             if goods_table:
                 item.update(material_code=pick(f, '物料编码', '编码', 'Codigo', 'SKU') or '', product_name=pick(f, '物品名称', '货物名称', '名称', 'Nombre') or '', spec_model=pick(f, '规格', 'Especificacion') or '', quantity=number(pick(f, '数量', 'Cantidad')), unit=pick(f, '单位', 'Unidad') or '')
+                item['merchandise_price'] = merchandise_price(f, source_table=name, source_position=index+1)
+                from .document_writer import PHYSICAL_ALIASES
+                item['physical'] = {field:number(pick(f,*aliases)) for field,aliases in PHYSICAL_ALIASES.items()
+                                    if field != 'actual_shipped_qty' and pick(f,*aliases) is not None}
                 valid &= bool((item['material_code'] or item['product_name']) and item['quantity'] is not None and item['unit'])
                 signature = digest(name, item['material_code'], item['product_name'], item['spec_model'], item['unit'])
             else:

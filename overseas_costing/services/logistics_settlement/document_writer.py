@@ -21,6 +21,7 @@ from .writer import DERIVED_FIELDS, locked, mutable_version
 PHYSICAL_ALIASES = {
     'actual_shipped_qty': ('装箱数量', '实发数量', '实际发货数量', '发货数量', 'Cantidad embarcada', 'Cantidad enviada', '数量', 'Cantidad'),
     'gross_weight_kg': ('毛重(kg)', '毛重', 'Gross weight (kg)', 'Gross weight', 'Peso bruto kg', 'Peso bruto'),
+    'net_weight_kg': ('净重(kg)', '净重', 'Net weight (kg)', 'Net weight', 'Peso neto'),
     'volume_m3': ('体积(m³)', '体积(m3)', '体积', 'CBM', 'Volume m3', 'Volumen m3'),
     'volume_weight_kg': ('体积重(kg)', '体积重', 'Volumetric weight', 'Peso volumétrico'),
     'chargeable_weight_kg': ('计费重(kg)', '计费重', 'Chargeable weight', 'Peso facturable'),
@@ -58,6 +59,15 @@ def packing_state_hash(items):
     return digest(sorted(rows, key=lambda row: row['name']))
 
 
+def source_packing_state_hash(items, context):
+    """Expense checks track adopted physical inputs, excluding computed columns."""
+    if context.get('root_kind') != 'expense':
+        return packing_state_hash(items)
+    from overseas_costing.services.effective_source_values import project_source_values
+    return digest(context.get('fingerprint'), packing_state_hash([
+        project_source_values(item, context) for item in items]))
+
+
 def frozen(batch, version):
     return version.get('status') in {'Confirmed', 'Archived'} or batch.get('confirm_status') == 'Confirmed' or batch.get('writeback_status') == 'Success'
 
@@ -90,6 +100,7 @@ def packing_rows(documents):
                     else:
                         values[field] = parsed
                 rows.append({'document_id': document['id'], 'line': row.get('position', index + 1),
+                             'adopted_line_key': row.get('settlement_line_key'),
                              'line_key': digest(document['id'], table_index, row.get('position', index), row),
                              'identity': key, 'values': values, 'invalid_fields': invalid,
                              'quality': (document.get('manifest') or {}).get('archive_quality') or (document.get('manifest') or {}).get('content_quality'),
@@ -107,14 +118,14 @@ def plan_packing(source, items, documents):
     valid = bool(source.get('approved')) and not source.get('invalid')
     for row in rows:
         key, values, reasons = row['identity'], row['values'], []
-        matches = by_identity[key]
+        matches = [item for item in items if row_meta(item).get('settlement_line_key') == row['adopted_line_key']] if row.get('adopted_line_key') else by_identity[key]
         if not valid:
             reasons.append('国际物流未审批通过或已失效，仅保留附件证据')
         if row['quality'] not in {'original', 'original_complete'} or row['archive_status'] != 'archived':
             reasons.append('附件原件或归档完整性待核对')
         if not key[0] or not key[2]:
             reasons.append('装箱行缺少明确物料编码或单位')
-        if len(matches) != 1 or counts[key] != 1:
+        if len(matches) != 1 or (not row.get('adopted_line_key') and counts[key] != 1):
             reasons.append('装箱行与当前物料无法唯一对应（编码、规格、单位）')
         if row['invalid_fields']:
             reasons.append('装箱物理字段不是有效非负数：' + ','.join(row['invalid_fields']))
@@ -358,3 +369,89 @@ def sync_logistics_documents(store, ledger, source, batch_name, actor, *, regist
         if changed or (prior and prior.get('effective_hash') != effective_hash):
             store.audit(source['id'], 'sync_documents', actor, source_snapshot=source['snapshot'], version=version['name'], issues=plan['issues'])
         return {**state, 'changed': changed, 'state_id': state_id}
+
+
+def sync_source_documents(store, ledger, source, batch_name, actor, *, source_context, register_file=None, trusted_review_actor=None):
+    """Apply the expense's packing into an isolated overlay, never old raw values."""
+    if source_context.get('root_kind') != 'expense':
+        return sync_logistics_documents(store,ledger,source,batch_name,actor,register_file=register_file)
+    from overseas_costing.services.effective_source_values import project_source_values, PHYSICAL_FIELDS
+    from overseas_costing.services.effective_logistics_source import context_for_source
+    register_file = register_file or (lambda attachment, document: register_private_file(ledger, attachment, document))
+    with store.atomic():
+        binding = store.get('binding',source_context['binding_id'],lock=True)
+        actual = store.get('source',binding['expense_id'],lock=True) if binding else None
+        batch = ledger.get('batch',batch_name,lock=True)
+        if not binding or context_for_source(actual,binding,batch['current_version'],batch_name) != source_context:
+            raise ValueError('采购支出来源已变化，装箱结果不能写回')
+        if locked(batch) and (not trusted_review_actor or batch.get('edit_lock_owner') != trusted_review_actor):
+            raise ValueError('批次正在编辑，采购支出装箱资料等待应用')
+        version = batch['current_version']
+        state_id = digest('expense_documents',source['id'],batch_name)
+        documents = [deepcopy(d) for d in source.get('documents') or [] if d.get('id')]
+        items = ledger.rows('item',batch=batch_name,version=version)
+        effective_hash = digest(source_context,documents)
+        prior = store.get('document_sync',state_id,lock=True)
+        items_hash = source_packing_state_hash(items, source_context)
+        if prior and prior.get('effective_hash') == effective_hash and prior.get('items_hash') == items_hash:
+            return {**prior,'changed':False}
+        projected = []
+        for item in items:
+            row = project_source_values(item,source_context)
+            meta = row_meta(row)
+            meta['settlement_packing_provenance'] = {k:v for k,v in (meta.get('settlement_packing_provenance') or {}).items()
+                if v.get('source_id') == source['id'] and v.get('source_snapshot') == source['snapshot']}
+            meta.pop('settlement_packing_candidates',None)
+            row['extra_json'] = dumps(meta)
+            projected.append(row)
+        body_rows = []
+        cached_rows = packing_rows(documents)
+        for goods in source.get('goods') or []:
+            if not goods.get('physical') and not goods.get('reviewed_physical'):
+                continue
+            fields = dict(goods.get('raw') or {})
+            if goods.get('reviewed_physical'):
+                fields = {'物料编码':goods.get('material_code'),'规格':goods.get('spec_model'),
+                          '单位':goods.get('unit'), **{
+                              PHYSICAL_ALIASES[key][0]:value for key,value in goods['reviewed_physical'].items()
+                              if key in PHYSICAL_ALIASES}}
+                # Do not count a reviewed projection of the same cached row twice.
+                key = (identity(goods.get('material_code')),identity(goods.get('spec_model')),identity(goods.get('unit')))
+                values = {k:v for k,v in goods['reviewed_physical'].items() if k in PHYSICAL_ALIASES}
+                equivalent = [r for r in cached_rows if r['identity'] == key and not r['invalid_fields']
+                              and all(number(r['values'].get(k)) is not None and Decimal(number(r['values'][k])) == Decimal(str(v)) for k,v in values.items())]
+                if len(equivalent) == 1 and len([r for r in cached_rows if r['identity'] == key]) == 1:
+                    continue
+            body_rows.append({'rowValue':[{'name':key,'value':value} for key,value in fields.items()],
+                              'position':goods.get('source_position'),'settlement_line_key':goods['line_key']})
+        packing_documents = documents + ([{'id':'approval-body:'+source['snapshot'],
+             'manifest':{'archive_quality':'original','archive_status':'archived'},
+             'tables':[{'kind':'packing','rows':body_rows}]}] if body_rows else [])
+        plan = plan_packing(source,projected,packing_documents)
+        for item in projected:
+            updates = plan['changes'].get(item['name']) or {}
+            meta = row_meta({**item,**updates})
+            values = {key:updates.get(key,item.get(key)) for key in PHYSICAL_FIELDS
+                      if updates.get(key,item.get(key)) is not None}
+            meta['settlement_physical'] = {'source_snapshot':source['snapshot'],
+                'source_context_fingerprint':source_context['fingerprint'], 'values':values,
+                'evidence':meta.get('settlement_packing_provenance') or {}}
+            has_values = any(values.get(key) is not None for key in ('gross_weight_kg','volume_m3','chargeable_weight_kg'))
+            row_reviews = [r for rows in plan['reviews'].values() for r in rows if r.get('item_name') == item['name']]
+            if has_values and not row_reviews:
+                meta.pop('settlement_packing_review',None)
+            if meta != row_meta(next(i for i in items if i['name'] == item['name'])):
+                ledger.put('item',item['name'],{'extra_json':dumps(meta), **{key:0 for key in DERIVED_FIELDS}})
+        document_issues = sorted({issue for d in documents for issue in d.get('issues') or []})
+        for document in documents:
+            save_attachment(store,ledger,source,document,batch,version,plan['reviews'].get(document['id'],[]),
+                            register_file, retired=document_retired(document))
+        remaining = ledger.rows('item',batch=batch_name,version=version)
+        state = {'id':state_id,'source_id':source['id'],'batch':batch_name,'version':version,
+                 'status':'review' if plan['issues'] or document_issues else 'applied',
+                 'source_context':source_context,'effective_hash':effective_hash,
+                 'items_hash':source_packing_state_hash(remaining, source_context),
+                 'blocking':bool(plan['blocking'] or document_issues),'issues':sorted(set(plan['issues']+document_issues)),
+                 'reviews':plan['reviews'],'document_issues':document_issues,'document_ids':[d['id'] for d in documents]}
+        store.put('document_sync',{k:state[k] for k in ('id','source_id','batch','status')}|{'data':dumps(state)})
+        return {**state,'changed':True}

@@ -24,6 +24,8 @@ def test_after_migrate_restores_deeplink_desktop_entry(monkeypatch) -> None:
             raising=False,
         )
 
+    from overseas_costing.services.logistics_settlement import policy_migration
+    monkeypatch.setattr(policy_migration,"register_after_migrate",lambda:calls.append("policy_upgrade"))
     install.after_migrate()
 
     assert calls[-3:] == [

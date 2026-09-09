@@ -686,4 +686,4 @@ def _is_formula_total_row(row, header_row, row_number):
 def _is_repeated_header(row: list[dict[str, Any]], columns: dict[str, int]) -> bool:
     material_cell = _cell_raw([row], 1, columns.get("material_code"))
     normalized = _normalize_header(material_cell)
-    return any(_normalize_header(alias) in normalized for alias in HEADER_ALIASES["material_code"])
+    return any(_normalize_header(alias) == normalized for alias in HEADER_ALIASES["material_code"])

@@ -62,27 +62,38 @@ def calculation_blockers(batch_name, version_name=None, *, for_calculation=False
     db = Store.frappe()
     mappings = db.find('batch_map', batch=batch_name, limit=1)
     logistics_source = db.get('source', mappings[0]['source_id'], lock=lock) if mappings else None
-    if logistics_source and logistics_source.get('invalid'):
+    if not binding and logistics_source and logistics_source.get('invalid'):
         return ['国际物流来源已失效，当前结果不能确认或推送']
-    document_states = db.find('document_sync', batch=batch_name, limit=1)
+    effective_id = binding['expense_id'] if binding else (logistics_source or {}).get('id')
+    document_states = db.find('document_sync', batch=batch_name, source_id=effective_id, limit=1) if effective_id else []
     if document_states and document_states[0].get('blocking'):
         return list(document_states[0].get('issues') or ['新装箱资料待核对'])
     if not binding:
         return ['尚未关联审批通过的物流结算采购支出，当前为初始录入或暂估'] if mappings and not for_calculation else []
+    from .bound_wiki_service import pending_wiki_issues
+    wiki_issues = pending_wiki_issues(db, binding)
+    if wiki_issues:
+        return wiki_issues
     expense = db.get('source', binding['expense_id'], lock=lock)
     logistics = db.get('source', binding['logistics_id'], lock=lock)
+    from .reviewed_cargo import resolve_reviewed_source
+    expense = resolve_reviewed_source(db, expense, binding)
     if for_calculation:
         version = FrappeLedger().get('version', version_name or binding.get('version'), lock=lock)
         if version and version.get('status') == 'Confirmed':
             return ['已确认版本保留历史，请在调整草稿中重新核算']
-    if not expense or not logistics or expense['invalid'] or logistics['invalid'] or expense['kind'] != 'expense' or not expense['approved']:
+    if not expense or expense['invalid'] or expense['kind'] != 'expense' or not expense['approved']:
         return ['关联采购支出尚未通过、已失效或不再属于物流结算，不能确认或推送']
     if binding.get('applied_cost_hash') != expense['cost_hash'] or binding.get('application_status') not in {'applied', 'applied_pending'}:
         return list(binding.get('issues') or ['最终采购支出尚未完整应用，请先核对资料'])
     if version_name and version_name != binding.get('version'):
         return ['当前最终采购支出已生成新版本；历史版本仅供追溯']
+    from overseas_costing.services.effective_logistics_source import resolve_source_context
+    context = resolve_source_context(batch_name,version_name or binding.get('version'),store=db,ledger=FrappeLedger(),lock=lock)
     issues = []
     application = db.get('application', binding.get('last_application', '')) or {}
+    if (application.get('source_context') or {}).get('fingerprint') != context.get('fingerprint'):
+        issues.append('当前来源策略或资料快照已变化，请重新采用采购支出资料')
     issues.extend((application.get('plan') or {}).get('goods_pending') or [])
     planned_rules = (application.get('plan') or {}).get('rules') or []
     actual_rules = [r for r in FrappeLedger().rows('rule', batch=batch_name, version=binding.get('version')) if r.get('is_final')]
@@ -108,6 +119,10 @@ def calculation_blockers(batch_name, version_name=None, *, for_calculation=False
             issues.append('当前货物或数量与最终采购支出不一致，请核对来源')
         if meta.get('settlement_packing_review'):
             issues.append('采购数量或物料已变化，请核对保留的装箱重量、体积')
+        from overseas_costing.services.effective_source_values import project_source_values
+        physical = project_source_values(item,context)
+        if not any(physical.get(key) is not None for key in ('gross_weight_kg','volume_m3','chargeable_weight_kg')):
+            issues.append('当前采购支出装箱资料待补，不能采用旧物流重量和体积')
         if meta.get('settlement_purchase_value_review'):
             issues.append('结算数量变化，请核对独立来源商品单价与发货货值')
         if cargo:
@@ -128,7 +143,8 @@ def has_final_binding(batch_name):
 
 def source_summary(source):
     from overseas_costing.utils.dingtalk import build_desktop_approval_url
-    return {'open_url': build_desktop_approval_url(source['instance']), **{key: source.get(key) for key in ('id', 'corp', 'instance', 'approval_no', 'kind', 'status', 'approved', 'invalid',
+    source = source or {}
+    return {'open_url': build_desktop_approval_url(source.get('instance') or ''), **{key: source.get(key) for key in ('id', 'corp', 'instance', 'approval_no', 'kind', 'status', 'approved', 'invalid',
              'amount', 'currency', 'fees', 'goods', 'goods_complete', 'issues', 'coverage', 'source_updated_at', 'snapshot', 'documents')}}
 
 
@@ -153,10 +169,11 @@ def batch_status(batch_name, version_name=None):
               'sync': db.get('state', 'sync') or {}, 'health': db.get('state', 'health') or {},
               'document_sync': next(iter(db.find('document_sync', batch=batch_name, limit=1)), None)}
     if binding:
-        result['expense'] = source_summary(db.get('source', binding['expense_id']))
+        from .reviewed_cargo import resolve_reviewed_source
+        result['expense'] = source_summary(resolve_reviewed_source(db, db.get('source', binding['expense_id']), binding))
         result['blocking_reasons'] = calculation_blockers(batch_name, binding.get('version'))
         app = db.get('application', binding.get('last_application', '')) or {}
-        result['application'] = {k: app.get(k) for k in ('source_snapshot', 'applied_at', 'version', 'status', 'plan')}
+        result['application'] = {k: app.get(k) for k in ('source_snapshot', 'applied_at', 'version', 'status', 'plan', 'source_context', 'review_id')}
         from .writer import item_review
         result['item_reviews'] = [item_review(i) for i in FrappeLedger().rows('item', batch=batch_name, version=viewed_version)]
         result['audit'] = db.find('audit', binding_id=binding['id'], limit=30)
@@ -166,10 +183,13 @@ def batch_status(batch_name, version_name=None):
         result.update(candidates=[], item_reviews=[], blocking_reasons=[], application=app)
         if app:
             snapshot = db.get('snapshot', app['source_snapshot'])
-            result['expense'] = source_summary({**snapshot, 'id': snapshot['source_id'], 'snapshot': app['source_snapshot']})
+            result['expense'] = source_summary(resolve_reviewed_source(db, {**snapshot, 'id': snapshot['source_id'], 'snapshot': app['source_snapshot']}, binding, version_name=viewed_version))
             result['binding'] = {**result['binding'], 'version': viewed_version, 'application_status': 'historical', 'issues': [], 'coverage': (app.get('plan') or {}).get('coverage'), 'source_snapshot': app['source_snapshot']}
         else:
             result.update(binding=None, expense=None, message='此历史版本尚未采用物流结算采购支出')
+    from overseas_costing.services.effective_logistics_source import resolve_source_context
+    result['source_context'] = resolve_source_context(batch_name,viewed_version,store=db,ledger=ledger)
+    result['document_sync'] = next(iter(db.find('document_sync',batch=batch_name,source_id=result['source_context']['root_source_id'],limit=1)),None)
     return result
 
 
@@ -236,8 +256,11 @@ def _apply_source_locked(db, source_id):
     if source['kind'] == 'logistics':
         batch_name = ensure_batch(db, source)
         from .document_writer import sync_logistics_documents
-        sync_logistics_documents(db, FrappeLedger(), source, batch_name, 'archive-sync')
         bindings = db.find('binding', logistics_id=source_id, limit=1)
+        if bindings:
+            # Continue archiving Intl; its changes cannot adopt data into a bound batch.
+            return
+        sync_logistics_documents(db, FrappeLedger(), source, batch_name, 'archive-sync')
     else:
         bindings = db.find('binding', expense_id=source_id, limit=1)
     for binding in bindings:
@@ -315,7 +338,12 @@ def resume_pending():
                 db.get('state', 'match_lock', lock=True)
                 current = db.get('document_sync', state['id'])
                 if current and current['status'] == 'queued':
-                    apply_source(current['source_id'])
+                    from overseas_costing.services.effective_logistics_source import resolve_source_context
+                    context = resolve_source_context(current['batch'],store=db,ledger=FrappeLedger())
+                    if context.get('root_source_id') != current['source_id']:
+                        db.put('document_sync',{'id':current['id'],'status':'historical','data':dumps({**current,'blocking':False})})
+                    else:
+                        apply_source(current['source_id'])
         except Exception as exc:
             db.audit(state['source_id'], 'document_sync_failed', 'pending-sync', reason=str(exc))
     db.put('state', {'id':'document_cursor', 'updated_at':utcnow(), 'data':dumps({'cursor':document_rows[-1]['id'] if len(document_rows)==50 else None})})

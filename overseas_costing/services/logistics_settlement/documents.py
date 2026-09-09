@@ -86,6 +86,19 @@ def enrich_raw(store, raw, *, reader, cache_file=None):
                 store.insert('document', {k: cached[k] for k in ('id','source_id','fingerprint','status')} | {'data': dumps(cached)})
         document = dict(cached)
         document['manifest'] = manifest
+        documents.append(document)
+    return with_cached_documents(row, documents)
+
+
+def with_cached_documents(raw, documents):
+    """Reclassify persisted tables after a policy upgrade, without fetching files."""
+    row = deepcopy(raw)
+    synthetic, fee_pending = [], []
+    for document in documents:
+        manifest = document.get('manifest') or {}
+        identity = document['id']
+        if manifest.get('retired_at') or document.get('retired_at'):
+            continue
         quality = str(manifest.get('archive_quality') or manifest.get('content_quality') or '')
         for table in document.get('tables') or []:
             eligible = table['complete'] and quality in {'original','original_complete'}
@@ -97,7 +110,6 @@ def enrich_raw(store, raw, *, reader, cache_file=None):
                 fee_pending.append('费用附件明细完整性待核对：' + str(manifest.get('file_name')))
         if not document.get('tables') and any(token in norm(manifest.get('file_name')) for token in ('运费','结算','账单','freight','invoice')):
             fee_pending.append('费用附件尚未完整识别：' + str(manifest.get('file_name')))
-        documents.append(document)
     # An approval fee table and a separate bill may be the same costs. Never add both pools.
     original = (row.get('raw_payload') or {}).get('formComponentValues') or []
     original_has_fee = any(c.get('componentType') == 'TableField' and any(label in norm(c.get('name')) for label in ('费用明细','付款明细','物流费用','desglosedegastos','支出明细')) for c in original)

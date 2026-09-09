@@ -23,6 +23,7 @@ from typing import Any, Callable
 from overseas_costing.services.material_value_semantics import (
     is_effectively_missing as _is_effectively_missing,
 )
+from overseas_costing.services import effective_logistics_source as effective_source
 from overseas_costing.services.source_review_manifest_service import (
     prepare_source_manifest,
     stable_source_identity,
@@ -154,6 +155,7 @@ def build_source_progress(sources: list[dict]) -> list[dict]:
             {
                 "source_id": str(source.get("source_id") or "")[:500],
                 "source_kind": str(source.get("source_kind") or "")[:60],
+                **({"approval_no": str(source['approval_no'])[:200]} if source.get('approval_no') else {}),
                 "label": str(
                     source.get("source_label")
                     or source.get("file_name")
@@ -578,10 +580,11 @@ def _fingerprint_source(source: dict) -> dict:
         "source_id": source.get("source_id"),
         "selected": bool(source.get("selected", True)),
         "locked": bool(source.get("locked")),
+        "source_context": source.get('source_context') or {},
     }
 
 
-def build_input_fingerprint(batch_name: str, version_name: str, items: list[dict], sources: list[dict]) -> str:
+def build_input_fingerprint(batch_name: str, version_name: str, items: list[dict], sources: list[dict], *, context=None) -> str:
     payload = {
         "batch": str(batch_name or ""),
         "version": str(version_name or ""),
@@ -591,6 +594,8 @@ def build_input_fingerprint(batch_name: str, version_name: str, items: list[dict
             key=lambda row: (str(row.get("source_kind") or ""), str(row.get("logical_source_id") or ""), str(row.get("sheet_name") or "")),
         ),
     }
+    if (context or {}).get('effective_source'):
+        payload['effective_source'] = context['effective_source']
     return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -1289,14 +1294,14 @@ def start_material_ai_fill(
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     items = repo.get_items(context["batch"], context["version"])
     sources = repo.list_sources(context["batch"], context["version"])
-    fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources)
+    fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources, context=context)
     running_finder = getattr(repo, "find_running_run", None)
     running = (
         running_finder(context["batch"], context["version"])
         if callable(running_finder)
         else None
     )
-    if running:
+    if running and (not context.get('effective_source') or _record_value(running, 'input_fingerprint') == fingerprint):
         if hasattr(repo, "commit"):
             repo.commit()
         return {
@@ -1344,10 +1349,11 @@ def _source_review_context(context: dict | None) -> dict:
         "version_modified": str(context.get("version_modified") or ""),
         "transport_mode": str(context.get("transport_mode") or ""),
         "fx_rates": deepcopy(context.get("fx_rates") or {}),
+        "effective_source": deepcopy(context.get('effective_source') or {}),
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'shipment-valuation-project-freight-v2'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-2'
 
 
 def _source_review_fingerprint(
@@ -1641,6 +1647,8 @@ def get_material_ai_fill_status(
         "candidates": candidates,
         "draft": draft,
         "source_progress": source_progress,
+        "source_context": next((effective_source.public_context(row.get('source_context'))
+                                for row in _load_json(_record_value(run, 'source_manifest_json'), []) if row.get('source_context')), {}),
         "completion_summary": {
             "proposal_count": proposal_count,
             "selected_count": selected_count,
@@ -1716,6 +1724,9 @@ def apply_material_ai_fill(
     _assert_run_batch(initial_run, batch_name)
     version_name = str(_record_value(initial_run, "version") or "")
     context = repo.get_context(str(batch_name), version_name)
+    if hasattr(repo, 'lock_review_scope'):
+        repo.lock_review_scope(context['batch'])
+        context = repo.get_context(str(batch_name), version_name)
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     run = repo.lock_run(str(run_id or ""))
     _assert_run_batch(run, batch_name)
@@ -1723,7 +1734,7 @@ def apply_material_ai_fill(
         raise ValueError("AI 草稿尚未准备完成或已经处理。")
     items = repo.get_items(context["batch"], context["version"])
     sources = repo.list_sources(context["batch"], context["version"])
-    current_fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources)
+    current_fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources, context=context)
     if current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
         repo.save_run(
             run,
@@ -1740,6 +1751,7 @@ def apply_material_ai_fill(
             "message": "资料或物料数据已变化，请重新运行 AI 填充。",
         }
     loaded_updates = _load_json(updates, []) if isinstance(updates, str) else updates
+    effective_source.require_available(context.get('effective_source') or {})
     normalized = validate_apply_updates(loaded_updates, items)
     applied = repo.apply_run(
         run,
@@ -1852,7 +1864,7 @@ def apply_source_ai_review(
         context=context,
     )
     saved_fee_fingerprint = _load_json(_record_value(run, "draft_json"), {}).get("fee_fingerprint")
-    current_fees = repo.get_fees(context["batch"], context["version"]) if hasattr(repo, "get_fees") else []
+    current_fees = _effective_review_fees(repo,context)
     fees_changed = bool(saved_fee_fingerprint and saved_fee_fingerprint != hashlib.sha256(_json(current_fees).encode()).hexdigest())
     if fees_changed or current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
         repo.save_run(
@@ -1863,6 +1875,7 @@ def apply_source_ai_review(
             completed_at=_now(),
         )
         return {"ok": False, "stale": True, "run_id": str(run_id), "status": "STALE"}
+    effective_source.require_available(context.get('effective_source') or {})
     proposals = _load_json(_record_value(run, "candidates_json"), [])
     selected = validate_source_review_application(
         proposals,
@@ -1894,12 +1907,16 @@ def apply_source_ai_review(
                 "input_fingerprint": current_fingerprint,
                 "application_fingerprint": application_fingerprint,
                 "operator": _session_user(),
+                "source_context": context.get('effective_source') or {},
+                "source_review": loaded_edits.get('_source_review') or {},
             },
         )
     except Exception:
         if hasattr(repo, "rollback"):
             repo.rollback()
         raise
+    if applied.get('ok') is False:
+        return {**applied,'run_id':str(run_id),'status':'READY'}
     return {
         "ok": True,
         "run_id": str(run_id),
@@ -2130,6 +2147,14 @@ def _ensure_local_attachment(source: dict) -> dict:
     from overseas_costing.services import attachment_parse_service, dingtalk_approval_service, import_service
 
     source_id = str(source.get("resolver_source_id") or source.get("source_id") or "")
+    bundle = effective_source.current_source_bundle(str(source.get('batch') or ''))
+    bound = bool(bundle and bundle['context']['root_kind'] == 'expense')
+    if bound:
+        effective_source.require_readable(bundle['context'])
+        if (source.get('source_context') or {}).get('fingerprint') != bundle['context']['fingerprint']:
+            raise ValueError('当前采购支出来源已变化，请重新分析。')
+        if source.get('download_required'):
+            raise ValueError('当前采购支出附件尚未完成本地归档，请等待同步。')
     if source.get("download_required"):
         process_id = str(source.get("process_instance_id") or "")
         file_id = str(source.get("file_id") or "")
@@ -2149,11 +2174,13 @@ def _ensure_local_attachment(source: dict) -> dict:
     row = frappe.db.get_value(
         "Overseas Cost Attachment",
         source_id,
-        ["name", "batch", "file_name", "file_url", "source_type", "parse_result_json"],
+        ["name", "batch", "version", "file_name", "file_url", "source_type", "parse_result_json"],
         as_dict=True,
     ) or {}
     if str(row.get("batch") or "") != str(source.get("batch") or ""):
         raise ValueError("附件已不属于当前批次，请重新分析。")
+    if bound and not effective_source.attachment_allowed(row, bundle, for_analysis=True):
+        raise ValueError('附件不属于当前采购支出及成本版本。')
     if not row.get("file_url"):
         raise ValueError("附件尚未保存到系统，暂时无法读取。")
     path = attachment_parse_service._resolve_source_file_path(file_url=str(row.get("file_url") or ""))
@@ -2347,7 +2374,7 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
             "text": "\n".join(f"{key}: {value}" for key, value in fields.items())[:MAX_AI_DOCUMENT_CHARS],
             "approval_role": source.get("approval_role") or "",
             "approved_fee": approved_fee,
-            "ai_eligible": False,
+            "ai_eligible": source.get('approval_role') == 'logistics_expense',
         }
     if kind == "approval_comment":
         comment = {"remark": source["comment_text"]} if "comment_text" in source else packing_source_service._find_comment_source(
@@ -2370,14 +2397,29 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
             sheet_name=str(source.get("sheet_name") or "") or None,
         )
         preview = trusted.get("preview") or {}
+        from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
         return _projection_candidates(items, source, preview), {
             "source_ref": _source_reference(source),
             "structured_rows": (preview.get("material_rows") or [])[:1000],
             "ai_eligible": False,
+            "cargo_reviews": [cargo_review_for_preview(trusted,source.get('source_context') or {})]
+                if (source.get('source_context') or {}).get('root_kind') == 'expense' else [],
         }
 
     attachment = _ensure_local_attachment(source)
     file_name = str(attachment.get("file_name") or source.get("file_name") or "")
+    if file_name.lower().endswith('.xls') and (source.get('source_context') or {}).get('root_kind')=='expense':
+        from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
+        from .packing_snapshot_service import _attachment_sheet_names
+        sheets = [source['sheet_name']] if source.get('sheet_name') else _attachment_sheet_names(attachment)
+        candidates, reviews, rows = [], [], []
+        for sheet in sheets:
+            trusted=packing_source_service.resolve_trusted_packing_source(batch_name=source['batch'],source_kind=kind,
+                source_id=str(source.get('resolver_source_id') or attachment.get('source_id')),sheet_name=sheet)
+            candidates.extend(_projection_candidates(items,{**source,'sheet_name':sheet},trusted['preview']))
+            reviews.append(cargo_review_for_preview(trusted,source['source_context']))
+            rows.extend(trusted['preview'].get('material_rows') or [])
+        return candidates, {'source_ref':_source_reference(source),'structured_rows':rows,'cargo_reviews':reviews,'ai_eligible':False}
     if file_name.lower().endswith(".xls"):
         raise ValueError("旧版 .xls 暂不支持，请另存为 .xlsx 后重新上传。")
     if file_name.lower().endswith((".xlsx", ".xlsm")):
@@ -2405,6 +2447,9 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
                     sheet_name=sheet_name,
                 )
                 preview = trusted.get("preview") or {}
+                if (source.get('source_context') or {}).get('root_kind') == 'expense':
+                    from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
+                    semantic_document.setdefault('cargo_reviews',[]).append(cargo_review_for_preview(trusted,source['source_context']))
                 all_candidates.extend(_projection_candidates(items, sheet_source, preview))
                 if preview.get('shipment_fill'):
                     semantic_document.setdefault('shipment_fills', []).append({
@@ -2951,6 +2996,24 @@ class _MaterialAIRunClaimLost(RuntimeError):
     """Raised internally when a superseded worker no longer owns a run."""
 
 
+def _effective_review_fees(repo, context):
+    rows = repo.get_fees(context['batch'],context['version']) if hasattr(repo,'get_fees') else []
+    if (context.get('effective_source') or {}).get('root_kind') == 'expense':
+        from .logistics_settlement.fee_policy import select_fees
+        return select_fees(rows,source_context=context['effective_source'])
+    return rows
+
+
+def _assert_bound_physical_updates(proposals,manual_updates):
+    from .effective_source_values import PHYSICAL_FIELDS
+    fields={str(update.get('fieldname') or '') for update in manual_updates}
+    for proposal in proposals:
+        if proposal.get('proposal_type')=='item_update':
+            fields.update((proposal.get('payload') or {}).get('fields') or {})
+    if fields-set(PHYSICAL_FIELDS):
+        raise ValueError('当前采购支出审核不能改写独立采购事实；数量和单位请采用完整货物表，商品价格须使用对应采购支出价格证据。')
+
+
 def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> dict:
     repo = repository or FrappeMaterialAIFillRepository()
     run = repo.get_run(str(run_id or ""))
@@ -3010,7 +3073,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 completed_at=_now(),
             )
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
-        existing_fees = repo.get_fees(context["batch"], context["version"]) if hasattr(repo, "get_fees") else []
+        existing_fees = _effective_review_fees(repo,context)
         clarification_text = str(_record_value(run, "clarification_text") or "")
 
         def requeue_latest_input() -> str:
@@ -3050,7 +3113,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 context=context,
             )
             if unified_review
-            else build_input_fingerprint(context["batch"], context["version"], items, sources)
+            else build_input_fingerprint(context["batch"], context["version"], items, sources, context=context)
         )
         if current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
             persist(status="STALE",
@@ -3069,9 +3132,13 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation, autofill_preview, extra, run_supplement
         reconciliation = None
         read_items = items
+        effective_bundle = effective_source.current_source_bundle(context['batch'], context['version'])
+        bound_source = bool(effective_bundle and effective_bundle['context']['root_kind'] == 'expense')
+        if bound_source:
+            read_items = effective_source.project_ai_items(items, effective_bundle)
         if unified_review:
             main_source = next((s for s in sources if s.get("approval_role") == "international_logistics" and s.get("source_kind") == "approval_form" and s.get("selected")), None)
-            if main_source:
+            if main_source and not bound_source:
                 from overseas_costing.services.logistics_purchase_facts_service import enrich_logistics_purchase_facts
                 enriched = enrich_logistics_purchase_facts(items, sources, fx_rates=context.get("fx_rates") or {})
                 proposed = build_logistics_reconciliation(enriched["items"], main_source)
@@ -3215,7 +3282,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             persist(source_progress_json=source_progress,
                 progress_percent=10 + int(50 * (source_index + 1) / max(1, len(sources))),
                 candidates_json=partial if unified_review else deterministic,
-                draft_json={"autofill_preview": autofill_preview(items, partial, existing_fees, fx_rates=context.get('fx_rates'))} if unified_review else {})
+                draft_json={"autofill_preview": autofill_preview(read_items, partial, existing_fees, fx_rates=context.get('fx_rates'))} if unified_review else {})
 
         for group in excel_proposals_by_parent.values():
             if len(group) == 1:
@@ -3282,6 +3349,10 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         )
         if unified_review:
             remaining = 60 - (time.monotonic() - supplement_started) if supplement_started else 60
+            latest_context = repo.get_context(batch_name, version_name)
+            if _source_review_context(latest_context) != _source_review_context(context):
+                persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
+                return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
             ai_result = run_supplement(lambda: _call_source_review_ai(
                 read_items,
                 documents,
@@ -3365,7 +3436,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             elif reconciliation:
                 candidates = [reconciliation, *candidates]
         else:
-            ai_result = _call_material_ai(items, documents)
+            latest_context = repo.get_context(batch_name, version_name)
+            if _source_review_context(latest_context) != _source_review_context(context):
+                persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
+                return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
+            ai_result = _call_material_ai(read_items, documents)
             candidates = normalize_candidates(deterministic + (ai_result.get("candidates") or []), items)
         for index, entry in enumerate(source_progress):
             if entry.get("status") not in {"ANALYZING", "PARSED"}:
@@ -3416,18 +3491,27 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "summary": counts,
                 "selected_count": sum(1 for row in candidates if row.get("default_selected")),
                 "proposal_count": len(candidates),
-                "autofill_preview": autofill_preview(items, candidates, existing_fees, fx_rates=context.get('fx_rates')),
+                "autofill_preview": autofill_preview(read_items, candidates, existing_fees, fx_rates=context.get('fx_rates')),
                 "fee_fingerprint": hashlib.sha256(_json(existing_fees).encode()).hexdigest(),
             }
+            cargo_reviews = [review for document in documents for review in document.get('cargo_reviews') or []]
+            if bound_source:
+                draft['source_context'] = effective_source.public_context(context.get('effective_source') or {})
+                usable = [review for review in cargo_reviews if review.get('complete')]
+                draft['cargo_review'] = usable[0] if len(usable) == 1 else {
+                    'rows':[],'complete':False,'reason':'多个完整表需要先选择唯一工作表重新分析。' if len(usable)>1 else '当前资料没有可信完整货物表，缺失归档或部分识别不能作为最终清单。',
+                    'source_context':effective_source.public_context(context.get('effective_source') or {})}
             draft["autofill_preview"]["unresolved"].extend(
                 {"source_id": entry.get("source_id"), "message": f"{entry.get('label') or '装箱资料'}：{entry.get('error') or entry.get('detail')}"}
                 for entry in source_progress if entry.get("parse_method") == "SYSTEM_EXCEL"
                 and entry.get("status") in {"FAILED", "NEEDS_SELECTION"}
             )
         else:
-            draft = build_material_ai_draft(items, candidates)
+            draft = build_material_ai_draft(read_items, candidates)
         try:
-            refreshed_context = repo.get_context(batch_name, version_name) if unified_review else context
+            if hasattr(repo, 'lock_review_scope'):
+                repo.lock_review_scope(batch_name)
+            refreshed_context = repo.get_context(batch_name, version_name)
             refreshed_items = repo.get_items(refreshed_context["batch"], refreshed_context["version"])
             refreshed_sources = (
                 _reload_review_manifest(repo, refreshed_context["batch"], refreshed_context["version"], run)
@@ -3450,7 +3534,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             )
             if unified_review
             else build_input_fingerprint(
-                context["batch"], context["version"], refreshed_items, refreshed_sources
+                context["batch"], context["version"], refreshed_items, refreshed_sources, context=refreshed_context
             )
         )
         if refreshed_fingerprint != current_fingerprint:
@@ -3492,7 +3576,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             source_progress_json=source_progress,
             candidates_json=candidates,
             draft_json=draft,
-            source_completeness="PARTIAL" if source_errors else "COMPLETE",
+            source_completeness="PARTIAL" if source_errors or any(
+                row.get('available') is False and (row.get('source_context') or {}).get('root_kind') == 'expense' for row in sources
+            ) else "COMPLETE",
             completed_at=_now(),
         )
         return {"ok": True, "run_id": str(run_id), "status": "READY", "candidate_count": len(candidates)}
@@ -3631,6 +3717,7 @@ class FrappeMaterialAIFillRepository:
             "batch_modified": str(batch.get("modified") or ""),
             "version_modified": str(version.get("modified") or ""),
             "transport_mode": str(batch.get("transport_mode") or ""),
+            "effective_source": (effective_source.current_source_bundle(resolved, selected_version) or {}).get('context') or {},
             "fx_rates": {
                 "USD": str(version.get("fx_usd_to_rmb") or ""),
                 "MXN": (
@@ -3669,11 +3756,13 @@ class FrappeMaterialAIFillRepository:
     def assert_write(self, batch_name: str, edit_token: str, expected_modified: str) -> None:
         from overseas_costing.services import edit_session_service
 
+        effective_source.current_source_bundle(batch_name, lock=True)
         edit_session_service.assert_batch_write(
             batch_name, edit_token=edit_token, expected_modified=expected_modified
         )
 
     def lock_review_scope(self, batch_name: str) -> None:
+        effective_source.current_source_bundle(batch_name, lock=True)
         frappe.db.sql(
             "SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
             (batch_name,),
@@ -3862,11 +3951,12 @@ class FrappeMaterialAIFillRepository:
         if status == "APPLIED":
             frappe.db.rollback()
             raise ValueError("已保存的 AI 草稿不能放弃。")
-        if status not in {"READY", "DISCARDED"}:
+        if status not in {"QUEUED", "RUNNING", "READY", "DISCARDED"}:
             frappe.db.rollback()
             raise ValueError("AI 草稿尚未准备完成或已经处理。")
-        if status == "READY":
+        if status != "DISCARDED":
             run.status = "DISCARDED"
+            run.progress_revision = int(_record_value(run, "progress_revision") or 0) + 1
             run.progress_step = "已放弃"
             run.completed_at = _now()
             run.save(ignore_permissions=True)
@@ -3897,8 +3987,21 @@ class FrappeMaterialAIFillRepository:
         frappe.db.commit()
         return self.get_run(run_id)
 
+    def _set_quantity_provenance(self, item_name, run, audit):
+        values = {'actual_shipped_qty_mode': 'EXPLICIT_SOURCE',
+                  'actual_shipped_qty_source_revision': str(_record_value(run, 'name') or '')}
+        bundle = effective_source.current_source_bundle(audit['batch'], audit['version'], lock=True)
+        if bundle and bundle['context']['root_kind'] == 'expense':
+            row = frappe.get_doc('Overseas Cost Item', item_name).as_dict()
+            values = effective_source.physical_update_values(row, values, bundle['context'], {'run_id': _record_value(run, 'name')})
+        frappe.db.set_value('Overseas Cost Item', item_name, values, update_modified=False)
+
     def apply_run(self, run: Any, updates: list[dict], audit: dict) -> dict:
         from overseas_costing.services import calculate_service, usage_service
+
+        bundle=effective_source.current_source_bundle(audit['batch'],audit['version'],lock=True)
+        if bundle and bundle['context']['root_kind']=='expense':
+            _assert_bound_physical_updates([],updates)
 
         sql = getattr(getattr(frappe, "db", None), "sql", None)
         if callable(sql):
@@ -3929,15 +4032,7 @@ class FrappeMaterialAIFillRepository:
                 if result.get("changed"):
                     changed += 1
                     if update["fieldname"] == "actual_shipped_qty" and not update.get("user_edited"):
-                        frappe.db.set_value(
-                            "Overseas Cost Item",
-                            update["item_name"],
-                            {
-                                "actual_shipped_qty_mode": "EXPLICIT_SOURCE",
-                                "actual_shipped_qty_source_revision": str(_record_value(run, "name") or ""),
-                            },
-                            update_modified=False,
-                        )
+                        self._set_quantity_provenance(update['item_name'], run, audit)
             audit_result = usage_service.record_usage(
                 action_type="OTHER",
                 batch_name=audit["batch"],
@@ -3972,6 +4067,16 @@ class FrappeMaterialAIFillRepository:
         """Apply selected purchase, packing and fee proposals in one database transaction."""
 
         from overseas_costing.services import calculate_service, fee_service, usage_service
+
+        bundle = effective_source.current_source_bundle(audit['batch'],audit['version'],lock=True)
+        if bundle and bundle['context']['root_kind'] == 'expense':
+            _assert_bound_physical_updates(proposals,manual_updates)
+            options = audit.get('source_review') or {}
+            if options.get('complete_cargo') or any(p['proposal_type'] == 'fee_update' for p in proposals):
+                return self._apply_bound_source_review(run,proposals,manual_updates,audit,bundle)
+            if any(p['proposal_type'] in {'material_replace','logistics_reconcile'} for p in proposals):
+                return {'ok':False,'candidate_only':True,'changed_count':0,
+                        'message':'采购支出货物行需核对当前完整表后采用；部分 AI 拆分仅保留候选。'}
 
         batch_rows = frappe.db.sql(
             "SELECT name, current_version FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
@@ -4032,17 +4137,7 @@ class FrappeMaterialAIFillRepository:
                         if result.get("changed"):
                             changed += 1
                             if fieldname == "actual_shipped_qty":
-                                frappe.db.set_value(
-                                    "Overseas Cost Item",
-                                    payload["item_name"],
-                                    {
-                                        "actual_shipped_qty_mode": "EXPLICIT_SOURCE",
-                                        "actual_shipped_qty_source_revision": str(
-                                            _record_value(run, "name") or ""
-                                        ),
-                                    },
-                                    update_modified=False,
-                                )
+                                self._set_quantity_provenance(payload['item_name'], run, audit)
                 elif proposal_type == "material_replace":
                     target_name = str(proposal.get("target_item_name") or "")
                     target = frappe.get_doc("Overseas Cost Item", target_name)
@@ -4204,6 +4299,61 @@ class FrappeMaterialAIFillRepository:
         except Exception:
             frappe.db.rollback()
             raise
+
+    def _apply_bound_source_review(self, run, proposals, manual_updates, audit, bundle):
+        _assert_bound_physical_updates(proposals,manual_updates)
+        from .logistics_settlement.reviewed_cargo import confirm_reviewed_cargo, cargo_review_for_preview
+        from .logistics_settlement.store import Store
+        from .logistics_settlement.ledger import FrappeLedger
+        from . import packing_source_service, calculate_service
+        draft = _load_json(_record_value(run,'draft_json'),{})
+        options = audit.get('source_review') or {}
+        cargo = draft.get('cargo_review') or {}
+        rows, complete = None, False
+        evidence = {'source_id':'ai:'+str(_record_value(run,'name')), 'source_kind':'source_review',
+                    'source_hash':str(audit['input_fingerprint']),'source_context':bundle['context'],
+                    'reason':str(options.get('reason') or ''),
+                    'source_refs':[ref for p in proposals for ref in p.get('source_refs') or []]}
+        if options.get('complete_cargo'):
+            if not cargo.get('complete'):
+                return {'ok':False,'candidate_only':True,'changed_count':0,'message':cargo.get('reason') or '缺少可信完整货物表。'}
+            trusted = packing_source_service.resolve_trusted_packing_source(batch_name=audit['batch'],
+                source_kind=cargo['source_kind'],source_id=cargo['source_id'],sheet_name=cargo.get('sheet') or None)
+            fresh = cargo_review_for_preview(trusted,bundle['context'])
+            if not fresh['complete'] or fresh != cargo:
+                raise ValueError('完整货物表已变化，请重新分析。')
+            rows, evidence, complete = fresh['rows'], fresh, True
+        fee_proposals = [p for p in proposals if p['proposal_type']=='fee_update']
+        fees = [{**p['payload'],'source_row':p['proposal_id'],'label':p['payload'].get('expense_category')}
+                for p in fee_proposals] if fee_proposals else None
+        if rows is None and fees is None:
+            return {'ok':False,'candidate_only':True,'changed_count':0,'message':'没有可采用的当前来源明细。'}
+        result = confirm_reviewed_cargo(Store.frappe(),FrappeLedger(),audit['batch'],bundle['context'],
+            rows,evidence,complete,audit['operator'],fees=fees,coverage=options.get('coverage') or None,
+            negative_confirmed=options.get('negative_confirmed') is True)
+        if not result.get('review_saved'):
+            return result
+        if result.get('ok'):
+            # Shared transaction changes source context first; field writes use the new gate.
+            updates = list(manual_updates)
+            for proposal in proposals:
+                if proposal['proposal_type']=='item_update':
+                    updates.extend({'item_name':proposal['payload']['item_name'],'fieldname':key,'value':value}
+                                   for key,value in proposal['payload'].get('fields',{}).items())
+            for update in updates:
+                saved = calculate_service.update_item_field(update['item_name'],update['fieldname'],update.get('value'),
+                    version_name=result['version'],remark='当前采购支出 AI 审核确认',_skip_edit_check=True,_skip_commit=True)
+                if not saved.get('ok'):
+                    raise ValueError(saved.get('message') or '审核字段采用失败。')
+        result['batch_modified']=str(frappe.db.get_value('Overseas Cost Batch',audit['batch'],'modified') or '')
+        draft['application']={**result,'fingerprint':audit.get('application_fingerprint')}
+        run.draft_json=_json(draft)
+        run.status='APPLIED'
+        run.progress_step='审核已采用' if result.get('ok') else '审核已保存，采用待处理'
+        run.applied_at=run.completed_at=_now()
+        run.save(ignore_permissions=True)
+        frappe.db.commit()
+        return result
 
     def commit(self) -> None:
         frappe.db.commit()

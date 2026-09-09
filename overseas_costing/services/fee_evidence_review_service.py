@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
+from overseas_costing.services import effective_logistics_source as effective_source
 
 try:
     import frappe
@@ -995,6 +996,7 @@ def build_input_fingerprint(
         "parse_status": attachment.get("parse_status"),
         "parse_result_json": attachment.get("parse_result_json"),
         "mapped_result_json": attachment.get("mapped_result_json"),
+        "source_context": attachment.get('source_context') or {},
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -1200,6 +1202,7 @@ class FrappeFeeEvidenceReviewRepository:
             **batch,
             "batch": batch_name,
             "version": version_name,
+            "effective_source": (effective_source.current_source_bundle(batch_name, version_name) or {}).get('context') or {},
             "version_status": version.get("status"),
             "fx_context": {
                 "fx_usd_to_rmb": version.get("fx_usd_to_rmb"),
@@ -1219,6 +1222,12 @@ class FrappeFeeEvidenceReviewRepository:
         ) or {}
         if str(row.get("batch") or "") != str(batch_name or ""):
             raise ValueError("凭证附件不属于当前批次。")
+        bundle = effective_source.current_source_bundle(batch_name)
+        if bundle and bundle['context']['root_kind'] == 'expense':
+            effective_source.require_readable(bundle['context'])
+            if not effective_source.attachment_allowed(row, bundle, for_analysis=True):
+                raise ValueError('凭证附件不属于当前采购支出及成本版本。')
+            row['source_context'] = bundle['context']
         file_url = str(row.get("file_url") or "")
         content_sha256 = ""
         if file_url:
@@ -1238,17 +1247,19 @@ class FrappeFeeEvidenceReviewRepository:
     def get_items(self, batch_name: str, version_name: str) -> list[dict]:
         fields = [
             "name", "row_no", "stable_line_key", "material_code", "product_name", "import_name",
-            "hs_code", "customs_declared_value_mxn", "goods_value",
+            "hs_code", "customs_declared_value_mxn", "goods_value", "spec_model", "quantity", "unit", "extra_json",
         ]
-        return frappe.get_all(
+        rows = frappe.get_all(
             "Overseas Cost Item",
             filters={"batch": batch_name, "version": version_name},
             fields=fields,
             order_by="row_no asc, name asc",
             limit_page_length=10000,
         )
+        return effective_source.project_ai_items(rows, effective_source.current_source_bundle(batch_name, version_name))
 
     def lock_batch(self, batch_name: str) -> None:
+        effective_source.current_source_bundle(batch_name, lock=True)
         frappe.db.sql("SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE", (batch_name,))
 
     def find_running(
@@ -1361,6 +1372,7 @@ class FrappeFeeEvidenceReviewRepository:
     ) -> None:
         from overseas_costing.services import fee_service
 
+        effective_source.current_source_bundle(batch_name, version_name, lock=True)
         fee_service._assert_write_context(
             batch_name,
             version_name,
@@ -1542,6 +1554,34 @@ class FrappeFeeEvidenceReviewRepository:
             values,
             update_modified=True,
         )
+
+    def adopt_reviewed_fees(self, context, fee_rows, attachment, run_id, options):
+        from .logistics_settlement.reviewed_cargo import confirm_reviewed_cargo
+        from .logistics_settlement.store import Store
+        from .logistics_settlement.ledger import FrappeLedger
+        from .logistics_settlement.model import digest
+        from . import fee_service
+        evidence = {'source_id':attachment['name'],'source_kind':'approval_attachment',
+                    'source_hash':_attachment_fingerprint(attachment),'source_context':context['effective_source'],
+                    'review_run':run_id,'reason':str(options.get('reason') or '')}
+        fees = [{**row,'source_row':row['logical_fee_key'],'label':row.get('expense_category')} for row in fee_rows]
+        result = confirm_reviewed_cargo(Store.frappe(),FrappeLedger(),context['batch'],context['effective_source'],
+            None,evidence,False,str(frappe.session.user),fees=fees,coverage=options.get('coverage') or None,
+            negative_confirmed=options.get('negative_confirmed') is True)
+        if not result.get('ok'):
+            return result, {}
+        if result['version'] != context['version']:
+            raise ValueError('成本版本已调整，请先打开当前草稿重新核对费用凭证。')
+        rules = fee_service._query_rules(context['batch'],result['version'])
+        by_key = {}
+        for row in fees:
+            line_key = digest('reviewed_fee',evidence['source_id'],None,str(row['source_row']))
+            code = 'settlement_freight_'+digest(context['effective_source']['binding_id'],line_key)[:20]
+            matched = next((rule for rule in rules if rule.get('rule_code')==code and rule.get('is_enabled')),None)
+            if not matched:
+                raise ValueError('审核费用没有生成当前最终费用，事务已撤回。')
+            by_key[row['logical_fee_key']]=matched
+        return result, by_key
 
     def save_fee_split(
         self,
@@ -1891,7 +1931,7 @@ def start_fee_evidence_review(
         str(attachment),
         str(evidence_role),
     )
-    if running:
+    if running and (not attachment_row.get('source_context') or _run_value(running, 'input_fingerprint') == fingerprint):
         repo.commit()
         return {
             "ok": True,
@@ -2033,6 +2073,12 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
     try:
         context = repo.get_context(str(_run_value(run, "batch")), str(_run_value(run, "version")))
         attachment = repo.get_attachment(context["batch"], str(_run_value(run, "attachment")))
+        initial_fingerprint = build_input_fingerprint(batch_name=context['batch'], version_name=context['version'],
+            logical_fee_key=str(_run_value(run, 'logical_fee_key') or ''), attachment=attachment,
+            evidence_role=str(_run_value(run, 'evidence_role') or ''))
+        if attachment.get('source_context') and initial_fingerprint != str(_run_value(run, 'input_fingerprint') or ''):
+            persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
+            return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
         items = repo.get_items(context["batch"], context["version"])
         progress = _json_list(_run_value(run, "source_progress_json")) or [{}]
         progress[0].update({"status": "READING", "detail": "正在解析/OCR"})
@@ -2049,6 +2095,9 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             }
         )
         persist(progress_step="DeepSeek 语义分析", progress_percent=65, source_progress_json=progress)
+        if (repo.get_context(context['batch'], context['version']).get('effective_source') or {}) != (context.get('effective_source') or {}):
+            persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
+            return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
         ai = _semantic_ai_review(parsed, attachment, items) if parsed else {"ok": False, "warning": parse_warning, "model": ""}
         draft = build_fee_evidence_review_draft(
             logical_fee_key=str(_run_value(run, "logical_fee_key")),
@@ -2086,6 +2135,13 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             }
         )
         attachment_fingerprint = _attachment_fingerprint(attachment)
+        draft['source_context'] = effective_source.public_context(context.get('effective_source') or attachment.get('source_context') or {})
+        if hasattr(repo, 'lock_batch'):
+            repo.lock_batch(context['batch'])
+        refreshed = repo.get_context(context['batch'], context['version'])
+        if (refreshed.get('effective_source') or {}) != (context.get('effective_source') or {}):
+            persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
+            return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
         final_fingerprint = build_input_fingerprint(
             batch_name=context["batch"], version_name=context["version"],
             logical_fee_key=str(_run_value(run, "logical_fee_key")),
@@ -2469,7 +2525,12 @@ def apply_fee_evidence_review(
         attachment = repo.get_attachment(
             context["batch"], str(_run_value(run, "attachment"))
         )
-        if _attachment_fingerprint(attachment) != str(
+        current_input = build_input_fingerprint(batch_name=context['batch'], version_name=context['version'],
+            logical_fee_key=str(_run_value(run, 'logical_fee_key') or ''), attachment=attachment,
+            evidence_role=str(_run_value(run, 'evidence_role') or ''))
+        source_changed = bool((_run_value(run, 'input_fingerprint') or attachment.get('source_context'))
+                              and current_input != str(_run_value(run, 'input_fingerprint') or ''))
+        if source_changed or _attachment_fingerprint(attachment) != str(
             _run_value(run, "attachment_fingerprint") or ""
         ):
             repo.mark_stale(str(run_id))
@@ -2480,6 +2541,7 @@ def apply_fee_evidence_review(
                 "message": "凭证内容已变化，请重新分析。",
             }
         draft = _json_dict(_run_value(run, "draft_json"))
+        effective_source.require_available(context.get('effective_source') or attachment.get('source_context') or {})
         evidence_values, fee_rows, components = _selected_proposals(
             draft, selections, edits
         )
@@ -2503,6 +2565,23 @@ def apply_fee_evidence_review(
                 context["batch"], context["version"], evidence_name
             ),
         )
+
+        bound = (context.get('effective_source') or {}).get('root_kind') == 'expense'
+        reviewed_rules = {}
+        if bound:
+            options = _json_dict(edits).get('_source_review') or {}
+            if not fee_rows:
+                return {'ok':False,'candidate_only':True,'message':'需选择与采购支出总额一致的完整费用拆分后采用；仅凭证或分项不能产生最终费用。'}
+            adopted, reviewed_rules = repo.adopt_reviewed_fees(context,fee_rows,attachment,str(run_id),options)
+            if not adopted.get('ok'):
+                if adopted.get('review_saved'):
+                    repo.finish_run(str(run_id),{'status':'APPLIED','progress_step':'审核已保存，采用待处理','completed_at':_now()})
+                    repo.commit()
+                else:
+                    repo.rollback()
+                return {**adopted,'run_id':run_id}
+            if any(str(component.get('fee_logical_key') or component.get('logical_fee_key') or '') not in reviewed_rules for component in components):
+                raise ValueError('费用分项必须对应本次已采用的最终费用拆分。')
 
         parent_components: list[dict] = []
         if normalized_evidence["evidence_type"] == "REFUND" and normalized_evidence.get(
@@ -2536,8 +2615,10 @@ def apply_fee_evidence_review(
                     )
                 },
             )
-        fee_rules_by_key: dict[str, dict] = {}
+        fee_rules_by_key: dict[str, dict] = dict(reviewed_rules)
         for fee_row in fee_rows:
+            if bound:
+                continue
             fee_key = str(fee_row.get("logical_fee_key") or "")
             fee_rules_by_key[fee_key] = repo.save_fee_split(
                 context=context,
