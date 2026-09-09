@@ -16,6 +16,33 @@ from overseas_costing.services.material_input_service import present_material_ro
 from overseas_costing.services.transport_fee_service import assert_no_duplicate_fees, fee_is_active, mark_duplicate_fees
 
 
+LEGACY_TAX_COMPONENT_FIELDS = (
+    "igi_amount",
+    "iva_amount",
+    "dta",
+    "prv_duty",
+    "prv_iva",
+)
+LEGACY_CUSTOMS_SERVICE_FIELDS = (
+    "revalidacion",
+    "maniobras",
+    "muellaje",
+    "entrega_mercancia",
+    "previo",
+    "service_aa",
+    "almacenajes",
+    "reconocimiento_aduanero",
+    "honorarios",
+    "complemento_maniobras",
+    "desconsolidacion",
+    "maniobra_falso",
+    "arrastre",
+    "patio_regulador",
+    "entrega_vacio",
+    "limpieza_contenedor",
+)
+
+
 def _decimal(value) -> Decimal | None:
     if value in (None, ""):
         return None
@@ -71,11 +98,58 @@ def _fee_component_rows(fee: dict, fee_components: list[dict]) -> list[dict]:
         row for row in (fee_components or [])
         if bool(row.get("is_active", 1))
         and str(row.get("status") or "").upper() == "CONFIRMED"
+        and str(row.get("cost_effect") or "COST").upper() == "COST"
         and (
             str(row.get("fee_rule") or "") == rule_name
             or str(row.get("logical_fee_key") or row.get("fee_logical_key") or "") == logical_key
         )
     ]
+
+
+def _legacy_fee_component_rows(
+    fee: dict, items: list[dict], fx_context: dict
+) -> list[dict]:
+    logical_key = _fee_key(fee)
+    if logical_key not in {"import_tax", "customs_clearance_fee"}:
+        return []
+    rows = []
+    for item in items:
+        if logical_key == "import_tax":
+            original_amount = _decimal(item.get("import_tax_total"))
+            if original_amount is None or original_amount == 0:
+                original_amount = sum(
+                    (
+                        _decimal(item.get(fieldname)) or Decimal("0")
+                        for fieldname in LEGACY_TAX_COMPONENT_FIELDS
+                    ),
+                    Decimal("0"),
+                )
+        else:
+            original_amount = sum(
+                (
+                    _decimal(item.get(fieldname)) or Decimal("0")
+                    for fieldname in LEGACY_CUSTOMS_SERVICE_FIELDS
+                ),
+                Decimal("0"),
+            )
+        if not original_amount:
+            continue
+        converted = convert_fee_amount_to_rmb(
+            {"amount": original_amount, "currency": "MXN"}, fx_context
+        )
+        rows.append(
+            {
+                "item": item.get("name"),
+                "stable_line_key": _item_key(item),
+                "currency": "MXN",
+                "original_amount": original_amount,
+                "amount_rmb": converted.get("amount_rmb") if converted.get("ok") else None,
+                "status": "CONFIRMED",
+                "is_active": 1,
+                "cost_effect": "COST",
+            }
+        )
+    return rows
 
 
 def _allocation_with_components(
@@ -84,10 +158,20 @@ def _allocation_with_components(
     fx_context: dict,
     fee_components: list[dict],
 ) -> dict:
+    components = _fee_component_rows(fee, fee_components)
+    component_source = "EVIDENCE_SKU_COMPONENT" if components else ""
+    if components and any(_decimal(row.get("amount_rmb")) is None for row in components):
+        return {
+            "status": "BLOCKED",
+            "code": "EVIDENCE_COMPONENT_FX_MISSING",
+            "allocations": {},
+        }
     full = allocate_fee_in_rmb(fee, items, fx_context)
     if full.get("status") != "ALLOCATED":
         return full
-    components = _fee_component_rows(fee, fee_components)
+    if not components:
+        components = _legacy_fee_component_rows(fee, items, fx_context)
+        component_source = "LEGACY_ITEM_FIELDS" if components else ""
     if not components:
         return full
 
@@ -103,11 +187,25 @@ def _allocation_with_components(
         if amount is None:
             missing_amount = True
             continue
+        if amount < 0:
+            return {
+                "status": "BLOCKED",
+                "code": "EVIDENCE_COMPONENT_AMOUNT_INVALID",
+                "allocations": {},
+            }
         if not key or key not in valid_keys:
             return {"status": "BLOCKED", "code": "EVIDENCE_COMPONENT_SKU_INVALID", "allocations": {}}
         component_allocations[key] = component_allocations.get(key, Decimal("0")) + amount
     if missing_amount:
-        return {"status": "BLOCKED", "code": "EVIDENCE_COMPONENT_FX_MISSING", "allocations": {}}
+        return {
+            "status": "BLOCKED",
+            "code": (
+                "EVIDENCE_COMPONENT_FX_MISSING"
+                if component_source == "EVIDENCE_SKU_COMPONENT"
+                else "LEGACY_COMPONENT_FX_MISSING"
+            ),
+            "allocations": {},
+        }
 
     fee_total = Decimal(str(full["amount"]))
     component_total = sum(component_allocations.values(), Decimal("0"))
@@ -137,6 +235,7 @@ def _allocation_with_components(
         "component_allocations": {key: _money(value) for key, value in component_allocations.items()},
         "residual_amount_rmb": _money(residual),
         "component_count": len(components),
+        "component_source": component_source,
         "basis": residual_result.get("basis") or full.get("basis") or "evidence_component",
     }
 
@@ -255,16 +354,23 @@ def preview_comprehensive_cost_data(
                 "fallback_reason": allocation.get("fallback_reason") or "",
                 "allocations": allocation.get("allocations") or {},
                 "component_allocations": allocation.get("component_allocations") or {},
+                "component_source": allocation.get("component_source") or "",
                 "residual_amount_rmb": allocation.get("residual_amount_rmb", _money(amount_rmb)),
             }
         )
 
+    reason_messages = {
+        "EVIDENCE_COMPONENT_FX_MISSING": "凭证 SKU 分项缺少汇率，请补充汇率后重新试算。",
+        "LEGACY_COMPONENT_FX_MISSING": "历史 SKU 税费分项缺少汇率，本次试算未计入。",
+    }
     for row in excluded_fees:
         incomplete_reasons.append(
             {
                 "reason_code": row["reason_code"],
                 "fee_key": row.get("fee_key") or "",
-                "message": "该费用未计入本次试算。",
+                "message": reason_messages.get(
+                    row["reason_code"], "该费用未计入本次试算。"
+                ),
             }
         )
 
@@ -405,7 +511,8 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
         fields=[
             "fee_rule", "logical_fee_key", "evidence", "attachment", "item", "stable_line_key",
             "component_type", "tax_code", "hs_code", "currency", "original_amount", "amount_rmb",
-            "exchange_rate", "allocation_basis", "source_evidence_json", "status", "is_active",
+            "exchange_rate", "allocation_basis", "source_evidence_json", "accounting_role",
+            "cost_effect", "reverses_component", "status", "is_active",
         ],
         limit_page_length=10000,
     )
@@ -431,7 +538,19 @@ def _json(value) -> str:
 
 
 def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None) -> str:
-    return hashlib.sha256(_json([items, fees, fx_context, transport_mode, fee_components or []]).encode()).hexdigest()
+    components = sorted(
+        (dict(row or {}) for row in (fee_components or [])),
+        key=lambda row: (
+            str(row.get("name") or ""),
+            str(row.get("fee_rule") or ""),
+            str(row.get("logical_fee_key") or ""),
+            str(row.get("item") or row.get("stable_line_key") or ""),
+            str(row.get("tax_code") or ""),
+        ),
+    )
+    return hashlib.sha256(
+        _json([items, fees, fx_context, transport_mode, components]).encode()
+    ).hexdigest()
 
 
 def build_saved_cost_data(
@@ -472,6 +591,9 @@ def build_saved_cost_data(
             allocations.append({
                 "rule_code": fee_key, "expense_category": fee["expense_category"],
                 "amount_rmb": fee["amount_rmb"], "allocated_rmb": _money(amount),
+                "component_allocated_rmb": fee.get("component_allocations", {}).get(key, "0.00"),
+                "component_source": fee.get("component_source") or "",
+                "residual_amount_rmb": fee.get("residual_amount_rmb", fee["amount_rmb"]),
                 "allocated_mxn": _money(amount * fx) if fx else None,
                 "basis": fee["allocation_basis"], "scope_type": fee["scope_type"],
                 "fallback_reason": fee["fallback_reason"],
@@ -567,7 +689,8 @@ class FrappeCostRepository:
                 "name", "fee_rule", "evidence", "attachment", "item", "stable_line_key",
                 "logical_fee_key", "component_type", "tax_code", "hs_code", "currency",
                 "original_amount", "amount_rmb", "exchange_rate", "allocation_basis",
-                "source_evidence_json", "status", "is_active",
+                "source_evidence_json", "accounting_role", "cost_effect",
+                "reverses_component", "status", "is_active",
             ],
             limit_page_length=10000,
         )
@@ -608,6 +731,8 @@ COST_INPUT_FIELDS = [
     "unit_price_uom", "quantity", "actual_shipped_qty", "actual_shipped_qty_mode",
     "actual_shipped_qty_source_revision", "shipped_uom", "goods_value", "gross_weight_kg", "volume_m3",
     "volume_weight_kg", "chargeable_weight_kg", "project_collection", "dingtalk_instance_id", "source_type",
+    "igi_amount", "iva_amount", "dta", "prv_duty", "prv_iva", "import_tax_total",
+    *LEGACY_CUSTOMS_SERVICE_FIELDS,
 ]
 
 

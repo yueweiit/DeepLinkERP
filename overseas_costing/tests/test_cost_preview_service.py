@@ -1,6 +1,7 @@
 """只读综合成本试算测试。"""
 
 from copy import deepcopy
+from decimal import Decimal
 
 import pytest
 
@@ -238,3 +239,134 @@ def test_empty_materials_cannot_be_a_complete_cost():
     result = preview_comprehensive_cost_data([], [{"amount_status": "NOT_INCURRED"}], {})
     assert result["summary"]["is_complete"] is False
     assert result["incomplete_reasons"][0]["reason_code"] == "MATERIAL_ITEMS_REQUIRED"
+
+
+def _import_tax_fee(amount="100", currency="RMB"):
+    return {
+        "name": "F1",
+        "logical_fee_key": "import_tax",
+        "expense_category": "进口税费",
+        "amount_status": "ACTUAL",
+        "amount": amount,
+        "currency": currency,
+        "allocation_basis": "goods_value",
+        "scope_type": "ALL_ITEMS",
+        "is_enabled": 1,
+    }
+
+
+def test_ledger_only_components_never_enter_cost() -> None:
+    result = preview_comprehensive_cost_data(
+        _items(),
+        [_import_tax_fee()],
+        {},
+        fee_components=[
+            {
+                "fee_rule": "F1",
+                "item": "ITEM-A",
+                "stable_line_key": "A",
+                "amount_rmb": "30",
+                "status": "CONFIRMED",
+                "is_active": 1,
+                "cost_effect": "LEDGER_ONLY",
+            }
+        ],
+    )
+
+    fee = result["included_fees"][0]
+    assert fee["component_allocations"] == {}
+    assert sum(Decimal(value) for value in fee["allocations"].values()) == Decimal(
+        "100.00"
+    )
+
+
+def test_new_components_suppress_legacy_tax_fields_and_allocate_only_residual() -> None:
+    items = _items()
+    items[0]["igi_amount"] = "40"
+    items[1]["igi_amount"] = "60"
+
+    result = preview_comprehensive_cost_data(
+        items,
+        [_import_tax_fee("120")],
+        {},
+        fee_components=[
+            {
+                "fee_rule": "F1",
+                "item": "ITEM-A",
+                "stable_line_key": "A",
+                "amount_rmb": "50",
+                "status": "CONFIRMED",
+                "is_active": 1,
+                "cost_effect": "COST",
+            }
+        ],
+    )
+
+    fee = result["included_fees"][0]
+    assert fee["component_allocations"] == {"A": "50.00"}
+    assert fee["residual_amount_rmb"] == "70.00"
+    assert fee["allocations"] == {"A": "85.00", "B": "35.00"}
+
+
+def test_legacy_tax_fields_are_compatibility_components_only_without_new_rows() -> None:
+    items = _items()
+    items[0]["igi_amount"] = "20"
+    items[1]["igi_amount"] = "10"
+
+    result = preview_comprehensive_cost_data(
+        items,
+        [_import_tax_fee("40", "MXN")],
+        {"fx_rmb_to_mxn": "2"},
+    )
+
+    fee = result["included_fees"][0]
+    assert fee["component_source"] == "LEGACY_ITEM_FIELDS"
+    assert fee["component_allocations"] == {"A": "10.00", "B": "5.00"}
+    assert fee["residual_amount_rmb"] == "5.00"
+    assert fee["allocations"] == {"A": "12.50", "B": "7.50"}
+
+
+def test_component_without_rmb_conversion_blocks_fee_with_chinese_fx_reason() -> None:
+    result = preview_comprehensive_cost_data(
+        _items(),
+        [_import_tax_fee("100", "MXN")],
+        {},
+        fee_components=[
+            {
+                "fee_rule": "F1",
+                "item": "ITEM-A",
+                "stable_line_key": "A",
+                "currency": "MXN",
+                "original_amount": "100",
+                "amount_rmb": None,
+                "status": "CONFIRMED",
+                "is_active": 1,
+                "cost_effect": "COST",
+            }
+        ],
+    )
+
+    assert result["excluded_fees"][0]["reason_code"] == "EVIDENCE_COMPONENT_FX_MISSING"
+    reason = next(
+        row
+        for row in result["incomplete_reasons"]
+        if row["reason_code"] == "EVIDENCE_COMPONENT_FX_MISSING"
+    )
+    assert "汇率" in reason["message"]
+
+
+def test_cost_input_hash_sorts_components_but_changes_when_a_component_changes() -> None:
+    components = [
+        {"name": "C2", "amount_rmb": "20", "cost_effect": "COST"},
+        {"name": "C1", "amount_rmb": "10", "cost_effect": "COST"},
+    ]
+    first = cost_preview_service.cost_input_hash([], [], {}, "AIR", components)
+    reordered = cost_preview_service.cost_input_hash(
+        [], [], {}, "AIR", list(reversed(components))
+    )
+    changed = cost_preview_service.cost_input_hash(
+        [], [], {}, "AIR", [{**components[0], "amount_rmb": "21"}, components[1]]
+    )
+
+    assert first == reordered
+    assert first != changed
