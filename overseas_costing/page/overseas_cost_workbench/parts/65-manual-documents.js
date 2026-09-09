@@ -54,7 +54,7 @@
     const $footer = dialog.$wrapper.find(".modal-footer");
     if (!$footer.length || $footer.find("[data-action='manual-doc-batch-parse']").length) return;
     const $button = $(
-      '<button class="btn btn-secondary btn-sm ocw-manual-batch-parse-btn" type="button" data-action="manual-doc-batch-parse">批量解析</button>'
+      '<button class="btn btn-secondary btn-sm ocw-manual-batch-parse-btn" type="button" data-action="manual-doc-batch-parse">解析手动补传</button>'
     );
     $button.on("click", () => {
       this.parseManualDocumentAttachments(batch, dialog, $button).catch((error) => this.showError(error));
@@ -114,7 +114,8 @@
     const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
     const logisticsType = this.detectManualDocumentLogisticsType(batch);
     const logisticsLabel = logisticsType ? this.transportLabel(logisticsType) : "未识别";
-    const attachmentGroups = OverseasCostWorkbenchState.partitionManualDocumentAttachments(items, logisticsType);
+    const attachmentGroups = OverseasCostWorkbenchState.partitionManualDocumentAttachments(items.filter((row) => !row.audit_only), logisticsType);
+    attachmentGroups.historical.push(...items.filter((row) => row.audit_only));
     const historyHtml = this.renderHistoricalManualDocumentAttachments(attachmentGroups.historical);
     if (!logisticsType) {
       return `
@@ -209,7 +210,7 @@
                         `
                         : ""
                     }
-                    <button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>
+                    ${attachment.source_type === "OA" || attachment.audit_only ? '<em>归档证据只读</em>' : `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>`}
                   </span>
                 </div>
               `;
@@ -224,6 +225,7 @@
     return plan
       .map((slot) => {
         const attachment = bySlot[slot.code] || null;
+        const archiveOnly = attachment && (attachment.source_type === "OA" || attachment.audit_only);
         const status = this.manualDocumentStatusInfo(slot, attachment, batch);
         const badge = this.manualDocumentBadgeInfo(slot);
         const fileName = attachment ? attachment.file_name || attachment.file_url || "--" : "";
@@ -241,12 +243,13 @@
               ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${this.escape(status.note || (slot.oaSource ? "优先从钉钉读取" : "缺了再补传"))}</em>`}
             </div>
             <div class="ocw-manual-doc-actions">
-              ${slot.oaSource ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button>` : ""}
-              ${slot.attachmentType === "Packing List" ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-dingtalk-packing-picker">从钉钉获取</button>` : ""}
+              ${!archiveOnly && slot.oaSource ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button>` : ""}
+              ${!archiveOnly && slot.attachmentType === "Packing List" ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-dingtalk-packing-picker">从钉钉获取</button>` : ""}
+              ${archiveOnly ? '<span>归档只读；装箱待核对请查看上方结算明细</span>' : `
               <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">
                 ${attachment ? "重传" : "上传"}
               </button>
-              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="manual-fill-gap" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}" data-gap-fieldname="${this.escape(focus.fieldname || "")}" data-gap-label="${this.escape(focus.label || slot.label)}">人工补填</button>
+              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="manual-fill-gap" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}" data-gap-fieldname="${this.escape(focus.fieldname || "")}" data-gap-label="${this.escape(focus.label || slot.label)}">人工补填</button>`}
               ${
                 attachment && attachment.file_url
                   ? `
@@ -256,7 +259,7 @@
                   : ""
               }
               ${
-                attachment
+                attachment && !archiveOnly
                   ? `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name)}" data-logistics-type="${this.escape(logisticsType)}">删除</button>`
                   : ""
               }
@@ -277,6 +280,7 @@
   }
 
   manualDocumentStatusInfo(slot, attachment, batch = {}) {
+    if (attachment?.source_type === "OA") return { label: attachment.audit_only ? "审计留存" : "已归档 · 查看核对状态", className: "uploaded" };
     if (attachment) return { label: "已补传", className: "uploaded" };
     const sourceAttachmentCount = Number(batch.source_attachment_count || 0);
     if (slot.oaSource && sourceAttachmentCount > 0) {
@@ -296,14 +300,20 @@
   async loadManualDocumentAttachments(batch, dialog, _logisticsType = "", focus = {}) {
     const logisticsType = this.detectManualDocumentLogisticsType(batch);
     const $target = dialog.$wrapper.find("[data-area='manual-documents']");
+    const viewedVersion = this.detailState?.batchName === batch.name ? this.detailState.versionName : batch.current_version;
+    const requestToken = {};
+    $target.data("ocw-document-request", requestToken);
     const result = await this.call(
       "overseas_costing.api.import_api.list_manual_document_attachments",
       {
         batch_name: batch.name,
+        version_name: viewedVersion || null,
         limit: 200,
       },
       true
     );
+    if ($target.data("ocw-document-request") !== requestToken) return;
+    if (this.detailState?.batchName === batch.name && this.detailState.versionName !== viewedVersion) return;
     if (!result || !result.ok) {
       $target.html(`
         <div class="ocw-purchase-empty">
@@ -676,7 +686,7 @@
     } finally {
       this.isParsingManualDocuments = false;
       if ($button && $button.length) {
-        $button.prop("disabled", false).text("批量解析");
+        $button.prop("disabled", false).text("解析手动补传");
       }
     }
   }

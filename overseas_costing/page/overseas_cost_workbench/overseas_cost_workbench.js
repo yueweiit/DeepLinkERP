@@ -5379,7 +5379,7 @@ class OverseasCostWorkbench {
     const $footer = dialog.$wrapper.find(".modal-footer");
     if (!$footer.length || $footer.find("[data-action='manual-doc-batch-parse']").length) return;
     const $button = $(
-      '<button class="btn btn-secondary btn-sm ocw-manual-batch-parse-btn" type="button" data-action="manual-doc-batch-parse">批量解析</button>'
+      '<button class="btn btn-secondary btn-sm ocw-manual-batch-parse-btn" type="button" data-action="manual-doc-batch-parse">解析手动补传</button>'
     );
     $button.on("click", () => {
       this.parseManualDocumentAttachments(batch, dialog, $button).catch((error) => this.showError(error));
@@ -5439,7 +5439,8 @@ class OverseasCostWorkbench {
     const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
     const logisticsType = this.detectManualDocumentLogisticsType(batch);
     const logisticsLabel = logisticsType ? this.transportLabel(logisticsType) : "未识别";
-    const attachmentGroups = OverseasCostWorkbenchState.partitionManualDocumentAttachments(items, logisticsType);
+    const attachmentGroups = OverseasCostWorkbenchState.partitionManualDocumentAttachments(items.filter((row) => !row.audit_only), logisticsType);
+    attachmentGroups.historical.push(...items.filter((row) => row.audit_only));
     const historyHtml = this.renderHistoricalManualDocumentAttachments(attachmentGroups.historical);
     if (!logisticsType) {
       return `
@@ -5534,7 +5535,7 @@ class OverseasCostWorkbench {
                         `
                         : ""
                     }
-                    <button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>
+                    ${attachment.source_type === "OA" || attachment.audit_only ? '<em>归档证据只读</em>' : `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name || "")}">删除</button>`}
                   </span>
                 </div>
               `;
@@ -5549,6 +5550,7 @@ class OverseasCostWorkbench {
     return plan
       .map((slot) => {
         const attachment = bySlot[slot.code] || null;
+        const archiveOnly = attachment && (attachment.source_type === "OA" || attachment.audit_only);
         const status = this.manualDocumentStatusInfo(slot, attachment, batch);
         const badge = this.manualDocumentBadgeInfo(slot);
         const fileName = attachment ? attachment.file_name || attachment.file_url || "--" : "";
@@ -5566,12 +5568,13 @@ class OverseasCostWorkbench {
               ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${this.escape(status.note || (slot.oaSource ? "优先从钉钉读取" : "缺了再补传"))}</em>`}
             </div>
             <div class="ocw-manual-doc-actions">
-              ${slot.oaSource ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button>` : ""}
-              ${slot.attachmentType === "Packing List" ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-dingtalk-packing-picker">从钉钉获取</button>` : ""}
+              ${!archiveOnly && slot.oaSource ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button>` : ""}
+              ${!archiveOnly && slot.attachmentType === "Packing List" ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-dingtalk-packing-picker">从钉钉获取</button>` : ""}
+              ${archiveOnly ? '<span>归档只读；装箱待核对请查看上方结算明细</span>' : `
               <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">
                 ${attachment ? "重传" : "上传"}
               </button>
-              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="manual-fill-gap" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}" data-gap-fieldname="${this.escape(focus.fieldname || "")}" data-gap-label="${this.escape(focus.label || slot.label)}">人工补填</button>
+              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="manual-fill-gap" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}" data-gap-fieldname="${this.escape(focus.fieldname || "")}" data-gap-label="${this.escape(focus.label || slot.label)}">人工补填</button>`}
               ${
                 attachment && attachment.file_url
                   ? `
@@ -5581,7 +5584,7 @@ class OverseasCostWorkbench {
                   : ""
               }
               ${
-                attachment
+                attachment && !archiveOnly
                   ? `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name)}" data-logistics-type="${this.escape(logisticsType)}">删除</button>`
                   : ""
               }
@@ -5602,6 +5605,7 @@ class OverseasCostWorkbench {
   }
 
   manualDocumentStatusInfo(slot, attachment, batch = {}) {
+    if (attachment?.source_type === "OA") return { label: attachment.audit_only ? "审计留存" : "已归档 · 查看核对状态", className: "uploaded" };
     if (attachment) return { label: "已补传", className: "uploaded" };
     const sourceAttachmentCount = Number(batch.source_attachment_count || 0);
     if (slot.oaSource && sourceAttachmentCount > 0) {
@@ -5621,14 +5625,20 @@ class OverseasCostWorkbench {
   async loadManualDocumentAttachments(batch, dialog, _logisticsType = "", focus = {}) {
     const logisticsType = this.detectManualDocumentLogisticsType(batch);
     const $target = dialog.$wrapper.find("[data-area='manual-documents']");
+    const viewedVersion = this.detailState?.batchName === batch.name ? this.detailState.versionName : batch.current_version;
+    const requestToken = {};
+    $target.data("ocw-document-request", requestToken);
     const result = await this.call(
       "overseas_costing.api.import_api.list_manual_document_attachments",
       {
         batch_name: batch.name,
+        version_name: viewedVersion || null,
         limit: 200,
       },
       true
     );
+    if ($target.data("ocw-document-request") !== requestToken) return;
+    if (this.detailState?.batchName === batch.name && this.detailState.versionName !== viewedVersion) return;
     if (!result || !result.ok) {
       $target.html(`
         <div class="ocw-purchase-empty">
@@ -6001,7 +6011,7 @@ class OverseasCostWorkbench {
     } finally {
       this.isParsingManualDocuments = false;
       if ($button && $button.length) {
-        $button.prop("disabled", false).text("批量解析");
+        $button.prop("disabled", false).text("解析手动补传");
       }
     }
   }
@@ -10494,6 +10504,7 @@ class OverseasCostWorkbench {
   }
 
   settlementAdoption(data = {}) {
+    if (data.historical) return data.binding ? "历史采用来源 · 仅供追溯" : "历史版本 · 尚未采用物流采购支出";
     if (!data.binding) return "未关联采购支出";
     if (data.expense?.invalid || data.logistics?.invalid) return "来源已失效 · 暂停采用";
     if (!data.expense?.approved) return "已关联 · 待审批通过";
@@ -10520,8 +10531,8 @@ class OverseasCostWorkbench {
     dialog.$wrapper.on("hide.bs.modal.ocwSettlement", (event) => {
       if (event.target === dialog.$wrapper.get(0)) this.stopSettlementDialog(state);
     });
-    dialog.$wrapper.addClass("ocw-settlement-modal");
     dialog.show();
+    dialog.$wrapper.addClass("ocw-settlement-modal");
     return state;
   }
 
@@ -10656,6 +10667,7 @@ class OverseasCostWorkbench {
     const candidates = data.candidates || [];
     this.settlementBody(state, `
       <p class="ocw-settlement-hint">覆盖已归档的历史国际物流与物流类采购支出；忽略近期拉取的日期、运输方式及条数。数据读取自本地归档，候选需确认后才建立关联。</p>
+      ${this.renderSettlementHealth(data)}
       <div class="ocw-settlement-toolbar"><strong>${this.escape(labels[job.status] || "尚未启动")} · ${this.escape(phases[job.phase] || "等待任务")}</strong>
         <span>已处理 ${this.escape(job.processed_count ?? 0)} / 已发现 ${this.escape(job.item_count ?? 0)} · 失败 ${this.escape(job.failed_count ?? data.failures?.length ?? 0)}</span>
         ${!job.id || ["completed"].includes(job.status) ? '<button class="ocw-primary-btn" data-settlement-action="start">一键匹配历史采购支出</button>' : ""}
@@ -10675,26 +10687,35 @@ class OverseasCostWorkbench {
         ${state.pages?.length ? '<button class="ocw-outline-btn" data-settlement-action="previous">上一页</button>' : ""}${data.has_more ? '<button class="ocw-outline-btn" data-settlement-action="next">下一页</button>' : ""}<span>每页最多 50 条</span></div>`);
   }
 
+  renderSettlementHealth(data = {}) {
+    const upstream = data.health?.health || {};
+    const error = upstream.last_error || data.health?.last_error || data.health?.error;
+    return `<div class="ocw-settlement-hint">本地同步：${this.escape(data.sync?.last_success || "未知／未同步")} · 上游归档最近成功：${this.escape(upstream.last_success_at || "未知／未同步")}
+      <br>待归档 ${this.escape(upstream.pending_count ?? "未知")} · 待重试 ${this.escape(upstream.retry_count ?? "未知")} · 需人工处理 ${this.escape(upstream.manual_required_count ?? "未知")}
+      ${data.pending_failure_count !== undefined ? ` · 未解决任务失败 ${this.escape(data.pending_failure_count)}` : ""}${data.control?.enabled === false ? " · 后台同步已暂停" : ""}
+      ${error ? `<p class="ocw-settlement-notice is-error">最近异常：${this.escape(error)}</p>` : ""}</div>`;
+  }
+
   renderSettlementSource(source = {}, heading = "采购支出") {
     return `<section class="ocw-settlement-source"><h4>${this.escape(heading)}</h4><strong>${this.escape(source.approval_no || source.instance || "尚未关联")}</strong>
       <p>${this.escape(source.status || "状态待核对")} · ${source.invalid ? "来源失效" : source.approved ? "审批已通过" : "尚未审批通过"}</p>
       <p>${this.escape(this.settlementAmount(source))}</p>
-      <small>${source.fees?.length ? "采用费用明细，不叠加审批总额。" : "未识别费用明细，使用总额；范围需核对。"} 更新：${this.escape(source.source_updated_at || "未提供")}</small>
+      <small>${source.fees?.length ? "采用费用明细，不叠加审批总额。" : source.amount !== null && source.amount !== undefined && source.amount !== "" ? "未识别费用明细，使用总额；范围需核对。" : "尚未识别明确费用或总额，请核对原单。"} 更新：${this.escape(source.source_updated_at || "未提供")}</small>
       ${(source.issues || []).map((issue) => `<p class="ocw-settlement-notice">${this.escape(typeof issue === "string" ? issue : JSON.stringify(issue))}</p>`).join("")}</section>`;
   }
 
   renderSettlementComparison(logistics = {}, expense = {}, labels = {}) {
     const goods = (source) => (source.goods || []).map((row) => `<tr>${[row.material_code, row.product_name, row.spec_model, row.quantity, row.unit].map((value) => `<td>${this.escape(value ?? "—")}</td>`).join("")}</tr>`).join("");
     const signature = (source) => JSON.stringify((source.goods || []).map((row) => [row.material_code, row.product_name, row.spec_model, String(row.quantity ?? ""), row.unit]));
-    return `<details class="ocw-settlement-comparison" open><summary>货物与来源核对 · ${signature(logistics) === signature(expense) ? "识别字段一致" : "存在差异，采用前请核对"}</summary>
+    return `<details class="ocw-settlement-comparison" open><summary>货物与来源核对 · ${!logistics.goods?.length || !expense.goods?.length ? "一方或双方货物尚未识别，请核对原单" : signature(logistics) === signature(expense) ? "识别字段一致" : "存在差异，采用前请核对"}</summary>
       <div class="ocw-settlement-source-grid">${[[logistics, labels.left || "国际物流货物"], [expense, labels.right || "采购支出货物"]].map(([source, title]) => `<div><h4>${this.escape(title)}</h4><div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table"><thead><tr><th>物料</th><th>品名</th><th>规格</th><th>数量</th><th>单位</th></tr></thead><tbody>${goods(source) || '<tr><td colspan="5">未识别货物行，需核对原单资料</td></tr>'}</tbody></table></div></div>`).join("")}</div>
       <p class="ocw-settlement-hint">采购支出提供最终货物基础字段；毛重、体积与计费重仍来自装箱资料。货物变化后须核对装箱对应关系。</p></details>`;
   }
 
   settlementChoiceFields(source = {}, currentCoverage = []) {
     const fields = [{ fieldtype: "Small Text", fieldname: "settlement_reason", label: "确认／更正依据", description: "冲突、更正和忽略须填写；普通候选可填写核对说明。" }];
-    if (source.coverage === "unknown") {
-      fields.push({ fieldtype: "HTML", fieldname: "coverage_note", options: '<p class="ocw-settlement-notice">费用覆盖范围不明确：请按原单选择。仅替换勾选范围内的已有费用，范围未确认时保留关联并等待采用。</p>' });
+    if (source.coverage === "unknown" || currentCoverage.length) {
+      fields.push({ fieldtype: "HTML", fieldname: "coverage_note", options: `<p class="ocw-settlement-notice">${currentCoverage.length ? "下方保留了原关联的覆盖范围；请对照当前原单重新核对，必要时取消旧范围。" : "费用覆盖范围不明确：请按原单选择。"}仅替换勾选范围内的已有费用，范围未确认时保留关联并等待采用。</p>` });
       for (const [key, label] of this.settlementCoverageOptions()) fields.push({ fieldtype: "Check", fieldname: `coverage_${key}`, label, default: currentCoverage.includes(key) ? 1 : 0 });
     }
     const negative = (source.fees?.length ? source.fees : [{ amount: source.amount }]).some((row) => Number(row.amount) < 0);
@@ -10776,21 +10797,22 @@ class OverseasCostWorkbench {
 
   async loadSettlementStrip(batchName) {
     const request = this.settlementStripRequest = (this.settlementStripRequest || 0) + 1;
-    const current = () => request === this.settlementStripRequest && this.detailState.batchName === batchName && this.detailState.tab === "documents";
+    const viewedVersion = this.detailState.versionName || null;
+    const current = () => request === this.settlementStripRequest && this.detailState.batchName === batchName && this.detailState.tab === "documents" && (this.detailState.versionName || null) === viewedVersion;
     try {
-      const data = await this.settlementApi("get_batch_settlement", { batch_name: batchName });
+      const data = await this.settlementApi("get_batch_settlement", { batch_name: batchName, version_name: viewedVersion });
       if (!current()) return;
       if (!data.ok) throw new Error(data.message || "读取关联失败");
       const $strip = this.$root.find("[data-area='settlement-strip']");
       $strip.html(`<div class="ocw-settlement-strip"><div><strong>物流采购支出</strong><span>${this.escape(this.settlementAdoption(data))}</span>
         <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后采用最终物流采购支出的货物与费用")}</small></div>
-        <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.binding ? "查看明细与费用" : "搜索／匹配采购支出"}</button>
-        ${data.binding ? '<button class="ocw-outline-btn" data-settlement-strip-action="source">打开原单</button><button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>' : ""}</div></div>`);
+        <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.historical ? "查看历史明细与费用" : data.binding ? "查看明细与费用" : "搜索／匹配采购支出"}</button>
+        ${data.binding ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开原单</button>${data.historical ? "" : '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>'}` : ""}</div></div>`);
       $strip.off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-action]", (event) => {
         const action = $(event.currentTarget).attr("data-settlement-strip-action");
         if (action === "source") { try { this.openSettlementSource(data.expense); } catch (error) { this.showError(error); } }
         else if (action === "correct") this.openSettlementSearch(batchName, data);
-        else this.openBatchSettlementDialog(batchName);
+        else this.openBatchSettlementDialog(batchName, viewedVersion);
       });
     } catch (error) {
       if (!current()) return;
@@ -10806,12 +10828,14 @@ class OverseasCostWorkbench {
     } else if (this.markBatchDirty) this.markBatchDirty(batchName);
   }
 
-  async openBatchSettlementDialog(batchName) {
+  async openBatchSettlementDialog(batchName, viewedVersion = null) {
     const state = this.settlementDialog("物流采购支出 · 明细与费用");
+    state.versionName = viewedVersion || (this.detailState?.batchName === batchName ? this.detailState.versionName : null);
     const load = async () => {
       const request = ++state.request;
       try {
-        const data = await this.settlementApi("get_batch_settlement", { batch_name: batchName });
+        if (state.data && !state.data.historical && this.detailState?.batchName === batchName) state.versionName = this.detailState.versionName;
+        const data = await this.settlementApi("get_batch_settlement", { batch_name: batchName, version_name: state.versionName });
         if (!state.open || request !== state.request) return;
         state.data = data;
         this.renderBatchSettlementDialog(state, data);
@@ -10826,6 +10850,7 @@ class OverseasCostWorkbench {
       const data = state.data || {};
       if (action === "refresh") return load();
       if (action === "source") return this.openSettlementSource(data.expense);
+      if (data.historical) throw new Error("历史版本仅供追溯，请返回当前调整草稿处理。");
       if (action === "search" || action === "correct") return this.openSettlementSearch(batchName, action === "correct" ? data : null, load);
       if (action === "history") return this.openSettlementHistory(true);
       if (action === "candidate") {
@@ -10841,15 +10866,16 @@ class OverseasCostWorkbench {
   renderBatchSettlementDialog(state, data) {
     const issues = [...new Set([...(data.binding?.issues || []), ...(data.blocking_reasons || [])])];
     this.settlementBody(state, `<div class="ocw-settlement-toolbar"><strong>${this.escape(this.settlementAdoption(data))}</strong><button class="ocw-outline-btn" data-settlement-action="refresh">刷新</button></div>
+      ${this.renderSettlementHealth(data)}
       ${data.message ? `<p>${this.escape(data.message)}</p>` : ""}
       ${data.binding ? `<div class="ocw-settlement-source-grid">${this.renderSettlementSource(data.logistics, "国际物流来源")}${this.renderSettlementSource(data.expense)}</div>
         ${this.renderSettlementComparison(data.logistics, data.expense)}
         <p>费用覆盖范围：${this.escape((data.binding.coverage || []).map((key) => Object.fromEntries(this.settlementCoverageOptions())[key] || key).join("、") || (data.expense?.coverage === "unknown" ? "待确认" : "国际运输费"))} · 采用版本：${this.escape(data.binding.version || "尚未采用")}</p>
         ${issues.map((issue) => `<p class="ocw-settlement-notice">${this.escape(issue)}</p>`).join("")}
-        <p class="ocw-settlement-hint">已采用的费用仍需重新试算。装箱、货值或汇率待核对时，请先补充对应资料；已确认版本保留历史。</p>
-        <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-action="source">打开原单</button><button class="ocw-outline-btn" data-settlement-action="correct">更正关联</button><button class="ocw-primary-btn" data-settlement-action="apply">核对范围／重试采用</button>
-          ${(data.item_reviews || []).some((row) => row.packing_pending || row.goods_value_pending) ? '<button class="ocw-outline-btn" data-settlement-action="items">核对装箱与货值</button>' : ""}</div>`
-        : `<div class="ocw-settlement-toolbar"><button class="ocw-primary-btn" data-settlement-action="search">搜索采购支出</button><button class="ocw-outline-btn" data-settlement-action="history">一键匹配历史采购支出</button></div>
+        <p class="ocw-settlement-hint">${data.historical ? "显示此版本采用时的采购支出快照，当前原单后续变化不会改写历史结果。" : "已采用的费用仍需重新试算。装箱、货值或汇率待核对时，请先补充对应资料；已确认版本保留历史。"}</p>
+        <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-action="source">打开原单</button>${data.historical ? "" : '<button class="ocw-outline-btn" data-settlement-action="correct">更正关联</button><button class="ocw-primary-btn" data-settlement-action="apply">核对范围／重试采用</button>'}
+          ${!data.historical && (data.item_reviews || []).some((row) => row.packing_pending || row.goods_value_pending) ? '<button class="ocw-outline-btn" data-settlement-action="items">核对装箱与货值</button>' : ""}</div>`
+        : data.historical ? '<p>此历史版本没有物流采购支出采用记录。</p>' : `<div class="ocw-settlement-toolbar"><button class="ocw-primary-btn" data-settlement-action="search">搜索采购支出</button><button class="ocw-outline-btn" data-settlement-action="history">一键匹配历史采购支出</button></div>
           ${(data.candidates || []).filter((row) => ["pending", "conflict"].includes(row.status)).map((row) => `<p>${this.escape(row.expense?.approval_no || row.expense?.instance)} · ${this.escape(this.settlementAmount(row.expense || {}))} · ${row.status === "conflict" ? "冲突" : "待确认"} <button class="ocw-outline-btn" data-settlement-action="candidate" data-id="${this.escape(row.id)}">复核关联</button></p>`).join("")}`}
       ${data.audit?.length ? `<details><summary>关联与采用记录</summary>${data.audit.map((row) => `<p>${this.escape(row.created_at || row.at || "")} · ${this.escape(row.action || "记录")} · ${this.escape(row.actor || "")} ${this.escape(row.reason || "")}</p>`).join("")}</details>` : ""}`);
   }
@@ -10902,6 +10928,7 @@ class OverseasCostWorkbench {
       if (action !== "apply") return;
       const choices = this.settlementChoices(state);
       const result = await this.settlementWrite(state, () => this.settlementApi("retry_application", { batch_name: batchName, expected_revision: data.binding.revision,
+        expected_snapshot: data.expense.snapshot, expected_version: data.viewed_version,
         ...(choices.coverage.length ? { coverage: JSON.stringify(choices.coverage) } : {}), negative_confirmed: choices.negative_confirmed }));
       this.settlementActions(state, "");
       this.settlementBody(state, this.renderSettlementWriteResult(result));
@@ -10912,8 +10939,16 @@ class OverseasCostWorkbench {
 
   renderSettlementItemReviews(items) {
     return `<div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table"><thead><tr><th>物料／品名</th><th>最终数量／单位</th><th>装箱数量／毛重／体积／计费重</th><th>采购货值</th><th>核对选择</th></tr></thead><tbody>${items.filter((row) => row.packing_pending || row.goods_value_pending).map((row, index) => `<tr><td>${this.escape(row.material_code)}<small>${this.escape(row.product_name)} ${this.escape(row.spec_model)}</small></td><td>${this.escape(row.quantity ?? "—")} ${this.escape(row.unit)}</td>
-      <td>装箱数量 ${this.escape(row.packing_quantity ?? "—")}<small>毛重 ${this.escape(row.gross_weight_kg ?? "—")} kg · 体积 ${this.escape(row.volume_m3 ?? "—")} m³ · 计费重 ${this.escape(row.chargeable_weight_kg ?? "—")} kg</small></td><td>${this.escape(row.goods_value ?? "—")}<small>单价 ${this.escape(row.unit_price ?? "—")}</small></td><td>
+      <td>装箱数量 ${this.escape(row.packing_quantity ?? "—")}<small>毛重 ${this.escape(row.gross_weight_kg ?? "—")} kg · 体积 ${this.escape(row.volume_m3 ?? "—")} m³ · 计费重 ${this.escape(row.chargeable_weight_kg ?? "—")} kg</small>${this.renderSettlementPackingCandidates(row.packing_candidates || [])}</td><td>${this.escape(row.goods_value ?? "—")}<small>单价 ${this.escape(row.unit_price ?? "—")}</small></td><td>
       ${row.packing_pending ? `<label><input type="checkbox" data-review-index="${index}" data-check="packing_confirmed"> 已核对装箱对应关系</label>` : ""}${row.goods_value_pending ? `<label><input type="checkbox" data-review-index="${index}" data-check="goods_value_confirmed"> 已核对采购货值</label>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+  }
+
+  renderSettlementPackingCandidates(candidates) {
+    if (!candidates.length) return "";
+    const labels = { actual_shipped_qty: "实发数量", quantity_applicability: "最终数量／装箱数量", gross_weight_kg: "毛重 kg", volume_m3: "体积 m³", chargeable_weight_kg: "计费重 kg", volume_weight_kg: "体积重 kg", weight_ratio: "重量比例" };
+    return `<details open><summary>归档候选与现有值</summary>${candidates.map((candidate) => `<p>${this.escape(candidate.reason || "装箱资料待核对")}<small>附件 ${this.escape(candidate.document_id || "")} · 行 ${this.escape(candidate.line ?? "—")}</small></p>
+      ${(candidate.conflicts || []).map((row) => `<p>${this.escape(labels[row.field] || row.field)}：现有 ${this.escape(row.existing ?? "—")} → 归档候选 ${this.escape(row.candidate ?? "—")}</p>`).join("")}
+      ${candidate.retired ? `<p>原依据已撤销，受影响字段：${this.escape((candidate.fields || []).map((field) => labels[field] || field).join("、"))}</p>` : ""}`).join("")}</details>`;
   }
 
   openSettlementItemReview(batchName, data, onComplete) {

@@ -224,6 +224,7 @@ def list_manual_document_attachments(
     batch_name: str,
     logistics_type: str | None = None,
     limit: int | None = 200,
+    version_name: str | None = None,
 ) -> dict:
     """查询人工上传的资料清单附件。"""
 
@@ -232,6 +233,7 @@ def list_manual_document_attachments(
         batch_name=batch_name,
         logistics_type=logistics_type,
         limit=limit,
+        version_name=version_name,
     )
 
 

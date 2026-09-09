@@ -1919,6 +1919,12 @@ def recalculate_batch(
     if not resolved_version_name:
         return {"ok": False, "batch_name": batch_doc_name, "message": "当前批次没有可重算版本。"}
 
+    from overseas_costing.services.logistics_settlement.runtime import calculation_blockers
+    settlement_issues = calculation_blockers(batch_doc_name, resolved_version_name, for_calculation=True, lock=True)
+    if settlement_issues:
+        return {"ok": False, "batch_name": batch_doc_name, "version_name": resolved_version_name,
+                "message": "；".join(settlement_issues), "calculation_review": {"status": "blocked", "issues": settlement_issues}}
+
     batch = _frappe.db.get_value(
         "Overseas Cost Batch",
         batch_doc_name,

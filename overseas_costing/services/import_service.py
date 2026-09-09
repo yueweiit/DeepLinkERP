@@ -943,6 +943,7 @@ def list_manual_document_attachments(
     batch_name: str,
     logistics_type: str | None = None,
     limit: int | None = 200,
+    version_name: str | None = None,
 ) -> dict:
     """返回人工上传的资料记录，用于资料补齐清单展示。"""
 
@@ -990,6 +991,15 @@ def list_manual_document_attachments(
         limit_page_length=requested_limit,
     )
 
+    resolved_version = _resolve_version_name(batch_doc_name, version_name)
+    oa_rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters={"batch": batch_doc_name, "source_type": "OA", "parse_result_json": ["like", '%"settlement_document"%']},
+        fields=["name","batch","version","source_type","attachment_type","source_doc_no","file_name","file_url","parse_status","parse_result_json","mapped_result_json","remark","creation","modified"],
+        order_by="creation asc", limit_page_length=requested_limit,
+    )
+    rows.extend(row for row in oa_rows if not row.get('version') or row['version'] == resolved_version)
+
     logistics_filter = str(logistics_type or "").strip().upper()
     items = []
     for row in rows:
@@ -1013,6 +1023,7 @@ def list_manual_document_attachments(
                 "slot_label": manual_meta.get("slot_label") or row.get("source_doc_no") or "",
                 "logistics_type": row_logistics_type,
                 "required": bool(manual_meta.get("required")),
+                "audit_only": bool(parse_result.get("approval_excluded") or parse_result.get("cost_source_allowed") is False or (row.get("source_type") == "OA" and not row.get("version"))),
                 "manual_note": manual_meta.get("manual_note") or row.get("remark") or "",
                 "remark": row.get("remark") or "",
                 "creation": row.get("creation"),
@@ -4219,6 +4230,9 @@ def _update_item_fields(
     if frappe is None:
         return []
 
+    from overseas_costing.services.logistics_settlement.runtime import guard_legacy_item_write
+    guard_legacy_item_write(batch_doc_name, version_name)
+
     item_doc = frappe.get_doc("Overseas Cost Item", item_name)
     changed_fields: list[dict] = []
 
@@ -5895,6 +5909,10 @@ def _create_packing_items_from_unmatched_preview(
     unmatched_rows = writeback_preview.get("unmatched_rows") or []
     if frappe is None or not unmatched_rows:
         return {"created_rows": [], "skipped_rows": []}
+
+    from overseas_costing.services.logistics_settlement.runtime import has_final_binding
+    if has_final_binding(batch_doc_name):
+        return {'created_rows': [], 'skipped_rows': [{'row': row, 'reason': '最终货物以采购支出为准；装箱中未匹配的行保留待核对'} for row in unmatched_rows]}
 
     attachment_provenance = _build_packing_attachment_provenance(
         attachment_name=attachment_name,

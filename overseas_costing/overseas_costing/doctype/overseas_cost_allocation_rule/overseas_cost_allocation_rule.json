@@ -19,7 +19,11 @@
     "priority_no",
     "remark",
     "is_enabled",
-    "is_active"
+    "is_active",
+    "source_binding_id",
+    "source_snapshot",
+    "covered_scopes",
+    "is_final"
   ],
   "fields": [
     {
@@ -69,7 +73,8 @@
     {
       "fieldname": "amount",
       "fieldtype": "Currency",
-      "label": "金额"
+      "label": "金额",
+      "precision": "6"
     },
     {
       "fieldname": "priority_no",
@@ -93,6 +98,30 @@
       "fieldtype": "Check",
       "label": "参与重算",
       "default": 1
+    },
+    {
+      "fieldname": "source_binding_id",
+      "fieldtype": "Data",
+      "label": "最终费用关联ID",
+      "read_only": 1
+    },
+    {
+      "fieldname": "source_snapshot",
+      "fieldtype": "Data",
+      "label": "最终来源快照",
+      "read_only": 1
+    },
+    {
+      "fieldname": "covered_scopes",
+      "fieldtype": "Data",
+      "label": "费用覆盖范围",
+      "read_only": 1
+    },
+    {
+      "fieldname": "is_final",
+      "fieldtype": "Check",
+      "label": "最终结算费用",
+      "read_only": 1
     }
   ],
   "permissions": [

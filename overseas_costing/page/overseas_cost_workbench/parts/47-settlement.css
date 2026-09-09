@@ -1,3 +1,12 @@
+.ocw-settlement-modal {
+  --ocw-brand: #0b8cf0;
+  --ocw-brand-dark: #076fbe;
+}
+.ocw-primary-btn[data-settlement-action] {
+  color: #fff;
+  background: #0b8cf0;
+  border-color: #0b8cf0;
+}
 .ocw-settlement-strip {
   display: flex;
   align-items: center;

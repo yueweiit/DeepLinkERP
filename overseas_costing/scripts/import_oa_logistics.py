@@ -3615,6 +3615,9 @@ def extract_purchase_expense_rows(instance: dict) -> list[dict]:
 def build_purchase_expense_item_values_from_approval(instance: dict) -> list[dict]:
     """把采购支出 OA 明细行映射成可回填采购字段的预览结构。"""
 
+    from overseas_costing.services.logistics_settlement.model import is_logistics_expense, components
+    if is_logistics_expense({c.get('name', ''): c.get('value') for c in components(instance)}):
+        return []
     values: list[dict] = []
     for row in extract_purchase_expense_rows(instance):
         mapped = map_purchase_expense_row_to_item(row)
@@ -4025,6 +4028,10 @@ def _sync_oa_goods_items(
     approval_item: dict,
     only_when_empty: bool = True,
 ) -> dict:
+    from overseas_costing.services.logistics_settlement.runtime import has_final_binding
+    if frappe is not None and has_final_binding(batch_name):
+        return {'action': 'skipped', 'ok': True, 'created_count': 0, 'updated_count': 0, 'skipped': True, 'reason': '已关联最终物流采购支出，保留其费用与物料来源'}
+
     if frappe is None:
         item_values = build_oa_item_values_from_approval(approval_item)
         return {
@@ -4180,6 +4187,10 @@ def _replace_items_with_purchase_expense_rows(
     approval_item: dict,
     purchase_rows: list[dict],
 ) -> dict:
+    from overseas_costing.services.logistics_settlement.runtime import has_final_binding
+    if frappe is not None and has_final_binding(batch_name):
+        return {'action': 'skipped', 'ok': True, 'created_count': 0, 'updated_count': 0, 'skipped': True, 'reason': '已关联最终物流采购支出，保留其费用与物料来源'}
+
     if frappe is None:
         return {
             "action": "preview",
@@ -4273,6 +4284,10 @@ def _restore_main_logistics_items_after_excluded_purchases(
     approval_item: dict,
     excluded_purchase_summaries: list[dict],
 ) -> dict:
+    from overseas_costing.services.logistics_settlement.runtime import has_final_binding
+    if frappe is not None and has_final_binding(batch_name):
+        return {'action': 'skipped', 'ok': True, 'created_count': 0, 'updated_count': 0, 'skipped': True, 'reason': '已关联最终物流采购支出，保留其费用与物料来源'}
+
     """只在现有行全部能证明来自已排除采购审批时，恢复主物流审批物料。"""
 
     excluded_purchase_decisions = [
@@ -4684,7 +4699,8 @@ def _sync_linked_purchase_fields(
                 "excluded_purchase_summaries": preview_result.get("excluded_purchase_summaries") or [],
                 "repair_result": repair_result,
             }
-        if preview_result.get("ok") and purchase_rows:
+        from overseas_costing.services.logistics_settlement.runtime import has_final_binding
+        if preview_result.get("ok") and purchase_rows and not has_final_binding(batch_name):
             rebuild_result = _replace_items_with_purchase_expense_rows(
                 batch_name=batch_name,
                 version_name=version_name,
@@ -4838,6 +4854,10 @@ def _sync_oa_logistics_allocation_rule(
     version_name: str,
     approval_item: dict,
 ) -> dict:
+    from overseas_costing.services.logistics_settlement.runtime import has_final_binding
+    if frappe is not None and has_final_binding(batch_name):
+        return {'action': 'skipped', 'ok': True, 'created_count': 0, 'updated_count': 0, 'skipped': True, 'reason': '已关联最终物流采购支出，保留其费用与物料来源'}
+
     """把国际物流 OA 的物流费用落成整票分摊规则。"""
 
     fee = approval_item.get("logistics_fee") if isinstance(approval_item.get("logistics_fee"), dict) else {}

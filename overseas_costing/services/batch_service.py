@@ -2494,14 +2494,15 @@ def _build_calculation_confirmation_readiness(
     actual_item_count = len(items)
     invalid_business_state = _build_invalid_business_state(batch, items)
 
-    has_international_freight = _has_positive_rule(
+    final_scopes = {scope.strip() for rule in rules if rule.get("is_final") and rule.get("is_enabled", 1) and rule.get("is_active", 1) for scope in str(rule.get("covered_scopes") or "").split(",")}
+    has_international_freight = ("freight" in final_scopes) or _has_positive_rule(
         rules,
         ("freight", "logistics", "运输", "运费", "海运", "物流"),
     ) or _has_positive_item_value(
         items,
         ("china_to_mexico_freight_rmb", "freight_alloc_rmb", "freight_alloc_mxn"),
     )
-    has_clearance_fee = _has_positive_rule(
+    has_clearance_fee = ("customs" in final_scopes) or _has_positive_rule(
         rules,
         ("clearance", "customs", "清关", "报关", "货代"),
     ) or _has_zero_confirmed_rule(
@@ -2511,7 +2512,7 @@ def _build_calculation_confirmation_readiness(
         items,
         ("mexico_customs_mxn", "mexico_customs_rmb", "mexico_customs_usd"),
     )
-    has_tariff = _has_positive_rule(
+    has_tariff = ("tax" in final_scopes) or _has_positive_rule(
         rules,
         ("tariff", "duty", "tax", "关税", "税费", "igi", "iva"),
     ) or _has_zero_confirmed_rule(
@@ -2536,7 +2537,8 @@ def _build_calculation_confirmation_readiness(
         **item_quality["checks"],
     }
 
-    blocking_reasons = []
+    from overseas_costing.services.logistics_settlement.runtime import calculation_blockers
+    blocking_reasons = calculation_blockers(batch.get("name") or "", resolved_version_name)
     if checks["has_invalid_business_approval"]:
         blocking_reasons.append(invalid_business_state.get("message") or "当前批次存在已拒绝/撤销/终止审批，不进入综合成本确认或 ERP 推送。")
     if not checks["has_current_version"]:
@@ -2607,7 +2609,8 @@ def _build_writeback_readiness(
         **item_quality["checks"],
     }
 
-    blocking_reasons = []
+    from overseas_costing.services.logistics_settlement.runtime import calculation_blockers
+    blocking_reasons = calculation_blockers(batch.get("name") or "", resolved_version_name)
     if checks["has_invalid_business_approval"]:
         blocking_reasons.append(invalid_business_state.get("message") or "当前批次存在已拒绝/撤销/终止审批，不进入综合成本确认或 ERP 推送。")
     if not checks["has_current_version"]:
@@ -2788,7 +2791,7 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
                 "basis_field",
                 "currency",
                 "amount",
-                "remark",
+                "remark", "is_enabled", "is_active", "is_final", "source_binding_id", "source_snapshot", "covered_scopes",
             ],
             order_by="priority_no asc, modified asc",
             limit_page_length=1000,
@@ -2944,6 +2947,11 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
             "message": "当前未连接 Frappe，不能真实确认计算结果。",
         }
 
+    from overseas_costing.services.logistics_settlement.runtime import lock_for_final_action, installed
+    settlement_issues = lock_for_final_action(_resolve_batch_name(batch_name) or batch_name, version_name) if installed() else []
+    if settlement_issues:
+        return {'ok': False, 'confirmed': False, 'blocking_reasons': settlement_issues, 'message': '；'.join(settlement_issues)}
+
     context = _load_erp_push_context(batch_name, version_name)
     if not context.get("ok"):
         return {**context, "confirmed": False}
@@ -3081,6 +3089,11 @@ def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dic
 
 
 def writeback_to_erp(batch_name: str, version_name: str | None = None) -> dict:
+    if frappe is not None:
+        from overseas_costing.services.logistics_settlement.runtime import lock_for_final_action, installed
+        settlement_issues = lock_for_final_action(_resolve_batch_name(batch_name) or batch_name, version_name) if installed() else []
+        if settlement_issues:
+            return {'ok': False, 'queued': False, 'pushed': False, 'blocking_reasons': settlement_issues, 'message': '；'.join(settlement_issues)}
     preview = preview_erp_payload(batch_name=batch_name, version_name=version_name)
     if not preview.get("ok"):
         return {

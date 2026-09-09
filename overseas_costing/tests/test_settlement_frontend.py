@@ -171,3 +171,70 @@ assert.equal(calls[0].method,'resolve_item_checks');
 assert.deepEqual(JSON.parse(calls[0].args.selections),[{item_name:'line',expected_item_hash:'currenthash',packing_confirmed:true}]);
 assert.equal(calls[0].args.expected_revision,9);
 ''')
+
+
+def test_historical_adoption_shows_frozen_source_and_no_write_actions():
+    run_js(CONTROLLER + '''
+const data={historical:true,binding:{application_status:'historical',version:'old'},expense:{approval_no:'OLD',amount:0,currency:'MXN',approved:true},logistics:{},item_reviews:[{packing_pending:true}]};
+w.renderBatchSettlementDialog({},data);
+assert(w.settlementAdoption(data).includes('历史采用来源'));
+const state={};w.renderBatchSettlementDialog(state,data);
+assert(state.html.includes('OLD'));assert(state.html.includes('0 MXN'));
+for(const action of ['correct','apply','items','search','history'])assert(!state.html.includes('data-settlement-action="'+action+'"'));
+''')
+
+
+def test_negative_acknowledgement_is_bound_to_reviewed_snapshot_and_version():
+    run_js(CONTROLLER + '''
+w.settlementApi=async(method,args)=>{calls.push({method,args});return {ok:true,application_status:'pending'}};
+w.openSettlementApplicationReview('B',{binding:{revision:2},viewed_version:'v1',expense:{amount:-10,coverage:'unknown',snapshot:'minus-ten'}},async()=>{});
+active.dialog.get_value=key=>key==='negative_confirmed'||key==='coverage_freight';
+await active.handler('apply');
+assert.equal(calls[0].args.expected_snapshot,'minus-ten');assert.equal(calls[0].args.expected_version,'v1');
+assert.equal(calls[0].args.negative_confirmed,true);assert(!('amount' in calls[0].args));
+''')
+
+
+def test_oa_archive_cards_are_read_only_and_manual_cards_keep_existing_controls():
+    manual = json.dumps(str(PARTS / '65-manual-documents.js'))
+    run_js('''
+const Manual=new Function('return class {'+fs.readFileSync(MANUAL,'utf8')+'}')();
+const m=new Manual();m.escape=w.escape;
+const plan=[{code:'sea_packing_list',label:'装箱单',attachmentType:'Packing List'}];
+const archive={name:'a',source_type:'OA',file_url:'/private/files/packing.xlsx',file_name:'packing.xlsx'};
+const html=m.renderManualDocumentCards(plan,{sea_packing_list:archive},'SEA',{});
+assert(html.includes('preview-manual-document'));
+for(const action of ['delete-manual-document','upload-manual-document','manual-fill-gap','open-dingtalk-packing-picker'])assert(!html.includes('data-action="'+action+'"'));
+assert(m.renderManualDocumentCards(plan,{sea_packing_list:{...archive,source_type:'Manual'}},'SEA',{}).includes('delete-manual-document'));
+'''.replace('MANUAL', manual))
+
+
+def test_health_keeps_local_and_upstream_freshness_distinct_and_missing_unknown():
+    run_js('''
+assert(w.renderSettlementHealth({}).includes('未知／未同步'));
+const html=w.renderSettlementHealth({sync:{last_success:'LOCAL'},health:{health:{last_success_at:'UPSTREAM',pending_count:0,retry_count:2,manual_required_count:1,last_error:'<script>'}},pending_failure_count:3,control:{enabled:false}});
+assert(html.includes('本地同步：LOCAL'));assert(html.includes('上游归档最近成功：UPSTREAM'));assert(html.includes('待归档 0'));assert(html.includes('未解决任务失败 3'));assert(html.includes('后台同步已暂停'));assert(!html.includes('<script>'));
+''')
+
+
+def test_packing_ack_shows_preserved_and_candidate_values_before_confirmation():
+    run_js('''
+const html=w.renderSettlementItemReviews([{item_name:'i',quantity:4,packing_pending:true,packing_candidates:[{document_id:'<doc>',reason:'冲突',line:2,conflicts:[{field:'gross_weight_kg',existing:8,candidate:0}]}]}]);
+assert(html.includes('现有 8 → 归档候选 0'));assert(html.includes('毛重 kg'));assert(html.includes('&lt;doc&gt;'));
+''')
+
+
+def test_unidentified_goods_and_amount_are_not_described_as_matched_or_usable():
+    run_js('''
+const html=w.renderSettlementComparison({goods:[]},{goods:[]});
+assert(!html.includes('识别字段一致'));assert(html.includes('尚未识别'));
+assert(!w.renderSettlementSource({amount:null}).includes('使用总额'));
+''')
+
+
+def test_existing_coverage_can_be_reviewed_even_when_new_source_has_known_scope():
+    run_js('''
+const fields=w.settlementChoiceFields({coverage:'freight',amount:100},['freight','customs']);
+assert(fields.some(f=>f.fieldname==='coverage_customs'&&f.default===1));
+assert(fields.some(f=>f.fieldname==='coverage_freight'));
+''')

@@ -27,8 +27,10 @@ doc_events = {}
 
 scheduler_events = {
     "cron": {
+        "*/10 * * * *": ["overseas_costing.services.logistics_settlement.runtime.resume_pending"],
+        "0 3 * * 0": ["overseas_costing.services.logistics_settlement.runtime.weekly_reconcile"],
         "0 */6 * * *": [
-            "overseas_costing.scripts.import_oa_logistics.scheduled_pull_logistics_approvals",
+            "overseas_costing.services.logistics_settlement.runtime.scheduled_sync",
         ],
     },
 }

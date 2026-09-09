@@ -43,6 +43,8 @@ WORKSPACE_NAME_CANDIDATES = (
 def after_install() -> None:
     """中文用途：Frappe 安装 app 后的初始化入口。"""
 
+    from overseas_costing.services.logistics_settlement.schema import install as install_settlement
+    install_settlement()
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()
@@ -55,6 +57,8 @@ def after_install() -> None:
 def after_migrate() -> None:
     """中文用途：Frappe migrate 后确保桌面入口存在。"""
 
+    from overseas_costing.services.logistics_settlement.schema import install as install_settlement
+    install_settlement()
     ensure_language_defaults()
     ensure_access_role()
     ensure_erpnext_standard_fields()

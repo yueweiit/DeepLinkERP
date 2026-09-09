@@ -54,7 +54,8 @@
     "actual_total_cost_rmb",
     "import_remark",
     "source_remark",
-    "extra_json"
+    "extra_json",
+    "source_corp_id"
   ],
   "fields": [
     {
@@ -329,6 +330,12 @@
       "fieldtype": "Long Text",
       "label": "扩展JSON",
       "permlevel": 1
+    },
+    {
+      "fieldname": "source_corp_id",
+      "fieldtype": "Data",
+      "label": "来源企业ID",
+      "read_only": 1
     }
   ],
   "permissions": [

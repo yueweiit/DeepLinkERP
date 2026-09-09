@@ -18,13 +18,13 @@ SOURCE_PRIORITY_RULES = {
         "label": "采购价/货值",
         "authoritative_source": "采购支出 OA",
         "fallback_sources": ["商业发票/装箱单等结构化附件", "OCR/文本解析候选", "人工补录"],
-        "summary": "采购单价、币种和货值优先采用采购支出 OA；附件只在 OA 缺失时补充。",
+        "summary": "商品采购单价、币种和货值优先采用商品采购支出 OA；附件只在 OA 缺失时补充。",
     },
     "logistics_fee": {
         "label": "物流费/清关费/杂费",
-        "authoritative_source": "国际物流 OA",
+        "authoritative_source": "已通过且已关联的物流结算采购支出 OA",
         "fallback_sources": ["OA 附件/货代账单/费用清单", "OCR/文本解析候选", "人工补录"],
-        "summary": "物流费、清关费和杂费优先采用国际物流 OA；附件和解析结果只做补充或复核。",
+        "summary": "物流结算采购支出覆盖的费用采用最终金额；国际物流用于初始暂估，未覆盖费用保留独立来源。",
     },
     "attachment_candidate": {
         "label": "附件解析候选",
@@ -49,7 +49,7 @@ def get_source_priority_policy() -> dict:
     return {
         "order": order,
         "rules": rules,
-        "short_summary": "税费听完税凭证；采购价听采购支出 OA；物流/清关/杂费听国际物流 OA；附件和 OCR 只做补充；人工调整保留记录。",
+        "short_summary": "税费听完税凭证；采购价听采购支出 OA；物流结算覆盖费用听最终采购支出 OA；附件和 OCR 只做补充；人工调整保留记录。",
     }
 
 
