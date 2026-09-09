@@ -184,7 +184,7 @@ def allocate_tax_certificate_components(
     for line in line_items or []:
         taxes = line.get("taxes") if isinstance(line.get("taxes"), dict) else {}
         tax_amounts = [
-            (tax_code, _decimal(taxes.get(fieldname)))
+            (fieldname, tax_code, _decimal(taxes.get(fieldname)))
             for fieldname, tax_code in LINE_TAX_FIELDS.items()
             if _decimal(taxes.get(fieldname)) not in (None, Decimal("0"))
         ]
@@ -214,7 +214,8 @@ def allocate_tax_certificate_components(
             )
             continue
         bases.add(basis)
-        for tax_code, amount in tax_amounts:
+        line_source = line.get("source_evidence") if isinstance(line.get("source_evidence"), dict) else {}
+        for fieldname, tax_code, amount in tax_amounts:
             assert amount is not None
             original_allocations = _allocate_money(amount, weights)
             if rmb_to_mxn:
@@ -225,6 +226,11 @@ def allocate_tax_certificate_components(
                 item = by_name[item_name]
                 evidence = {
                     **source_ref,
+                    **(
+                        line_source.get(fieldname)
+                        if isinstance(line_source.get(fieldname), dict)
+                        else {}
+                    ),
                     "row": line.get("row_no"),
                     "hs_code": str(line.get("hs_code") or ""),
                     "import_name": str(line.get("import_name") or ""),
@@ -378,14 +384,44 @@ def summarize_evidence_ledger(evidence: list[dict], *, current_amount: Any, curr
     }
 
 
-def _generic_amount(parsed: dict) -> tuple[str, str]:
+def _generic_amount(parsed: dict) -> dict:
     from overseas_costing.services import fee_service
 
     candidates = fee_service._extract_amount_candidates(parsed)
     if not candidates:
-        return "", ""
-    row = candidates[0]
-    return str(row.get("amount") or ""), str(row.get("currency") or "")
+        return {"amount": "", "currency": "", "path": ""}
+    return dict(candidates[0])
+
+
+def _precise_source_ref(ref: dict | None) -> bool:
+    row = ref if isinstance(ref, dict) else {}
+    return bool(
+        (row.get("page") and row.get("text_line"))
+        or (row.get("sheet") and row.get("cell"))
+        or row.get("region")
+        or row.get("image_region")
+        or row.get("type") == "MANUAL_REVIEW"
+    )
+
+
+def _source_refs(parsed: dict, paths: list[str], *, attachment: dict) -> list[dict]:
+    source_map = (
+        parsed.get("source_evidence")
+        if isinstance(parsed.get("source_evidence"), dict)
+        else {}
+    )
+    refs = []
+    for path in paths:
+        locator = source_map.get(path) if isinstance(source_map.get(path), dict) else {}
+        ref = {
+            "attachment": str(attachment.get("name") or ""),
+            "file_name": str(attachment.get("file_name") or ""),
+            "path": path,
+            **locator,
+        }
+        if ref not in refs:
+            refs.append(ref)
+    return refs
 
 
 def build_fee_evidence_review_draft(
@@ -402,21 +438,65 @@ def build_fee_evidence_review_draft(
     parsed = _json_dict(attachment.get("parse_result_json"))
     mapped = _json_dict(attachment.get("mapped_result_json"))
     combined = {**parsed, **mapped}
-    accounting = suggest_evidence_accounting(
+    deterministic_accounting = suggest_evidence_accounting(
         combined,
         evidence_role=evidence_role,
         file_name=str(attachment.get("file_name") or ""),
     )
+    accounting = dict(deterministic_accounting)
+    semantic_conflicts = []
     if ai_review:
-        for fieldname in ("evidence_type", "accounting_role", "direction", "is_final", "suggested_amount_status", "confidence", "reason"):
+        for fieldname in (
+            "evidence_type",
+            "accounting_role",
+            "direction",
+            "is_final",
+            "suggested_amount_status",
+            "confidence",
+            "reason",
+        ):
             if ai_review.get(fieldname) not in (None, ""):
+                if (
+                    fieldname in {"evidence_type", "accounting_role", "direction", "is_final"}
+                    and (_decimal(deterministic_accounting.get("confidence"), Decimal("0")) or Decimal("0"))
+                    >= Decimal("0.90")
+                    and str(ai_review.get(fieldname))
+                    != str(deterministic_accounting.get(fieldname))
+                ):
+                    semantic_conflicts.append(fieldname)
                 accounting[fieldname] = ai_review[fieldname]
     split = split_customs_evidence(combined)
-    is_tax = accounting["evidence_type"] == "TAX_CERTIFICATE"
-    amount, currency = _generic_amount(combined)
-    if is_tax:
+    deterministic_is_tax = deterministic_accounting["evidence_type"] == "TAX_CERTIFICATE"
+    amount_candidate = _generic_amount(combined)
+    amount = str(amount_candidate.get("amount") or "")
+    currency = str(amount_candidate.get("currency") or "")
+    if deterministic_is_tax:
         amount = split["document_total"] or split["import_tax_amount"]
         currency = "MXN"
+        evidence_paths = (
+            ["header.paid_total_mxn"]
+            if split["document_total"]
+            else [
+                f"tax_totals.{fieldname}"
+                for fieldname in TAX_TOTAL_FIELDS
+                if _decimal((combined.get("tax_totals") or {}).get(fieldname), Decimal("0"))
+            ]
+        )
+    else:
+        candidate_path = str(amount_candidate.get("path") or "")
+        evidence_paths = [candidate_path] if candidate_path else []
+    evidence_source_refs = _source_refs(combined, evidence_paths, attachment=attachment)
+    precise_amount_source = bool(evidence_source_refs) and all(
+        _precise_source_ref(ref) for ref in evidence_source_refs
+    )
+    confidence = _decimal(accounting.get("confidence"), Decimal("0")) or Decimal("0")
+    has_conflict = bool(semantic_conflicts)
+    default_selected = (
+        confidence >= Decimal("0.90")
+        and bool(amount)
+        and precise_amount_source
+        and not has_conflict
+    )
     evidence = {
         **accounting,
         "proposal_id": "evidence:classification",
@@ -424,17 +504,79 @@ def build_fee_evidence_review_draft(
         "file_name": str(attachment.get("file_name") or ""),
         "original_amount": amount,
         "currency": currency or "RMB",
-        "default_selected": Decimal(str(accounting.get("confidence") or "0")) >= Decimal("0.90") and bool(amount),
-        "source_refs": [{"attachment": str(attachment.get("name") or ""), "path": "parse_result_json"}],
+        "default_selected": default_selected,
+        "source_refs": evidence_source_refs,
+        "has_conflict": has_conflict,
+        "needs_review": has_conflict or not precise_amount_source or confidence < Decimal("0.90"),
+        "warning": (
+            "AI 语义判断与确定性规则冲突，请人工核对。"
+            if has_conflict
+            else (
+                "金额缺少可定位证据，请对照原附件确认。"
+                if amount and not precise_amount_source
+                else ""
+            )
+        ),
     }
     fee_splits = []
-    if is_tax:
+    if deterministic_is_tax:
+        tax_paths = [
+            f"tax_totals.{fieldname}"
+            for fieldname in TAX_TOTAL_FIELDS
+            if _decimal((combined.get("tax_totals") or {}).get(fieldname), Decimal("0"))
+        ]
+        tax_source_refs = _source_refs(combined, tax_paths, attachment=attachment)
+        service_source_refs = []
+        for index, service_fee in enumerate(combined.get("service_fees") or []):
+            locator = service_fee.get("source_evidence") if isinstance(service_fee, dict) else None
+            service_source_refs.append(
+                {
+                    "attachment": str(attachment.get("name") or ""),
+                    "file_name": str(attachment.get("file_name") or ""),
+                    "path": f"service_fees[{index}].amount_mxn",
+                    **(locator if isinstance(locator, dict) else {}),
+                }
+            )
         if Decimal(split["import_tax_amount"] or "0"):
-            fee_splits.append({"proposal_id": "fee:import_tax", "logical_fee_key": "import_tax", "label": "进口税费", "amount": split["import_tax_amount"], "currency": "MXN", "default_selected": evidence["default_selected"], "source_refs": evidence["source_refs"]})
+            fee_splits.append(
+                {
+                    "proposal_id": "fee:import_tax",
+                    "logical_fee_key": "import_tax",
+                    "label": "进口税费",
+                    "amount": split["import_tax_amount"],
+                    "currency": "MXN",
+                    "default_selected": default_selected
+                    and bool(tax_source_refs)
+                    and all(_precise_source_ref(ref) for ref in tax_source_refs),
+                    "source_refs": tax_source_refs,
+                }
+            )
         if Decimal(split["customs_clearance_amount"] or "0"):
-            fee_splits.append({"proposal_id": "fee:customs_clearance_fee", "logical_fee_key": "customs_clearance_fee", "label": "清关费", "amount": split["customs_clearance_amount"], "currency": "MXN", "default_selected": evidence["default_selected"], "source_refs": evidence["source_refs"]})
+            fee_splits.append(
+                {
+                    "proposal_id": "fee:customs_clearance_fee",
+                    "logical_fee_key": "customs_clearance_fee",
+                    "label": "清关费",
+                    "amount": split["customs_clearance_amount"],
+                    "currency": "MXN",
+                    "default_selected": default_selected
+                    and bool(service_source_refs)
+                    and all(_precise_source_ref(ref) for ref in service_source_refs),
+                    "source_refs": service_source_refs,
+                }
+            )
     elif amount and accounting.get("accounting_role") in {"ESTIMATE", "FINAL_BILL"}:
-        fee_splits.append({"proposal_id": f"fee:{logical_fee_key}", "logical_fee_key": logical_fee_key, "label": logical_fee_key, "amount": amount, "currency": currency or "RMB", "default_selected": evidence["default_selected"], "source_refs": evidence["source_refs"]})
+        fee_splits.append(
+            {
+                "proposal_id": f"fee:{logical_fee_key}",
+                "logical_fee_key": logical_fee_key,
+                "label": logical_fee_key,
+                "amount": amount,
+                "currency": currency or "RMB",
+                "default_selected": evidence["default_selected"],
+                "source_refs": evidence["source_refs"],
+            }
+        )
 
     component_result = allocate_tax_certificate_components(
         combined.get("line_items") or [],
@@ -442,14 +584,24 @@ def build_fee_evidence_review_draft(
         fx_context=fx_context or {},
         source_ref={"attachment": attachment.get("name"), "file": attachment.get("file_name")},
         explicit_matches=(ai_review or {}).get("line_item_matches") or {},
-    ) if is_tax else {"components": [], "unmatched_lines": [], "needs_review": False, "allocation_basis": "", "missing_fx": False}
+    ) if deterministic_is_tax else {"components": [], "unmatched_lines": [], "needs_review": False, "allocation_basis": "", "missing_fx": False}
     components = []
     for index, row in enumerate(component_result["components"], start=1):
-        components.append({**row, "proposal_id": f"component:{index}", "fee_logical_key": "import_tax"})
+        component_ref = row.get("source_evidence") if isinstance(row.get("source_evidence"), dict) else {}
+        component_selected = default_selected and _precise_source_ref(component_ref)
+        components.append(
+            {
+                **row,
+                "proposal_id": f"component:{index}",
+                "fee_logical_key": "import_tax",
+                "default_selected": component_selected,
+                "needs_review": not component_selected,
+            }
+        )
     return {
         "evidence": evidence,
         "fee_splits": fee_splits,
-        "tax_breakdown": split["tax_breakdown"] if is_tax else [],
+        "tax_breakdown": split["tax_breakdown"] if deterministic_is_tax else [],
         "components": components,
         "item_options": [
             {
@@ -462,7 +614,7 @@ def build_fee_evidence_review_draft(
             if row.get("name")
         ],
         "unmatched_lines": component_result["unmatched_lines"],
-        "unclassified_difference": split["unclassified_difference"] if is_tax else "0.00",
+        "unclassified_difference": split["unclassified_difference"] if deterministic_is_tax else "0.00",
         "missing_fx": component_result["missing_fx"],
         "summary": {
             "fee_proposal_count": len(fee_splits),
@@ -1101,23 +1253,40 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
     selected = {str(value) for value in (_json_list(selections) if isinstance(selections, str) else selections or [])}
     edit_map = _json_dict(edits)
 
-    def allowed_edits(proposal_id: Any, allowed: frozenset[str]) -> dict:
-        values = _json_dict(edit_map.get(str(proposal_id or "")))
-        return {key: values[key] for key in allowed if key in values}
+    def apply_allowed_edits(row: dict, allowed: frozenset[str]) -> dict:
+        values = _json_dict(edit_map.get(str(row.get("proposal_id") or "")))
+        for fieldname in allowed:
+            if fieldname not in values:
+                continue
+            row[fieldname] = values[fieldname]
+            if fieldname not in {"original_amount", "amount"}:
+                continue
+            row["human_edits"] = sorted(
+                set([*(row.get("human_edits") or []), fieldname])
+            )
+            row["source_refs"] = [
+                *(row.get("source_refs") or []),
+                {
+                    "type": "MANUAL_REVIEW",
+                    "field": fieldname,
+                    "operator": _session_user(),
+                },
+            ]
+        return row
 
     evidence = dict(draft.get("evidence") or {})
-    evidence.update(allowed_edits(evidence.get("proposal_id"), EVIDENCE_EDIT_FIELDS))
+    apply_allowed_edits(evidence, EVIDENCE_EDIT_FIELDS)
     evidence["selected"] = evidence.get("proposal_id") in selected
     fee_rows = []
     for raw in draft.get("fee_splits") or []:
         row = dict(raw)
-        row.update(allowed_edits(row.get("proposal_id"), FEE_SPLIT_EDIT_FIELDS))
+        apply_allowed_edits(row, FEE_SPLIT_EDIT_FIELDS)
         if str(row.get("proposal_id") or "") in selected:
             fee_rows.append(row)
     components = []
     for raw in draft.get("components") or []:
         row = dict(raw)
-        row.update(allowed_edits(row.get("proposal_id"), COMPONENT_EDIT_FIELDS))
+        apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
         if str(row.get("proposal_id") or "") in selected:
             components.append(row)
     return evidence, fee_rows, components

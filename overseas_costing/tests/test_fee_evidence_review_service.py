@@ -201,8 +201,18 @@ def test_review_draft_uses_only_evidenced_numbers_and_defaults_final_tax_certifi
                 "hs_code": "90041000",
                 "import_name": "GAFAS",
                 "taxes": {"igi_amount_mxn": 10.01, "iva_amount_mxn": 20},
+                "source_evidence": {
+                    "hs_code": {"page": 3, "text_line": 18},
+                    "igi_amount_mxn": {"page": 3, "text_line": 20},
+                    "iva_amount_mxn": {"page": 3, "text_line": 21},
+                },
             }
         ],
+        "source_evidence": {
+            "header.paid_total_mxn": {"page": 4, "text_line": 2},
+            "tax_totals.igi_mxn": {"page": 4, "text_line": 4},
+            "tax_totals.iva_mxn": {"page": 4, "text_line": 5},
+        },
         "validation": {"status": "passed"},
     }
     draft = service.build_fee_evidence_review_draft(
@@ -224,6 +234,89 @@ def test_review_draft_uses_only_evidenced_numbers_and_defaults_final_tax_certifi
         "ITEM-SUNGLASSES",
     }
     assert all(row["source_evidence"] for row in draft["components"])
+
+
+def test_amount_without_precise_locator_is_not_default_selected() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="customs_clearance_fee",
+        attachment={
+            "name": "ATT-NO-LOCATOR",
+            "file_name": "quotation.pdf",
+            "parse_result_json": {"total_amount": 100, "currency": "MXN"},
+        },
+        items=[],
+        ai_review={
+            "evidence_type": "QUOTE",
+            "accounting_role": "ESTIMATE",
+            "direction": "DEBIT",
+            "confidence": "0.99",
+        },
+    )
+
+    assert draft["evidence"]["default_selected"] is False
+    assert draft["evidence"]["needs_review"] is True
+
+
+def test_ai_rule_conflict_is_marked_and_not_default_selected() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment={
+            "name": "ATT-CONFLICT",
+            "file_name": "完税凭证.pdf",
+            "parse_result_json": {
+                "parser": "mexico_tax_certificate_pedimento",
+                "header": {"paid_total_mxn": "30"},
+                "tax_totals": {"igi_mxn": "30"},
+                "line_items": [],
+                "validation": {"status": "passed"},
+                "source_evidence": {
+                    "header.paid_total_mxn": {"page": 1, "text_line": 4},
+                    "tax_totals.igi_mxn": {"page": 1, "text_line": 3},
+                },
+            },
+        },
+        items=_items(),
+        ai_review={
+            "evidence_type": "QUOTE",
+            "accounting_role": "ESTIMATE",
+            "confidence": "0.99",
+        },
+    )
+
+    assert draft["evidence"]["has_conflict"] is True
+    assert draft["evidence"]["default_selected"] is False
+    assert "AI" in draft["evidence"]["warning"]
+
+
+def test_human_amount_edits_are_recorded_as_manual_review_evidence() -> None:
+    evidence, fee_rows, _components = service._selected_proposals(
+        {
+            "evidence": {
+                "proposal_id": "evidence:classification",
+                "original_amount": "10",
+                "source_refs": [{"page": 1, "text_line": 2}],
+            },
+            "fee_splits": [
+                {
+                    "proposal_id": "fee:import_tax",
+                    "logical_fee_key": "import_tax",
+                    "amount": "10",
+                    "source_refs": [{"page": 1, "text_line": 2}],
+                }
+            ],
+            "components": [],
+        },
+        ["evidence:classification", "fee:import_tax"],
+        {
+            "evidence:classification": {"original_amount": "11"},
+            "fee:import_tax": {"amount": "11"},
+        },
+    )
+
+    assert evidence["human_edits"] == ["original_amount"]
+    assert fee_rows[0]["human_edits"] == ["amount"]
+    assert evidence["source_refs"][-1]["type"] == "MANUAL_REVIEW"
+    assert fee_rows[0]["source_refs"][-1]["field"] == "amount"
 
 
 def test_payment_and_refund_evidence_never_replace_the_fee_total() -> None:

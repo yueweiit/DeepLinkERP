@@ -9,8 +9,42 @@ from overseas_costing.services.attachment_parse_service import (
     extract_pdf_text_with_method,
     extract_source_document_field_candidates,
     parse_purchase_order_text,
+    parse_tax_certificate_text,
     preview_source_document,
 )
+
+
+def test_tax_certificate_amounts_include_page_and_text_line_evidence() -> None:
+    parsed = parse_tax_certificate_text(
+        "--- Page 3 ---\nDTA 0 10.00\nIGI/IGE 0 20.00\nIMPORTE PAGADO: $ 30.00",
+        "pedimento.pdf",
+    )
+
+    assert parsed["source_evidence"]["header.paid_total_mxn"]["page"] == 3
+    assert parsed["source_evidence"]["header.paid_total_mxn"]["text_line"] == 4
+    assert parsed["source_evidence"]["tax_totals.dta_mxn"]["page"] == 3
+    assert parsed["source_evidence"]["tax_totals.dta_mxn"]["text_line"] == 2
+    assert parsed["source_evidence"]["tax_totals.igi_mxn"]["text_line"] == 3
+
+
+def test_tax_certificate_line_item_taxes_keep_their_own_evidence_location() -> None:
+    parsed = parse_tax_certificate_text(
+        "\n".join(
+            [
+                "--- Page 4 ---",
+                "001 90041000 00 1 1 1 10.000 1 10.00000 CHN CHN",
+                "GAFAS DE SOL",
+                "IGI 10.00 0 0 5.00",
+                "IVA 16.00 0 0 8.00",
+            ]
+        ),
+        "pedimento.pdf",
+    )
+
+    item = parsed["line_items"][0]
+    assert item["source_evidence"]["hs_code"]["page"] == 4
+    assert item["source_evidence"]["igi_amount_mxn"]["text_line"] == 4
+    assert item["source_evidence"]["iva_amount_mxn"]["text_line"] == 5
 
 
 def test_classify_customs_declaration_before_price_document() -> None:

@@ -1043,6 +1043,26 @@ def parse_tax_certificate_text(text: str, source_name: str | None = None) -> dic
     summary["validation_status_label"] = validation["status_label"]
     summary["needs_manual_review"] = validation["status"] != "passed"
 
+    source_evidence = {}
+    paid_total_evidence = _source_locator(
+        normalized, r"IMPORTE\s+PAGADO|^\s*TOTAL\s*$"
+    )
+    if paid_total is not None and paid_total_evidence:
+        source_evidence["header.paid_total_mxn"] = paid_total_evidence
+    tax_patterns = {
+        "dta_mxn": r"\bDTA\s+0\s+[\d,]+(?:\.\d+)?",
+        "prv_mxn": r"\bPRV\s+0\s+[\d,]+(?:\.\d+)?",
+        "prv_iva_mxn": r"\bIVA/PRV\s+0\s+[\d,]+(?:\.\d+)?",
+        "iva_mxn": r"\bIVA\s+0\s+[\d,]+(?:\.\d+)?",
+        "igi_mxn": r"\bIGI/IGE\s+0\s+[\d,]+(?:\.\d+)?",
+    }
+    for fieldname, pattern in tax_patterns.items():
+        if tax_totals.get(fieldname) in (None, 0, 0.0):
+            continue
+        locator = _source_locator(normalized, pattern)
+        if locator:
+            source_evidence[f"tax_totals.{fieldname}"] = locator
+
     return {
         "source_name": source_name or "",
         "parser": "mexico_tax_certificate_pedimento",
@@ -1051,6 +1071,7 @@ def parse_tax_certificate_text(text: str, source_name: str | None = None) -> dic
         "header": header,
         "tax_totals": tax_totals,
         "line_items": line_items,
+        "source_evidence": source_evidence,
         "validation": validation,
         "raw_text_sample": normalized[:1200],
     }
@@ -2198,6 +2219,13 @@ def _parse_declared_item_count(text: str) -> int | None:
 
 def _parse_pedimento_items(text: str) -> list[dict]:
     lines = [line.strip() for line in text.splitlines()]
+    page_by_index: list[int] = []
+    current_page = 1
+    for line in lines:
+        marker = re.fullmatch(r"---\s*Page\s*(\d+)\s*---", line, flags=re.IGNORECASE)
+        if marker:
+            current_page = int(marker.group(1))
+        page_by_index.append(current_page)
     items: list[dict] = []
     index = 0
     while index < len(lines):
@@ -2210,6 +2238,16 @@ def _parse_pedimento_items(text: str) -> list[dict]:
         tax_lines = _collect_item_tax_lines(lines, index + 1)
         tax_lines.update(_parse_item_tax_fields(lines[index]))
         value_line = _next_value_line(lines, index + 1)
+        item_evidence = {
+            "hs_code": _line_locator(lines, page_by_index, index),
+            "quantity_umc": _line_locator(lines, page_by_index, index),
+            "quantity_umt": _line_locator(lines, page_by_index, index),
+        }
+        for offset, tax_line in enumerate(lines[index + 1 : index + 9], start=index + 1):
+            parsed_taxes = _parse_item_tax_fields(tax_line)
+            for fieldname in parsed_taxes:
+                if fieldname.endswith("_amount_mxn"):
+                    item_evidence[fieldname] = _line_locator(lines, page_by_index, offset)
         items.append(
             {
                 "row_no": len(items) + 1,
@@ -2223,12 +2261,23 @@ def _parse_pedimento_items(text: str) -> list[dict]:
                 "seller_country": item_match["seller_country"],
                 "import_name": description,
                 "taxes": tax_lines,
+                "source_evidence": item_evidence,
                 "value_line_raw": value_line,
                 "needs_manual_review": not description,
             }
         )
         index += 1
     return items
+
+
+def _line_locator(lines: list[str], page_by_index: list[int], index: int) -> dict:
+    if index < 0 or index >= len(lines):
+        return {}
+    return {
+        "page": page_by_index[index],
+        "text_line": index + 1,
+        "text_excerpt": lines[index][:500],
+    }
 
 
 def _match_pedimento_item_line(line: str) -> dict | None:
@@ -2372,6 +2421,17 @@ def _ensure_pdf_path(path: Path) -> Path:
 
 def _normalize_text(text: str | None) -> str:
     return str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _source_locator(text: str, pattern: str) -> dict:
+    page = 1
+    for line_no, line in enumerate(str(text or "").splitlines(), start=1):
+        marker = re.fullmatch(r"---\s*Page\s*(\d+)\s*---", line.strip(), flags=re.IGNORECASE)
+        if marker:
+            page = int(marker.group(1))
+        if re.search(pattern, line, flags=re.IGNORECASE):
+            return {"page": page, "text_line": line_no, "text_excerpt": line.strip()[:500]}
+    return {}
 
 
 def _search(pattern: str, text: str) -> str:
