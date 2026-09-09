@@ -19,6 +19,7 @@ HEADER_ALIASES = {
     ),
     "material_code": ("品目编码", "物料编码", "itemcode", "item code", "sku", "货号"),
     "product_name": ("中文品名", "产品名称", "物料名称", "品名", "productname"),
+    "spec_model": ("规格型号", "规格，型号，品牌", "specificationmodelbrand", "specmodel"),
     "quantity": ("总个数", "总数量", "数量", "quantity", "qty"),
     "unit": ("申报单位", "单位", "unit"),
     "length_m": ("长m", "长度m", "lengthm"),
@@ -80,6 +81,9 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
                 "product_name": product_name,
                 "quantity": _decimal_text(_to_decimal(field_cells.get("quantity", {}).get("raw_value"))),
                 "unit": _string_value(field_cells.get("unit", {}).get("raw_value")),
+                "spec_model": _string_value(field_cells.get("spec_model", {}).get("raw_value")),
+                **{field: _decimal_text(_to_decimal(field_cells.get(field, {}).get("raw_value")))
+                   for field in ("net_weight_kg", "gross_weight_kg", "volume_m3", "package_count")},
                 "chargeable_weight_kg": _decimal_text(
                     _to_decimal(field_cells.get("chargeable_weight_kg", {}).get("raw_value"))
                 ),

@@ -588,7 +588,7 @@ def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_e
     monkeypatch.setattr(
         service,
         "list_packing_sources",
-        lambda _batch: {
+        lambda _batch, **_kwargs: {
             "wiki_workbooks": [{"sheets": [
                 {
                     "source_kind": "wiki_sheet",
@@ -654,7 +654,7 @@ def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_e
     monkeypatch.setattr(
         service,
         "_list_approval_body_ai_sources",
-        lambda _batch: [
+        lambda _batch, **_kwargs: [
             {
                 "source_kind": "approval_form",
                 "source_id": "approval:MAIN:form",
@@ -685,7 +685,7 @@ def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(mon
     monkeypatch.setattr(
         service,
         "list_packing_sources",
-        lambda _batch: {
+        lambda _batch, **_kwargs: {
             "wiki_workbooks": [
                 {
                     "sheets": [
@@ -707,7 +707,7 @@ def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(mon
         "get_current_packing_snapshot",
         lambda _batch: {"source_kind": "wiki_sheet", "source_id": "WB:S1"},
     )
-    monkeypatch.setattr(service, "_list_approval_body_ai_sources", lambda _batch: [])
+    monkeypatch.setattr(service, "_list_approval_body_ai_sources", lambda _batch, **_kwargs: [])
     monkeypatch.setattr(
         service,
         "frappe",
@@ -719,3 +719,26 @@ def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(mon
     second = service.list_material_ai_sources("B1", version_name="V1")
 
     assert first[0]["source_hash"] != second[0]["source_hash"]
+
+
+def test_current_wiki_refreshes_only_its_manifest_without_catalog_scan(monkeypatch):
+    from types import SimpleNamespace
+    from overseas_costing.integrations import dingtalk_packing_source
+
+    current_hash = {"value": "a" * 64}
+    calls = []
+    def latest(workbook, sheet):
+        calls.append((workbook, sheet))
+        return {"content_sha256": current_hash["value"], "capture_finished_at": "2026-09-09"}
+    monkeypatch.setattr(dingtalk_packing_source, "get_packing_runtime_clients", lambda: SimpleNamespace(
+        catalog=SimpleNamespace(get_latest_snapshot=latest)))
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *a, **kw: []))
+    monkeypatch.setattr(service, "list_packing_sources", lambda *a, **kw: {"wiki_workbooks": [], "approval_sources": []})
+    monkeypatch.setattr(service, "_list_approval_body_ai_sources", lambda *a, **kw: [])
+    monkeypatch.setattr(service, "get_current_packing_snapshot", lambda *a: {
+        "source_kind": "wiki_sheet", "source_id": "WB:S1", "source_hash": "old-confirmed-hash"})
+    first = service.list_material_ai_sources("B1")
+    current_hash["value"] = "b" * 64
+    second = service.list_material_ai_sources("B1")
+    assert first[0]["source_hash"] != second[0]["source_hash"]
+    assert calls == [("WB", "S1"), ("WB", "S1")]

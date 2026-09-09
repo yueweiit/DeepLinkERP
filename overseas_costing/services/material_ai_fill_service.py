@@ -14,6 +14,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import time
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -71,7 +72,7 @@ MAX_SOURCE_BYTES = 25 * 1024 * 1024
 MAX_VISION_IMAGES = 20
 MAX_VISION_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_DEEPSEEK_VISION_MODEL = "deepseek-v4-flash-vision-exp"
-REVIEW_PROPOSAL_TYPES = frozenset({"material_replace", "item_update", "fee_update"})
+REVIEW_PROPOSAL_TYPES = frozenset({"material_replace", "item_update", "fee_update", "logistics_reconcile"})
 REVIEW_ITEM_FIELDS = frozenset(
     {
         "product_name",
@@ -546,6 +547,7 @@ def _fingerprint_item(item: dict) -> dict:
             "source_doc_no",
             "material_code",
             "product_name",
+            "spec_model",
             "quantity",
             "purchase_uom",
             "unit_price",
@@ -555,6 +557,9 @@ def _fingerprint_item(item: dict) -> dict:
             "actual_shipped_qty_mode",
             "source_type",
             "parse_status",
+            "extra_json",
+            "manual_override_flag",
+            "manual_override_reason",
             *ALLOWED_FIELDS,
         )
     }
@@ -905,6 +910,8 @@ def normalize_source_review_proposals(
         if not isinstance(raw, dict):
             continue
         proposal_type = str(raw.get("proposal_type") or "")
+        if proposal_type == "logistics_reconcile":
+            continue  # Never accept row creation/reconciliation from model output.
         if proposal_type not in REVIEW_PROPOSAL_TYPES:
             continue
         refs = [
@@ -978,7 +985,12 @@ def normalize_source_review_proposals(
                 ),
                 None,
             )
-            conflict = conflict or bool(existing_fee)
+            approved = any(
+                (evidence.get(str(ref.get("document_id") or "")) or {}).get("approved_fee") ==
+                {"amount": str(payload.get("amount")), "currency": payload.get("currency")}
+                for ref in refs
+            )
+            conflict = (conflict or bool(existing_fee)) and not approved
         identity = (
             (proposal_type, payload.get("logical_fee_key"), payload.get("amount"), payload.get("currency"))
             if proposal_type == "fee_update"
@@ -1006,6 +1018,8 @@ def normalize_source_review_proposals(
                 "result_origin": "SYSTEM" if system_origin else "AI",
                 "conflict_group": str(raw.get("conflict_group") or "")[:200],
                 "recommended": bool(raw.get("recommended")),
+                "carrier": str(raw.get("carrier") or "")[:100],
+                "alternatives": raw.get("alternatives") or [],
                 "default_selected": bool(raw.get("default_selected", confidence >= 0.9)) and confidence >= 0.9 and not conflict,
                 "payload": payload,
             }
@@ -1082,6 +1096,8 @@ def validate_source_review_application(
         if conflict_group:
             selected_groups[conflict_group] = proposal_id
         proposal_edit = edits.get(proposal_id) or {}
+        if proposal_edit and proposal["proposal_type"] == "logistics_reconcile":
+            raise ValueError("物流行由服务器生成，不接受浏览器修改来源或采购事实。")
         if proposal_edit:
             if proposal["proposal_type"] == "material_replace":
                 edit_rows = proposal_edit.get("replacement_rows") or []
@@ -1171,6 +1187,13 @@ def build_approval_fee_proposals(
     candidates = extract_logistics_quote_candidates_from_approval({"form_fields": source.get("form_fields") or {}})
     if not candidates:
         return []
+    from overseas_costing.services.logistics_autofill_service import selected_carrier
+    chosen = selected_carrier(candidates, source.get("approval_decisions") or [])
+    alternatives = deepcopy(candidates)
+    if chosen:
+        candidates = [row for row in candidates if row.get("carrier") == chosen]
+        if len(candidates) != 1:
+            chosen = ""  # A carrier decision does not resolve two totals for it.
     definition = primary_freight_definition(transport_mode) or {}
     fee_key = str(definition.get("logical_fee_key") or "")
     if fee_key not in REVIEW_FEE_KEYS:
@@ -1192,9 +1215,12 @@ def build_approval_fee_proposals(
             {
                 "proposal_id": f"approval-fee:{source.get('process_instance_id') or source.get('source_id')}:{index}",
                 "proposal_type": "fee_update",
-                "confidence": 0.98 if not multiple and not existing else 0.65,
-                "conflict": multiple or bool(existing),
-                "default_selected": not multiple and not existing,
+                "confidence": 0.98 if chosen or (not multiple and not existing) else 0.65,
+                "conflict": (multiple or bool(existing)) and not bool(chosen),
+                "default_selected": bool(chosen) or (not multiple and not existing),
+                "approved_carrier": bool(chosen),
+                "carrier": carrier,
+                "alternatives": alternatives,
                 "result_origin": "SYSTEM",
                 "conflict_group": f"fee:{fee_key}",
                 "recommended": str(candidate.get("pricing_basis") or "") == "volume",
@@ -1301,16 +1327,31 @@ def start_material_ai_fill(
     return {"ok": True, "run_id": run_id, "status": "QUEUED", "reused": False}
 
 
+def _source_review_context(context: dict | None) -> dict:
+    context = context or {}
+    return {
+        "version_modified": str(context.get("version_modified") or ""),
+        "transport_mode": str(context.get("transport_mode") or ""),
+        "fx_rates": deepcopy(context.get("fx_rates") or {}),
+    }
+
+
 def _source_review_fingerprint(
     batch_name: str,
     version_name: str,
     items: list[dict],
     sources: list[dict],
     clarification_text: str,
+    *,
+    context: dict | None = None,
 ) -> str:
     base = build_input_fingerprint(batch_name, version_name, items, sources)
     return hashlib.sha256(
-        _json({"base": base, "clarification_text": str(clarification_text or "")[:4000]}).encode("utf-8")
+        _json({
+            "base": base,
+            "clarification_text": str(clarification_text or "")[:4000],
+            "context": _source_review_context(context),
+        }).encode("utf-8")
     ).hexdigest()
 
 
@@ -1377,6 +1418,7 @@ def start_source_ai_review(
     context = repo.get_context(str(batch_name), str(version_name))
     if hasattr(repo, "lock_review_scope"):
         repo.lock_review_scope(context["batch"])
+        context = repo.get_context(str(batch_name), str(version_name))
     items = repo.get_items(context["batch"], context["version"])
     sources = prepare_source_manifest(
         repo.list_sources(context["batch"], context["version"]),
@@ -1384,7 +1426,8 @@ def start_source_ai_review(
     )
     clarification = str(clarification_text or "").strip()[:4000]
     fingerprint = _source_review_fingerprint(
-        context["batch"], context["version"], items, sources, clarification
+        context["batch"], context["version"], items, sources, clarification,
+        context=context,
     )
     running_finder = getattr(repo, "find_running_run", None)
     running = (
@@ -1392,7 +1435,10 @@ def start_source_ai_review(
         if callable(running_finder)
         else None
     )
-    if running and selected_source_ids is None:
+    if (
+        running and selected_source_ids is None and not force
+        and str(_record_value(running, "input_fingerprint") or "") == fingerprint
+    ):
         if hasattr(repo, "commit"):
             repo.commit()
         return {
@@ -1508,10 +1554,18 @@ def get_material_ai_fill_status(
     _assert_run_batch(run, batch_name)
     progress_revision = int(_record_value(run, "progress_revision", 0) or 0)
     status_value = str(_record_value(run, "status") or "")
+    stalled = False
+    if status_value in RUNNING_STATES:
+        try:
+            heartbeat = datetime.fromisoformat(str(_record_value(run, "modified") or _record_value(run, "started_at") or ""))
+            stalled = (datetime.fromisoformat(_now()) - heartbeat).total_seconds() > 180
+        except (ValueError, TypeError):
+            pass
     if (
         after_revision is not None
         and int(after_revision) == progress_revision
         and status_value in RUNNING_STATES
+        and not stalled
     ):
         return {
             "ok": True,
@@ -1542,6 +1596,8 @@ def get_material_ai_fill_status(
         proposal_type = str(candidate.get("proposal_type") or "")
         if proposal_type == "material_replace":
             material_proposal_count += 1
+        elif proposal_type == "logistics_reconcile":
+            material_proposal_count += len((candidate.get("payload") or {}).get("rows") or [])
         elif proposal_type == "fee_update":
             fee_proposal_count += 1
         elif proposal_type == "item_update":
@@ -1560,6 +1616,7 @@ def get_material_ai_fill_status(
         "status": status_value,
         "progress_revision": progress_revision,
         "unchanged": False,
+        **({"stalled": True} if stalled else {}),
         "progress_step": str(_record_value(run, "progress_step") or ""),
         "progress_percent": int(_record_value(run, "progress_percent", 0) or 0),
         "model": str(_record_value(run, "model") or ""),
@@ -1757,8 +1814,11 @@ def apply_source_ai_review(
     if str(_record_value(run, "status") or "") != "READY":
         raise ValueError("AI 资料审核草稿尚未准备完成或已经处理。")
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
-    items = repo.get_items(context["batch"], context["version"])
+    if hasattr(repo, "lock_review_inputs"):
+        repo.lock_review_inputs(context["batch"], context["version"])
     try:
+        context = repo.get_context(str(batch_name), version_name)
+        items = repo.get_items(context["batch"], context["version"])
         sources = _reload_review_manifest(
             repo, context["batch"], context["version"], run
         )
@@ -1774,8 +1834,12 @@ def apply_source_ai_review(
     current_fingerprint = _source_review_fingerprint(
         context["batch"], context["version"], items, sources,
         str(_record_value(run, "clarification_text") or ""),
+        context=context,
     )
-    if current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
+    saved_fee_fingerprint = _load_json(_record_value(run, "draft_json"), {}).get("fee_fingerprint")
+    current_fees = repo.get_fees(context["batch"], context["version"]) if hasattr(repo, "get_fees") else []
+    fees_changed = bool(saved_fee_fingerprint and saved_fee_fingerprint != hashlib.sha256(_json(current_fees).encode()).hexdigest())
+    if fees_changed or current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
         repo.save_run(
             run,
             status="STALE",
@@ -2073,6 +2137,8 @@ def _ensure_local_attachment(source: dict) -> dict:
         ["name", "batch", "file_name", "file_url", "source_type", "parse_result_json"],
         as_dict=True,
     ) or {}
+    if str(row.get("batch") or "") != str(source.get("batch") or ""):
+        raise ValueError("附件已不属于当前批次，请重新分析。")
     if not row.get("file_url"):
         raise ValueError("附件尚未保存到系统，暂时无法读取。")
     path = attachment_parse_service._resolve_source_file_path(file_url=str(row.get("file_url") or ""))
@@ -2083,7 +2149,99 @@ def _ensure_local_attachment(source: dict) -> dict:
 
 def _projection_candidates(items: list[dict], source: dict, preview: dict) -> list[dict]:
     from overseas_costing.services import material_import_service
+    from overseas_costing.services.logistics_autofill_service import extra
 
+    logistics_rows = any(extra(item).get("logistics_row", {}).get("identity") or
+                         str(item.get("stable_line_key") or "").startswith("logistics:") for item in items)
+    blocked_fields = set()
+    blockers = (preview.get("validation") or {}).get("blocking") or []
+    for blocker in blockers:
+        # Per-field, real merge ranges do not need a shared-box grouping guess.
+        # Each field is deduplicated independently below and cross-row values
+        # are withheld. This exemption never applies to totals or formula errors.
+        if (logistics_rows and blocker.get("code") == "conflicting_merge_ranges"
+                and (preview.get("source") or {}).get("merge_ranges_available")):
+            continue
+        preview.setdefault("autofill_warnings", []).append(str(blocker.get("message") or blocker))
+        if blocker.get("code") == "total_mismatch" and blocker.get("field"):
+            blocked_fields.add(blocker["field"])
+        else:
+            return []
+    if preview.get("ok") is False and not blockers:
+        preview.setdefault("autofill_warnings", []).append("装箱解析未通过校验，未自动填充。")
+        return []
+    if logistics_rows:
+        original_preview = preview
+        preview = deepcopy(preview)
+        used = set()
+        for row in preview.get("material_rows") or []:
+            matches = [item for item in items if str(item.get("material_code") or "").casefold() == str(row.get("material_code") or "").casefold()]
+            if len(matches) > 1:
+                exact = [item for item in matches if _canonical_value("actual_shipped_qty", item.get("actual_shipped_qty")) == _canonical_value("actual_shipped_qty", row.get("quantity"))]
+                if row.get("quantity") not in (None, ""):
+                    matches = exact
+                if len(matches) > 1 and row.get("spec_model"):
+                    exact = [item for item in matches if str(item.get("spec_model") or "").strip() == str(row["spec_model"]).strip()]
+                    if exact:
+                        matches = exact
+            matches = [item for item in matches if item["name"] not in used]
+            if len(matches) > 1:
+                peers = [candidate for candidate in preview.get("material_rows") or [] if str(candidate.get("material_code") or "").casefold() == str(row.get("material_code") or "").casefold()]
+                targets = [item for item in items if str(item.get("material_code") or "").casefold() == str(row.get("material_code") or "").casefold()]
+                if len(peers) == len(targets):
+                    matches = [min(matches, key=lambda item: int(item.get("row_no") or 0))]
+            if len(matches) == 1:
+                row["_target_stable_line_key"] = matches[0]["stable_line_key"]
+                used.add(matches[0]["name"])
+            elif row.get("material_code"):
+                original_preview.setdefault("autofill_warnings", []).append(f"第 {row.get('source_row')} 行 {row.get('material_code')} 无法按物流编码、数量和规格唯一匹配，未填充该行装箱数据。")
+        # Shipment rows are distinct identities, not SKU aggregates. Read every
+        # physical field independently; a missing net weight must not hide gross.
+        grouped = {}
+        for row in preview.get("material_rows") or []:
+            key = row.get("_target_stable_line_key")
+            if key:
+                grouped.setdefault(key, []).append(row)
+        result = []
+        def field_total(rows, field, row_numbers):
+            seen, total = set(), Decimal("0")
+            for row in rows:
+                region = (row.get("field_ranges") or {}).get(field) or {}
+                start, end = region.get("start_row", row.get("source_row")), region.get("end_row", row.get("source_row"))
+                if field != "package_count" and start is not None and any(n not in row_numbers for n in range(int(start), int(end) + 1)):
+                    return None
+                key = (start, end, region.get("start_column"), region.get("end_column"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                value = _decimal(row.get(field))
+                if value is None or value < 0:
+                    return None
+                # A shared carton is represented at its anchor only. Zero on
+                # the other shipment row is explicit, not a second carton.
+                if field == "package_count" and start not in row_numbers:
+                    value = Decimal("0")
+                total += value
+            return total if seen else None
+        for key, rows in grouped.items():
+            target = next(item for item in items if item.get("stable_line_key") == key)
+            row_numbers = {int(row["source_row"]) for row in rows if row.get("source_row")}
+            for field in ("net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg"):
+                if field in blocked_fields:
+                    continue
+                value = field_total(rows, field, row_numbers)
+                if value is None:
+                    continue
+                result.append({"item_name": target["name"], "fieldname": field,
+                    "suggested_value": format(value, "f"), "confidence": 0.99,
+                    "reason": "装箱单按物流编码、数量和行身份匹配，字段合并范围只累计一次",
+                    "source_refs": [_source_reference(source, row=row.get("source_row")) for row in rows]})
+            count = field_total(rows, "package_count", row_numbers)
+            if count is not None:
+                result.append({"item_name": target["name"], "fieldname": "package_count",
+                    "suggested_value": format(count, "f"), "confidence": 0.99,
+                    "source_refs": [_source_reference(source, row=row.get("source_row")) for row in rows]})
+        return result
     projection = material_import_service.build_wiki_material_projection(items, preview)
     candidates = []
     source_rows = {
@@ -2113,6 +2271,8 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
             continue
         item_name = str(targets[0].get("name") or "")
         for fieldname in ALLOWED_FIELDS:
+            if fieldname in blocked_fields:
+                continue
             if _is_blank(incoming.get(fieldname)):
                 continue
             candidates.append(
@@ -2127,7 +2287,7 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
             )
         for conflict in incoming.get("source_conflicts") or []:
             fieldname = str(conflict.get("field") or "")
-            if fieldname not in ALLOWED_FIELDS:
+            if fieldname not in ALLOWED_FIELDS or fieldname in blocked_fields:
                 continue
             for option in conflict.get("options") or []:
                 candidates.append(
@@ -2151,15 +2311,18 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
     kind = str(source.get("source_kind") or "")
     if kind == "approval_form":
         fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
+        approved_proposals = [p for p in build_approval_fee_proposals(source, transport_mode="SEA") if p.get("approved_carrier")]
+        approved_fee = ({"amount": p["payload"]["amount"], "currency": p["payload"]["currency"]} if (p := next(iter(approved_proposals), None)) else None)
         return [], {
             "source_ref": _source_reference(source),
             "form_fields": fields,
             "text": "\n".join(f"{key}: {value}" for key, value in fields.items())[:MAX_AI_DOCUMENT_CHARS],
             "approval_role": source.get("approval_role") or "",
+            "approved_fee": approved_fee,
             "ai_eligible": False,
         }
     if kind == "approval_comment":
-        comment = packing_source_service._find_comment_source(
+        comment = {"remark": source["comment_text"]} if "comment_text" in source else packing_source_service._find_comment_source(
             str(source.get("batch") or ""),
             str(source.get("resolver_source_id") or source.get("source_id") or ""),
         )
@@ -2215,11 +2378,16 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
                 )
                 preview = trusted.get("preview") or {}
                 all_candidates.extend(_projection_candidates(items, sheet_source, preview))
+                if preview.get("autofill_warnings"):
+                    semantic_document.setdefault("parse_errors", []).extend(preview["autofill_warnings"])
+                if not preview.get("material_rows"):
+                    errors = (preview.get("validation") or {}).get("blocking") or []
+                    raise ValueError("；".join(str(error.get("message") or error) for error in errors) or "未识别到装箱物料表头或明细。")
                 structured_rows.extend((preview.get("material_rows") or [])[:1000])
-            except Exception:
-                # Purchase/sample spreadsheets are still valuable semantic evidence even
-                # when they are not shaped like a packing list.
-                continue
+            except Exception as exc:
+                semantic_document.setdefault("parse_errors", []).append(f"{sheet_name}: {exc}")
+        if not structured_rows and semantic_document.get("parse_errors"):
+            raise ValueError("；".join(semantic_document["parse_errors"]))
         semantic_document["structured_rows"] = structured_rows[:2000]
         if frappe is not None and attachment.get("source_id"):
             frappe.db.set_value(
@@ -2847,7 +3015,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         persist(source_progress_json=source_progress)
         current_fingerprint = (
             _source_review_fingerprint(
-                context["batch"], context["version"], items, sources, clarification_text
+                context["batch"], context["version"], items, sources, clarification_text,
+                context=context,
             )
             if unified_review
             else build_input_fingerprint(context["batch"], context["version"], items, sources)
@@ -2865,12 +3034,30 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "replacement_run_id": requeue_latest_input(),
             }
 
-        persist(progress_step="解析/OCR", progress_percent=35)
+        persist(progress_step="读取主审批与装箱附件", progress_percent=10)
+        from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation, autofill_preview, extra, run_supplement
+        reconciliation = None
+        read_items = items
+        if unified_review:
+            main_source = next((s for s in sources if s.get("approval_role") == "international_logistics" and s.get("source_kind") == "approval_form" and s.get("selected")), None)
+            if main_source:
+                from overseas_costing.services.logistics_purchase_facts_service import enrich_logistics_purchase_facts
+                enriched = enrich_logistics_purchase_facts(items, sources, fx_rates=context.get("fx_rates") or {})
+                proposed = build_logistics_reconciliation(enriched["items"], main_source)
+                if proposed and (proposed.get("blocked") or len(proposed["payload"]["rows"]) > len(items) or any(extra(row).get("logistics_row") for row in enriched["items"])):
+                    reconciliation = proposed
+                    reconciliation["payload"]["unresolved"].extend(enriched["unresolved"])
+                    read_items = deepcopy(proposed["payload"]["rows"])
+                    for row in read_items:
+                        if not row.get("manual_override_flag"):
+                            for field in ("net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg"):
+                                row[field] = None
         deterministic: list[dict] = []
         deterministic_proposals: list[dict] = []
         excel_proposals_by_parent: dict[str, list[tuple[int, dict, list[dict]]]] = {}
         documents: list[dict] = []
         source_errors = []
+        supplement_started = None
         for source_index, source in enumerate(sources):
             if unified_review and source.get("selected") is False:
                 _update_source_progress(
@@ -2890,7 +3077,16 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 source_progress_json=source_progress,
             )
             try:
-                source_candidates, document = _read_source(items, source)
+                supplemental = unified_review and source.get("source_kind") != "approval_form" and source.get("parse_method") != "SYSTEM_EXCEL"
+                if supplemental:
+                    supplement_started = supplement_started or time.monotonic()
+                    remaining = 60 - (time.monotonic() - supplement_started)
+                    bounded = run_supplement(lambda: {"ok": True, "result": _read_source(read_items, source)}, seconds=max(0.001, remaining)) if remaining > 0 else {"ok": False, "warning": "补充资料读取已达 60 秒，保留系统直读结果。"}
+                    if not bounded.get("ok"):
+                        raise ValueError(bounded["warning"])
+                    source_candidates, document = bounded["result"]
+                else:
+                    source_candidates, document = _read_source(read_items, source)
                 deterministic.extend(source_candidates)
                 has_document_evidence = _document_has_evidence(document)
                 if has_document_evidence:
@@ -2932,13 +3128,17 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         page_count=page_count,
                         candidate_count=len(source_candidates),
                     )
+                    if document.get("parse_errors"):
+                        error = "；".join(document["parse_errors"])
+                        _update_source_progress(source_progress, source_index, status="FAILED", detail="部分装箱行未读取", error=error[:1000], candidate_count=len(source_candidates))
+                        source_errors.append({"source": source.get("source_label") or source.get("source_id"), "message": error})
                     if has_document_evidence and unified_review and source.get("source_kind") == "approval_form":
                         from overseas_costing.services.source_review_extract_service import (
                             build_system_approval_proposals,
                         )
 
-                        approval_proposals = build_system_approval_proposals(
-                            items,
+                        approval_proposals = [] if reconciliation else build_system_approval_proposals(
+                            read_items,
                             source,
                             transport_mode=str(context.get("transport_mode") or ""),
                         )
@@ -2979,7 +3179,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     }
                 )
 
-            persist(source_progress_json=source_progress)
+            partial = ([reconciliation] if reconciliation else []) + deterministic_proposals
+            persist(source_progress_json=source_progress,
+                progress_percent=10 + int(50 * (source_index + 1) / max(1, len(sources))),
+                candidates_json=partial if unified_review else deterministic,
+                draft_json={"autofill_preview": autofill_preview(items, partial, existing_fees)} if unified_review else {})
 
         for group in excel_proposals_by_parent.values():
             if len(group) == 1:
@@ -2988,6 +3192,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             fruitful = [entry for entry in group if entry[2]]
             if not fruitful:
                 for source_index, _source, _proposals in group:
+                    if source_progress[source_index].get("status") == "FAILED":
+                        continue
                     _update_source_progress(
                         source_progress,
                         source_index,
@@ -3001,12 +3207,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 _update_source_progress(
                     source_progress,
                     fruitful_index,
-                    status="COMPLETED",
+                    status="FAILED" if source_progress[fruitful_index].get("error") else "COMPLETED",
                     detail=f"已唯一匹配工作表 {fruitful_source.get('sheet_name')}",
                     candidate_count=len(proposals),
                 )
                 for source_index, _source, empty_proposals in group:
-                    if empty_proposals or source_index == fruitful_index:
+                    if empty_proposals or source_index == fruitful_index or source_progress[source_index].get("status") == "FAILED":
                         continue
                     _update_source_progress(
                         source_progress,
@@ -3041,12 +3247,13 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             source_progress_json=source_progress,
         )
         if unified_review:
-            ai_result = _call_source_review_ai(
-                items,
+            remaining = 60 - (time.monotonic() - supplement_started) if supplement_started else 60
+            ai_result = run_supplement(lambda: _call_source_review_ai(
+                read_items,
                 documents,
                 clarification_text=clarification_text,
                 fx_rates=context.get("fx_rates") or {},
-            )
+            ), seconds=max(0.001, remaining)) if remaining > 0 else {"ok": False, "proposals": [], "warning": "补充识别已达 60 秒，已保留系统直读结果。"}
             enhanced_by_id = {
                 str(document.get("document_id") or ""): document
                 for document in ai_result.get("evidence_documents") or []
@@ -3056,13 +3263,62 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 enhanced_by_id.get(str(document.get("document_id") or ""), document)
                 for document in documents
             ]
+            approved = {p["payload"]["logical_fee_key"]: p for p in deterministic_proposals if p.get("approved_carrier")}
+            system_fields = {(p.get("target_item_name"), field) for p in deterministic_proposals if p.get("proposal_type") == "item_update" for field in p.get("payload", {}).get("fields", {})}
+            supplemental_proposals = [deepcopy(p) for p in (ai_result.get("proposals") or []) if isinstance(p, dict) and isinstance(p.get("payload"), dict)]
+            if reconciliation:
+                for proposal in supplemental_proposals:
+                    if proposal.get("proposal_type") == "item_update":
+                        payload = proposal.get("payload") or {}
+                        target = proposal.get("target_item_name") or payload.get("item_name")
+                        payload["fields"] = {field: value for field, value in payload.get("fields", {}).items() if field not in {"actual_shipped_qty", "shipped_uom"} and (target, field) not in system_fields}
+            review_input = [p for p in deterministic_proposals + supplemental_proposals
+                if p.get("proposal_type") != "fee_update" or p.get("payload", {}).get("logical_fee_key") not in approved
+                or p is approved[p["payload"]["logical_fee_key"]]]
             candidates = normalize_source_review_proposals(
-                deterministic_proposals + (ai_result.get("proposals") or []),
-                items,
+                review_input,
+                read_items,
                 validation_documents,
                 fx_rates=context.get("fx_rates") or {},
                 existing_fees=existing_fees,
             )
+            if reconciliation and not reconciliation.get("blocked"):
+                rows_by_name = {row["name"]: row for row in reconciliation["payload"]["rows"]}
+                packing_counts = {}
+                for proposal in deterministic_proposals:
+                    payload = proposal.get("payload") or {}
+                    count = payload.get("fields", {}).get("package_count")
+                    if count is not None:
+                        packing_counts.setdefault(payload.get("item_name"), set()).add(str(count))
+                for name, counts in packing_counts.items():
+                    if name in rows_by_name and len(counts) == 1:
+                        row = rows_by_name[name]
+                        row["package_count"] = next(iter(counts))
+                        metadata = extra(row)
+                        metadata.setdefault("logistics_row", {}).setdefault("packing", {})["package_count"] = row["package_count"]
+                        row["extra_json"] = _json(metadata)
+                retained = []
+                for proposal in candidates:
+                    if proposal["proposal_type"] == "item_update" and proposal.get("default_selected"):
+                        payload = proposal["payload"]
+                        row = rows_by_name.get(payload["item_name"])
+                        fields = {k: v for k, v in payload["fields"].items() if k in {"net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg", "project_collection"}}
+                        if row is not None:
+                            row.update(fields)
+                            reconciliation["source_refs"].extend(proposal.get("source_refs") or [])
+                            continue
+                    # Free text never overrides authoritative shipment quantities.
+                    if proposal["proposal_type"] == "item_update":
+                        proposal["payload"]["fields"] = {k: v for k, v in proposal["payload"]["fields"].items() if k in {"net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg", "project_collection"}}
+                        if not proposal["payload"]["fields"]:
+                            continue
+                        if str(proposal["payload"].get("item_name") or "").startswith("draft-"):
+                            reconciliation["payload"]["unresolved"].append({"message": proposal.get("reason") or "新物流行的补充字段存在差异，已保留结构化资料。"})
+                            continue
+                    retained.append(proposal)
+                candidates = [reconciliation, *retained]
+            elif reconciliation:
+                candidates = [reconciliation, *candidates]
         else:
             ai_result = _call_material_ai(items, documents)
             candidates = normalize_candidates(deterministic + (ai_result.get("candidates") or []), items)
@@ -3115,13 +3371,21 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "summary": counts,
                 "selected_count": sum(1 for row in candidates if row.get("default_selected")),
                 "proposal_count": len(candidates),
+                "autofill_preview": autofill_preview(items, candidates, existing_fees),
+                "fee_fingerprint": hashlib.sha256(_json(existing_fees).encode()).hexdigest(),
             }
+            draft["autofill_preview"]["unresolved"].extend(
+                {"source_id": entry.get("source_id"), "message": f"{entry.get('label') or '装箱资料'}：{entry.get('error') or entry.get('detail')}"}
+                for entry in source_progress if entry.get("parse_method") == "SYSTEM_EXCEL"
+                and entry.get("status") in {"FAILED", "NEEDS_SELECTION"}
+            )
         else:
             draft = build_material_ai_draft(items, candidates)
-        refreshed_items = repo.get_items(context["batch"], context["version"])
         try:
+            refreshed_context = repo.get_context(batch_name, version_name) if unified_review else context
+            refreshed_items = repo.get_items(refreshed_context["batch"], refreshed_context["version"])
             refreshed_sources = (
-                _reload_review_manifest(repo, context["batch"], context["version"], run)
+                _reload_review_manifest(repo, refreshed_context["batch"], refreshed_context["version"], run)
                 if unified_review
                 else repo.list_sources(context["batch"], context["version"])
             )
@@ -3137,6 +3401,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             _source_review_fingerprint(
                 context["batch"], context["version"], refreshed_items, refreshed_sources,
                 clarification_text,
+                context=refreshed_context,
             )
             if unified_review
             else build_input_fingerprint(
@@ -3145,7 +3410,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         )
         if refreshed_fingerprint != current_fingerprint:
             before_manifest = _load_json(_record_value(run, "source_manifest_json"), [])
-            if refreshed_items != items or not _materialization_only_source_change(before_manifest, refreshed_sources):
+            if (
+                _source_review_context(refreshed_context) != _source_review_context(context)
+                or refreshed_items != items
+                or not _materialization_only_source_change(before_manifest, refreshed_sources)
+            ):
                 persist(status="STALE",
                     progress_step="资料或版本已变化",
                     error_message="任务运行期间资料或物料数据已变化，系统已按最新资料重新排队。",
@@ -3334,7 +3603,7 @@ class FrappeMaterialAIFillRepository:
         return frappe.get_all(
             "Overseas Cost Item",
             filters={"batch": batch_name, "version": version_name},
-            fields=list(GRID_FIELDS),
+            fields=list(dict.fromkeys([*GRID_FIELDS, "extra_json", "manual_override_flag", "manual_override_reason"])),
             order_by="row_no asc, name asc",
             limit_page_length=10000,
         )
@@ -3364,6 +3633,13 @@ class FrappeMaterialAIFillRepository:
             "SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
             (batch_name,),
         )
+
+    def lock_review_inputs(self, batch_name: str, version_name: str) -> None:
+        for doctype in ("Overseas Cost Version", "Overseas Cost Item", "Overseas Cost Allocation Rule"):
+            if doctype == "Overseas Cost Version":
+                frappe.db.sql("SELECT name FROM `tabOverseas Cost Version` WHERE batch=%s AND name=%s FOR UPDATE", (batch_name, version_name))
+            else:
+                frappe.db.sql(f"SELECT name FROM `tab{doctype}` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE", (batch_name, version_name))
 
     def find_reusable_run(self, batch_name: str, version_name: str, input_fingerprint: str):
         rows = frappe.get_all(
@@ -3691,7 +3967,11 @@ class FrappeMaterialAIFillRepository:
             for proposal in proposals:
                 proposal_type = proposal["proposal_type"]
                 payload = proposal["payload"]
-                if proposal_type == "item_update":
+                if proposal_type == "logistics_reconcile":
+                    from overseas_costing.services.logistics_autofill_service import apply_reconciliation
+                    created_items.extend(apply_reconciliation(frappe, proposal, batch=audit["batch"], version=audit["version"], current=before["items"], run_id=str(_record_value(run, "name") or "")))
+                    changed += len(payload.get("rows") or [])
+                elif proposal_type == "item_update":
                     for fieldname, value in payload.get("fields", {}).items():
                         result = calculate_service.update_item_field(
                             payload["item_name"],

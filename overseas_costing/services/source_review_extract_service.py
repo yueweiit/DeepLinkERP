@@ -86,6 +86,12 @@ def _approval_goods_rows(source: dict) -> list[dict]:
     from overseas_costing.scripts.import_oa_logistics import extract_oa_goods_rows
 
     fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
+    from overseas_costing.services.logistics_purchase_facts_service import parse_labelled_approval_rows
+    for label, value in fields.items():
+        if any(key in str(label) for key in ("货物信息", "采购明细", "需求明细")):
+            labelled = parse_labelled_approval_rows(value)
+            if labelled:
+                return labelled
     payload = {
         "form_fields": fields,
         "transport_mode_raw": source.get("transport_mode_raw") or "",

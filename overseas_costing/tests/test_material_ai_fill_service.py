@@ -1231,7 +1231,7 @@ def test_unified_start_rejects_source_id_not_signed_for_current_batch() -> None:
         )
 
 
-def test_unified_start_reuses_running_task_even_when_force_is_requested() -> None:
+def test_unified_force_start_replaces_stalled_running_task() -> None:
     queued = []
     repository = _StartRepository(
         existing={"name": "RUN-ACTIVE", "status": "RUNNING", "progress_revision": 7}
@@ -1243,14 +1243,14 @@ def test_unified_start_reuses_running_task_even_when_force_is_requested() -> Non
 
     assert result == {
         "ok": True,
-        "run_id": "RUN-ACTIVE",
-        "status": "RUNNING",
-        "reused": True,
-        "reuse_reason": "RUNNING",
-        "progress_revision": 7,
+        "run_id": "RUN-1",
+        "status": "QUEUED",
+        "reused": False,
+        "reuse_reason": "",
+        "progress_revision": 0,
     }
-    assert queued == []
-    assert repository.created == []
+    assert queued == ["RUN-1"]
+    assert len(repository.created) == 1
 
 
 class _LifecycleRepository(_StartRepository):
@@ -1851,21 +1851,21 @@ def test_unified_worker_keeps_deterministic_freight_attachment_totals_when_ai_is
             "file_name": "海运报价.pdf",
         }
     ]
+    original_context = repository.get_context
+    repository.get_context = lambda batch, version: {
+        **original_context(batch, version),
+        "transport_mode": "SEA",
+    }
     manifest = prepare_source_manifest(repository.sources)
     repository.run.update(
         {
             "proposal_version": 1,
             "source_manifest_json": manifest,
             "input_fingerprint": service._source_review_fingerprint(
-                "B1", "V1", _items(), manifest, ""
+                "B1", "V1", _items(), manifest, "", context=repository.get_context("B1", "V1")
             ),
         }
     )
-    original_context = repository.get_context
-    repository.get_context = lambda batch, version: {
-        **original_context(batch, version),
-        "transport_mode": "SEA",
-    }
     quote_text = (
         "体积方案：5000元/方 * 11.67 = 58,350元\n"
         "重量方案：25元/kg * 4200 = 105,000元"
@@ -1919,21 +1919,21 @@ def test_unified_worker_rejects_vision_rate_as_fee_total(monkeypatch) -> None:
             "file_name": "海运报价.png",
         }
     ]
+    original_context = repository.get_context
+    repository.get_context = lambda batch, version: {
+        **original_context(batch, version),
+        "transport_mode": "SEA",
+    }
     manifest = prepare_source_manifest(repository.sources)
     repository.run.update(
         {
             "proposal_version": 1,
             "source_manifest_json": manifest,
             "input_fingerprint": service._source_review_fingerprint(
-                "B1", "V1", _items(), manifest, ""
+                "B1", "V1", _items(), manifest, "", context=repository.get_context("B1", "V1")
             ),
         }
     )
-    original_context = repository.get_context
-    repository.get_context = lambda batch, version: {
-        **original_context(batch, version),
-        "transport_mode": "SEA",
-    }
     image_document = {
         "source_ref": {
             "source": "approval_attachment",
@@ -2005,21 +2005,22 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
             "form_fields": {"物流报价Cotización de logística": "DHL报价，251元"},
         }
     ]
-    repository.run.update(
-        {
-            "proposal_version": 1,
-            "clarification_text": "两款是一套，共四套",
-            "input_fingerprint": service._source_review_fingerprint(
-                "B1", "V1", _items(), repository.sources, "两款是一套，共四套"
-            ),
-        }
-    )
     original_context = repository.get_context
     repository.get_context = lambda batch, version: {
         **original_context(batch, version),
         "transport_mode": "EXPRESS",
         "fx_rates": {"USD": "7.178751"},
     }
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "clarification_text": "两款是一套，共四套",
+            "input_fingerprint": service._source_review_fingerprint(
+                "B1", "V1", _items(), repository.sources, "两款是一套，共四套",
+                context=repository.get_context("B1", "V1"),
+            ),
+        }
+    )
     monkeypatch.setattr(
         service,
         "_read_source",

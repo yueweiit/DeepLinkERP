@@ -510,7 +510,7 @@ def get_current_packing_snapshot(batch_name: str) -> dict[str, Any] | None:
     return _public_snapshot(frappe.get_doc("Overseas Packing Snapshot", name))
 
 
-def list_packing_sources(batch_name: str) -> dict[str, Any]:
+def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None, include_wiki: bool = True) -> dict[str, Any]:
     """返回受控来源 ID；不返回服务器路径、对象键、原始审批 JSON 或任何凭据。"""
 
     if frappe is None:
@@ -564,7 +564,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
         else:
             manual.append({**item, "source_kind": "manual_attachment"})
 
-    detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name))
+    detail = approval_detail if approval_detail is not None else packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name))
     comments = []
     for approval_row in [
         detail.get("main_approval"),
@@ -661,6 +661,8 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
                 }
             )
 
+    if not include_wiki:
+        return {"approval_sources": [*approval, *comments], "manual_sources": manual, "wiki_workbooks": []}
     wiki = []
     wiki_error = ""
     try:
@@ -758,12 +760,12 @@ MATERIAL_AI_DOCUMENT_SUFFIXES = (
 )
 
 
-def _list_approval_body_ai_sources(batch_name: str) -> list[dict[str, Any]]:
+def _list_approval_body_ai_sources(batch_name: str, *, detail: dict | None = None) -> list[dict[str, Any]]:
     """Expose only the current logistics approval and its server-verified purchase links."""
 
     from overseas_costing.services import dingtalk_approval_service
 
-    detail = dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
+    detail = detail if detail is not None else dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
     if not detail.get("ok"):
         return []
 
@@ -806,6 +808,7 @@ def _list_approval_body_ai_sources(batch_name: str) -> list[dict[str, Any]]:
             ),
             "occurred_at": str(approval.get("finish_time") or approval.get("create_time") or ""),
             "form_fields": fields,
+            "approval_decisions": [row for row in approval.get("timeline") or [] if isinstance(row, dict) and row.get("remark")],
             "source_updated_at": str(
                 approval.get("finish_time")
                 or approval.get("create_time")
@@ -834,7 +837,11 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
-    packing = list_packing_sources(str(batch_name))
+    detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
+    packing = list_packing_sources(str(batch_name), approval_detail=detail, include_wiki=False)
+    comment_index = {str(row.get("source_id") or ""): row for approval in
+        [detail.get("main_approval") or {}, *(detail.get("linked_purchase_approvals") or [])]
+        for row in approval.get("timeline") or [] if isinstance(row, dict)}
     result: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -878,6 +885,8 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
             "excluded": bool(source.get("excluded")),
             "exclude_reason": str(source.get("exclude_reason") or source.get("exclusion_reason") or ""),
             "form_fields": source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {},
+            "approval_decisions": source.get("approval_decisions") or [],
+            "dedicated_packing": bool(source.get("dedicated_packing")),
             "content_hash": str(
                 source.get("content_hash")
                 or source.get("content_sha256")
@@ -892,7 +901,11 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
             "source_updated_at": public["source_updated_at"],
             "content_hash": public["content_hash"],
             "content": public["form_fields"],
+            "decisions": public["approval_decisions"],
+            "comment_text": str((comment_index.get(source_id) or {}).get("remark") or ""),
         }
+        if kind == "approval_comment":
+            public["comment_text"] = hash_basis["comment_text"]
         public["source_hash"] = hashlib.sha256(_json(hash_basis).encode("utf-8")).hexdigest()
         result.append(public)
 
@@ -920,14 +933,35 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
         row.get("source_kind") == "wiki_sheet" and row.get("source_id") == current_wiki_source
         for row in result
     ):
-        append_source(current_snapshot)
+        # Revalidate just the attached Sheet. A confirmed snapshot's old hash
+        # cannot prove that the current server archive still has that content.
+        try:
+            from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
+
+            workbook_id, separator, sheet_id = current_wiki_source.partition(":")
+            if not separator or not workbook_id or not sheet_id:
+                raise ValueError("当前装箱计划来源 ID 不合法。")
+            manifest = get_packing_runtime_clients().catalog.get_latest_snapshot(workbook_id, sheet_id) or {}
+            content_hash = str(manifest.get("content_sha256") or "")
+            if not content_hash:
+                raise ValueError("当前装箱计划 Sheet 缺少可验证的归档哈希。")
+            append_source({**current_snapshot, "content_hash": content_hash,
+                           "source_updated_at": manifest.get("capture_finished_at") or ""})
+        except Exception as exc:
+            append_source({**current_snapshot, "source_hash": "", "content_hash": "",
+                           "available": False, "excluded": True, "exclude_reason": str(exc)})
     try:
-        approval_body_sources = _list_approval_body_ai_sources(str(batch_name))
+        approval_body_sources = _list_approval_body_ai_sources(str(batch_name), detail=detail)
     except Exception:
         approval_body_sources = []
     for source in approval_body_sources:
         append_source(source)
+    approval_body_by_instance = {str(source.get("process_instance_id") or ""): source for source in approval_body_sources}
     for source in packing.get("approval_sources") or []:
+        owning = approval_body_by_instance.get(str(source.get("process_instance_id") or "")) or {}
+        packing_fields = {key: value for key, value in (owning.get("form_fields") or {}).items() if "装箱单附件" in key}
+        source = {**source, "approval_role": owning.get("approval_role") or source.get("approval_role"),
+                  "dedicated_packing": bool(packing_fields and str(source.get("file_name") or source.get("source_label") or "--") in _json(packing_fields))}
         is_unmaterialized = str(source.get("source_id") or "").startswith("oa:") or not source.get("attachment_name")
         if source.get("source_kind") != "approval_comment" and not is_unmaterialized:
             continue
@@ -987,6 +1021,7 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
             ):
                 continue
         owning_approval = approval_body_by_instance.get(attachment_instance) or {}
+        packing_fields = {key: value for key, value in (owning_approval.get("form_fields") or {}).items() if "装箱单附件" in key}
         source = {
             "source_kind": (
                 "approval_attachment"
@@ -994,6 +1029,8 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
                 else "manual_attachment"
             ),
             "source_id": row.get("name"),
+            "approval_role": owning_approval.get("approval_role") or "",
+            "dedicated_packing": bool(packing_fields and file_name in _json(packing_fields)),
             "source_label": file_name or row.get("name"),
             "file_name": file_name,
             "source_updated_at": row.get("modified"),
@@ -1016,14 +1053,14 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
                 if invalid_approval
                 else ""
             ),
-            "content_hash": str(
+            "content_hash": str(packing_source_service._attachment_hash(row) if row.get("file_url") else (
                 (
                     snapshot.get("download")
                     if isinstance(snapshot.get("download"), dict)
                     else {}
                 ).get("sha256")
                 or packing_source_service._attachment_hash(row)
-            ),
+            )),
         }
         sheets = _attachment_sheet_names(row) if file_name.lower().endswith((".xlsx", ".xlsm")) else []
         if sheets:
@@ -1034,6 +1071,8 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
     return sorted(
         result,
         key=lambda row: (
+            0 if row.get("approval_role") == "international_logistics" and row.get("source_kind") == "approval_form" else
+            1 if row.get("dedicated_packing") else 2 if row.get("source_kind") == "approval_form" else 3,
             str(row.get("source_kind") or ""),
             str(row.get("source_id") or ""),
             str(row.get("sheet_name") or ""),

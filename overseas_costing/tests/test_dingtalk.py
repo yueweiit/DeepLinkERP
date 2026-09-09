@@ -2188,7 +2188,7 @@ def test_sync_linked_purchase_fields_propagates_manual_review_audit_failure(monk
     assert result["repair_result"]["audit_logged"] is False
 
 
-def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) -> None:
+def test_invalid_purchase_item_repair_requires_confirmation_before_restoring_rows(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 
     deleted_filters = []
@@ -2286,13 +2286,12 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
         }],
     )
 
-    assert repaired["action"] == "restored_main_logistics_items"
-    assert repaired["deleted_count"] == 1
-    assert repaired["created_count"] == 1
-    assert deleted_filters == [("Overseas Cost Item", {"batch": "BATCH-001", "version": "VER-001"})]
-    assert inserted_items[0]["material_code"] == "MAT-MAIN"
-    assert inserted_items[0]["transport_mode"] == "EXPRESS"
-    assert inserted_audits[0]["field_name"] == "invalid_purchase_item_repair"
+    assert repaired["action"] == "manual_required"
+    assert repaired["deleted_count"] == 0
+    assert repaired["created_count"] == 0
+    assert deleted_filters == []
+    assert inserted_items == []
+    assert inserted_audits[0]["field_name"] == "invalid_purchase_item_repair_review"
     audit_new_value = json.loads(inserted_audits[0]["new_value"])
     assert audit_new_value["excluded_purchase_decisions"] == [{
         "source_approval_no": "PUR-REFUSED",
@@ -2303,7 +2302,8 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
         "message": "",
     }]
     assert "dingtalk_instance_id" in audit_new_value["affected_fields"]
-    assert batch_updates[0][2]["item_count"] == 1
+    assert batch_updates == []
+    assert "确认" in repaired["reason"]
 
 
 def test_invalid_purchase_item_repair_protects_mixed_or_manual_rows(monkeypatch) -> None:
@@ -2353,7 +2353,7 @@ def test_invalid_purchase_item_repair_protects_mixed_or_manual_rows(monkeypatch)
     assert protected["protected_count"] == 1
 
 
-def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> None:
+def test_invalid_purchase_item_repair_never_enters_destructive_transaction(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 
     events = []
@@ -2436,17 +2436,11 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
 
     assert result["action"] == "manual_required"
     assert result["deleted_count"] == 0
-    assert events == [
-        ("savepoint", "before_invalid_purchase_item_repair"),
-        "delete",
-        "insert_failed",
-        ("rollback", "before_invalid_purchase_item_repair"),
-    ]
+    assert events == []
     assert audit_payloads[0]["field_name"] == "invalid_purchase_item_repair_review"
     audit_result = json.loads(audit_payloads[0]["new_value"])
     assert audit_result["action"] == "manual_required"
-    assert audit_result["rolled_back"] is True
-    assert "insert failed" in audit_result["reason"]
+    assert "确认" in audit_result["reason"]
 
 
 def test_invalid_purchase_item_manual_review_reports_audit_failure(monkeypatch) -> None:
