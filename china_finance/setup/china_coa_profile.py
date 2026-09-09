@@ -9,7 +9,7 @@ from frappe.utils import add_days, cint, getdate, now_datetime
 
 CHART_TEMPLATE = "中国企业会计准则－一般纳税人制造业（1.0）"
 CHART_VERSION = "1.0"
-MAPPING_RULE_VERSION = "1.5"
+MAPPING_RULE_VERSION = "1.6"
 
 COMPANY_DEFAULT_ACCOUNTS = {
 	"default_cash_account": "1001",
@@ -34,7 +34,38 @@ COMPANY_DEFAULT_ACCOUNTS = {
 
 SETTINGS_ACCOUNTS = {"profit_loss_account": "4103", "retained_earnings_account": "410401"}
 TAX_ACCOUNT_RULES = {"Input": "22210101", "Output": "22210102"}
+TAX_ACCOUNT_RULE_OVERRIDES = {
+	# In the source chart, the ordinary output VAT detail is 22210107;
+	# 22210102 is specifically "销项税额抵减".
+	"悦为智能技术(东莞)有限公司": {"Output": "22210107"},
+}
 TEMPORARY_ACCOUNT_NUMBERS = ("1901", "6901", "999901")
+COMPANY_DEFAULT_ACCOUNT_OVERRIDES = {
+	# The Yuewei source chart uses 660203 for property management and 660225
+	# for depreciation, while the standard profile uses 660203 for depreciation.
+	"悦为智能技术(东莞)有限公司": {"depreciation_expense_account": "660225"},
+}
+
+# A numbered chart may use a different but valid account type for a company
+# specific detail account. Keep this override in the profile instead of
+# forcing a rename or restructuring of the company's existing chart.
+COMPANY_ACCOUNT_TYPE_OVERRIDES = {
+	"悦为智能技术(东莞)有限公司": {"660203": "Expense Account"},
+}
+
+
+def get_company_default_accounts(company):
+	return {
+		**COMPANY_DEFAULT_ACCOUNTS,
+		**COMPANY_DEFAULT_ACCOUNT_OVERRIDES.get(company, {}),
+	}
+
+
+def get_tax_account_rules(company):
+	return {
+		**TAX_ACCOUNT_RULES,
+		**TAX_ACCOUNT_RULE_OVERRIDES.get(company, {}),
+	}
 
 
 @lru_cache(maxsize=1)
@@ -129,6 +160,14 @@ def validate_profile(company, include_defaults=True):
 	actual, duplicates = get_company_accounts_by_number(company)
 	errors = [_("科目编号 {0} 重复：{1}").format(number, "、".join(names)) for number, names in duplicates.items()]
 	warnings = []
+	child_parents = {
+		row.parent_account
+		for row in frappe.get_all(
+			"Account", filters={"company": company, "parent_account": ["is", "set"]}, fields=["parent_account"]
+		)
+		if row.parent_account
+	}
+	account_type_overrides = COMPANY_ACCOUNT_TYPE_OVERRIDES.get(company, {})
 	for number, rule in expected.items():
 		account = actual.get(number)
 		if not account:
@@ -138,10 +177,12 @@ def validate_profile(company, include_defaults=True):
 			errors.append(_("科目 {0} 根类型应为 {1}").format(number, rule["root_type"]))
 		if account.disabled:
 			errors.append(_("必需科目 {0} 已停用").format(number))
-		if cint(account.is_group) != cint(rule["is_group"]):
-			errors.append(_("科目 {0} 分组属性不正确").format(number))
-		if (account.account_type or None) != rule["account_type"]:
-			errors.append(_("科目 {0} 类型应为 {1}").format(number, rule["account_type"] or _("空")))
+		has_children = account.name in child_parents
+		if bool(account.is_group) != has_children:
+			errors.append(_("科目 {0} 分组属性与实际父子关系不一致").format(number))
+		expected_account_type = account_type_overrides.get(number, rule["account_type"])
+		if not account.is_group and (account.account_type or None) != expected_account_type:
+			errors.append(_("科目 {0} 类型应为 {1}").format(number, expected_account_type or _("空")))
 		if account.account_name != rule["account_name"]:
 			warnings.append(
 				_("科目 {0} 名称与模板不一致：当前为 {1}，模板为 {2}").format(
@@ -151,7 +192,7 @@ def validate_profile(company, include_defaults=True):
 	default_differences = []
 	if include_defaults:
 		company_doc = frappe.get_cached_doc("Company", company)
-		for fieldname, number in COMPANY_DEFAULT_ACCOUNTS.items():
+		for fieldname, number in get_company_default_accounts(company).items():
 			expected_account = actual.get(number)
 			if expected_account and company_doc.get(fieldname) != expected_account.name:
 				warnings.append(_("公司默认科目 {0} 应为 {1}").format(fieldname, expected_account.name))
@@ -166,7 +207,7 @@ def validate_profile(company, include_defaults=True):
 		"template": CHART_TEMPLATE,
 		"version": CHART_VERSION,
 		"hash": get_chart_hash(),
-		"status": "Ready" if not errors and not warnings else "Needs Attention",
+		"status": "Ready" if not errors else "Needs Attention",
 		"errors": errors,
 		"warnings": warnings,
 		"default_differences": default_differences,
@@ -181,7 +222,7 @@ def apply_company_defaults(company, repair=False):
 		frappe.throw(_("科目编号存在重复，不能同步公司默认科目"))
 	company_doc = frappe.get_doc("Company", company)
 	updated = 0
-	for fieldname, number in COMPANY_DEFAULT_ACCOUNTS.items():
+	for fieldname, number in get_company_default_accounts(company).items():
 		account = accounts.get(number)
 		if not account:
 			continue
@@ -225,7 +266,7 @@ def ensure_tax_mappings(company, effective_from):
 	if not is_profile_company(company):
 		return 0
 	created = 0
-	for direction, number in TAX_ACCOUNT_RULES.items():
+	for direction, number in get_tax_account_rules(company).items():
 		account = get_account_by_number(company, number, leaf=True)
 		filters = {"company": company, "direction": direction, "account": account.name, "effective_from": getdate(effective_from)}
 		effective_to = _available_tax_mapping_end(company, direction, account.name, effective_from)
@@ -334,8 +375,8 @@ def _remove_unused_generic_tax_templates(company):
 def _normalize_generic_item_tax_templates(company, vat_account):
 	"""Split an unused generic item tax template into China output and input variants."""
 	updated = created = 0
-	output_account = get_account_by_number(company, TAX_ACCOUNT_RULES["Output"], leaf=True)
-	input_account = get_account_by_number(company, TAX_ACCOUNT_RULES["Input"], leaf=True)
+	output_account = get_account_by_number(company, get_tax_account_rules(company)["Output"], leaf=True)
+	input_account = get_account_by_number(company, get_tax_account_rules(company)["Input"], leaf=True)
 	for template in frappe.get_all(
 		"Item Tax Template", filters={"company": company, "disabled": 0}, fields=["name", "title"]
 	):
@@ -382,8 +423,8 @@ def _ensure_china_tax_templates(company):
 	ERPNext does not create these templates when the company is created with an
 	imported chart. Keep this idempotent and use numbered China VAT accounts.
 	"""
-	output_account = get_account_by_number(company, TAX_ACCOUNT_RULES["Output"], leaf=True)
-	input_account = get_account_by_number(company, TAX_ACCOUNT_RULES["Input"], leaf=True)
+	output_account = get_account_by_number(company, get_tax_account_rules(company)["Output"], leaf=True)
+	input_account = get_account_by_number(company, get_tax_account_rules(company)["Input"], leaf=True)
 	created = {"sales": 0, "purchase": 0, "item": 0}
 
 	definitions = (
@@ -444,7 +485,7 @@ def normalize_generic_vat_templates(company):
 			("Sales Taxes and Charges Template", "Sales Taxes and Charges", "Output"),
 			("Purchase Taxes and Charges Template", "Purchase Taxes and Charges", "Input"),
 		):
-			target = get_account_by_number(company, TAX_ACCOUNT_RULES[direction], leaf=True)
+			target = get_account_by_number(company, get_tax_account_rules(company)[direction], leaf=True)
 			for template in frappe.get_all(doctype, filters={"company": company, "disabled": 0}, pluck="name"):
 				if not _tax_template_is_unused(doctype, company, template):
 					continue
@@ -458,7 +499,7 @@ def normalize_generic_vat_templates(company):
 					continue
 				for row in frappe.get_all("Item Tax Template Detail", filters={"parent": template, "parenttype": "Item Tax Template"}, fields=["name", "tax_type"]):
 					if str(row.tax_type or "").strip().upper().startswith("VAT"):
-						frappe.db.set_value("Item Tax Template Detail", row.name, "tax_type", get_account_by_number(company, TAX_ACCOUNT_RULES["Output"], leaf=True).name, update_modified=False)
+						frappe.db.set_value("Item Tax Template Detail", row.name, "tax_type", get_account_by_number(company, get_tax_account_rules(company)["Output"], leaf=True).name, update_modified=False)
 				if str(frappe.db.get_value("Item Tax Template", template, "title") or "").startswith("China Tax"):
 					frappe.db.set_value("Item Tax Template", template, "disabled", 1, update_modified=False)
 		removed_templates = _remove_unused_generic_tax_templates(company)
@@ -475,7 +516,7 @@ def normalize_generic_vat_templates(company):
 		("Sales Taxes and Charges Template", "Sales Taxes and Charges", "Output"),
 		("Purchase Taxes and Charges Template", "Purchase Taxes and Charges", "Input"),
 	):
-		target = get_account_by_number(company, TAX_ACCOUNT_RULES[direction], leaf=True)
+		target = get_account_by_number(company, get_tax_account_rules(company)[direction], leaf=True)
 		for template in frappe.get_all(template_doctype, filters={"company": company, "disabled": 0}, pluck="name"):
 			rows = frappe.get_all(child_doctype, filters={"parent": template, "parenttype": template_doctype}, fields=["name", "account_head"])
 			if not rows or any(row.account_head != vat.name for row in rows):

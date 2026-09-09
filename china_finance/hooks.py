@@ -86,11 +86,20 @@ page_js = {
 	"bank-reconciliation-tool": "public/js/bank_reconciliation_tool.js",
 }
 
-app_include_js = ["/assets/china_finance/js/bank_reconciliation_tool.js"]
+app_include_js = [
+	"/assets/china_finance/js/bank_reconciliation_tool.js",
+	"/assets/china_finance/js/account_display.js",
+]
+
+doctype_tree_js = {
+	"Account": "public/js/account_tree.js",
+}
 
 override_whitelisted_methods = {
 	"erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool.get_bank_transactions":
 		"china_finance.services.bank_reconciliation.get_bank_transactions_with_summary",
+	"erpnext.accounts.doctype.account.chart_of_accounts.chart_of_accounts.get_charts_for_country":
+		"china_finance.services.account_template.get_charts_for_country",
 }
 
 # Keep ERPNext's bank statement import workflow intact while allowing the
@@ -98,6 +107,8 @@ override_whitelisted_methods = {
 override_doctype_class = {
 	"Bank Statement Import": "china_finance.overrides.bank_statement_import.ChinaFinanceBankStatementImport",
 	"Bank Statement Import Log": "china_finance.overrides.bank_statement_import.ChinaFinanceBankStatementImportLog",
+	"Company": "china_finance.overrides.company.ChinaFinanceCompany",
+	"Period Closing Voucher": "china_finance.overrides.period_closing_voucher.ChinaFinancePeriodClosingVoucher",
 }
 
 # Svg Icons

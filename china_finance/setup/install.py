@@ -168,6 +168,7 @@ def after_install():
 	sync_china_accounting_voucher_print_format()
 	backfill_bank_transaction_summaries()
 	sync_reclassification_rules()
+	sync_account_display_properties()
 	sync_navigation_metadata()
 
 
@@ -194,8 +195,45 @@ def after_migrate():
 	sync_china_accounting_voucher_print_format()
 	backfill_bank_transaction_summaries()
 	sync_reclassification_rules()
+	sync_account_display_properties()
 	sync_navigation_metadata()
 	validate_deployment_schema()
+
+
+def sync_account_display_properties():
+	"""Show Account.account_name in Link fields without changing Account.name."""
+	properties = (
+		("title_field", "account_name", "Data"),
+		("show_title_field_in_link", "1", "Check"),
+	)
+	changed = False
+	for property_name, value, property_type in properties:
+		filters = {
+			"doctype_or_field": "DocType",
+			"doc_type": "Account",
+			"field_name": None,
+			"property": property_name,
+		}
+		setter_name = frappe.db.exists("Property Setter", filters)
+		if setter_name:
+			if frappe.db.get_value("Property Setter", setter_name, "value") != value:
+				frappe.db.set_value("Property Setter", setter_name, "value", value, update_modified=False)
+				changed = True
+			continue
+
+		frappe.get_doc(
+			{
+				"doctype": "Property Setter",
+				**filters,
+				"value": value,
+				"property_type": property_type,
+				"is_system_generated": 1,
+			}
+		).insert(ignore_permissions=True)
+		changed = True
+
+	if changed:
+		frappe.clear_cache(doctype="Account")
 
 
 def sync_roles():
