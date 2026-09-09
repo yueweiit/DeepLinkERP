@@ -52,9 +52,14 @@ DETAIL_ACCOUNTS = (
 
 OTHER_PAYABLE_ACCOUNTS = (
 	("224100", "其他应付款（明细）", None, None),
-	("224101", "其他应付款-社保", "224100", "Payable"),
-	("224102", "其他应付款-公积金", "224100", "Payable"),
+	# These are aggregated payroll-liability details, not supplier subledgers.
+	# Leaving account_type empty prevents Journal Entry from requiring a party
+	# for every monthly social-security/provident-fund accrual.
+	("224101", "其他应付款-社保", "224100", None),
+	("224102", "其他应付款-公积金", "224100", None),
 )
+
+NON_PARTY_LIABILITY_ACCOUNT_NUMBERS = ("224101", "224102")
 
 
 def repair_aaa_finance(company=COMPANY, apply=False, limit=None):
@@ -72,6 +77,7 @@ def repair_aaa_finance(company=COMPANY, apply=False, limit=None):
 		return plan
 
 	account_map = ensure_detail_accounts(company)
+	non_party_liability_accounts = normalize_non_party_liability_accounts(company, apply=True)
 	fix_bank_account(company, account_map)
 	clone_statement_mappings(company, account_map)
 	customer_name = ensure_customer(company)
@@ -98,6 +104,7 @@ def repair_aaa_finance(company=COMPANY, apply=False, limit=None):
 	return {
 		"company": company,
 		"created_accounts": account_map,
+		"non_party_liability_accounts": non_party_liability_accounts,
 		"customer": customer_name,
 		"shareholder": shareholder_name,
 		"bank_summaries": bank_summaries,
@@ -276,6 +283,40 @@ def ensure_detail_accounts(company):
 			name = doc.name
 		accounts[number] = name
 	return accounts
+
+
+def normalize_non_party_liability_accounts(company=COMPANY, apply=False):
+	"""Keep aggregated payroll-liability details outside the party subledger."""
+	if company != COMPANY:
+		frappe.throw("此维护脚本仅允许处理 aaa 的悦为智能技术(东莞)有限公司")
+
+	rows = frappe.get_all(
+		"Account",
+		filters={
+			"company": company,
+			"account_number": ["in", list(NON_PARTY_LIABILITY_ACCOUNT_NUMBERS)],
+		},
+		fields=["name", "account_number", "account_name", "account_type", "root_type", "is_group"],
+		order_by="account_number",
+	)
+	result = {
+		"company": company,
+		"accounts": rows,
+		"changed": [],
+		"missing": [
+			number for number in NON_PARTY_LIABILITY_ACCOUNT_NUMBERS
+			if number not in {row.account_number for row in rows}
+		],
+	}
+	if not apply:
+		return result
+
+	for row in rows:
+		if row.account_type:
+			frappe.db.set_value("Account", row.name, "account_type", "", update_modified=False)
+			result["changed"].append({"name": row.name, "account_number": row.account_number})
+	frappe.db.commit()
+	return result
 
 
 def fix_bank_account(company, account_map):
