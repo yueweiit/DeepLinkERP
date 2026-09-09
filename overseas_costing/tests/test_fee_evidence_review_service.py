@@ -654,6 +654,166 @@ def test_refund_parent_must_be_a_valid_payment_for_the_same_fee_and_currency() -
         service.validate_refund_parent(refund, {**payment, "evidence_type": "QUOTE"})
 
 
+def test_unique_refund_parent_adds_reviewable_sku_reversal_proposals() -> None:
+    draft = {
+        "evidence": {
+            "proposal_id": "evidence:classification",
+            "evidence_type": "REFUND",
+            "accounting_role": "SETTLEMENT",
+            "direction": "CREDIT",
+            "currency": "MXN",
+            "original_amount": "15",
+            "default_selected": True,
+            "source_refs": [{"attachment": "ATT-R", "page": 1, "text_line": 8}],
+        },
+        "components": [],
+        "summary": {"component_proposal_count": 0},
+    }
+    payment = {
+        "name": "PAYMENT-1",
+        "batch": "B1",
+        "version": "V1",
+        "fee_rule": "F1",
+        "attachment": "ATT-P",
+        "evidence_type": "PAYMENT",
+        "accounting_role": "SETTLEMENT",
+        "currency": "MXN",
+        "original_amount": "30",
+        "validation_status": "VALID",
+    }
+    original_components = [
+        {
+            "name": "C1",
+            "logical_fee_key": "import_tax",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "currency": "MXN",
+            "original_amount": "20",
+            "amount_rmb": "10",
+        },
+        {
+            "name": "C2",
+            "logical_fee_key": "import_tax",
+            "item": "ITEM-SUNGLASSES",
+            "stable_line_key": "LINE-SUNGLASSES",
+            "currency": "MXN",
+            "original_amount": "10",
+            "amount_rmb": "5",
+        },
+    ]
+
+    result = service.add_refund_review_proposals(
+        draft,
+        batch_name="B1",
+        version_name="V1",
+        fee_rule="F1",
+        candidates=[payment],
+        components_by_evidence={"PAYMENT-1": original_components},
+    )
+
+    assert result["evidence"]["related_evidence"] == "PAYMENT-1"
+    assert result["refund_parent_options"] == [payment]
+    assert [row["original_amount"] for row in result["components"]] == [
+        "-10.00",
+        "-5.00",
+    ]
+    assert all(row["fee_logical_key"] == "import_tax" for row in result["components"])
+    assert all(row["default_selected"] for row in result["components"])
+
+
+def test_ambiguous_refund_parent_stays_unlinked_and_requires_review() -> None:
+    draft = {
+        "evidence": {
+            "evidence_type": "REFUND",
+            "accounting_role": "SETTLEMENT",
+            "currency": "MXN",
+            "original_amount": "15",
+        },
+        "components": [],
+        "summary": {},
+    }
+    candidates = [
+        {
+            "name": name,
+            "batch": "B1",
+            "version": "V1",
+            "fee_rule": "F1",
+            "evidence_type": "PAYMENT",
+            "accounting_role": "SETTLEMENT",
+            "currency": "MXN",
+            "validation_status": "VALID",
+        }
+        for name in ("P1", "P2")
+    ]
+
+    result = service.add_refund_review_proposals(
+        draft,
+        batch_name="B1",
+        version_name="V1",
+        fee_rule="F1",
+        candidates=candidates,
+        components_by_evidence={},
+    )
+
+    assert not result["evidence"].get("related_evidence")
+    assert result["evidence"]["needs_review"] is True
+    assert result["components"] == []
+
+
+def test_ambiguous_refund_parents_expose_unselected_reversal_choices() -> None:
+    draft = {
+        "evidence": {
+            "evidence_type": "REFUND",
+            "accounting_role": "SETTLEMENT",
+            "direction": "CREDIT",
+            "currency": "MXN",
+            "original_amount": "5",
+            "source_refs": [{"attachment": "R1", "page": 1, "text_line": 2}],
+        },
+        "components": [],
+        "summary": {},
+    }
+    candidates = [
+        {
+            "name": name,
+            "batch": "B1",
+            "version": "V1",
+            "fee_rule": "F1",
+            "evidence_type": "PAYMENT",
+            "accounting_role": "SETTLEMENT",
+            "direction": "DEBIT",
+            "currency": "MXN",
+            "validation_status": "VALID",
+        }
+        for name in ("P1", "P2")
+    ]
+    components = {
+        name: [
+            {
+                "name": f"C-{name}",
+                "logical_fee_key": "import_tax",
+                "item": "ITEM-GLASSES",
+                "currency": "MXN",
+                "original_amount": "10",
+                "amount_rmb": "5",
+            }
+        ]
+        for name in ("P1", "P2")
+    }
+
+    result = service.add_refund_review_proposals(
+        draft,
+        batch_name="B1",
+        version_name="V1",
+        fee_rule="F1",
+        candidates=candidates,
+        components_by_evidence=components,
+    )
+
+    assert {row["refund_parent"] for row in result["components"]} == {"P1", "P2"}
+    assert all(row["default_selected"] is False for row in result["components"])
+
+
 def test_review_children_require_selected_evidence_and_final_role_is_consistent() -> None:
     with pytest.raises(ValueError, match="先确认凭证"):
         service.validate_review_selections(

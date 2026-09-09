@@ -423,6 +423,7 @@ def build_refund_reversal_components(
                 "source_evidence": {"reverses_component": component_name},
                 "confidence": "1.00",
                 "default_selected": True,
+                "fee_logical_key": str(source.get("logical_fee_key") or ""),
             }
         )
     return result
@@ -453,6 +454,117 @@ def validate_refund_parent(refund: dict, payment: dict) -> dict:
     if refund_currency != payment_currency:
         raise ValueError("退款与原付款凭证的币种必须一致。")
     return dict(payment)
+
+
+def add_refund_review_proposals(
+    draft: dict,
+    *,
+    batch_name: str,
+    version_name: str,
+    fee_rule: str,
+    candidates: list[dict],
+    components_by_evidence: dict[str, list[dict]],
+) -> dict:
+    """Add only an unambiguous payment relationship to a refund review draft."""
+
+    result = {
+        **draft,
+        "evidence": dict(draft.get("evidence") or {}),
+        "components": [dict(row) for row in (draft.get("components") or [])],
+        "summary": dict(draft.get("summary") or {}),
+    }
+    evidence = result["evidence"]
+    if str(evidence.get("evidence_type") or "").upper() != "REFUND":
+        return result
+    refund = {
+        **evidence,
+        "batch": batch_name,
+        "version": version_name,
+        "fee_rule": fee_rule,
+    }
+    compatible = []
+    for candidate in candidates or []:
+        try:
+            validate_refund_parent(refund, candidate)
+        except ValueError:
+            continue
+        compatible.append(dict(candidate))
+    result["refund_parent_options"] = compatible
+    if len(compatible) != 1:
+        evidence["needs_review"] = True
+        evidence["default_selected"] = False
+        evidence["warning"] = (
+            "存在多笔可能的原付款，请人工选择后核对冲回比例。"
+            if compatible
+            else "未找到可靠的原付款，退款 SKU 分项暂不冲回。"
+        )
+        refund_source = next(
+            (
+                ref
+                for ref in (evidence.get("source_refs") or [])
+                if isinstance(ref, dict) and _precise_source_ref(ref)
+            ),
+            {},
+        )
+        for parent in compatible:
+            parent_name = str(parent.get("name") or "")
+            original_components = components_by_evidence.get(parent_name) or []
+            try:
+                reversals = build_refund_reversal_components(
+                    evidence.get("original_amount"), original_components
+                )
+            except ValueError:
+                continue
+            for index, row in enumerate(reversals, start=1):
+                row["proposal_id"] = f"refund-component:{parent_name}:{index}"
+                row["refund_parent"] = parent_name
+                row["source_evidence"] = {
+                    **refund_source,
+                    "reverses_component": row.get("reverses_component"),
+                }
+                row["default_selected"] = False
+                row["needs_review"] = True
+                row["warning"] = "请先确认该冲回分项对应的原付款。"
+                result["components"].append(row)
+        result["summary"]["component_proposal_count"] = len(result["components"])
+        return result
+    parent = compatible[0]
+    original_components = components_by_evidence.get(str(parent.get("name") or "")) or []
+    if not original_components:
+        evidence["needs_review"] = True
+        evidence["default_selected"] = False
+        evidence["warning"] = "原付款没有可验证的 SKU 分项，退款暂不自动冲回。"
+        return result
+    try:
+        reversals = build_refund_reversal_components(
+            evidence.get("original_amount"), original_components
+        )
+    except ValueError as exc:
+        evidence["needs_review"] = True
+        evidence["default_selected"] = False
+        evidence["warning"] = str(exc)
+        return result
+    evidence["related_evidence"] = parent["name"]
+    refund_source = next(
+        (
+            ref
+            for ref in (evidence.get("source_refs") or [])
+            if isinstance(ref, dict) and _precise_source_ref(ref)
+        ),
+        {},
+    )
+    default_selected = bool(evidence.get("default_selected")) and bool(refund_source)
+    for index, row in enumerate(reversals, start=1):
+        row["proposal_id"] = f"refund-component:{index}"
+        row["source_evidence"] = {
+            **refund_source,
+            "reverses_component": row.get("reverses_component"),
+        }
+        row["default_selected"] = default_selected
+        row["needs_review"] = not default_selected
+        result["components"].append(row)
+    result["summary"]["component_proposal_count"] = len(result["components"])
+    return result
 
 
 def split_customs_evidence(parsed: dict) -> dict:
@@ -1335,7 +1447,6 @@ class FrappeFeeEvidenceReviewRepository:
                 "evidence": evidence_name,
                 "status": "CONFIRMED",
                 "is_active": 1,
-                "cost_effect": "COST",
             },
             fields=[
                 "name",
@@ -1349,9 +1460,43 @@ class FrappeFeeEvidenceReviewRepository:
                 "original_amount",
                 "amount_rmb",
                 "exchange_rate",
+                "accounting_role",
+                "cost_effect",
             ],
             order_by="logical_fee_key asc, tax_code asc, item asc, name asc",
             limit_page_length=10000,
+        )
+
+    def get_refund_candidates(
+        self, batch_name: str, version_name: str, fee_rule: str
+    ) -> list[dict]:
+        return frappe.get_all(
+            "Overseas Cost Fee Evidence",
+            filters={
+                "batch": batch_name,
+                "version": version_name,
+                "fee_rule": fee_rule,
+                "evidence_type": "PAYMENT",
+                "accounting_role": "SETTLEMENT",
+                "validation_status": "VALID",
+                "direction": "DEBIT",
+            },
+            fields=[
+                "name",
+                "batch",
+                "version",
+                "fee_rule",
+                "attachment",
+                "evidence_type",
+                "accounting_role",
+                "currency",
+                "direction",
+                "validation_status",
+                "original_amount",
+                "confirmed_at",
+            ],
+            order_by="confirmed_at desc, name desc",
+            limit_page_length=1000,
         )
 
     def update_evidence(self, evidence_name: str, values: dict) -> None:
@@ -1829,6 +1974,25 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             evidence_role=str(_run_value(run, "evidence_role")),
             ai_review=ai.get("review") if ai.get("ok") else None,
         )
+        if str((draft.get("evidence") or {}).get("evidence_type") or "").upper() == "REFUND":
+            candidates = repo.get_refund_candidates(
+                context["batch"],
+                context["version"],
+                str(_run_value(run, "fee_rule") or ""),
+            )
+            draft = add_refund_review_proposals(
+                draft,
+                batch_name=context["batch"],
+                version_name=context["version"],
+                fee_rule=str(_run_value(run, "fee_rule") or ""),
+                candidates=candidates,
+                components_by_evidence={
+                    str(row.get("name") or ""): repo.get_evidence_components(
+                        str(row.get("name") or "")
+                    )
+                    for row in candidates
+                },
+            )
         progress[0].update(
             {
                 "status": "COMPLETED",
