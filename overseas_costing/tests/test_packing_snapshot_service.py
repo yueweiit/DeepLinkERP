@@ -381,8 +381,18 @@ def test_list_sources_recommends_cached_sheet_without_submitting_refresh(monkeyp
             assert workbook_id == "WB-2026"
             self.snapshot_queries += 1
             return [
-                {"sheet_id": "st-ring", "status": "ready", "created_at": "2026-09-07T10:00:00+08:00"},
-                {"sheet_id": "st-broken", "status": "ready", "created_at": "2026-09-07T09:00:00+08:00"},
+                {
+                    "sheet_id": "st-ring",
+                    "status": "ready",
+                    "created_at": "2026-09-07T10:00:00+08:00",
+                    "content_sha256": "a" * 64,
+                },
+                {
+                    "sheet_id": "st-broken",
+                    "status": "ready",
+                    "created_at": "2026-09-07T09:00:00+08:00",
+                    "content_sha256": "b" * 64,
+                },
             ]
 
     class FakeArchive:
@@ -447,6 +457,7 @@ def test_list_sources_recommends_cached_sheet_without_submitting_refresh(monkeyp
     assert "匹配当前批次 5/5 个 SKU" in sheets[0]["recommendation_reasons"]
     assert sheets[0]["extra_item_codes"] == ["CW000224"]
     assert sheets[0]["snapshot_updated_at"] == "2026-09-07T10:00:00+08:00"
+    assert sheets[0]["content_hash"] == "a" * 64
     broken = next(item for item in sheets if item["source_id"] == "WB-2026:st-broken")
     assert broken["snapshot_status"] == "unreadable"
     assert result["wiki_error"] == ""
@@ -665,3 +676,46 @@ def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_e
     assert rejected["excluded"] is True
     assert "审计专用" in rejected["exclude_reason"]
     assert "UNRELATED" not in repr(result)
+
+
+def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(monkeypatch):
+    from types import SimpleNamespace
+
+    trusted_hash = {"value": "a" * 64}
+    monkeypatch.setattr(
+        service,
+        "list_packing_sources",
+        lambda _batch: {
+            "wiki_workbooks": [
+                {
+                    "sheets": [
+                        {
+                            "source_kind": "wiki_sheet",
+                            "source_id": "WB:S1",
+                            "source_label": "Sheet1",
+                            "source_updated_at": "2026-09-09 10:00:00",
+                            "source_hash": trusted_hash["value"],
+                        }
+                    ]
+                }
+            ],
+            "approval_sources": [],
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "get_current_packing_snapshot",
+        lambda _batch: {"source_kind": "wiki_sheet", "source_id": "WB:S1"},
+    )
+    monkeypatch.setattr(service, "_list_approval_body_ai_sources", lambda _batch: [])
+    monkeypatch.setattr(
+        service,
+        "frappe",
+        SimpleNamespace(get_list=lambda *_args, **_kwargs: []),
+    )
+
+    first = service.list_material_ai_sources("B1", version_name="V1")
+    trusted_hash["value"] = "b" * 64
+    second = service.list_material_ai_sources("B1", version_name="V1")
+
+    assert first[0]["source_hash"] != second[0]["source_hash"]

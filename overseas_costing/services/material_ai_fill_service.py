@@ -470,6 +470,7 @@ def _document_has_evidence(document: dict) -> bool:
         and (
             any(isinstance(row, dict) for row in document.get("structured_rows") or [])
             or any(isinstance(row, dict) for row in document.get("semantic_rows") or [])
+            or any(isinstance(row, dict) for row in document.get("_image_payloads") or [])
             or bool(document.get("form_fields"))
             or str(document.get("text") or "").strip()
         )
@@ -712,6 +713,7 @@ def build_source_review_messages(
         "item_update 的 payload 格式为 {\"item_name\":\"现有行名\",\"fields\":{物料字段...}}；"
         "fee_update 的 payload 格式为 {\"logical_fee_key\":\"系统逻辑费用\",\"amount\":\"金额\","
         "\"currency\":\"RMB/MXN/USD\",\"amount_status\":\"ESTIMATED/ACTUAL\"}。"
+        "amount 只能填写明确的总价；5000元/方、25元/kg 等 unit_rate 仅是费率，绝不能作为费用总额。"
         "material_replace 可将一条模糊来源行拆成多条临时明细；数量表达为套装数量时要结合人工说明和审批总数量。"
         "fee_update 只能补充系统给出的逻辑费用。所有数值必须引用真实 document_id 以及字段、Sheet 行或页码；"
         "图片转录可作为证据；只有文字和数值清晰可见时才可返回候选，模糊、遮挡或无法唯一匹配时不得猜测。"
@@ -943,6 +945,10 @@ def normalize_source_review_proposals(
                     continue
             else:
                 payload = _normalize_fee_values(raw.get("payload") or {})
+                if _fee_amount_is_rate_only(
+                    payload.get("amount"), refs, evidence
+                ):
+                    continue
         except ValueError:
             continue
         confidence = float(_confidence(raw.get("confidence")))
@@ -1730,6 +1736,9 @@ def apply_source_ai_review(
     _assert_run_batch(initial_run, batch_name)
     version_name = str(_record_value(initial_run, "version") or "")
     context = repo.get_context(str(batch_name), version_name)
+    if hasattr(repo, "lock_review_scope"):
+        repo.lock_review_scope(context["batch"])
+        context = repo.get_context(str(batch_name), version_name)
     run = repo.lock_run(str(run_id or ""))
     _assert_run_batch(run, batch_name)
     if str(_record_value(run, "status") or "") == "APPLIED":
@@ -1747,8 +1756,6 @@ def apply_source_ai_review(
         }
     if str(_record_value(run, "status") or "") != "READY":
         raise ValueError("AI 资料审核草稿尚未准备完成或已经处理。")
-    if hasattr(repo, "lock_review_scope"):
-        repo.lock_review_scope(context["batch"])
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     items = repo.get_items(context["batch"], context["version"])
     try:
@@ -1845,6 +1852,181 @@ def _source_reference(source: dict, *, row: Any = None, cell: str = "", page: An
         if str(source.get(fieldname) or "").strip():
             result[fieldname] = str(source.get(fieldname) or "").strip()
     return result
+
+
+def _document_fee_lines(document: dict) -> list[tuple[str, dict]]:
+    """Flatten server-read evidence into lines with canonical source locations."""
+
+    lines: list[tuple[str, dict]] = []
+    for fieldname, value in (document.get("form_fields") or {}).items():
+        text = str(value or "").strip()
+        if text:
+            lines.extend(
+                (line, {"field": str(fieldname)})
+                for line in text.splitlines()
+                if line.strip()
+            )
+    for row in document.get("semantic_rows") or []:
+        if not isinstance(row, dict):
+            continue
+        cells = [cell for cell in row.get("cells") or [] if isinstance(cell, dict)]
+        text = " ".join(str(cell.get("value") or "").strip() for cell in cells).strip()
+        if not text:
+            continue
+        lines.append(
+            (
+                text,
+                {
+                    "sheet": str(row.get("sheet") or ""),
+                    "row": row.get("source_row"),
+                    "cells": cells,
+                },
+            )
+        )
+    current_page = None
+    for raw_line in str(document.get("text") or "").splitlines():
+        page_match = re.fullmatch(r"\s*---\s*Page\s+(\d+)\s*---\s*", raw_line, re.IGNORECASE)
+        if page_match:
+            current_page = int(page_match.group(1))
+            continue
+        if raw_line.strip():
+            lines.append((raw_line.strip(), {"page": current_page}))
+    for observation in document.get("vision_observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        anchor = observation.get("anchor") if isinstance(observation.get("anchor"), dict) else {}
+        for line in str(observation.get("description") or "").splitlines():
+            if line.strip():
+                lines.append(
+                    (
+                        line.strip(),
+                        {
+                            "sheet": str(anchor.get("sheet") or ""),
+                            "row": anchor.get("row"),
+                            "cell": str(anchor.get("cell") or ""),
+                            "page": anchor.get("page"),
+                        },
+                    )
+                )
+    return lines
+
+
+def _fee_amount_key(value: Any) -> str:
+    number = _decimal(str(value or "").replace(",", ""))
+    return format(number.normalize(), "f") if number is not None else ""
+
+
+def _fee_amount_is_rate_only(
+    amount: Any, refs: list[dict], evidence: dict[str, dict]
+) -> bool:
+    """Reject model amounts that are evidenced only as per-unit freight rates."""
+
+    amount_key = _fee_amount_key(amount)
+    if not amount_key:
+        return False
+    document_ids = {
+        str(ref.get("document_id") or "")
+        for ref in refs or []
+        if str(ref.get("document_id") or "")
+    }
+    text = "\n".join(
+        line
+        for document_id in document_ids
+        for line, _locator in _document_fee_lines(evidence.get(document_id) or {})
+    )
+    rate_keys = {
+        _fee_amount_key(match.group("amount"))
+        for match in re.finditer(
+            r"(?P<amount>\d[\d,]*(?:\.\d+)?)\s*"
+            r"(?:元|rmb|cny|¥|￥|usd|美元|美金|mxn|peso|比索)?\s*/\s*"
+            r"(?:方|立方|cbm\b|m3\b|kg\b|kgs?\b)",
+            text,
+            re.IGNORECASE,
+        )
+    }
+    if amount_key not in rate_keys:
+        return False
+    from overseas_costing.scripts.import_oa_logistics import (
+        extract_logistics_quote_candidates_from_approval,
+    )
+
+    total_keys = {
+        _fee_amount_key(candidate.get("amount"))
+        for candidate in extract_logistics_quote_candidates_from_approval(
+            {"form_fields": {"物流报价": text}}
+        )
+    }
+    return amount_key not in total_keys
+
+
+def build_document_fee_proposals(
+    source: dict,
+    document: dict,
+    *,
+    transport_mode: str = "",
+    existing_fees: list[dict] | None = None,
+) -> list[dict]:
+    """Deterministically extract freight totals from server-read attachment text/cells."""
+
+    lines = _document_fee_lines(document)
+    combined = "\n".join(line for line, _locator in lines)
+    if not combined or not re.search(
+        r"(?:物流|运费|freight|shipping|报价|体积方案|重量方案|/(?:方|立方|cbm|m3|kg|kgs?))",
+        combined,
+        re.IGNORECASE,
+    ):
+        return []
+    synthetic = {
+        **source,
+        "process_instance_id": "",
+        "form_fields": {"物流报价": combined},
+    }
+    proposals = build_approval_fee_proposals(
+        synthetic,
+        transport_mode=transport_mode,
+        existing_fees=existing_fees,
+    )
+    document_id = str(document.get("document_id") or "")
+    for index, proposal in enumerate(proposals, start=1):
+        original_ref = (proposal.get("source_refs") or [{}])[0]
+        try:
+            line_index = int(original_ref.get("row") or 0) - 1
+        except (TypeError, ValueError):
+            line_index = -1
+        locator = dict(lines[line_index][1]) if 0 <= line_index < len(lines) else {}
+        cells = locator.pop("cells", [])
+        amount_key = _fee_amount_key((proposal.get("payload") or {}).get("amount"))
+        if cells and not locator.get("cell"):
+            matching_cell = next(
+                (
+                    cell
+                    for cell in cells
+                    if amount_key
+                    and amount_key in str(cell.get("value") or "").replace(",", "")
+                ),
+                cells[0],
+            )
+            locator["cell"] = str(matching_cell.get("cell") or "")
+        proposal["proposal_id"] = (
+            f"document-fee:{source.get('source_id') or document_id}:{index}"
+        )[:120]
+        proposal["reason"] = "附件文本中的物流总价由系统规则校验，费率不会作为总额。"
+        proposal["source_refs"] = [
+            {
+                **_source_reference(
+                    source,
+                    row=locator.get("row"),
+                    cell=str(locator.get("cell") or ""),
+                    page=locator.get("page"),
+                ),
+                "document_id": document_id,
+                **({"sheet": locator.get("sheet")} if locator.get("sheet") else {}),
+                **({"field": locator.get("field")} if locator.get("field") else {}),
+            }
+        ]
+        payload = proposal.get("payload") or {}
+        payload["remark"] = "来自服务器读取的物流报价附件，待确认。"
+    return proposals
 
 
 def _excel_column_label(column: Any) -> str:
@@ -2476,7 +2658,13 @@ def _call_source_review_ai(
         if _document_has_evidence(document) and document.get("ai_eligible", True)
     ]
     if not documents:
-        return {"ok": False, "model": "", "proposals": [], "warning": "没有可供 AI 分析的资料。"}
+        return {
+            "ok": False,
+            "model": "",
+            "proposals": [],
+            "warning": "没有可供 AI 分析的资料。",
+            "evidence_documents": [],
+        }
     vision_result = _call_vision_style_descriptions(documents)
     vision_by_document: dict[str, list[dict]] = {}
     for observation in vision_result.get("observations") or []:
@@ -2499,6 +2687,7 @@ def _call_source_review_ai(
             "model": config.get("model") or "",
             "proposals": [],
             "warning": "；".join(part for part in ("未配置 DeepSeek 密钥，已保留规则解析候选；AI 分析未完成。", vision_result.get("warning")) if part),
+            "evidence_documents": documents,
         }
     bounded = []
     remaining = MAX_AI_DOCUMENT_CHARS
@@ -2546,6 +2735,7 @@ def _call_source_review_ai(
             "proposals": parsed.get("proposals") or [],
             "warning": str(vision_result.get("warning") or ""),
             "vision_model": vision_result.get("model") or "",
+            "evidence_documents": documents,
         }
     except Exception as exc:  # pragma: no cover - network failures are integration-tested
         return {
@@ -2554,6 +2744,7 @@ def _call_source_review_ai(
             "proposals": [],
             "warning": "；".join(part for part in (f"DeepSeek 分析失败，已保留规则解析候选：{exc}", vision_result.get("warning")) if part),
             "vision_model": vision_result.get("model") or "",
+            "evidence_documents": documents,
         }
 
 
@@ -2705,6 +2896,15 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 if has_document_evidence:
                     document = {**document, "document_id": f"DOC-{len(documents) + 1}"}
                     documents.append(document)
+                    if unified_review and source.get("source_kind") != "approval_form":
+                        deterministic_proposals.extend(
+                            build_document_fee_proposals(
+                                source,
+                                document,
+                                transport_mode=str(context.get("transport_mode") or ""),
+                                existing_fees=existing_fees,
+                            )
+                        )
                 if unified_review and source.get("parse_method") == "SYSTEM_EXCEL":
                     parent_id = str(
                         source.get("parent_source_id") or source.get("source_id") or ""
@@ -2847,10 +3047,19 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 clarification_text=clarification_text,
                 fx_rates=context.get("fx_rates") or {},
             )
+            enhanced_by_id = {
+                str(document.get("document_id") or ""): document
+                for document in ai_result.get("evidence_documents") or []
+                if isinstance(document, dict) and document.get("document_id")
+            }
+            validation_documents = [
+                enhanced_by_id.get(str(document.get("document_id") or ""), document)
+                for document in documents
+            ]
             candidates = normalize_source_review_proposals(
                 deterministic_proposals + (ai_result.get("proposals") or []),
                 items,
-                documents,
+                validation_documents,
                 fx_rates=context.get("fx_rates") or {},
                 existing_fees=existing_fees,
             )

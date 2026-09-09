@@ -691,6 +691,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
                         "workbook_year": sheet.get("year") or workbook.get("year"),
                         "snapshot_updated_at": snapshot_state.get("snapshot_updated_at"),
                         "snapshot_status": snapshot_state.get("snapshot_status") or "not_cached",
+                        "content_hash": snapshot_state.get("content_hash") or "",
                         "available": True,
                     }
                 )
@@ -877,7 +878,12 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
             "excluded": bool(source.get("excluded")),
             "exclude_reason": str(source.get("exclude_reason") or source.get("exclusion_reason") or ""),
             "form_fields": source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {},
-            "content_hash": str(source.get("content_hash") or ""),
+            "content_hash": str(
+                source.get("content_hash")
+                or source.get("content_sha256")
+                or source.get("source_hash")
+                or ""
+            ),
         }
         hash_basis = {
             "source_kind": kind,
@@ -903,7 +909,13 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
         for sheet in workbook.get("sheets") or []:
             source_id = str(sheet.get("source_id") or "")
             if source_id == current_wiki_source:
-                append_source(sheet)
+                append_source(
+                    {
+                        **sheet,
+                        "source_hash": sheet.get("source_hash")
+                        or current_snapshot.get("source_hash"),
+                    }
+                )
     if current_wiki_source and not any(
         row.get("source_kind") == "wiki_sheet" and row.get("source_id") == current_wiki_source
         for row in result
@@ -1107,6 +1119,9 @@ def _packing_snapshot_summaries(clients: Any, workbook_id: str) -> dict[str, dic
         state = {
             "snapshot_status": "ready",
             "snapshot_updated_at": manifest.get("created_at"),
+            "content_hash": str(
+                manifest.get("content_sha256") or manifest.get("sha256") or ""
+            ),
         }
         try:
             payload = clients.archive.download(manifest)

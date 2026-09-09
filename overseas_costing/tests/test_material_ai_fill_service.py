@@ -33,6 +33,7 @@ from overseas_costing.services.material_ai_fill_service import (
     _is_effectively_missing,
     build_source_progress,
     validate_source_review_manual_updates,
+    build_document_fee_proposals,
 )
 
 
@@ -340,6 +341,104 @@ def test_freight_alternatives_share_conflict_group_and_recommend_volume_without_
     assert all(row["result_origin"] == "SYSTEM" for row in proposals)
 
 
+def test_freight_pdf_attachment_keeps_totals_and_never_emits_unit_rates() -> None:
+    source = {
+        "source_kind": "approval_attachment",
+        "source_id": "ATT-FREIGHT",
+        "source_label": "海运报价.pdf",
+    }
+    document = {
+        "document_id": "DOC-1",
+        "source_ref": {"source": "approval_attachment", "file": "海运报价.pdf"},
+        "text": (
+            "预估方数：11.67方\n"
+            "体积方案：5000元/方 * 11.67 = 58,350元\n"
+            "重量方案：25元/kg * 4200 = 105,000元"
+        ),
+        "ai_eligible": True,
+    }
+
+    deterministic = build_document_fee_proposals(
+        source, document, transport_mode="SEA"
+    )
+    normalized = normalize_source_review_proposals(
+        [
+            *deterministic,
+            {
+                "proposal_id": "AI-RATE-VOLUME",
+                "proposal_type": "fee_update",
+                "confidence": 0.99,
+                "payload": {
+                    "logical_fee_key": "international_sea_freight",
+                    "amount": "5000",
+                    "currency": "RMB",
+                    "amount_status": "ESTIMATED",
+                },
+                "source_refs": [{"document_id": "DOC-1", "page": 1}],
+            },
+            {
+                "proposal_id": "AI-RATE-WEIGHT",
+                "proposal_type": "fee_update",
+                "confidence": 0.99,
+                "payload": {
+                    "logical_fee_key": "international_sea_freight",
+                    "amount": "25",
+                    "currency": "RMB",
+                    "amount_status": "ESTIMATED",
+                },
+                "source_refs": [{"document_id": "DOC-1", "page": 1}],
+            },
+        ],
+        _items(),
+        [document],
+    )
+
+    assert [row["payload"]["amount"] for row in normalized] == ["58350", "105000"]
+    assert [row["recommended"] for row in normalized] == [True, False]
+    assert all(row["default_selected"] is False for row in normalized)
+
+
+def test_freight_excel_attachment_is_parsed_deterministically() -> None:
+    source = {
+        "source_kind": "approval_attachment",
+        "source_id": "ATT-FREIGHT-XLSX",
+        "source_label": "海运报价.xlsx",
+    }
+    document = {
+        "document_id": "DOC-1",
+        "source_ref": {"source": "approval_attachment", "file": "海运报价.xlsx"},
+        "semantic_rows": [
+            {
+                "sheet": "报价",
+                "source_row": 8,
+                "cells": [
+                    {
+                        "cell": "A8",
+                        "value": "体积方案：5000元/方 * 11.67 = 58,350元",
+                    }
+                ],
+            },
+            {
+                "sheet": "报价",
+                "source_row": 9,
+                "cells": [
+                    {
+                        "cell": "A9",
+                        "value": "重量方案：25元/kg * 4200 = 105,000元",
+                    }
+                ],
+            },
+        ],
+        "ai_eligible": False,
+    }
+
+    proposals = build_document_fee_proposals(source, document, transport_mode="SEA")
+
+    assert [row["payload"]["amount"] for row in proposals] == ["58350", "105000"]
+    assert [row["source_refs"][0]["row"] for row in proposals] == [8, 9]
+    assert [row["source_refs"][0]["cell"] for row in proposals] == ["A8", "A9"]
+
+
 def test_item_update_cannot_modify_readonly_purchase_identity_or_quantity() -> None:
     documents = [
         {
@@ -504,6 +603,67 @@ def test_empty_document_is_removed_before_deepseek_call(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert "没有可供 AI 识别" in result["warning"]
+
+
+def test_image_payload_is_kept_as_source_review_evidence() -> None:
+    assert material_ai_fill_service._document_has_evidence(
+        {
+            "source_ref": {"source": "approval_attachment", "file": "报价.png"},
+            "text": "",
+            "_image_payloads": [
+                {"anchor": {"file": "报价.png"}, "data_url": "data:image/png;base64,AA=="}
+            ],
+        }
+    ) is True
+
+
+def test_source_review_ai_returns_vision_transcription_for_server_validation(monkeypatch) -> None:
+    from overseas_costing.services import allocation_service
+
+    monkeypatch.setattr(
+        material_ai_fill_service,
+        "_call_vision_style_descriptions",
+        lambda _documents: {
+            "ok": True,
+            "model": "vision-test",
+            "observations": [
+                {
+                    "document_id": "DOC-1",
+                    "anchor": {"file": "报价.png"},
+                    "description": "5000元/方 * 11.67 = 58,350元",
+                }
+            ],
+            "warning": "",
+        },
+    )
+    monkeypatch.setattr(
+        allocation_service,
+        "_ai_config",
+        lambda: {"api_key": "test", "model": "deepseek-test"},
+    )
+    monkeypatch.setattr(
+        allocation_service,
+        "_call_chat_completions",
+        lambda *_args, **_kwargs: '{"proposals":[]}',
+    )
+
+    result = material_ai_fill_service._call_source_review_ai(
+        _items(),
+        [
+            {
+                "document_id": "DOC-1",
+                "source_ref": {"source": "approval_attachment", "file": "报价.png"},
+                "_image_payloads": [
+                    {"anchor": {"file": "报价.png"}, "data_url": "data:image/png;base64,AA=="}
+                ],
+                "ai_eligible": True,
+            }
+        ],
+    )
+
+    assert result["evidence_documents"][0]["vision_observations"][0]["description"] == (
+        "5000元/方 * 11.67 = 58,350元"
+    )
 
 
 def test_existing_values_and_source_conflicts_are_never_overwritten() -> None:
@@ -1395,6 +1555,35 @@ def test_unified_apply_rolls_back_when_transaction_write_fails() -> None:
 
     assert repository.rollbacks == 1
 
+
+def test_unified_apply_locks_batch_before_run_to_match_regeneration_order() -> None:
+    repository = _LifecycleRepository()
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "clarification_text": "",
+            "candidates_json": [],
+            "input_fingerprint": material_ai_fill_service._source_review_fingerprint(
+                "B1", "V1", _items(), repository.sources, ""
+            ),
+        }
+    )
+    lock_order = []
+    repository.lock_review_scope = lambda batch: lock_order.append(("batch", batch))
+    repository.lock_run = lambda run_id: (
+        lock_order.append(("run", run_id)) or repository.run
+    )
+    repository.apply_source_review = lambda *_args, **_kwargs: {
+        "changed_count": 0,
+        "batch_modified": "M2",
+    }
+
+    apply_source_ai_review(
+        "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
+    )
+
+    assert lock_order == [("batch", "B1"), ("run", "RUN-1")]
+
 def test_status_and_discard_return_public_payload_without_mutating_materials() -> None:
     repository = _LifecycleRepository()
     status = get_material_ai_fill_status("B1", "RUN-1", repository=repository)
@@ -1646,6 +1835,160 @@ def test_unified_worker_is_ready_with_system_approval_results_when_ai_is_unavail
         "gross_weight_kg": "4200",
     }
     assert repository.run["source_progress_json"][0]["parse_method"] == "SYSTEM_APPROVAL"
+
+
+def test_unified_worker_keeps_deterministic_freight_attachment_totals_when_ai_is_unavailable(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "approval_attachment",
+            "source_id": "ATT-FREIGHT",
+            "source_hash": "freight-hash",
+            "source_label": "海运报价.pdf",
+            "file_name": "海运报价.pdf",
+        }
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "source_manifest_json": manifest,
+            "input_fingerprint": service._source_review_fingerprint(
+                "B1", "V1", _items(), manifest, ""
+            ),
+        }
+    )
+    original_context = repository.get_context
+    repository.get_context = lambda batch, version: {
+        **original_context(batch, version),
+        "transport_mode": "SEA",
+    }
+    quote_text = (
+        "体积方案：5000元/方 * 11.67 = 58,350元\n"
+        "重量方案：25元/kg * 4200 = 105,000元"
+    )
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda _items, source: (
+            [],
+            {
+                "source_ref": {
+                    "source": "approval_attachment",
+                    "source_id": source["source_id"],
+                    "file": "海运报价.pdf",
+                },
+                "text": quote_text,
+                "ai_eligible": True,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_call_source_review_ai",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "model": "deepseek-test",
+            "proposals": [],
+            "warning": "AI 不可用",
+        },
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    proposals = repository.run["candidates_json"]
+    assert [row["payload"]["amount"] for row in proposals] == ["58350", "105000"]
+    assert [row["recommended"] for row in proposals] == [True, False]
+
+
+def test_unified_worker_rejects_vision_rate_as_fee_total(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "approval_attachment",
+            "source_id": "ATT-IMAGE",
+            "source_hash": "image-hash",
+            "source_label": "海运报价.png",
+            "file_name": "海运报价.png",
+        }
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "source_manifest_json": manifest,
+            "input_fingerprint": service._source_review_fingerprint(
+                "B1", "V1", _items(), manifest, ""
+            ),
+        }
+    )
+    original_context = repository.get_context
+    repository.get_context = lambda batch, version: {
+        **original_context(batch, version),
+        "transport_mode": "SEA",
+    }
+    image_document = {
+        "source_ref": {
+            "source": "approval_attachment",
+            "source_id": manifest[0]["source_id"],
+            "file": "海运报价.png",
+        },
+        "_image_payloads": [
+            {"anchor": {"file": "海运报价.png"}, "data_url": "data:image/png;base64,AA=="}
+        ],
+        "ai_eligible": True,
+    }
+    monkeypatch.setattr(service, "_read_source", lambda *_args: ([], image_document))
+
+    def fake_ai(_items_arg, documents, **_kwargs):
+        enhanced = [
+            {
+                **documents[0],
+                "vision_observations": [
+                    {
+                        "document_id": documents[0]["document_id"],
+                        "anchor": {"file": "海运报价.png"},
+                        "description": "5000元/方 * 11.67 = 58,350元",
+                    }
+                ],
+            }
+        ]
+        return {
+            "ok": True,
+            "model": "deepseek-test",
+            "warning": "",
+            "evidence_documents": enhanced,
+            "proposals": [
+                {
+                    "proposal_id": "AI-RATE",
+                    "proposal_type": "fee_update",
+                    "confidence": 0.99,
+                    "payload": {
+                        "logical_fee_key": "international_sea_freight",
+                        "amount": "5000",
+                        "currency": "RMB",
+                        "amount_status": "ESTIMATED",
+                    },
+                    "source_refs": [
+                        {"document_id": documents[0]["document_id"]}
+                    ],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(service, "_call_source_review_ai", fake_ai)
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    assert repository.run["candidates_json"] == []
 
 
 def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monkeypatch) -> None:

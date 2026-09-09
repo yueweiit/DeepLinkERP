@@ -191,6 +191,29 @@ def test_non_kg_shipping_quantity_never_becomes_net_weight() -> None:
     assert "gross_weight_kg" not in fields
 
 
+def test_total_gross_is_not_allocated_when_any_logistics_row_is_unmatched() -> None:
+    proposals = build_system_approval_proposals(
+        [{"name": "I1", "material_code": "SKU-1"}],
+        {
+            "source_kind": "approval_form",
+            "source_id": "approval:LOG-1:form",
+            "approval_role": "international_logistics",
+            "form_fields": {
+                "货物信息": [
+                    {"物料编码": "SKU-1", "数量": 60, "单位": "KG"},
+                    {"物料编码": "SKU-MISSING", "数量": 40, "单位": "KG"},
+                ],
+                "重量Peso（KG）": 120,
+            },
+        },
+    )
+
+    assert len(proposals) == 1
+    fields = proposals[0]["payload"]["fields"]
+    assert fields["net_weight_kg"] == "60"
+    assert "gross_weight_kg" not in fields
+
+
 def test_snvq1vekp5_system_approval_values_and_gross_allocation_are_exact() -> None:
     quantities = [1494, 990, 396, 396, 216]
     items = [

@@ -140,14 +140,22 @@ def build_system_approval_proposals(
     )
     from overseas_costing.utils.field_mapper import map_oa_row_to_item
 
+    goods_rows = _approval_goods_rows(source)
     mapped_rows = []
-    for source_row, raw in enumerate(_approval_goods_rows(source), start=1):
+    allocation_targets: set[str] = set()
+    complete_net_set = bool(goods_rows)
+    for source_row, raw in enumerate(goods_rows, start=1):
         mapped = map_oa_row_to_item(raw)
         item = _match_item(items, mapped.get("material_code"), raw.get("source_doc_no"))
         quantity = _decimal(mapped.get("quantity"))
         if not item or quantity is None or quantity <= 0:
+            complete_net_set = False
             continue
         uom = normalize_weight_uom(mapped.get("unit"))
+        item_name = str(item.get("name") or "")
+        if uom != "kg" or not item_name or item_name in allocation_targets:
+            complete_net_set = False
+        allocation_targets.add(item_name)
         fields = {
             "actual_shipped_qty": _decimal_text(quantity),
             "shipped_uom": uom,
@@ -161,7 +169,12 @@ def build_system_approval_proposals(
 
     form_fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
     total_gross = _decimal(_find_field_value(form_fields, LOGISTICS_WEIGHT_FIELD_ALIASES))
-    if total_gross and mapped_rows and not any("gross_weight_kg" in fields for _, _, fields in mapped_rows):
+    if (
+        total_gross
+        and complete_net_set
+        and len(mapped_rows) == len(goods_rows)
+        and not any("gross_weight_kg" in fields for _, _, fields in mapped_rows)
+    ):
         nets = [_decimal(fields.get("net_weight_kg")) for _, _, fields in mapped_rows]
         if all(value is not None and value > 0 for value in nets):
             allocation = allocate_gross_weight(total_gross, [value for value in nets if value is not None])
