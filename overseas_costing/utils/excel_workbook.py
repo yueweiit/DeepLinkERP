@@ -141,7 +141,9 @@ def read_packing_grid(
                 formula_value = formula_sheet.cell(row_number, column_number).value
                 formula = formula_value if isinstance(formula_value, str) and formula_value.startswith("=") else None
                 raw_value = value_sheet.cell(row_number, column_number).value if formula else formula_value
-                display_value = _packing_display_value(raw_value)
+                display_value = _packing_display_value(
+                    raw_value, formula_sheet.cell(row_number, column_number).number_format
+                )
                 row.append(
                     dataclass_dict(
                         Cell(
@@ -191,11 +193,23 @@ def read_packing_grid(
         value_workbook.close()
 
 
-def _packing_display_value(value: Any) -> str | None:
+def _packing_display_value(value: Any, number_format: str = "General") -> str | None:
     if value is None:
         return None
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        pattern = str(number_format or "General").split(";", 1)[0]
+        if "%" in pattern:
+            decimal_part = pattern.rsplit(".", 1)[1].split("%", 1)[0] if "." in pattern else ""
+            places = sum(character in {"0", "#"} for character in decimal_part)
+            return f"{float(value) * 100:.{places}f}%"
+        numeric = re.sub(r'"[^"]*"|\[[^\]]*\]', "", pattern)
+        if re.search(r"[0#]", numeric) and numeric.lower() != "general":
+            decimal_part = numeric.rsplit(".", 1)[1] if "." in numeric else ""
+            places = sum(character in {"0", "#"} for character in decimal_part)
+            grouped = "," in numeric.split(".", 1)[0]
+            return format(float(value), f"{',' if grouped else ''}.{places}f")
     return str(value)
 
 

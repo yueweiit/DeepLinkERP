@@ -28,6 +28,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest -r requirements.txt
 
+      - name: Verify generated workbench assets
+        run: |
+          python overseas_costing/scripts/build_workbench_assets.py
+          git diff --exit-code -- overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.css overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.css
+
+      - name: Check workbench JavaScript syntax
+        run: |
+          node --check overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
+          node --check overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
+
       - name: Run backend tests
         run: python -m pytest -q overseas_costing/tests
 

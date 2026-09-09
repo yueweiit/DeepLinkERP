@@ -192,13 +192,24 @@ def discard_material_ai_fill(batch_name, run_id):
 
 
 @frappe.whitelist()
-def start_source_ai_review(batch_name, version_name, clarification_text=None, force=False):
+def start_source_ai_review(
+    batch_name,
+    version_name,
+    clarification_text=None,
+    force=False,
+    selected_source_ids_json=None,
+):
     batch_name = require_batch_permission(batch_name, "write")
     return material_ai_fill_service.start_source_ai_review(
         batch_name,
         str(version_name or "")[:200],
         str(clarification_text or "")[:4000],
         force=str(force).strip().lower() in {"1", "true", "yes"},
+        selected_source_ids=(
+            _ai_review_payload(selected_source_ids_json, list, "资料来源选择")
+            if selected_source_ids_json is not None
+            else None
+        ),
     )
 
 

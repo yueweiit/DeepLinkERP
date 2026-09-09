@@ -16,13 +16,13 @@ def test_toolbar_has_one_upload_entry_and_ai_action_on_one_line() -> None:
     assert "mf-import-xlsx" not in render
 
 
-def test_source_tabs_are_four_non_wrapping_items_with_named_local_upload() -> None:
+def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     tabs = source.split("renderMaterialSourceTabs(dialog)", 2)[2].split("renderMaterialAttachmentSources", 1)[0]
     assert "装箱计划表" in tabs
-    assert "钉钉表单附件" in tabs
-    assert "评论附件与评论" in tabs
     assert "本地上传装箱单" in tabs
+    assert "钉钉表单附件" not in tabs
+    assert "评论附件与评论" not in tabs
     assert "allowed_file_types" in source
     for suffix in (".xlsx", ".xlsm", ".pdf", ".png", ".doc", ".docx"):
         assert suffix in source
@@ -49,7 +49,7 @@ def test_material_grid_uses_sticky_readable_identity_columns_and_scroll_controls
     assert "position: sticky" in css
 
 
-def test_ai_draft_ui_exposes_progress_candidates_and_explicit_apply_discard() -> None:
+def test_ai_review_ui_exposes_progress_candidates_and_single_confirmation_surface() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     for endpoint in (
         "start_source_ai_review",
@@ -62,20 +62,22 @@ def test_ai_draft_ui_exposes_progress_candidates_and_explicit_apply_discard() ->
         assert step in source
     assert "AI 草稿" in source
     assert "告诉 AI 如何理解" in source
-    assert "确认所选草稿" in source
-    assert "放弃草稿" in source
+    assert "确认写入（" in source
+    assert 'data-action="mf-ai-review-cancel"' in source
+    assert "renderSourceAIReviewProposals(true)" in source
     assert "data-action=\"mf-ai-adopt-candidate\"" in source
     assert ".is-ai-draft" in (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
-    footer = source.split("renderMaterialAIFillFooter()", 2)[2].split("bindMaterialGridScrollControls", 1)[0]
-    assert 'data-action="mf-ai-discard" ${mutating ? "disabled" : ""}' in footer
+    workspace = source.split("renderMaterialFeeWorkspace()", 1)[1].split("renderMaterialFeeMetric", 1)[0]
+    assert "renderSourceAIReviewProposals()" not in workspace
+    assert "renderMaterialAIFillFooter()" not in workspace
 
 
-def test_ai_poll_updates_progress_surface_without_rerendering_workspace() -> None:
+def test_ai_poll_switches_progress_dialog_to_confirmation_without_rerendering_workspace() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     poll = source.split("async pollMaterialAIFill", 1)[1].split("updateMaterialAIDraftFromInput", 1)[0]
     assert "updateMaterialAIProgressSurface" in poll
     assert "renderMaterialFeeWorkspace" not in poll
-    assert "aiPendingReady" in poll
+    assert "showMaterialAIReadyDraft" in poll
 
 
 def test_ai_candidates_use_one_fixed_workspace_popover_instead_of_cell_details() -> None:
@@ -128,6 +130,16 @@ console.log(JSON.stringify({callCount,sentForce,status:state.aiFill.status,hasSt
         "status": "QUEUED",
         "hasStartPromise": False,
     }
+
+
+def test_ai_analysis_never_flushes_or_writes_pending_business_inputs() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    start = source.split("async runMaterialAIFillStart", 1)[1].split(
+        "async pollMaterialAIFill", 1
+    )[0]
+    assert "flushMaterialFeeInputs" not in start
+    assert "pendingWrites.size" in start
+    assert "selected_source_ids_json" in start
 
 
 def test_ai_poll_is_incremental_unfrozen_and_skips_unchanged_revision() -> None:
@@ -185,20 +197,28 @@ console.log(JSON.stringify({calls,globalErrors,surfaceUpdates,status:state.aiFil
 
 def test_progress_surface_updates_existing_nodes_without_replacing_roots() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
-    updater = source.split("updateMaterialAIProgressSurface()", 2)[2].split(
+    updater = source.split("\n  updateMaterialAIProgressSurface()", 1)[1].split(
         "showMaterialAIReadyDraft", 1
     )[0]
     assert "replaceWith" not in updater
     assert "updateMaterialAIProgressSources" in updater
 
 
-def test_ai_progress_uses_minimizable_dialog_and_explicit_view_draft() -> None:
+def test_ai_progress_dialog_becomes_wide_confirmation_with_fixed_actions() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
     assert "openMaterialAIProgressDialog" in source
     assert 'data-action="mf-ai-minimize"' in source
     assert 'data-action="mf-ai-progress-restore"' in source
-    assert 'data-action="mf-ai-view-draft"' in source
+    assert 'data-action="mf-ai-review-cancel"' in source
+    assert 'data-action="mf-ai-change-sources"' in source
+    assert "确认写入（" in source
+    assert "系统直读" in source
+    assert "AI 识别" in source
+    assert "materialAIPhysicalSummary" in source
+    assert "净重 ${this.escape(physical.netWeight)} kg" in source
+    assert "毛重 ${this.escape(physical.grossWeight)} kg" in source
+    assert "资料来源" in source
     assert "material_proposal_count" in source
     assert "packing_proposal_count" in source
     assert "fee_proposal_count" in source

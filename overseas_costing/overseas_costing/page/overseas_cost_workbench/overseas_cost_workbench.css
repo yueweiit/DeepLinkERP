@@ -7354,6 +7354,8 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-progress-chip[hidden] { display: none; }
 .ocw-mf-ai-progress-chip i { width: 7px; height: 7px; border-radius: 50%; background: #0b8cf0; box-shadow: 0 0 0 4px rgba(11, 140, 240, 0.12); }
 .ocw-mf-ai-progress-modal .modal-dialog { max-width: min(820px, calc(100vw - 34px)); }
+.ocw-mf-ai-progress-modal.is-review .modal-dialog { max-width: min(1280px, calc(100vw - 34px)); }
+.ocw-mf-ai-progress-modal.is-review .modal-body { max-height: calc(100vh - 105px); overflow: auto; }
 .ocw-mf-ai-progress-modal .modal-footer { display: none; }
 .ocw-mf-ai-progress-dialog { display: grid; gap: 14px; }
 .ocw-mf-ai-progress-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
@@ -7381,6 +7383,31 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-progress-warning { padding: 9px 11px; border-radius: 7px; background: #fff8e7; color: #8a5700; font-size: 11px; line-height: 1.5; }
 .ocw-mf-ai-progress-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 4px; }
 .ocw-mf-ai-progress-dialog > footer > div { display: flex; gap: 8px; }
+.ocw-mf-ai-review-dialog { display: grid; gap: 14px; }
+.ocw-mf-ai-review-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.ocw-mf-ai-review-dialog > header > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.ocw-mf-ai-review-dialog > header > div:first-child { display: grid; gap: 4px; }
+.ocw-mf-ai-review-dialog > header span { color: #667085; font-size: 12px; }
+.ocw-mf-ai-review-dialog > header b { padding: 5px 9px; border-radius: 999px; background: #eef6fd; color: #076fbe; font-size: 11px; }
+.ocw-mf-ai-physical-summary { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 14px; border: 1px solid #d7e8f7; border-radius: 10px; background: #f8fbff; }
+.ocw-mf-ai-physical-summary b { color: #24415f; font-size: 13px; }
+.ocw-mf-ai-review-dialog > main .ocw-mf-ai-proposals { max-height: 48vh; overflow: auto; padding: 0; border: 0; background: transparent; }
+.ocw-mf-ai-review-sources { border: 1px solid #dce6f2; border-radius: 9px; background: #fff; }
+.ocw-mf-ai-review-sources > summary { display: flex; justify-content: space-between; gap: 10px; padding: 11px 13px; cursor: pointer; font-weight: 700; }
+.ocw-mf-ai-review-sources > summary span { color: #667085; font-size: 11px; font-weight: 400; }
+.ocw-mf-ai-review-sources > div { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; padding: 0 12px 12px; }
+.ocw-mf-ai-review-sources section { display: grid; align-content: start; gap: 6px; }
+.ocw-mf-ai-review-sources h4 { margin: 0; color: #475467; font-size: 11px; }
+.ocw-mf-ai-review-sources label { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 8px; margin: 0; padding: 8px; border-radius: 7px; background: #f8fafc; font-weight: 400; }
+.ocw-mf-ai-review-sources label > span { display: grid; gap: 2px; min-width: 0; }
+.ocw-mf-ai-review-sources label strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.ocw-mf-ai-review-sources label small, .ocw-mf-ai-review-sources label i { color: #667085; font-size: 10px; font-style: normal; }
+.ocw-mf-ai-review-sources label em { color: #b42318; font-size: 10px; font-style: normal; }
+.ocw-mf-ai-review-sources label b { color: #076fbe; font-size: 10px; white-space: nowrap; }
+.ocw-mf-ai-review-sources label.is-failed { background: #fff0ee; }
+.ocw-mf-ai-review-sources label.is-needs_selection { background: #fff8e7; }
+.ocw-mf-ai-review-dialog > footer { position: sticky; z-index: 4; bottom: -15px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 -15px -15px; padding: 13px 15px; border-top: 1px solid #d7e8f7; background: rgba(255,255,255,.98); box-shadow: 0 -5px 14px rgba(16,24,40,.08); }
+.ocw-mf-ai-review-dialog > footer > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 @media (max-width: 700px) {
   .ocw-mf-ai-clarification { grid-template-columns: 1fr; }
 }

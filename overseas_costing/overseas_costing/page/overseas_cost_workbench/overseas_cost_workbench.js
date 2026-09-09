@@ -9709,10 +9709,8 @@ class OverseasCostWorkbench {
             </div>
           </div>
           <label class="ocw-mf-ai-clarification"><span>告诉 AI 如何理解</span><input data-mf-ai-clarification="1" value="${this.escape(state.aiClarification || "")}" maxlength="4000" placeholder="例如：两款是一套，共四套；每种数量相同" /></label>
-          ${this.renderSourceAIReviewProposals()}
           ${this.renderMaterialFeeGrid()}
           <div class="ocw-mf-ai-candidate-popover" data-mf-ai-candidate-popover="1" role="dialog" aria-label="AI 候选详情" hidden></div>
-          ${this.renderMaterialAIFillFooter()}
         </section>
         <section class="ocw-mf-section ocw-mf-fee-section">
           <div class="ocw-mf-section-title"><div><span>02</span><h3>费用与凭证</h3><p>录入金额后自动保存；凭证可稍后补充，系统会在 SKU 试算时统一分摊。</p></div></div>
@@ -10116,7 +10114,7 @@ class OverseasCostWorkbench {
       <div class="ocw-mf-ai-progress-warning" data-mf-ai-progress-warning ${warning ? "" : "hidden"}>${this.escape(warning)}</div>
       <footer>
         <button class="ocw-outline-btn" type="button" data-action="mf-ai-minimize">最小化</button>
-        <div><button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry" ${failed ? "" : "hidden"}>重新分析</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-view-draft" ${ready ? "" : "hidden"}>查看草稿</button></div>
+        <div><button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry" ${failed ? "" : "hidden"}>重新分析</button></div>
       </footer>
     </div>`;
   }
@@ -10190,8 +10188,14 @@ class OverseasCostWorkbench {
           state.aiProgressMinimized = true;
           dialog.hide();
           this.updateMaterialAIProgressSurface();
-        } else if (action === "mf-ai-view-draft") {
-          this.showMaterialAIReadyDraft();
+        } else if (action === "mf-ai-review-cancel") {
+          state.aiProgressMinimized = false;
+          if (state.aiFill) state.aiFill.reviewDialogVisible = false;
+          dialog.hide();
+        } else if (action === "mf-ai-change-sources") {
+          this.restartMaterialAIWithSources(dialog).catch((error) => this.showError(error));
+        } else if (action === "mf-ai-apply") {
+          this.applyMaterialAIFill().catch((error) => this.showError(error));
         } else if (action === "mf-ai-progress-retry") {
           dialog.hide();
           state.aiProgressDialog = null;
@@ -10200,10 +10204,43 @@ class OverseasCostWorkbench {
           this.startMaterialAIFill({ force: true });
         }
       });
+      dialog.$wrapper
+        .off("change.ocwAIReview input.ocwAIReview")
+        .on("change.ocwAIReview", "[data-mf-ai-proposal-select]", (event) => {
+          const fill = state.aiFill;
+          if (!fill?.selections) return;
+          const proposalId = String($(event.currentTarget).attr("data-proposal-id") || "");
+          const checked = $(event.currentTarget).prop("checked");
+          const proposal = (fill.proposals || []).find((row) => String(row.proposal_id || "") === proposalId);
+          if (checked && proposal?.conflict_group) {
+            (fill.proposals || []).forEach((row) => {
+              if (row.conflict_group === proposal.conflict_group) fill.selections.delete(String(row.proposal_id || ""));
+            });
+          }
+          if (checked) fill.selections.add(proposalId);
+          else fill.selections.delete(proposalId);
+          this.renderMaterialAIReviewDialog();
+        })
+        .on("change.ocwAIReview", "[data-mf-ai-source-select]", (event) => {
+          const fill = state.aiFill;
+          const sourceId = String($(event.currentTarget).val() || "");
+          const source = (fill?.source_progress || []).find((row) => String(row.source_id || "") === sourceId);
+          if (source && !source.locked && source.selectable !== false) {
+            source.selected = Boolean($(event.currentTarget).prop("checked"));
+          }
+        })
+        .on("input.ocwAIReview", "[data-mf-ai-edit]", (event) => {
+          this.updateSourceAIReviewEdit($(event.currentTarget));
+        });
     } else {
       state.aiProgressDialog.show();
+      if (state.aiFill?.status !== "READY" && !state.aiProgressDialog.$wrapper.find("[data-mf-ai-progress-host]").length) {
+        state.aiProgressDialog.$wrapper.removeClass("is-review");
+        state.aiProgressDialog.fields_dict.progress_html.$wrapper.html(this.renderMaterialAIProgressDialogContent());
+      }
     }
     this.updateMaterialAIProgressSurface();
+    if (state.aiFill?.status === "READY") this.showMaterialAIReadyDraft();
   }
 
   updateMaterialAIProgressSurface() {
@@ -10248,7 +10285,6 @@ class OverseasCostWorkbench {
       $host.find("[data-mf-ai-summary='failed_source_count']").prop("hidden", !Number(summary.failed_source_count || 0));
       $host.find("[data-mf-ai-progress-warning]").text(warning).prop("hidden", !warning);
       $host.find("[data-action='mf-ai-progress-retry']").prop("hidden", !failed);
-      $host.find("[data-action='mf-ai-view-draft']").prop("hidden", !ready);
       this.updateMaterialAIProgressSources($host, sources);
     }
   }
@@ -10257,31 +10293,128 @@ class OverseasCostWorkbench {
     const state = this.ensureMaterialFeeState();
     const ready = state.aiPendingReady || state.aiFill;
     if (ready?.status !== "READY") return;
-    state.aiFill = this.initializeMaterialAIDraft({ ...ready, draftVisible: true });
+    state.aiFill = ready.selections instanceof Set
+      ? ready
+      : this.initializeMaterialAIDraft({ ...ready, draftVisible: true });
     state.aiFill.draftVisible = true;
+    state.aiFill.reviewDialogVisible = true;
     state.aiPendingReady = null;
     state.aiProgressMinimized = false;
-    if (state.aiProgressDialog) {
-      state.aiProgressDialog.hide();
-      state.aiProgressDialog = null;
-    }
-    this.renderMaterialFeeWorkspacePreservingPosition();
+    this.renderMaterialAIReviewDialog();
+  }
+
+  materialAIReadStatusLabel(source) {
+    return {
+      READ: "已读取",
+      FAILED: "读取失败",
+      NO_RESULT: "未产生结果",
+      EXCLUDED: "已排除",
+      NEEDS_SELECTION: "待选择 Sheet",
+    }[String(source?.read_status || "NO_RESULT")] || "未产生结果";
+  }
+
+  renderMaterialAIReviewSources(fill) {
+    const sources = Array.isArray(fill?.source_progress) ? fill.source_progress : [];
+    const groups = ["READ", "FAILED", "NO_RESULT", "EXCLUDED", "NEEDS_SELECTION"];
+    return `<details class="ocw-mf-ai-review-sources" open><summary>资料来源 <span>${sources.length} 份</span></summary><div>${groups.map((status) => {
+      const rows = sources.filter((source) => String(source.read_status || "NO_RESULT") === status);
+      if (!rows.length) return "";
+      return `<section><h4>${this.materialAIReadStatusLabel({ read_status: status })}（${rows.length}）</h4>${rows.map((source) => {
+        const identity = [source.approval_no ? `审批 ${source.approval_no}` : "", source.sheet_name ? `Sheet ${source.sheet_name}` : "", source.actor_name || "", source.occurred_at || ""].filter(Boolean).join(" · ");
+        const canToggle = !source.locked && source.selectable !== false;
+        return `<label class="is-${String(status).toLowerCase()}"><input type="checkbox" data-mf-ai-source-select="1" value="${this.escape(source.source_id || "")}" ${source.selected ? "checked" : ""} ${canToggle ? "" : "disabled"}><span><strong>${this.escape(source.label || source.source_id || "未命名资料")}</strong><small>${this.escape(identity || this.materialAIReadStatusLabel(source))}</small>${source.error ? `<em>${this.escape(source.error)}</em>` : ""}<i>${Number(source.result_count || source.candidate_count || 0)} 个候选 · ${this.escape(source.parse_method || "NONE")}</i></span>${source.locked ? "<b>锁定纳入</b>" : ""}</label>`;
+      }).join("")}</section>`;
+    }).join("") || `<p>未找到可用资料来源。</p>`}</div></details>`;
+  }
+
+  renderMaterialAIReviewDialogContent() {
+    const fill = this.ensureMaterialFeeState().aiFill || {};
+    const selectedCount = (fill.selections?.size || 0) + Object.keys(fill.manualUpdates || {}).length;
+    const systemCount = (fill.proposals || []).filter((row) => row.result_origin === "SYSTEM").length;
+    const aiCount = (fill.proposals || []).filter((row) => row.result_origin !== "SYSTEM").length;
+    const physical = this.materialAIPhysicalSummary(fill);
+    const physicalSummary = physical.itemCount
+      ? `<div class="ocw-mf-ai-physical-summary"><b>明细 ${physical.itemCount} 条</b><b>净重 ${this.escape(physical.netWeight)} kg</b><b>毛重 ${this.escape(physical.grossWeight)} kg</b></div>`
+      : "";
+    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>资料分析结果</strong><span>分析、预览和更换来源均不修改业务数据</span></div><div><b>系统直读 ${systemCount}</b><b>AI 识别 ${aiCount}</b></div></header>${physicalSummary}${fill.ai_warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(fill.ai_warning)}</div>` : ""}<main>${this.renderSourceAIReviewProposals(true)}</main>${this.renderMaterialAIReviewSources(fill)}<footer><span data-mf-ai-selected-count="1">已选 ${selectedCount} 项</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${fill.applying ? "disabled" : ""}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${fill.applying ? "disabled" : ""}>更换来源并重新生成</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${fill.applying || !selectedCount ? "disabled" : ""}>${fill.applying ? "正在写入…" : `确认写入（${selectedCount}项）`}</button></div></footer></div>`;
+  }
+
+  materialAIPhysicalSummary(fill) {
+    const rows = (fill?.proposals || []).filter((proposal) => String(proposal.proposal_id || "").startsWith("system-approval:") && proposal.proposal_type === "item_update");
+    const compact = (value) => {
+      const rounded = Math.round(Number(value || 0) * 1000000) / 1000000;
+      return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(6);
+    };
+    return {
+      itemCount: rows.length,
+      netWeight: compact(rows.reduce((sum, row) => sum + Number(row.payload?.fields?.net_weight_kg || 0), 0)),
+      grossWeight: compact(rows.reduce((sum, row) => sum + Number(row.payload?.fields?.gross_weight_kg || 0), 0)),
+    };
+  }
+
+  renderMaterialAIReviewDialog() {
+    const state = this.ensureMaterialFeeState();
+    const dialog = state.aiProgressDialog;
+    if (!dialog?.$wrapper?.length || state.aiFill?.status !== "READY") return;
+    dialog.$wrapper.addClass("is-review");
+    dialog.fields_dict.progress_html.$wrapper.html(this.renderMaterialAIReviewDialogContent());
+  }
+
+  updateMaterialAIReviewSelectionSurface() {
+    const state = this.ensureMaterialFeeState();
+    const fill = state.aiFill;
+    const $wrapper = state.aiProgressDialog?.$wrapper;
+    if (!$wrapper?.length || !fill) return;
+    const count = (fill.selections?.size || 0) + Object.keys(fill.manualUpdates || {}).length;
+    $wrapper.find("[data-mf-ai-proposal-select]").each((_index, node) => {
+      const proposalId = String($(node).attr("data-proposal-id") || "");
+      $(node).prop("checked", fill.selections.has(proposalId));
+    });
+    $wrapper.find("[data-mf-ai-selected-count]").text(`已选 ${count} 项`);
+    $wrapper.find("[data-action='mf-ai-apply']")
+      .prop("disabled", Boolean(fill.applying || !count))
+      .text(fill.applying ? "正在写入…" : `确认写入（${count}项）`);
+  }
+
+  async restartMaterialAIWithSources(dialog) {
+    const state = this.ensureMaterialFeeState();
+    const selectedSourceIds = (state.aiFill?.source_progress || [])
+      .filter((source) => source.selected && !source.locked && source.selectable !== false)
+      .map((source) => String(source.source_id || ""))
+      .filter(Boolean);
+    state.aiFill = null;
+    state.aiPendingReady = null;
+    dialog.$wrapper.removeClass("is-review");
+    await this.startMaterialAIFill({ force: true, selectedSourceIds });
   }
 
   sourceAIReviewProposalLabel(proposal) {
     return { material_replace: "拆分临时物料", item_update: "补充物料字段", fee_update: "补充费用" }[proposal?.proposal_type] || "资料候选";
   }
 
-  renderSourceAIReviewProposals() {
+  renderSourceAIReviewProposals(forDialog = false) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY" || !fill.draftVisible || !Array.isArray(fill.proposals)) return "";
+    if (!forDialog || fill?.status !== "READY" || !fill.draftVisible || !Array.isArray(fill.proposals)) return "";
     if (!fill.proposals.length) return `<div class="ocw-mf-ai-proposals is-empty">当前资料没有形成可保存候选，请补充说明或资料后重新分析。</div>`;
     return `<div class="ocw-mf-ai-proposals">${fill.proposals.map((proposal) => {
       const selected = fill.selections?.has(String(proposal.proposal_id || ""));
       const tone = proposal.conflict || Number(proposal.confidence || 0) < 0.9 ? "review" : "ready";
-      const sources = (proposal.source_refs || []).map((ref) => [ref.file, ref.sheet, ref.field, ref.row ? `第 ${ref.row} 行` : "", ref.cell].filter(Boolean).join(" · ")).join("；");
+      const sources = (proposal.source_refs || []).map((ref) => {
+        const source = (fill.source_progress || []).find((row) => String(row.label || "") === String(ref.file || "") && (!ref.sheet || String(row.sheet_name || row.sheet || "") === String(ref.sheet || ""))) || {};
+        return [
+          ref.file,
+          ref.approval_no ? `审批 ${ref.approval_no}` : source.approval_no ? `审批 ${source.approval_no}` : "",
+          ref.sheet,
+          ref.field,
+          ref.row ? `第 ${ref.row} 行` : "",
+          ref.cell,
+          ref.actor_name || source.actor_name || "",
+          ref.occurred_at || source.occurred_at || "",
+        ].filter(Boolean).join(" · ");
+      }).join("；");
+      const origin = proposal.result_origin === "SYSTEM" ? "系统直读" : "AI 识别";
       return `<article class="is-${tone}">
-        <header><label><input type="checkbox" data-mf-ai-proposal-select="1" data-proposal-id="${this.escape(proposal.proposal_id || "")}" ${selected ? "checked" : ""} /><strong>${this.escape(this.sourceAIReviewProposalLabel(proposal))}</strong></label><span>${Math.round(Number(proposal.confidence || 0) * 100)}%</span></header>
+        <header><label><input type="checkbox" data-mf-ai-proposal-select="1" data-proposal-id="${this.escape(proposal.proposal_id || "")}" ${selected ? "checked" : ""} /><strong>${this.escape(this.sourceAIReviewProposalLabel(proposal))}</strong></label><span>${this.escape(origin)} · ${Math.round(Number(proposal.confidence || 0) * 100)}%${proposal.recommended ? " · 推荐" : ""}</span></header>
         ${this.renderSourceAIReviewProposalFields(proposal)}
         <details><summary>依据与说明</summary><p>${this.escape(proposal.reason || "待人工核对")}</p><p>${this.escape(sources || "来源位置未标注")}</p></details>
       </article>`;
@@ -10322,6 +10455,7 @@ class OverseasCostWorkbench {
       fill.edits[proposalId][fieldname] = String($input.val() ?? "");
     }
     fill.selections.add(proposalId);
+    this.updateMaterialAIReviewSelectionSurface();
   }
 
   renderMaterialAIFillFooter() {
@@ -10437,15 +10571,22 @@ class OverseasCostWorkbench {
     return startPromise;
   }
 
+  restartMaterialAIForChangedSources() {
+    const state = this.ensureMaterialFeeState();
+    if (state.aiProgressDialog) {
+      state.aiProgressDialog.hide();
+      state.aiProgressDialog = null;
+    }
+    state.aiFill = null;
+    state.aiPendingReady = null;
+    return this.startMaterialAIFill({ force: false });
+  }
+
   async runMaterialAIFillStart(state, options = {}) {
-    if (!(await this.flushMaterialFeeInputs(state))) {
-      state.aiFill = null;
-      if (state.aiProgressDialog) {
-        state.aiProgressDialog.hide();
-        state.aiProgressDialog = null;
-      }
-      this.updateMaterialAIProgressSurface();
-      return;
+    if (state.calculationWrite) await state.calculationWrite;
+    while (state.pendingWrites.size) await Promise.all([...state.pendingWrites]);
+    if (Object.keys(state.materialDrafts || {}).length || Object.keys(state.feeDrafts || {}).length || Object.keys(state.materialSaveErrors || {}).length) {
+      throw new Error("当前页面有未保存修改，请先完成保存再分析资料。");
     }
     const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName;
@@ -10453,12 +10594,14 @@ class OverseasCostWorkbench {
     let lastError = null;
     for (let attempt = 0; attempt < 3 && !started; attempt += 1) {
       try {
-        started = await this.call("overseas_costing.api.materials.start_source_ai_review", {
+        const payload = {
           batch_name: batchName,
           version_name: versionName,
           clarification_text: state.aiClarification || "",
           force: options.force === true && attempt === 0 ? 1 : 0,
-        }, false);
+        };
+        if (Array.isArray(options.selectedSourceIds)) payload.selected_source_ids_json = JSON.stringify(options.selectedSourceIds);
+        started = await this.call("overseas_costing.api.materials.start_source_ai_review", payload, false);
       } catch (error) {
         lastError = error;
         state.aiFill = { ...state.aiFill, progress_step: "连接中断，正在重试", connection_error: this.materialAIErrorMessage(error, "启动请求暂时失败，正在自动重试。") };
@@ -10501,7 +10644,10 @@ class OverseasCostWorkbench {
       }
       state.aiFill = { ...state.aiFill, ...status, runId, polling: true, draftVisible: false };
       delete state.aiFill.connection_error;
-      if (status.status === "READY") state.aiPendingReady = status;
+      if (status.status === "READY") {
+        state.aiPendingReady = status;
+        this.showMaterialAIReadyDraft();
+      }
       this.updateMaterialAIProgressSurface();
       if (["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
@@ -10578,11 +10724,11 @@ class OverseasCostWorkbench {
       && String(this.detailState.versionName || "") === versionName
       && this.detailState.tab === "documents";
     fill.applying = true;
-    this.renderMaterialFeeWorkspace();
+    this.renderMaterialAIReviewDialog();
     try {
       if (!(await this.ensureEditSession())) {
         fill.applying = false;
-        if (isCurrent()) this.renderMaterialFeeWorkspace();
+        if (isCurrent()) this.renderMaterialAIReviewDialog();
         return;
       }
       if (!isCurrent()) return;
@@ -10600,18 +10746,22 @@ class OverseasCostWorkbench {
         fill.applying = false;
         fill.status = "STALE";
         fill.error_message = result.message || "资料或物料数据已变化，请重新运行 AI 填充。";
-        this.renderMaterialFeeWorkspace();
+        this.renderMaterialAIReviewDialog();
         return;
       }
       if (!result?.ok) throw new Error(result?.message || "AI 草稿保存失败。 ");
       this.updateMaterialFeeExpectedModified(result);
+      if (state.aiProgressDialog) {
+        state.aiProgressDialog.hide();
+        state.aiProgressDialog = null;
+      }
       state.aiFill = null;
       frappe.show_alert({ message: result.message || "所选 AI 资料草稿已保存", indicator: "green" });
       await this.loadMaterialFeeWorkspace({ quiet: true });
     } catch (error) {
       fill.applying = false;
       if (!isCurrent()) return;
-      this.renderMaterialFeeWorkspace();
+      this.renderMaterialAIReviewDialog();
       throw error;
     }
   }
@@ -11967,7 +12117,7 @@ class OverseasCostWorkbench {
                 this.previewMaterialAttachmentSource(sourceDialog, attachment).catch((error) => this.showWikiMaterialSourceError(sourceDialog, error));
               } else {
                 frappe.show_alert({ message: "装箱资料已加入，AI 将在后台分析", indicator: "green" });
-                this.startMaterialAIFill({ force: false });
+                this.restartMaterialAIForChangedSources();
               }
             }).catch((error) => this.showError(error));
           }).catch((error) => this.showError(error));
@@ -12057,7 +12207,7 @@ class OverseasCostWorkbench {
       batch_name: this.detailState.batchName,
     }, true);
     const nextWorkbooks = result?.wiki_workbooks || [];
-    dialog.materialAttachmentSources = [...(result?.approval_sources || []), ...(result?.manual_attachments || [])];
+    dialog.materialAttachmentSources = [...(result?.manual_attachments || [])];
     if (
       preserveOnError
       && result?.wiki_error
@@ -12128,22 +12278,18 @@ class OverseasCostWorkbench {
   }
 
   renderMaterialSourceTabs(dialog) {
-    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["form", "钉钉表单附件"], ["comment", "评论附件与评论"], ["local", "本地上传装箱单"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
+    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["local", "本地上传装箱单"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
   }
 
   renderMaterialAttachmentSources(dialog) {
-    const rows = (dialog.materialAttachmentSources || []).filter((row) => {
-      if (dialog.materialSourceTab === "local") return row.source_kind === "manual_attachment";
-      const comment = row.source_kind === "approval_comment" || row.origin === "Comment";
-      return dialog.materialSourceTab === "comment" ? comment : row.source_kind === "approval_attachment" && !comment;
-    });
+    const rows = (dialog.materialAttachmentSources || []).filter((row) => row.source_kind === "manual_attachment");
     const cards = rows.map((row) => {
       const sheets = row.sheets?.length ? row.sheets : [""];
       const semanticOnly = row.supported_for_material_import === false;
       const status = semanticOnly ? (row.available ? "可供 AI 识别" : "选择 AI 填充后自动获取并识别") : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
       return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${semanticOnly ? `<span>AI 资料</span>` : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
     }).join("");
-    return `<div class="ocw-mf-wiki-toolbar"><span>可使用物流审批及关联采购审批中的资料；表格可直接预览，文档和图片由 AI 识别。</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>${dialog.materialSourceTab === "local" ? `<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>` : ""}</div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无可用资料</strong></div>`}</div>`;
+    return `<div class="ocw-mf-wiki-toolbar"><span>本页仅保留本地装箱单；钉钉正文、附件和评论会由“AI 分析资料”自动收集。</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button><button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button></div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无本地装箱单</strong></div>`}</div>`;
   }
 
   async previewMaterialAttachmentSource(dialog, sourceId, sheetName = "") {
@@ -12156,27 +12302,11 @@ class OverseasCostWorkbench {
     dialog.wikiMaterialOperationError = "";
     this.renderWikiMaterialSources(dialog);
     try {
-      let attachment = source.attachment_name || (String(source.source_id).startsWith("oa:") ? "" : source.source_id);
-      if (source.source_kind === "approval_attachment" && !source.available) {
-        if (!(await this.ensureEditSession()) || !isCurrent()) return;
-        if (!attachment) {
-          const prepared = await this.call("overseas_costing.api.import_api.prepare_dingtalk_archive_attachment", {
-            batch_name: dialog.materialBatchName, process_instance_id: source.process_instance_id, file_id: source.file_id,
-          });
-          if (!prepared?.ok || !prepared.attachment_name) throw new Error(prepared?.message || "无法准备钉钉附件。");
-          attachment = prepared.attachment_name;
-        }
-        if (!isCurrent()) return;
-        const downloaded = await this.call("overseas_costing.api.import_api.download_oa_form_attachment", { attachment_name: attachment });
-        if (!downloaded?.ok) throw new Error(downloaded?.message || "附件获取失败，请重试。");
-        if (!isCurrent()) return;
-        await this.loadWikiMaterialSources(dialog);
-        source = dialog.materialAttachmentSources.find((row) => row.attachment_name === attachment || row.source_id === attachment) || source;
-      }
+      const attachment = source.attachment_name || source.source_id;
       if (!isCurrent()) return;
       const sheets = source.sheets || [];
       const selectedSheet = sheetName || (sheets.length === 1 ? sheets[0] : "");
-      if (source.source_kind !== "approval_comment" && !selectedSheet) {
+      if (!selectedSheet) {
         if (!sheets.length) throw new Error("未读取到工作表，请检查文件或重新上传。");
         dialog.wikiMaterialOperationError = "文件包含多个工作表，请选择要导入的工作表。";
         return;
@@ -12451,7 +12581,7 @@ class OverseasCostWorkbench {
     dialog.hide();
     frappe.show_alert({ message: `已更新 ${result.updated_count || 0} 行、${result.changed_field_count || 0} 个字段`, indicator: "green" });
     await this.loadMaterialFeeWorkspace({ quiet: true });
-    this.startMaterialAIFill({ force: false });
+    this.restartMaterialAIForChangedSources();
   }
 
   validateWikiMaterialAllocations(preview, choices) {

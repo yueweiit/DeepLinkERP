@@ -165,7 +165,7 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
     monkeypatch.setattr(api.material_ai_fill_service, "apply_source_ai_review", lambda *args: calls.append(("apply", args)) or {"ok": True})
     monkeypatch.setattr(api.material_ai_fill_service, "discard_source_ai_review", lambda *args: calls.append(("discard", args)) or {"ok": True})
 
-    api.start_source_ai_review("B", "V", "两款是一套", 1)
+    api.start_source_ai_review("B", "V", "两款是一套", 1, '["SOURCE-1"]')
     api.get_source_ai_review_status("B", "R", None, "9")
     api.apply_source_ai_review(
         "B",
@@ -178,9 +178,12 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
     )
     api.discard_source_ai_review("B", "R")
 
+    start_call = next(row for row in calls if row[0] == "start")
+    assert start_call[2]["selected_source_ids"] == ["SOURCE-1"]
+
     assert checks == ["write", "read", "write", "write"]
     assert calls[0][1] == ("B", "V", "两款是一套")
-    assert calls[0][2] == {"force": True}
+    assert calls[0][2] == {"force": True, "selected_source_ids": ["SOURCE-1"]}
     assert calls[1][2]["after_revision"] == 9
     assert calls[2][1][2:4] == (["P1"], {"P1": {}})
     assert calls[2][1][6][0]["fieldname"] == "goods_value"

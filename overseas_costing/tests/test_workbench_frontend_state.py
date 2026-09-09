@@ -1401,31 +1401,32 @@ console.log(JSON.stringify({endpoint,args,modified:workspace.detailState.expecte
     assert result["batch"]["status"] == "Calculated"
 
 
-def test_packing_attachment_prepares_downloads_then_previews_exact_sheet():
+def test_local_packing_attachment_previews_exact_sheet_without_dingtalk_download():
     result = _fee_workspace_result(r"""
 const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B',versionName:'V'};
 workspace.ensureEditSession=async()=>true;workspace.renderWikiMaterialSources=()=>{};
-const source={source_id:'oa:source',source_kind:'approval_attachment',process_instance_id:'OA',file_id:'F',available:false};
+const source={source_id:'ATT',attachment_name:'ATT',source_kind:'manual_attachment',available:true,sheets:['采购明细']};
 const dialog={materialBatchName:'B',materialVersionName:'V',materialAttachmentSources:[source],hide(){this.hidden=true}};
-workspace.loadWikiMaterialSources=async()=>{dialog.materialAttachmentSources=[{...source,source_id:'ATT',attachment_name:'ATT',available:true,sheets:['采购明细']}];return true};
-const calls=[];workspace.call=async(endpoint,args)=>{calls.push([endpoint,args]);if(endpoint.endsWith('prepare_dingtalk_archive_attachment'))return {ok:true,attachment_name:'ATT'};if(endpoint.endsWith('download_oa_form_attachment'))return {ok:true};return {ok:true,rows:[]}};
+const calls=[];workspace.call=async(endpoint,args)=>{calls.push([endpoint,args]);return {ok:true,rows:[]}};
 workspace.openMaterialImportPreviewDialog=()=>{};
-await workspace.previewMaterialAttachmentSource(dialog,'oa:source');console.log(JSON.stringify(calls));
+await workspace.previewMaterialAttachmentSource(dialog,'ATT');console.log(JSON.stringify(calls));
 """)
-    assert [call[0].split(".")[-1] for call in result] == ["prepare_dingtalk_archive_attachment", "download_oa_form_attachment", "preview_material_import"]
-    assert result[-1][1] == dict(batch_name="B", source_kind="approval_attachment", source_id="ATT", sheet_name="采购明细")
+    assert [call[0].split(".")[-1] for call in result] == ["preview_material_import"]
+    assert result[0][1] == dict(batch_name="B", source_kind="manual_attachment", source_id="ATT", sheet_name="采购明细")
 
 
-def test_packing_attachment_failure_preserves_picker_for_retry():
+def test_direct_source_picker_excludes_dingtalk_attachments():
     result = _fee_workspace_result(r"""
 const workspace=Object.create(Harness.prototype);workspace.detailState={batchName:'B',versionName:'V'};
-workspace.ensureEditSession=async()=>true;workspace.renderWikiMaterialSources=()=>{};
-const dialog={materialBatchName:'B',materialVersionName:'V',materialAttachmentSources:[{source_id:'ATT',attachment_name:'ATT',source_kind:'approval_attachment',available:false}],hide(){this.hidden=true}};
-workspace.call=async()=>({ok:false,message:'附件正在归档，请稍后重试。'});
-let error='';try{await workspace.previewMaterialAttachmentSource(dialog,'ATT')}catch(e){error=e.message}
-console.log(JSON.stringify({error,busy:dialog.wikiMaterialBusy,hidden:Boolean(dialog.hidden)}));
+workspace.escape=(value)=>String(value??'');
+const dialog={materialSourceTab:'local',wikiMaterialBusy:'',materialAttachmentSources:[
+  {source_id:'OA',source_label:'钉钉秘密附件.xlsx',source_kind:'approval_attachment',available:true,sheets:['Sheet1']},
+  {source_id:'LOCAL',source_label:'本地装箱单.xlsx',source_kind:'manual_attachment',available:true,sheets:['Sheet1']}
+]};
+const html=workspace.renderMaterialAttachmentSources(dialog);
+console.log(JSON.stringify({hasDingtalk:html.includes('钉钉秘密附件'),hasLocal:html.includes('本地装箱单')}));
 """)
-    assert result == dict(error="附件正在归档，请稍后重试。", busy="", hidden=False)
+    assert result == dict(hasDingtalk=False, hasLocal=True)
 
 
 def test_trial_waits_for_pending_writes_and_ignores_duplicate_clicks():

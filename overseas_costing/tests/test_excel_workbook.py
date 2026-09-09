@@ -246,6 +246,26 @@ def test_read_packing_grid_preserves_real_merge_ranges(tmp_path) -> None:
     assert grid["cells"][2][1]["raw_value"] is None
 
 
+def test_read_packing_grid_keeps_raw_and_excel_formatted_display_values(tmp_path) -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "数值显示"
+    sheet["A1"] = 12.3
+    sheet["A1"].number_format = "#,##0.00"
+    sheet["B1"] = 0.256
+    sheet["B1"].number_format = "0.0%"
+    path = tmp_path / "formatted.xlsm"
+    workbook.save(path)
+    workbook.close()
+
+    grid = read_packing_grid(path, sheet_name="数值显示", require_exact_sheet=True)
+
+    assert grid["cells"][0][0]["raw_value"] == 12.3
+    assert grid["cells"][0][0]["display_value"] == "12.30"
+    assert grid["cells"][0][1]["raw_value"] == 0.256
+    assert grid["cells"][0][1]["display_value"] == "25.6%"
+
+
 def test_parse_yuewei_excel_workbook_expands_merged_batch_fields() -> None:
     meta, blocks = _parse_sample_blocks()
 

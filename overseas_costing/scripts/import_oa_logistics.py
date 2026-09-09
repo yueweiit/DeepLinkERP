@@ -2212,6 +2212,8 @@ def _looks_like_quote_amount_line(line: str) -> bool:
     text = _clean(line)
     if not text:
         return False
+    if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", text, re.IGNORECASE) and "=" not in text:
+        return False
     if re.search(r"(?:合计|总计|总费用|总价)", text, re.IGNORECASE):
         return True
     if "=" not in text:
@@ -2234,6 +2236,11 @@ def _parse_direct_quote_line(line: str) -> dict | None:
     )
     if not match:
         return None
+    tail = _clean(match.group("tail"))
+    if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", tail, re.IGNORECASE):
+        # The amount immediately after the colon is a rate.  If the line also
+        # contains an equals sign, the total-line parser will take its RHS.
+        return None
     carrier = _clean(match.group("carrier")).strip("：:")
     if not carrier or len(carrier) > 40:
         return None
@@ -2249,7 +2256,7 @@ def _parse_direct_quote_line(line: str) -> dict | None:
         "carrier": carrier,
         "amount": amount,
         "currency": _normalize_currency_code(match.group("currency")) or _normalize_currency_code(text) or "RMB",
-        "remark": _clean(match.group("tail")),
+        "remark": tail,
     }
 
 
@@ -2317,8 +2324,7 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
         amount = _parse_quote_total_amount(line)
         if amount is None:
             continue
-        candidates.append(
-            {
+        candidate = {
                 "carrier": carrier,
                 "amount": amount,
                 "currency": _normalize_currency_code(line) or "RMB",
@@ -2329,7 +2335,12 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
                 "evidence_line_no": line_no,
                 "status": "待确认",
             }
-        )
+        before_total = line.rsplit("=", 1)[0] if "=" in line else line
+        if re.search(r"/(?:方|立方|cbm|m3)", before_total, re.IGNORECASE):
+            candidate["pricing_basis"] = "volume"
+        elif re.search(r"/(?:kg|kgs?)\b", before_total, re.IGNORECASE):
+            candidate["pricing_basis"] = "weight"
+        candidates.append(candidate)
     return candidates
 
 

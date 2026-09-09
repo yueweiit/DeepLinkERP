@@ -601,6 +601,40 @@ def test_extract_logistics_quote_candidates_reads_formula_amount_line() -> None:
     ]
 
 
+def test_quote_candidates_treat_per_unit_values_as_rates_not_total_amounts() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "预估方数：11.67方\n"
+                    "体积方案：5000元/方 * 11.67 = 58,350元\n"
+                    "重量方案：25元/kg * 4200 = 105,000元"
+                )
+            }
+        }
+    )
+
+    assert [(row["amount"], row.get("pricing_basis")) for row in candidates] == [
+        (58350.0, "volume"),
+        (105000.0, "weight"),
+    ]
+    assert all(row["amount"] not in {5000, 25} for row in candidates)
+
+
+def test_quote_candidates_ignore_rate_only_lines_without_a_total() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "体积方案：5000元/方\n重量方案：25元/kg"
+                )
+            }
+        }
+    )
+
+    assert candidates == []
+
+
 def test_extract_logistics_quote_candidates_reads_compact_dhl_quote_with_comma() -> None:
     candidates = extract_logistics_quote_candidates_from_approval(
         {

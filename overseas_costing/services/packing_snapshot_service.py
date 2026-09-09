@@ -532,6 +532,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
             continue
         snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
         archive = snapshot.get("archive") if isinstance(snapshot.get("archive"), dict) else {}
+        download = snapshot.get("download") if isinstance(snapshot.get("download"), dict) else {}
         sheets = _attachment_sheet_names(row)
         item = {
             "source_id": row.get("name"),
@@ -542,6 +543,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
             "download_required": not bool(row.get("file_url")),
             "supported_for_material_import": str(row.get("file_name") or "").lower().endswith((".xlsx", ".xlsm")),
             "attachment_type": row.get("attachment_type") or "",
+            "content_hash": str(download.get("sha256") or archive.get("sha256") or ""),
             "sheets": sheets,
         }
         if str(row.get("source_type") or "").upper() == "OA":
@@ -552,6 +554,8 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
                 "file_id": str(snapshot.get("file_id") or ""),
                 "archive_status": archive.get("status") or ("archived" if item["available"] else "pending"),
                 "can_download": not item["available"] and (archive.get("status") == "archived" or bool(snapshot.get("file_id"))),
+                "actor_name": str(snapshot.get("comment_user_name") or ""),
+                "occurred_at": str(snapshot.get("comment_time") or row.get("modified") or ""),
             })
             approval.append(item)
             approval_by_name[str(row.get("name") or "")] = item
@@ -562,9 +566,18 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
 
     detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name))
     comments = []
-    for approval_row in [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]:
-        if not isinstance(approval_row, dict) or approval_row.get("excluded"):
+    for approval_row in [
+        detail.get("main_approval"),
+        *(detail.get("linked_purchase_approvals") or []),
+        *(detail.get("excluded_linked_purchase_approvals") or []),
+    ]:
+        if not isinstance(approval_row, dict):
             continue
+        approval_excluded = bool(approval_row.get("excluded"))
+        approval_exclusion_reason = str(
+            approval_row.get("exclusion_reason")
+            or ("审批已失效，不参与分析。" if approval_excluded else "")
+        )
         for attachment in approval_row.get("attachments") or []:
             if not isinstance(attachment, dict) or not _is_material_ai_attachment(attachment.get("file_name")):
                 continue
@@ -583,6 +596,27 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
                 "archive_status": archive_status,
                 "can_download": not available and archive_status == "archived",
                 "download_required": not available,
+                "content_hash": str(
+                    attachment.get("sha256") or attachment.get("content_sha256") or ""
+                ),
+                "approval_no": str(
+                    approval_row.get("business_id") or approval_row.get("approval_no") or ""
+                ),
+                "actor_name": str(
+                    attachment.get("comment_user_name")
+                    or approval_row.get("originator_user_name")
+                    or approval_row.get("originator_name")
+                    or ""
+                ),
+                "occurred_at": str(
+                    attachment.get("comment_time")
+                    or attachment.get("source_updated_at")
+                    or approval_row.get("finish_time")
+                    or approval_row.get("create_time")
+                    or ""
+                ),
+                "excluded": approval_excluded,
+                "exclude_reason": approval_exclusion_reason,
             }
             if existing:
                 existing.update(metadata)
@@ -604,7 +638,11 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
             approval.append(item)
             approval_by_identity[identity] = item
         for timeline in approval_row.get("timeline") or []:
-            if not isinstance(timeline, dict) or not timeline.get("packing_candidate") or not timeline.get("source_id"):
+            if (
+                not isinstance(timeline, dict)
+                or not timeline.get("source_id")
+                or not str(timeline.get("remark") or "").strip()
+            ):
                 continue
             comments.append(
                 {
@@ -612,8 +650,13 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
                     "source_id": timeline.get("source_id"),
                     "source_label": f"评论 · {timeline.get('user_name') or timeline.get('user_id') or '未知人员'}",
                     "source_updated_at": timeline.get("operation_time"),
-                    "instance_id": approval_row.get("instance_id") or "",
-                    "available": True,
+                    "process_instance_id": approval_row.get("instance_id") or "",
+                    "approval_no": approval_row.get("business_id") or approval_row.get("approval_no") or "",
+                    "actor_name": timeline.get("user_name") or timeline.get("user_id") or "",
+                    "occurred_at": timeline.get("operation_time") or "",
+                    "available": not approval_excluded,
+                    "excluded": approval_excluded,
+                    "exclude_reason": approval_exclusion_reason,
                     "remark_preview": str(timeline.get("remark") or "")[:160],
                 }
             )
@@ -700,6 +743,7 @@ def list_packing_sources(batch_name: str) -> dict[str, Any]:
 MATERIAL_AI_DOCUMENT_SUFFIXES = (
     ".xlsx",
     ".xlsm",
+    ".xls",
     ".pdf",
     ".png",
     ".jpg",
@@ -723,17 +767,22 @@ def _list_approval_body_ai_sources(batch_name: str) -> list[dict[str, Any]]:
         return []
 
     def source(approval: dict, role: str) -> dict[str, Any] | None:
-        if not isinstance(approval, dict) or approval.get("excluded"):
+        if not isinstance(approval, dict):
             return None
         instance_id = str(approval.get("instance_id") or "").strip()
         if not instance_id:
             return None
-        fields = {
-            str(row.get("label") or ""): row.get("value")
-            for row in approval.get("form_fields") or []
-            if isinstance(row, dict) and str(row.get("label") or "").strip()
-        }
-        if not fields:
+        raw_fields = approval.get("form_fields") or []
+        fields = (
+            dict(raw_fields)
+            if isinstance(raw_fields, dict)
+            else {
+                str(row.get("label") or ""): row.get("value")
+                for row in raw_fields
+                if isinstance(row, dict) and str(row.get("label") or "").strip()
+            }
+        )
+        if not fields and not approval.get("excluded"):
             return None
         title = str(approval.get("title") or ("国际物流审批" if role == "international_logistics" else "采购审批"))
         return {
@@ -742,6 +791,19 @@ def _list_approval_body_ai_sources(batch_name: str) -> list[dict[str, Any]]:
             "source_label": f"{title}正文",
             "process_instance_id": instance_id,
             "approval_role": role,
+            "excluded": bool(approval.get("excluded")),
+            "exclude_reason": str(
+                approval.get("exclusion_reason")
+                or ("审批已失效，不参与分析。" if approval.get("excluded") else "")
+            ),
+            "approval_no": str(approval.get("business_id") or approval.get("approval_no") or ""),
+            "actor_name": str(
+                approval.get("originator_user_name")
+                or approval.get("originator_name")
+                or approval.get("originator_userid")
+                or ""
+            ),
+            "occurred_at": str(approval.get("finish_time") or approval.get("create_time") or ""),
             "form_fields": fields,
             "source_updated_at": str(
                 approval.get("finish_time")
@@ -759,6 +821,10 @@ def _list_approval_body_ai_sources(batch_name: str) -> list[dict[str, Any]]:
         linked = source(approval, "purchase")
         if linked:
             rows.append(linked)
+    for approval in detail.get("excluded_linked_purchase_approvals") or []:
+        excluded = source(approval, "purchase")
+        if excluded:
+            rows.append(excluded)
     return rows
 
 
@@ -794,17 +860,31 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
             "sheet_name": str(sheet_name or source.get("sheet_name") or ""),
             "source_updated_at": str(source.get("source_updated_at") or source.get("modified") or ""),
             "available": bool(source.get("available", True)),
+            "can_download": bool(source.get("can_download")),
             "download_required": bool(source.get("download_required")),
             "process_instance_id": str(source.get("process_instance_id") or ""),
             "file_id": str(source.get("file_id") or ""),
             "approval_role": str(source.get("approval_role") or ""),
+            "approval_no": str(source.get("approval_no") or source.get("business_id") or ""),
+            "actor_name": str(
+                source.get("actor_name")
+                or source.get("comment_user_name")
+                or source.get("comment_user")
+                or source.get("user_name")
+                or ""
+            ),
+            "occurred_at": str(source.get("occurred_at") or source.get("source_updated_at") or ""),
+            "excluded": bool(source.get("excluded")),
+            "exclude_reason": str(source.get("exclude_reason") or source.get("exclusion_reason") or ""),
             "form_fields": source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {},
+            "content_hash": str(source.get("content_hash") or ""),
         }
         hash_basis = {
             "source_kind": kind,
             "logical_source_id": logical_source_id,
             "sheet_name": public["sheet_name"],
-            **({} if process_instance_id and file_id else {"source_updated_at": public["source_updated_at"]}),
+            "source_updated_at": public["source_updated_at"],
+            "content_hash": public["content_hash"],
             "content": public["form_fields"],
         }
         public["source_hash"] = hashlib.sha256(_json(hash_basis).encode("utf-8")).hexdigest()
@@ -859,26 +939,42 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
         ],
         limit_page_length=5000,
     )
+    approval_body_by_instance = {
+        str(source.get("process_instance_id") or ""): source
+        for source in approval_body_sources
+        if str(source.get("process_instance_id") or "")
+    }
     for row in attachment_rows:
         if version_name and row.get("version") and str(row.get("version")) != str(version_name):
             continue
         file_name = str(row.get("file_name") or "")
         if not file_name.lower().endswith(MATERIAL_AI_DOCUMENT_SUFFIXES):
             continue
-        if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
-            continue
+        audit_only = (
+            str(row.get("source_type") or "").upper() == "OA"
+            and packing_source_service._attachment_is_audit_only(row)
+        )
         snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
+        attachment_instance = str(
+            snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""
+        )
+        excluded_instances = {
+            str(source.get("process_instance_id") or "")
+            for source in approval_body_sources
+            if source.get("excluded") and str(source.get("process_instance_id") or "")
+        }
+        invalid_approval = bool(attachment_instance and attachment_instance in excluded_instances)
         if str(row.get("source_type") or "").upper() == "OA":
             allowed_instances = {
                 str(source.get("process_instance_id") or "")
                 for source in [*approval_body_sources, *(packing.get("approval_sources") or [])]
                 if str(source.get("process_instance_id") or "")
             }
-            attachment_instance = str(
-                snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""
-            )
-            if not attachment_instance or attachment_instance not in allowed_instances:
+            if not audit_only and (
+                not attachment_instance or attachment_instance not in allowed_instances
+            ):
                 continue
+        owning_approval = approval_body_by_instance.get(attachment_instance) or {}
         source = {
             "source_kind": (
                 "approval_attachment"
@@ -893,6 +989,29 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None) -
             "download_required": not bool(row.get("file_url")),
             "process_instance_id": str(snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""),
             "file_id": str(snapshot.get("file_id") or ""),
+            "approval_no": str(owning_approval.get("approval_no") or ""),
+            "actor_name": str(
+                snapshot.get("comment_user_name") or owning_approval.get("actor_name") or ""
+            ),
+            "occurred_at": str(
+                snapshot.get("comment_time") or owning_approval.get("occurred_at") or ""
+            ),
+            "excluded": audit_only or invalid_approval,
+            "exclude_reason": (
+                "审计专用附件，不参与资料分析。"
+                if audit_only
+                else "所属审批已失效，不参与资料分析。"
+                if invalid_approval
+                else ""
+            ),
+            "content_hash": str(
+                (
+                    snapshot.get("download")
+                    if isinstance(snapshot.get("download"), dict)
+                    else {}
+                ).get("sha256")
+                or packing_source_service._attachment_hash(row)
+            ),
         }
         sheets = _attachment_sheet_names(row) if file_name.lower().endswith((".xlsx", ".xlsm")) else []
         if sheets:

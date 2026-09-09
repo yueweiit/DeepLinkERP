@@ -498,8 +498,8 @@ def test_list_sources_includes_unsaved_approval_excel_files_and_safe_download_id
 
     result = service.list_packing_sources("B1")
     sources = result["approval_sources"]
-    assert len(sources) == 5
-    assert len({row["source_id"] for row in sources}) == 5
+    assert len(sources) == 6
+    assert len({row["source_id"] for row in sources}) == 6
     by_file = {row["file_id"]: row for row in sources}
     assert by_file["F1"]["source_id"] == "ATT-1"
     assert by_file["F1"]["available"] is True
@@ -514,11 +514,63 @@ def test_list_sources_includes_unsaved_approval_excel_files_and_safe_download_id
     assert by_file["F3"]["can_download"] is False
     assert by_file["F4"]["supported_for_material_import"] is True
     assert by_file["PDF"]["supported_for_material_import"] is False
+    assert by_file["BAD"]["excluded"] is True
+    assert "已失效" in by_file["BAD"]["exclude_reason"]
     assert "secret" not in repr(result)
-    assert "REJECTED" not in repr(result)
 
 
-def test_material_ai_source_manifest_uses_current_version_and_excludes_audit_only(monkeypatch):
+def test_list_sources_includes_free_comments_even_without_packing_keyword_classification(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *_args, **_kwargs: []))
+    monkeypatch.setattr(
+        service.packing_source_service.dingtalk_approval_service,
+        "get_batch_dingtalk_approval_detail",
+        lambda _batch: {
+            "main_approval": {
+                "instance_id": "MAIN",
+                "business_id": "LOG-1",
+                "attachments": [],
+                "timeline": [
+                    {
+                        "source_id": "COMMENT-HASH",
+                        "remark": "请以最终报价为准",
+                        "packing_candidate": False,
+                        "user_name": "张三",
+                        "operation_time": "2026-09-08 11:00:00",
+                    }
+                ],
+            },
+            "linked_purchase_approvals": [],
+        },
+    )
+    monkeypatch.setattr(
+        dingtalk_packing_source,
+        "get_packing_runtime_clients",
+        lambda: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    result = service.list_packing_sources("B1")
+
+    assert result["approval_sources"] == [
+        {
+            "source_kind": "approval_comment",
+            "source_id": "COMMENT-HASH",
+            "source_label": "评论 · 张三",
+            "source_updated_at": "2026-09-08 11:00:00",
+            "process_instance_id": "MAIN",
+            "approval_no": "LOG-1",
+            "actor_name": "张三",
+            "occurred_at": "2026-09-08 11:00:00",
+            "available": True,
+            "excluded": False,
+            "exclude_reason": "",
+            "remark_preview": "请以最终报价为准",
+        }
+    ]
+
+
+def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_excluded(monkeypatch):
     import json
     from types import SimpleNamespace
 
@@ -606,8 +658,10 @@ def test_material_ai_source_manifest_uses_current_version_and_excludes_audit_onl
     result = service.list_material_ai_sources("B1", version_name="V1")
 
     identities = {row["logical_source_id"] for row in result}
-    assert identities == {"approval:MAIN:form", "oa:P1:F1", "CURRENT"}
+    assert identities == {"approval:MAIN:form", "oa:P1:F1", "CURRENT", "REJECTED"}
     assert "WB:S1" not in identities
     assert "OLD" not in repr(result)
-    assert "REJECTED" not in repr(result)
+    rejected = next(row for row in result if row["logical_source_id"] == "REJECTED")
+    assert rejected["excluded"] is True
+    assert "审计专用" in rejected["exclude_reason"]
     assert "UNRELATED" not in repr(result)

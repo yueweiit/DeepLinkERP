@@ -1,6 +1,7 @@
 """物料 AI 草稿合并、校验和任务生命周期测试。"""
 
 import copy
+import json
 import re
 
 import pytest
@@ -316,6 +317,29 @@ def test_unified_review_marks_different_source_values_as_conflicting() -> None:
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_freight_alternatives_share_conflict_group_and_recommend_volume_without_defaulting() -> None:
+    source = {
+        "source_id": "approval:LOG-1:form",
+        "process_instance_id": "LOG-1",
+        "source_label": "国际物流审批正文",
+        "form_fields": {
+            "物流报价Cotización de logística": (
+                "预估方数：11.67方\n"
+                "体积方案：5000元/方 * 11.67 = 58,350元\n"
+                "重量方案：25元/kg * 4200 = 105,000元"
+            )
+        },
+    }
+
+    proposals = build_approval_fee_proposals(source, transport_mode="SEA")
+
+    assert [row["payload"]["amount"] for row in proposals] == ["58350", "105000"]
+    assert len({row["conflict_group"] for row in proposals}) == 1
+    assert [row["recommended"] for row in proposals] == [True, False]
+    assert all(row["default_selected"] is False for row in proposals)
+    assert all(row["result_origin"] == "SYSTEM" for row in proposals)
+
+
 def test_item_update_cannot_modify_readonly_purchase_identity_or_quantity() -> None:
     documents = [
         {
@@ -560,6 +584,43 @@ def test_fingerprint_is_stable_and_changes_with_material_or_source_inputs() -> N
     assert build_input_fingerprint("B1", "V1", _items(), changed_sources) != first
 
 
+def test_only_first_trusted_oa_download_may_refresh_source_fingerprint() -> None:
+    service = material_ai_fill_service
+    before = [
+        {
+            "source_kind": "approval_attachment",
+            "source_id": "oa:PROC-1:FILE-1",
+            "logical_source_id": "oa:PROC-1:FILE-1",
+            "source_hash": "archive",
+            "content_hash": "sha256-ok",
+            "selected": True,
+            "available": False,
+            "download_required": True,
+        }
+    ]
+    after = [
+        {
+            **before[0],
+            "source_id": "oa:PROC-1:FILE-1:sheet:a",
+            "parent_source_id": "oa:PROC-1:FILE-1",
+            "source_hash": "downloaded",
+            "sheet_name": "Sheet A",
+            "available": True,
+            "download_required": False,
+        }
+    ]
+
+    assert service._materialization_only_source_change(before, after) is True
+
+    changed_content = copy.deepcopy(after)
+    changed_content[0]["content_hash"] = "sha256-changed"
+    assert service._materialization_only_source_change(before, changed_content) is False
+
+    already_local = copy.deepcopy(before)
+    already_local[0].update(available=True, download_required=False)
+    assert service._materialization_only_source_change(already_local, changed_content) is False
+
+
 def test_ai_prompt_limits_model_to_data_mapping_and_marks_documents_untrusted() -> None:
     messages = build_ai_messages(
         _items(),
@@ -666,6 +727,8 @@ def test_ai_fee_proposal_never_overwrites_an_existing_known_fee_by_default() -> 
 
 
 def test_unified_proposals_keep_conflicts_unselected_and_validate_selected_edits() -> None:
+    items = _items()
+    items[0]["parse_status"] = "UNVERIFIED"
     raw = [
         {
             "proposal_id": "P1",
@@ -710,7 +773,7 @@ def test_unified_proposals_keep_conflicts_unselected_and_validate_selected_edits
         {"document_id": "DOC-1", "source_ref": {"source": "approval_attachment", "file": "Aduro.xlsx"}, "structured_rows": [{"source_row": 11}, {"source_row": 12}]},
         {"document_id": "DOC-2", "source_ref": {"source": "approval_form", "file": "国际物流审批正文"}, "form_fields": {"物流报价": "DHL报价，251元"}},
     ]
-    normalized = normalize_source_review_proposals(raw, _items(), documents, fx_rates={"USD": "7.178751"})
+    normalized = normalize_source_review_proposals(raw, items, documents, fx_rates={"USD": "7.178751"})
     assert [row["proposal_id"] for row in normalized] == ["P1", "P2"]
     assert sum(float(normalized[0]["payload"]["replacement_rows"][index]["goods_value"]) for index in (0, 1)) == 114.0
 
@@ -718,22 +781,24 @@ def test_unified_proposals_keep_conflicts_unselected_and_validate_selected_edits
         normalized,
         ["P1", "P2"],
         {"P1": {"replacement_rows": [{"quantity": 4}, {"quantity": 4}]}},
-        _items(),
+        items,
         fx_rates={"USD": "7.178751"},
     )
     assert [row["proposal_id"] for row in selected] == ["P1", "P2"]
     with pytest.raises(ValueError, match="不属于当前草稿"):
-        validate_source_review_application(normalized, ["INVENTED"], {}, _items())
+        validate_source_review_application(normalized, ["INVENTED"], {}, items)
     with pytest.raises(ValueError, match="币种"):
         validate_source_review_application(
             normalized,
             ["P1"],
             {"P1": {"replacement_rows": [{"purchase_currency": "EUR"}, {}]}},
-            _items(),
+            items,
         )
 
 
 def test_replacement_price_edit_recalculates_rmb_goods_value_with_current_fx() -> None:
+    items = _items()
+    items[0]["parse_status"] = "UNVERIFIED"
     documents = [
         {
             "document_id": "DOC-1",
@@ -757,7 +822,7 @@ def test_replacement_price_edit_recalculates_rmb_goods_value_with_current_fx() -
                 "source_refs": [{"document_id": "DOC-1", "row": 11}, {"document_id": "DOC-1", "row": 12}],
             }
         ],
-        _items(),
+        items,
         documents,
         fx_rates={"USD": "7.178751"},
     )
@@ -766,13 +831,38 @@ def test_replacement_price_edit_recalculates_rmb_goods_value_with_current_fx() -
         proposals,
         ["P1"],
         {"P1": {"replacement_rows": [{"unit_price": "2.00"}, {}]}},
-        _items(),
+        items,
         fx_rates={"USD": "7.178751"},
     )
 
     rows = selected[0]["payload"]["replacement_rows"]
     assert rows[0]["goods_value"] == "57.43"
     assert rows[1]["goods_value"] == "65.76"
+
+
+def test_material_replacement_rejects_verified_business_rows() -> None:
+    proposal = {
+        "proposal_id": "P1",
+        "proposal_type": "material_replace",
+        "target_item_name": "ITEM-1",
+        "confidence": 0.99,
+        "payload": {
+            "replacement_rows": [
+                {"product_name": "A", "quantity": 1, "purchase_uom": "个"},
+                {"product_name": "B", "quantity": 1, "purchase_uom": "个"},
+            ]
+        },
+        "source_refs": [{"document_id": "DOC-1", "row": 1}],
+    }
+    documents = [
+        {
+            "document_id": "DOC-1",
+            "source_ref": {"source": "approval_attachment", "file": "packing.xlsx"},
+            "semantic_rows": [{"source_row": 1}],
+        }
+    ]
+
+    assert normalize_source_review_proposals([proposal], _items(), documents) == []
 
 
 def test_semantic_excel_evidence_requires_the_server_sheet_and_cell_location() -> None:
@@ -798,6 +888,45 @@ def test_semantic_excel_evidence_requires_the_server_sheet_and_cell_location() -
     assert normalize_source_review_proposals([proposal], _items(), documents) == []
     proposal["source_refs"][0]["sheet"] = "Sheet1"
     assert normalize_source_review_proposals([proposal], _items(), documents)[0]["source_refs"][0]["sheet"] == "Sheet1"
+
+
+def test_semantic_excel_evidence_binds_server_issued_sheet_source_id() -> None:
+    documents = [
+        {
+            "document_id": "DOC-1",
+            "ai_eligible": False,
+            "source_ref": {
+                "source": "approval_attachment",
+                "source_id": "oa:PROC-1:FILE-1",
+                "file": "multi-sheet.xlsx",
+            },
+            "sheet_source_ids": {"Sheet1": "oa:PROC-1:FILE-1:sheet:server-id"},
+            "semantic_rows": [
+                {
+                    "sheet": "Sheet1",
+                    "source_row": 11,
+                    "cells": [{"cell": "F11", "value": "12.5"}],
+                }
+            ],
+        }
+    ]
+    proposal = {
+        "proposal_id": "P1",
+        "proposal_type": "item_update",
+        "target_item_name": "ITEM-1",
+        "confidence": 0.99,
+        "result_origin": "SYSTEM",
+        "payload": {"fields": {"gross_weight_kg": "12.5"}},
+        "source_refs": [
+            {"document_id": "DOC-1", "sheet": "Sheet1", "row": 11, "cell": "F11"}
+        ],
+    }
+
+    normalized = normalize_source_review_proposals([proposal], _items(), documents)
+
+    assert normalized[0]["source_refs"][0]["source_id"] == (
+        "oa:PROC-1:FILE-1:sheet:server-id"
+    )
 
 
 def test_excel_semantic_reader_preserves_sheet_rows_cells_and_image_anchors(tmp_path) -> None:
@@ -900,6 +1029,48 @@ def test_unified_start_fingerprints_clarification_and_does_not_require_edit_leas
     assert repository.created[0]["proposal_version"] == 1
 
 
+def test_unified_start_persists_server_validated_source_selection() -> None:
+    repository = _StartRepository()
+    repository.sources = [
+        {
+            "source_kind": "approval_form",
+            "source_id": "approval:PROC-1:form",
+            "source_hash": "form-hash",
+            "form_fields": {"重量": "4200"},
+        },
+        {
+            "source_kind": "manual_attachment",
+            "source_id": "ATT-1",
+            "source_hash": "file-hash",
+            "file_name": "packing.xlsx",
+        },
+    ]
+    repository.list_sources = lambda _batch, _version: copy.deepcopy(repository.sources)
+
+    start_source_ai_review(
+        "B1", "V1", selected_source_ids=[], repository=repository, enqueue=lambda _run: None
+    )
+
+    manifest = json.loads(repository.created[0]["source_manifest_json"])
+    assert manifest[0]["locked"] is True
+    assert manifest[0]["selected"] is True
+    assert manifest[1]["selected"] is False
+    assert json.loads(repository.created[0]["source_progress_json"])[1]["read_status"] == "EXCLUDED"
+
+
+def test_unified_start_rejects_source_id_not_signed_for_current_batch() -> None:
+    repository = _StartRepository()
+
+    with pytest.raises(ValueError, match="不属于当前批次"):
+        start_source_ai_review(
+            "B1",
+            "V1",
+            selected_source_ids=["CROSS-BATCH"],
+            repository=repository,
+            enqueue=lambda _run: None,
+        )
+
+
 def test_unified_start_reuses_running_task_even_when_force_is_requested() -> None:
     queued = []
     repository = _StartRepository(
@@ -991,6 +1162,33 @@ def test_apply_revalidates_fingerprint_and_marks_changed_sources_stale() -> None
     assert result["stale"] is True
     assert repository.run["status"] == "STALE"
     assert repository.applied == []
+
+
+def test_unified_apply_marks_removed_selected_source_stale() -> None:
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository()
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "source_manifest_json": manifest,
+            "input_fingerprint": material_ai_fill_service._source_review_fingerprint(
+                "B1", "V1", _items(), manifest, ""
+            ),
+        }
+    )
+    repository.sources = [
+        {"source_kind": "manual_attachment", "source_id": "B", "source_hash": "h2"}
+    ]
+
+    result = apply_source_ai_review(
+        "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
+    )
+
+    assert result["status"] == "STALE"
+    assert result["stale"] is True
+    assert repository.run["status"] == "STALE"
 
 
 def test_apply_is_one_repository_transaction_and_preserves_user_edit_marker() -> None:
@@ -1114,6 +1312,88 @@ def test_unified_apply_sends_manual_grid_edits_through_same_transaction() -> Non
     assert repository.source_applied[0][0] == []
     assert repository.source_applied[0][1][0]["fieldname"] == "goods_value"
 
+
+def test_unified_apply_is_idempotent_for_same_request_and_rejects_different_retry() -> None:
+    repository = _LifecycleRepository()
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "clarification_text": "",
+            "candidates_json": [],
+            "input_fingerprint": material_ai_fill_service._source_review_fingerprint(
+                "B1", "V1", _items(), repository.sources, ""
+            ),
+        }
+    )
+    calls = []
+
+    def apply_once(run, selected, manual_updates, audit):
+        calls.append((selected, manual_updates, audit))
+        run["status"] = "APPLIED"
+        run["draft_json"] = {
+            "application": {
+                "fingerprint": audit["application_fingerprint"],
+                "changed_count": 0,
+                "batch_modified": "M2",
+            }
+        }
+        return {"changed_count": 0, "batch_modified": "M2"}
+
+    repository.apply_source_review = apply_once
+
+    first = apply_source_ai_review(
+        "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
+    )
+    repeated = apply_source_ai_review(
+        "B1", "RUN-1", [], {}, "OLD-TOKEN", "OLD-MODIFIED", repository=repository
+    )
+
+    assert first["ok"] is True
+    assert repeated["ok"] is True
+    assert repeated["idempotent"] is True
+    assert len(calls) == 1
+
+    with pytest.raises(ValueError, match="不同"):
+        apply_source_ai_review(
+            "B1",
+            "RUN-1",
+            [],
+            {},
+            "OLD-TOKEN",
+            "OLD-MODIFIED",
+            manual_updates=[
+                {"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": "1"}
+            ],
+            repository=repository,
+        )
+
+
+def test_unified_apply_rolls_back_when_transaction_write_fails() -> None:
+    repository = _LifecycleRepository()
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "clarification_text": "",
+            "candidates_json": [],
+            "input_fingerprint": material_ai_fill_service._source_review_fingerprint(
+                "B1", "V1", _items(), repository.sources, ""
+            ),
+        }
+    )
+    repository.rollbacks = 0
+    repository.rollback = lambda: setattr(
+        repository, "rollbacks", repository.rollbacks + 1
+    )
+    repository.apply_source_review = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("写入失败")
+    )
+
+    with pytest.raises(RuntimeError, match="写入失败"):
+        apply_source_ai_review(
+            "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
+        )
+
+    assert repository.rollbacks == 1
 
 def test_status_and_discard_return_public_payload_without_mutating_materials() -> None:
     repository = _LifecycleRepository()
@@ -1301,7 +1581,7 @@ def test_worker_keeps_deterministic_candidates_when_deepseek_is_unavailable(monk
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY"
+    assert result["status"] == "READY", repository.run.get("error_message")
     assert repository.run["status"] == "READY"
     assert repository.run["ai_completed"] == 0
     assert "AI 识别未完成" in repository.run["ai_warning"]
@@ -1310,6 +1590,62 @@ def test_worker_keeps_deterministic_candidates_when_deepseek_is_unavailable(monk
     assert repository.run["source_progress_json"][0]["status"] == "COMPLETED"
     assert repository.run["source_progress_json"][0]["candidate_count"] == 1
     assert repository.rollbacks == 0
+
+
+def test_unified_worker_is_ready_with_system_approval_results_when_ai_is_unavailable(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "approval_form",
+            "source_id": "approval:PROC-1:form",
+            "source_hash": "approval-hash",
+            "source_label": "国际物流审批正文",
+            "process_instance_id": "PROC-1",
+            "approval_no": "LOG-1",
+            "approval_role": "international_logistics",
+            "form_fields": {
+                "货物信息": [{"物料编码": "FL000427", "数量": "1494", "单位": "KG"}],
+                "重量Peso（KG）": "4200",
+            },
+        }
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "source_manifest_json": manifest,
+            "input_fingerprint": service._source_review_fingerprint(
+                "B1", "V1", _items(), manifest, ""
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "_call_source_review_ai",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "model": "deepseek-test",
+            "proposals": [],
+            "warning": "AI 不可用",
+        },
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    proposals = repository.run["candidates_json"]
+    assert len(proposals) == 1
+    assert proposals[0]["result_origin"] == "SYSTEM"
+    assert proposals[0]["payload"]["fields"] == {
+        "actual_shipped_qty": "1494",
+        "shipped_uom": "kg",
+        "net_weight_kg": "1494",
+        "gross_weight_kg": "4200",
+    }
+    assert repository.run["source_progress_json"][0]["parse_method"] == "SYSTEM_APPROVAL"
 
 
 def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monkeypatch) -> None:
@@ -1375,7 +1711,7 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY"
+    assert result["status"] == "READY", repository.run.get("error_message")
     proposals = repository.run["candidates_json"]
     assert {row["proposal_type"] for row in proposals} == {"item_update", "fee_update"}
     fee = next(row for row in proposals if row["proposal_type"] == "fee_update")
@@ -1425,3 +1761,187 @@ def test_deterministic_excel_candidate_preserves_sheet_row_and_cell_reference() 
             "cell": "E8",
         }
     ]
+
+
+def test_downloaded_excel_parent_expands_to_stable_sheet_sources() -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    parent = {
+        "source_kind": "approval_attachment",
+        "source_id": "oa:PROC-1:FILE-1",
+        "logical_source_id": "oa:PROC-1:FILE-1",
+        "source_hash": "archived",
+        "source_label": "multi.xlsx",
+        "file_name": "multi.xlsx",
+    }
+    repository.run["source_manifest_json"] = prepare_source_manifest([parent])
+    repository.sources = [
+        {
+            **parent,
+            "source_id": "ATT-1",
+            "source_hash": "downloaded",
+            "sheet_name": sheet,
+        }
+        for sheet in ("Sheet A", "Sheet B")
+    ]
+
+    expanded = service._reload_review_manifest(repository, "B1", "V1", repository.run)
+
+    assert len(expanded) == 2
+    assert all(source["selected"] for source in expanded)
+    assert {source["parent_source_id"] for source in expanded} == {"oa:PROC-1:FILE-1"}
+    assert len({source["source_id"] for source in expanded}) == 2
+
+
+def test_unmaterialized_excel_candidates_are_bound_to_sheet_source_ids() -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+
+    source = {
+        "source_kind": "approval_attachment",
+        "source_id": "oa:PROC-1:FILE-1",
+        "logical_source_id": "oa:PROC-1:FILE-1",
+        "source_label": "multi.xlsx",
+        "file_name": "multi.xlsx",
+    }
+    candidates = []
+    for sheet, value in (("Sheet A", "10"), ("Sheet B", "20")):
+        candidate = _candidate("ITEM-1", "gross_weight_kg", value, source="multi.xlsx")
+        candidate["source_refs"][0]["sheet"] = sheet
+        candidates.append(candidate)
+
+    entries = service._excel_review_entries(
+        0,
+        source,
+        candidates,
+        {"document_id": "DOC-1", "sheet_names": ["Sheet A", "Sheet B"]},
+    )
+
+    assert len(entries) == 2
+    assert [entry[1]["sheet_name"] for entry in entries] == ["Sheet A", "Sheet B"]
+    assert all(len(entry[2]) == 1 for entry in entries)
+    assert all(
+        entry[2][0]["source_refs"][0]["source_id"] == entry[1]["source_id"]
+        for entry in entries
+    )
+    assert all(
+        entry[2][0]["source_refs"][0]["document_id"] == "DOC-1" for entry in entries
+    )
+
+
+def test_unified_worker_keeps_single_sheet_deterministic_excel_result(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "manual_attachment",
+            "source_id": "ATT-1",
+            "logical_source_id": "ATT-1",
+            "source_hash": "file-hash",
+            "source_label": "packing.xlsx",
+            "file_name": "packing.xlsx",
+            "sheet_name": "Sheet1",
+        }
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "source_manifest_json": manifest,
+            "input_fingerprint": service._source_review_fingerprint(
+                "B1", "V1", _items(), manifest, ""
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda _items, _source: (
+            [_candidate("ITEM-1", "gross_weight_kg", "12.5", source="packing.xlsx")],
+            {
+                "source_ref": {
+                    "source": "manual_attachment",
+                    "source_id": manifest[0]["source_id"],
+                    "file": "packing.xlsx",
+                    "sheet": "Sheet1",
+                },
+                "structured_rows": [{"source_row": 8, "gross_weight_kg": "12.5"}],
+                "ai_eligible": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_call_source_review_ai",
+        lambda *_args, **_kwargs: {"ok": False, "proposals": [], "warning": "AI 不可用"},
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    proposals = repository.run["candidates_json"]
+    assert len(proposals) == 1
+    assert proposals[0]["result_origin"] == "SYSTEM"
+    assert proposals[0]["payload"]["fields"] == {"gross_weight_kg": "12.5"}
+    assert proposals[0]["source_refs"][0]["source_id"] == manifest[0]["source_id"]
+
+
+def test_unified_worker_requires_sheet_selection_when_multiple_sheets_produce_results(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "manual_attachment",
+            "source_id": "ATT-1",
+            "logical_source_id": "ATT-1",
+            "source_hash": "file-hash",
+            "source_label": "multi.xlsx",
+            "file_name": "multi.xlsx",
+            "sheet_name": sheet,
+        }
+        for sheet in ("Sheet A", "Sheet B")
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "source_manifest_json": manifest,
+            "input_fingerprint": service._source_review_fingerprint(
+                "B1", "V1", _items(), manifest, ""
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda _items, source: (
+            [_candidate("ITEM-1", "gross_weight_kg", "12.5", source="multi.xlsx")],
+            {
+                "source_ref": {
+                    "source": "manual_attachment",
+                    "file": "multi.xlsx",
+                    "sheet": source["sheet_name"],
+                },
+                "structured_rows": [{"source_row": 8, "gross_weight_kg": "12.5"}],
+                "ai_eligible": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_call_source_review_ai",
+        lambda *_args, **_kwargs: {"ok": False, "proposals": [], "warning": ""},
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    assert repository.run["candidates_json"] == []
+    progress = repository.run["source_progress_json"]
+    assert {row["read_status"] for row in progress} == {"NEEDS_SELECTION"}
+    assert all(len(row["sheet_options"]) == 2 for row in progress)
