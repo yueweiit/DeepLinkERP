@@ -23,7 +23,15 @@ EVIDENCE_TYPES = frozenset(
 )
 ACCOUNTING_ROLES = frozenset({"ESTIMATE", "FINAL_BILL", "SETTLEMENT", "REFERENCE"})
 EVIDENCE_EDIT_FIELDS = frozenset(
-    {"evidence_type", "accounting_role", "original_amount", "currency", "direction", "is_final"}
+    {
+        "evidence_type",
+        "accounting_role",
+        "original_amount",
+        "currency",
+        "direction",
+        "related_evidence",
+        "is_final",
+    }
 )
 FEE_SPLIT_EDIT_FIELDS = frozenset({"amount", "currency", "amount_status"})
 COMPONENT_EDIT_FIELDS = frozenset({"item"})
@@ -241,6 +249,8 @@ def allocate_tax_certificate_components(
                         "item": item_name,
                         "stable_line_key": str(item.get("stable_line_key") or item_name),
                         "component_type": "IMPORT_TAX",
+                        "accounting_role": "FINAL_BILL",
+                        "cost_effect": "COST",
                         "tax_code": tax_code,
                         "hs_code": str(line.get("hs_code") or ""),
                         "currency": "MXN",
@@ -262,6 +272,187 @@ def allocate_tax_certificate_components(
         "allocation_basis": basis,
         "missing_fx": bool(components and not rmb_to_mxn),
     }
+
+
+def allocate_service_fee_components(
+    service_fees: list[dict],
+    items: list[dict],
+    *,
+    fx_context: dict | None = None,
+    source_ref: dict | None = None,
+) -> dict:
+    """Allocate broker/service rows by explicit SKU scope or complete purchase value."""
+
+    source_ref = dict(source_ref or {})
+    by_name = {str(row.get("name") or ""): row for row in items or []}
+    rmb_to_mxn = _positive((fx_context or {}).get("fx_rmb_to_mxn"))
+    components = []
+    for index, service_fee in enumerate(service_fees or []):
+        if not isinstance(service_fee, dict):
+            continue
+        amount = _decimal(service_fee.get("amount_mxn"))
+        if amount is None or amount < 0:
+            return {
+                "components": [],
+                "needs_review": True,
+                "reason_code": "SERVICE_AMOUNT_INVALID",
+                "missing_fx": False,
+            }
+        explicit_names = [
+            str(value)
+            for value in (service_fee.get("item_names") or service_fee.get("items") or [])
+            if str(value)
+        ]
+        if explicit_names:
+            if any(name not in by_name for name in explicit_names):
+                return {
+                    "components": [],
+                    "needs_review": True,
+                    "reason_code": "SKU_MATCH_REQUIRED",
+                    "missing_fx": False,
+                }
+            matches = [by_name[name] for name in explicit_names]
+        else:
+            matches = list(items or [])
+        weights = [
+            (str(row.get("name") or ""), _positive(row.get("goods_value")))
+            for row in matches
+        ]
+        if not weights or any(value is None for _, value in weights):
+            return {
+                "components": [],
+                "needs_review": True,
+                "reason_code": "SKU_ALLOCATION_BASIS_MISSING",
+                "missing_fx": False,
+            }
+        usable_weights = [(key, value) for key, value in weights if value is not None]
+        original_allocations = _allocate_money(amount, usable_weights)
+        rmb_allocations = (
+            _allocate_decimal(amount / rmb_to_mxn, usable_weights)
+            if rmb_to_mxn
+            else {}
+        )
+        locator = (
+            service_fee.get("source_evidence")
+            if isinstance(service_fee.get("source_evidence"), dict)
+            else {}
+        )
+        for item_name, original_amount in original_allocations.items():
+            item = by_name[item_name]
+            components.append(
+                {
+                    "item": item_name,
+                    "stable_line_key": str(item.get("stable_line_key") or item_name),
+                    "component_type": "CUSTOMS_SERVICE",
+                    "accounting_role": "FINAL_BILL",
+                    "cost_effect": "COST",
+                    "tax_code": "",
+                    "hs_code": str(item.get("hs_code") or ""),
+                    "currency": "MXN",
+                    "original_amount": _money(original_amount),
+                    "amount_rmb": (
+                        _decimal_amount(rmb_allocations[item_name]) if rmb_to_mxn else None
+                    ),
+                    "exchange_rate": _money(rmb_to_mxn) if rmb_to_mxn else None,
+                    "allocation_basis": "purchase_goods_value",
+                    "source_evidence": {
+                        **source_ref,
+                        **locator,
+                        "service_row": index + 1,
+                        "service_code": str(service_fee.get("code") or ""),
+                    },
+                    "confidence": "1.00" if len(matches) == 1 else "0.95",
+                    "default_selected": bool(locator),
+                }
+            )
+    return {
+        "components": components,
+        "needs_review": False,
+        "reason_code": "",
+        "missing_fx": bool(components and not rmb_to_mxn),
+    }
+
+
+def build_refund_reversal_components(
+    refund_amount: Any, original_components: list[dict]
+) -> list[dict]:
+    """Project a linked refund across the original SKU/tax proportions as ledger rows."""
+
+    amount = _decimal(refund_amount)
+    weighted = [
+        (str(row.get("name") or ""), abs(_decimal(row.get("original_amount"), Decimal("0")) or Decimal("0")))
+        for row in original_components or []
+    ]
+    weighted = [(key, value) for key, value in weighted if key and value > 0]
+    original_total = sum((value for _, value in weighted), Decimal("0"))
+    if amount is None or amount <= 0 or not weighted or amount > original_total:
+        raise ValueError("退款金额必须为正数且不能超过原分项合计。")
+    by_name = {str(row.get("name") or ""): row for row in original_components or []}
+    original_allocations = _allocate_money(amount, weighted)
+    original_rmb_total = sum(
+        (_decimal(row.get("amount_rmb"), Decimal("0")) or Decimal("0") for row in original_components or []),
+        Decimal("0"),
+    )
+    rmb_allocations = (
+        _allocate_decimal(amount / original_total * original_rmb_total, weighted)
+        if original_rmb_total
+        else {}
+    )
+    result = []
+    for component_name, original_allocation in original_allocations.items():
+        source = by_name[component_name]
+        result.append(
+            {
+                "item": source.get("item"),
+                "stable_line_key": source.get("stable_line_key"),
+                "component_type": "REFUND_REVERSAL",
+                "accounting_role": "SETTLEMENT",
+                "cost_effect": "LEDGER_ONLY",
+                "tax_code": source.get("tax_code") or "",
+                "hs_code": source.get("hs_code") or "",
+                "currency": str(source.get("currency") or "RMB"),
+                "original_amount": _money(-original_allocation),
+                "amount_rmb": (
+                    _decimal_amount(-rmb_allocations[component_name])
+                    if component_name in rmb_allocations
+                    else None
+                ),
+                "exchange_rate": source.get("exchange_rate"),
+                "allocation_basis": "original_component_proportion",
+                "reverses_component": component_name,
+                "source_evidence": {"reverses_component": component_name},
+                "confidence": "1.00",
+                "default_selected": True,
+            }
+        )
+    return result
+
+
+def validate_refund_parent(refund: dict, payment: dict) -> dict:
+    """Validate that a refund points at a usable payment for the same fee ledger."""
+
+    if (
+        str(refund.get("evidence_type") or "").upper() != "REFUND"
+        or str(refund.get("accounting_role") or "").upper() != "SETTLEMENT"
+    ):
+        raise ValueError("只有退款结算凭证可以关联原付款。")
+    if (
+        not payment
+        or str(payment.get("evidence_type") or "").upper() != "PAYMENT"
+        or str(payment.get("accounting_role") or "").upper() != "SETTLEMENT"
+        or str(payment.get("validation_status") or "").upper() != "VALID"
+    ):
+        raise ValueError("关联的原付款凭证必须是已核对的付款结算凭证。")
+    if any(
+        str(refund.get(field) or "") != str(payment.get(field) or "")
+        for field in ("batch", "version", "fee_rule")
+    ):
+        raise ValueError("关联的原付款凭证必须属于同一批次、版本和费用。")
+    refund_currency = str(refund.get("currency") or "RMB").upper().replace("CNY", "RMB")
+    payment_currency = str(payment.get("currency") or "RMB").upper().replace("CNY", "RMB")
+    if refund_currency != payment_currency:
+        raise ValueError("退款与原付款凭证的币种必须一致。")
+    return dict(payment)
 
 
 def split_customs_evidence(parsed: dict) -> dict:
@@ -585,15 +776,40 @@ def build_fee_evidence_review_draft(
         source_ref={"attachment": attachment.get("name"), "file": attachment.get("file_name")},
         explicit_matches=(ai_review or {}).get("line_item_matches") or {},
     ) if deterministic_is_tax else {"components": [], "unmatched_lines": [], "needs_review": False, "allocation_basis": "", "missing_fx": False}
+    service_component_result = allocate_service_fee_components(
+        combined.get("service_fees") or [],
+        items,
+        fx_context=fx_context or {},
+        source_ref={"attachment": attachment.get("name"), "file": attachment.get("file_name")},
+    ) if deterministic_is_tax else {"components": [], "needs_review": False, "reason_code": "", "missing_fx": False}
     components = []
-    for index, row in enumerate(component_result["components"], start=1):
+    component_candidates = [
+        *component_result["components"],
+        *service_component_result["components"],
+    ]
+    for index, row in enumerate(component_candidates, start=1):
         component_ref = row.get("source_evidence") if isinstance(row.get("source_evidence"), dict) else {}
         component_selected = default_selected and _precise_source_ref(component_ref)
+        fee_logical_key = (
+            "customs_clearance_fee"
+            if row.get("component_type") == "CUSTOMS_SERVICE"
+            else "import_tax"
+        )
         components.append(
             {
                 **row,
                 "proposal_id": f"component:{index}",
-                "fee_logical_key": "import_tax",
+                "fee_logical_key": fee_logical_key,
+                "accounting_role": (
+                    accounting.get("accounting_role")
+                    if accounting.get("accounting_role") in {"ESTIMATE", "FINAL_BILL", "SETTLEMENT"}
+                    else row.get("accounting_role") or "FINAL_BILL"
+                ),
+                "cost_effect": (
+                    "LEDGER_ONLY"
+                    if accounting.get("accounting_role") == "SETTLEMENT"
+                    else row.get("cost_effect") or "COST"
+                ),
                 "default_selected": component_selected,
                 "needs_review": not component_selected,
             }
@@ -613,13 +829,24 @@ def build_fee_evidence_review_draft(
             for row in items
             if row.get("name")
         ],
-        "unmatched_lines": component_result["unmatched_lines"],
+        "unmatched_lines": [
+            *component_result["unmatched_lines"],
+            *(
+                [{
+                    "reason_code": service_component_result.get("reason_code"),
+                    "message": "清关服务费缺少完整采购货值或明确 SKU 范围。",
+                }]
+                if service_component_result.get("needs_review")
+                else []
+            ),
+        ],
         "unclassified_difference": split["unclassified_difference"] if deterministic_is_tax else "0.00",
-        "missing_fx": component_result["missing_fx"],
+        "missing_fx": component_result["missing_fx"] or service_component_result["missing_fx"],
         "summary": {
             "fee_proposal_count": len(fee_splits),
             "component_proposal_count": len(components),
-            "unmatched_line_count": len(component_result["unmatched_lines"]),
+            "unmatched_line_count": len(component_result["unmatched_lines"])
+            + (1 if service_component_result.get("needs_review") else 0),
         },
     }
 
@@ -1306,6 +1533,16 @@ def validate_review_selections(evidence: dict, fee_rows: list[dict], components:
             raise ValueError("凭证审核草稿只有确认最终账单后才能保存为实际费用；否则请保留暂估。")
 
 
+def group_components_by_fee_key(components: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in components or []:
+        fee_key = str(row.get("fee_logical_key") or row.get("logical_fee_key") or "")
+        if not fee_key:
+            raise ValueError("SKU 费用分项缺少逻辑费用标识。")
+        grouped.setdefault(fee_key, []).append(row)
+    return {key: grouped[key] for key in sorted(grouped)}
+
+
 def validate_component_amount_conservation(
     fee: dict,
     components: list[dict],
@@ -1315,26 +1552,57 @@ def validate_component_amount_conservation(
 
     from overseas_costing.services.cost_preview_service import convert_fee_amount_to_rmb
 
-    fee_result = convert_fee_amount_to_rmb(fee or {}, fx_context or {})
-    if not fee_result.get("ok"):
-        if fee_result.get("reason_code") == "FX_RATE_MISSING":
-            raise ValueError("缺少费用币种汇率，无法保存 SKU 税费分项。")
-        raise ValueError("请先确认有效的进口税费总额，再保存 SKU 税费分项。")
+    fee_currency = str(fee.get("currency") or "RMB").upper().replace("CNY", "RMB")
+    fee_amount = _decimal(fee.get("amount"))
+    if fee_currency not in {"RMB", "MXN", "USD"} or fee_amount is None or fee_amount < 0:
+        raise ValueError("请先确认有效的费用总额，再保存 SKU 税费分项。")
 
+    cost_components = [
+        row
+        for row in (components or [])
+        if str(row.get("cost_effect") or "COST").upper() == "COST"
+    ]
     grouped: dict[str, dict[str, Decimal]] = {}
     component_total_rmb = Decimal("0")
-    for row in components or []:
+    missing_rmb = False
+    for row in cost_components:
         currency = str(row.get("currency") or "RMB").upper().replace("CNY", "RMB")
         original_amount = _decimal(row.get("original_amount"))
         amount_rmb = _decimal(row.get("amount_rmb"))
         if currency not in {"RMB", "MXN", "USD"} or original_amount is None or original_amount < 0:
             raise ValueError("SKU 税费分项原币金额或币种不合法。")
-        if amount_rmb is None or amount_rmb < 0:
-            raise ValueError("SKU 税费分项缺少有效汇率换算金额。")
         totals = grouped.setdefault(currency, {"original": Decimal("0"), "rmb": Decimal("0")})
         totals["original"] += original_amount
-        totals["rmb"] += amount_rmb
-        component_total_rmb += amount_rmb
+        if amount_rmb is None:
+            missing_rmb = True
+        elif amount_rmb < 0:
+            raise ValueError("SKU 税费分项人民币金额不合法。")
+        else:
+            totals["rmb"] += amount_rmb
+            component_total_rmb += amount_rmb
+
+    fee_result = convert_fee_amount_to_rmb(fee or {}, fx_context or {})
+    if not fee_result.get("ok"):
+        if fee_result.get("reason_code") == "FX_RATE_MISSING":
+            if set(grouped) - {fee_currency}:
+                raise ValueError("缺少汇率时，SKU 分项必须与费用使用同一原币。")
+            if any(
+                row.get("amount_rmb") not in (None, "")
+                or row.get("exchange_rate") not in (None, "")
+                for row in cost_components
+            ):
+                raise ValueError("缺少可验证的汇率快照，不能接受人民币换算金额。")
+            original_total = grouped.get(fee_currency, {}).get("original", Decimal("0"))
+            if original_total - fee_amount > Decimal("0.005"):
+                raise ValueError("SKU 税费分项合计超过费用总额。")
+            return {
+                "original_currency": fee_currency,
+                "original_total": _money(original_total),
+                "missing_fx": True,
+            }
+        raise ValueError("请先确认有效的进口税费总额，再保存 SKU 税费分项。")
+    if missing_rmb:
+        raise ValueError("SKU 税费分项缺少有效汇率换算金额。")
 
     for currency, totals in grouped.items():
         converted = convert_fee_amount_to_rmb(
@@ -1426,6 +1694,7 @@ def apply_fee_evidence_review(
                     "currency": currency,
                     "original_amount": amount,
                     "direction": direction,
+                    "related_evidence": str(evidence_values.get("related_evidence") or "") or None,
                     "is_final": 1 if _checked(evidence_values.get("is_final")) else 0,
                     "attachment_fingerprint": _attachment_fingerprint(attachment),
                     "parse_snapshot_json": _json(draft),
@@ -1490,34 +1759,66 @@ def apply_fee_evidence_review(
                     }
                 ).insert(ignore_permissions=True)
         if components:
-            tax_rule = fee_rules_by_key.get("import_tax") or fee_service.materialize_fee_rule(context["batch"], context["version"], "import_tax")
-            validate_component_amount_conservation(tax_rule, components, context.get("fx_context") or {})
-            frappe.db.sql(
-                "UPDATE `tabOverseas Cost Fee SKU Component` SET status='VOID', is_active=0 WHERE evidence=%s AND logical_fee_key='import_tax' AND is_active=1",
-                (evidence_name,),
-            )
-            valid_items = {row["name"]: row for row in repo.get_items(context["batch"], context["version"])}
-            for row in components:
-                item = valid_items.get(str(row.get("item") or ""))
-                if not item:
-                    raise ValueError("凭证分项关联的 SKU 不属于当前批次。")
-                original_amount = _decimal(row.get("original_amount"))
-                rmb_amount = _decimal(row.get("amount_rmb"))
-                if original_amount is None or original_amount < 0:
-                    raise ValueError("SKU 税费分项金额不合法。")
-                frappe.get_doc(
-                    {
-                        "doctype": "Overseas Cost Fee SKU Component", "batch": context["batch"], "version": context["version"],
-                        "fee_rule": tax_rule["name"], "logical_fee_key": "import_tax", "evidence": evidence_name,
-                        "attachment": attachment["name"], "item": item["name"], "stable_line_key": item.get("stable_line_key") or item["name"],
-                        "component_type": row.get("component_type") or "IMPORT_TAX", "tax_code": str(row.get("tax_code") or "")[:80],
-                        "hs_code": str(row.get("hs_code") or "")[:80], "currency": str(row.get("currency") or "MXN"),
-                        "original_amount": original_amount, "amount_rmb": rmb_amount, "exchange_rate": _decimal(row.get("exchange_rate")),
-                        "allocation_basis": str(row.get("allocation_basis") or "")[:140],
-                        "source_evidence_json": _json(row.get("source_evidence") or {}), "confidence": _decimal(row.get("confidence")),
-                        "status": "CONFIRMED", "is_active": 1,
-                    }
-                ).insert(ignore_permissions=True)
+            valid_items = {
+                row["name"]: row
+                for row in repo.get_items(context["batch"], context["version"])
+            }
+            for fee_key, fee_components in group_components_by_fee_key(components).items():
+                fee_rule = fee_rules_by_key.get(fee_key) or fee_service.materialize_fee_rule(
+                    context["batch"], context["version"], fee_key
+                )
+                validate_component_amount_conservation(
+                    fee_rule, fee_components, context.get("fx_context") or {}
+                )
+                frappe.db.sql(
+                    "UPDATE `tabOverseas Cost Fee SKU Component` SET status='VOID', is_active=0 WHERE evidence=%s AND logical_fee_key=%s AND is_active=1",
+                    (evidence_name, fee_key),
+                )
+                for row in fee_components:
+                    item = valid_items.get(str(row.get("item") or ""))
+                    if not item:
+                        raise ValueError("凭证分项关联的 SKU 不属于当前批次。")
+                    original_amount = _decimal(row.get("original_amount"))
+                    rmb_amount = _decimal(row.get("amount_rmb"))
+                    accounting_role = str(
+                        row.get("accounting_role") or "FINAL_BILL"
+                    ).upper()
+                    cost_effect = str(row.get("cost_effect") or "COST").upper()
+                    is_reversal = (
+                        accounting_role == "SETTLEMENT"
+                        and cost_effect == "LEDGER_ONLY"
+                        and bool(row.get("reverses_component"))
+                    )
+                    if original_amount is None or (original_amount < 0 and not is_reversal):
+                        raise ValueError("SKU 税费分项金额不合法。")
+                    frappe.get_doc(
+                        {
+                            "doctype": "Overseas Cost Fee SKU Component",
+                            "batch": context["batch"],
+                            "version": context["version"],
+                            "fee_rule": fee_rule["name"],
+                            "logical_fee_key": fee_key,
+                            "evidence": evidence_name,
+                            "attachment": attachment["name"],
+                            "item": item["name"],
+                            "stable_line_key": item.get("stable_line_key") or item["name"],
+                            "component_type": row.get("component_type") or "IMPORT_TAX",
+                            "accounting_role": accounting_role,
+                            "cost_effect": cost_effect,
+                            "tax_code": str(row.get("tax_code") or "")[:80],
+                            "hs_code": str(row.get("hs_code") or "")[:80],
+                            "currency": str(row.get("currency") or "MXN"),
+                            "original_amount": original_amount,
+                            "amount_rmb": rmb_amount,
+                            "exchange_rate": _decimal(row.get("exchange_rate")),
+                            "allocation_basis": str(row.get("allocation_basis") or "")[:140],
+                            "source_evidence_json": _json(row.get("source_evidence") or {}),
+                            "confidence": _decimal(row.get("confidence")),
+                            "reverses_component": row.get("reverses_component") or None,
+                            "status": "CONFIRMED",
+                            "is_active": 1,
+                        }
+                    ).insert(ignore_permissions=True)
         frappe.db.set_value("Overseas Cost Batch", context["batch"], "status", "Dirty", update_modified=True)
         _insert_audit_log(
             batch_doc_name=context["batch"], version_name=context["version"], action_type="EDIT",

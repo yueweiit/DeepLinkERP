@@ -96,3 +96,4 @@ def test_fee_evidence_and_component_support_refund_linkage_and_cost_effect() -> 
     ]
     assert component["cost_effect"]["options"].splitlines() == ["COST", "LEDGER_ONLY"]
     assert component["reverses_component"]["options"] == "Overseas Cost Fee SKU Component"
+    assert "REFUND_REVERSAL" in component["component_type"]["options"].splitlines()

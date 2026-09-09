@@ -90,7 +90,7 @@
       "fieldname": "component_type",
       "fieldtype": "Select",
       "label": "分项类型",
-      "options": "IMPORT_TAX\nCUSTOMS_SERVICE\nOTHER",
+      "options": "IMPORT_TAX\nCUSTOMS_SERVICE\nREFUND_REVERSAL\nOTHER",
       "reqd": 1
     },
     {

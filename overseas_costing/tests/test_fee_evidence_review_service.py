@@ -106,6 +106,8 @@ def test_tax_components_split_same_hs_by_declared_value_and_conserve_each_tax() 
         assert sum(Decimal(row["original_amount"]) for row in rows) == expected
         assert sum(Decimal(row["amount_rmb"]) for row in rows) == expected / 2
         assert all(row["source_evidence"]["attachment"] == "ATT-TAX" for row in rows)
+        assert all(row["accounting_role"] == "FINAL_BILL" for row in rows)
+        assert all(row["cost_effect"] == "COST" for row in rows)
 
 
 def test_tax_components_fall_back_to_purchase_value_and_block_without_any_basis() -> None:
@@ -319,6 +321,24 @@ def test_human_amount_edits_are_recorded_as_manual_review_evidence() -> None:
     assert fee_rows[0]["source_refs"][-1]["field"] == "amount"
 
 
+def test_refund_parent_is_an_allowed_evidence_edit() -> None:
+    evidence, _fee_rows, _components = service._selected_proposals(
+        {
+            "evidence": {
+                "proposal_id": "evidence:classification",
+                "evidence_type": "REFUND",
+                "related_evidence": "",
+            },
+            "fee_splits": [],
+            "components": [],
+        },
+        ["evidence:classification"],
+        {"evidence:classification": {"related_evidence": "PAYMENT-1"}},
+    )
+
+    assert evidence["related_evidence"] == "PAYMENT-1"
+
+
 def test_payment_and_refund_evidence_never_replace_the_fee_total() -> None:
     for evidence_type, direction in (("PAYMENT", "DEBIT"), ("REFUND", "CREDIT")):
         draft = service.build_fee_evidence_review_draft(
@@ -441,7 +461,7 @@ def test_component_amounts_are_authoritative_and_only_residual_uses_fee_rule() -
     assert result["summary"]["total_cost_rmb"] == "300.00"
 
 
-def test_component_conservation_rejects_missing_fx_and_amounts_above_fee_total() -> None:
+def test_component_conservation_allows_original_currency_without_fx() -> None:
     fee = {"amount": "100", "currency": "MXN"}
     valid = [
         {"currency": "MXN", "original_amount": "40", "amount_rmb": "20"},
@@ -452,8 +472,25 @@ def test_component_conservation_rejects_missing_fx_and_amounts_above_fee_total()
         fee, valid, {"fx_rmb_to_mxn": "2"}
     )["component_total_rmb"] == "50.00"
 
-    with pytest.raises(ValueError, match="汇率"):
+    missing_fx = service.validate_component_amount_conservation(
+        fee,
+        [
+            {"currency": "MXN", "original_amount": "40", "amount_rmb": None},
+            {"currency": "MXN", "original_amount": "60", "amount_rmb": None},
+        ],
+        {},
+    )
+    assert missing_fx == {
+        "original_currency": "MXN",
+        "original_total": "100.00",
+        "missing_fx": True,
+    }
+    with pytest.raises(ValueError, match="汇率快照"):
         service.validate_component_amount_conservation(fee, valid, {})
+
+
+def test_component_conservation_rejects_invalid_conversion_and_amounts_above_fee_total() -> None:
+    fee = {"amount": "100", "currency": "MXN"}
     with pytest.raises(ValueError, match="换算金额"):
         service.validate_component_amount_conservation(
             fee,
@@ -466,6 +503,155 @@ def test_component_conservation_rejects_missing_fx_and_amounts_above_fee_total()
             [{"currency": "RMB", "original_amount": "51", "amount_rmb": "51"}],
             {"fx_rmb_to_mxn": "2"},
         )
+
+
+def test_clearance_service_without_line_scope_uses_purchase_value() -> None:
+    result = service.allocate_service_fee_components(
+        [
+            {
+                "amount_mxn": "30",
+                "source_evidence": {"page": 2, "text_line": 8},
+            }
+        ],
+        _items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+    )
+
+    assert [row["original_amount"] for row in result["components"]] == [
+        "20.00",
+        "10.00",
+    ]
+    assert [row["amount_rmb"] for row in result["components"]] == ["10", "5"]
+    assert all(
+        row["allocation_basis"] == "purchase_goods_value"
+        for row in result["components"]
+    )
+
+
+def test_clearance_service_requires_complete_purchase_values() -> None:
+    items = _items()
+    items[1]["goods_value"] = ""
+
+    result = service.allocate_service_fee_components(
+        [{"amount_mxn": "30", "source_evidence": {"page": 2, "text_line": 8}}],
+        items,
+        fx_context={"fx_rmb_to_mxn": "2"},
+    )
+
+    assert result["components"] == []
+    assert result["needs_review"] is True
+    assert result["reason_code"] == "SKU_ALLOCATION_BASIS_MISSING"
+
+
+def test_mixed_customs_draft_includes_clearance_service_components() -> None:
+    parsed = {
+        "parser": "mexico_tax_certificate_pedimento",
+        "header": {"paid_total_mxn": "50"},
+        "tax_totals": {"igi_mxn": "20"},
+        "service_fees": [
+            {
+                "code": "broker_service",
+                "amount_mxn": "30",
+                "source_evidence": {"page": 2, "text_line": 8},
+            }
+        ],
+        "line_items": [],
+        "source_evidence": {
+            "header.paid_total_mxn": {"page": 2, "text_line": 10},
+            "tax_totals.igi_mxn": {"page": 2, "text_line": 6},
+        },
+        "validation": {"status": "passed"},
+    }
+
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment={"name": "ATT-MIXED", "parse_result_json": parsed},
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+    )
+
+    clearance = [
+        row
+        for row in draft["components"]
+        if row["fee_logical_key"] == "customs_clearance_fee"
+    ]
+    assert sum(Decimal(row["original_amount"]) for row in clearance) == Decimal("30")
+    assert all(row["component_type"] == "CUSTOMS_SERVICE" for row in clearance)
+
+
+def test_linked_refund_reverses_original_sku_tax_proportions_as_ledger_only() -> None:
+    reversed_rows = service.build_refund_reversal_components(
+        "15",
+        [
+            {
+                "name": "COMP-1",
+                "item": "ITEM-GLASSES",
+                "stable_line_key": "LINE-GLASSES",
+                "tax_code": "IVA",
+                "currency": "MXN",
+                "original_amount": "20",
+                "amount_rmb": "10",
+            },
+            {
+                "name": "COMP-2",
+                "item": "ITEM-SUNGLASSES",
+                "stable_line_key": "LINE-SUNGLASSES",
+                "tax_code": "IVA",
+                "currency": "MXN",
+                "original_amount": "10",
+                "amount_rmb": "5",
+            },
+        ],
+    )
+
+    assert [row["original_amount"] for row in reversed_rows] == ["-10.00", "-5.00"]
+    assert [row["amount_rmb"] for row in reversed_rows] == ["-5", "-2.5"]
+    assert [row["reverses_component"] for row in reversed_rows] == [
+        "COMP-1",
+        "COMP-2",
+    ]
+    assert all(row["accounting_role"] == "SETTLEMENT" for row in reversed_rows)
+    assert all(row["cost_effect"] == "LEDGER_ONLY" for row in reversed_rows)
+
+
+def test_components_are_grouped_by_their_own_logical_fee_key() -> None:
+    grouped = service.group_components_by_fee_key(
+        [
+            {"fee_logical_key": "import_tax", "original_amount": "20"},
+            {"fee_logical_key": "customs_clearance_fee", "original_amount": "30"},
+            {"fee_logical_key": "import_tax", "original_amount": "10"},
+        ]
+    )
+
+    assert list(grouped) == ["customs_clearance_fee", "import_tax"]
+    assert [row["original_amount"] for row in grouped["import_tax"]] == ["20", "10"]
+
+
+def test_refund_parent_must_be_a_valid_payment_for_the_same_fee_and_currency() -> None:
+    refund = {
+        "batch": "B1",
+        "version": "V1",
+        "fee_rule": "F1",
+        "evidence_type": "REFUND",
+        "accounting_role": "SETTLEMENT",
+        "currency": "MXN",
+    }
+    payment = {
+        "name": "PAYMENT-1",
+        "batch": "B1",
+        "version": "V1",
+        "fee_rule": "F1",
+        "evidence_type": "PAYMENT",
+        "accounting_role": "SETTLEMENT",
+        "currency": "MXN",
+        "validation_status": "VALID",
+    }
+
+    assert service.validate_refund_parent(refund, payment)["name"] == "PAYMENT-1"
+    with pytest.raises(ValueError, match="币种"):
+        service.validate_refund_parent(refund, {**payment, "currency": "USD"})
+    with pytest.raises(ValueError, match="原付款"):
+        service.validate_refund_parent(refund, {**payment, "evidence_type": "QUOTE"})
 
 
 def test_review_children_require_selected_evidence_and_final_role_is_consistent() -> None:
