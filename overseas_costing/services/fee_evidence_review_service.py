@@ -1291,7 +1291,13 @@ class FrappeFeeEvidenceReviewRepository:
         return rows[0] if rows else None
 
     def create_run(self, values: dict):
-        return frappe.get_doc({"doctype": self.RUN_DOCTYPE, **values}).insert(ignore_permissions=True)
+        serialized = {
+            key: _json(value) if key.endswith("_json") and not isinstance(value, str) else value
+            for key, value in values.items()
+        }
+        return frappe.get_doc({"doctype": self.RUN_DOCTYPE, **serialized}).insert(
+            ignore_permissions=True
+        )
 
     def get_run(self, run_id: str):
         return frappe.get_doc(self.RUN_DOCTYPE, run_id)

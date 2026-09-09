@@ -1254,6 +1254,33 @@ def test_start_review_persists_requested_evidence_role() -> None:
     assert repository.created[0]["evidence_role"] == "tax_certificate"
 
 
+def test_frappe_run_creation_serializes_long_text_json_fields(monkeypatch) -> None:
+    captured = {}
+
+    class RunDocument:
+        def insert(self, **_kwargs):
+            return self
+
+    class FakeFrappe:
+        @staticmethod
+        def get_doc(values):
+            captured.update(values)
+            return RunDocument()
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+
+    service.FrappeFeeEvidenceReviewRepository().create_run(
+        {
+            "status": "QUEUED",
+            "source_progress_json": [{"status": "WAITING"}],
+            "draft_json": {"summary": {}},
+        }
+    )
+
+    assert captured["source_progress_json"] == '[{"status":"WAITING"}]'
+    assert captured["draft_json"] == '{"summary":{}}'
+
+
 class _ApplyRepository:
     def __init__(self, *, fail_audit=False):
         self.fail_audit = fail_audit
