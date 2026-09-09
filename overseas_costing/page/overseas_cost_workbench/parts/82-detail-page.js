@@ -8,7 +8,7 @@
     const writeback = String(batch.writeback_status || "").toLowerCase();
     const status = String(batch.status || "").toLowerCase();
     const sourceStatus = batch.source_status || {};
-    const cost = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const cost = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     if (!batch.subsidiary_code || ["missing", "pending", "invalid"].includes(String(sourceStatus.purchase_approval_sync_state || "").toLowerCase())) {
       return "purchase";
     }
@@ -23,6 +23,9 @@
       this.showPendingFeature("缺少批次号，无法打开详情。");
       return;
     }
+    // Detail navigation supersedes any outstanding list/summary response,
+    // including browser history navigation while an edit is already open.
+    this._workbenchRequestId = (this._workbenchRequestId || 0) + 1;
     if (this.detailState.editToken && this.detailState.batchName && this.detailState.batchName !== normalizedName) {
       await this.releaseEditSession();
     }
@@ -206,7 +209,7 @@
           </div>
         </header>
         <section class="ocw-detail-statusbar">
-          ${this.detailStatusChip("当前问题", this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
+          ${this.detailStatusChip("当前问题", batch.summary_snapshot?.calculation_schema === 2 && batch.summary_snapshot.is_complete && !batch.subsidiary_code ? "业务主体待补" : this.issueLabel(issue), issue === "ready" ? "ok" : "warn")}
           ${this.detailStatusChip("资料", documentStatus, documentStatus.includes("待") ? "warn" : "ok")}
           ${this.detailStatusChip("计算", this.batchStatusInfo(batch.status, batch, Number(batch.item_count || 0)).label, String(batch.status || "").toLowerCase().includes("calculated") ? "ok" : "warn")}
           ${this.detailStatusChip("ERP", erpInfo.label, erpInfo.state === "is-ok" ? "ok" : erpInfo.state === "is-warn" ? "warn" : "neutral")}
@@ -282,20 +285,7 @@
   }
 
   async renderDocumentsDetailTab() {
-    const batch = this.getDetailBatch();
-    const resolvedType = this.detectManualDocumentLogisticsType(batch);
-    const $content = this.$root.find("[data-area='detail-content']");
-    $content.html(`
-      <div class="ocw-detail-section-head"><div><span>异常处理</span><h2>资料与费用</h2></div><button class="ocw-outline-btn" type="button" data-action="detail-repull">重拉本批次</button></div>
-      <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
-      <div data-area="manual-documents">${this.renderManualDocumentPanel(batch, resolvedType, [])}</div>
-    `);
-    this.loadSettlementStrip(batch.name);
-    try {
-      await this.loadManualDocumentAttachments(batch, this.detailDocumentAdapter(), resolvedType);
-    } catch (error) {
-      this.showError(error);
-    }
+    return this.loadMaterialFeeWorkspace();
   }
 
   async renderVoucherDetailTab() {
@@ -398,9 +388,9 @@
       const sortMark = sku.sortBy === column.fieldname ? (sku.sortOrder === "asc" ? " ↑" : " ↓") : "";
       return `<th class="${index < 2 ? `ocw-sku-sticky ocw-sku-sticky-${index}` : ""}" title="${this.escape(`${column.excel_col} ${column.label}`)}">${sortable ? `<button type="button" data-action="sku-sort" data-sort-by="${this.escape(column.fieldname)}">` : ""}<span>${this.escape(column.excel_col)}</span>${this.escape(column.label)}${sortMark}${sortable ? "</button>" : ""}</th>`;
     }).join("");
-    const body = items.map((row) => `<tr>${columns.map((column, index) => this.renderSkuPageCell(row, column, index)).join("")}</tr>`).join("");
+    const body = items.map((row) => `<tr class="${this.approvalLinkNeedsReview(row.approval_link) ? "ocw-approval-row" : ""}">${columns.map((column, index) => this.renderSkuPageCell(row, column, index)).join("")}</tr>`).join("");
     this.$root.find("[data-area='detail-content']").html(`
-      <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2></div><strong>共 ${Number(result.total || 0)} 行</strong></div>
+      <div class="ocw-detail-section-head"><div><span>服务端分页</span><h2>SKU 明细</h2>${result.calculation_stale ? "<span>结果待更新，请先开始试算</span>" : ""}</div><strong>共 ${Number(result.total || 0)} 行</strong></div>
       <div class="ocw-sku-toolbar">
         <label><span>搜索当前批次 SKU</span><input class="form-control" type="search" data-role="sku-keyword" value="${this.escape(sku.keyword)}" placeholder="物料编码或产品名称" /></label>
         <div class="ocw-sku-groups" role="group" aria-label="SKU 字段分组">${groups.map(([key, label]) => `<button class="${sku.fieldGroup === key ? "is-active" : ""}" type="button" data-action="sku-group" data-field-group="${key}">${label}</button>`).join("")}</div>
@@ -427,7 +417,10 @@
   }
 
   renderSkuPageCell(row, column, index) {
-    const editable = this.isEditableColumn(column);
+    if (column.fieldname === "approval_link") {
+      return `<td class="ocw-readonly-cell" data-editable-cell="0">${this.renderApprovalLinkMarker(row.approval_link) || this.escape(row.approval_link?.approval_no || (row.approval_link?.status === "linked" ? "已关联" : "--"))}</td>`;
+    }
+    const editable = column.fieldname !== "transport_mode" && this.isEditableColumn(column);
     const rawValue = this.shouldShowEmptyZeroFee(column.fieldname, row[column.fieldname]) ? "" : this.normalizeEditorValue(row[column.fieldname]);
     const displayValue = this.formatCellValue(row[column.fieldname], column);
     const content = this.renderCell(row[column.fieldname], column);
@@ -551,7 +544,23 @@
     if (this.detailState.editToken) return true;
     const batch = this.getDetailBatch();
     if (!batch || !batch.name) return false;
-    const result = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name }, true);
+    const batchName = String(batch.name);
+    const acquireId = Number(this.editSessionAcquireId || 0) + 1;
+    this.editSessionAcquireId = acquireId;
+    const result = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batchName }, true);
+    if (String(this.detailState.batchName || "") !== batchName || this.editSessionAcquireId !== acquireId) {
+      if (result?.ok && result.edit_token) {
+        try {
+          await this.call("overseas_costing.api.edit_session.release", {
+            batch_name: batchName,
+            edit_token: result.edit_token,
+          });
+        } catch (error) {
+          console.warn("[overseas-cost-workbench] 旧批次编辑租约释放失败，将在过期后自动释放", error);
+        }
+      }
+      return false;
+    }
     if (!result || !result.ok) {
       this.detailState.readonly = true;
       const lockedBy = (result && result.locked_by) || "其他用户";

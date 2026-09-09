@@ -7,21 +7,13 @@ SCOPES = {'freight', 'customs', 'tax', 'mexico_inland'}
 
 
 def row_scope(rule):
-    if rule.get('covered_scopes'):
-        return set(str(rule['covered_scopes']).split(','))
-    code = str(rule.get('rule_code') or '').lower()
-    if 'mexico_inland' in code:
-        return {'mexico_inland'}
-    if 'freight' in code or 'ocean' in code:
-        return {'freight'}
-    if 'customs' in code or 'clearance' in code:
-        return {'customs'}
-    if 'tax' in code:
-        return {'tax'}
-    return set()
+    from .fee_policy import row_scopes
+    return row_scopes(rule)
 
 
 def row_meta(item):
+    if isinstance(item.get('extra_json'),dict):
+        return dict(item['extra_json'])
     try:
         return json.loads(item.get('extra_json') or '{}')
     except (ValueError, TypeError):
@@ -51,6 +43,8 @@ def plan_application(expense, items, rules, *, binding_id, coverage=None, negati
         if fee.get('currency') != expense['currency']:
             blocking.append('整单与明细币种不一致，需核对原币合计')
         result_rules.append({'rule_code': 'settlement_freight_' + digest(binding_id, fee['line_key'])[:20], 'expense_category': fee.get('label') or '国际物流费用', 'amount': fee.get('amount'), 'currency': fee.get('currency'), 'source_binding_id': binding_id, 'source_snapshot': expense.get('snapshot', expense['fingerprint']), 'covered_scopes': ','.join(scopes), 'is_final': 1, 'is_enabled': 1, 'is_active': 1})
+    for rule in result_rules:
+        rule.update(logical_fee_key=rule['rule_code'], amount_status='ACTUAL',scope_type='ALL_ITEMS')
     if result_rules and all(r['amount'] is not None for r in result_rules):
         round_fee_rules(result_rules)
     updates, additions, used, packing_review, goods_pending = [], [], set(), [], []

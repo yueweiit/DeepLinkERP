@@ -10,7 +10,7 @@ try:
 except Exception:  # pragma: no cover - 本地纯函数测试时保持可导入
     frappe = None
 
-from overseas_costing.services import batch_service
+from overseas_costing.services import batch_service, cost_preview_service, cost_review_service, fee_service
 
 
 ISSUE_ORDER = ("purchase", "logistics", "calculation", "erp_failed")
@@ -127,6 +127,7 @@ def normalize_page(page, page_length, *, default_length: int = 30) -> tuple[int,
 
 
 def classify_batch(batch: dict, stats: dict) -> dict:
+    """Legacy stats-only helper; production lists use saved-result readiness."""
     approval_state = str(
         (batch.get("source_status") or {}).get("purchase_approval_sync_state") or ""
     ).lower()
@@ -159,15 +160,12 @@ def classify_batch(batch: dict, stats: dict) -> dict:
     return {"issue_codes": issues, "primary_issue": primary, "primary_action": action}
 
 
-def filter_batches_for_task(rows: list[dict], task: str) -> list[dict]:
+def filter_batches_for_task(rows: list[dict], task: str, review_status: str = "pending") -> list[dict]:
     if task == "pending":
-        return [row for row in rows if row.get("primary_issue") != "ready"]
+        return [row for row in rows if row.get("review_state") == "processing"]
     if task == "cost":
-        return [
-            row
-            for row in rows
-            if _as_float(row.get("actual_total_cost_rmb") or row.get("estimated_total_cost_rmb")) > 0
-        ]
+        state = "confirmed" if str(review_status).lower() == "confirmed" else "ready"
+        return [row for row in rows if row.get("review_state") == state]
     if task == "erp":
         return [
             row
@@ -255,6 +253,15 @@ def build_batch_result_preview_item(item: dict, *, calculated: bool) -> dict:
         "total_unit_rmb": None,
     }
     if not calculated:
+        return result
+
+    saved = batch_service._saved_expense_classification(item)
+    if saved is not None:
+        result.update({"freight_alloc_rmb": _round_result_amount(saved["freight"]),
+                       "tax_alloc_rmb": _round_result_amount(saved["tax"]),
+                       "clearance_alloc_rmb": _round_result_amount(saved["clearance"]),
+                       "unlisted_other_cost_rmb": _round_result_amount(saved["other"]),
+                       "total_unit_rmb": _round_result_amount(item.get("total_unit_rmb"))})
         return result
 
     metadata = _load_result_preview_json(item.get("derived_json"))
@@ -371,6 +378,9 @@ def build_batch_result_preview_payload(
         for currency, amount in purchase_totals_by_currency.items()
     ]
     total_quantity = sum(_as_float(item.get("quantity")) for item in ordered_items)
+    saved_units = [_load_result_preview_json(item.get("derived_json")) for item in ordered_items]
+    if saved_units and all(meta.get("calculation_schema") == 2 for meta in saved_units):
+        total_quantity = sum(_as_float(meta.get("shipping_quantity")) for meta in saved_units)
     weighted_total_unit_rmb = None
     has_all_total_costs = all(item.get("total_cost_rmb") not in (None, "") for item in ordered_items)
     if calculated and total_quantity and has_all_total_costs:
@@ -476,36 +486,7 @@ def get_batch_result_preview(batch_name: str, page=1, page_length=20) -> dict:
     )
 
 
-def _load_current_item_stats(batch_names: list[str]) -> dict[str, dict]:
-    if frappe is None or not batch_names:
-        return {}
-    rows = frappe.db.sql(
-        """
-        select item.batch,
-               count(*) as item_count,
-               sum(case when coalesce(item.unit_price, 0) <= 0
-                              or coalesce(item.purchase_currency, '') = ''
-                              or coalesce(item.goods_value, 0) <= 0
-                        then 1 else 0 end) as missing_purchase_count,
-               sum(case when coalesce(item.actual_shipped_qty, 0) <= 0
-                              or coalesce(item.gross_weight_kg, 0) <= 0
-                        then 1 else 0 end) as missing_logistics_count
-          from `tabOverseas Cost Item` item
-          inner join `tabOverseas Cost Batch` batch
-                  on batch.name = item.batch and batch.current_version = item.version
-         where item.batch in %(batch_names)s
-         group by item.batch
-        """,
-        {"batch_names": tuple(batch_names)},
-        as_dict=True,
-    )
-    return {row["batch"]: row for row in rows}
-
-
 def _matches_workbench_filters(row: dict, filters: dict) -> bool:
-    issue = str(filters.get("issue") or "")
-    if issue and issue not in row.get("issue_codes", []):
-        return False
     subsidiary = str(filters.get("subsidiary_code") or "")
     if subsidiary and str(row.get("subsidiary_code") or "") != subsidiary:
         return False
@@ -516,6 +497,61 @@ def _matches_workbench_filters(row: dict, filters: dict) -> bool:
     if erp_status and str(row.get("writeback_status") or "").lower() != erp_status:
         return False
     return True
+
+
+def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
+    """Load only already-authorized batch IDs, with a fixed query count per chunk.
+
+    Exact (batch, current_version) grouping prevents foreign or historical rows
+    from supplying readiness. Grouping columns never enter the cost input hash.
+    Reads neither backfill legacy fields nor recalculate persisted results.
+    """
+    result = {}
+    chunk_size = 200
+    for offset in range(0, len(batches), chunk_size):
+        chunk = batches[offset:offset + chunk_size]
+        names = [row["name"] for row in chunk]
+        versions = [row["current_version"] for row in chunk if row.get("current_version")]
+        version_rows, item_rows, rule_rows, evidence_rows, audit_rows = [], [], [], [], []
+        if frappe is not None and versions:
+            filters = {"batch": ["in", names], "version": ["in", versions]}
+            version_rows = frappe.get_all("Overseas Cost Version",
+                filters={"batch": ["in", names], "name": ["in", versions]},
+                fields=["name", "batch", "version_code", "status", "fx_usd_to_rmb", "fx_rmb_to_mxn",
+                        "calculated_at", "summary_snapshot_json"], limit_page_length=0)
+            item_rows = frappe.get_all("Overseas Cost Item", filters=filters,
+                fields=["batch", "version", *cost_preview_service.COST_INPUT_FIELDS, *cost_review_service.SAVED_ITEM_OUTPUT_FIELDS],
+                order_by="row_no asc, name asc", limit_page_length=0)
+            rule_rows = frappe.get_all("Overseas Cost Allocation Rule", filters=filters,
+                fields=fee_service._rule_fields(), order_by="priority_no asc, modified asc", limit_page_length=0)
+            evidence_rows = frappe.get_all("Overseas Cost Fee Evidence", filters=filters,
+                fields=["batch", "version", "fee_rule", "evidence_role", "validation_status"], limit_page_length=0)
+            confirmed_names = [row["name"] for row in chunk if str(row.get("confirm_status") or "").lower() == "confirmed"]
+            if confirmed_names:
+                audit_rows = frappe.get_all("Overseas Cost Audit Log",
+                    filters={"batch": ["in", confirmed_names], "version": ["in", versions],
+                             "action_type": "BATCH_EDIT", "field_name": "confirm_status"},
+                    fields=["batch", "version", "creation", "new_value"],
+                    order_by="creation desc", limit_page_length=0)
+        by_version = {(row["batch"], row["name"]): dict(row) for row in version_rows}
+        groups = []
+        for rows in (item_rows, rule_rows, evidence_rows):
+            grouped = {}
+            for row in rows:
+                grouped.setdefault((row.get("batch"), row.get("version")), []).append(row)
+            groups.append(grouped)
+        reviewed = {}
+        for row in audit_rows:
+            if _load_result_preview_json(row.get("new_value")).get("confirm_status") == "Confirmed":
+                reviewed.setdefault((row.get("batch"), row.get("version")), row.get("creation"))
+        for batch in chunk:
+            key = (batch["name"], batch.get("current_version"))
+            version = by_version.get(key, {})
+            version["reviewed_at"] = reviewed.get(key)
+            result[batch["name"]] = cost_review_service.evaluate_review_readiness(
+                batch=batch, version=version, items=groups[0].get(key, []),
+                fees=groups[1].get(key, []), evidence=groups[2].get(key, []))
+    return result
 
 
 def _classified_batches(filters: dict | None = None) -> list[dict]:
@@ -532,9 +568,9 @@ def _classified_batches(filters: dict | None = None) -> list[dict]:
             and (row.get("source_status") or {}).get("invalid_business_scope") == "source_approval"
         )
     ]
-    stats = _load_current_item_stats([row["name"] for row in batches])
+    readiness = _load_review_readiness(batches)
     classified = [
-        {**row, **classify_batch(row, stats.get(row["name"], {}))}
+        {**row, **readiness[row["name"]]}
         for row in batches
     ]
     return [row for row in classified if _matches_workbench_filters(row, filters)]
@@ -546,7 +582,16 @@ def get_workbench_batches(
     page=1,
     page_length=30,
 ) -> dict:
-    classified = filter_batches_for_task(_classified_batches(filters), task)
+    filters = dict(filters or {})
+    classified = filter_batches_for_task(_classified_batches(filters), task, filters.get("review_status") or "pending")
+    if task == "pending" and filters.get("issue"):
+        classified = [row for row in classified if filters["issue"] in row["issue_codes"]]
+    if task == "cost" and filters.get("review_warning") in {"estimated", "evidence_missing"}:
+        warning_code = {"estimated": "ESTIMATED_AMOUNT", "evidence_missing": "EVIDENCE_MISSING"}[filters["review_warning"]]
+        classified = [row for row in classified if any(warning["code"] == warning_code for warning in row["review_warnings"])]
+    if task == "erp":
+        classified = [{**row, "primary_action": "erp_retry"}
+                      if "fail" in str(row.get("writeback_status") or "").lower() else row for row in classified]
     page, page_length = normalize_page(page, page_length)
     offset = (page - 1) * page_length
     return {
@@ -558,12 +603,44 @@ def get_workbench_batches(
     }
 
 
-def get_workbench_summary(filters: dict | None = None) -> dict:
+def get_workbench_summary(filters: dict | None = None, task: str = "pending") -> dict:
+    filters = dict(filters or {})
+    # Cards summarize the base population, not the currently selected card.
+    base_filters = {key: value for key, value in filters.items() if key not in {"issue", "review_status", "review_warning"}}
+    rows = _classified_batches(base_filters)
     counts = {"purchase": 0, "logistics": 0, "calculation": 0, "erp_failed": 0}
-    for row in _classified_batches(filters):
+    for row in filter_batches_for_task(rows, "pending"):
         for code in row["issue_codes"]:
             counts[code] += 1
-    return {"ok": True, "counts": counts}
+    if task == "erp":
+        counts["erp_failed"] = sum("erp_failed" in row["issue_codes"] for row in filter_batches_for_task(rows, "erp"))
+    review_rows = filter_batches_for_task(rows, "cost", filters.get("review_status") or "pending")
+    review_counts = {"pending": sum(row["review_state"] == "ready" for row in rows),
+                     "confirmed": sum(row["review_state"] == "confirmed" for row in rows)}
+    for key, warning_code in (("estimated", "ESTIMATED_AMOUNT"), ("evidence_missing", "EVIDENCE_MISSING")):
+        review_counts[key] = sum(any(warning["code"] == warning_code for warning in row["review_warnings"]) for row in review_rows)
+    return {"ok": True, "counts": counts, "review_counts": review_counts}
+
+
+def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
+    item = dict(row)
+    if transport_mode in {"SEA", "AIR", "EXPRESS"}:
+        item["transport_mode"] = transport_mode
+    derived = _load_result_preview_json(item.get("derived_json"))
+    if derived.get("calculation_schema") == 2:
+        shipping = derived.get("shipping_unit_cost") or {}
+        pricing = derived.get("purchase_pricing_unit_cost") or {}
+        item["shipping_unit_label"] = shipping.get("uom") or "单位待补"
+        item["purchase_pricing_unit_display"] = f"{pricing['amount_rmb']} / {pricing['uom']}" if pricing else "单位换算未明确"
+        item["calculated_customs_rmb"] = derived.get("mexico_customs_rmb")
+        item["calculated_tax_rmb"] = derived.get("tax_allocated_rmb")
+        item["calculated_direct_rmb"] = derived.get("direct_fees_rmb")
+        item["calculated_allocated_rmb"] = derived.get("allocated_fees_rmb")
+    return item
+
+
+def _load_sku_batch_meta(batch_name):
+    return frappe.db.get_value("Overseas Cost Batch", batch_name, ["transport_mode", "current_version", "status"], as_dict=True) or {}
 
 
 def get_batch_items_page(
@@ -607,7 +684,7 @@ def get_batch_items_page(
     )
     fieldnames = list(
         dict.fromkeys(
-            ["name", "row_no", "excel_row_no", "modified"]
+            ["name", "row_no", "excel_row_no", "modified", "derived_json", "source_doc_no", "dingtalk_instance_id"]
             + [column["fieldname"] for column in columns]
         )
     )
@@ -628,6 +705,27 @@ def get_batch_items_page(
         limit_start=(query["page"] - 1) * query["page_length"],
         limit_page_length=query["page_length"],
     )
+    batch_meta = _load_sku_batch_meta(batch_doc_name)
+    mode = batch_meta.get("transport_mode") if resolved_version == batch_meta.get("current_version") else ""
+    from overseas_costing.services.approval_link_service import attach_approval_links
+
+    items = attach_approval_links(batch_doc_name, [present_saved_sku_result(row, mode) for row in items])
+    columns = [dict(column) for column in columns]
+    if query["group"] in {"basic", "all"}:
+        columns.append({"excel_col": "", "fieldname": "approval_link", "label": "采购审批来源", "read_only": 1})
+    if query["group"] in {"total", "all"}:
+        for column in columns:
+            if column["fieldname"] == "total_unit_rmb":
+                column["label"] = "每发货单位成本 RMB"
+        columns.extend([
+            {"excel_col": "", "fieldname": "shipping_unit_label", "label": "发货计价单位"},
+            {"excel_col": "", "fieldname": "purchase_pricing_unit_display", "label": "每采购计价单位成本 RMB"},
+        ])
+    if query["group"] in {"logistics", "tax", "total", "all"}:
+        columns.extend([
+            {"excel_col": "", "fieldname": "calculated_customs_rmb", "label": "本次清关费用 RMB"},
+            {"excel_col": "", "fieldname": "calculated_tax_rmb", "label": "本次进口税费 RMB"},
+        ])
     return {
         "ok": True,
         "batch_name": batch_doc_name,
@@ -639,6 +737,7 @@ def get_batch_items_page(
         "page_length": query["page_length"],
         "page_count": (total + query["page_length"] - 1) // query["page_length"],
         "field_group": query["group"],
+        "calculation_stale": batch_meta.get("status") == "Dirty",
     }
 
 

@@ -102,13 +102,20 @@ def calculation_blockers(batch_name, version_name=None, *, for_calculation=False
         source_row = source_goods.get(meta.get('settlement_line_key'))
         if source_row:
             seen_goods.append(source_row['line_key'])
-        if source_row and (source_row.get('quantity') is None or Decimal(str(item.get('quantity') or 0)) != Decimal(str(source_row['quantity'])) or
-                           any(identity(item.get(key)) != identity(source_row.get(key)) for key in ('material_code', 'unit'))):
+        cargo = meta.get('settlement_cargo') or {}
+        if source_row and (source_row.get('quantity') is None or Decimal(str(cargo.get('quantity') or 0)) != Decimal(str(source_row['quantity'])) or
+                           identity(item.get('material_code')) != identity(source_row.get('material_code')) or identity(cargo.get('unit')) != identity(source_row.get('unit'))):
             issues.append('当前货物或数量与最终采购支出不一致，请核对来源')
         if meta.get('settlement_packing_review'):
             issues.append('采购数量或物料已变化，请核对保留的装箱重量、体积')
         if meta.get('settlement_purchase_value_review'):
-            issues.append('数量变化，请核对独立来源商品货值')
+            issues.append('结算数量变化，请核对独立来源商品单价与发货货值')
+        if cargo:
+            from .valuation import value_final_cargo
+            current_version = FrappeLedger().get('version',binding.get('version')) or {}
+            valuation = value_final_cargo(item,cargo,{k:v for k,v in current_version.items() if k.startswith('fx_')})
+            if valuation.get('error') or valuation.get('input_fingerprint') != (meta.get('settlement_valuation') or {}).get('input_fingerprint'):
+                issues.append('最终发货货值缺少依据或已失效，请核对商品单价、单位和汇率后重新采用')
     if expense.get('goods_complete') and (set(seen_goods) != set(source_goods) or len(seen_goods) != len(set(seen_goods))):
         issues.append('当前货物清单与最终采购支出不一致，存在缺行或重复行')
     return sorted(set(issues))

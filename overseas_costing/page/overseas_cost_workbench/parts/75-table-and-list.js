@@ -548,6 +548,14 @@
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     const count = Number(sourceStatus.linked_purchase_count || 0);
     const reason = sourceStatus.invalid_business_reason || sourceStatus.purchase_approval_sync_message || "";
+    if ((state === "invalid" || state === "excluded" || sourceStatus.invalid_business) && sourceStatus.has_oa_logistics) {
+      return `
+        <div class="ocw-parent-metric ocw-purchase-approval-metric is-missing" title="${this.escape(reason)}">
+          <strong>资料来自国际物流审批</strong>
+          <small>关联采购审批已排除</small>
+        </div>
+      `;
+    }
     if (state === "invalid" || sourceStatus.invalid_business) {
       return `
         <div class="ocw-parent-metric ocw-purchase-approval-metric is-invalid" title="${this.escape(reason)}">
@@ -567,8 +575,8 @@
     if (state === "missing" && sourceStatus.has_oa_logistics) {
       return `
         <div class="ocw-parent-metric ocw-purchase-approval-metric is-missing" title="${this.escape(reason)}">
-          <strong>未关联</strong>
-          <small>采购审批</small>
+          <strong>资料来自国际物流审批</strong>
+          <small>采购审批待关联</small>
         </div>
       `;
     }
@@ -587,9 +595,10 @@
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     if (!sourceStatus.invalid_business && state !== "invalid") return "";
     const reason = sourceStatus.invalid_business_reason || sourceStatus.purchase_approval_sync_message || "关联采购审批已拒绝/撤销/终止，不进入核算和 ERP 推送。";
+    const linkedPurchaseExcluded = sourceStatus.invalid_business_scope === "linked_purchase_approval" && sourceStatus.has_oa_logistics;
     return `
       <div class="ocw-invalid-business-alert">
-        <strong>采购审批无效</strong>
+        <strong>${linkedPurchaseExcluded ? "关联采购审批已排除" : "采购审批无效"}</strong>
         <span>${this.escape(reason)}</span>
       </div>
     `;
@@ -599,7 +608,7 @@
     const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
     if (state === "invalid") return this.renderInvalidBusinessAlert(sourceStatus);
     if (state !== "pending" && state !== "missing") return "";
-    const title = state === "pending" ? "采购审批状态未同步" : "未关联采购审批";
+    const title = state === "pending" ? "采购审批状态未同步" : "采购审批待关联";
     return `
       <div class="ocw-invalid-business-alert is-info">
         <strong>${title}</strong>
@@ -677,8 +686,9 @@
   }
 
   batchTotalCostNumber(batch, items, hasLoadedItems) {
+    if (batch.summary_snapshot?.calculation_schema === 2) return Number(batch.summary_snapshot.total_cost_rmb || 0);
     const loadedValue = hasLoadedItems ? this.sumRowsNumber(items, "total_cost_rmb") : 0;
-    const batchValue = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const batchValue = Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     return this.isPositive(loadedValue) ? loadedValue : batchValue;
   }
 

@@ -166,17 +166,28 @@ def test_quantity_change_recomputes_unit_totals_without_overwriting_purchase_pri
 
 
 def mock_formal_calculation(monkeypatch, rules, fx=None):
+    from overseas_costing.services import cost_preview_service
     writes = []
-    fake_db = SimpleNamespace(get_value=lambda *args, **kwargs: {'name': 'B', 'extra_json': '{}'},
-                              set_value=lambda *args, **kwargs: writes.append((args, kwargs)), commit=lambda: None)
-    monkeypatch.setattr(service, '_frappe', SimpleNamespace(db=fake_db))
+    fake_db = SimpleNamespace(get_value=lambda *args, **kwargs: {'name': 'B', 'extra_json': '{}', 'modified': 'M1', 'current_version': 'V'},
+                              set_value=lambda *args, **kwargs: writes.append((args, kwargs)), commit=lambda: None, rollback=lambda: None)
+    fake_frappe = SimpleNamespace(db=fake_db, get_all=lambda *args, **kwargs: [], utils=SimpleNamespace(now=lambda: '2026-09-09 12:00:00'))
+    monkeypatch.setattr(service, '_frappe', fake_frappe)
+    monkeypatch.setattr(cost_preview_service, 'frappe', fake_frappe)
     monkeypatch.setattr(service, '_resolve_batch_name', lambda _: 'B')
     monkeypatch.setattr(service, '_resolve_version_name', lambda *_: 'V')
     monkeypatch.setattr(service, '_get_items', lambda *_: [item(china_to_mexico_freight_rmb=900)])
-    monkeypatch.setattr(service, '_get_rules', lambda *_: rules)
-    monkeypatch.setattr(service, '_get_version_context', lambda *_: fx or {'fx_rmb_to_mxn': 2.5})
     monkeypatch.setattr(service, '_insert_audit_log', lambda **kwargs: None)
-    monkeypatch.setattr(service, '_now', lambda: '2026-09-09 12:00:00')
+
+    class SnapshotRepository(cost_preview_service.FrappeCostRepository):
+        # Replace database input loading only; use the actual production trial
+        # calculation, snapshot construction and Frappe repository save methods.
+        def lock_and_load(self, *args, **kwargs):
+            context = {'batch': 'B', 'version': 'V', 'current_version': 'V', 'batch_modified': 'M1',
+                       'version_status': 'Active', 'transport_mode': 'SEA'}
+            items = [{'unit': '件', 'actual_shipped_qty': row['quantity'], **row} for row in service._get_items('B', 'V')]
+            current_rules = [{'logical_fee_key': row['rule_code'], 'amount_status': 'ACTUAL', **row} for row in rules]
+            return context, items, current_rules, fx if fx is not None else {'fx_rmb_to_mxn': 2.5}
+    monkeypatch.setattr(cost_preview_service, 'FrappeCostRepository', SnapshotRepository)
     def no_ai(**kwargs):
         raise AssertionError('final pools must not be replaced by AI or legacy normalization')
     monkeypatch.setattr(service.allocation_service, 'suggest_allocation_rules_with_ai', no_ai)
@@ -188,9 +199,8 @@ def mock_formal_calculation(monkeypatch, rules, fx=None):
                                     ([final_rule(100, currency='MXN')], {'fx_rmb_to_mxn': 0})])
 def test_formal_recalculation_blocks_invalid_final_before_any_writes(monkeypatch, rules, fx):
     writes = mock_formal_calculation(monkeypatch, rules, fx)
-    result = service.recalculate_batch('B')
-    assert result['ok'] is False
-    assert result['calculation_review']['status'] == 'blocked'
+    with pytest.raises(ValueError):
+        service.recalculate_batch('B')
     assert writes == []
 
 
@@ -199,8 +209,8 @@ def test_formal_zero_retains_final_metadata_and_never_calls_ai(monkeypatch):
     writes = mock_formal_calculation(monkeypatch, rules)
     result = service.recalculate_batch('B')
     assert result['ok'] is True
-    assert result['summary_snapshot']['total_cost_rmb'] == 100
-    assert result['allocation_rules'][0]['source_binding_id'] == 'BINDING-1'
+    assert Decimal(result['summary_snapshot']['total_cost_rmb']) == 100
+    assert result['included_fees'][0]['source_binding_id'] == 'BINDING-1'
     assert writes
 
 
@@ -251,12 +261,13 @@ def test_rule_item_read_keeps_chargeable_weight_for_final_allocation(monkeypatch
     assert [row['freight_alloc_rmb'] for row in rows] == [75, 25]
 
 
-def test_formal_legacy_missing_snapshot_fx_blocks_before_ai(monkeypatch):
+def test_formal_legacy_missing_snapshot_fx_is_excluded_without_fake_conversion(monkeypatch):
     rules = [{'rule_code': 'legacy_freight', 'amount': 100, 'currency': 'MXN'}]
     writes = mock_formal_calculation(monkeypatch, rules, {'fx_rmb_to_mxn': None})
     result = service.recalculate_batch('B')
-    assert result['ok'] is False
-    assert writes == []
+    assert result['ok'] and not result['summary']['is_complete']
+    assert Decimal(result['summary']['total_cost_rmb']) == 100
+    assert result['excluded_fees'][0]['reason_code'] == 'FX_RATE_MISSING'
 
 
 def test_superseded_freight_rule_does_not_drop_uncovered_misc_fallback():
@@ -280,15 +291,15 @@ def test_formal_recalculation_uses_and_snapshots_exact_selected_fee_pools(monkey
     monkeypatch.setattr(service, '_get_items', lambda *_: items)
     result = service.recalculate_batch('B')
     assert result['ok'] is True
-    assert result['summary_snapshot']['total_logistics_mxn'] == preview_summary['total_logistics_mxn'] == expected_mxn
+    assert preview_summary['total_logistics_mxn'] == expected_mxn
     item_update = next(args[2] for args, _ in writes if args[0] == 'Overseas Cost Item')
-    assert item_update['total_logistics_mxn'] == preview_rows[0]['total_logistics_mxn'] == expected_mxn
+    assert Decimal(item_update['total_logistics_mxn']) == Decimal(str(preview_rows[0]['total_logistics_mxn'])) == expected_mxn
     actual_rules = json.loads(item_update['derived_json'])['allocated_rules']
-    reported_codes = [rule['rule_code'] for rule in result['allocation_rules']]
+    reported_codes = [rule['fee_key'] for rule in result['included_fees']]
     assert [rule['rule_code'] for rule in actual_rules] == reported_codes
     assert result['summary_snapshot']['rule_count'] == len(reported_codes)
     version_update = next(args[2] for args, _ in writes if args[0] == 'Overseas Cost Version')
-    assert json.loads(version_update['rule_snapshot_json']) == result['allocation_rules']
+    assert json.loads(version_update['rule_snapshot_json']) == result['included_fees']
 
 
 def test_explicit_disabled_rule_also_suppresses_legacy_item_fallback_without_final():

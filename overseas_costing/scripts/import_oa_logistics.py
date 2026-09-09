@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -2127,12 +2129,12 @@ def _normalize_allocation_basis(value: Any) -> str:
     return "gross_weight"
 
 
-def _parse_money_amount(value: Any) -> float | None:
+def _parse_money_amount(value: Any, *, allow_zero: bool = False) -> float | None:
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
         number = float(value)
-        return number if number > 0 else None
+        return number if math.isfinite(number) and (number > 0 or allow_zero and number == 0) else None
 
     text = _clean(value).replace("，", ",")
     if not text:
@@ -2145,7 +2147,7 @@ def _parse_money_amount(value: Any) -> float | None:
             number = float(raw_number)
         except ValueError:
             continue
-        if number <= 0:
+        if not math.isfinite(number) or number < 0 or number == 0 and not allow_zero:
             continue
 
         before = text[max(0, match.start() - 12) : match.start()].lower()
@@ -2169,7 +2171,7 @@ def extract_logistics_fee_from_approval(item: dict) -> dict:
     currency_field, currency_raw = _find_field_entry(form_fields, LOGISTICS_CURRENCY_FIELD_ALIASES)
     explicit_currency = _normalize_currency_code(currency_raw)
     source_field, raw_value = _find_field_entry(form_fields, LOGISTICS_FEE_FIELD_ALIASES)
-    amount = _parse_money_amount(raw_value)
+    amount = _parse_money_amount(raw_value, allow_zero=True)
     if amount is None:
         return {}
     currency = _normalize_currency_code(raw_value) or explicit_currency or "RMB"
@@ -2210,6 +2212,8 @@ def _looks_like_quote_amount_line(line: str) -> bool:
     text = _clean(line)
     if not text:
         return False
+    if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", text, re.IGNORECASE) and "=" not in text:
+        return False
     if re.search(r"(?:合计|总计|总费用|总价)", text, re.IGNORECASE):
         return True
     if "=" not in text:
@@ -2232,6 +2236,11 @@ def _parse_direct_quote_line(line: str) -> dict | None:
     )
     if not match:
         return None
+    tail = _clean(match.group("tail"))
+    if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", tail, re.IGNORECASE):
+        # The amount immediately after the colon is a rate.  If the line also
+        # contains an equals sign, the total-line parser will take its RHS.
+        return None
     carrier = _clean(match.group("carrier")).strip("：:")
     if not carrier or len(carrier) > 40:
         return None
@@ -2247,7 +2256,7 @@ def _parse_direct_quote_line(line: str) -> dict | None:
         "carrier": carrier,
         "amount": amount,
         "currency": _normalize_currency_code(match.group("currency")) or _normalize_currency_code(text) or "RMB",
-        "remark": _clean(match.group("tail")),
+        "remark": tail,
     }
 
 
@@ -2271,6 +2280,42 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
         carrier_match = re.search(r"^\s*(?:\d+\s*[.、]?\s*)?(.+?)报价", line)
         if carrier_match:
             carrier = _clean(carrier_match.group(1)).strip("：:")
+        # A rate and its explicitly labelled total may share a line.
+        rate_total = re.search(
+            r"(?P<rate>\d[\d,]*(?:\.\d+)?)\s*元\s*/\s*(?P<unit>立方|方|cbm|m3|kg|公斤)"
+            r".*?(?:费用|总价|总额|合计)\s*[:：=]\s*[¥￥]?\s*(?P<total>\d[\d,]*(?:\.\d+)?)\s*(?:元|RMB|CNY)",
+            line, re.IGNORECASE,
+        )
+        if rate_total and carrier_match:
+            candidates.append({"carrier": carrier, "amount": float(rate_total["total"].replace(",", "")),
+                "unit_rate": float(rate_total["rate"].replace(",", "")), "amount_kind": "total_amount",
+                "currency": "RMB", "volume_m3": volume_m3,
+                "pricing_basis": "weight" if rate_total["unit"].lower() in {"kg", "公斤"} else "volume",
+                "source_field": source_field, "source_value": text, "evidence_line": line,
+                "evidence_line_no": line_no, "status": "待确认"})
+            continue
+        compact_quote = re.search(
+            r"^\s*(?:\d+\s*[.、]?\s*)?(?P<carrier>[^,，:：]{1,40}?)报价\s*[,，:：]?\s*"
+            r"(?P<amount>[-+]?\d[\d,]*(?:\.\d+)?)\s*"
+            r"(?P<currency>usd|美金|美元|rmb|cny|元|mxn|peso|比索)\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if compact_quote:
+            candidates.append(
+                {
+                    "carrier": _clean(compact_quote.group("carrier")),
+                    "amount": float(compact_quote.group("amount").replace(",", "")),
+                    "currency": _normalize_currency_code(compact_quote.group("currency")) or "RMB",
+                    "volume_m3": volume_m3,
+                    "source_field": source_field,
+                    "source_value": text,
+                    "evidence_line": line,
+                    "evidence_line_no": line_no,
+                    "status": "待确认",
+                }
+            )
+            continue
         direct_quote = _parse_direct_quote_line(line)
         if direct_quote:
             candidates.append(
@@ -2293,8 +2338,7 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
         amount = _parse_quote_total_amount(line)
         if amount is None:
             continue
-        candidates.append(
-            {
+        candidate = {
                 "carrier": carrier,
                 "amount": amount,
                 "currency": _normalize_currency_code(line) or "RMB",
@@ -2305,7 +2349,12 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
                 "evidence_line_no": line_no,
                 "status": "待确认",
             }
-        )
+        before_total = line.rsplit("=", 1)[0] if "=" in line else line
+        if re.search(r"/(?:方|立方|cbm|m3)", before_total, re.IGNORECASE):
+            candidate["pricing_basis"] = "volume"
+        elif re.search(r"/(?:kg|kgs?)\b", before_total, re.IGNORECASE):
+            candidate["pricing_basis"] = "weight"
+        candidates.append(candidate)
     return candidates
 
 
@@ -2460,7 +2509,7 @@ def _merge_ai_logistics_text_summary(base_summary: dict, ai_summary: dict) -> di
     return merged
 
 
-def extract_logistics_text_summary_from_approval(item: dict) -> dict:
+def extract_logistics_text_summary_from_approval(item: dict, *, allow_ai: bool = True) -> dict:
     """提取钉钉国际物流审批正文里的整票基础信息。"""
 
     form_fields = item.get("form_fields") or {}
@@ -2494,7 +2543,7 @@ def extract_logistics_text_summary_from_approval(item: dict) -> dict:
         "logistics_quote_evidence": first_quote.get("evidence_line"),
     }
     source_text = _build_logistics_ai_source_text(form_fields)
-    if _should_ai_parse_logistics_text(summary, source_text):
+    if allow_ai and _should_ai_parse_logistics_text(summary, source_text):
         summary = _merge_ai_logistics_text_summary(
             summary,
             _call_ai_logistics_text_summary(source_text, summary),
@@ -3765,7 +3814,10 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
             {
                 "row_no": index,
                 "quantity": _to_number_or_none(mapped.get("quantity")),
-                "source_type": "oa_logistics",
+                "actual_shipped_qty": _to_number_or_none(mapped.get("quantity")),
+                "actual_shipped_qty_mode": "EXPLICIT_SOURCE",
+                "shipped_uom": mapped.get("unit") or "",
+                "source_type": "OA_LOGISTICS_ROW",
                 "source_doc_no": source_approval_no or source_instance_id,
                 "parse_status": "SUCCESS",
                 "dingtalk_instance_id": source_instance_id,
@@ -3803,12 +3855,12 @@ def build_batch_values_from_approval(item: dict) -> dict:
     oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
     oa_attachments = item.get("oa_attachments") or oa_form_attachments
     attachment_count = len(oa_attachments) if oa_attachments else _count_dingtalk_attachments(form_fields)
-    transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or "SEA"
+    transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or ""
     transport_mode_raw = item.get("transport_mode_raw") or ""
     business_type = normalize_business_type(
         item.get("business_type") or transport_mode_raw,
         transport_mode=transport_mode,
-    ) or "SEA_STANDARD"
+    ) or ""
     subsidiary = extract_subsidiary_from_approval(item)
     values = {
         "batch_no": batch_no,
@@ -4069,7 +4121,11 @@ def _sync_oa_goods_items(
         }
 
     created_names: list[str] = []
+    from overseas_costing.services.transport_service import prepare_item_transport
+
+    batch_transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     for values in item_values:
+        values = prepare_item_transport(values, batch_transport_mode)
         doc_values = _filter_item_values(
             {
                 **values,
@@ -4177,7 +4233,43 @@ def _build_purchase_expense_item_doc_values(
             }
         ),
     }
-    return _filter_item_values(values)
+    from overseas_costing.services.transport_service import prepare_item_transport
+
+    batch_transport_mode = (
+        frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode")
+        if frappe is not None else approval_item.get("transport_mode") or approval_item.get("transport_mode_raw") or ""
+    )
+    values["transport_mode"] = row.get("transport_mode") or ""
+    return _filter_item_values(prepare_item_transport(values, batch_transport_mode))
+
+
+def _has_logistics_item_structure(
+    *, batch_name: str, version_name: str, approval_item: dict, existing_items: list[dict] | None = None,
+) -> bool:
+    """Shipment rows and saved purchase facts change only through the confirmation flow."""
+    for raw_row in extract_oa_goods_rows(approval_item):
+        row = map_oa_row_to_item(raw_row)
+        if (row.get("material_code") or row.get("product_name")) and _parse_money_amount(row.get("quantity")):
+            return True
+    if existing_items is None:
+        if not version_name or frappe is None or not hasattr(frappe, "get_all"):
+            return False
+        existing_items = frappe.get_all(
+            "Overseas Cost Item", filters={"batch": batch_name, "version": version_name},
+            fields=["source_type"], limit_page_length=10000,
+        )
+    return any(_clean(row.get("source_type")).upper() == "OA_LOGISTICS_ROW" for row in existing_items)
+
+
+def _logistics_purchase_preview_result(preview_result: dict) -> dict:
+    return {
+        "action": "preview" if preview_result.get("ok") else "failed",
+        "sync_strategy": "logistics_read_only", "ok": bool(preview_result.get("ok")),
+        "confirmation_required": True, "updated_count": 0, "changed_field_count": 0,
+        "created_count": 0, "deleted_count": 0, "skipped_count": 0,
+        "unmatched_count": 0, "ambiguous_count": 0, "purchase_preview": preview_result,
+        "message": "已读取采购资料，保留当前物流明细和采购事实；请在自动填充资料中预览并确认。",
+    }
 
 
 def _replace_items_with_purchase_expense_rows(
@@ -4222,6 +4314,14 @@ def _replace_items_with_purchase_expense_rows(
         fields=["name", "manual_override_flag", "source_type"],
         limit_page_length=10000,
     )
+    if _has_logistics_item_structure(
+        batch_name=batch_name, version_name=version_name, approval_item=approval_item, existing_items=existing_items,
+    ):
+        return {
+            "action": "skipped", "ok": True, "created_count": 0, "updated_count": 0, "deleted_count": 0,
+            "confirmation_required": True, "existing_count": len(existing_items),
+            "reason": "保留物流明细和采购事实；物料调整需在自动填充资料中确认。",
+        }
     manual_items = [item for item in existing_items if int(item.get("manual_override_flag") or 0)]
     if manual_items:
         return {
@@ -4284,11 +4384,10 @@ def _restore_main_logistics_items_after_excluded_purchases(
     approval_item: dict,
     excluded_purchase_summaries: list[dict],
 ) -> dict:
+    """审核已排除采购的历史行，保留现状并要求用户确认后恢复。"""
     from overseas_costing.services.logistics_settlement.runtime import has_final_binding
     if frappe is not None and has_final_binding(batch_name):
         return {'action': 'skipped', 'ok': True, 'created_count': 0, 'updated_count': 0, 'skipped': True, 'reason': '已关联最终物流采购支出，保留其费用与物料来源'}
-
-    """只在现有行全部能证明来自已排除采购审批时，恢复主物流审批物料。"""
 
     excluded_purchase_decisions = [
         {
@@ -4391,71 +4490,11 @@ def _restore_main_logistics_items_after_excluded_purchases(
             existing_count=len(existing_items),
         )
 
-    savepoint = getattr(frappe.db, "savepoint", None)
-    rollback = getattr(frappe.db, "rollback", None)
-    savepoint_name = "before_invalid_purchase_item_repair"
-    if not callable(savepoint) or not callable(rollback):
-        return manual_required(
-            "当前数据库不支持修复保存点，为避免部分删除已停止自动恢复。",
-            existing_count=len(existing_items),
-        )
-
-    savepoint(savepoint_name)
-    created_names: list[str] = []
-    try:
-        frappe.db.delete("Overseas Cost Item", {"batch": batch_name, "version": version_name})
-        for values in main_item_values:
-            doc_values = _filter_item_values(
-                {
-                    **values,
-                    "doctype": "Overseas Cost Item",
-                    "batch": batch_name,
-                    "version": version_name,
-                }
-            )
-            doc_values["doctype"] = "Overseas Cost Item"
-            created_names.append(frappe.get_doc(doc_values).insert(ignore_permissions=True).name)
-
-        frappe.db.set_value(
-            "Overseas Cost Batch",
-            batch_name,
-            {"item_count": len(created_names), "status": "Imported"},
-            update_modified=True,
-        )
-        _insert_batch_audit_log(
-            batch_name=batch_name,
-            field_name="invalid_purchase_item_repair",
-            old_value={
-                "item_count": len(existing_items),
-                "source": "PURCHASE_EXPENSE_OA",
-                "excluded_purchase_instance_ids": sorted(excluded_instance_ids),
-            },
-            new_value={
-                "created_count": len(created_names),
-                "source": "oa_logistics",
-                "logistics_source_instance_id": approval_item.get("source_instance_id") or "",
-                "excluded_purchase_decisions": excluded_purchase_decisions,
-                "affected_fields": ["source_type", "dingtalk_instance_id", "item_count"],
-            },
-            remark="关联采购审批已拒绝、撤销或终止，已将可证明由该采购审批生成的 SKU 恢复为主物流审批物料。",
-        )
-    except Exception as exc:
-        rollback(save_point=savepoint_name)
-        return manual_required(
-            f"恢复主物流审批 SKU 失败，已回滚到修复前：{exc}",
-            existing_count=len(existing_items),
-            rolled_back=True,
-        )
-    return {
-        "action": "restored_main_logistics_items",
-        "ok": True,
-        "created_count": len(created_names),
-        "updated_count": len(created_names),
-        "deleted_count": len(existing_items),
-        "excluded_purchase_instance_ids": sorted(excluded_instance_ids),
-        "item_names": created_names,
-        "message": f"已排除无效采购审批，并恢复 {len(created_names)} 条主物流审批 SKU。",
-    }
+    return manual_required(
+        "关联采购审批已排除，历史物料行已保留；请在自动填充资料中预览主物流明细并确认后恢复。",
+        existing_count=len(existing_items), logistics_item_count=len(main_item_values),
+        confirmation_required=True,
+    )
 
 
 def _oa_attachment_parse_targets(record: dict) -> list[str]:
@@ -4700,6 +4739,10 @@ def _sync_linked_purchase_fields(
                 "repair_result": repair_result,
             }
         from overseas_costing.services.logistics_settlement.runtime import has_final_binding
+        if _has_logistics_item_structure(
+            batch_name=batch_name, version_name=version_name, approval_item=approval_item,
+        ):
+            return {**_logistics_purchase_preview_result(preview_result), "linked_purchase_count": len(linked_approvals)}
         if preview_result.get("ok") and purchase_rows and not has_final_binding(batch_name):
             rebuild_result = _replace_items_with_purchase_expense_rows(
                 batch_name=batch_name,
@@ -4848,17 +4891,57 @@ def _persist_linked_purchase_approval_statuses(*, batch_name: str, summaries: li
     )
 
 
+def _oa_fee_sync_context(batch_name, version_name, *, edit_token=None, expected_modified=None) -> dict:
+    """Serialize fee writers with the batch lease and current version guards."""
+    from overseas_costing.services import edit_session_service
+
+    rows = frappe.db.sql(
+        """select name, current_version, transport_mode, status, confirm_status, is_locked,
+                  modified, edit_lock_owner, edit_lock_token, edit_lock_expires_at,
+                  source_approval_status, extra_json
+             from `tabOverseas Cost Batch` where name = %s for update""",
+        (batch_name,), as_dict=True)
+    if not rows:
+        raise ValueError("未找到当前批次。")
+    batch = dict(rows[0])
+    if edit_token is not None or expected_modified is not None:
+        if not edit_token or not expected_modified:
+            raise PermissionError("缺少编辑会话或数据版本，请刷新后重试。")
+        edit_session_service.assert_editable(batch, str(frappe.session.user), str(edit_token), expected_modified)
+    elif edit_session_service.lock_is_active(batch):
+        raise PermissionError("当前批次存在正在使用的编辑会话，OA 费用同步暂缓。")
+    if batch.get("current_version") != version_name:
+        raise ValueError("只能更新当前成本版本的物流费用。")
+    versions = frappe.db.sql(
+        "select name, batch, status from `tabOverseas Cost Version` where name = %s for update",
+        (version_name,), as_dict=True)
+    if not versions or versions[0].get("batch") != batch_name:
+        raise ValueError("成本版本不属于当前批次。")
+    if (batch.get("confirm_status") in {"Confirmed", "Partially Confirmed"}
+            or batch.get("status") in {"Confirmed", "Written Back"}
+            or batch.get("is_locked") in (1, True, "1") or versions[0].get("status") != "Active"):
+        raise PermissionError("已确认或归档版本不能覆盖物流费用，请先创建调整版本。")
+    return batch
+
+
 def _sync_oa_logistics_allocation_rule(
     *,
     batch_name: str,
     version_name: str,
     approval_item: dict,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
+    manual_entry: bool = False,
 ) -> dict:
     from overseas_costing.services.logistics_settlement.runtime import has_final_binding
     if frappe is not None and has_final_binding(batch_name):
         return {'action': 'skipped', 'ok': True, 'created_count': 0, 'updated_count': 0, 'skipped': True, 'reason': '已关联最终物流采购支出，保留其费用与物料来源'}
 
     """把国际物流 OA 的物流费用落成整票分摊规则。"""
+
+    if manual_entry and (not edit_token or not expected_modified):
+        return {"ok": False, "action": "blocked", "created_count": 0, "updated_count": 0,
+                "message": "缺少编辑会话或数据版本，请刷新后重试。"}
 
     fee = approval_item.get("logistics_fee") if isinstance(approval_item.get("logistics_fee"), dict) else {}
     fee = fee or extract_logistics_fee_from_approval(approval_item)
@@ -4878,7 +4961,7 @@ def _sync_oa_logistics_allocation_rule(
                 "source_field": selected.get("source_field") or "物流报价",
                 "source_value": selected.get("evidence_line") or selected.get("source_value") or "",
             }
-    parsed_amount = _parse_money_amount(fee.get("amount")) if fee else None
+    parsed_amount = _parse_money_amount(fee.get("amount"), allow_zero=True) if fee else None
     if not fee or parsed_amount is None:
         return {
             "action": "skipped",
@@ -4896,14 +4979,48 @@ def _sync_oa_logistics_allocation_rule(
             "reason": "当前批次没有版本，无法生成物流费用分摊规则。",
         }
 
+    from overseas_costing.services import batch_service, fee_service, import_service
+
+    if frappe is not None:
+        invalid_response = import_service._invalid_batch_cost_write_response(batch_name, version_name)
+        if invalid_response:
+            return {**invalid_response, "action": "blocked", "created_count": 0, "updated_count": 0}
+        try:
+            batch = _oa_fee_sync_context(batch_name, version_name, edit_token=edit_token, expected_modified=expected_modified)
+            # Under REPEATABLE READ ordinary queries still see a pre-lock
+            # snapshot. Validate the locked batch and current item provenance.
+            items = frappe.db.sql(
+                """select name, source_type, dingtalk_instance_id from `tabOverseas Cost Item`
+                    where batch = %s and version = %s order by name for update""",
+                (batch_name, version_name), as_dict=True)
+            invalid = batch_service._build_invalid_business_state(batch, items)
+            if invalid.get("invalid"):
+                return {"ok": False, "invalid_business": True, "invalid_business_scope": invalid.get("scope"),
+                        "message": invalid.get("message"), "action": "blocked", "created_count": 0, "updated_count": 0}
+            mode = batch.get("transport_mode")
+            definition = fee_service.primary_freight_definition(mode)
+        except (ValueError, PermissionError, RuntimeError) as exc:
+            return {"ok": False, "action": "blocked", "created_count": 0, "updated_count": 0, "message": str(exc)}
+    else:
+        mode = detect_approval_transport_mode(approval_item.get("transport_mode") or approval_item.get("transport_mode_raw")
+                                              or (approval_item.get("form_fields") or {}))
+        try:
+            definition = fee_service.primary_freight_definition(mode)
+        except ValueError as exc:
+            return {"ok": False, "action": "blocked", "created_count": 0, "updated_count": 0, "message": str(exc)}
+
     amount = float(parsed_amount)
     currency = _normalize_currency_code(fee.get("currency")) or "RMB"
-    allocation_basis = _normalize_allocation_basis(fee.get("allocation_basis") or approval_item.get("allocation_basis"))
+    allocation_basis = definition["allocation_basis"]
+    manual_basis = str(fee.get("allocation_basis") or approval_item.get("allocation_basis") or "").strip()
+    if manual_entry and manual_basis in fee_service.ALLOCATION_BASES:
+        allocation_basis = manual_basis
     values = {
         "batch": batch_name,
         "version": version_name,
         "rule_code": "oa_logistics_freight",
-        "expense_category": "国际物流费用",
+        **definition,
+        "amount_status": "ESTIMATED",
         "allocation_basis": allocation_basis,
         "basis_field": allocation_basis,
         "currency": currency,
@@ -4913,6 +5030,9 @@ def _sync_oa_logistics_allocation_rule(
         "is_active": 1,
         "is_enabled": 1,
     }
+    revision = ("manual:" if manual_entry else "oa:") + hashlib.sha256(
+        json.dumps(values, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:20]
+    values.update(amount_revision=revision, scope_revision=revision)
 
     if frappe is None:
         return {
@@ -4924,29 +5044,46 @@ def _sync_oa_logistics_allocation_rule(
             "fee": fee,
         }
 
-    from overseas_costing.services import import_service
+    # Read protected/manual/retired rows from the current database state, not
+    # the transaction snapshot that may precede another user's committed save.
+    rule_fields = ", ".join(f"`{field}`" for field in fee_service._rule_fields())
+    rules = frappe.db.sql(
+        f"""select {rule_fields} from `tabOverseas Cost Allocation Rule`
+            where batch = %s and version = %s order by name for update""",
+        (batch_name, version_name), as_dict=True)
+    candidates = [dict(row) for row in rules if row.get("rule_code") == "oa_logistics_freight"
+                  or fee_service.map_historical_fee_key(row, mode) == definition["logical_fee_key"]]
+    active = [row for row in candidates if fee_service.fee_is_active(row)]
 
-    invalid_response = import_service._invalid_batch_cost_write_response(batch_name, version_name)
-    if invalid_response:
-        return {
-            **invalid_response,
-            "action": "blocked",
-            "created_count": 0,
-            "updated_count": 0,
-        }
+    def preserve(action, reason, *, ok=True):
+        names = [str(row.get("name") or "") for row in candidates]
+        _insert_batch_audit_log(batch_name=batch_name, field_name="oa_logistics_freight_candidate",
+                               old_value={"rule_names": names},
+                               new_value={"candidate_fee": fee, "action": action, "reason": reason},
+                               remark="保留新的 OA 物流报价供复核，现有费用记录未修改。")
+        return {"ok": ok, "action": action, "created_count": 0, "updated_count": 0,
+                "rule_name": names[0] if names else "", "fee": fee, "message": reason, "reason": reason,
+                **({"duplicate_rule_names": [str(row.get("name") or "") for row in active]} if action == "conflict" else {})}
 
-    existing_name = frappe.db.get_value(
-        "Overseas Cost Allocation Rule",
-        {"batch": batch_name, "version": version_name, "rule_code": values["rule_code"]},
-        "name",
-    )
+    if len(active) > 1:
+        return preserve("conflict", "国际物流费用存在重复记录，请先核对并停用重复费用。", ok=False)
+    if any(not fee_service.fee_is_active(row) for row in candidates):
+        return preserve("retired", "该物流费用已有停用记录，同步保留停用状态。")
+    current = active[0] if active else {}
+    existing_name = current.get("name")
     if existing_name:
-        current = frappe.db.get_value(
-            "Overseas Cost Allocation Rule",
-            existing_name,
-            list(values.keys()),
-            as_dict=True,
-        ) or {}
+        revisions = [str(current.get(field) or "") for field in ("amount_revision", "scope_revision")]
+        if (current.get("rule_code") != "oa_logistics_freight"
+                or str(current.get("amount_status") or "").upper() in {"ACTUAL", "NOT_INCURRED", "INCLUDED"}
+                or any(value and not value.startswith("oa:") for value in revisions)
+                or current.get("logical_fee_key") not in (None, "", definition["logical_fee_key"])):
+            return preserve("protected", "该物流费用已经人工保存或确认，新报价已保留供复核。")
+        # Revision tracks only changes to its source facts; keep existing scope and
+        # amount revision values on a refresh that has not changed those inputs.
+        if not manual_entry and all(_values_match(current.get(field), values[field]) for field in ("amount", "currency", "amount_status")):
+            values["amount_revision"] = current.get("amount_revision") or revision
+        if not manual_entry and all(_values_match(current.get(field), values[field]) for field in ("allocation_basis", "basis_field")):
+            values["scope_revision"] = current.get("scope_revision") or revision
         if current and all(_values_match(current.get(fieldname), value) for fieldname, value in values.items()):
             return {
                 "action": "unchanged",
@@ -4966,6 +5103,8 @@ def _sync_oa_logistics_allocation_rule(
         action = "created"
         created_count = 1
         updated_count = 0
+
+    frappe.db.set_value("Overseas Cost Batch", batch_name, {"status": "Dirty"}, update_modified=True)
 
     _insert_batch_audit_log(
         batch_name=batch_name,
@@ -5040,6 +5179,8 @@ def _recalculate_after_purchase_sync(
 ) -> dict:
     if frappe is None:
         return {"action": "skipped", "reason": "当前未连接 Frappe。"}
+    if logistics_fee_sync and logistics_fee_sync.get("ok") is False:
+        return {"action": "blocked", "ok": False, "message": logistics_fee_sync.get("message") or "物流费用同步未完成，暂不自动试算。"}
     purchase_changed = purchase_sync.get("ok") and int(purchase_sync.get("updated_count") or 0) > 0
     fee_changed = bool(logistics_fee_sync and logistics_fee_sync.get("ok") and logistics_fee_sync.get("action") in {"created", "updated"})
     if not purchase_changed and not fee_changed:
@@ -5963,6 +6104,7 @@ def sync_existing_linked_purchase_fields(limit: int | None = 200) -> dict:
             "source_approval_no": row.get("source_approval_no") or trace.get("source_approval_no") or "",
             "source_instance_id": row.get("source_instance_id") or trace.get("source_instance_id") or "",
             "linked_purchase_approvals": linked_approvals,
+            "form_fields": trace.get("form_fields") or {},
         }
         purchase_sync = _sync_linked_purchase_fields(
             batch_name=row.get("name"),
@@ -6003,7 +6145,7 @@ def sync_existing_linked_purchase_fields(limit: int | None = 200) -> dict:
     }
 
 
-def save_sea_approvals_to_erp(result: dict) -> dict:
+def save_sea_approvals_to_erp(result: dict, *, recalculate_after_sync: bool = True) -> dict:
     """保存国际物流 OA，生成批次，并自动补关联采购支出 OA 的采购字段。
 
     国际物流 OA 负责批次头、物料基础行、附件记录和采购支出关联。
@@ -6102,12 +6244,37 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
                 version_name=saved_row.get("version_name") or "",
                 approval_item=item,
             )
-            recalculate_sync = _recalculate_after_purchase_sync(
-                batch_name=saved_row["batch_name"],
-                version_name=saved_row.get("version_name") or "",
-                purchase_sync=purchase_sync,
-                logistics_fee_sync=logistics_fee_sync,
-            )
+            if recalculate_after_sync:
+                recalculate_sync = _recalculate_after_purchase_sync(
+                    batch_name=saved_row["batch_name"],
+                    version_name=saved_row.get("version_name") or "",
+                    purchase_sync=purchase_sync,
+                    logistics_fee_sync=logistics_fee_sync,
+                )
+            else:
+                purchase_changed = bool(
+                    purchase_sync.get("ok")
+                    and int(purchase_sync.get("updated_count") or 0) > 0
+                )
+                fee_changed = bool(
+                    logistics_fee_sync.get("ok")
+                    and logistics_fee_sync.get("action") in {"created", "updated"}
+                )
+                if purchase_changed or fee_changed:
+                    from overseas_costing.services.import_service import _mark_batch_dirty
+
+                    _mark_batch_dirty(saved_row["batch_name"])
+                    recalculate_sync = {
+                        "action": "marked_stale",
+                        "ok": True,
+                        "message": "补同步导致计算输入变化，已进入待重新试算，未自动计算。",
+                    }
+                else:
+                    recalculate_sync = {
+                        "action": "skipped",
+                        "ok": True,
+                        "reason": "补同步未改变采购事实或物流费用。",
+                    }
             _commit_oa_pull_progress()
             return saved_row, item_sync, attachment_sync, purchase_sync, logistics_fee_sync, recalculate_sync
 
@@ -6576,7 +6743,7 @@ def sync_purchase_expenses_from_process(
     rows = frappe.get_all(
         "Overseas Cost Batch",
         filters={"source_type": "oa_logistics"},
-        fields=["name", "batch_no", "current_version"],
+        fields=["name", "batch_no", "current_version", "extra_json"],
         limit_page_length=page_length,
         order_by="modified desc",
     )
@@ -6591,13 +6758,22 @@ def sync_purchase_expenses_from_process(
     total_ambiguous = 0
     failed_items: list[dict] = []
     for row in rows:
-        purchase_sync = import_service.apply_linked_purchase_expense_fillable_fields(
-            batch_name=row.get("name"),
-            version_name=row.get("current_version") or "",
-            purchase_summaries_json=purchase_summaries_json,
-            recalculate_after_writeback=False,
-            trusted_server_payload=True,
-        )
+        _root, trace, _is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+        if _has_logistics_item_structure(
+            batch_name=row.get("name"), version_name=row.get("current_version") or "", approval_item=trace,
+        ):
+            purchase_sync = _logistics_purchase_preview_result(import_service.preview_linked_purchase_expense_oa(
+                batch_name=row.get("name"), version_name=row.get("current_version") or "",
+                purchase_summaries_json=purchase_summaries_json, trusted_server_payload=True,
+            ))
+        else:
+            purchase_sync = import_service.apply_linked_purchase_expense_fillable_fields(
+                batch_name=row.get("name"),
+                version_name=row.get("current_version") or "",
+                purchase_summaries_json=purchase_summaries_json,
+                recalculate_after_writeback=False,
+                trusted_server_payload=True,
+            )
         recalculate_sync = _recalculate_after_purchase_sync(
             batch_name=row.get("name"),
             version_name=row.get("current_version") or "",

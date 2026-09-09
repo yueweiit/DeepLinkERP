@@ -1,0 +1,199 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Fee SKU Component",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "track_changes": 1,
+  "sort_field": "creation",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version",
+    "fee_rule",
+    "logical_fee_key",
+    "evidence",
+    "attachment",
+    "item",
+    "stable_line_key",
+    "component_type",
+    "accounting_role",
+    "cost_effect",
+    "tax_code",
+    "hs_code",
+    "currency",
+    "original_amount",
+    "amount_rmb",
+    "exchange_rate",
+    "allocation_basis",
+    "source_evidence_json",
+    "confidence",
+    "reverses_component",
+    "status",
+    "is_active"
+  ],
+  "fields": [
+    {
+      "fieldname": "batch",
+      "fieldtype": "Link",
+      "label": "所属批次",
+      "options": "Overseas Cost Batch",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "version",
+      "fieldtype": "Link",
+      "label": "所属版本",
+      "options": "Overseas Cost Version",
+      "reqd": 1
+    },
+    {
+      "fieldname": "fee_rule",
+      "fieldtype": "Link",
+      "label": "费用规则",
+      "options": "Overseas Cost Allocation Rule",
+      "reqd": 1
+    },
+    {
+      "fieldname": "logical_fee_key",
+      "fieldtype": "Data",
+      "label": "逻辑费用标识",
+      "reqd": 1
+    },
+    {
+      "fieldname": "evidence",
+      "fieldtype": "Link",
+      "label": "费用凭证",
+      "options": "Overseas Cost Fee Evidence"
+    },
+    {
+      "fieldname": "attachment",
+      "fieldtype": "Link",
+      "label": "凭证附件",
+      "options": "Overseas Cost Attachment"
+    },
+    {
+      "fieldname": "item",
+      "fieldtype": "Link",
+      "label": "SKU 行",
+      "options": "Overseas Cost Item",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "stable_line_key",
+      "fieldtype": "Data",
+      "label": "稳定物料行标识",
+      "reqd": 1
+    },
+    {
+      "fieldname": "component_type",
+      "fieldtype": "Select",
+      "label": "分项类型",
+      "options": "IMPORT_TAX\nCUSTOMS_SERVICE\nREFUND_REVERSAL\nOTHER",
+      "reqd": 1
+    },
+    {
+      "fieldname": "accounting_role",
+      "fieldtype": "Select",
+      "label": "会计作用",
+      "options": "ESTIMATE\nFINAL_BILL\nSETTLEMENT",
+      "default": "FINAL_BILL",
+      "reqd": 1
+    },
+    {
+      "fieldname": "cost_effect",
+      "fieldtype": "Select",
+      "label": "成本作用",
+      "options": "COST\nLEDGER_ONLY",
+      "default": "COST",
+      "reqd": 1
+    },
+    {
+      "fieldname": "tax_code",
+      "fieldtype": "Data",
+      "label": "税种"
+    },
+    {
+      "fieldname": "hs_code",
+      "fieldtype": "Data",
+      "label": "HS 编码"
+    },
+    {
+      "fieldname": "currency",
+      "fieldtype": "Select",
+      "label": "币种",
+      "options": "RMB\nMXN\nUSD",
+      "reqd": 1
+    },
+    {
+      "fieldname": "original_amount",
+      "fieldtype": "Currency",
+      "label": "原币金额",
+      "precision": "6"
+    },
+    {
+      "fieldname": "amount_rmb",
+      "fieldtype": "Currency",
+      "label": "人民币金额",
+      "precision": "6"
+    },
+    {
+      "fieldname": "exchange_rate",
+      "fieldtype": "Float",
+      "label": "汇率快照",
+      "precision": "9"
+    },
+    {
+      "fieldname": "allocation_basis",
+      "fieldtype": "Data",
+      "label": "分摊依据"
+    },
+    {
+      "fieldname": "source_evidence_json",
+      "fieldtype": "Long Text",
+      "label": "来源证据 JSON",
+      "read_only": 1
+    },
+    {
+      "fieldname": "confidence",
+      "fieldtype": "Float",
+      "label": "置信度"
+    },
+    {
+      "fieldname": "reverses_component",
+      "fieldtype": "Link",
+      "label": "冲回原分项",
+      "options": "Overseas Cost Fee SKU Component"
+    },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "label": "状态",
+      "options": "DRAFT\nCONFIRMED\nVOID",
+      "default": "DRAFT",
+      "reqd": 1
+    },
+    {
+      "fieldname": "is_active",
+      "fieldtype": "Check",
+      "label": "有效",
+      "default": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1
+    },
+    {
+      "role": "海外成本核算用户",
+      "read": 1,
+      "write": 1,
+      "create": 1
+    }
+  ]
+}

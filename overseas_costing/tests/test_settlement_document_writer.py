@@ -282,6 +282,18 @@ def test_expense_application_replans_previously_unmatched_local_packing(setup):
     assert sync(s, l, src, batch)['blocking']
     apply_binding(s, l, binding['id'], 'u')
     target = next(row for row in l.rows('item', version=version['name']) if row['material_code'] == 'A')
-    assert target['gross_weight_kg'] == '8' and str(target['quantity']) == '4'
+    assert target['gross_weight_kg'] == '8' and json.loads(target['extra_json'])['settlement_cargo']['quantity'] == '4'
+    assert target.get('quantity') in (None,0)
     state = s.find('document_sync')[0]
     assert all('未找到' not in row.get('reason', '') for rows in state['reviews'].values() for row in rows)
+
+
+@pytest.mark.parametrize('mode', ['MANUAL_CONFIRMED', 'EXPLICIT_SOURCE'])
+def test_explicit_zero_packing_quantity_is_not_filled_as_missing(setup, mode):
+    s,l,b,v,i,*_=setup
+    l.put('item',i['name'],{'actual_shipped_qty':0,'actual_shipped_qty_mode':mode,'shipped_uom':'件'})
+    result=sync(s,l,logistics(s,[document()]),b)
+    item=l.get('item',i['name'])
+    assert item['actual_shipped_qty']==0 and item['actual_shipped_qty_mode']==mode
+    assert result['blocking']
+    assert 'actual_shipped_qty' not in json.loads(item['extra_json']).get('settlement_packing_provenance',{})

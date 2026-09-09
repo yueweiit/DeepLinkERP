@@ -133,6 +133,15 @@
       const recordName = $(event.currentTarget).attr("data-record-name");
       if (recordName) this.openTaxCertificateRecordDialog(recordName).catch((error) => this.showError(error));
     });
+    dialog.$wrapper.on("click", "[data-action='ai-review-voucher']", (event) => {
+      event.preventDefault();
+      const $button = $(event.currentTarget);
+      this.openVoucherFeeEvidenceReview({
+        batchName: String($button.attr("data-batch-name") || dialog.$wrapper.data("ocw-voucher-batch-name") || ""),
+        versionName: String($button.attr("data-version-name") || ""),
+        attachment: String($button.attr("data-attachment-name") || ""),
+      }).catch((error) => this.showError(error));
+    });
   }
 
   getVoucherDialogFile(dialog) {
@@ -300,6 +309,7 @@
           <div><span>保存时间</span><b>${this.escape(this.formatValue(row.modified || row.creation || "--"))}</b></div>
           <div class="ocw-voucher-record-action">
             <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-voucher-record" data-record-name="${this.escape(row.name)}">查看记录</button>
+            <button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="ai-review-voucher" data-attachment-name="${this.escape(row.name)}" data-batch-name="${this.escape(batch.name || row.batch_name || "")}" data-version-name="${this.escape(row.version || "")}">AI 解析并分摊到 SKU</button>
           </div>
         </div>
       </div>
@@ -367,6 +377,16 @@
       const checked = $(event.currentTarget).is(":checked");
       detailDialog.$wrapper.find("[data-action='resolve-voucher-record']").prop("disabled", !checked);
     });
+    detailDialog.$wrapper.on("click", "[data-action='ai-review-voucher']", (event) => {
+      event.preventDefault();
+      const $button = $(event.currentTarget);
+      detailDialog.hide();
+      this.openVoucherFeeEvidenceReview({
+        batchName: String($button.attr("data-batch-name") || ""),
+        versionName: String($button.attr("data-version-name") || ""),
+        attachment: String($button.attr("data-attachment-name") || recordName || ""),
+      }).catch((error) => this.showError(error));
+    });
   }
 
   renderTaxCertificateRecordDetail(result) {
@@ -388,6 +408,8 @@
     const rawPaymentDate = header.payment_date || record.payment_date || "";
     const paymentDateText = this.formatVoucherPaymentDate(rawPaymentDate, fxSync.normalized_payment_date || fxSync.payment_date || "");
     const systemFxInfo = this.formatSystemPaymentFx(fxSync, rawPaymentDate);
+    const batchName = String(batch.name || record.batch_name || this.detailState.batchName || "");
+    const versionName = String(record.version || (batchName === this.detailState.batchName ? this.detailState.versionName : "") || "");
 
     return `
       <div class="ocw-voucher-record-detail">
@@ -419,6 +441,7 @@
           <div><span>商品分项</span><strong>${this.escape(itemCount)}</strong></div>
         </div>
         <div class="ocw-voucher-tax-chips">${this.renderVoucherTaxChips(taxes)}</div>
+        <div class="ocw-voucher-record-ai-action"><button class="ocw-primary-btn" type="button" data-action="ai-review-voucher" data-attachment-name="${this.escape(record.name || result.record_name || "")}" data-batch-name="${this.escape(batchName)}" data-version-name="${this.escape(versionName)}">AI 解析并分摊到 SKU</button><span>生成费用、税种和 SKU 对应关系草稿，确认前不会写入成本。</span></div>
         ${this.renderVoucherReconciliation(mappedResult, { showSaveButton: false })}
         ${this.renderVoucherManualResolution(record, mappedResult)}
         ${this.renderVoucherValidation(validation)}
@@ -442,6 +465,23 @@
         <div class="ocw-voucher-more">共 ${this.escape(String(items.length || 0))} 条分项。</div>
       </div>
     `;
+  }
+
+  async openVoucherFeeEvidenceReview({ batchName = "", versionName = "", attachment = "" } = {}) {
+    const targetBatch = String(batchName || this.detailState.batchName || "");
+    if (!targetBatch || !attachment) throw new Error("未找到完税凭证对应的批次或附件记录。");
+    if (String(this.detailState.batchName || "") !== targetBatch) {
+      await this.openBatchDetail(targetBatch, "vouchers");
+    }
+    const batch = this.getDetailBatch() || this.getSelectableBatch(targetBatch, this.getSelectableBatches()) || {};
+    const targetVersion = String(versionName || this.detailState.versionName || batch.current_version || "");
+    if (!targetVersion) throw new Error("当前批次没有可编辑的成本版本。");
+    await this.openFeeEvidenceReviewDialog("import_tax", attachment, {
+      batchName: targetBatch,
+      versionName: targetVersion,
+      evidenceRole: "tax_certificate",
+      force: false,
+    });
   }
 
   renderVoucherManualResolution(record, mappedResult = {}) {

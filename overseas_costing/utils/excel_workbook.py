@@ -7,12 +7,14 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
-from overseas_costing.utils.field_mapper import normalize_unit
+from overseas_costing.utils.field_mapper import normalize_transport_mode, normalize_unit
 
 try:
     from openpyxl import load_workbook
 except Exception:  # pragma: no cover - 只在真实解析 xlsx 时才需要报错
     load_workbook = None
+
+from overseas_costing.services.packing_grid import Cell, MergeRange, PackingSheetNotFound, dataclass_dict
 
 
 MAX_EXCEL_COLUMN = "BE"
@@ -76,6 +78,139 @@ BLOCK_COLUMN_MAP = {
     "projectCollection": "BD",
     "transportMode": "BE",
 }
+
+
+def read_packing_grid(
+    file_path: str | Path,
+    *,
+    sheet_name: str | None,
+    require_exact_sheet: bool,
+    max_rows: int | None = None,
+    max_columns: int | None = None,
+) -> dict[str, Any]:
+    """读取用户选定的工作表，保留公式、缓存值和真实合并范围。"""
+
+    if load_workbook is None:
+        raise RuntimeError("解析 .xlsx 需要安装 openpyxl，请先安装后再导入真实 Excel。")
+
+    path = Path(file_path).expanduser()
+    requested_sheet = (sheet_name or "").strip()
+    if require_exact_sheet and (max_rows is not None or max_columns is not None):
+        preflight_workbook = load_workbook(path, data_only=False, read_only=True)
+        try:
+            if not requested_sheet:
+                raise PackingSheetNotFound("必须选择一个明确的工作表。")
+            if requested_sheet not in preflight_workbook.sheetnames:
+                available = "、".join(preflight_workbook.sheetnames)
+                raise PackingSheetNotFound(
+                    f"工作簿中不存在工作表：{requested_sheet}。当前文件包含：{available}。"
+                )
+            preflight_sheet = preflight_workbook[requested_sheet]
+            if max_rows is not None and preflight_sheet.max_row > max_rows:
+                raise ValueError(f"Excel 最多支持 {max_rows} 行。")
+            if max_columns is not None and preflight_sheet.max_column > max_columns:
+                raise ValueError(f"Excel 最多支持 {max_columns} 列。")
+        finally:
+            preflight_workbook.close()
+
+    formula_workbook = load_workbook(path, data_only=False, read_only=False)
+    value_workbook = load_workbook(path, data_only=True, read_only=False)
+    try:
+        if require_exact_sheet:
+            if not requested_sheet:
+                raise PackingSheetNotFound("必须选择一个明确的工作表。")
+            if requested_sheet not in formula_workbook.sheetnames:
+                available = "、".join(formula_workbook.sheetnames)
+                raise PackingSheetNotFound(
+                    f"工作簿中不存在工作表：{requested_sheet}。当前文件包含：{available}。"
+                )
+            selected_sheet = requested_sheet
+        else:
+            selected_sheet, _, _ = _select_sheet(formula_workbook, sheet_name)
+
+        formula_sheet = formula_workbook[selected_sheet]
+        value_sheet = value_workbook[selected_sheet]
+        if max_rows is not None and formula_sheet.max_row > max_rows:
+            raise ValueError(f"Excel 最多支持 {max_rows} 行。")
+        if max_columns is not None and formula_sheet.max_column > max_columns:
+            raise ValueError(f"Excel 最多支持 {max_columns} 列。")
+        cells: list[list[dict[str, Any]]] = []
+        for row_number in range(1, formula_sheet.max_row + 1):
+            row: list[dict[str, Any]] = []
+            for column_number in range(1, formula_sheet.max_column + 1):
+                formula_value = formula_sheet.cell(row_number, column_number).value
+                formula = formula_value if isinstance(formula_value, str) and formula_value.startswith("=") else None
+                raw_value = value_sheet.cell(row_number, column_number).value if formula else formula_value
+                display_value = _packing_display_value(
+                    raw_value, formula_sheet.cell(row_number, column_number).number_format
+                )
+                row.append(
+                    dataclass_dict(
+                        Cell(
+                            raw_value=raw_value,
+                            display_value=display_value,
+                            formula=formula,
+                            row=row_number,
+                            column=column_number,
+                        )
+                    )
+                )
+            cells.append(row)
+
+        merge_ranges = sorted(
+            (
+                dataclass_dict(
+                    MergeRange(
+                        start_row=merged.min_row,
+                        end_row=merged.max_row,
+                        start_column=merged.min_col,
+                        end_column=merged.max_col,
+                        evidence_kind="xlsx_merge",
+                    )
+                )
+                for merged in formula_sheet.merged_cells.ranges
+            ),
+            key=lambda item: (
+                item["start_row"],
+                item["start_column"],
+                item["end_row"],
+                item["end_column"],
+            ),
+        )
+        return {
+            "schema_version": 1,
+            "source_kind": "manual_attachment",
+            "source_file": path.name,
+            "sheet_name": selected_sheet,
+            "range_address": f"A1:{formula_sheet.cell(formula_sheet.max_row, formula_sheet.max_column).coordinate}",
+            "cells": cells,
+            "merge_ranges_available": True,
+            "merge_ranges": merge_ranges,
+            "available_sheets": list(formula_workbook.sheetnames),
+        }
+    finally:
+        formula_workbook.close()
+        value_workbook.close()
+
+
+def _packing_display_value(value: Any, number_format: str = "General") -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        pattern = str(number_format or "General").split(";", 1)[0]
+        if "%" in pattern:
+            decimal_part = pattern.rsplit(".", 1)[1].split("%", 1)[0] if "." in pattern else ""
+            places = sum(character in {"0", "#"} for character in decimal_part)
+            return f"{float(value) * 100:.{places}f}%"
+        numeric = re.sub(r'"[^"]*"|\[[^\]]*\]', "", pattern)
+        if re.search(r"[0#]", numeric) and numeric.lower() != "general":
+            decimal_part = numeric.rsplit(".", 1)[1] if "." in numeric else ""
+            places = sum(character in {"0", "#"} for character in decimal_part)
+            grouped = "," in numeric.split(".", 1)[0]
+            return format(float(value), f"{',' if grouped else ''}.{places}f")
+    return str(value)
 
 
 def col_to_index(column: str) -> int:
@@ -311,7 +446,7 @@ def parse_sisa_warehouse_receipt_sheet(worksheet, source_sheet: str | None = Non
         "sourceTemplate": "sisa_warehouse_receipt",
         "sourceType": "PACKING_LIST",
         "sourceDocNo": block_id,
-        "transportMode": "海运",
+        "transportMode": _transport_from_sheet_name(source_sheet),
         "remark": "SiSA墨西哥专线进仓单产品清单",
         "items": [_build_attachment_item(row, source_sheet) for row in rows],
     }
@@ -603,7 +738,7 @@ def _read_sisa_warehouse_receipt_row(
         "piece_count": box_count,
         "gross_weight_kg": gross_weight_kg,
         "volume_m3": volume_m3,
-        "transport_mode": "海运",
+        "transport_mode": _transport_from_sheet_name(worksheet.title),
         "packing": f"{_format_number(box_count)}箱" if box_count else None,
         "source_remark": source_remark,
         "_box_no": box_no or f"未标箱号-{row_no}",
@@ -861,7 +996,7 @@ ATTACHMENT_HEADER_ALIASES = {
     "goods_value": ("总价", "总金额", "rmb"),
     "planned_ship_date": ("计划出货日期",),
     "source_remark": ("备注", "remarks"),
-    "export_mode": ("出口方式",),
+    "export_mode": ("出口方式", "运输方式", "物流方式", "transportmode", "shippingmode"),
     "project_collection": ("项目归属", "项目"),
 }
 
@@ -1096,12 +1231,16 @@ def _transport_from_sheet_name(source_sheet: str) -> str:
         return "空运"
     if "快递" in source_sheet:
         return "快递"
-    return "海运"
+    if "海运" in source_sheet:
+        return "海运"
+    # English mode names must be complete words, not product names such as chair.
+    match = re.search(r"\b(sea|air|express)\b", source_sheet, re.IGNORECASE)
+    return match.group(1).upper() if match else ""
 
 
 def _attachment_transport_mode(export_mode, source_sheet: str) -> str:
     text = str(export_mode or "").strip()
-    if any(keyword in text for keyword in ("海运", "空运", "快递", "express", "Express", "AIR", "Air", "air")):
+    if normalize_transport_mode(text):
         return text
     return _transport_from_sheet_name(source_sheet)
 

@@ -28,6 +28,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest -r requirements.txt
 
+      - name: Verify generated workbench assets
+        run: |
+          python overseas_costing/scripts/build_workbench_assets.py
+          git diff --exit-code -- overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.css overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.css
+
+      - name: Check workbench JavaScript syntax
+        run: |
+          node --check overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
+          node --check overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
+
       - name: Run backend tests
         run: python -m pytest -q overseas_costing/tests
 
@@ -36,9 +46,14 @@ jobs:
 
   deploy:
     name: Deploy to DeepLinkERP
+    # The mirror runs CI only; both repositories otherwise rebuild the same host.
+    if: github.repository == 'yueweiit/DeepLinkERP'
     needs: test
     runs-on: ubuntu-latest
     environment: production
+    concurrency:
+      group: overseas-costing-production-deploy
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,11 +64,13 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           test -n "$DEPLOY_HOST" || (echo "Missing DEPLOY_HOST" && exit 1)
           test -n "$DEPLOY_USER" || (echo "Missing DEPLOY_USER" && exit 1)
           test -n "$DEPLOY_SSH_PRIVATE_KEY" || (echo "Missing DEPLOY_SSH_PRIVATE_KEY" && exit 1)
           test -n "$DEPLOY_KNOWN_HOSTS" || (echo "Missing DEPLOY_KNOWN_HOSTS" && exit 1)
+          test -n "$DEEPSEEK_API_KEY" || (echo "Missing DEEPSEEK_API_KEY" && exit 1)
 
       - name: Load SSH key
         uses: webfactory/ssh-agent@v0.9.0
@@ -67,6 +84,41 @@ jobs:
           mkdir -p "$HOME/.ssh"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Preflight DeepSeek connection
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: python .github/scripts/preflight_deepseek.py
+
+      - name: Preflight document parsing runtime
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          remote_runtime_script="/tmp/preflight_document_runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          remote_runtime_dockerfile="/tmp/preflight_material_ai_runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.Containerfile"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/install_document_runtime.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_runtime_script"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/material-ai-runtime.Containerfile \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_runtime_dockerfile"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash '$remote_runtime_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '$remote_runtime_dockerfile' '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' preflight; script_exit_code=\$?; rm -f '$remote_runtime_script' '$remote_runtime_dockerfile'; exit \$script_exit_code"
+
+      - name: Prepare production rollback point
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          remote_release_script="/tmp/manage_material_ai_release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/manage_material_ai_release.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_release_script"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash '$remote_release_script' prepare /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'"
 
       - name: Upgrade and migrate ERP
         env:
@@ -87,7 +139,48 @@ jobs:
           PY'
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            'cd /home/yuewei/ERPNext-Docker/frappe_docker && git pull --ff-only && ./upgrade_bench.sh && ./migrate_site.sh deeplinkerp.com'
+            "cd /home/yuewei/ERPNext-Docker/frappe_docker && git pull --ff-only && ./upgrade_bench.sh && ./migrate_site.sh deeplinkerp.com"
+
+      - name: Install document parsing runtime
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          remote_runtime_script="/tmp/install_document_runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          remote_runtime_dockerfile="/tmp/material-ai-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.Containerfile"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/install_document_runtime.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_runtime_script"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/material-ai-runtime.Containerfile \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_runtime_dockerfile"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash '$remote_runtime_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '$remote_runtime_dockerfile' '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' install; script_exit_code=\$?; rm -f '$remote_runtime_script' '$remote_runtime_dockerfile'; exit \$script_exit_code"
+
+      - name: Configure and verify material AI
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          local_key_file="$RUNNER_TEMP/deepseek-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          remote_key_file="/tmp/deepseek-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key"
+          remote_config_script="/tmp/configure_material_ai-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          umask 077
+          printf '%s' "$DEEPSEEK_API_KEY" > "$local_key_file"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$local_key_file" "$DEPLOY_USER@$DEPLOY_HOST:$remote_key_file"
+          rm -f "$local_key_file"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/configure_material_ai.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_config_script"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash '$remote_config_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '$remote_key_file'; script_exit_code=\$?; rm -f '$remote_config_script' '$remote_key_file'; exit \$script_exit_code"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.material_ai_fill_service.verify_material_ai_runtime --kwargs '"'"'{"check_connection": True}'"'"''
 
       - name: Synchronize and verify frontend assets
         env:
@@ -103,4 +196,33 @@ jobs:
             "cd /home/yuewei/ERPNext-Docker/frappe_docker && bash '$remote_asset_script'; script_exit_code=\$?; rm -f '$remote_asset_script'; exit \$script_exit_code"
 
       - name: Check online login page
-        run: curl --fail --silent --show-error --retry 3 https://deeplinkerp.com/login >/dev/null
+        run: |
+          curl --fail --silent --show-error \
+            --retry 18 \
+            --retry-delay 5 \
+            --retry-max-time 90 \
+            --retry-all-errors \
+            https://deeplinkerp.com/login >/dev/null
+
+      - name: Rollback failed material AI release
+        if: failure()
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          remote_release_script="/tmp/manage_material_ai_release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "if [ -f '$remote_release_script' ]; then bash '$remote_release_script' rollback /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'; fi"
+
+      - name: Remove temporary deployment files
+        if: always()
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "rm -f '/tmp/manage_material_ai_release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' '/tmp/deepseek-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key' '/tmp/configure_material_ai-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh'"

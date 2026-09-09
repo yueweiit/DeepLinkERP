@@ -1,150 +1,224 @@
 {
-  "doctype": "DocType",
-  "name": "Overseas Cost Allocation Rule",
-  "module": "Overseas Costing",
-  "autoname": "hash",
-  "title_field": "rule_code",
-  "track_changes": 1,
-  "sort_field": "modified",
-  "sort_order": "DESC",
-  "field_order": [
-    "batch",
-    "version",
-    "rule_code",
-    "expense_category",
-    "allocation_basis",
-    "basis_field",
-    "currency",
-    "amount",
-    "priority_no",
-    "remark",
-    "is_enabled",
-    "is_active",
-    "source_binding_id",
-    "source_snapshot",
-    "covered_scopes",
-    "is_final"
-  ],
-  "fields": [
-    {
-      "fieldname": "batch",
-      "fieldtype": "Link",
-      "label": "所属批次",
-      "options": "Overseas Cost Batch",
-      "reqd": 1
-    },
-    {
-      "fieldname": "version",
-      "fieldtype": "Link",
-      "label": "所属版本",
-      "options": "Overseas Cost Version",
-      "reqd": 1
-    },
-    {
-      "fieldname": "rule_code",
-      "fieldtype": "Data",
-      "label": "规则编码",
-      "reqd": 1,
-      "in_list_view": 1
-    },
-    {
-      "fieldname": "expense_category",
-      "fieldtype": "Data",
-      "label": "费用类别",
-      "in_list_view": 1
-    },
-    {
-      "fieldname": "allocation_basis",
-      "fieldtype": "Select",
-      "label": "分摊依据",
-      "options": "goods_value\ngross_weight\nvolume\nchargeable_weight",
-      "default": "goods_value"
-    },
-    {
-      "fieldname": "basis_field",
-      "fieldtype": "Data",
-      "label": "分摊基数字段"
-    },
-    {
-      "fieldname": "currency",
-      "fieldtype": "Data",
-      "label": "币种"
-    },
-    {
-      "fieldname": "amount",
-      "fieldtype": "Currency",
-      "label": "金额",
-      "precision": "6"
-    },
-    {
-      "fieldname": "priority_no",
-      "fieldtype": "Int",
-      "label": "优先级",
-      "default": 0
-    },
-    {
-      "fieldname": "remark",
-      "fieldtype": "Small Text",
-      "label": "备注"
-    },
-    {
-      "fieldname": "is_active",
-      "fieldtype": "Check",
-      "label": "是否启用",
-      "default": 1
-    },
-    {
-      "fieldname": "is_enabled",
-      "fieldtype": "Check",
-      "label": "参与重算",
-      "default": 1
-    },
-    {
-      "fieldname": "source_binding_id",
-      "fieldtype": "Data",
-      "label": "最终费用关联ID",
-      "read_only": 1
-    },
-    {
-      "fieldname": "source_snapshot",
-      "fieldtype": "Data",
-      "label": "最终来源快照",
-      "read_only": 1
-    },
-    {
-      "fieldname": "covered_scopes",
-      "fieldtype": "Data",
-      "label": "费用覆盖范围",
-      "read_only": 1
-    },
-    {
-      "fieldname": "is_final",
-      "fieldtype": "Check",
-      "label": "最终结算费用",
-      "read_only": 1
-    }
-  ],
-  "permissions": [
-    {
-      "role": "System Manager",
-      "read": 1,
-      "write": 1,
-      "create": 1,
-      "delete": 1,
-      "share": 1,
-      "print": 1,
-      "email": 1,
-      "export": 1
-    },
-    {
-      "role": "海外成本核算用户",
-      "read": 1,
-      "write": 1,
-      "create": 1,
-      "print": 1,
-      "email": 1,
-      "export": 1,
-      "report": 1
-    }
-  ]
+ "doctype": "DocType",
+ "name": "Overseas Cost Allocation Rule",
+ "module": "Overseas Costing",
+ "autoname": "hash",
+ "title_field": "rule_code",
+ "track_changes": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "field_order": [
+  "batch",
+  "version",
+  "rule_code",
+  "logical_fee_key",
+  "expense_category",
+  "amount_status",
+  "allocation_basis",
+  "basis_field",
+  "scope_type",
+  "scope_value_json",
+  "scope_revision",
+  "currency",
+  "amount",
+  "amount_revision",
+  "required_evidence_role",
+  "included_in_fee_key",
+  "priority_no",
+  "remark",
+  "is_enabled",
+  "is_active",
+  "status_change_reason",
+  "status_changed_by",
+  "status_changed_at",
+  "source_binding_id",
+  "source_snapshot",
+  "covered_scopes",
+  "is_final"
+ ],
+ "fields": [
+  {
+   "fieldname": "batch",
+   "fieldtype": "Link",
+   "label": "所属批次",
+   "options": "Overseas Cost Batch",
+   "reqd": 1
+  },
+  {
+   "fieldname": "version",
+   "fieldtype": "Link",
+   "label": "所属版本",
+   "options": "Overseas Cost Version",
+   "reqd": 1
+  },
+  {
+   "fieldname": "rule_code",
+   "fieldtype": "Data",
+   "label": "规则编码",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "logical_fee_key",
+   "fieldtype": "Data",
+   "label": "逻辑费用标识",
+   "reqd": 1
+  },
+  {
+   "fieldname": "expense_category",
+   "fieldtype": "Data",
+   "label": "费用类别",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "amount_status",
+   "fieldtype": "Select",
+   "label": "金额状态",
+   "options": "MISSING\nESTIMATED\nACTUAL\nNOT_INCURRED\nINCLUDED",
+   "default": "MISSING"
+  },
+  {
+   "fieldname": "allocation_basis",
+   "fieldtype": "Select",
+   "label": "分摊依据",
+   "options": "goods_value\ngross_weight\nvolume\nchargeable_weight",
+   "default": "goods_value"
+  },
+  {
+   "fieldname": "basis_field",
+   "fieldtype": "Data",
+   "label": "分摊基数字段"
+  },
+  {
+   "fieldname": "scope_type",
+   "fieldtype": "Select",
+   "label": "费用适用范围",
+   "options": "ALL_ITEMS\nITEMS\nDIRECT_ITEM",
+   "default": "ALL_ITEMS"
+  },
+  {
+   "fieldname": "scope_value_json",
+   "fieldtype": "Long Text",
+   "label": "费用范围JSON"
+  },
+  {
+   "fieldname": "scope_revision",
+   "fieldtype": "Data",
+   "label": "费用范围修订"
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Data",
+   "label": "币种"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "金额",
+   "precision": "6"
+  },
+  {
+   "fieldname": "amount_revision",
+   "fieldtype": "Data",
+   "label": "金额修订"
+  },
+  {
+   "fieldname": "required_evidence_role",
+   "fieldtype": "Data",
+   "label": "必需最终凭证角色"
+  },
+  {
+   "fieldname": "included_in_fee_key",
+   "fieldtype": "Data",
+   "label": "已包含于费用"
+  },
+  {
+   "fieldname": "priority_no",
+   "fieldtype": "Int",
+   "label": "优先级",
+   "default": 0
+  },
+  {
+   "fieldname": "remark",
+   "fieldtype": "Small Text",
+   "label": "备注"
+  },
+  {
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "label": "是否启用",
+   "default": 1
+  },
+  {
+   "fieldname": "is_enabled",
+   "fieldtype": "Check",
+   "label": "参与重算",
+   "default": 1
+  },
+  {
+   "fieldname": "status_change_reason",
+   "fieldtype": "Small Text",
+   "label": "状态变更原因"
+  },
+  {
+   "fieldname": "status_changed_by",
+   "fieldtype": "Link",
+   "label": "状态变更人",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "status_changed_at",
+   "fieldtype": "Datetime",
+   "label": "状态变更时间",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_binding_id",
+   "fieldtype": "Data",
+   "label": "最终费用关联ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_snapshot",
+   "fieldtype": "Data",
+   "label": "最终来源快照",
+   "read_only": 1
+  },
+  {
+   "fieldname": "covered_scopes",
+   "fieldtype": "Data",
+   "label": "费用覆盖范围",
+   "read_only": 1
+  },
+  {
+   "fieldname": "is_final",
+   "fieldtype": "Check",
+   "label": "最终结算费用",
+   "read_only": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1,
+   "share": 1,
+   "print": 1,
+   "email": 1,
+   "export": 1
+  },
+  {
+   "role": "海外成本核算用户",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "print": 1,
+   "email": 1,
+   "export": 1,
+   "report": 1
+  }
+ ]
 }

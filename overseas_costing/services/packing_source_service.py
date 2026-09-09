@@ -16,6 +16,23 @@ from overseas_costing.services import dingtalk_approval_service, import_service
 from overseas_costing.services.packing_comment_service import parse_packing_comment
 
 
+SOURCE_KIND_ALIASES = {
+    "manual_attachment": "manual_attachment",
+    "attachment": "approval_attachment",
+    "approval_attachment": "approval_attachment",
+    "comment": "approval_comment",
+    "approval_comment": "approval_comment",
+    "wiki_sheet": "wiki_sheet",
+}
+
+
+def normalize_packing_source_kind(value: str) -> str:
+    kind = str(value or "").strip().lower()
+    if kind not in SOURCE_KIND_ALIASES:
+        raise ValueError("不支持的装箱来源类型。")
+    return SOURCE_KIND_ALIASES[kind]
+
+
 def _revision_signing_key() -> bytes:
     if frappe is None:  # only used by pure unit tests
         return b"overseas-costing-test-key"
@@ -244,6 +261,25 @@ def _attachment_source(batch_name: str, source_id: str) -> dict:
     ) or {}
 
 
+def _attachment_source_v2(batch_name: str, source_id: str) -> dict:
+    if frappe is None:
+        return {}
+    return frappe.db.get_value(
+        "Overseas Cost Attachment",
+        {"name": source_id, "batch": batch_name},
+        [
+            "name",
+            "batch",
+            "source_type",
+            "file_name",
+            "file_url",
+            "modified",
+            "parse_result_json",
+        ],
+        as_dict=True,
+    ) or {}
+
+
 def _attachment_is_audit_only(source: dict) -> bool:
     try:
         snapshot = json.loads(source.get("parse_result_json") or "{}")
@@ -272,6 +308,180 @@ def _find_comment_source(batch_name: str, source_id: str) -> dict:
                 "instance_id": approval.get("instance_id") or "",
             }
     return {}
+
+
+def resolve_trusted_packing_source(
+    *,
+    batch_name: str,
+    source_kind: str,
+    source_id: str,
+    sheet_name: str | None = None,
+    strict_material_xlsx: bool = False,
+) -> dict:
+    """重新从服务器可信存储解析来源，浏览器不能提供正文、路径、总数或工作簿 URL。"""
+
+    from overseas_costing.services.packing_grid import build_grid_from_dingtalk_snapshot
+    from overseas_costing.services.packing_parse_service import parse_packing_grid
+    from overseas_costing.utils.excel_workbook import read_packing_grid
+
+    kind = normalize_packing_source_kind(source_kind)
+    resolved_source_id = str(source_id or "").strip()
+    if kind in {"manual_attachment", "approval_attachment"}:
+        source = _attachment_source_v2(batch_name, resolved_source_id)
+        if not source:
+            raise ValueError("未找到当前批次的装箱附件。")
+        if kind == "approval_attachment" and str(source.get("source_type") or "").upper() != "OA":
+            raise ValueError("所选附件不是当前批次的钉钉审批附件。")
+        if _attachment_is_audit_only(source):
+            raise ValueError("该附件来自已排除审批，只能审计查看，不能作为装箱来源。")
+        file_url = str(source.get("file_url") or "").strip()
+        if not file_url:
+            raise ValueError("装箱附件尚未保存到系统。")
+        selected_sheet = str(sheet_name or "").strip()
+        path = import_service._resolve_excel_file_path(file_url=file_url)
+        if strict_material_xlsx:
+            from overseas_costing.services.material_import_service import validate_material_workbook_metadata
+
+            validate_material_workbook_metadata(
+                str(source.get("file_name") or path.name),
+                path.stat().st_size,
+            )
+        grid = read_packing_grid(
+            str(path),
+            sheet_name=selected_sheet,
+            require_exact_sheet=True,
+            max_rows=1000 if strict_material_xlsx else None,
+            max_columns=120 if strict_material_xlsx else None,
+        )
+        source_hash = hashlib.sha256(
+            f"{_attachment_hash(source)}|{selected_sheet}".encode("utf-8")
+        ).hexdigest()
+        return {
+            "source_hash": source_hash,
+            "source": {
+                "source_kind": kind,
+                "source_id": resolved_source_id,
+                "source_label": str(source.get("file_name") or resolved_source_id),
+                "sheet_name": selected_sheet,
+                "source_updated_at": str(source.get("modified") or ""),
+            },
+            "grid": grid,
+            "preview": parse_packing_grid(grid),
+        }
+
+    if kind == "approval_comment":
+        source = _find_comment_source(batch_name, resolved_source_id)
+        if not source:
+            raise ValueError("未找到该钉钉评论，可能已重新同步。")
+        parsed = parse_packing_comment(str(source.get("remark") or ""))
+        if not parsed.get("is_candidate"):
+            raise ValueError("该评论没有可识别的装箱信息。")
+        source_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "instance_id": source.get("instance_id"),
+                    "operation_time": source.get("operation_time"),
+                    "user_id": source.get("user_id"),
+                    "remark": source.get("remark"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "source_hash": source_hash,
+            "source": {
+                "source_kind": kind,
+                "source_id": resolved_source_id,
+                "source_label": "钉钉审批评论",
+                "instance_id": source.get("instance_id") or "",
+                "source_updated_at": source.get("operation_time") or "",
+                "comment_user": source.get("user_name") or source.get("user_id") or "",
+            },
+            "preview": _comment_snapshot_preview(parsed),
+        }
+
+    workbook_id, separator, sheet_id = resolved_source_id.partition(":")
+    if not separator or not workbook_id or not sheet_id:
+        raise ValueError("装箱计划表 Sheet 来源 ID 不合法。")
+    from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
+
+    clients = get_packing_runtime_clients()
+    manifest = clients.catalog.get_latest_snapshot(workbook_id, sheet_id)
+    if not manifest:
+        raise ValueError("装箱计划表 Sheet 尚无可用缓存，请先刷新资料。")
+    payload = clients.archive.download(manifest)
+    if str(payload.get("workbookId") or "") != workbook_id or str(payload.get("sheetId") or "") != sheet_id:
+        raise ValueError("装箱计划表快照与所选 Sheet 不一致。")
+    grid = build_grid_from_dingtalk_snapshot(payload)
+    source_hash = str(manifest.get("content_sha256") or "").strip().lower()
+    if not source_hash:
+        source_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    return {
+        "source_hash": source_hash,
+        "source": {
+            "source_kind": kind,
+            "source_id": resolved_source_id,
+            "source_label": str(payload.get("sheetName") or sheet_id),
+            "workbook_id": workbook_id,
+            "sheet_id": sheet_id,
+            "sheet_name": payload.get("sheetName") or "",
+            "source_updated_at": payload.get("captureFinishedAt") or manifest.get("capture_finished_at"),
+        },
+        "grid": grid,
+        "preview": parse_packing_grid(grid),
+    }
+
+
+def _comment_snapshot_preview(parsed: dict) -> dict:
+    rows = []
+    for index, row in enumerate(parsed.get("rows") or [], start=1):
+        rows.append(
+            {
+                "source_row": index,
+                "material_code": row.get("material_code"),
+                "product_name": row.get("product_name"),
+                "quantity": str(row.get("actual_shipped_qty")) if row.get("actual_shipped_qty") is not None else None,
+                "unit": row.get("unit"),
+                "raw_fields": dict(row),
+            }
+        )
+    gross = parsed.get("gross_weight_kg")
+    volume = parsed.get("volume_m3")
+    group = {
+        "group_id": "comment-package-1",
+        "row_numbers": list(range(1, len(rows) + 1)),
+        "dimensions": {"value": parsed.get("dimensions_cm"), "unit": "cm"},
+        "net_weight_kg": {"value": None, "count_once": True},
+        "gross_weight_kg": {"value": str(gross) if gross is not None else None, "count_once": True},
+        "volume_m3": {"value": str(volume) if volume is not None else None, "count_once": True},
+        "package_count": {"value": "1", "count_once": True},
+        "evidence": [{"kind": "trusted_comment_text", "confidence": parsed.get("confidence")}],
+        "needs_confirmation": True,
+    }
+    blocking = [{"code": "group_confirmation_required", "message": "评论中的包装范围需要人工确认。"}]
+    return {
+        "ok": False,
+        "source": {"source_kind": "approval_comment"},
+        "material_row_count": len(rows),
+        "package_group_count": 1,
+        "package_count": 1,
+        "material_rows": rows,
+        "groups": [group],
+        "totals": {
+            "net_weight_kg": {"value": None, "kind": "missing"},
+            "gross_weight_kg": {"value": str(gross) if gross is not None else None, "kind": "comment_value"},
+            "volume_m3": {"value": str(volume) if volume is not None else None, "kind": "comment_calculated_dimensions"},
+        },
+        "validation": {
+            "blocking": blocking,
+            "warnings": [],
+            "needs_group_confirmation": True,
+        },
+    }
 
 
 def _comment_preview_kwargs(batch_name: str, source: dict, version_name: str | None = None) -> tuple[dict, dict]:

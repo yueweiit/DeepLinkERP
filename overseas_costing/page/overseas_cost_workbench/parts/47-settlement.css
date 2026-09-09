@@ -45,3 +45,6 @@
   .ocw-settlement-source-grid { grid-template-columns: 1fr; }
   .ocw-settlement-search-row { align-items: flex-start; flex-wrap: wrap; }
 }
+.ocw-mf-grid-table td.ocw-mf-settlement-quantity { padding: 6px 8px; }
+.ocw-mf-grid-table td.ocw-mf-settlement-quantity > span { padding: 0 0 3px; }
+.ocw-mf-grid-table td.ocw-mf-settlement-quantity > small { position: static; display: block; font-size: 10px; line-height: 1.4; white-space: normal; }

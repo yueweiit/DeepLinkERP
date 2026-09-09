@@ -69,11 +69,16 @@ class OverseasCostWorkbench {
     this.filters.issue = this.viewState.issue;
     this.filters.business_type = this.viewState.businessType;
     this.filters.subsidiary_code = this.viewState.subsidiaryCode;
-    if (this.viewState.startDate) this.filters.start_date = this.viewState.startDate;
-    if (this.viewState.endDate) this.filters.end_date = this.viewState.endDate;
+    if (this.viewState.hasDateRange) {
+      this.filters.start_date = this.viewState.startDate;
+      this.filters.end_date = this.viewState.endDate;
+    }
     this.filters.erp_status = this.viewState.erpStatus;
+    this.filters.review_status = this.viewState.reviewStatus;
+    this.filters.review_warning = this.viewState.reviewWarning;
     this.workbenchTotal = 0;
     this.exceptionCounts = {};
+    this.reviewCounts = {};
     this.resultPreviewState = {
       batchName: "",
       page: 1,
@@ -425,6 +430,7 @@ class OverseasCostWorkbench {
 
   bindEvents() {
     if (this.bindRedesignEvents) this.bindRedesignEvents();
+    if (this.bindMaterialFeeWorkspaceEvents) this.bindMaterialFeeWorkspaceEvents();
     this.$root.on("click", "[data-batch-name]", (event) => {
       // 新工作台由显式的详情导航设置批次上下文；这里仅保留旧壳层的隐式选中兼容。
       if (this.$root.hasClass("ocw-redesign")) return;

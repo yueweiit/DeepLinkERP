@@ -1,0 +1,130 @@
+"""Final-source ownership and scope selection shared by production fee consumers."""
+from decimal import Decimal, InvalidOperation
+
+
+METADATA_FIELDS = ('is_final', 'source_binding_id', 'source_snapshot', 'covered_scopes')
+SCOPES = frozenset({'freight', 'customs', 'tax', 'mexico_inland'})
+LEGACY_POOL_CURRENCIES = {'china_misc_rmb': 'RMB', 'china_misc_mxn': 'MXN',
+    'china_ocean_usd': 'USD', 'china_to_mexico_freight_rmb': 'RMB',
+    'mexico_inland_mxn': 'MXN', 'mexico_misc_mxn': 'MXN', 'mexico_inland_misc_rmb': 'RMB'}
+
+
+def is_final(rule):
+    return str(rule.get('is_final') or '').strip().lower() not in {'', '0', 'false', 'no', 'none'}
+
+
+def row_scopes(rule):
+    explicit = str(rule.get('covered_scopes') or '').strip()
+    if explicit:
+        return {value.strip() for value in explicit.split(',') if value.strip()}
+    keys = ' '.join(str(rule.get(field) or '').lower() for field in ('logical_fee_key', 'rule_code'))
+    if 'mexico_inland' in keys or 'destination_delivery' in keys:
+        return {'mexico_inland'}
+    if 'customs' in keys or 'clearance' in keys:
+        return {'customs'}
+    if 'tax' in keys:
+        return {'tax'}
+    if any(token in keys for token in ('freight', 'ocean', 'international_express_fee', 'express_surcharge', 'forwarder_surcharge')):
+        return {'freight'}
+    return set()
+
+
+def covered_scopes(fees):
+    return set().union(*(row_scopes(fee) for fee in fees if is_final(fee)))
+
+
+def _number(value, label):
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f'最终费用{label}缺失或无效') from None
+    if not parsed.is_finite():
+        raise ValueError(f'最终费用{label}缺失或无效')
+    return parsed
+
+
+def validate_final(fee, fx_context=None):
+    if any(str(fee.get(field, 1)).lower() in {'0', 'false', 'none', ''} for field in ('is_enabled', 'is_active')):
+        raise ValueError('最终费用已停用，需核对来源，不能恢复旧暂估')
+    if not all(str(fee.get(field) or '').strip() for field in ('source_binding_id', 'source_snapshot')):
+        raise ValueError('最终费用缺少明确来源')
+    scopes = {value.strip() for value in str(fee.get('covered_scopes') or '').split(',') if value.strip()}
+    if not scopes or scopes - SCOPES:
+        raise ValueError('最终费用覆盖范围缺失或无效')
+    if str(fee.get('amount_status') or '').upper() != 'ACTUAL':
+        raise ValueError('最终费用必须具有明确实际金额状态')
+    _number(fee.get('amount'), '金额')
+    currency = str(fee.get('currency') or '').strip().upper()
+    if currency not in {'RMB', 'CNY', 'USD', 'MXN'}:
+        raise ValueError('最终费用币种缺失或不支持')
+    if fx_context is not None:
+        required = ['fx_rmb_to_mxn'] + (['fx_usd_to_rmb'] if currency == 'USD' else [])
+        for field in required:
+            if _number(fx_context.get(field), '汇率') <= 0:
+                raise ValueError('最终费用汇率必须大于零')
+
+
+def select_fees(fees, fx_context=None):
+    """Select once without reviving estimates, including when final zero is disabled.
+
+    ``None`` performs structural validation for fee lists; a supplied FX mapping
+    also requires all rates needed by the final RMB/MXN calculation.
+    """
+    finals = [fee for fee in fees if is_final(fee)]
+    if not finals:
+        return list(fees)
+    for fee in finals:
+        validate_final(fee, fx_context)
+    if len({(fee['source_binding_id'], fee['source_snapshot']) for fee in finals}) != 1:
+        raise ValueError('最终费用来源重叠或快照不一致')
+    covered = covered_scopes(finals)
+    selected = []
+    for fee in fees:
+        scopes = row_scopes(fee)
+        if not is_final(fee) and scopes & covered:
+            active = all(str(fee.get(flag, 1)).lower() not in {'0', 'false'} for flag in ('is_active', 'is_enabled'))
+            if active and scopes - covered:
+                raise ValueError('旧费用覆盖范围交叉，不能部分停用整笔费用')
+            continue
+        selected.append(fee)
+    return selected
+
+
+def assert_fee_edit_allowed(existing_fees, payload):
+    """Source fees and their retired scopes can only change through settlement review."""
+    keys = {str(payload.get(field) or '') for field in ('name', 'rule_code', 'logical_fee_key')} - {''}
+    owned = [fee for fee in existing_fees if is_final(fee) or fee.get('source_binding_id')]
+    if is_final(payload) or any(payload.get(field) for field in METADATA_FIELDS if field != 'is_final') or any(
+        keys & {str(fee.get(field) or '') for field in ('name', 'rule_code', 'logical_fee_key')} for fee in owned
+    ):
+        raise ValueError('最终采购支出费用为来源事实，请通过结算关联更正')
+    if row_scopes(payload) & set().union(*(row_scopes(fee) for fee in owned)):
+        raise ValueError('该费用范围已由最终采购支出覆盖，不能恢复旧费用或增加重复费用')
+
+
+def supplement_legacy_fees(items, fees):
+    """Preserve identifiable old item pools only for a settlement-owned trial."""
+    if not any(is_final(fee) for fee in fees):
+        return list(fees)
+    explicit = [fee for fee in fees if not fee.get('virtual')]
+    codes = {str(fee.get(field) or '') for fee in explicit for field in ('logical_fee_key', 'rule_code')}
+    scopes = set().union(*(row_scopes(fee) for fee in explicit))
+    added = []
+    for field, currency in LEGACY_POOL_CURRENCIES.items():
+        if field in codes:
+            continue
+        values = {_number(item.get(field), '旧费用金额') for item in items if item.get(field) not in (None, '', 0, '0')}
+        values.discard(Decimal(0))
+        if not values:
+            continue
+        if field == 'mexico_inland_misc_rmb':
+            raise ValueError('旧内陆／杂费覆盖范围不明确，请先核对')
+        if row_scopes({'rule_code': field}) & scopes:
+            continue
+        if len(values) != 1:
+            raise ValueError('旧费用字段存在不同金额，请先核对费用池')
+        added.append({'name': 'legacy-item:' + field, 'rule_code': field, 'logical_fee_key': field,
+            'amount': str(next(iter(values))), 'currency': currency, 'amount_status': 'ESTIMATED',
+            'allocation_basis': 'gross_weight', 'scope_type': 'ALL_ITEMS', 'is_active': 1, 'is_enabled': 1})
+    added_scopes = set().union(*(row_scopes(fee) for fee in added))
+    return [fee for fee in fees if not (fee.get('virtual') and row_scopes(fee) & added_scopes)] + added

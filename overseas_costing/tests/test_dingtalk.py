@@ -601,6 +601,64 @@ def test_extract_logistics_quote_candidates_reads_formula_amount_line() -> None:
     ]
 
 
+def test_quote_candidates_treat_per_unit_values_as_rates_not_total_amounts() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "预估方数：11.67方\n"
+                    "体积方案：5000元/方 * 11.67 = 58,350元\n"
+                    "重量方案：25元/kg * 4200 = 105,000元"
+                )
+            }
+        }
+    )
+
+    assert [(row["amount"], row.get("pricing_basis")) for row in candidates] == [
+        (58350.0, "volume"),
+        (105000.0, "weight"),
+    ]
+    assert all(row["amount"] not in {5000, 25} for row in candidates)
+
+
+def test_quote_candidates_ignore_rate_only_lines_without_a_total() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "体积方案：5000元/方\n重量方案：25元/kg"
+                )
+            }
+        }
+    )
+
+    assert candidates == []
+
+
+def test_extract_logistics_quote_candidates_reads_compact_dhl_quote_with_comma() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": "DHL报价，251元",
+            }
+        }
+    )
+
+    assert candidates == [
+        {
+            "carrier": "DHL",
+            "amount": 251.0,
+            "currency": "RMB",
+            "volume_m3": None,
+            "source_field": "物流报价Cotización de logística",
+            "source_value": "DHL报价，251元",
+            "evidence_line": "DHL报价，251元",
+            "evidence_line_no": 1,
+            "status": "待确认",
+        }
+    ]
+
+
 def test_extract_logistics_text_summary_reads_dhl_express_text_block() -> None:
     summary = extract_logistics_text_summary_from_approval(
         {
@@ -2130,7 +2188,7 @@ def test_sync_linked_purchase_fields_propagates_manual_review_audit_failure(monk
     assert result["repair_result"]["audit_logged"] is False
 
 
-def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) -> None:
+def test_invalid_purchase_item_repair_requires_confirmation_before_restoring_rows(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 
     deleted_filters = []
@@ -2156,6 +2214,10 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
             return self
 
     class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, field):
+            return "EXPRESS"
+
         @staticmethod
         def savepoint(name):
             assert name == "before_invalid_purchase_item_repair"
@@ -2224,12 +2286,12 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
         }],
     )
 
-    assert repaired["action"] == "restored_main_logistics_items"
-    assert repaired["deleted_count"] == 1
-    assert repaired["created_count"] == 1
-    assert deleted_filters == [("Overseas Cost Item", {"batch": "BATCH-001", "version": "VER-001"})]
-    assert inserted_items[0]["material_code"] == "MAT-MAIN"
-    assert inserted_audits[0]["field_name"] == "invalid_purchase_item_repair"
+    assert repaired["action"] == "manual_required"
+    assert repaired["deleted_count"] == 0
+    assert repaired["created_count"] == 0
+    assert deleted_filters == []
+    assert inserted_items == []
+    assert inserted_audits[0]["field_name"] == "invalid_purchase_item_repair_review"
     audit_new_value = json.loads(inserted_audits[0]["new_value"])
     assert audit_new_value["excluded_purchase_decisions"] == [{
         "source_approval_no": "PUR-REFUSED",
@@ -2240,7 +2302,8 @@ def test_invalid_purchase_item_repair_restores_main_logistics_rows(monkeypatch) 
         "message": "",
     }]
     assert "dingtalk_instance_id" in audit_new_value["affected_fields"]
-    assert batch_updates[0][2]["item_count"] == 1
+    assert batch_updates == []
+    assert "确认" in repaired["reason"]
 
 
 def test_invalid_purchase_item_repair_protects_mixed_or_manual_rows(monkeypatch) -> None:
@@ -2290,7 +2353,7 @@ def test_invalid_purchase_item_repair_protects_mixed_or_manual_rows(monkeypatch)
     assert protected["protected_count"] == 1
 
 
-def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> None:
+def test_invalid_purchase_item_repair_never_enters_destructive_transaction(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 
     events = []
@@ -2315,6 +2378,10 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
             return self
 
     class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, field):
+            return "AIR"
+
         @staticmethod
         def savepoint(name):
             events.append(("savepoint", name))
@@ -2369,17 +2436,11 @@ def test_invalid_purchase_item_repair_rolls_back_insert_failure(monkeypatch) -> 
 
     assert result["action"] == "manual_required"
     assert result["deleted_count"] == 0
-    assert events == [
-        ("savepoint", "before_invalid_purchase_item_repair"),
-        "delete",
-        "insert_failed",
-        ("rollback", "before_invalid_purchase_item_repair"),
-    ]
+    assert events == []
     assert audit_payloads[0]["field_name"] == "invalid_purchase_item_repair_review"
     audit_result = json.loads(audit_payloads[0]["new_value"])
     assert audit_result["action"] == "manual_required"
-    assert audit_result["rolled_back"] is True
-    assert "insert failed" in audit_result["reason"]
+    assert "确认" in audit_result["reason"]
 
 
 def test_invalid_purchase_item_manual_review_reports_audit_failure(monkeypatch) -> None:
@@ -2472,6 +2533,11 @@ def test_sync_linked_purchase_fields_rebuilds_items_from_purchase_expense_rows(m
             return self
 
     class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, field):
+            assert (doctype, name, field) == ("Overseas Cost Batch", "BATCH-001", "transport_mode")
+            return "AIR"
+
         @staticmethod
         def delete(doctype, filters):
             deleted_filters.append((doctype, filters))
@@ -2627,6 +2693,9 @@ def test_sync_oa_logistics_allocation_rule_creates_rule_and_recalculates(monkeyp
         return {"ok": True, "summary_snapshot": {"total_cost_rmb": 1234}}
 
     monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "_oa_fee_sync_context", lambda *args, **kwargs: {"transport_mode": "SEA"})
+    monkeypatch.setattr(FakeFrappe.db, "sql", lambda *args, **kwargs: [], raising=False)
+    monkeypatch.setattr(FakeFrappe.db, "set_value", lambda *args, **kwargs: None, raising=False)
     monkeypatch.setattr("overseas_costing.services.calculate_service.recalculate_batch", fake_recalculate_batch)
 
     rule_result = _sync_oa_logistics_allocation_rule(
@@ -2688,6 +2757,9 @@ def test_sync_express_single_quote_creates_freight_rule(monkeypatch) -> None:
             return FakeDoc(payload)
 
     monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "_oa_fee_sync_context", lambda *args, **kwargs: {"transport_mode": "EXPRESS"})
+    monkeypatch.setattr(FakeFrappe.db, "sql", lambda *args, **kwargs: [], raising=False)
+    monkeypatch.setattr(FakeFrappe.db, "set_value", lambda *args, **kwargs: None, raising=False)
 
     rule_result = _sync_oa_logistics_allocation_rule(
         batch_name="202608131523000315085",
@@ -2714,7 +2786,7 @@ def test_sync_express_single_quote_creates_freight_rule(monkeypatch) -> None:
     assert rule_result["rule"]["amount"] == 3403.49434
     assert rule_result["rule"]["currency"] == "RMB"
     assert rule_result["rule"]["rule_code"] == "oa_logistics_freight"
-    assert inserted_rules[0]["expense_category"] == "国际物流费用"
+    assert inserted_rules[0]["expense_category"] == "国际快递费"
 
 
 def test_sync_oa_logistics_allocation_rule_blocks_invalid_batch_before_db_write(monkeypatch) -> None:

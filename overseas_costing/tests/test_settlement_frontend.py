@@ -206,6 +206,7 @@ const html=m.renderManualDocumentCards(plan,{sea_packing_list:archive},'SEA',{})
 assert(html.includes('preview-manual-document'));
 for(const action of ['delete-manual-document','upload-manual-document','manual-fill-gap','open-dingtalk-packing-picker'])assert(!html.includes('data-action="'+action+'"'));
 assert(m.renderManualDocumentCards(plan,{sea_packing_list:{...archive,source_type:'Manual'}},'SEA',{}).includes('delete-manual-document'));
+assert(m.renderManualDocumentCards(plan,{sea_packing_list:{...archive,source_type:'Manual'}},'SEA',{}).includes('open-packing-flow'));
 '''.replace('MANUAL', manual))
 
 
@@ -237,4 +238,83 @@ def test_existing_coverage_can_be_reviewed_even_when_new_source_has_known_scope(
 const fields=w.settlementChoiceFields({coverage:'freight',amount:100},['freight','customs']);
 assert(fields.some(f=>f.fieldname==='coverage_customs'&&f.default===1));
 assert(fields.some(f=>f.fieldname==='coverage_freight'));
+''')
+
+
+WORKSPACE_METHODS = '''
+const Workspace=new Function('return class {'+fs.readFileSync(WORKSPACE,'utf8')+'}')();
+for (const name of Object.getOwnPropertyNames(Workspace.prototype)) if(name!=='constructor') w[name]=Workspace.prototype[name];
+'''.replace('WORKSPACE', json.dumps(str(PARTS / '78-material-fee-workspace.js')))
+
+
+def test_current_inline_workspace_retains_material_fee_and_packing_controls_with_settlement_strip():
+    run_js(WORKSPACE_METHODS + '''
+const state={batchName:'B',materials:{},fees:{summary:{}},preview:{}};
+w.ensureMaterialFeeState=()=>state;w.detailState={batchName:'B',versionName:'V',tab:'documents'};
+let html='';let loaded;
+w.$root={find:()=>({html:value=>html=value})};w.closeMaterialAICandidatePopover=()=>{};
+w.renderMaterialAIProgressChip=()=>'';w.renderMaterialFeeGrid=()=>'<table data-current-material-grid></table>';
+w.renderMaterialFeeTable=()=>'<table data-current-fee-table></table>';w.renderMaterialFeeCostTable=()=>'<section data-current-cost-result></section>';
+w.renderMaterialFeeTodos=()=>'';w.bindMaterialGridScrollControls=()=>{};w.restoreMaterialFeeInputFocus=()=>{};
+w.loadSettlementStrip=(batch)=>loaded=batch;
+w.renderMaterialFeeWorkspace();
+assert(html.includes('data-area="settlement-strip"'));
+assert(html.indexOf('ocw-mf-page-head')<html.indexOf('data-area="settlement-strip"'));
+assert(html.indexOf('data-area="settlement-strip"')<html.indexOf('ocw-mf-material-section'));
+for(const marker of ['data-current-material-grid','data-current-fee-table','data-current-cost-result','mf-import-wiki','mf-ai-fill','mf-show-sources'])assert(html.includes(marker));
+assert.equal(loaded,'B');assert(!html.includes('manual-documents'));
+''')
+
+
+def test_archive_evidence_uses_current_sources_dialog_and_ignores_late_closed_response():
+    run_js(WORKSPACE_METHODS + '''
+const state={batchName:'B',fees:{evidence_candidates:[{attachment:'manual',file_name:'manual.xlsx'}]}};
+w.ensureMaterialFeeState=()=>state;w.detailState={batchName:'B',versionName:'V',tab:'documents'};
+const calls=[];let resolve;let sourceHtml='';let active;
+w.call=(method,args)=>{calls.push({method,args});return new Promise(r=>resolve=r)};
+global.frappe={ui:{Dialog:class {constructor(options){this.options=options;this.fields_dict={sources:{$wrapper:{html:html=>sourceHtml=html}}};this.$wrapper={addClass:()=>{},on:()=>{}};active=this;}show(){}hide(){this.onhide?.();}}}};
+w.openMaterialFeeSourcesDialog();
+assert.equal(calls.length,1);assert.equal(calls[0].method,'overseas_costing.api.import_api.list_manual_document_attachments');
+assert.equal(calls[0].args.version_name,'V');
+active.hide();resolve({ok:true,items:[{name:'oa',source_type:'OA',file_name:'<archived>',file_url:'/private/files/a.xlsx'}]});
+await new Promise(r=>setImmediate(r));assert.equal(sourceHtml,'');
+w.materialFeeState=state;w.openMaterialFeeSourcesDialog();
+resolve({ok:true,items:[{name:'oa',source_type:'OA',audit_only:true,file_name:'<archived>',file_url:'/private/files/a.xlsx'}]});
+await new Promise(r=>setImmediate(r));
+assert(sourceHtml.includes('manual.xlsx'));assert(sourceHtml.includes('&lt;archived&gt;'));assert(sourceHtml.includes('审计留存，只读'));
+assert(sourceHtml.includes('data-mf-preview-source'));assert(!sourceHtml.includes('delete-manual-document'));
+''')
+
+
+def test_settlement_quantity_is_readonly_and_distinct_from_original_packing_values():
+    run_js(WORKSPACE_METHODS + '''
+w.materialFeeState={};w.materialAICell=()=>null;w.renderMaterialAICandidates=()=>'';w.formatValue=x=>String(x);
+const item={name:'A',actual_shipped_qty:4,shipped_uom:'箱',effective_shipping_quantity:6,effective_shipping_uom:'件',settlement_cargo:{quantity:6,unit:'件'}};
+const quantity=w.renderMaterialFeeGridCell(item,{field:'actual_shipped_qty',label:'发货数量'},new Set(),1);
+const unit=w.renderMaterialFeeGridCell(item,{field:'shipped_uom',label:'发货单位'},new Set(),2);
+assert(quantity.includes('物流结算采用'));assert(quantity.includes('6'));assert(quantity.includes('装箱原值 4 箱'));
+assert(!quantity.includes('<input'));assert(!unit.includes('<input'));assert(unit.includes('件'));
+assert(w.renderMaterialFeeGridCell({...item,settlement_cargo:null},{field:'actual_shipped_qty',label:'发货数量'},new Set(),1).includes('<input'));
+''')
+
+
+def test_detail_entry_uses_production_inline_workspace_and_history_entry_stays_in_pull_dialog():
+    detail = (PARTS / '82-detail-page.js').read_text()
+    documents = detail.split('  async renderDocumentsDetailTab() {', 1)[1].split('\n  }', 1)[0]
+    assert 'loadMaterialFeeWorkspace' in documents
+    assert 'renderManualDocumentPanel' not in documents
+    pull = (PARTS / '50-import-category.js').read_text()
+    assert 'data-action="settlement-history"' in pull
+    assert 'this.openSettlementHistory(start)' in pull
+
+
+def test_final_source_fee_row_is_readonly_while_ordinary_fee_remains_editable():
+    run_js(WORKSPACE_METHODS + '''
+w.materialFeeState={preview:{included_fees:[{fee_key:'final'}]}};w.materialFeeSavedCostPreview=()=>null;w.formatMoney=x=>String(x);
+const fee={logical_fee_key:'final',source_binding_id:'binding',is_final:1,amount_state:'ACTUAL',currency:'RMB',amount:0,allocation_basis:'volume',allocation:{basis:'gross_weight'}};
+const html=w.renderMaterialFeeRow(fee);
+assert(!html.includes('<input'));assert(!html.includes('<select'));assert(!html.includes('mf-edit-fee'));
+assert(html.includes('RMB 0'));assert(html.includes('物流采购支出'));assert(html.includes('mf-view-settlement-source'));
+assert(html.includes('分摊'));assert(html.includes('毛重'));
+assert(w.renderMaterialFeeRow({...fee,source_binding_id:null,is_final:0}).includes('data-mf-fee-amount'));
 ''')

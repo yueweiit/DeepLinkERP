@@ -47,7 +47,9 @@ def test_final_rule_and_quantity_cannot_diverge_from_adopted_source(setup, monke
     l.put('rule',final['name'],{'amount':999})
     assert any('费用' in reason and '不一致' in reason for reason in runtime.calculation_blockers(b['name'],v['name']))
     l.put('rule',final['name'],{'amount':'100'})
-    l.put('item',i['name'],{'quantity':999})
+    import json
+    meta=json.loads(l.get('item',i['name'])['extra_json']);meta['settlement_cargo']['quantity']='999'
+    l.put('item',i['name'],{'extra_json':json.dumps(meta)})
     assert any('数量' in reason and '不一致' in reason for reason in runtime.calculation_blockers(b['name'],v['name']))
 
 

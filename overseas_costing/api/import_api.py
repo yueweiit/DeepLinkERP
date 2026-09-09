@@ -48,7 +48,7 @@ def _verified_packing_attachment(
 def import_main_excel(
     source_name: str,
     source_type: str = "excel",
-    transport_mode: str = "SEA",
+    transport_mode: str = "",
     source_sheet: str | None = None,
     project_collection: str | None = None,
     version_type: str = "Estimated",
@@ -590,6 +590,8 @@ def confirm_logistics_quote_candidate(
     candidate_index: int,
     version_name: str | None = None,
     confirmation_note: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """人工确认一条物流报价候选后，生成对应的整票物流费用分摊规则。"""
 
@@ -599,6 +601,8 @@ def confirm_logistics_quote_candidate(
         candidate_index=candidate_index,
         version_name=version_name,
         confirmation_note=confirmation_note,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
 
 
@@ -618,6 +622,8 @@ def save_manual_logistics_quote(
     pre_delivery_date: str | None = None,
     destination: str | None = None,
     note: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """手工补录物流报价后，生成/更新对应的整票物流费用分摊规则。"""
 
@@ -637,6 +643,8 @@ def save_manual_logistics_quote(
         pre_delivery_date=pre_delivery_date,
         destination=destination,
         note=note,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
     )
 
 

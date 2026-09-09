@@ -236,7 +236,7 @@ def test_get_batch_list_defaults_to_recent_days_with_classic_samples(monkeypatch
                 }
             ]
 
-    FakeFrappe.get_list = FakeFrappe.get_all
+    FakeFrappe.get_list = staticmethod(lambda *args, **kwargs: [{'name': 'BATCH-RECENT'}, {'name': 'BATCH-HPCU'}])
     monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
     monkeypatch.setattr(batch_service, "_recent_start", lambda recent_days: "2026-07-15 00:00:00")
     monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
@@ -247,8 +247,9 @@ def test_get_batch_list_defaults_to_recent_days_with_classic_samples(monkeypatch
     assert result["ok"] is True
     assert result["total"] == 2
     assert len(calls) == 2
-    assert calls[0][1]["filters"] == [["source_created_at", ">=", "2026-07-15 00:00:00"]]
-    assert calls[1][1]["filters"] == []
+    scope = ["name", "in", ["BATCH-RECENT", "BATCH-HPCU"]]
+    assert calls[0][1]["filters"] == [scope, ["source_created_at", ">=", "2026-07-15 00:00:00"]]
+    assert calls[1][1]["filters"] == [scope]
     assert ["batch_no", "=", "HPCU5155607"] in calls[1][1]["or_filters"]
     classic_item = next(item for item in result["items"] if item["batch_no"] == "HPCU5155607")
     assert classic_item["is_classic_sample"] == 1
@@ -369,7 +370,7 @@ def test_get_batch_list_keyword_can_find_history_batch_by_item_field(monkeypatch
                 ]
             return []
 
-    FakeFrappe.get_list = FakeFrappe.get_all
+    FakeFrappe.get_list = staticmethod(lambda *args, **kwargs: [{'name': 'HISTORY-BATCH'}])
     monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
     monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
     monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
@@ -393,7 +394,7 @@ def test_get_batch_list_uses_explicit_source_created_date_range(monkeypatch) -> 
             calls.append((doctype, kwargs))
             return []
 
-    FakeFrappe.get_list = FakeFrappe.get_all
+    FakeFrappe.get_list = staticmethod(lambda *args, **kwargs: [{'name': 'ALLOWED'}])
     monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
     monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
     monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
@@ -409,6 +410,7 @@ def test_get_batch_list_uses_explicit_source_created_date_range(monkeypatch) -> 
 
     assert result["ok"] is True
     assert calls[0][1]["filters"] == [
+        ["name", "in", ["ALLOWED"]],
         ["source_created_at", ">=", "2026-07-21 00:00:00"],
         ["source_created_at", "<=", "2026-08-21 23:59:59"],
     ]
@@ -912,6 +914,7 @@ def test_build_batch_source_status_explains_missing_and_pending_purchase_approva
             "name": "BATCH-MISSING",
             "source_type": "oa_logistics",
             "source_approval_no": "LOGISTICS-001",
+            "extra_json": "{}",
         }
     )
     pending = _build_batch_source_status(

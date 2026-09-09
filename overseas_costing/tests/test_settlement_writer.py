@@ -47,7 +47,7 @@ def setup():
     batch = ledger.create('batch', {'batch_no': 'B', 'status': 'Calculated', 'confirm_status': 'Pending'})
     version = ledger.create('version', {'batch': batch['name'], 'status': 'Active', 'is_current': 1})
     ledger.put('batch', batch['name'], {'current_version': version['name']})
-    item = ledger.create('item', {'batch': batch['name'], 'version': version['name'], 'material_code': 'A', 'unit': '件', 'quantity': 2, 'unit_price': 10, 'goods_value': 20, 'gross_weight_kg': 4, 'volume_m3': 3, 'extra_json': dumps({'goods_value_source': 'derived_quantity_unit_price'})})
+    item = ledger.create('item', {'batch': batch['name'], 'version': version['name'], 'material_code': 'A', 'unit': '件', 'quantity': 2, 'unit_price': 10, 'goods_value': 20, 'purchase_currency':'RMB', 'purchase_uom':'件', 'unit_price_uom':'件', 'source_doc_no':'GOODS-PURCHASE', 'gross_weight_kg': 4, 'volume_m3': 3, 'extra_json': dumps({'goods_value_source': 'derived_quantity_unit_price'})})
     rule = ledger.create('rule', {'batch': batch['name'], 'version': version['name'], 'rule_code': 'oa_logistics_freight', 'amount': 200, 'currency': 'RMB', 'is_enabled': 1, 'is_active': 1})
     logistics = ingest(store, source('L', 'logistics'))
     row = source('E', amount='100')
@@ -65,8 +65,10 @@ def test_application_atomic_quantity_packing_and_repeated_sync(setup):
     applied = apply_binding(s, l, binding['id'], 'u')
     assert applied['application_status'] == 'applied_pending'
     changed = l.get('item', item['name'])
-    assert str(changed['quantity']) == '4'
-    assert str(changed['goods_value']) == '40'
+    assert str(changed['quantity']) == '2'
+    assert str(changed['goods_value']) == '20'
+    meta = json.loads(changed['extra_json'])
+    assert meta['settlement_cargo']['quantity'] == '4' and meta['settlement_valuation']['amount_rmb'] == '40.000000'
     assert changed['gross_weight_kg'] == 4 and changed['volume_m3'] == 3
     assert json.loads(changed['extra_json'])['settlement_packing_review']
     assert l.get('rule', rule['name'])['is_enabled'] == 0

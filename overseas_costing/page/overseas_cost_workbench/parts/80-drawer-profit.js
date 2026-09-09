@@ -177,9 +177,9 @@
     const summary = batch.summary_snapshot || {};
     const itemCount = items.length || Number(batch.item_count || 0);
     const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
-    const totalCost = items.length
+    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
       ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+      : Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     const fields = [
       ["报关/来源单号", batch.customs_no || batch.source_approval_no || batch.batch_no || "--"],
       ["运单/柜号", batch.waybill_no || "--"],
@@ -409,9 +409,9 @@
   renderErpFlowPanel(batch, items) {
     const summary = batch.summary_snapshot || {};
     const itemCount = items.length || Number(batch.item_count || 0);
-    const totalCost = items.length
+    const totalCost = summary.calculation_schema === 2 ? Number(summary.total_cost_rmb || 0) : items.length
       ? this.sumRowsNumber(items, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0);
+      : Number((summary.calculation_schema === 2 ? summary.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb) || 0);
     const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
     const hasVersion = this.hasText(batch.current_version);
     const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
@@ -495,6 +495,7 @@
   }
 
   sourceStatusLabel(sourceStatus, batch) {
+    if (sourceStatus.has_oa_logistics) return "资料来自国际物流审批";
     if (sourceStatus.invalid_business) return "采购审批无效";
     if (Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0) > 0) return "已有关联资料";
     if (batch.source_approval_no || batch.source_instance_id || batch.source_dingtalk_url) return "已关联钉钉审批单";
@@ -507,6 +508,7 @@
     const statuses = Array.isArray(sourceStatus.linked_purchase_approval_statuses)
       ? sourceStatus.linked_purchase_approval_statuses.filter(Boolean)
       : [];
+    if ((state === "invalid" || state === "excluded" || sourceStatus.invalid_business) && sourceStatus.has_oa_logistics) return "关联采购审批已排除";
     if (state === "invalid" || sourceStatus.invalid_business) return "采购审批无效";
     if (state === "pending") return count ? `${count} 条状态未同步` : "状态未同步";
     if (state === "missing") return "未关联采购审批";

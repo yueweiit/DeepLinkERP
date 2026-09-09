@@ -85,6 +85,70 @@ def test_batch_detail_normalizes_main_linked_comments_and_archives(monkeypatch) 
     assert "raw_payload" not in result["main_approval"]
 
 
+def test_missing_main_returns_structured_repair_state_not_false_unlinked_message(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    class DB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {
+                "name": "B1", "batch_no": "OA-1", "source_type": "oa_logistics",
+                "source_approval_no": "OA-1", "source_instance_id": "PROC-MISSING", "extra_json": "{}",
+            }
+
+    class Source:
+        @staticmethod
+        def get_instance_bundle(_ids):
+            return {"instances": {}, "attachments": [], "health": {}}
+
+        @staticmethod
+        def get_repair_statuses(_ids):
+            return {"PROC-MISSING": {"status": "retry", "attempts": 2, "error_code": "HTTP_500", "error_message": "temporary"}}
+
+    monkeypatch.setattr(service, "frappe", type("F", (), {"db": DB()})())
+    monkeypatch.setattr(service, "_get_approval_source", lambda: Source())
+
+    result = service.get_batch_dingtalk_approval_detail("B1")
+
+    assert result["ok"] is False
+    assert result["source_state"]["code"] == "repairing"
+    assert result["source_state"]["purchase_link_state"] == "unknown"
+    assert result["repair_status"]["attempts"] == 2
+    assert "正在补同步" in result["message"]
+
+
+def test_main_payload_links_are_trusted_even_when_old_batch_trace_is_empty(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    class DB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {
+                "name": "B1", "batch_no": "OA-1", "source_type": "oa_logistics",
+                "source_approval_no": "OA-1", "source_instance_id": "MAIN", "extra_json": "{}",
+            }
+
+    class Source:
+        calls = []
+
+        def get_instance_bundle(self, ids):
+            self.calls.append(list(ids))
+            if len(self.calls) == 1:
+                return {"instances": {"MAIN": {"processInstanceId": "MAIN", "businessId": "OA-1", "status": "RUNNING"}}, "attachments": [], "health": {}}
+            return {"instances": {"BUY": {"processInstanceId": "BUY", "businessId": "PUR-1", "status": "COMPLETED", "result": "agree"}}, "attachments": [], "health": {}}
+
+    source = Source()
+    monkeypatch.setattr(service, "frappe", type("F", (), {"db": DB()})())
+    monkeypatch.setattr(service, "_get_approval_source", lambda: source)
+    monkeypatch.setattr(service, "_trusted_linked_instance_ids", lambda _payload: ["BUY"])
+
+    result = service.get_batch_dingtalk_approval_detail("B1")
+
+    assert source.calls == [["MAIN"], ["BUY"]]
+    assert result["source_state"]["purchase_link_state"] == "available"
+    assert result["linked_purchase_approvals"][0]["instance_id"] == "BUY"
+
+
 def test_form_fields_render_structured_values_without_download_credentials() -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

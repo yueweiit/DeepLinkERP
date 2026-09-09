@@ -37,12 +37,12 @@ def main():
         'first_name': 'Local settlement reader', 'enabled': 1, 'send_welcome_email': 0,
         'roles': [{'role': '海外成本核算用户'}]}).insert(ignore_permissions=True)
 
-    def raw_source(corp, kind, amount='0', documents=None, hour='00'):
+    def raw_source(corp, kind, amount='0', documents=None, hour='00', currency='RMB'):
         fields = [{'name': '运输说明', 'value': '海运 MXT500174'}]
         if kind == 'expense':
             fields += [{'name': '采购支出', 'value': '服务类采购Compra De Servicios'},
                        {'name': '服务类采购', 'value': '物流及运输服务Servicios de logística y transporte'},
-                       {'name': '总金额Monto Total', 'value': amount}, {'name': '币种Moneda', 'value': 'RMB'},
+                       {'name': '总金额Monto Total', 'value': amount}, {'name': '币种Moneda', 'value': currency},
                        {'name': '货物明细', 'componentType': 'TableField', 'value': [
                            {'rowId': 'a', 'rowValue': [{'name': '物料编码', 'value': 'A'},
                             {'name': '数量', 'value': '2'}, {'name': '单位', 'value': '件'}]}]}]
@@ -54,18 +54,19 @@ def main():
     def ingest(raw):
         return db.ingest(parse_source(raw, logistics_codes={'logistics'}))
 
-    def fixture(tag, amount='0', **physical):
+    def fixture(tag, amount='0', currency='RMB', fx_rmb_to_mxn=2.5, fx_usd_to_rmb=None, **physical):
         corp = 'LOCAL-DOC-' + run + '-' + tag
-        batch = ledger.create('batch', {'batch_no': corp, 'status': 'Draft', 'confirm_status': 'Pending', 'source_corp_id': corp})
+        batch = ledger.create('batch', {'batch_no': corp, 'status': 'Draft', 'transport_mode': 'SEA', 'confirm_status': 'Pending', 'source_corp_id': corp})
         version = ledger.create('version', {'batch': batch['name'], 'version_code': 'LOCAL-INITIAL', 'status': 'Active',
-                                          'is_current': 1, 'fx_rmb_to_mxn': 2.5})
+                                          'is_current': 1, 'fx_rmb_to_mxn': fx_rmb_to_mxn, 'fx_usd_to_rmb': fx_usd_to_rmb})
         ledger.put('batch', batch['name'], {'current_version': version['name']})
         item = ledger.create('item', {'batch': batch['name'], 'version': version['name'], 'row_no': 1,
              'material_code': 'A', 'product_name': '本地装箱集成验证', 'unit': '件', 'quantity': 2,
-             'actual_shipped_qty': 0, 'unit_price': 10, 'goods_value': 20, 'gross_weight_kg': 0, 'volume_m3': 0,
+             'actual_shipped_qty': 0, 'unit_price': 10, 'goods_value': 20,
+             'purchase_currency': 'RMB', 'purchase_uom': '件', 'unit_price_uom': '件', 'source_doc_no': 'LOCAL-PURCHASE', 'gross_weight_kg': 0, 'volume_m3': 0,
              'extra_json': dumps({'goods_value_source': 'purchase_approval'}), **physical})
         logistics = ingest(raw_source(corp, 'logistics'))
-        expense = ingest(raw_source(corp, 'expense', amount=amount))
+        expense = ingest(raw_source(corp, 'expense', amount=amount, currency=currency))
         candidate = match_source(db, expense['id'])[0]
         binding = confirm_candidate(db, candidate['id'], candidate['revision'], 'local-document-test')
         db.insert('batch_map', {'id': logistics['id'], 'source_id': logistics['id'], 'batch': batch['name'], 'data': '{}'})
@@ -305,6 +306,27 @@ def main():
     assert recalculate_batch(batch['name'])['ok'] is True
     db.commit()
     report('fee_detail_stable_tail_reordering_no_total_double_count', ok=True, batch=batch['name'])
+    # Actual SQL storage must conserve both currencies after stable per-fee allocation.
+    corp, batch, version, item, binding = fixture('allocation-tail', amount='1', currency='MXN', fx_rmb_to_mxn=3, actual_shipped_qty=2, gross_weight_kg=1)
+    for position, code in enumerate(('B', 'C'), 2):
+        ledger.create('item', {'batch': batch['name'], 'version': version['name'], 'row_no': position,
+            'material_code': code, 'product_name': code, 'unit': '件', 'quantity': 2,
+            'actual_shipped_qty': 2, 'unit_price': 10, 'goods_value': 20, 'gross_weight_kg': 1,
+            'purchase_currency': 'RMB', 'purchase_uom': '件', 'unit_price_uom': '件', 'source_doc_no': 'LOCAL-PURCHASE'})
+    applied = apply_binding(db, ledger, binding['id'], 'local-document-test')
+    assert applied['application_status'] == 'applied', applied
+    calculated = recalculate_batch(batch['name'])
+    rows = ledger.rows('item', batch=batch['name'], version=version['name'])
+    assert sum(Decimal(str(row['freight_alloc_rmb'])) for row in rows) == Decimal('0.333333')
+    assert sum(Decimal(str(row['freight_alloc_mxn'])) for row in rows) == Decimal('1')
+    assert sum(Decimal(str(row['total_logistics_mxn'])) for row in rows) == Decimal('1')
+    snapshots = [json.loads(row['derived_json']) for row in rows]
+    assert all(snapshot['calculation_schema'] == 2 for snapshot in snapshots)
+    assert sum(Decimal(rule['allocated_rmb']) for snapshot in snapshots for rule in snapshot['allocated_rules'] if rule.get('is_final')) == Decimal('0.333333')
+    assert sum(Decimal(rule['allocated_mxn']) for snapshot in snapshots for rule in snapshot['allocated_rules'] if rule.get('is_final')) == Decimal('1')
+    assert Decimal(calculated['summary_snapshot']['fee_pool_rmb']) == Decimal('0.333333')
+    db.commit()
+    report('saved_schema_two_currency_allocation_conservation', ok=True, batch=batch['name'])
     report('document_integration_complete', ok=True, run=run, site=SITE)
     frappe.destroy()
 

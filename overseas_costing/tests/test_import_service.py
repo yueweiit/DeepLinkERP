@@ -18,6 +18,9 @@ from overseas_costing.services.attachment_parse_service import (
 )
 from overseas_costing.services.import_service import (
     _build_attachment_price_provenance,
+    _build_packing_unmatched_item_values,
+    _prepare_imported_item_values,
+    _protect_existing_shipping_values,
     _build_source_document_manual_review,
     _diagnose_ambiguous_source_row,
     _diagnose_unmatched_source_row,
@@ -50,6 +53,60 @@ from overseas_costing.services.import_service import (
     apply_packing_list_fillable_fields,
     download_oa_form_attachment,
 )
+
+
+def test_new_packing_item_has_stable_key_and_explicit_quantity_provenance(monkeypatch) -> None:
+    from overseas_costing.services import import_service as service
+
+    monkeypatch.setattr(service, "_filter_doctype_values", lambda _doctype, values, **_kwargs: values)
+    values = _build_packing_unmatched_item_values(
+        batch_doc_name="B1",
+        version_name="V1",
+        row_no=1,
+        mapped_row={
+            "material_code": "M1",
+            "actual_shipped_qty": 9,
+            "unit": "桶",
+        },
+        attachment_provenance={"source_file_name": "装箱计划.xlsx"},
+    )
+
+    assert values["stable_line_key"]
+    assert values["actual_shipped_qty_mode"] == "EXPLICIT_SOURCE"
+    assert values["purchase_uom"] == "桶"
+    assert values["shipped_uom"] == "桶"
+    assert values["cost_output_uom"] == "桶"
+
+
+def test_imported_purchase_row_defaults_shipping_to_purchase_quantity() -> None:
+    values = _prepare_imported_item_values(
+        {"material_code": "M1", "quantity": 34, "unit": "桶", "unit_price": 25},
+        source_revision="OA-REV-1",
+        include_stable_key=True,
+    )
+
+    assert values["stable_line_key"]
+    assert values["actual_shipped_qty_mode"] == "DEFAULT_PURCHASE"
+    assert values["purchase_uom"] == "桶"
+    assert values["unit_price_uom"] == "桶"
+    assert values["shipped_uom"] == "桶"
+    assert values["actual_shipped_qty_source_revision"] == "OA-REV-1"
+
+
+def test_reimport_without_explicit_shipping_never_clears_confirmed_quantity() -> None:
+    values = _protect_existing_shipping_values(
+        {
+            "actual_shipped_qty": 0,
+            "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+            "actual_shipped_qty_source_revision": "",
+            "shipped_uom": "件",
+            "cost_output_uom": "件",
+            "goods_value": 850,
+        },
+        source_actual_present=False,
+    )
+
+    assert values == {"goods_value": 850}
 
 
 def test_unmatched_row_diagnosis_explains_missing_code() -> None:

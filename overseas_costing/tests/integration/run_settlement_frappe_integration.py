@@ -3,6 +3,7 @@ Run inside bench/sites with PYTHONPATH=/tmp/settlement-code and the bench Python
 No credentials are read or printed; frappe reads the isolated site's config itself.
 """
 import json
+from decimal import Decimal
 import os
 from pathlib import Path
 import subprocess
@@ -86,15 +87,17 @@ def main():
 
     def fixture(tag, amount='0', quantity=2):
         corp = 'LOCAL-' + run + '-' + tag
-        batch = ledger.create('batch', {'batch_no': corp, 'status': 'Draft', 'confirm_status': 'Pending', 'source_corp_id': corp})
+        batch = ledger.create('batch', {'batch_no': corp, 'status': 'Draft', 'transport_mode': 'SEA', 'confirm_status': 'Pending', 'source_corp_id': corp})
         version = ledger.create('version', {'batch': batch['name'], 'version_code': 'LOCAL-INITIAL', 'status': 'Active', 'is_current': 1, 'fx_rmb_to_mxn': 2.5})
         ledger.put('batch', batch['name'], {'current_version': version['name']})
         item = ledger.create('item', {'batch': batch['name'], 'version': version['name'], 'row_no': 1,
                                      'material_code': 'A', 'product_name': '本地结算测试物料', 'unit': '件',
-                                     'quantity': 2, 'actual_shipped_qty': 2, 'unit_price': 10, 'goods_value': 20,
+                                     'quantity': 2, 'actual_shipped_qty': 2, 'actual_shipped_qty_mode': 'EXPLICIT_SOURCE',
+                                     'unit_price': 10, 'goods_value': 20, 'purchase_currency': 'RMB',
+                                     'purchase_uom': '件', 'unit_price_uom': '件', 'source_doc_no': 'LOCAL-PURCHASE',
                                      'gross_weight_kg': 4, 'volume_m3': 3, 'china_to_mexico_freight_rmb': 200,
                                      'extra_json': dumps({'goods_value_source': 'derived_quantity_unit_price'})})
-        rule = ledger.create('rule', {'batch': batch['name'], 'version': version['name'], 'rule_code': 'oa_logistics_freight',
+        rule = ledger.create('rule', {'batch': batch['name'], 'version': version['name'], 'rule_code': 'oa_logistics_freight', 'logical_fee_key': 'international_sea_freight', 'amount_status': 'ACTUAL',
                                      'amount': 200, 'currency': 'RMB', 'allocation_basis': 'gross_weight', 'is_enabled': 1, 'is_active': 1})
         logistics = ingest(source(corp + '-L', 'logistics', corp=corp))
         expense = ingest(source(corp + '-E', corp=corp, amount=amount, quantity=quantity))
@@ -111,7 +114,7 @@ def main():
     final = [r for r in ledger.rows('rule', batch=batch['name'], version=version['name']) if r.get('is_final')]
     assert len(final) == 1 and float(final[0]['amount']) == 0
     calc = recalculate_batch(batch['name'])
-    assert calc['ok'] and calc['summary_snapshot']['total_cost_rmb'] == 20, calc
+    assert calc['ok'] and Decimal(calc['summary_snapshot']['total_cost_rmb']) == 20, calc
     again = apply_binding(db, ledger, binding['id'], 'local-test')
     assert again['last_application'] == applied['last_application']
     assert db.count('application', binding_id=binding['id']) == 1
@@ -122,7 +125,10 @@ def main():
     applied = apply_binding(db, ledger, binding['id'], 'local-test')
     assert applied['application_status'] == 'applied_pending'
     updated = ledger.get('item', item['name'])
-    assert float(updated['quantity']) == 4 and float(updated['goods_value']) == 40 and float(updated['unit_price']) == 10
+    assert float(updated['quantity']) == 2 and float(updated['goods_value']) == 20 and float(updated['unit_price']) == 10
+    from overseas_costing.services.material_input_service import present_material_row
+    assert Decimal(present_material_row(updated)['effective_shipping_quantity']) == 4
+    assert Decimal(present_material_row(updated)['shipment_value_rmb']) == 40
     assert float(updated['gross_weight_kg']) == 4 and float(updated['volume_m3']) == 3
     assert calculation_blockers(batch['name'], version['name'])
     blocked = recalculate_batch(batch['name'])
@@ -131,7 +137,7 @@ def main():
              'expected_item_hash': item_review(updated)['revision'], 'packing_confirmed': True}], '本地核对保留装箱资料', 'local-test')
     assert resolved['application_status'] == 'applied'
     calc = recalculate_batch(batch['name'])
-    assert calc['ok'] and calc['summary_snapshot']['total_cost_rmb'] == 140, calc
+    assert calc['ok'] and Decimal(calc['summary_snapshot']['total_cost_rmb']) == 140, calc
     ledger.put('version', version['name'], {'status': 'Confirmed'})
     ledger.put('batch', batch['name'], {'confirm_status': 'Confirmed'})
     ingest(source(corp + '-E', corp=corp, amount='120', quantity=4, hour='01'))
@@ -142,8 +148,11 @@ def main():
     assert len(ledger.rows('version', batch=batch['name'])) == 2
     apply_binding(db, ledger, binding['id'], 'local-test')
     assert len(ledger.rows('version', batch=batch['name'])) == 2
-    frozen = recalculate_batch(batch['name'], version_name=version['name'])
-    assert frozen['ok'] is False
+    try:
+        frozen = recalculate_batch(batch['name'], version_name=version['name'])
+        assert frozen.get('ok') is False, 'Expected frozen version rejection'
+    except (ValueError, PermissionError):
+        pass
     db.commit()
     report('quantity_packing_resolution_and_confirmed_freeze', ok=True, batch=batch['name'], adjustment=adjusted['version'])
 

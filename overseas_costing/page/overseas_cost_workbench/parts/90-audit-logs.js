@@ -748,7 +748,7 @@
     const freightAlloc = hasLoadedItems ? this.sumRowsNumber(loadedItems, "freight_alloc_rmb") : 0;
     const totalCost = hasLoadedItems
       ? this.sumRowsNumber(loadedItems, "total_cost_rmb")
-      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+      : Number((batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb) || 0);
     const taxTotal = hasLoadedItems
       ? this.sumRowsNumber(loadedItems, "import_tax_total") ||
         this.sumRowsNumber(loadedItems, "mexico_customs_mxn") ||

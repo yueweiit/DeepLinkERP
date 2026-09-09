@@ -33,7 +33,9 @@
     const itemCount = hasLoadedItems ? itemRows.length : Number(batch.item_count || 0);
     const approvalState = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
 
-    if (sourceStatus.invalid_business || approvalState === "invalid") reasons.push("采购审批无效");
+    if (sourceStatus.invalid_business || approvalState === "invalid" || approvalState === "excluded") {
+      reasons.push(sourceStatus.has_oa_logistics ? "关联采购审批已排除" : "采购审批无效");
+    }
     if (!this.hasText(batch.subsidiary_code)) reasons.push("缺业务主体");
     if (approvalState === "missing") reasons.push("未关联采购审批");
     if (approvalState === "pending") reasons.push("采购审批状态未同步");

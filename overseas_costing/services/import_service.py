@@ -26,7 +26,8 @@ try:
 except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导入
     frappe = None
 
-from overseas_costing.services import attachment_parse_service
+from overseas_costing.services import attachment_parse_service, material_input_service
+from overseas_costing.services.transport_service import prepare_item_transport
 from overseas_costing.integrations.dingtalk_approval_source import (
     ArchiveIntegrityError,
     ArchiveNotReady,
@@ -215,6 +216,7 @@ NUMERIC_ITEM_FIELDS = {
     "mexico_misc_mxn",
     "mexico_inland_misc_rmb",
     "china_to_mexico_freight_rmb",
+    "net_weight_kg",
     "gross_weight_kg",
     "volume_m3",
     "volume_weight_kg",
@@ -232,7 +234,7 @@ NUMERIC_ITEM_FIELDS = {
 def import_main_excel(
     source_name: str,
     source_type: str = "excel",
-    transport_mode: str = "SEA",
+    transport_mode: str = "",
     source_sheet: str | None = None,
     project_collection: str | None = None,
     version_type: str = "Estimated",
@@ -384,7 +386,7 @@ def import_parsed_excel_blocks(
     result = import_main_excel(
         source_name=source_name,
         source_type="excel",
-        transport_mode="SEA",
+        transport_mode="",
         source_sheet=source_sheet,
         project_collection=project_collection,
         version_type=version_type,
@@ -1116,6 +1118,16 @@ def register_manual_document_attachment(
     if resolved_file_url:
         _attach_existing_file_to_attachment(resolved_file_url, doc.name)
     frappe.db.commit()
+    try:
+        from overseas_costing.services.material_ai_fill_service import schedule_source_ai_review
+
+        schedule_source_ai_review(
+            batch_doc_name,
+            resolved_version_name,
+            trigger_mode="LOCAL_UPLOAD",
+        )
+    except Exception:
+        pass
     return {
         "ok": True,
         "attachment": {
@@ -1156,6 +1168,12 @@ def delete_manual_document_attachment(attachment_name: str) -> dict:
         return {"ok": False, "attachment_name": resolved_attachment_name, "message": "只能删除人工上传资料记录。"}
 
     rollback_result = _rollback_manual_document_attachment_parse_effects(attachment_doc)
+    from overseas_costing.services import fee_service
+
+    fee_service.unlink_fee_evidence_for_attachment(
+        resolved_attachment_name,
+        reason="费用凭证附件已删除，保留原关联历史。",
+    )
     frappe.delete_doc("Overseas Cost Attachment", resolved_attachment_name, ignore_permissions=True)
     frappe.db.commit()
     rollback_message = ""
@@ -3218,11 +3236,11 @@ def _resolve_or_create_excel_batch(
         "batch_no": batch_no,
         "customs_no": block.get("customsNo") or "",
         "waybill_no": waybill_no,
-        "transport_mode": normalize_transport_mode(block.get("transportMode") or transport_mode) or "SEA",
+        "transport_mode": normalize_transport_mode(block.get("transportMode") or transport_mode) or "",
         "business_type": normalize_business_type(
             block.get("businessType") or block.get("business_type") or block.get("transportMode"),
             transport_mode=block.get("transportMode") or transport_mode,
-        ) or normalize_business_type(transport_mode, transport_mode=transport_mode) or "SEA_STANDARD",
+        ) or normalize_business_type(transport_mode, transport_mode=transport_mode) or "",
         "project_collection": project_collection or block.get("projectCollection") or "",
         "source_type": "excel",
         "source_file_name": source_name,
@@ -3238,6 +3256,9 @@ def _resolve_or_create_excel_batch(
     }
 
     if existing_name:
+        for fieldname in ("transport_mode", "business_type"):
+            if not values[fieldname]:
+                values.pop(fieldname)
         frappe.db.set_value("Overseas Cost Batch", existing_name, values, update_modified=True)
         return frappe.get_doc("Overseas Cost Batch", existing_name), "updated"
 
@@ -3284,6 +3305,48 @@ def _resolve_or_create_excel_version(
     return frappe.get_doc(values).insert(ignore_permissions=True), "created"
 
 
+def _prepare_imported_item_values(
+    mapped_row: dict,
+    *,
+    source_revision: str = "",
+    include_stable_key: bool = False,
+    batch_transport_mode: str = "",
+) -> dict:
+    """Attach explicit quantity/unit provenance to a normalized imported row."""
+
+    values = prepare_item_transport(mapped_row, batch_transport_mode)
+    unit = normalize_unit(values.get("purchase_uom") or values.get("unit")) or ""
+    shipped_uom = normalize_unit(values.get("shipped_uom") or unit) or ""
+    values["purchase_uom"] = unit
+    values["shipped_uom"] = shipped_uom
+    values["cost_output_uom"] = shipped_uom
+    if values.get("unit_price") not in (None, "") and not values.get("unit_price_uom"):
+        values["unit_price_uom"] = unit
+    values["actual_shipped_qty_mode"] = (
+        "EXPLICIT_SOURCE" if _to_float(values.get("actual_shipped_qty")) > 0 else "DEFAULT_PURCHASE"
+    )
+    values["actual_shipped_qty_source_revision"] = str(source_revision or "")
+    if include_stable_key:
+        values["stable_line_key"] = material_input_service.ensure_stable_line_key(values)
+    return values
+
+
+def _protect_existing_shipping_values(values: dict, *, source_actual_present: bool) -> dict:
+    """Keep confirmed shipping facts when a normal source refresh omits them."""
+
+    protected = dict(values or {})
+    if not source_actual_present:
+        for fieldname in (
+            "actual_shipped_qty",
+            "actual_shipped_qty_mode",
+            "actual_shipped_qty_source_revision",
+            "shipped_uom",
+            "cost_output_uom",
+        ):
+            protected.pop(fieldname, None)
+    return protected
+
+
 def _upsert_excel_items(
     *,
     batch_doc_name: str,
@@ -3295,7 +3358,9 @@ def _upsert_excel_items(
     created_count = 0
     updated_count = 0
     unchanged_count = 0
+    batch_transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "transport_mode") or ""
     for index, mapped_row in enumerate(mapped_rows):
+        source_actual_present = _to_float(mapped_row.get("actual_shipped_qty")) > 0
         mapped_row = _coerce_item_numeric_defaults(mapped_row)
         row_no = mapped_row.get("row_no") or index + 1
         quantity = _to_float(mapped_row.get("quantity"))
@@ -3304,7 +3369,16 @@ def _upsert_excel_items(
             mapped_row["goods_value"] = unit_price * quantity
 
         values = {
-            **mapped_row,
+            **_prepare_imported_item_values(
+                mapped_row,
+                batch_transport_mode=batch_transport_mode,
+                source_revision=str(
+                    mapped_row.get("dingtalk_instance_id")
+                    or mapped_row.get("source_doc_no")
+                    or mapped_row.get("source_file_name")
+                    or ""
+                ),
+            ),
             "batch": batch_doc_name,
             "version": version_name,
             "row_no": row_no,
@@ -3316,6 +3390,10 @@ def _upsert_excel_items(
             "name",
         )
         if existing_name:
+            values = _protect_existing_shipping_values(
+                values,
+                source_actual_present=source_actual_present,
+            )
             filtered_values = _filter_doctype_values("Overseas Cost Item", values)
             if _item_values_changed(existing_name, filtered_values):
                 frappe.db.set_value(
@@ -3331,6 +3409,7 @@ def _upsert_excel_items(
             continue
 
         values["doctype"] = "Overseas Cost Item"
+        values["stable_line_key"] = material_input_service.ensure_stable_line_key(values)
         values = _filter_doctype_values("Overseas Cost Item", values, keep_doctype=True)
         upserted_items.append(frappe.get_doc(values).insert(ignore_permissions=True).name)
         created_count += 1
@@ -3407,6 +3486,10 @@ def _upsert_default_allocation_rules(
             "is_enabled": 1,
         }
         if existing_name:
+            enabled = frappe.db.get_value("Overseas Cost Allocation Rule", existing_name, "is_enabled")
+            if enabled in (0, "0", False):
+                upserted_rules.append(existing_name)
+                continue
             frappe.db.set_value("Overseas Cost Allocation Rule", existing_name, values, update_modified=True)
             upserted_rules.append(existing_name)
             continue
@@ -3676,6 +3759,8 @@ def confirm_logistics_quote_candidate(
     candidate_index: int | str,
     version_name: str | None = None,
     confirmation_note: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """人工确认 OA 物流报价候选后才写入整票物流费用分摊规则。"""
 
@@ -3703,7 +3788,9 @@ def confirm_logistics_quote_candidate(
     batch_row = _get_batch_trace_row(batch_doc_name)
     payload, trace, is_root_trace = _get_oa_trace_storage(batch_row.get("extra_json"))
     explicit_fee = trace.get("logistics_fee") if isinstance(trace.get("logistics_fee"), dict) else {}
-    if _to_float(explicit_fee.get("amount")) > 0:
+    from overseas_costing.scripts import import_oa_logistics
+
+    if import_oa_logistics._parse_money_amount(explicit_fee.get("amount"), allow_zero=True) is not None:
         return {"ok": False, "message": "该审批单已填写明确物流费用，不能再用报价候选覆盖。"}
 
     candidates = trace.get("logistics_quote_candidates")
@@ -3718,8 +3805,6 @@ def confirm_logistics_quote_candidate(
     if selected["amount"] <= 0:
         return {"ok": False, "message": "所选报价未包含有效金额，不能生成分摊规则。"}
 
-    from overseas_costing.scripts import import_oa_logistics
-
     carrier_label = selected["carrier"] or "未标注供应商"
     fee = {
         **selected,
@@ -3730,9 +3815,16 @@ def confirm_logistics_quote_candidate(
         batch_name=batch_doc_name,
         version_name=resolved_version_name,
         approval_item={"logistics_fee": fee},
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+        manual_entry=True,
     )
     if not rule_result.get("ok"):
         return {"ok": False, "message": rule_result.get("message") or "物流费用分摊规则保存失败。"}
+    if rule_result.get("action") in {"protected", "retired"}:
+        frappe.db.commit()
+        return {"ok": True, "batch_name": batch_doc_name, "version_name": resolved_version_name,
+                "rule_result": rule_result, "message": rule_result["message"]}
 
     old_confirmed = trace.get("confirmed_logistics_quote") if isinstance(trace.get("confirmed_logistics_quote"), dict) else {}
     operator = str(getattr(getattr(frappe, "session", None), "user", "") or "").strip()
@@ -3774,6 +3866,7 @@ def confirm_logistics_quote_candidate(
     return {
         "ok": True,
         "batch_name": batch_doc_name,
+        "batch_modified": str(frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified")),
         "version_name": resolved_version_name,
         "confirmed_quote": confirmed,
         "rule_result": rule_result,
@@ -3811,6 +3904,8 @@ def save_manual_logistics_quote(
     pre_delivery_date: str | None = None,
     destination: str | None = None,
     note: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
 ) -> dict:
     """手工补录物流报价，写入整票物流费用分摊规则并保留来源痕迹。"""
 
@@ -3862,9 +3957,16 @@ def save_manual_logistics_quote(
         batch_name=batch_doc_name,
         version_name=resolved_version_name,
         approval_item={"logistics_fee": fee, "allocation_basis": normalized_basis},
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+        manual_entry=True,
     )
     if not rule_result.get("ok"):
         return {"ok": False, "message": rule_result.get("message") or "物流费用分摊规则保存失败。"}
+    if rule_result.get("action") in {"protected", "retired"}:
+        frappe.db.commit()
+        return {"ok": True, "batch_name": batch_doc_name, "version_name": resolved_version_name,
+                "rule_result": rule_result, "message": rule_result["message"]}
 
     batch_row = _get_batch_trace_row(batch_doc_name)
     payload, trace, is_root_trace = _get_oa_trace_storage(batch_row.get("extra_json"))
@@ -3908,6 +4010,7 @@ def save_manual_logistics_quote(
     return {
         "ok": True,
         "batch_name": batch_doc_name,
+        "batch_modified": str(frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified")),
         "version_name": resolved_version_name,
         "confirmed_quote": confirmed,
         "rule_result": rule_result,
@@ -6049,19 +6152,26 @@ def _build_packing_unmatched_item_values(
         attachment_provenance.get("source_attachment_id"),
     )
     source_doc_no = _first_non_empty(mapped_row.get("source_doc_no"), attachment_provenance.get("source_doc_no"), source_file_name)
+    unit = normalize_unit(mapped_row.get("unit")) or ""
     values = {
         "doctype": "Overseas Cost Item",
         "batch": batch_doc_name,
         "version": version_name,
         "row_no": row_no,
+        "stable_line_key": material_input_service.ensure_stable_line_key({}),
         "excel_row_no": mapped_row.get("excel_row_no"),
         "material_code": mapped_row.get("material_code") or "",
         "product_name": mapped_row.get("product_name") or "",
         "product_name_es": mapped_row.get("product_name_es") or "",
         "spec_model": mapped_row.get("spec_model") or "",
-        "unit": normalize_unit(mapped_row.get("unit")) or "",
+        "unit": unit,
+        "purchase_uom": unit,
+        "unit_price_uom": unit if mapped_row.get("unit_price") not in (None, "") else "",
         "quantity": _to_float(actual_qty),
         "actual_shipped_qty": _to_float(actual_qty),
+        "actual_shipped_qty_mode": "EXPLICIT_SOURCE" if _to_float(actual_qty) > 0 else "DEFAULT_PURCHASE",
+        "shipped_uom": unit,
+        "cost_output_uom": unit,
         "unit_price": _to_float(mapped_row.get("unit_price")),
         "purchase_currency": mapped_row.get("purchase_currency") or "",
         "goods_value": _to_float(mapped_row.get("goods_value")),
@@ -6082,6 +6192,11 @@ def _build_packing_unmatched_item_values(
         "parse_status": "SUCCESS",
         "raw_excel_json": _json_dumps(mapped_row),
     }
+    batch_transport_mode = (
+        frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "transport_mode")
+        if frappe is not None else ""
+    )
+    values = prepare_item_transport(values, batch_transport_mode)
     return _filter_doctype_values("Overseas Cost Item", values, keep_doctype=True)
 
 

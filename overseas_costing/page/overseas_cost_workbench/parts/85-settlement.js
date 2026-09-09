@@ -302,14 +302,16 @@
     this.openDingtalkLink(url);
   }
 
-  async loadSettlementStrip(batchName) {
+  async loadSettlementStrip(batchName, cachedData = null) {
     const request = this.settlementStripRequest = (this.settlementStripRequest || 0) + 1;
     const viewedVersion = this.detailState.versionName || null;
     const current = () => request === this.settlementStripRequest && this.detailState.batchName === batchName && this.detailState.tab === "documents" && (this.detailState.versionName || null) === viewedVersion;
     try {
-      const data = await this.settlementApi("get_batch_settlement", { batch_name: batchName, version_name: viewedVersion });
+      const data = cachedData && cachedData.viewed_version === viewedVersion ? cachedData
+        : await this.settlementApi("get_batch_settlement", { batch_name: batchName, version_name: viewedVersion });
       if (!current()) return;
       if (!data.ok) throw new Error(data.message || "读取关联失败");
+      if (this.materialFeeState?.batchName === batchName) this.materialFeeState.settlementData = data;
       const $strip = this.$root.find("[data-area='settlement-strip']");
       $strip.html(`<div class="ocw-settlement-strip"><div><strong>物流采购支出</strong><span>${this.escape(this.settlementAdoption(data))}</span>
         <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后采用最终物流采购支出的货物与费用")}</small></div>

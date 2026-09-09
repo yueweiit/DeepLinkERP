@@ -366,11 +366,65 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
     ) or {}
     main_id = str(batch.get("source_instance_id") or "").strip()
     if not main_id:
-        return {"ok": False, "message": "当前批次没有钉钉审批实例 ID。"}
+        return {
+            "ok": False,
+            "message": "当前批次缺少钉钉审批实例 ID，暂无法判断关联采购审批。",
+            "source_state": {
+                "code": "missing_instance_id",
+                "repairable": False,
+                "purchase_link_state": "unknown",
+            },
+        }
     candidate_linked_ids = [value for value in _linked_instance_ids(batch.get("extra_json")) if value != main_id]
     instance_ids = [main_id, *candidate_linked_ids]
-    bundle = _get_approval_source().get_instance_bundle(instance_ids)
+    source = _get_approval_source()
+    bundle = source.get_instance_bundle(instance_ids)
     instances = bundle.get("instances") or {}
+    main_payload = instances.get(main_id)
+    if not isinstance(main_payload, dict):
+        repair_statuses = source.get_repair_statuses([main_id]) if hasattr(source, "get_repair_statuses") else {}
+        repair_status = repair_statuses.get(main_id) or {}
+        repair_state = str(repair_status.get("status") or "")
+        repairing = repair_state in {"pending", "running", "retry"}
+        return {
+            "ok": False,
+            "batch_name": batch.get("name") or batch_name,
+            "message": "钉钉审批正在补同步，请稍后重试。" if repairing else "钉钉同步库缺少该物流审批，暂无法判断关联采购审批。",
+            "data_source": "postgres",
+            "fallback_used": False,
+            "repair_status": repair_status,
+            "source_state": {
+                "code": "repairing" if repairing else ("manual_required" if repair_state == "manual_required" else "missing_in_postgres"),
+                "repairable": True,
+                "purchase_link_state": "unknown",
+                "failure_code": repair_status.get("error_code") or "",
+                "failure_reason": repair_status.get("error_message") or "",
+            },
+        }
+    if not _approval_matches_batch(batch, main_payload):
+        return {
+            "ok": False,
+            "message": "批次来源与钉钉物流审批不一致，已拒绝显示审批内容。",
+            "source_state": {
+                "code": "source_mismatch",
+                "repairable": False,
+                "purchase_link_state": "unknown",
+            },
+        }
+
+    trusted_linked_ids = [value for value in _trusted_linked_instance_ids(main_payload) if value != main_id]
+    missing_from_first_bundle = [value for value in trusted_linked_ids if value not in instances]
+    if missing_from_first_bundle:
+        linked_bundle = source.get_instance_bundle(missing_from_first_bundle)
+        instances = {**instances, **(linked_bundle.get("instances") or {})}
+        bundle["attachments"] = [*(bundle.get("attachments") or []), *(linked_bundle.get("attachments") or [])]
+        actors = dict(bundle.get("actors") or {})
+        for corp_id, values in (linked_bundle.get("actors") or {}).items():
+            actors.setdefault(corp_id, {}).update(values or {})
+        bundle["actors"] = actors
+        if not bundle.get("health") and linked_bundle.get("health"):
+            bundle["health"] = linked_bundle.get("health")
+
     actors = bundle.get("actors") or {}
     manifests_by_instance: dict[str, list[dict]] = defaultdict(list)
     local_by_file = _local_attachment_map(batch.get("name") or batch_name)
@@ -382,13 +436,7 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
         manifests_by_instance[instance_id].append(
             _attachment_item(row, local_by_file.get((instance_id, file_id)), actors)
         )
-    main_payload = instances.get(main_id)
-    if not isinstance(main_payload, dict):
-        return {"ok": False, "message": "成本系统数据库中未找到该物流审批。"}
-    if not _approval_matches_batch(batch, main_payload):
-        return {"ok": False, "message": "批次来源与钉钉物流审批不一致，已拒绝显示审批内容。"}
-    trusted_linked = set(_trusted_linked_instance_ids(main_payload))
-    linked_ids = [instance_id for instance_id in candidate_linked_ids if instance_id in trusted_linked]
+    linked_ids = trusted_linked_ids
     health = bundle.get("health") or {}
     archive_rows = [row for rows in manifests_by_instance.values() for row in rows]
     archive_health = {
@@ -404,6 +452,14 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
         for instance_id in linked_ids
         if isinstance(instances.get(instance_id), dict)
     ]
+    missing_linked_ids = [instance_id for instance_id in linked_ids if instance_id not in instances]
+    source_state = {
+        "code": "excluded" if main_approval.get("excluded") else "available",
+        "repairable": False,
+        "purchase_link_state": (
+            "repairing" if missing_linked_ids else ("available" if linked_ids else "none")
+        ),
+    }
     return {
         "ok": True,
         "batch_name": batch.get("name") or batch_name,
@@ -412,10 +468,11 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
         "source_updated_at": health.get("source_updated_at"),
         "source_lag_seconds": health.get("source_lag_seconds"),
         "archive_health": archive_health,
+        "source_state": source_state,
         "main_approval": main_approval,
         "linked_purchase_approvals": [row for row in linked_approvals if not row.get("excluded")],
         "excluded_linked_purchase_approvals": [row for row in linked_approvals if row.get("excluded")],
-        "missing_linked_instance_ids": [instance_id for instance_id in linked_ids if instance_id not in instances],
+        "missing_linked_instance_ids": missing_linked_ids,
     }
 
 

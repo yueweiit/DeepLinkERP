@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from overseas_costing.integrations.dingtalk_approval_source import (
+    ApprovalRepairSubmitter,
     ApprovalSourceConfig,
     ArchiveIntegrityError,
     ArchiveNotReady,
@@ -123,6 +124,60 @@ def test_postgres_source_fetches_linked_instances_in_one_query() -> None:
     assert params == (["PROC-A", "PROC-B"],)
     assert list(items) == ["PROC-A", "PROC-B"]
     assert items["PROC-A"]["title"] == "A"
+
+
+def test_postgres_source_resolves_instance_and_business_references_in_one_query() -> None:
+    cursor = FakeCursor([
+        {"corp_id": "CORP-1", "process_instance_id": "PROC-A", "business_id": "OA-A", "process_code": "LOG"},
+        {"corp_id": "CORP-1", "process_instance_id": "PROC-B", "business_id": "OA-B", "process_code": "LOG"},
+    ])
+    source = PostgresApprovalSource(_config(), connect=lambda **_kwargs: FakeConnection(cursor))
+
+    result = source.get_reference_coverage(["PROC-A", "MISSING"], ["OA-B", "OA-X"])
+
+    assert len(cursor.calls) == 1
+    sql, params = cursor.calls[0]
+    assert "process_instance_id = ANY(%s)" in sql
+    assert "business_id = ANY(%s)" in sql
+    assert params == (["PROC-A", "MISSING"], ["OA-B", "OA-X"])
+    assert result["by_instance"]["PROC-A"]["business_id"] == "OA-A"
+    assert result["by_business"]["OA-B"][0]["process_instance_id"] == "PROC-B"
+
+
+def test_postgres_source_reads_latest_repair_status_for_all_instances_in_one_query() -> None:
+    cursor = FakeCursor([
+        {"process_instance_id": "PROC-A", "status": "retry", "attempts": 2, "error_code": "HTTP_500"},
+    ])
+    source = PostgresApprovalSource(_config(), connect=lambda **_kwargs: FakeConnection(cursor))
+
+    result = source.get_repair_statuses(["PROC-A", "PROC-B", "PROC-A"])
+
+    assert len(cursor.calls) == 1
+    sql, params = cursor.calls[0]
+    assert "approval_repair_status_v1" in sql
+    assert "DISTINCT ON (process_instance_id)" in sql
+    assert params == (["PROC-A", "PROC-B"],)
+    assert result["PROC-A"]["status"] == "retry"
+
+
+def test_repair_submitter_only_calls_security_definer_function() -> None:
+    class SubmitCursor(FakeCursor):
+        def fetchone(self):
+            return {"request_id": 91}
+
+    cursor = SubmitCursor([])
+    submitter = ApprovalRepairSubmitter(_config(), connect=lambda **_kwargs: FakeConnection(cursor))
+    result = submitter.request_repair(
+        corp_id="CORP-1", process_instance_id="PROC-A", expected_business_id="OA-A",
+        expected_process_code="LOG", expected_purpose="international_logistics",
+        request_key="a" * 64, requested_by="user@example.com", trigger_source="manual",
+    )
+
+    assert result == 91
+    sql, params = cursor.calls[0]
+    assert sql.startswith("SELECT costing_read.request_approval_repair(")
+    assert "INSERT" not in sql.upper()
+    assert params[0:5] == ("CORP-1", "PROC-A", "OA-A", "LOG", "international_logistics")
 
 
 def test_postgres_source_loads_instance_bundle_without_per_record_queries() -> None:

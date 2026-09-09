@@ -20,7 +20,33 @@ from overseas_costing.utils.validators import require_in, require_value
 class OverseasCostItem(Document):
     """海外成本明细行。"""
 
+    def on_trash(self) -> None:
+        if not self.flags.get('ignore_permissions'):
+            from overseas_costing.services.calculate_service import _server_metadata_fields
+            if 'settlement_cargo' in _server_metadata_fields(getattr(self, 'extra_json', None)):
+                raise ValueError('已采用物流结算采购支出的物料不能直接删除，请更正来源明细或关联。')
+
     def validate(self) -> None:
+        # Frappe reserves flags from client document payloads. Existing validated
+        # backend services explicitly use save/insert(ignore_permissions=True).
+        if not self.flags.get("ignore_permissions"):
+            from overseas_costing.services.calculate_service import (
+                _server_metadata_fields,
+                assert_server_metadata_unchanged,
+            )
+
+            previous = self.get_doc_before_save()
+            assert_server_metadata_unchanged(
+                getattr(previous, "extra_json", None), getattr(self, "extra_json", None)
+            )
+            if ('settlement_cargo' in _server_metadata_fields(getattr(previous, 'extra_json', None))
+                    and any(getattr(previous, field, None) != getattr(self, field, None)
+                            for field in ('material_code', 'product_name', 'spec_model'))):
+                raise ValueError('物料身份已采用物流结算采购支出，请更正来源后重新应用。')
+            if _server_metadata_fields(getattr(previous, "extra_json", None)) and any(
+                getattr(previous, field, None) != getattr(self, field, None) for field in ("batch", "version")
+            ):
+                raise ValueError("服务器来源物料不能通过普通保存迁移到其他批次或版本。")
         require_value(self.batch, "所属批次")
         require_value(self.version, "所属版本")
         if not self.material_code and not self.product_name:

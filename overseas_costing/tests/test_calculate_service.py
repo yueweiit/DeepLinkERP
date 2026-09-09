@@ -3,6 +3,7 @@
 import json
 
 from overseas_costing.services.calculate_service import (
+    _build_new_item_values,
     batch_update_items,
     calculate_item_rows,
     confirm_actual_shipped_qty_from_quantity,
@@ -12,6 +13,40 @@ from overseas_costing.services.calculate_service import (
     recalculate_batch,
     update_item_field,
 )
+
+
+def test_new_manual_item_defaults_shipping_quantity_to_purchase_quantity() -> None:
+    values = _build_new_item_values(
+        "BATCH-1",
+        "VERSION-1",
+        {"material_code": "M1", "quantity": 34, "unit": "桶", "unit_price": 25},
+        row_no=1,
+    )
+
+    assert values["stable_line_key"]
+    assert values["purchase_uom"] == "桶"
+    assert values["shipped_uom"] == "桶"
+    assert values["cost_output_uom"] == "桶"
+    assert values["actual_shipped_qty_mode"] == "DEFAULT_PURCHASE"
+    assert values.get("actual_shipped_qty") in (None, "")
+
+
+def test_new_manual_item_keeps_explicit_shipping_quantity() -> None:
+    values = _build_new_item_values(
+        "BATCH-1",
+        "VERSION-1",
+        {
+            "material_code": "M1",
+            "quantity": 34,
+            "unit": "桶",
+            "actual_shipped_qty": 32,
+            "shipped_uom": "桶",
+        },
+        row_no=1,
+    )
+
+    assert values["actual_shipped_qty"] == 32
+    assert values["actual_shipped_qty_mode"] == "MANUAL_CONFIRMED"
 
 
 def test_recalculate_batch_rejects_invalid_main_approval_before_writing(monkeypatch) -> None:
@@ -359,6 +394,75 @@ def test_update_item_field_dry_run_allows_editable_field_and_coerces_numeric_val
     assert result["changed"] is True
     assert result["value"] == 12.5
     assert result["manual_override_reason"] == "修正装箱单数量"
+
+
+def test_existing_purchase_value_requires_reason_before_server_save(monkeypatch) -> None:
+    from overseas_costing.services import calculate_service as service
+
+    class Item:
+        batch = "B1"
+        version = "V1"
+        row_no = 1
+        goods_value = 100
+
+        def save(self, **_kwargs):
+            raise AssertionError("missing correction reason must not save")
+
+    class DB:
+        @staticmethod
+        def set_value(*_args, **_kwargs):
+            raise AssertionError("missing correction reason must not mutate batch")
+
+    class FakeFrappe:
+        db = DB()
+
+        @staticmethod
+        def get_doc(doctype, name):
+            assert (doctype, name) == ("Overseas Cost Item", "ITEM-1")
+            return Item()
+
+    monkeypatch.setattr(service, "_frappe", FakeFrappe)
+
+    result = update_item_field(
+        "ITEM-1",
+        "goods_value",
+        "120",
+        _skip_edit_check=True,
+    )
+
+    assert result["ok"] is False
+    assert result["edit_mode"] == "reason_required"
+    assert "修改原因" in result["message"]
+
+
+def test_net_weight_is_an_editable_numeric_material_field() -> None:
+    result = update_item_field(
+        item_name="ITEM-1",
+        fieldname="net_weight_kg",
+        value="8.25",
+        remark="核对装箱计划净重",
+    )
+
+    assert result["ok"] is True
+    assert result["value"] == 8.25
+
+
+def test_shipping_quantity_edit_requires_positive_value_and_records_manual_provenance() -> None:
+    invalid = update_item_field(
+        item_name="ITEM-1",
+        fieldname="actual_shipped_qty",
+        value="0",
+    )
+    valid = update_item_field(
+        item_name="ITEM-1",
+        fieldname="actual_shipped_qty",
+        value="12",
+    )
+
+    assert invalid["ok"] is False
+    assert "大于 0" in invalid["message"]
+    assert valid["ok"] is True
+    assert valid["companion_updates"]["actual_shipped_qty_mode"] == "MANUAL_CONFIRMED"
 
 
 def test_update_item_field_dry_run_rejects_calculated_field_without_reason() -> None:

@@ -11,6 +11,8 @@ from pathlib import PurePosixPath
 import unicodedata
 from urllib.parse import unquote
 
+from overseas_costing.services.material_value_semantics import is_effectively_missing
+
 from .application import row_meta
 from .jobs import utcnow
 from .model import digest, dumps, fields_of, number, pick
@@ -32,7 +34,8 @@ def identity(value):
 
 
 def item_key(item):
-    return tuple(identity(item.get(field)) for field in ('material_code', 'spec_model', 'unit'))
+    cargo = row_meta(item).get('settlement_cargo') or {}
+    return (identity(item.get('material_code')), identity(item.get('spec_model')), identity(cargo.get('unit') or item.get('shipped_uom') or item.get('unit')))
 
 
 def packing_state_hash(items):
@@ -50,13 +53,13 @@ def packing_state_hash(items):
         rows.append({'name': item['name'], 'identity': item_key(item), 'numeric': numeric,
                      'provenance': meta.get('settlement_packing_provenance') or {},
                      'candidates': meta.get('settlement_packing_candidates') or {},
-                     'packing_review': bool(meta.get('settlement_packing_review')),
+                     'packing_review': bool(meta.get('settlement_packing_review')), 'settlement_cargo':meta.get('settlement_cargo'),
                      'packing_quantity': meta.get('packing_quantity')})
     return digest(sorted(rows, key=lambda row: row['name']))
 
 
 def frozen(batch, version):
-    return version.get('status') == 'Confirmed' or batch.get('confirm_status') == 'Confirmed' or batch.get('writeback_status') == 'Success'
+    return version.get('status') in {'Confirmed', 'Archived'} or batch.get('confirm_status') == 'Confirmed' or batch.get('writeback_status') == 'Success'
 
 
 def document_retired(document):
@@ -129,6 +132,8 @@ def plan_packing(source, items, documents):
         for field, value in values.items():
             existing = number(item.get(field))
             empty = item.get(field) in (None, '') or (existing is not None and Decimal(existing) == 0 and field not in provenance)
+            if field == 'actual_shipped_qty':
+                empty = is_effectively_missing(field, item.get(field), item) and field not in provenance
             if empty:
                 if existing is None or Decimal(existing) != Decimal(value):
                     updates[field] = value
@@ -140,8 +145,11 @@ def plan_packing(source, items, documents):
                 provenance[field] = {'document_id': row['document_id'], 'line_key': row['line_key'], 'line': row['line'],
                                      'source_id': source['id'], 'source_snapshot': source['snapshot'], 'value': value}
         quantity = values.get('actual_shipped_qty')
-        if quantity is not None and (number(item.get('quantity')) is None or Decimal(quantity) != Decimal(number(item.get('quantity')))):
-            conflicts.append({'field': 'quantity_applicability', 'existing': item.get('quantity'), 'candidate': quantity})
+        final_quantity = (meta.get('settlement_cargo') or {}).get('quantity',item.get('quantity'))
+        if quantity is not None and (number(final_quantity) is None or Decimal(quantity) != Decimal(number(final_quantity))):
+            conflicts.append({'field': 'quantity_applicability', 'existing': final_quantity, 'candidate': quantity})
+        if 'actual_shipped_qty' in updates:
+            updates.update(actual_shipped_qty_mode='EXPLICIT_SOURCE',shipped_uom=key[2],actual_shipped_qty_source_revision=source['snapshot'])
         if provenance != (meta.get('settlement_packing_provenance') or {}):
             meta['settlement_packing_provenance'] = provenance
         if quantity is not None:

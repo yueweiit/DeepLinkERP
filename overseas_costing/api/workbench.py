@@ -8,6 +8,7 @@ import frappe
 
 from overseas_costing.services import workbench_service
 from overseas_costing.services import dingtalk_approval_service
+from overseas_costing.services import approval_repair_service
 from overseas_costing.services.access_control import require_batch_permission, require_overseas_cost_access
 
 
@@ -26,9 +27,9 @@ def get_batches(filters_json=None, task="pending", page=1, page_length=30) -> di
 
 
 @frappe.whitelist()
-def get_summary(filters_json=None) -> dict:
+def get_summary(filters_json=None, task="pending") -> dict:
     require_overseas_cost_access()
-    return workbench_service.get_workbench_summary(_filters(filters_json))
+    return workbench_service.get_workbench_summary(_filters(filters_json), task=task)
 
 
 @frappe.whitelist()
@@ -86,3 +87,14 @@ def get_batch_dingtalk_approval_detail(batch_name) -> dict:
 
     batch_name = require_batch_permission(batch_name, "read")
     return dingtalk_approval_service.get_batch_dingtalk_approval_detail(batch_name)
+
+
+@frappe.whitelist()
+def request_batch_dingtalk_approval_repair(batch_name) -> dict:
+    """受控提交单笔审批补同步；必须拥有批次写权限。"""
+
+    batch_name = require_batch_permission(batch_name, "write")
+    return approval_repair_service.request_batch_repair(
+        batch_name,
+        requested_by=frappe.session.user,
+    )

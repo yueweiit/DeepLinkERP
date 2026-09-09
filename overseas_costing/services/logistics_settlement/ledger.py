@@ -2,7 +2,8 @@
 from .writer import clean_copy
 
 DOCTYPES = {'batch': 'Overseas Cost Batch', 'version': 'Overseas Cost Version',
-            'item': 'Overseas Cost Item', 'rule': 'Overseas Cost Allocation Rule', 'attachment': 'Overseas Cost Attachment'}
+            'item': 'Overseas Cost Item', 'rule': 'Overseas Cost Allocation Rule', 'attachment': 'Overseas Cost Attachment',
+            'evidence':'Overseas Cost Fee Evidence', 'component':'Overseas Cost Fee SKU Component'}
 
 
 class FrappeLedger:

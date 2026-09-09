@@ -2,7 +2,7 @@
 
 `run_settlement_frappe_integration.py` exercises the settlement backend against real Frappe and MariaDB. It refuses to connect unless the site is `settlement-test.local` and its configured database host is `oc-settlement-test-db`.
 
-Prerequisites: an isolated, migrated Frappe test site with the Overseas Costing app installed; the current app package copied to `/tmp/settlement-code/overseas_costing`; no OA, object storage or ERP connections are required. The script reads the site's existing configuration through Frappe and never prints credentials. It creates synthetic `LOCAL-*` test records with a unique run identifier and leaves them on the disposable site for inspection.
+Prerequisites: an isolated Frappe test site with the current production-based Overseas Costing app installed and a complete `bench migrate` applied (including Fee Evidence, Fee SKU Component, material AI and packing DocTypes); invoking only the settlement schema installer is insufficient. Also required: the current app package copied to `/tmp/settlement-code/overseas_costing`; no OA, object storage or ERP connections are required. The script reads the site's existing configuration through Frappe and never prints credentials. It creates synthetic `LOCAL-*` test records with a unique run identifier and leaves them on the disposable site for inspection.
 
 From the costing worktree, using the existing local backend container:
 
@@ -12,7 +12,7 @@ docker cp overseas_costing/tests/integration/run_settlement_frappe_integration.p
 docker exec -e PYTHONPATH=/tmp/settlement-code -w /home/frappe/frappe-bench/sites overseas-cost-local-backend-1 /home/frappe/frappe-bench/env/bin/python /tmp/run_settlement_frappe_integration.py
 ```
 
-Successful runs print one JSON result per check and finish with `integration_complete`. Coverage includes idempotent schema installation and unique indexes, real document persistence, zero final fees, quantity changes and packing review, frozen confirmed versions and idempotent adjustment drafts, application/rebind rollback after injected failures, and concurrent confirmation through independent database connections on both sides of the one-to-one association.
+Successful runs print one JSON result per check and finish with `integration_complete`. Coverage includes idempotent schema installation and unique indexes, real document persistence, zero final fees, final shipment quantity overlays while preserving independent purchase values and raw packing, packing review, frozen confirmed versions and idempotent adjustment drafts, application/rebind rollback after injected failures, and concurrent confirmation through independent database connections on both sides of the one-to-one association.
 
 This is an opt-in integration script, not part of the default pytest run. Do not change the site or database-host guard to target production or an existing demo site.
 
@@ -24,7 +24,7 @@ This is an opt-in integration script, not part of the default pytest run. Do not
 docker exec -e PYTHONPATH=/tmp/settlement-code -w /home/frappe/frappe-bench/sites overseas-cost-local-backend-1 /home/frappe/frappe-bench/env/bin/python /tmp/settlement-code/overseas_costing/tests/integration/run_settlement_document_frappe_integration.py
 ```
 
-The script tests actual Frappe File and Attachment insertion, private file access for the costing role and denial to Guest, physical packing fill precedence, separate shipped/purchase quantities, preservation of independent purchase values, item-review acknowledgement clearing document blockers, frozen adjustment/history preservation, explicit retirement, queued retry, and exact six-place fee persistence including stable remainder after reordered detail input. A previously unattached cached File may be adopted by Frappe's Attach-field hook; already-owned historical File links must remain unchanged when a new version reuses the same URL.
+The script tests actual Frappe File and Attachment insertion, private file access for the costing role and denial to Guest, physical packing fill precedence, separate shipped/purchase quantities, preservation of independent purchase values, item-review acknowledgement clearing document blockers, frozen adjustment/history preservation, explicit retirement, queued retry, and exact six-place fee persistence including stable remainder after reordered detail input and conserved RMB/MXN allocation totals across three stored item rows. Fixtures provide explicit ACTUAL logical fee identities and independent purchase price, currency, unit and document evidence, as required by the production trial engine. A previously unattached cached File may be adopted by Frappe's Attach-field hook; already-owned historical File links must remain unchanged when a new version reuses the same URL.
 
 Parsed packing documents and their synthetic cached bytes are fixtures: this script does not validate XLSX extraction or contact object storage. The scheduled `resume_pending` queue inventory, cursor IDs and enable-control record are restricted to the new fixture using a Store wrapper, so concurrent browser QA batches are untouched. Target reads/writes, row locks, `apply_source`, File controllers and calculations all use real Frappe/MariaDB. No production implementation is patched by the test. A successful run finishes with `document_integration_complete`.
 

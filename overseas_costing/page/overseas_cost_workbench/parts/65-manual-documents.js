@@ -242,13 +242,15 @@
               <span class="ocw-manual-doc-status-badge ${this.escape(status.className)}">${this.escape(status.label)}</span>
               ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${this.escape(status.note || (slot.oaSource ? "优先从钉钉读取" : "缺了再补传"))}</em>`}
             </div>
+            ${slot.attachmentType === "Packing List" && this.renderPackingComparisonCardStatus ? this.renderPackingComparisonCardStatus(batch) : ""}
             <div class="ocw-manual-doc-actions">
               ${!archiveOnly && slot.oaSource ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button>` : ""}
-              ${!archiveOnly && slot.attachmentType === "Packing List" ? `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-dingtalk-packing-picker">从钉钉获取</button>` : ""}
-              ${archiveOnly ? '<span>归档只读；装箱待核对请查看上方结算明细</span>' : `
-              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">
-                ${attachment ? "重传" : "上传"}
-              </button>
+              ${archiveOnly ? '<span>归档只读；装箱待核对请查看结算明细</span>' : `
+              ${
+                slot.attachmentType === "Packing List"
+                  ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="open-packing-flow">获取装箱单</button>`
+                  : `<button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">${attachment ? "重传" : "上传"}</button>`
+              }
               <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="manual-fill-gap" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}" data-gap-fieldname="${this.escape(focus.fieldname || "")}" data-gap-label="${this.escape(focus.label || slot.label)}">人工补填</button>`}
               ${
                 attachment && attachment.file_url
@@ -312,6 +314,18 @@
       },
       true
     );
+    if (logisticsType) {
+      try {
+        const comparisons = await this.call("overseas_costing.api.packing_api.list_freight_comparisons", {
+          batch_name: batch.name,
+        }, false);
+        this.packingComparisonHistoryByBatch = this.packingComparisonHistoryByBatch || {};
+        this.packingComparisonHistoryByBatch[batch.name] = Array.isArray(comparisons) ? comparisons : [];
+      } catch (_error) {
+        this.packingComparisonHistoryByBatch = this.packingComparisonHistoryByBatch || {};
+        this.packingComparisonHistoryByBatch[batch.name] = [];
+      }
+    }
     if ($target.data("ocw-document-request") !== requestToken) return;
     if (this.detailState?.batchName === batch.name && this.detailState.versionName !== viewedVersion) return;
     if (!result || !result.ok) {
@@ -336,7 +350,7 @@
     }
   }
 
-  openManualDocumentUploader(batch, dialog, _logisticsType, slot) {
+  openManualDocumentUploader(batch, dialog, _logisticsType, slot, onRegistered = null) {
     const logisticsType = this.detectManualDocumentLogisticsType(batch);
     if (!logisticsType) {
       this.showPendingFeature("运输方式未识别，无法确定资料清单。");
@@ -354,7 +368,12 @@
       allow_multiple: false,
       on_success: (fileDoc) => {
         const uploaded = Array.isArray(fileDoc) ? fileDoc[0] : fileDoc;
-        this.registerManualDocumentAttachment(batch, dialog, logisticsType, slot, uploaded).catch((error) => this.showError(error));
+        this.registerManualDocumentAttachment(batch, dialog, logisticsType, slot, uploaded)
+          .then((result) => {
+            if (result && typeof onRegistered === "function") return onRegistered(result);
+            return null;
+          })
+          .catch((error) => this.showError(error));
       },
     });
     [0, 80, 200, 500, 1000, 2000].forEach((delay) => {
@@ -530,9 +549,12 @@
       return;
     }
     frappe.show_alert({ message: result.message || "资料已上传", indicator: "green" });
-    await this.loadManualDocumentAttachments(batch, dialog, logisticsType, {
-      slotCodes: Array.isArray(slot.focusSlotCodes) ? slot.focusSlotCodes : [],
-    });
+    if (dialog && dialog.$wrapper && dialog.$wrapper.find("[data-area='manual-documents']").length) {
+      await this.loadManualDocumentAttachments(batch, dialog, logisticsType, {
+        slotCodes: Array.isArray(slot.focusSlotCodes) ? slot.focusSlotCodes : [],
+      });
+    }
+    return result;
   }
 
   openManualGapFillDialog(batch, gap = {}, sourceDialog = null) {
@@ -855,6 +877,30 @@
     return String(dialog.$wrapper.find(`[data-field='${fieldname}']`).val() || "").trim();
   }
 
+  async callLogisticsQuoteWrite(method, batch, payload) {
+    const inDetail = this.detailState?.batchName === batch.name;
+    let acquired = null;
+    try {
+      if (inDetail) {
+        if (!(await this.ensureEditSession())) throw new Error("未能获取编辑权，物流报价未保存。");
+      } else {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "未能获取编辑权，物流报价未保存。");
+      }
+      const result = await this.call(method, {
+        ...payload,
+        edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+        expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
+      }, true);
+      if (result?.batch_modified && this.detailState?.batchName === batch.name) {
+        this.detailState.expectedModified = result.batch_modified;
+      }
+      return result;
+    } finally {
+      if (acquired?.edit_token) await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token });
+    }
+  }
+
   async saveManualLogisticsQuote(batch, dialog) {
     if (!batch || this.isSavingManualLogisticsQuote) return;
     const payload = {
@@ -883,7 +929,7 @@
           <div class="ocw-confirm-copy">
             <h4>确认保存物流报价补录？</h4>
             <p>系统会把 ${this.escape(this.formatMoney(payload.amount))} ${this.escape(payload.currency)} 写入当前批次费用池，并立即重新试算。</p>
-            <div class="ocw-confirm-note">保存后仍可再次修改补录金额，修改记录会保留。</div>
+            <div class="ocw-confirm-note">已有人工保存费用时，新报价会保留供复核；调整金额请在费用清单中处理。</div>
           </div>
         `,
         () => resolve(true),
@@ -896,7 +942,7 @@
     const $button = dialog.$wrapper.find("[data-action='save-manual-logistics-quote']");
     $button.prop("disabled", true).text("保存中...");
     try {
-      const result = await this.call("overseas_costing.api.import_api.save_manual_logistics_quote", payload, true);
+      const result = await this.callLogisticsQuoteWrite("overseas_costing.api.import_api.save_manual_logistics_quote", batch, payload);
       if (!result || !result.ok) {
         throw new Error((result && result.message) || "物流报价补录保存失败");
       }
@@ -929,7 +975,7 @@
           <div class="ocw-confirm-copy">
             <h4>确认使用该物流报价？</h4>
             <p>将确认 ${this.escape(carrier)} 的 ${this.escape(amount)}，生成整票物流费用分摊规则并重新试算。</p>
-            <div class="ocw-confirm-note">确认后仍可改选其他候选，系统会保留每次确认记录。</div>
+            <div class="ocw-confirm-note">已有人工保存费用时，新报价会保留供复核；调整金额请在费用清单中处理。</div>
           </div>
         `,
         () => resolve(true),
@@ -940,14 +986,14 @@
 
     this.isConfirmingLogisticsQuote = true;
     try {
-      const result = await this.call(
+      const result = await this.callLogisticsQuoteWrite(
         "overseas_costing.api.import_api.confirm_logistics_quote_candidate",
+        batch,
         {
           batch_name: batch.name,
           version_name: batch.current_version || null,
           candidate_index: candidateIndex,
-        },
-        true
+        }
       );
       if (!result || !result.ok) {
         throw new Error((result && result.message) || "物流报价确认失败");
