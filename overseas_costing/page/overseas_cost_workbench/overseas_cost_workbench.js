@@ -9623,7 +9623,8 @@ class OverseasCostWorkbench {
 
   materialFeeBasisLabel(value) {
     return {
-      goods_value: "采购货值",
+      goods_value: "本次发货货值",
+      project_gross_weight: "按项目毛重及项目内毛重分摊",
       gross_weight: "毛重",
       volume: "体积",
       chargeable_weight: "计费重",
@@ -9826,7 +9827,7 @@ class OverseasCostWorkbench {
       { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
       { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
       { field: "shipped_uom", label: "发货单位", width: 130 },
-      { field: "goods_value", label: "采购货值 RMB", numeric: true, purchaseField: true, width: 150 },
+      { field: "shipment_value_rmb", label: "本次发货货值 RMB", numeric: true, readonly: true, width: 160 },
       { field: "gross_weight_kg", label: "毛重 kg", numeric: true, width: 130 },
       { field: "volume_m3", label: "体积 m³", numeric: true, width: 130 },
       { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true, width: 140 },
@@ -9835,6 +9836,7 @@ class OverseasCostWorkbench {
     if (compact) [54, 190, 110, 220].forEach((width, index) => { columns[index].width = width; });
     if (state.showAuxiliary) {
       columns.push(
+        { field: "goods_value", label: "原采购全额 RMB", numeric: true, purchaseField: true, width: 150 },
         { field: "net_weight_kg", label: "净重 kg", numeric: true, width: 130 },
         { field: "unit_price", label: "原币单价", numeric: true, purchaseField: true, width: 130 },
         { field: "purchase_uom", label: "采购单位", purchaseField: true, width: 120 },
@@ -9990,6 +9992,13 @@ class OverseasCostWorkbench {
     const reason = draft?.error || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
       const fullValue = this.formatValue(value ?? "--");
+      if (column.field === "shipment_value_rmb") {
+        const valuation = item.shipment_valuation || {};
+        const sourceLabel = valuation.error ? "估值待核对" : ["packing_row_total", "packing_unit_price"].includes(valuation.method)
+          ? "装箱货值已取得" : valuation.method === "purchase_unit_price" ? "采购单价 × 本次发货数"
+            : valuation.method === "LEGACY_PURCHASE" ? "历史采购口径" : "本次发货估值";
+        return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(valuation.error_detail || reason)}"><span>${this.escape(fullValue)}</span><small>${this.escape(sourceLabel)}</small></td>`;
+      }
       return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
     }
     if (requiresCorrection) {
@@ -10387,18 +10396,27 @@ class OverseasCostWorkbench {
       const row = items.find((item) => String(item.name || "") === String(update.item_name || ""));
       if (row) row[update.fieldname] = update.value;
     });
-    return { items, fees, unresolved: preview?.unresolved || [] };
+    const summaryStale = Object.keys(fill.manualUpdates || {}).length > 0 || Object.keys(fill.edits || {}).length > 0
+      || proposals.some(proposal => Boolean(proposal.default_selected) !== Boolean(selected(proposal)));
+    return { items, fees, project_summary: summaryStale ? [] : preview?.project_summary || [], summaryStale, unresolved: preview?.unresolved || [] };
   }
 
   renderMaterialAIAutofillPreview(fill) {
     const preview = this.materialAIAutofillPreview(fill);
-    const columns = [["row_no", "行"], ["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "发运单位"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["goods_value", "货值 RMB"]];
+    const columns = [["row_no", "行"], ["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "发运单位"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["shipment_value_rmb", "本次发货货值 RMB"], ["project_collection", "项目归属"]];
     const value = (input) => this.escape(input === null || input === undefined || input === "" ? "—" : input);
     const money = (input) => {
       if (input === null || input === undefined || String(input).trim() === "") return "—";
       return Number.isFinite(Number(input)) ? Number(input).toFixed(2) : value(input);
     };
-    return `<section class="ocw-mf-ai-preview-section"><h4>物料明细 <span>${preview.items.length} 条</span></h4><div class="ocw-mf-ai-preview-table"><table><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${preview.items.map((row, index) => `<tr data-mf-ai-preview-item="${this.escape(row.name || row.stable_line_key || "")}">${columns.map(([field]) => `<td>${value(field === "row_no" ? row.row_no ?? index + 1 : row[field])}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${columns.length}">暂无可填充的物料明细。</td></tr>`}</tbody></table></div></section><section class="ocw-mf-ai-preview-section"><h4>费用</h4>${preview.fees.length ? `<div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>填充金额</th><th>币种</th><th>原金额</th><th>金额变更</th><th>承运人 / 说明</th></tr></thead><tbody>${preview.fees.map((fee) => `<tr><td>${value(fee.fee_type || fee.expense_category || fee.logical_fee_key)}</td><td>${money(fee.amount)}</td><td>${value(fee.currency)}</td><td>${money(fee.previous_amount)}</td><td>${money(fee.previous_amount)} → ${money(fee.amount)} ${value(fee.currency)}</td><td>${value([fee.carrier, fee.remark].filter(Boolean).join(" · "))}</td></tr>`).join("")}</tbody></table></div>` : `<p class="ocw-mf-ai-preview-empty">本次没有费用变更。</p>`}</section>${preview.unresolved.length ? `<section class="ocw-mf-ai-preview-unresolved"><h4>仍需补充 / 核对</h4><ul>${preview.unresolved.map((row) => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || "待核对")}</li>`).join("")}</ul></section>` : ""}`;
+    if (preview.summaryStale) preview.unresolved = [...preview.unresolved, {message: "草稿选择或数据已修改，项目汇总已隐藏；确认填充后请重新试算。"}];
+    return `${this.renderShipmentProjectSummary(preview.project_summary)}<section class="ocw-mf-ai-preview-section"><h4>物料明细 <span>${preview.items.length} 条</span></h4><div class="ocw-mf-ai-preview-table"><table><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${preview.items.map((row, index) => `<tr data-mf-ai-preview-item="${this.escape(row.name || row.stable_line_key || "")}">${columns.map(([field]) => `<td>${value(field === "row_no" ? row.row_no ?? index + 1 : row[field])}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${columns.length}">暂无可填充的物料明细。</td></tr>`}</tbody></table></div></section><section class="ocw-mf-ai-preview-section"><h4>费用</h4>${preview.fees.length ? `<div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>填充金额</th><th>币种</th><th>原金额</th><th>金额变更</th><th>承运人 / 说明</th></tr></thead><tbody>${preview.fees.map((fee) => `<tr><td>${value(fee.fee_type || fee.expense_category || fee.logical_fee_key)}</td><td>${money(fee.amount)}</td><td>${value(fee.currency)}</td><td>${money(fee.previous_amount)}</td><td>${money(fee.previous_amount)} → ${money(fee.amount)} ${value(fee.currency)}</td><td>${value([fee.carrier, fee.remark].filter(Boolean).join(" · "))}</td></tr>`).join("")}</tbody></table></div>` : `<p class="ocw-mf-ai-preview-empty">本次没有费用变更。</p>`}</section>${preview.unresolved.length ? `<section class="ocw-mf-ai-preview-unresolved"><h4>仍需补充 / 核对</h4><ul>${preview.unresolved.map((row) => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || "待核对")}</li>`).join("")}</ul></section>` : ""}`;
+  }
+
+  renderShipmentProjectSummary(projects = []) {
+    if (!projects.length) return "";
+    const fields = ["project_collection", "goods_value_rmb", "gross_weight_kg", "allocated_fees_rmb", "total_cost_rmb"];
+    return `<section class="ocw-mf-ai-preview-section"><h4>项目汇总</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>项目归属</th><th>本次发货货值 RMB</th><th>毛重 kg</th><th>分摊费用 RMB</th><th>综合成本 RMB</th></tr></thead><tbody>${projects.map(row => `<tr>${fields.map(field => `<td>${this.escape(row[field] ?? "—")}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>`;
   }
 
   materialAIPhysicalSummary(fill) {
@@ -12140,9 +12158,10 @@ class OverseasCostWorkbench {
     const preview = this.materialFeeSavedCostPreview();
     const legacyTotal = header.summary_snapshot?.total_cost_rmb;
     const hasLegacyTotal = legacyTotal !== undefined && legacyTotal !== null && legacyTotal !== "" && Number.isFinite(Number(legacyTotal));
+    const staleCost = header.status === "Dirty" && Boolean(preview || hasLegacyTotal);
     const sectionTitle = `<div class="ocw-mf-section-title">
       <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p></div>
-      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
+      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
     </div>`;
     if (!preview) {
       return `<section class="ocw-mf-section ocw-mf-cost-section">${sectionTitle}
@@ -12160,15 +12179,18 @@ class OverseasCostWorkbench {
     }).join("");
     return `<section class="ocw-mf-section ocw-mf-cost-section">
       ${sectionTitle}
+      ${staleCost ? '<p class="ocw-mf-trial-note">资料已更新，请点击“开始试算”。以下为历史结果。</p><details class="ocw-mf-cost-history"><summary>查看上次试算</summary>' : ""}
+      ${this.renderShipmentProjectSummary(preview.project_summary || [])}
       <div class="ocw-mf-cost-summary">
         <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : header.status === "Dirty" ? "上次试算 · 结果待更新" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
-        <dl><div><dt>采购金额</dt><dd>${this.escape(summary.purchase_goods_value_rmb || "0.00")}</dd></div><div><dt>直接费用</dt><dd>${this.escape(summary.direct_fees_rmb || "0.00")}</dd></div><div><dt>分摊费用</dt><dd>${this.escape(summary.allocated_fees_rmb || "0.00")}</dd></div><div><dt>已计入费用</dt><dd>${Number(summary.included_fee_count || 0)} 笔</dd></div></dl>
+        <dl><div><dt>本次发货货值</dt><dd>${this.escape(summary.purchase_goods_value_rmb || "0.00")}</dd></div><div><dt>直接费用</dt><dd>${this.escape(summary.direct_fees_rmb || "0.00")}</dd></div><div><dt>分摊费用</dt><dd>${this.escape(summary.allocated_fees_rmb || "0.00")}</dd></div><div><dt>已计入费用</dt><dd>${Number(summary.included_fee_count || 0)} 笔</dd></div></dl>
       </div>
       <p class="ocw-mf-trial-note">试算不生成正式成本版本；凭证待补单独保留，已知金额可先参与计算。${summary.estimated_fee_count ? `含 ${Number(summary.estimated_fee_count)} 笔暂估费用，需后续核实。` : ""}</p>
-      <div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>采购货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}${Number(item.shipping_quantity_difference) < 0 ? `<small class="ocw-mf-warning">少发 ${this.escape(String(-Number(item.shipping_quantity_difference)))} ${this.escape(item.shipping_unit_cost?.uom || "")}</small>` : ""}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>
+      <div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>本次发货货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}${Number(item.shipping_quantity_difference) < 0 ? `<small class="ocw-mf-warning">少发 ${this.escape(String(-Number(item.shipping_quantity_difference)))} ${this.escape(item.shipping_unit_cost?.uom || "")}</small>` : ""}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>
       ${preview.excluded_fees?.length ? `<div class="ocw-mf-excluded"><strong>未计入费用</strong>${preview.excluded_fees.map((fee) => `<span>${this.escape(fee.expense_category || fee.fee_key || "费用")} · ${this.escape(this.materialFeeExclusionReason(fee))}</span>`).join("")}</div>` : ""}
       ${(preview.incomplete_reasons || []).filter((reason) => reason.item_key || reason.reason_code === "MATERIAL_ITEMS_REQUIRED").length ? `<div class="ocw-mf-excluded"><strong>物料待补</strong>${preview.incomplete_reasons.filter((reason) => reason.item_key || reason.reason_code === "MATERIAL_ITEMS_REQUIRED").map((reason) => `<span>${this.escape(items.find((item) => item.stable_line_key === reason.item_key)?.material_code || "")} ${this.escape(reason.message || "请补充物料资料")}</span>`).join("")}</div>` : ""}
-      <details class="ocw-mf-allocation-notes"><summary>查看系统分摊说明</summary><p>海运与港杂优先按体积，空运与快递按计费重，配送按毛重，清关与税费按采购货值。适用物料的体积或重量不齐全时，整笔费用自动按完整的采购货值分摊。</p><ul>${allocationNotes || "<li>本次暂无已计入费用。</li>"}</ul></details>
+      <details class="ocw-mf-allocation-notes"><summary>查看系统分摊说明</summary><p>已确认的项目规则优先按项目毛重，再按项目内发货行毛重分摊，缺项时不会切换依据。其他费用：海运与港杂优先按体积，空运与快递按计费重，配送按毛重，清关与税费按采购货值。适用物料的体积或重量不齐全时，整笔费用自动按完整的采购货值分摊。</p><ul>${allocationNotes || "<li>本次暂无已计入费用。</li>"}</ul></details>
+      ${staleCost ? "</details>" : ""}
     </section>`;
   }
 

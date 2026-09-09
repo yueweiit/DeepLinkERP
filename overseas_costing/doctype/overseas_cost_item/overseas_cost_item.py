@@ -21,6 +21,22 @@ class OverseasCostItem(Document):
     """海外成本明细行。"""
 
     def validate(self) -> None:
+        # Frappe reserves flags from client document payloads. Existing validated
+        # backend services explicitly use save/insert(ignore_permissions=True).
+        if not self.flags.get("ignore_permissions"):
+            from overseas_costing.services.calculate_service import (
+                _server_metadata_fields,
+                assert_server_metadata_unchanged,
+            )
+
+            previous = self.get_doc_before_save()
+            assert_server_metadata_unchanged(
+                getattr(previous, "extra_json", None), getattr(self, "extra_json", None)
+            )
+            if _server_metadata_fields(getattr(previous, "extra_json", None)) and any(
+                getattr(previous, field, None) != getattr(self, field, None) for field in ("batch", "version")
+            ):
+                raise ValueError("服务器来源物料不能通过普通保存迁移到其他批次或版本。")
         require_value(self.batch, "所属批次")
         require_value(self.version, "所属版本")
         if not self.material_code and not self.product_name:

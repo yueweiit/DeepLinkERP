@@ -1121,8 +1121,13 @@ def validate_source_review_application(
                     _normalize_review_item_update_values(proposal_edit)
                 )
             else:
+                server_scope = proposal['payload'].pop('scope_value_json', None)
                 proposal["payload"].update(_normalize_fee_values(proposal_edit, partial=True))
                 proposal["payload"] = _normalize_fee_values(proposal["payload"])
+                if server_scope:
+                    if proposal['payload'].get('scope_type') != 'ALL_ITEMS' or proposal['payload'].get('allocation_basis') != 'gross_weight':
+                        raise ValueError('项目毛重分摊规则需要重新分析资料后调整。')
+                    proposal['payload']['scope_value_json'] = server_scope
         selected.append(proposal)
     return selected
 
@@ -1209,6 +1214,8 @@ def build_approval_fee_proposals(
         None,
     )
     proposals = []
+    from overseas_costing.services.project_freight_service import approval_project_policy
+    project_policy = approval_project_policy(source) if chosen else None
     for index, candidate in enumerate(candidates, start=1):
         carrier = str(candidate.get("carrier") or "物流服务商").strip()
         proposals.append(
@@ -1219,6 +1226,7 @@ def build_approval_fee_proposals(
                 "conflict": (multiple or bool(existing)) and not bool(chosen),
                 "default_selected": bool(chosen) or (not multiple and not existing),
                 "approved_carrier": bool(chosen),
+                "_project_policy": project_policy,
                 "carrier": carrier,
                 "alternatives": alternatives,
                 "result_origin": "SYSTEM",
@@ -1242,7 +1250,7 @@ def build_approval_fee_proposals(
                     "amount": format(Decimal(str(candidate.get("amount"))).normalize(), "f"),
                     "currency": str(candidate.get("currency") or "RMB"),
                     "scope_type": "ALL_ITEMS",
-                    "allocation_basis": str(definition.get("allocation_basis") or "goods_value"),
+                    "allocation_basis": 'gross_weight' if project_policy else str(definition.get("allocation_basis") or "goods_value"),
                     "remark": f"{carrier} 报价；来自钉钉审批正文，待补凭证。",
                 },
             }
@@ -1336,6 +1344,9 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
+SOURCE_REVIEW_PROCESSING_VERSION = 'shipment-valuation-project-freight-v1'
+
+
 def _source_review_fingerprint(
     batch_name: str,
     version_name: str,
@@ -1348,6 +1359,7 @@ def _source_review_fingerprint(
     base = build_input_fingerprint(batch_name, version_name, items, sources)
     return hashlib.sha256(
         _json({
+            "processing_version": SOURCE_REVIEW_PROCESSING_VERSION,
             "base": base,
             "clarification_text": str(clarification_text or "")[:4000],
             "context": _source_review_context(context),
@@ -2241,6 +2253,19 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
                 result.append({"item_name": target["name"], "fieldname": "package_count",
                     "suggested_value": format(count, "f"), "confidence": 0.99,
                     "source_refs": [_source_reference(source, row=row.get("source_row")) for row in rows]})
+        from overseas_costing.services.shipment_valuation_service import build_shipment_valuations
+        matched_items = [item for item in items if item.get('stable_line_key') in grouped]
+        has_values = any(row.get('currency') or row.get('unit_price') is not None or row.get('total_amount') is not None for row in preview.get('material_rows') or [])
+        shipment_fill = build_shipment_valuations(matched_items, preview, source) if has_values else {
+            'valuations':{},'warnings':[], 'projects':{item['name']: next(row['project_collection'] for row in grouped[item['stable_line_key']] if row.get('project_collection'))
+                for item in matched_items if any(row.get('project_collection') for row in grouped[item['stable_line_key']])}}
+        original_preview['shipment_fill'] = shipment_fill
+        shipment_fill['attempted_item_names'] = [item['name'] for item in matched_items] if has_values else []
+        original_preview.setdefault('autofill_warnings', []).extend(shipment_fill['warnings'])
+        for name, project in shipment_fill['projects'].items():
+            target = next(item for item in matched_items if item['name'] == name)
+            result.append({'item_name':name,'fieldname':'project_collection','suggested_value':project,
+                'confidence':0.99,'reason':'装箱单项目归属','source_refs':[_source_reference(source,row=row.get('source_row')) for row in grouped[target['stable_line_key']]]})
         return result
     projection = material_import_service.build_wiki_material_projection(items, preview)
     candidates = []
@@ -2378,6 +2403,9 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
                 )
                 preview = trusted.get("preview") or {}
                 all_candidates.extend(_projection_candidates(items, sheet_source, preview))
+                if preview.get('shipment_fill'):
+                    semantic_document.setdefault('shipment_fills', []).append({
+                        'source_id':source.get('source_id'), 'sheet_name':sheet_name, **preview['shipment_fill']})
                 if preview.get("autofill_warnings"):
                     semantic_document.setdefault("parse_errors", []).extend(preview["autofill_warnings"])
                 if not preview.get("material_rows"):
@@ -3055,6 +3083,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         deterministic: list[dict] = []
         deterministic_proposals: list[dict] = []
         excel_proposals_by_parent: dict[str, list[tuple[int, dict, list[dict]]]] = {}
+        selected_excel_sheets = set()
         documents: list[dict] = []
         source_errors = []
         supplement_started = None
@@ -3183,11 +3212,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             persist(source_progress_json=source_progress,
                 progress_percent=10 + int(50 * (source_index + 1) / max(1, len(sources))),
                 candidates_json=partial if unified_review else deterministic,
-                draft_json={"autofill_preview": autofill_preview(items, partial, existing_fees)} if unified_review else {})
+                draft_json={"autofill_preview": autofill_preview(items, partial, existing_fees, fx_rates=context.get('fx_rates'))} if unified_review else {})
 
         for group in excel_proposals_by_parent.values():
             if len(group) == 1:
                 deterministic_proposals.extend(group[0][2])
+                selected_excel_sheets.add((group[0][1].get('source_id'), group[0][1].get('sheet_name')))
                 continue
             fruitful = [entry for entry in group if entry[2]]
             if not fruitful:
@@ -3203,6 +3233,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 continue
             if len(fruitful) == 1:
                 deterministic_proposals.extend(fruitful[0][2])
+                selected_excel_sheets.add((fruitful[0][1].get('source_id'), fruitful[0][1].get('sheet_name')))
                 fruitful_index, fruitful_source, proposals = fruitful[0]
                 _update_source_progress(
                     source_progress,
@@ -3282,6 +3313,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 fx_rates=context.get("fx_rates") or {},
                 existing_fees=existing_fees,
             )
+            # Bind policy only from deterministic server proposals, never model output.
+            server_policies = {p['proposal_id']:p['_project_policy'] for p in deterministic_proposals if p.get('_project_policy')}
+            for candidate in candidates:
+                policy = server_policies.get(candidate['proposal_id'])
+                if policy:
+                    candidate['payload']['scope_value_json'] = _json({'item_keys':[], 'project_allocation':policy})
             if reconciliation and not reconciliation.get("blocked"):
                 rows_by_name = {row["name"]: row for row in reconciliation["payload"]["rows"]}
                 packing_counts = {}
@@ -3317,6 +3354,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                             continue
                     retained.append(proposal)
                 candidates = [reconciliation, *retained]
+                from overseas_costing.services.shipment_review_service import merge_shipment_fills
+                failed_packing = any(source.get('dedicated_packing') and source.get('selected')
+                    and source_progress[index].get('status') == 'FAILED' for index, source in enumerate(sources))
+                merge_shipment_fills(reconciliation, documents, selected_excel_sheets,
+                    required_item_names=rows_by_name if failed_packing else ())
             elif reconciliation:
                 candidates = [reconciliation, *candidates]
         else:
@@ -3371,7 +3413,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "summary": counts,
                 "selected_count": sum(1 for row in candidates if row.get("default_selected")),
                 "proposal_count": len(candidates),
-                "autofill_preview": autofill_preview(items, candidates, existing_fees),
+                "autofill_preview": autofill_preview(items, candidates, existing_fees, fx_rates=context.get('fx_rates')),
                 "fee_fingerprint": hashlib.sha256(_json(existing_fees).encode()).hexdigest(),
             }
             draft["autofill_preview"]["unresolved"].extend(
@@ -4045,7 +4087,7 @@ class FrappeMaterialAIFillRepository:
                             "required_evidence_role": "freight_invoice",
                             "is_active": 1,
                             "is_enabled": 1,
-                        }
+                        }, trusted_project_policy=True
                     )
                     transport_mode = frappe.db.get_value(
                         "Overseas Cost Batch", audit["batch"], "transport_mode"

@@ -22,6 +22,9 @@ HEADER_ALIASES = {
     "spec_model": ("规格型号", "规格，型号，品牌", "specificationmodelbrand", "specmodel"),
     "quantity": ("总个数", "总数量", "数量", "quantity", "qty"),
     "unit": ("申报单位", "单位", "unit"),
+    "unit_price": ("单价", "unitprice", "priceperunit"),
+    "total_amount": ("总价", "总金额", "总货值", "金额", "totalprice", "totalamount", "goodsvalue", "totalvalue", "amount"),
+    "currency": ("币种", "货币", "currency"),
     "length_m": ("长m", "长度m", "lengthm"),
     "width_m": ("宽m", "宽度m", "widthm"),
     "height_m": ("高m", "高度m", "heightm"),
@@ -66,6 +69,7 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
             break
         field_cells = {field: _source_field_cell(cells, row_number, column, field_merges)
                        for field, column in columns.items()}
+        currency, currency_evidence = _price_currency(field_cells, original_headers, columns, header_row)
         material_code = _string_value(field_cells.get("material_code", {}).get("raw_value"))
         product_name = _string_value(field_cells.get("product_name", {}).get("raw_value"))
         if not any(cell.get("raw_value") not in (None, "") or cell.get("formula") for cell in field_cells.values()):
@@ -81,6 +85,10 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
                 "product_name": product_name,
                 "quantity": _decimal_text(_to_decimal(field_cells.get("quantity", {}).get("raw_value"))),
                 "unit": _string_value(field_cells.get("unit", {}).get("raw_value")),
+                "unit_price": _decimal_text(_to_decimal(field_cells.get("unit_price", {}).get("raw_value"))),
+                "total_amount": _decimal_text(_to_decimal(field_cells.get("total_amount", {}).get("raw_value"))),
+                "currency": currency,
+                "currency_evidence": currency_evidence,
                 "spec_model": _string_value(field_cells.get("spec_model", {}).get("raw_value")),
                 **{field: _decimal_text(_to_decimal(field_cells.get(field, {}).get("raw_value")))
                    for field in ("net_weight_kg", "gross_weight_kg", "volume_m3", "package_count")},
@@ -92,6 +100,14 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
                 ),
                 "field_ranges": {field: _source_field_range(row_number, column, field_merges)
                                  for field, column in columns.items()},
+                "field_evidence": {
+                    field: {**dict(cell),
+                            "cached_value": cell.get("raw_value") if cell.get("formula") else None,
+                            "cache_status": ("missing" if cell.get("raw_value") in (None, "") else "available")
+                                            if cell.get("formula") else "not_formula",
+                            "range": _source_field_range(row_number, columns[field], field_merges)}
+                    for field, cell in field_cells.items()
+                },
                 "raw_fields": {
                     header: dict(cells[row_number - 1][column - 1])
                     for column, header in original_headers.items()
@@ -108,6 +124,13 @@ def parse_packing_grid(grid: dict[str, Any]) -> dict[str, Any]:
     warnings: list[dict[str, str]] = []
 
     for row in material_rows:
+        for field in ("unit_price", "total_amount", "currency", "quantity", "unit"):
+            evidence = row["field_evidence"].get(field) or {}
+            if evidence.get("cache_status") == "missing":
+                warnings.append({
+                    "code": "unresolved_valuation_formula", "field": field,
+                    "message": f"第 {row['source_row']} 行 {field} 公式没有缓存结果，发货估值不可使用该单元格。",
+                })
         code = row.get("material_code") or ""
         if code and not re.search(r"[A-Za-z]", code):
             warnings.append(
@@ -476,6 +499,11 @@ def _total_mismatch_blockers(totals: dict[str, dict[str, Any]]) -> list[dict[str
 
 
 def _header_match_score(field: str, header: str, aliases: tuple[str, ...]) -> int:
+    monetary = any(marker in header for marker in ("单价", "总价", "金额", "货值", "price", "amount", "value", "currency", "币种"))
+    if field in {"unit", "quantity"} and monetary:
+        return 0
+    if field in {"unit_price", "total_amount"} and any(marker in header for marker in ("currency", "币种", "货币")):
+        return 0
     matches = [_normalize_header(alias) for alias in aliases if _normalize_header(alias) in header]
     if not matches:
         return 0
@@ -486,6 +514,39 @@ def _header_match_score(field: str, header: str, aliases: tuple[str, ...]) -> in
         if any(marker in header for marker in ("每件", "单件", "perpiece", "perunit", "unit")):
             score -= 100
     return score
+
+
+def _currency_label(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    match = re.search(r"(?<![A-Z])(RMB|CNY|USD|MXN|EUR|GBP|HKD|JPY)(?![A-Z])", text)
+    if match:
+        return match.group(1)
+    return "RMB" if "人民币" in text else None
+
+
+def _price_currency(field_cells, headers, columns, header_row):
+    cell = field_cells.get("currency") or {}
+    explicit = _string_value(cell.get("raw_value"))
+    candidates = []
+    if explicit:
+        candidates.append((_currency_label(explicit) or explicit.upper(), {
+            "kind": "column", "label": headers.get(columns.get("currency")), **dict(cell),
+        }))
+    # A present formula without a cache is not permission to substitute a header.
+    if not explicit and cell.get("formula"):
+        return None, {"kind": "column", **dict(cell)}
+    for field in ("total_amount", "unit_price"):
+        column = columns.get(field)
+        label = headers.get(column, "")
+        currency = _currency_label(label)
+        if currency:
+            candidates.append((currency, {"kind": "header", "field": field, "label": label,
+                                          "row": header_row, "column": column, "raw_value": label}))
+    currencies = {"RMB" if currency == "CNY" else currency for currency, _evidence in candidates}
+    if len(currencies) > 1:
+        return candidates[0][0], {"kind": "conflict", "candidates": [
+            {"currency": currency, **evidence} for currency, evidence in candidates]}
+    return candidates[0] if candidates else (None, None)
 
 
 def _build_package_total(

@@ -1580,7 +1580,10 @@ class FrappeFeeEvidenceReviewRepository:
                 "status_change_reason": "已人工确认凭证审核草稿",
                 "is_active": 1,
                 "is_enabled": 1,
-            }
+            },
+            # The allocation shell was loaded from the server, not from the
+            # evidence draft. Confirmation changes amount/status only.
+            trusted_project_policy=True,
         )
         current = fee_service._decorate_historical_rules(
             fee_service._query_rules(context["batch"], context["version"]),

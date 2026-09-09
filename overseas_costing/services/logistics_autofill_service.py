@@ -180,6 +180,7 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         row = {field: old.get(field) for field in (*PURCHASE_FIELDS, *PHYSICAL_FIELDS,
                 "project_collection", "manual_override_flag", "manual_override_reason", "spec_model")}
         row.update({"name": retained_name or f"draft-{key[10:]}", "stable_line_key": (old.get("stable_line_key") if retained_name else None) or key,
+                    "unit": old.get('unit') or goods_row.get('unit') or '',
                     "row_no": index, "material_code": code,
                     "product_name": goods_row.get("product_name") or old.get("product_name") or code,
                     "spec_model": goods_row.get("spec_model") or old.get("spec_model"),
@@ -278,7 +279,7 @@ def selected_carrier(candidates: list[dict], decisions: list[dict]) -> str:
     return ""
 
 
-def autofill_preview(items: list[dict], proposals: list[dict], existing_fees: list[dict]) -> dict:
+def autofill_preview(items: list[dict], proposals: list[dict], existing_fees: list[dict], *, fx_rates=None) -> dict:
     reconciliation = next((p for p in proposals if p["proposal_type"] == "logistics_reconcile"), None)
     rows = deepcopy(reconciliation["payload"]["rows"] if reconciliation and not reconciliation.get("blocked") else items)
     by_name = {row["name"]: row for row in rows}
@@ -298,4 +299,23 @@ def autofill_preview(items: list[dict], proposals: list[dict], existing_fees: li
             old = next((fee for fee in existing_fees if fee.get("logical_fee_key") == payload.get("logical_fee_key")), {})
             fees.append({**payload, "proposal_id": proposal["proposal_id"], "fee_type": payload.get("expense_category"),
                          "previous_amount": old.get("amount"), "carrier": proposal.get("carrier", "")})
-    return {"items": rows, "fees": fees, "changes": changes, "unresolved": unresolved}
+    from overseas_costing.services.material_input_service import present_material_row
+    from overseas_costing.services.cost_preview_service import preview_comprehensive_cost_data
+    if not reconciliation or not reconciliation.get('blocked'):
+        rows = [present_material_row(row) for row in rows]
+    from overseas_costing.services.fee_service import merge_logical_fee
+    effective_fees = deepcopy(existing_fees)
+    for fee in fees:
+        try:
+            effective_fees = merge_logical_fee(effective_fees, fee)['fees']
+        except ValueError as exc:
+            unresolved.append({'message':str(exc)})
+    rates = fx_rates or {}
+    mxn_to_rmb = _purchase_decimal(rates.get('MXN'))
+    cost = preview_comprehensive_cost_data(rows, effective_fees, {
+        'fx_usd_to_rmb':rates.get('USD'),
+        'fx_rmb_to_mxn':str(Decimal('1') / mxn_to_rmb) if mxn_to_rmb and mxn_to_rmb > 0 else None})
+    unresolved.extend(reason for reason in cost['incomplete_reasons']
+        if str(reason.get('reason_code') or '').startswith(('PROJECT_', 'SHIPMENT_VALUATION_', 'FX_', 'DUPLICATE_LOGICAL_FEE')))
+    return {"items": rows, "fees": fees, "changes": changes, "unresolved": unresolved,
+            "project_summary": cost['project_summary'], "cost_summary": cost['summary']}

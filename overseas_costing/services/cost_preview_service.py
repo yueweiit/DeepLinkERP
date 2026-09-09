@@ -158,6 +158,12 @@ def _allocation_with_components(
     fx_context: dict,
     fee_components: list[dict],
 ) -> dict:
+    from overseas_costing.services.project_freight_service import policy_from_fee
+    if policy_from_fee(fee):
+        # The confirmed internal project policy governs the entire freight.
+        # Invoice SKU splits remain evidence, not a second allocation rule.
+        return {**allocate_fee_in_rmb(fee, items, fx_context),
+                'component_source':'PROJECT_POLICY_PRIORITY'}
     components = _fee_component_rows(fee, fee_components)
     component_source = "EVIDENCE_SKU_COMPONENT" if components else ""
     if components and any(_decimal(row.get("amount_rmb")) is None for row in components):
@@ -257,14 +263,14 @@ def preview_comprehensive_cost_data(
     goods_total = Decimal("0")
     for row in presented_items:
         key = _item_key(row)
-        goods_value = _decimal(row.get("goods_value"))
+        goods_value = _decimal(row.get("shipment_value_rmb"))
         if goods_value is None or goods_value <= 0:
             incomplete_reasons.append(
                 {
-                    "reason_code": "GOODS_VALUE_MISSING",
+                    "reason_code": row.get('shipment_valuation', {}).get('error') or "GOODS_VALUE_MISSING",
                     "item_key": key,
                     "field": "goods_value",
-                    "message": "采购货值缺失，该行试算不完整。",
+                    "message": "本次发货货值缺失或已失效，该行试算不完整。",
                 }
             )
             goods_value = Decimal("0")
@@ -353,6 +359,8 @@ def preview_comprehensive_cost_data(
                 "preferred_basis": allocation.get("preferred_basis") or "",
                 "fallback_reason": allocation.get("fallback_reason") or "",
                 "allocations": allocation.get("allocations") or {},
+                "project_allocations": allocation.get("project_allocations") or {},
+                "project_weights_kg": allocation.get("project_weights_kg") or {},
                 "component_allocations": allocation.get("component_allocations") or {},
                 "component_source": allocation.get("component_source") or "",
                 "residual_amount_rmb": allocation.get("residual_amount_rmb", _money(amount_rmb)),
@@ -360,8 +368,11 @@ def preview_comprehensive_cost_data(
         )
 
     reason_messages = {
+        "DUPLICATE_LOGICAL_FEE": "存在同名费用重复记录，请核对并停用重复记录后重新试算。",
         "EVIDENCE_COMPONENT_FX_MISSING": "凭证 SKU 分项缺少汇率，请补充汇率后重新试算。",
         "LEGACY_COMPONENT_FX_MISSING": "历史 SKU 税费分项缺少汇率，本次试算未计入。",
+        "PROJECT_MEMBERSHIP_REQUIRED": "项目归属不完整或与确认规则不一致，请重新分析资料。",
+        "PROJECT_WEIGHT_REQUIRED": "项目毛重缺失或总重为零，不能按已确认规则分摊。",
     }
     for row in excluded_fees:
         incomplete_reasons.append(
@@ -408,16 +419,19 @@ def preview_comprehensive_cost_data(
         purchase_quantity = _decimal(row.get("quantity"))
         purchase_uom = str(row.get("purchase_uom") or row.get("unit") or "").strip()
         pricing_uom = str(row.get("unit_price_uom") or "").strip()
+        pricing_quantity = purchase_quantity
+        if row.get('shipment_valuation', {}).get('method') != 'LEGACY_PURCHASE':
+            pricing_quantity = shipped_quantity if pricing_uom == shipped_uom else None
         purchase_pricing_unit_cost = None
         if (
-            purchase_quantity is not None
-            and purchase_quantity > 0
+            pricing_quantity is not None
+            and pricing_quantity > 0
             and pricing_uom
             and purchase_uom
             and pricing_uom == purchase_uom
         ):
             purchase_pricing_unit_cost = {
-                "amount_rmb": _unit_money(total / purchase_quantity),
+                "amount_rmb": _unit_money(total / pricing_quantity),
                 "uom": pricing_uom,
             }
         preview_items.append(
@@ -427,6 +441,10 @@ def preview_comprehensive_cost_data(
                 "material_code": row.get("material_code") or "",
                 "product_name": row.get("product_name") or "",
                 "goods_value_rmb": _money(rounded_goods[key]),
+                "shipment_value_rmb": _money(rounded_goods[key]),
+                "valuation_source": row.get('shipment_valuation'),
+                "project_collection": row.get('project_collection') or '',
+                "gross_weight_kg": row.get('gross_weight_kg'),
                 "direct_fees_rmb": _money(costs["direct_fees_rmb"]),
                 "allocated_fees_rmb": _money(costs["allocated_fees_rmb"]),
                 "total_cost_rmb": _money(total),
@@ -448,11 +466,13 @@ def preview_comprehensive_cost_data(
     }
     if estimated_fee_count:
         summary["estimated_fee_count"] = estimated_fee_count
+    from overseas_costing.services.shipment_cost_service import project_summaries
     return {
         "ok": True,
         "read_only": True,
         "summary": summary,
         "items": preview_items,
+        "project_summary": project_summaries(preview_items),
         "included_fees": included_fees,
         "excluded_fees": excluded_fees,
         "ignored_fees": ignored_fees,
@@ -727,6 +747,7 @@ class FrappeCostRepository:
 
 
 COST_INPUT_FIELDS = [
+    'extra_json',
     "name", "row_no", "stable_line_key", "material_code", "product_name", "unit", "purchase_uom",
     "unit_price_uom", "quantity", "actual_shipped_qty", "actual_shipped_qty_mode",
     "actual_shipped_qty_source_revision", "shipped_uom", "goods_value", "gross_weight_kg", "volume_m3",

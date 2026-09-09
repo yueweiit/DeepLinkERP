@@ -109,6 +109,7 @@ DEFAULT_FX_RMB_TO_MXN = 2.6
 PURCHASE_CORRECTION_FIELDS = frozenset(
     {"goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"}
 )
+SERVER_ITEM_METADATA_FIELDS = frozenset({"shipment_valuation", "logistics_row", "autofill_review"})
 EDITABLE_ITEM_FIELDS = frozenset(
     {
         "material_code",
@@ -397,6 +398,26 @@ def _normalize_edit_remark(remark: str | None = None, manual_override_reason: st
     return str(manual_override_reason or remark or "").strip()
 
 
+def _server_metadata_fields(value, fields=SERVER_ITEM_METADATA_FIELDS) -> dict:
+    """Extract reserved JSON keys while keeping unrelated legacy extensions editable."""
+    if isinstance(value, str):
+        try:
+            value = _json.loads(value or "{}")
+        except (TypeError, ValueError):
+            value = {}
+    if not isinstance(value, dict):
+        return {}
+    return {key: value[key] for key in fields if key in value}
+
+
+def assert_server_metadata_unchanged(previous, proposed, *, fields=SERVER_ITEM_METADATA_FIELDS) -> None:
+    """Public writes may retain source facts, but cannot create, replace, or remove them."""
+    before = _json.dumps(_server_metadata_fields(previous, fields), sort_keys=True, default=str)
+    after = _json.dumps(_server_metadata_fields(proposed, fields), sort_keys=True, default=str)
+    if before != after:
+        raise ValueError("服务器来源元数据不能通过普通编辑修改，请重新分析资料并确认。")
+
+
 def _validate_edit_field(fieldname: str, remark: str = "") -> tuple[bool, str, str]:
     if not fieldname:
         return False, "字段名不能为空。", "missing"
@@ -455,6 +476,8 @@ def _preview_update_result(update: dict, default_remark: str = "") -> dict:
         }
     try:
         coerced_value = _coerce_edit_value(fieldname, value)
+        if fieldname == "extra_json":
+            assert_server_metadata_unchanged(None, coerced_value)
     except ValueError as exc:
         return {
             "ok": False,
@@ -1251,6 +1274,8 @@ def update_item_field(
 
     try:
         coerced_value = _coerce_edit_value(fieldname, value)
+        if fieldname == "extra_json" and _frappe is None:
+            assert_server_metadata_unchanged(None, coerced_value)
     except ValueError as exc:
         return {
             "ok": False,
@@ -1307,6 +1332,17 @@ def update_item_field(
             expected_modified=expected_modified,
         )
     old_value = getattr(item_doc, fieldname, None)
+    if fieldname == "extra_json":
+        try:
+            # This API saves with ignore_permissions=True after validating its payload.
+            # Do not let that trusted persistence flag authorize client source facts.
+            assert_server_metadata_unchanged(old_value, coerced_value)
+        except ValueError as exc:
+            return {
+                "ok": False, "changed": False, "item_name": item_name,
+                "fieldname": fieldname, "version_name": version_name or item_doc.version,
+                "edit_mode": "server_metadata", "message": str(exc),
+            }
     if (
         fieldname in PURCHASE_CORRECTION_FIELDS
         and not _edit_values_equal(fieldname, old_value, coerced_value)
@@ -1661,6 +1697,7 @@ def create_item(
 ) -> dict:
     try:
         payload = _load_payload(item_payload)
+        assert_server_metadata_unchanged(None, payload.get("extra_json"))
     except (TypeError, ValueError, _json.JSONDecodeError) as exc:
         return {
             "ok": False,
@@ -1920,6 +1957,9 @@ def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str
     batch_doc_name = _resolve_batch_name(batch_name)
     if not batch_doc_name:
         return {"ok": False, "message": f"未找到批次：{batch_name}"}
+    version_batch = _frappe.db.get_value("Overseas Cost Version", version_name, "batch")
+    if version_batch != batch_doc_name:
+        raise ValueError("分摊规则的版本不存在或不属于当前批次。")
 
     payload = _json.loads(rule_payload or "{}")
     rule_name = payload.get("rule_id") or payload.get("name")
@@ -1940,8 +1980,6 @@ def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str
         )
         if key in payload
     }
-    values.update({"batch": batch_doc_name, "version": version_name})
-
     if not rule_name and rule_code:
         rule_name = _frappe.db.get_value(
             "Overseas Cost Allocation Rule",
@@ -1949,10 +1987,29 @@ def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str
             "name",
         )
 
+    previous = (_frappe.db.get_value(
+        "Overseas Cost Allocation Rule", rule_name,
+        ["batch", "version", "scope_value_json", "scope_type", "allocation_basis", "basis_field"], as_dict=True,
+    ) or {}) if rule_name else {}
+    if rule_name and not previous:
+        raise ValueError("分摊规则不存在，请刷新后重试。")
+    if rule_name and (previous.get("batch") != batch_doc_name or previous.get("version") != version_name):
+        raise ValueError("分摊规则不属于当前批次和版本，不能迁移已有规则。")
+    previous_scope = previous.get("scope_value_json")
+    assert_server_metadata_unchanged(
+        previous_scope, payload.get("scope_value_json", previous_scope), fields=("project_allocation",)
+    )
+    if _server_metadata_fields(previous_scope, ("project_allocation",)) and any(
+        field in payload and payload[field] != expected
+        for field, expected in (("scope_type", "ALL_ITEMS"), ("allocation_basis", "gross_weight"),
+                                ("basis_field", "gross_weight"))
+    ):
+        raise ValueError("已确认的项目毛重规则不能变更为其他范围或依据。")
+
     if rule_name:
         _frappe.db.set_value("Overseas Cost Allocation Rule", rule_name, values, update_modified=True)
     else:
-        values["doctype"] = "Overseas Cost Allocation Rule"
+        values.update({"doctype": "Overseas Cost Allocation Rule", "batch": batch_doc_name, "version": version_name})
         rule_name = _frappe.get_doc(values).insert(ignore_permissions=True).name
 
     _frappe.db.set_value("Overseas Cost Batch", batch_doc_name, "status", "Dirty", update_modified=True)

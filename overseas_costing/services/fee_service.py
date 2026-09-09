@@ -376,7 +376,7 @@ def validate_fee_status_transition(
     }
 
 
-def normalize_fee_payload(payload) -> dict:
+def normalize_fee_payload(payload, *, trusted_project_policy=False) -> dict:
     raw = _load_dict(payload)
     fee_key = str(raw.get("logical_fee_key") or "").strip()
     if not fee_key:
@@ -441,6 +441,15 @@ def normalize_fee_payload(payload) -> dict:
             "is_enabled": 1 if raw.get("is_enabled", 1) else 0,
         }
     )
+    from overseas_costing.services.project_freight_service import policy_from_fee, validate_policy
+    policy = policy_from_fee(raw)
+    if policy:
+        if not trusted_project_policy:
+            raise ValueError('项目分摊规则只能由可信资料审核生成。')
+        validate_policy(policy)
+        if scope_type != 'ALL_ITEMS' or basis != 'gross_weight':
+            raise ValueError('项目毛重规则不能变更为其他范围或依据。')
+        normalized['scope_value_json'] = json.dumps({'item_keys': [], 'project_allocation': policy}, ensure_ascii=False, sort_keys=True)
     return normalized
 
 
@@ -449,7 +458,8 @@ def _cost_value(record: dict, fieldname: str):
     if fieldname == "amount" and value not in (None, ""):
         return _decimal_text(value)
     if fieldname == "scope_value_json":
-        return tuple(_scope_keys(record))
+        from overseas_costing.services.project_freight_service import policy_from_fee
+        return (tuple(_scope_keys(record)), json.dumps(policy_from_fee(record), sort_keys=True))
     return value
 
 
@@ -461,6 +471,12 @@ def merge_logical_fee(existing_fees: list[dict], payload: dict, *, revision: str
     existing_index = next((index for index in matches if fee_is_active(fees[index])), matches[0] if matches else None)
     previous = fees[existing_index] if existing_index is not None else {}
     merged = {**previous, **payload}
+    from overseas_costing.services.project_freight_service import policy_from_fee
+    # Ordinary amount/status edits cannot erase a server-confirmed policy.
+    if policy_from_fee(previous) and not policy_from_fee(payload):
+        if merged.get('scope_type') != 'ALL_ITEMS' or merged.get('allocation_basis') != 'gross_weight':
+            raise ValueError('已有项目毛重分摊规则，请重新分析资料后调整。')
+        merged['scope_value_json'] = previous['scope_value_json']
     if previous and not fee_is_active(previous) and fee_is_active(merged):
         raise ValueError("该费用已停用，请先核对历史记录，不能通过保存金额恢复启用。")
     if previous.get("rule_code") == "oa_logistics_freight":
@@ -638,21 +654,27 @@ def save_fee(
     edit_token: str | None = None,
     expected_modified: str | None = None,
 ) -> dict:
-    payload = normalize_fee_payload(fee_payload)
     if frappe is None:
+        payload = normalize_fee_payload(fee_payload)
         merged = merge_logical_fee([], payload, revision="DRY-RUN")
         return {"ok": True, "dry_run": True, **merged}
 
     _assert_write_context(batch_name, version_name, edit_token, expected_modified)
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     existing = _decorate_historical_rules(_query_rules(batch_name, version_name), transport_mode)
+    raw_payload = _load_dict(fee_payload)
     previous = next(
         (
             row for row in existing
-            if row.get("logical_fee_key") == payload["logical_fee_key"] and fee_is_active(row)
+            if row.get("logical_fee_key") == raw_payload.get("logical_fee_key") and fee_is_active(row)
         ),
         {},
     )
+    from overseas_costing.services.project_freight_service import policy_from_fee
+    submitted_policy = policy_from_fee(raw_payload)
+    if submitted_policy and submitted_policy != policy_from_fee(previous):
+        raise ValueError('不能通过浏览器修改服务器签发的项目分摊规则。')
+    payload = normalize_fee_payload(raw_payload, trusted_project_policy=bool(submitted_policy))
     transition = validate_fee_status_transition(
         previous.get("amount_status") or "MISSING",
         payload.get("amount_status"),

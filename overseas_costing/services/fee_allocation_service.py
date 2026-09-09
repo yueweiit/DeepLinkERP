@@ -91,6 +91,9 @@ def resolve_eligible_items(fee: dict, items: list[dict]) -> list[dict]:
 
 
 def basis_decimal(item: dict, basis: str) -> Decimal | None:
+    if basis == 'goods_value':
+        from overseas_costing.services.shipment_cost_service import shipment_value
+        return _decimal(shipment_value(item)['amount_rmb'])
     field = {
         "goods_value": "goods_value",
         "gross_weight": "gross_weight_kg",
@@ -104,6 +107,9 @@ def basis_decimal(item: dict, basis: str) -> Decimal | None:
 
 
 def preferred_allocation_basis(fee: dict) -> str:
+    from overseas_costing.services.project_freight_service import policy_from_fee
+    if policy_from_fee(fee):
+        return 'gross_weight'
     key = str(fee.get("logical_fee_key") or fee.get("rule_code") or "")
     saved_basis = str(fee.get("allocation_basis") or fee.get("basis_field") or "")
     manual_revision = any(str(fee.get(field) or "") and not str(fee.get(field)).startswith("oa:")
@@ -210,6 +216,16 @@ def allocate_fee(fee: dict, items: list[dict], *, currency_precision: int = 2) -
         return _blocked("DIRECT_ITEM_SCOPE_INVALID")
     if not eligible:
         return _blocked("FEE_SCOPE_EMPTY")
+
+    from overseas_costing.services.project_freight_service import policy_from_fee, allocate_projects
+    policy = policy_from_fee(fee)
+    if policy:
+        keys = [_item_key(row) for row in eligible]
+        if not all(keys) or len(set(keys)) != len(keys):
+            return _blocked('STABLE_ITEM_KEY_DUPLICATED')
+        if scope_type != 'ALL_ITEMS':
+            return _blocked('PROJECT_SCOPE_INVALID')
+        return allocate_projects(policy, amount, eligible, currency_precision)
 
     selection = select_allocation_basis(fee, eligible)
     basis = selection["basis"]

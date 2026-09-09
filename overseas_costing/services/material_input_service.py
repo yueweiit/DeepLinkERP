@@ -22,6 +22,7 @@ VALID_QTY_MODES = frozenset(
 )
 
 GRID_FIELDS = (
+    'extra_json',
     "name",
     "modified",
     "row_no",
@@ -154,6 +155,10 @@ def present_material_row(item: dict) -> dict:
             "revision": row.get("actual_shipped_qty_source_revision") or "",
         },
     }
+    from overseas_costing.services.shipment_cost_service import shipment_value
+    valuation = shipment_value(row)
+    row['shipment_value_rmb'] = valuation['amount_rmb']
+    row['shipment_valuation'] = valuation
     return row
 
 
@@ -169,14 +174,15 @@ def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
         reasons: dict[str, list[dict]] = {}
         for blocking in (row.get("effective_shipping") or {}).get("blocking") or []:
             reasons.setdefault(str(blocking.get("field") or "actual_shipped_qty"), []).append(blocking)
-        if _positive_decimal(row.get("goods_value")) is None:
-            reasons.setdefault("goods_value", []).append(
-                {"code": "GOODS_VALUE_REQUIRED", "message": "缺少采购货值。"}
+        if _positive_decimal(row.get("shipment_value_rmb")) is None:
+            value_field = 'goods_value' if row['shipment_valuation']['method'] == 'LEGACY_PURCHASE' else 'shipment_value_rmb'
+            reasons.setdefault(value_field, []).append(
+                {"code": row['shipment_valuation'].get('error') or "GOODS_VALUE_REQUIRED", "message": "本次发货货值缺失或已失效，请重新分析资料。"}
             )
         row_states[key] = {"missing_fields": [], "field_reasons": reasons}
 
     basis_fields = {
-        "goods_value": "goods_value",
+        "goods_value": "shipment_value_rmb",
         "gross_weight": "gross_weight_kg",
         "volume": "volume_m3",
         "chargeable_weight": "chargeable_weight_kg",
@@ -195,11 +201,12 @@ def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
         for row in fee_allocation_service.resolve_eligible_items(fee, presented):
             if _positive_decimal(row.get(fieldname)) is not None:
                 continue
+            reason_field = 'goods_value' if fieldname == 'shipment_value_rmb' and row['shipment_valuation']['method'] == 'LEGACY_PURCHASE' else fieldname
             key = str(row.get("stable_line_key") or row.get("name") or "")
             state = row_states.get(key)
             if state is None:
                 continue
-            state["field_reasons"].setdefault(fieldname, []).append(
+            state["field_reasons"].setdefault(reason_field, []).append(
                 {
                     "code": "ALLOCATION_BASIS_REQUIRED",
                     "fee_key": fee_key,
