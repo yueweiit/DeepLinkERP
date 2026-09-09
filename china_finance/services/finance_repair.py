@@ -36,11 +36,18 @@ BANK_SUMMARY_REPAIRS = {
 }
 
 DETAIL_ACCOUNTS = (
-	("660207", "管理费用－租金", "6602", "Expense Account"),
-	("660208", "管理费用－物业水电费", "6602", "Expense Account"),
-	("660209", "管理费用－社保", "6602", "Expense Account"),
-	("660210", "管理费用－公积金", "6602", "Expense Account"),
-	("660211", "管理费用－招聘费", "6602", "Expense Account"),
+	("660201", "管理费用－办公费", "6602", "Expense Account"),
+	("660202", "管理费用－房租", "6602", "Expense Account"),
+	("660203", "管理费用－物业管理费", "6602", "Expense Account"),
+	("660204", "管理费用－水电费", "6602", "Expense Account"),
+	("660207", "管理费用－差旅费", "6602", "Expense Account"),
+	("660208", "管理费用－社会保险费", "6602", "Expense Account"),
+	("660209", "管理费用－工资", "6602", "Expense Account"),
+	("660210", "管理费用－保险金", "6602", "Expense Account"),
+	("660211", "管理费用－福利费", "6602", "Expense Account"),
+	("660212", "管理费用－油费", "6602", "Expense Account"),
+	("660213", "管理费用－住房公积金", "6602", "Expense Account"),
+	("660229", "管理费用－公积金", "6602", "Expense Account"),
 )
 
 OTHER_PAYABLE_ACCOUNTS = (
@@ -199,6 +206,44 @@ def _account(company, number):
 	)
 
 
+def split_management_fee_accounts(company=COMPANY, apply=False):
+	"""Validate the source chart's separate property/utilities accounts."""
+	if company != COMPANY:
+		frappe.throw("此维护脚本仅允许处理 aaa 的悦为智能技术(东莞)有限公司")
+
+	property_account = _account(company, "660203")
+	if not property_account:
+		frappe.throw("aaa 缺少 660203 管理费用－物业管理费科目")
+
+	utilities_before = _account(company, "660204")
+	result = {
+		"company": company,
+		"property_account_before": property_account,
+		"property_account_after": property_account,
+		"utilities_account": utilities_before,
+		"renamed": False,
+		"created": False,
+		"statement_mappings_cloned": False,
+	}
+	if not apply:
+		return result
+
+	from erpnext.accounts.doctype.account.account import update_account_number
+
+	if frappe.db.get_value("Account", property_account, "account_name") != "管理费用－物业管理费":
+		new_name = update_account_number(property_account, "管理费用－物业管理费", "660203")
+		result["property_account_after"] = new_name or _account(company, "660203")
+		result["renamed"] = True
+
+	account_map = ensure_detail_accounts(company)
+	result["utilities_account"] = account_map["660204"]
+	result["created"] = not utilities_before
+	clone_statement_mappings(company, account_map)
+	result["statement_mappings_cloned"] = True
+	frappe.db.commit()
+	return result
+
+
 def ensure_detail_accounts(company):
 	accounts = {}
 	parent_6602 = _account(company, "6602")
@@ -290,7 +335,7 @@ def clone_statement_mappings(company, account_map):
 	clones = {
 		**{number: name for number, name in account_map.items() if number != "100201"},
 	}
-	for source_number, target_numbers in (("660299", ("660207", "660208", "660209", "660210", "660211")), ("2241", ("224101", "224102"))):
+	for source_number, target_numbers in (("660299", ("660201", "660202", "660203", "660204", "660207", "660208", "660209", "660210", "660211", "660212", "660213", "660229")), ("2241", ("224101", "224102"))):
 		source = _account(company, source_number)
 		if not source:
 			continue
@@ -415,8 +460,13 @@ def _row_account_number(row):
 
 
 def _has_mixed_facility_terms(description):
-	terms = ("租金", "房租", "物业", "水电", "电费")
-	return sum(1 for term in terms if term in (description or "")) >= 2
+	text = description or ""
+	categories = (
+		any(term in text for term in ("租金", "房租")),
+		"物业" in text,
+		any(term in text for term in ("水电", "电费")),
+	)
+	return sum(categories) >= 2
 
 
 def _target_account(company, source_name, row, summary, bank_transaction, account_map, source_root=None):
@@ -436,21 +486,21 @@ def _target_account(company, source_name, row, summary, bank_transaction, accoun
 		# annotations. They are deliberately explicit so a generic tax reference
 		# cannot be mistaken for individual income tax or social insurance.
 		explicit_numbers = {
-			"ACC-BTN-2026-00175": "660211",
+			"ACC-BTN-2026-00175": "660299",
 			"ACC-BTN-2026-00176": "1221",
-			"ACC-BTN-2026-00190": "222110",
+			"ACC-BTN-2026-00190": "222112",
 			"ACC-BTN-2026-00193": "660303",
 			"ACC-BTN-2026-00195": "1221",
 			"ACC-BTN-2026-00200": "1221",
 			"ACC-BTN-2026-00209": "221103",
-			"ACC-BTN-2026-00217": "660211",
+			"ACC-BTN-2026-00217": "660299",
 		}
 		if bank_name in explicit_numbers:
 			return _account(company, explicit_numbers[bank_name])
 		if "批量代发" in bank_summary and any(term in bank_summary for term in ("付费", "费用", "手续费", "服务费")):
 			return _account(company, "660303")
 		if "招聘" in bank_summary and "备用金" in bank_summary:
-			return account_map["660211"]
+			return _account(company, "660299")
 		if "公众号注册退款" in bank_summary:
 			return _account(company, "1221")
 	if source_root == "ACC-JV-2026-00164" and number == "660303":
@@ -462,20 +512,24 @@ def _target_account(company, source_name, row, summary, bank_transaction, accoun
 			return _account(company, "221101")
 	if source_root == "ACC-JV-2026-00154" and number == "660299":
 		if "房租" in line_summary or "租金" in line_summary:
-			return account_map["660207"]
-		if "物业" in line_summary or "电费" in line_summary or "水电" in line_summary:
-			return account_map["660208"]
+			return account_map["660202"]
+		if "水电" in line_summary or "电费" in line_summary:
+			return account_map["660204"]
+		if "物业" in line_summary:
+			return account_map["660203"]
 	if number == "660299" and not _has_mixed_facility_terms(line_summary):
 		if "房租" in line_summary or "租金" in line_summary:
-			return account_map["660207"]
-		if "物业" in line_summary or "电费" in line_summary or "水电" in line_summary:
-			return account_map["660208"]
+			return account_map["660202"]
+		if "水电" in line_summary or "电费" in line_summary:
+			return account_map["660204"]
+		if "物业" in line_summary:
+			return account_map["660203"]
 	if source_root in {"ACC-JV-2026-00139", "ACC-JV-2026-00165"}:
 		if number == "660201" and "社保" in line_summary:
-			return account_map["660209"]
+			return account_map["660208"]
 	if source_root in {"ACC-JV-2026-00148", "ACC-JV-2026-00165"}:
 		if number == "660201" and "公积金" in line_summary:
-			return account_map["660210"]
+			return account_map["660229"]
 		if number == "2241":
 			if "公积金" in line_summary:
 				return account_map["224102"]
@@ -496,7 +550,7 @@ def _target_account(company, source_name, row, summary, bank_transaction, accoun
 	if bank_transaction:
 		description = bank_transaction.description or ""
 		if number == "660299" and "报销" in description:
-			return _account(company, "660202")
+			return _account(company, "660201")
 		if number == "660299" and any(word in description for word in ("招聘", "退款", "退回", "验证", "实名")):
 			return _account(company, "1221")
 		if number == "660299" and "社保" in description:
