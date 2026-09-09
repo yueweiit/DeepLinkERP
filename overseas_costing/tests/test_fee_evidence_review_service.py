@@ -1209,6 +1209,7 @@ def test_attachment_fingerprint_uses_file_content_not_attachment_identity() -> N
         "file_name": "renamed.pdf",
         "file_url": "/files/renamed.pdf",
         "modified": "m2",
+        "parse_result_json": {"total": "30", "parser_version": "new"},
     }
 
     assert service._attachment_fingerprint(first) == service._attachment_fingerprint(

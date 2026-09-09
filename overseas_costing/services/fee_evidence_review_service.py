@@ -1068,15 +1068,13 @@ def _session_user() -> str:
 
 
 def _attachment_fingerprint(attachment: dict) -> str:
+    content_sha256 = str(attachment.get("content_sha256") or "").strip().lower()
+    if content_sha256:
+        return hashlib.sha256(f"content:{content_sha256}".encode("utf-8")).hexdigest()
     payload = {
-        "content_sha256": str(attachment.get("content_sha256") or ""),
-        "parse_status": attachment.get("parse_status"),
-        "parse_result_json": attachment.get("parse_result_json"),
-        "mapped_result_json": attachment.get("mapped_result_json"),
+        "file_name": str(attachment.get("file_name") or "").strip().lower(),
+        "file_url": str(attachment.get("file_url") or ""),
     }
-    if not payload["content_sha256"]:
-        payload["file_name"] = str(attachment.get("file_name") or "").strip().lower()
-        payload["file_url"] = str(attachment.get("file_url") or "")
     return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
 
 
