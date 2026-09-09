@@ -776,7 +776,7 @@ const RuleAction = ({ transaction }: { transaction: UnreconciledTransaction }) =
 
 const VouchersForTransaction = ({ transaction, contentHeight }: { transaction: UnreconciledTransaction, contentHeight: number }) => {
 
-    const { data: vouchers, isLoading, error } = useGetVouchersForTransaction(transaction)
+    const { data: vouchers, isLoading, isValidating, error } = useGetVouchersForTransaction(transaction)
 
     const voucherList = vouchers?.message ?? []
     const listHeight = contentHeight - 120
@@ -785,7 +785,11 @@ const VouchersForTransaction = ({ transaction, contentHeight }: { transaction: U
         return <ErrorBanner error={error} />
     }
 
-    if (isLoading) {
+    // A transaction change can reuse an SWR cache entry while the new voucher
+    // query is still being refreshed. Do not render the empty state during
+    // that interval, otherwise the right pane briefly flashes stale/empty
+    // content before the current transaction's result arrives.
+    if (isLoading || isValidating) {
         return <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2 text-sm text-ink-gray-5">
                 <Separator className="flex-1" />
