@@ -64,7 +64,90 @@ def convert_fee_amount_to_rmb(fee: dict, fx_context: dict) -> dict:
     return {"ok": False, "reason_code": "FX_RATE_MISSING", "currency": currency}
 
 
-def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_context: dict) -> dict:
+def _fee_component_rows(fee: dict, fee_components: list[dict]) -> list[dict]:
+    rule_name = str(fee.get("name") or "")
+    logical_key = _fee_key(fee)
+    return [
+        row for row in (fee_components or [])
+        if bool(row.get("is_active", 1))
+        and str(row.get("status") or "").upper() == "CONFIRMED"
+        and (
+            str(row.get("fee_rule") or "") == rule_name
+            or str(row.get("logical_fee_key") or row.get("fee_logical_key") or "") == logical_key
+        )
+    ]
+
+
+def _allocation_with_components(
+    fee: dict,
+    items: list[dict],
+    fx_context: dict,
+    fee_components: list[dict],
+) -> dict:
+    full = allocate_fee_in_rmb(fee, items, fx_context)
+    if full.get("status") != "ALLOCATED":
+        return full
+    components = _fee_component_rows(fee, fee_components)
+    if not components:
+        return full
+
+    item_name_to_key = {str(row.get("name") or ""): _item_key(row) for row in items}
+    valid_keys = {_item_key(row) for row in items}
+    component_allocations: dict[str, Decimal] = {}
+    missing_amount = False
+    for row in components:
+        amount = _decimal(row.get("amount_rmb"))
+        key = str(row.get("stable_line_key") or "")
+        if key not in valid_keys:
+            key = item_name_to_key.get(str(row.get("item") or ""), "")
+        if amount is None:
+            missing_amount = True
+            continue
+        if not key or key not in valid_keys:
+            return {"status": "BLOCKED", "code": "EVIDENCE_COMPONENT_SKU_INVALID", "allocations": {}}
+        component_allocations[key] = component_allocations.get(key, Decimal("0")) + amount
+    if missing_amount:
+        return {"status": "BLOCKED", "code": "EVIDENCE_COMPONENT_FX_MISSING", "allocations": {}}
+
+    fee_total = Decimal(str(full["amount"]))
+    component_total = sum(component_allocations.values(), Decimal("0"))
+    residual = fee_total - component_total
+    if residual < Decimal("-0.005"):
+        return {"status": "BLOCKED", "code": "EVIDENCE_COMPONENT_TOTAL_EXCEEDS_FEE", "allocations": {}}
+    residual = max(residual, Decimal("0"))
+    if residual:
+        residual_fee = {**fee, "amount": format(residual, "f"), "currency": "RMB"}
+        residual_result = allocate_fee_in_rmb(residual_fee, items, {})
+        if residual_result.get("status") != "ALLOCATED":
+            return residual_result
+        residual_allocations = {
+            key: Decimal(str(value or "0"))
+            for key, value in (residual_result.get("allocations") or {}).items()
+        }
+    else:
+        residual_result = full
+        residual_allocations = {key: Decimal("0") for key in valid_keys}
+    allocations = {
+        key: _money(component_allocations.get(key, Decimal("0")) + residual_allocations.get(key, Decimal("0")))
+        for key in valid_keys
+    }
+    return {
+        **full,
+        "allocations": allocations,
+        "component_allocations": {key: _money(value) for key, value in component_allocations.items()},
+        "residual_amount_rmb": _money(residual),
+        "component_count": len(components),
+        "basis": residual_result.get("basis") or full.get("basis") or "evidence_component",
+    }
+
+
+def preview_comprehensive_cost_data(
+    items: list[dict],
+    fees: list[dict],
+    fx_context: dict,
+    *,
+    fee_components: list[dict] | None = None,
+) -> dict:
     """Calculate a transparent preview from caller-provided snapshots only."""
 
     presented_items = [present_material_row(dict(row or {})) for row in (items or [])]
@@ -127,7 +210,12 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
             excluded_fees.append({**common, "reason_code": "AMOUNT_STATUS_INVALID"})
             continue
 
-        allocation = allocate_fee_in_rmb(fee, presented_items, fx_context or {})
+        allocation = _allocation_with_components(
+            fee,
+            presented_items,
+            fx_context or {},
+            fee_components or [],
+        )
         if allocation.get("status") != "ALLOCATED":
             excluded_fees.append(
                 {
@@ -166,6 +254,8 @@ def preview_comprehensive_cost_data(items: list[dict], fees: list[dict], fx_cont
                 "preferred_basis": allocation.get("preferred_basis") or "",
                 "fallback_reason": allocation.get("fallback_reason") or "",
                 "allocations": allocation.get("allocations") or {},
+                "component_allocations": allocation.get("component_allocations") or {},
+                "residual_amount_rmb": allocation.get("residual_amount_rmb", _money(amount_rmb)),
             }
         )
 
@@ -309,7 +399,19 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
         ["fx_usd_to_rmb", "fx_rmb_to_mxn"],
         as_dict=True,
     ) or {}
-    result = preview_comprehensive_cost_data(raw_items, rules, version_row)
+    fee_components = frappe.get_all(
+        "Overseas Cost Fee SKU Component",
+        filters={"batch": batch_name, "version": version, "status": "CONFIRMED", "is_active": 1},
+        fields=[
+            "fee_rule", "logical_fee_key", "evidence", "attachment", "item", "stable_line_key",
+            "component_type", "tax_code", "hs_code", "currency", "original_amount", "amount_rmb",
+            "exchange_rate", "allocation_basis", "source_evidence_json", "status", "is_active",
+        ],
+        limit_page_length=10000,
+    )
+    result = preview_comprehensive_cost_data(
+        raw_items, rules, version_row, fee_components=fee_components
+    )
     result.update(
         {
             "batch_name": batch_name,
@@ -328,16 +430,23 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
 
 
-def cost_input_hash(items, fees, fx_context, transport_mode) -> str:
-    return hashlib.sha256(_json([items, fees, fx_context, transport_mode]).encode()).hexdigest()
+def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None) -> str:
+    return hashlib.sha256(_json([items, fees, fx_context, transport_mode, fee_components or []]).encode()).hexdigest()
 
 
-def build_saved_cost_data(items: list[dict], fees: list[dict], fx_context: dict, transport_mode: str) -> dict:
+def build_saved_cost_data(
+    items: list[dict],
+    fees: list[dict],
+    fx_context: dict,
+    transport_mode: str,
+    *,
+    fee_components: list[dict] | None = None,
+) -> dict:
     """Project one preview into stored result fields without mutating source facts."""
     transport_mode = fee_service.resolve_transport_mode(transport_mode)
     fees = fee_service._decorate_historical_rules(fees, transport_mode)
     assert_no_duplicate_fees(fees)
-    result = preview_comprehensive_cost_data(items, fees, fx_context)
+    result = preview_comprehensive_cost_data(items, fees, fx_context, fee_components=fee_components or [])
     raw_by_key = {_item_key(present_material_row(row)): row for row in items}
     fx = _decimal(fx_context.get("fx_rmb_to_mxn"))
     fx = fx if fx is not None and fx > 0 else None
@@ -400,7 +509,7 @@ def build_saved_cost_data(items: list[dict], fees: list[dict], fx_context: dict,
         })
     summary = {
         **result["summary"], "calculation_schema": 2,
-        "input_hash": cost_input_hash(items, fees, fx_context, transport_mode),
+        "input_hash": cost_input_hash(items, fees, fx_context, transport_mode, fee_components or []),
         "total_goods_value": result["summary"]["purchase_goods_value_rmb"],
         "total_gross_weight_kg": str(gross_total),
         "total_volume_m3": str(sum((_decimal(row.get("volume_m3")) or Decimal("0") for row in items), Decimal("0"))),
@@ -444,6 +553,24 @@ class FrappeCostRepository:
         context = {**batch, "transport_mode": mode, "batch": name, "version": version, "batch_modified": str(batch["modified"]),
                    "version_modified": str(version_row["modified"]), "version_status": version_row["status"]}
         return context, items, fees, fx
+
+    def load_fee_components(self, context):
+        return frappe.get_all(
+            "Overseas Cost Fee SKU Component",
+            filters={
+                "batch": context["batch"],
+                "version": context["version"],
+                "status": "CONFIRMED",
+                "is_active": 1,
+            },
+            fields=[
+                "name", "fee_rule", "evidence", "attachment", "item", "stable_line_key",
+                "logical_fee_key", "component_type", "tax_code", "hs_code", "currency",
+                "original_amount", "amount_rmb", "exchange_rate", "allocation_basis",
+                "source_evidence_json", "status", "is_active",
+            ],
+            limit_page_length=10000,
+        )
 
     def assert_unchanged(self, context):
         current = frappe.db.get_value("Overseas Cost Batch", context["batch"], ["modified", "current_version"], as_dict=True)
@@ -495,7 +622,14 @@ def calculate_comprehensive_cost(batch_name, version_name=None, *, edit_token=No
             raise ValueError("只能试算当前版本，请刷新批次。")
         if context.get("version_status") in {"Confirmed", "Archived"} or context.get("confirm_status") == "Confirmed" or context.get("is_locked"):
             raise PermissionError("已确认或归档版本不能覆盖，请先创建调整版本。")
-        result = build_saved_cost_data(items, fees, fx, context["transport_mode"])
+        fee_components = repo.load_fee_components(context) if hasattr(repo, "load_fee_components") else []
+        result = build_saved_cost_data(
+            items,
+            fees,
+            fx,
+            context["transport_mode"],
+            fee_components=fee_components,
+        )
         repo.assert_unchanged(context)
         modified = repo.save(context, result)
         if commit_after_calculate:

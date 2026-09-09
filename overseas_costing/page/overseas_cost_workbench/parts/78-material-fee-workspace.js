@@ -21,6 +21,9 @@
         aiProgressMinimized: false,
         aiStartPromise: null,
         activeAICandidate: null,
+        feeEvidenceReview: null,
+        feeEvidenceReviewDialog: null,
+        feeEvidenceReviewStartPromise: null,
       };
     }
     if (!Number.isFinite(this.materialFeeState.requestId)) this.materialFeeState.requestId = 0;
@@ -60,6 +63,9 @@
     });
     this.$root.on("click", "[data-action='mf-link-evidence']", (event) => {
       this.openMaterialFeeEvidenceDialog($(event.currentTarget).attr("data-fee-key"));
+    });
+    this.$root.on("change", "[data-mf-fee-status='1']", (event) => {
+      this.changeMaterialFeeStatus($(event.currentTarget)).catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='mf-evidence-status']", (event) => {
       const $button = $(event.currentTarget);
@@ -455,10 +461,17 @@
     const errorId = this.materialFeeErrorId(feeKey);
     const feeLabel = String(fee.expense_category || feeKey || "费用");
     const evidence = fee.evidence || [];
+    const evidenceFinancials = fee.evidence_financials || {};
+    const settlementRows = Object.entries(evidenceFinancials.settlement_net_by_currency || {}).map(([code, value]) => `${code} ${this.formatMoney(value)}`);
+    const finalRows = Object.entries(evidenceFinancials.final_bill_by_currency || {}).map(([code, value]) => `${code} ${this.formatMoney(value)}`);
+    const statusOptions = [
+      ["MISSING", "待补"], ["ESTIMATED", "暂估"], ["ACTUAL", "实际"],
+      ["NOT_INCURRED", "未发生"], ["INCLUDED", "已包含"],
+    ];
     return `
       <tr class="${[fee.legacy_unmapped || fee.requires_review ? "is-review" : "", aiFeeProposal ? "is-ai-draft" : ""].filter(Boolean).join(" ")}">
         <td><strong>${this.escape(fee.expense_category || fee.logical_fee_key || "--")}</strong><small>${fee.virtual ? "默认项 · 未入库" : fee.legacy_unmapped ? "历史费用 · 请核对" : "已保存"}</small>${mexicoEntry ? "<small>由墨西哥同事补充</small>" : ""}</td>
-        <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span>${inclusionLabel ? `<small>${this.escape(inclusionLabel)}</small>` : ""}</td>
+        <td><select data-mf-fee-status="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(amountStatus)}" aria-label="${this.escape(feeLabel)}状态">${statusOptions.map(([value, label]) => `<option value="${value}" ${value === amountStatus ? "selected" : ""}>${label}</option>`).join("")}</select>${inclusionLabel ? `<small>${this.escape(inclusionLabel)}</small>` : ""}</td>
         <td class="ocw-mf-fee-amount-cell ${inlineError ? "is-save-error" : ""}" ${inlineError ? `title="${this.escape(inlineError)}"` : ""}>
           <div class="ocw-mf-fee-inline-fields">
             ${aiFeeProposal
@@ -467,12 +480,12 @@
               : `<select data-mf-fee-input="currency" data-mf-fee-currency="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(this.normalizeMaterialFeeCurrency(fee.currency || "RMB"))}" aria-label="${this.escape(feeLabel)}币种" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}">${supportedCurrency ? "" : `<option value="" selected disabled>请选择币种（原 ${this.escape(currency || "未设置")}）</option>`}${currencyOptions.map((option) => `<option value="${option.value}" ${option.value === currency ? "selected" : ""}>${option.label}</option>`).join("")}</select>
                  <input data-mf-fee-input="amount" data-mf-fee-amount="1" data-fee-key="${this.escape(feeKey)}" data-original-value="${this.escape(fee.amount ?? "")}" value="${this.escape(amount)}" ${forceActual ? 'data-mf-force-actual="1"' : ""} inputmode="decimal" aria-label="${this.escape(feeLabel)}原币金额" aria-invalid="${inlineError ? "true" : "false"}" aria-describedby="${this.escape(errorId)}" />`}
           </div>
-          <small data-mf-fee-amount-hint="1">${aiFeeProposal ? "AI 草稿 · 确认所选草稿后才会保存" : defaultZero ? "默认暂估 0，待墨西哥确认" : missingSavedAmount ? "尚未计入 · 按 Enter 或离开后确认为实际" : "Enter 或失焦自动保存为实际"}</small>
+          <small data-mf-fee-amount-hint="1">${aiFeeProposal ? "AI 草稿 · 确认所选草稿后才会保存" : defaultZero ? "默认暂估 0，待墨西哥确认" : missingSavedAmount ? "首次金额默认暂估" : "Enter 或失焦自动保存；状态可单独调整"}</small>
           <small id="${this.escape(errorId)}" class="ocw-mf-fee-inline-error-text ${inlineError ? "is-visible" : ""}" data-mf-fee-error="1">${this.escape(inlineError)}</small>
         </td>
         <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidence.length ? `${evidence.length} 份已关联` : "可上传或关联已有资料"}</small></td>
-        <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">更多设置</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联凭证</button></div>
-          <details class="ocw-mf-row-details"><summary>范围与凭证详情</summary><div><span>适用：${this.escape(scopeLabel)}</span>${evidence.length ? evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · 终核状态：${this.escape(this.materialFeeEvidenceFinalLabel(row.validation_status))} <button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="VALID">确认有效</button><button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="INVALID">标记无效</button></span>`).join("") : "<span>暂无关联凭证</span>"}</div></details>
+        <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">更多设置</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联并解析凭证</button></div>
+          <details class="ocw-mf-row-details"><summary>范围与凭证详情</summary><div><span>适用：${this.escape(scopeLabel)}</span>${finalRows.length ? `<span>最终账单：${this.escape(finalRows.join("；"))}</span>` : ""}${settlementRows.length ? `<span>已付款净额：${this.escape(settlementRows.join("；"))}（不与账单重复计费）</span>` : ""}${evidence.length ? evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · ${this.escape(row.evidence_type || "待分类")} · ${this.escape(row.currency || "")} ${this.escape(row.original_amount ?? "待补金额")} · 终核状态：${this.escape(this.materialFeeEvidenceFinalLabel(row.validation_status))} <button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="VALID">确认有效</button><button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="INVALID">标记无效</button></span>`).join("") : "<span>暂无关联凭证</span>"}</div></details>
         </td>
       </tr>
     `;
@@ -1727,6 +1740,7 @@
       included_in_fee_key: fee.included_in_fee_key || "",
       priority_no: fee.priority_no ?? 0,
       remark: fee.remark || "",
+      status_change_reason: overrides.status_change_reason || fee.status_change_reason || "",
       is_active: fee.is_active === undefined ? 1 : fee.is_active,
       is_enabled: fee.is_enabled === undefined ? 1 : fee.is_enabled,
     };
@@ -1798,8 +1812,9 @@
       const latestFee = this.findMaterialFee(feeKey);
       if (!latestFee) throw new Error("费用项已变更，请刷新后重试");
       const expectedModified = this.detailState.expectedModified;
+      const amountStatus = String(latestFee.amount_state || latestFee.amount_status || "MISSING").toUpperCase();
       const payload = this.materialFeeSavePayload(latestFee, {
-        amount_status: "ACTUAL",
+        amount_status: amountStatus === "MISSING" ? "ESTIMATED" : amountStatus,
         amount,
         currency,
       });
@@ -1999,19 +2014,95 @@
     await this.loadMaterialFeeWorkspace({ quiet: true });
   }
 
+  materialFeeStatusNeedsReason(fee, nextStatus) {
+    const previous = String(fee.amount_state || fee.amount_status || "MISSING").toUpperCase();
+    const next = String(nextStatus || "MISSING").toUpperCase();
+    if (previous === next) return false;
+    if (["NOT_INCURRED", "INCLUDED"].includes(next)) return true;
+    if (previous === "ACTUAL" && next === "ESTIMATED") return true;
+    if (next === "ACTUAL") {
+      return !(fee.evidence || []).some((row) => String(row.validation_status || "") === "VALID" && Number(row.is_final || 0));
+    }
+    return false;
+  }
+
+  requestMaterialFeeStatusReason(fee, nextStatus) {
+    return new Promise((resolve) => {
+      const dialog = new frappe.ui.Dialog({
+        title: `调整费用状态：${fee.expense_category || fee.logical_fee_key}`,
+        fields: [
+          { fieldtype: "Small Text", fieldname: "reason", label: "修改原因", reqd: 1, description: "将记录前后状态、操作者和时间。" },
+        ],
+        primary_action_label: "确认修改",
+        primary_action: (values) => {
+          const reason = String(values?.reason || "").trim();
+          if (!reason) return;
+          dialog.hide();
+          resolve(reason);
+        },
+      });
+      dialog.$wrapper.on("hidden.bs.modal", () => resolve(""));
+      dialog.show();
+    });
+  }
+
+  async changeMaterialFeeStatus($select) {
+    const feeKey = String($select.attr("data-fee-key") || "");
+    const fee = this.findMaterialFee(feeKey);
+    if (!fee) return;
+    const previous = String($select.attr("data-original-value") || fee.amount_state || fee.amount_status || "MISSING").toUpperCase();
+    const nextStatus = String($select.val() || "MISSING").toUpperCase();
+    if (previous === nextStatus) return;
+    const reason = this.materialFeeStatusNeedsReason(fee, nextStatus)
+      ? await this.requestMaterialFeeStatusReason(fee, nextStatus)
+      : "";
+    if (this.materialFeeStatusNeedsReason(fee, nextStatus) && !reason) {
+      $select.val(previous);
+      return;
+    }
+    const currentAmount = String(fee.amount ?? "").trim();
+    if (["ESTIMATED", "ACTUAL"].includes(nextStatus) && !currentAmount) {
+      $select.val(previous);
+      frappe.show_alert({ message: "暂估或实际费用需要金额；也可以先关联并解析凭证。", indicator: "orange" });
+      return;
+    }
+    if (!(await this.ensureMaterialFeeEditSession())) {
+      $select.val(previous);
+      return;
+    }
+    $select.prop("disabled", true);
+    try {
+      const payload = this.materialFeeSavePayload(fee, {
+        amount_status: nextStatus,
+        status_change_reason: reason,
+      });
+      if (["NOT_INCURRED", "INCLUDED"].includes(nextStatus) && reason) payload.remark = reason;
+      const result = await this.call("overseas_costing.api.fees.save_fee", {
+        batch_name: this.detailState.batchName,
+        version_name: this.detailState.versionName,
+        fee_payload: JSON.stringify(payload),
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+      }, false);
+      if (!result?.ok) throw new Error(result?.message || "费用状态保存失败");
+      this.updateMaterialFeeExpectedModified(result);
+      frappe.show_alert({ message: "费用状态已保存，试算结果待更新", indicator: "green" });
+      await this.loadMaterialFeeWorkspace({ quiet: true });
+    } catch (error) {
+      $select.val(previous).prop("disabled", false);
+      throw error;
+    }
+  }
+
   openMaterialFeeEvidenceDialog(feeKey) {
     const fee = this.findMaterialFee(feeKey);
     if (!fee) return;
-    if (!fee.name) {
-      frappe.show_alert({ message: "请先编辑并保存这笔费用，再关联凭证。", indicator: "orange" });
-      return;
-    }
     const candidates = this.ensureMaterialFeeState().fees?.evidence_candidates || [];
     const linked = new Set((fee.evidence || []).map((row) => row.attachment));
     const dialog = new frappe.ui.Dialog({
-      title: `关联凭证：${fee.expense_category || fee.logical_fee_key}`,
-      fields: [{ fieldtype: "HTML", fieldname: "evidence", options: `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">一个凭证可关联多笔费用，一笔费用也可关联多个凭证。附件识别金额只是候选，不会自动修改费用。</div>${candidates.length ? candidates.map((candidate) => `<label class="ocw-mf-evidence-option"><input type="checkbox" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}" ${linked.has(candidate.attachment) ? "checked disabled" : ""}/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong><small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}</small>${candidate.amount_candidates?.length ? `<em>识别候选：${candidate.amount_candidates.map((row) => `${this.escape(row.currency || "")} ${this.escape(row.amount)} <button type="button" data-mf-use-candidate="1" data-candidate-amount="${this.escape(row.amount || "")}" data-candidate-currency="${this.escape(row.currency || fee.currency || "RMB")}">带入费用表</button>`).join("、")}</em>` : ""}</span></label>`).join("") : `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`}<button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并关联</button></div>` }],
-      primary_action_label: "关联所选凭证",
+      title: `关联并解析凭证：${fee.expense_category || fee.logical_fee_key}`,
+      fields: [{ fieldtype: "HTML", fieldname: "evidence", options: `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。所有结果都要在审核草稿中确认。</div>${candidates.length ? candidates.map((candidate) => `<label class="ocw-mf-evidence-option"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong><small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small></span></label>`).join("") : `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`}<button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>` }],
+      primary_action_label: "开始解析所选凭证",
       primary_action: () => this.linkSelectedMaterialFeeEvidence(dialog, fee),
     });
     dialog.show();
@@ -2019,40 +2110,17 @@
     dialog.$wrapper.on("click", "[data-action='mf-upload-evidence']", () => {
       this.uploadMaterialFeeEvidence(dialog, fee);
     });
-    dialog.$wrapper.on("click", "[data-mf-use-candidate]", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const $button = $(event.currentTarget);
-      dialog.hide();
-      this.openMaterialFeeDialog(fee.logical_fee_key, {
-        amount: $button.attr("data-candidate-amount"),
-        currency: $button.attr("data-candidate-currency"),
-      });
-    });
   }
 
   async linkSelectedMaterialFeeEvidence(dialog, fee) {
     if (!(await this.ensureEditSession())) return;
-    const attachments = dialog.$wrapper.find("[data-mf-evidence-attachment]:checked:not(:disabled)").toArray().map((node) => $(node).attr("data-mf-evidence-attachment"));
+    const attachments = dialog.$wrapper.find("[data-mf-evidence-attachment]:checked").toArray().map((node) => $(node).attr("data-mf-evidence-attachment"));
     if (!attachments.length) {
-      frappe.show_alert({ message: "请选择至少一份未关联凭证", indicator: "orange" });
+      frappe.show_alert({ message: "请选择一份凭证", indicator: "orange" });
       return;
     }
-    for (const attachment of attachments) {
-      const result = await this.call("overseas_costing.api.fees.link_fee_evidence", {
-        batch_name: this.detailState.batchName,
-        fee_rule: fee.name,
-        attachment,
-        evidence_role: fee.required_evidence_role || "expense_invoice",
-        edit_token: this.detailState.editToken,
-        expected_modified: this.detailState.expectedModified,
-      });
-      if (!result || !result.ok) throw new Error(result?.message || "凭证关联失败");
-      this.updateMaterialFeeExpectedModified(result);
-    }
     dialog.hide();
-    frappe.show_alert({ message: `已关联 ${attachments.length} 份凭证`, indicator: "green" });
-    await this.loadMaterialFeeWorkspace({ quiet: true });
+    await this.openFeeEvidenceReviewDialog(fee.logical_fee_key, attachments[0]);
   }
 
   uploadMaterialFeeEvidence(dialog, fee) {
@@ -2076,25 +2144,213 @@
       } catch (_error) {
         // 识别失败不影响凭证关联，用户仍可以手填费用。
       }
-      const result = await this.call("overseas_costing.api.fees.link_fee_evidence", {
-        batch_name: this.detailState.batchName,
-        fee_rule: fee.name,
+      dialog.hide();
+      await this.openFeeEvidenceReviewDialog(fee.logical_fee_key, attachment);
+      if (!recognitionOk) frappe.show_alert({ message: "规则预解析未完成，AI 审核中仍可关联并人工补录", indicator: "orange" });
+    });
+  }
+
+  renderFeeEvidenceReviewProgressShell() {
+    return `<div class="ocw-mf-evidence-review-dialog" data-mf-fee-review-host="1">
+      <header><div><strong data-mf-fee-review-title>正在启动凭证分析</strong><span data-mf-fee-review-step>建立审核任务</span></div><b data-mf-fee-review-percent>0%</b></header>
+      <div class="ocw-mf-ai-progress"><i data-mf-fee-review-bar style="width:0%"></i></div>
+      <div class="ocw-mf-fee-review-source"><i></i><div><strong data-mf-fee-review-source-name>读取凭证资料</strong><span data-mf-fee-review-source-detail>等待后台任务</span></div><em data-mf-fee-review-source-status>等待</em></div>
+      <div class="ocw-mf-ai-progress-warning" data-mf-fee-review-warning hidden></div>
+      <div data-mf-fee-review-draft></div>
+      <footer><button class="ocw-outline-btn" type="button" data-action="mf-fee-review-discard" hidden>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-fee-review-apply" hidden>确认所选草稿</button></footer>
+    </div>`;
+  }
+
+  feeEvidenceReviewStatusLabel(status) {
+    return {
+      WAITING: "等待", DOWNLOADING: "下载中", READING: "读取中", PARSED: "已解析",
+      ANALYZING: "AI 分析中", COMPLETED: "已完成", FAILED: "失败", SKIPPED: "跳过",
+    }[String(status || "WAITING").toUpperCase()] || String(status || "等待");
+  }
+
+  async openFeeEvidenceReviewDialog(feeKey, attachment, options = {}) {
+    const state = this.ensureMaterialFeeState();
+    if (state.feeEvidenceReviewStartPromise) {
+      state.feeEvidenceReviewDialog?.show();
+      return state.feeEvidenceReviewStartPromise;
+    }
+    if (!(await this.ensureMaterialFeeEditSession())) return;
+    state.feeEvidenceReview = {
+      status: "STARTING", logicalFeeKey: String(feeKey || ""), attachment: String(attachment || ""),
+      batchName: String(options.batchName || this.detailState.batchName || ""),
+      versionName: String(options.versionName || this.detailState.versionName || ""),
+      progress_percent: 0, progress_step: "正在启动凭证分析", progress_revision: 0,
+    };
+    if (!state.feeEvidenceReviewDialog) {
+      const dialog = new frappe.ui.Dialog({
+        title: "AI 凭证解析与 SKU 分摊审核",
+        fields: [{ fieldtype: "HTML", fieldname: "fee_review", options: this.renderFeeEvidenceReviewProgressShell() }],
+      });
+      state.feeEvidenceReviewDialog = dialog;
+      dialog.$wrapper.addClass("ocw-mf-evidence-review-modal");
+      dialog.$wrapper.on("change", "[data-mf-fee-review-select]", (event) => {
+        const review = state.feeEvidenceReview;
+        const id = String($(event.currentTarget).attr("data-proposal-id") || "");
+        if ($(event.currentTarget).prop("checked")) review.selections.add(id);
+        else review.selections.delete(id);
+      });
+      dialog.$wrapper.on("input change", "[data-mf-fee-review-edit]", (event) => {
+        const $input = $(event.currentTarget);
+        const proposalId = String($input.attr("data-proposal-id") || "");
+        const fieldname = String($input.attr("data-fieldname") || "");
+        const review = state.feeEvidenceReview;
+        review.edits[proposalId] = review.edits[proposalId] || {};
+        review.edits[proposalId][fieldname] = $input.attr("type") === "checkbox" ? ($input.prop("checked") ? 1 : 0) : String($input.val() ?? "");
+        review.selections.add(proposalId);
+        dialog.$wrapper.find(`[data-mf-fee-review-select][data-proposal-id='${proposalId.replace(/'/g, "\\'")}']`).prop("checked", true);
+      });
+      dialog.$wrapper.on("click", "[data-action='mf-fee-review-apply']", () => this.applyFeeEvidenceReview().catch((error) => this.showError(error)));
+      dialog.$wrapper.on("click", "[data-action='mf-fee-review-discard']", () => this.discardFeeEvidenceReview().catch((error) => this.showError(error)));
+    }
+    state.feeEvidenceReviewDialog.show();
+    state.feeEvidenceReviewDialog.$wrapper.find("[data-mf-fee-review-draft]").empty().removeData("rendered");
+    this.updateFeeEvidenceReviewProgress();
+    const startPromise = (async () => {
+      const fee = this.findMaterialFee(feeKey) || {};
+      const started = await this.call("overseas_costing.api.fees.start_fee_evidence_review", {
+        batch_name: state.feeEvidenceReview.batchName,
+        version_name: state.feeEvidenceReview.versionName,
+        logical_fee_key: feeKey,
         attachment,
-        evidence_role: fee.required_evidence_role || "expense_invoice",
+        evidence_role: fee.required_evidence_role || options.evidenceRole || "expense_invoice",
+        force: options.force ? 1 : 0,
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
-      });
-      if (!result || !result.ok) throw new Error(result?.message || "凭证关联失败");
-      this.updateMaterialFeeExpectedModified(result);
-      dialog.hide();
-      await this.loadMaterialFeeWorkspace({ quiet: true });
-      frappe.show_alert({
-        message: recognitionOk
-          ? "凭证已关联，识别金额已作为候选，等待人工确认"
-          : "凭证已关联；本次未识别出金额，可手工补录",
-        indicator: recognitionOk ? "green" : "orange",
-      });
+      }, false);
+      if (!started?.ok) throw new Error(started?.message || "凭证分析任务启动失败");
+      state.feeEvidenceReview = {
+        ...state.feeEvidenceReview, runId: started.run_id, status: started.status,
+        progress_revision: Number(started.progress_revision || 0), progress_step: "读取凭证", progress_percent: 5,
+      };
+      this.updateFeeEvidenceReviewProgress();
+      await this.pollFeeEvidenceReview(state, state.feeEvidenceReview.batchName, started.run_id);
+    })().catch((error) => {
+      state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
+      this.updateFeeEvidenceReviewProgress();
+    }).finally(() => {
+      if (state.feeEvidenceReviewStartPromise === startPromise) state.feeEvidenceReviewStartPromise = null;
     });
+    state.feeEvidenceReviewStartPromise = startPromise;
+    return startPromise;
+  }
+
+  async pollFeeEvidenceReview(state, batchName, runId) {
+    let failures = 0;
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      if (this.materialFeeState !== state) return;
+      let result;
+      try {
+        result = await this.call("overseas_costing.api.fees.get_fee_evidence_review_status", {
+          batch_name: batchName,
+          run_id: runId,
+          after_revision: Number(state.feeEvidenceReview?.progress_revision || 0),
+        }, false);
+        failures = 0;
+      } catch (error) {
+        failures += 1;
+        state.feeEvidenceReview.connection_error = this.materialAIErrorMessage(error, "状态连接暂时中断，正在重试。 ");
+        this.updateFeeEvidenceReviewProgress();
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(5000, 800 * failures)));
+        continue;
+      }
+      if (!result?.ok) throw new Error(result?.message || "凭证分析状态读取失败");
+      if (!result.unchanged) {
+        state.feeEvidenceReview = { ...state.feeEvidenceReview, ...result, runId };
+        delete state.feeEvidenceReview.connection_error;
+        if (result.status === "READY") {
+          const draft = result.draft || {};
+          const proposals = [draft.evidence, ...(draft.fee_splits || []), ...(draft.components || [])].filter(Boolean);
+          state.feeEvidenceReview.selections = new Set(proposals.filter((row) => row.default_selected).map((row) => String(row.proposal_id || "")));
+          state.feeEvidenceReview.edits = {};
+        }
+        this.updateFeeEvidenceReviewProgress();
+      }
+      if (["READY", "FAILED", "STALE", "APPLIED", "DISCARDED"].includes(String(result.status || ""))) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    }
+    throw new Error("凭证分析超时，请稍后重新分析。 ");
+  }
+
+  updateFeeEvidenceReviewProgress() {
+    const state = this.ensureMaterialFeeState();
+    const review = state.feeEvidenceReview || {};
+    const dialog = state.feeEvidenceReviewDialog;
+    if (!dialog?.$wrapper?.length) return;
+    const $host = dialog.$wrapper.find("[data-mf-fee-review-host]");
+    const progress = Math.max(0, Math.min(100, Number(review.progress_percent || 0)));
+    const source = (review.source_progress || [])[0] || {};
+    const warning = String(review.connection_error || review.ai_warning || review.error_message || "");
+    $host.find("[data-mf-fee-review-title]").text(review.status === "READY" ? "凭证审核草稿已生成" : review.status === "FAILED" ? "凭证分析未完成" : "正在解析凭证");
+    $host.find("[data-mf-fee-review-step]").text(review.progress_step || "读取凭证");
+    $host.find("[data-mf-fee-review-percent]").text(`${progress}%`);
+    $host.find("[data-mf-fee-review-bar]").css("width", `${progress}%`);
+    $host.find("[data-mf-fee-review-source-name]").text(source.display_name || source.label || review.attachment || "凭证资料");
+    $host.find("[data-mf-fee-review-source-detail]").text(source.detail || "后台处理中");
+    $host.find("[data-mf-fee-review-source-status]").text(this.feeEvidenceReviewStatusLabel(source.status));
+    $host.find("[data-mf-fee-review-warning]").text(warning).prop("hidden", !warning);
+    const ready = review.status === "READY";
+    $host.find("[data-action='mf-fee-review-apply'], [data-action='mf-fee-review-discard']").prop("hidden", !ready);
+    if (ready && !$host.find("[data-mf-fee-review-draft]").data("rendered")) {
+      $host.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft || {})).data("rendered", true);
+    }
+  }
+
+  renderFeeEvidenceReviewDraft(draft) {
+    const evidence = draft.evidence || {};
+    const selected = (row) => row?.default_selected ? "checked" : "";
+    const statusOptions = [["ESTIMATED", "暂估"], ["ACTUAL", "实际"]];
+    const feeRows = draft.fee_splits || [];
+    const componentRows = draft.components || [];
+    const itemOptions = draft.item_options || [];
+    const evidenceId = this.escape(evidence.proposal_id || "evidence:classification");
+    return `<div class="ocw-mf-fee-review-draft">
+      <section><h4>凭证总额</h4><label class="ocw-mf-review-choice"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${evidenceId}" ${selected(evidence)}><span><strong>${this.escape(evidence.currency || "RMB")} ${this.escape(evidence.original_amount || "待人工补录")}</strong><small>${this.escape(evidence.reason || "请核对凭证类型和会计作用")}</small></span></label><div class="ocw-mf-review-fields"><label>凭证类型<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="evidence_type">${[["QUOTE","报价"],["PREPAYMENT","预付款／暂缴"],["FINAL_INVOICE","最终发票／结算单"],["TAX_CERTIFICATE","完税凭证"],["PAYMENT","付款流水"],["REFUND","退款／贷项"],["OTHER","其他"]].map(([value,label]) => `<option value="${value}" ${value === evidence.evidence_type ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>会计作用<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="accounting_role">${[["ESTIMATE","更新暂估"],["FINAL_BILL","最终账单"],["SETTLEMENT","付款／退款流水"],["REFERENCE","仅作参考"]].map(([value,label]) => `<option value="${value}" ${value === evidence.accounting_role ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>金额<input data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="original_amount" value="${this.escape(evidence.original_amount || "")}" inputmode="decimal"></label><label>币种<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="currency">${this.materialFeeCurrencyOptions().map((option) => `<option value="${option.value}" ${option.value === (evidence.currency || "RMB") ? "selected" : ""}>${option.label}</option>`).join("")}</select></label><label>方向<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="direction"><option value="DEBIT" ${evidence.direction !== "CREDIT" ? "selected" : ""}>付款／应付</option><option value="CREDIT" ${evidence.direction === "CREDIT" ? "selected" : ""}>退款／冲回</option></select></label><label class="is-checkbox"><input type="checkbox" data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="is_final" ${evidence.is_final ? "checked" : ""}> 已确认是最终凭证</label></div></section>
+      <section><h4>费用拆分</h4>${feeRows.length ? feeRows.map((row) => `<label class="ocw-mf-review-choice"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}><span><strong>${this.escape(row.label || row.logical_fee_key)} · ${this.escape(row.currency)} <input data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount" value="${this.escape(row.amount || "")}" inputmode="decimal"></strong><small><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount_status">${statusOptions.map(([value,label]) => `<option value="${value}" ${value === (row.amount_status || evidence.suggested_amount_status) ? "selected" : ""}>${label}</option>`).join("")}</select></small></span></label>`).join("") : "<p>未识别出可安全拆分的金额，可保留凭证后人工补录。</p>"}</section>
+      <section><h4>税种 · HS / SKU 匹配与分摊结果</h4><div class="ocw-mf-review-table"><table><thead><tr><th>选择</th><th>税种</th><th>HS</th><th>SKU 匹配</th><th>原币金额</th><th>RMB</th><th>依据</th></tr></thead><tbody>${componentRows.length ? componentRows.map((row) => `<tr><td><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}></td><td>${this.escape(row.tax_code || "--")}</td><td>${this.escape(row.hs_code || "--")}</td><td><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="item" aria-label="选择税费分项对应 SKU">${itemOptions.map((option) => `<option value="${this.escape(option.item || "")}" ${String(option.item || "") === String(row.item || "") ? "selected" : ""}>${this.escape([option.material_code, option.product_name].filter(Boolean).join(" · ") || option.stable_line_key || option.item)}</option>`).join("")}</select></td><td>${this.escape(row.currency || "MXN")} ${this.escape(row.original_amount || "--")}</td><td>${this.escape(row.amount_rmb || "缺汇率")}</td><td>${this.escape(row.allocation_basis || "--")}</td></tr>`).join("") : `<tr><td colspan="7">暂无可精确归集的 SKU 税费分项</td></tr>`}</tbody></table></div></section>
+      <section class="is-difference"><h4>待归类差额</h4><strong>${this.escape(draft.unclassified_difference || "0.00")} ${this.escape(evidence.currency || "")}</strong><small>人工确认前不计入成本。</small></section>
+      <section><h4>来源证据</h4><p>${(evidence.source_refs || []).map((ref) => this.escape([ref.file_name || ref.attachment, ref.sheet, ref.page ? `第 ${ref.page} 页` : "", ref.row ? `第 ${ref.row} 行` : "", ref.cell].filter(Boolean).join(" · "))).join("；") || "证据位置未完整提取，请人工核对原附件。"}</p></section>
+    </div>`;
+  }
+
+  async applyFeeEvidenceReview() {
+    const state = this.ensureMaterialFeeState();
+    const review = state.feeEvidenceReview;
+    if (review?.status !== "READY" || !(await this.ensureMaterialFeeEditSession())) return;
+    const result = await this.call("overseas_costing.api.fees.apply_fee_evidence_review", {
+      batch_name: review.batchName || this.detailState.batchName,
+      run_id: review.runId,
+      selections_json: JSON.stringify([...review.selections]),
+      edits_json: JSON.stringify(review.edits || {}),
+      edit_token: this.detailState.editToken,
+      expected_modified: this.detailState.expectedModified,
+    }, false);
+    if (!result?.ok) throw new Error(result?.message || "凭证审核草稿保存失败");
+    this.updateMaterialFeeExpectedModified(result);
+    state.feeEvidenceReviewDialog?.hide();
+    state.feeEvidenceReviewDialog = null;
+    state.feeEvidenceReview = null;
+    frappe.show_alert({ message: result.message || "凭证草稿已保存", indicator: "green" });
+    if (this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });
+  }
+
+  async discardFeeEvidenceReview() {
+    const state = this.ensureMaterialFeeState();
+    const review = state.feeEvidenceReview;
+    if (!review?.runId) return;
+    const result = await this.call("overseas_costing.api.fees.discard_fee_evidence_review", {
+      batch_name: review.batchName || this.detailState.batchName,
+      run_id: review.runId,
+    }, false);
+    if (!result?.ok) throw new Error(result?.message || "放弃凭证草稿失败");
+    state.feeEvidenceReviewDialog?.hide();
+    state.feeEvidenceReviewDialog = null;
+    state.feeEvidenceReview = null;
+    frappe.show_alert({ message: result.message, indicator: "green" });
   }
 
   async setMaterialFeeEvidenceStatus(evidenceName, status) {

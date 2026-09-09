@@ -116,7 +116,8 @@
     "source_remark",
     "raw_excel_json",
     "derived_json",
-    "extra_json"
+    "extra_json",
+    "customs_declared_value_mxn"
   ],
   "fields": [
     {
@@ -696,6 +697,11 @@
       "fieldname": "extra_json",
       "fieldtype": "Long Text",
       "label": "扩展JSON"
+    },
+    {
+      "fieldname": "customs_declared_value_mxn",
+      "fieldtype": "Currency",
+      "label": "申报货值 MXN"
     }
   ],
   "permissions": [

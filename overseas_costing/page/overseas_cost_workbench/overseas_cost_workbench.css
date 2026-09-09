@@ -7035,6 +7035,16 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-fee-table td > strong,
 .ocw-mf-fee-table td > small { display: block; }
 .ocw-mf-fee-table td > small { margin-top: 4px; color: var(--mf-muted); }
+.ocw-mf-fee-table select[data-mf-fee-status] {
+  min-width: 92px;
+  height: 30px;
+  border: 1px solid #cfd9e6;
+  border-radius: 7px;
+  padding: 4px 26px 4px 8px;
+  background: #fff;
+  color: #344054;
+  font: inherit;
+}
 
 .ocw-mf-badge {
   display: inline-flex;
@@ -7108,6 +7118,52 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-row-details > div { display: grid; gap: 6px; margin-top: 7px; padding: 8px; border-radius: 6px; background: #f7f9fc; }
 .ocw-mf-row-details span { display: block; color: #475467; line-height: 1.45; }
 .ocw-mf-row-details button + button { margin-left: 7px; color: #b42318; }
+
+.ocw-mf-evidence-review-modal .modal-dialog {
+  width: min(1180px, calc(100vw - 32px));
+  max-width: min(1180px, calc(100vw - 32px));
+}
+.ocw-mf-evidence-review-dialog { display: grid; gap: 14px; min-height: 430px; }
+.ocw-mf-evidence-review-dialog > header,
+.ocw-mf-evidence-review-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ocw-mf-evidence-review-dialog > header > div { display: grid; gap: 3px; }
+.ocw-mf-evidence-review-dialog > header span { color: var(--mf-muted); font-size: 12px; }
+.ocw-mf-evidence-review-dialog > header b { color: var(--mf-blue); font-size: 20px; }
+.ocw-mf-fee-review-source { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 11px; border: 1px solid var(--mf-border); border-radius: 9px; }
+.ocw-mf-fee-review-source > i { width: 8px; height: 8px; border-radius: 50%; background: var(--mf-blue); }
+.ocw-mf-fee-review-source > div { display: grid; gap: 3px; }
+.ocw-mf-fee-review-source span,
+.ocw-mf-fee-review-source em { color: var(--mf-muted); font-size: 12px; font-style: normal; }
+.ocw-mf-fee-review-draft { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ocw-mf-fee-review-draft > section { min-width: 0; padding: 13px; border: 1px solid var(--mf-border); border-radius: 9px; background: #fff; }
+.ocw-mf-fee-review-draft > section:nth-child(3),
+.ocw-mf-fee-review-draft > section:last-child { grid-column: 1 / -1; }
+.ocw-mf-fee-review-draft h4 { margin: 0 0 10px; font-size: 14px; }
+.ocw-mf-fee-review-draft p { margin: 0; color: var(--mf-muted); font-size: 12px; line-height: 1.5; }
+.ocw-mf-review-choice { display: flex; gap: 9px; align-items: flex-start; margin: 7px 0; padding: 9px; border-radius: 8px; background: #f8fbff; }
+.ocw-mf-review-choice > span { display: grid; flex: 1; gap: 3px; min-width: 0; }
+.ocw-mf-review-choice small { color: var(--mf-muted); }
+.ocw-mf-review-choice input[type='text'],
+.ocw-mf-review-choice input[inputmode='decimal'],
+.ocw-mf-review-choice select,
+.ocw-mf-review-fields :is(input, select) { height: 30px; border: 1px solid #cfd9e6; border-radius: 6px; padding: 4px 7px; background: #fff; }
+.ocw-mf-review-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.ocw-mf-review-fields label { display: grid; gap: 4px; color: var(--mf-muted); font-size: 11px; }
+.ocw-mf-review-fields label.is-checkbox { display: flex; align-items: center; min-height: 30px; padding-top: 16px; }
+.ocw-mf-review-fields label.is-checkbox input { width: 16px; height: 16px; margin: 0; }
+.ocw-voucher-record-ai-action { display: flex; align-items: center; gap: 12px; margin: 12px 0; padding: 10px 12px; border: 1px solid #acd7f5; border-radius: 8px; background: #f2f9ff; }
+.ocw-voucher-record-ai-action span { color: #667085; font-size: 12px; }
+.ocw-mf-review-table { overflow: auto; max-height: 280px; }
+.ocw-mf-review-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ocw-mf-review-table th,
+.ocw-mf-review-table td { padding: 7px; border: 1px solid #e6ebf2; text-align: left; }
+.ocw-mf-fee-review-draft .is-difference { background: #fffaf0; }
+.ocw-mf-fee-review-draft .is-difference small { display: block; margin-top: 4px; color: #b54708; }
+@media (max-width: 760px) {
+  .ocw-mf-fee-review-draft { grid-template-columns: 1fr; }
+  .ocw-mf-fee-review-draft > section { grid-column: 1 !important; }
+  .ocw-mf-review-fields { grid-template-columns: 1fr; }
+}
 
 .ocw-mf-preview-card {
   position: sticky;

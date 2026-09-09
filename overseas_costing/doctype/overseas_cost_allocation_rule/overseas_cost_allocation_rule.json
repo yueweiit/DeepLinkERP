@@ -27,7 +27,10 @@
     "priority_no",
     "remark",
     "is_enabled",
-    "is_active"
+    "is_active",
+    "status_change_reason",
+    "status_changed_by",
+    "status_changed_at"
   ],
   "fields": [
     {
@@ -146,6 +149,24 @@
       "fieldtype": "Check",
       "label": "参与重算",
       "default": 1
+    },
+    {
+      "fieldname": "status_change_reason",
+      "fieldtype": "Small Text",
+      "label": "状态变更原因"
+    },
+    {
+      "fieldname": "status_changed_by",
+      "fieldtype": "Link",
+      "label": "状态变更人",
+      "options": "User",
+      "read_only": 1
+    },
+    {
+      "fieldname": "status_changed_at",
+      "fieldtype": "Datetime",
+      "label": "状态变更时间",
+      "read_only": 1
     }
   ],
   "permissions": [

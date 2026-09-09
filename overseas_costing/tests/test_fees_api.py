@@ -77,3 +77,46 @@ def test_link_and_validate_evidence_require_batch_write_permission(monkeypatch) 
     assert calls == [("BATCH", "write"), ("BATCH", "write")]
     assert linked["batch_name"] == "BATCH-DOC"
     assert validated["batch_name"] == "BATCH-DOC"
+
+
+def test_fee_evidence_review_endpoints_enforce_permissions_and_bounded_drafts(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    permissions = []
+    monkeypatch.setattr(
+        api,
+        "require_batch_permission",
+        lambda batch, ptype: permissions.append((batch, ptype)) or "BATCH-DOC",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        api.fee_evidence_review_service,
+        "start_fee_evidence_review",
+        lambda **kwargs: captured.setdefault("start", kwargs) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api.fee_evidence_review_service,
+        "get_fee_evidence_review_status",
+        lambda **kwargs: captured.setdefault("status", kwargs) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api.fee_evidence_review_service,
+        "apply_fee_evidence_review",
+        lambda **kwargs: captured.setdefault("apply", kwargs) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api.fee_evidence_review_service,
+        "discard_fee_evidence_review",
+        lambda **kwargs: captured.setdefault("discard", kwargs) or {"ok": True},
+    )
+
+    api.start_fee_evidence_review("BATCH", "V1", "import_tax", "ATT", "tax_certificate", False, "EDIT", "MOD")
+    api.get_fee_evidence_review_status("BATCH", "RUN", "3")
+    api.apply_fee_evidence_review("BATCH", "RUN", '["evidence:classification"]', '{"evidence:classification":{"currency":"MXN"}}', "EDIT", "MOD")
+    api.discard_fee_evidence_review("BATCH", "RUN")
+
+    assert permissions == [("BATCH", "write"), ("BATCH", "read"), ("BATCH", "write"), ("BATCH", "write")]
+    assert captured["status"]["after_revision"] == 3
+    assert captured["apply"]["selections"] == ["evidence:classification"]
+    assert captured["apply"]["edits"]["evidence:classification"]["currency"] == "MXN"
+    with pytest.raises(ValueError, match="过大"):
+        api.apply_fee_evidence_review("BATCH", "RUN", "[]", "x" * 1_100_000, "EDIT", "MOD")

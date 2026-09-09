@@ -1,0 +1,187 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Fee Evidence AI Run",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "track_changes": 1,
+  "sort_field": "creation",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version",
+    "logical_fee_key",
+    "fee_rule",
+    "attachment",
+    "evidence",
+    "operator_name",
+    "status",
+    "input_fingerprint",
+    "attachment_fingerprint",
+    "execution_token",
+    "progress_revision",
+    "progress_step",
+    "progress_percent",
+    "source_progress_json",
+    "model",
+    "ai_completed",
+    "ai_warning",
+    "draft_json",
+    "error_message",
+    "started_at",
+    "completed_at",
+    "applied_at"
+  ],
+  "fields": [
+    {
+      "fieldname": "batch",
+      "fieldtype": "Link",
+      "label": "所属批次",
+      "options": "Overseas Cost Batch",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "version",
+      "fieldtype": "Link",
+      "label": "所属版本",
+      "options": "Overseas Cost Version",
+      "reqd": 1
+    },
+    {
+      "fieldname": "logical_fee_key",
+      "fieldtype": "Data",
+      "label": "逻辑费用标识",
+      "reqd": 1
+    },
+    {
+      "fieldname": "fee_rule",
+      "fieldtype": "Link",
+      "label": "费用规则",
+      "options": "Overseas Cost Allocation Rule"
+    },
+    {
+      "fieldname": "attachment",
+      "fieldtype": "Link",
+      "label": "凭证附件",
+      "options": "Overseas Cost Attachment",
+      "reqd": 1
+    },
+    {
+      "fieldname": "evidence",
+      "fieldtype": "Link",
+      "label": "费用凭证",
+      "options": "Overseas Cost Fee Evidence"
+    },
+    {
+      "fieldname": "operator_name",
+      "fieldtype": "Data",
+      "label": "操作者"
+    },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "label": "状态",
+      "options": "QUEUED\nRUNNING\nREADY\nAPPLIED\nDISCARDED\nSTALE\nFAILED",
+      "default": "QUEUED",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "input_fingerprint",
+      "fieldtype": "Data",
+      "label": "输入指纹",
+      "reqd": 1
+    },
+    {
+      "fieldname": "attachment_fingerprint",
+      "fieldtype": "Data",
+      "label": "附件指纹"
+    },
+    {
+      "fieldname": "execution_token",
+      "fieldtype": "Data",
+      "label": "执行令牌",
+      "hidden": 1,
+      "read_only": 1
+    },
+    {
+      "fieldname": "progress_revision",
+      "fieldtype": "Int",
+      "label": "进度版本",
+      "default": 0,
+      "hidden": 1,
+      "read_only": 1
+    },
+    {
+      "fieldname": "progress_step",
+      "fieldtype": "Data",
+      "label": "当前步骤"
+    },
+    {
+      "fieldname": "progress_percent",
+      "fieldtype": "Int",
+      "label": "进度",
+      "default": 0
+    },
+    {
+      "fieldname": "source_progress_json",
+      "fieldtype": "Long Text",
+      "label": "资料处理进度 JSON"
+    },
+    {
+      "fieldname": "model",
+      "fieldtype": "Data",
+      "label": "模型"
+    },
+    {
+      "fieldname": "ai_completed",
+      "fieldtype": "Check",
+      "label": "AI 识别完成"
+    },
+    {
+      "fieldname": "ai_warning",
+      "fieldtype": "Small Text",
+      "label": "AI 提示"
+    },
+    {
+      "fieldname": "draft_json",
+      "fieldtype": "Long Text",
+      "label": "审核草稿 JSON"
+    },
+    {
+      "fieldname": "error_message",
+      "fieldtype": "Small Text",
+      "label": "错误"
+    },
+    {
+      "fieldname": "started_at",
+      "fieldtype": "Datetime",
+      "label": "开始时间"
+    },
+    {
+      "fieldname": "completed_at",
+      "fieldtype": "Datetime",
+      "label": "完成时间"
+    },
+    {
+      "fieldname": "applied_at",
+      "fieldtype": "Datetime",
+      "label": "应用时间"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1
+    },
+    {
+      "role": "海外成本核算用户",
+      "read": 1,
+      "write": 1,
+      "create": 1
+    }
+  ]
+}

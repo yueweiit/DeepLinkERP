@@ -49,6 +49,9 @@ FEE_FIELDS = (
     "included_in_fee_key",
     "priority_no",
     "remark",
+    "status_change_reason",
+    "status_changed_by",
+    "status_changed_at",
     "is_active",
     "is_enabled",
 )
@@ -336,13 +339,50 @@ def _scope_keys(payload: dict) -> list[str]:
     return sorted(set(fee_allocation_service._scope_keys(payload)))
 
 
+def default_status_for_amount_entry(current_status: object, amount: object) -> str:
+    """The first entered amount is provisional until final evidence proves otherwise."""
+
+    status = str(current_status or "MISSING").strip().upper()
+    if status == "MISSING" and amount not in (None, ""):
+        return "ESTIMATED"
+    return status
+
+
+def validate_fee_status_transition(
+    previous_status: object,
+    next_status: object,
+    *,
+    reason: object = "",
+    has_valid_final_evidence: bool = False,
+) -> dict:
+    previous = str(previous_status or "MISSING").strip().upper()
+    current = str(next_status or "MISSING").strip().upper()
+    normalized_reason = str(reason or "").strip()
+    changed = previous != current
+    requires_reason = changed and (
+        current in {"NOT_INCURRED", "INCLUDED"}
+        or (previous == "ACTUAL" and current == "ESTIMATED")
+        or (current == "ACTUAL" and not has_valid_final_evidence)
+    )
+    if requires_reason and not normalized_reason:
+        if current == "ACTUAL":
+            raise ValueError("没有已核对的最终凭证，改为实际费用时必须填写原因。")
+        raise ValueError("该费用状态变更必须填写原因。")
+    return {
+        "previous_status": previous,
+        "next_status": current,
+        "reason": normalized_reason,
+        "requires_reason": requires_reason,
+    }
+
+
 def normalize_fee_payload(payload) -> dict:
     raw = _load_dict(payload)
     fee_key = str(raw.get("logical_fee_key") or "").strip()
     if not fee_key:
         raise ValueError("逻辑费用标识不能为空。")
 
-    status = str(raw.get("amount_status") or "MISSING").strip().upper()
+    status = default_status_for_amount_entry(raw.get("amount_status"), raw.get("amount"))
     if status not in AMOUNT_STATUSES:
         raise ValueError("金额状态不合法。")
     scope_type = str(raw.get("scope_type") or "ALL_ITEMS").strip().upper()
@@ -535,6 +575,57 @@ def _query_rules(batch_name: str, version_name: str) -> list[dict]:
     )
 
 
+def _has_valid_final_evidence(rule_name: str) -> bool:
+    if frappe is None or not rule_name:
+        return False
+    return bool(
+        frappe.db.get_value(
+            "Overseas Cost Fee Evidence",
+            {"fee_rule": rule_name, "validation_status": "VALID", "is_final": 1},
+            "name",
+        )
+    )
+
+
+def materialize_fee_rule(batch_name: str, version_name: str, logical_fee_key: str) -> dict:
+    """Create a non-counting fee shell so evidence may be linked before an amount exists."""
+
+    if frappe is None:
+        return {"name": "DRY-FEE", "logical_fee_key": logical_fee_key, "amount_status": "MISSING"}
+    mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
+    existing = _decorate_historical_rules(_query_rules(batch_name, version_name), mode)
+    active = next(
+        (row for row in existing if row.get("logical_fee_key") == logical_fee_key and fee_is_active(row)),
+        None,
+    )
+    if active:
+        return active
+    template = next(
+        (row for row in build_default_fee_templates(mode) if row["logical_fee_key"] == logical_fee_key),
+        None,
+    )
+    if not template:
+        raise ValueError("当前批次没有该逻辑费用项。")
+    values = {
+        key: template.get(key)
+        for key in FEE_FIELDS
+        if key not in {"status_changed_by", "status_changed_at", "status_change_reason"}
+    }
+    values.update(
+        {
+            "doctype": "Overseas Cost Allocation Rule",
+            "batch": batch_name,
+            "version": version_name,
+            "amount_status": "MISSING",
+            "amount": None,
+            "amount_revision": f"evidence-shell:{_revision()}",
+            "scope_revision": f"system:{_revision()}",
+        }
+    )
+    doc = frappe.get_doc(values).insert(ignore_permissions=True)
+    return {**values, "name": doc.name, "virtual": False}
+
+
 def save_fee(
     batch_name: str,
     version_name: str,
@@ -550,6 +641,27 @@ def save_fee(
     _assert_write_context(batch_name, version_name, edit_token, expected_modified)
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     existing = _decorate_historical_rules(_query_rules(batch_name, version_name), transport_mode)
+    previous = next(
+        (
+            row for row in existing
+            if row.get("logical_fee_key") == payload["logical_fee_key"] and fee_is_active(row)
+        ),
+        {},
+    )
+    transition = validate_fee_status_transition(
+        previous.get("amount_status") or "MISSING",
+        payload.get("amount_status"),
+        reason=payload.get("status_change_reason") or payload.get("remark"),
+        has_valid_final_evidence=_has_valid_final_evidence(str(previous.get("name") or "")),
+    )
+    if transition["previous_status"] != transition["next_status"]:
+        payload.update(
+            {
+                "status_change_reason": transition["reason"],
+                "status_changed_by": _session_user(),
+                "status_changed_at": _now(),
+            }
+        )
     merged = merge_logical_fee(existing, payload, revision=_revision())
     fee = merged["fee"]
     if not str(fee.get("amount_revision") or "").startswith("manual:"):
@@ -566,6 +678,18 @@ def save_fee(
         ).name
     if merged["cost_inputs_changed"]:
         frappe.db.set_value("Overseas Cost Batch", batch_name, "status", "Dirty", update_modified=True)
+    if transition["previous_status"] != transition["next_status"]:
+        from overseas_costing.services.calculate_service import _insert_audit_log
+
+        _insert_audit_log(
+            batch_doc_name=batch_name,
+            version_name=version_name,
+            action_type="EDIT",
+            field_name=f"fee:{payload['logical_fee_key']}:amount_status",
+            old_value=transition["previous_status"],
+            new_value=transition["next_status"],
+            action_remark=transition["reason"] or "费用状态人工调整",
+        )
     frappe.db.commit()
     batch_modified = frappe.db.get_value("Overseas Cost Batch", batch_name, "modified")
     return {
@@ -804,6 +928,15 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
             "validation_status",
             "source_revision",
             "remark",
+            "evidence_type",
+            "accounting_role",
+            "currency",
+            "original_amount",
+            "direction",
+            "is_final",
+            "attachment_fingerprint",
+            "confirmed_by",
+            "confirmed_at",
         ],
         limit_page_length=5000,
     )
@@ -828,7 +961,21 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
                 evidence=evidence,
                 calculation={"input_hash": current_hash},
         )
-        statuses.append({**rule, **status, "allocation": allocation, "evidence": evidence})
+        from overseas_costing.services.fee_evidence_review_service import summarize_evidence_ledger
+
+        statuses.append(
+            {
+                **rule,
+                **status,
+                "allocation": allocation,
+                "evidence": evidence,
+                "evidence_financials": summarize_evidence_ledger(
+                    evidence,
+                    current_amount=rule.get("amount"),
+                    current_status=rule.get("amount_status") or "MISSING",
+                ),
+            }
+        )
 
     attachments = frappe.get_all(
         "Overseas Cost Attachment",

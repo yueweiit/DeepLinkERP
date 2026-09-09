@@ -421,13 +421,13 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
         "overseas_costing.api.calculate.batch_update_items",
         "overseas_costing.api.fees.get_fee_worklist",
         "overseas_costing.api.fees.save_fee",
-        "overseas_costing.api.fees.link_fee_evidence",
+        "overseas_costing.api.fees.start_fee_evidence_review",
         "overseas_costing.api.fees.set_fee_evidence_status",
         "overseas_costing.api.calculate.preview_comprehensive_cost",
         "overseas_costing.api.import_api.preview_oa_source_attachment",
     ):
         assert endpoint in workspace
-    assert "带入费用表" in workspace
+    assert "确认所选草稿" in workspace
     assert "openWikiMaterialImportDialog" in workspace
     assert "previewWikiMaterialImport" in workspace
     assert "data-mf-wiki-source" in workspace
@@ -447,7 +447,7 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
     assert "source_validation" in workspace
     assert "data-mf-source-validation" in workspace
     assert "DUPLICATE_TARGET_SELECTION" in workspace
-    assert "本次未识别出金额，可手工补录" in workspace
+    assert "未识别出可安全拆分的金额，可保留凭证后人工补录" in workspace
     assert "writeback" not in workspace.lower()
     assert "recalculate" not in workspace.lower()
     assert ".ocw-mf-workspace" in stylesheet
@@ -490,14 +490,14 @@ def test_fee_workspace_missing_saved_amount_is_visible_inline_and_keeps_more_set
         "allocation_basis:'gross_weight',scope_type:'ALL_ITEMS',allocation:{status:'NOT_ALLOCATED'},evidence:[]});"
         "console.log(JSON.stringify({amount:row.includes('data-mf-fee-amount')&&row.includes('value=\"2000\"'),"
         "currency:row.includes('data-mf-fee-currency')&&row.includes('value=\"RMB\"'),"
-        "notCounted:row.includes('\u5c1a\u672a\u8ba1\u5165'),forceActual:row.includes('data-mf-force-actual=\"1\"'),"
+        "firstEstimate:row.includes('\u9996\u6b21\u91d1\u989d\u9ed8\u8ba4\u6682\u4f30'),forceActual:row.includes('data-mf-force-actual=\"1\"'),"
         "more:row.includes('\u66f4\u591a\u8bbe\u7f6e')}));"
     )
 
     assert result == {
         "amount": True,
         "currency": True,
-        "notCounted": True,
+        "firstEstimate": True,
         "forceActual": True,
         "more": True,
     }
@@ -621,7 +621,7 @@ def test_fee_workspace_blur_clears_focus_target_until_another_fee_input_focuses(
     assert result == {"afterFocus": {"feeKey": "fee-a", "field": "amount"}, "afterBlur": None}
 
 
-def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_preview() -> None:
+def test_fee_workspace_missing_saved_amount_submits_estimate_and_refreshes_fee_preview() -> None:
     result = _fee_workspace_result(
         FEE_INPUT_FIXTURE
         + "const workspace=Object.create(Harness.prototype);"
@@ -659,7 +659,7 @@ def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_pre
         "logical_fee_key": "international_sea_freight",
         "rule_code": "sea-freight",
         "expense_category": "\u56fd\u9645\u6d77\u8fd0\u8d39",
-        "amount_status": "ACTUAL",
+        "amount_status": "ESTIMATED",
         "amount": "2000",
         "currency": "RMB",
         "allocation_basis": "volume",
@@ -669,6 +669,7 @@ def test_fee_workspace_missing_saved_amount_submits_actual_and_refreshes_fee_pre
         "included_in_fee_key": "",
         "priority_no": 3,
         "remark": "keep me",
+        "status_change_reason": "",
         "is_active": 1,
         "is_enabled": 1,
     }
@@ -725,7 +726,7 @@ def test_fee_workspace_invalid_inline_value_stays_visible_without_writing(
     assert result["describedBy"]
 
 
-def test_fee_workspace_missing_saved_amount_currency_blur_also_submits_actual() -> None:
+def test_fee_workspace_missing_saved_amount_currency_blur_also_submits_estimate() -> None:
     result = _fee_workspace_result(
         FEE_INPUT_FIXTURE
         + "const workspace=Object.create(Harness.prototype);"
@@ -741,7 +742,7 @@ def test_fee_workspace_missing_saved_amount_currency_blur_also_submits_actual() 
         "console.log(JSON.stringify({payload}));"
     )
 
-    assert result["payload"]["amount_status"] == "ACTUAL"
+    assert result["payload"]["amount_status"] == "ESTIMATED"
     assert result["payload"]["amount"] == "2000"
     assert result["payload"]["currency"] == "RMB"
 
@@ -1360,7 +1361,8 @@ workspace.openMaterialFeeDialog('freight');
 console.log(JSON.stringify({row,fields}));
 """)
     assert '<select data-mf-fee-input="currency"' in result["row"]
-    assert result["row"].count("<option ") == 3
+    amount_cell = result["row"].split('ocw-mf-fee-inline-fields', 1)[1].split('</div>', 1)[0]
+    assert amount_cell.count("<option ") == 3
     assert 'value="RMB" selected' in result["row"]
     assert "人民币" in result["row"] and "比索" in result["row"] and "美金" in result["row"]
     fields = {field["fieldname"]: field for field in result["fields"]}
