@@ -41,3 +41,13 @@ console.log(JSON.stringify(h.renderMaterialFeeGridCell({name:'I',shipment_value_
 shipment_valuation:{method:'packing_row_total',error:''}}, {field:'shipment_value_rmb',readonly:true},new Set(),0)));
 """)
     assert '10560' in result and '装箱货值已取得' in result
+
+
+def test_nonblocking_purchase_and_manual_notes_are_folded():
+    html=_frontend_result(FRONTEND_SETUP + """
+h.escape=x=>String(x ?? '');
+console.log(JSON.stringify(h.renderMaterialAIAutofillPreview({selections:new Set(),draft:{autofill_preview:{
+items:[],notes:[{message:'采购待关联；发货货值 10560 已取得，不影响试算。'}]}}})));
+""")
+    assert '<details class="ocw-mf-ai-review-notes">' in html
+    assert '10560' in html and '仍需补充 / 核对' not in html

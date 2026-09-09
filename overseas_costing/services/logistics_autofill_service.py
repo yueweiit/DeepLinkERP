@@ -283,11 +283,24 @@ def autofill_preview(items: list[dict], proposals: list[dict], existing_fees: li
     reconciliation = next((p for p in proposals if p["proposal_type"] == "logistics_reconcile"), None)
     rows = deepcopy(reconciliation["payload"]["rows"] if reconciliation and not reconciliation.get("blocked") else items)
     by_name = {row["name"]: row for row in rows}
+    originals = {row['name']:row for row in items}
+    notes = []
     fees, changes, unresolved = [], [], list((reconciliation or {}).get("payload", {}).get("unresolved", []))
     for proposal in proposals:
         payload = proposal.get("payload") or {}
         if not proposal.get("default_selected"):
             if proposal.get("conflict"):
+                original = originals.get(payload.get('item_name'), {})
+                retained = by_name.get(payload.get('item_name'), {})
+                fields = payload.get('fields') or {}
+                if (proposal.get('proposal_type') == 'item_update' and proposal.get('result_origin') == 'SYSTEM'
+                    and str(original.get('manual_override_flag') or '0').lower() not in {'0','false','no'}
+                    and fields and set(fields).issubset(PHYSICAL_FIELDS)
+                    and all(_purchase_decimal(original.get(field)) is not None and _purchase_decimal(original.get(field)) >= 0 for field in fields)
+                    and all(retained.get(field) == original.get(field) for field in fields)):
+                    notes.append({'proposal_id':proposal['proposal_id'],
+                        'message':f'{original.get("material_code")} 已保留人工填写的重量/体积，装箱单差异留在高级来源中供追溯。'})
+                    continue
                 unresolved.append({"proposal_id": proposal["proposal_id"], "message": proposal.get("reason") or "存在待核对差异"})
             continue
         if proposal["proposal_type"] == "item_update" and payload.get("item_name") in by_name:
@@ -303,6 +316,18 @@ def autofill_preview(items: list[dict], proposals: list[dict], existing_fees: li
     from overseas_costing.services.cost_preview_service import preview_comprehensive_cost_data
     if not reconciliation or not reconciliation.get('blocked'):
         rows = [present_material_row(row) for row in rows]
+    presented = {row['name']:row for row in rows}
+    remaining = []
+    for issue in unresolved:
+        row = presented.get(issue.get('item_name'), {})
+        valuation = row.get('shipment_valuation') or {}
+        if ('未匹配到采购明细' in str(issue.get('message') or '') and not valuation.get('error')
+            and valuation.get('method') not in (None, 'LEGACY_PURCHASE')
+            and _purchase_decimal(row.get('shipment_value_rmb')) is not None and _purchase_decimal(row.get('shipment_value_rmb')) > 0):
+            notes.append({**issue,'message':f'{row.get("material_code")} 采购审批仍待关联；本次发货货值 {row["shipment_value_rmb"]} RMB 已取得，不影响本次试算。'})
+        else:
+            remaining.append(issue)
+    unresolved = remaining
     from overseas_costing.services.fee_service import merge_logical_fee
     effective_fees = deepcopy(existing_fees)
     for fee in fees:
@@ -317,5 +342,5 @@ def autofill_preview(items: list[dict], proposals: list[dict], existing_fees: li
         'fx_rmb_to_mxn':str(Decimal('1') / mxn_to_rmb) if mxn_to_rmb and mxn_to_rmb > 0 else None})
     unresolved.extend(reason for reason in cost['incomplete_reasons']
         if str(reason.get('reason_code') or '').startswith(('PROJECT_', 'SHIPMENT_VALUATION_', 'FX_', 'DUPLICATE_LOGICAL_FEE')))
-    return {"items": rows, "fees": fees, "changes": changes, "unresolved": unresolved,
+    return {"items": rows, "fees": fees, "changes": changes, "unresolved": unresolved, "notes": notes,
             "project_summary": cost['project_summary'], "cost_summary": cost['summary']}

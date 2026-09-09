@@ -247,3 +247,36 @@ def test_processing_revision_invalidates_predeployment_ready_draft(monkeypatch):
     old=service._source_review_fingerprint('B','V',[],[],'')
     monkeypatch.setattr(service,'SOURCE_REVIEW_PROCESSING_VERSION','new-parser',raising=False)
     assert old != service._source_review_fingerprint('B','V',[],[],'')
+
+
+def test_verified_shipment_and_preserved_manual_weights_are_notes_not_unresolved():
+    from overseas_costing.services.logistics_autofill_service import autofill_preview
+    rows=shipment_items();rows[1]['manual_override_flag']=1
+    proposals=[{'proposal_id':'R','proposal_type':'logistics_reconcile','default_selected':True,
+        'payload':{'rows':rows,'unresolved':[{'item_name':'I7','message':'CW000191 未匹配到采购明细，采购数量和货值待补。'}]}},
+        {'proposal_id':'P','proposal_type':'item_update','target_item_name':'I1','result_origin':'SYSTEM',
+         'default_selected':False,'conflict':True,'payload':{'item_name':'I1','fields':{'gross_weight_kg':'9.7'}}}]
+    result=autofill_preview(rows,proposals,[])
+    assert result['unresolved']==[]
+    assert any('10560' in note['message'] and '已取得' in note['message'] for note in result['notes'])
+    assert any('人工' in note['message'] for note in result['notes'])
+    assert result['items'][1]['gross_weight_kg']==4.85
+    proposals[-1]['result_origin']='AI'
+    assert autofill_preview(rows,proposals,[])['unresolved']
+
+
+@pytest.mark.parametrize('case',['missing_weight','zero_value'])
+def test_unresolved_empty_manual_weight_or_zero_shipment_value_cannot_be_folded(case):
+    from overseas_costing.services.logistics_autofill_service import autofill_preview
+    row=shipment_items()[-1]
+    if case == 'missing_weight':
+        row.update(gross_weight_kg=None,manual_override_flag=1)
+        proposals=[{'proposal_id':'P','proposal_type':'item_update','result_origin':'SYSTEM','conflict':True,
+            'payload':{'item_name':row['name'],'fields':{'gross_weight_kg':130}}}]
+    else:
+        metadata=json.loads(row['extra_json']);metadata['shipment_valuation']['amount_rmb']='0'
+        row['extra_json']=json.dumps(metadata)
+        proposals=[{'proposal_id':'R','proposal_type':'logistics_reconcile','default_selected':True,
+            'payload':{'rows':[row],'unresolved':[{'item_name':row['name'],'message':'未匹配到采购明细'}]}}]
+    result=autofill_preview([row],proposals,[])
+    assert result['unresolved'] and not result['notes']

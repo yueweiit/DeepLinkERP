@@ -1344,7 +1344,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'shipment-valuation-project-freight-v1'
+SOURCE_REVIEW_PROCESSING_VERSION = 'shipment-valuation-project-freight-v2'
 
 
 def _source_review_fingerprint(
