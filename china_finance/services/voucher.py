@@ -339,6 +339,7 @@ def create_voucher_from_source(doc, source_event="Posting", force=False):
 		return existing
 
 	entries = get_gl_entries(doc.doctype, doc.name, cancelled=source_event == "Cancellation")
+	entries = restore_negative_journal_entry_debits(doc, entries, source_event)
 	reversal_of = None
 	if source_event == "Cancellation":
 		reversal_of = frappe.db.get_value(
@@ -380,14 +381,7 @@ def create_voucher_from_source(doc, source_event="Posting", force=False):
 		voucher.flags.ignore_links = True
 	voucher.insert()
 	voucher.submit()
-	if doc.doctype in ("Journal Entry", "Payment Entry") and frappe.db.has_column(doc.doctype, "custom_china_voucher_number"):
-		frappe.db.set_value(
-			doc.doctype,
-			doc.name,
-			"custom_china_voucher_number",
-			voucher.statutory_number,
-			update_modified=False,
-		)
+	_sync_source_voucher_number(doc.doctype, doc.name, voucher.statutory_number)
 	if source_event == "Posting":
 		from china_finance.services.cash_flow_assignment import create_assignment_if_required
 
@@ -417,6 +411,105 @@ def get_gl_entries(voucher_type, voucher_no, cancelled=False):
 		order_by="creation asc, name asc",
 	)
 	return [to_voucher_entry(row) for row in rows]
+
+
+def restore_negative_journal_entry_debits(doc, entries, source_event="Posting"):
+	"""Preserve a negative debit used for an accounting offset in snapshots.
+
+	ERPNext normalizes a negative debit to a positive GL credit while posting.
+	The source Journal Entry still retains the original debit-column sign, which
+	is required by the Chinese voucher presentation for interest offsets.
+	"""
+	if getattr(doc, "doctype", None) != "Journal Entry" or source_event != "Posting":
+		return entries
+
+	negative_rows = [
+		row for row in doc.accounts
+		if flt(row.debit) < -0.005 and abs(flt(row.credit)) <= 0.005
+	]
+	if not negative_rows:
+		return entries
+
+	used_entries = set()
+	for source_row in negative_rows:
+		candidate = next(
+			(
+				entry for entry in entries
+				if id(entry) not in used_entries
+				and entry.get("account") == source_row.account
+				and abs(flt(entry.get("debit"))) <= 0.005
+				and flt(entry.get("credit")) > 0.005
+				and abs(flt(entry.get("credit")) - abs(flt(source_row.debit))) <= 0.005
+				and abs(flt(entry.get("credit_in_account_currency")) - abs(flt(source_row.debit_in_account_currency))) <= 0.005
+			),
+			None,
+		)
+		if not candidate:
+			continue
+		used_entries.add(id(candidate))
+		candidate["debit"] = source_row.debit
+		candidate["credit"] = 0
+		candidate["debit_in_account_currency"] = source_row.debit_in_account_currency
+		candidate["credit_in_account_currency"] = 0
+		candidate["remarks"] = source_row.user_remark or candidate.get("remarks")
+
+	return entries
+
+
+def repair_negative_debit_snapshot(source_name, company=None):
+	"""Repair an existing posted Journal Entry snapshot once after sign loss."""
+	journal_entry = frappe.get_doc("Journal Entry", source_name)
+	if company and journal_entry.company != company:
+		frappe.throw(_("来源凭证公司不匹配：{0}").format(source_name))
+	snapshot_name = frappe.db.get_value(
+		"China Accounting Voucher",
+		{"source_doctype": "Journal Entry", "source_name": source_name, "source_event": "Posting"},
+		"name",
+	)
+	if not snapshot_name:
+		frappe.throw(_("未找到来源凭证对应的中国会计凭证：{0}").format(source_name))
+
+	snapshot = frappe.get_doc("China Accounting Voucher", snapshot_name)
+	entries = restore_negative_journal_entry_debits(
+		journal_entry, get_gl_entries("Journal Entry", source_name), "Posting"
+	)
+	changed = 0
+	if len(snapshot.entries) != len(entries):
+		frappe.throw(_("中国会计凭证分录数量与总账不一致：{0}").format(source_name))
+	for current, entry in zip(snapshot.entries, entries):
+		if current.account != entry["account"]:
+			frappe.throw(_("中国会计凭证分录顺序与总账不一致：{0}").format(source_name))
+		values = {
+			"debit": entry["debit"],
+			"credit": entry["credit"],
+			"debit_in_account_currency": entry["debit_in_account_currency"],
+			"credit_in_account_currency": entry["credit_in_account_currency"],
+			"remarks": entry["remarks"],
+		}
+		if any(flt(current.get(fieldname)) != flt(value) for fieldname, value in values.items() if fieldname != "remarks"):
+			changed += 1
+		frappe.db.set_value("China Accounting Voucher Entry", current.name, values, update_modified=False)
+
+	total_debit = sum(flt(entry["debit"], 2) for entry in entries)
+	total_credit = sum(flt(entry["credit"], 2) for entry in entries)
+	frappe.db.set_value(
+		"China Accounting Voucher",
+		snapshot.name,
+		{
+			"total_debit": total_debit,
+			"total_credit": total_credit,
+			"source_hash": calculate_entries_hash(entries),
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()
+	return {
+		"snapshot": snapshot.name,
+		"source": source_name,
+		"changed_rows": changed,
+		"total_debit": total_debit,
+		"total_credit": total_credit,
+	}
 
 
 def to_voucher_entry(row):
@@ -473,6 +566,142 @@ def classify_voucher_word(entries, settings):
 	return "记"
 
 
+def _sync_source_voucher_number(source_doctype, source_name, statutory_number):
+	if source_doctype not in FORMAL_VOUCHER_SOURCES or not source_name:
+		return
+	if not frappe.db.has_column(source_doctype, "custom_china_voucher_number"):
+		return
+	frappe.db.set_value(
+		source_doctype,
+		source_name,
+		"custom_china_voucher_number",
+		statutory_number,
+		update_modified=False,
+	)
+
+
+def _formal_sequence_key(voucher):
+	return "|".join((voucher.company, voucher.fiscal_year, voucher.accounting_period, voucher.voucher_word, "formal"))
+
+
+def _formal_voucher_order_key(voucher):
+	"""Sort formal vouchers by date, then by stable creation order."""
+	return (
+		getdate(voucher.get("posting_date")),
+		str(voucher.get("creation") or ""),
+		str(voucher.get("name") or ""),
+	)
+
+
+def _build_formal_voucher_numbering(existing, current):
+	"""Return all formal vouchers in the order used for monthly numbering."""
+	rows = [dict(row) for row in existing]
+	rows.append(
+		{
+			"name": current.get("name"),
+			"posting_date": current.get("posting_date"),
+			"creation": current.get("creation") or now_datetime(),
+			"source_doctype": current.get("source_doctype"),
+			"source_name": current.get("source_name"),
+			"source_event": current.get("source_event"),
+		}
+	)
+	return sorted(rows, key=_formal_voucher_order_key)
+
+
+def _get_or_create_formal_sequence(voucher, sequence_key):
+	row = frappe.db.sql(
+		"SELECT name, current_value FROM `tabChina Voucher Sequence` WHERE sequence_key=%s FOR UPDATE",
+		(sequence_key,),
+		as_dict=True,
+	)
+	if row:
+		return row[0]
+
+	try:
+		frappe.get_doc(
+			{
+				"doctype": "China Voucher Sequence",
+				"sequence_key": sequence_key,
+				"company": voucher.company,
+				"fiscal_year": voucher.fiscal_year,
+				"accounting_period": voucher.accounting_period,
+				"voucher_word": voucher.voucher_word,
+				"current_value": 0,
+			}
+		).insert(ignore_permissions=True)
+	except frappe.DuplicateEntryError:
+		pass
+
+	row = frappe.db.sql(
+		"SELECT name, current_value FROM `tabChina Voucher Sequence` WHERE sequence_key=%s FOR UPDATE",
+		(sequence_key,),
+		as_dict=True,
+	)
+	if not row:
+		frappe.throw(_("无法创建凭证字号流水号记录：{0}").format(sequence_key))
+	return row[0]
+
+
+def _renumber_formal_vouchers(voucher, sequence_key, sequence_row):
+	"""Assign contiguous numbers in posting-date order within one locked month."""
+	existing = frappe.db.sql(
+		"""
+		SELECT name, posting_date, creation, source_doctype, source_name, source_event
+		FROM `tabChina Accounting Voucher`
+		WHERE company=%s AND fiscal_year=%s AND accounting_period=%s
+			AND voucher_word=%s AND source_doctype IN ('Journal Entry', 'Payment Entry')
+			AND docstatus=1
+		ORDER BY posting_date ASC, creation ASC, name ASC
+		FOR UPDATE
+		""",
+		(voucher.company, voucher.fiscal_year, voucher.accounting_period, voucher.voucher_word),
+		as_dict=True,
+	)
+	ordered = _build_formal_voucher_numbering(existing, voucher)
+
+	# voucher_key is unique. Move existing keys aside before applying the new
+	# date-ordered keys so an insertion in the middle cannot collide with an old key.
+	token = frappe.generate_hash(length=16)
+	for row in existing:
+		frappe.db.set_value(
+			"China Accounting Voucher",
+			row.name,
+			"voucher_key",
+			f"renumbering|{token}|{row.name}",
+			update_modified=False,
+		)
+
+	for sequence, row in enumerate(ordered, start=1):
+		statutory_number = f"{voucher.voucher_word}{sequence}"
+		voucher_key = f"{sequence_key}|{sequence:08d}"
+		if row["name"] == voucher.name:
+			voucher.sequence_number = sequence
+			voucher.statutory_number = statutory_number
+			voucher.voucher_key = voucher_key
+			continue
+
+		frappe.db.set_value(
+			"China Accounting Voucher",
+			row["name"],
+			{
+				"sequence_number": sequence,
+				"statutory_number": statutory_number,
+				"voucher_key": voucher_key,
+			},
+			update_modified=False,
+		)
+		_sync_source_voucher_number(row["source_doctype"], row["source_name"], statutory_number)
+
+	frappe.db.set_value(
+		"China Voucher Sequence",
+		sequence_row["name"],
+		"current_value",
+		len(ordered),
+		update_modified=False,
+	)
+
+
 def assign_voucher_number(voucher):
 	if voucher.voucher_key:
 		return
@@ -486,55 +715,9 @@ def assign_voucher_number(voucher):
 	settings = get_company_settings(voucher.company)
 	if not settings:
 		frappe.throw(_("公司 {0} 未启用中国财务设置").format(voucher.company))
-	period_key = voucher.accounting_period
-	sequence_key = "|".join((voucher.company, voucher.fiscal_year, period_key, voucher.voucher_word, "formal"))
-
-	row = frappe.db.sql(
-		"SELECT name, current_value FROM `tabChina Voucher Sequence` WHERE sequence_key=%s FOR UPDATE",
-		(sequence_key,),
-		as_dict=True,
-	)
-	if not row:
-		try:
-			frappe.get_doc(
-				{
-					"doctype": "China Voucher Sequence",
-					"sequence_key": sequence_key,
-					"company": voucher.company,
-					"fiscal_year": voucher.fiscal_year,
-					"accounting_period": voucher.accounting_period,
-					"voucher_word": voucher.voucher_word,
-					"current_value": get_existing_formal_sequence(voucher, sequence_key),
-				}
-			).insert(ignore_permissions=True)
-		except frappe.DuplicateEntryError:
-			pass
-		row = frappe.db.sql(
-			"SELECT name, current_value FROM `tabChina Voucher Sequence` WHERE sequence_key=%s FOR UPDATE",
-			(sequence_key,),
-			as_dict=True,
-		)
-
-	sequence = cint(row[0].current_value) + 1
-	frappe.db.set_value("China Voucher Sequence", row[0].name, "current_value", sequence, update_modified=False)
-	voucher.sequence_number = sequence
-	# The sequence key contains the accounting period, so the displayed
-	# voucher mark restarts at 1 each month while remaining concise.
-	voucher.statutory_number = f"{voucher.voucher_word}{sequence}"
-	voucher.voucher_key = f"{sequence_key}|{sequence:08d}"
-
-
-def get_existing_formal_sequence(voucher, sequence_key):
-	"""Seed the new formal sequence from historical Journal/Payment vouchers."""
-	return frappe.db.sql(
-		"""
-		SELECT COALESCE(MAX(sequence_number), 0)
-		FROM `tabChina Accounting Voucher`
-		WHERE company=%s AND fiscal_year=%s AND accounting_period=%s
-			AND voucher_word=%s AND source_doctype IN ('Journal Entry', 'Payment Entry')
-		""",
-		(voucher.company, voucher.fiscal_year, voucher.accounting_period, voucher.voucher_word),
-	)[0][0]
+	sequence_key = _formal_sequence_key(voucher)
+	sequence_row = _get_or_create_formal_sequence(voucher, sequence_key)
+	_renumber_formal_vouchers(voucher, sequence_key, sequence_row)
 
 
 def calculate_entries_hash(entries):

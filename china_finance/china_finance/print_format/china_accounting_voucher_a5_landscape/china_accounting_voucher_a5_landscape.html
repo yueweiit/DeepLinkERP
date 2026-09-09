@@ -61,6 +61,7 @@
 </style>
 
 {% set page_size = 8 %}
+{% set company_abbr = frappe.db.get_value("Company", doc.company, "abbr") or "" %}
 {% set pages = doc.entries|batch(page_size, fill_with=None)|list %}
 {% if not pages %}{% set pages = [[]] %}{% endif %}
 
@@ -95,7 +96,8 @@
     <tbody>
       {% for row in page %}
         {% if row %}
-          {% set account_info = frappe.db.get_value("Account", row.account, ["account_number", "account_name"], as_dict=True) %}
+          {% set account_info = frappe.db.get_value("Account", row.account, ["account_number", "account_name", "parent_account"], as_dict=True) %}
+          {% set display_account_name = account_info.account_name if account_info else "" %}
           {% set summary = (row.remarks or doc.remarks or "").split("\n", 1)[0] %}
           {% if "｜" in summary %}{% set summary = summary.split("｜", 1)[0] %}{% endif %}
           <tr>
@@ -103,9 +105,9 @@
             <td>
               {% if account_info %}
                 <span class="cf-account-code">{{ account_info.account_number or "" }}</span>
-                {{ account_info.account_name or "" }}
+                {{ display_account_name or "" }}
               {% else %}
-                {{ row.account or "" }}
+                {{ (row.account or "").replace(" - " ~ company_abbr, "") if company_abbr else (row.account or "") }}
               {% endif %}
               {% if row.party %}<div class="cf-subtext">{{ row.party_type or "往来" }}：{{ row.party }}</div>{% endif %}
             </td>

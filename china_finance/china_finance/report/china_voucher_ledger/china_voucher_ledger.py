@@ -3,6 +3,11 @@ import re
 import frappe
 from frappe import _
 
+from china_finance.services.account_display import (
+	get_account_display_title,
+	strip_account_company_suffix,
+)
+
 
 def execute(filters=None):
 	filters = frappe._dict(filters or {})
@@ -49,7 +54,7 @@ def execute(filters=None):
 		LEFT JOIN `tabJournal Entry` je ON v.source_doctype='Journal Entry' AND je.name=v.source_name
 		LEFT JOIN `tabPayment Entry` pe ON v.source_doctype='Payment Entry' AND pe.name=v.source_name
 		WHERE {' AND '.join(conditions)}
-		ORDER BY v.accounting_period, v.voucher_word, v.sequence_number, v.name, e.idx
+		ORDER BY v.accounting_period, v.voucher_word, v.posting_date, v.sequence_number, v.name, e.idx
 		""",
 		filters,
 		as_dict=True,
@@ -62,13 +67,7 @@ def execute(filters=None):
 
 
 def _format_account_labels(entries, company):
-	"""Show the leaf account together with its numbered parent account.
-
-	The account link stores the full Frappe Account name, but the old export
-	only rendered the leaf code and name (for example ``221101 - 工资``).
-	Keep the account master data unchanged and add the parent subject in this
-	report view instead (for example ``221101 - 应付职工薪酬 - 工资``).
-	"""
+	"""Render the canonical account name stored by the company chart."""
 	account_names = {entry.get("account") for entry in entries if entry.get("account")}
 	if not account_names:
 		return
@@ -87,22 +86,12 @@ def _format_account_labels(entries, company):
 
 		account = account_map.get(account_name)
 		if not account:
-			label_cache[account_name] = account_name
-			return account_name
+			label_cache[account_name] = strip_account_company_suffix(account_name, company)
+			return label_cache[account_name]
 
-		name_parts = [account.account_name] if account.account_name else []
-		parent = account_map.get(account.parent_account)
-		visited = {account_name}
-		while parent and parent.name not in visited:
-			visited.add(parent.name)
-			if parent.account_number and parent.account_name:
-				name_parts.append(parent.account_name)
-			parent = account_map.get(parent.parent_account)
-
-		name_parts.reverse()
-		label = " - ".join(name_parts) or account_name
-		if account.account_number:
-			label = f"{account.account_number} - {label}"
+		label = get_account_display_title(account.account_number, account.account_name)
+		if not label:
+			label = strip_account_company_suffix(account_name, company)
 		label_cache[account_name] = label
 		return label
 

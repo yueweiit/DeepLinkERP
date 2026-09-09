@@ -5,7 +5,6 @@ frappe.query_reports["China Voucher Ledger"] = {
 			label: __("公司"),
 			fieldtype: "Link",
 			options: "Company",
-			default: frappe.defaults.get_user_default("Company"),
 			reqd: 1,
 		},
 		{
@@ -80,7 +79,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 			frappe.set_route("Form", "China Accounting Voucher", snapshot_name);
 		});
 		if (!report.get_filter_value("company")) {
-			report.set_filter_value("company", frappe.defaults.get_user_default("Company"));
+			show_company_selector(report);
 		}
 		if (!report.get_filter_value("from_date") || !report.get_filter_value("to_date")) {
 			const today = frappe.datetime.get_today();
@@ -92,6 +91,63 @@ frappe.query_reports["China Voucher Ledger"] = {
 		}
 	},
 };
+
+function show_company_selector(report) {
+	if (report._china_voucher_company_dialog_open) return;
+
+	// Query Report calls refresh immediately after onload. Hold that first
+	// refresh until a company has been explicitly selected in the dialog.
+	report._china_voucher_company_refresh_pending = true;
+	if (!report._china_voucher_company_refresh_guarded) {
+		const original_refresh = report.refresh;
+		report._china_voucher_company_refresh_guarded = true;
+		report.refresh = function (...args) {
+			if (this._china_voucher_company_refresh_pending) {
+				return Promise.resolve();
+			}
+			return original_refresh.apply(this, args);
+		};
+	}
+
+	report._china_voucher_company_dialog_open = true;
+	const dialog = new frappe.ui.Dialog({
+		title: __("选择公司"),
+		fields: [
+			{
+				fieldname: "company",
+				label: __("公司"),
+				fieldtype: "Link",
+				options: "Company",
+				reqd: 1,
+				default: frappe.defaults.get_user_default("Company") || "",
+			},
+		],
+		size: "small",
+	});
+
+	dialog.set_primary_action(__("查询"), () => {
+		const values = dialog.get_values();
+		if (!values || !values.company) return;
+
+		// Keep the report filter as the source of truth so the existing filter,
+		// URL filters, and subsequent company changes continue to work normally.
+		report.set_filter_value("company", values.company);
+		report._china_voucher_company_refresh_pending = false;
+		dialog.hide();
+		report.refresh(true);
+	});
+
+	dialog.onhide = () => {
+		report._china_voucher_company_dialog_open = false;
+		// Closing without a selection leaves the original mandatory filter
+		// behavior available for manual selection in the report filter area.
+		if (!report.get_filter_value("company")) {
+			report._china_voucher_company_refresh_pending = false;
+		}
+	};
+
+	dialog.show();
+}
 
 function ensure_voucher_ledger_styles() {
 	if (document.getElementById("china-voucher-ledger-inline-style")) return;
