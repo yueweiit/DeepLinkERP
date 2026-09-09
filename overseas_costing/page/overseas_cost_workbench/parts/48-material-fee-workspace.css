@@ -446,6 +446,12 @@
 .ocw-mf-ai-progress-modal .modal-body .form-column,
 .ocw-mf-ai-progress-modal .modal-body .frappe-control[data-fieldname="progress_html"] { min-height: 0; }
 .ocw-mf-ai-progress-modal .modal-footer { display: none; }
+.ocw-mf-ai-progress-modal .ocw-primary-btn { color: #ffffff; border-color: #076fbe; background: #076fbe; cursor: pointer; }
+.ocw-mf-ai-progress-modal .ocw-primary-btn:hover:not(:disabled) { color: #ffffff; border-color: #085c9d; background: #085c9d; }
+.ocw-mf-ai-progress-modal .ocw-outline-btn { color: #076fbe; border-color: #076fbe; background: #ffffff; cursor: pointer; }
+.ocw-mf-ai-progress-modal .ocw-outline-btn:hover:not(:disabled) { color: #076fbe; border-color: #076fbe; background: #eef6fd; }
+.ocw-mf-ai-progress-modal .ocw-primary-btn:disabled,
+.ocw-mf-ai-progress-modal .ocw-outline-btn:disabled { color: #475467; border-color: #cbd5e1; background: #e4e7ec; opacity: 1; cursor: not-allowed; }
 .ocw-mf-ai-progress-dialog,
 .ocw-mf-ai-review-dialog { display: flex; flex-direction: column; gap: 14px; max-height: calc(100dvh - 155px); min-height: 0; }
 .ocw-mf-ai-progress-dialog > header,

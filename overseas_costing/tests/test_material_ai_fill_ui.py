@@ -1,11 +1,42 @@
 from html.parser import HTMLParser
 from pathlib import Path
+import re
+
+import pytest
 
 from overseas_costing.tests.test_workbench_frontend_state import _fee_workspace_result
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PARTS = ROOT / "page" / "overseas_cost_workbench" / "parts"
+
+
+@pytest.mark.parametrize("button_class", ["ocw-primary-btn", "ocw-outline-btn"])
+@pytest.mark.parametrize("state", ["", ":hover:not(:disabled)", ":disabled"])
+def test_detached_autofill_modal_buttons_have_readable_explicit_colors(button_class, state):
+    # Frappe appends dialogs outside the workbench theme-variable root.
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    selector = f".ocw-mf-ai-progress-modal .{button_class}{state}"
+    declarations = {}
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if selector in [entry.strip() for entry in selectors.split(",")]:
+            declarations.update(dict(re.findall(r"([\w-]+)\s*:\s*([^;]+)", body)))
+    colors = {}
+    for name in ("color", "background", "border-color"):
+        value = declarations.get(name, "").strip()
+        assert re.fullmatch(r"#[\da-fA-F]{6}", value), f"{selector} needs an explicit {name}, got {value!r}"
+        colors[name] = value
+
+    def luminance(hex_color):
+        channels = [int(hex_color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4 for channel in channels]
+        return sum(channel * weight for channel, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+    lighter, darker = sorted([luminance(colors["color"]), luminance(colors["background"])], reverse=True)
+    assert (lighter + 0.05) / (darker + 0.05) >= 4.5, f"{selector} text must remain readable"
+    if state == ":disabled":
+        assert declarations.get("opacity") == "1"
+        assert declarations.get("cursor") == "not-allowed"
 
 
 def test_toolbar_has_one_upload_entry_and_ai_action_on_one_line() -> None:
@@ -463,6 +494,43 @@ def test_autofill_ready_renders_full_table_without_visible_candidate_checkboxes(
     assert "disabled" not in _AutofillHTML(markup).actions["mf-ai-apply"]
 
 
+def test_autofill_preview_distinguishes_purchase_and_shipment_quantities():
+    result = _fee_workspace_result(AUTOFILL_FIXTURE + r"""
+state.aiFill.draft.autofill_preview.items[0].quantity='200000';
+state.aiFill.draft.autofill_preview.items[0].actual_shipped_qty='22000';
+console.log(JSON.stringify({html:workspace.renderMaterialAIAutofillPreview(state.aiFill)}));
+""")
+    assert "<th>采购数量</th>" in result["html"]
+    assert "<th>实发数量</th>" in result["html"]
+    assert ">200000<" in result["html"]
+    assert ">22000<" in result["html"]
+
+
+def test_autofill_fee_preview_formats_change_without_mutating_payload_values():
+    result = _fee_workspace_result(AUTOFILL_FIXTURE + r"""
+state.aiFill.draft.autofill_preview.fees=[{fee_type:'国际运费',amount:'7756.2',previous_amount:2004,currency:'RMB'}];
+const before=JSON.stringify(state.aiFill);
+const html=workspace.renderMaterialAIAutofillPreview(state.aiFill);
+console.log(JSON.stringify({html,unchanged:before===JSON.stringify(state.aiFill)}));
+""")
+    assert ">7756.20<" in result["html"]
+    assert ">2004.00<" in result["html"]
+    assert "2004.00 → 7756.20 RMB" in result["html"]
+    assert "<input" not in result["html"]
+    assert result["unchanged"] is True
+
+
+def test_autofill_fee_preview_does_not_coerce_missing_or_unsafe_values_to_zero():
+    result = _fee_workspace_result(AUTOFILL_FIXTURE + r"""
+state.aiFill.draft.autofill_preview.fees=[{amount:'',previous_amount:null,currency:'<USD>'},{amount:'<invalid>',previous_amount:0}];
+console.log(JSON.stringify({html:workspace.renderMaterialAIAutofillPreview(state.aiFill)}));
+""")
+    assert "— → — &lt;USD&gt;" in result["html"]
+    assert "0.00 → &lt;invalid&gt;" in result["html"]
+    assert "<invalid>" not in result["html"]
+    assert "<USD>" not in result["html"]
+
+
 def test_autofill_progress_and_ready_keep_actions_outside_scroll_body() -> None:
     result = _fee_workspace_result(AUTOFILL_FIXTURE + r"""
 const ready=workspace.renderMaterialAIReviewDialogContent();
@@ -601,7 +669,7 @@ console.log(JSON.stringify({selected:[...state.aiFill.selections],preview:worksp
 """)
     assert "quote" in result["selected"]
     assert "other" not in result["selected"]
-    assert ">90<" in result["preview"]
+    assert ">90.00<" in result["preview"]
 
 
 def test_autofill_new_logistics_rows_cannot_create_browser_edits() -> None:
