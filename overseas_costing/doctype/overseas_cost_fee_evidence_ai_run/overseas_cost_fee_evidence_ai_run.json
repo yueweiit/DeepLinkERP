@@ -10,6 +10,7 @@
     "batch",
     "version",
     "logical_fee_key",
+    "evidence_role",
     "fee_rule",
     "attachment",
     "evidence",
@@ -51,6 +52,12 @@
       "fieldname": "logical_fee_key",
       "fieldtype": "Data",
       "label": "逻辑费用标识",
+      "reqd": 1
+    },
+    {
+      "fieldname": "evidence_role",
+      "fieldtype": "Data",
+      "label": "凭证用途",
       "reqd": 1
     },
     {

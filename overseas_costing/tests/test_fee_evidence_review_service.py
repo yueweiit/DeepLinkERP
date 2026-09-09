@@ -760,6 +760,12 @@ class _StartRepository:
     def get_attachment(self, batch_name, attachment_name):
         return {"name": attachment_name, "batch": batch_name, "file_name": "关税.pdf", "modified": "m1", "file_url": "/files/tax.pdf", "parse_status": "Parsed", "parse_result_json": "{}", "mapped_result_json": "{}"}
 
+    def materialize_fee_rule(self, _batch_name, _version_name, logical_fee_key):
+        return {"name": "FEE-1", "logical_fee_key": logical_fee_key}
+
+    def find_or_create_pending_evidence(self, **_kwargs):
+        return "EVIDENCE-1"
+
     def find_running(self, *_args):
         return self.running
 
@@ -788,6 +794,123 @@ def test_start_review_reuses_running_task_even_when_force_is_requested() -> None
     assert enqueued == []
 
 
+def test_start_review_force_bypasses_only_same_input_ready_reuse() -> None:
+    repository = _StartRepository(
+        reusable={"name": "RUN-OLD", "status": "READY", "progress_revision": 8}
+    )
+
+    result = service.start_fee_evidence_review(
+        "B1",
+        "V1",
+        "import_tax",
+        "ATT-1",
+        "tax_certificate",
+        force=True,
+        repository=repository,
+        enqueue=lambda _run_id: None,
+    )
+
+    assert result["run_id"] == "RUN-NEW"
+    assert result["reused"] is False
+
+
+def test_execute_passes_persisted_evidence_role_to_draft(monkeypatch) -> None:
+    class Repository:
+        def __init__(self):
+            self.run = {
+                "name": "RUN-1",
+                "batch": "B1",
+                "version": "V1",
+                "logical_fee_key": "import_tax",
+                "evidence_role": "refund",
+                "attachment": "ATT-1",
+                "status": "QUEUED",
+                "source_progress_json": [{}],
+            }
+
+        def get_run(self, _run_id):
+            return self.run
+
+        def claim_run(self, _run_id, token):
+            self.run = {**self.run, "status": "RUNNING", "execution_token": token}
+            return self.run
+
+        def get_context(self, _batch, _version):
+            return {"batch": "B1", "version": "V1", "fx_context": {}}
+
+        def get_attachment(self, _batch, _attachment):
+            return {
+                "name": "ATT-1",
+                "file_name": "退款.pdf",
+                "modified": "m1",
+                "file_url": "/files/refund.pdf",
+                "parse_status": "Parsed",
+                "parse_result_json": {"classification": {"code": "refund"}},
+                "mapped_result_json": {},
+            }
+
+        def get_items(self, _batch, _version):
+            return []
+
+        def save_claimed(self, _run_id, token, **updates):
+            assert token == self.run["execution_token"]
+            self.run = {**self.run, **updates}
+            return self.run
+
+        def rollback(self):
+            return None
+
+    captured = {}
+    monkeypatch.setattr(
+        service,
+        "_parse_attachment_for_review",
+        lambda _attachment, _batch: ({"classification": {"code": "refund"}}, ""),
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_ai_review",
+        lambda *_args: {"ok": False, "warning": "", "model": ""},
+    )
+    monkeypatch.setattr(
+        service,
+        "build_fee_evidence_review_draft",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "summary": {},
+            "evidence": {},
+            "fee_splits": [],
+            "components": [],
+        },
+    )
+
+    result = service.execute_fee_evidence_review("RUN-1", repository=Repository())
+
+    assert result["status"] == "READY"
+    assert captured["evidence_role"] == "refund"
+
+
+def test_execute_claim_loss_never_writes_with_a_new_owners_token() -> None:
+    class Repository:
+        def __init__(self):
+            self.run = {"name": "RUN-1", "status": "QUEUED"}
+
+        def get_run(self, _run_id):
+            return self.run
+
+        def claim_run(self, _run_id, _token):
+            self.run = {"name": "RUN-1", "status": "RUNNING", "execution_token": "other"}
+            return None
+
+    result = service.execute_fee_evidence_review("RUN-1", repository=Repository())
+
+    assert result == {
+        "ok": True,
+        "run_id": "RUN-1",
+        "status": "RUNNING",
+        "claimed": False,
+    }
+
+
 def test_incremental_status_omits_large_draft_while_running_and_unchanged() -> None:
     class Repository:
         def get_run(self, _run_id):
@@ -797,3 +920,251 @@ def test_incremental_status_omits_large_draft_while_running_and_unchanged() -> N
 
     assert result["unchanged"] is True
     assert "draft" not in result
+
+
+def test_apply_lock_order_contains_every_mutated_target() -> None:
+    assert service.review_lock_targets(
+        {"batch": "B1", "version": "V1"},
+        {"name": "RUN1", "attachment": "A1", "evidence": "E1"},
+    ) == [
+        ("batch", "B1"),
+        ("run", "RUN1"),
+        ("version", "V1"),
+        ("attachment", "A1"),
+        ("fee_rules", "B1", "V1"),
+        ("evidence", "E1"),
+        ("items", "B1", "V1"),
+        ("components", "B1", "V1"),
+    ]
+
+
+def test_duplicate_attachment_fingerprint_is_rejected() -> None:
+    candidate = {
+        "attachment": "A-NEW",
+        "attachment_fingerprint": "sha256:x",
+        "accounting_role": "FINAL_BILL",
+        "direction": "DEBIT",
+        "original_amount": "30",
+        "validation_status": "VALID",
+    }
+    existing = [
+        {
+            "name": "E-OLD",
+            "attachment": "A-OLD",
+            "attachment_fingerprint": "sha256:x",
+            "accounting_role": "FINAL_BILL",
+            "direction": "DEBIT",
+            "original_amount": "30.00",
+            "validation_status": "VALID",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="重复凭证"):
+        service.assert_no_duplicate_evidence(candidate, existing)
+
+    service.assert_no_duplicate_evidence(
+        candidate,
+        [{**existing[0], "attachment": "A-NEW"}],
+    )
+
+
+def test_review_fingerprint_includes_evidence_role() -> None:
+    attachment = {"name": "A1", "modified": "m1", "file_url": "/files/a.pdf"}
+
+    assert service.build_input_fingerprint(
+        batch_name="B1",
+        version_name="V1",
+        logical_fee_key="import_tax",
+        attachment=attachment,
+        evidence_role="tax_certificate",
+    ) != service.build_input_fingerprint(
+        batch_name="B1",
+        version_name="V1",
+        logical_fee_key="import_tax",
+        attachment=attachment,
+        evidence_role="expense_invoice",
+    )
+
+
+def test_start_review_persists_requested_evidence_role() -> None:
+    repository = _StartRepository()
+
+    service.start_fee_evidence_review(
+        "B1",
+        "V1",
+        "import_tax",
+        "ATT-1",
+        "tax_certificate",
+        repository=repository,
+        enqueue=lambda _run_id: None,
+    )
+
+    assert repository.created[0]["evidence_role"] == "tax_certificate"
+
+
+class _ApplyRepository:
+    def __init__(self, *, fail_audit=False):
+        self.fail_audit = fail_audit
+        self.attachment = {
+            "name": "ATT-1",
+            "batch": "B1",
+            "file_name": "账单.pdf",
+            "modified": "m1",
+            "file_url": "/files/bill.pdf",
+            "parse_status": "Parsed",
+            "parse_result_json": "{}",
+            "mapped_result_json": "{}",
+        }
+        self.draft = {
+            "evidence": {
+                "proposal_id": "evidence:classification",
+                "evidence_type": "FINAL_INVOICE",
+                "accounting_role": "FINAL_BILL",
+                "direction": "DEBIT",
+                "currency": "MXN",
+                "original_amount": "30",
+                "is_final": 1,
+            },
+            "fee_splits": [
+                {
+                    "proposal_id": "fee:import_tax",
+                    "logical_fee_key": "import_tax",
+                    "amount": "30",
+                    "currency": "MXN",
+                    "amount_status": "ACTUAL",
+                }
+            ],
+            "components": [],
+        }
+        self.run = {
+            "name": "RUN-1",
+            "batch": "B1",
+            "version": "V1",
+            "fee_rule": "F1",
+            "attachment": "ATT-1",
+            "evidence": "E1",
+            "status": "READY",
+            "attachment_fingerprint": service._attachment_fingerprint(self.attachment),
+            "draft_json": self.draft,
+        }
+        self.calls = []
+        self.commits = 0
+        self.rollbacks = 0
+        self.saved_evidence = None
+
+    def get_run(self, _run_id):
+        return self.run
+
+    def get_context(self, batch_name, version_name):
+        self.calls.append(("context", batch_name, version_name))
+        return {
+            "batch": batch_name,
+            "version": version_name,
+            "transport_mode": "AIR",
+            "fx_context": {"fx_rmb_to_mxn": "2"},
+        }
+
+    def lock_apply_context(self, _context, _run):
+        self.calls.append(("lock",))
+        return self.run
+
+    def assert_batch_write(self, _batch_name, _version_name, **_kwargs):
+        self.calls.append(("permission",))
+
+    def get_attachment(self, _batch_name, _attachment_name):
+        return self.attachment
+
+    def list_duplicate_evidence_candidates(self, *_args):
+        return []
+
+    def update_evidence(self, _evidence_name, values):
+        self.saved_evidence = values
+        self.calls.append(("evidence",))
+
+    def save_fee_split(self, **kwargs):
+        self.calls.append(("fee", kwargs["fee_row"]["logical_fee_key"]))
+        return {
+            "name": "F1",
+            "logical_fee_key": "import_tax",
+            "amount": "30",
+            "currency": "MXN",
+        }
+
+    def mark_batch_dirty(self, _batch_name):
+        self.calls.append(("dirty",))
+
+    def insert_review_audit(self, **_kwargs):
+        self.calls.append(("audit",))
+        if self.fail_audit:
+            raise RuntimeError("audit failed")
+
+    def finish_run(self, _run_id, values):
+        self.calls.append(("finish", values["status"]))
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def get_batch_modified(self, _batch_name):
+        return "m2"
+
+
+def test_apply_review_commits_once_and_preserves_evidence_gross_total() -> None:
+    repository = _ApplyRepository()
+
+    result = service.apply_fee_evidence_review(
+        "B1",
+        "RUN-1",
+        ["evidence:classification", "fee:import_tax"],
+        {},
+        "EDIT",
+        "m1",
+        repository=repository,
+    )
+
+    assert result["status"] == "APPLIED"
+    assert repository.saved_evidence["original_amount"] == Decimal("30")
+    assert repository.commits == 1
+    assert repository.rollbacks == 0
+    assert repository.calls.index(("lock",)) < repository.calls.index(("permission",))
+    assert repository.calls[-1] == ("finish", "APPLIED")
+
+
+def test_apply_review_rolls_back_all_writes_and_leaves_run_unfinished_on_error() -> None:
+    repository = _ApplyRepository(fail_audit=True)
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        service.apply_fee_evidence_review(
+            "B1",
+            "RUN-1",
+            ["evidence:classification", "fee:import_tax"],
+            {},
+            "EDIT",
+            "m1",
+            repository=repository,
+        )
+
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+    assert not any(call[0] == "finish" for call in repository.calls)
+
+
+def test_settlement_evidence_cannot_be_selected_as_a_fee_total() -> None:
+    with pytest.raises(ValueError, match="结算流水"):
+        service.validate_fee_split_conservation(
+            {
+                "accounting_role": "SETTLEMENT",
+                "currency": "MXN",
+                "original_amount": "30",
+            },
+            [
+                {
+                    "logical_fee_key": "import_tax",
+                    "currency": "MXN",
+                    "amount": "30",
+                    "amount_status": "ESTIMATED",
+                }
+            ],
+        )

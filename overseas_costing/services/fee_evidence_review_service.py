@@ -851,11 +851,19 @@ def build_fee_evidence_review_draft(
     }
 
 
-def build_input_fingerprint(*, batch_name: str, version_name: str, logical_fee_key: str, attachment: dict) -> str:
+def build_input_fingerprint(
+    *,
+    batch_name: str,
+    version_name: str,
+    logical_fee_key: str,
+    attachment: dict,
+    evidence_role: str = "",
+) -> str:
     payload = {
         "batch": batch_name,
         "version": version_name,
         "logical_fee_key": logical_fee_key,
+        "evidence_role": str(evidence_role or ""),
         "attachment": attachment.get("name"),
         "modified": str(attachment.get("modified") or ""),
         "file_url": attachment.get("file_url"),
@@ -865,6 +873,50 @@ def build_input_fingerprint(*, batch_name: str, version_name: str, logical_fee_k
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def review_lock_targets(context: dict, run: Any) -> list[tuple]:
+    """Return the global lock order used by review application."""
+
+    batch = str(context.get("batch") or "")
+    version = str(context.get("version") or "")
+    return [
+        ("batch", batch),
+        ("run", str(_run_value(run, "name") or "")),
+        ("version", version),
+        ("attachment", str(_run_value(run, "attachment") or "")),
+        ("fee_rules", batch, version),
+        ("evidence", str(_run_value(run, "evidence") or "")),
+        ("items", batch, version),
+        ("components", batch, version),
+    ]
+
+
+def assert_no_duplicate_evidence(candidate: dict, existing_rows: list[dict]) -> None:
+    """Reject a second physical attachment that represents the same business evidence."""
+
+    fingerprint = str(candidate.get("attachment_fingerprint") or "")
+    if not fingerprint:
+        return
+    candidate_amount = _decimal(candidate.get("original_amount"))
+    candidate_currency = str(candidate.get("currency") or "RMB").upper().replace("CNY", "RMB")
+    for row in existing_rows or []:
+        if str(row.get("validation_status") or "VALID").upper() != "VALID":
+            continue
+        if str(row.get("attachment") or "") == str(candidate.get("attachment") or ""):
+            continue
+        same_business_evidence = (
+            str(row.get("attachment_fingerprint") or "") == fingerprint
+            and str(row.get("accounting_role") or "").upper()
+            == str(candidate.get("accounting_role") or "").upper()
+            and str(row.get("direction") or "DEBIT").upper()
+            == str(candidate.get("direction") or "DEBIT").upper()
+            and str(row.get("currency") or "RMB").upper().replace("CNY", "RMB")
+            == candidate_currency
+            and _decimal(row.get("original_amount")) == candidate_amount
+        )
+        if same_business_evidence:
+            raise ValueError("检测到重复凭证，请核对已确认的附件记录。")
 
 
 def _now() -> str:
@@ -1057,7 +1109,14 @@ class FrappeFeeEvidenceReviewRepository:
     def lock_batch(self, batch_name: str) -> None:
         frappe.db.sql("SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE", (batch_name,))
 
-    def find_running(self, batch_name: str, version_name: str, logical_fee_key: str, attachment: str):
+    def find_running(
+        self,
+        batch_name: str,
+        version_name: str,
+        logical_fee_key: str,
+        attachment: str,
+        evidence_role: str = "",
+    ):
         rows = frappe.get_all(
             self.RUN_DOCTYPE,
             filters={
@@ -1065,6 +1124,7 @@ class FrappeFeeEvidenceReviewRepository:
                 "version": version_name,
                 "logical_fee_key": logical_fee_key,
                 "attachment": attachment,
+                "evidence_role": evidence_role,
                 "status": ["in", list(RUNNING_STATUSES)],
             },
             fields=["name", "status", "progress_revision"],
@@ -1103,6 +1163,390 @@ class FrappeFeeEvidenceReviewRepository:
         if not rows:
             raise ValueError("未找到费用凭证 AI 审核任务。")
         return self.get_run(run_id)
+
+    def lock_apply_context(self, context: dict, run: Any):
+        """Lock all mutable review targets in one stable global order."""
+
+        batch = str(context.get("batch") or "")
+        version = str(context.get("version") or "")
+        self.lock_batch(batch)
+        locked_run = self.lock_run(str(_run_value(run, "name") or ""))
+        frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Version` "
+            "WHERE name=%s AND batch=%s FOR UPDATE",
+            (version, batch),
+        )
+        frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Attachment` "
+            "WHERE name=%s AND batch=%s FOR UPDATE",
+            (str(_run_value(locked_run, "attachment") or ""), batch),
+        )
+        frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Allocation Rule` "
+            "WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
+            (batch, version),
+        )
+        frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Fee Evidence` "
+            "WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
+            (batch, version),
+        )
+        frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Item` "
+            "WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
+            (batch, version),
+        )
+        frappe.db.sql(
+            "SELECT name FROM `tabOverseas Cost Fee SKU Component` "
+            "WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
+            (batch, version),
+        )
+        return locked_run
+
+    def assert_batch_write(
+        self,
+        batch_name: str,
+        version_name: str,
+        *,
+        edit_token: str,
+        expected_modified: str,
+    ) -> None:
+        from overseas_costing.services import fee_service
+
+        fee_service._assert_write_context(
+            batch_name,
+            version_name,
+            edit_token,
+            expected_modified,
+        )
+
+    def materialize_fee_rule(
+        self, batch_name: str, version_name: str, logical_fee_key: str
+    ) -> dict:
+        from overseas_costing.services import fee_service
+
+        return fee_service.materialize_fee_rule(
+            batch_name, version_name, logical_fee_key
+        )
+
+    def find_or_create_pending_evidence(
+        self,
+        *,
+        context: dict,
+        fee_rule: dict,
+        attachment: dict,
+        evidence_role: str,
+        attachment_fingerprint: str,
+    ) -> str:
+        evidence_name = str(
+            frappe.db.get_value(
+                "Overseas Cost Fee Evidence",
+                {
+                    "fee_rule": fee_rule["name"],
+                    "attachment": attachment["name"],
+                    "evidence_role": evidence_role,
+                },
+                "name",
+            )
+            or ""
+        )
+        if evidence_name:
+            return evidence_name
+        return str(
+            frappe.get_doc(
+                {
+                    "doctype": "Overseas Cost Fee Evidence",
+                    "batch": context["batch"],
+                    "version": context["version"],
+                    "fee_rule": fee_rule["name"],
+                    "attachment": attachment["name"],
+                    "evidence_role": evidence_role or "expense_invoice",
+                    "validation_status": "PENDING",
+                    "source_revision": str(attachment.get("modified") or ""),
+                    "attachment_fingerprint": attachment_fingerprint,
+                }
+            ).insert(ignore_permissions=True).name
+        )
+
+    def save_attachment_parse(self, attachment_name: str, parsed: dict) -> None:
+        frappe.db.set_value(
+            "Overseas Cost Attachment",
+            attachment_name,
+            {"parse_result_json": _json(parsed), "parse_status": "Parsed"},
+            update_modified=True,
+        )
+        frappe.db.commit()
+
+    def list_duplicate_evidence_candidates(
+        self, batch_name: str, version_name: str, evidence_name: str
+    ) -> list[dict]:
+        filters: dict[str, Any] = {
+            "batch": batch_name,
+            "version": version_name,
+            "validation_status": "VALID",
+        }
+        if evidence_name:
+            filters["name"] = ["!=", evidence_name]
+        return frappe.get_all(
+            "Overseas Cost Fee Evidence",
+            filters=filters,
+            fields=[
+                "name",
+                "attachment",
+                "attachment_fingerprint",
+                "accounting_role",
+                "direction",
+                "currency",
+                "original_amount",
+                "validation_status",
+                "review_run",
+            ],
+            order_by="name asc",
+            limit_page_length=10000,
+        )
+
+    def get_evidence(self, evidence_name: str) -> dict:
+        return (
+            frappe.db.get_value(
+                "Overseas Cost Fee Evidence",
+                evidence_name,
+                [
+                    "name",
+                    "batch",
+                    "version",
+                    "fee_rule",
+                    "attachment",
+                    "evidence_type",
+                    "accounting_role",
+                    "currency",
+                    "direction",
+                    "validation_status",
+                    "original_amount",
+                ],
+                as_dict=True,
+            )
+            or {}
+        )
+
+    def get_evidence_components(self, evidence_name: str) -> list[dict]:
+        return frappe.get_all(
+            "Overseas Cost Fee SKU Component",
+            filters={
+                "evidence": evidence_name,
+                "status": "CONFIRMED",
+                "is_active": 1,
+                "cost_effect": "COST",
+            },
+            fields=[
+                "name",
+                "item",
+                "stable_line_key",
+                "logical_fee_key",
+                "component_type",
+                "tax_code",
+                "hs_code",
+                "currency",
+                "original_amount",
+                "amount_rmb",
+                "exchange_rate",
+            ],
+            order_by="logical_fee_key asc, tax_code asc, item asc, name asc",
+            limit_page_length=10000,
+        )
+
+    def update_evidence(self, evidence_name: str, values: dict) -> None:
+        frappe.db.set_value(
+            "Overseas Cost Fee Evidence",
+            evidence_name,
+            values,
+            update_modified=True,
+        )
+
+    def save_fee_split(
+        self,
+        *,
+        context: dict,
+        fee_row: dict,
+        evidence_values: dict,
+        attachment: dict,
+        draft: dict,
+        run_id: str,
+    ) -> dict:
+        from overseas_costing.services import fee_service
+
+        fee_key = str(fee_row.get("logical_fee_key") or "")
+        fee_shell = self.materialize_fee_rule(
+            context["batch"], context["version"], fee_key
+        )
+        status = str(
+            fee_row.get("amount_status")
+            or evidence_values.get("suggested_amount_status")
+            or "ESTIMATED"
+        ).upper()
+        amount = _decimal(fee_row.get("amount"))
+        currency = str(fee_row.get("currency") or "RMB").upper().replace(
+            "CNY", "RMB"
+        )
+        payload = fee_service.normalize_fee_payload(
+            {
+                **fee_shell,
+                "logical_fee_key": fee_key,
+                "amount_status": status,
+                "amount": format(amount, "f"),
+                "currency": currency,
+                "remark": "凭证 AI 审核确认："
+                f"{attachment.get('file_name') or attachment.get('name')}",
+                "status_change_reason": "已人工确认凭证审核草稿",
+                "is_active": 1,
+                "is_enabled": 1,
+            }
+        )
+        current = fee_service._decorate_historical_rules(
+            fee_service._query_rules(context["batch"], context["version"]),
+            context.get("transport_mode") or "",
+        )
+        previous = next(
+            (
+                row
+                for row in current
+                if row.get("logical_fee_key") == fee_key
+                and fee_service.fee_is_active(row)
+            ),
+            {},
+        )
+        if str(previous.get("amount_status") or "MISSING") != status:
+            payload.update(
+                {
+                    "status_change_reason": "已人工确认凭证审核草稿",
+                    "status_changed_by": _session_user(),
+                    "status_changed_at": _now(),
+                }
+            )
+        merged = fee_service.merge_logical_fee(
+            current, payload, revision=f"evidence-review:{run_id}"
+        )
+        values = {
+            key: merged["fee"].get(key)
+            for key in (*fee_service.FEE_FIELDS, "amount_revision", "scope_revision")
+        }
+        values.update({"batch": context["batch"], "version": context["version"]})
+        rule_name = str(merged["fee"].get("name") or fee_shell.get("name") or "")
+        frappe.db.set_value(
+            "Overseas Cost Allocation Rule", rule_name, values, update_modified=True
+        )
+        result = {**merged["fee"], "name": rule_name}
+        link_name = frappe.db.get_value(
+            "Overseas Cost Fee Evidence",
+            {
+                "fee_rule": rule_name,
+                "attachment": attachment["name"],
+                "evidence_role": "fee_split",
+            },
+            "name",
+        )
+        if not link_name and rule_name != str(evidence_values.get("fee_rule") or ""):
+            frappe.get_doc(
+                {
+                    "doctype": "Overseas Cost Fee Evidence",
+                    "batch": context["batch"],
+                    "version": context["version"],
+                    "fee_rule": rule_name,
+                    "attachment": attachment["name"],
+                    "evidence_role": "fee_split",
+                    "validation_status": "VALID",
+                    "evidence_type": evidence_values.get("evidence_type") or "OTHER",
+                    "accounting_role": evidence_values.get("accounting_role")
+                    or "REFERENCE",
+                    "currency": currency,
+                    "original_amount": amount,
+                    "direction": evidence_values.get("direction") or "DEBIT",
+                    "is_final": 1 if _checked(evidence_values.get("is_final")) else 0,
+                    "attachment_fingerprint": _attachment_fingerprint(attachment),
+                    "parse_snapshot_json": _json(draft),
+                    "confirmed_by": _session_user(),
+                    "confirmed_at": _now(),
+                    "review_run": run_id,
+                }
+            ).insert(ignore_permissions=True)
+        return result
+
+    def replace_components(
+        self,
+        *,
+        context: dict,
+        fee_rule: dict,
+        evidence_name: str,
+        attachment_name: str,
+        logical_fee_key: str,
+        components: list[dict],
+    ) -> None:
+        frappe.db.sql(
+            "UPDATE `tabOverseas Cost Fee SKU Component` "
+            "SET status='VOID', is_active=0 "
+            "WHERE evidence=%s AND logical_fee_key=%s AND is_active=1",
+            (evidence_name, logical_fee_key),
+        )
+        for row in components:
+            frappe.get_doc(
+                {
+                    "doctype": "Overseas Cost Fee SKU Component",
+                    "batch": context["batch"],
+                    "version": context["version"],
+                    "fee_rule": fee_rule["name"],
+                    "logical_fee_key": logical_fee_key,
+                    "evidence": evidence_name,
+                    "attachment": attachment_name,
+                    **row,
+                    "source_evidence_json": _json(row.get("source_evidence") or {}),
+                    "status": "CONFIRMED",
+                    "is_active": 1,
+                }
+            ).insert(ignore_permissions=True)
+
+    def mark_batch_dirty(self, batch_name: str) -> None:
+        frappe.db.set_value(
+            "Overseas Cost Batch",
+            batch_name,
+            "status",
+            "Dirty",
+            update_modified=True,
+        )
+
+    def insert_review_audit(
+        self,
+        *,
+        context: dict,
+        run_id: str,
+        fee_count: int,
+        component_count: int,
+    ) -> None:
+        from overseas_costing.services.calculate_service import _insert_audit_log
+
+        _insert_audit_log(
+            batch_doc_name=context["batch"],
+            version_name=context["version"],
+            action_type="EDIT",
+            field_name="fee_evidence_review",
+            old_value="草稿",
+            new_value="已确认",
+            action_remark=(
+                f"确认费用凭证 AI 草稿 {run_id}：费用 {fee_count} 项，"
+                f"SKU 分项 {component_count} 项。"
+            ),
+        )
+
+    def finish_run(self, run_id: str, values: dict) -> None:
+        frappe.db.set_value(self.RUN_DOCTYPE, run_id, values, update_modified=True)
+
+    def mark_stale(self, run_id: str) -> None:
+        self.rollback()
+        self.finish_run(
+            run_id, {"status": "STALE", "progress_step": "凭证已变化"}
+        )
+        self.commit()
+
+    def get_batch_modified(self, batch_name: str):
+        return frappe.db.get_value("Overseas Cost Batch", batch_name, "modified")
 
     def claim_run(self, run_id: str, token: str):
         rows = frappe.db.sql(
@@ -1189,17 +1633,18 @@ def start_fee_evidence_review(
     repository: Any | None = None,
     enqueue: Any | None = None,
 ) -> dict:
-    from overseas_costing.services import fee_service
-
     repo = repository or FrappeFeeEvidenceReviewRepository()
     context = repo.get_context(str(batch_name), str(version_name))
     if frappe is not None:
-        fee_service._assert_write_context(
-            context["batch"], context["version"], edit_token, expected_modified
+        repo.assert_batch_write(
+            context["batch"],
+            context["version"],
+            edit_token=edit_token,
+            expected_modified=expected_modified,
         )
     repo.lock_batch(context["batch"])
     attachment_row = repo.get_attachment(context["batch"], str(attachment))
-    fee = fee_service.materialize_fee_rule(
+    fee = repo.materialize_fee_rule(
         context["batch"], context["version"], str(logical_fee_key)
     )
     attachment_fingerprint = _attachment_fingerprint(attachment_row)
@@ -1208,9 +1653,14 @@ def start_fee_evidence_review(
         version_name=context["version"],
         logical_fee_key=str(logical_fee_key),
         attachment=attachment_row,
+        evidence_role=str(evidence_role),
     )
     running = repo.find_running(
-        context["batch"], context["version"], str(logical_fee_key), str(attachment)
+        context["batch"],
+        context["version"],
+        str(logical_fee_key),
+        str(attachment),
+        str(evidence_role),
     )
     if running:
         repo.commit()
@@ -1233,35 +1683,19 @@ def start_fee_evidence_review(
             "reuse_reason": "SAME_INPUT",
             "progress_revision": int(_run_value(reusable, "progress_revision", 0) or 0),
         }
-    evidence_name = ""
-    if frappe is not None:
-        evidence_name = str(
-            frappe.db.get_value(
-                "Overseas Cost Fee Evidence",
-                {"fee_rule": fee["name"], "attachment": attachment, "evidence_role": str(evidence_role)},
-                "name",
-            )
-            or ""
-        )
-        if not evidence_name:
-            evidence_name = frappe.get_doc(
-                {
-                    "doctype": "Overseas Cost Fee Evidence",
-                    "batch": context["batch"],
-                    "version": context["version"],
-                    "fee_rule": fee["name"],
-                    "attachment": attachment,
-                    "evidence_role": str(evidence_role or "expense_invoice"),
-                    "validation_status": "PENDING",
-                    "source_revision": str(attachment_row.get("modified") or ""),
-                    "attachment_fingerprint": attachment_fingerprint,
-                }
-            ).insert(ignore_permissions=True).name
+    evidence_name = repo.find_or_create_pending_evidence(
+        context=context,
+        fee_rule=fee,
+        attachment=attachment_row,
+        evidence_role=str(evidence_role or "expense_invoice"),
+        attachment_fingerprint=attachment_fingerprint,
+    )
     created = repo.create_run(
         {
             "batch": context["batch"],
             "version": context["version"],
             "logical_fee_key": str(logical_fee_key),
+            "evidence_role": str(evidence_role),
             "fee_rule": fee.get("name"),
             "attachment": str(attachment),
             "evidence": evidence_name,
@@ -1375,14 +1809,8 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
         progress[0].update({"status": "READING", "detail": "正在解析/OCR"})
         persist(progress_step="解析／OCR", progress_percent=30, source_progress_json=progress)
         parsed, parse_warning = _parse_attachment_for_review(attachment, context["batch"])
-        if parsed and frappe is not None and not _json_dict(attachment.get("parse_result_json")):
-            frappe.db.set_value(
-                "Overseas Cost Attachment",
-                attachment["name"],
-                {"parse_result_json": _json(parsed), "parse_status": "Parsed"},
-                update_modified=True,
-            )
-            frappe.db.commit()
+        if parsed and not _json_dict(attachment.get("parse_result_json")):
+            repo.save_attachment_parse(attachment["name"], parsed)
             attachment = repo.get_attachment(context["batch"], attachment["name"])
         progress[0].update(
             {
@@ -1398,6 +1826,7 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             attachment=attachment,
             items=items,
             fx_context=context["fx_context"],
+            evidence_role=str(_run_value(run, "evidence_role")),
             ai_review=ai.get("review") if ai.get("ok") else None,
         )
         progress[0].update(
@@ -1411,7 +1840,9 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
         attachment_fingerprint = _attachment_fingerprint(attachment)
         final_fingerprint = build_input_fingerprint(
             batch_name=context["batch"], version_name=context["version"],
-            logical_fee_key=str(_run_value(run, "logical_fee_key")), attachment=attachment,
+            logical_fee_key=str(_run_value(run, "logical_fee_key")),
+            attachment=attachment,
+            evidence_role=str(_run_value(run, "evidence_role")),
         )
         persist(
             status="READY",
@@ -1623,6 +2054,142 @@ def validate_component_amount_conservation(
     }
 
 
+def normalize_evidence_for_apply(
+    evidence: dict,
+    *,
+    context: dict,
+    run: Any,
+    attachment: dict,
+    draft: dict,
+) -> dict:
+    evidence_type = str(evidence.get("evidence_type") or "OTHER").upper()
+    accounting_role = str(evidence.get("accounting_role") or "REFERENCE").upper()
+    direction = str(evidence.get("direction") or "DEBIT").upper()
+    currency = str(evidence.get("currency") or "RMB").upper().replace("CNY", "RMB")
+    amount = _decimal(evidence.get("original_amount"))
+    if evidence_type not in EVIDENCE_TYPES or accounting_role not in ACCOUNTING_ROLES:
+        raise ValueError("凭证类型或会计作用不合法。")
+    if direction not in {"DEBIT", "CREDIT"} or currency not in {"RMB", "MXN", "USD"}:
+        raise ValueError("凭证方向或币种不合法。")
+    if amount is not None and amount < 0:
+        raise ValueError("凭证金额不能小于 0，请通过付款／退款方向表达正负。")
+    if evidence_type == "REFUND" and direction != "CREDIT":
+        raise ValueError("退款凭证必须使用退款方向。")
+    if evidence_type == "PAYMENT" and direction != "DEBIT":
+        raise ValueError("付款凭证必须使用付款方向。")
+    return {
+        **evidence,
+        "batch": context["batch"],
+        "version": context["version"],
+        "fee_rule": str(_run_value(run, "fee_rule") or ""),
+        "attachment": attachment["name"],
+        "evidence_type": evidence_type,
+        "accounting_role": accounting_role,
+        "currency": currency,
+        "original_amount": amount,
+        "direction": direction,
+        "related_evidence": str(evidence.get("related_evidence") or "") or None,
+        "is_final": 1 if _checked(evidence.get("is_final")) else 0,
+        "attachment_fingerprint": _attachment_fingerprint(attachment),
+        "parse_snapshot_json": _json(draft),
+        "validation_status": "VALID",
+        "validated_by": _session_user(),
+        "validated_at": _now(),
+        "confirmed_by": _session_user(),
+        "confirmed_at": _now(),
+        "review_run": str(_run_value(run, "name") or ""),
+    }
+
+
+def validate_fee_split_conservation(evidence: dict, fee_rows: list[dict]) -> None:
+    if not fee_rows:
+        return
+    if str(evidence.get("accounting_role") or "").upper() == "SETTLEMENT":
+        raise ValueError("付款和退款只记录结算流水，不能直接写入费用总额。")
+    evidence_amount = _decimal(evidence.get("original_amount"))
+    evidence_currency = str(evidence.get("currency") or "RMB").upper().replace(
+        "CNY", "RMB"
+    )
+    if evidence_amount is None:
+        raise ValueError("请先确认凭证总额，再保存费用拆分。")
+    split_total = Decimal("0")
+    for row in fee_rows:
+        currency = str(row.get("currency") or "RMB").upper().replace("CNY", "RMB")
+        amount = _decimal(row.get("amount"))
+        status = str(row.get("amount_status") or "ESTIMATED").upper()
+        if currency != evidence_currency:
+            raise ValueError("费用拆分必须与凭证总额使用同一币种。")
+        if amount is None or amount < 0 or status not in {"ESTIMATED", "ACTUAL"}:
+            raise ValueError("费用拆分金额、币种或状态不合法。")
+        split_total += amount
+    if split_total - evidence_amount > Decimal("0.005"):
+        raise ValueError("费用拆分合计不能超过凭证总额。")
+
+
+def normalize_component_for_apply(
+    row: dict,
+    *,
+    item: dict,
+    parent_component_names: set[str] | None = None,
+) -> dict:
+    component_type = str(row.get("component_type") or "IMPORT_TAX").upper()
+    accounting_role = str(row.get("accounting_role") or "FINAL_BILL").upper()
+    cost_effect = str(row.get("cost_effect") or "COST").upper()
+    currency = str(row.get("currency") or "RMB").upper().replace("CNY", "RMB")
+    original_amount = _decimal(row.get("original_amount"))
+    rmb_amount = _decimal(row.get("amount_rmb"))
+    reversal_link = str(row.get("reverses_component") or "")
+    if component_type not in {
+        "IMPORT_TAX",
+        "CUSTOMS_SERVICE",
+        "OTHER",
+        "REFUND_REVERSAL",
+    }:
+        raise ValueError("SKU 费用分项类型不合法。")
+    if accounting_role not in {"ESTIMATE", "FINAL_BILL", "SETTLEMENT"}:
+        raise ValueError("SKU 费用分项会计作用不合法。")
+    if cost_effect not in {"COST", "LEDGER_ONLY"} or currency not in {
+        "RMB",
+        "MXN",
+        "USD",
+    }:
+        raise ValueError("SKU 费用分项成本作用或币种不合法。")
+    is_reversal = (
+        component_type == "REFUND_REVERSAL"
+        and accounting_role == "SETTLEMENT"
+        and cost_effect == "LEDGER_ONLY"
+        and bool(reversal_link)
+    )
+    if original_amount is None or (original_amount < 0 and not is_reversal):
+        raise ValueError("SKU 税费分项金额不合法。")
+    if accounting_role == "SETTLEMENT" and cost_effect != "LEDGER_ONLY":
+        raise ValueError("结算流水 SKU 分项不能重复计入成本。")
+    if component_type == "REFUND_REVERSAL":
+        if not is_reversal or reversal_link not in (parent_component_names or set()):
+            raise ValueError("退款冲回分项必须关联原付款的有效 SKU 分项。")
+        if rmb_amount is not None and rmb_amount > 0:
+            raise ValueError("退款冲回分项人民币金额必须为负数。")
+    elif rmb_amount is not None and rmb_amount < 0:
+        raise ValueError("SKU 税费分项人民币金额不合法。")
+    return {
+        "item": item["name"],
+        "stable_line_key": item.get("stable_line_key") or item["name"],
+        "component_type": component_type,
+        "accounting_role": accounting_role,
+        "cost_effect": cost_effect,
+        "tax_code": str(row.get("tax_code") or "")[:80],
+        "hs_code": str(row.get("hs_code") or "")[:80],
+        "currency": currency,
+        "original_amount": original_amount,
+        "amount_rmb": rmb_amount,
+        "exchange_rate": _decimal(row.get("exchange_rate")),
+        "allocation_basis": str(row.get("allocation_basis") or "")[:140],
+        "source_evidence": row.get("source_evidence") or {},
+        "confidence": _decimal(row.get("confidence")),
+        "reverses_component": reversal_link or None,
+    }
+
+
 def apply_fee_evidence_review(
     batch_name: str,
     run_id: str,
@@ -1633,212 +2200,174 @@ def apply_fee_evidence_review(
     *,
     repository: Any | None = None,
 ) -> dict:
-    from overseas_costing.services import edit_session_service, fee_service
-    from overseas_costing.services.calculate_service import _insert_audit_log
-
     repo = repository or FrappeFeeEvidenceReviewRepository()
     initial = repo.get_run(str(run_id or ""))
     if str(_run_value(initial, "batch") or "") != str(batch_name or ""):
         raise ValueError("费用凭证审核任务不属于当前批次。")
     context = repo.get_context(str(batch_name), str(_run_value(initial, "version") or ""))
-    if frappe is not None:
-        edit_session_service.assert_batch_write(
-            context["batch"], edit_token=edit_token, expected_modified=expected_modified
-        )
-    run = repo.lock_run(str(run_id))
-    if str(_run_value(run, "status") or "") != "READY":
-        raise ValueError("费用凭证审核草稿尚未准备完成或已经处理。")
-    attachment = repo.get_attachment(context["batch"], str(_run_value(run, "attachment")))
-    if _attachment_fingerprint(attachment) != str(_run_value(run, "attachment_fingerprint") or ""):
-        frappe.db.set_value(repo.RUN_DOCTYPE, run_id, {"status": "STALE", "progress_step": "凭证已变化"}, update_modified=True)
-        frappe.db.commit()
-        return {"ok": False, "stale": True, "status": "STALE", "message": "凭证内容已变化，请重新分析。"}
-    draft = _json_dict(_run_value(run, "draft_json"))
-    evidence_values, fee_rows, components = _selected_proposals(draft, selections, edits)
-    if not evidence_values.get("selected") and not fee_rows and not components:
-        raise ValueError("请至少选择一项凭证审核草稿。")
-    validate_review_selections(evidence_values, fee_rows, components)
     try:
-        frappe.db.sql("SELECT name FROM `tabOverseas Cost Version` WHERE name=%s AND batch=%s FOR UPDATE", (context["version"], context["batch"]))
-        frappe.db.sql("SELECT name FROM `tabOverseas Cost Allocation Rule` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE", (context["batch"], context["version"]))
-        frappe.db.sql("SELECT name FROM `tabOverseas Cost Item` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE", (context["batch"], context["version"]))
+        run = repo.lock_apply_context(context, initial)
+        context = repo.get_context(
+            str(batch_name), str(_run_value(run, "version") or "")
+        )
+        repo.assert_batch_write(
+            context["batch"],
+            context["version"],
+            edit_token=edit_token,
+            expected_modified=expected_modified,
+        )
+        if str(_run_value(run, "status") or "") != "READY":
+            raise ValueError("费用凭证审核草稿尚未准备完成或已经处理。")
+        attachment = repo.get_attachment(
+            context["batch"], str(_run_value(run, "attachment"))
+        )
+        if _attachment_fingerprint(attachment) != str(
+            _run_value(run, "attachment_fingerprint") or ""
+        ):
+            repo.mark_stale(str(run_id))
+            return {
+                "ok": False,
+                "stale": True,
+                "status": "STALE",
+                "message": "凭证内容已变化，请重新分析。",
+            }
+        draft = _json_dict(_run_value(run, "draft_json"))
+        evidence_values, fee_rows, components = _selected_proposals(
+            draft, selections, edits
+        )
+        if not evidence_values.get("selected") and not fee_rows and not components:
+            raise ValueError("请至少选择一项凭证审核草稿。")
+        validate_review_selections(evidence_values, fee_rows, components)
         evidence_name = str(_run_value(run, "evidence") or "")
+        if not evidence_name:
+            raise ValueError("凭证关联记录缺失，请重新发起审核。")
+        normalized_evidence = normalize_evidence_for_apply(
+            evidence_values,
+            context=context,
+            run=run,
+            attachment=attachment,
+            draft=draft,
+        )
+        validate_fee_split_conservation(normalized_evidence, fee_rows)
+        assert_no_duplicate_evidence(
+            normalized_evidence,
+            repo.list_duplicate_evidence_candidates(
+                context["batch"], context["version"], evidence_name
+            ),
+        )
+
+        parent_components: list[dict] = []
+        if normalized_evidence["evidence_type"] == "REFUND" and normalized_evidence.get(
+            "related_evidence"
+        ):
+            parent = repo.get_evidence(normalized_evidence["related_evidence"])
+            validate_refund_parent(normalized_evidence, parent)
+            parent_components = repo.get_evidence_components(parent["name"])
+
         if evidence_values.get("selected"):
-            evidence_type = str(evidence_values.get("evidence_type") or "OTHER").upper()
-            accounting_role = str(evidence_values.get("accounting_role") or "REFERENCE").upper()
-            direction = str(evidence_values.get("direction") or "DEBIT").upper()
-            currency = str(evidence_values.get("currency") or "RMB").upper().replace("CNY", "RMB")
-            if evidence_type not in EVIDENCE_TYPES or accounting_role not in ACCOUNTING_ROLES:
-                raise ValueError("凭证类型或会计作用不合法。")
-            if direction not in {"DEBIT", "CREDIT"} or currency not in {"RMB", "MXN", "USD"}:
-                raise ValueError("凭证方向或币种不合法。")
-            amount = _decimal(evidence_values.get("original_amount"))
-            matching_split = next(
-                (
-                    row for row in fee_rows
-                    if str(row.get("logical_fee_key") or "") == str(_run_value(run, "logical_fee_key") or "")
-                ),
-                None,
-            )
-            if matching_split and accounting_role != "SETTLEMENT":
-                amount = _decimal(matching_split.get("amount"))
-                currency = str(matching_split.get("currency") or currency).upper().replace("CNY", "RMB")
-            if amount is not None and amount < 0:
-                raise ValueError("凭证金额不能小于 0，请通过付款／退款方向表达正负。")
-            frappe.db.set_value(
-                "Overseas Cost Fee Evidence",
+            repo.update_evidence(
                 evidence_name,
                 {
-                    "evidence_type": evidence_type,
-                    "accounting_role": accounting_role,
-                    "currency": currency,
-                    "original_amount": amount,
-                    "direction": direction,
-                    "related_evidence": str(evidence_values.get("related_evidence") or "") or None,
-                    "is_final": 1 if _checked(evidence_values.get("is_final")) else 0,
-                    "attachment_fingerprint": _attachment_fingerprint(attachment),
-                    "parse_snapshot_json": _json(draft),
-                    "validation_status": "VALID",
-                    "validated_by": _session_user(),
-                    "validated_at": _now(),
-                    "confirmed_by": _session_user(),
-                    "confirmed_at": _now(),
-                    "review_run": str(run_id),
+                    key: normalized_evidence.get(key)
+                    for key in (
+                        "evidence_type",
+                        "accounting_role",
+                        "currency",
+                        "original_amount",
+                        "direction",
+                        "related_evidence",
+                        "is_final",
+                        "attachment_fingerprint",
+                        "parse_snapshot_json",
+                        "validation_status",
+                        "validated_by",
+                        "validated_at",
+                        "confirmed_by",
+                        "confirmed_at",
+                        "review_run",
+                    )
                 },
-                update_modified=True,
             )
         fee_rules_by_key: dict[str, dict] = {}
         for fee_row in fee_rows:
             fee_key = str(fee_row.get("logical_fee_key") or "")
-            fee_shell = fee_service.materialize_fee_rule(context["batch"], context["version"], fee_key)
-            status = str(fee_row.get("amount_status") or evidence_values.get("suggested_amount_status") or "ESTIMATED").upper()
-            amount = _decimal(fee_row.get("amount"))
-            currency = str(fee_row.get("currency") or "RMB").upper().replace("CNY", "RMB")
-            if amount is None or amount < 0 or currency not in {"RMB", "MXN", "USD"}:
-                raise ValueError("费用拆分金额或币种不合法。")
-            if status not in {"ESTIMATED", "ACTUAL"}:
-                raise ValueError("凭证费用拆分只能保存为暂估或实际。")
-            payload = fee_service.normalize_fee_payload(
-                {
-                    **fee_shell,
-                    "logical_fee_key": fee_key,
-                    "amount_status": status,
-                    "amount": format(amount, "f"),
-                    "currency": currency,
-                    "remark": f"凭证 AI 审核确认：{attachment.get('file_name') or attachment.get('name')}",
-                    "status_change_reason": "已人工确认凭证审核草稿",
-                    "is_active": 1,
-                    "is_enabled": 1,
-                }
+            fee_rules_by_key[fee_key] = repo.save_fee_split(
+                context=context,
+                fee_row=fee_row,
+                evidence_values=normalized_evidence,
+                attachment=attachment,
+                draft=draft,
+                run_id=str(run_id),
             )
-            current = fee_service._decorate_historical_rules(
-                fee_service._query_rules(context["batch"], context["version"]), context.get("transport_mode") or ""
-            )
-            merged = fee_service.merge_logical_fee(current, payload, revision=f"evidence-review:{run_id}")
-            values = {key: merged["fee"].get(key) for key in (*fee_service.FEE_FIELDS, "amount_revision", "scope_revision")}
-            values.update({"batch": context["batch"], "version": context["version"]})
-            rule_name = str(merged["fee"].get("name") or fee_shell.get("name") or "")
-            frappe.db.set_value("Overseas Cost Allocation Rule", rule_name, values, update_modified=True)
-            fee_rules_by_key[fee_key] = {**merged["fee"], "name": rule_name}
-            link_name = frappe.db.get_value(
-                "Overseas Cost Fee Evidence",
-                {"fee_rule": rule_name, "attachment": attachment["name"], "evidence_role": "fee_split"},
-                "name",
-            )
-            if not link_name and rule_name != str(_run_value(run, "fee_rule") or ""):
-                frappe.get_doc(
-                    {
-                        "doctype": "Overseas Cost Fee Evidence", "batch": context["batch"], "version": context["version"],
-                        "fee_rule": rule_name, "attachment": attachment["name"], "evidence_role": "fee_split",
-                        "validation_status": "VALID", "evidence_type": evidence_values.get("evidence_type") or "OTHER",
-                        "accounting_role": evidence_values.get("accounting_role") or "REFERENCE", "currency": currency,
-                        "original_amount": amount, "direction": evidence_values.get("direction") or "DEBIT",
-                        "is_final": 1 if _checked(evidence_values.get("is_final")) else 0,
-                        "attachment_fingerprint": _attachment_fingerprint(attachment), "parse_snapshot_json": _json(draft),
-                        "confirmed_by": _session_user(), "confirmed_at": _now(), "review_run": run_id,
-                    }
-                ).insert(ignore_permissions=True)
         if components:
             valid_items = {
                 row["name"]: row
                 for row in repo.get_items(context["batch"], context["version"])
             }
+            parent_component_names = {
+                str(row.get("name") or "") for row in parent_components
+            }
             for fee_key, fee_components in group_components_by_fee_key(components).items():
-                fee_rule = fee_rules_by_key.get(fee_key) or fee_service.materialize_fee_rule(
+                fee_rule = fee_rules_by_key.get(fee_key) or repo.materialize_fee_rule(
                     context["batch"], context["version"], fee_key
                 )
-                validate_component_amount_conservation(
-                    fee_rule, fee_components, context.get("fx_context") or {}
-                )
-                frappe.db.sql(
-                    "UPDATE `tabOverseas Cost Fee SKU Component` SET status='VOID', is_active=0 WHERE evidence=%s AND logical_fee_key=%s AND is_active=1",
-                    (evidence_name, fee_key),
-                )
+                normalized_components = []
                 for row in fee_components:
                     item = valid_items.get(str(row.get("item") or ""))
                     if not item:
                         raise ValueError("凭证分项关联的 SKU 不属于当前批次。")
-                    original_amount = _decimal(row.get("original_amount"))
-                    rmb_amount = _decimal(row.get("amount_rmb"))
-                    accounting_role = str(
-                        row.get("accounting_role") or "FINAL_BILL"
-                    ).upper()
-                    cost_effect = str(row.get("cost_effect") or "COST").upper()
-                    is_reversal = (
-                        accounting_role == "SETTLEMENT"
-                        and cost_effect == "LEDGER_ONLY"
-                        and bool(row.get("reverses_component"))
+                    normalized_components.append(
+                        normalize_component_for_apply(
+                            row,
+                            item=item,
+                            parent_component_names=parent_component_names,
+                        )
                     )
-                    if original_amount is None or (original_amount < 0 and not is_reversal):
-                        raise ValueError("SKU 税费分项金额不合法。")
-                    frappe.get_doc(
-                        {
-                            "doctype": "Overseas Cost Fee SKU Component",
-                            "batch": context["batch"],
-                            "version": context["version"],
-                            "fee_rule": fee_rule["name"],
-                            "logical_fee_key": fee_key,
-                            "evidence": evidence_name,
-                            "attachment": attachment["name"],
-                            "item": item["name"],
-                            "stable_line_key": item.get("stable_line_key") or item["name"],
-                            "component_type": row.get("component_type") or "IMPORT_TAX",
-                            "accounting_role": accounting_role,
-                            "cost_effect": cost_effect,
-                            "tax_code": str(row.get("tax_code") or "")[:80],
-                            "hs_code": str(row.get("hs_code") or "")[:80],
-                            "currency": str(row.get("currency") or "MXN"),
-                            "original_amount": original_amount,
-                            "amount_rmb": rmb_amount,
-                            "exchange_rate": _decimal(row.get("exchange_rate")),
-                            "allocation_basis": str(row.get("allocation_basis") or "")[:140],
-                            "source_evidence_json": _json(row.get("source_evidence") or {}),
-                            "confidence": _decimal(row.get("confidence")),
-                            "reverses_component": row.get("reverses_component") or None,
-                            "status": "CONFIRMED",
-                            "is_active": 1,
-                        }
-                    ).insert(ignore_permissions=True)
-        frappe.db.set_value("Overseas Cost Batch", context["batch"], "status", "Dirty", update_modified=True)
-        _insert_audit_log(
-            batch_doc_name=context["batch"], version_name=context["version"], action_type="EDIT",
-            field_name="fee_evidence_review", old_value="草稿", new_value="已确认",
-            action_remark=f"确认费用凭证 AI 草稿 {run_id}：费用 {len(fee_rows)} 项，SKU 分项 {len(components)} 项。",
+                if any(
+                    row["cost_effect"] == "COST" for row in normalized_components
+                ):
+                    validate_component_amount_conservation(
+                        fee_rule,
+                        normalized_components,
+                        context.get("fx_context") or {},
+                    )
+                repo.replace_components(
+                    context=context,
+                    fee_rule=fee_rule,
+                    evidence_name=evidence_name,
+                    attachment_name=attachment["name"],
+                    logical_fee_key=fee_key,
+                    components=normalized_components,
+                )
+        repo.mark_batch_dirty(context["batch"])
+        repo.insert_review_audit(
+            context=context,
+            run_id=str(run_id),
+            fee_count=len(fee_rows),
+            component_count=len(components),
         )
-        frappe.db.set_value(
-            repo.RUN_DOCTYPE, run_id,
-            {"status": "APPLIED", "progress_step": "已确认保存", "progress_percent": 100, "applied_at": _now(), "completed_at": _now()},
-            update_modified=True,
+        repo.finish_run(
+            str(run_id),
+            {
+                "status": "APPLIED",
+                "progress_step": "已确认保存",
+                "progress_percent": 100,
+                "applied_at": _now(),
+                "completed_at": _now(),
+            },
         )
-        frappe.db.commit()
+        repo.commit()
         return {
-            "ok": True, "run_id": run_id, "status": "APPLIED", "fee_count": len(fee_rows),
+            "ok": True,
+            "run_id": run_id,
+            "status": "APPLIED",
+            "fee_count": len(fee_rows),
             "component_count": len(components),
-            "batch_modified": frappe.db.get_value("Overseas Cost Batch", context["batch"], "modified"),
+            "batch_modified": repo.get_batch_modified(context["batch"]),
             "message": "费用凭证审核草稿已保存，试算结果待更新。",
         }
     except Exception:
-        frappe.db.rollback()
+        repo.rollback()
         raise
 
 
@@ -1851,16 +2380,19 @@ def discard_fee_evidence_review(
         raise ValueError("费用凭证审核任务不属于当前批次。")
     status = str(_run_value(run, "status") or "")
     if status == "APPLIED":
-        frappe.db.rollback()
+        repo.rollback()
         raise ValueError("已保存的凭证草稿不能放弃。")
     if status not in {"READY", "DISCARDED", "FAILED", "STALE"}:
-        frappe.db.rollback()
+        repo.rollback()
         raise ValueError("凭证审核任务仍在运行，请稍后再放弃。")
     if status != "DISCARDED":
-        frappe.db.set_value(
-            repo.RUN_DOCTYPE, run_id,
-            {"status": "DISCARDED", "progress_step": "已放弃草稿", "completed_at": _now()},
-            update_modified=True,
+        repo.finish_run(
+            str(run_id),
+            {
+                "status": "DISCARDED",
+                "progress_step": "已放弃草稿",
+                "completed_at": _now(),
+            },
         )
-        frappe.db.commit()
+        repo.commit()
     return {"ok": True, "run_id": run_id, "status": "DISCARDED", "message": "凭证审核草稿已放弃，关联记录保留，业务金额未改变。"}

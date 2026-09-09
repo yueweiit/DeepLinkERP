@@ -97,3 +97,14 @@ def test_fee_evidence_and_component_support_refund_linkage_and_cost_effect() -> 
     assert component["cost_effect"]["options"].splitlines() == ["COST", "LEDGER_ONLY"]
     assert component["reverses_component"]["options"] == "Overseas Cost Fee SKU Component"
     assert "REFUND_REVERSAL" in component["component_type"]["options"].splitlines()
+
+
+def test_fee_evidence_ai_run_persists_requested_evidence_role() -> None:
+    fields = _fields(
+        _doctype(
+            "doctype/overseas_cost_fee_evidence_ai_run/overseas_cost_fee_evidence_ai_run.json"
+        )
+    )
+
+    assert fields["evidence_role"]["fieldtype"] == "Data"
+    assert fields["evidence_role"]["reqd"] == 1
