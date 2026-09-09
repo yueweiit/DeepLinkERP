@@ -22,7 +22,10 @@ from china_finance.services.financial_statement import (
 	validate_statement_links,
 )
 from china_finance.setup.china_coa_profile import get_china_coa_master_data_readiness
-from china_finance.setup.templates import requires_manual_cash_flow_assignment
+from china_finance.setup.templates import (
+	classify_company_account, is_strictly_excluded_from_statement,
+	refine_classification_for_template, requires_manual_cash_flow_assignment,
+)
 from china_finance.services.prior_period_error import get_prior_period_error_readiness
 
 
@@ -68,19 +71,28 @@ def _mapping_readiness(company, statement_type, from_date, to_date):
 		"Changes in Equity": ("Equity",),
 		"Cash Flow": ("Asset", "Liability", "Equity", "Income", "Expense"),
 	}[statement_type]
-	required = set(_active_accounts(company, root_types))
-	if statement_type == "Cash Flow":
-		cash_accounts = set(frappe.get_all(
-			"Account", filters={"company": company, "is_group": 0, "account_type": ["in", ["Cash", "Bank"]]}, pluck="name"
-		))
-		required -= cash_accounts
-		required -= {
-			row.name for row in frappe.get_all(
-				"Account", filters={"company": company, "is_group": 0, "disabled": 0},
-				fields=["name", "account_number"],
-			)
-			if requires_manual_cash_flow_assignment(row.account_number)
-		}
+	valid_rows = {row.row_code: row.row_type for row in template.rows}
+	accounts = frappe.get_all(
+		"Account", filters={"company": company, "is_group": 0, "disabled": 0, "root_type": ["in", root_types]},
+		fields=["name", "account_name", "account_number", "parent_account", "root_type", "account_type", "is_group"],
+	)
+	accounts_by_name = {
+		row.name: row for row in frappe.get_all(
+			"Account", filters={"company": company, "disabled": 0},
+			fields=["name", "account_name", "account_number", "parent_account", "root_type", "account_type", "is_group"],
+		)
+	}
+	required = set()
+	for account in accounts:
+		if is_strictly_excluded_from_statement(account.account_number, statement_type):
+			continue
+		if statement_type == "Cash Flow" and requires_manual_cash_flow_assignment(account.account_number):
+			continue
+		classification, _basis = classify_company_account(company, account, statement_type, accounts_by_name)
+		classification = refine_classification_for_template(account, statement_type, valid_rows, classification)
+		row_code = classification[0] if isinstance(classification, tuple) else classification
+		if row_code and valid_rows.get(row_code) == "Mapped Accounts":
+			required.add(account.name)
 	if statement_type == "Balance Sheet":
 		mappings = get_mappings(company, template, to_date)
 		by_account = {row.account: row for row in mappings}
@@ -118,8 +130,9 @@ def get_statutory_report_readiness_data(company, from_date, to_date):
 	from_date, to_date = getdate(from_date), getdate(to_date)
 	settings = frappe.get_cached_doc("China Finance Settings", company)
 	items = []
-	enterprise = settings.enabled and settings.accounting_standard == "企业会计准则"
-	items.append(_item("ACCOUNTING_STANDARD", _("企业会计准则正式报表范围"), enterprise, settings.accounting_standard))
+	supported_standard = settings.accounting_standard in ("企业会计准则", "小企业会计准则")
+	enterprise = settings.enabled and supported_standard
+	items.append(_item("ACCOUNTING_STANDARD", _("中国会计准则正式报表范围"), enterprise, settings.accounting_standard))
 	master_data = get_china_coa_master_data_readiness(company)
 	items.append(_item(
 		"CHINA_COA_MASTER_DATA", _("主数据与业务默认科目已就绪"),

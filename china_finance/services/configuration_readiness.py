@@ -56,8 +56,9 @@ def build_configuration_readiness(company, as_of_date=None):
 	master_data = get_china_coa_master_data_readiness(company)
 
 	settings_errors = []
+	role_separation_warning = False
 	if not settings.enforce_role_separation:
-		settings_errors.append(_("未启用职责分离"))
+		role_separation_warning = True
 	if not settings.profit_loss_account:
 		settings_errors.append(_("未配置本年利润科目"))
 	if not settings.retained_earnings_account:
@@ -125,8 +126,12 @@ def build_configuration_readiness(company, as_of_date=None):
 				),
 				_item(
 					"SETTINGS", _("中国财务设置"), not settings_errors,
-					"；".join(settings_errors) if settings_errors else _("关键设置已完成"),
-					_route("form", "China Finance Settings", {"name": settings.name}), len(settings_errors),
+					"；".join(
+						[*settings_errors, *([_("未启用职责分离")] if role_separation_warning else [])]
+					) if settings_errors or role_separation_warning else _("关键设置已完成"),
+					_route("form", "China Finance Settings", {"name": settings.name}),
+					len(settings_errors) + int(role_separation_warning),
+					severity="Blocking" if settings_errors else ("Warning" if role_separation_warning else "Blocking"),
 				),
 				_item(
 					"RECONCILIATION_SCOPE", _("对账范围"), not missing_scopes,
@@ -202,7 +207,9 @@ def build_configuration_readiness(company, as_of_date=None):
 	return {
 		"company": company,
 		"as_of_date": str(as_of_date),
-		"status": "Ready" if all(item["passed"] for item in items if item["severity"] != "Info") else "Needs Attention",
+		"status": "Ready" if not any(
+			not item["passed"] and item["severity"] == "Blocking" for item in items
+		) else "Needs Attention",
 		"passed_count": sum(1 for item in items if item["passed"]),
 		"pending_count": sum(1 for item in items if not item["passed"]),
 		"sections": sections,

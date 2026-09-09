@@ -9,6 +9,35 @@ from frappe.utils import add_days, flt, get_first_day, getdate, today
 
 
 RECLASSIFICATION_TOLERANCE = 0.01
+PROFIT_AND_LOSS_CLOSING_REMARK = "结转本期损益"
+
+
+def _append_profit_and_loss_exclusions(conditions, parameters, alias="gle"):
+	"""Exclude period closing entries from movement-based income statements.
+
+	Some imported or manually created closing entries use the ordinary
+	``Journal Entry`` voucher type instead of ``Period Closing Voucher``. They
+	transfer income and expense balances to equity and must not be counted as
+	ordinary-period activity in the Profit and Loss statement.
+	"""
+	conditions.append(f"{alias}.voucher_type!='Period Closing Voucher'")
+	conditions.append(
+		f"""NOT (
+			{alias}.voucher_type='Journal Entry'
+			AND EXISTS (
+				SELECT 1
+				FROM `tabJournal Entry` je
+				WHERE je.name={alias}.voucher_no
+					AND je.company=%(company)s
+					AND je.docstatus=1
+					AND (
+						TRIM(COALESCE(je.user_remark, ''))=%(profit_and_loss_closing_remark)s
+						OR TRIM(COALESCE(je.remark, ''))=%(profit_and_loss_closing_remark)s
+					)
+			)
+		)"""
+	)
+	parameters["profit_and_loss_closing_remark"] = PROFIT_AND_LOSS_CLOSING_REMARK
 
 
 def get_balance_sheet_reclassification_rules(company=None, template=None, to_date=None):
@@ -378,7 +407,8 @@ def get_unmapped_account_balances(
 		cost_center,
 		project,
 	)
-	conditions.append("gle.voucher_type!='Period Closing Voucher'") if statement_type == "Profit and Loss" else None
+	if statement_type == "Profit and Loss":
+		_append_profit_and_loss_exclusions(conditions, parameters)
 	if mapped_accounts:
 		conditions.append("gle.account NOT IN %(mapped_accounts)s")
 		parameters["mapped_accounts"] = list(mapped_accounts)
@@ -541,24 +571,24 @@ def _get_account_daily_balances(
 	if not accounts:
 		return {}
 	conditions = [
-		"company=%(company)s", "account IN %(accounts)s", "posting_date>=%(from_date)s",
-		"posting_date<=%(to_date)s", "is_cancelled=0",
+		"gle.company=%(company)s", "gle.account IN %(accounts)s", "gle.posting_date>=%(from_date)s",
+		"gle.posting_date<=%(to_date)s", "gle.is_cancelled=0",
 	]
 	parameters = {
 		"company": company, "accounts": list(accounts), "from_date": from_date, "to_date": to_date,
 	}
 	for fieldname, value in (("finance_book", finance_book), ("cost_center", cost_center), ("project", project)):
 		if value:
-			conditions.append(f"{fieldname}=%({fieldname})s")
+			conditions.append(f"gle.{fieldname}=%({fieldname})s")
 			parameters[fieldname] = value
 	if exclude_period_closing:
-		conditions.append("voucher_type!='Period Closing Voucher'")
+		_append_profit_and_loss_exclusions(conditions, parameters)
 	rows = frappe.db.sql(
 		f"""
-		SELECT account, posting_date, SUM(debit-credit) AS balance
-		FROM `tabGL Entry`
+		SELECT gle.account, gle.posting_date, SUM(gle.debit-gle.credit) AS balance
+		FROM `tabGL Entry` gle
 		WHERE {' AND '.join(conditions)}
-		GROUP BY account, posting_date
+		GROUP BY gle.account, gle.posting_date
 		""",
 		parameters, as_dict=True,
 	)
@@ -1031,11 +1061,11 @@ def get_owner_equity_balance(company, to_date, finance_book=None, cost_center=No
 
 def get_net_profit(company, from_date, to_date, finance_book=None, cost_center=None, project=None):
 	conditions, values = get_gl_conditions(company, from_date, to_date, finance_book, cost_center, project)
+	_append_profit_and_loss_exclusions(conditions, values)
 	amount = frappe.db.sql(
 		f"""SELECT COALESCE(SUM(gle.credit-gle.debit), 0) FROM `tabGL Entry` gle
 		INNER JOIN `tabAccount` account ON account.name=gle.account
-		WHERE {' AND '.join(conditions)} AND account.root_type IN ('Income', 'Expense')
-		AND gle.voucher_type!='Period Closing Voucher'""",
+		WHERE {' AND '.join(conditions)} AND account.root_type IN ('Income', 'Expense')""",
 		values,
 	)[0][0]
 	return flt(amount, 2)

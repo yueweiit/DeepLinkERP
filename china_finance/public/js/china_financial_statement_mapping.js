@@ -90,15 +90,32 @@ function load_review_context(frm) {
 
 function render_local_context(frm) {
 	const rows = frm.__statement_rows || {};
-	render_review_context(frm, {
+	const render = (account = {}) => render_review_context(frm, {
 		mapping_source: frm.doc.mapping_source,
 		reviewed: Boolean(frm.doc.reviewed),
 		statement_type: frm.doc.template?.includes("Cash Flow") ? "Cash Flow" : null,
-		account: { name: frm.doc.account, account_name: frm.doc.account },
+		account: { name: frm.doc.account, ...account },
 		row: row_context(rows, frm.doc.row_code),
 		cash_inflow_row: row_context(rows, frm.doc.cash_inflow_row_code),
 		cash_outflow_row: row_context(rows, frm.doc.cash_outflow_row_code),
 		guidance: __("保存后可查看完整科目性质和复核提示。"),
+	});
+	if (!frm.doc.account) {
+		render();
+		return;
+	}
+	const account_name = frm.doc.account;
+	frappe.db.get_value(
+		"Account",
+		account_name,
+		["account_name", "account_number", "root_type", "account_type"],
+	).then((response) => {
+		if (frm.doc.account !== account_name) return;
+		const account = response.message || {};
+		account.account_label = [account.account_number, account.account_name].filter(Boolean).join(" - ");
+		render(account);
+	}).catch(() => {
+		if (frm.doc.account === account_name) render();
 	});
 }
 
@@ -113,7 +130,7 @@ function render_review_context(frm, context) {
 	const escape = frappe.utils.escape_html;
 	const item = (label, value) => `<div class="mb-2"><span class="text-muted">${escape(label)}</span><div class="font-weight-bold">${escape(value || __("未选择"))}</div></div>`;
 	const account = context.account || {};
-	const accountLabel = [account.account_number, account.account_name || account.name].filter(Boolean).join(" | ");
+	const accountLabel = account.account_label || [account.account_number, account.account_name].filter(Boolean).join(" | ");
 	const nature = [account.root_type, account.account_type].filter(Boolean).join(" / ");
 	const sections = [
 		item(__("会计科目"), accountLabel),

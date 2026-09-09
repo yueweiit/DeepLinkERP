@@ -2,6 +2,8 @@ import frappe
 from frappe import _
 from frappe.utils import now_datetime
 
+from china_finance.services.account_display import get_account_display_label, strip_account_company_suffix
+
 
 REVIEW_ROLES = ("System Manager", "Accounts Manager", "China Finance Manager")
 
@@ -34,8 +36,10 @@ def get_mapping_review_context(name):
 	template = frappe.get_cached_doc("China Financial Statement Template", doc.template)
 	account = frappe.db.get_value(
 		"Account", doc.account,
-		["account_name", "account_number", "root_type", "account_type"], as_dict=True,
+		["name", "account_name", "account_number", "root_type", "account_type"], as_dict=True,
 	) or {}
+	account_name = account.get("account_name") or strip_account_company_suffix(doc.account, doc.company)
+	account_label = get_account_display_label(account, doc.company) or account_name
 	rows = _row_details(template)
 	return {
 		"mapping_source": doc.mapping_source,
@@ -43,10 +47,11 @@ def get_mapping_review_context(name):
 		"statement_type": template.statement_type,
 		"account": {
 			"name": doc.account,
-			"account_name": account.account_name or doc.account,
-			"account_number": account.account_number,
-			"root_type": account.root_type,
-			"account_type": account.account_type,
+			"account_name": account_name,
+			"account_number": account.get("account_number"),
+			"account_label": account_label,
+			"root_type": account.get("root_type"),
+			"account_type": account.get("account_type"),
 		},
 		"row": rows.get(doc.row_code),
 		"cash_inflow_row": rows.get(doc.cash_inflow_row_code),

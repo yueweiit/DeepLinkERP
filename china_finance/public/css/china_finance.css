@@ -3,6 +3,23 @@
 	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 16px;
 	margin-bottom: 16px;
+	min-width: 0;
+	width: 100%;
+}
+
+.china-balance-sheet-panel,
+.china-balance-sheet-panel__body {
+	min-width: 0;
+	width: 100%;
+}
+
+.china-balance-sheet-panel__body {
+	overflow-x: auto;
+}
+
+.china-balance-sheet-panel__body .datatable {
+	min-width: 0;
+	width: 100%;
 }
 
 .china-balance-sheet-panel__title {
@@ -53,6 +70,26 @@
 
 .china-voucher-ledger-report .dt-row {
 	min-height: 28px;
+}
+
+.china-financial-statements-native-table {
+	min-width: 0;
+	width: 100%;
+}
+
+.china-financial-statements-native-table .datatable {
+	max-width: 100%;
+	width: 100%;
+}
+
+.china-financial-statements-native-table .dt-scrollable {
+	max-width: 100%;
+	overflow-x: auto !important;
+}
+
+.china-financial-statements-native-table .dt-row {
+	min-width: 100%;
+	width: max-content;
 }
 
 

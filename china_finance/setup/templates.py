@@ -2,7 +2,7 @@ import frappe
 from frappe.utils import add_days, getdate
 
 TEMPLATE_VERSION = "3.0"
-MAPPING_RULE_VERSION = "1.5"
+MAPPING_RULE_VERSION = "1.6"
 TEMPLATE_EFFECTIVE_FROM = "2026-01-01"
 
 # Depreciation and amortisation cannot be translated into a direct-method cash
@@ -492,7 +492,7 @@ def sync_unreviewed_automatic_mappings(company, accounting_standard):
 				"row_code": row_code,
 				"supplementary_row_code": get_supplementary_row_code(account, statement_type, valid_rows, row_code),
 				"account_number_snapshot": account.account_number,
-				"mapping_basis": _basis,
+				"mapping_basis": _basis or "Accounting Standard Downgrade",
 				"mapping_rule_version": MAPPING_RULE_VERSION,
 			}
 			if statement_type == "Cash Flow":
@@ -549,6 +549,7 @@ def create_automatic_mappings(company, accounting_standard, effective_from):
 				)
 			if not row_code or valid_rows.get(row_code) != "Mapped Accounts":
 				continue
+			basis = basis or "Accounting Standard Downgrade"
 			effective_date = getdate(effective_from)
 			mapping_key = f"{company}|{template}|{account.name}|{effective_date}"
 			if frappe.db.exists("China Financial Statement Mapping", {"mapping_key": mapping_key}):
@@ -721,11 +722,35 @@ def _classify_known_profile_fallback(account, statement_type):
 
 def refine_classification_for_template(account, statement_type, valid_rows, classification):
 	"""Use small-enterprise statutory detail rows when the selected template has them."""
-	if not account or not classification:
+	if not account:
 		return classification
 	number = str(account.account_number or "")
 	name = account.account_name or account.name or ""
 	if statement_type == "Balance Sheet":
+		# The small-enterprise form does not expose several enterprise-chart
+		# headings.  Put their leaf accounts into the closest statutory line so
+		# they are not silently omitted from the balance sheet.  This branch is
+		# deliberately gated by FIXED_ASSETS_NET, which only exists in the small
+		# enterprise template.
+		if "FIXED_ASSETS_NET" in valid_rows:
+			small_special = (
+				(("1321", "1407"), "FINISHED_GOODS"),
+				(("1501", "1502"), "LONG_TERM_BOND_INVESTMENTS"),
+				(("1503", "1521", "1531", "1532", "1711", "1811", "3101", "3201", "3202"), "OTHER_NONCURRENT_ASSETS"),
+				(("2101",), "OTHER_CURRENT_LIABILITIES"),
+				(("2314",), "OTHER_PAYABLES"),
+				(("2401",), "DEFERRED_INCOME"),
+				(("2502", "2801", "2901"), "OTHER_NONCURRENT_LIABILITIES"),
+			)
+			for prefixes, row_code in small_special:
+				if number.startswith(prefixes) and row_code in valid_rows:
+					return row_code
+			# In this chart 1622 is used for accumulated depreciation of
+			# productive biological assets, not for right-of-use assets.
+			if number.startswith("1622") and "生产性生物资产" in name and "BIOLOGICAL_ASSETS" in valid_rows:
+				return "BIOLOGICAL_ASSETS"
+		if not classification:
+			return classification
 		# Small-enterprise templates intentionally collapse several enterprise
 		# presentation lines.  Keep this downgrade explicit and auditable.
 		if "SHORT_TERM_INVESTMENTS" in valid_rows and number.startswith("1101"):
@@ -773,9 +798,10 @@ def refine_classification_for_template(account, statement_type, valid_rows, clas
 		):
 			row_code = "INVESTMENT_INCOME"
 		elif (
-			number.startswith(("6117", "6301"))
+			number.startswith(("6115", "6117", "6201", "6301"))
 			and "NONOPERATING_INCOME" in valid_rows
 			and "OTHER_INCOME" not in valid_rows
+			and "ASSET_DISPOSAL_INCOME" not in valid_rows
 		):
 			row_code = "NONOPERATING_INCOME"
 		elif (
@@ -827,6 +853,18 @@ def refine_classification_for_template(account, statement_type, valid_rows, clas
 				row_code = "TAX_LATE_PAYMENT_PENALTIES"
 		if row_code and row_code in valid_rows:
 			return row_code
+	if statement_type == "Changes in Equity" and "CLOSING_EQUITY" in valid_rows:
+		# The small-enterprise equity form has no separate rows for OCI or the
+		# detailed profit-distribution subaccounts.  Preserve their movements in
+		# the available equity-change lines; direct owner distributions remain a
+		# separate line.
+		if number.startswith("4003") and "OTHER_CHANGES" in valid_rows:
+			return "OTHER_CHANGES"
+		if number.startswith("4104"):
+			if number.startswith(("410404", "410410")) and "DISTRIBUTIONS" in valid_rows:
+				return "DISTRIBUTIONS"
+			if "OTHER_CHANGES" in valid_rows:
+				return "OTHER_CHANGES"
 	return classification
 
 
@@ -844,6 +882,8 @@ def get_supplementary_row_code(account, statement_type, valid_rows, row_code):
 	name = account.account_name or account.name or ""
 	if row_code == "ADMIN_EXPENSES" and (number.startswith(("660206", "530101")) or any(word in name for word in ("研发", "研究"))):
 		return "RESEARCH_EXPENSES"
+	if row_code == "NONOPERATING_INCOME" and number.startswith("6201") and "GOVERNMENT_GRANTS" in valid_rows:
+		return "GOVERNMENT_GRANTS"
 	return None
 
 

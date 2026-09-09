@@ -254,9 +254,12 @@ class ChinaStatementMapping {
 		if (!rules.length) $list.html(`<div class="smc-empty">${__("暂无展示调整规则")}</div>`);
 		rules.forEach((rule) => {
 			const sign_scope = rule.source_account ? __("余额贡献") : "";
+			const source_account_label = rule.source_account
+				? (rule.source_account_label || this.get_account_label(rule.source_account))
+				: "";
 			const $row = $(`
 				<div class="smc-reclassification-row">
-					<span>${frappe.utils.escape_html(labels[rule.source_row_code] || rule.source_row_code)}${rule.source_account ? ` <small class="text-muted">(${frappe.utils.escape_html(rule.source_account)})</small>` : ` <small class="text-muted">(${__("全部科目")})</small>`}</span>
+					<span>${frappe.utils.escape_html(labels[rule.source_row_code] || rule.source_row_code)}${rule.source_account ? ` <small class="text-muted">(${frappe.utils.escape_html(source_account_label)})</small>` : ` <small class="text-muted">(${__("全部科目")})</small>`}</span>
 					<span class="smc-reclassification-signs">
 						<span>${__("正常")} ${sign_scope} <span class="smc-reclassification-sign smc-reclassification-sign--positive">${normal_sign()}</span></span>
 						<span>${__("需调整")} ${sign_scope} <span class="smc-reclassification-sign smc-reclassification-sign--negative">${adjusted_sign()}</span></span>
@@ -278,7 +281,7 @@ class ChinaStatementMapping {
 		const options = rows.map((row) => ({ label: `${row.label} (${row.row_code})`, value: row.row_code }));
 		const account_options = [{ label: __("全部科目"), value: "" }].concat(
 			rows.flatMap((row) => (row.mappings || []).map((mapping) => ({
-				label: `${mapping.account} → ${row.label}`, value: mapping.account,
+				label: `${this.get_account_label(mapping.account, mapping)} → ${row.label}`, value: mapping.account,
 			}))),
 		);
 		const dialog = new frappe.ui.Dialog({
@@ -313,7 +316,7 @@ class ChinaStatementMapping {
 		});
 		const get_source_account_options = (row_code) => [{ label: __("全部科目"), value: "" }].concat(
 			(rows.find((row) => row.row_code === row_code)?.mappings || []).map((mapping) => ({
-				label: mapping.account, value: mapping.account,
+				label: this.get_account_label(mapping.account, mapping), value: mapping.account,
 			}))
 		);
 		const refresh_source_accounts = (preserve_value = false) => {
@@ -628,9 +631,7 @@ class ChinaStatementMapping {
 		if (expanded) {
 			const $chips = $('<div class="smc-chips smc-chips--aggregate"></div>').appendTo($row);
 			accounts.forEach((mapping) => {
-				const label = mapping.account_number
-					? `${mapping.account_number} ${mapping.account_name}`
-					: mapping.account_name;
+				const label = this.get_account_label(mapping);
 				$chips.append(
 					`<span class="smc-chip"><span class="smc-chip__dot ${mapping.reviewed ? "smc-chip__dot--reviewed" : "smc-chip__dot--pending"}"></span><span>${frappe.utils.escape_html(label)}</span></span>`,
 				);
@@ -758,9 +759,7 @@ class ChinaStatementMapping {
 	}
 
 	render_chip(mapping) {
-		const label = mapping.account_number
-			? `${mapping.account_number} ${mapping.account_name}`
-			: mapping.account_name;
+		const label = this.get_account_label(mapping);
 		const $chip = $(
 			`<span class="smc-chip smc-chip--link" title="${frappe.utils.escape_html(__("查看该科目总账"))}"></span>`,
 		);
@@ -874,13 +873,11 @@ class ChinaStatementMapping {
 			if (account.is_group) {
 				if (only_unmapped && !has_unmapped_leaf(account.name)) return;
 				const collapsed = this.collapsed_accounts.has(account.name);
-				const label = account.account_number
-					? `${account.account_number} ${account.account_name}`
-					: account.account_name;
+				const label = this.get_account_label(account);
 				const $group = $(
 					`<div class="smc-account smc-account--group" style="padding-left: ${10 + depth * 16}px">
 						<span class="smc-account__toggle">${collapsed ? "▸" : "▾"}</span>
-						<span class="smc-account__grouplabel" title="${frappe.utils.escape_html(account.name)}">${frappe.utils.escape_html(label)}</span>
+						<span class="smc-account__grouplabel" title="${frappe.utils.escape_html(label)}">${frappe.utils.escape_html(label)}</span>
 					</div>`,
 				);
 				const unmapped_count = count_unmapped_leaf(account.name);
@@ -912,9 +909,7 @@ class ChinaStatementMapping {
 	}
 
 	render_account(account, target_label, unmapped, depth = 0) {
-		const label = account.account_number
-			? `${account.account_number} ${account.account_name}`
-			: account.account_name;
+		const label = this.get_account_label(account);
 		const $item = $('<div class="smc-account"></div>').css("padding-left", `${18 + depth * 16}px`);
 		if (unmapped) {
 			$item.append('<span class="smc-account__dot"></span>');
@@ -932,7 +927,7 @@ class ChinaStatementMapping {
 			});
 			$item.append($checkbox);
 		}
-		$item.append(`<span title="${frappe.utils.escape_html(account.name)}">${frappe.utils.escape_html(label)}</span>`);
+		$item.append(`<span title="${frappe.utils.escape_html(label)}">${frappe.utils.escape_html(label)}</span>`);
 		if (target_label) {
 			$item.append(`<span class="smc-account__target">→ ${frappe.utils.escape_html(target_label)}</span>`);
 		} else if (unmapped && account.likely_row) {
@@ -940,6 +935,19 @@ class ChinaStatementMapping {
 			$item.append(`<span class="smc-account__target smc-account__suggestion">${__("建议映射")}: ${frappe.utils.escape_html(suggestion)}</span>`);
 		}
 		return $item;
+	}
+
+	get_account_label(account_name_or_row, row = null) {
+		const account = typeof account_name_or_row === "string"
+			? (this.data?.accounts || []).find((item) => item.name === account_name_or_row)
+				|| (this.data?.rows || []).flatMap((item) => item.mappings || []).find((item) => item.account === account_name_or_row)
+			: account_name_or_row;
+		if (account?.account_label) return account.account_label;
+		if (account?.account_number || account?.account_name) {
+			return [account.account_number, account.account_name].filter(Boolean).join(" ");
+		}
+		if (row?.account_label) return row.account_label;
+		return typeof account_name_or_row === "string" ? account_name_or_row : "";
 	}
 
 	account_targets() {

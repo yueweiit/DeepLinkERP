@@ -1,8 +1,15 @@
 import frappe
 from frappe import _
-from frappe.utils import flt, getdate, now_datetime
+from frappe.utils import add_days, flt, get_first_day, get_last_day, getdate, now_datetime
 
-from china_finance.services.financial_statement import get_template, snapshot_statement, validate_statement_links
+from erpnext.accounts.utils import get_fiscal_year
+
+from china_finance.services.financial_statement import (
+	PROFIT_AND_LOSS_CLOSING_REMARK,
+	get_template,
+	snapshot_statement,
+	validate_statement_links,
+)
 from china_finance.services.ledger_reconciliation import get_ar_ap_ledger_check
 from china_finance.services.reconciliation_control import get_reconciliation_closing_checks
 from china_finance.services.archive import create_archive_package
@@ -18,6 +25,10 @@ from china_finance.setup.china_coa_profile import (
 	TEMPORARY_ACCOUNT_NUMBERS, get_china_coa_master_data_readiness,
 	get_company_accounts_by_number, get_profile_status,
 )
+from china_finance.setup.templates import (
+	classify_company_account, is_strictly_excluded_from_statement,
+	refine_classification_for_template, requires_manual_cash_flow_assignment,
+)
 
 
 def run_closing_checks(company, from_date, to_date, period_closing_voucher=None, closing_type="Monthly"):
@@ -29,8 +40,9 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 		checks.append({"check_code": code, "description": description, "passed": int(bool(passed)), "details": details, "severity": severity})
 
 	configuration_errors = []
+	role_separation_warning = False
 	if not settings.enforce_role_separation:
-		configuration_errors.append(_("未启用制单、审核、记账职责分离"))
+		role_separation_warning = True
 	if not settings.profit_loss_account:
 		configuration_errors.append(_("未配置本年利润科目"))
 	if not settings.retained_earnings_account:
@@ -38,8 +50,11 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	if flt(settings.reconciliation_tolerance) <= 0:
 		configuration_errors.append(_("对账金额容差必须大于零"))
 	add(
-		"CONFIGURATION_READINESS", _("中国财务关键配置完整"), not configuration_errors,
-		"；".join(configuration_errors),
+		"CONFIGURATION_READINESS", _("中国财务关键配置完整"), not configuration_errors and not role_separation_warning,
+		"；".join(
+			[*configuration_errors, *([_("未启用制单、审核、记账职责分离")] if role_separation_warning else [])]
+		),
+		"Blocking" if configuration_errors else ("Warning" if role_separation_warning else "Blocking"),
 	)
 	prior_errors = get_prior_period_error_readiness(company, from_date, to_date)
 	add(
@@ -48,8 +63,13 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	)
 	coa_status = get_profile_status(company)
 	if coa_status.get("supported"):
-		coa_errors = [*coa_status.get("errors", []), *coa_status.get("warnings", [])]
-		add("CHINA_COA_INTEGRITY", _("中国科目模板及公司默认科目完整"), not coa_errors, "；".join(coa_errors))
+		coa_errors = coa_status.get("errors", [])
+		coa_warnings = coa_status.get("warnings", [])
+		add(
+			"CHINA_COA_INTEGRITY", _("中国科目模板及公司默认科目完整"), not coa_errors,
+			"；".join([*coa_errors, *coa_warnings]),
+			"Blocking" if coa_errors else ("Warning" if coa_warnings else "Blocking"),
+		)
 		accounts, _duplicates = get_company_accounts_by_number(company)
 		temporary_accounts = [accounts[number].name for number in TEMPORARY_ACCOUNT_NUMBERS if number in accounts]
 		temporary_balances = []
@@ -95,6 +115,7 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 		"RECONCILIATION_SCOPE_CONFIGURATION", _("客户、供应商和银行对账范围已按设置配置"),
 		not missing_scope_types,
 		_("缺少对账范围：{0}").format(", ".join(missing_scope_types)) if missing_scope_types else "",
+		"Blocking" if closing_type == "Year End" else "Warning",
 	)
 
 	trial = frappe.db.sql(
@@ -193,6 +214,7 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	add(
 		"ACCOUNTING_POLICY_COVERAGE", _("核心会计政策已完整配置并生效"),
 		disclosure_checks["policy"]["passed"], disclosure_checks["policy"]["details"],
+		"Blocking" if closing_type == "Year End" else "Warning",
 	)
 	add(
 		"FINANCIAL_STATEMENT_NOTES", _("财务报表附注已提交"),
@@ -201,9 +223,12 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	)
 	statutory_readiness = get_statutory_report_readiness_data(company, from_date, to_date)
 	add(
-		"STATUTORY_REPORT_READINESS", _("企业会计准则四表一注正式输出就绪"),
+		"STATUTORY_REPORT_READINESS", _("中国会计准则四表一注正式输出就绪"),
 		statutory_readiness["passed"],
-		_("阻断项 {0} 个").format(statutory_readiness["blocking_count"]),
+		(_("阻断项 {0} 个") if closing_type == "Year End" else _("尚未完成项 {0} 个")).format(
+			statutory_readiness["blocking_count"]
+		),
+		"Blocking" if closing_type == "Year End" else "Warning",
 	)
 
 	blocked_purchases = get_blocked_purchase_invoices(company, from_date, to_date)
@@ -285,10 +310,29 @@ def get_account_mapping_coverage(company, templates):
 	)
 	missing = []
 	for template, statement_type in template_types.items():
-		for account in accounts:
-			required = is_account_applicable_to_statement(
-				statement_type, account.root_type, account.account_type
+		valid_rows = {
+			row.row_code: row.row_type
+			for row in frappe.get_cached_doc("China Financial Statement Template", template).rows
+		}
+		accounts_by_name = {
+			row.name: row for row in frappe.get_all(
+				"Account", filters={"company": company, "disabled": 0},
+				fields=["name", "account_name", "account_number", "parent_account", "root_type", "account_type", "is_group"],
 			)
+		}
+		for account in accounts:
+			if not is_account_applicable_to_statement(statement_type, account.root_type, account.account_type):
+				continue
+			if is_strictly_excluded_from_statement(account.account_number, statement_type):
+				continue
+			if statement_type == "Cash Flow" and requires_manual_cash_flow_assignment(account.account_number):
+				continue
+			classification, _basis = classify_company_account(company, account, statement_type, accounts_by_name)
+			classification = refine_classification_for_template(account, statement_type, valid_rows, classification)
+			row_code = classification[0] if isinstance(classification, tuple) else classification
+			# An account with no applicable row in the selected statutory form is
+			# intentionally outside that form, not a missing mapping.
+			required = bool(row_code and valid_rows.get(row_code) == "Mapped Accounts")
 			if required and (template, account.name) not in mapped:
 				missing.append(f"{statement_type}:{account.name}")
 	return {
@@ -325,6 +369,51 @@ def count_missing_vouchers(company, from_date, to_date):
 	)[0][0]
 
 
+def get_pending_bank_vouchers(company, from_date, to_date):
+	"""Return bank-generated Journal Entries that are still drafts.
+
+	A Period Closing Voucher reads GL Entry. Bank transactions whose linked
+	Journal Entries are still drafts are therefore not ready to be included in
+	the monthly closing calculation.
+	"""
+	if not frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
+		return []
+	return frappe.db.sql(
+		"""
+		SELECT bt.name, bt.date, bt.reference_number, bt.custom_china_journal_entry
+		FROM `tabBank Transaction` bt
+		LEFT JOIN `tabJournal Entry` je ON je.name=bt.custom_china_journal_entry
+		WHERE bt.company=%s
+			AND bt.date BETWEEN %s AND %s
+			AND bt.docstatus=1
+			AND bt.custom_china_journal_entry IS NOT NULL
+			AND (je.name IS NULL OR je.docstatus!=1)
+		ORDER BY bt.date, bt.reference_number
+		""",
+		(company, from_date, to_date),
+		as_dict=True,
+	)
+
+
+def get_ordinary_profit_loss_closings(company, from_date, to_date):
+	"""Find legacy ordinary Journal Entries used for period closing."""
+	return frappe.get_all(
+		"Journal Entry",
+		filters={
+			"company": company,
+			"posting_date": ["between", [from_date, to_date]],
+			"docstatus": ["!=", 2],
+			"voucher_type": "Journal Entry",
+		},
+		or_filters=[
+			["Journal Entry", "user_remark", "=", PROFIT_AND_LOSS_CLOSING_REMARK],
+			["Journal Entry", "remark", "=", PROFIT_AND_LOSS_CLOSING_REMARK],
+		],
+		fields=["name", "posting_date", "docstatus"],
+		order_by="posting_date, name",
+	)
+
+
 def count_voucher_hash_errors(company, from_date, to_date):
 	errors = 0
 	for name in frappe.get_all(
@@ -359,6 +448,130 @@ def create_report_snapshots(closing_run):
 
 
 @frappe.whitelist()
+def create_period_closing_voucher(company, from_date, to_date, closing_type="Monthly", allow_first_period=False):
+	"""Create the draft PCV for the next continuous closing period.
+
+	ERPNext calculates the actual entries when the Period Closing Voucher is
+	submitted. This endpoint only creates the reviewed draft and supplies the
+	configured profit-and-loss closing account as the target account. An explicit
+	``allow_first_period`` opt-in permits a complete monthly period to be used as
+	the first period when no earlier closing voucher exists.
+	"""
+	frappe.only_for(("System Manager", "China Finance Manager"))
+
+	if not company:
+		frappe.throw(_("必须选择公司"))
+
+	from_date = getdate(from_date)
+	to_date = getdate(to_date)
+	if not from_date or not to_date or from_date > to_date:
+		frappe.throw(_("损益结转期间不正确"))
+	if closing_type not in ("Monthly", "Year End"):
+		frappe.throw(_("不支持的结账类型：{0}").format(closing_type))
+
+	settings = frappe.get_cached_doc("China Finance Settings", company)
+	if not settings.profit_loss_account:
+		frappe.throw(_("请先在中国财务设置中配置本年利润科目"))
+
+	fiscal_year_info = get_fiscal_year(to_date, company=company)
+	fiscal_year, fiscal_year_start, fiscal_year_end = (
+		fiscal_year_info[0], getdate(fiscal_year_info[1]), getdate(fiscal_year_info[2])
+	)
+	if to_date > fiscal_year_end:
+		frappe.throw(_("结转截止日期不能晚于会计年度结束日 {0}").format(fiscal_year_end))
+
+	previous_end_date = frappe.db.get_value(
+		"Period Closing Voucher",
+		{"company": company, "fiscal_year": fiscal_year, "docstatus": 1},
+		"period_end_date",
+		order_by="period_end_date desc",
+	)
+	required_start_date = add_days(getdate(previous_end_date), 1) if previous_end_date else fiscal_year_start
+	first_period_override = bool(
+		allow_first_period
+		and not previous_end_date
+		and closing_type == "Monthly"
+		and from_date >= fiscal_year_start
+	)
+	if from_date != required_start_date and not first_period_override:
+		frappe.throw(
+			_("本期必须从 {0} 开始，不能跳过或重复结转期间").format(required_start_date),
+			title=_("结转期间不连续"),
+		)
+
+	if closing_type == "Monthly":
+		if from_date != get_first_day(from_date) or to_date != get_last_day(from_date):
+			frappe.throw(_("月度结转期间必须是完整自然月"), title=_("月度结转期间不正确"))
+	elif to_date != fiscal_year_end:
+		frappe.throw(_("年度结转截止日期必须是会计年度结束日 {0}").format(fiscal_year_end))
+
+	pending_bank_vouchers = get_pending_bank_vouchers(company, from_date, to_date)
+	if pending_bank_vouchers:
+		references = [row.reference_number or row.name for row in pending_bank_vouchers[:10]]
+		frappe.throw(
+			_("本期还有 {0} 张银行流水凭证未审核提交，请先处理：{1}").format(
+				len(pending_bank_vouchers), "、".join(references)
+			),
+			title=_("银行凭证尚未完成"),
+		)
+
+	legacy_closings = get_ordinary_profit_loss_closings(company, from_date, to_date)
+	if legacy_closings:
+		frappe.throw(
+			_("本期已有普通记账凭证作为损益结转：{0}。请先取消或确认旧结转，再生成月末结转凭证").format(
+				"、".join(row.name for row in legacy_closings)
+			),
+			title=_("存在旧损益结转"),
+		)
+
+	existing = frappe.db.get_value(
+		"Period Closing Voucher",
+		{
+			"company": company,
+			"period_start_date": from_date,
+			"period_end_date": to_date,
+			"docstatus": ["!=", 2],
+		},
+		["name", "docstatus", "closing_account_head"],
+		as_dict=True,
+	)
+	if existing:
+		if existing.closing_account_head != settings.profit_loss_account:
+			frappe.throw(
+				_("该期间已有损益结转凭证 {0}，但结转科目不是当前设置的 {1}").format(
+					existing.name, settings.profit_loss_account
+				),
+				title=_("结转科目不一致"),
+			)
+		return {
+			"name": existing.name,
+			"created": False,
+			"docstatus": existing.docstatus,
+			"message": _("该期间已经存在损益结转凭证 {0}").format(existing.name),
+		}
+
+	voucher = frappe.get_doc(
+		{
+			"doctype": "Period Closing Voucher",
+			"transaction_date": to_date,
+			"company": company,
+			"fiscal_year": fiscal_year,
+			"period_start_date": from_date,
+			"period_end_date": to_date,
+			"closing_account_head": settings.profit_loss_account,
+			"remarks": _("{0}至{1}损益结转").format(from_date, to_date),
+		}
+	)
+	voucher.insert()
+	return {
+		"name": voucher.name,
+		"created": True,
+		"docstatus": voucher.docstatus,
+		"message": _("已生成损益结转凭证草稿 {0}，提交后系统将按实际损益科目生成分录").format(voucher.name),
+	}
+
+
+@frappe.whitelist()
 def preview_closing_checks(company, from_date, to_date, period_closing_voucher=None, closing_type="Monthly"):
 	frappe.only_for(("System Manager", "China Finance Manager"))
 	return run_closing_checks(company, getdate(from_date), getdate(to_date), period_closing_voucher, closing_type)
@@ -372,12 +585,48 @@ def reopen_closing(name, reason):
 	doc = frappe.get_doc("China Closing Run", name)
 	if doc.docstatus != 1 or doc.status != "Closed":
 		frappe.throw(_("只有已结账运行单可以重新开账"))
-	later = frappe.db.exists("China Closing Run", {"company": doc.company, "to_date": [">", doc.to_date], "status": "Closed", "docstatus": 1})
-	if later:
-		frappe.throw(_("存在更晚期间的结账记录，不能重新打开当前期间"))
-	doc.db_set("status", "Reopened")
-	doc.db_set("reopen_reason", reason)
-	doc.db_set("reopened_by", frappe.session.user)
-	doc.db_set("reopened_on", now_datetime())
+	# A closing run freezes the company cumulatively through its end date. If a
+	# user needs to reopen an earlier period, every later closed run must be
+	# reopened first; otherwise its later snapshots and freeze boundary would
+	# claim that the earlier period is still closed. Process the chain in
+	# reverse chronological order, while leaving the Period Closing Vouchers
+	# themselves submitted for an explicit, auditable cancellation step.
+	runs = frappe.get_all(
+		"China Closing Run",
+		filters={
+			"company": doc.company,
+			"to_date": [">=", doc.to_date],
+			"status": "Closed",
+			"docstatus": 1,
+		},
+		fields=["name", "to_date", "period_closing_voucher"],
+		order_by="to_date desc, creation desc",
+		ignore_permissions=True,
+	)
+	if not any(run.name == doc.name for run in runs):
+		frappe.throw(_("未找到需要重新开账的当前结账运行单"))
+
+	reopened_on = now_datetime()
+	for run in runs:
+		frappe.db.set_value(
+			"China Closing Run",
+			run.name,
+			{
+				"status": "Reopened",
+				"reopen_reason": reason,
+				"reopened_by": frappe.session.user,
+				"reopened_on": reopened_on,
+			},
+			update_modified=True,
+		)
+
 	frappe.db.set_value("Company", doc.company, "accounts_frozen_till_date", doc.previous_frozen_date)
-	return {"name": doc.name, "status": "Reopened"}
+	return {
+		"name": doc.name,
+		"status": "Reopened",
+		"reopened_runs": runs,
+		"period_closing_vouchers": [
+			run.period_closing_voucher for run in runs if run.period_closing_voucher
+		],
+		"previous_frozen_date": doc.previous_frozen_date,
+	}

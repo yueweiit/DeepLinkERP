@@ -4,6 +4,11 @@ from frappe.utils import cint, getdate, today
 
 from china_finance.services.financial_statement import get_template
 from china_finance.services.statement_mapping_review import REVIEW_ROLES, set_mapping_reviewed
+from china_finance.services.account_display import (
+	get_account_display_label,
+	get_account_display_title,
+	strip_account_company_suffix,
+)
 from china_finance.setup.templates import TEMPLATE_EFFECTIVE_FROM, classify_company_account, refine_classification_for_template
 
 READ_ROLES = (
@@ -55,7 +60,7 @@ def get_mapping_console(company, statement_type, accounting_standard=None):
 	leaf_accounts = frappe.get_all(
 		"Account",
 		filters={"company": company, "is_group": 0, "disabled": 0},
-		fields=["name", "account_name", "account_number", "root_type", "account_type"],
+		fields=["name", "account_name", "account_number", "parent_account", "root_type", "account_type"],
 		order_by="name",
 	)
 	all_accounts = frappe.get_all(
@@ -106,7 +111,7 @@ def get_mapping_account_totals(company, accounts, as_of_date):
 
 
 def get_reclassification_rules_for_console(company, template):
-	return frappe.get_all(
+	rules = frappe.get_all(
 		"China Financial Statement Reclassification Rule",
 		filters={"company": company, "template": template.name},
 		fields=[
@@ -115,21 +120,56 @@ def get_reclassification_rules_for_console(company, template):
 		],
 		order_by="source_row_code, effective_from",
 	)
+	account_names = {rule.source_account for rule in rules if rule.source_account}
+	accounts = (
+		frappe.get_all(
+			"Account",
+			filters={"company": company, "name": ["in", list(account_names)]},
+			fields=["name", "account_name", "account_number"],
+		)
+		if account_names
+		else []
+	)
+	account_by_name = {account.name: account for account in accounts}
+	for rule in rules:
+		if rule.source_account:
+			rule.source_account_label = get_account_display_label(
+				account_by_name.get(rule.source_account) or rule.source_account,
+				company,
+			) or strip_account_company_suffix(rule.source_account, company)
+	return rules
 
 
 def build_console_payload(template, mappings, leaf_accounts, all_accounts=None, company=None):
 	"""Pure aggregation so tests can run without a database."""
 	account_index = {account.name: account for account in leaf_accounts}
+	all_account_index = {account.name: account for account in (all_accounts or [])}
+
+	def account_label(account):
+		if not account:
+			return ""
+		parent = all_account_index.get(account.parent_account)
+		return get_account_display_title(
+			account.account_number,
+			account.account_name,
+			parent_account_name=parent.account_name if parent else None,
+			parent_account_number=parent.account_number if parent else None,
+		)
+
 	row_mappings = {}
 	mapped_accounts = set()
 	pending_review = 0
 	for mapping in mappings:
 		account = account_index.get(mapping.account)
+		account = account or all_account_index.get(mapping.account)
+		account_name = account.account_name if account else strip_account_company_suffix(mapping.account, company)
+		account_number = account.account_number if account else None
 		item = {
 			"name": mapping.name,
 			"account": mapping.account,
-			"account_name": account.account_name if account else mapping.account,
-			"account_number": account.account_number if account else None,
+			"account_name": account_name,
+			"account_number": account_number,
+			"account_label": account_label(account) or get_account_display_title(account_number, account_name),
 			"root_type": account.root_type if account else None,
 			"row_code": mapping.row_code,
 			"supplementary_row_code": getattr(mapping, "supplementary_row_code", None),
@@ -203,6 +243,7 @@ def build_console_payload(template, mappings, leaf_accounts, all_accounts=None, 
 			"name": account.name,
 			"account_name": account.account_name,
 			"account_number": account.account_number,
+			"account_label": account_label(account),
 			"parent_account": account.parent_account or "",
 			"is_group": int(bool(account.is_group)),
 			"root_type": account.root_type,
@@ -234,7 +275,7 @@ def build_console_payload(template, mappings, leaf_accounts, all_accounts=None, 
 def save_mapping(company, template, account, row_code, cash_inflow_row_code=None, cash_outflow_row_code=None, sign_multiplier=1):
 	"""Create or update the mapping of one account to a statement row; DocType validates."""
 	_require_write_access()
-	effective_from = _default_effective_from(company)
+	effective_from = str(_default_effective_from(company))
 	mapping_key = "|".join((company, template, account, effective_from))
 	values = {
 		"row_code": row_code,

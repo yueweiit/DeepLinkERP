@@ -1,5 +1,7 @@
 import frappe
 from frappe import _
+
+from china_finance.services.account_display import get_account_display_title
 from frappe.utils import flt, getdate, nowdate
 from frappe.utils.file_manager import save_file
 from frappe.utils.pdf import get_pdf
@@ -137,13 +139,14 @@ def execute_native_trial_balance(filters, activity_balance=False):
 		"project": filters.project,
 		"include_default_book_entries": 1,
 		"show_net_values": 1,
-		"show_group_accounts": 0,
+		"show_group_accounts": 1,
 		"show_zero_values": filters.get("show_zero_values", 0),
 		"with_period_closing_entry_for_opening": 1,
 		"with_period_closing_entry_for_current_period": 1,
 	})
 	columns, data = execute_trial_balance(native_filters)
 	_adjust_opening_entries_by_posting_date(data, filters)
+	_keep_numbered_group_accounts(data)
 	_format_native_account_labels(columns, data, filters.company)
 	if activity_balance:
 		_rename_activity_balance_columns(columns)
@@ -164,15 +167,12 @@ def _format_native_account_labels(columns, rows, company):
 	def account_label(account_name):
 		if account_name in label_cache:
 			return label_cache[account_name]
-		parts = []
-		visited = set()
 		current = account_map.get(account_name)
-		while current and current.name not in visited:
-			visited.add(current.name)
-			if current.account_number:
-				parts.append(f"{current.account_number} - {current.account_name}")
-			current = account_map.get(current.parent_account)
-		label_cache[account_name] = " - ".join(reversed(parts)) or account_name
+		label_cache[account_name] = (
+			get_account_display_title(current.account_number, current.account_name)
+			if current and current.account_number
+			else account_name
+		)
 		return label_cache[account_name]
 
 	for column in columns:
@@ -453,7 +453,7 @@ def _legacy_execute_account_activity_balance(filters):
 				party_row = balance_values(party_values.copy())
 				if not filters.show_zero_values and not any(party_row.get(key) for key in ("opening_debit", "opening_credit", "period_debit", "period_credit", "closing_debit", "closing_credit")):
 					continue
-				rows_out.append({"account": account.name, "account_category": category.get(account.root_type or "", account.root_type or ""), "account_number": account.account_number or "", "account_name": account.account_name or account.name, "currency": account.account_currency or frappe.get_cached_value("Company", filters.company, "default_currency"), "party_type": party_type or _("未指定往来"), "party": _party_label(party_type, party), "parent_account": account.name, "indent": levels[account.name] + 1, "is_group": 0, **party_row})
+				rows_out.append({"account": "", "account_category": category.get(account.root_type or "", account.root_type or ""), "account_number": "", "account_name": "", "currency": account.account_currency or frappe.get_cached_value("Company", filters.company, "default_currency"), "party_type": party_type or _("未指定往来"), "party": _party_label(party_type, party), "parent_account": account.name, "indent": levels[account.name] + 1, "is_group": 0, **party_row})
 	return get_account_activity_columns(bool(filters.expand_party)), rows_out, _("金额按 GL Entry 聚合；期初 + 本期发生 = 期末余额")
 
 
@@ -471,13 +471,14 @@ def execute_account_activity_balance(filters):
 		"project": filters.project,
 		"include_default_book_entries": 1,
 		"show_net_values": 1,
-		"show_group_accounts": 0,
+		"show_group_accounts": 1,
 		"show_zero_values": filters.get("show_zero_values", 0),
 		"with_period_closing_entry_for_opening": 1,
 		"with_period_closing_entry_for_current_period": 1,
 	})
 	columns, native_rows = execute_trial_balance(native_filters)
 	_adjust_opening_entries_by_posting_date(native_rows, filters)
+	_keep_numbered_group_accounts(native_rows)
 	if not filters.get("expand_party"):
 		_format_native_account_labels(columns, native_rows, filters.company)
 		return columns, native_rows, _activity_balance_message(filters)
@@ -542,8 +543,10 @@ def execute_account_activity_balance(filters):
 				if not filters.get("show_zero_values") and not any(party.get(field) for field in ("opening_debit", "opening_credit", "debit", "credit", "closing_debit", "closing_credit")):
 					continue
 				party_row = {
-					"account": party.get("party") or _("未指定往来"),
-					"account_name": party.get("party") or _("未指定往来"),
+					# A party detail is not an account. Keep the 科目 column limited
+					# to actual Account values; show the party only in its own column.
+					"account": "",
+					"account_name": "",
 					"party_type": party.get("party_type") or _("未指定往来"),
 					"party": _party_label(party.get("party_type"), party.get("party")),
 					"indent": (row.get("indent") or 0) + 1,
@@ -558,6 +561,42 @@ def execute_account_activity_balance(filters):
 				output.append(party_row)
 	_format_native_account_labels(party_columns, output, filters.company)
 	return party_columns, output, _activity_balance_message(filters)
+
+
+def _keep_numbered_group_accounts(rows):
+	"""Keep coded parent accounts as summary rows, but hide chart root nodes.
+
+	The statutory account balance layout uses four-digit accounts as category
+	 totals and six-digit accounts as detail accounts. ERPNext also returns
+	 uncoded root nodes such as ``资产`` and ``负债`` when group accounts are
+	 enabled; those nodes are structural containers rather than report rows.
+	"""
+	if not rows:
+		return
+
+	rows[:] = [
+		row
+		for row in rows
+		if not row.get("is_group_account") or row.get("acc_number") or row.get("account") in ("'Total'", "Total")
+	]
+
+	# ERPNext's grouped total is based on the root rows after netting them by
+	# account type. For this report the footer must remain the debit/credit
+	# total of actual accounts, as it was before parent rows were displayed.
+	total_row = next(
+		(row for row in rows if row.get("account") in ("'Total'", "Total")),
+		None,
+	)
+	if total_row:
+		detail_rows = [
+			row
+			for row in rows
+			if row.get("account")
+			and row.get("account") not in ("'Total'", "Total")
+			and not row.get("is_group_account")
+		]
+		for fieldname in ("opening_debit", "opening_credit", "debit", "credit", "closing_debit", "closing_credit"):
+			total_row[fieldname] = sum(flt(row.get(fieldname)) for row in detail_rows)
 
 
 def _activity_balance_message(filters):

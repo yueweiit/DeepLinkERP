@@ -3,10 +3,16 @@ frappe.query_reports["China Financial Statements"] = {
 		const report = frappe.query_report;
 		report.page.main.find(".china-balance-sheet-panels").remove();
 		report.page.main.find(".china-balance-sheet-checks").remove();
-		report.page.main.find(".china-activity-balance-panel").remove();
-		report.$report.removeClass("china-activity-balance-report");
+	report.page.main.find(".china-activity-balance-panel").remove();
+	report.$report.removeClass("china-activity-balance-report china-financial-statements-native-table");
 		report.$report.show();
-		if (report.get_filter_value("statement_type") !== "Balance Sheet") return;
+		const statement_type = report.get_filter_value("statement_type");
+		const native_statement_types = ["Profit and Loss", "Cash Flow", "Account Activity and Balance"];
+		if (native_statement_types.includes(statement_type)) {
+			report.$report.addClass("china-financial-statements-native-table");
+			bind_native_statement_table_layout(report);
+		}
+		if (statement_type !== "Balance Sheet") return;
 
 		const currency = report.raw_data.chart?.currency;
 		const asset_rows = report.data
@@ -281,6 +287,22 @@ function source_account_link(label, accounts) {
 	return `<a href="#" class="china-finance-source-account-link" title="${title}" data-account="${frappe.utils.escape_html(account)}">${label}</a>`;
 }
 
+function bind_native_statement_table_layout(report) {
+	if (report.__china_financial_statement_layout_bound) return;
+	report.__china_financial_statement_layout_bound = true;
+	report.$report.on("dblclick.china_financial_statement_layout", ".dt-cell__resize-handle", () => {
+		// frappe-datatable recalculates the resized column on double-click but
+		// does not recalculate the scroll container width afterwards. This leaves
+		// the rightmost amount column underneath the clipping boundary.
+		requestAnimationFrame(() => {
+			const datatable = report.datatable;
+			if (!datatable?.style) return;
+			datatable.style.refreshColumnWidth();
+			datatable.style.setBodyStyle();
+		});
+	});
+}
+
 function bind_source_account_links() {
 	if (frappe._china_finance_source_account_links_bound) return;
 	frappe._china_finance_source_account_links_bound = true;
@@ -330,7 +352,7 @@ function render_balance_sheet_tree(panel, rows, currency) {
 		{
 			id: "label",
 			name: __("项目"),
-			width: 260,
+			width: 3,
 			format: (value, row, column, data) => {
 				let label = frappe.utils.escape_html(value ?? "");
 				if (data?.source_accounts?.length) {
@@ -340,20 +362,21 @@ function render_balance_sheet_tree(panel, rows, currency) {
 				return label;
 			},
 		},
-		{ id: "opening_amount", name: __("期初余额"), width: 140, format: format_amount },
-		{ id: "amount", name: __("期末余额"), width: 150, format: format_amount },
+		{ id: "opening_amount", name: __("期初余额"), width: 1, format: format_amount },
+		{ id: "amount", name: __("期末余额"), width: 1, format: format_amount },
 	];
 	if (has_comparison) {
-		columns.push({ id: "comparison_amount", name: __("比较期余额"), width: 150, format: format_amount });
+		columns.push({ id: "comparison_amount", name: __("比较期余额"), width: 1, format: format_amount });
 	}
 
 	const datatable = new window.DataTable(panel.body, {
 		columns,
 		data: rows,
 		treeView: true,
-		// Fluid layout stretches the columns to the panel width, so no
-		// horizontal scrollbar appears and sticky columns cannot overlap.
-		layout: "fluid",
+		// Ratio layout fills the entire panel and keeps the item column wider
+		// than the amount columns at every screen size.
+		layout: "ratio",
+		serialNoColumn: false,
 		cellHeight: 29,
 		inlineFilters: true,
 		language: frappe.boot.lang,
