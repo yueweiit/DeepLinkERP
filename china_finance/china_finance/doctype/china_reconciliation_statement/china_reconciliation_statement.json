@@ -1,6 +1,6 @@
 {
  "actions":[], "autoname":"naming_series:", "creation":"2026-07-17 00:00:00.000000", "doctype":"DocType", "engine":"InnoDB",
- "field_order":["naming_series","company","scope","period_key","statement_type","party_type","party","bank_account","account","from_date","to_date","version","replaces","status","confirmation_section","confirmation_method","internal_review_reason","confirmation_file","confirmed_by","confirmed_on","amount_section","opening_balance","period_debit","period_credit","closing_balance","counterparty_balance","calculated_bank_balance","difference","blocked_line_count","waived_line_count","bank_snapshot_section","outstanding_book_count","unallocated_bank_count","unallocated_bank_amount","bank_snapshot_json","lines_section","lines","remarks"],
+ "field_order":["naming_series","company","scope","period_key","statement_type","party_type","party","bank_account","account","from_date","to_date","version","replaces","status","confirmation_section","confirmation_method","internal_review_reason","confirmation_file","confirmed_by","confirmed_on","amount_section","opening_balance","period_debit","period_credit","closing_balance","counterparty_balance","calculated_bank_balance","difference","blocked_line_count","waived_line_count","bank_snapshot_section","outstanding_book_count","opening_outstanding_book_count","period_outstanding_book_count","unallocated_bank_count","unallocated_bank_amount","bank_snapshot_json","lines_section","lines","remarks"],
  "fields":[
   {"default":"CNR-.YYYY.-.#####","fieldname":"naming_series","fieldtype":"Select","label":"编号规则","options":"CNR-.YYYY.-.#####","reqd":1},
   {"fieldname":"company","fieldtype":"Link","in_list_view":1,"label":"公司","options":"Company","reqd":1},
@@ -33,7 +33,9 @@
   {"fieldname":"blocked_line_count","fieldtype":"Int","label":"采购拦截明细数","read_only":1},
   {"fieldname":"waived_line_count","fieldtype":"Int","label":"采购豁免明细数","read_only":1},
   {"fieldname":"bank_snapshot_section","fieldtype":"Section Break","label":"银行对账快照","depends_on":"eval:doc.statement_type=='Bank'"},
-  {"fieldname":"outstanding_book_count","fieldtype":"Int","label":"账面未达笔数","read_only":1},
+  {"fieldname":"outstanding_book_count","fieldtype":"Int","label":"账面未达总笔数","read_only":1},
+  {"fieldname":"opening_outstanding_book_count","fieldtype":"Int","label":"期初未达笔数（明细隐藏）","read_only":1},
+  {"fieldname":"period_outstanding_book_count","fieldtype":"Int","label":"本期未达笔数","read_only":1},
   {"fieldname":"unallocated_bank_count","fieldtype":"Int","label":"银行未匹配笔数","read_only":1},
   {"fieldname":"unallocated_bank_amount","fieldtype":"Currency","label":"银行未匹配金额","read_only":1},
   {"fieldname":"bank_snapshot_json","fieldtype":"Long Text","label":"银行对账快照数据","read_only":1,"hidden":1},

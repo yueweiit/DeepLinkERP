@@ -103,45 +103,65 @@ def refresh_bank_snapshot(statement, save=False):
 	account = frappe.db.get_value("Bank Account", statement.bank_account, "account")
 	if not account:
 		frappe.throw(_("银行账户未关联会计科目"))
+	from_date = getdate(statement.from_date)
+	to_date = getdate(statement.to_date)
 	calculated_bank_balance, book_entries = get_native_bank_reconciliation_data(
-		statement.bank_account, account, statement.company, statement.to_date
+		statement.bank_account, account, statement.company, to_date
 	)
 	bank_transactions = frappe.get_all(
 		"Bank Transaction",
-		filters={"company": statement.company, "bank_account": statement.bank_account, "docstatus": 1, "date": ["<=", statement.to_date]},
+		filters={"company": statement.company, "bank_account": statement.bank_account, "docstatus": 1, "date": ["<=", to_date]},
 		fields=["name", "date", "deposit", "withdrawal", "unallocated_amount", "status", "description"],
 		order_by="date, name",
 	)
 	tolerance = get_tolerance(statement.company)
 	unallocated = [row for row in bank_transactions if abs(flt(row.unallocated_amount)) > tolerance]
+	opening_book_entries = [row for row in book_entries if getdate(row.get("posting_date")) < from_date]
+	period_book_entries = [row for row in book_entries if getdate(row.get("posting_date")) >= from_date]
+	period_bank_transactions = [row for row in bank_transactions if getdate(row.date) >= from_date]
 	statement.account = account
 	statement.calculated_bank_balance = flt(calculated_bank_balance, 2)
 	statement.outstanding_book_count = len(book_entries)
+	statement.opening_outstanding_book_count = len(opening_book_entries)
+	statement.period_outstanding_book_count = len(period_book_entries)
 	statement.unallocated_bank_count = len(unallocated)
 	statement.unallocated_bank_amount = sum(flt(row.unallocated_amount) for row in unallocated)
 	statement.bank_snapshot_json = json.dumps(
-		{"generated_on": str(now_datetime()), "book_outstanding": book_entries, "unallocated_bank_transactions": unallocated},
+		{
+			"generated_on": str(now_datetime()),
+			"book_outstanding": book_entries,
+			"book_outstanding_opening": opening_book_entries,
+			"book_outstanding_period": period_book_entries,
+			"bank_transactions_period": period_bank_transactions,
+			"unallocated_bank_transactions": unallocated,
+		},
 		ensure_ascii=False, sort_keys=True, default=str,
 	)
 	lines = []
-	for row in book_entries:
+	# 期初未达账项仍保留在银行快照和余额计算中，但不放入本期明细，避免历史凭证混入本期对账单。
+	for row in period_book_entries:
 		lines.append(
 			{
+				"period_category": "本期未达",
 				"line_source": "Book Outstanding", "match_status": "Timing", "posting_date": row.get("posting_date"),
 				"voucher_type": row.get("payment_document"), "voucher_no": row.get("payment_entry"), "account": account,
 				"remarks": row.get("against_account") or row.get("reference_no"), "debit": row.get("debit"),
 				"credit": row.get("credit"), "reconciling_amount": flt(row.get("credit")) - flt(row.get("debit")),
 			}
 		)
-	for row in unallocated:
+	for row in period_bank_transactions:
+		matched = abs(flt(row.unallocated_amount)) <= tolerance
 		lines.append(
 			{
-				"line_source": "Bank Transaction", "match_status": "Unmatched", "posting_date": row.date,
+				"period_category": "本期银行流水", "line_source": "Bank Transaction",
+				"match_status": "Matched" if matched else "Unmatched", "posting_date": row.date,
 				"voucher_type": "Bank Transaction", "voucher_no": row.name, "account": account,
 				"remarks": row.description, "debit": row.deposit, "credit": row.withdrawal,
-				"reconciling_amount": flt(row.deposit) - flt(row.withdrawal),
+				"reconciling_amount": 0 if matched else flt(row.deposit) - flt(row.withdrawal),
 			}
 		)
+	category_order = {"本期未达": 1, "本期银行流水": 2}
+	lines.sort(key=lambda row: (category_order.get(row.get("period_category"), 99), getdate(row.get("posting_date")), row.get("voucher_no") or ""))
 	statement.set("lines", lines)
 	if save:
 		statement.save()

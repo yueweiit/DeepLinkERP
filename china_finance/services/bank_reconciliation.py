@@ -4,7 +4,7 @@ import json
 import re
 
 import frappe
-from frappe.utils import flt
+from frappe.utils import flt, getdate
 from erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool import (
 	create_journal_entry_bts,
 	get_bank_transactions,
@@ -17,15 +17,18 @@ DEFAULT_ACCOUNT_MAPPING = {
 	"利息": "660302",
 	"手续费": "660303",
 	"服务费": "660303",
-	"报销": "660202",
+	"报销": "660201",
 	"社保": "221103",
 	"工资": "221101",
 	"代发": "221101",
-	"招聘": "660211",
+	# The source chart has no dedicated recruitment expense account. Keep
+	# unclassified recruitment charges in Management Expense - Other.
+	"招聘": "660299",
 	"租金水电物业管理费": "660299",
-	"租金": "660207",
-	"物业水电": "660208",
-	"物业": "660208",
+	"租金": "660202",
+	"物业水电": "660299",
+	"物业": "660203",
+	"水电": "660204",
 	"缴税": "22210104",
 	"公积金": "221104",
 	"补缴": "221104",
@@ -34,6 +37,25 @@ DEFAULT_ACCOUNT_MAPPING = {
 	"退回": "1221",
 	"验证": "1221",
 	"实名": "1221",
+}
+
+# Only company-style counterparties are auto-filled into the accounting party
+# field. Personal names such as employee reimbursement recipients stay in the
+# bank statement metadata and are already included in the reimbursement summary.
+COMPANY_NAME_MARKERS = ("有限公司", "有限责任公司", "股份有限公司", "集团公司", "公司")
+CONFIRMED_UNLINKED_BANK_REFERENCES = {
+	"C0347GZ00067CTZ",
+	"C0347GZ000C7OXZ",
+	"C0347GZ000F1H1Z",
+	"C0347GZ000L36UZ",
+	"C0347GZ000Z17JZ",
+	"C0347H30010RMVZ",
+	"C0347H80011WJFZ",
+	"C0347H9000NWEUZ",
+	"C0347H9000T824Z",
+	"C0347HD0007FPMZ",
+	"C0347HD0005GH0Z",
+	"C0347HK0012R48Z",
 }
 
 
@@ -70,6 +92,24 @@ def clean_bank_summary(value):
 	return value
 
 
+def _apply_journal_entry_summary(journal_entry, summary):
+	"""Put the concise business summary on the parent and every entry row."""
+	summary = (summary or "").strip()
+	if not summary:
+		return
+	if journal_entry.meta.has_field("custom_remark"):
+		# ERPNext's create_remarks hook otherwise replaces ``remark`` with the
+		# cheque/reference text when the Journal Entry is inserted.
+		journal_entry.custom_remark = 1
+	if journal_entry.meta.has_field("remark"):
+		journal_entry.remark = summary
+	if journal_entry.meta.has_field("user_remark"):
+		journal_entry.user_remark = summary
+	for entry in journal_entry.accounts:
+		if entry.meta.has_field("user_remark"):
+			entry.user_remark = summary
+
+
 def prepare_bank_transaction(doc, method=None):
 	"""Persist useful CMB metadata before the standard Bank Transaction submit hook."""
 	description = str(doc.description or "")
@@ -84,6 +124,17 @@ def prepare_bank_transaction(doc, method=None):
 	for fieldname, value in metadata.items():
 		if value and frappe.get_meta("Bank Transaction").has_field(fieldname) and not doc.get(fieldname):
 			setattr(doc, fieldname, value)
+
+	# The bank statement contains the counterparty's legal name, but ERPNext's
+	# native importer does not map it to party_type/party. Resolve it only when
+	# an exact Customer/Supplier master already exists; never create master data
+	# implicitly during a bank import.
+	if not doc.get("party_type") and not doc.get("party"):
+		party = _resolve_company_party(
+			metadata["bank_party_name"], doc, _preferred_party_type(doc)
+		)
+		if party:
+			doc.update(party)
 
 	# CMB 流水号 is the stable idempotency key. Keep it in the native
 	# transaction_id field as well as reference_number for reconciliation.
@@ -119,6 +170,57 @@ def _extract_bank_metadata(description, label):
 	return match.group(1).strip() if match else ""
 
 
+def _resolve_company_party(counterparty_name, bank_transaction, preferred_party_type=None):
+	"""Resolve a company counterparty to an existing Customer or Supplier."""
+	name = (counterparty_name or "").strip()
+	if not name or not any(marker in name for marker in COMPANY_NAME_MARKERS):
+		return {}
+
+	# Prefer the party type accepted by the target account. In particular, the
+	# verification/refund rows use 1221 (Receivable), so both payment and refund
+	# rows must use Customer even though one direction is a bank withdrawal.
+	is_withdrawal = flt(bank_transaction.get("withdrawal")) > 0
+	party_types = (preferred_party_type,) if preferred_party_type else (
+		("Supplier",) if is_withdrawal else ("Customer",)
+	)
+	name_fields = {"Supplier": "supplier_name", "Customer": "customer_name"}
+	for party_type in party_types:
+		name_field = name_fields[party_type]
+		party = frappe.db.get_value(
+			party_type,
+			{"disabled": 0, name_field: name},
+			"name",
+		)
+		if not party:
+			party = frappe.db.get_value(
+				party_type,
+				{"disabled": 0, "name": name},
+				"name",
+			)
+		if party:
+			return {"party_type": party_type, "party": party}
+
+	return {}
+
+
+def _preferred_party_type(bank_transaction):
+	"""Return a party type compatible with the account chosen for the row."""
+	account = _resolve_account(
+		bank_transaction.get("description") or bank_transaction.get("custom_summary"),
+		bank_transaction.get("company"),
+		reference_number=bank_transaction.get("reference_number"),
+		counterparty_name=bank_transaction.get("bank_party_name"),
+	)
+	if not account:
+		return None
+	account_info = frappe.db.get_value("Account", account, ["account_type"], as_dict=True)
+	if account_info and account_info.account_type == "Receivable":
+		return "Customer"
+	if account_info and account_info.account_type == "Payable":
+		return "Supplier"
+	return None
+
+
 @frappe.whitelist()
 def create_journal_entry_with_summary(remarks=None, **kwargs):
 	"""Create an editable Journal Entry draft and link it to the bank transaction."""
@@ -129,13 +231,10 @@ def create_journal_entry_with_summary(remarks=None, **kwargs):
 		bank_transaction = frappe.get_doc("Bank Transaction", bank_transaction_name)
 		_validate_bank_account_company(bank_transaction.bank_account, bank_transaction.company)
 	journal_entry = create_journal_entry_bts(**kwargs, allow_edit=True)
+	if _is_interest_income_account(kwargs.get("second_account")):
+		_restore_interest_offset_debit(journal_entry, kwargs.get("second_account"))
 	if remarks:
-		if journal_entry.meta.has_field("user_remark"):
-			journal_entry.user_remark = remarks
-		if journal_entry.meta.has_field("remark"):
-			journal_entry.remark = remarks
-		for entry in journal_entry.accounts:
-			entry.user_remark = remarks
+		_apply_journal_entry_summary(journal_entry, remarks)
 	if journal_entry.meta.has_field("custom_china_bank_transaction"):
 		journal_entry.custom_china_bank_transaction = kwargs["bank_transaction_name"]
 	journal_entry.insert()
@@ -148,6 +247,22 @@ def create_journal_entry_with_summary(remarks=None, **kwargs):
 			update_modified=False,
 		)
 	return journal_entry
+
+
+def _is_interest_income_account(account):
+	return bool(account and frappe.db.get_value("Account", account, "account_number") == "660302")
+
+
+def _restore_interest_offset_debit(journal_entry, account=None):
+	"""Keep interest income as a negative debit in the source Journal Entry."""
+	for entry in journal_entry.accounts:
+		if account and entry.account != account:
+			continue
+		if entry.credit_in_account_currency > 0 and not entry.debit_in_account_currency:
+			entry.debit_in_account_currency = -abs(entry.credit_in_account_currency)
+			entry.credit_in_account_currency = 0
+			entry.debit = -abs(entry.credit)
+			entry.credit = 0
 
 
 def on_journal_entry_submit(doc, method=None):
@@ -218,7 +333,12 @@ def auto_create_voucher_on_submit(doc, method=None):
 	if amount <= 0:
 		return
 
-	expense_account = _resolve_account(raw_description or desc, company)
+	expense_account = _resolve_account(
+		raw_description or desc,
+		company,
+		reference_number=doc.reference_number,
+		counterparty_name=doc.get("bank_party_name"),
+	)
 	if not expense_account:
 		frappe.log_error(
 			f"Auto voucher: no account found for bank transaction {doc.name} ({desc})",
@@ -233,9 +353,6 @@ def auto_create_voucher_on_submit(doc, method=None):
 		je.voucher_type = "Journal Entry"
 		je.cheque_no = doc.reference_number or doc.name
 		je.cheque_date = doc.date
-		je.remark = f"银行流水 {doc.name}：{desc}"
-		if je.meta.has_field("user_remark"):
-			je.user_remark = clean_bank_summary(desc)
 		if je.meta.has_field("custom_china_bank_transaction"):
 			je.custom_china_bank_transaction = doc.name
 
@@ -265,6 +382,10 @@ def auto_create_voucher_on_submit(doc, method=None):
 			}
 			expense_entry.update(_get_safe_party_fields(expense_account, doc))
 			je.append("accounts", expense_entry)
+			if _is_interest_income_account(expense_account):
+				_restore_interest_offset_debit(je, expense_account)
+
+		_apply_journal_entry_summary(je, desc)
 
 		je.insert(ignore_permissions=True)
 		if frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
@@ -287,7 +408,176 @@ def auto_create_voucher_on_submit(doc, method=None):
 		)
 
 
-def _resolve_account(description, company):
+@frappe.whitelist()
+def repair_draft_bank_journal_entry_summaries(company, from_date=None, to_date=None):
+	"""Backfill summaries on existing draft JEs created from bank transactions."""
+	frappe.only_for(("System Manager", "China Finance Manager"))
+	if not company:
+		frappe.throw(_("必须选择公司"))
+	if not frappe.get_meta("Bank Transaction").has_field("custom_china_journal_entry"):
+		return {"processed": 0, "updated": 0, "skipped": 0}
+
+	from_date = getdate(from_date) if from_date else None
+	to_date = getdate(to_date) if to_date else None
+	filters = {"company": company, "custom_china_journal_entry": ["is", "set"]}
+	if from_date and to_date:
+		filters["date"] = ["between", [from_date, to_date]]
+	elif from_date:
+		filters["date"] = [">=", from_date]
+	elif to_date:
+		filters["date"] = ["<=", to_date]
+
+	rows = frappe.get_all(
+		"Bank Transaction",
+		filters=filters,
+		fields=["name", "custom_china_journal_entry", "custom_summary", "description"],
+		order_by="date, name",
+	)
+	processed = updated = skipped = 0
+	for row in rows:
+		journal_entry_name = row.custom_china_journal_entry
+		if not frappe.db.exists("Journal Entry", journal_entry_name):
+			skipped += 1
+			continue
+		journal_entry = frappe.get_doc("Journal Entry", journal_entry_name)
+		if journal_entry.docstatus != 0:
+			# Posted vouchers must be amended through the normal accounting flow.
+			skipped += 1
+			continue
+		summary = clean_bank_summary(row.custom_summary or row.description)
+		if not summary:
+			skipped += 1
+			continue
+
+		before = (
+			getattr(journal_entry, "custom_remark", None),
+			getattr(journal_entry, "remark", None),
+			getattr(journal_entry, "user_remark", None),
+			[entry.user_remark for entry in journal_entry.accounts],
+		)
+		_apply_journal_entry_summary(journal_entry, summary)
+		after = (
+			getattr(journal_entry, "custom_remark", None),
+			getattr(journal_entry, "remark", None),
+			getattr(journal_entry, "user_remark", None),
+			[entry.user_remark for entry in journal_entry.accounts],
+		)
+		processed += 1
+		if before != after:
+			values = {
+				"remark": journal_entry.remark,
+				"user_remark": journal_entry.user_remark,
+			}
+			if journal_entry.meta.has_field("custom_remark"):
+				values["custom_remark"] = journal_entry.custom_remark
+			frappe.db.set_value("Journal Entry", journal_entry.name, values, update_modified=False)
+			for entry in journal_entry.accounts:
+				frappe.db.set_value(
+					"Journal Entry Account", entry.name, "user_remark", entry.user_remark, update_modified=False
+				)
+			updated += 1
+
+	frappe.db.commit()
+	return {"processed": processed, "updated": updated, "skipped": skipped}
+
+
+@frappe.whitelist()
+def repair_unlinked_bank_vouchers(company="悦为智能技术(东莞)有限公司", references=None):
+	"""Repair the confirmed bank rows that previously had no draft voucher.
+
+	This is an explicit repair operation, not part of normal bank import. It may
+	create the missing Customer/Supplier masters required by the 1221 receivable
+	account, then reuses the normal automatic-voucher path for the selected rows.
+	"""
+	frappe.only_for(("System Manager", "China Finance Manager"))
+	if company != "悦为智能技术(东莞)有限公司":
+		frappe.throw("此维护操作仅允许处理 aaa 的悦为智能技术(东莞)有限公司")
+
+	if isinstance(references, str):
+		try:
+			references = json.loads(references)
+		except json.JSONDecodeError:
+			references = [item.strip() for item in references.split(",") if item.strip()]
+	references = set(references or CONFIRMED_UNLINKED_BANK_REFERENCES)
+
+	rows = frappe.get_all(
+		"Bank Transaction",
+		filters={
+			"company": company,
+			"reference_number": ["in", list(references)],
+			"docstatus": 1,
+		},
+		fields=["name", "reference_number"],
+		order_by="date,reference_number",
+	)
+	result = {"processed": 0, "created": 0, "skipped": 0, "parties_created": [], "errors": []}
+	for row in rows:
+		result["processed"] += 1
+		bank_transaction = frappe.get_doc("Bank Transaction", row.name)
+		if bank_transaction.get("custom_china_journal_entry") and frappe.db.exists(
+			"Journal Entry", bank_transaction.custom_china_journal_entry
+		):
+			result["skipped"] += 1
+			continue
+
+		try:
+			party = _ensure_company_party(bank_transaction)
+			if party:
+				bank_transaction.db_set("party_type", party["party_type"], update_modified=False)
+				bank_transaction.db_set("party", party["party"], update_modified=False)
+			voucher_before = bank_transaction.get("custom_china_journal_entry")
+			auto_create_voucher_on_submit(bank_transaction)
+			voucher_after = frappe.db.get_value(
+				"Bank Transaction", bank_transaction.name, "custom_china_journal_entry"
+			)
+			if voucher_after and voucher_after != voucher_before:
+				result["created"] += 1
+			else:
+				result["errors"].append({"name": bank_transaction.name, "error": "未生成凭证"})
+		except Exception as exc:
+			result["errors"].append({"name": bank_transaction.name, "error": str(exc)})
+
+	frappe.db.commit()
+	return result
+
+
+def _ensure_company_party(bank_transaction):
+	"""Create a party master only for the explicit repair operation."""
+	name = (bank_transaction.get("bank_party_name") or "").strip()
+	if not name or not any(marker in name for marker in COMPANY_NAME_MARKERS):
+		return {}
+
+	preferred_party_type = _preferred_party_type(bank_transaction)
+	party = _resolve_company_party(name, bank_transaction, preferred_party_type)
+	if party:
+		return party
+
+	is_withdrawal = flt(bank_transaction.get("withdrawal")) > 0
+	party_type = preferred_party_type or ("Supplier" if is_withdrawal else "Customer")
+	name_field = "supplier_name" if party_type == "Supplier" else "customer_name"
+	party_name = frappe.db.get_value(
+		party_type, {"disabled": 0, name_field: name}, "name"
+	)
+	if not party_name:
+		party_name = frappe.db.get_value(party_type, {"disabled": 0, "name": name}, "name")
+	if party_name:
+		return {"party_type": party_type, "party": party_name}
+
+	values = {
+		"doctype": party_type,
+		name_field: name,
+		"customer_type" if party_type == "Customer" else "supplier_type": "Company",
+	}
+	if party_type == "Customer":
+		values.update({"customer_group": "Commercial", "territory": "China"})
+	else:
+		values["supplier_group"] = "Services"
+	party_doc = frappe.get_doc(values)
+	party_doc.insert(ignore_permissions=True)
+	return {"party_type": party_type, "party": party_doc.name}
+
+
+def _resolve_account(description, company, reference_number=None, counterparty_name=None):
 	"""Resolve high-confidence bank summaries; leave unclassified rows for review."""
 	raw_description = str(description or "")
 	description = clean_bank_summary(raw_description)
@@ -299,34 +589,45 @@ def _resolve_account(description, company):
 	elif "批量代发" in search_text and any(term in search_text for term in ("付费", "费用", "手续费", "服务费")):
 		account_number = "660303"
 	elif "招聘" in search_text and "备用金" in search_text:
-		account_number = "660211"
+		account_number = "660299"
 	elif "公众号注册退款" in search_text or "企业实名验证" in search_text or "银行账户一分钱打款验证" in search_text:
 		account_number = "1221"
 	elif "个税" in search_text or "个人所得税" in search_text:
-		account_number = "222110"
+		account_number = "222112"
 	elif "社保" in search_text:
 		account_number = "221103"
 	elif "公积金" in search_text or ("补缴" in search_text and "住房公积金" in search_text):
 		account_number = "221104"
 	elif "实时缴税" in search_text or "缴税" in search_text or "税单" in search_text:
-		# A generic tax-bank reference does not identify the tax subaccount.
-		return None
+		# The confirmed business rule is to use the chart's generic tax account
+		# when the bank reference does not identify a tax type.
+		account_number = "222199"
+	elif "利息" in search_text or "interest" in search_text.lower():
+		# Interest income is represented as a negative debit to the finance expense
+		# account. The bank deposit remains a positive debit, so the two lines
+		# offset without presenting the finance expense as a credit.
+		account_number = "660302"
 	elif "工资" in search_text or "代发" in search_text:
 		account_number = "221101"
 	elif "手续费" in search_text or "服务费" in search_text:
 		account_number = "660303"
-	elif "投资" in search_text:
+	elif "投资" in search_text or (
+		reference_number == "C0347H30010RMVZ"
+		and (counterparty_name or "").strip() == "周悦"
+	):
 		account_number = "4001"
 	elif "办公" in search_text and "报销" in search_text:
-		account_number = "660202"
+		account_number = "660201"
 	elif "报销" in search_text and _extract_bank_metadata(raw_description, "对方"):
 		# The CMB statement identifies these rows as employee reimbursements;
 		# the reviewed aaa policy books them to Management Expense - Office.
+		account_number = "660201"
+	elif ("租金" in search_text or "房租" in search_text) and not any(term in search_text for term in ("物业", "水电", "电费")):
 		account_number = "660202"
-	elif "租金" in search_text and not any(term in search_text for term in ("物业", "水电", "电费")):
-		account_number = "660207"
-	elif any(term in search_text for term in ("物业水电", "水电", "电费")) and "租金" not in search_text:
-		account_number = "660208"
+	elif ("水电" in search_text or "电费" in search_text) and "物业" not in search_text and "租金" not in search_text:
+		account_number = "660204"
+	elif "物业" in search_text and "租金" not in search_text:
+		account_number = "660203"
 	elif "验证" in search_text or "实名" in search_text:
 		account_number = "1221"
 	else:
@@ -336,8 +637,13 @@ def _resolve_account(description, company):
 
 
 def _has_mixed_facility_terms(description):
-	terms = ("租金", "房租", "物业", "水电", "电费")
-	return sum(1 for term in terms if term in description) >= 2
+	text = description or ""
+	categories = (
+		any(term in text for term in ("租金", "房租")),
+		"物业" in text,
+		any(term in text for term in ("水电", "电费")),
+	)
+	return sum(categories) >= 2
 
 
 def _get_safe_party_fields(account, bank_transaction):

@@ -96,6 +96,7 @@ class ChinaFinanceBankStatementImportLog(BankStatementImportLog):
 			if str(transaction.get("reference") or "").strip() not in existing_references
 		]
 
+	@frappe.whitelist(methods=["POST"])
 	def insert_transactions(self):
 		"""Import the complete batch atomically after validating every row.
 

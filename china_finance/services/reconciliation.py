@@ -66,6 +66,7 @@ def generate_statement(
 			"scope": scope,
 			"period_key": f"{from_date}|{to_date}",
 			"statement_type": statement_type,
+			"party_type": statement_type if statement_type in ("Customer", "Supplier") else None,
 			"party": party,
 			"bank_account": bank_account,
 			"account": account,

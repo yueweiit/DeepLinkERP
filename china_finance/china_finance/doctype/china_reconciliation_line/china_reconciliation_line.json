@@ -1,7 +1,8 @@
 {
  "actions":[], "creation":"2026-07-17 00:00:00.000000", "doctype":"DocType", "editable_grid":1, "engine":"InnoDB",
- "field_order":["line_source","match_status","posting_date","voucher_type","voucher_no","account","remarks","debit","credit","balance","reconciling_amount","purchase_invoice","purchase_orders","purchase_receipts","tax_invoices","reconciliation_policy","reconciliation_status","reconciliation_reason","waiver_reason","waived_by","waived_on"],
+ "field_order":["period_category","line_source","match_status","posting_date","voucher_type","voucher_no","account","remarks","debit","credit","balance","reconciling_amount","purchase_invoice","purchase_orders","purchase_receipts","tax_invoices","reconciliation_policy","reconciliation_status","reconciliation_reason","waiver_reason","waived_by","waived_on"],
  "fields":[
+  {"fieldname":"period_category","fieldtype":"Select","in_list_view":1,"label":"期间分类","options":"期初未达\n本期未达\n本期银行流水\n期初银行流水","read_only":1},
   {"fieldname":"line_source","fieldtype":"Select","label":"明细来源","options":"Ledger\nBook Outstanding\nBank Transaction","read_only":1},
   {"fieldname":"match_status","fieldtype":"Select","label":"匹配状态","options":"Matched\nUnmatched\nTiming","read_only":1},
   {"fieldname":"posting_date","fieldtype":"Date","in_list_view":1,"label":"过账日期","read_only":1},

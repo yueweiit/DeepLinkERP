@@ -44,7 +44,7 @@ class ChinaReconciliationStatement(Document):
 				if row.reconciliation_status == STATUS_WAIVED:
 					if not row.waiver_reason or not row.waived_by or not row.waived_on:
 						frappe.throw(_("采购齐套豁免必须记录原因、豁免人和豁免时间"))
-					if not frappe.has_role(("System Manager", "Accounts Manager", "China Finance Manager")):
+					if not set(("System Manager", "Accounts Manager", "China Finance Manager")) & set(frappe.get_roles()):
 						frappe.throw(_("只有财务经理可以豁免采购齐套校验"))
 		comparison_balance = self.calculated_bank_balance if self.statement_type == "Bank" else self.closing_balance
 		self.difference = flt(self.counterparty_balance) - flt(comparison_balance)
@@ -58,7 +58,7 @@ class ChinaReconciliationStatement(Document):
 		if self.confirmation_method == "Internal Review":
 			if not self.internal_review_reason:
 				frappe.throw(_("内部复核必须填写原因"))
-			if not frappe.has_role(("System Manager", "Accounts Manager", "China Finance Manager")):
+			if not set(("System Manager", "Accounts Manager", "China Finance Manager")) & set(frappe.get_roles()):
 				frappe.throw(_("只有中国财务管理员可以确认内部复核"))
 		if self.statement_type == "Bank" and not self.bank_snapshot_json:
 			frappe.throw(_("银行对账必须先生成银行对账快照"))

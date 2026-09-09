@@ -6,6 +6,11 @@ from frappe.tests import UnitTestCase
 from openpyxl import Workbook
 
 from china_finance.overrides.bank_statement_import import get_full_import_preview, _validate_import_batch
+from china_finance.services.bank_reconciliation import (
+	_apply_journal_entry_summary,
+	_resolve_account,
+	_resolve_company_party,
+)
 from china_finance.services.bank_statement_import import parse_cmb_statement
 
 
@@ -69,6 +74,7 @@ class TestBankStatementImport(UnitTestCase):
 		rows = parse_cmb_statement(content.getvalue(), "测试银行账户")
 
 		self.assertEqual(rows[0][4], "FLOW-001")
+		self.assertEqual(rows[0][3].split("｜", 1)[0], "报销-张三")
 		self.assertIn("对方：张三", rows[0][3])
 		self.assertIn("交易类型：对公转账正常提出", rows[0][3])
 		self.assertIn("业务参考号：BIZ-001", rows[0][3])
@@ -132,3 +138,89 @@ class TestBankStatementImport(UnitTestCase):
 	def test_import_batch_rejects_duplicate_references_before_writes(self):
 		with self.assertRaises(frappe.ValidationError):
 			_validate_import_batch([{"reference": "FLOW-001"}, {"reference": "FLOW-001"}])
+
+	def test_interest_income_resolves_to_finance_expense_account(self):
+		with patch(
+			"china_finance.services.bank_reconciliation.frappe.db.get_value",
+			return_value="660302 - 利息收入",
+		) as get_value:
+			account = _resolve_account("利息收入", "悦为智能技术（东莞）有限公司")
+
+		self.assertEqual(account, "660302 - 利息收入")
+		self.assertEqual(get_value.call_args.args[1]["account_number"], "660302")
+
+	def test_generic_tax_reference_uses_zero_tax_account(self):
+		with patch(
+			"china_finance.services.bank_reconciliation.frappe.db.get_value",
+			return_value="222199 - 其他应交税费",
+		) as get_value:
+			account = _resolve_account(
+				"00TX:实时缴税:税单号:626071511934404123",
+				"悦为智能技术（东莞）有限公司",
+				reference_number="C0347H80011WJFZ",
+			)
+
+		self.assertEqual(account, "222199 - 其他应交税费")
+		self.assertEqual(get_value.call_args.args[1]["account_number"], "222199")
+
+	def test_confirmed_investment_transfer_uses_share_capital_account(self):
+		with patch(
+			"china_finance.services.bank_reconciliation.frappe.db.get_value",
+			return_value="4001 - 实收资本",
+		) as get_value:
+			account = _resolve_account(
+				"转账",
+				"悦为智能技术（东莞）有限公司",
+				reference_number="C0347H30010RMVZ",
+				counterparty_name="周悦",
+			)
+
+		self.assertEqual(account, "4001 - 实收资本")
+		self.assertEqual(get_value.call_args.args[1]["account_number"], "4001")
+
+	def test_company_counterparty_prefers_party_type_by_flow_direction(self):
+		transaction = frappe._dict(withdrawal=100, deposit=0)
+		with patch(
+			"china_finance.services.bank_reconciliation.frappe.db.get_value",
+			side_effect=["SUP-001", None],
+		):
+			party = _resolve_company_party("东莞市润企产业运营服务有限公司", transaction)
+
+		self.assertEqual(party, {"party_type": "Supplier", "party": "SUP-001"})
+
+	def test_receivable_counterparty_uses_customer_even_for_bank_payment(self):
+		transaction = frappe._dict(withdrawal=100, deposit=0)
+		with patch(
+			"china_finance.services.bank_reconciliation.frappe.db.get_value",
+			return_value="CUS-001",
+		):
+			party = _resolve_company_party(
+				"深圳市腾讯计算机系统有限公司", transaction, preferred_party_type="Customer"
+			)
+
+		self.assertEqual(party, {"party_type": "Customer", "party": "CUS-001"})
+
+	def test_personal_counterparty_is_not_auto_assigned_as_party(self):
+		with patch("china_finance.services.bank_reconciliation.frappe.db.get_value") as get_value:
+			party = _resolve_company_party("张三", frappe._dict(withdrawal=100, deposit=0))
+
+		self.assertEqual(party, {})
+		get_value.assert_not_called()
+
+	def test_bank_voucher_summary_is_written_to_parent_and_each_line(self):
+		journal_entry = frappe.new_doc("Journal Entry")
+		journal_entry.append("accounts", {
+			"account": "660201 - 管理费用－办公费",
+			"debit_in_account_currency": 100,
+		})
+		journal_entry.append("accounts", {
+			"account": "100201 - 银行存款－基本存款账户",
+			"credit_in_account_currency": 100,
+		})
+
+		_apply_journal_entry_summary(journal_entry, "报销-张三")
+
+		self.assertEqual(journal_entry.custom_remark, 1)
+		self.assertEqual(journal_entry.remark, "报销-张三")
+		self.assertEqual(journal_entry.user_remark, "报销-张三")
+		self.assertEqual([row.user_remark for row in journal_entry.accounts], ["报销-张三", "报销-张三"])

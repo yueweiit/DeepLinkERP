@@ -225,7 +225,7 @@ def _format_amount(amount):
 
 
 def _build_description(row):
-	parts = [str(row.get("摘要") or "").strip()]
+	parts = [_build_business_summary(row)]
 	for label, fieldname in (
 		("对方", "收(付)方名称"),
 		("账号", "收(付)方账号"),
@@ -243,6 +243,15 @@ def _build_description(row):
 		if value:
 			parts.append(f"{label}：{value}")
 	return "｜".join(part for part in parts if part)
+
+
+def _build_business_summary(row):
+	"""Return the user-facing summary while keeping bank metadata separate."""
+	summary = str(row.get("摘要") or "").strip()
+	counterparty = str(row.get("收(付)方名称") or "").strip()
+	if summary in {"报销", "报销款"} and counterparty:
+		return f"{summary}-{counterparty}"
+	return summary
 
 
 def _validate_cmb_balances(worksheet, header_row, header_indexes):
@@ -300,7 +309,7 @@ def _get_or_create_converted_file(doc, rows, file_hash, doctype=None, fieldname=
 	# Bump the normalized-file format whenever the column layout changes. This
 	# prevents a previously generated, misaligned CSV from being reused for the
 	# same source workbook after the parser is fixed.
-	filename = f"招商银行流水-v2-{file_hash[:12]}.csv"
+	filename = f"招商银行流水-v3-{file_hash[:12]}.csv"
 	existing = frappe.db.get_value(
 		"File",
 		{"attached_to_doctype": doctype, "attached_to_name": doc.name, "file_name": filename},
