@@ -6,6 +6,11 @@
       fields: [
         {
           fieldtype: "HTML",
+          fieldname: "settlement_history",
+          options: `<div class="ocw-pull-note"><strong>物流类采购支出结算</strong><span>匹配全部已归档历史采购支出，不受下方日期、运输方式和条数限制。</span><div class="ocw-settlement-toolbar"><button type="button" class="ocw-outline-btn" data-action="settlement-history">一键匹配历史采购支出</button><button type="button" class="ocw-outline-btn" data-action="settlement-history-status">查看匹配进度与结果</button></div></div>`,
+        },
+        {
+          fieldtype: "HTML",
           fieldname: "pull_note",
           options: `
             <div class="ocw-pull-note">
@@ -42,6 +47,10 @@
       },
     });
     dialog.show();
+    dialog.$wrapper.on("click.ocwSettlementHistory", "[data-action='settlement-history'],[data-action='settlement-history-status']", (event) => {
+      const start = $(event.currentTarget).attr("data-action") === "settlement-history";
+      this.openSettlementHistory(start).catch((error) => this.showError(error));
+    });
     this.setOaPullPrimaryState(dialog, "ready");
   }
 

@@ -35,7 +35,7 @@
         </div>
         <div class="ocw-allocation-policy">
           <strong>当前口径</strong>
-          <span>物流费、清关费、税费、仓储费、罚款、杂费等有来源的费用原则上都进综合成本；系统默认先按毛重分摊。确认属于抛货时，可人工改为体积/计费重后重新试算；${this.escape(sourcePrioritySummary)}</span>
+          <span>已确认关联且审批通过的物流采购支出，按核对后的覆盖范围替换原费用；国际物流报价保留为暂估依据。装箱和汇率核对后再试算，费用按当前规则分摊；${this.escape(sourcePrioritySummary)}</span>
         </div>
         <div class="ocw-allocation-grid">
           <div class="ocw-allocation-head">
@@ -136,7 +136,7 @@
     return (
       sourceStatus.source_priority_summary ||
       policy.short_summary ||
-      "税费听完税凭证；采购价听采购支出 OA；物流/清关/杂费听国际物流 OA；附件和 OCR 只做补充；人工调整保留记录。"
+      "税费听完税凭证；采购价听采购支出 OA；物流结算覆盖费用听最终采购支出 OA；附件和 OCR 只做补充；人工调整保留记录。"
     );
   }
 
@@ -233,6 +233,7 @@
     const remark = String(rule.remark || "").trim();
     const code = String(rule.rule_code || rule.fee_key || "").toLowerCase();
     const sourceStatus = batch.source_status || {};
+    if (rule.source_binding_id && Number(rule.is_final) === 1) return "最终物流采购支出 OA";
     if (remark.includes("AI") || rule.is_ai_suggestion) return "AI基础分摊/待人工复核";
     if (remark.includes("钉钉") || code.includes("oa_logistics")) return "钉钉国际物流 OA";
     if ((sourceStatus.confirmed_logistics_quote || {}).amount && (code.includes("freight") || code.includes("logistics"))) {

@@ -287,8 +287,10 @@
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
       <div class="ocw-detail-section-head"><div><span>异常处理</span><h2>资料与费用</h2></div><button class="ocw-outline-btn" type="button" data-action="detail-repull">重拉本批次</button></div>
+      <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
       <div data-area="manual-documents">${this.renderManualDocumentPanel(batch, resolvedType, [])}</div>
     `);
+    this.loadSettlementStrip(batch.name);
     try {
       await this.loadManualDocumentAttachments(batch, this.detailDocumentAdapter(), resolvedType);
     } catch (error) {
