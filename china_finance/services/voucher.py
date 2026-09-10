@@ -75,9 +75,10 @@ def validate_source_approval(doc, method=None):
 		frappe.throw(_("{0} 已启用制单审核分离，但 {1} 没有启用审批工作流").format(settings.company, doc.doctype))
 	reviewer = get_reviewer(doc.doctype, doc.name)
 	if not reviewer:
-		frappe.throw(_("单据尚未完成独立审核，不能记账"))
-	if reviewer in {doc.owner, frappe.session.user}:
-		frappe.throw(_("制单人、审核人和记账人不能由同一用户兼任"))
+		frappe.throw(_("单据尚未完成审核，不能记账"))
+	# A small accounting team may have one user complete preparation, review,
+	# and posting. Keep the workflow review record and audit fields, but do not
+	# reject the posting only because the same user performed each step.
 
 
 def on_gl_source_submit(doc, method=None):
