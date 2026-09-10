@@ -80,7 +80,7 @@ def enrich_raw(store, raw, *, reader, cache_file=None):
                     try:
                         parsed['file_url'] = cache_file(content, str(manifest.get('file_name') or 'attachment'))
                     except Exception as exc:
-                        if type(exc).__name__ != 'MaxFileSizeReached':
+                        if type(exc).__name__ not in {'MaxFileSizeReached', 'MaxFileSizeReachedError'}:
                             raise
                         # The immutable archive is still available. A private File
                         # cache size limit must not discard the entire approval.
