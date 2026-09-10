@@ -8,6 +8,7 @@ import frappe
 
 from overseas_costing.services import material_ai_fill_service, material_import_service, material_input_service
 from overseas_costing.services.access_control import require_batch_permission
+from overseas_costing.services.material_ai_errors import source_review_endpoint
 
 
 USER_QUANTITY_MODES = {"DEFAULT_PURCHASE", "MANUAL_CONFIRMED"}
@@ -206,6 +207,7 @@ def save_source_ai_clarification(batch_name, clarification_text, expected_revisi
 
 
 @frappe.whitelist()
+@source_review_endpoint("启动分析")
 def start_source_ai_review(
     batch_name,
     version_name,
@@ -213,6 +215,7 @@ def start_source_ai_review(
     force=False,
     selected_source_ids_json=None,
     expected_clarification_revision=None,
+    request_id=None,
 ):
     batch_name = require_batch_permission(batch_name, "write")
     return material_ai_fill_service.start_source_ai_review(
@@ -222,6 +225,7 @@ def start_source_ai_review(
         **({"expected_clarification_revision": int(expected_clarification_revision)}
            if expected_clarification_revision is not None else {}),
         force=str(force).strip().lower() in {"1", "true", "yes"},
+        request_id=request_id,
         selected_source_ids=(
             _ai_review_payload(selected_source_ids_json, list, "资料来源选择")
             if selected_source_ids_json is not None
@@ -231,6 +235,7 @@ def start_source_ai_review(
 
 
 @frappe.whitelist()
+@source_review_endpoint("读取分析状态")
 def get_source_ai_review_status(batch_name, run_id=None, version_name=None, after_revision=None):
     batch_name = require_batch_permission(batch_name, "read")
     return material_ai_fill_service.get_source_ai_review_status(

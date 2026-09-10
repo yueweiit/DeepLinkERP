@@ -7345,11 +7345,13 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-grid-scroll::-webkit-scrollbar { display: none; }
 .ocw-mf-grid-scroll-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 6px 10px 2px; background: #fff; }
 /* Use the custom WebKit track so macOS overlay scrollbars do not fade it out. */
-.ocw-mf-grid-scrollbar { height: 16px; overflow-x: scroll; overflow-y: hidden; scrollbar-color: auto; scrollbar-width: auto; }
+.ocw-mf-grid-scrollbar { height: 24px; overflow-x: scroll; overflow-y: hidden; scrollbar-color: auto; scrollbar-width: auto; }
 .ocw-mf-grid-scrollbar > div { height: 1px; }
-.ocw-mf-grid-scrollbar::-webkit-scrollbar { display: block; height: 12px; }
-.ocw-mf-grid-scrollbar::-webkit-scrollbar-track { border-radius: 99px; background: #e8f0f7; }
-.ocw-mf-grid-scrollbar::-webkit-scrollbar-thumb { border: 2px solid #e8f0f7; border-radius: 99px; background: #78bdf0; }
+.ocw-mf-grid-scrollbar::-webkit-scrollbar { display: block; height: 20px !important; }
+.ocw-mf-grid-scrollbar::-webkit-scrollbar-track { border-radius: 99px; background: #dde9f3; }
+.ocw-mf-grid-scrollbar::-webkit-scrollbar-thumb { border: 2px solid #dde9f3; border-radius: 99px; background: #1683d8; }
+.ocw-mf-grid-scrollbar::-webkit-scrollbar-thumb:hover { background: #0968b2; }
+.ocw-mf-grid-scrollbar::-webkit-scrollbar-thumb:active { background: #07558f; }
 .ocw-mf-grid-scroll-controls button { width: 32px; min-width: 32px; padding: 3px; font-size: 18px; line-height: 1; }
 .ocw-mf-grid-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-top: 1px solid #edf1f6; color: var(--mf-muted); font-size: 12px; }
 .ocw-mf-grid-footer > div { display: flex; gap: 7px; }
@@ -7505,7 +7507,8 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-source-progress article em { color: #667085; font-size: 11px; font-style: normal; }
 .ocw-mf-ai-source-progress article small { color: #b42318; white-space: normal; }
 .ocw-mf-ai-progress-empty { padding: 22px; border: 1px dashed #cbd5e1; border-radius: 8px; color: #667085; text-align: center; }
-.ocw-mf-ai-progress-warning { padding: 9px 11px; border-radius: 7px; background: #fff8e7; color: #8a5700; font-size: 11px; line-height: 1.5; }
+.ocw-mf-ai-progress-warning { padding: 9px 11px; border-radius: 7px; background: #fff8e7; color: #8a5700; font-size: 11px; line-height: 1.5; white-space: pre-line; overflow-wrap: anywhere; }
+.ocw-mf-ai-progress-modal [data-mf-ai-source-restriction] { color: #8a5700; line-height: 1.5; }
 .ocw-mf-ai-review-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .ocw-mf-ai-review-dialog > header > div { display: flex; flex-wrap: wrap; gap: 7px; }
 .ocw-mf-ai-review-dialog > header > div:first-child { display: grid; gap: 4px; }

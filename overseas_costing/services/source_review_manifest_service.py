@@ -80,6 +80,12 @@ def prepare_source_manifest(
     by_id: dict[str, dict] = {}
     for raw in raw_sources or []:
         source = deepcopy(raw or {})
+        if source.get('analysis_allowed') is False and source.get('analysis_required'):
+            from .material_ai_source_dependencies import SourceEligibilityError
+            raise SourceEligibilityError(source.get('analysis_reason') or '必需来源不可读取。', source=source,
+                code=source.get('analysis_code') or 'SOURCE_UNAVAILABLE')
+        if source.get('analysis_allowed') is False:
+            source.update(excluded=True, exclude_reason=source.get('analysis_reason') or '来源不可读取。')
         public_id, parent_id = stable_source_identity(source)
         if public_id in by_id:
             raise ValueError(f"资料来源标识重复：{public_id}。")
@@ -170,6 +176,11 @@ def source_progress_manifest(manifest: Iterable[dict]) -> list[dict]:
                 "selected": bool(source.get("selected")),
                 "locked": bool(source.get("locked")),
                 "selectable": bool(source.get("selectable")),
+                "analysis_allowed": bool(source.get("analysis_allowed", source.get("selectable"))),
+                "analysis_reason": _text(source.get("analysis_reason"), 1000),
+                "adoption_allowed": bool(source.get("adoption_allowed", True)),
+                "final_fee_allowed": bool(source.get("final_fee_allowed", False)),
+                "adoption_restriction": _text(source.get("adoption_restriction"), 1000),
                 "read_status": read_status,
                 "parse_method": parse_method,
                 "result_count": int(source.get("result_count") or 0),

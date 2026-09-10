@@ -1476,6 +1476,7 @@ def start_source_ai_review(
     clarification_text: str | None = None,
     *,
     force: bool = False,
+    request_id: str | None = None,
     expected_clarification_revision: int | None = None,
     selected_source_ids: list[str] | None = None,
     repository: Any | None = None,
@@ -1489,6 +1490,25 @@ def start_source_ai_review(
     if hasattr(repo, "lock_review_scope"):
         repo.lock_review_scope(context["batch"])
         context = repo.get_context(str(batch_name), str(version_name))
+    request_key = str(request_id or '')
+    if request_key and not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', request_key):
+        raise ValueError('分析请求标识不合法，请重新打开分析。')
+    from .logistics_settlement.model import digest
+    request_fingerprint = digest(version_name, clarification_text, expected_clarification_revision,
+                                 selected_source_ids, force, trigger_mode)
+    if request_key and callable(getattr(repo, 'find_start_request', None)):
+        requested = repo.find_start_request(context['batch'], context['version'], request_key, request_fingerprint)
+        if requested:
+            return {'ok': True, 'run_id': _record_value(requested, 'name'),
+                    'status': _record_value(requested, 'status'), 'reused': True,
+                    'reuse_reason': 'SAME_REQUEST',
+                    'progress_revision': int(_record_value(requested, 'progress_revision', 0) or 0)}
+
+    def remember_request(run):
+        if request_key and callable(getattr(repo, 'save_start_request', None)):
+            repo.save_start_request(context['batch'], context['version'], request_key,
+                                    request_fingerprint, str(_record_value(run, 'name')))
+
     note = _saved_clarification(repo, context["batch"], locked=True)
     if expected_clarification_revision is not None and int(expected_clarification_revision) != note["revision"]:
         return {"ok": False, "conflict": True, "clarification": note,
@@ -1524,6 +1544,7 @@ def start_source_ai_review(
         running and selected_source_ids is None and not force
         and str(_record_value(running, "input_fingerprint") or "") == fingerprint
     ):
+        remember_request(running)
         if hasattr(repo, "commit"):
             repo.commit()
         return {
@@ -1538,6 +1559,7 @@ def start_source_ai_review(
         context["batch"], context["version"], fingerprint
     )
     if existing:
+        remember_request(existing)
         if hasattr(repo, "commit"):
             repo.commit()
         return {
@@ -1576,6 +1598,7 @@ def start_source_ai_review(
             "progress_revision": 0,
         }
     )
+    remember_request(created)
     run_id = str(_record_value(created, "name") or "")
     (enqueue or _default_enqueue)(run_id)
     if hasattr(repo, "commit"):
@@ -3883,6 +3906,31 @@ def _now() -> str:
 class FrappeMaterialAIFillRepository:
     supports_row_selection = True
 
+    def find_start_request(self, batch, version, request_id, fingerprint):
+        from .logistics_settlement.store import Store
+        from .logistics_settlement.model import digest
+        record = Store.frappe().get('state', digest('ai-start-request', batch, version, request_id), lock=True)
+        if not record:
+            return None
+        if record.get('fingerprint') != fingerprint:
+            raise ValueError('此分析请求的资料或说明已变化，请重新启动分析。')
+        return self.get_start_request_run(record['run_id'])
+
+    def get_start_request_run(self, run_id):
+        # Permissions/context can establish an older REPEATABLE READ snapshot before the batch lock.
+        rows = frappe.db.sql(
+            'SELECT name,status,progress_revision FROM `tabOverseas Cost Material AI Run` WHERE name=%s FOR UPDATE',
+            (run_id,), as_dict=True)
+        if not rows:
+            raise ValueError('原分析任务已不存在，请重新启动分析。')
+        return rows[0]
+
+    def save_start_request(self, batch, version, request_id, fingerprint, run_id):
+        from .logistics_settlement.store import Store
+        from .logistics_settlement.model import digest
+        Store.frappe().put('state', {'id': digest('ai-start-request', batch, version, request_id),
+            'updated_at': _now(), 'data': _json({'run_id': run_id, 'fingerprint': fingerprint})})
+
     def capture_row_dependencies(self,sources,context,*,allow_pending=False):
         from .material_ai_source_dependencies import capture_dependencies
         from .logistics_settlement.store import Store
@@ -3890,14 +3938,17 @@ class FrappeMaterialAIFillRepository:
         ledger=FrappeLedger()
         inherited=effective_source.json_dict((ledger.get('version',context['version']) or {}).get('extra_json')).get('ai_row_adoption')
         return capture_dependencies(sources,store=Store.frappe(),ledger=ledger,batch_name=context['batch'],
-            source_context=context.get('effective_source') or {},inherited=inherited,allow_pending=allow_pending)
+            source_context=context.get('effective_source') or {},inherited=inherited,allow_pending=allow_pending,purpose='analysis')
 
-    def assert_row_dependencies(self,batch,dependencies,*,lock=False):
+    def assert_row_dependencies(self,batch,dependencies,*,lock=False,purpose="analysis"):
         from .material_ai_source_dependencies import dependency_issues
         from .logistics_settlement.store import Store
         from .logistics_settlement.ledger import FrappeLedger
-        issues=dependency_issues({'dependencies':dependencies},store=Store.frappe(),ledger=FrappeLedger(),batch_name=batch,lock=lock)
-        if issues:raise ValueError('来源内容已更新或失效，请重新分析；本次未保存。')
+        issues=dependency_issues({'dependencies':dependencies},store=Store.frappe(),ledger=FrappeLedger(),batch_name=batch,lock=lock,purpose=purpose)
+        if issues:raise ValueError('；'.join(issues))
+
+    def assert_adoption_dependencies(self,batch,dependencies,*,lock=False):
+        self.assert_row_dependencies(batch,dependencies,lock=lock,purpose='adoption')
 
     def save_row_review_draft(self, run, draft):
         frappe.db.set_value("Overseas Cost Material AI Run", _record_value(run, "name"), "draft_json", _json(draft), update_modified=False)

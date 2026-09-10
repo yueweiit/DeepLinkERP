@@ -63,7 +63,9 @@ def list_current_source_documents(batch_name, version_name=None):
     sources = packing_snapshot_service.list_material_ai_sources(batch_name,version_name)
     allowed = ('source_kind','source_id','source_label','file_name','sheet_name','approval_no','available',
                'excluded','exclude_reason','source_context','actor_name','occurred_at',
-               'cache_refreshed_at','refresh_last_checked_at','refresh_last_success_at','refresh_error')
+               'cache_refreshed_at','refresh_last_checked_at','refresh_last_success_at','refresh_error',
+               'analysis_allowed','analysis_reason','analysis_code','analysis_required','adoption_allowed',
+               'final_fee_allowed','adoption_restriction')
     items = [{key:source.get(key) for key in allowed} for source in sources]
     history = []
     if context.get('root_kind') == 'expense':

@@ -893,6 +893,14 @@ def selected_packing_ai_sources(batch_name, bundle):
 
 
 def list_material_ai_sources(batch_name: str, version_name: str | None = None) -> list[dict[str, Any]]:
+    from .material_ai_source_dependencies import annotate_source_eligibility
+    from .logistics_settlement.store import Store
+    from .logistics_settlement.ledger import FrappeLedger
+    return annotate_source_eligibility(_list_material_ai_sources(batch_name, version_name),
+        store=Store.frappe(), ledger=FrappeLedger(), batch_name=batch_name)
+
+
+def _list_material_ai_sources(batch_name: str, version_name: str | None = None) -> list[dict[str, Any]]:
     """Return a stable manifest of every trusted source the material AI task may read."""
 
     if frappe is None:

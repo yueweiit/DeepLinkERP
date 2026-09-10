@@ -409,7 +409,7 @@
               batch_name: batchName,
               version_name: this.detailState.versionName || batch.current_version || null,
               run_id: "",
-            }, false)
+            }, false, { inlineErrors: true })
           : Promise.resolve(null),
         shouldRestoreAI ? Promise.resolve(null)
           : this.call("overseas_costing.api.materials.get_source_ai_clarification", { batch_name: batchName }, false),
@@ -435,7 +435,7 @@
       }
       state.loading = false;
       this.renderMaterialFeeWorkspace();
-      if (["QUEUED", "RUNNING"].includes(String(state.aiFill?.status || "")) && !state.aiFill.polling) {
+      if (["QUEUED", "RUNNING"].includes(String(state.aiFill?.status || "")) && !state.aiFill.polling && !state.aiFill.polling_paused) {
         state.aiFill.polling = true;
         this.pollMaterialAIFill(
           state,
@@ -1097,11 +1097,11 @@
     const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
     const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
     const summary = fill.completion_summary || {};
-    const warning = String(fill.connection_error || fill.ai_warning || fill.error_message || "");
+    const warning = this.materialAIProgressWarning(fill);
     const ready = fill.status === "READY";
     const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
-    const canRetry = failed || Boolean(fill.stalled || fill.is_stalled || fill.connection_error);
-    const title = ready ? "AI 资料草稿已生成" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+    const canRetry = failed || Boolean(fill.stalled || fill.is_stalled || fill.connection_error || fill.polling_paused);
+    const title = ready ? "AI 资料草稿已生成" : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
     return `<div class="ocw-mf-ai-progress-dialog" data-mf-ai-progress-host="1">
       <header><div><strong data-mf-ai-progress-title>${this.escape(title)}</strong><span data-mf-ai-progress-step>${this.escape(fill.progress_step || "等待读取资料")}</span></div><b data-mf-ai-progress-percent>${progress}%</b></header>
       <main class="ocw-mf-ai-dialog-body">
@@ -1134,14 +1134,15 @@
       status,
       label: String(source?.label || "未命名资料"),
       detail: [source?.approval_no ? `审批 ${source.approval_no}` : "", source?.detail, location].filter(Boolean).join(" · ") || status.label,
-      error: String(source?.error || ""),
+      error: source?.error ? this.materialAIErrorMessage(source.error, "资料读取失败") : "",
+      restriction: this.materialAISourceRestriction(source),
     };
   }
 
   renderMaterialAIProgressSourceRow(source, index) {
     const key = this.materialAIProgressSourceKey(source, index);
     const view = this.materialAIProgressSourceView(source);
-    return `<article class="is-${view.status.tone}" data-mf-ai-source-key="${this.escape(key)}"><i></i><div><strong data-mf-ai-source-label>${this.escape(view.label)}</strong><span data-mf-ai-source-detail>${this.escape(view.detail)}</span><small data-mf-ai-source-error ${view.error ? "" : "hidden"}>${this.escape(view.error)}</small></div><em data-mf-ai-source-status>${view.status.label}</em></article>`;
+    return `<article class="is-${view.status.tone}" data-mf-ai-source-key="${this.escape(key)}"><i></i><div><strong data-mf-ai-source-label>${this.escape(view.label)}</strong><span data-mf-ai-source-detail>${this.escape(view.detail)}</span><small data-mf-ai-source-restriction ${view.restriction ? "" : "hidden"}>${this.escape(view.restriction)}</small><small data-mf-ai-source-error ${view.error ? "" : "hidden"}>${this.escape(view.error)}</small></div><em data-mf-ai-source-status>${view.status.label}</em></article>`;
   }
 
   updateMaterialAIProgressSources($host, sources) {
@@ -1168,6 +1169,7 @@
       $row.find("[data-mf-ai-source-detail]").text(view.detail);
       $row.find("[data-mf-ai-source-status]").text(view.status.label);
       $row.find("[data-mf-ai-source-error]").text(view.error).prop("hidden", !view.error);
+      $row.find("[data-mf-ai-source-restriction]").text(view.restriction).prop("hidden", !view.restriction);
     });
     remaining.forEach(($row) => $row.remove());
     $list.find("[data-mf-ai-progress-empty]").prop("hidden", Boolean(sources.length));
@@ -1207,12 +1209,7 @@
         } else if (action === "mf-ai-row-preview") {
           this.previewMaterialAIRowSelection();
         } else if (action === "mf-ai-progress-retry") {
-          dialog.hide();
-          state.aiProgressDialog = null;
-          state.aiFill = null;
-          state.aiPendingReady = null;
-          state.aiStartPromise = null;
-          this.startMaterialAIFill({ force: true });
+          this.retryMaterialAIProgress();
         }
       });
       dialog.$wrapper
@@ -1241,7 +1238,7 @@
           const fill = state.aiFill;
           const sourceId = String($(event.currentTarget).val() || "");
           const source = (fill?.source_progress || []).find((row) => String(row.source_id || "") === sourceId);
-          if (source && !source.locked && source.selectable !== false) {
+          if (this.materialAICanSelectSource(source)) {
             source.selected = Boolean($(event.currentTarget).prop("checked"));
           }
         })
@@ -1281,10 +1278,10 @@
       const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
       const ready = fill.status === "READY";
       const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
-      const title = ready ? "AI 资料草稿已生成" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+      const title = ready ? "AI 资料草稿已生成" : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
       const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
       const summary = fill.completion_summary || {};
-      const warning = String(fill.connection_error || fill.ai_warning || fill.error_message || "");
+      const warning = this.materialAIProgressWarning(fill);
       $host.find("[data-mf-ai-progress-title]").text(title);
       $host.find("[data-mf-ai-progress-step]").text(fill.progress_step || "等待读取资料");
       $host.find("[data-mf-ai-progress-percent]").text(`${progress}%`);
@@ -1299,7 +1296,7 @@
       Object.entries(labels).forEach(([key, label]) => $host.find(`[data-mf-ai-summary='${key}']`).text(label));
       $host.find("[data-mf-ai-summary='failed_source_count']").prop("hidden", !Number(summary.failed_source_count || 0));
       $host.find("[data-mf-ai-progress-warning]").text(warning).prop("hidden", !warning);
-      $host.find("[data-action='mf-ai-progress-retry']").prop("hidden", !(failed || fill.stalled || fill.is_stalled || fill.connection_error));
+      $host.find("[data-action='mf-ai-progress-retry']").prop("hidden", !(failed || fill.stalled || fill.is_stalled || fill.connection_error || fill.polling_paused));
       this.updateMaterialAIProgressSources($host, sources);
     }
   }
@@ -1329,6 +1326,16 @@
     }[String(source?.read_status || "NO_RESULT")] || "未产生结果";
   }
 
+  materialAICanSelectSource(source) {
+    return Boolean(source) && !source.locked && source.selectable !== false && source.analysis_allowed !== false;
+  }
+
+  materialAISourceRestriction(source) {
+    if (source?.analysis_allowed === false) return `不可分析：${source.analysis_reason || source.adoption_restriction || "当前资料不可用于分析"}`;
+    if (source?.adoption_allowed === false) return `仅供分析：${source.adoption_restriction || "当前资料暂不能采用"}`;
+    return String(source?.adoption_restriction || source?.analysis_reason || "");
+  }
+
   renderMaterialAIReviewSources(fill) {
     const sources = Array.isArray(fill?.source_progress) ? fill.source_progress : [];
     const groups = ["READ", "FAILED", "NO_RESULT", "EXCLUDED", "NEEDS_SELECTION"];
@@ -1337,8 +1344,9 @@
       if (!rows.length) return "";
       return `<section><h4>${this.materialAIReadStatusLabel({ read_status: status })}（${rows.length}）</h4>${rows.map((source) => {
         const identity = [source.approval_no || source.source_context?.instance_id ? `审批 ${source.approval_no || source.source_context.instance_id}` : "", source.sheet_name ? `Sheet ${source.sheet_name}` : "", source.actor_name || "", source.occurred_at || ""].filter(Boolean).join(" · ");
-        const canToggle = !source.locked && source.selectable !== false;
-        return `<label class="is-${String(status).toLowerCase()}"><input type="checkbox" data-mf-ai-source-select="1" value="${this.escape(source.source_id || "")}" ${source.selected ? "checked" : ""} ${canToggle ? "" : "disabled"}><span><strong>${this.escape(source.label || source.source_id || "未命名资料")}</strong><small>${this.escape(identity || this.materialAIReadStatusLabel(source))}</small>${source.error ? `<em>${this.escape(source.error)}</em>` : ""}<i>${Number(source.result_count || source.candidate_count || 0)} 个候选 · ${this.escape(source.parse_method || "NONE")}</i></span>${source.locked ? "<b>锁定纳入</b>" : ""}</label>`;
+        const canToggle = this.materialAICanSelectSource(source);
+        const restriction = this.materialAISourceRestriction(source);
+        return `<label class="is-${String(status).toLowerCase()}"><input type="checkbox" data-mf-ai-source-select="1" value="${this.escape(source.source_id || "")}" ${source.selected && source.analysis_allowed !== false ? "checked" : ""} ${canToggle ? "" : "disabled"}><span><strong>${this.escape(source.label || source.source_id || "未命名资料")}</strong><small>${this.escape(identity || this.materialAIReadStatusLabel(source))}</small>${restriction ? `<small data-mf-ai-source-restriction>${this.escape(restriction)}</small>` : ""}${source.error ? `<em>${this.escape(this.materialAIErrorMessage(source.error, "资料读取失败"))}</em>` : ""}<i>${Number(source.result_count || source.candidate_count || 0)} 个候选 · ${this.escape(source.parse_method || "NONE")}</i></span>${source.locked ? "<b>锁定纳入</b>" : ""}</label>`;
       }).join("")}</section>`;
     }).join("") || `<p>未找到可用资料来源。</p>`}</div></details>`;
   }
@@ -1659,13 +1667,12 @@
   async restartMaterialAIWithSources(dialog) {
     const state = this.ensureMaterialFeeState();
     const selectedSourceIds = (state.aiFill?.source_progress || [])
-      .filter((source) => source.selected && !source.locked && source.selectable !== false)
+      .filter((source) => source.selected && this.materialAICanSelectSource(source))
       .map((source) => String(source.source_id || ""))
       .filter(Boolean);
-    state.aiFill = null;
     state.aiPendingReady = null;
     dialog.$wrapper.removeClass("is-review");
-    await this.startMaterialAIFill({ force: true, selectedSourceIds });
+    await this.startMaterialAIFill({ force: true, restart: true, selectedSourceIds });
   }
 
   sourceAIReviewProposalLabel(proposal) {
@@ -1831,26 +1838,125 @@
     return fill;
   }
 
-  materialAIErrorMessage(error, fallback = "AI 分析暂时不可用，请稍后重试。") {
-    const message = String(error?.message || error || "").trim();
-    if (/QueryDeadlockError|changed since last read|\(1020\)/i.test(message)) {
-      return "任务状态正在同步，系统会自动重试。";
+  materialAIErrorPayload(error) {
+    let payload = error?.responseJSON || error?.responseText || error?.xhr?.responseJSON || error?.xhr?.responseText || error;
+    if (typeof payload === "string") {
+      try { payload = JSON.parse(payload); } catch (_error) { return payload; }
     }
-    if (!message || /Traceback|frappe\.exceptions/i.test(message)) return fallback;
+    if (payload?.message && typeof payload.message === "object") payload = payload.message;
+    return payload;
+  }
+
+  materialAIErrorMessage(error, fallback = "AI 分析暂时不可用，请稍后重试。") {
+    const payload = this.materialAIErrorPayload(error);
+    if (!payload?.error?.reason && payload?.ok !== false) {
+      const status = error?.status ?? error?.xhr?.status;
+      if (status !== undefined) {
+        const transportMessage = {
+          0: "网络连接已中断，请检查连接后重试。",
+          401: "登录已失效，请重新登录后重试。",
+          403: "当前账号没有访问权限，请确认账号权限后重试。",
+          408: "请求超时，请稍后重试。",
+          502: "服务暂时不可用，请稍后重试。",
+          503: "服务暂时不可用，请稍后重试。",
+          504: "服务响应超时，请稍后重试。",
+        }[Number(status)];
+        if (transportMessage) return transportMessage;
+      }
+    }
+    const readable = payload?.error?.reason || payload?.reason || payload;
+    const message = String(this.normalizeErrorMessage?.(readable)
+      || this.extractReadableError?.(readable)
+      || (typeof readable === "string" ? readable : typeof readable?.message === "string" ? readable.message : "")).trim();
+    if (/QueryDeadlockError|changed since last read|\(1020\)/i.test(message)) {
+      return "任务状态正在同步，请稍后重试。";
+    }
+    if (!message || message === "操作失败" || /^\s*[\[{]/.test(message) || /\[object Object\]|Traceback|frappe\.exceptions/i.test(message)) return fallback;
     return message.slice(0, 500);
   }
 
-  failMaterialAIProgress(error, fallback) {
+  materialAIProgressWarning(fill) {
+    const payload = this.materialAIErrorPayload(fill.request_error || fill);
+    const detail = payload?.error || {};
+    const message = this.materialAIErrorMessage(fill.connection_error || fill.ai_warning || fill.error_message || fill.request_error, "");
+    return [message,
+      detail.stage ? `环节：${detail.stage}` : "",
+      detail.scope ? `范围：${detail.scope}` : "",
+      detail.source_label || detail.source_id || detail.approval_no
+        ? `来源：${[detail.source_label || detail.source_id, detail.approval_no ? `审批 ${detail.approval_no}` : ""].filter(Boolean).join(" · ")}` : "",
+      detail.next_action ? `下一步：${detail.next_action}` : "",
+      payload?.trace_id ? `参考编号：${payload.trace_id}` : "",
+    ].filter(Boolean).join("\n");
+  }
+
+  materialAIRequestRetryable(error) {
+    const payload = this.materialAIErrorPayload(error);
+    if (payload?.ok === false || payload?.retryable === false || payload?.error?.retryable === false) return false;
+    const status = error?.status ?? error?.xhr?.status;
+    if (status !== undefined) return [0, 408, 502, 503, 504].includes(Number(status));
+    const message = this.materialAIErrorMessage(error, "");
+    return /network|fetch failed|failed to fetch|load failed|timeout|timed out|connection (?:failed|reset|lost|refused)|网络|连接中断|连接超时/i.test(message);
+  }
+
+  failMaterialAIProgress(error, fallback, { resumePolling = false } = {}) {
     const state = this.ensureMaterialFeeState();
     state.aiFill = {
       ...(state.aiFill || {}),
-      status: "FAILED",
-      progress_step: "连接失败",
+      status: resumePolling ? state.aiFill?.status || "RUNNING" : "FAILED",
+      progress_step: resumePolling ? state.aiFill?.progress_step || "状态读取已暂停" : "分析未完成",
       error_message: this.materialAIErrorMessage(error, fallback),
+      request_error: this.materialAIErrorPayload(error),
       connection_error: "",
+      polling: false,
+      polling_paused: resumePolling,
     };
     this.openMaterialAIProgressDialog();
     this.updateMaterialAIProgressSurface();
+  }
+
+  retryMaterialAIProgress() {
+    const state = this.ensureMaterialFeeState();
+    const fill = state.aiFill;
+    const workerStalled = Boolean(fill?.stalled || fill?.is_stalled);
+    if (state.aiPollRetryPromise && !workerStalled) return state.aiPollRetryPromise;
+    if (fill?.runId && !workerStalled && !["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(fill.status)) {
+      const generation = state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
+      fill.polling_paused = false;
+      delete fill.connection_error;
+      delete fill.error_message;
+      delete fill.request_error;
+      this.openMaterialAIProgressDialog();
+      const polling = this.pollMaterialAIFill(state, this.detailState.batchName, this.detailState.versionName, fill.runId)
+        .catch((error) => {
+          if (this.materialFeeState === state && state.aiRunGeneration === generation) {
+            this.failMaterialAIProgress(error, "AI 分析状态读取失败，请重试。", { resumePolling: true });
+          }
+        }).finally(() => {
+          if (state.aiPollRetryPromise === polling) state.aiPollRetryPromise = null;
+        });
+      state.aiPollRetryPromise = polling;
+      return polling;
+    }
+    state.aiStartPromise = null;
+    state.aiPollRetryPromise = null;
+    const options = { ...(state.aiStartOptions || {}) };
+    // A failed start may have reached the server. Keep its key until a run is known.
+    if (fill?.runId) {
+      options.force = true;
+      options.restart = true;
+      delete options.request_id;
+      delete options.requestPayload;
+      if (!Array.isArray(options.selectedSourceIds) && fill?.source_progress?.length) {
+        options.selectedSourceIds = fill.source_progress.filter((source) => source.selected && this.materialAICanSelectSource(source))
+          .map((source) => String(source.source_id || "")).filter(Boolean);
+      }
+    }
+    return this.startMaterialAIFill(options);
+  }
+
+  materialAINewRequestId() {
+    if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
+    return Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
   startMaterialAIFill(options = {}) {
@@ -1864,12 +1970,13 @@
       this.openMaterialAIProgressDialog();
       return Promise.resolve();
     }
-    state.aiFill = { status: "STARTING", progress_step: "正在启动分析任务", progress_percent: 0, progress_revision: 0, source_progress: [] };
+    state.aiStartOptions = { ...options, request_id: options.request_id || this.materialAINewRequestId(), ...(Array.isArray(options.selectedSourceIds) ? { selectedSourceIds: [...options.selectedSourceIds] } : {}) };
+    state.aiFill = { status: "STARTING", progress_step: "正在启动分析任务", progress_percent: 0, progress_revision: 0, source_progress: state.aiFill?.source_progress || [] };
     state.aiPendingReady = null;
     state.aiProgressMinimized = false;
     const generation = state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
     this.openMaterialAIProgressDialog();
-    const startPromise = this.runMaterialAIFillStart(state, options)
+    const startPromise = this.runMaterialAIFillStart(state, state.aiStartOptions)
       .catch((error) => {
         if (this.materialFeeState === state && state.aiRunGeneration === generation) this.failMaterialAIProgress(error, "AI 分析任务启动失败，请稍后重试。");
       })
@@ -1893,49 +2000,68 @@
 
   async runMaterialAIFillStart(state, options = {}) {
     const generation = state.aiRunGeneration;
-    const isCurrent = () => this.materialFeeState === state && state.aiRunGeneration === generation;
+    const batchName = this.detailState.batchName;
+    const versionName = this.detailState.versionName;
+    const isCurrent = () => this.materialFeeState === state && state.aiRunGeneration === generation
+      && this.detailState.batchName === batchName && this.detailState.versionName === versionName
+      && this.detailState.tab === "documents";
     if (state.calculationWrite) await state.calculationWrite;
     while (state.pendingWrites.size) await Promise.all([...state.pendingWrites]);
     if (!isCurrent()) return;
     if (Object.keys(state.materialDrafts || {}).length || Object.keys(state.feeDrafts || {}).length || Object.keys(state.materialSaveErrors || {}).length) {
       throw new Error("当前页面有未保存修改，请先完成保存再分析资料。");
     }
-    const batchName = this.detailState.batchName;
-    const versionName = this.detailState.versionName;
+    const requestId = options.request_id || this.materialAINewRequestId();
+    let payload = options.requestPayload?.request_id === requestId ? { ...options.requestPayload } : null;
+    if (!payload) {
+      payload = {
+        batch_name: batchName,
+        version_name: versionName,
+        request_id: requestId,
+        ...(state.aiClarificationLoaded
+          ? { expected_clarification_revision: state.aiClarificationRevision }
+          : { clarification_text: state.aiClarification || "" }),
+        force: options.force === true ? 1 : 0,
+      };
+      if (Array.isArray(options.selectedSourceIds)) {
+        const sources = new Map((state.aiFill?.source_progress || []).map((source) => [String(source.source_id || ""), source]));
+        payload.selected_source_ids_json = JSON.stringify(options.selectedSourceIds.filter((id) => {
+          const source = sources.get(String(id));
+          return !source || this.materialAICanSelectSource(source);
+        }));
+      }
+    }
+    // Retry the exact request: note edits and source refreshes may happen while its response is missing.
+    state.aiStartOptions = { ...options, request_id: requestId, requestPayload: { ...payload } };
     let started = null;
     let lastError = null;
     for (let attempt = 0; attempt < 3 && !started; attempt += 1) {
       if (!isCurrent()) return;
       try {
-        const payload = {
-          batch_name: batchName,
-          version_name: versionName,
-          ...(state.aiClarificationLoaded
-            ? { expected_clarification_revision: state.aiClarificationRevision }
-            : { clarification_text: state.aiClarification || "" }),
-          force: options.force === true ? 1 : 0,
-        };
-        if (Array.isArray(options.selectedSourceIds)) payload.selected_source_ids_json = JSON.stringify(options.selectedSourceIds);
-        started = await this.call("overseas_costing.api.materials.start_source_ai_review", payload, false);
+        started = await this.call("overseas_costing.api.materials.start_source_ai_review", { ...payload }, false, { inlineErrors: true });
+        if (!isCurrent()) return;
+        if (!started?.ok) throw started || new Error("AI 分析任务启动失败。");
       } catch (error) {
         if (!isCurrent()) return;
+        if (!this.materialAIRequestRetryable(error)) throw error;
+        started = null;
         lastError = error;
-        state.aiFill = { ...state.aiFill, progress_step: "连接中断，正在重试", connection_error: this.materialAIErrorMessage(error, "启动请求暂时失败，正在自动重试。") };
+        state.aiFill = { ...state.aiFill, progress_step: attempt < 2 ? "连接中断，正在重试" : "启动请求未完成", connection_error: this.materialAIErrorMessage(error, "启动请求暂时失败，正在自动重试。") };
         this.updateMaterialAIProgressSurface();
         if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 700 * (attempt + 1)));
       }
     }
     if (!isCurrent()) return;
     if (!started && lastError) throw lastError;
-    if (!started?.ok) throw new Error(started?.message || "AI 分析任务启动失败。 ");
-    state.aiFill = { runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, progress_revision: Number(started.progress_revision || 0), source_progress: [], reused: Boolean(started.reused), reuse_reason: started.reuse_reason || "" };
+    if (!started?.ok) throw started || new Error("AI 分析任务启动失败。");
+    state.aiFill = { ...started, runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, progress_revision: Number(started.progress_revision || 0), source_progress: started.source_progress || state.aiFill?.source_progress || [], reused: Boolean(started.reused), reuse_reason: started.reuse_reason || "" };
     state.aiPendingReady = null;
     this.openMaterialAIProgressDialog();
     this.updateMaterialAIProgressSurface();
     const polling = this.pollMaterialAIFill(state, batchName, versionName, started.run_id);
     if (options.restart) {
       polling.catch((error) => {
-        if (isCurrent()) this.failMaterialAIProgress(error, "AI 分析状态读取失败，请重试。");
+        if (isCurrent()) this.failMaterialAIProgress(error, "AI 分析状态读取失败，请重试。", { resumePolling: true });
       });
       return;
     }
@@ -1951,41 +2077,56 @@
       && this.detailState.versionName === versionName
       && this.detailState.tab === "documents"
       && (!state.aiFill?.runId || state.aiFill.runId === runId);
-    for (let attempt = 0; attempt < 300; attempt += 1) {
-      if (!isCurrent()) return;
-      let status = null;
-      try {
-        status = await this.call("overseas_costing.api.materials.get_source_ai_review_status", {
-          batch_name: batchName,
-          run_id: runId,
-          after_revision: Number(state.aiFill?.progress_revision || 0),
-        }, false);
+    if (!isCurrent()) return;
+    state.aiFill = { ...state.aiFill, runId, polling: true, polling_paused: false };
+    try {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
         if (!isCurrent()) return;
-        if (!status?.ok) throw new Error(status?.message || "AI 分析状态读取失败。 ");
-        failureCount = 0;
-      } catch (error) {
-        if (!isCurrent()) return;
-        failureCount += 1;
-        state.aiFill = { ...state.aiFill, connection_error: this.materialAIErrorMessage(error, "状态连接暂时中断，正在自动重试。") };
+        let status = null;
+        try {
+          status = await this.call("overseas_costing.api.materials.get_source_ai_review_status", {
+            batch_name: batchName,
+            run_id: runId,
+            after_revision: Number(state.aiFill?.progress_revision || 0),
+          }, false, { inlineErrors: true });
+          if (!isCurrent()) return;
+          if (!status?.ok) throw status || new Error("AI 分析状态读取失败。");
+          failureCount = 0;
+        } catch (error) {
+          if (!isCurrent()) return;
+          failureCount += 1;
+          if (!this.materialAIRequestRetryable(error) || failureCount >= 3) {
+            this.failMaterialAIProgress(error, "状态读取暂时中断，点击重试继续查看当前任务。", { resumePolling: true });
+            return;
+          }
+          state.aiFill = { ...state.aiFill, connection_error: this.materialAIErrorMessage(error, "状态连接暂时中断，正在自动重试。") };
+          this.updateMaterialAIProgressSurface();
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(5000, 800 * failureCount)));
+          continue;
+        }
+        const hadRequestError = Boolean(state.aiFill.connection_error || state.aiFill.request_error || state.aiFill.polling_paused);
+        delete state.aiFill.connection_error;
+        delete state.aiFill.request_error;
+        delete state.aiFill.error_message;
+        state.aiFill.polling_paused = false;
+        if (status.unchanged) {
+          if (hadRequestError) this.updateMaterialAIProgressSurface();
+          await new Promise((resolve) => window.setTimeout(resolve, 1200));
+          continue;
+        }
+        state.aiFill = { ...state.aiFill, ...status, runId, polling: true, draftVisible: false };
+        if (status.status === "READY") {
+          state.aiPendingReady = status;
+          this.showMaterialAIReadyDraft();
+        }
         this.updateMaterialAIProgressSurface();
-        await new Promise((resolve) => window.setTimeout(resolve, Math.min(5000, 800 * failureCount)));
-        continue;
-      }
-      if (status.unchanged) {
+        if (["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
         await new Promise((resolve) => window.setTimeout(resolve, 1200));
-        continue;
       }
-      state.aiFill = { ...state.aiFill, ...status, runId, polling: true, draftVisible: false };
-      delete state.aiFill.connection_error;
-      if (status.status === "READY") {
-        state.aiPendingReady = status;
-        this.showMaterialAIReadyDraft();
-      }
-      this.updateMaterialAIProgressSurface();
-      if (["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
-      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      if (isCurrent()) this.failMaterialAIProgress(new Error("状态读取等待时间较长，点击重试继续查看当前任务。"), undefined, { resumePolling: true });
+    } finally {
+      if (isCurrent()) state.aiFill.polling = false;
     }
-    if (isCurrent()) this.failMaterialAIProgress(new Error("AI 分析处理超时，请稍后重新分析。"));
   }
 
   updateMaterialAIDraftFromInput($input) {

@@ -666,7 +666,7 @@ def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_e
         ],
     )
 
-    result = service.list_material_ai_sources("B1", version_name="V1")
+    result = service._list_material_ai_sources("B1", version_name="V1")
 
     identities = {row["logical_source_id"] for row in result}
     assert identities == {"approval:MAIN:form", "oa:P1:F1", "CURRENT", "REJECTED"}
@@ -714,9 +714,9 @@ def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(mon
         SimpleNamespace(get_list=lambda *_args, **_kwargs: []),
     )
 
-    first = service.list_material_ai_sources("B1", version_name="V1")
+    first = service._list_material_ai_sources("B1", version_name="V1")
     trusted_hash["value"] = "b" * 64
-    second = service.list_material_ai_sources("B1", version_name="V1")
+    second = service._list_material_ai_sources("B1", version_name="V1")
 
     assert first[0]["source_hash"] != second[0]["source_hash"]
 
@@ -737,8 +737,8 @@ def test_current_wiki_refreshes_only_its_manifest_without_catalog_scan(monkeypat
     monkeypatch.setattr(service, "_list_approval_body_ai_sources", lambda *a, **kw: [])
     monkeypatch.setattr(service, "get_current_packing_snapshot", lambda *a: {
         "source_kind": "wiki_sheet", "source_id": "WB:S1", "source_hash": "old-confirmed-hash"})
-    first = service.list_material_ai_sources("B1")
+    first = service._list_material_ai_sources("B1")
     current_hash["value"] = "b" * 64
-    second = service.list_material_ai_sources("B1")
+    second = service._list_material_ai_sources("B1")
     assert first[0]["source_hash"] != second[0]["source_hash"]
     assert calls == [("WB", "S1"), ("WB", "S1")]

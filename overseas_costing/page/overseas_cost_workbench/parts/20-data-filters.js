@@ -1,5 +1,18 @@
-  async call(method, args = {}, freeze = false) {
-    const response = await frappe.call({ method, args, freeze });
+  async call(method, args = {}, freeze = false, options = {}) {
+    const inlineAIRequest = options.inlineErrors === true && [
+      "overseas_costing.api.materials.start_source_ai_review",
+      "overseas_costing.api.materials.get_source_ai_review_status",
+    ].includes(method);
+    // Frappe's status handlers show a second dialog even when a caller handles the error.
+    const response = inlineAIRequest
+      ? await $.ajax({
+          url: `/api/method/${method}`,
+          type: "POST",
+          data: args,
+          dataType: "json",
+          headers: { "X-Frappe-CSRF-Token": frappe.csrf_token, Accept: "application/json" },
+        })
+      : await frappe.call({ method, args, freeze });
     return response.message || {};
   }
   async loadBatches() {

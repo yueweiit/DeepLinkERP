@@ -289,7 +289,7 @@ def test_bound_source_listing_never_opens_even_corrupt_workbooks(setup,monkeypat
     monkeypatch.setattr(effective,'current_source_bundle',lambda *a,**kw:bundle)
     monkeypatch.setattr(packing,'frappe',SimpleNamespace(get_list=lambda *a,**kw:[attachment]))
     monkeypatch.setattr(packing,'_attachment_sheet_names',lambda *a:pytest.fail('catalogue opened workbook'))
-    result=packing.list_material_ai_sources(b['name'],v['name'])
+    result=packing._list_material_ai_sources(b['name'],v['name'])
     card=next(row for row in result if row.get('source_id')=='A')
     assert not card['available'] and card['exclude_reason']
 

@@ -61,7 +61,7 @@ def test_bound_manifest_reads_only_expense_body_comments_and_current_documents(m
     monkeypatch.setattr(effective, 'current_source_bundle', lambda *a, **kw: bundle)
     monkeypatch.setattr(packing, 'frappe', SimpleNamespace(get_list=lambda *a, **kw: [row, {**row, 'name': 'OLD', 'version': 'old'}, {'name': 'manual', 'source_type': 'Manual', 'file_name': 'OLD.txt'}]))
     monkeypatch.setattr(packing.packing_source_service.dingtalk_approval_service, 'get_batch_dingtalk_approval_detail', lambda *a: pytest.fail('read old Intl approval'))
-    sources = packing.list_material_ai_sources(batch['name'], version['name'])
+    sources = packing._list_material_ai_sources(batch['name'], version['name'])
     assert {s['source_kind'] for s in sources} == {'approval_form', 'approval_comment', 'approval_attachment'}
     assert {s['process_instance_id'] for s in sources} == {'E'}
     assert 'OLD' not in json.dumps(sources) and 'manual' not in json.dumps(sources)
@@ -140,7 +140,7 @@ def test_ai_complete_deepseek_payload_excludes_old_values_and_has_expense_body(m
         input_items.append({**old_item, 'name': 'I2', 'extra_json': json.dumps({'settlement_line_key': 'second-line'})})
     monkeypatch.setattr(effective, 'current_source_bundle', lambda *a, **kw: bundle)
     monkeypatch.setattr(packing, 'frappe', SimpleNamespace(get_list=lambda *a, **kw: []))
-    sources = packing.list_material_ai_sources(batch['name'], version['name'])
+    sources = packing._list_material_ai_sources(batch['name'], version['name'])
     repo = _LifecycleRepository(status='QUEUED')
     repo.sources = sources
     repo.get_items = lambda *a: copy.deepcopy(input_items)

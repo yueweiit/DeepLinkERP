@@ -6,26 +6,90 @@ from .logistics_settlement.document_writer import document_retired
 from .logistics_settlement.model import digest
 
 
+class SourceEligibilityError(ValueError):
+    """Safe source identity and a business reason, never archived document contents."""
+    def __init__(self, reason, *, source=None, code='SOURCE_UNAVAILABLE'):
+        source = source or {}
+        self.code = code
+        self.source_id = str(source.get('source_id') or source.get('id') or '')[:500]
+        self.approval_no = str(source.get('approval_no') or '')[:200]
+        self.source_label = str(source.get('source_label') or source.get('title') or '')[:300]
+        identity = ' · '.join(filter(None, (self.approval_no, self.source_label)))
+        super().__init__(f'{identity}：{reason}' if identity else reason)
+
+
+def approval_eligibility(source):
+    """Archive readability is independent of settlement classification/approval."""
+    status = str(source.get('status') or '').upper()
+    result = str(source.get('approval_result') or '').lower()
+    invalid = status in {'TERMINATED', 'CANCELED', 'CANCELLED', 'DELETED', 'REJECTED',
+                         'WITHDRAWN', 'WITHDRAW', 'REVOKED'} or result in {'refuse', 'reject', 'disagree'}
+    readable = _enabled(source) and not invalid
+    approved = readable and status == 'COMPLETED' and result in {'agree', 'approved', 'pass'}
+    pending = status == 'RUNNING'
+    reason = '' if readable else ('审批已拒绝、撤销或停用，不能用于当前分析。' if source else '本地审批归档缺失，请核对资料。')
+    restriction = '' if approved else ('审批中，仅供分析；不能作为最终结算费用。' if pending else '审批尚未通过，不能作为最终结算费用。')
+    return {'analysis_allowed': bool(readable), 'analysis_reason': reason,
+            'analysis_code': '' if readable else ('SOURCE_INVALID' if source else 'SOURCE_ARCHIVE_MISSING'),
+            'adoption_allowed': bool(readable and (source.get('kind') != 'expense' or approved)),
+            'final_fee_allowed': bool(approved), 'adoption_restriction': restriction}
+
+
+def annotate_source_eligibility(sources, *, store, ledger, batch_name):
+    """Use the same read checks for the displayed catalog and task execution."""
+    annotated = []
+    for raw in sources:
+        source = deepcopy(raw)
+        source.update(analysis_allowed=True, analysis_reason='', analysis_code='',
+                      adoption_allowed=True, final_fee_allowed=False, adoption_restriction='')
+        source['analysis_required'] = bool(raw.get('source_kind') == 'approval_form'
+            and raw.get('approval_role') in {'international_logistics', 'logistics_expense'})
+        try:
+            if raw.get('excluded') or raw.get('available') is False and not raw.get('can_download'):
+                raise SourceEligibilityError(raw.get('exclude_reason') or '资料不可读取，请核对来源。', source=raw)
+            context = raw.get('source_context') or {}
+            context = context.get('packing') or context
+            instance = raw.get('process_instance_id') or context.get('instance_id')
+            if instance:
+                matches = store.find('source', instance=instance, **({'corp': context['corp_id']} if context.get('corp_id') else {}))
+                if len(matches) != 1:
+                    raise SourceEligibilityError('缺少唯一的本地审批归档，请核对资料。', source=raw, code='SOURCE_ARCHIVE_MISSING')
+                source.update(approval_eligibility(matches[0]))
+            # Explicit selection ensures excluded rows cannot silently pass this check.
+            capture_dependencies([{**raw, 'selected': True}], store=store, ledger=ledger,
+                batch_name=batch_name, source_context=context, allow_pending=True, purpose='analysis', lock=False)
+        except (ValueError, OSError) as error:
+            source.update(analysis_allowed=False, adoption_allowed=False, final_fee_allowed=False,
+                analysis_reason=str(error), analysis_code=getattr(error, 'code', 'SOURCE_ARCHIVE_UNAVAILABLE'))
+        annotated.append(source)
+    return annotated
+
+
 def _enabled(record):
     return bool(record) and not (record.get('invalid') or record.get('disabled') or record.get('excluded')
         or record.get('retired_at') or record.get('available') is False or record.get('is_active') in (0, '0'))
 
 
-def _read_dependency(dependency, store, ledger, batch_name, *, lock=False):
+def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpose="adoption"):
+    if purpose not in {"analysis", "adoption"}:
+        raise ValueError("来源校验阶段不合法。")
     kind = dependency['kind']
     if kind == 'pending_attachment':
         # A remote file has no local row yet. Its immutable resolver identity is
         # fenced by the archived approval until the worker seals the local file.
         approval = _read_dependency({'kind': 'approval', 'source_id': dependency['source_id']},
-                                    store, ledger, batch_name, lock=lock)
+                                    store, ledger, batch_name, lock=lock, purpose=purpose)
         if approval.get('instance') != dependency.get('process_instance_id'):
             raise ValueError('待下载附件的审批身份已变化。')
         return {'identity': {k:v for k,v in dependency.items() if k != 'fingerprint'},
                 'approval': approval}
     if kind == 'approval':
         source = store.get('source', dependency['source_id'], lock=lock) or {}
-        if not _enabled(source) or (source.get('kind') == 'expense' and not source.get('approved')):
-            raise ValueError('审批来源缺失、未批准或已停用。')
+        eligibility = approval_eligibility(source)
+        if not eligibility['analysis_allowed']:
+            raise SourceEligibilityError(eligibility['analysis_reason'], source=source, code=eligibility['analysis_code'])
+        if purpose == 'adoption' and not eligibility['adoption_allowed']:
+            raise SourceEligibilityError(eligibility['adoption_restriction'], source=source, code='SOURCE_NOT_APPROVED')
         batch = ledger.get('batch', batch_name, lock=lock) or {}
         from .import_service import _get_linked_purchase_approvals_from_extra
         reference = next((row for row in _get_linked_purchase_approvals_from_extra(batch.get('extra_json'))
@@ -97,7 +161,7 @@ def _read_dependency(dependency, store, ledger, batch_name, *, lock=False):
     raise ValueError('来源依赖类型无法核对。')
 
 
-def dependency_issues(adoption, *, store=None, ledger=None, batch_name='', lock=False):
+def dependency_issues(adoption, *, store=None, ledger=None, batch_name='', lock=False, purpose='adoption'):
     dependencies = adoption.get('dependencies')
     if dependencies is None:
         return ['所选来源缺少依赖记录，请重新分析采用。'] if adoption.get('sources') else []
@@ -108,15 +172,17 @@ def dependency_issues(adoption, *, store=None, ledger=None, batch_name='', lock=
     issues = []
     for dependency in dependencies:
         try:
-            current = _read_dependency(dependency, store, ledger, batch_name, lock=lock)
+            current = _read_dependency(dependency, store, ledger, batch_name, lock=lock, purpose=purpose)
             if digest(current) != dependency.get('fingerprint'):
                 issues.append('所选来源内容已更新，请重新分析采用。')
+        except SourceEligibilityError as error:
+            issues.append(str(error))
         except (ValueError, KeyError, TypeError, OSError):
             issues.append('所选来源缺失、已更新或停用，请重新核对资料。')
     return sorted(set(issues))
 
 
-def capture_dependencies(sources, *, store, ledger, batch_name, source_context, inherited=None, allow_pending=False):
+def capture_dependencies(sources, *, store, ledger, batch_name, source_context, inherited=None, allow_pending=False, purpose="adoption", lock=True):
     """Save descriptors plus current local fingerprints after the run was revalidated."""
     dependencies = {}
 
@@ -124,17 +190,22 @@ def capture_dependencies(sources, *, store, ledger, batch_name, source_context, 
         key = digest(descriptor)
         if key not in dependencies:
             try:
-                fingerprint = digest(_read_dependency(descriptor, store, ledger, batch_name, lock=True))
+                fingerprint = digest(_read_dependency(descriptor, store, ledger, batch_name, lock=lock, purpose=purpose))
+            except SourceEligibilityError:
+                raise
             except (ValueError, KeyError, TypeError, OSError) as exc:
-                raise ValueError('所选来源缺少有效本地归档，请重新核对资料。') from exc
+                raise SourceEligibilityError(str(exc) if isinstance(exc, ValueError) else '本地归档无法读取，请核对资料。',
+                    source=active_source, code='SOURCE_ARCHIVE_UNAVAILABLE') from exc
             dependencies[key] = {**descriptor, 'fingerprint': fingerprint}
 
+    active_source = {}
     for source in sources or []:
+        active_source = source
         if source.get('selected') is False and not source.get('locked'):
             continue
         source_id = str(source.get('resolver_source_id') or source.get('attachment_name') or source.get('source_id') or '')
         if inherited and (source_id == inherited.get('id') or source.get('scoped_packing')):
-            if dependency_issues(inherited, store=store, ledger=ledger, batch_name=batch_name, lock=True):
+            if dependency_issues(inherited, store=store, ledger=ledger, batch_name=batch_name, lock=lock, purpose=purpose):
                 raise ValueError('所选来源已变化，请重新分析采用。')
             for saved in inherited.get('dependencies') or []:
                 descriptor = {key: value for key, value in saved.items() if key != 'fingerprint'}
@@ -148,7 +219,7 @@ def capture_dependencies(sources, *, store, ledger, batch_name, source_context, 
         if instance:
             candidates = store.find('source', instance=instance, **({'corp': context['corp_id']} if context.get('corp_id') else {}))
             if len(candidates) != 1:
-                raise ValueError('所选审批来源缺少唯一的本地归档。')
+                raise SourceEligibilityError('所选审批来源缺少唯一的本地归档。', source=source, code='SOURCE_ARCHIVE_MISSING')
             approval_source = candidates[0]
             add({'kind': 'approval', 'source_id': candidates[0]['id']})
         if kind in ('approval_attachment', 'approval_comment_attachment', 'manual_attachment'):
