@@ -93,7 +93,7 @@ def lines_for_source(source):
     for document in source.get('documents') or []:
         manifest=document.get('manifest') or {}
         if manifest.get('retired_at') or document.get('retired_at'): continue
-        if manifest.get('archive_quality') not in ('original','original_complete'):
+        if (manifest.get('content_quality') or manifest.get('archive_quality')) not in ('original','original_complete'):
             continue
         for table in document.get('freight_tables') or []:
             for row in table['rows']:

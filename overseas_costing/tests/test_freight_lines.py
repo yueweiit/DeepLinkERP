@@ -386,3 +386,13 @@ def test_active_fee_recovery_can_readopt_same_lines_without_duplicate_applicatio
     assert a.context(s,l,b['name'],v['name'])['available']
     assert a.confirm(s,l,b['name'],v['name'],c['id'],c['revision'],c['line_ids'],'tester')['cached']
     assert len(s.find('freight_application',batch=b['name']))==3
+
+
+def test_archive_content_quality_contract_indexes_original_and_excludes_converted():
+    from overseas_costing.services.logistics_settlement.freight_lines import lines_for_source
+    raw=monthly();manifest=raw['settlement_documents'][0]['manifest'];manifest.pop('archive_quality')
+    manifest['content_quality']='original'
+    parsed=parse_source(raw,logistics_codes={'logistics'})
+    assert len(lines_for_source(parsed))==2
+    manifest['content_quality']='preview_only'
+    assert lines_for_source(parse_source(raw,logistics_codes={'logistics'}))==[]
