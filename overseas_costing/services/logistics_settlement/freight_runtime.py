@@ -5,6 +5,14 @@ from .application import row_meta
 from .ai_matching import save
 
 
+def financial_summary(source):
+    from .runtime import source_summary
+    # The full payment statement is server evidence, not a batch-readable payload.
+    allowed={'id','corp','instance','approval_no','kind','status','approved','invalid','title','process_code',
+             'amount','currency','source_updated_at','snapshot','open_url'}
+    return {k:v for k,v in source_summary(source).items() if k in allowed}
+
+
 def candidate_view(store,candidate):
     from .runtime import source_summary
     source=store.get('source',candidate['expense_id'])
@@ -16,7 +24,7 @@ def candidate_view(store,candidate):
         lines.append({**line,'available':source['approved'] and not source['invalid'] and not line.get('ambiguous') and line['scope']=='freight'
             and not any(c['logistics_id']!=candidate['logistics_id'] for c in occupied),
             'adopted':any(c['logistics_id']==candidate['logistics_id'] and c['line_id']==lid for c in occupied)})
-    return {**candidate,'expense':source_summary(source),'lines':lines,
+    return {**candidate,'expense':financial_summary(source),'lines':lines,
             'packing_available':any(l.get('cargo_text') for l in lines) or bool(source.get('goods')) or any(d.get('tables') for d in source.get('documents') or [])}
 
 
@@ -44,7 +52,7 @@ def batch_status(store,ledger,batch_name,version_name=None):
     base['audit']=store.find('audit',binding_id=batch_name,limit=50)
     legacy=store.find('binding',logistics_id=logistics['id'])
     if legacy and not row_meta(version).get('freight_settlement'):
-        base['legacy_binding']={**legacy[0],'expense':source_summary(store.get('source',legacy[0]['expense_id']))}
+        base['legacy_binding']={**legacy[0],'expense':financial_summary(store.get('source',legacy[0]['expense_id']))}
         base['message']='已有整单关联保留历史，请按本票费用明细核对后迁移；旧金额不会自动扩大到其他票。'
     return base
 
@@ -126,4 +134,4 @@ def line_evidence(store,ledger,batch_name,version_name,line_id):
     from .runtime import source_summary
     source=store.get('snapshot',line['snapshot']) or {}
     return {**{k:line.get(k) for k in ('amount','currency','waybill','approval_no','label','billing_weight','cargo_text','evidence')},
-            'source':source_summary(source),'source_snapshot':line['snapshot']}
+            'source':financial_summary(source),'source_snapshot':line['snapshot']}

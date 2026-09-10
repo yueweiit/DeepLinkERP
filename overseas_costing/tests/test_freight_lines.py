@@ -334,7 +334,9 @@ def test_evidence_view_rejects_neighbor_bill_row_and_other_version():
     s,l,b,v,item,ls,e=setup_cost();c=m.rule_pass(s,ls['id'])[0]
     result=r.line_evidence(s,l,b['name'],v['name'],c['line_ids'][0])
     assert result['amount']=='2600' and result['evidence']['row']==2
-    assert 'HONOR' not in result['cargo_text']
+    assert 'HONOR' not in dumps(result)
+    assert not {'goods','fees','documents'} & set(result['source'])
+    assert not {'goods','fees','documents'} & set(r.candidate_view(s,c)['expense'])
     other=next(row for row in m.current_lines(s,e) if row['id'] not in c['line_ids'])
     with pytest.raises(ValueError):r.line_evidence(s,l,b['name'],v['name'],other['id'])
     with pytest.raises(ValueError):r.line_evidence(s,l,b['name'],'unrelated',c['line_ids'][0])

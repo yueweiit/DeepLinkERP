@@ -203,7 +203,9 @@ def find_expenses(batch_name, query='', after=None):
     params = [logistics['corp'], token, token, after or '']
     rows = db.sql("SELECT * FROM oc_ls_source WHERE kind='expense' AND CAST(JSON_EXTRACT(data,'$.invalid') AS CHAR) IN ('false','0') AND corp=%s AND (instance LIKE %s OR data LIKE %s) AND id>%s ORDER BY id LIMIT 51", params)
     sources = [db.unpack(row) for row in rows]
-    return {'ok': True, 'items': [{**runtime.source_summary(s), 'occupied': bool(db.find('binding', expense_id=s['id'], limit=1))} for s in sources[:50]],
+    from overseas_costing.services.logistics_settlement.freight_runtime import financial_summary
+    summarize=financial_summary if runtime.freight_enabled() else runtime.source_summary
+    return {'ok': True, 'items': [{**summarize(s), 'occupied': bool(db.find('binding', expense_id=s['id'], limit=1)) if not runtime.freight_enabled() else False} for s in sources[:50]],
             'has_more': len(sources)>50, 'next_cursor': sources[49]['id'] if len(sources)>50 else None}
 
 
