@@ -678,6 +678,45 @@ def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_e
     assert "UNRELATED" not in repr(result)
 
 
+@pytest.mark.parametrize('audit_first', [True, False])
+def test_material_ai_duplicate_audit_copy_cannot_hide_readable_attachment(monkeypatch, audit_first):
+    import json
+    from types import SimpleNamespace
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest, stable_source_identity
+
+    metadata = {'process_instance_id': 'MAIN', 'file_id': 'FILE-1'}
+    active = {'name': 'ACTIVE', 'version': 'V1', 'source_type': 'OA', 'file_name': '装箱单.xlsx',
+              'file_url': '/private/files/packing.xlsx', 'parse_result_json': json.dumps(metadata)}
+    audit = {**active, 'name': 'AUDIT', 'parse_result_json': json.dumps({**metadata,
+             'approval_excluded': True, 'cost_source_allowed': False})}
+    rows = [audit, active] if audit_first else [active, audit]
+    original = copy.deepcopy(rows)
+    monkeypatch.setattr(service, 'frappe', SimpleNamespace(get_list=lambda *a, **kw: rows))
+    monkeypatch.setattr(service.effective_source, 'current_source_bundle', lambda *a: None)
+    monkeypatch.setattr(service.packing_source_service.dingtalk_approval_service,
+                        'get_batch_dingtalk_approval_detail', lambda *a: {})
+    monkeypatch.setattr(service, 'list_packing_sources', lambda *a, **kw: {})
+    monkeypatch.setattr(service, 'get_current_packing_snapshot', lambda *a: {})
+    monkeypatch.setattr(service, '_list_approval_body_ai_sources', lambda *a, **kw: [{
+        'source_id': 'approval:MAIN:form', 'source_kind': 'approval_form', 'process_instance_id': 'MAIN'}])
+    monkeypatch.setattr(service, '_attachment_sheet_names', lambda row: ['本票装箱'])
+    monkeypatch.setattr(service.packing_source_service, '_attachment_hash', lambda row: 'same-content')
+
+    raw = service._list_material_ai_sources('B1', 'V1')
+    sheet = next(row for row in raw if row.get('sheet_name'))
+    assert sheet['source_id'] == 'ACTIVE'
+    selected_id = stable_source_identity(sheet)[0]
+    manifest = prepare_source_manifest(raw, selected_source_ids=[selected_id])
+    selected = [row for row in manifest if row.get('sheet_name') and row['selected']]
+    assert len(selected) == 1 and selected[0]['resolver_source_id'] == 'ACTIVE'
+    assert rows == original  # Audit records remain excluded and untouched.
+
+    rows[:] = [audit]
+    excluded = service._list_material_ai_sources('B1', 'V1')
+    with pytest.raises(ValueError, match='不可选'):
+        prepare_source_manifest(excluded, selected_source_ids=[selected_id])
+
+
 def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(monkeypatch):
     from types import SimpleNamespace
 

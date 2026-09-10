@@ -127,7 +127,11 @@ def prepare_source_manifest(
             raise ValueError(f"资料来源 {unknown[0]} 不属于当前批次或已失效。")
         unavailable = sorted(source_id for source_id in explicit if not by_id[source_id]["selectable"])
         if unavailable:
-            raise ValueError(f"资料来源 {unavailable[0]} 当前不可选。")
+            from .material_ai_source_dependencies import SourceEligibilityError
+            source = by_id[unavailable[0]]
+            reason = source.get('analysis_reason') or source.get('exclude_reason') or '资料不可读取，请核对来源。'
+            raise SourceEligibilityError(f'{reason} 当前不可选。', source=source,
+                code=source.get('analysis_code') or 'SOURCE_UNAVAILABLE')
 
     for source in prepared:
         selected = bool(source["locked"])

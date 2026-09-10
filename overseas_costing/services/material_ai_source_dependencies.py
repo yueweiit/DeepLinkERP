@@ -15,7 +15,7 @@ class SourceEligibilityError(ValueError):
         self.approval_no = str(source.get('approval_no') or '')[:200]
         self.source_label = str(source.get('source_label') or source.get('title') or '')[:300]
         identity = ' · '.join(filter(None, (self.approval_no, self.source_label)))
-        super().__init__(f'{identity}：{reason}' if identity else reason)
+        super().__init__(f'{identity}：{reason}' if identity and not str(reason).startswith(f'{identity}：') else reason)
 
 
 def approval_eligibility(source):

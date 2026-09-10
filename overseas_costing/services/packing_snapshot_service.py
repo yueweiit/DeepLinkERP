@@ -916,7 +916,7 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None) 
         [detail.get("main_approval") or {}, *(detail.get("linked_purchase_approvals") or [])]
         for row in approval.get("timeline") or [] if isinstance(row, dict)}
     result: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: dict[tuple[str, str, str], int] = {}
 
     def append_source(source: dict[str, Any], *, sheet_name: str = "") -> None:
         kind = str(source.get("source_kind") or "")
@@ -929,9 +929,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None) 
             else source_id
         )
         key = (kind, logical_source_id, str(sheet_name or ""))
-        if not kind or not source_id or key in seen:
+        if not kind or not source_id:
             return
-        seen.add(key)
         public = {
             "source_kind": kind,
             "source_id": source_id,
@@ -980,7 +979,17 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None) 
         if kind == "approval_comment":
             public["comment_text"] = hash_basis["comment_text"]
         public["source_hash"] = hashlib.sha256(_json(hash_basis).encode("utf-8")).hexdigest()
-        result.append(public)
+        if key in seen:
+            # The same OA file can have audit copies and an older usable local
+            # archive. A newer excluded copy must not hide that archive.
+            def availability(row):
+                return (not row.get('excluded'), bool(row.get('available')), bool(row.get('can_download')))
+            index = seen[key]
+            if availability(public) > availability(result[index]):
+                result[index] = public
+        else:
+            seen[key] = len(result)
+            result.append(public)
 
     try:
         current_snapshot = get_current_packing_snapshot(str(batch_name)) or {}

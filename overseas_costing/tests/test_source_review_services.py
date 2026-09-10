@@ -81,6 +81,17 @@ def test_archived_dingtalk_attachment_is_selectable_before_local_download() -> N
     assert manifest[0]["parse_method"] == "SYSTEM_EXCEL"
 
 
+def test_unavailable_selection_reports_document_identity_and_reason():
+    from overseas_costing.services.material_ai_source_dependencies import SourceEligibilityError
+    source = {'source_id':'opaque-id', 'source_kind':'approval_attachment', 'approval_no':'LOG-1',
+              'source_label':'装箱单.xlsx', 'excluded':True, 'exclude_reason':'审计专用附件，不参与资料分析。'}
+    with pytest.raises(SourceEligibilityError) as caught:
+        prepare_source_manifest([source], selected_source_ids=['opaque-id'])
+    assert caught.value.source_id == 'opaque-id'
+    assert caught.value.approval_no == 'LOG-1'
+    assert '装箱单.xlsx' in str(caught.value) and '审计专用' in str(caught.value)
+
+
 def test_progress_manifest_exposes_only_safe_source_metadata() -> None:
     manifest = prepare_source_manifest(
         [
