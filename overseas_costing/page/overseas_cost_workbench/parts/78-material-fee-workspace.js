@@ -35,6 +35,9 @@
     this.materialFeeState.aiFill = this.materialFeeState.aiFill || null;
     this.materialFeeState.aiPendingReady = this.materialFeeState.aiPendingReady || null;
     if (this.materialFeeState.aiClarification === undefined) this.materialFeeState.aiClarification = "";
+    if (this.materialFeeState.aiClarificationSaved === undefined) this.materialFeeState.aiClarificationSaved = "";
+    if (!Number.isFinite(this.materialFeeState.aiClarificationRevision)) this.materialFeeState.aiClarificationRevision = 0;
+    if (!this.materialFeeState.aiClarificationStatus) this.materialFeeState.aiClarificationStatus = "saved";
     if (!Number.isFinite(this.materialFeeState.inputRevision)) this.materialFeeState.inputRevision = 0;
     if (this.materialFeeState.focusedFeeInput === undefined) this.materialFeeState.focusedFeeInput = null;
     return this.materialFeeState;
@@ -81,8 +84,22 @@
       this.refreshMaterialFeeCostPreview(true).catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='mf-show-sources']", () => this.openMaterialFeeSourcesDialog());
-    this.$root.on("click", "[data-action='mf-import-wiki']", () => {
-      this.openWikiMaterialImportDialog().catch((error) => this.showError(error));
+    this.$root.on("click", "[data-action='mf-import-wiki']", async () => {
+      const state = this.ensureMaterialFeeState();
+      try {
+      if (!state.settlementData) {
+        const batchName = this.detailState.batchName;
+        const data = await this.settlementApi("get_batch_settlement", {batch_name: batchName, version_name: this.detailState.versionName || null});
+        if (this.materialFeeState !== state || this.detailState.batchName !== batchName) return;
+        if (!data?.ok) throw new Error(data?.message || "资料来源读取失败，请重试");
+        state.settlementData = data;
+      }
+      const freightEnabled = state.settlementData.freight_mode === true;
+      const action = freightEnabled
+        ? this.openBatchSettlementDialog(this.detailState.batchName, this.detailState.versionName || this.getDetailBatch().current_version, "packing")
+        : this.openWikiMaterialImportDialog();
+      await action;
+      } catch (error) { this.showError(error); }
     });
     this.$root.on("click", "[data-action='mf-ai-fill']", () => {
       const fill = this.ensureMaterialFeeState().aiFill;
@@ -121,8 +138,17 @@
       );
     });
     this.$root.on("input", "[data-mf-ai-clarification]", (event) => {
-      this.ensureMaterialFeeState().aiClarification = String($(event.currentTarget).val() || "").slice(0, 4000);
+      const state = this.ensureMaterialFeeState();
+      state.aiClarification = String($(event.currentTarget).val() || "").slice(0, 4000);
+      state.aiClarificationDirty = state.aiClarification.trim() !== state.aiClarificationSaved;
+      state.aiClarificationStatus = state.aiClarificationSavePromise ? "saving" : (state.aiClarificationDirty ? "unsaved" : "saved");
+      state.aiClarificationError = "";
+      this.updateMaterialAIClarificationStatus();
     });
+    this.$root.on("click", "[data-action='mf-ai-clarification-save']", () =>
+      this.saveMaterialAIClarification().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='mf-ai-clarification-rerun']", () =>
+      this.reanalyzeMaterialAIClarification().catch((error) => this.showError(error)));
     this.$root.on("change", "[data-mf-ai-proposal-select]", (event) => {
       const fill = this.ensureMaterialFeeState().aiFill;
       if (!fill?.selections) return;
@@ -223,6 +249,118 @@
     }
   }
 
+  invalidateMaterialAIClarification(note) {
+    const state = this.ensureMaterialFeeState();
+    if (Number(note.revision || 0) > Number(state.aiFill?.clarification_revision ?? state.aiClarificationRevision ?? 0) && state.aiFill
+        && ["STARTING","QUEUED","RUNNING","READY"].includes(state.aiFill.status)) {
+      state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
+      state.aiFill = { ...state.aiFill, status: "STALE", draftVisible: false, stale: true };
+      state.aiPendingReady = null;
+      state.aiStartPromise = null;
+    }
+  }
+
+  acceptMaterialAIClarification(note) {
+    const state = this.ensureMaterialFeeState();
+    if (!note || Number(note.revision || 0) < Number(state.aiClarificationRevision || 0)) return;
+    this.invalidateMaterialAIClarification(note);
+    if (state.aiClarificationDirty || state.aiClarificationSavePromise) return;
+    state.aiClarification = String(note.text || "");
+    state.aiClarificationSaved = state.aiClarification;
+    state.aiClarificationRevision = Number(note.revision || 0);
+    state.aiClarificationLoaded = true;
+    state.aiClarificationStatus = "saved";
+    state.aiClarificationError = "";
+  }
+
+  materialAIClarificationStatusText() {
+    const state = this.ensureMaterialFeeState();
+    return { unsaved: "未保存", saving: "保存中…", saved: "已保存", failed: "保存失败" }[state.aiClarificationStatus] || "未保存";
+  }
+
+  renderMaterialAIClarification() {
+    const state = this.ensureMaterialFeeState();
+    const busy = Boolean(state.aiClarificationSavePromise || state.aiClarificationRerunPromise);
+    return `<div class="ocw-mf-ai-clarification"><label><span>告诉 AI 如何理解</span><input data-mf-ai-clarification="1" value="${this.escape(state.aiClarification || "")}" maxlength="4000" placeholder="例如：两款是一套，共四套；每种数量相同" /></label><div class="ocw-mf-ai-clarification-actions"><span data-mf-ai-clarification-status="${state.aiClarificationStatus}" role="status" title="${this.escape(state.aiClarificationError || "")}">${this.materialAIClarificationStatusText()}</span><button type="button" class="ocw-outline-btn" data-action="mf-ai-clarification-save" ${busy ? "disabled" : ""}>保存说明</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-clarification-rerun" ${busy ? "disabled" : ""}>按说明重新分析</button></div></div>`;
+  }
+
+  updateMaterialAIClarificationStatus() {
+    if (!this.$root?.find) return;
+    const state = this.ensureMaterialFeeState();
+    this.$root.find("[data-mf-ai-clarification-status]").text(this.materialAIClarificationStatusText())
+      .attr("data-mf-ai-clarification-status", state.aiClarificationStatus)
+      .attr("title", state.aiClarificationError || "");
+    this.$root.find("[data-action='mf-ai-clarification-save'], [data-action='mf-ai-clarification-rerun']")
+      .prop("disabled", Boolean(state.aiClarificationSavePromise || state.aiClarificationRerunPromise));
+  }
+
+  saveMaterialAIClarification() {
+    const state = this.ensureMaterialFeeState();
+    if (state.aiClarificationSavePromise) return state.aiClarificationSavePromise;
+    const submittedText = String(state.aiClarification || "").trim();
+    const expectedRevision = Number(state.aiClarificationRevision || 0);
+    state.aiClarificationStatus = "saving";
+    state.aiClarificationError = "";
+    const savePromise = (async () => {
+      try {
+        const result = await this.call("overseas_costing.api.materials.save_source_ai_clarification", {
+          batch_name: state.batchName, clarification_text: submittedText, expected_revision: expectedRevision,
+        }, false);
+        if (this.materialFeeState !== state) return false;
+        if (!result?.ok) {
+          if (result?.conflict && result.clarification) {
+            this.invalidateMaterialAIClarification(result.clarification);
+            state.aiClarificationRevision = Number(result.clarification.revision || 0);
+            state.aiClarificationSaved = String(result.clarification.text || "");
+          }
+          throw new Error(result?.message || "说明保存失败，请重试。");
+        }
+        const note = result.clarification;
+        this.invalidateMaterialAIClarification(note);
+        state.aiClarificationSaved = String(note.text || "");
+        state.aiClarificationRevision = Number(note.revision || 0);
+        state.aiClarificationLoaded = true;
+        state.aiClarificationDirty = String(state.aiClarification || "").trim() !== state.aiClarificationSaved;
+        if (!state.aiClarificationDirty) state.aiClarification = state.aiClarificationSaved;
+        state.aiClarificationStatus = state.aiClarificationDirty ? "unsaved" : "saved";
+        this.updateMaterialAIProgressSurface();
+        return result;
+      } catch (error) {
+        if (this.materialFeeState === state) {
+          state.aiClarificationStatus = "failed";
+          state.aiClarificationDirty = true;
+          state.aiClarificationError = error.message || "说明保存失败，请重试。";
+        }
+        throw error;
+      } finally {
+        state.aiClarificationSavePromise = null;
+        if (this.materialFeeState === state) this.updateMaterialAIClarificationStatus();
+      }
+    })();
+    state.aiClarificationSavePromise = savePromise;
+    this.updateMaterialAIClarificationStatus();
+    return savePromise;
+  }
+
+  reanalyzeMaterialAIClarification() {
+    const state = this.ensureMaterialFeeState();
+    if (state.aiClarificationRerunPromise) return state.aiClarificationRerunPromise;
+    const rerun = (async () => {
+      const saved = await this.saveMaterialAIClarification();
+      if (!saved || this.materialFeeState !== state) return;
+      if (state.aiClarificationDirty) throw new Error("说明仍有未保存修改，请保存后重新分析。");
+      // Retire the old polling generation even when its start promise is still pending.
+      state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
+      state.aiStartPromise = null;
+      return this.startMaterialAIFill({ force: false, restart: true });
+    })().finally(() => {
+      state.aiClarificationRerunPromise = null;
+      if (this.materialFeeState === state) this.updateMaterialAIClarificationStatus();
+    });
+    state.aiClarificationRerunPromise = rerun;
+    return rerun;
+  }
+
   async loadMaterialFeeWorkspace(options = {}) {
     const state = this.ensureMaterialFeeState();
     const batch = this.getDetailBatch();
@@ -232,7 +370,8 @@
     if (!options.quiet) this.renderDetailTabLoading("正在读取费用、凭证和物料表");
     try {
       const shouldRestoreAI = !state.aiFill;
-      const [detail, materials, fees, preview, latestAI] = await Promise.all([
+      const restoreGeneration = state.aiRunGeneration || 0;
+      const [detail, materials, fees, preview, latestAI, savedClarification] = await Promise.all([
         this.call("overseas_costing.api.batch.get_batch_detail", {
           batch_name: batchName,
           version_name: this.detailState.versionName || batch.current_version || null,
@@ -258,6 +397,8 @@
               run_id: "",
             }, false)
           : Promise.resolve(null),
+        shouldRestoreAI ? Promise.resolve(null)
+          : this.call("overseas_costing.api.materials.get_source_ai_clarification", { batch_name: batchName }, false),
       ]);
       if (
         requestId !== state.requestId
@@ -270,8 +411,10 @@
       state.fees = fees;
       state.preview = preview;
       state.settlementData = null;
-      if (latestAI?.ok && latestAI.status && latestAI.status !== "NONE") {
-        state.aiClarification = latestAI.clarification_text || state.aiClarification || "";
+      this.acceptMaterialAIClarification(savedClarification?.clarification || latestAI?.clarification);
+      if (!state.aiFill && restoreGeneration === (state.aiRunGeneration || 0) && latestAI?.ok && latestAI.status && latestAI.status !== "NONE") {
+        if (Number(latestAI.clarification_revision || 0) < Number(state.aiClarificationRevision || 0)
+            && ["QUEUED","RUNNING","READY"].includes(latestAI.status)) latestAI.status = "STALE";
         state.aiFill = { ...latestAI, runId: latestAI.run_id, draftVisible: false };
         state.aiPendingReady = latestAI.status === "READY" ? latestAI : null;
       }
@@ -391,7 +534,7 @@
               <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (state.aiFill?.status === "READY" ? "查看填充预览" : "查看填充进度") : "自动填充资料"}</button>
             </div>
           </div>
-          <label class="ocw-mf-ai-clarification"><span>告诉 AI 如何理解</span><input data-mf-ai-clarification="1" value="${this.escape(state.aiClarification || "")}" maxlength="4000" placeholder="例如：两款是一套，共四套；每种数量相同" /></label>
+          ${this.renderMaterialAIClarification()}
           ${this.renderMaterialFeeGrid()}
           <div class="ocw-mf-ai-candidate-popover" data-mf-ai-candidate-popover="1" role="dialog" aria-label="AI 候选详情" hidden></div>
         </section>
@@ -674,7 +817,7 @@
     if (column.field === "shipped_uom") value = item.effective_shipping_uom;
     if (shippingField && item.settlement_cargo) {
       const rawPacking = [item.actual_shipped_qty ?? "未识别", item.shipped_uom || "单位待核对"].join(" ");
-      return `<td class="ocw-mf-cell is-readonly ocw-mf-settlement-quantity" data-mf-column-index="${columnIndex}"><span>${this.escape(this.formatValue(value ?? "--"))}</span><small>${item.source_adoption_state === "historical_pending" ? "当前来源待补" : "采购支出采用"}</small>${column.field === "actual_shipped_qty" ? `<small>装箱原值 ${this.escape(rawPacking)}</small>` : ""}</td>`;
+      return `<td class="ocw-mf-cell is-readonly ocw-mf-settlement-quantity" data-mf-column-index="${columnIndex}"><span>${this.escape(this.formatValue(value ?? "--"))}</span><small>${item.source_adoption_state === "historical_pending" ? "当前来源待补" : item.source_context?.packing?.selected_source ? "资料来源采用" : "采购支出采用"}</small>${column.field === "actual_shipped_qty" ? `<small>装箱原值 ${this.escape(rawPacking)}</small>` : ""}</td>`;
     }
     const originalValue = value;
     const draft = this.materialFeeState?.materialDrafts?.[`${item.name}:${column.field}`];
@@ -1391,7 +1534,7 @@
       return state.aiStartPromise;
     }
     const currentStatus = String(state.aiFill?.status || "");
-    if (["STARTING", "QUEUED", "RUNNING", "READY"].includes(currentStatus)) {
+    if (!options.restart && ["STARTING", "QUEUED", "RUNNING", "READY"].includes(currentStatus)) {
       this.openMaterialAIProgressDialog();
       return Promise.resolve();
     }
@@ -1441,7 +1584,9 @@
         const payload = {
           batch_name: batchName,
           version_name: versionName,
-          clarification_text: state.aiClarification || "",
+          ...(state.aiClarificationLoaded
+            ? { expected_clarification_revision: state.aiClarificationRevision }
+            : { clarification_text: state.aiClarification || "" }),
           force: options.force === true ? 1 : 0,
         };
         if (Array.isArray(options.selectedSourceIds)) payload.selected_source_ids_json = JSON.stringify(options.selectedSourceIds);
@@ -1461,7 +1606,14 @@
     state.aiPendingReady = null;
     this.openMaterialAIProgressDialog();
     this.updateMaterialAIProgressSurface();
-    await this.pollMaterialAIFill(state, batchName, versionName, started.run_id);
+    const polling = this.pollMaterialAIFill(state, batchName, versionName, started.run_id);
+    if (options.restart) {
+      polling.catch((error) => {
+        if (isCurrent()) this.failMaterialAIProgress(error, "AI 分析状态读取失败，请重试。");
+      });
+      return;
+    }
+    await polling;
   }
 
   async pollMaterialAIFill(state, batchName, versionName, runId) {
@@ -2939,10 +3091,10 @@
   }
 
   renderMaterialFeeSourcesContent(candidates = [], context = {}, history = []) {
-    const label = context.root_kind === "expense" ? "采购支出" : "国际物流";
+    const label = context.packing?.selected_source?.source_label || (context.root_kind === "expense" ? (context.separate_adoption ? "支付单据" : "采购支出") : "国际物流");
     const rows = candidates.map((row) => `<div><span><strong>${this.escape(row.source_label || row.file_name || row.attachment || "资料")}</strong><small>${this.escape(row.approval_no || "")} · ${this.escape(row.source_kind || row.source_type || "附件")}${row.sheet_name ? ` · ${this.escape(row.sheet_name)}` : ""} · ${row.excluded || row.available === false ? this.escape(row.exclude_reason || "资料待处理") : "当前来源"}</small>${row.cache_refreshed_at ? `<small>本地缓存：${this.escape(row.cache_refreshed_at)}</small>` : ""}${row.refresh_error ? `<small>上次刷新失败，资料待核对：${this.escape(row.refresh_error)}</small>` : ""}</span></div>`).join("");
     const old = history.map((row) => `<div><span><strong>${this.escape(row.file_name || "历史资料")}</strong><small>${this.escape(row.source_doc_no || "")} · 历史留存，不参与当前核算与 AI</small></span>${row.file_url ? `<button class="ocw-outline-btn ocw-mini-btn" data-mf-preview-source="1" data-file-url="${this.escape(row.file_url)}" data-file-name="${this.escape(row.file_name || "")}">查看历史附件</button>` : ""}</div>`).join("");
-    return `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note"><strong>当前资料来源：${label}</strong><p>装箱、物料、费用及 AI 使用以下同一份资料清单。${context.root_kind === "expense" ? "采购支出资料不足时保留待处理。" : "确认匹配采购支出后统一切换。"}</p></div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" data-action="view-current-source">打开当前原单</button></div><div class="ocw-mf-source-list">${rows || '<div class="ocw-detail-empty"><strong>当前来源资料待补</strong></div>'}</div>${old ? `<details><summary>历史资料（${history.length}）</summary><div class="ocw-mf-source-list">${old}</div></details>` : ""}</div>`;
+    return `<div class="ocw-mf-sources"><div class="ocw-mf-dialog-note"><strong>当前资料来源：${this.escape(label)}</strong><p>${context.separate_adoption ? "以下资料用于当前装箱、物料及 AI 分析；实际运费按已采用费用明细单独核对。" : "装箱、物料、费用及 AI 使用以下同一份资料清单。"}</p></div><div class="ocw-mf-source-actions"><button class="ocw-outline-btn" data-action="view-current-source">打开当前原单</button></div><div class="ocw-mf-source-list">${rows || '<div class="ocw-detail-empty"><strong>当前来源资料待补</strong></div>'}</div>${old ? `<details><summary>历史资料（${history.length}）</summary><div class="ocw-mf-source-list">${old}</div></details>` : ""}</div>`;
   }
 
   openMaterialFeeSourcesDialog() {
@@ -2959,7 +3111,9 @@
     });
     dialog.$wrapper.on("click", "[data-action='view-current-source']", () => {
       const data = state.settlementData;
-      const source = data?.binding ? data.expense : data?.logistics;
+      const sourceId = dialog.sourceContext?.root_source_id;
+      const source = (data?.candidates || []).map(row => row.expense).find(row => row?.id === sourceId)
+        || (data?.binding ? data.expense : data?.logistics);
       if (source?.open_url) this.openSettlementSource(source);
       else if (data?.binding || dialog.sourceContext?.root_kind === "expense") {
         frappe.show_alert({ message: "当前采购支出原单入口待补，请刷新关联资料。", indicator: "orange" });

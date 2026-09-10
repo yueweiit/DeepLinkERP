@@ -72,12 +72,16 @@ def manual_candidate(store,ledger,batch_name,expense_id,reason):
 def resume(store,ledger):
     # Durable per-request outcomes; no repeated source reads or automatic candidate confirmation.
     for record in store.find('state'):
-        if record.get('status')!='queued' or record.get('kind') not in ('freight_apply','packing_apply','freight_refresh'):continue
+        if record.get('status')!='queued' or record.get('kind') not in ('freight_apply','packing_apply','freight_refresh','freight_amend','packing_replace'):continue
         try:
             if record['kind']=='freight_refresh':
                 result=adoption.source_updated(store,ledger,record['source_id'])
             else:
-                call=adoption.confirm if record['kind']=='freight_apply' else packing.confirm
+                if record['kind']=='freight_amend':call=adoption.amend
+                elif record['kind']=='packing_replace':
+                    from .packing_selection import confirm_selection
+                    call=confirm_selection
+                else:call=adoption.confirm if record['kind']=='freight_apply' else packing.confirm
                 result=call(store,ledger,**record['request'])
             if result['status']=='queued':continue
             record.update(status='completed',result=result);save(store,record)

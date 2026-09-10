@@ -90,7 +90,11 @@ class Store:
         try:
             yield
             self.sql(f'RELEASE SAVEPOINT {name}')
-        except Exception:
+        except Exception as exc:
+            # InnoDB has already rolled back the whole transaction on deadlock.
+            # Its savepoints no longer exist; keep the original conflict visible.
+            if type(exc).__name__ == 'QueryDeadlockError' or (exc.args and exc.args[0] == 1213):
+                raise
             self.sql(f'ROLLBACK TO SAVEPOINT {name}')
             self.sql(f'RELEASE SAVEPOINT {name}')
             raise

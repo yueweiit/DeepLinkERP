@@ -274,12 +274,19 @@ def preview_comprehensive_cost_data(
 ) -> dict:
     """Calculate a transparent preview from caller-provided snapshots only."""
 
-    fees = supplement_legacy_fees(items, select_fees(fees, fx_context or {}, source_context=source_context_from_items(items)))
+    source_issues=[]
+    try:
+        fees = supplement_legacy_fees(items, select_fees(fees, fx_context or {}, source_context=source_context_from_items(items)))
+    except ValueError as exc:
+        # Read-only previews remain navigable so the user can correct the source.
+        # Formal calculation still uses strict select_fees and cannot consume this subtotal.
+        fees=[]
+        source_issues=[{'reason_code':'FINAL_FEE_REVIEW_REQUIRED','message':str(exc)}]
     precision = 6 if any(is_final(fee) for fee in fees) else 2
     money = lambda value: _result_money(value, precision)
     presented_items = [present_material_row(dict(row or {})) for row in (items or [])]
     item_costs: dict[str, dict] = {}
-    incomplete_reasons = []
+    incomplete_reasons = list(source_issues)
     if not presented_items:
         incomplete_reasons.append({"reason_code": "MATERIAL_ITEMS_REQUIRED", "message": "当前批次没有物料，请先补充物料数据。"})
     goods_total = Decimal("0")

@@ -89,3 +89,23 @@ def test_manual_selection_of_current_expense_preserves_confirmed_candidate(setup
         assert s.get('candidate',binding['candidate_id'])==before
     finally:
         sys.modules.pop(module_name,None)
+
+
+def test_expected_amendment_conflict_returns_inline_message(batch_api, monkeypatch):
+    from overseas_costing.services.logistics_settlement import freight_adoption
+    monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
+    def stale(*args,**kwargs):raise ValueError('费用或成本版本已变化，请刷新后更正')
+    monkeypatch.setattr(freight_adoption,'amend',stale)
+    result=batch_api.amend_freight_claim('B','V','claim','old','amount','review',amount='10')
+    assert result=={'ok':False,'code':'REVIEW_REQUIRED','message':'费用或成本版本已变化，请刷新后更正'}
+
+
+def test_database_concurrency_conflict_has_safe_inline_error(batch_api, monkeypatch):
+    from overseas_costing.services.logistics_settlement import freight_adoption
+    class QueryDeadlockError(Exception):pass
+    monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
+    def conflict(*args,**kwargs):raise QueryDeadlockError('private SQL')
+    monkeypatch.setattr(freight_adoption,'amend',conflict)
+    result=batch_api.amend_freight_claim('B','V','claim','old','amount','review',amount='10')
+    assert not result['ok'] and result['code']=='REVIEW_CONFLICT' and '未保存' in result['message']
+    assert 'private' not in str(result)

@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,8 +40,10 @@ jobs:
           node --check overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
           node --check overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
 
-      - name: Run backend tests
-        run: python -m pytest -q overseas_costing/tests
+      - name: Run tests affected by this update
+        env:
+          TEST_BASE: ${{ github.event.before }}
+        run: python overseas_costing/scripts/run_affected_tests.py "$TEST_BASE"
 
       - name: Compile Python files
         run: python -m compileall -q overseas_costing

@@ -7,7 +7,7 @@ from urllib.parse import urlparse, parse_qs
 from .logistics_settlement.model import digest
 
 POLICY_VERSION = 'procurement-source-2'
-CONTEXT_FIELDS = ('separate_adoption', 'freight', 'packing', 'policy_version', 'batch', 'cost_version', 'root_kind', 'root_source_id', 'corp_id', 'instance_id',
+CONTEXT_FIELDS = ('selected_source', 'separate_adoption', 'freight', 'packing', 'policy_version', 'batch', 'cost_version', 'root_kind', 'root_source_id', 'corp_id', 'instance_id',
                   'binding_id', 'binding_revision', 'source_snapshot', 'approved', 'invalid', 'available', 'fingerprint')
 
 
@@ -135,9 +135,17 @@ def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None
                 'fields':{'本票已采用装箱明细':goods},'raw':{'formComponentValues':[{'name':'本票已采用装箱明细','componentType':'TableField','value':goods}],'comments':[]}}
         binding={'id':review['id'],'revision':review['revision'],'expense_id':review['source_id']}
         packing=context_for_source(source,binding,version.get('name'),batch_name)
+        if review.get('selection'):
+            selected={k:v for k,v in review['selection'].items() if k not in ('goods','text','issues')}
+            packing.update(selected_source=selected,root_kind=(snapshot or {}).get('kind','expense'),approved=available,
+                           completeness='complete' if review.get('complete') else 'unconfirmed')
+            packing['fingerprint']=digest(packing)
+            source={k:v for k,v in source.items() if k in ('id','snapshot','available','approved','invalid','status','approval_result',
+                'corp','instance','process_code','approval_no','source_updated_at','title','kind','goods','goods_complete','fields','raw','documents','attachments')}
+            source.update(selected_source=selected,scoped_text=review['selection'].get('text',''),goods_complete=bool(review.get('complete')))
         bundle.update(source=source,binding=binding)
         ctx=dict(packing)
-    ctx.update(policy_version='shipment-sources-1',separate_adoption=True,freight=freight,packing=packing)
+    ctx.update(policy_version='shipment-sources-2' if packing.get('selected_source') else 'shipment-sources-1',separate_adoption=True,freight=freight,packing=packing)
     ctx['fingerprint']=digest({k:v for k,v in ctx.items() if k not in ('fingerprint','freight')}, {k:v for k,v in freight.items() if k!='historical'})
     bundle['context']=ctx
     return bundle
@@ -176,6 +184,9 @@ def json_dict(value):
 def attachment_allowed(row, bundle, *, for_analysis=False):
     from .logistics_settlement.document_writer import document_retired
     context = bundle['context']
+    if (context.get('packing') or {}).get('selected_source'):
+        # Full archived files cannot re-enter analysis after selecting a shipment slice.
+        return False
     if context['root_kind'] != 'expense':
         return True
     meta = json_dict(row.get('parse_result_json'))
@@ -324,7 +335,7 @@ def project_ai_items(items, bundle):
 def physical_update_values(item, updates, context, evidence):
     """Persist current packing adoption without overwriting any raw historical field."""
     from .effective_source_values import PHYSICAL_FIELDS as physical_fields, physical_overlay_update
-    if context.get('root_kind') != 'expense':
+    if context.get('root_kind') != 'expense' and not (context.get('packing') or {}).get('selected_source'):
         return updates
     meta = physical_overlay_update(item, context, updates, evidence=evidence)
     result = dict(updates) if context.get('separate_adoption') else {key: value for key, value in updates.items() if key not in physical_fields}

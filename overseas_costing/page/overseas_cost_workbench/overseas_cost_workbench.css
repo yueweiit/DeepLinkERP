@@ -6966,6 +6966,51 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-grid-table td.ocw-mf-settlement-quantity { padding: 6px 8px; }
 .ocw-mf-grid-table td.ocw-mf-settlement-quantity > span { padding: 0 0 3px; }
 .ocw-mf-grid-table td.ocw-mf-settlement-quantity > small { position: static; display: block; font-size: 10px; line-height: 1.4; white-space: normal; }
+.ocw-freight-modal .modal-dialog { width: min(1280px, calc(100vw - 40px)); max-width: 1280px; }
+.ocw-freight-modal .modal-body { max-height: min(78vh, 900px); padding-bottom: 0; }
+.ocw-freight-modal [data-fieldname="settlement_actions"] { position: sticky; bottom: 0; z-index: 3; margin: 0 -20px; padding: 0 20px; background: #fff; box-shadow: 0 -5px 15px #233b4b08; }
+.ocw-freight-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 14px; }
+.ocw-freight-heading strong, .ocw-freight-heading small { display: block; overflow-wrap: anywhere; }
+.ocw-freight-heading strong { margin-top: 3px; }
+.ocw-freight-heading small { color: #66788a; }
+.ocw-freight-tabs { display: flex; gap: 24px; border-bottom: 1px solid #dce7ef; margin-bottom: 18px; }
+.ocw-freight-tabs button { border: 0; border-radius: 0; padding: 12px 3px; background: none; color: #66788a; font-weight: 600; border-bottom: 3px solid transparent; }
+.ocw-freight-tabs button[aria-selected="true"] { color: #0879c7; border-bottom-color: #0879c7; }
+.ocw-freight-section-title { font-size: 15px; font-weight: 600; margin: 0 0 12px; color: #243b4c; }
+.ocw-settlement-toolbar .ocw-freight-section-title { margin: 0; margin-right: auto; }
+.ocw-freight-row-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ocw-freight-row-actions button { white-space: nowrap; }
+.ocw-freight-fee-table { min-width: 930px; }
+.ocw-freight-fee-table td:last-child { min-width: 140px; }
+.ocw-freight-money { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ocw-freight-source-no { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.ocw-freight-status { display: inline-block; border-radius: 5px; padding: 2px 6px; color: #276344; background: #edf7f1; white-space: nowrap; }
+.ocw-freight-field { display: block; max-width: 720px; font-size: 13px; font-weight: 500; margin: 18px 0; }
+.ocw-freight-field input, .ocw-freight-field textarea, .ocw-freight-field select { display: block; width: 100%; margin-top: 7px; padding: 9px 11px; border: 1px solid #cad7e0; border-radius: 6px; background: #fff; font-weight: 400; color: #243b4c; }
+.ocw-freight-field input[type="number"] { max-width: 300px; }
+.ocw-freight-field input:focus, .ocw-freight-field textarea:focus, .ocw-freight-field select:focus { outline: 2px solid #c5e7ff; border-color: #0b8cf0; }
+.ocw-freight-change-summary { display: flex; flex-wrap: wrap; gap: 32px; padding: 15px 18px; margin: 16px 0; background: #f4f8fc; border-radius: 8px; }
+.ocw-freight-change-summary small, .ocw-freight-change-summary strong { display: block; }
+.ocw-freight-change-summary small { color: #66788a; margin: 3px 0; }
+.ocw-freight-change-summary strong { font-size: 16px; font-variant-numeric: tabular-nums; }
+.ocw-freight-negative { display: block; padding: 10px 12px; background: #fff5df; border-radius: 6px; font-weight: 400; }
+.ocw-freight-negative[hidden] { display: none; }
+.ocw-freight-negative input { margin-right: 8px; }
+.ocw-freight-packing-sources { min-width: 850px; }
+.ocw-freight-packing-sources .is-selected { background: #edf7ff; }
+.ocw-freight-packing-goods { min-width: 900px; }
+.ocw-freight-missing { color: #9a6518; }
+.ocw-freight-evidence-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 380px; overflow-y: auto; padding: 14px; border: 1px solid #e3eaf0; background: #f8fafc; font-size: 12px; }
+.ocw-freight-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 0; border-top: 1px solid #dce7ef; }
+.ocw-freight-footer > span { color: #66788a; font-size: 12px; }
+.ocw-freight-modal button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 720px) {
+  .ocw-freight-modal .modal-dialog { width: calc(100vw - 16px); margin: 8px; }
+  .ocw-freight-tabs { gap: 18px; }
+  .ocw-freight-footer { align-items: flex-start; flex-direction: column; }
+  .ocw-freight-footer .ocw-freight-row-actions { width: 100%; }
+  .ocw-freight-footer .ocw-primary-btn { flex: 1; }
+}
 
 .ocw-mf-workspace {
   --mf-blue: var(--ocw-accent, #0b8cf0);
@@ -7364,7 +7409,13 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-banner > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ocw-mf-ai-banner > div:first-child span, .ocw-mf-ai-banner p { color: #475467; font-size: 11px; }
 .ocw-mf-ai-banner p { margin: 0; padding: 7px 9px; border-radius: 6px; background: #fff8e7; color: #8a5700; }
-.ocw-mf-ai-clarification { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #e7edf5; background: #fbfdff; }
+.ocw-mf-ai-clarification { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #e7edf5; background: #fbfdff; }
+.ocw-mf-ai-clarification > label { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: center; gap: 10px; margin: 0; min-width: 0; }
+.ocw-mf-ai-clarification-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ocw-mf-ai-clarification-actions button { white-space: nowrap; }
+.ocw-mf-ai-clarification [data-mf-ai-clarification-status="saved"] { color: #027a48; }
+.ocw-mf-ai-clarification [data-mf-ai-clarification-status="unsaved"] { color: #854a0e; }
+.ocw-mf-ai-clarification [data-mf-ai-clarification-status="failed"] { color: #b42318; }
 .ocw-mf-ai-clarification span { color: #344054; font-size: 12px; font-weight: 700; }
 .ocw-mf-ai-clarification input { width: 100%; min-width: 0; height: 34px; padding: 0 10px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #101828; }
 .ocw-mf-ai-proposals { display: grid; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #d7e8f7; background: #f8fbff; }
@@ -7494,7 +7545,7 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-review-sources label.is-failed { background: #fff0ee; }
 .ocw-mf-ai-review-sources label.is-needs_selection { background: #fff8e7; }
 @media (max-width: 700px) {
-  .ocw-mf-ai-clarification { grid-template-columns: 1fr; }
+  .ocw-mf-ai-clarification, .ocw-mf-ai-clarification > label { grid-template-columns: 1fr; }
   .ocw-mf-ai-dialog-footer > span { display: none; }
   .ocw-mf-ai-dialog-footer > div { margin-left: auto; }
 }

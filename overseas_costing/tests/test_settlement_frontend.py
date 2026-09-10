@@ -359,7 +359,7 @@ const calls=[];w.detailState={batchName:'B',tab:'documents',versionName:'old-con
 w.openBatchDetail=async(...args)=>calls.push(args);
 w.markBatchDirty=()=>{};
 await w.refreshSettlementBatch('B');
-assert.deepEqual(calls,[['B','documents',{updateUrl:false}]]);
+assert.deepEqual(calls,[['B','documents',{updateUrl:false,propagateError:true}]]);
 w.detailState.batchName='OTHER';await w.refreshSettlementBatch('B');assert.equal(calls.length,1);
 ''')
 

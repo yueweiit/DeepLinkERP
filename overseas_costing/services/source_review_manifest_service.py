@@ -83,7 +83,7 @@ def prepare_source_manifest(
         public_id, parent_id = stable_source_identity(source)
         if public_id in by_id:
             raise ValueError(f"资料来源标识重复：{public_id}。")
-        locked = _text(source.get("source_kind"), 60) == "approval_form" and not source.get("excluded")
+        locked = _text(source.get("source_kind"), 60) == "approval_form" and not source.get("excluded") and not source.get('scoped_packing')
         selectable = (
             bool(source.get("available", True)) or bool(source.get("can_download"))
         ) and not bool(source.get("excluded"))

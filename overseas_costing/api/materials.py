@@ -192,18 +192,35 @@ def discard_material_ai_fill(batch_name, run_id):
 
 
 @frappe.whitelist()
+def get_source_ai_clarification(batch_name):
+    batch_name = require_batch_permission(batch_name, "read")
+    return material_ai_fill_service.get_source_ai_clarification(batch_name)
+
+
+@frappe.whitelist()
+def save_source_ai_clarification(batch_name, clarification_text, expected_revision):
+    batch_name = require_batch_permission(batch_name, "write")
+    return material_ai_fill_service.save_source_ai_clarification(
+        batch_name, str(clarification_text or "")[:4000], int(expected_revision),
+    )
+
+
+@frappe.whitelist()
 def start_source_ai_review(
     batch_name,
     version_name,
     clarification_text=None,
     force=False,
     selected_source_ids_json=None,
+    expected_clarification_revision=None,
 ):
     batch_name = require_batch_permission(batch_name, "write")
     return material_ai_fill_service.start_source_ai_review(
         batch_name,
         str(version_name or "")[:200],
-        str(clarification_text or "")[:4000],
+        None if clarification_text is None else str(clarification_text or "")[:4000],
+        **({"expected_clarification_revision": int(expected_clarification_revision)}
+           if expected_clarification_revision is not None else {}),
         force=str(force).strip().lower() in {"1", "true", "yes"},
         selected_source_ids=(
             _ai_review_payload(selected_source_ids_json, list, "资料来源选择")

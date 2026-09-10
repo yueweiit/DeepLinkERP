@@ -1475,7 +1475,7 @@ def update_item_field(
     item_doc = _frappe.get_doc("Overseas Cost Item", item_name)
     from overseas_costing.services.effective_source_values import PHYSICAL_FIELDS, batch_source_context, project_source_values, physical_overlay_update
     source_context = batch_source_context(item_doc.batch,item_doc.version,lock=True)
-    expense_physical = source_context.get('root_kind') == 'expense' and fieldname in PHYSICAL_FIELDS
+    expense_physical = (source_context.get('root_kind') == 'expense' or (source_context.get('packing') or {}).get('selected_source')) and fieldname in PHYSICAL_FIELDS
     if not _skip_edit_check:
         from overseas_costing.services import edit_session_service
 

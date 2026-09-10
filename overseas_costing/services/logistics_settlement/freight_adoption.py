@@ -1,5 +1,5 @@
 """Atomic fee-line claims, with independent packing and frozen version evidence."""
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from copy import deepcopy
 from .model import digest, dumps
 from .freight_lines import POLICY
@@ -16,7 +16,7 @@ def context(store,ledger,batch_name,version_name=None,*,live=False):
     saved=row_meta(version).get('freight_settlement') or {}
     records=deepcopy(saved.get('claims') or [])
     historical=version.get('name')!=batch.get('current_version') or version.get('status') in ('Confirmed','Archived')
-    issues=['费用采用已恢复，等待重新核对实际费用'] if saved.get('recovery_pending') else []
+    issues=['实际运费待核对；不会恢复旧暂估'] if saved.get('recovery_pending') else []
     if not historical or live:
         for claim in records:
             logistics=store.get('source',claim['logistics_id']) or {}
@@ -98,12 +98,16 @@ def confirm(store,ledger,batch_name,version_name,candidate_id,candidate_revision
                 'line_id':line_id,'source_snapshot':source['snapshot'],'logistics_snapshot':logistics['snapshot'],'charge_key':line['charge_key'],
                 'amount':line['amount'],'currency':line['currency'],'label':line['label'],'evidence':line['evidence'],
                 'waybill':line['waybill'],'approval_no':source['approval_no'],'actor':actor,'adopted_at':utcnow()}
+            if prior_claim and prior_claim.get('manual_corrected') and claim_id not in replace_claim_ids:
+                claim = deepcopy(prior_claim)
             validate_final(rule_for(claim))
             selected.append(claim)
         new_claims={k:v for k,v in old_claims.items() if k not in replace_claim_ids}
         for claim in selected: new_claims[claim['id']]=claim
         signature=lambda r:{k:r.get(k) for k in ('id','source_snapshot','logistics_snapshot','line_id','amount','currency','charge_key')}
-        revision=digest(POLICY,[signature(new_claims[k]) for k in sorted(new_claims)])
+        if old_claims and [signature(old_claims[k]) for k in sorted(old_claims)] == [signature(new_claims[k]) for k in sorted(new_claims)] and previous['available']:
+            return {'status':'applied','version':version_name,'revision':previous['revision'],'claims':previous['claims'],'cached':True}
+        revision=digest(POLICY,previous['revision'],[signature(new_claims[k]) for k in sorted(new_claims)])
         if previous.get('epoch'):revision=digest(revision,previous['epoch'])
         if previous['revision']==revision: return {'status':'applied','version':version_name,'revision':revision,'cached':True}
         if locked(batch):
@@ -112,41 +116,108 @@ def confirm(store,ledger,batch_name,version_name,candidate_id,candidate_revision
                 'reason':reason,'negative_confirmed':negative_confirmed}
             save(store,{'id':digest(POLICY,'queued',batch_name,revision),'kind':'freight_apply','status':'queued','request':request})
             return {'status':'queued','version':version_name,'message':'批次正在编辑，费用采用已排队'}
-        version=mutable_version(ledger,batch);vname=version['name']
-        before={'rules':ledger.rows('rule',batch=batch_name,version=vname),'claims':previous['claims'],'version':deepcopy(version)}
-        # Release only explicitly replaced claims. An invalid source never frees its line automatically.
-        for cid in replace_claim_ids:
-            store.sql('DELETE FROM oc_ls_freight_claim WHERE id=%s',(cid,))
-        for claim in selected:
-            store.put('freight_claim',{k:claim[k] for k in ('id','batch','logistics_id','source_id','line_id','charge_key')}|{'data':dumps(claim)})
-        for rule in before['rules']:
-            scopes=row_scopes(rule)
-            if 'freight' not in scopes: continue
-            if scopes-{'freight'}: raise ValueError('已有费用同时含运费与其他费用，请先核对覆盖范围')
-            # Keep historical rule evidence but remove it from current final selection.
-            ledger.put('rule',rule['name'],{'is_enabled':0,'is_active':0,'is_final':0})
-        rules=[rule_for(r) for r in new_claims.values()];round_fee_rules(rules)
-        for rule in rules:
-            existing=next((r for r in ledger.rows('rule',batch=batch_name,version=vname) if r.get('rule_code')==rule['rule_code']),None)
-            values={**rule,'batch':batch_name,'version':vname}
-            ledger.put('rule',existing['name'],values) if existing else ledger.create('rule',values)
-        # Applied amounts use the same six-decimal, currency-conserving pool as the rules.
-        for rule in rules: new_claims[rule['source_binding_id']]['applied_amount']=rule['amount']
-        meta=row_meta(version);old=meta.get('freight_settlement') or {}
-        meta['freight_settlement']={'policy':POLICY,'revision':revision,'epoch':previous.get('epoch'),'claims':list(new_claims.values()),'packing_review_id':old.get('packing_review_id')}
-        ledger.put('version',vname,{'extra_json':dumps(meta),'calculated_at':None,'summary_snapshot_json':'{}','rule_snapshot_json':'[]'})
-        ledger.put('batch',batch_name,{'status':'Dirty','confirm_status':'Pending','is_locked':0})
-        ctx=refresh_item_contexts(store,ledger,batch_name,vname)
-        app={'id':digest(POLICY,batch_name,vname,revision),'batch':batch_name,'version':vname,'revision':revision,
-             'claims':list(new_claims.values()),'before':before,'source_context':ctx,'actor':actor,'reason':reason,'applied_at':utcnow()}
-        store.insert('freight_application',{k:app[k] for k in ('id','batch','version','revision')}|{'data':dumps(app)})
-        store.audit(batch_name,'freight_lines_adopted',actor,revision=revision,reason=reason,line_ids=line_ids,version=vname)
-        return {'status':'applied','version':vname,'revision':revision,'claims':list(new_claims.values())}
+        return _write_claims(store,ledger,batch,previous,new_claims,revision,actor,reason,line_ids,replace_claim_ids)
+
+
+def _write_claims(store,ledger,batch,previous,new_claims,revision,actor,reason,line_ids,replace_claim_ids):
+    batch_name=batch['name']
+    version=mutable_version(ledger,batch);vname=version['name']
+    before={'rules':ledger.rows('rule',batch=batch_name,version=vname),'claims':previous['claims'],'version':deepcopy(version)}
+    # Release only explicitly replaced claims. An invalid source never frees its line automatically.
+    for cid in replace_claim_ids:
+        store.sql('DELETE FROM oc_ls_freight_claim WHERE id=%s',(cid,))
+    for claim in new_claims.values():
+        store.put('freight_claim',{k:claim[k] for k in ('id','batch','logistics_id','source_id','line_id','charge_key')}|{'data':dumps(claim)})
+    for rule in before['rules']:
+        scopes=row_scopes(rule)
+        if 'freight' not in scopes: continue
+        if scopes-{'freight'}: raise ValueError('已有费用同时含运费与其他费用，请先核对覆盖范围')
+        # Keep historical rule evidence but remove it from current final selection.
+        ledger.put('rule',rule['name'],{'is_enabled':0,'is_active':0,'is_final':0})
+    rules=[rule_for(r) for r in new_claims.values()];round_fee_rules(rules)
+    for rule in rules:
+        existing=next((r for r in ledger.rows('rule',batch=batch_name,version=vname) if r.get('rule_code')==rule['rule_code']),None)
+        values={**rule,'batch':batch_name,'version':vname}
+        ledger.put('rule',existing['name'],values) if existing else ledger.create('rule',values)
+    # Applied amounts use the same six-decimal, currency-conserving pool as the rules.
+    for rule in rules: new_claims[rule['source_binding_id']]['applied_amount']=rule['amount']
+    meta=row_meta(version);old=meta.get('freight_settlement') or {}
+    meta['freight_settlement']={'policy':POLICY,'revision':revision,'epoch':previous.get('epoch'),'claims':list(new_claims.values()),'packing_review_id':old.get('packing_review_id'),'recovery_pending':not bool(new_claims)}
+    ledger.put('version',vname,{'extra_json':dumps(meta),'calculated_at':None,'summary_snapshot_json':'{}','rule_snapshot_json':'[]'})
+    ledger.put('batch',batch_name,{'status':'Dirty','confirm_status':'Pending','is_locked':0})
+    ctx=refresh_item_contexts(store,ledger,batch_name,vname)
+    app={'id':digest(POLICY,batch_name,vname,revision),'batch':batch_name,'version':vname,'revision':revision,
+         'claims':list(new_claims.values()),'before':before,'source_context':ctx,'actor':actor,'reason':reason,'applied_at':utcnow()}
+    store.insert('freight_application',{k:app[k] for k in ('id','batch','version','revision')}|{'data':dumps(app)})
+    store.audit(batch_name,'freight_lines_adopted',actor,revision=revision,reason=reason,line_ids=line_ids,version=vname)
+    return {'status':'applied','version':vname,'revision':revision,'claims':list(new_claims.values())}
+
+
+def amend(store, ledger, batch_name, version_name, claim_id, expected_revision, action, actor, *,
+          reason='', amount=None, candidate_id=None, candidate_revision=None, line_ids=None, negative_confirmed=False):
+    """Change only the human adoption; archived statements are immutable."""
+    if action not in ('amount', 'replace', 'revoke') or not str(reason).strip():
+        raise ValueError('请选择更正操作并填写核对原因')
+    request = dict(batch_name=batch_name, version_name=version_name, claim_id=claim_id,
+                   expected_revision=expected_revision, action=action, actor=actor, reason=str(reason).strip(),
+                   amount=amount, candidate_id=candidate_id, candidate_revision=candidate_revision,
+                   line_ids=line_ids, negative_confirmed=negative_confirmed)
+    operation_id = digest('freight-amend-1', request)
+    with store.atomic():
+        store.get('state', 'match_lock', lock=True)
+        batch = ledger.get('batch', batch_name, lock=True) or {}
+        previous = context(store, ledger, batch_name, batch.get('current_version'))
+        done = store.get('state', operation_id) or {}
+        if done.get('status') == 'completed':
+            result = done['result']
+            if result['version'] == batch.get('current_version') and result['revision'] == previous['revision']:
+                return {**result, 'cached': True}
+            raise ValueError('这次更正已处理，当前费用又有变化，请刷新')
+        if batch.get('current_version') != version_name or previous['revision'] != expected_revision:
+            raise ValueError('费用或成本版本已变化，请刷新后更正')
+        claims = {c['id']:deepcopy(c) for c in previous['claims']}
+        if claim_id not in claims:
+            raise ValueError('待更正费用不属于本票当前采用记录')
+        if action == 'amount':
+            claim = claims[claim_id]
+            source = store.get('source', claim['source_id'], lock=True) or {}
+            logistics = store.get('source', claim['logistics_id'], lock=True) or {}
+            if not source.get('approved') or source.get('invalid') or source.get('snapshot') != claim['source_snapshot'] or logistics.get('invalid') or logistics.get('snapshot') != claim['logistics_snapshot']:
+                raise ValueError('原费用来源已变化或失效，请先核对新证据')
+            try:
+                value = Decimal(str(amount))
+                if not value.is_finite() or abs(value) >= Decimal('1000000000000') or value != value.quantize(Decimal('.000001')):
+                    raise ValueError()
+            except (InvalidOperation, ValueError, TypeError):
+                raise ValueError('更正金额须是有效数字，最多六位小数')
+            if value < 0 and not negative_confirmed:
+                raise ValueError('请确认负数冲抵费用')
+            claim.update(original_amount=claim.get('original_amount', claim['amount']), amount=format(value.normalize(), 'f'),
+                         manual_corrected=True, correction_reason=str(reason).strip(), corrected_by=actor, corrected_at=utcnow())
+            validate_final(rule_for(claim))
+        elif action == 'revoke':
+            del claims[claim_id]
+        if locked(batch):
+            save(store, {'id':operation_id, 'kind':'freight_amend', 'status':'queued', 'request':request})
+            return {'status':'queued','version':version_name,'message':'批次正在编辑，费用更正已排队'}
+        if action == 'replace':
+            result = confirm(store, ledger, batch_name, version_name, candidate_id, candidate_revision, line_ids, actor,
+                             replace_claim_ids=[claim_id], expected_revision=expected_revision, reason=reason,
+                             negative_confirmed=negative_confirmed)
+        else:
+            revision = digest(POLICY, operation_id, claims)
+            result = _write_claims(store,ledger,batch,previous,claims,revision,actor,reason,[],[claim_id] if action=='revoke' else [])
+        if result['status'] == 'applied':
+            save(store, {'id':operation_id, 'kind':'freight_amend', 'status':'completed', 'request':request, 'result':result})
+            store.audit(batch_name,'freight_'+action,actor,claim_id=claim_id,reason=str(reason),before=previous['claims'],after=result.get('claims',[]),version=result['version'])
+        return result
 
 
 def blockers(store,ledger,batch_name,version_name,for_calculation=False):
     ctx=context(store,ledger,batch_name,version_name,live=True)
     packing_issues=['物料或数量变化后，保留的装箱重量、体积待核对'] if any(row_meta(i).get('settlement_packing_review') for i in ledger.rows('item',batch=batch_name,version=version_name)) else []
+    from .packing_selection import scope_blockers
+    packing_issues += scope_blockers(ledger,batch_name,version_name)
     if not ctx['selected']: return packing_issues + ([] if for_calculation else ['尚未采用审批通过的本票实际运费'])
     if ctx['issues']: return ctx['issues']
     if not ctx['claims']: return ['本票实际运费待核对，不能恢复旧暂估']

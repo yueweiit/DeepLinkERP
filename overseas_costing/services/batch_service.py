@@ -1641,7 +1641,7 @@ def get_batch_items(
     if not resolved_version_name:
         return {"ok": False, "batch_name": batch_doc_name, "message": "当前批次没有版本。"}
 
-    fields = list(dict.fromkeys(EXTRA_ITEM_FIELDS + EXCEL_FIELDNAMES))
+    fields = list(dict.fromkeys(EXTRA_ITEM_FIELDS + EXCEL_FIELDNAMES + ["extra_json"]))
     db_filters, or_filters = _build_item_query_args(
         batch_doc_name,
         resolved_version_name,
@@ -1664,6 +1664,9 @@ def get_batch_items(
         batch_fields,
         as_dict=True,
     ) or {}
+    from overseas_costing.services.effective_source_values import project_source_values
+    items = [project_source_values(item) for item in items]
+    for item in items: item.pop("extra_json", None)
     batch_business_type = _resolve_batch_business_type(batch_header)
     for item in items:
         item["business_type"] = batch_business_type

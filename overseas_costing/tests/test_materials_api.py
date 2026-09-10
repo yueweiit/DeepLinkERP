@@ -187,3 +187,18 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
     assert calls[1][2]["after_revision"] == 9
     assert calls[2][1][2:4] == (["P1"], {"P1": {}})
     assert calls[2][1][6][0]["fieldname"] == "goods_value"
+
+
+def test_clarification_api_permissions_and_optimistic_revision(monkeypatch):
+    api = _load_api(monkeypatch)
+    checks = []
+    monkeypatch.setattr(api, 'require_batch_permission', lambda b, p: checks.append(p) or 'B1')
+    monkeypatch.setattr(api.material_ai_fill_service, 'get_source_ai_clarification', lambda *a: {'args': a})
+    monkeypatch.setattr(api.material_ai_fill_service, 'save_source_ai_clarification', lambda *a: {'args': a})
+    monkeypatch.setattr(api.material_ai_fill_service, 'start_source_ai_review', lambda *a, **k: {'args': a, 'kwargs': k})
+    assert api.get_source_ai_clarification('batch')['args'] == ('B1',)
+    assert api.save_source_ai_clarification('batch', '说明', '2')['args'] == ('B1', '说明', 2)
+    started = api.start_source_ai_review('batch', 'V1', expected_clarification_revision='3')
+    assert started['args'][2] is None
+    assert started['kwargs']['expected_clarification_revision'] == 3
+    assert checks == ['read', 'write', 'write']

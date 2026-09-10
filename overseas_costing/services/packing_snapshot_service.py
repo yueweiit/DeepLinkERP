@@ -530,7 +530,7 @@ def get_current_packing_snapshot(batch_name: str, version_name: str | None = Non
         return None
     snapshot = _public_snapshot(frappe.get_doc("Overseas Packing Snapshot", name))
     bundle = effective_source.current_source_bundle(batch_name, version_name)
-    if bundle and (bundle['context']['root_kind'] == 'expense' or effective_source.json_dict(snapshot.get('source_context_json'))):
+    if bundle and (bundle['context']['root_kind'] == 'expense' or (bundle['context'].get('packing') or {}).get('selected_source') or effective_source.json_dict(snapshot.get('source_context_json'))):
         context = bundle['context']
         saved = effective_source.json_dict(snapshot.get('source_context_json'))
         if saved.get('fingerprint') != context['fingerprint'] or not context['approved'] or context['invalid'] or not context['available']:
@@ -544,6 +544,10 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
     bundle = effective_source.current_source_bundle(batch_name)
+    if bundle and (bundle['context'].get('packing') or {}).get('selected_source'):
+        selected=selected_packing_ai_sources(batch_name,bundle)
+        return {'approval_sources':[{k:v for k,v in row.items() if k not in ('scoped_goods','scoped_text','form_fields')} for row in selected],
+                'manual_sources':[],'manual_attachments':[],'wiki_workbooks':[],'source_context':bundle['context']}
     if bundle and bundle['context']['root_kind'] == 'expense':
         sources = _bound_material_sources(batch_name, bundle)
         # The picker receives descriptors, never raw form/comment content.
@@ -873,12 +877,29 @@ def _list_approval_body_ai_sources(batch_name: str, *, detail: dict | None = Non
     return rows
 
 
+def selected_packing_ai_sources(batch_name, bundle):
+    """Selected source content is already shipment-scoped and locally archived."""
+    context=bundle['context'];source=bundle['source'];selected=context['packing']['selected_source']
+    rows=[{**g,**(g.get('physical') or {}),'source_row':(g.get('evidence') or {}).get('row') or g.get('source_position') or index}
+          for index,g in enumerate(source.get('goods') or [],1)]
+    return [{'source_id':selected['id'],'logical_source_id':selected['id'],'source_kind':selected['source_kind'],
+             'source_label':selected['source_label'],'file_name':(selected.get('evidence') or {}).get('file_name') or selected['source_label'],
+             'sheet_name':selected.get('sheet',''),'approval_no':selected['approval_no'],'process_instance_id':context['instance_id'],
+             'batch':batch_name,'source_context':context,'source_hash':selected['revision'],'content_hash':selected['revision'],
+             'source_updated_at':selected.get('occurred_at',''),'actor_name':selected.get('actor_name',''),
+             'available':bool(context['available']),'excluded':not context['available'],'approval_role':'logistics_expense',
+             'selected_source':selected,'scoped_packing':True,'scoped_goods':rows,'scoped_text':source.get('scoped_text',''),
+             'form_fields':{},'approval_decisions':[],'can_download':False}]
+
+
 def list_material_ai_sources(batch_name: str, version_name: str | None = None) -> list[dict[str, Any]]:
     """Return a stable manifest of every trusted source the material AI task may read."""
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
     bundle = effective_source.current_source_bundle(batch_name, version_name)
+    if bundle and (bundle['context'].get('packing') or {}).get('selected_source'):
+        return selected_packing_ai_sources(batch_name,bundle)
     if bundle and bundle['context']['root_kind'] == 'expense':
         return _bound_material_sources(batch_name, bundle)
     detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}

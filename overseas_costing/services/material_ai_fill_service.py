@@ -1343,6 +1343,48 @@ def start_material_ai_fill(
     return {"ok": True, "run_id": run_id, "status": "QUEUED", "reused": False}
 
 
+def _saved_clarification(repo: Any, batch_name: str, *, locked: bool = False) -> dict:
+    reader = (getattr(repo, "get_locked_clarification", None) if locked else None) or getattr(repo, "get_clarification", None)
+    note = reader(batch_name) if callable(reader) else {}
+    return {**(note or {}), "text": str((note or {}).get("text") or ""),
+            "revision": int((note or {}).get("revision") or 0)}
+
+
+def get_source_ai_clarification(batch_name: str, *, repository: Any | None = None) -> dict:
+    repo = repository or FrappeMaterialAIFillRepository()
+    return {"ok": True, "clarification": _saved_clarification(repo, str(batch_name))}
+
+
+def save_source_ai_clarification(
+    batch_name: str, clarification_text: str, expected_revision: int,
+    *, repository: Any | None = None,
+) -> dict:
+    """Save interpretation only; the API enforces the batch write permission."""
+    repo = repository or FrappeMaterialAIFillRepository()
+    repo.lock_review_scope(str(batch_name))
+    current = _saved_clarification(repo, str(batch_name), locked=True)
+    text = str(clarification_text or "").strip()[:4000]
+    if text == current["text"]:
+        return {"ok": True, "unchanged": True, "clarification": current}
+    if int(expected_revision) != current["revision"]:
+        return {"ok": False, "conflict": True, "clarification": current,
+                "message": "说明已被其他页面修改；已保留你的输入，请核对后再次保存。"}
+    note = {"text": text, "revision": current["revision"] + 1,
+            "updated_at": _now(), "updated_by": _session_user()}
+    repo.write_clarification(str(batch_name), note)
+    repo.invalidate_clarification_runs(str(batch_name))
+    return {"ok": True, "unchanged": False, "clarification": note}
+
+
+def _clarification_changed(repo: Any, batch_name: str, run: Any, *, locked: bool = False) -> bool:
+    if not callable(getattr(repo, "get_clarification", None)):
+        return False
+    current = _saved_clarification(repo, batch_name, locked=locked)
+    saved_input = _load_json(_record_value(run, "draft_json"), {}).get("review_input") or {}
+    return (int(saved_input.get("clarification_revision") or 0) != current["revision"]
+            or str(_record_value(run, "clarification_text") or "") != current["text"])
+
+
 def _source_review_context(context: dict | None) -> dict:
     context = context or {}
     return {
@@ -1350,6 +1392,8 @@ def _source_review_context(context: dict | None) -> dict:
         "transport_mode": str(context.get("transport_mode") or ""),
         "fx_rates": deepcopy(context.get("fx_rates") or {}),
         "effective_source": deepcopy(context.get('effective_source') or {}),
+        **({"clarification_revision": int(context["clarification_revision"] or 0)}
+           if context.get("clarification_revision") else {}),
     }
 
 
@@ -1425,9 +1469,10 @@ def _reload_review_manifest(repo: Any, batch_name: str, version_name: str, run: 
 def start_source_ai_review(
     batch_name: str,
     version_name: str,
-    clarification_text: str = "",
+    clarification_text: str | None = None,
     *,
     force: bool = False,
+    expected_clarification_revision: int | None = None,
     selected_source_ids: list[str] | None = None,
     repository: Any | None = None,
     enqueue: Callable[[str], None] | None = None,
@@ -1440,12 +1485,26 @@ def start_source_ai_review(
     if hasattr(repo, "lock_review_scope"):
         repo.lock_review_scope(context["batch"])
         context = repo.get_context(str(batch_name), str(version_name))
+    note = _saved_clarification(repo, context["batch"], locked=True)
+    if expected_clarification_revision is not None and int(expected_clarification_revision) != note["revision"]:
+        return {"ok": False, "conflict": True, "clarification": note,
+                "message": "保存的说明已变化，请刷新说明后重新分析。"}
+    if clarification_text is not None and callable(getattr(repo, "write_clarification", None)):
+        saved = save_source_ai_clarification(context["batch"], clarification_text,
+            0 if expected_clarification_revision is None else int(expected_clarification_revision), repository=repo)
+        if not saved["ok"]:
+            return saved
+        note = saved["clarification"]
+        context = repo.get_context(str(batch_name), str(version_name))
+    if callable(getattr(repo, "get_clarification", None)):
+        context["clarification_revision"] = note["revision"]
     items = repo.get_items(context["batch"], context["version"])
     sources = prepare_source_manifest(
         repo.list_sources(context["batch"], context["version"]),
         selected_source_ids=selected_source_ids,
     )
-    clarification = str(clarification_text or "").strip()[:4000]
+    clarification = (note["text"] if clarification_text is None or callable(getattr(repo, "get_clarification", None))
+                     else str(clarification_text or "").strip()[:4000])
     fingerprint = _source_review_fingerprint(
         context["batch"], context["version"], items, sources, clarification,
         context=context,
@@ -1498,6 +1557,11 @@ def start_source_ai_review(
             "source_progress_json": _json(build_source_progress(sources)),
             "trigger_mode": str(trigger_mode or "MANUAL")[:40],
             "clarification_text": clarification,
+            "draft_json": _json({"review_input": {
+                "clarification_revision": note["revision"],
+                "cost_version": context["version"],
+                "source_context": deepcopy(context.get("effective_source") or {}),
+            }}),
             "proposal_version": 1,
             "source_completeness": "PENDING",
             "progress_step": "等待读取资料",
@@ -1532,7 +1596,7 @@ def schedule_source_ai_review(
         return start_source_ai_review(
             str(batch_name or ""),
             str(version_name or ""),
-            "",
+            None,
             force=False,
             trigger_mode=trigger_mode,
         )
@@ -1672,6 +1736,7 @@ def get_source_ai_review_status(
     repository: Any | None = None,
 ) -> dict:
     repo = repository or FrappeMaterialAIFillRepository()
+    clarification = _saved_clarification(repo, str(batch_name))
     selected_run_id = str(run_id or "").strip()
     if not selected_run_id:
         finder = getattr(repo, "find_latest_review_run", None)
@@ -1686,14 +1751,32 @@ def get_source_ai_review_status(
                 "review_mode": True,
                 "proposals": [],
                 "draft": {},
+                "clarification": clarification,
             }
         selected_run_id = str(_record_value(latest, "name") or "")
+    run = repo.get_run(selected_run_id)
+    _assert_run_batch(run, batch_name)
+    changed = _clarification_changed(repo, str(batch_name), run)
+    if not changed and _record_value(run,'status') == 'READY':
+        try:
+            current=repo.get_context(str(batch_name),str(_record_value(run,'version') or ''))
+            if callable(getattr(repo,'get_clarification',None)):
+                current['clarification_revision']=clarification['revision']
+            inputs=_reload_review_manifest(repo,current['batch'],current['version'],run)
+            changed=_source_review_fingerprint(current['batch'],current['version'],repo.get_items(current['batch'],current['version']),
+                inputs,str(_record_value(run,'clarification_text') or ''),context=current)!=_record_value(run,'input_fingerprint')
+        except ValueError:
+            changed=True
     result = get_material_ai_fill_status(
         batch_name,
         selected_run_id,
-        after_revision=after_revision,
+        after_revision=None if changed else after_revision,
         repository=repo,
     )
+    result["clarification"] = clarification
+    if changed and result.get("status") in ACTIVE_STATES:
+        result.update(status="STALE", stale=True, progress_step="说明或资料已变化",
+                      error_message="说明、资料或成本版本已变化，请重新分析；旧草稿不能确认填充。")
     if result.get("unchanged"):
         result["review_mode"] = True
         return result
@@ -1703,6 +1786,7 @@ def get_source_ai_review_status(
             "review_mode": True,
             "trigger_mode": str(_record_value(run, "trigger_mode") or ""),
             "clarification_text": str(_record_value(run, "clarification_text") or ""),
+            "clarification_revision": int((_load_json(_record_value(run, "draft_json"), {}).get("review_input") or {}).get("clarification_revision") or 0),
             "source_completeness": str(_record_value(run, "source_completeness") or ""),
             "proposals": result.get("candidates") or [],
         }
@@ -1838,6 +1922,10 @@ def apply_source_ai_review(
             "idempotent": True,
             "message": "该确认请求已成功写入，本次未重复修改数据。",
         }
+    if _clarification_changed(repo, context["batch"], run, locked=True):
+        repo.save_run(run, status="STALE", progress_step="说明已变化",
+                      error_message="保存的说明已变化，请按新说明重新分析。", completed_at=_now())
+        return {"ok": False, "stale": True, "run_id": str(run_id), "status": "STALE"}
     if str(_record_value(run, "status") or "") != "READY":
         raise ValueError("AI 资料审核草稿尚未准备完成或已经处理。")
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
@@ -1866,7 +1954,7 @@ def apply_source_ai_review(
     saved_fee_fingerprint = _load_json(_record_value(run, "draft_json"), {}).get("fee_fingerprint")
     current_fees = _effective_review_fees(repo,context)
     fees_changed = bool(saved_fee_fingerprint and saved_fee_fingerprint != hashlib.sha256(_json(current_fees).encode()).hexdigest())
-    if fees_changed or current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
+    if _clarification_changed(repo, context["batch"], run, locked=True) or fees_changed or current_fingerprint != str(_record_value(run, "input_fingerprint") or ""):
         repo.save_run(
             run,
             status="STALE",
@@ -1947,6 +2035,8 @@ def _source_reference(source: dict, *, row: Any = None, cell: str = "", page: An
     for fieldname in ("source_id", "approval_no", "actor_name", "occurred_at"):
         if str(source.get(fieldname) or "").strip():
             result[fieldname] = str(source.get(fieldname) or "").strip()
+    if isinstance(source.get("selected_source"), dict):
+        result["selected_source"] = deepcopy(source["selected_source"])
     return result
 
 
@@ -2362,6 +2452,15 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
     """Return deterministic candidates and a bounded document for semantic matching."""
 
     from overseas_costing.services import attachment_parse_service, packing_source_service
+
+    if source.get("scoped_packing"):
+        rows = deepcopy(source.get("scoped_goods") or [])[:1000]
+        return _projection_candidates(items, source, {"material_rows": rows}), {
+            "source_ref": _source_reference(source),
+            "structured_rows": rows,
+            "text": str(source.get("scoped_text") or "")[:MAX_AI_DOCUMENT_CHARS],
+            "ai_eligible": True,
+        }
 
     kind = str(source.get("source_kind") or "")
     if kind == "approval_form":
@@ -3036,6 +3135,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
 
     def persist(**updates: Any) -> Any:
         nonlocal run
+        if "draft_json" in updates:
+            draft = _load_json(updates["draft_json"], {})
+            review_input = _load_json(_record_value(run, "draft_json"), {}).get("review_input")
+            if review_input is not None:
+                updates["draft_json"] = {**draft, "review_input": deepcopy(review_input)}
         if owns_claim and callable(save_claimed):
             saved = save_claimed(str(run_id), execution_token, **updates)
             if not saved:
@@ -3059,6 +3163,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         context = repo.get_context(batch_name, version_name)
         items = repo.get_items(context["batch"], context["version"])
         unified_review = bool(_record_value(run, "proposal_version", 0))
+        if unified_review and _clarification_changed(repo, batch_name, run):
+            persist(status="STALE", progress_step="说明已变化", completed_at=_now())
+            return {"ok": False, "run_id": str(run_id), "status": "STALE"}
         try:
             sources = (
                 _reload_review_manifest(repo, context["batch"], context["version"], run)
@@ -3077,13 +3184,13 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         clarification_text = str(_record_value(run, "clarification_text") or "")
 
         def requeue_latest_input() -> str:
-            if not unified_review:
+            if not unified_review or _clarification_changed(repo, batch_name, run):
                 return ""
             try:
                 replacement = start_source_ai_review(
                     context["batch"],
                     context["version"],
-                    clarification_text,
+                    None,
                     force=False,
                     selected_source_ids=_selected_ids_from_run_manifest(
                         _record_value(run, "source_manifest_json")
@@ -3526,6 +3633,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 completed_at=_now(),
             )
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
+        if unified_review and _clarification_changed(repo, batch_name, run, locked=True):
+            persist(status="STALE", progress_step="说明已变化", completed_at=_now())
+            return {"ok": False, "run_id": str(run_id), "status": "STALE"}
         refreshed_fingerprint = (
             _source_review_fingerprint(
                 context["batch"], context["version"], refreshed_items, refreshed_sources,
@@ -3563,6 +3673,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     refreshed_sources, source_progress, candidates
                 )
             sources = refreshed_sources
+        if unified_review:
+            draft["review_input"] = deepcopy(_load_json(_record_value(run, "draft_json"), {}).get("review_input") or {})
         persist(status="READY",
             progress_step="草稿已生成",
             progress_percent=100,
@@ -3688,6 +3800,42 @@ def _now() -> str:
 
 
 class FrappeMaterialAIFillRepository:
+    def get_clarification(self, batch_name: str) -> dict:
+        meta = _load_json(frappe.db.get_value("Overseas Cost Batch", batch_name, "extra_json"), {})
+        note = meta.get("ai_clarification") or {}
+        return {**note, "text": str(note.get("text") or ""), "revision": int(note.get("revision") or 0)}
+
+    def get_locked_clarification(self, batch_name: str) -> dict:
+        # A locking read sees commits made while this request waited for the batch lock,
+        # even when an earlier permission/context read established a transaction snapshot.
+        rows = frappe.db.sql(
+            "SELECT extra_json FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
+            (batch_name,), as_dict=True,
+        )
+        meta = _load_json(rows[0].get("extra_json") if rows else None, {})
+        note = meta.get("ai_clarification") or {}
+        return {**note, "text": str(note.get("text") or ""), "revision": int(note.get("revision") or 0)}
+
+    def write_clarification(self, batch_name: str, note: dict) -> None:
+        rows = frappe.db.sql(
+            "SELECT name, extra_json FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
+            (batch_name,), as_dict=True,
+        )
+        if not rows:
+            raise ValueError("未找到批次。")
+        meta = _load_json(rows[0].get("extra_json"), {})
+        meta["ai_clarification"] = deepcopy(note)
+        frappe.db.set_value("Overseas Cost Batch", batch_name, "extra_json", _json(meta), update_modified=False)
+
+    def invalidate_clarification_runs(self, batch_name: str) -> None:
+        # Updating the status revokes a worker's execution claim without deleting history.
+        frappe.db.sql("""
+            UPDATE `tabOverseas Cost Material AI Run`
+            SET status='STALE', progress_step=%s, error_message=%s, completed_at=%s,
+                progress_revision=COALESCE(progress_revision, 0)+1
+            WHERE batch=%s AND proposal_version>0 AND status IN ('QUEUED','RUNNING','READY')
+        """, ("说明已变化", "说明已保存，请按新说明重新分析。", _now(), batch_name))
+
     def get_context(self, batch_name: str, version_name: str | None = None) -> dict:
         if frappe is None:
             raise RuntimeError("当前未连接 Frappe。")
@@ -3715,6 +3863,7 @@ class FrappeMaterialAIFillRepository:
             "batch": str(batch.get("name") or ""),
             "version": selected_version,
             "batch_modified": str(batch.get("modified") or ""),
+            "clarification_revision": self.get_clarification(resolved)["revision"],
             "version_modified": str(version.get("modified") or ""),
             "transport_mode": str(batch.get("transport_mode") or ""),
             "effective_source": (effective_source.current_source_bundle(resolved, selected_version) or {}).get('context') or {},

@@ -86,6 +86,7 @@
     } catch (error) {
       if (requestId !== this.detailState.requestId || this.detailState.batchName !== normalizedName) return;
       this.renderDetailError(error);
+      if (options.propagateError) throw error;
     }
   }
 

@@ -352,28 +352,31 @@
     }
   }
 
-  async refreshSettlementBatch(batchName) {
+  async refreshSettlementBatch(batchName, expectedVersion = null) {
     if (this.detailState?.batchName === batchName) {
       // Adoption can create an adjustment version; fetch current header without the old version pin.
-      await this.openBatchDetail(batchName, this.detailState.tab || "documents", { updateUrl: false });
+      if (expectedVersion) this.detailState.versionName = expectedVersion;
+      await this.openBatchDetail(batchName, this.detailState.tab || "documents", { updateUrl: false, propagateError: true });
     } else if (this.markBatchDirty) this.markBatchDirty(batchName);
   }
 
-  async openBatchSettlementDialog(batchName, viewedVersion = null) {
+  async openBatchSettlementDialog(batchName, viewedVersion = null, initialTab = 'freight') {
     if (this.batchSettlementState?.open) this.stopSettlementDialog(this.batchSettlementState);
     const state = this.settlementDialog("本票运费与装箱核对");
     this.batchSettlementState = state;
     state.batchName = batchName;
+    state.freightTab = ['freight', 'packing', 'audit'].includes(initialTab) ? initialTab : 'freight';
     state.versionName = viewedVersion || (this.detailState?.batchName === batchName ? this.detailState.versionName : null);
     state.detailContext = this.detailState?.batchName === batchName ? this.settlementDetailContext() : null;
     state.autoMatchChecked = false;
     state.autoMatchStarted = false;
     const load = () => this.loadBatchSettlementDialog(state);
-    const afterWrite = () => {
+    const afterWrite = (result = {}) => {
       // Adoption may create a new current adjustment version. Only a completed
       // write may deliberately advance this dialog's version and navigation fence.
       if (state.open && !state.data?.historical && this.detailState?.batchName === batchName) {
-        state.versionName = this.detailState.versionName || null;
+        state.versionName = result.version || this.detailState.versionName || null;
+        if (result.version) this.detailState.versionName = result.version;
         state.detailContext = this.settlementDetailContext();
       }
       return load();
@@ -382,9 +385,9 @@
       const data = state.data || {};
       if (action === "refresh") return load();
       if (action === "source") return this.openSettlementSource(data.expense);
-      if (data.historical) throw new Error("历史版本仅供追溯，请返回当前调整草稿处理。");
       if (!this.isBatchSettlementCurrent(state)) throw new Error("当前批次或版本已变化，请重新打开本票资料。");
       if (data.freight_mode) return this.handleFreightAction(state, action, $button, afterWrite);
+      if (data.historical) throw new Error("历史版本仅供追溯，请返回当前调整草稿处理。");
       if (action === "retry-matching") return this.startBatchSettlementMatching(state, true);
       if (action === "search" || action === "correct") return this.openSettlementSearch(batchName, action === "correct" ? data : null, afterWrite,
         { versionName: data.viewed_version || state.versionName, logistics: data.logistics });
@@ -396,6 +399,9 @@
       if (action === "items") return this.openSettlementItemReview(batchName, data, afterWrite);
     });
     await load();
+    if (this.isBatchSettlementCurrent(state) && state.data?.freight_mode && state.freightTab === 'packing') {
+      await this.handleFreightAction(state, 'packing-sources-refresh', null, afterWrite);
+    }
   }
 
   settlementDetailContext() {
@@ -476,7 +482,7 @@
   }
 
   renderBatchSettlementDialog(state, data) {
-    if (data.freight_mode) return this.settlementBody(state, this.renderFreightContent(data));
+    if (data.freight_mode) return this.renderFreightWorkspace(state);
     const issues = [...new Set([...(data.binding?.issues || []), ...(data.blocking_reasons || [])])];
     this.settlementBody(state, `<div class="ocw-settlement-toolbar"><strong>本票匹配 · 国际物流审批号：${this.escape(data.logistics?.approval_no || data.matching?.approval_no || data.logistics?.instance || state.batchName || "待读取")}</strong><button class="ocw-outline-btn" data-settlement-action="refresh">刷新</button></div>
       <p>${this.escape(this.settlementAdoption(data))}</p>

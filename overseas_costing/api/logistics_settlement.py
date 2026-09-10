@@ -1,5 +1,6 @@
 """Settlement RPCs: server-owned source data, optimistic revisions, per-batch permissions."""
 import json
+from functools import wraps
 import frappe
 
 from overseas_costing.services.access_control import require_batch_permission, require_overseas_cost_access
@@ -9,6 +10,21 @@ from overseas_costing.services.logistics_settlement.matching import confirm_cand
 from overseas_costing.services.logistics_settlement.writer import apply_binding, reverse_binding
 from overseas_costing.services.logistics_settlement.ledger import FrappeLedger
 from overseas_costing.services.logistics_settlement.jobs import retry_job, pause_job
+
+
+def _review_validation(function):
+    """Expected conflicts stay beside the user's draft instead of spawning a dialog."""
+    @wraps(function)
+    def checked(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except ValueError as exc:
+            return {'ok':False,'message':str(exc),'code':'REVIEW_REQUIRED'}
+        except Exception as exc:
+            if type(exc).__name__ in ('QueryDeadlockError','QueryTimeoutError'):
+                return {'ok':False,'message':'其他操作正在更新本票，当前更正未保存。请刷新后重试。','code':'REVIEW_CONFLICT'}
+            raise
+    return checked
 
 
 def _decode(value, expected):
@@ -240,6 +256,7 @@ def prepare_manual_candidate(batch_name, expense_id, reason):
 
 
 @frappe.whitelist(methods=['POST'])
+@_review_validation
 def confirm_freight_lines(batch_name,version_name,candidate_id,candidate_revision,line_ids,replace_claim_ids=None,expected_revision=None,reason='',negative_confirmed=False):
     if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
     batch_name=require_batch_permission(batch_name,'write')
@@ -248,6 +265,46 @@ def confirm_freight_lines(batch_name,version_name,candidate_id,candidate_revisio
         replace_claim_ids=_decode(replace_claim_ids,list) if replace_claim_ids else [],expected_revision=expected_revision,
         reason=str(reason),negative_confirmed=negative_confirmed in (True,1,'1','true'))
     return {'ok':True,**result}
+
+
+@frappe.whitelist(methods=['POST'])
+@_review_validation
+def list_shipment_packing_sources(batch_name,version_name):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'read')
+    from overseas_costing.services.logistics_settlement.packing_selection import list_sources
+    return {'ok':True,**list_sources(runtime.store(),FrappeLedger(),batch_name,version_name)}
+
+
+@frappe.whitelist(methods=['POST'])
+@_review_validation
+def preview_shipment_packing_source(batch_name,version_name,source_id,source_revision):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.logistics_settlement.packing_selection import preview_selection
+    return {'ok':True,'preview':preview_selection(runtime.store(),FrappeLedger(),batch_name,version_name,source_id,source_revision)}
+
+
+@frappe.whitelist(methods=['POST'])
+@_review_validation
+def confirm_shipment_packing_source(batch_name,version_name,preview_id,revision,replace_all=False):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.logistics_settlement.packing_selection import confirm_selection
+    return {'ok':True,**confirm_selection(runtime.store(),FrappeLedger(),batch_name,version_name,preview_id,revision,
+        frappe.session.user,replace_all=replace_all in (True,1,'1','true'))}
+
+
+@frappe.whitelist(methods=['POST'])
+@_review_validation
+def amend_freight_claim(batch_name,version_name,claim_id,expected_revision,action,reason,amount=None,
+                        candidate_id=None,candidate_revision=None,line_ids=None,negative_confirmed=False):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.logistics_settlement.freight_adoption import amend
+    return {'ok':True,**amend(runtime.store(),FrappeLedger(),batch_name,version_name,claim_id,expected_revision,action,
+        frappe.session.user,reason=str(reason),amount=amount,candidate_id=candidate_id,candidate_revision=candidate_revision,
+        line_ids=_decode(line_ids,list) if line_ids else None,negative_confirmed=negative_confirmed in (True,1,'1','true'))}
 
 
 @frappe.whitelist(methods=['POST'])
@@ -268,6 +325,7 @@ def confirm_freight_packing(batch_name,version_name,preview_id,revision,selectio
 
 
 @frappe.whitelist(methods=['POST'])
+@_review_validation
 def reject_freight_candidate(batch_name,candidate_id,revision,reason):
     if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
     batch_name=require_batch_permission(batch_name,'write');db=runtime.store()
@@ -352,6 +410,7 @@ def restore_application(batch_name, application_id, expected_revision, reason):
 
 
 @frappe.whitelist()
+@_review_validation
 def freight_line_evidence(batch_name,version_name,line_id):
     batch_name=require_batch_permission(batch_name)
     from overseas_costing.services.logistics_settlement.freight_runtime import line_evidence
@@ -359,6 +418,7 @@ def freight_line_evidence(batch_name,version_name,line_id):
 
 
 @frappe.whitelist(methods=['POST'])
+@_review_validation
 def resolve_freight_packing_checks(batch_name,version_name,selections,reason):
     batch_name=require_batch_permission(batch_name,'write')
     from overseas_costing.services.logistics_settlement.freight_packing import resolve_checks

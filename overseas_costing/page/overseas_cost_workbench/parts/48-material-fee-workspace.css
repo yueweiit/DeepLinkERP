@@ -395,7 +395,13 @@
 .ocw-mf-ai-banner > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ocw-mf-ai-banner > div:first-child span, .ocw-mf-ai-banner p { color: #475467; font-size: 11px; }
 .ocw-mf-ai-banner p { margin: 0; padding: 7px 9px; border-radius: 6px; background: #fff8e7; color: #8a5700; }
-.ocw-mf-ai-clarification { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #e7edf5; background: #fbfdff; }
+.ocw-mf-ai-clarification { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #e7edf5; background: #fbfdff; }
+.ocw-mf-ai-clarification > label { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: center; gap: 10px; margin: 0; min-width: 0; }
+.ocw-mf-ai-clarification-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ocw-mf-ai-clarification-actions button { white-space: nowrap; }
+.ocw-mf-ai-clarification [data-mf-ai-clarification-status="saved"] { color: #027a48; }
+.ocw-mf-ai-clarification [data-mf-ai-clarification-status="unsaved"] { color: #854a0e; }
+.ocw-mf-ai-clarification [data-mf-ai-clarification-status="failed"] { color: #b42318; }
 .ocw-mf-ai-clarification span { color: #344054; font-size: 12px; font-weight: 700; }
 .ocw-mf-ai-clarification input { width: 100%; min-width: 0; height: 34px; padding: 0 10px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #101828; }
 .ocw-mf-ai-proposals { display: grid; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #d7e8f7; background: #f8fbff; }
@@ -525,7 +531,7 @@
 .ocw-mf-ai-review-sources label.is-failed { background: #fff0ee; }
 .ocw-mf-ai-review-sources label.is-needs_selection { background: #fff8e7; }
 @media (max-width: 700px) {
-  .ocw-mf-ai-clarification { grid-template-columns: 1fr; }
+  .ocw-mf-ai-clarification, .ocw-mf-ai-clarification > label { grid-template-columns: 1fr; }
   .ocw-mf-ai-dialog-footer > span { display: none; }
   .ocw-mf-ai-dialog-footer > div { margin-left: auto; }
 }

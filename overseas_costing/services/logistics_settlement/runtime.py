@@ -81,7 +81,7 @@ def calculation_blockers(batch_name, version_name=None, *, for_calculation=False
             mapping=db.find('batch_map',batch=batch_name)
             original=db.get('source',mapping[0]['source_id'],lock=lock) if mapping else None
             if original and original.get('invalid'):issues.append('本票国际物流已撤销或失效')
-            if ctx.get('root_kind')=='expense' and (ctx.get('invalid') or not ctx.get('available')):issues.append('已采用装箱来源已变化，请重新核对')
+            if (ctx.get('root_kind')=='expense' or (ctx.get('packing') or {}).get('selected_source')) and (ctx.get('invalid') or not ctx.get('available')):issues.append('已采用装箱来源已变化，请重新核对')
             return issues
     binding = for_batch(batch_name, lock=lock)
     if not installed():

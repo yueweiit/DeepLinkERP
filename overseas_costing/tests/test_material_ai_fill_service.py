@@ -1690,6 +1690,10 @@ def test_latest_source_review_status_can_restore_background_draft() -> None:
             "source_progress_json": '[{"source_id":"A","label":"采购明细.xlsx","status":"PARSED"}]',
         }
     )
+    from overseas_costing.services import material_ai_fill_service as service
+    context=repository.get_context('B1','V1')
+    repository.run['input_fingerprint']=service._source_review_fingerprint('B1','V1',repository.get_items('B1','V1'),
+        service._reload_review_manifest(repository,'B1','V1',repository.run),repository.run['clarification_text'],context=context)
     repository.find_latest_review_run = lambda batch, version: repository.run
 
     status = get_source_ai_review_status(

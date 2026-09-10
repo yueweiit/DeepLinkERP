@@ -48,6 +48,13 @@ def physical_overlay_update(item, context, values, *, evidence):
         if field in PHYSICAL_FIELDS:
             adopted[field] = value
             proof[field] = evidence
+    if 'settlement_packing_missing' in meta:
+        missing=set(meta['settlement_packing_missing'])
+        for field,value in values.items():
+            if field in PHYSICAL_FIELDS:
+                if value is None: missing.add(field)
+                else: missing.discard(field)
+        meta['settlement_packing_missing']=sorted(missing)
     meta['settlement_physical'] = {'source_snapshot':context['source_snapshot'],
         'source_context_fingerprint':context['fingerprint'],'values':adopted,'evidence':proof}
     return meta
@@ -62,6 +69,12 @@ def project_source_values(item, context=None):
         row['source_context']=context
         meta['effective_logistics_source']=context
         row['extra_json']=meta
+        if (context.get('packing') or {}).get('selected_source'):
+            physical=meta.get('settlement_physical') or {}
+            if physical.get('source_snapshot') == context.get('source_snapshot'):
+                row.update({k:v for k,v in (physical.get('values') or {}).items() if k in PHYSICAL_FIELDS})
+            for field in meta.get('settlement_packing_missing') or []:
+                if field in (*PHYSICAL_FIELDS,'quantity'): row[field]=None
         # These are independently adopted rows; changing freight must not blank packing or customs.
         return row
     if not expense_context(context):

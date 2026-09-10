@@ -193,10 +193,14 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str, *,
     """Overlay persisted fees; preserve all active conflicts and retired intent."""
 
     from overseas_costing.services.logistics_settlement.fee_policy import covered_scopes, row_scopes, select_fees, is_final
-    decorated = select_fees(_decorate_historical_rules(existing_fees, transport_mode),source_context=source_context)
+    freight=(source_context or {}).get('freight') or {}
+    pending_freight=freight.get('selected') and not freight.get('available')
+    decorated=_decorate_historical_rules(existing_fees, transport_mode)
+    decorated=[r for r in decorated if 'freight' not in row_scopes(r)] if pending_freight else select_fees(decorated,source_context=source_context)
     if source_context and source_context.get('root_kind') == 'expense' and not source_context.get('separate_adoption'):
         return mark_duplicate_fees(decorated)
     covered = covered_scopes(decorated)
+    if pending_freight: covered.add('freight')
     templates = [row for row in build_default_fee_templates(transport_mode) if not row_scopes(row) & covered]
     template_by_key = {row["logical_fee_key"]: dict(row) for row in templates}
     extras = []
