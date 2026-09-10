@@ -238,22 +238,7 @@ def confirm_selection(store,ledger,batch_name,version_name,preview_id,revision,a
             values.update(batch=batch_name,version=vname,extra_json=dumps(meta),**{k:0 for k in DERIVED_FIELDS})
             saved=ledger.put('item',target['name'],values) if target else ledger.create('item',values);kept.add(saved['name'])
         removed={i['name'] for i in ledger.rows('item',batch=batch_name,version=vname)}-kept
-        for kind in ('evidence','component'):
-            for row in ledger.rows(kind,batch=batch_name,version=vname):
-                if row.get('item') in removed:
-                    scope_issues.append({'kind':kind,'name':row['name']})
-                    ledger.put(kind,row['name'],{'item':None,**({'is_active':0} if kind=='component' else {})})
-        for rule in ledger.rows('rule',batch=batch_name,version=vname):
-            if rule.get('scope_type') not in (None,'','ALL_ITEMS'):
-                from overseas_costing.services.fee_allocation_service import _scope_keys, _item_key
-                current_items=[i for i in ledger.rows('item',batch=batch_name,version=vname) if i['name'] in kept]
-                new_keys={_item_key(i) for i in current_items}
-                key_map={old['name']:_item_key(ledger.get('item',copies['item'][old['name']])) for old in olditems if copies['item'][old['name']] in kept}
-                keys=[key_map.get(k,k) for k in _scope_keys(rule)]
-                if keys and set(keys).issubset(new_keys):ledger.put('rule',rule['name'],{'scope_value_json':dumps(keys)})
-                else:
-                    scope_issues.append({'kind':'rule','name':rule['name']})
-                    ledger.put('rule',rule['name'],{'is_enabled':0,'is_active':0})
+        scope_issues=preserve_selected_scopes(ledger,batch_name,vname,olditems,copies,kept)
         for name in removed:ledger.delete('item',name)
         metadata=row_meta(version);freight=metadata.get('freight_settlement') or {'policy':'shipment-freight-1','revision':review['freight_revision'],'claims':[]}
         freight['packing_review_id']=review['id'];metadata.update(freight_settlement=freight,packing_scope_issues=scope_issues)
@@ -283,3 +268,25 @@ def scope_blockers(ledger,batch_name,version_name):
         else:unresolved=row.get('item') not in ids
         if unresolved:issues.append('装箱替换后，物料定向费用／凭证需在资料与费用中重新指定：'+row.get('rule_code',row['name']))
     return issues
+
+
+def preserve_selected_scopes(ledger,batch_name,vname,olditems,copies,kept):
+    removed={i['name'] for i in ledger.rows('item',batch=batch_name,version=vname)}-kept
+    scope_issues=[]
+    for kind in ('evidence','component'):
+        for row in ledger.rows(kind,batch=batch_name,version=vname):
+            if row.get('item') in removed:
+                scope_issues.append({'kind':kind,'name':row['name']})
+                ledger.put(kind,row['name'],{'item':None,**({'is_active':0} if kind=='component' else {})})
+    for rule in ledger.rows('rule',batch=batch_name,version=vname):
+        if rule.get('scope_type') not in (None,'','ALL_ITEMS'):
+            from overseas_costing.services.fee_allocation_service import _scope_keys, _item_key
+            current_items=[i for i in ledger.rows('item',batch=batch_name,version=vname) if i['name'] in kept]
+            new_keys={_item_key(i) for i in current_items}
+            key_map={old['name']:_item_key(ledger.get('item',copies['item'][old['name']])) for old in olditems if copies['item'][old['name']] in kept}
+            keys=[key_map.get(k,k) for k in _scope_keys(rule)]
+            if keys and set(keys).issubset(new_keys):ledger.put('rule',rule['name'],{'scope_value_json':dumps(keys)})
+            else:
+                scope_issues.append({'kind':'rule','name':rule['name']})
+                ledger.put('rule',rule['name'],{'is_enabled':0,'is_active':0})
+    return scope_issues

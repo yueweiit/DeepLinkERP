@@ -181,7 +181,7 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
                 "project_collection", "manual_override_flag", "manual_override_reason", "spec_model")}
         row.update({"name": retained_name or f"draft-{key[10:]}", "stable_line_key": (old.get("stable_line_key") if retained_name else None) or key,
                     "unit": old.get('unit') or goods_row.get('unit') or '',
-                    "row_no": index, "material_code": code,
+                    "row_no": index, "material_code": code, "_review_origin": "source",
                     "product_name": goods_row.get("product_name") or old.get("product_name") or code,
                     "spec_model": goods_row.get("spec_model") or old.get("spec_model"),
                     "actual_shipped_qty": str(goods_row["quantity"]),
@@ -197,12 +197,15 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         metadata["logistics_row"] = {**prior, "identity": key, "source_id": source["source_id"], "approval_no": source.get("approval_no"),
                                       "row_no": index, "purchase_key": purchase_key, "purchase_fact": fact}
         row["extra_json"] = json.dumps(metadata, ensure_ascii=False, default=str)
+        row['_review_source_values'] = {key: row.get(key) for key in ('material_code','product_name','spec_model','actual_shipped_qty','shipped_uom','unit','stable_line_key')}
+        # Physical fields copied/apportioned above are historical context, not evidence from this approval.
         rows.append(row)
     # Never silently remove unrelated or manually added rows.
     unmatched = [row for row in items if str(row.get("name")) not in used]
     for original in unmatched:
         row = deepcopy(original)
         row["_existing_name"] = row["name"]
+        row["_review_origin"] = "current"
         row["stable_line_key"] = row.get("stable_line_key") or "retained:" + hashlib.sha256(row["name"].encode()).hexdigest()[:32]
         row["row_no"] = len(rows) + 1
         rows.append(row)

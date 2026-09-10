@@ -105,7 +105,11 @@ def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None
     bundle=_legacy_source_bundle(batch_name,version_name,store=store,ledger=ledger,lock=lock)
     if store is None:return bundle
     version=bundle['version'] or {};meta=json_dict(version.get('extra_json'))
-    if bundle.get('binding') and not meta.get('freight_settlement'):return bundle
+    if bundle.get('binding') and not meta.get('freight_settlement'):
+        if meta.get('ai_row_adoption'):
+            from .material_ai_selected_scope import apply_scope
+            return apply_scope(bundle,meta['ai_row_adoption'],historical=version.get('name')!=bundle['batch'].get('current_version'),store=store,ledger=ledger,batch_name=batch_name)
+        return bundle
     from .logistics_settlement.freight_adoption import context as freight_context
     freight=freight_context(store,ledger,batch_name,version.get('name'))
     ctx=dict(bundle['context']);packing=dict(ctx)
@@ -148,6 +152,9 @@ def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None
     ctx.update(policy_version='shipment-sources-2' if packing.get('selected_source') else 'shipment-sources-1',separate_adoption=True,freight=freight,packing=packing)
     ctx['fingerprint']=digest({k:v for k,v in ctx.items() if k not in ('fingerprint','freight')}, {k:v for k,v in freight.items() if k!='historical'})
     bundle['context']=ctx
+    if meta.get('ai_row_adoption'):
+        from .material_ai_selected_scope import apply_scope
+        bundle=apply_scope(bundle,meta['ai_row_adoption'],historical=freight['historical'],store=store,ledger=ledger,batch_name=batch_name)
     return bundle
 
 
@@ -162,14 +169,14 @@ def current_source_bundle(batch_name, version_name=None, *, lock=False):
 
 
 def require_available(context):
-    if context.get('root_kind') == 'expense' and (
+    if (context.get('root_kind') == 'expense' or (context.get('packing') or {}).get('selected_source')) and (
         not context.get('available') or not context.get('approved') or context.get('invalid')
     ):
         raise ValueError('当前关联采购支出缺失、未批准或已失效，不能使用资料；请核对当前来源。')
 
 
 def require_readable(context):
-    if context.get('root_kind') == 'expense' and not context.get('available'):
+    if (context.get('root_kind') == 'expense' or (context.get('packing') or {}).get('selected_source')) and not context.get('available'):
         raise ValueError('当前关联采购支出缺少本地归档，暂时无法分析；请等待同步。')
 
 
@@ -283,7 +290,7 @@ PHYSICAL_FIELDS = ('actual_shipped_qty', 'shipped_uom', 'net_weight_kg', 'gross_
 
 def project_ai_items(items, bundle):
     """Independent AI input projection; raw historical fields never enter prompts."""
-    if not bundle or bundle['context']['root_kind'] != 'expense':
+    if not bundle or (bundle['context']['root_kind'] != 'expense' and not (bundle['context'].get('packing') or {}).get('selected_source')):
         return items
     context = bundle['context']
     require_readable(context)
@@ -296,7 +303,10 @@ def project_ai_items(items, bundle):
     goods_rows = source.get('goods') or []
     used = set()
     for goods in goods_rows:
-        matches = [item for item in items if goods.get('line_key') and json_dict(item.get('extra_json')).get('settlement_line_key') == goods['line_key']]
+        def line_keys(item):
+            meta=json_dict(item.get('extra_json'))
+            return (item.get('stable_line_key'),meta.get('settlement_line_key'),(meta.get('settlement_cargo') or {}).get('line_key'),item.get('name'))
+        matches = [item for item in items if goods.get('line_key') and goods['line_key'] in line_keys(item)]
         if not matches and sum(key(row) == key(goods) for row in goods_rows) == 1:
             matches = [item for item in items if key(item) == key(goods)]
         if len(matches) != 1:

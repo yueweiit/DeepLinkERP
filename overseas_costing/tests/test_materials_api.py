@@ -9,7 +9,7 @@ import pytest
 
 def _load_api(monkeypatch):
     fake_frappe = ModuleType("frappe")
-    fake_frappe.whitelist = lambda: (lambda function: function)
+    fake_frappe.whitelist = lambda **kwargs: (lambda function: function)
     monkeypatch.setitem(sys.modules, "frappe", fake_frappe)
     sys.modules.pop("overseas_costing.api.materials", None)
     return importlib.import_module("overseas_costing.api.materials")
@@ -202,3 +202,18 @@ def test_clarification_api_permissions_and_optimistic_revision(monkeypatch):
     assert started['args'][2] is None
     assert started['kwargs']['expected_clarification_revision'] == 3
     assert checks == ['read', 'write', 'write']
+
+
+def test_selected_row_preview_and_confirm_use_ids_write_permission_and_inline_conflicts(monkeypatch):
+    from types import SimpleNamespace
+    from overseas_costing.services import material_ai_selection_service as selection
+    api=_load_api(monkeypatch);calls=[];rollbacks=[]
+    api.frappe.db=SimpleNamespace(rollback=lambda:rollbacks.append(True))
+    monkeypatch.setattr(api,'require_batch_permission',lambda batch,permission:calls.append((batch,permission)) or 'B')
+    monkeypatch.setattr(selection,'prepare',lambda *args:calls.append(args) or {'ok':True})
+    assert api.preview_source_ai_selection('BATCH','RUN','["ROW"]','[]','replace_all','V')['ok']
+    assert calls==[('BATCH','write'),('B','RUN',['ROW'],[],'replace_all','V')]
+    def expired(*args):raise ValueError('来源已更新，请重新预览')
+    monkeypatch.setattr(selection,'confirm',expired)
+    result=api.confirm_source_ai_selection('BATCH','RUN','PREVIEW','REV','TOKEN','MOD')
+    assert not result['ok'] and result['code']=='REVIEW_REQUIRED' and rollbacks

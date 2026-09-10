@@ -240,6 +240,13 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str, *,
     rows = [template_by_key[row["logical_fee_key"]] for row in templates
             if row["logical_fee_key"] not in retired_keys or not template_by_key[row["logical_fee_key"]].get("virtual")]
     rows.extend(extras)
+    claims={c['id']:c for c in freight.get('claims') or []}
+    for row in rows:
+        claim=claims.get(row.get('source_binding_id'))
+        if claim:
+            row.update(freight_claim_id=claim['id'],original_amount=claim.get('original_amount',claim.get('amount')),
+                applied_amount=claim.get('applied_amount',claim.get('amount')),source_label=claim.get('title') or claim.get('approval_no') or '支付账单',
+                manual_corrected=claim.get('manual_corrected',False))
     return mark_duplicate_fees(rows)
 
 

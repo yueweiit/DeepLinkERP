@@ -647,3 +647,33 @@
 .ocw-approval-marker p { margin: 3px 0; font-size: 12px; line-height: 1.5; }
 .ocw-mf-grid-table .ocw-approval-row > td:not(.is-missing):not(.is-save-error):not(.is-default),
 .ocw-sku-table .ocw-approval-row > td { background-color: #fffaf0; }
+
+.ocw-mf-ai-row-controls { padding: 12px 14px; border: 1px solid #dce6f2; border-radius: 8px; background: #f5f9ff; }
+.ocw-mf-ai-row-controls label { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-weight: 600; }
+.ocw-mf-ai-row-controls select { min-height: 36px; padding: 6px 10px; border: 1px solid #b8c9df; border-radius: 5px; background: #fff; color: #1f344f; }
+.ocw-mf-ai-row-controls p { margin: 8px 0 0; color: #52647a; line-height: 1.6; }
+.ocw-mf-ai-row-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.ocw-mf-ai-review-dialog,
+.ocw-mf-ai-dialog-body > *,
+.ocw-mf-ai-preview-section { min-width: 0; }
+.ocw-mf-ai-preview-table { max-width: 100%; }
+.ocw-mf-ai-row-catalog td:nth-child(4),
+.ocw-mf-ai-row-catalog td:last-child,
+.ocw-mf-ai-fee-catalog td:last-child,
+.ocw-mf-ai-final-table td:nth-child(2) { min-width: 180px; max-width: 320px; white-space: normal; overflow-wrap: anywhere; }
+.ocw-mf-ai-preview-table input[type="checkbox"] { width: 17px; height: 17px; accent-color: #1673cc; cursor: pointer; }
+.ocw-mf-ai-preview-table input[type="checkbox"]:disabled { cursor: not-allowed; }
+.ocw-mf-ai-preview-table tr.is-review { background: #fffaf0; }
+.ocw-mf-ai-review-error { margin: 12px 0; padding: 10px 12px; border: 1px solid #f0b5b5; border-radius: 6px; background: #fff3f2; color: #a92727; white-space: normal; overflow-wrap: anywhere; }
+.ocw-mf-fee-table > tbody > .ocw-mf-freight-editor-row > td { padding: 0; background: #f5f9ff; white-space: normal; }
+.ocw-mf-freight-editor { padding: 18px; border-left: 3px solid #297fc7; }
+.ocw-mf-freight-editor fieldset { min-width: 0; border: 0; padding: 0; margin: 0 0 14px; }
+.ocw-mf-freight-editor .ocw-freight-field { max-width: 720px; }
+.ocw-mf-freight-editor .ocw-freight-field input,
+.ocw-mf-freight-editor .ocw-freight-field select,
+.ocw-mf-freight-editor .ocw-freight-field textarea { width: 100%; min-height: 36px; }
+.ocw-mf-freight-editor .ocw-settlement-table-wrap { max-height: 320px; overflow: auto; }
+.ocw-mf-freight-editor .ocw-settlement-table td { white-space: normal; }
+.ocw-mf-freight-editor > .ocw-mf-row-actions { gap: 10px; }
+.ocw-mf-freight-editor > .ocw-mf-row-actions button { min-height: 36px; padding: 7px 12px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; font-size: 12px; }
+.ocw-mf-freight-editor > .ocw-mf-row-actions .ocw-primary-btn { border-color: #076fbe; background: #076fbe; color: #fff; }

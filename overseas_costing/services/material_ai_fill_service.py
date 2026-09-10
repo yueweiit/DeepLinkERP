@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from . import material_ai_fee_policy
+
 import hashlib
 import json
 import base64
@@ -710,6 +712,7 @@ def build_source_review_messages(
     *,
     clarification_text: str = "",
     fx_rates: dict | None = None,
+    fee_policy: dict | None = None,
 ) -> list[dict]:
     """Build the unified review prompt while treating every source as untrusted evidence."""
 
@@ -744,7 +747,8 @@ def build_source_review_messages(
     user = _json(
         {
             "items": safe_items,
-            "allowed_logical_fee_keys": sorted(REVIEW_FEE_KEYS),
+            "allowed_logical_fee_keys": sorted(key for key in REVIEW_FEE_KEYS if fee_policy is None or fee_policy.get(key, {}).get("can_apply")),
+            "fee_eligibility": fee_policy or {},
             "fx_rates_to_rmb": fx_rates or {},
             "manual_clarification_untrusted": str(clarification_text or "")[:4000],
             "untrusted_documents": documents or [],
@@ -1503,6 +1507,7 @@ def start_source_ai_review(
         repo.list_sources(context["batch"], context["version"]),
         selected_source_ids=selected_source_ids,
     )
+    source_dependencies = repo.capture_row_dependencies(sources,context,allow_pending=True) if callable(getattr(repo,'capture_row_dependencies',None)) else None
     clarification = (note["text"] if clarification_text is None or callable(getattr(repo, "get_clarification", None))
                      else str(clarification_text or "").strip()[:4000])
     fingerprint = _source_review_fingerprint(
@@ -1561,6 +1566,7 @@ def start_source_ai_review(
                 "clarification_revision": note["revision"],
                 "cost_version": context["version"],
                 "source_context": deepcopy(context.get("effective_source") or {}),
+                **({"source_dependencies":source_dependencies} if source_dependencies is not None else {}),
             }}),
             "proposal_version": 1,
             "source_completeness": "PENDING",
@@ -1765,6 +1771,10 @@ def get_source_ai_review_status(
             inputs=_reload_review_manifest(repo,current['batch'],current['version'],run)
             changed=_source_review_fingerprint(current['batch'],current['version'],repo.get_items(current['batch'],current['version']),
                 inputs,str(_record_value(run,'clarification_text') or ''),context=current)!=_record_value(run,'input_fingerprint')
+            if changed and getattr(repo, "supports_row_selection", False):
+                from .material_ai_selection_service import material_fingerprint
+                saved_material=_load_json(_record_value(run,'draft_json'),{}).get('material_input_fingerprint')
+                changed=not saved_material or saved_material!=material_fingerprint(repo.get_items(current['batch'],current['version']),inputs,current)
         except ValueError:
             changed=True
     result = get_material_ai_fill_status(
@@ -1791,6 +1801,12 @@ def get_source_ai_review_status(
             "proposals": result.get("candidates") or [],
         }
     )
+    if result.get("status") == "READY" and getattr(repo, "supports_row_selection", False):
+        from .material_ai_selection_service import review_catalog
+        try:
+            result["row_review"] = review_catalog(repo, str(batch_name), run)
+        except ValueError as error:
+            result.update(status="STALE", stale=True, error_message=str(error))
     return result
 
 
@@ -1972,6 +1988,10 @@ def apply_source_ai_review(
         items,
         fx_rates=context.get("fx_rates") or {},
     )
+    from .material_ai_fee_policy import assert_allowed
+    assert_allowed(selected, current_fees, context.get("effective_source") or {})
+    if getattr(repo, "supports_row_selection", False):
+        raise ValueError("请刷新 AI 预览并勾选物料或费用后确认，旧的整批提案不能直接写入。")
     normalized_manual_updates = validate_source_review_manual_updates(
         loaded_manual_updates, items
     )
@@ -2448,7 +2468,7 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
     return candidates
 
 
-def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
+def _read_source(items: list[dict], source: dict, *, attachment_ready=None) -> tuple[list[dict], dict]:
     """Return deterministic candidates and a bounded document for semantic matching."""
 
     from overseas_costing.services import attachment_parse_service, packing_source_service
@@ -2506,6 +2526,8 @@ def _read_source(items: list[dict], source: dict) -> tuple[list[dict], dict]:
         }
 
     attachment = _ensure_local_attachment(source)
+    if attachment_ready is not None:
+        attachment_ready(attachment)
     file_name = str(attachment.get("file_name") or source.get("file_name") or "")
     if file_name.lower().endswith('.xls') and (source.get('source_context') or {}).get('root_kind')=='expense':
         from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
@@ -2993,6 +3015,7 @@ def _call_source_review_ai(
     *,
     clarification_text: str = "",
     fx_rates: dict | None = None,
+    fee_policy: dict | None = None,
 ) -> dict:
     from overseas_costing.services import allocation_service
 
@@ -3069,6 +3092,7 @@ def _call_source_review_ai(
                 bounded,
                 clarification_text=clarification_text,
                 fx_rates=fx_rates,
+                fee_policy=fee_policy,
             ),
         )
         parsed = allocation_service._extract_json_object(content)
@@ -3097,9 +3121,7 @@ class _MaterialAIRunClaimLost(RuntimeError):
 
 def _effective_review_fees(repo, context):
     rows = repo.get_fees(context['batch'],context['version']) if hasattr(repo,'get_fees') else []
-    if (context.get('effective_source') or {}).get('root_kind') == 'expense':
-        from .logistics_settlement.fee_policy import select_fees
-        return select_fees(rows,source_context=context['effective_source'])
+    # Include retired rows for eligibility checks; the fee policy selects calculation inputs separately.
     return rows
 
 
@@ -3133,12 +3155,17 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "claimed": False,
             }
 
+    dependency_baseline = None
+
     def persist(**updates: Any) -> Any:
         nonlocal run
         if "draft_json" in updates:
             draft = _load_json(updates["draft_json"], {})
             review_input = _load_json(_record_value(run, "draft_json"), {}).get("review_input")
             if review_input is not None:
+                review_input = deepcopy(review_input)
+                if dependency_baseline is not None:
+                    review_input['source_dependencies'] = deepcopy(dependency_baseline)
                 updates["draft_json"] = {**draft, "review_input": deepcopy(review_input)}
         if owns_claim and callable(save_claimed):
             saved = save_claimed(str(run_id), execution_token, **updates)
@@ -3180,6 +3207,13 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 completed_at=_now(),
             )
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
+        dependency_baseline=(_load_json(_record_value(run,'draft_json'),{}).get('review_input') or {}).get('source_dependencies')
+        if unified_review and dependency_baseline is not None and callable(getattr(repo,'assert_row_dependencies',None)):
+            try:
+                repo.assert_row_dependencies(batch_name,dependency_baseline)
+            except ValueError as error:
+                persist(status='STALE',progress_step='来源已变化',error_message=str(error),completed_at=_now())
+                return {'ok':False,'run_id':str(run_id),'status':'STALE'}
         existing_fees = _effective_review_fees(repo,context)
         clarification_text = str(_record_value(run, "clarification_text") or "")
 
@@ -3240,7 +3274,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         reconciliation = None
         read_items = items
         effective_bundle = effective_source.current_source_bundle(context['batch'], context['version'])
-        bound_source = bool(effective_bundle and effective_bundle['context']['root_kind'] == 'expense')
+        bound_source = bool(effective_bundle and (effective_bundle['context']['root_kind'] == 'expense' or (effective_bundle['context'].get('packing') or {}).get('selected_source')))
         if bound_source:
             read_items = effective_source.project_ai_items(items, effective_bundle)
         if unified_review:
@@ -3264,6 +3298,32 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         documents: list[dict] = []
         source_errors = []
         supplement_started = None
+
+        def read_review_source(source):
+            if not (unified_review and source.get('download_required') and dependency_baseline is not None
+                    and callable(getattr(repo, 'capture_row_dependencies', None))):
+                return _read_source(read_items, source)
+
+            def seal_attachment(attachment):
+                nonlocal dependency_baseline
+                repo.assert_row_dependencies(batch_name, dependency_baseline, lock=True)
+                local_source = {**source, 'resolver_source_id': attachment.get('name') or attachment['source_id'],
+                                'available': True, 'download_required': False}
+                sealed = repo.capture_row_dependencies([local_source], context)
+                from .logistics_settlement.model import digest
+                merged = {digest({k:v for k,v in d.items() if k != 'fingerprint'}): d for d in dependency_baseline}
+                for dependency in sealed:
+                    key = digest({k:v for k,v in dependency.items() if k != 'fingerprint'})
+                    if key in merged and merged[key] != dependency:
+                        raise ValueError('下载期间来源内容已变化，请重新分析。')
+                    merged[key] = dependency
+                dependency_baseline = list(merged.values())
+                # Persist the local baseline before any bytes are parsed. Later
+                # reads and READY/preview/confirm all validate this same evidence.
+                persist(draft_json=_load_json(_record_value(run, 'draft_json'), {}))
+
+            return _read_source(read_items, source, attachment_ready=seal_attachment)
+
         for source_index, source in enumerate(sources):
             if unified_review and source.get("selected") is False:
                 _update_source_progress(
@@ -3287,12 +3347,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 if supplemental:
                     supplement_started = supplement_started or time.monotonic()
                     remaining = 60 - (time.monotonic() - supplement_started)
-                    bounded = run_supplement(lambda: {"ok": True, "result": _read_source(read_items, source)}, seconds=max(0.001, remaining)) if remaining > 0 else {"ok": False, "warning": "补充资料读取已达 60 秒，保留系统直读结果。"}
+                    bounded = run_supplement(lambda: {"ok": True, "result": read_review_source(source)}, seconds=max(0.001, remaining)) if remaining > 0 else {"ok": False, "warning": "补充资料读取已达 60 秒，保留系统直读结果。"}
                     if not bounded.get("ok"):
                         raise ValueError(bounded["warning"])
                     source_candidates, document = bounded["result"]
                 else:
-                    source_candidates, document = _read_source(read_items, source)
+                    source_candidates, document = read_review_source(source)
                 deterministic.extend(source_candidates)
                 has_document_evidence = _document_has_evidence(document)
                 if has_document_evidence:
@@ -3465,6 +3525,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 documents,
                 clarification_text=clarification_text,
                 fx_rates=context.get("fx_rates") or {},
+                fee_policy=material_ai_fee_policy.prompt_policy(existing_fees, context.get("effective_source") or {}, REVIEW_FEE_KEYS),
             ), seconds=max(0.001, remaining)) if remaining > 0 else {"ok": False, "proposals": [], "warning": "补充识别已达 60 秒，已保留系统直读结果。"}
             enhanced_by_id = {
                 str(document.get("document_id") or ""): document
@@ -3512,6 +3573,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     if name in rows_by_name and len(counts) == 1:
                         row = rows_by_name[name]
                         row["package_count"] = next(iter(counts))
+                        row.setdefault("_review_source_values", {})["package_count"] = row["package_count"]
                         metadata = extra(row)
                         metadata.setdefault("logistics_row", {}).setdefault("packing", {})["package_count"] = row["package_count"]
                         row["extra_json"] = _json(metadata)
@@ -3523,6 +3585,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         fields = {k: v for k, v in payload["fields"].items() if k in {"net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg", "project_collection"}}
                         if row is not None:
                             row.update(fields)
+                            row.setdefault("_review_source_values", {}).update(fields)
                             reconciliation["source_refs"].extend(proposal.get("source_refs") or [])
                             continue
                     # Free text never overrides authoritative shipment quantities.
@@ -3590,6 +3653,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 )
             )
         if unified_review:
+            from .material_ai_fee_policy import decorate
+            from .material_ai_selection_service import material_fingerprint
+            candidates = decorate(candidates, existing_fees, context.get("effective_source") or {})
             counts = {proposal_type: 0 for proposal_type in REVIEW_PROPOSAL_TYPES}
             for proposal in candidates:
                 counts[proposal["proposal_type"]] += 1
@@ -3600,6 +3666,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "proposal_count": len(candidates),
                 "autofill_preview": autofill_preview(read_items, candidates, existing_fees, fx_rates=context.get('fx_rates')),
                 "fee_fingerprint": hashlib.sha256(_json(existing_fees).encode()).hexdigest(),
+                "material_input_fingerprint": material_fingerprint(items,sources,context),
             }
             cargo_reviews = [review for document in documents for review in document.get('cargo_reviews') or []]
             if bound_source:
@@ -3633,6 +3700,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 completed_at=_now(),
             )
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
+        if unified_review and dependency_baseline is not None and callable(getattr(repo,'assert_row_dependencies',None)):
+            try:
+                repo.assert_row_dependencies(batch_name,dependency_baseline,lock=True)
+            except ValueError as error:
+                persist(status='STALE',progress_step='来源已变化',error_message=str(error),completed_at=_now())
+                return {'ok':False,'run_id':str(run_id),'status':'STALE'}
         if unified_review and _clarification_changed(repo, batch_name, run, locked=True):
             persist(status="STALE", progress_step="说明已变化", completed_at=_now())
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
@@ -3673,7 +3746,15 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     refreshed_sources, source_progress, candidates
                 )
             sources = refreshed_sources
+        if unified_review and dependency_baseline is not None and any(d.get('kind') == 'pending_attachment' for d in dependency_baseline):
+            try:
+                repo.assert_row_dependencies(batch_name, dependency_baseline, lock=True)
+                dependency_baseline = repo.capture_row_dependencies(sources, refreshed_context)
+            except ValueError as error:
+                persist(status='STALE', progress_step='来源未完成归档或已变化', error_message=str(error), completed_at=_now())
+                return {'ok':False, 'run_id':str(run_id), 'status':'STALE'}
         if unified_review:
+            draft['material_input_fingerprint'] = material_fingerprint(refreshed_items, sources, refreshed_context)
             draft["review_input"] = deepcopy(_load_json(_record_value(run, "draft_json"), {}).get("review_input") or {})
         persist(status="READY",
             progress_step="草稿已生成",
@@ -3800,6 +3881,31 @@ def _now() -> str:
 
 
 class FrappeMaterialAIFillRepository:
+    supports_row_selection = True
+
+    def capture_row_dependencies(self,sources,context,*,allow_pending=False):
+        from .material_ai_source_dependencies import capture_dependencies
+        from .logistics_settlement.store import Store
+        from .logistics_settlement.ledger import FrappeLedger
+        ledger=FrappeLedger()
+        inherited=effective_source.json_dict((ledger.get('version',context['version']) or {}).get('extra_json')).get('ai_row_adoption')
+        return capture_dependencies(sources,store=Store.frappe(),ledger=ledger,batch_name=context['batch'],
+            source_context=context.get('effective_source') or {},inherited=inherited,allow_pending=allow_pending)
+
+    def assert_row_dependencies(self,batch,dependencies,*,lock=False):
+        from .material_ai_source_dependencies import dependency_issues
+        from .logistics_settlement.store import Store
+        from .logistics_settlement.ledger import FrappeLedger
+        issues=dependency_issues({'dependencies':dependencies},store=Store.frappe(),ledger=FrappeLedger(),batch_name=batch,lock=lock)
+        if issues:raise ValueError('来源内容已更新或失效，请重新分析；本次未保存。')
+
+    def save_row_review_draft(self, run, draft):
+        frappe.db.set_value("Overseas Cost Material AI Run", _record_value(run, "name"), "draft_json", _json(draft), update_modified=False)
+
+    def apply_row_selection(self, run, preview, draft, context):
+        from .material_ai_selection_writer import apply_selection
+        return apply_selection(run, preview, draft, context)
+
     def get_clarification(self, batch_name: str) -> dict:
         meta = _load_json(frappe.db.get_value("Overseas Cost Batch", batch_name, "extra_json"), {})
         note = meta.get("ai_clarification") or {}
@@ -3845,7 +3951,7 @@ class FrappeMaterialAIFillRepository:
         if not resolved:
             raise ValueError(f"未找到批次：{batch_name}")
         batch = frappe.db.get_value(
-            "Overseas Cost Batch", resolved, ["name", "current_version", "modified", "transport_mode"], as_dict=True
+            "Overseas Cost Batch", resolved, ["name", "current_version", "modified", "transport_mode", "confirm_status", "writeback_status"], as_dict=True
         ) or {}
         selected_version = str(version_name or batch.get("current_version") or "")
         version = frappe.db.get_value(
@@ -3857,7 +3963,7 @@ class FrappeMaterialAIFillRepository:
             raise ValueError("版本不属于当前批次。")
         if selected_version != str(batch.get("current_version") or ""):
             raise ValueError("只能在当前版本生成 AI 草稿。")
-        if str(version.get("status") or "") != "Active":
+        if str(version.get("status") or "") != "Active" or batch.get("confirm_status")=="Confirmed" or batch.get("writeback_status")=="Success":
             raise ValueError("已确认或归档版本不能生成 AI 草稿。")
         return {
             "batch": str(batch.get("name") or ""),

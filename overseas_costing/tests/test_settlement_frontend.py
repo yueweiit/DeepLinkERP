@@ -516,10 +516,11 @@ def test_detail_entry_uses_production_inline_workspace_and_history_entry_stays_i
 def test_final_source_fee_row_is_readonly_while_ordinary_fee_remains_editable():
     run_js(WORKSPACE_METHODS + '''
 w.materialFeeState={preview:{included_fees:[{fee_key:'final'}]}};w.materialFeeSavedCostPreview=()=>null;w.formatMoney=x=>String(x);
-const fee={logical_fee_key:'final',source_binding_id:'binding',is_final:1,amount_state:'ACTUAL',currency:'RMB',amount:0,allocation_basis:'volume',allocation:{basis:'gross_weight'}};
+const fee={logical_fee_key:'final',source_binding_id:'binding',source_label:'银行支付流程',is_final:1,amount_state:'ACTUAL',currency:'RMB',amount:0,allocation_basis:'volume',allocation:{basis:'gross_weight'}};
 const html=w.renderMaterialFeeRow(fee);
 assert(!html.includes('<input'));assert(!html.includes('<select'));assert(!html.includes('mf-edit-fee'));
-assert(html.includes('RMB 0'));assert(html.includes('物流采购支出'));assert(html.includes('mf-view-settlement-source'));
+assert(html.includes('RMB 0'));assert(html.includes('银行支付流程'));assert(!html.includes('物流采购支出'));assert(html.includes('mf-view-settlement-source'));
+for(const action of ['amount','replace','revoke'])assert(html.includes(`data-mf-freight-action="${action}"`));
 assert(html.includes('分摊'));assert(html.includes('毛重'));
 assert(w.renderMaterialFeeRow({...fee,source_binding_id:null,is_final:0}).includes('data-mf-fee-amount'));
 ''')

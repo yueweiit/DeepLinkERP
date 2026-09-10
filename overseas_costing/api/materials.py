@@ -263,6 +263,29 @@ def apply_source_ai_review(
     )
 
 
+@frappe.whitelist(methods=['POST'])
+def preview_source_ai_selection(batch_name,run_id,row_ids_json,fee_ids_json,mode,expected_version):
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.material_ai_selection_service import prepare
+    try:
+        return prepare(batch_name,str(run_id),_ai_review_payload(row_ids_json,list,'物料选择'),
+            _ai_review_payload(fee_ids_json,list,'费用选择'),str(mode),str(expected_version))
+    except ValueError as error:
+        frappe.db.rollback()
+        return {'ok':False,'code':'REVIEW_REQUIRED','message':str(error)}
+
+
+@frappe.whitelist(methods=['POST'])
+def confirm_source_ai_selection(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified):
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.material_ai_selection_service import confirm
+    try:
+        return confirm(batch_name,str(run_id),str(preview_id),str(preview_revision),str(edit_token),str(expected_modified))
+    except ValueError as error:
+        frappe.db.rollback()
+        return {'ok':False,'code':'REVIEW_REQUIRED','message':str(error)}
+
+
 @frappe.whitelist()
 def discard_source_ai_review(batch_name, run_id):
     batch_name = require_batch_permission(batch_name, "write")

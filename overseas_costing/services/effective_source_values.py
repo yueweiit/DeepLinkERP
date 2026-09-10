@@ -4,7 +4,7 @@ from .shipment_cost_service import object_json
 
 PHYSICAL_FIELDS = ('actual_shipped_qty', 'actual_shipped_qty_mode', 'actual_shipped_qty_source_revision',
                    'shipped_uom', 'gross_weight_kg', 'net_weight_kg', 'volume_m3', 'volume_weight_kg',
-                   'chargeable_weight_kg', 'weight_ratio')
+                   'chargeable_weight_kg', 'weight_ratio', 'package_count', 'packaging_type')
 
 
 def item_source_context(item):
@@ -63,6 +63,7 @@ def physical_overlay_update(item, context, values, *, evidence):
 def project_source_values(item, context=None):
     row = dict(item)
     meta = deepcopy(object_json(row.get('extra_json')))
+    row.update({k:v for k,v in (meta.get('ai_row_packing_values') or {}).items() if k in ('package_count','packaging_type')})
     adopted_context = meta.get('effective_logistics_source') or {}
     context = context if context is not None else adopted_context
     if context.get('separate_adoption'):
@@ -73,8 +74,8 @@ def project_source_values(item, context=None):
             physical=meta.get('settlement_physical') or {}
             if physical.get('source_snapshot') == context.get('source_snapshot'):
                 row.update({k:v for k,v in (physical.get('values') or {}).items() if k in PHYSICAL_FIELDS})
-            for field in meta.get('settlement_packing_missing') or []:
-                if field in (*PHYSICAL_FIELDS,'quantity'): row[field]=None
+        for field in meta.get('settlement_packing_missing') or []:
+            if field in (*PHYSICAL_FIELDS,'quantity'): row[field]=None
         # These are independently adopted rows; changing freight must not blank packing or customs.
         return row
     if not expense_context(context):
