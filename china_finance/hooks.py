@@ -108,6 +108,7 @@ override_doctype_class = {
 	"Bank Statement Import": "china_finance.overrides.bank_statement_import.ChinaFinanceBankStatementImport",
 	"Bank Statement Import Log": "china_finance.overrides.bank_statement_import.ChinaFinanceBankStatementImportLog",
 	"Company": "china_finance.overrides.company.ChinaFinanceCompany",
+	"Journal Entry": "china_finance.overrides.journal_entry.ChinaFinanceJournalEntry",
 	"Period Closing Voucher": "china_finance.overrides.period_closing_voucher.ChinaFinancePeriodClosingVoucher",
 }
 
