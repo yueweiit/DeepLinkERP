@@ -1,6 +1,6 @@
 import pytest
 from overseas_costing.tests.test_settlement_writer import setup
-from overseas_costing.tests.test_logistics_settlement import source, ingest
+from overseas_costing.tests.test_logistics_settlement import source, ingest, store
 from overseas_costing.services.logistics_settlement.writer import apply_binding
 from overseas_costing.services.logistics_settlement import runtime
 
@@ -152,3 +152,73 @@ def test_queued_document_resume_rechecks_stop_after_inventory(setup,monkeypatch)
     monkeypatch.setattr(runtime,'apply_source',lambda _:pytest.fail('stopped document queue applied work'))
     runtime.resume_pending()
     assert s.get('document_sync','queue')['status']=='queued'
+
+
+def attach_load_job(monkeypatch, store, count):
+    from types import SimpleNamespace
+    from overseas_costing.services.logistics_settlement.jobs import start_job, run_step
+    rows = [source(f'worker-{index}') for index in range(count)]
+    class Archive:
+        def page(self, *, cursor, limit, **kwargs):
+            offset = int(cursor or 0)
+            page = rows[offset:offset + limit]
+            return {'items': page, 'next_cursor': offset + len(page),
+                    'has_more': offset + len(page) < len(rows)}
+    upstream = Archive()
+    job = start_job(store, mode='incremental', actor='tester')
+    while job['phase'] == 'inventory':
+        job = run_step(store, upstream, job['id'], logistics_codes={'logistics'})
+    store.commit()
+    monkeypatch.setattr(runtime, 'store', lambda: store)
+    monkeypatch.setattr(runtime, 'archive', lambda: upstream)
+    monkeypatch.setattr(runtime, 'logistics_codes', lambda: {'logistics'})
+    monkeypatch.setattr(runtime, 'freight_enabled', lambda: False)
+    monkeypatch.setattr(runtime, 'apply_source', None)
+    monkeypatch.setattr(runtime, 'frappe', SimpleNamespace(db=store.db, log_error=lambda **kwargs: None))
+    return job
+
+
+def test_worker_commits_slow_source_and_requeues_before_next_reader(store, monkeypatch):
+    job = attach_load_job(monkeypatch, store, 205)
+    elapsed, prepared, queued, checkpoints = [0], [], [], []
+    monkeypatch.setattr(runtime, 'monotonic', lambda: elapsed[0], raising=False)
+    monkeypatch.setattr(runtime, 'RUN_JOB_BUDGET_SECONDS', 60, raising=False)
+    original_commit = store.commit
+    def commit():
+        original_commit()
+        checkpoints.append(store.count('job_item', job_id=job['id'], status='loaded'))
+    monkeypatch.setattr(store, 'commit', commit)
+    def prepare(raw):
+        prepared.append(raw['process_instance_id'])
+        elapsed[0] += 61  # A slow download/parse, without sleeping in the test.
+        return raw
+    monkeypatch.setattr(runtime, 'prepare_source', prepare)
+    def enqueue(job_id):
+        assert checkpoints[-1] == len(prepared)
+        queued.append(job_id)
+    monkeypatch.setattr(runtime, 'enqueue', enqueue)
+    runtime.run_job(job['id'])
+    assert len(prepared) == 1 and checkpoints[0] == 1
+    assert store.count('job_item', job_id=job['id'], status='pending') == 204
+    assert queued == [job['id']]
+    runtime.run_job(job['id'])
+    assert len(prepared) == len(set(prepared)) == 2
+    assert store.count('job_item', job_id=job['id'], status='pending') == 203
+    assert queued == [job['id'], job['id']]
+
+
+def test_worker_fast_load_is_step_bounded_and_continues_to_completion(store, monkeypatch):
+    job = attach_load_job(monkeypatch, store, 5)
+    prepared, queued = [], []
+    monkeypatch.setattr(runtime, 'monotonic', lambda: 0, raising=False)
+    monkeypatch.setattr(runtime, 'RUN_JOB_MAX_STEPS', 3, raising=False)
+    monkeypatch.setattr(runtime, 'prepare_source', lambda raw: prepared.append(raw['process_instance_id']) or raw)
+    monkeypatch.setattr(runtime, 'enqueue', queued.append)
+    runtime.run_job(job['id'])
+    assert len(prepared) == 3 and queued == [job['id']]
+    assert store.count('job_item', job_id=job['id'], status='pending') == 2
+    runtime.run_job(job['id'])
+    completed = store.get('job', job['id'])
+    assert completed['status'] == 'completed' and completed['processed_count'] == 5
+    assert len(prepared) == len(set(prepared)) == 5
+    assert queued == [job['id']]

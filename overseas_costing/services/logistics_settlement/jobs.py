@@ -69,7 +69,9 @@ def run_step(store, archive, job_id, *, logistics_codes, now=None, apply_source=
                 if not page['has_more']:
                     job['phase'] = 'load'
             elif job['phase'] == 'load':
-                items = store.find('job_item', job_id=job_id, status='pending', limit=200)
+                # One approval may download/parse several attachments. Return after
+                # it finishes so the worker commits progress before starting another.
+                items = store.find('job_item', job_id=job_id, status='pending', limit=1)
                 references = [i for i in items if i.get('inventory_only')]
                 fetched = {}
                 if references:

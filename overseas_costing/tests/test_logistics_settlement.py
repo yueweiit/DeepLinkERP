@@ -188,14 +188,49 @@ def test_initialization_over_200_and_catchup(store):
     archive = Archive()
     job = start_job(store, mode='initialize', actor='tester', now='2026-09-09T03:00:00+00:00')
     assert start_job(store, mode='initialize', actor='tester', now='2026-09-09T04:00:00+00:00')['id'] == job['id']
-    for _ in range(20):
-        job = run_step(store, archive, job['id'], logistics_codes={'logistics'}, now='2026-09-09T05:00:00+00:00')
+    prepared = []
+    def prepare(raw):
+        prepared.append(raw['process_instance_id'])
+        return raw
+    for _ in range(250):
+        job = run_step(store, archive, job['id'], logistics_codes={'logistics'}, now='2026-09-09T05:00:00+00:00', prepare_source=prepare)
         if job['status'] == 'completed':
             break
     assert job['status'] == 'completed'
     assert store.count('source') == 206
+    assert len(prepared) == 206 and len(set(prepared)) == 206
+    assert job['item_count'] == job['processed_count'] == 206
     assert job['caught_up'] is True
     assert store.get('state', 'sync')['watermark'] == '2026-09-09T05:00:00+00:00'
+
+
+def test_load_step_yields_after_one_complete_approval_with_all_attachments(store):
+    from overseas_costing.services.logistics_settlement.jobs import start_job, run_step
+    from overseas_costing.services.logistics_settlement.documents import enrich_raw
+    rows = [source(f'E{i}') for i in range(3)]
+    for row in rows:
+        row['attachments'] = [
+            {'file_id': f'{row["process_instance_id"]}-{part}', 'file_name': f'cargo-{part}.csv',
+             'archive_status': 'archived', 'archive_quality': 'original'}
+            for part in range(2)]
+    class Archive:
+        def page(self, **kwargs):
+            return {'items': rows, 'has_more': False, 'next_cursor': None}
+    read = []
+    def reader(manifest):
+        read.append(manifest['file_id'])
+        return '物料编码,数量,单位\nAA100,2,件\n'.encode()
+    job = start_job(store, mode='incremental', actor='tester')
+    run_step(store, Archive(), job['id'], logistics_codes={'logistics'})
+    job = run_step(store, Archive(), job['id'], logistics_codes={'logistics'},
+                   prepare_source=lambda raw: enrich_raw(store, raw, reader=reader))
+    assert len(read) == 2
+    assert job['phase'] == 'load' and job['item_count'] == 3
+    assert store.count('job_item', job_id=job['id'], status='loaded') == 1
+    assert store.count('job_item', job_id=job['id'], status='pending') == 2
+    loaded = store.find('source')[0]
+    assert len(loaded['documents']) == 2
+    assert all(document['tables'] for document in loaded['documents'])
 
 
 def test_job_failure_is_durable_and_retryable(store):

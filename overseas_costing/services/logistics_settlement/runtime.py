@@ -1,6 +1,7 @@
 """Local-only reads and background archive synchronization for logistics settlement."""
 from decimal import Decimal
 import json
+from time import monotonic
 
 try:
     import frappe
@@ -14,6 +15,10 @@ from .writer import apply_binding
 from .ledger import FrappeLedger
 from .jobs import start_job, run_step, retry_job, utcnow
 from .application import row_meta
+
+
+RUN_JOB_BUDGET_SECONDS = 60
+RUN_JOB_MAX_STEPS = 100
 
 
 def installed():
@@ -438,13 +443,18 @@ def run_ai_matching(matching_ai_job_id):
 def run_job(settlement_job_id):
     job_id = settlement_job_id
     db = store()
+    started = monotonic()
     try:
         upstream = None if db.get('job', job_id)['mode'] == 'reparse' else archive()
-        for _ in range(4):
+        for _ in range(RUN_JOB_MAX_STEPS):
             job = run_step(db, upstream, job_id, logistics_codes=logistics_codes(), apply_source=apply_source, prepare_source=prepare_source, freight_mode=freight_enabled())
             db.commit()
             if job['status'] not in {'queued', 'running'}:
                 return job
+            # The budget is cooperative: finish and commit this approval's complete
+            # attachment set, then yield rather than risking another slow download.
+            if monotonic() - started >= RUN_JOB_BUDGET_SECONDS:
+                break
         enqueue(job_id)
         db.commit()
     except Exception as exc:
