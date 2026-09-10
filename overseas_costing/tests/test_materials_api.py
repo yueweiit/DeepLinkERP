@@ -183,10 +183,14 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
 
     assert checks == ["write", "read", "write", "write"]
     assert calls[0][1] == ("B", "V", "两款是一套")
-    assert calls[0][2] == {"force": True, "selected_source_ids": ["SOURCE-1"]}
+    assert calls[0][2] == {"force": True, "selected_source_ids": ["SOURCE-1"], "request_id": None}
     assert calls[1][2]["after_revision"] == 9
     assert calls[2][1][2:4] == (["P1"], {"P1": {}})
     assert calls[2][1][6][0]["fieldname"] == "goods_value"
+
+    api.start_source_ai_review("B", "V", request_id="retry-request-1")
+    assert calls[-1][2]["request_id"] == "retry-request-1"
+    assert checks[-1] == "write"
 
 
 def test_clarification_api_permissions_and_optimistic_revision(monkeypatch):

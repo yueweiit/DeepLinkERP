@@ -172,7 +172,7 @@ await h.recalculate();console.log(JSON.stringify({calls,errors}));
     assert result["errors"] and "资料与费用" in result["errors"][0]
 
 
-def test_overview_recalculate_waits_for_an_inflight_saved_trial():
+def test_overview_recalculate_does_not_duplicate_an_inflight_saved_trial():
     result = _frontend_result(FRONTEND_SETUP + """
 let resolve;const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
   if(endpoint.endsWith('calculate_comprehensive_cost'))return await new Promise(r=>{resolve=r});
@@ -183,11 +183,13 @@ h.recordUsage=()=>{};h.applyRecalculateSummary=()=>{};h.refreshDetailSummary=asy
 const trial=h.refreshMaterialFeeCostPreview();await new Promise(r=>setImmediate(r));
 h.detailState.tab='overview';const recalculating=h.recalculate();await new Promise(r=>setImmediate(r));
 const callsBefore=calls.length;resolve(saved);await Promise.all([trial,recalculating]);
-console.log(JSON.stringify({callsBefore,calls,errors}));
+console.log(JSON.stringify({callsBefore,calls,errors,modified:h.detailState.expectedModified}));
 """)
     assert result["callsBefore"] == 1
     assert result["errors"] == []
-    assert result["calls"][1]["args"]["expected_modified"] == "m2"
+    assert len(result["calls"]) == 1
+    assert result["calls"][0]["endpoint"].endswith("calculate_comprehensive_cost")
+    assert result["modified"] == "m2"
 
 
 def test_saved_trial_acknowledges_mutation_while_preserving_new_draft():
