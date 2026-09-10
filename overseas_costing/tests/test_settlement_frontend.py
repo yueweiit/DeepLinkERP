@@ -8,7 +8,7 @@ PARTS = Path(__file__).resolve().parents[1] / 'page/overseas_cost_workbench/part
 
 def run_js(body):
     prelude = '''const fs=require('fs');
-const Workbench=new Function('return class {'+fs.readFileSync(PART,'utf8')+'}')();
+const Workbench=new Function('return class {'+fs.readFileSync(PART,'utf8')+fs.readFileSync(PART.replace('85-settlement.js','87-freight.js'),'utf8')+'}')();
 const w=new Workbench();
 w.escape=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const assert=require('assert').strict;
@@ -24,6 +24,15 @@ assert(html.includes('0 USD')); assert(!html.includes('90 USD'));
 assert(html.includes('&lt;img')); assert(!html.includes('<script>'));
 assert(w.settlementAmount({amount:0,currency:'MXN'}).includes('0 MXN'));
 assert(w.settlementAmount({amount:null}).includes('未识别'));
+''')
+
+
+def test_freight_dialog_separates_claims_packing_and_bill_total():
+    run_js('''
+const html=w.renderFreightContent({viewed_version:'v',logistics:{approval_no:'LOG'},freight:{claims:[{id:'c',amount:'2600',currency:'RMB',approval_no:'PAY'}]},packing:{message:'装箱保留待核对'},candidates:[{id:'p',revision:'r',status:'pending',expense:{approval_no:'PAY',amount:'9000',currency:'RMB'},lines:[{id:'line',amount:'2600',currency:'RMB',waybill:'1234567890',evidence:{file_name:'monthly.xlsx',sheet:'DHL',row:2},cargo_text:'Oppo <unsafe>'}],packing_available:true}]});
+assert(html.includes('已审批运费'));assert(html.includes('装箱保留待核对'));assert(html.includes('整单合计，仅供核对'));
+assert(html.includes('2600 RMB'));assert(html.includes('第 2 行'));assert(html.includes('freight-review'));assert(html.includes('packing-review'));
+assert(!html.includes('<unsafe>'));assert(!html.includes('已付款'));
 ''')
 
 

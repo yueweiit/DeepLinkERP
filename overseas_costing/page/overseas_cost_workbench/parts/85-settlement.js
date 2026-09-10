@@ -177,6 +177,7 @@
   }
 
   renderSettlementHistory(state, data) {
+    if (data.freight_mode) return this.renderFreightHistory(state,data);
     const job = data.job || {};
     const labels = { queued: "排队中", running: "进行中", completed: "本轮完成", partial: "部分失败", paused: "已暂停", failed: "失败" };
     const phases = { inventory: "扫描历史来源", load: "整理资料", match: "生成候选", finished: "已结束" };
@@ -334,7 +335,7 @@
       const currentSource = data.binding ? data.expense : data.logistics;
       const sourceLabel = data.binding ? "采购支出" : "国际物流";
       const $strip = this.$root.find("[data-area='settlement-strip']");
-      $strip.html(`<div class="ocw-settlement-strip"><div><strong>${data.historical ? "此版本资料来源" : "当前资料来源"}：${sourceLabel}</strong><span>${this.escape(this.settlementAdoption(data))}</span>
+      $strip.html(data.freight_mode ? this.renderFreightStrip(data) : `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "此版本资料来源" : "当前资料来源"}：${sourceLabel}</strong><span>${this.escape(this.settlementAdoption(data))}</span>
         <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后，装箱、SKU、运费及 AI 资料统一切换至采购支出")}</small></div>
         <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.historical ? "查看历史明细与费用" : data.binding ? "查看明细与费用" : "搜索／匹配采购支出"}</button>
         ${currentSource?.open_url ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开${sourceLabel}原单</button>` : ""}${data.binding && !data.historical ? '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>' : ""}</div></div>`);
@@ -360,7 +361,7 @@
 
   async openBatchSettlementDialog(batchName, viewedVersion = null) {
     if (this.batchSettlementState?.open) this.stopSettlementDialog(this.batchSettlementState);
-    const state = this.settlementDialog("本票匹配 · 物流采购支出");
+    const state = this.settlementDialog("本票运费与装箱核对");
     this.batchSettlementState = state;
     state.batchName = batchName;
     state.versionName = viewedVersion || (this.detailState?.batchName === batchName ? this.detailState.versionName : null);
@@ -383,6 +384,7 @@
       if (action === "source") return this.openSettlementSource(data.expense);
       if (data.historical) throw new Error("历史版本仅供追溯，请返回当前调整草稿处理。");
       if (!this.isBatchSettlementCurrent(state)) throw new Error("当前批次或版本已变化，请重新打开本票资料。");
+      if (data.freight_mode) return this.handleFreightAction(state, action, $button, afterWrite);
       if (action === "retry-matching") return this.startBatchSettlementMatching(state, true);
       if (action === "search" || action === "correct") return this.openSettlementSearch(batchName, action === "correct" ? data : null, afterWrite,
         { versionName: data.viewed_version || state.versionName, logistics: data.logistics });
@@ -474,6 +476,7 @@
   }
 
   renderBatchSettlementDialog(state, data) {
+    if (data.freight_mode) return this.settlementBody(state, this.renderFreightContent(data));
     const issues = [...new Set([...(data.binding?.issues || []), ...(data.blocking_reasons || [])])];
     this.settlementBody(state, `<div class="ocw-settlement-toolbar"><strong>本票匹配 · 国际物流审批号：${this.escape(data.logistics?.approval_no || data.matching?.approval_no || data.logistics?.instance || state.batchName || "待读取")}</strong><button class="ocw-outline-btn" data-settlement-action="refresh">刷新</button></div>
       <p>${this.escape(this.settlementAdoption(data))}</p>
@@ -534,7 +537,8 @@
         const result = await this.settlementWrite(state, () => this.settlementApi("prepare_manual_candidate", { batch_name: batchName, expense_id: $button.attr("data-id"), reason }));
         if (!current()) return;
         if (!result?.ok || !result.candidate) throw new Error(result?.message || "候选准备失败，请刷新重试");
-        this.openSettlementCandidateReview([result.candidate], { batchName, versionName, correction, onComplete });
+        if (result.freight_mode) this.openFreightReview(batchName,versionName,result.candidate,context.freight || {},onComplete || (async()=>{}));
+        else this.openSettlementCandidateReview([result.candidate], { batchName, versionName, correction, onComplete });
       }
     });
     await load();

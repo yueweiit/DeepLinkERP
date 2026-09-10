@@ -13,6 +13,7 @@ from .matching import save_binding
 from .writer import apply_binding
 from .ledger import FrappeLedger
 from .jobs import start_job, run_step, retry_job, utcnow
+from .application import row_meta
 
 
 def installed():
@@ -29,13 +30,17 @@ def enabled():
     return bool(installed() and (Store.frappe().get('state', 'control') or {}).get('enabled'))
 
 
+def freight_enabled():
+    return bool(frappe is not None and getattr(frappe,'conf',None) and frappe.conf.get('overseas_costing_freight_lines_enabled'))
+
+
 def archive():
     from overseas_costing.scripts.import_oa_logistics import _get_postgres_approval_source
     from overseas_costing.integrations.logistics_settlement_source import SettlementArchive
     def tracked_pairs():
-        tracked = store().sql("SELECT s.corp,s.instance FROM oc_ls_source s WHERE (s.kind IN ('logistics','expense') AND CAST(JSON_EXTRACT(s.data,'$.invalid') AS CHAR) IN ('false','0')) OR EXISTS (SELECT 1 FROM oc_ls_binding b WHERE b.expense_id=s.id OR b.logistics_id=s.id)")
+        tracked = store().sql("SELECT s.corp,s.instance FROM oc_ls_source s WHERE (s.kind IN ('logistics','expense') AND CAST(JSON_EXTRACT(s.data,'$.invalid') AS CHAR) IN ('false','0')) OR EXISTS (SELECT 1 FROM oc_ls_binding b WHERE b.expense_id=s.id OR b.logistics_id=s.id) OR EXISTS(SELECT 1 FROM oc_ls_freight_claim f WHERE f.source_id=s.id OR f.logistics_id=s.id) OR EXISTS(SELECT 1 FROM oc_ls_packing_review p WHERE p.source_id=s.id AND p.status='applied')")
         return [(r['corp'], r['instance']) for r in tracked]
-    return SettlementArchive(_get_postgres_approval_source(), logistics_codes=logistics_codes(),
+    return SettlementArchive(_get_postgres_approval_source(), logistics_codes=logistics_codes(), financial=freight_enabled(),
                              tracked_pairs=tracked_pairs)
 
 
@@ -60,6 +65,19 @@ def for_batch(batch_name, *, lock=False):
 
 def calculation_blockers(batch_name, version_name=None, *, for_calculation=False, lock=False):
     """No upstream requests. Invalid/stale final sources cannot silently revive estimates."""
+    if freight_enabled():
+        from .freight_adoption import blockers
+        db=store();ledger=FrappeLedger()
+        version=ledger.get('version',version_name or (ledger.get('batch',batch_name) or {}).get('current_version')) or {}
+        if row_meta(version).get('freight_settlement') or not for_batch(batch_name):
+            issues=blockers(db,ledger,batch_name,version.get('name'),for_calculation)
+            from overseas_costing.services.effective_logistics_source import resolve_source_context
+            ctx=resolve_source_context(batch_name,version.get('name'),store=db,ledger=ledger,lock=lock)
+            mapping=db.find('batch_map',batch=batch_name)
+            original=db.get('source',mapping[0]['source_id'],lock=lock) if mapping else None
+            if original and original.get('invalid'):issues.append('本票国际物流已撤销或失效')
+            if ctx.get('root_kind')=='expense' and (ctx.get('invalid') or not ctx.get('available')):issues.append('已采用装箱来源已变化，请重新核对')
+            return issues
     binding = for_batch(batch_name, lock=lock)
     if not installed():
         return []
@@ -112,7 +130,6 @@ def calculation_blockers(batch_name, version_name=None, *, for_calculation=False
     source_goods = {g['line_key']: g for g in expense['goods']}
     seen_goods = []
     for item in FrappeLedger().rows('item', batch=batch_name, version=binding.get('version')):
-        from .application import row_meta
         meta = row_meta(item)
         source_row = source_goods.get(meta.get('settlement_line_key'))
         if source_row:
@@ -142,17 +159,24 @@ def calculation_blockers(batch_name, version_name=None, *, for_calculation=False
 
 def has_final_binding(batch_name):
     """Legacy import must not replace settlement-owned item rows or restore initial fees."""
-    return bool(for_batch(batch_name))
+    if for_batch(batch_name):return True
+    if not installed():return False
+    batch=FrappeLedger().get('batch',batch_name) or {}
+    version=FrappeLedger().get('version',batch.get('current_version')) or {}
+    return bool(row_meta(version).get('freight_settlement'))
 
 
 def source_summary(source):
     from overseas_costing.utils.dingtalk import build_desktop_approval_url
     source = source or {}
     return {'open_url': build_desktop_approval_url(source.get('instance') or ''), **{key: source.get(key) for key in ('id', 'corp', 'instance', 'approval_no', 'kind', 'status', 'approved', 'invalid',
-             'amount', 'currency', 'fees', 'goods', 'goods_complete', 'issues', 'coverage', 'source_updated_at', 'snapshot', 'documents')}}
+             'title', 'process_code', 'amount', 'currency', 'fees', 'goods', 'goods_complete', 'issues', 'coverage', 'source_updated_at', 'snapshot', 'documents')}}
 
 
 def batch_status(batch_name, version_name=None):
+    if freight_enabled():
+        from .freight_runtime import batch_status as freight_status
+        return freight_status(store(),FrappeLedger(),batch_name,version_name)
     from . import batch_matching
     db = store()
     ledger = FrappeLedger()
@@ -258,6 +282,8 @@ def ensure_batch_source(db, batch_name):
 
 def start_batch_matching(batch_name, version_name=None):
     from . import batch_matching
+    if freight_enabled():
+        from . import freight_matching as batch_matching
     db = store()
     batch = FrappeLedger().get('batch', batch_name) or {}
     if version_name and version_name != batch.get('current_version'):
@@ -277,6 +303,8 @@ def start_batch_matching(batch_name, version_name=None):
 
 def run_batch_matching(batch_matching_job_id):
     from . import batch_matching
+    if freight_enabled():
+        from . import freight_matching as batch_matching
     from overseas_costing.services import allocation_service
     config = allocation_service._ai_config()
     config['timeout'] = min(120, max(60, float(config.get('timeout') or 60)))
@@ -341,8 +369,17 @@ def apply_source(source_id):
 
 def _apply_source_locked(db, source_id):
     source = db.get('source', source_id)
+    if freight_enabled():
+        from .freight_adoption import source_updated
+        source_updated(db,FrappeLedger(),source_id)
+        # Never send broader monthly bills through the old whole-source writer.
+        if source['kind']!='logistics':return
     if source['kind'] == 'logistics':
         batch_name = ensure_batch(db, source)
+        if freight_enabled():
+            from overseas_costing.services.effective_logistics_source import resolve_source_context
+            ctx=resolve_source_context(batch_name,store=db,ledger=FrappeLedger())
+            if ctx.get('root_source_id')!=source_id:return
         from .document_writer import sync_logistics_documents
         bindings = db.find('binding', logistics_id=source_id, limit=1)
         if bindings:
@@ -358,6 +395,9 @@ def _apply_source_locked(db, source_id):
 
 
 def begin(mode='initialize', start='', end='', request_key=None):
+    if freight_enabled() and mode=='initialize':
+        start=start or '2026-01-01'
+        request_key=request_key or 'shipment-freight-1'
     db = store()
     upstream = archive()
     preflight = upstream.preflight() if mode == 'initialize' else {'health': upstream.health(), 'data_source': 'postgres'}
@@ -401,7 +441,7 @@ def run_job(settlement_job_id):
     try:
         upstream = None if db.get('job', job_id)['mode'] == 'reparse' else archive()
         for _ in range(4):
-            job = run_step(db, upstream, job_id, logistics_codes=logistics_codes(), apply_source=apply_source, prepare_source=prepare_source)
+            job = run_step(db, upstream, job_id, logistics_codes=logistics_codes(), apply_source=apply_source, prepare_source=prepare_source, freight_mode=freight_enabled())
             db.commit()
             if job['status'] not in {'queued', 'running'}:
                 return job
@@ -431,6 +471,9 @@ def resume_pending():
     if not enabled():
         return
     db = store()
+    if freight_enabled():
+        from .freight_runtime import resume
+        resume(db,FrappeLedger())
     document_cursor = (db.get('state', 'document_cursor') or {}).get('cursor')
     document_rows = db.find('document_sync', status='queued', limit=50, after=document_cursor)
     for state in document_rows:
@@ -463,7 +506,7 @@ def resume_pending():
                     return
                 db.get('state', 'match_lock', lock=True)
                 current = db.get('binding', binding['id'], lock=True)
-                if current and current.get('application_status') in {'pending', 'queued', 'applied_pending'}:
+                if current and not freight_enabled() and current.get('application_status') in {'pending', 'queued', 'applied_pending'}:
                     apply_binding(db, FrappeLedger(), current['id'], 'pending-sync')
         except Exception as exc:
             db.audit(binding['id'], 'application_failed', 'pending-sync', reason=str(exc))
@@ -476,6 +519,27 @@ def weekly_reconcile():
 
 
 def lock_for_final_action(batch_name, version_name=None):
+    if installed():
+        db=Store.frappe();ledger=FrappeLedger()
+        db.get('state','match_lock',lock=True)
+        batch=ledger.get('batch',batch_name,lock=True) or {}
+        version=ledger.get('version',version_name or batch.get('current_version'),lock=True) or {}
+        managed=row_meta(version).get('freight_settlement')
+        if managed:
+            from .freight_adoption import blockers
+            issues=blockers(db,ledger,batch_name,version.get('name'))
+            mapping=db.find('batch_map',batch=batch_name)
+            original=db.get('source',mapping[0]['source_id'],lock=True) if mapping else None
+            if not original or original.get('invalid'):issues.append('本票国际物流缺失、撤销或失效')
+            review=db.get('packing_review',managed.get('packing_review_id') or '')
+            refs=[(c['source_id'],c['source_snapshot']) for c in managed.get('claims',[])]
+            if review:
+                refs.append((review['source_id'],review['source_snapshot']))
+                if not original or original.get('snapshot')!=review['logistics_snapshot']:issues.append('本票物流与装箱核对时的版本不同，请重新比对')
+            for sid,snapshot in refs:
+                source=db.get('source',sid,lock=True) or {}
+                if not source.get('approved') or source.get('invalid') or source.get('snapshot')!=snapshot:issues.append('采用的费用或装箱来源更新／失效，请先核对调整草稿')
+            return sorted(set(issues))
     binding = for_batch(batch_name, lock=True)
     if not binding:
         return []
@@ -488,7 +552,7 @@ def lock_for_final_action(batch_name, version_name=None):
 
 def guard_legacy_item_write(batch_name, version_name):
     binding = for_batch(batch_name, lock=True)
-    if not binding:
+    if not binding and not has_final_binding(batch_name):
         return
     batch = FrappeLedger().get('batch', batch_name, lock=True)
     version = FrappeLedger().get('version', version_name, lock=True)

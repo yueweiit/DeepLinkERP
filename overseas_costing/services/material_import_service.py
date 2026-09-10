@@ -1456,7 +1456,7 @@ def preview_material_import(
             "source_totals": _source_totals(trusted.get("preview") or {}),
         }
     )
-    if (context.get('source_context') or {}).get('root_kind') == 'expense':
+    if (context.get('source_context') or {}).get('root_kind') == 'expense' and not (context.get('source_context') or {}).get('separate_adoption'):
         from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
         comparison['cargo_review'] = cargo_review_for_preview(trusted,context['source_context'])
     from overseas_costing.services.approval_link_service import attach_preview_approval_links
@@ -1549,7 +1549,7 @@ def apply_material_import(
         if comparison["preview_hash"] != str(claims.get("preview_hash") or ""):
             repo.rollback()
             return {"ok": False, "source_changed": True, "code": "PREVIEW_CHANGED"}
-        if (context.get('source_context') or {}).get('root_kind') == 'expense' and (not existing or choices.get('confirm_complete_cargo')):
+        if (context.get('source_context') or {}).get('root_kind') == 'expense' and not (context.get('source_context') or {}).get('separate_adoption') and (not existing or choices.get('confirm_complete_cargo')):
             from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
             review = cargo_review_for_preview(trusted,context['source_context'])
             if not review['complete'] or choices.get('confirm_complete_cargo') is not True:

@@ -54,6 +54,9 @@ def number(value):
 
 
 def currency(value):
+    value = decoded(value)
+    if isinstance(value, list):
+        value = value[0] if len(value) == 1 else ''
     key = norm(value)
     if key in ('rmb', 'cny', '人民币', '人民币rmb', '人民币cny', 'rmb人民币', 'cny人民币'):
         return 'RMB'
@@ -188,14 +191,15 @@ def parse_source(row, *, logistics_codes):
     if not corp or not instance:
         raise ValueError('来源缺少企业或审批实例 ID')
     process = row.get('process_code') or payload.get('processCode')
-    classified = is_logistics_expense(fields)
+    from .freight_lines import financial_candidate, identifiers_in
+    classified = is_logistics_expense(fields) or financial_candidate(row, fields) or row.get('financial_scope') is True
     kind = 'logistics' if process in logistics_codes else 'expense' if classified else 'unclassified'
     status = str(row.get('status') or payload.get('status') or '').upper()
     result = str(row.get('result') or payload.get('result') or '').lower()
-    invalid = bool(row.get('deleted_at')) or status in {'TERMINATED', 'CANCELED', 'CANCELLED', 'DELETED', 'REJECTED'} or result in {'refuse', 'reject', 'disagree'}
+    invalid = bool(row.get('deleted_at')) or status in {'TERMINATED', 'CANCELED', 'CANCELLED', 'DELETED', 'REJECTED', 'WITHDRAWN', 'WITHDRAW', 'REVOKED'} or result in {'refuse', 'reject', 'disagree'}
     approved = not invalid and status == 'COMPLETED' and result in {'agree', 'approved', 'pass'}
     text = '\n'.join(str(v) for v in fields.values() if not isinstance(v, (dict, list)))
-    identifiers = set()
+    identifiers = identifiers_in(text) | identifiers_in(payload.get('comments') or []) | identifiers_in(payload.get('operationRecords') or [])
     for token in re.findall(r'(?<![A-Z0-9])(?:[A-Z]{4}\d{7}|MXT\d{4,})(?![A-Z0-9])', text.upper()):
         identifiers.add(('container' if re.fullmatch(r'[A-Z]{4}\d{7}', token) else 'waybill', token))
     for key, value in fields.items():
@@ -225,7 +229,7 @@ def parse_source(row, *, logistics_codes):
         if 'Relate' in str(c.get('componentType') or c.get('component_type')) or '关联' in str(c.get('name')) or 'asociar' in norm(c.get('name')):
             walk(c.get('value')); walk(c.get('extValue'))
     cur = currency(pick(fields, '币种', 'Moneda'))
-    amount = number(pick(fields, '本次申请金额', '申请金额', '支付金额', '总金额', 'Monto Total', '合计金额', '金额'))
+    amount = number(pick(fields, '本次申请金额', '申请金额', '支付金额', '总金额', 'Monto Total', '合计金额', '合计总额（元）', '合计总额', '金额'))
     fees, goods, issues = [], [], []
     goods_table_validity = []
     fee_issues = list(row.get('settlement_fee_issues') or [])
@@ -286,10 +290,12 @@ def parse_source(row, *, logistics_codes):
     other_scope_labels = ('双清','包税','清关','税费','关税','内陆','境内运输','陆运','ddp','despacho','aduana','impuesto','arancel','inland','fletelocal')
     coverage = 'unknown' if any(norm(label) in scope_text for label in other_scope_labels) else 'freight'
     normalized = {'id': digest(corp, instance), 'corp': corp, 'instance': instance, 'process_code': process, 'approval_no': approval_no, 'kind': kind, 'status': status, 'approval_result': result, 'deleted_at': row.get('deleted_at'), 'approved': approved, 'invalid': invalid, 'source_updated_at': timestamp(row.get('updated_at')), 'identifiers': sorted(identifiers), 'related': sorted(related), 'amount': amount, 'currency': cur, 'fees': fees, 'goods': goods, 'billing': billing, 'goods_complete': bool(goods_table_validity) and all(goods_table_validity), 'issues': issues, 'fee_issues': fee_issues, 'coverage': coverage, 'fields': fields, 'raw': payload, 'archive_revision': row.get('archive_revision'), 'documents': row.get('settlement_documents') or [], 'attachments': row.get('attachments') or [], 'parser_version': PARSER_VERSION}
+    normalized['identifiers']=sorted(set(map(tuple,normalized['identifiers'])) | {('material',code) for g in goods for code in re.findall(r'[A-Z]{1,8}\d[A-Z0-9_-]*',str(g.get('material_code') or '').upper())})
+    normalized['title'] = row.get('title') or payload.get('title') or row.get('process_name') or row.get('template_name') or ''
     attachments = sorted((attachment_identity(a) for a in normalized['attachments']), key=dumps)
     scalar_fields = {key: value for key, value in fields.items() if not isinstance(value, (dict, list))}
     normalized['match_hash'] = digest(kind, corp, normalized['identifiers'], normalized['related'])
-    normalized['cost_hash'] = digest(approved, invalid, scalar_fields, stable_lines(fees), stable_lines(goods), fee_issues, billing, attachments, normalized['goods_complete'], PARSER_VERSION)
+    normalized['cost_hash'] = digest(approved, invalid, normalized['title'], approval_no, scalar_fields, stable_lines(fees), stable_lines(goods), fee_issues, billing, attachments, normalized['goods_complete'], PARSER_VERSION)
     normalized['packing_hash'] = digest(payload.get('operationRecords'), payload.get('comments'), attachments)
-    normalized['fingerprint'] = digest(kind, status, result, invalid, payload, attachments, normalized['documents'], PARSER_VERSION)
+    normalized['fingerprint'] = digest(kind, status, result, invalid, payload, attachments, normalized['documents'], normalized['title'], approval_no, process, PARSER_VERSION)
     return normalized

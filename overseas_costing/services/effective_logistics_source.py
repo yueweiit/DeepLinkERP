@@ -7,7 +7,7 @@ from urllib.parse import urlparse, parse_qs
 from .logistics_settlement.model import digest
 
 POLICY_VERSION = 'procurement-source-2'
-CONTEXT_FIELDS = ('policy_version', 'batch', 'cost_version', 'root_kind', 'root_source_id', 'corp_id', 'instance_id',
+CONTEXT_FIELDS = ('separate_adoption', 'freight', 'packing', 'policy_version', 'batch', 'cost_version', 'root_kind', 'root_source_id', 'corp_id', 'instance_id',
                   'binding_id', 'binding_revision', 'source_snapshot', 'approved', 'invalid', 'available', 'fingerprint')
 
 
@@ -38,7 +38,7 @@ def context_for_source(source, binding=None, version_name=None, batch_name=None)
     return result
 
 
-def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None, lock=False):
+def _legacy_source_bundle(batch_name, version_name=None, *, store=None, ledger=None, lock=False):
     """Internal local read, returning context plus source. No upstream clients."""
     from .logistics_settlement.reviewed_cargo import resolve_reviewed_source
     if ledger is None:
@@ -91,6 +91,56 @@ def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None
         version_name if version_name != batch.get('current_version') else None)
     return {'context': context_for_source(source, binding, version_name, batch_name),
             'source': source, 'binding': binding, 'batch': batch, 'version': version}
+
+
+def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None, lock=False):
+    if store is None:
+        from .logistics_settlement.runtime import installed
+        if installed():
+            from .logistics_settlement.store import Store
+            store=Store.frappe()
+    if ledger is None:
+        from .logistics_settlement.ledger import FrappeLedger
+        ledger=FrappeLedger()
+    bundle=_legacy_source_bundle(batch_name,version_name,store=store,ledger=ledger,lock=lock)
+    if store is None:return bundle
+    version=bundle['version'] or {};meta=json_dict(version.get('extra_json'))
+    if bundle.get('binding') and not meta.get('freight_settlement'):return bundle
+    from .logistics_settlement.freight_adoption import context as freight_context
+    freight=freight_context(store,ledger,batch_name,version.get('name'))
+    ctx=dict(bundle['context']);packing=dict(ctx)
+    frozen=(meta.get('effective_logistics_source') or {}).get('packing') or {}
+    if freight['historical'] and frozen:
+        snapshot=store.get('snapshot',frozen.get('source_snapshot',''))
+        source={**(snapshot or {}),'id':frozen.get('root_source_id'),'snapshot':frozen.get('source_snapshot'),'available':bool(snapshot)}
+        binding={'id':frozen['binding_id'],'revision':frozen['binding_revision'],'expense_id':frozen['root_source_id']} if frozen.get('binding_id') else None
+        packing=context_for_source(source,binding,version.get('name'),batch_name);ctx=dict(packing)
+        bundle.update(source=source,binding=binding)
+    review=store.get('packing_review',freight.get('packing_review_id') or '')
+    if review and review.get('status')=='applied':
+        snapshot=store.get('snapshot',review['source_snapshot'])
+        current=store.get('source',review['source_id']) or {}
+        active=snapshot if freight['historical'] else current
+        mapping=store.find('batch_map',batch=batch_name)
+        original=store.get('source',mapping[0]['source_id']) if mapping else {}
+        logistics_ok=freight['historical'] or (original and not original.get('invalid') and original.get('snapshot')==review['logistics_snapshot'])
+        available=bool(logistics_ok and active and active.get('approved') and not active.get('invalid') and (freight['historical'] or current.get('snapshot')==review['source_snapshot']))
+        # Only adopted shipment rows, never the raw monthly workbook or another ticket's comments.
+        goods=[]
+        for item in review.get('adopted_items') or []:
+            row=json_dict(item.get('extra_json')).get('settlement_cargo') or {}
+            goods.append(row or {k:item.get(k) for k in ('material_code','product_name','spec_model','quantity','unit')})
+        source={**(snapshot or {}),'id':review['source_id'],'snapshot':review['source_snapshot'],'available':available,'approved':available,
+                'invalid':bool(active.get('invalid')),'goods':goods,'goods_complete':False,'documents':[],'attachments':[],
+                'fields':{'本票已采用装箱明细':goods},'raw':{'formComponentValues':[{'name':'本票已采用装箱明细','componentType':'TableField','value':goods}],'comments':[]}}
+        binding={'id':review['id'],'revision':review['revision'],'expense_id':review['source_id']}
+        packing=context_for_source(source,binding,version.get('name'),batch_name)
+        bundle.update(source=source,binding=binding)
+        ctx=dict(packing)
+    ctx.update(policy_version='shipment-sources-1',separate_adoption=True,freight=freight,packing=packing)
+    ctx['fingerprint']=digest({k:v for k,v in ctx.items() if k not in ('fingerprint','freight')}, {k:v for k,v in freight.items() if k!='historical'})
+    bundle['context']=ctx
+    return bundle
 
 
 def resolve_source_context(batch_name, version_name=None, *, store=None, ledger=None, lock=False):
@@ -277,6 +327,6 @@ def physical_update_values(item, updates, context, evidence):
     if context.get('root_kind') != 'expense':
         return updates
     meta = physical_overlay_update(item, context, updates, evidence=evidence)
-    result = {key: value for key, value in updates.items() if key not in physical_fields}
+    result = dict(updates) if context.get('separate_adoption') else {key: value for key, value in updates.items() if key not in physical_fields}
     result['extra_json'] = json.dumps(meta, ensure_ascii=False, default=str, separators=(',', ':'))
     return result

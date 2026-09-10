@@ -27,7 +27,7 @@ def project_batch_items(items, batch, version=None):
 
 
 def source_context_from_items(items):
-    contexts = [item_source_context(item) for item in items if expense_context(item_source_context(item))]
+    contexts = [item_source_context(item) for item in items if expense_context(item_source_context(item)) or item_source_context(item).get('separate_adoption')]
     if len({context.get('fingerprint') for context in contexts}) > 1:
         raise ValueError('物料采用来源不一致，请重新应用当前采购支出')
     return contexts[0] if contexts else {}
@@ -58,6 +58,12 @@ def project_source_values(item, context=None):
     meta = deepcopy(object_json(row.get('extra_json')))
     adopted_context = meta.get('effective_logistics_source') or {}
     context = context if context is not None else adopted_context
+    if context.get('separate_adoption'):
+        row['source_context']=context
+        meta['effective_logistics_source']=context
+        row['extra_json']=meta
+        # These are independently adopted rows; changing freight must not blank packing or customs.
+        return row
     if not expense_context(context):
         return row
     valid = (context.get('available') and context.get('approved') and not context.get('invalid')

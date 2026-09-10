@@ -38,7 +38,7 @@ def start_job(store, *, mode, actor, start='', end='', now=None, request_key=Non
         return save_job(store, job)
 
 
-def run_step(store, archive, job_id, *, logistics_codes, now=None, apply_source=None, prepare_source=None):
+def run_step(store, archive, job_id, *, logistics_codes, now=None, apply_source=None, prepare_source=None, freight_mode=False):
     now = now or utcnow()
     with store.atomic():
         job = store.get('job', job_id, lock=True)
@@ -115,7 +115,10 @@ def run_step(store, archive, job_id, *, logistics_codes, now=None, apply_source=
                 for item in store.find('job_item', job_id=job_id, status='loaded', limit=200):
                     try:
                         with store.atomic():
-                            if item.get('match_changed'):
+                            if freight_mode:
+                                from .freight_matching import match_changed_source
+                                match_changed_source(store,item['source_id'])
+                            elif item.get('match_changed'):
                                 candidates = match_source(store, item['source_id'])
                                 for candidate in candidates:
                                     if candidate['method'] == 'explicit' and candidate['status'] == 'pending':

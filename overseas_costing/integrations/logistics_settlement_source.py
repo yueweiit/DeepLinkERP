@@ -3,10 +3,11 @@ from overseas_costing.services.logistics_settlement.model import dumps
 
 
 class SettlementArchive:
-    def __init__(self, source, *, logistics_codes, tracked_pairs=()):
+    def __init__(self, source, *, logistics_codes, tracked_pairs=(), financial=False):
         self.source = source
         self.logistics_codes = sorted(logistics_codes)
         self.tracked_pairs = tracked_pairs
+        self.financial=financial
 
     @staticmethod
     def _expense_category_sql():
@@ -14,14 +15,18 @@ class SettlementArchive:
 
     @staticmethod
     def _active_sql():
-        return "deleted_at IS NULL AND UPPER(COALESCE(status,'')) NOT IN ('TERMINATED','CANCELED','CANCELLED','DELETED','REJECTED') AND LOWER(COALESCE(result,'')) NOT IN ('refuse','reject','disagree')"
+        return "deleted_at IS NULL AND UPPER(COALESCE(status,'')) NOT IN ('TERMINATED','CANCELED','CANCELLED','DELETED','REJECTED','WITHDRAWN','WITHDRAW','REVOKED') AND LOWER(COALESCE(result,'')) NOT IN ('refuse','reject','disagree')"
 
     def health(self):
         with self.source._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute('SELECT * FROM costing_read.sync_health_v1 LIMIT 1')
                 rows = cursor.fetchall()
-                return dict(rows[0]) if rows else {}
+                health=dict(rows[0]) if rows else {}
+                if self.financial:
+                    cursor.execute("SELECT corp_id,process_code,template_name,COUNT(window_start)::int AS windows,COUNT(*) FILTER(WHERE status='completed')::int AS completed_windows,COUNT(*) FILTER(WHERE status='failed')::int AS failed_windows,SUM(discovered_count)::int AS discovered_count,SUM(processed_count)::int AS processed_count,MAX(source_count)::int AS source_count,MAX(eligible_source_count)::int AS eligible_source_count,MAX(attachment_count)::int AS attachment_count,MAX(attachment_available_count)::int AS attachment_available_count,MAX(last_error) AS last_error,MAX(updated_at) AS updated_at FROM costing_read.financial_template_coverage_v1 GROUP BY corp_id,process_code,template_name ORDER BY template_name")
+                    health['financial_coverage']=[dict(r) for r in cursor.fetchall()]
+                return health
 
     def inventory_page(self, **kwargs):
         return self.page(**kwargs, lightweight=True)
@@ -44,7 +49,7 @@ class SettlementArchive:
         else:
             # Filter before pagination and payload/attachment hydration. Previously
             # adopted sources remain readable after their category is revoked.
-            scope = '(process_code=ANY(%s) OR ' + self._expense_category_sql() + ') AND (' + self._active_sql() + ')'
+            scope = '(process_code=ANY(%s) OR ' + ('financial_scope' if self.financial else self._expense_category_sql()) + ') AND (' + self._active_sql() + ')'
             args.append(self.logistics_codes)
             tracked_pairs = self.tracked_pairs() if callable(self.tracked_pairs) else self.tracked_pairs
             if tracked_pairs:
@@ -61,6 +66,10 @@ class SettlementArchive:
                        FROM costing_read.attachment_archives_v2 GROUP BY corp_id, process_instance_id) f
               USING (corp_id, process_instance_id)
         ) SELECT ''' + projection + ' FROM changed WHERE ' + ' AND '.join(where) + ' ORDER BY changed_at, corp_id, process_instance_id LIMIT %s'
+        if self.financial:
+            sql=sql.replace('SELECT a.*, GREATEST(a.updated_at, COALESCE(f.attachment_updated_at, a.updated_at))',
+                'SELECT a.*, fin.template_name, COALESCE(fin.has_transport_evidence,false) AS financial_scope, fin.transport_evidence, GREATEST(a.updated_at, COALESCE(fin.evidence_updated_at,a.updated_at), COALESCE(fin.scope_registered_at,a.updated_at), COALESCE(f.attachment_updated_at, a.updated_at))')
+            sql=sql.replace('FROM costing_read.approval_instances_v2 a','FROM costing_read.approval_instances_v2 a LEFT JOIN costing_read.financial_sources_v1 fin USING (corp_id,process_instance_id)')
         args.append(min(200, int(limit)) + 1)
         with self.source._connection() as connection:
             with connection.cursor() as cur:
@@ -91,18 +100,21 @@ class SettlementArchive:
     def preflight(self):
         with self.source._connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute('''SELECT CASE WHEN process_code=ANY(%s) THEN 'logistics'
+                query='''SELECT CASE WHEN process_code=ANY(%s) THEN 'logistics'
                     WHEN ''' + self._expense_category_sql() + ''' THEN 'expense' ELSE 'excluded' END AS source_kind,
                     process_code, EXTRACT(YEAR FROM create_time)::int AS year,
                     status, result, deleted_at IS NOT NULL AS deleted, COUNT(*)::int AS count, MIN(create_time) AS first_created,
                     MAX(create_time) AS last_created FROM costing_read.approval_instances_v2
                     GROUP BY source_kind, process_code, EXTRACT(YEAR FROM create_time), status, result, deleted_at IS NOT NULL
-                    ORDER BY year, process_code''', (self.logistics_codes,))
+                    ORDER BY year, process_code'''
+                if self.financial:
+                    query=query.replace(self._expense_category_sql(),"EXISTS(SELECT 1 FROM costing_read.financial_sources_v1 fin WHERE fin.corp_id=approval_instances_v2.corp_id AND fin.process_instance_id=approval_instances_v2.process_instance_id AND fin.has_transport_evidence)")
+                cursor.execute(query,(self.logistics_codes,))
                 inventory = [dict(r) for r in cursor.fetchall()]
         counts = {'logistics': 0, 'expense': 0, 'approved_expense': 0, 'excluded': 0, 'invalid': 0}
         active_inventory = []
         for row in inventory:
-            invalid = row['deleted'] or str(row['status']).upper() in {'TERMINATED','CANCELED','CANCELLED','DELETED','REJECTED'} or str(row['result']).lower() in {'refuse','reject','disagree'}
+            invalid = row['deleted'] or str(row['status']).upper() in {'TERMINATED','CANCELED','CANCELLED','DELETED','REJECTED','WITHDRAWN','WITHDRAW','REVOKED'} or str(row['result']).lower() in {'refuse','reject','disagree'}
             if row['source_kind'] != 'excluded' and invalid:
                 counts['invalid'] += row['count']
                 continue

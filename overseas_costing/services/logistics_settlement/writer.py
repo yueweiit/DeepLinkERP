@@ -74,6 +74,8 @@ def application_context(store, ledger, binding):
     batch = ledger.get('batch', mappings[0]['batch'], lock=True)
     if not batch:
         raise ValueError('来源对应的成本批次不存在')
+    if row_meta(ledger.get('version',batch['current_version']) or {}).get('freight_settlement'):
+        raise ValueError('本批次已采用按票费用／装箱策略，旧整单写入已停用')
     return batch
 
 

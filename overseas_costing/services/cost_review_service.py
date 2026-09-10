@@ -144,7 +144,7 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
         source_ready = (source_context.get('available') and source_context.get('approved')
                         and not source_context.get('invalid') and bool(items)
                         and all(item_source_context(item).get('fingerprint') == source_context.get('fingerprint')
-                                and _dict(item.get('extra_json')).get('settlement_cargo') for item in items))
+                                and (source_context.get('separate_adoption') or _dict(item.get('extra_json')).get('settlement_cargo')) for item in items))
         if not source_ready:
             block('SOURCE_ADOPTION_PENDING', '当前采购支出资料尚未有效采用，旧结果仅供追溯。')
 

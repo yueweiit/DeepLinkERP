@@ -241,3 +241,10 @@ def test_manual_adjustment_preserves_fee_evidence_components_and_legacy_scope(li
     assert component['item']==item['name'] and component['evidence']==evidence['name']
     assert component['fee_rule']==evidence['fee_rule'] and evidence['fee_rule']!='R1'
     assert component['amount_rmb']=='80' and evidence['attachment']=='FILE1'
+
+
+def test_manual_adjustment_keeps_independent_source_and_adoption_metadata(lifecycle):
+    policy={'freight_settlement':{'policy':'shipment-freight-1','revision':'rev','claims':[{'id':'fee'}],'packing_review_id':'packing'},'effective_logistics_source':{'fingerprint':'source'}}
+    lifecycle.records['Overseas Cost Version']['CONFIRMED']['extra_json']=json.dumps(policy)
+    result=service.create_version('B1','CONFIRMED','Adjustment')
+    assert json.loads(lifecycle.records['Overseas Cost Version'][result['version_name']]['extra_json'])==policy

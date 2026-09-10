@@ -194,7 +194,7 @@ def compose_fee_worklist_rows(existing_fees: list[dict], transport_mode: str, *,
 
     from overseas_costing.services.logistics_settlement.fee_policy import covered_scopes, row_scopes, select_fees, is_final
     decorated = select_fees(_decorate_historical_rules(existing_fees, transport_mode),source_context=source_context)
-    if source_context and source_context.get('root_kind') == 'expense':
+    if source_context and source_context.get('root_kind') == 'expense' and not source_context.get('separate_adoption'):
         return mark_duplicate_fees(decorated)
     covered = covered_scopes(decorated)
     templates = [row for row in build_default_fee_templates(transport_mode) if not row_scopes(row) & covered]
@@ -681,7 +681,7 @@ def save_fee(
 
     from overseas_costing.services.effective_source_values import batch_source_context
     context = batch_source_context(batch_name, version_name, lock=True)
-    if context.get('root_kind') == 'expense':
+    if context.get('root_kind') == 'expense' and not context.get('separate_adoption'):
         raise ValueError('当前费用统一来自已匹配采购支出，请通过采购支出资料审核采用完整费用明细。')
     _assert_write_context(batch_name, version_name, edit_token, expected_modified)
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
@@ -1060,7 +1060,7 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     )
     summary = fee_status_service.summarize_fee_statuses(statuses)
     candidates = build_evidence_candidates(attachments, version_name=version)
-    if source_context.get('root_kind') == 'expense':
+    if source_context.get('root_kind') == 'expense' and not source_context.get('separate_adoption'):
         from overseas_costing.services.effective_logistics_source import current_source_bundle, attachment_allowed
         bundle = current_source_bundle(batch_name, version)
         current_names = {row['name'] for row in attachments if bundle and attachment_allowed(row, bundle)}

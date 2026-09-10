@@ -8,6 +8,11 @@ import re
 from .model import digest, dumps
 
 TABLES = {
+    'freight_line': 'source_id VARCHAR(64) NOT NULL, snapshot VARCHAR(64) NOT NULL, line_key VARCHAR(64) NOT NULL, waybill VARCHAR(160) NOT NULL, approval_no VARCHAR(160) NOT NULL, charge_key VARCHAR(64) NOT NULL',
+    'freight_candidate': 'logistics_id VARCHAR(64) NOT NULL, expense_id VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, UNIQUE(logistics_id, expense_id)',
+    'freight_claim': 'batch VARCHAR(140) NOT NULL, logistics_id VARCHAR(64) NOT NULL, source_id VARCHAR(64) NOT NULL, line_id VARCHAR(64) NOT NULL, charge_key VARCHAR(64) NOT NULL UNIQUE',
+    'freight_application': 'batch VARCHAR(140) NOT NULL, version VARCHAR(140) NOT NULL, revision VARCHAR(64) NOT NULL, UNIQUE(batch, version, revision)',
+    'packing_review': 'batch VARCHAR(140) NOT NULL, version VARCHAR(140) NOT NULL, source_id VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL',
     'source': 'corp VARCHAR(128) NOT NULL, instance VARCHAR(160) NOT NULL, kind VARCHAR(32) NOT NULL, snapshot VARCHAR(64) NOT NULL, match_hash VARCHAR(64) NOT NULL, updated_at VARCHAR(64) NOT NULL, UNIQUE(corp, instance)',
     'snapshot': 'source_id VARCHAR(64) NOT NULL, fingerprint VARCHAR(64) NOT NULL, UNIQUE(source_id, fingerprint)',
     'document': 'source_id VARCHAR(64) NOT NULL, fingerprint VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL',
@@ -60,6 +65,12 @@ class Store:
         for lock_id in ('job_lock', 'match_lock'):
             if not self.get('state', lock_id):
                 self.insert('state', {'id': lock_id, 'updated_at': '', 'data': '{}'})
+        for column in ('waybill','approval_no','source_id','charge_key'):
+            name='oc_ls_freight_'+column
+            if self.is_sqlite:
+                self.sql(f'CREATE INDEX IF NOT EXISTS {name} ON oc_ls_freight_line ({column})')
+            elif not self.sql('SHOW INDEX FROM oc_ls_freight_line WHERE Key_name=%s',(name,)):
+                self.sql(f'CREATE INDEX {name} ON oc_ls_freight_line ({column})')
 
     @staticmethod
     def validate_columns(table, keys):
@@ -153,4 +164,7 @@ class Store:
             self.sql('DELETE FROM oc_ls_reference WHERE source_id=%s', (source_id,))
             for instance in parsed['related']:
                 self.insert('reference', {'id': digest(source_id, instance), 'source_id': source_id, 'corp': parsed['corp'], 'target_instance': instance, 'data': '{}'})
+            if result['kind'] == 'expense':
+                from .freight_matching import index_source
+                index_source(self,result)
         return result

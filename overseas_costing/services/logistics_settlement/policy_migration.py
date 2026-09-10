@@ -22,6 +22,7 @@ def register(store, ledger):
             mapping = store.find('batch_map',source_id=binding['logistics_id'],limit=1)
             batch = ledger.get('batch',mapping[0]['batch']) if mapping else None
             version = ledger.get('version',batch['current_version']) if batch else {}
+            if row_meta(version or {}).get('freight_settlement'):continue
             context = row_meta(version or {}).get('effective_logistics_source') or {}
             if context.get('policy_version') != POLICY_VERSION:
                 ids.append(binding['id'])
@@ -58,7 +59,12 @@ def run_step(store, ledger, *, limit=50):
                                    'raw_payload':source['raw'],'attachments':source.get('attachments') or []}
                             parsed = parse_source(with_cached_documents(raw,source.get('documents') or []),logistics_codes=set())
                             store.ingest(parsed)
-                        apply_binding(store,ledger,binding_id,'source-policy-upgrade')
+                        mapping=store.find('batch_map',source_id=binding['logistics_id'],limit=1)
+                        batch=ledger.get('batch',mapping[0]['batch']) if mapping else {}
+                        version=ledger.get('version',batch.get('current_version')) or {}
+                        from .runtime import freight_enabled
+                        if not freight_enabled() and not row_meta(version).get('freight_settlement'):
+                            apply_binding(store,ledger,binding_id,'source-policy-upgrade')
                 state['failed'].pop(binding_id,None)
             except Exception as exc:
                 state['failed'][binding_id] = str(exc)

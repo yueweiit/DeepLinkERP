@@ -70,7 +70,27 @@ def select_fees(fees, fx_context=None, *, source_context=None):
     ``None`` performs structural validation for fee lists; a supplied FX mapping
     also requires all rates needed by the final RMB/MXN calculation.
     """
-    if source_context and source_context.get('root_kind') == 'expense':
+    freight = (source_context or {}).get('freight') or {}
+    if freight.get('selected'):
+        if not freight.get('available'):
+            raise ValueError('已采用实际运费来源待核对，不能恢复旧暂估')
+        owned={(c['id'],c['source_snapshot']) for c in freight['claims']}
+        selected=[]; seen=set()
+        for fee in fees:
+            if 'freight' not in row_scopes(fee):
+                selected.append(fee); continue
+            pair=(fee.get('source_binding_id'),fee.get('source_snapshot'))
+            if is_final(fee) and pair in owned:
+                validate_final(fee,fx_context)
+                if pair in seen: raise ValueError('本票运费明细重复计费')
+                seen.add(pair);selected.append(fee)
+            elif is_final(fee):
+                raise ValueError('当前运费与采用来源不一致')
+            elif row_scopes(fee)-{'freight'}:
+                raise ValueError('旧费用覆盖范围交叉，请核对')
+        if seen!=owned: raise ValueError('本票已采用费用缺失，不能恢复旧暂估')
+        return selected
+    if source_context and source_context.get('root_kind') == 'expense' and not source_context.get('separate_adoption'):
         if not source_context.get('available') or not source_context.get('approved') or source_context.get('invalid'):
             return []
         finals = [fee for fee in fees if is_final(fee)
@@ -114,7 +134,8 @@ def assert_fee_edit_allowed(existing_fees, payload):
 def supplement_legacy_fees(items, fees):
     """Preserve identifiable old item pools only for a settlement-owned trial."""
     from overseas_costing.services.effective_source_values import source_context_from_items
-    if source_context_from_items(items).get('root_kind') == 'expense':
+    context=source_context_from_items(items)
+    if context.get('root_kind') == 'expense' and not context.get('separate_adoption'):
         return list(fees)
     if not any(is_final(fee) for fee in fees):
         return list(fees)

@@ -2293,6 +2293,7 @@ def create_version(batch_name: str, source_version_name: str, version_type: str)
             "fx_usd_to_rmb": getattr(source_doc, "fx_usd_to_rmb", None),
             "fx_rmb_to_mxn": getattr(source_doc, "fx_rmb_to_mxn", None),
             "rule_snapshot_json": None, "summary_snapshot_json": None, "calculated_at": None,
+            "extra_json": getattr(source_doc, "extra_json", None),
             "remark": f"Cloned from {source_version}",
         }).insert(ignore_permissions=True)
 

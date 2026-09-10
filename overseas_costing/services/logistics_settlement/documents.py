@@ -57,17 +57,24 @@ def parse_document(content, file_name):
         kind = 'fee' if fee_heading else 'packing' if packing else 'fee' if fee and not any(norm(v) in {'数量','cantidad','数量cantidad'} for v in header) else 'goods'
         complete = norm(title) in (COMPLETE_FEES if kind == 'fee' else COMPLETE_GOODS) and bool(parsed_rows)
         tables.append({'title': title, 'kind': kind, 'complete': complete, 'rows': parsed_rows, 'header_position': nonempty[header_pos][0]})
-    return {'status': 'parsed' if tables else 'review', 'tables': tables, 'issues': [] if tables else ['未识别出可核对的明细表']}
+    from .freight_lines import statement_tables
+    freight_tables = statement_tables(sheets)
+    return {'status': 'parsed' if tables or freight_tables else 'review', 'tables': tables, 'freight_tables': freight_tables,
+            'issues': [] if tables or freight_tables else ['未识别出可核对的明细表']}
 
 
 def enrich_raw(store, raw, *, reader, cache_file=None):
     row = deepcopy(raw)
+    from .freight_lines import financial_candidate
+    from .model import components,fields_of
+    financial=row.get('financial_scope') is True or financial_candidate(row,fields_of(components(row.get('raw_payload') or {})))
     documents, synthetic, fee_pending = [], [], []
     for manifest in row.get('attachments') or []:
         if manifest.get('retired_at'):
             continue
-        identity = digest(row.get('corp_id'), row.get('process_instance_id'), manifest.get('file_id'),
+        identity_values=(row.get('corp_id'), row.get('process_instance_id'), manifest.get('file_id'),
                           manifest.get('sha256'), manifest.get('bucket'), manifest.get('object_key'), PARSER_VERSION)
+        identity = digest(*(identity_values+('shipment-freight-1',) if financial else identity_values))
         cached = store.get('document', identity)
         if not cached:
             if manifest.get('archive_status') != 'archived':
