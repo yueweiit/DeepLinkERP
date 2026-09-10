@@ -23,7 +23,7 @@ DAILY_NAVIGATION = (
 VOUCHER_NAVIGATION = (
 	("Journal Entry", "记账凭证", "DocType"),
 	("China Accounting Voucher", "中国会计凭证", "DocType"),
-	("Period Closing Voucher", "期末结账凭证", "DocType"),
+	("Period Closing Voucher", "期末结转", "DocType"),
 	("China Closing Run", "中国结账运行单", "DocType"),
 )
 
