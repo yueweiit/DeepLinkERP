@@ -1370,12 +1370,11 @@
   renderMaterialAIReviewDialogContent() {
     const fill = this.ensureMaterialFeeState().aiFill || {};
     if (fill.row_review) return this.renderMaterialAIRowReview(fill);
-    const selectedCount = (fill.selections?.size || 0) + Object.keys(fill.manualUpdates || {}).length;
     const physical = this.materialAIPhysicalSummary(fill);
     const physicalSummary = physical.itemCount
       ? `<div class="ocw-mf-ai-physical-summary"><b>明细 ${physical.itemCount} 条</b><b>净重 ${this.escape(physical.netWeight)} kg</b><b>毛重 ${this.escape(physical.grossWeight)} kg</b></div>`
       : "";
-    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>请核对物料和费用，确认后一次填充到当前批次。</span></div></header><main class="ocw-mf-ai-dialog-body">${physicalSummary}${fill.ai_warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(fill.ai_warning)}</div>` : ""}<div data-mf-ai-autofill-preview="1">${this.renderMaterialAIAutofillPreview(fill)}</div>${this.renderCurrentSourceReviewControls(fill.source_context || fill.draft?.source_context || {}, fill.draft?.cargo_review, { fees: (fill.proposals || []).some(p => p.proposal_type === "fee_update"), values: fill.edits?._source_review || {} })}<details class="ocw-mf-ai-review-advanced"><summary>高级：来源与其他方案</summary><div>${this.renderMaterialAIReviewSources(fill)}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${fill.applying ? "disabled" : ""}>更换来源并重新生成</button>${this.renderSourceAIReviewProposals(true)}</div></details></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${fill.applying ? "disabled" : ""}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${fill.applying ? "disabled" : ""}>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${fill.applying || !selectedCount ? "disabled" : ""}>${fill.applying ? "正在填充…" : "确认填充"}</button></div></footer></div>`;
+    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>请核对物料和费用，确认后一次填充到当前批次。</span></div></header><main class="ocw-mf-ai-dialog-body">${physicalSummary}${fill.ai_warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(fill.ai_warning)}</div>` : ""}<div data-mf-ai-autofill-preview="1">${this.renderMaterialAIAutofillPreview(fill)}</div>${this.renderCurrentSourceReviewControls(fill.source_context || fill.draft?.source_context || {}, fill.draft?.cargo_review, { fees: (fill.proposals || []).some(p => p.proposal_type === "fee_update"), values: fill.edits?._source_review || {} })}<details class="ocw-mf-ai-review-advanced"><summary>高级：来源与其他方案</summary><div>${this.renderMaterialAIReviewSources(fill)}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${fill.applying ? "disabled" : ""}>更换来源并重新生成</button>${this.renderSourceAIReviewProposals(true)}</div></details></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${fill.applying ? "disabled" : ""}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${fill.applying ? "disabled" : ""}>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canApplyMaterialAIFill(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : "确认填充"}</button></div></footer></div>`;
   }
 
   ensureMaterialAIRowSelection(fill) {
@@ -1479,7 +1478,7 @@
 
   canConfirmMaterialAIRowSelection(fill) {
     const selection = this.ensureMaterialAIRowSelection(fill);
-    return fill.status === "READY" && !fill.applying && !fill.discarding && !selection.loading
+    return fill.status === "READY" && !this.isMaterialFeeCalculationBusy() && !fill.applying && !fill.discarding && !selection.loading
       && selection.preview?.can_apply === true && selection.previewKey === this.materialAIRowSelectionKey(fill)
       && (selection.mode !== "replace_all" || selection.rows.size > 0);
   }
@@ -1520,7 +1519,7 @@
     const selection = fill.rowSelection;
     const key = this.materialAIRowSelectionKey(fill);
     const current = () => this.materialFeeState === state && state.aiFill === fill && key === this.materialAIRowSelectionKey(fill) && this.detailState.tab === "documents";
-    fill.applying = true; selection.error = ""; this.renderMaterialAIReviewDialog();
+    fill.applying = true; selection.error = ""; this.updateMaterialFeeWriteControls(state); this.renderMaterialAIReviewDialog();
     try {
       if (!(await this.ensureEditSession()) || !current()) return;
       const result = await this.call("overseas_costing.api.materials.confirm_source_ai_selection", {
@@ -1539,7 +1538,7 @@
       await this.loadMaterialFeeWorkspace({ quiet: true });
     } catch (error) {
       if (current()) selection.error = this.materialAIErrorMessage(error, "填充未保存，请重试。");
-    } finally { fill.applying = false; if (current()) this.renderMaterialAIReviewDialog(); }
+    } finally { fill.applying = false; this.updateMaterialFeeWriteControls(state); if (current()) this.renderMaterialAIReviewDialog(); }
   }
 
   materialAIAutofillPreview(fill) {
@@ -1645,7 +1644,6 @@
     const fill = state.aiFill;
     const $wrapper = state.aiProgressDialog?.$wrapper;
     if (!$wrapper?.length || !fill) return;
-    const count = (fill.selections?.size || 0) + Object.keys(fill.manualUpdates || {}).length;
     $wrapper.find("[data-mf-ai-proposal-select]").each((_index, node) => {
       const proposalId = String($(node).attr("data-proposal-id") || "");
       $(node).prop("checked", fill.selections.has(proposalId));
@@ -1654,7 +1652,7 @@
     const physical = this.materialAIPhysicalSummary(fill);
     $wrapper.find(".ocw-mf-ai-physical-summary").html(`<b>明细 ${physical.itemCount} 条</b><b>净重 ${this.escape(physical.netWeight)} kg</b><b>毛重 ${this.escape(physical.grossWeight)} kg</b>`);
     $wrapper.find("[data-action='mf-ai-apply']")
-      .prop("disabled", Boolean(fill.applying || !count))
+      .prop("disabled", !this.canApplyMaterialAIFill(fill))
       .text(fill.applying ? "正在填充…" : "确认填充");
   }
 
@@ -1767,7 +1765,7 @@
     const updateCount = (fill.selections?.size ?? 0) + Object.keys(fill.manualUpdates || {}).length;
     const candidateCount = Number(fill.draft?.proposal_count || fill.draft?.candidate_count || 0);
     const mutating = Boolean(fill.applying || fill.discarding);
-    return `<div class="ocw-mf-ai-footer"><span>AI 草稿 · 已选择 ${updateCount} 项${candidateCount ? ` · 共 ${candidateCount} 个提案` : ""}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${mutating ? "disabled" : ""}>${fill.discarding ? "正在放弃…" : "放弃草稿"}</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${mutating || !updateCount ? "disabled" : ""}>${fill.applying ? "正在保存…" : "确认所选草稿"}</button></div></div>`;
+    return `<div class="ocw-mf-ai-footer"><span>AI 草稿 · 已选择 ${updateCount} 项${candidateCount ? ` · 共 ${candidateCount} 个提案` : ""}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${mutating ? "disabled" : ""}>${fill.discarding ? "正在放弃…" : "放弃草稿"}</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canApplyMaterialAIFill(fill) ? "" : "disabled"}>${fill.applying ? "正在保存…" : "确认所选草稿"}</button></div></div>`;
   }
 
   bindMaterialGridScrollControls() {
@@ -2052,7 +2050,7 @@
     const state = this.ensureMaterialFeeState();
     const fill = state.aiFill;
     if (fill?.row_review) return this.confirmMaterialAIRowSelection();
-    if (fill?.status !== "READY" || fill.applying || fill.discarding) return;
+    if (!this.canApplyMaterialAIFill(fill)) return;
     const batchName = String(this.detailState.batchName || "");
     const versionName = String(this.detailState.versionName || "");
     const isCurrent = () => this.materialFeeState === state
@@ -2064,6 +2062,7 @@
       fill.edits = { ...(fill.edits || {}), _source_review: this.collectCurrentSourceReviewControls(state.aiProgressDialog.$wrapper) };
     }
     fill.applying = true;
+    this.updateMaterialFeeWriteControls(state);
     this.renderMaterialAIReviewDialog();
     try {
       if (!(await this.ensureEditSession())) {
@@ -2103,6 +2102,9 @@
       if (!isCurrent()) return;
       this.renderMaterialAIReviewDialog();
       throw error;
+    } finally {
+      fill.applying = false;
+      this.updateMaterialFeeWriteControls(state);
     }
   }
 
@@ -3223,8 +3225,29 @@
     await this.loadMaterialFeeWorkspace({ quiet: true });
   }
 
+  isMaterialFeeCalculationBusy(state = this.materialFeeState) {
+    return Boolean(state?.previewRunning || state?.calculationWrite);
+  }
+
+  canApplyMaterialAIFill(fill) {
+    if (fill?.status !== "READY" || fill.applying || fill.discarding || this.isMaterialFeeCalculationBusy()) return false;
+    if (fill.row_review) return this.canConfirmMaterialAIRowSelection(fill);
+    return (fill.selections?.size || 0) + Object.keys(fill.manualUpdates || {}).length > 0;
+  }
+
+  updateMaterialFeeWriteControls(state) {
+    if (this.materialFeeState !== state) return;
+    const calculating = this.isMaterialFeeCalculationBusy(state);
+    this.$root?.find("[data-action='mf-preview-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying))
+      ?.text?.(calculating ? "计算中…" : "开始试算");
+    for (const root of [this.$root, state.aiProgressDialog?.$wrapper]) {
+      root?.find("[data-action='mf-ai-apply']")?.prop?.("disabled", !this.canApplyMaterialAIFill(state.aiFill));
+    }
+  }
+
   async flushMaterialFeeInputs(state) {
-    if (["QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""))) throw new Error("请先确认保存或放弃 AI 草稿，再开始试算。 ");
+    // Analysis proposals are independent of saved facts. Only an actual AI write blocks a trial.
+    if (state.aiFill?.applying) throw new Error("AI 资料正在保存，请保存完成后再开始试算。");
     if (state.calculationWrite) await state.calculationWrite;
     while (state.pendingWrites.size) await Promise.all([...state.pendingWrites]);
     if (this.materialFeeState !== state || this.detailState.batchName !== state.batchName) return false;
@@ -3268,7 +3291,7 @@
 
   async refreshMaterialFeeCostPreview(scrollToResult = false) {
     const state = this.ensureMaterialFeeState();
-    if (state.previewRunning) return false;
+    if (this.isMaterialFeeCalculationBusy(state)) return false;
     const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName;
     const isCurrent = () => this.materialFeeState === state
@@ -3276,7 +3299,7 @@
       && this.detailState.versionName === versionName
       && this.detailState.tab === "documents";
     state.previewRunning = true;
-    this.$root.find("[data-action='mf-preview-cost']").prop("disabled", true).text("计算中…");
+    this.updateMaterialFeeWriteControls(state);
     try {
       if (!(await this.flushMaterialFeeInputs(state)) || !isCurrent()) return false;
       if (this.ensureEditSession && !(await this.ensureEditSession())) return false;
@@ -3319,7 +3342,7 @@
       return true;
     } finally {
       state.previewRunning = false;
-      if (isCurrent()) this.$root.find("[data-action='mf-preview-cost']").prop("disabled", false).text("开始试算");
+      this.updateMaterialFeeWriteControls(state);
     }
   }
 
@@ -3391,8 +3414,8 @@
     const sourcePending = state.materials?.calculation_stale || state.fees?.summary?.source_pending;
     const staleCost = (header.status === "Dirty" || sourcePending) && Boolean(preview || hasLegacyTotal);
     const sectionTitle = `<div class="ocw-mf-section-title">
-      <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p></div>
-      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${state.previewRunning ? "disabled" : ""}>${state.previewRunning ? "计算中…" : "开始试算"}</button></div>
+      <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p><p>本次按已保存资料试算，未采用的 AI 结果不计入。</p></div>
+      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
     </div>`;
     if (!preview) {
       return `<section class="ocw-mf-section ocw-mf-cost-section">${sectionTitle}

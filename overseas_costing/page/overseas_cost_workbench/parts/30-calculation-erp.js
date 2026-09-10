@@ -16,11 +16,15 @@
     this.activeBatchName = batch.name;
     this.exportPinnedBatchName = batch.name;
     let acquired = null;
+    const inDetail = this.detailState?.batchName === batch.name;
+    const feeState = inDetail && this.materialFeeState?.batchName === batch.name ? this.materialFeeState : null;
+    if (feeState && this.isMaterialFeeCalculationBusy(feeState)) return;
+    if (feeState) {
+      feeState.previewRunning = true;
+      this.updateMaterialFeeWriteControls(feeState);
+    }
     try {
-      const inDetail = this.detailState?.batchName === batch.name;
-      if (inDetail && this.materialFeeState?.batchName === batch.name) {
-        if (!(await this.flushMaterialFeeInputs(this.materialFeeState))) return;
-      }
+      if (feeState && !(await this.flushMaterialFeeInputs(feeState))) return;
       if (inDetail) {
         if (!(await this.ensureEditSession())) return;
       } else {
@@ -64,6 +68,10 @@
       this.recordUsage("RECALCULATE", { batch, status: "Failed", remark: error.message || "重新试算失败" });
       this.showError(error);
     } finally {
+      if (feeState) {
+        feeState.previewRunning = false;
+        this.updateMaterialFeeWriteControls(feeState);
+      }
       if (acquired?.edit_token) await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token });
     }
   }
