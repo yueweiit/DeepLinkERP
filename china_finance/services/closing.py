@@ -584,7 +584,7 @@ def reopen_closing(name, reason):
 		frappe.throw(_("重新开账必须填写原因"))
 	doc = frappe.get_doc("China Closing Run", name)
 	if doc.docstatus != 1 or doc.status != "Closed":
-		frappe.throw(_("只有已结账运行单可以重新开账"))
+		frappe.throw(_("只有已结账的期末智能结转可以重新开账"))
 	# A closing run freezes the company cumulatively through its end date. If a
 	# user needs to reopen an earlier period, every later closed run must be
 	# reopened first; otherwise its later snapshots and freeze boundary would
@@ -604,7 +604,7 @@ def reopen_closing(name, reason):
 		ignore_permissions=True,
 	)
 	if not any(run.name == doc.name for run in runs):
-		frappe.throw(_("未找到需要重新开账的当前结账运行单"))
+		frappe.throw(_("未找到需要重新开账的当前期末智能结转"))
 
 	reopened_on = now_datetime()
 	for run in runs:

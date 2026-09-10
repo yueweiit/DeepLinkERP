@@ -93,7 +93,7 @@ def create_archive_package(company, reference_doctype, reference_name, closing_r
 	if closing_run:
 		closing_doc = frappe.get_doc("China Closing Run", closing_run)
 		if closing_doc.company != company:
-			frappe.throw(_("结账运行单不属于请求公司"))
+			frappe.throw(_("期末智能结转不属于请求公司"))
 		closing_doc.check_permission("read")
 	include_company_documents = reference_doctype == "Company" or bool(closing_run)
 	document_filters = {"company": company, "status": "Archived"}

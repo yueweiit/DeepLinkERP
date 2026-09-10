@@ -3,7 +3,7 @@
  "field_order":["company","closing_run","statement_type","template","template_version","report_status","from_date","to_date","comparison_from_date","comparison_to_date","amount_unit","approved_by","approved_on","notes","notes_sha256","mapping_sha256","cash_scope_sha256","validation_json","data_json","sha256","created_on","created_by"],
  "fields":[
   {"fieldname":"company","fieldtype":"Link","in_list_view":1,"label":"公司","options":"Company","reqd":1},
-  {"fieldname":"closing_run","fieldtype":"Link","label":"结账运行单","options":"China Closing Run","reqd":1},
+ {"fieldname":"closing_run","fieldtype":"Link","label":"期末智能结转","options":"China Closing Run","reqd":1},
   {"fieldname":"statement_type","fieldtype":"Select","in_list_view":1,"label":"报表类型","options":"Balance Sheet\nProfit and Loss\nCash Flow\nChanges in Equity","reqd":1},
   {"fieldname":"template","fieldtype":"Link","label":"报表模板","options":"China Financial Statement Template","reqd":1},
   {"fieldname":"template_version","fieldtype":"Data","label":"模板版本","read_only":1},

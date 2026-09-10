@@ -75,7 +75,7 @@ def execute(filters=None):
 		)
 		comparison_to = None
 	warnings = list(dict.fromkeys(result["warnings"]))
-	message_parts = [_('编制状态：草表。正式法定财务报表须从已通过检查的结账运行单生成。')]
+	message_parts = [_('编制状态：草表。正式法定财务报表须从已通过检查的期末智能结转生成。')]
 	if result.get("checks"):
 		failed_checks = [check for check in result["checks"] if not check["passed"]]
 		blocking_checks = [check for check in failed_checks if check.get("blocking", True)]

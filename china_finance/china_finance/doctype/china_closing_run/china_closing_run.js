@@ -47,7 +47,7 @@ frappe.ui.form.on("China Closing Run", {
 					frm.set_value("period_closing_voucher", result.name);
 					const show_result = () => frappe.msgprint({
 						message: result.message + (frm.is_new()
-							? __("；当前结账运行单尚未保存，请保存后再提交结账")
+							? __("；当前期末智能结转尚未保存，请保存后再提交结转")
 							: ""),
 						primary_action: {
 							label: __("打开损益结转凭证"),

@@ -518,7 +518,7 @@ def generate_statutory_report_package(closing_run, formats=None):
 	run = frappe.get_doc("China Closing Run", closing_run)
 	run.check_permission("read")
 	if run.docstatus != 1 or run.status != "Closed":
-		frappe.throw(_("只有已通过检查并提交的结账运行单可以生成正式法定财务报表"))
+		frappe.throw(_("只有已通过检查并提交的期末智能结转可以生成正式法定财务报表"))
 	readiness = get_statutory_report_readiness_data(run.company, run.from_date, run.to_date)
 	if not readiness["passed"]:
 		frappe.throw(_("正式法定财务报表就绪度未通过，阻断项 {0} 个").format(readiness["blocking_count"]))
@@ -528,7 +528,7 @@ def generate_statutory_report_package(closing_run, formats=None):
 		order_by="statement_type",
 	)
 	if len(snapshots) != 4:
-		frappe.throw(_("结账运行单缺少完整四表快照"))
+		frappe.throw(_("期末智能结转缺少完整四表快照"))
 	requested = set(frappe.parse_json(formats) if isinstance(formats, str) else (formats or ["PDF", "Excel"]))
 	files = {}
 	if "Excel" in requested:
