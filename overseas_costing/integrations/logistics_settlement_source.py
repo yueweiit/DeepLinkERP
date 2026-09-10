@@ -12,6 +12,10 @@ class SettlementArchive:
     def _expense_category_sql():
         return "costing_read.is_logistics_purchase(COALESCE(form_component_values, raw_payload->'formComponentValues', raw_payload->'form_component_values'))"
 
+    @staticmethod
+    def _active_sql():
+        return "deleted_at IS NULL AND UPPER(COALESCE(status,'')) NOT IN ('TERMINATED','CANCELED','CANCELLED','DELETED','REJECTED') AND LOWER(COALESCE(result,'')) NOT IN ('refuse','reject','disagree')"
+
     def health(self):
         with self.source._connection() as connection:
             with connection.cursor() as cursor:
@@ -40,7 +44,7 @@ class SettlementArchive:
         else:
             # Filter before pagination and payload/attachment hydration. Previously
             # adopted sources remain readable after their category is revoked.
-            scope = 'process_code=ANY(%s) OR ' + self._expense_category_sql()
+            scope = '(process_code=ANY(%s) OR ' + self._expense_category_sql() + ') AND (' + self._active_sql() + ')'
             args.append(self.logistics_codes)
             tracked_pairs = self.tracked_pairs() if callable(self.tracked_pairs) else self.tracked_pairs
             if tracked_pairs:
@@ -95,10 +99,17 @@ class SettlementArchive:
                     GROUP BY source_kind, process_code, EXTRACT(YEAR FROM create_time), status, result, deleted_at IS NOT NULL
                     ORDER BY year, process_code''', (self.logistics_codes,))
                 inventory = [dict(r) for r in cursor.fetchall()]
-        counts = {'logistics': 0, 'expense': 0, 'approved_expense': 0, 'excluded': 0}
+        counts = {'logistics': 0, 'expense': 0, 'approved_expense': 0, 'excluded': 0, 'invalid': 0}
+        active_inventory = []
         for row in inventory:
+            invalid = row['deleted'] or str(row['status']).upper() in {'TERMINATED','CANCELED','CANCELLED','DELETED','REJECTED'} or str(row['result']).lower() in {'refuse','reject','disagree'}
+            if row['source_kind'] != 'excluded' and invalid:
+                counts['invalid'] += row['count']
+                continue
             counts[row['source_kind']] += row['count']
+            if row['source_kind'] != 'excluded':
+                active_inventory.append(row)
             if row['source_kind'] == 'expense' and not row['deleted'] and row['status'] == 'COMPLETED' and str(row['result']).lower() in {'agree', 'approved', 'pass'}:
                 counts['approved_expense'] += row['count']
-        return {'inventory': [r for r in inventory if r['source_kind'] != 'excluded'],
+        return {'inventory': active_inventory,
                 'scope_counts': counts, 'health': self.health(), 'data_source': 'postgres'}

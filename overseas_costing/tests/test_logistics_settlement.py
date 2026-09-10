@@ -91,6 +91,34 @@ def test_pending_refused_and_deleted_never_approved():
         assert not parse_source(row, logistics_codes={'logistics'})['approved']
 
 
+@pytest.mark.parametrize('status,result', [('COMPLETED','refuse'), ('TERMINATED','agree'), ('CANCELED','')])
+def test_rejected_or_withdrawn_sources_do_not_generate_candidates(store, status, result):
+    ingest(store, source('L', 'logistics'))
+    rejected = ingest(store, {**source('E'), 'status': status, 'result': result})
+    assert match_source(store, rejected['id']) == []
+    assert store.count('candidate') == 0
+
+
+def test_withdrawn_logistics_is_not_an_alternative_match(store):
+    ingest(store, {**source('old-L', 'logistics'), 'status': 'TERMINATED'})
+    good = ingest(store, source('L', 'logistics'))
+    expense = ingest(store, source('E'))
+    candidates = match_source(store, expense['id'])
+    assert len(candidates) == 1 and candidates[0]['logistics_id'] == good['id']
+    assert candidates[0]['status'] == 'pending'
+
+
+def test_revocation_removes_unconfirmed_candidate_but_retains_source(store):
+    from overseas_costing.services.logistics_settlement.matching import refresh_candidate_snapshots
+    ingest(store, source('L', 'logistics'))
+    expense = ingest(store, source('E'))
+    candidate = match_source(store, expense['id'])[0]
+    ingest(store, {**source('E'), 'status': 'TERMINATED'})
+    refresh_candidate_snapshots(store, expense['id'])
+    assert store.get('candidate', candidate['id'])['status'] == 'stale'
+    assert store.get('source', expense['id'])['invalid']
+
+
 def test_snapshots_idempotent_and_comment_only_change_preserves_matching_hash(store):
     row = source('E')
     first = ingest(store, row)

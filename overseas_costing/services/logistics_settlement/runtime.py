@@ -33,7 +33,7 @@ def archive():
     from overseas_costing.scripts.import_oa_logistics import _get_postgres_approval_source
     from overseas_costing.integrations.logistics_settlement_source import SettlementArchive
     def tracked_pairs():
-        tracked = store().sql("SELECT s.corp,s.instance FROM oc_ls_source s WHERE s.kind IN ('logistics','expense') OR EXISTS (SELECT 1 FROM oc_ls_binding b WHERE b.expense_id=s.id OR b.logistics_id=s.id)")
+        tracked = store().sql("SELECT s.corp,s.instance FROM oc_ls_source s WHERE (s.kind IN ('logistics','expense') AND CAST(JSON_EXTRACT(s.data,'$.invalid') AS CHAR) IN ('false','0')) OR EXISTS (SELECT 1 FROM oc_ls_binding b WHERE b.expense_id=s.id OR b.logistics_id=s.id)")
         return [(r['corp'], r['instance']) for r in tracked]
     return SettlementArchive(_get_postgres_approval_source(), logistics_codes=logistics_codes(),
                              tracked_pairs=tracked_pairs)
@@ -297,6 +297,18 @@ def begin(mode='initialize', start='', end='', request_key=None):
 def enqueue(job_id):
     frappe.enqueue('overseas_costing.services.logistics_settlement.runtime.run_job', queue='long',
                    timeout=900, settlement_job_id=job_id, enqueue_after_commit=True)
+
+
+def run_ai_matching(matching_ai_job_id):
+    from . import ai_matching
+    from overseas_costing.services import allocation_service
+    config = allocation_service._ai_config()
+    config['timeout'] = min(120, max(60, float(config.get('timeout') or 60)))
+    def call_model(messages):
+        if not config.get('api_key'):
+            raise ValueError('未配置 DeepSeek API 密钥')
+        return allocation_service._extract_json_object(allocation_service._call_chat_completions(config, messages))
+    return ai_matching.run(store(), matching_ai_job_id, call_model, config.get('model', ''))
 
 
 def run_job(settlement_job_id):

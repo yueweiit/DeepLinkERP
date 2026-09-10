@@ -88,7 +88,7 @@ def run_step(store, archive, job_id, *, logistics_codes, now=None, apply_source=
                             # Resume old unfiltered manifests without enriching or
                             # importing unrelated purchases. Keep adoption revocations.
                             tracked = previous and (previous['kind'] in {'logistics', 'expense'} or store.find('binding', expense_id=parsed['id'], limit=1))
-                            if parsed['kind'] == 'unclassified' and not tracked:
+                            if (parsed['kind'] == 'unclassified' or parsed['invalid']) and not tracked:
                                 item.update(status='excluded', error='', attempts=item.get('attempts', 0) + 1)
                                 store.put('job_item', {k: item[k] for k in ('id', 'job_id', 'source_id', 'status')} | {'data': dumps(item)})
                                 continue

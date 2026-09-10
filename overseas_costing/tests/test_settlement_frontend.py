@@ -37,6 +37,16 @@ assert(!html.includes('已发现 800')); assert(html.includes('服务类采购 �
 ''')
 
 
+def test_deepseek_second_pass_is_available_after_rules_and_shows_persisted_progress():
+    run_js('''
+let html='';w.settlementBody=(s,value)=>html=value;
+w.renderSettlementHistory({status:'pending',pages:[]},{job:{status:'partial'},ai_job:{id:'ai',status:'completed',total:5,processed:5,recommended:2,no_match:3,failed:0}});
+assert(html.includes('DeepSeek 补充匹配'));assert(html.includes('推荐 2'));assert(html.includes('证据不足 3'));
+w.renderSettlementHistory({status:'pending',pages:[]},{job:{status:'running'}});
+assert(!html.includes('data-settlement-action="ai-match"'));
+''')
+
+
 def test_linked_status_never_implies_calculated_and_invalid_source_cannot_be_final():
     run_js('''
 assert(w.settlementAdoption({binding:{application_status:'pending'},expense:{approved:true}}).includes('待采用'));

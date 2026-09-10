@@ -14759,6 +14759,12 @@ class OverseasCostWorkbench {
     this.settlementHistoryState = state;
     this.settlementEvents(state, async (action, $button) => {
       if (action === "start") return this.startSettlementHistory(state);
+      if (action === "ai-match") {
+        const result = await this.settlementWrite(state, () => this.settlementApi("start_ai_matching", {}));
+        await this.loadSettlementHistory(state);
+        if (result.message) this.settlementNotice(state, result.message);
+        return;
+      }
       if (action === "refresh") return this.loadSettlementHistory(state);
       if (action === "pause" || action === "retry") {
         await this.settlementWrite(state, () => this.settlementApi("control_job", { job_id: state.jobId, action }));
@@ -14818,7 +14824,7 @@ class OverseasCostWorkbench {
       state.data = result;
       state.jobId = result.job?.id || state.jobId;
       this.renderSettlementHistory(state, result);
-      if (["queued", "running"].includes(result.job?.status)) {
+      if (["queued", "running"].includes(result.job?.status) || ["queued", "running"].includes(result.ai_job?.status)) {
         state.timer = setTimeout(() => this.loadSettlementHistory(state), 3000);
       }
     } catch (error) {
@@ -14834,9 +14840,11 @@ class OverseasCostWorkbench {
     const phases = { inventory: "扫描历史来源", load: "整理资料", match: "生成候选", finished: "已结束" };
     const candidates = data.candidates || [];
     const scope = data.health?.scope_counts;
+    const ai = data.ai_job || {};
+    const aiLabels = {queued:"排队中",running:"分析中",completed:"分析完成",partial:"部分结果待重试",failed:"分析失败",stale:"资料已变化，请重试"};
     this.settlementBody(state, `
-      <p class="ocw-settlement-hint">采购支出先按「服务类采购 → 物流及运输服务」筛选：采购支出＝服务类采购，且服务类采购＝物流及运输服务；不限定海运、空运、快递等下级运输方式。再与历史国际物流匹配，忽略近期拉取的日期及条数。候选需确认后才建立关联。</p>
-      ${scope ? `<p class="ocw-settlement-hint">上次范围核对：国际物流 ${this.escape(scope.logistics)} · 物流类采购支出 ${this.escape(scope.expense)}（审批通过 ${this.escape(scope.approved_expense)}）· 不符合分类 ${this.escape(scope.excluded)}。未通过审批的单据不作为最终核算依据。</p>` : ''}
+      <p class="ocw-settlement-hint">采购支出先按「服务类采购 → 物流及运输服务」筛选：采购支出＝服务类采购，且服务类采购＝物流及运输服务；不限定海运、空运、快递等下级运输方式。排除已拒绝、已撤销、已删除单据，再与历史国际物流匹配。忽略近期拉取的日期及条数，候选需确认后才建立关联。</p>
+      ${scope ? `<p class="ocw-settlement-hint">上次范围核对：国际物流 ${this.escape(scope.logistics)} · 物流类采购支出 ${this.escape(scope.expense)}（审批通过 ${this.escape(scope.approved_expense)}）· 不符合分类 ${this.escape(scope.excluded)} · 失效单据 ${this.escape(scope.invalid ?? 0)}。审批中的单据保留待处理，未通过审批的不作为最终核算依据。</p>` : ''}
       ${this.renderSettlementHealth(data)}
       <div class="ocw-settlement-toolbar"><strong>${this.escape(labels[job.status] || "尚未启动")} · ${this.escape(phases[job.phase] || "等待任务")}</strong>
         <span>已处理 ${this.escape(job.processed_count ?? 0)} / 本轮读取来源 ${this.escape(job.item_count ?? 0)}${job.excluded_count ? ` · 旧清单已排除 ${this.escape(job.excluded_count)}` : ''} · 失败 ${this.escape(job.failed_count ?? data.failures?.length ?? 0)}</span>
@@ -14845,6 +14853,9 @@ class OverseasCostWorkbench {
         ${["paused", "partial", "failed"].includes(job.status) ? '<button class="ocw-outline-btn" data-settlement-action="retry">继续／重试失败项</button>' : ""}
         <button class="ocw-outline-btn" data-settlement-action="refresh">刷新</button>
       </div>
+      <div class="ocw-settlement-toolbar">${["completed", "partial"].includes(job.status) ? '<button class="ocw-outline-btn" data-settlement-action="ai-match">DeepSeek 补充匹配</button>' : ''}
+        <span>第二轮仅分析未匹配和冲突单据；已有明确结果不重复分析，AI 不会自动建立关联。</span></div>
+      ${ai.id ? `<p class="ocw-settlement-hint">DeepSeek：${this.escape(aiLabels[ai.status] || ai.status)} · 待分析 ${this.escape(ai.total ?? 0)} · 已处理 ${this.escape(ai.processed ?? 0)} · 推荐 ${this.escape(ai.recommended ?? 0)} · 证据不足 ${this.escape(ai.no_match ?? 0)} · 失败 ${this.escape(ai.failed ?? 0)}${ai.error ? ` · ${this.escape(ai.error)}` : ''}</p>` : ''}
       <p class="ocw-settlement-hint">关闭窗口后停止页面轮询，后台任务继续。暂停会在当前小批处理后生效。</p>
       <div class="ocw-settlement-toolbar">${[["pending", "待确认"], ["conflict", "冲突"], ["confirmed", "已关联"], ["rejected", "已忽略"]].map(([key, label]) => `<button class="${state.status === key ? "ocw-primary-btn" : "ocw-outline-btn"}" data-settlement-action="filter" data-status="${key}">${label} ${this.escape(data.counts?.[key] ?? 0)}</button>`).join("")}<span>未匹配 ${this.escape(data.counts?.unmatched ?? 0)}</span></div>
       ${job.error ? `<p class="ocw-settlement-notice is-error">${this.escape(job.error)}</p>` : ""}

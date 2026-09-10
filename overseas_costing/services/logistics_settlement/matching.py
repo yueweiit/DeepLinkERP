@@ -11,7 +11,10 @@ def related_expenses(store, logistics):
 
 def match_source(store, source_id):
     source = store.get('source', source_id)
-    if not source or source['kind'] == 'unclassified':
+    if not source:
+        return []
+    if source['kind'] == 'unclassified' or source['invalid']:
+        invalidate_source_candidates(store, source_id)
         return []
     if source['kind'] == 'logistics':
         results = []
@@ -25,11 +28,11 @@ def match_source(store, source_id):
     for token_type, token in source['identifiers']:
         for ident in store.find('identifier', corp=source['corp'], token=token):
             other = store.get('source', ident['source_id'])
-            if other['kind'] == 'logistics' and ident['token_type'] == token_type:
+            if other['kind'] == 'logistics' and not other['invalid'] and ident['token_type'] == token_type:
                 evidence.setdefault(other['id'], []).append({'type': token_type, 'value': token})
     for instance in source['related']:
         for other in store.find('source', corp=source['corp'], instance=instance):
-            if other['kind'] == 'logistics':
+            if other['kind'] == 'logistics' and not other['invalid']:
                 evidence.setdefault(other['id'], []).append({'type': 'explicit', 'value': instance})
     results = []
     for logistics_id, proof in evidence.items():
@@ -109,9 +112,9 @@ def confirm_candidate(store, candidate_id, revision, actor, *, resolve=False, re
             raise ValueError('关联冲突：每票物流和物流支出只能各关联一次')
         validate_sources(store, candidate)
         current_targets = eligible_logistics(store, expense)
-        if candidate['method'] != 'manual' and logistics['id'] not in current_targets:
+        if candidate['method'] not in {'manual', 'deepseek'} and logistics['id'] not in current_targets:
             raise ValueError('匹配标识已变化，请重新匹配')
-        ambiguous = len(current_targets) > 1 or any(s['id'] != expense['id'] for s in related_expenses(store, logistics))
+        ambiguous = len(current_targets) > 1 or any(s['id'] != expense['id'] for s in related_expenses(store, logistics)) or any(c['expense_id'] != expense['id'] and c['status'] in {'pending','conflict'} for c in store.find('candidate', logistics_id=logistics['id']))
         if ambiguous and not (resolve and reason.strip()):
             raise ValueError('关联冲突：新增了其他支出候选，请逐项核对后确认')
         binding = {'id': digest('binding', logistics['id']), 'logistics_id': logistics['id'], 'expense_id': expense['id'], 'actor': actor, 'revision': 1, 'status': 'bound', 'application_status': 'pending', 'candidate_id': candidate_id}
@@ -162,10 +165,18 @@ def refresh_candidate_snapshots(store, source_id):
             continue
         logistics = store.get('source', candidate['logistics_id'])
         expense = store.get('source', candidate['expense_id'])
+        changed = candidate['logistics_snapshot'] != logistics['snapshot'] or candidate['expense_snapshot'] != expense['snapshot']
+        if changed and candidate['method'] == 'deepseek':
+            candidate.update(status='stale', reason='来源资料已变化，需要重新分析 AI 匹配依据')
+            save_candidate(store, candidate)
+            continue
+        if changed and any(e.get('type') == 'deepseek' for e in candidate['evidence']):
+            candidate['evidence'] = [e for e in candidate['evidence'] if e.get('type') != 'deepseek']
+            candidate['reason'] = '规则候选待核对；旧 AI 分析已失效'
         candidate.update(logistics_snapshot=logistics['snapshot'], expense_snapshot=expense['snapshot'])
         candidate['revision'] = digest(logistics['snapshot'], expense['snapshot'], candidate['evidence_hash'])
         if logistics['invalid'] or expense['invalid'] or expense['kind'] != 'expense':
-            candidate.update(status='conflict', reason='审批状态或来源类别已变化')
+            candidate.update(status='stale', reason='审批已失效或来源类别不符，不再参与匹配')
         save_candidate(store, candidate)
 
 

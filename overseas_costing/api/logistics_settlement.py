@@ -37,10 +37,29 @@ def start_history_matching():
     return runtime.begin('initialize')
 
 
+@frappe.whitelist(methods=['POST'])
+def start_ai_matching():
+    frappe.only_for('System Manager')
+    from overseas_costing.services.logistics_settlement import ai_matching
+    from overseas_costing.services import allocation_service
+    db = runtime.store()
+    rule_job = db.get('job', (db.get('state', 'latest_job') or {}).get('job_id', '')) or {}
+    if rule_job.get('status') not in {'completed', 'partial'}:
+        raise ValueError('请先完成规则匹配，再分析未匹配和冲突单据')
+    if not allocation_service._ai_config().get('api_key'):
+        raise ValueError('未配置 DeepSeek API 密钥')
+    job = ai_matching.start(db, frappe.session.user)
+    if job.get('status') == 'queued':
+        frappe.enqueue('overseas_costing.services.logistics_settlement.runtime.run_ai_matching', queue='long',
+                       timeout=600, matching_ai_job_id=job['id'], enqueue_after_commit=True)
+    return {'ok': True, 'ai_job': job, 'message': job.get('message')}
+
+
 @frappe.whitelist()
 def get_matching_status(job_id=None, after=None, status=None):
     frappe.only_for('System Manager')
     db = runtime.store()
+    from overseas_costing.services.logistics_settlement import ai_matching
     job = db.get('job', job_id) if job_id else None
     if not job:
         latest = db.get('state', 'latest_job') or {}
@@ -48,8 +67,8 @@ def get_matching_status(job_id=None, after=None, status=None):
     filters = {'status': status} if status in {'pending', 'conflict', 'confirmed', 'rejected'} else {}
     candidates = db.find('candidate', limit=51, after=after, **filters)
     counts = {s: db.count('candidate', status=s) for s in ('pending', 'conflict', 'confirmed', 'rejected')}
-    unmatched = db.sql("SELECT COUNT(*) AS n FROM oc_ls_source s WHERE s.kind='expense' AND NOT EXISTS (SELECT 1 FROM oc_ls_binding b WHERE b.expense_id=s.id) AND NOT EXISTS (SELECT 1 FROM oc_ls_candidate c WHERE c.expense_id=s.id AND c.status IN ('pending','conflict'))")[0]['n']
-    return {'ok': True, 'job': job, 'counts': {**counts, 'unmatched': unmatched},
+    unmatched = db.sql("SELECT COUNT(*) AS n FROM oc_ls_source s WHERE s.kind='expense' AND CAST(JSON_EXTRACT(s.data,'$.invalid') AS CHAR) IN ('false','0') AND NOT EXISTS (SELECT 1 FROM oc_ls_binding b WHERE b.expense_id=s.id) AND NOT EXISTS (SELECT 1 FROM oc_ls_candidate c WHERE c.expense_id=s.id AND c.status IN ('pending','conflict'))")[0]['n']
+    return {'ok': True, 'job': job, 'ai_job': ai_matching.latest(db), 'counts': {**counts, 'unmatched': unmatched},
             'candidates': [runtime.candidate_view(db, c) for c in candidates[:50]],
             'has_more': len(candidates) > 50, 'next_cursor': candidates[49]['id'] if len(candidates) > 50 else None,
             'failures': db.find('job_item', job_id=job['id'], status='failed', limit=50) if job else [],
@@ -133,7 +152,7 @@ def find_expenses(batch_name, query='', after=None):
     logistics = db.get('source', mapping[0]['source_id'])
     token = '%' + str(query).strip().replace('%', '\\%').replace('_', '\\_') + '%'
     params = [logistics['corp'], token, token, after or '']
-    rows = db.sql("SELECT * FROM oc_ls_source WHERE kind='expense' AND corp=%s AND (instance LIKE %s OR data LIKE %s) AND id>%s ORDER BY id LIMIT 51", params)
+    rows = db.sql("SELECT * FROM oc_ls_source WHERE kind='expense' AND CAST(JSON_EXTRACT(data,'$.invalid') AS CHAR) IN ('false','0') AND corp=%s AND (instance LIKE %s OR data LIKE %s) AND id>%s ORDER BY id LIMIT 51", params)
     sources = [db.unpack(row) for row in rows]
     return {'ok': True, 'items': [{**runtime.source_summary(s), 'occupied': bool(db.find('binding', expense_id=s['id'], limit=1))} for s in sources[:50]],
             'has_more': len(sources)>50, 'next_cursor': sources[49]['id'] if len(sources)>50 else None}

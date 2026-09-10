@@ -158,7 +158,7 @@ def test_preflight_is_accessible_with_migration_granted_reader_role(fixture):
     admin, archive = fixture
     approval(admin, 'alive'); approval(admin, 'deleted', deleted=True)
     result = archive.preflight()
-    assert sum(row['count'] for row in result['inventory']) == 2
+    assert sum(row['count'] for row in result['inventory']) == 1
     assert result['data_source'] == 'postgres'
 
 
@@ -187,7 +187,7 @@ def test_inventory_excludes_unrelated_purchases_before_hydration(fixture):
     assert {r['process_instance_id'] for r in page['items']} == {'logistics', 'sea', 'air', 'courier', 'road', 'unspecified'}
     assert archive.source.hydrated == 6
     counts = archive.preflight()['scope_counts']
-    assert counts == {'logistics': 1, 'expense': 5, 'approved_expense': 4, 'excluded': 2}
+    assert counts == {'logistics': 1, 'expense': 5, 'approved_expense': 4, 'excluded': 2, 'invalid': 0}
 
 
 def test_tracked_expense_category_loss_is_still_read_and_tenant_scoped(fixture):
@@ -204,13 +204,31 @@ def test_tracked_expense_category_loss_is_still_read_and_tenant_scoped(fixture):
     assert [(r['corp_id'], r['process_instance_id']) for r in rows] == [('corp-b', 'changed-expense')]
 
 
+def test_initial_inventory_excludes_invalid_but_follows_tracked_revocation(fixture):
+    admin, archive = fixture
+    fields = Jsonb([{'name':'采购支出','value':'服务类采购'}, {'name':'服务类采购','value':'物流及运输服务'}])
+    for instance, status, result, deleted in [
+        ('valid','COMPLETED','agree',False), ('pending','RUNNING','',False),
+        ('refused','COMPLETED','refuse',False), ('withdrawn','TERMINATED','agree',False),
+        ('deleted','COMPLETED','agree',True)]:
+        approval(admin, instance, deleted=deleted)
+        admin.execute("UPDATE ding_approval_instance SET process_code='BUY',form_component_values=%s,status=%s,result=%s WHERE process_instance_id=%s", (fields,status,result,instance))
+    rows = archive.page(upper=UPPER)['items']
+    assert {r['process_instance_id'] for r in rows} == {'valid','pending'}
+    counts = archive.preflight()['scope_counts']
+    assert counts['expense'] == 2 and counts['approved_expense'] == 1 and counts['invalid'] == 3
+    archive.tracked_pairs = [('corp-a','withdrawn')]
+    rows = archive.page(upper=UPPER)['items']
+    assert {r['process_instance_id'] for r in rows} == {'valid','pending','withdrawn'}
+
+
 def test_preflight_sql_is_valid_with_readonly_connection_independent_of_reader_grants(fixture, pg_config):
     admin, _ = fixture
     approval(admin, 'alive'); approval(admin, 'deleted', deleted=True)
     archive = SettlementArchive(PostgresApprovalSource(ApprovalSourceConfig(pg_config['host'], int(pg_config.get('port', 5432)),
         pg_config['dbname'], pg_config.get('user', 'postgres'), pg_config.get('password', ''))), logistics_codes={'LOG'})
     result = archive.preflight()
-    assert sum(row['count'] for row in result['inventory']) == 2
+    assert sum(row['count'] for row in result['inventory']) == 1
 
 
 def test_keyset_paging_over_200_equal_timestamps_retains_tombstones(fixture):
@@ -221,6 +239,7 @@ def test_keyset_paging_over_200_equal_timestamps_retains_tombstones(fixture):
         approval(admin, f'EXCLUDED{index:04d}')
     admin.execute("UPDATE ding_approval_instance SET process_code='BUY' WHERE process_instance_id LIKE 'EXCLUDED%'")
     approval(admin, 'I0000', corp='corp-b')
+    archive.tracked_pairs = [('corp-a', 'I0204')]
     rows, sizes = all_pages(archive)
     assert sizes == [200, 6]
     assert len({(row['corp_id'], row['process_instance_id']) for row in rows}) == 206
@@ -234,6 +253,7 @@ def test_attachment_change_and_retirement_wake_unchanged_old_approval(fixture):
     admin, archive = fixture
     approval(admin, 'old'); attachment(admin, 'old')
     original = archive.page(upper=UPPER)['items'][0]
+    archive.tracked_pairs = [('corp-a', 'old')]
     boundary = admin.execute('SELECT clock_timestamp() AS boundary').fetchone()['boundary']
     admin.execute("UPDATE costing_read.attachment_archive SET retired_at=clock_timestamp(), updated_at=clock_timestamp(), content_quality='preview' WHERE process_instance_id='old'")
     changed = archive.page(lower=boundary.isoformat(), upper=UPPER)['items']
