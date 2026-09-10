@@ -32,6 +32,8 @@ class SettlementArchive:
         return self.page(**kwargs, lightweight=True)
 
     def page(self, *, cursor=None, limit=200, lower='', upper, start='', end='', lightweight=False, pairs=None):
+        # Full finance payloads can be megabytes; retain larger lightweight pages.
+        limit = max(1, min(20 if self.financial and not lightweight else 200, int(limit)))
         where = ['changed_at < %s']
         args = [upper]
         if lower:
@@ -70,7 +72,7 @@ class SettlementArchive:
             sql=sql.replace('SELECT a.*, GREATEST(a.updated_at, COALESCE(f.attachment_updated_at, a.updated_at))',
                 'SELECT a.*, fin.template_name, COALESCE(fin.has_transport_evidence,false) AS financial_scope, fin.transport_evidence, GREATEST(a.updated_at, COALESCE(fin.evidence_updated_at,a.updated_at), COALESCE(fin.scope_registered_at,a.updated_at), COALESCE(f.attachment_updated_at, a.updated_at))')
             sql=sql.replace('FROM costing_read.approval_instances_v2 a','FROM costing_read.approval_instances_v2 a LEFT JOIN costing_read.financial_sources_v1 fin USING (corp_id,process_instance_id)')
-        args.append(min(200, int(limit)) + 1)
+        args.append(limit + 1)
         with self.source._connection() as connection:
             with connection.cursor() as cur:
                 cur.execute(sql, tuple(args))
@@ -95,7 +97,14 @@ class SettlementArchive:
             return []
         from datetime import datetime, timezone, timedelta
         # Refresh selected changed rows only; a transient absence is never a tombstone.
-        return self.page(pairs=pairs, upper=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), limit=200)['items']
+        upper = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        rows, cursor = [], None
+        while True:
+            page = self.page(pairs=pairs, upper=upper, cursor=cursor, limit=200)
+            rows.extend(page['items'])
+            if not page['has_more']:
+                return rows
+            cursor = page['next_cursor']
 
     def preflight(self):
         with self.source._connection() as connection:
