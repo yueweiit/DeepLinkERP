@@ -40,12 +40,16 @@ from minio.error import S3Error
 
 from overseas_costing.api import packing_api
 from overseas_costing.api import workbench
+from overseas_costing.api import air_sea_comparison
 from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
 
 if not hasattr(workbench, "get_batch_dingtalk_approval_detail"):
     raise SystemExit("backend is missing get_batch_dingtalk_approval_detail")
 if not hasattr(packing_api, "preview_freight_comparison"):
     raise SystemExit("backend is missing packing_api.preview_freight_comparison")
+for method in ("search_batches", "preview_batch", "list_records", "get_record", "save_record", "delete_record"):
+    if not hasattr(air_sea_comparison, method):
+        raise SystemExit(f"air/sea comparison API missing: {method}")
 
 page_script = Path(
     "/home/frappe/frappe-bench/apps/overseas_costing/overseas_costing/"
@@ -60,12 +64,21 @@ for marker in ("openPackingFlowDialog", "独立试算，不修改正式费用"):
     if marker not in page_source:
         raise SystemExit(f"workbench page script is missing {marker}")
 
+comparison_script = page_script.parent.parent / "air_sea_cost_comparison" / "air_sea_cost_comparison.js"
+if not comparison_script.is_file() or "OverseasAirSeaCalculator" not in comparison_script.read_text(encoding="utf-8"):
+    raise SystemExit("air/sea comparison page assets missing")
+
 frappe.init(site=os.environ["SITE_NAME"], sites_path="/home/frappe/frappe-bench/sites")
 frappe.connect()
 try:
-    for doctype in ("Overseas Packing Snapshot", "Overseas Freight Comparison"):
+    for doctype in ("Overseas Packing Snapshot", "Overseas Freight Comparison", "Overseas Air Sea Comparison"):
         if not frappe.db.exists("DocType", doctype):
             raise SystemExit(f"missing DocType after migrate: {doctype}")
+    if not frappe.db.exists("Page", "air-sea-cost-comparison"):
+        raise SystemExit("air/sea comparison Page missing after migrate")
+    sidebar = frappe.get_doc("Workspace Sidebar", "海外成本核算")
+    if [item.link_to for item in sidebar.items[:2]] != ["overseas-cost-workbench", "air-sea-cost-comparison"]:
+        raise SystemExit("air/sea comparison sidebar position is incorrect")
 
     clients = get_packing_runtime_clients()
     views = (

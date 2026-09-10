@@ -1,0 +1,405 @@
+.air-sea-cost-comparison {
+      --blue: #0b8cf0;
+      --blue-dark: #075fa8;
+      --blue-pale: #eaf5ff;
+      --ink: #15283d;
+      --muted: #65788d;
+      --line: #d8e3ee;
+      --surface: #ffffff;
+      --page: #f3f7fb;
+      --sea: #087f8c;
+      --sea-pale: #e7f7f7;
+      --air: #e2762b;
+      --air-pale: #fff2e8;
+      --warn: #a76500;
+      --warn-pale: #fff7df;
+      --danger: #b93636;
+      --danger-pale: #fff0f0;
+      --ok: #197a56;
+      --ok-pale: #eaf8f1;
+      --shadow: 0 10px 28px rgba(30, 72, 110, .08);
+    }
+.air-sea-cost-comparison * { box-sizing: border-box; }
+.air-sea-cost-comparison { background: var(--page); }
+.air-sea-cost-comparison {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+.air-sea-cost-comparison button,
+.air-sea-cost-comparison input,
+.air-sea-cost-comparison textarea { font: inherit; }
+.air-sea-cost-comparison button { cursor: pointer; }
+.air-sea-cost-comparison .shell { max-width: 1480px; margin: 0 auto; padding: 24px 28px 56px; }
+.air-sea-cost-comparison .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 18px;
+    }
+.air-sea-cost-comparison .eyebrow {
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+.air-sea-cost-comparison h1 { margin: 3px 0 4px; font-size: 30px; letter-spacing: 0; line-height: 1.25; }
+.air-sea-cost-comparison .subtitle { margin: 0; color: var(--muted); font-size: 14px; }
+.air-sea-cost-comparison .top-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.air-sea-cost-comparison .btn {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 9px 14px;
+      font-weight: 700;
+      transition: border-color .15s, background .15s, transform .15s;
+    }
+.air-sea-cost-comparison .btn:hover { border-color: var(--blue); transform: translateY(-1px); }
+.air-sea-cost-comparison .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+.air-sea-cost-comparison .btn.primary:hover { background: var(--blue-dark); }
+.air-sea-cost-comparison .btn.ghost { color: var(--blue-dark); }
+.air-sea-cost-comparison .section {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+      overflow: hidden;
+    }
+.air-sea-cost-comparison .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px 20px 15px;
+      border-bottom: 1px solid var(--line);
+    }
+.air-sea-cost-comparison .section-head h2 { margin: 0; font-size: 18px; }
+.air-sea-cost-comparison .section-head p { margin: 3px 0 0; color: var(--muted); }
+.air-sea-cost-comparison .section-body { padding: 18px 20px 20px; }
+.air-sea-cost-comparison .step-label { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; color: var(--ink); font-size: 14px; font-weight: 800; }
+.air-sea-cost-comparison .step-number { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 12px; }
+.air-sea-cost-comparison .step-hint { color: var(--muted); font-size: 12px; font-weight: 500; }
+.air-sea-cost-comparison .packing-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.air-sea-cost-comparison .packing-toolbar h3 { margin: 0; font-size: 15px; }
+.air-sea-cost-comparison .packing-toolbar p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .packing-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.air-sea-cost-comparison .packing-actions .btn { min-height: 40px; }
+.air-sea-cost-comparison .packing-entry { display: block; }
+.air-sea-cost-comparison .packing-table-scroll { max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.air-sea-cost-comparison .packing-table { width: 100%; min-width: 2380px; border-collapse: collapse; table-layout: fixed; }
+.air-sea-cost-comparison .packing-table th,
+.air-sea-cost-comparison .packing-table td { border-right: 1px solid #e6edf3; border-bottom: 1px solid #e6edf3; }
+.air-sea-cost-comparison .packing-table th:last-child,
+.air-sea-cost-comparison .packing-table td:last-child { border-right: 0; }
+.air-sea-cost-comparison .packing-table th { position: sticky; top: 0; z-index: 2; min-height: 42px; padding: 5px 6px; background: var(--blue); color: #fff; font-size: 11px; font-weight: 800; line-height: 1.2; text-align: left; vertical-align: middle; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.air-sea-cost-comparison .packing-table td { min-height: 43px; padding: 3px; background: #fff; vertical-align: top; }
+.air-sea-cost-comparison .packing-table tbody tr:hover td { background: #f8fbfe; }
+.air-sea-cost-comparison .packing-table th.col-0,
+.air-sea-cost-comparison .packing-table td.col-0 { width: 185px; }
+.air-sea-cost-comparison .packing-table th.col-1,
+.air-sea-cost-comparison .packing-table td.col-1 { width: 112px; }
+.air-sea-cost-comparison .packing-table th.col-6,
+.air-sea-cost-comparison .packing-table td.col-6 { width: 100px; }
+.air-sea-cost-comparison .packing-table th.col-11,
+.air-sea-cost-comparison .packing-table td.col-11 { width: 112px; }
+.air-sea-cost-comparison .packing-table th.col-20,
+.air-sea-cost-comparison .packing-table td.col-20,
+.air-sea-cost-comparison .packing-table th.col-23,
+.air-sea-cost-comparison .packing-table td.col-23,
+.air-sea-cost-comparison .packing-table th.col-24,
+.air-sea-cost-comparison .packing-table td.col-24 { width: 80px; }
+.air-sea-cost-comparison .packing-table th.col-25,
+.air-sea-cost-comparison .packing-table td.col-25 { width: 86px; }
+.air-sea-cost-comparison .packing-table th.col-26,
+.air-sea-cost-comparison .packing-table td.col-26 { width: 112px; }
+.air-sea-cost-comparison .packing-table th.aux-col,
+.air-sea-cost-comparison .packing-table td.aux-col { width: 100px; }
+.air-sea-cost-comparison .packing-table th.numeric-col,
+.air-sea-cost-comparison .packing-table td.numeric-col,
+.air-sea-cost-comparison .packing-table .numeric-col .grid-input { text-align: right; }
+.air-sea-cost-comparison .grid-input { width: 100%; min-height: 34px; padding: 6px 7px; border: 1px solid transparent; border-radius: 4px; background: #fbfdff; color: var(--ink); font-size: 12px; line-height: 1.35; resize: none; overflow: hidden; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.air-sea-cost-comparison .grid-input:hover { border-color: #c8d5e2; }
+.air-sea-cost-comparison .grid-input:focus { border-color: var(--blue); background: #fff; box-shadow: 0 0 0 2px rgba(11, 140, 240, .12); }
+.air-sea-cost-comparison .grid-status { color: var(--muted); font-size: 11px; }
+.air-sea-cost-comparison .grid-status.success { color: var(--ok); }
+.air-sea-cost-comparison .grid-status.error { color: var(--danger); }
+.air-sea-cost-comparison .empty-data-hint { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .empty-data-hint[hidden] { display: none; }
+.air-sea-cost-comparison .mapping-hint { margin-top: 8px; color: var(--warn); font-size: 12px; }
+.air-sea-cost-comparison .mapping-hint[hidden] { display: none; }
+.air-sea-cost-comparison .record-panel { margin-top: 12px; padding: 14px; border: 1px solid #bfd5e8; border-radius: 8px; background: #f8fbfe; }
+.air-sea-cost-comparison .record-panel[hidden] { display: none; }
+.air-sea-cost-comparison .record-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.air-sea-cost-comparison .record-panel-title { margin: 0; font-size: 14px; font-weight: 800; }
+.air-sea-cost-comparison .record-panel-hint { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+.air-sea-cost-comparison .record-panel-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.air-sea-cost-comparison .record-name-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 12px; }
+.air-sea-cost-comparison .record-name-row input { height: 36px; }
+.air-sea-cost-comparison .record-list { display: grid; gap: 8px; max-height: 270px; overflow-y: auto; }
+.air-sea-cost-comparison .record-empty { padding: 14px; border: 1px dashed var(--line); color: var(--muted); text-align: center; font-size: 12px; background: #fff; }
+.air-sea-cost-comparison .record-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.air-sea-cost-comparison .record-item.current { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(11, 140, 240, .08); }
+.air-sea-cost-comparison .record-item-info { min-width: 0; }
+.air-sea-cost-comparison .record-item-name { overflow-wrap: anywhere; font-weight: 800; }
+.air-sea-cost-comparison .record-item-meta { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.air-sea-cost-comparison .record-item-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.air-sea-cost-comparison .record-item-actions .btn { padding: 6px 9px; font-size: 12px; }
+.air-sea-cost-comparison .summary-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: #fbfdff; }
+.air-sea-cost-comparison .summary-item { min-width: 0; }
+.air-sea-cost-comparison .summary-head { margin-top: 14px; margin-bottom: 7px; color: var(--ink); font-size: 13px; font-weight: 800; }
+.air-sea-cost-comparison .summary-label { color: var(--muted); font-size: 11px; font-weight: 700; }
+.air-sea-cost-comparison .summary-value { margin-top: 2px; color: var(--ink); font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.air-sea-cost-comparison .summary-value small { color: var(--muted); font-size: 11px; font-weight: 500; }
+.air-sea-cost-comparison .summary-value-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.air-sea-cost-comparison .summary-currency-select { width: 76px; height: 30px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--ink); font-size: 12px; }
+.air-sea-cost-comparison .field-groups { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 12px; }
+.air-sea-cost-comparison .parameter-group { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.air-sea-cost-comparison .parameter-group[open] { border-color: #bfd5e8; }
+.air-sea-cost-comparison .parameter-group summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; cursor: pointer; list-style: none; font-weight: 800; }
+.air-sea-cost-comparison .parameter-group summary::-webkit-details-marker { display: none; }
+.air-sea-cost-comparison .parameter-group summary::after { content: "+"; color: var(--blue); font-size: 18px; font-weight: 400; }
+.air-sea-cost-comparison .parameter-group[open] summary::after { content: "−"; }
+.air-sea-cost-comparison .parameter-group summary small { margin-left: 6px; color: var(--muted); font-size: 11px; font-weight: 500; }
+.air-sea-cost-comparison .parameter-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; padding: 0 12px 12px; }
+.air-sea-cost-comparison .parameter-section { min-width: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: #fcfdff; }
+.air-sea-cost-comparison .parameter-section:nth-child(1) { border-color: #c7e2f6; background: #f4faff; }
+.air-sea-cost-comparison .parameter-section:nth-child(2) { border-color: #f1d6bd; background: #fff8f2; }
+.air-sea-cost-comparison .parameter-section:nth-child(3) { grid-column: 1 / 2; border-color: #e1e7ec; background: #fcfdfe; }
+.air-sea-cost-comparison .parameter-section + .parameter-section { padding-top: 10px; }
+.air-sea-cost-comparison .parameter-section-title { margin-bottom: 5px; color: var(--ink); font-size: 13px; font-weight: 800; }
+.air-sea-cost-comparison .parameter-section:nth-child(1) .parameter-section-title { color: var(--sea); }
+.air-sea-cost-comparison .parameter-section:nth-child(2) .parameter-section-title { color: var(--air); }
+.air-sea-cost-comparison .reference-note { margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.air-sea-cost-comparison .group-fields { display: grid; grid-template-columns: 1fr; gap: 0; }
+.air-sea-cost-comparison .group-fields .field { display: grid; grid-template-columns: minmax(150px, 1fr) auto; align-items: center; gap: 12px; min-width: 0; min-height: 42px; padding: 4px 0; border-bottom: 1px solid rgba(190, 207, 220, .55); }
+.air-sea-cost-comparison .group-fields .field:last-child { border-bottom: 0; }
+.air-sea-cost-comparison .group-fields .field label { margin: 0; }
+.air-sea-cost-comparison .group-fields .field > .input-wrap,
+.air-sea-cost-comparison .group-fields .field > .currency-control,
+.air-sea-cost-comparison .group-fields .field > .exchange-wrap { justify-self: end; }
+.air-sea-cost-comparison .group-fields .field > .input-wrap { width: 112px; }
+.air-sea-cost-comparison .group-fields .field[hidden],
+.air-sea-cost-comparison .reference-note[hidden] { display: none !important; }
+.air-sea-cost-comparison .readonly-field input { border-color: #e1e8ee; background: #f4f7f9; color: #607286; }
+.air-sea-cost-comparison .section-kicker { color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+.air-sea-cost-comparison .pill.blue { color: var(--blue-dark); background: var(--blue-pale); }
+.air-sea-cost-comparison .pill.sea { color: var(--sea); background: var(--sea-pale); }
+.air-sea-cost-comparison .pill.air { color: var(--air); background: var(--air-pale); }
+.air-sea-cost-comparison .pill.warn { color: var(--warn); background: var(--warn-pale); }
+.air-sea-cost-comparison .pill.danger { color: var(--danger); background: var(--danger-pale); }
+.air-sea-cost-comparison .pill.ok { color: var(--ok); background: var(--ok-pale); }
+.air-sea-cost-comparison .source-grid { display: grid; grid-template-columns: minmax(300px, 1.05fr) minmax(500px, 1.95fr); gap: 18px; }
+.air-sea-cost-comparison .paste-box { min-height: 224px; resize: vertical; width: 100%; }
+.air-sea-cost-comparison textarea,
+.air-sea-cost-comparison input {
+      width: 100%;
+      border: 1px solid #c8d5e2;
+      border-radius: 6px;
+      background: #fbfdff;
+      color: var(--ink);
+      outline: none;
+    }
+.air-sea-cost-comparison textarea { padding: 12px; line-height: 1.55; }
+.air-sea-cost-comparison input { height: 38px; padding: 7px 10px; }
+.air-sea-cost-comparison textarea:focus,
+.air-sea-cost-comparison input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(11, 140, 240, .12); }
+.air-sea-cost-comparison .paste-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.air-sea-cost-comparison .parse-status { min-height: 22px; color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .parse-status.success { color: var(--ok); }
+.air-sea-cost-comparison .parse-status.error { color: var(--danger); }
+.air-sea-cost-comparison .field-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 13px 14px; }
+.air-sea-cost-comparison .field { min-width: 0; }
+.air-sea-cost-comparison .field label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: #40556a; font-size: 12px; font-weight: 700; }
+.air-sea-cost-comparison .field small { color: var(--muted); font-weight: 400; }
+.air-sea-cost-comparison .field.span-2 { grid-column: span 2; }
+.air-sea-cost-comparison .input-wrap { position: relative; }
+.air-sea-cost-comparison .input-wrap input { padding-right: 42px; }
+.air-sea-cost-comparison .input-wrap input.exchange-input { padding-right: 10px; }
+.air-sea-cost-comparison .unit { position: absolute; right: 10px; top: 8px; color: var(--muted); font-size: 12px; pointer-events: none; }
+.air-sea-cost-comparison .exchange-wrap { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.air-sea-cost-comparison .exchange-wrap input.exchange-input { width: 112px; }
+.air-sea-cost-comparison .exchange-wrap .input-wrap { width: 112px; order: 2; }
+.air-sea-cost-comparison .exchange-display { position: static; order: 1; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.air-sea-cost-comparison .currency-control { display: grid; grid-template-columns: 112px 78px; gap: 6px; align-items: center; }
+.air-sea-cost-comparison .currency-control input { padding-right: 10px; }
+.air-sea-cost-comparison .currency-select { width: 100%; height: 38px; padding: 7px 6px; border: 1px solid #c8d5e2; border-radius: 6px; background: #fbfdff; color: var(--ink); outline: none; }
+.air-sea-cost-comparison .currency-select:focus,
+.air-sea-cost-comparison .summary-currency-select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(11, 140, 240, .12); }
+.air-sea-cost-comparison .input-note { min-height: 18px; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.air-sea-cost-comparison .input-note.pending { color: var(--warn); }
+.air-sea-cost-comparison .metric-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+.air-sea-cost-comparison .metric {
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--blue);
+      border-radius: 7px;
+      padding: 13px 15px;
+      background: #fbfdff;
+    }
+.air-sea-cost-comparison .metric.sea { border-left-color: var(--sea); }
+.air-sea-cost-comparison .metric.air { border-left-color: var(--air); }
+.air-sea-cost-comparison .metric-label { color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .metric-value { margin-top: 2px; font-size: 22px; font-weight: 800; line-height: 1.25; }
+.air-sea-cost-comparison .metric-value .metric-unit { color: var(--muted); font-size: 12px; font-weight: 500; }
+.air-sea-cost-comparison .metric-foot { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.air-sea-cost-comparison .metric-foot strong { color: var(--ink); }
+.air-sea-cost-comparison .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
+.air-sea-cost-comparison .mode-panel { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.air-sea-cost-comparison .mode-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px 17px; }
+.air-sea-cost-comparison .mode-head.sea { background: var(--sea-pale); }
+.air-sea-cost-comparison .mode-head.air { background: var(--air-pale); }
+.air-sea-cost-comparison .mode-title { display: flex; align-items: center; gap: 9px; font-size: 19px; font-weight: 800; }
+.air-sea-cost-comparison .mode-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.air-sea-cost-comparison .mode-meta { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .cost-list { padding: 5px 17px 12px; }
+.air-sea-cost-comparison .cost-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(170px, 1fr) max-content; gap: 12px; align-items: center; height: 48px; min-height: 48px; border-bottom: 1px solid #edf2f6; }
+.air-sea-cost-comparison .cost-row:last-child { border-bottom: 0; }
+.air-sea-cost-comparison .cost-row > * { min-width: 0; }
+.air-sea-cost-comparison .cost-name { font-weight: 700; }
+.air-sea-cost-comparison .cost-level { margin: 13px -17px 3px; padding: 5px 17px; color: var(--muted); background: #f7fafc; border-top: 1px solid #edf2f6; border-bottom: 1px solid #edf2f6; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+.air-sea-cost-comparison .cost-level:first-child { margin-top: 0; border-top: 0; }
+.air-sea-cost-comparison .cost-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 750; }
+.air-sea-cost-comparison .cost-formula { justify-self: end; color: var(--muted); font-size: 11px; text-align: right; white-space: nowrap; }
+.air-sea-cost-comparison .cost-value-stack { width: 100%; text-align: right; }
+.air-sea-cost-comparison .cost-value-stack .cost-value { white-space: nowrap; }
+.air-sea-cost-comparison .cost-diff { min-height: 16px; margin-top: 2px; color: var(--danger); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.air-sea-cost-comparison .cost-diff.higher { color: var(--danger); }
+.air-sea-cost-comparison .cost-diff.lower { color: var(--ok); }
+.air-sea-cost-comparison .cost-diff.neutral { color: var(--muted); }
+.air-sea-cost-comparison .formula-info { position: relative; display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid #b9cddd; border-radius: 50%; color: var(--blue-dark); cursor: help; font-size: 12px; font-weight: 800; }
+.air-sea-cost-comparison .formula-info::after { content: attr(data-tip); position: absolute; z-index: 5; right: 0; bottom: calc(100% + 8px); width: 230px; padding: 9px 10px; border: 1px solid #b9cddd; border-radius: 6px; background: #14283d; color: #fff; box-shadow: 0 7px 20px rgba(20, 40, 61, .18); font-size: 11px; font-weight: 500; line-height: 1.45; opacity: 0; pointer-events: none; transform: translateY(4px); transition: opacity .15s, transform .15s; }
+.air-sea-cost-comparison .formula-info:hover::after,
+.air-sea-cost-comparison .formula-info:focus::after { opacity: 1; transform: translateY(0); }
+.air-sea-cost-comparison .cost-row.subtotal { margin: 4px -17px 0; padding: 7px 17px; background: #f7fafc; border-top: 1px solid var(--line); border-bottom: 0; }
+.air-sea-cost-comparison .cost-row.total { height: 70px; min-height: 70px; margin: 0 -17px; padding: 13px 17px; background: #eef6ff; border-top: 1px solid #bfddf5; border-bottom: 0; }
+.air-sea-cost-comparison .cost-row.total .cost-name,
+.air-sea-cost-comparison .cost-row.total .cost-value { color: var(--blue-dark); font-size: 16px; }
+.air-sea-cost-comparison .cost-row.time-row { height: 60px; min-height: 60px; }
+.air-sea-cost-comparison .avg-block { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 72px; padding: 15px 17px; border-top: 1px solid var(--line); }
+.air-sea-cost-comparison .avg-label { color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .avg-value { color: var(--blue-dark); font-size: 25px; font-weight: 850; }
+.air-sea-cost-comparison .avg-unit { color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .mode-footnote { padding: 0 17px 15px; color: var(--muted); font-size: 11px; }
+.air-sea-cost-comparison .composition { margin-top: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: #fbfdff; }
+.air-sea-cost-comparison .composition-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.air-sea-cost-comparison .composition-head h3 { margin: 0; font-size: 15px; }
+.air-sea-cost-comparison .composition-head span { color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .bar-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) 90px; gap: 10px; align-items: center; margin: 8px 0; }
+.air-sea-cost-comparison .bar-label { font-weight: 800; }
+.air-sea-cost-comparison .bar-track { display: flex; height: 24px; overflow: hidden; border-radius: 4px; background: #eaf0f5; }
+.air-sea-cost-comparison .bar-segment { height: 100%; transition: width .25s ease; }
+.air-sea-cost-comparison .bar-segment.transport { background: var(--blue); }
+.air-sea-cost-comparison .bar-segment.tax { background: #edb44b; }
+.air-sea-cost-comparison .bar-segment.other { background: #9aaebe; }
+.air-sea-cost-comparison .bar-total { text-align: right; font-variant-numeric: tabular-nums; font-weight: 800; }
+.air-sea-cost-comparison .legend { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 12px; color: var(--muted); font-size: 11px; }
+.air-sea-cost-comparison .legend span { display: inline-flex; align-items: center; gap: 5px; }
+.air-sea-cost-comparison .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+.air-sea-cost-comparison .legend .transport { background: var(--blue); }
+.air-sea-cost-comparison .legend .tax { background: #edb44b; }
+.air-sea-cost-comparison .legend .other { background: #9aaebe; }
+.air-sea-cost-comparison .result-banner { display: grid; grid-template-columns: 1.25fr .75fr; gap: 18px; align-items: stretch; margin-bottom: 18px; }
+.air-sea-cost-comparison .winner { border: 1px solid #b8d9f5; border-radius: 9px; background: var(--blue-pale); padding: 18px; }
+.air-sea-cost-comparison .winner h3 { margin: 0 0 4px; color: var(--blue-dark); font-size: 25px; }
+.air-sea-cost-comparison .winner p { margin: 0; color: #41647d; }
+.air-sea-cost-comparison .winner-number { margin-top: 14px; font-size: 30px; font-weight: 850; line-height: 1.15; }
+.air-sea-cost-comparison .winner-number small { color: var(--muted); font-size: 12px; font-weight: 500; }
+.air-sea-cost-comparison .delta-card { border: 1px solid var(--line); border-radius: 9px; padding: 18px; }
+.air-sea-cost-comparison .delta-card h3 { margin: 0 0 12px; font-size: 15px; }
+.air-sea-cost-comparison .delta-line { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid #edf2f6; }
+.air-sea-cost-comparison .delta-line:last-child { border-bottom: 0; }
+.air-sea-cost-comparison .delta-line span { color: var(--muted); }
+.air-sea-cost-comparison .delta-line strong { font-variant-numeric: tabular-nums; }
+.air-sea-cost-comparison .comparison-table { width: 100%; border-collapse: collapse; }
+.air-sea-cost-comparison .comparison-table th,
+.air-sea-cost-comparison .comparison-table td { padding: 12px 13px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+.air-sea-cost-comparison .comparison-table th:first-child,
+.air-sea-cost-comparison .comparison-table td:first-child { text-align: left; }
+.air-sea-cost-comparison .comparison-table th { color: var(--muted); background: #f7fafc; font-size: 12px; font-weight: 700; }
+.air-sea-cost-comparison .comparison-table td strong { font-size: 16px; }
+.air-sea-cost-comparison .comparison-table .best { color: var(--ok); font-weight: 800; }
+.air-sea-cost-comparison .risk-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 18px; }
+.air-sea-cost-comparison .risk-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+.air-sea-cost-comparison .risk-group { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.air-sea-cost-comparison .risk-group.prerequisite { border-color: #efc1c1; }
+.air-sea-cost-comparison .risk-group.pending { border-color: #f0d89e; }
+.air-sea-cost-comparison .risk-group-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 13px; background: #f7fafc; font-weight: 800; }
+.air-sea-cost-comparison .risk-group.prerequisite .risk-group-head { background: var(--danger-pale); color: var(--danger); }
+.air-sea-cost-comparison .risk-group.pending .risk-group-head { background: var(--warn-pale); color: var(--warn); }
+.air-sea-cost-comparison .risk-group-head small { color: var(--muted); font-size: 11px; font-weight: 500; }
+.air-sea-cost-comparison .risk-list { display: grid; gap: 8px; padding: 10px; }
+.air-sea-cost-comparison .risk { display: flex; align-items: flex-start; gap: 10px; border: 1px solid var(--line); border-radius: 7px; padding: 11px 12px; background: #fbfdff; }
+.air-sea-cost-comparison .risk-mark { flex: 0 0 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; background: var(--warn-pale); color: var(--warn); font-weight: 800; }
+.air-sea-cost-comparison .risk.danger .risk-mark { background: var(--danger-pale); color: var(--danger); }
+.air-sea-cost-comparison .risk.ok .risk-mark { background: var(--ok-pale); color: var(--ok); }
+.air-sea-cost-comparison .risk-title { font-weight: 750; }
+.air-sea-cost-comparison .risk-text { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .footer-note { margin-top: 16px; color: var(--muted); font-size: 12px; }
+.air-sea-cost-comparison .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (max-width: 1050px) {
+.air-sea-cost-comparison .source-grid,
+.air-sea-cost-comparison .compare-grid,
+.air-sea-cost-comparison .result-banner { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .field-grid { grid-template-columns: repeat(3, minmax(130px, 1fr)); }
+.air-sea-cost-comparison .field-groups,
+.air-sea-cost-comparison .risk-groups { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .parameter-sections { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .parameter-section:nth-child(3) { grid-column: auto; }
+
+
+}
+@media (max-width: 720px) {
+.air-sea-cost-comparison .shell { padding: 18px 12px 36px; }
+.air-sea-cost-comparison .topbar,
+.air-sea-cost-comparison .section-head { align-items: flex-start; flex-direction: column; }
+.air-sea-cost-comparison .top-actions { justify-content: flex-start; }
+.air-sea-cost-comparison .quick-answer-note { margin-left: 0; width: 100%; }
+.air-sea-cost-comparison .ingest-layout { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .ingest-actions { flex-direction: row; align-items: center; }
+.air-sea-cost-comparison .ingest-actions .btn { flex: 1; }
+.air-sea-cost-comparison .field-grid,
+.air-sea-cost-comparison .metric-strip,
+.air-sea-cost-comparison .risk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.air-sea-cost-comparison .group-fields { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .group-fields .field { grid-template-columns: 1fr; gap: 6px; }
+.air-sea-cost-comparison .group-fields .field > .input-wrap,
+.air-sea-cost-comparison .group-fields .field > .currency-control,
+.air-sea-cost-comparison .group-fields .field > .exchange-wrap { justify-self: stretch; }
+.air-sea-cost-comparison .currency-control { grid-template-columns: minmax(0, 1fr) 78px; }
+.air-sea-cost-comparison .exchange-wrap { justify-content: flex-start; flex-wrap: wrap; }
+.air-sea-cost-comparison .field.span-2 { grid-column: span 2; }
+.air-sea-cost-comparison .cost-row { grid-template-columns: 1fr auto; gap: 5px 10px; padding: 8px 0; }
+.air-sea-cost-comparison .cost-formula { grid-column: 1 / -1; }
+.air-sea-cost-comparison .cost-value { grid-column: 2; grid-row: 1; }
+.air-sea-cost-comparison .comparison-table { min-width: 650px; }
+.air-sea-cost-comparison .table-scroll { overflow-x: auto; }
+
+
+}
+@media (max-width: 440px) {
+.air-sea-cost-comparison .field-grid,
+.air-sea-cost-comparison .metric-strip,
+.air-sea-cost-comparison .risk-grid { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .risk-groups { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .field.span-2 { grid-column: auto; }
+.air-sea-cost-comparison h1 { font-size: 25px; }
+.air-sea-cost-comparison .record-name-row { grid-template-columns: 1fr; }
+.air-sea-cost-comparison .record-item { align-items: flex-start; flex-direction: column; }
+
+
+}

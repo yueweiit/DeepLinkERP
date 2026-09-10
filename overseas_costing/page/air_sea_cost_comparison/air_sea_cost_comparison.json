@@ -1,0 +1,15 @@
+{
+  "doctype": "Page",
+  "name": "air-sea-cost-comparison",
+  "module": "Overseas Costing",
+  "title": "空运海运成本对比",
+  "standard": "Yes",
+  "roles": [
+    {
+      "role": "System Manager"
+    },
+    {
+      "role": "海外成本核算用户"
+    }
+  ]
+}

@@ -3,3 +3,4 @@ include requirements.txt
 include license.txt
 recursive-include overseas_costing *.json
 recursive-include overseas_costing *.md
+recursive-include overseas_costing *.js *.css *.html

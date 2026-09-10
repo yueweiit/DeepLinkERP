@@ -25,6 +25,13 @@ fixtures = []
 doctype_js = {}
 doc_events = {}
 
+has_permission = {
+    "Overseas Air Sea Comparison": "overseas_costing.services.air_sea_records.has_permission",
+}
+permission_query_conditions = {
+    "Overseas Air Sea Comparison": "overseas_costing.services.air_sea_records.permission_query_conditions",
+}
+
 scheduler_events = {
     "cron": {
         "*/10 * * * *": ["overseas_costing.services.logistics_settlement.runtime.resume_pending"],

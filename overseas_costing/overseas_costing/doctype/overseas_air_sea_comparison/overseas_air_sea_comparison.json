@@ -1,0 +1,140 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Air Sea Comparison",
+  "module": "Overseas Costing",
+  "autoname": "",
+  "naming_rule": "By script",
+  "title_field": "title",
+  "track_changes": 1,
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "field_order": [
+    "title",
+    "status",
+    "payload_json",
+    "result_json",
+    "formula_version",
+    "sea_total",
+    "air_total",
+    "source_batch",
+    "source_version",
+    "source_packing_snapshot",
+    "create_request_id",
+    "create_request_hash",
+    "last_request_id",
+    "last_request_hash"
+  ],
+  "fields": [
+    {
+      "fieldname": "title",
+      "fieldtype": "Data",
+      "label": "记录名称",
+      "reqd": 1,
+      "in_list_view": 1,
+      "length": 80
+    },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "label": "状态",
+      "options": "Draft\nReady",
+      "read_only": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "payload_json",
+      "fieldtype": "Long Text",
+      "label": "装箱及参数快照",
+      "reqd": 1
+    },
+    {
+      "fieldname": "result_json",
+      "fieldtype": "Long Text",
+      "label": "服务端计算结果",
+      "read_only": 1
+    },
+    {
+      "fieldname": "formula_version",
+      "fieldtype": "Data",
+      "label": "公式版本",
+      "read_only": 1
+    },
+    {
+      "fieldname": "sea_total",
+      "fieldtype": "Currency",
+      "label": "海运费用 CNY",
+      "read_only": 1
+    },
+    {
+      "fieldname": "air_total",
+      "fieldtype": "Currency",
+      "label": "空运费用 CNY",
+      "read_only": 1
+    },
+    {
+      "fieldname": "source_batch",
+      "fieldtype": "Link",
+      "label": "来源批次",
+      "options": "Overseas Cost Batch",
+      "read_only": 1
+    },
+    {
+      "fieldname": "source_version",
+      "fieldtype": "Link",
+      "label": "来源成本版本",
+      "options": "Overseas Cost Version",
+      "read_only": 1
+    },
+    {
+      "fieldname": "source_packing_snapshot",
+      "fieldtype": "Link",
+      "label": "来源装箱快照",
+      "options": "Overseas Packing Snapshot",
+      "read_only": 1
+    },
+    {
+      "fieldname": "create_request_id",
+      "fieldtype": "Data",
+      "label": "create_request_id",
+      "read_only": 1,
+      "hidden": 1
+    },
+    {
+      "fieldname": "create_request_hash",
+      "fieldtype": "Data",
+      "label": "create_request_hash",
+      "read_only": 1,
+      "hidden": 1
+    },
+    {
+      "fieldname": "last_request_id",
+      "fieldtype": "Data",
+      "label": "last_request_id",
+      "read_only": 1,
+      "hidden": 1
+    },
+    {
+      "fieldname": "last_request_hash",
+      "fieldtype": "Data",
+      "label": "last_request_hash",
+      "read_only": 1,
+      "hidden": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "create": 1,
+      "write": 1,
+      "delete": 1
+    },
+    {
+      "role": "海外成本核算用户",
+      "read": 1,
+      "create": 1,
+      "write": 1,
+      "delete": 1
+    }
+  ]
+}

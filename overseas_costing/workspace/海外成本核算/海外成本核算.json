@@ -1,6 +1,6 @@
 {
   "charts": [],
-  "content": "[{\"id\":\"overseas-cost-heading\",\"type\":\"header\",\"data\":{\"text\":\"海外采购综合成本核算\",\"col\":12}},{\"id\":\"overseas-cost-workbench-card\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"综合成本工作台\",\"col\":3}}]",
+  "content": "[{\"id\":\"overseas-cost-heading\",\"type\":\"header\",\"data\":{\"text\":\"海外采购综合成本核算\",\"col\":12}},{\"id\":\"overseas-cost-workbench-card\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"综合成本工作台\",\"col\":3}},{\"id\":\"air-sea-cost-comparison-card\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"空运海运成本对比\",\"col\":3}}]",
   "custom_blocks": [],
   "docstatus": 0,
   "doctype": "Workspace",
@@ -32,6 +32,13 @@
       "doc_view": "",
       "label": "综合成本工作台",
       "link_to": "overseas-cost-workbench",
+      "type": "Page"
+    },
+    {
+      "color": "Blue",
+      "doc_view": "",
+      "label": "空运海运成本对比",
+      "link_to": "air-sea-cost-comparison",
       "type": "Page"
     }
   ],

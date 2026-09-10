@@ -2050,6 +2050,17 @@ def delete_batch(batch_name: str, remark: str | None = None) -> dict:
     if not batch_doc_name:
         return {"ok": False, "message": f"未找到批次：{batch_name}。"}
 
+    # Comparison saves lock the same parent before persisting their source link.
+    # Current reads must follow that lock so a newly committed reference cannot
+    # be hidden by an older REPEATABLE READ snapshot.
+    if not _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "name", for_update=True):
+        return {"ok": False, "message": f"批次不存在或已被删除：{batch_name}。"}
+    if _frappe.db.table_exists("Overseas Air Sea Comparison") and _frappe.db.get_value(
+        "Overseas Air Sea Comparison", {"source_batch": batch_doc_name}, "name", for_update=True
+    ):
+        return {"ok": False, "batch_name": batch_doc_name,
+            "message": "该批次仍被空运海运测算记录引用，请先处理相关测算记录后再删除批次。"}
+
     delete_plan = [
         ("Overseas Cost Audit Log", "audit_log_count"),
         ("Overseas Cost Fee Evidence", "fee_evidence_count"),

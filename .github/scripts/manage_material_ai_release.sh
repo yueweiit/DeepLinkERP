@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode="${1:?prepare or rollback is required}"
+mode="${1:?prepare, rollback or rollback-code is required}"
 compose_root="${2:-/home/yuewei/ERPNext-Docker/frappe_docker}"
 site_name="${3:-deeplinkerp.com}"
 release_id="${4:?release id is required}"
@@ -73,8 +73,65 @@ rollback_release() {
     bench --site "$site_name" clear-cache
 }
 
+rollback_code_release() {
+  # Additive releases retain the current database, files and site configuration.
+  # The original rollback mode remains available for deliberate full recovery.
+  docker image inspect "$backup_image" >/dev/null
+  docker compose -f "$compose_file" stop frontend websocket queue-short queue-long scheduler >/dev/null
+  docker image tag "$backup_image" "$base_image"
+  docker compose -f "$compose_file" up -d --no-deps --force-recreate backend
+
+  # Run UI restoration from the restored image, never the failed release's code.
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench/sites backend \
+    env SITE_NAME="$site_name" /home/frappe/frappe-bench/env/bin/python - <<'PY'
+import os
+
+import frappe
+from overseas_costing import install
+
+frappe.init(site=os.environ["SITE_NAME"])
+frappe.connect()
+frappe.set_user("Administrator")
+try:
+    result = install.ensure_workspace_sidebar()
+    if not result.get("ok"):
+        raise RuntimeError(result.get("message") or "Cannot restore the previous workspace sidebar")
+    # Restore only workspace navigation; ensure_workspace also adjusts ERP defaults.
+    for candidate in install.WORKSPACE_NAME_CANDIDATES:
+        name = (frappe.db.exists("Workspace", candidate)
+                or frappe.db.exists("Workspace", {"label": candidate})
+                or frappe.db.exists("Workspace", {"title": candidate}))
+        if name:
+            workspace = frappe.get_doc("Workspace", name)
+            install._set_workspace_content(workspace)
+            workspace.save(ignore_permissions=True)
+            break
+    # Desk caches native page assets by Page.modified, independently of clear-cache.
+    frappe.db.set_value("Page", install.WORKBENCH_PAGE, "modified", frappe.utils.now_datetime())
+    frappe.db.commit()
+finally:
+    frappe.destroy()
+PY
+
+  docker compose -f "$compose_file" up -d --force-recreate \
+    backend websocket queue-short queue-long scheduler frontend
+  backend_id=$(docker compose -f "$compose_file" ps -q backend)
+  frontend_id=$(docker compose -f "$compose_file" ps -q frontend)
+  test -n "$backend_id" && test -n "$frontend_id"
+  rollback_assets_dir=$(mktemp -d)
+  trap 'rm -rf "$rollback_assets_dir"' EXIT
+  docker cp "$backend_id:/home/frappe/frappe-bench/assets/." "$rollback_assets_dir/"
+  test -s "$rollback_assets_dir/assets.json"
+  docker cp "$rollback_assets_dir/." "$frontend_id:/home/frappe/frappe-bench/assets/"
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+    bench --site "$site_name" clear-cache
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+    bench --site "$site_name" clear-website-cache
+}
+
 case "$mode" in
   prepare) prepare_release ;;
   rollback) rollback_release ;;
+  rollback-code) rollback_code_release ;;
   *) echo "Unknown mode: $mode" >&2; exit 2 ;;
 esac

@@ -18,6 +18,7 @@ WORKSPACE_TITLE = "海外成本核算"
 WORKSPACE_HEADING = "海外采购综合成本核算"
 MODULE_NAME = "Overseas Costing"
 WORKBENCH_PAGE = "overseas-cost-workbench"
+COMPARISON_PAGE = "air-sea-cost-comparison"
 ACCESS_ROLE = "海外成本核算用户"
 ERP_SETTINGS_DOCTYPE = "Overseas Cost ERP Settings"
 HOME_WORKSPACE_LABEL = "Home"
@@ -193,6 +194,13 @@ def ensure_desktop_icon() -> dict:
     return _ensure_deeplink_desktop_icon(frappe)
 
 
+def cost_sidebar_items() -> list[dict]:
+    return [
+        {"label": "综合成本工作台", "type": "Link", "link_type": "Page", "link_to": WORKBENCH_PAGE, "icon": "calculator", "idx": 1},
+        {"label": "空运海运成本对比", "type": "Link", "link_type": "Page", "link_to": COMPARISON_PAGE, "icon": "calculator", "idx": 2},
+    ]
+
+
 def ensure_workspace_sidebar() -> dict:
     """创建 DeepLinkERP 首页图标实际使用的工作区侧边栏入口。"""
 
@@ -226,16 +234,7 @@ def ensure_workspace_sidebar() -> dict:
     _set_child_table(
         sidebar,
         "items",
-        [
-            {
-                "label": "综合成本工作台",
-                "type": "Link",
-                "link_type": "Page",
-                "link_to": WORKBENCH_PAGE,
-                "icon": "calculator",
-                "idx": 1,
-            }
-        ],
+        cost_sidebar_items(),
     )
 
     if created:
@@ -620,6 +619,11 @@ def _set_workspace_content(doc) -> None:
             },
         },
         {
+            "id": "air-sea-cost-comparison-card",
+            "type": "shortcut",
+            "data": {"shortcut_name": "空运海运成本对比", "col": 3},
+        },
+        {
             "id": "overseas-cost-erp-settings-card",
             "type": "shortcut",
             "data": {
@@ -637,6 +641,12 @@ def _set_workspace_content(doc) -> None:
                 "type": "Page",
                 "label": "综合成本工作台",
                 "link_to": WORKBENCH_PAGE,
+                "color": "Blue",
+            },
+            {
+                "type": "Page",
+                "label": "空运海运成本对比",
+                "link_to": COMPARISON_PAGE,
                 "color": "Blue",
             },
             {

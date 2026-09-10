@@ -40,6 +40,13 @@ jobs:
           node --check overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
           node --check overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
 
+      - name: Verify air sea comparison assets
+        run: |
+          python overseas_costing/scripts/build_air_sea_assets.py
+          git diff --exit-code -- overseas_costing/page/air_sea_cost_comparison overseas_costing/overseas_costing/page/air_sea_cost_comparison
+          node --check overseas_costing/page/air_sea_cost_comparison/air_sea_cost_comparison.js
+          node --check overseas_costing/overseas_costing/page/air_sea_cost_comparison/air_sea_cost_comparison.js
+
       - name: Run tests affected by this update
         env:
           TEST_BASE: ${{ github.event.before }}
@@ -218,7 +225,7 @@ jobs:
           remote_release_script="/tmp/manage_material_ai_release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "if [ -f '$remote_release_script' ]; then bash '$remote_release_script' rollback /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'; fi"
+            "if [ -f '$remote_release_script' ]; then bash '$remote_release_script' rollback-code /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'; fi"
 
       - name: Remove temporary deployment files
         if: always()
