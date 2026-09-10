@@ -213,13 +213,13 @@ def get_auxiliary_accounting(entry):
 
 def get_columns():
 	return [
-		{"label": _("凭证字号"), "fieldname": "statutory_number", "fieldtype": "Data", "width": 90},
-		{"label": _("凭证日期"), "fieldname": "posting_date", "fieldtype": "Date", "width": 120},
-		{"label": _("会计期间"), "fieldname": "accounting_period", "fieldtype": "Data", "width": 100},
-		{"label": _("摘要"), "fieldname": "remarks", "fieldtype": "Data", "width": 180},
-		{"label": _("科目"), "fieldname": "account", "fieldtype": "Data", "width": 240},
-		{"label": _("往来单位"), "fieldname": "party", "fieldtype": "Dynamic Link", "options": "party_type", "width": 140},
-		{"label": _("借方"), "fieldname": "debit", "fieldtype": "Currency", "width": 125},
-		{"label": _("贷方"), "fieldname": "credit", "fieldtype": "Currency", "width": 125},
-		{"label": _("本位币金额"), "fieldname": "base_total_amount", "fieldtype": "Currency", "width": 130},
+		{"label": _("凭证字号"), "fieldname": "statutory_number", "fieldtype": "Data", "width": 100},
+		{"label": _("凭证日期"), "fieldname": "posting_date", "fieldtype": "Date", "width": 130},
+		{"label": _("会计期间"), "fieldname": "accounting_period", "fieldtype": "Data", "width": 110},
+		{"label": _("摘要"), "fieldname": "remarks", "fieldtype": "Data", "width": 270},
+		{"label": _("科目"), "fieldname": "account", "fieldtype": "Data", "width": 330},
+		{"label": _("往来单位"), "fieldname": "party", "fieldtype": "Dynamic Link", "options": "party_type", "width": 150},
+		{"label": _("借方"), "fieldname": "debit", "fieldtype": "Currency", "width": 150},
+		{"label": _("贷方"), "fieldname": "credit", "fieldtype": "Currency", "width": 150},
+		{"label": _("本位币金额"), "fieldname": "base_total_amount", "fieldtype": "Currency", "width": 160},
 	]

@@ -42,9 +42,8 @@ frappe.query_reports["China Voucher Ledger"] = {
 	],
 	tree: false,
 	get_datatable_options(datatable_options) {
-		// Use proportional columns so the report fills the available page width
-		// instead of leaving unused space after the fixed column widths.
-		datatable_options.layout = "ratio";
+		// Keep one fixed width for each column so every row stays aligned.
+		datatable_options.layout = "fixed";
 		return datatable_options;
 	},
 	formatter(value, row, column, data, default_formatter) {
