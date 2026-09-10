@@ -14658,8 +14658,10 @@ class OverseasCostWorkbench {
     await this.refreshDetailSummary();
   }
 
-  settlementApi(action, args = {}) {
-    return this.call(`overseas_costing.api.logistics_settlement.${action}`, args);
+  async settlementApi(action, args = {}) {
+    const type = ["get_batch_settlement", "get_matching_status", "find_expenses"].includes(action) ? "GET" : "POST";
+    const response = await frappe.call({ method: `overseas_costing.api.logistics_settlement.${action}`, args, type });
+    return response.message || {};
   }
 
   settlementAmount(source = {}) {
@@ -14843,7 +14845,7 @@ class OverseasCostWorkbench {
     const ai = data.ai_job || {};
     const aiLabels = {queued:"排队中",running:"分析中",completed:"分析完成",partial:"部分结果待重试",failed:"分析失败",stale:"资料已变化，请重试"};
     this.settlementBody(state, `
-      <p class="ocw-settlement-hint">采购支出先按「服务类采购 → 物流及运输服务」筛选：采购支出＝服务类采购，且服务类采购＝物流及运输服务；不限定海运、空运、快递等下级运输方式。排除已拒绝、已撤销、已删除单据，再与历史国际物流匹配。忽略近期拉取的日期及条数，候选需确认后才建立关联。</p>
+      <p class="ocw-settlement-hint">覆盖所有名称含「采购支出」的流程，明确属于「物流及运输服务」才纳入；「服务类采购 → 物流及运输服务」等父级别名可兼容，不限定海运、空运、快递等运输方式。排除已拒绝、已撤销、已删除单据，再与历史国际物流匹配。忽略近期拉取的日期及条数，候选需确认后才建立关联。</p>
       ${scope ? `<p class="ocw-settlement-hint">上次范围核对：国际物流 ${this.escape(scope.logistics)} · 物流类采购支出 ${this.escape(scope.expense)}（审批通过 ${this.escape(scope.approved_expense)}）· 不符合分类 ${this.escape(scope.excluded)} · 失效单据 ${this.escape(scope.invalid ?? 0)}。审批中的单据保留待处理，未通过审批的不作为最终核算依据。</p>` : ''}
       ${this.renderSettlementHealth(data)}
       <div class="ocw-settlement-toolbar"><strong>${this.escape(labels[job.status] || "尚未启动")} · ${this.escape(phases[job.phase] || "等待任务")}</strong>
@@ -14943,7 +14945,10 @@ class OverseasCostWorkbench {
           }));
         } else {
           const selections = candidates.map((row) => this.settlementSelection(row, choices));
-          result = await this.settlementWrite(state, () => this.settlementApi("confirm_matches", { selections: JSON.stringify(selections) }));
+          result = await this.settlementWrite(state, () => this.settlementApi("confirm_matches", {
+            selections: JSON.stringify(selections),
+            ...(context.batchName ? { batch_name: context.batchName, version_name: context.versionName || null } : {}),
+          }));
         }
       } else if (action === "reject") {
         result = await this.settlementWrite(state, () => this.settlementApi("reject_match", { candidate_id: candidate.id, revision: candidate.revision, reason: choices.reason }));
@@ -14996,7 +15001,7 @@ class OverseasCostWorkbench {
       $strip.off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-action]", (event) => {
         const action = $(event.currentTarget).attr("data-settlement-strip-action");
         if (action === "source") { try { this.openSettlementSource(currentSource); } catch (error) { this.showError(error); } }
-        else if (action === "correct") this.openSettlementSearch(batchName, data);
+        else if (action === "correct") this.openSettlementSearch(batchName, data, null, { versionName: viewedVersion, logistics: data.logistics });
         else this.openBatchSettlementDialog(batchName, viewedVersion);
       });
     } catch (error) {
@@ -15014,43 +15019,124 @@ class OverseasCostWorkbench {
   }
 
   async openBatchSettlementDialog(batchName, viewedVersion = null) {
-    const state = this.settlementDialog("物流采购支出 · 明细与费用");
+    if (this.batchSettlementState?.open) this.stopSettlementDialog(this.batchSettlementState);
+    const state = this.settlementDialog("本票匹配 · 物流采购支出");
+    this.batchSettlementState = state;
+    state.batchName = batchName;
     state.versionName = viewedVersion || (this.detailState?.batchName === batchName ? this.detailState.versionName : null);
-    const load = async () => {
-      const request = ++state.request;
-      try {
-        if (state.data && !state.data.historical && this.detailState?.batchName === batchName) state.versionName = this.detailState.versionName;
-        const data = await this.settlementApi("get_batch_settlement", { batch_name: batchName, version_name: state.versionName });
-        if (!state.open || request !== state.request) return;
-        state.data = data;
-        this.renderBatchSettlementDialog(state, data);
-      } catch (error) {
-        if (state.open && request === state.request) {
-          this.settlementBody(state, '<button class="ocw-outline-btn" data-settlement-action="refresh">重新读取</button>');
-          this.settlementNotice(state, error.message || "读取失败", true);
-        }
+    state.detailContext = this.detailState?.batchName === batchName ? this.settlementDetailContext() : null;
+    state.autoMatchChecked = false;
+    state.autoMatchStarted = false;
+    const load = () => this.loadBatchSettlementDialog(state);
+    const afterWrite = () => {
+      // Adoption may create a new current adjustment version. Only a completed
+      // write may deliberately advance this dialog's version and navigation fence.
+      if (state.open && !state.data?.historical && this.detailState?.batchName === batchName) {
+        state.versionName = this.detailState.versionName || null;
+        state.detailContext = this.settlementDetailContext();
       }
+      return load();
     };
     this.settlementEvents(state, async (action, $button) => {
       const data = state.data || {};
       if (action === "refresh") return load();
       if (action === "source") return this.openSettlementSource(data.expense);
       if (data.historical) throw new Error("历史版本仅供追溯，请返回当前调整草稿处理。");
-      if (action === "search" || action === "correct") return this.openSettlementSearch(batchName, action === "correct" ? data : null, load);
-      if (action === "history") return this.openSettlementHistory(true);
+      if (!this.isBatchSettlementCurrent(state)) throw new Error("当前批次或版本已变化，请重新打开本票资料。");
+      if (action === "retry-matching") return this.startBatchSettlementMatching(state, true);
+      if (action === "search" || action === "correct") return this.openSettlementSearch(batchName, action === "correct" ? data : null, afterWrite,
+        { versionName: data.viewed_version || state.versionName, logistics: data.logistics });
       if (action === "candidate") {
         const candidate = (data.candidates || []).find((row) => row.id === $button.attr("data-id"));
-        if (candidate) this.openSettlementCandidateReview([candidate], { batchName, onComplete: load });
+        if (candidate) this.openSettlementCandidateReview([candidate], { batchName, versionName: data.viewed_version || state.versionName, onComplete: afterWrite });
       }
-      if (action === "apply") return this.openSettlementApplicationReview(batchName, data, load);
-      if (action === "items") return this.openSettlementItemReview(batchName, data, load);
+      if (action === "apply") return this.openSettlementApplicationReview(batchName, data, afterWrite);
+      if (action === "items") return this.openSettlementItemReview(batchName, data, afterWrite);
     });
     await load();
   }
 
+  settlementDetailContext() {
+    return JSON.stringify([this.detailState?.batchName, this.detailState?.versionName || null, this.detailState?.tab]);
+  }
+
+  isBatchSettlementCurrent(state, request = state.request) {
+    return state.open && request === state.request && this.batchSettlementState === state
+      && (!state.detailContext || state.detailContext === this.settlementDetailContext());
+  }
+
+  async loadBatchSettlementDialog(state) {
+    if (!this.isBatchSettlementCurrent(state) || state.busy) return;
+    clearTimeout(state.timer);
+    state.timer = null;
+    const request = ++state.request;
+    try {
+      const data = await this.settlementApi("get_batch_settlement", { batch_name: state.batchName, version_name: state.versionName || null });
+      if (!this.isBatchSettlementCurrent(state, request)) return;
+      if (!data?.ok) throw new Error(data?.message || "读取本票匹配失败");
+      state.data = data;
+      this.renderBatchSettlementDialog(state, data);
+      const autoMatch = !state.autoMatchChecked;
+      state.autoMatchChecked = true;
+      if (autoMatch && !data.binding && !data.historical && ["not_started", "stale"].includes(data.matching?.status)) {
+        return this.startBatchSettlementMatching(state);
+      }
+      if (!data.binding && !data.historical && ["queued", "running"].includes(data.matching?.status)) {
+        state.timer = setTimeout(() => this.loadBatchSettlementDialog(state), 3000);
+      }
+    } catch (error) {
+      if (!this.isBatchSettlementCurrent(state, request)) return;
+      this.settlementBody(state, '<button class="ocw-outline-btn" data-settlement-action="refresh">重新读取</button>');
+      this.settlementNotice(state, error.message || "读取失败", true);
+    }
+  }
+
+  async startBatchSettlementMatching(state, retry = false) {
+    const data = state.data || {};
+    if (!this.isBatchSettlementCurrent(state) || state.busy || data.binding || data.historical) return;
+    const statuses = retry ? ["failed", "partial", "stale", "not_started"] : ["not_started", "stale"];
+    if (!statuses.includes(data.matching?.status) || (!retry && state.autoMatchStarted)) return;
+    state.autoMatchStarted = true;
+    let request;
+    try {
+      const result = await this.settlementWrite(state, () => {
+        request = state.request;
+        return this.settlementApi("start_batch_matching", { batch_name: state.batchName, version_name: state.versionName || null });
+      });
+      if (!this.isBatchSettlementCurrent(state, request)) return;
+      if (!result?.ok || !result.matching) throw new Error(result?.message || "本票匹配启动失败，请重试");
+      state.data = { ...data, matching: result.matching };
+      this.renderBatchSettlementDialog(state, state.data);
+      await this.loadBatchSettlementDialog(state);
+    } catch (error) {
+      if (!this.isBatchSettlementCurrent(state, request)) return;
+      state.data = { ...data, matching: { ...data.matching, status: "failed", error: error.message || "本票匹配启动失败" } };
+      this.renderBatchSettlementDialog(state, state.data);
+    }
+  }
+
+  renderBatchSettlementMatching(data) {
+    const matching = data.matching || {};
+    const labels = { not_started: "准备匹配", stale: "资料已变化", queued: "排队中", running: "匹配中", completed: "匹配完成",
+      partial: "部分失败", failed: "匹配失败", unavailable: "来源待补齐", bound: "已保存关联", historical: "历史版本" };
+    const stages = { rules: "规则匹配", deepseek: "DeepSeek 补充匹配", saved: "已保存结果" };
+    const counters = matching.counters || matching;
+    const retry = ["partial", "failed", "stale", "not_started"].includes(matching.status);
+    return `<section class="ocw-settlement-source"><div class="ocw-settlement-toolbar"><strong>${this.escape(labels[matching.status] || "状态待读取")} · ${this.escape(stages[matching.stage] || "本票匹配")}</strong>
+      ${retry ? '<button class="ocw-outline-btn" data-settlement-action="retry-matching">本票重试</button>' : ""}</div>
+      <p>已处理 ${this.escape(counters.processed ?? 0)} / ${this.escape(counters.total ?? 0)} · 推荐 ${this.escape(counters.recommended ?? 0)} · 证据不足 ${this.escape(counters.no_match ?? 0)} · 失败 ${this.escape(counters.failed ?? 0)}</p>
+      <p class="ocw-settlement-hint">先按本票标识进行规则匹配，仅对未解决的候选使用 DeepSeek；结果保存后可直接读取，候选需复核确认。</p>
+      ${matching.cached ? '<p class="ocw-settlement-hint">已读取本票保存结果。</p>' : ""}
+      ${matching.finished_at ? `<p class="ocw-settlement-hint">保存时间：${this.escape(matching.finished_at)}</p>` : ""}
+      ${matching.message ? `<p>${this.escape(matching.message)}</p>` : ""}
+      ${matching.error ? `<p class="ocw-settlement-notice is-error">${this.escape(matching.error)}</p>` : ""}
+      ${matching.status === "completed" && !(data.candidates || []).some((row) => ["pending", "conflict"].includes(row.status)) ? '<p>未找到可靠匹配，结果已保存；可输入关键词人工搜索本票采购支出。</p>' : ""}</section>`;
+  }
+
   renderBatchSettlementDialog(state, data) {
     const issues = [...new Set([...(data.binding?.issues || []), ...(data.blocking_reasons || [])])];
-    this.settlementBody(state, `<div class="ocw-settlement-toolbar"><strong>${this.escape(this.settlementAdoption(data))}</strong><button class="ocw-outline-btn" data-settlement-action="refresh">刷新</button></div>
+    this.settlementBody(state, `<div class="ocw-settlement-toolbar"><strong>本票匹配 · 国际物流审批号：${this.escape(data.logistics?.approval_no || data.matching?.approval_no || data.logistics?.instance || state.batchName || "待读取")}</strong><button class="ocw-outline-btn" data-settlement-action="refresh">刷新</button></div>
+      <p>${this.escape(this.settlementAdoption(data))}</p>
       ${this.renderSettlementHealth(data)}
       ${data.message ? `<p>${this.escape(data.message)}</p>` : ""}
       ${data.binding ? `<div class="ocw-settlement-source-grid">${this.renderSettlementSource(data.logistics, "国际物流来源")}${this.renderSettlementSource(data.expense)}</div>
@@ -15060,36 +15146,45 @@ class OverseasCostWorkbench {
         <p class="ocw-settlement-hint">${data.historical ? "显示此版本采用时的采购支出快照，当前原单后续变化不会改写历史结果。" : "已采用的费用仍需重新试算。装箱、货值或汇率待核对时，请先补充对应资料；已确认版本保留历史。"}</p>
         <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-action="source">打开原单</button>${data.historical ? "" : '<button class="ocw-outline-btn" data-settlement-action="correct">更正关联</button><button class="ocw-primary-btn" data-settlement-action="apply">核对范围／重试采用</button>'}
           ${!data.historical && (data.item_reviews || []).some((row) => row.packing_pending || row.goods_value_pending) ? '<button class="ocw-outline-btn" data-settlement-action="items">核对装箱与货值</button>' : ""}</div>`
-        : data.historical ? '<p>此历史版本没有物流采购支出采用记录。</p>' : `<div class="ocw-settlement-toolbar"><button class="ocw-primary-btn" data-settlement-action="search">搜索采购支出</button><button class="ocw-outline-btn" data-settlement-action="history">一键匹配历史采购支出</button></div>
-          ${(data.candidates || []).filter((row) => ["pending", "conflict"].includes(row.status)).map((row) => `<p>${this.escape(row.expense?.approval_no || row.expense?.instance)} · ${this.escape(this.settlementAmount(row.expense || {}))} · ${row.status === "conflict" ? "冲突" : "待确认"} <button class="ocw-outline-btn" data-settlement-action="candidate" data-id="${this.escape(row.id)}">复核关联</button></p>`).join("")}`}
+        : data.historical ? '<p>此历史版本没有物流采购支出采用记录。</p>' : `${this.renderBatchSettlementMatching(data)}<div class="ocw-settlement-toolbar"><button class="ocw-primary-btn" data-settlement-action="search">搜索本票采购支出</button></div>
+          ${(data.candidates || []).filter((row) => ["pending", "conflict"].includes(row.status)).map((row) => `<p>${this.escape(row.expense?.approval_no || row.expense?.instance)} · ${this.escape(this.settlementAmount(row.expense || {}))} · ${row.status === "conflict" ? "冲突" : "待确认"}<br>匹配依据：${this.escape(row.reason || row.method || "待复核")} <button class="ocw-outline-btn" data-settlement-action="candidate" data-id="${this.escape(row.id)}">复核关联</button></p>`).join("")}`}
       ${data.audit?.length ? `<details><summary>关联与采用记录</summary>${data.audit.map((row) => `<p>${this.escape(row.created_at || row.at || "")} · ${this.escape(row.action || "记录")} · ${this.escape(row.actor || "")} ${this.escape(row.reason || "")}</p>`).join("")}</details>` : ""}`);
   }
 
-  async openSettlementSearch(batchName, correction = null, onComplete = null) {
-    const state = this.settlementDialog(correction ? "更正关联 · 搜索新采购支出" : "搜索采购支出", [
+  async openSettlementSearch(batchName, correction = null, onComplete = null, context = {}) {
+    const versionName = context.versionName || correction?.viewed_version || (this.detailState?.batchName === batchName ? this.detailState.versionName : null);
+    const logistics = context.logistics || correction?.logistics || {};
+    const target = logistics.approval_no || logistics.instance || batchName;
+    const state = this.settlementDialog(correction ? "更正关联 · 搜索本票新采购支出" : "本票匹配 · 搜索采购支出", [
       { fieldtype: "Data", fieldname: "settlement_query", label: "审批号、单据号或原单关键词" },
-      { fieldtype: "Small Text", fieldname: "settlement_reason", label: "人工关联依据" },
+      { fieldtype: "Small Text", fieldname: "settlement_reason", label: "人工关联依据", description: "请说明该采购支出与本票国际物流的对应关系。" },
     ], true);
     Object.assign(state, { after: null, pages: [], query: "", data: {} });
+    const detailContext = this.detailState?.batchName === batchName ? this.settlementDetailContext() : null;
+    const current = (request = state.request) => state.open && request === state.request && (!detailContext || detailContext === this.settlementDetailContext());
     const load = async () => {
+      if (!current() || state.busy) return;
       const request = ++state.request;
       try {
-        const result = await this.settlementApi("find_expenses", { batch_name: batchName, query: state.query, after: state.after });
-        if (!state.open || request !== state.request) return;
+        const result = state.query ? await this.settlementApi("find_expenses", { batch_name: batchName, query: state.query, after: state.after })
+          : { ok: true, items: [], has_more: false, message: "请输入审批号、物流标识或货物关键词；搜索结果仅用于关联本票。" };
+        if (!current(request)) return;
+        if (!result?.ok) throw new Error(result?.message || "搜索失败");
         state.data = result;
-        this.settlementBody(state, `${correction ? this.renderSettlementSource(correction.expense, "当前关联（旧单）") : ""}<p class="ocw-settlement-hint">仅搜索本地归档、同一企业的物流类采购支出。填写人工依据后，选择候选进入新旧资料复核。</p>
+        this.settlementBody(state, `<p><strong>固定关联目标 · 本票国际物流审批号：${this.escape(target)}</strong></p>${correction ? this.renderSettlementSource(correction.expense, "当前关联（旧单）") : ""}<p class="ocw-settlement-hint">仅搜索本地归档、同一企业的物流类采购支出。填写人工关联依据后，选择候选进入资料复核。</p>
           <button class="ocw-primary-btn" data-settlement-action="search">搜索</button>${result.message ? `<p>${this.escape(result.message)}</p>` : ""}
           ${(result.items || []).map((row) => `<div class="ocw-settlement-search-row"><div><strong>${this.escape(row.approval_no || row.instance)}</strong><p>${this.escape(this.settlementAmount(row))} · ${this.escape(row.status || "待核对")} ${row.occupied ? "· 已有关联" : ""} ${row.invalid ? "· 已失效" : ""}</p></div>
-            ${!row.invalid ? `<button class="ocw-outline-btn" data-settlement-action="choose" data-id="${this.escape(row.id)}">选择并复核</button>` : ""}</div>`).join("") || "<p>没有可显示的采购支出。可修改关键词或先运行历史匹配。</p>"}
+            ${!row.invalid ? `<button class="ocw-outline-btn" data-settlement-action="choose" data-id="${this.escape(row.id)}">选择并复核</button>` : ""}</div>`).join("") || (state.query ? "<p>没有符合关键词的采购支出，请调整关键词。</p>" : "")}
           <div class="ocw-settlement-toolbar">${state.pages.length ? '<button class="ocw-outline-btn" data-settlement-action="previous">上一页</button>' : ""}${result.has_more ? '<button class="ocw-outline-btn" data-settlement-action="next">下一页</button>' : ""}</div>`);
       } catch (error) {
-        if (state.open && request === state.request) {
+        if (current(request)) {
           this.settlementBody(state, '<button class="ocw-outline-btn" data-settlement-action="search">重新搜索</button>');
           this.settlementNotice(state, error.message || "搜索失败", true);
         }
       }
     };
     this.settlementEvents(state, async (action, $button) => {
+      if (!current()) throw new Error("当前批次或版本已变化，请重新打开本票搜索。");
       if (action === "search") { state.query = String(state.dialog.get_value("settlement_query") || "").trim(); state.after = null; state.pages = []; return load(); }
       if (action === "next") { state.pages.push(state.after); state.after = state.data.next_cursor; return load(); }
       if (action === "previous") { state.after = state.pages.pop() ?? null; return load(); }
@@ -15097,9 +15192,9 @@ class OverseasCostWorkbench {
         const reason = String(state.dialog.get_value("settlement_reason") || "").trim();
         if (!reason) throw new Error("请填写人工关联依据，再选择候选。");
         const result = await this.settlementWrite(state, () => this.settlementApi("prepare_manual_candidate", { batch_name: batchName, expense_id: $button.attr("data-id"), reason }));
-        if (!state.open) return;
+        if (!current()) return;
         if (!result?.ok || !result.candidate) throw new Error(result?.message || "候选准备失败，请刷新重试");
-        this.openSettlementCandidateReview([result.candidate], { batchName, correction, onComplete });
+        this.openSettlementCandidateReview([result.candidate], { batchName, versionName, correction, onComplete });
       }
     });
     await load();

@@ -83,32 +83,39 @@ def stable_lines(lines):
 
 
 def is_logistics_expense(fields):
-    # Keep the same exact category contract as costing_read.is_logistics_purchase.
-    parents = {norm(k) for k in ('采购类型','采购类别','采购分类','采购支出','Tipo de compra','Categoría de compra','Gastos de Compra','采购类型Tipo de compra','采购类别Categoría de compra','采购分类Categoría de compra','采购支出Gastos de Compra')}
-    children = {norm(k) for k in ('服务类采购','Adquisiciones de servicios','Compra De Servicios','服务类采购 Adquisiciones de servicios','服务类采购Compra De Servicios')}
-    service = {norm(v) for v in ('服务类采购','Compra De Servicios','服务类采购Compra De Servicios')}
-    logistics = {norm(v) for v in ('物流及运输服务','Servicios de logística y transporte','物流及运输服务Servicios de logística y transporte')}
-    parent = child = complete = False
-    for label, value in fields.items():
-        key = norm(label)
-        if key not in parents | children:
-            continue
-        value = decoded(value)
+    # Keep this exact category contract aligned with costing_read.is_logistics_purchase.
+    # A selected service child is authoritative across renamed upper categories.
+    def key(value):
+        return re.sub(r'\s+', '', value).lower()
+
+    def path(value):
         if isinstance(value, str):
-            value = re.split(r'→|->|>|/|／', value)
+            if value.strip().startswith('['):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return None
+            else:
+                value = re.split(r'→|->|>|/|／', value)
         if not isinstance(value, list) or len(value) not in (1, 2) or any(not isinstance(v, str) for v in value):
+            return None
+        return [key(v) for v in value]
+
+    parents = {key(k) for k in ('采购类型','采购类别','采购分类','采购支出','Tipo de compra','Categoría de compra','Categoria de compra','Gastos de Compra','采购类型Tipo de compra','采购类别Categoría de compra','采购类别Categoria de compra','采购分类Categoría de compra','采购分类Categoria de compra','采购支出Gastos de Compra')}
+    children = {key(k) for k in ('服务类采购','Adquisiciones de servicios','Compra De Servicios','服务类采购 Adquisiciones de servicios','服务类采购Compra De Servicios')}
+    service = {key(v) for v in ('服务类采购','Compra De Servicios','服务类采购Compra De Servicios','服务商采购','Compra de proveedores','服务商采购Compra de proveedores','服务商采购Compra de servicios')}
+    logistics = {key(v) for v in ('物流及运输服务','Servicios de logística y transporte','Servicios de logistica y transporte','物流及运输服务Servicios de logística y transporte','物流及运输服务Servicios de logistica y transporte')}
+    normalized = [(key(label), path(value)) for label, value in fields.items() if isinstance(label, str) and key(label) in parents | children]
+    if any(label in children and value and len(value) == 1 and value[0] in logistics for label, value in normalized):
+        return True
+    complete = False
+    for label, value in normalized:
+        if label not in parents:
+            continue
+        if not value or value[0] not in service or (len(value) == 2 and value[1] not in logistics):
             return False
-        path = list(map(norm, value))
-        if key in parents:
-            if path[0] not in service or (len(path) == 2 and path[1] not in logistics):
-                return False
-            parent = True
-            complete |= len(path) == 2
-        else:
-            if len(path) != 1 or path[0] not in logistics:
-                return False
-            child = True
-    return complete or (parent and child)
+        complete |= len(value) == 2
+    return complete
 
 
 def components(payload):

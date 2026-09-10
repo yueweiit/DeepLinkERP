@@ -51,3 +51,17 @@ def test_service_billing_quantity_does_not_turn_fee_table_into_goods(store):
     assert parsed['documents'][0]['tables'][0]['kind']=='fee'
     assert not parsed['goods'] and parsed['coverage']=='unknown'
     assert not plan_application(parsed,[],[{'name':'c','rule_code':'customs_fee','amount':20}],binding_id='b')['ready']
+
+
+def test_private_file_size_limit_keeps_parsed_source_and_records_cache_gap(store):
+    from overseas_costing.services.logistics_settlement.documents import enrich_raw
+    data=workbook('完整货物明细',[['物料编码','数量','单位'],['A',2,'件']])
+    row=source('E');row['attachments']=[{'file_id':'f','file_name':'cargo.xlsx','archive_status':'archived','archive_quality':'original','sha256':'large'}]
+    class MaxFileSizeReached(Exception):
+        pass
+    def cache_file(*_):
+        raise MaxFileSizeReached('File size exceeded the maximum allowed size of 10.0 MB')
+    result=enrich_raw(store,row,reader=lambda _:data,cache_file=cache_file)
+    doc=result['settlement_documents'][0]
+    assert doc['tables'] and not doc.get('file_url') and doc['cache_issues']
+    assert store.count('document')==1

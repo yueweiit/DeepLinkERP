@@ -20,18 +20,20 @@ from psycopg.types.json import Jsonb
 from overseas_costing.integrations.dingtalk_approval_source import ApprovalSourceConfig, PostgresApprovalSource
 from overseas_costing.integrations.logistics_settlement_source import SettlementArchive
 from overseas_costing.services.logistics_settlement.jobs import start_job, run_step
-from overseas_costing.services.logistics_settlement.model import parse_source
+from overseas_costing.services.logistics_settlement.model import is_logistics_expense, parse_source
 from overseas_costing.services.logistics_settlement.store import Store
 
 DSN = os.environ.get('SETTLEMENT_ADAPTER_TEST_DSN')
 pytestmark = pytest.mark.skipif(not DSN, reason='Requires an explicitly configured disposable PostgreSQL database')
 UPPER = '2099-01-01T00:00:00+00:00'
 MIGRATIONS = [
+    '20260703000000_create_ding_process_template',
     '20260703000001_create_ding_approval_instance',
     '1788492000000_create_costing_archive',
     '1788492060000_limit_archive_to_logistics',
     '1788505200000_add_archive_diagnostics',
     '20260909000000_logistics_settlement_archive',
+    '20260910000000_purchase_template_scope',
 ]
 
 
@@ -93,7 +95,8 @@ class TrackedArchive(SettlementArchive):
 @pytest.fixture
 def fixture(pg_config):
     admin = psycopg.connect(DSN, autocommit=True, row_factory=dict_row)
-    admin.execute('TRUNCATE ding_approval_instance, costing_read.allowed_process_template, costing_read.attachment_archive RESTART IDENTITY CASCADE')
+    admin.execute('TRUNCATE ding_process_template, ding_approval_instance, costing_read.allowed_process_template, costing_read.attachment_archive RESTART IDENTITY CASCADE')
+    admin.execute('TRUNCATE costing_read.purchase_template_scope, costing_read.purchase_approval_exposure')
     admin.execute("INSERT INTO costing_read.allowed_process_template(process_code,purpose,archive_attachments) VALUES ('LOG','international_logistics',true),('BUY','purchase_expense',false)")
     config = ApprovalSourceConfig(pg_config['host'], int(pg_config.get('port', 5432)), pg_config['dbname'], 'costing_reader', '')
     archive = TrackedArchive(TrackedSource(config))
@@ -314,3 +317,34 @@ def test_empty_changed_source_request_returns_no_rows(fixture):
     admin, archive = fixture
     approval(admin, 'unrelated')
     assert archive.get_sources([]) == []
+
+
+def test_purchase_classifier_contract_matches_upstream_sql_and_python(fixture):
+    admin, _ = fixture
+    local_fixture = Path(__file__).resolve().parent.parent / 'fixtures/purchase-category-cases.json'
+    upstream = Path(os.environ.get('SETTLEMENT_UPSTREAM_WORKTREE') or
+                    Path(__file__).resolve().parents[3].parent / 'dingtalk-settlement-upstream')
+    cases = json.loads(local_fixture.read_text())
+    assert cases == json.loads((upstream / 'src/db/fixtures/purchase-category-cases.json').read_text())
+    for case in cases:
+        sql_result = admin.execute('SELECT costing_read.is_logistics_purchase(%s) AS eligible',
+                                   (Jsonb(case['components']),)).fetchone()['eligible']
+        python_result = is_logistics_expense({c['name']: c['value'] for c in case['components']})
+        assert sql_result is python_result is case['expected'], case['description']
+
+
+def test_new_purchase_template_exposes_old_approval_in_incremental_consumer(fixture):
+    admin, archive = fixture
+    fields = [{'name':'采购支出Gastos de Compra','value':'服务商采购Compra de proveedores'},
+              {'name':'服务类采购 Adquisiciones de servicios','value':'物流及运输服务Servicios de logística y transporte'}]
+    admin.execute("""INSERT INTO ding_approval_instance(corp_id,process_instance_id,process_code,status,result,
+        updated_at,form_component_values,raw_payload) VALUES
+        ('corp-a','newly-visible','FUTURE','COMPLETED','agree','2025-01-01',%s,'{}')""", (Jsonb(fields),))
+    assert archive.page(upper=UPPER)['items'] == []
+    boundary = admin.execute('SELECT clock_timestamp() AS boundary').fetchone()['boundary']
+    admin.execute("INSERT INTO ding_process_template(corp_id,process_code,name) VALUES ('corp-a','FUTURE','未来公司采购支出')")
+    rows = archive.page(lower=boundary.isoformat(), upper=UPPER)['items']
+    assert [row['process_instance_id'] for row in rows] == ['newly-visible']
+    assert parse_source(rows[0], logistics_codes={'LOG'})['kind'] == 'expense'
+    admin.execute("UPDATE ding_process_template SET name='历史模板',is_deleted=true,enabled=false WHERE process_code='FUTURE'")
+    assert [row['process_instance_id'] for row in archive.page(upper=UPPER)['items']] == ['newly-visible']

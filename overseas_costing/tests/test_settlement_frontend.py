@@ -153,7 +153,183 @@ def test_manual_search_rejects_missing_reason_without_preparing_a_candidate():
 w.settlementApi=async(method,args)=>{calls.push({method,args});return {ok:true,items:[]}};
 await w.openSettlementSearch('B');active.dialog.get_value=()=>'';
 await assert.rejects(()=>active.handler('choose',{attr:()=> 'expense'}),/人工关联依据/);
-assert.deepEqual(calls.map(x=>x.method),['find_expenses']);
+assert.deepEqual(calls,[]);
+''')
+
+
+BATCH_CONTROLLER = CONTROLLER + '''
+w.detailState={batchName:'B',versionName:'V',tab:'documents'};
+const timers=new Map();let timerId=0;
+global.setTimeout=(fn,ms)=>{timers.set(++timerId,{fn,ms});return timerId};
+global.clearTimeout=id=>timers.delete(id);
+w.settlementNotice=(s,message)=>s.notice=message;
+'''
+
+
+def test_batch_rpc_reads_with_get_and_starts_with_post():
+    run_js('''
+const calls=[];global.frappe={call:async request=>{calls.push(request);return {message:{ok:true}}}};
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true}};
+assert.deepEqual(await w.settlementApi('get_batch_settlement',{batch_name:'B',version_name:'V'}),{ok:true});
+await w.settlementApi('start_batch_matching',{batch_name:'B',version_name:'V'});
+assert.equal(calls[0].type,'GET');assert.equal(calls[1].type,'POST');
+assert(calls.every(x=>x.args.batch_name==='B'&&x.args.version_name==='V'));
+''')
+
+
+def test_batch_open_starts_rules_once_and_polls_only_current_ticket():
+    run_js(BATCH_CONTROLLER + '''
+let status='not_started';
+w.settlementApi=async(method,args)=>{calls.push({method,args});
+ if(method==='start_batch_matching'){status='running';return {ok:true,matching:{status,stage:'rules',approval_no:'LOG-123'}};}
+ return {ok:true,viewed_version:'V',logistics:{approval_no:'LOG-123'},matching:{status,stage:'rules',total:5,processed:1}};
+};
+await w.openBatchSettlementDialog('B','V');
+assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,1);
+assert(calls.every(x=>x.args.batch_name==='B'&&x.args.version_name==='V'));
+assert.equal(timers.size,1);assert.equal([...timers.values()][0].ms,3000);
+assert(active.html.includes('本票匹配'));assert(active.html.includes('LOG-123'));assert(active.html.includes('规则匹配'));
+assert(!active.html.includes('一键匹配历史'));assert(!active.html.includes('data-settlement-action="history"'));
+await active.handler('refresh');assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,1);
+status='completed';const poll=[...timers.values()][0];timers.clear();await poll.fn();
+assert.equal(calls.at(-1).method,'get_batch_settlement');assert.equal(timers.size,0);
+assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,1);
+''')
+
+
+def test_batch_cached_no_match_and_global_candidates_are_read_without_restarting():
+    run_js(BATCH_CONTROLLER + '''
+for(const candidates of [[],[{id:'c',revision:1,status:'pending',reason:'同一运单',expense:{approval_no:'EXP'},logistics:{approval_no:'LOG'}}]]){
+ calls.length=0;
+ w.settlementApi=async(method,args)=>{calls.push({method,args});return {ok:true,logistics:{approval_no:'LOG'},candidates,matching:{status:'completed',stage:'saved',cached:true,no_match:candidates.length?0:4,recommended:candidates.length,finished_at:'2026-09-10T08:00:00Z',message:'已读取本票保存结果'}}};
+ await w.openBatchSettlementDialog('B','V');await active.handler('refresh');
+ assert(calls.every(x=>x.method==='get_batch_settlement'));assert.equal(timers.size,0);
+ assert(active.html.includes('2026-09-10T08:00:00Z'));assert(active.html.includes('已读取本票保存结果'));
+ assert(active.html.includes(candidates.length?'同一运单':'未找到可靠匹配'));
+ w.stopSettlementDialog(active);
+}
+''')
+
+
+def test_failed_and_partial_batch_jobs_wait_for_explicit_ticket_retry():
+    run_js(BATCH_CONTROLLER + '''
+for(const initial of ['failed','partial']){
+ calls.length=0;let status=initial;
+ w.settlementApi=async(method,args)=>{calls.push({method,args});if(method==='start_batch_matching')status='running';return {ok:true,logistics:{approval_no:'LOG'},matching:{status,stage:'deepseek',error:'模型错误<script>',failed:2}}};
+ await w.openBatchSettlementDialog('B','V');await active.handler('refresh');
+ assert(calls.every(x=>x.method==='get_batch_settlement'));assert.equal(timers.size,0);
+ assert(active.html.includes('本票重试'));assert(active.html.includes('模型错误&lt;script&gt;'));assert(!active.html.includes('<script>'));
+ await active.handler('retry-matching');
+ assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,1);
+ assert(active.html.includes('DeepSeek'));assert.equal(timers.size,1);w.stopSettlementDialog(active);
+}
+''')
+
+
+def test_automatic_batch_matching_is_decided_once_per_opening_even_when_status_changes():
+    run_js(BATCH_CONTROLLER + '''
+for(const initial of ['completed','partial','failed','stale']){
+ calls.length=0;let status=initial;
+ w.settlementApi=async(method,args)=>{calls.push({method,args});if(method==='start_batch_matching')status='completed';return {ok:true,matching:{status}}};
+ await w.openBatchSettlementDialog('B','V');
+ assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,initial==='stale'?1:0);
+ status='stale';await active.handler('refresh');
+ assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,initial==='stale'?1:0);
+ assert(active.html.includes('本票重试'));w.stopSettlementDialog(active);
+}
+''')
+
+
+def test_start_failure_keeps_ticket_retry_without_automatic_resubmission():
+    run_js(BATCH_CONTROLLER + '''
+const actualWrite=Workbench.prototype.settlementWrite;
+w.settlementWrite=(state,action)=>{state.dialog.$wrapper={find:()=>({prop:()=>{}})};return actualWrite.call(w,state,action)};
+w.settlementApi=async(method,args)=>{calls.push({method,args});if(method==='start_batch_matching')throw Error('连接中断');return {ok:true,matching:{status:'not_started'}}};
+await w.openBatchSettlementDialog('B','V');
+assert(active.html.includes('连接中断'));assert(active.html.includes('本票重试'));assert.equal(active.busy,false);
+await active.handler('refresh');assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,1);
+await active.handler('retry-matching');assert.equal(calls.filter(x=>x.method==='start_batch_matching').length,2);
+assert.equal(timers.size,0);
+''')
+
+
+def test_bound_and_historical_batch_never_auto_match_or_offer_retry():
+    run_js(BATCH_CONTROLLER + '''
+for(const data of [{binding:{},expense:{approval_no:'BOUND'},matching:{status:'not_started'}},{historical:true,matching:{status:'stale'}}]){
+ calls.length=0;w.settlementApi=async(method,args)=>{calls.push({method,args});return {ok:true,...data}};
+ await w.openBatchSettlementDialog('B','V');
+ assert.deepEqual(calls.map(x=>x.method),['get_batch_settlement']);assert.equal(timers.size,0);
+ assert(!active.html.includes('data-settlement-action="retry-matching"'));
+ if(data.binding)assert(active.html.includes('BOUND'));
+ if(data.historical)await assert.rejects(()=>active.handler('retry-matching'),/历史版本/);
+ w.stopSettlementDialog(active);
+}
+''')
+
+
+def test_closed_or_navigated_batch_result_cannot_start_or_schedule_matching():
+    run_js(BATCH_CONTROLLER + '''
+for(const change of ['close','version','batch']){
+ w.detailState={batchName:'B',versionName:'V',tab:'documents'};calls.length=0;let resolve;
+ w.settlementApi=(method,args)=>{calls.push({method,args});return new Promise(r=>resolve=r)};
+ const pending=w.openBatchSettlementDialog('B','V');
+ if(change==='close')w.stopSettlementDialog(active);else if(change==='version')w.detailState.versionName='V2';else w.detailState.batchName='OTHER';
+ resolve({ok:true,logistics:{approval_no:'WRONG'},matching:{status:'not_started'}});await pending;
+ assert.deepEqual(calls.map(x=>x.method),['get_batch_settlement']);assert.equal(timers.size,0);assert(!active.html);
+}
+''')
+
+
+def test_batch_latest_read_wins_and_late_start_after_close_has_no_poll():
+    run_js(BATCH_CONTROLLER + '''
+const resolvers=[];w.settlementApi=(method,args)=>{calls.push({method,args});return new Promise(r=>resolvers.push(r))};
+const opening=w.openBatchSettlementDialog('B','V');const refresh=active.handler('refresh');
+resolvers[1]({ok:true,matching:{status:'completed',message:'NEW'}});await refresh;
+resolvers[0]({ok:true,matching:{status:'not_started',message:'OLD'}});await opening;
+assert(active.html.includes('NEW'));assert(!active.html.includes('OLD'));assert.equal(calls.length,2);
+w.stopSettlementDialog(active);calls.length=0;resolvers.length=0;
+const next=w.openBatchSettlementDialog('B','V');resolvers[0]({ok:true,matching:{status:'not_started'}});
+await new Promise(r=>setImmediate(r));assert.equal(calls[1].method,'start_batch_matching');
+w.stopSettlementDialog(active);resolvers[1]({ok:true,matching:{status:'running',stage:'rules'}});await next;
+assert.equal(calls.length,2);assert.equal(timers.size,0);
+''')
+
+
+def test_batch_review_confirmation_carries_fixed_batch_and_version_context():
+    run_js(BATCH_CONTROLLER + '''
+w.settlementApi=async(method,args)=>{calls.push({method,args});return {ok:true,viewed_version:'V',logistics:{approval_no:'LOG'},matching:{status:'completed'},candidates:[{id:'C',revision:4,status:'pending',expense:{approval_no:'E'},logistics:{approval_no:'LOG'}}]}};
+await w.openBatchSettlementDialog('B','V');await active.handler('candidate',{attr:()=> 'C'});
+await active.handler('confirm');const confirmation=calls.find(x=>x.method==='confirm_matches');
+assert.equal(confirmation.args.batch_name,'B');assert.equal(confirmation.args.version_name,'V');
+assert.deepEqual(JSON.parse(confirmation.args.selections).map(x=>x.id),['C']);
+''')
+
+
+def test_manual_batch_search_stays_empty_until_query_and_keeps_target_and_version():
+    run_js(BATCH_CONTROLLER + '''
+const values={settlement_query:'',settlement_reason:'核对本票运单'};let review;
+w.settlementApi=async(method,args)=>{calls.push({method,args});return method==='prepare_manual_candidate'?{ok:true,candidate:{id:'C'}}:{ok:true,items:[{id:'E',approval_no:'EXP'}]}};
+w.openSettlementCandidateReview=(candidates,context)=>review={candidates,context};
+await w.openSettlementSearch('B',null,null,{versionName:'V',logistics:{approval_no:'LOG-123'}});
+active.dialog.get_value=key=>values[key];assert.equal(calls.length,0);
+assert(active.html.includes('LOG-123'));assert(active.html.includes('请输入'));assert(active.html.includes('本票'));
+await active.handler('search');assert.equal(calls.length,0);
+values.settlement_query='运单 A';await active.handler('search');
+assert.deepEqual(calls[0],{method:'find_expenses',args:{batch_name:'B',query:'运单 A',after:null}});
+assert(active.html.includes('LOG-123'));assert(active.html.includes('EXP'));
+await active.handler('choose',{attr:()=> 'E'});
+assert.equal(review.context.batchName,'B');assert.equal(review.context.versionName,'V');
+assert.equal(calls.at(-1).args.reason,'核对本票运单');
+''')
+
+
+def test_global_history_scope_accepts_purchase_names_and_parent_aliases():
+    run_js('''
+let html='';w.settlementBody=(s,value)=>html=value;
+w.renderSettlementHistory({status:'pending',pages:[]},{job:{},candidates:[]});
+assert(html.includes('所有名称含'));assert(html.includes('父级'));assert(html.includes('别名'));
+assert(html.includes('物流及运输服务'));assert(html.includes('已拒绝'));assert(html.includes('已撤销'));assert(html.includes('已删除'));
+assert(!html.includes('采购支出＝服务类采购'));
 ''')
 
 

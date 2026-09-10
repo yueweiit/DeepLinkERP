@@ -32,6 +32,11 @@ def get_batch_settlement(batch_name, version_name=None):
 
 
 @frappe.whitelist(methods=['POST'])
+def start_batch_matching(batch_name, version_name=None):
+    return runtime.start_batch_matching(require_batch_permission(batch_name, 'write'), version_name)
+
+
+@frappe.whitelist(methods=['POST'])
 def start_history_matching():
     frappe.only_for('System Manager')
     return runtime.begin('initialize')
@@ -91,7 +96,7 @@ def control_job(job_id, action):
 
 
 @frappe.whitelist(methods=['POST'])
-def confirm_matches(selections):
+def confirm_matches(selections, batch_name=None, version_name=None):
     selections = _decode(selections, list)
     if not selections or len(selections) > 200:
         raise ValueError('每次确认 1 至 200 组候选')
@@ -100,9 +105,16 @@ def confirm_matches(selections):
     for selection in selections:
         try:
             with db.atomic():
-                candidate = db.get('candidate', selection['id'])
+                db.get('state', 'match_lock', lock=True)
+                candidate = db.get('candidate', selection['id'], lock=True)
                 if not candidate:
                     raise ValueError('候选不存在')
+                if batch_name:
+                    require_batch_permission(batch_name, 'write')
+                    if not db.find('batch_map', batch=batch_name, source_id=candidate['logistics_id']):
+                        raise ValueError('候选不属于本票国际物流')
+                    if version_name and (FrappeLedger().get('batch', batch_name, lock=True) or {}).get('current_version') != version_name:
+                        raise ValueError('成本版本已变化，请刷新当前版本后确认')
                 _authorize_source(db, candidate['logistics_id'], write=True)
                 binding = confirm_candidate(db, candidate['id'], selection['revision'], frappe.session.user,
                                             resolve=selection.get('resolve') is True, reason=str(selection.get('reason') or ''))
@@ -110,12 +122,29 @@ def confirm_matches(selections):
                     binding = configure_binding(db, binding,
                         coverage=_decode(selection['coverage'], list) if selection.get('coverage') is not None else None,
                         negative_confirmed=selection.get('negative_confirmed') is True, actor=frappe.session.user)
-                applied = apply_binding(db, FrappeLedger(), binding['id'], frappe.session.user)
-                results.append({'candidate_id': candidate['id'], 'ok': True, 'application_status': applied['application_status'], 'issues': applied.get('issues', [])})
+            # Association and adoption are distinct durable states. A document/fee
+            # failure rolls back only adoption; current source gates block old costs.
+            applied = _apply_saved_binding(db, binding)
+            results.append({'candidate_id': candidate['id'], 'ok': True, 'application_status': applied['application_status'], 'issues': applied.get('issues', [])})
         except Exception as exc:
             results.append({'candidate_id': selection.get('id'), 'ok': False, 'message': str(exc)})
     return {'ok': all(r['ok'] for r in results), 'results': results,
             'confirmed_count': sum(r['ok'] for r in results), 'failed_count': sum(not r['ok'] for r in results)}
+
+
+def _apply_saved_binding(db, binding):
+    try:
+        return apply_binding(db, FrappeLedger(), binding['id'], frappe.session.user)
+    except Exception as exc:
+        from overseas_costing.services.logistics_settlement.writer import pending
+        with db.atomic():
+            current = db.get('binding', binding['id'], lock=True)
+            if current['revision'] != binding['revision'] or current['expense_id'] != binding['expense_id']:
+                return current
+            issue = '关联已保存，资料采用待重试：' + str(exc)[:300]
+            pending(db, current, 'pending', [issue])
+            db.audit(binding['id'], 'application_failed', frappe.session.user, reason=issue)
+            return current
 
 
 @frappe.whitelist(methods=['POST'])
@@ -138,17 +167,19 @@ def correct_match(batch_name, binding_id, expected_revision, candidate_id, candi
         binding = replace_binding(db, binding_id, expected_revision, candidate_id, candidate_revision,
                                   frappe.session.user, reason,
                                   on_replace=lambda old,new: reverse_binding(db, FrappeLedger(), old, new, frappe.session.user))
-        applied = apply_binding(db, FrappeLedger(), binding['id'], frappe.session.user)
+    applied = _apply_saved_binding(db, binding)
     return {'ok': True, 'application_status': applied['application_status'], 'issues': applied.get('issues', [])}
 
 
 @frappe.whitelist()
 def find_expenses(batch_name, query='', after=None):
     batch_name = require_batch_permission(batch_name)
+    if not str(query or '').strip():
+        return {'ok': True, 'items': [], 'has_more': False, 'message': '请输入审批号、物流标识或货物关键词；搜索结果仅用于关联本票'}
     db = runtime.store()
     mapping = db.find('batch_map', batch=batch_name, limit=1)
     if not mapping:
-        return {'ok': True, 'items': [], 'message': '请先初始化历史来源'}
+        return {'ok': True, 'items': [], 'message': '请先点击本票匹配以整理当前国际物流原单'}
     logistics = db.get('source', mapping[0]['source_id'])
     token = '%' + str(query).strip().replace('%', '\\%').replace('_', '\\_') + '%'
     params = [logistics['corp'], token, token, after or '']

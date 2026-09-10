@@ -360,9 +360,9 @@ def test_initialization_manifest_and_pause_resume_are_durable(store):
     assert start_job(store, mode='initialize', actor='u')['id'] == job['id']
 
 
-def test_category_requires_parent_and_accepts_exact_structured_path():
+def test_category_accepts_explicit_child_and_exact_structured_path():
     from overseas_costing.services.logistics_settlement.model import is_logistics_expense
-    assert not is_logistics_expense({'服务类采购':'物流及运输服务'})
+    assert is_logistics_expense({'服务类采购':'物流及运输服务'})
     for value in [['服务类采购','物流及运输服务'], '["服务类采购","物流及运输服务"]', '服务类采购→物流及运输服务']:
         assert is_logistics_expense({'采购类别':value})
     assert not is_logistics_expense({'采购支出':'商品类采购','采购类别':['服务类采购','物流及运输服务']})

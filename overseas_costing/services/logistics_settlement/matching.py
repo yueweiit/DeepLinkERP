@@ -76,6 +76,7 @@ def save_binding(store, binding):
 
 def reject_candidate(store, candidate_id, revision, actor, reason):
     with store.atomic():
+        store.get('state', 'match_lock', lock=True)
         candidate = store.get('candidate', candidate_id, lock=True)
         if not candidate or candidate['revision'] != revision or candidate['status'] == 'confirmed':
             raise ValueError('候选已变化，请刷新')
@@ -115,6 +116,8 @@ def confirm_candidate(store, candidate_id, revision, actor, *, resolve=False, re
         if candidate['method'] not in {'manual', 'deepseek'} and logistics['id'] not in current_targets:
             raise ValueError('匹配标识已变化，请重新匹配')
         ambiguous = len(current_targets) > 1 or any(s['id'] != expense['id'] for s in related_expenses(store, logistics)) or any(c['expense_id'] != expense['id'] and c['status'] in {'pending','conflict'} for c in store.find('candidate', logistics_id=logistics['id']))
+        ambiguous = ambiguous or any(c['logistics_id'] != logistics['id'] and c['status'] in {'pending', 'conflict'}
+                                     for c in store.find('candidate', expense_id=expense['id']))
         if ambiguous and not (resolve and reason.strip()):
             raise ValueError('关联冲突：新增了其他支出候选，请逐项核对后确认')
         binding = {'id': digest('binding', logistics['id']), 'logistics_id': logistics['id'], 'expense_id': expense['id'], 'actor': actor, 'revision': 1, 'status': 'bound', 'application_status': 'pending', 'candidate_id': candidate_id}

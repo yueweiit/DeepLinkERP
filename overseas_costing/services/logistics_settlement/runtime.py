@@ -153,6 +153,7 @@ def source_summary(source):
 
 
 def batch_status(batch_name, version_name=None):
+    from . import batch_matching
     db = store()
     ledger = FrappeLedger()
     batch = ledger.get('batch', batch_name) or {}
@@ -162,16 +163,17 @@ def batch_status(batch_name, version_name=None):
     historical = bool(version_name and version_name != batch.get('current_version'))
     mappings = db.find('batch_map', batch=batch_name, limit=1)
     if not mappings:
-        return {'ok': True, 'mapped': False, 'binding': None, 'historical': historical, 'viewed_version': viewed_version, 'candidates': [], 'message': '尚未整理此批次的国际物流来源'}
+        return {'ok': True, 'mapped': False, 'binding': None, 'historical': historical, 'viewed_version': viewed_version, 'candidates': [],
+                'matching': {'status': 'not_started', 'cached': False}, 'message': '尚未整理此批次的国际物流来源；匹配时仅补读本票审批'}
     source = db.get('source', mappings[0]['source_id'])
     bindings = db.find('binding', logistics_id=source['id'], limit=1)
     binding = bindings[0] if bindings else None
-    candidates = db.find('candidate', logistics_id=source['id'], limit=100)
-    candidates = [candidate_view(db, c) for c in candidates if c['status'] not in {'stale', 'rejected'}]
+    candidates = [candidate_view(db, c) for c in batch_matching.candidates(db, source)]
     result = {'ok': True, 'mapped': True, 'historical': historical, 'viewed_version': viewed_version, 'logistics': source_summary(source), 'candidates': candidates,
               'binding': {k: binding.get(k) for k in ('id', 'revision', 'application_status', 'issues', 'version', 'source_snapshot', 'coverage')} if binding else None,
               'sync': db.get('state', 'sync') or {}, 'health': db.get('state', 'health') or {},
               'document_sync': next(iter(db.find('document_sync', batch=batch_name, limit=1)), None)}
+    result['matching'] = batch_matching.status(db, source['id']) if not historical else {'status': 'historical', 'cached': True}
     if binding:
         from .reviewed_cargo import resolve_reviewed_source
         result['expense'] = source_summary(resolve_reviewed_source(db, db.get('source', binding['expense_id']), binding))
@@ -201,6 +203,88 @@ def candidate_view(db, candidate):
     return {**{k: candidate.get(k) for k in ('id', 'revision', 'status', 'method', 'reason', 'evidence')},
             'logistics': source_summary(db.get('source', candidate['logistics_id'])),
             'expense': source_summary(db.get('source', candidate['expense_id']))}
+
+
+def ensure_batch_source(db, batch_name):
+    """Explicit match action only: hydrate one exact approval, never create a batch."""
+    from .model import parse_source
+    ledger = FrappeLedger()
+    batch = ledger.get('batch', batch_name) or {}
+    mapping = db.find('batch_map', batch=batch_name, limit=1)
+    if mapping:
+        return db.get('source', mapping[0]['source_id'])
+    instance = str(batch.get('source_instance_id') or '').strip()
+    if not instance:
+        raise ValueError('本票缺少国际物流审批实例，请先补齐原单身份')
+    corp = str(batch.get('source_corp_id') or '').strip()
+    if not corp:
+        corp = str(frappe.conf.get('overseas_costing_settlement_legacy_corp_id') or frappe.conf.get('overseas_costing_dingtalk_corp_id') or '')
+    if not corp:
+        raise ValueError('本票缺少企业信息，无法安全确定国际物流原单')
+    source = db.get('source', digest(corp, instance))
+    if not source:
+        rows = archive().get_sources([(corp, instance)])
+        exact = [r for r in rows if r.get('corp_id') == corp and r.get('process_instance_id') == instance]
+        if len(exact) != 1:
+            raise ValueError('上游归档尚未提供本票国际物流审批，请等待归档补齐后重试')
+        raw = exact[0]
+        if parse_source(raw, logistics_codes=logistics_codes())['kind'] != 'logistics':
+            raise ValueError('本票原单不是国际物流流程，需核对批次来源')
+        try:
+            raw = prepare_source(raw)
+        except Exception as exc:
+            # A document problem must not erase the approval identity or trigger
+            # a global initialization. Keep the source explicitly pending review.
+            raw = {**raw, 'settlement_fee_issues': ['本票附件待处理：' + str(exc)[:300]]}
+        source = db.ingest(parse_source(raw, logistics_codes=logistics_codes()))
+    if source['kind'] != 'logistics' or source['invalid']:
+        raise ValueError('本票国际物流来源已失效或类型不符')
+    with db.atomic():
+        db.get('state', 'match_lock', lock=True)
+        current_batch = ledger.get('batch', batch_name, lock=True) or {}
+        if current_batch.get('source_instance_id') != instance or current_batch.get('source_corp_id') not in (None, '', corp):
+            raise ValueError('批次原单已变化，请刷新后重试')
+        mappings = db.find('batch_map', source_id=source['id'])
+        if mappings and mappings[0]['batch'] != batch_name:
+            raise ValueError('该国际物流已对应其他批次，请先处理重复批次')
+        existing = db.find('batch_map', batch=batch_name)
+        if existing and existing[0]['source_id'] != source['id']:
+            raise ValueError('本票来源映射已变化，请刷新')
+        if not existing:
+            db.insert('batch_map', {'id': source['id'], 'source_id': source['id'], 'batch': batch_name, 'data': '{}'})
+        ledger.put('batch', batch_name, {'source_corp_id': corp})
+    return source
+
+
+def start_batch_matching(batch_name, version_name=None):
+    from . import batch_matching
+    db = store()
+    batch = FrappeLedger().get('batch', batch_name) or {}
+    if version_name and version_name != batch.get('current_version'):
+        raise ValueError('历史版本只读，请返回当前版本匹配')
+    source = ensure_batch_source(db, batch_name)
+    with db.atomic():
+        db.get('state', 'match_lock', lock=True)
+        batch = FrappeLedger().get('batch', batch_name, lock=True) or {}
+        if version_name and version_name != batch.get('current_version'):
+            raise ValueError('成本版本已变化，请刷新当前版本后匹配')
+        job = batch_matching.start(db, source['id'], frappe.session.user)
+    if job.get('status') == 'queued':
+        frappe.enqueue('overseas_costing.services.logistics_settlement.runtime.run_batch_matching', queue='long',
+                       timeout=600, batch_matching_job_id=job['id'], enqueue_after_commit=True)
+    return {'ok': True, 'matching': job}
+
+
+def run_batch_matching(batch_matching_job_id):
+    from . import batch_matching
+    from overseas_costing.services import allocation_service
+    config = allocation_service._ai_config()
+    config['timeout'] = min(120, max(60, float(config.get('timeout') or 60)))
+    def call_model(messages):
+        if not config.get('api_key'):
+            raise ValueError('未配置 DeepSeek API 密钥，规则候选已保存，可人工搜索关联')
+        return allocation_service._extract_json_object(allocation_service._call_chat_completions(config, messages))
+    return batch_matching.run(store(), batch_matching_job_id, call_model, config.get('model', ''))
 
 
 def ensure_batch(db, source):

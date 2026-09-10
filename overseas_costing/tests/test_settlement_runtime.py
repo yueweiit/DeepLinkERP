@@ -12,6 +12,38 @@ def attach_runtime(monkeypatch, s, ledger):
     monkeypatch.setattr(runtime, 'archive', lambda: pytest.fail('normal page query contacted upstream'))
 
 
+def test_single_batch_mapping_uses_exact_local_source_without_creating_batch(setup, monkeypatch):
+    s,l,b,v,i,r,binding = setup
+    attach_runtime(monkeypatch,s,l)
+    s.sql('DELETE FROM oc_ls_batch_map')
+    l.put('batch',b['name'],{'source_corp_id':'C','source_instance_id':'L'})
+    result = runtime.ensure_batch_source(s,b['name'])
+    assert result['id'] == binding['logistics_id']
+    assert s.find('batch_map',batch=b['name'])[0]['source_id'] == binding['logistics_id']
+    assert len(l.rows('batch')) == 1
+
+
+def test_single_batch_missing_identity_never_starts_global_initialization(setup, monkeypatch):
+    s,l,b,*_ = setup; attach_runtime(monkeypatch,s,l)
+    s.sql('DELETE FROM oc_ls_batch_map')
+    with pytest.raises(ValueError,match='审批实例'):
+        runtime.ensure_batch_source(s,b['name'])
+
+
+def test_single_batch_hydrates_only_exact_approval_and_preserves_existing_costs(setup, monkeypatch):
+    from types import SimpleNamespace
+    s,l,b,v,i,r,binding = setup; attach_runtime(monkeypatch,s,l)
+    s.sql('DELETE FROM oc_ls_batch_map')
+    l.put('batch',b['name'],{'source_corp_id':'C','source_instance_id':'new-L'})
+    calls=[]
+    monkeypatch.setattr(runtime,'archive',lambda:SimpleNamespace(get_sources=lambda pairs:calls.append(pairs) or [source('new-L','logistics')]))
+    monkeypatch.setattr(runtime,'logistics_codes',lambda:{'logistics'})
+    monkeypatch.setattr(runtime,'prepare_source',lambda raw:raw)
+    result=runtime.ensure_batch_source(s,b['name'])
+    assert calls == [[('C','new-L')]] and result['instance'] == 'new-L'
+    assert l.get('item',i['name'])['quantity'] == 2 and l.get('rule',r['name'])['amount'] == 200
+
+
 def test_normal_batch_query_uses_only_local_persisted_data(setup, monkeypatch):
     s,l,b,v,i,r,binding = setup
     attach_runtime(monkeypatch,s,l)

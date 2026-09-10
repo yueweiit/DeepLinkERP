@@ -77,7 +77,15 @@ def enrich_raw(store, raw, *, reader, cache_file=None):
                 content = reader(manifest)
                 parsed = parse_document(content, str(manifest.get('file_name') or 'attachment'))
                 if cache_file:
-                    parsed['file_url'] = cache_file(content, str(manifest.get('file_name') or 'attachment'))
+                    try:
+                        parsed['file_url'] = cache_file(content, str(manifest.get('file_name') or 'attachment'))
+                    except Exception as exc:
+                        if type(exc).__name__ != 'MaxFileSizeReached':
+                            raise
+                        # The immutable archive is still available. A private File
+                        # cache size limit must not discard the entire approval.
+                        parsed['cache_issues'] = ['附件超过本地预览大小限制；原始归档保留，预览待处理']
+                        parsed['issues'] = list(parsed.get('issues') or []) + parsed['cache_issues']
             cached = {'id': identity, 'source_id': digest(row.get('corp_id'), row.get('process_instance_id')),
                       'fingerprint': identity, 'status': parsed['status'], 'file_id': manifest.get('file_id'),
                       'file_name': manifest.get('file_name'), 'manifest': manifest, **parsed}
