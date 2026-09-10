@@ -3,8 +3,14 @@ from overseas_costing.services.logistics_settlement.model import dumps
 
 
 class SettlementArchive:
-    def __init__(self, source):
+    def __init__(self, source, *, logistics_codes, tracked_pairs=()):
         self.source = source
+        self.logistics_codes = sorted(logistics_codes)
+        self.tracked_pairs = tracked_pairs
+
+    @staticmethod
+    def _expense_category_sql():
+        return "costing_read.is_logistics_purchase(COALESCE(form_component_values, raw_payload->'formComponentValues', raw_payload->'form_component_values'))"
 
     def health(self):
         with self.source._connection() as connection:
@@ -31,6 +37,16 @@ class SettlementArchive:
         if pairs:
             where.append('(' + ' OR '.join('(corp_id=%s AND process_instance_id=%s)' for _ in pairs) + ')')
             args.extend(v for pair in pairs for v in pair)
+        else:
+            # Filter before pagination and payload/attachment hydration. Previously
+            # adopted sources remain readable after their category is revoked.
+            scope = 'process_code=ANY(%s) OR ' + self._expense_category_sql()
+            args.append(self.logistics_codes)
+            tracked_pairs = self.tracked_pairs() if callable(self.tracked_pairs) else self.tracked_pairs
+            if tracked_pairs:
+                scope += " OR (corp_id,process_instance_id) IN (SELECT value->>0,value->>1 FROM jsonb_array_elements(%s::jsonb))"
+                args.append(dumps(tracked_pairs))
+            where.append('(' + scope + ')')
         projection = 'corp_id, process_instance_id, changed_at, archive_revision' if lightweight else '*'
         sql = '''WITH changed AS (
             SELECT a.*, GREATEST(a.updated_at, COALESCE(f.attachment_updated_at, a.updated_at)) AS changed_at,
@@ -71,9 +87,18 @@ class SettlementArchive:
     def preflight(self):
         with self.source._connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute('''SELECT process_code, EXTRACT(YEAR FROM create_time)::int AS year,
-                    status, result, COUNT(*)::int AS count, MIN(create_time) AS first_created,
+                cursor.execute('''SELECT CASE WHEN process_code=ANY(%s) THEN 'logistics'
+                    WHEN ''' + self._expense_category_sql() + ''' THEN 'expense' ELSE 'excluded' END AS source_kind,
+                    process_code, EXTRACT(YEAR FROM create_time)::int AS year,
+                    status, result, deleted_at IS NOT NULL AS deleted, COUNT(*)::int AS count, MIN(create_time) AS first_created,
                     MAX(create_time) AS last_created FROM costing_read.approval_instances_v2
-                    GROUP BY process_code, EXTRACT(YEAR FROM create_time), status, result ORDER BY year, process_code''')
+                    GROUP BY source_kind, process_code, EXTRACT(YEAR FROM create_time), status, result, deleted_at IS NOT NULL
+                    ORDER BY year, process_code''', (self.logistics_codes,))
                 inventory = [dict(r) for r in cursor.fetchall()]
-        return {'inventory': inventory, 'health': self.health(), 'data_source': 'postgres'}
+        counts = {'logistics': 0, 'expense': 0, 'approved_expense': 0, 'excluded': 0}
+        for row in inventory:
+            counts[row['source_kind']] += row['count']
+            if row['source_kind'] == 'expense' and not row['deleted'] and row['status'] == 'COMPLETED' and str(row['result']).lower() in {'agree', 'approved', 'pass'}:
+                counts['approved_expense'] += row['count']
+        return {'inventory': [r for r in inventory if r['source_kind'] != 'excluded'],
+                'scope_counts': counts, 'health': self.health(), 'data_source': 'postgres'}

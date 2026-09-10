@@ -32,7 +32,11 @@ def enabled():
 def archive():
     from overseas_costing.scripts.import_oa_logistics import _get_postgres_approval_source
     from overseas_costing.integrations.logistics_settlement_source import SettlementArchive
-    return SettlementArchive(_get_postgres_approval_source())
+    def tracked_pairs():
+        tracked = store().sql("SELECT s.corp,s.instance FROM oc_ls_source s WHERE s.kind IN ('logistics','expense') OR EXISTS (SELECT 1 FROM oc_ls_binding b WHERE b.expense_id=s.id OR b.logistics_id=s.id)")
+        return [(r['corp'], r['instance']) for r in tracked]
+    return SettlementArchive(_get_postgres_approval_source(), logistics_codes=logistics_codes(),
+                             tracked_pairs=tracked_pairs)
 
 
 def logistics_codes():
@@ -278,6 +282,10 @@ def begin(mode='initialize', start='', end='', request_key=None):
         control = db.get('state', 'control') or {}
         if mode != 'initialize' and not control.get('enabled'):
             return {'ok': True, 'skipped': True, 'message': '物流结算同步已暂停'}
+        if mode != 'initialize':
+            previous_health = db.get('state', 'health') or {}
+            if 'scope_counts' in previous_health:
+                preflight['scope_counts'] = previous_health['scope_counts']
         db.put('state', {'id': 'health', 'updated_at': utcnow(), 'data': dumps(preflight)})
         job = start_job(db, mode=mode, actor=frappe.session.user, start=start, end=end, request_key=request_key)
         if mode == 'initialize':

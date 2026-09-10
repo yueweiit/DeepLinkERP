@@ -27,6 +27,16 @@ assert(w.settlementAmount({amount:null}).includes('未识别'));
 ''')
 
 
+def test_history_distinguishes_eligible_expenses_from_all_read_sources():
+    run_js('''
+let html=''; w.settlementBody=(s,value)=>html=value;
+w.renderSettlementHistory({status:'pending',pages:[]},{job:{status:'running',phase:'load',item_count:800,processed_count:0,excluded_count:622},health:{scope_counts:{logistics:141,expense:37,approved_expense:23,excluded:622}},counts:{},candidates:[]});
+assert(html.includes('物流类采购支出 37')); assert(html.includes('审批通过 23'));
+assert(html.includes('国际物流 141')); assert(html.includes('不符合分类 622'));
+assert(!html.includes('已发现 800')); assert(html.includes('服务类采购 → 物流及运输服务'));
+''')
+
+
 def test_linked_status_never_implies_calculated_and_invalid_source_cannot_be_final():
     run_js('''
 assert(w.settlementAdoption({binding:{application_status:'pending'},expense:{approved:true}}).includes('待采用'));

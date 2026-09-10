@@ -76,7 +76,7 @@ class TrackedSource(PostgresApprovalSource):
 
 class TrackedArchive(SettlementArchive):
     def __init__(self, source):
-        super().__init__(source)
+        super().__init__(source, logistics_codes={'LOG'})
         self.full_pages = 0
         self.requested_pairs = []
 
@@ -162,11 +162,53 @@ def test_preflight_is_accessible_with_migration_granted_reader_role(fixture):
     assert result['data_source'] == 'postgres'
 
 
+def test_inventory_excludes_unrelated_purchases_before_hydration(fixture):
+    admin, archive = fixture
+    approval(admin, 'logistics')
+    categories = {
+        'sea': [{'name': '采购支出Gastos de Compra', 'value': '服务类采购Compra De Servicios'},
+                {'name': '服务类采购 Adquisiciones de servicios', 'value': '物流及运输服务Servicios de logística y transporte'},
+                {'name': '物流及运输服务', 'value': '海运费用'}],
+        'air': [{'name': '采购类别', 'value': ['服务类采购', '物流及运输服务']},
+                {'name': '物流及运输服务', 'value': '空运费用'}],
+        'courier': [{'name': '采购支出', 'value': '服务类采购'}, {'name': '服务类采购', 'value': '物流及运输服务'},
+                    {'name': '物流及运输服务', 'value': '快递费用'}],
+        'road': [{'name': '采购支出', 'value': '服务类采购'}, {'name': '服务类采购', 'value': '物流及运输服务'},
+                 {'name': '物流及运输服务', 'value': '陆运费用'}],
+        'unspecified': [{'name': '采购支出', 'value': '服务类采购'}, {'name': '服务类采购', 'value': '物流及运输服务'}],
+        'commodity': [{'name': '采购支出', 'value': '商品采购'}, {'name': '备注', 'value': '物流及运输服务 海运 MXT500174'}],
+        'consulting': [{'name': '采购支出', 'value': '服务类采购'}, {'name': '服务类采购', 'value': '咨询服务'}],
+    }
+    for instance, fields in categories.items():
+        approval(admin, instance)
+        admin.execute("UPDATE ding_approval_instance SET process_code='BUY',form_component_values=%s WHERE process_instance_id=%s", (Jsonb(fields), instance))
+    admin.execute("UPDATE ding_approval_instance SET status='RUNNING' WHERE process_instance_id='air'")
+    page = archive.page(upper=UPPER)
+    assert {r['process_instance_id'] for r in page['items']} == {'logistics', 'sea', 'air', 'courier', 'road', 'unspecified'}
+    assert archive.source.hydrated == 6
+    counts = archive.preflight()['scope_counts']
+    assert counts == {'logistics': 1, 'expense': 5, 'approved_expense': 4, 'excluded': 2}
+
+
+def test_tracked_expense_category_loss_is_still_read_and_tenant_scoped(fixture):
+    admin, archive = fixture
+    for corp in ('corp-a', 'corp-b'):
+        approval(admin, 'changed-expense', corp=corp)
+    admin.execute("UPDATE ding_approval_instance SET process_code='BUY',form_component_values='[]'::jsonb")
+    archive.tracked_pairs = [('corp-a', 'changed-expense')]
+    rows = archive.inventory_page(upper=UPPER)['items']
+    assert [(r['corp_id'], r['process_instance_id']) for r in rows] == [('corp-a', 'changed-expense')]
+    assert len(archive.get_sources([('corp-b', 'changed-expense')])) == 1
+    archive.tracked_pairs = lambda: [('corp-b', 'changed-expense')]
+    rows = archive.page(upper=UPPER)['items']
+    assert [(r['corp_id'], r['process_instance_id']) for r in rows] == [('corp-b', 'changed-expense')]
+
+
 def test_preflight_sql_is_valid_with_readonly_connection_independent_of_reader_grants(fixture, pg_config):
     admin, _ = fixture
     approval(admin, 'alive'); approval(admin, 'deleted', deleted=True)
     archive = SettlementArchive(PostgresApprovalSource(ApprovalSourceConfig(pg_config['host'], int(pg_config.get('port', 5432)),
-        pg_config['dbname'], pg_config.get('user', 'postgres'), pg_config.get('password', ''))))
+        pg_config['dbname'], pg_config.get('user', 'postgres'), pg_config.get('password', ''))), logistics_codes={'LOG'})
     result = archive.preflight()
     assert sum(row['count'] for row in result['inventory']) == 2
 
@@ -175,6 +217,9 @@ def test_keyset_paging_over_200_equal_timestamps_retains_tombstones(fixture):
     admin, archive = fixture
     for index in range(205):
         approval(admin, f'I{index:04d}', deleted=index == 204)
+    for index in range(7):
+        approval(admin, f'EXCLUDED{index:04d}')
+    admin.execute("UPDATE ding_approval_instance SET process_code='BUY' WHERE process_instance_id LIKE 'EXCLUDED%'")
     approval(admin, 'I0000', corp='corp-b')
     rows, sizes = all_pages(archive)
     assert sizes == [200, 6]

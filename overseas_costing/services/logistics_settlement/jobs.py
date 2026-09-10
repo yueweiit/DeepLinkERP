@@ -83,9 +83,17 @@ def run_step(store, archive, job_id, *, logistics_codes, now=None, apply_source=
                                     raise ValueError('来源暂时无法读取，保留原状态待重试')
                                 item['raw'] = fetched[item['source_id']]
                                 item['inventory_only'] = False
-                            raw = prepare_source(item['raw']) if prepare_source else item['raw']
-                            parsed = parse_source(raw, logistics_codes=logistics_codes)
+                            parsed = parse_source(item['raw'], logistics_codes=logistics_codes)
                             previous = store.get('source', parsed['id'])
+                            # Resume old unfiltered manifests without enriching or
+                            # importing unrelated purchases. Keep adoption revocations.
+                            tracked = previous and (previous['kind'] in {'logistics', 'expense'} or store.find('binding', expense_id=parsed['id'], limit=1))
+                            if parsed['kind'] == 'unclassified' and not tracked:
+                                item.update(status='excluded', error='', attempts=item.get('attempts', 0) + 1)
+                                store.put('job_item', {k: item[k] for k in ('id', 'job_id', 'source_id', 'status')} | {'data': dumps(item)})
+                                continue
+                            if prepare_source:
+                                parsed = parse_source(prepare_source(item['raw']), logistics_codes=logistics_codes)
                             saved = store.ingest(parsed)
                             item['match_changed'] = item.get('force_match', False) or not previous or previous['match_hash'] != saved['match_hash']
                             if item['match_changed']:
@@ -132,6 +140,7 @@ def run_step(store, archive, job_id, *, logistics_codes, now=None, apply_source=
                             store.put('state', {'id': 'sync', 'updated_at': now, 'data': dumps({'watermark': max(job['upper'], previous_state.get('watermark') or ''), 'job_id': job_id, 'last_success': now if not failed else previous_state.get('last_success'), 'failed_count': failed})})
             job['processed_count'] = store.count('job_item', job_id=job_id, status='done')
             job['item_count'] = store.count('job_item', job_id=job_id)
+            job['excluded_count'] = store.count('job_item', job_id=job_id, status='excluded')
             job['last_step_at'] = now
         except Exception as exc:
             job.update(status='failed', error=str(exc), last_step_at=now)

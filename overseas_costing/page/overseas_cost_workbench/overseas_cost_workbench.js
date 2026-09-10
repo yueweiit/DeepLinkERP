@@ -14833,11 +14833,13 @@ class OverseasCostWorkbench {
     const labels = { queued: "排队中", running: "进行中", completed: "本轮完成", partial: "部分失败", paused: "已暂停", failed: "失败" };
     const phases = { inventory: "扫描历史来源", load: "整理资料", match: "生成候选", finished: "已结束" };
     const candidates = data.candidates || [];
+    const scope = data.health?.scope_counts;
     this.settlementBody(state, `
-      <p class="ocw-settlement-hint">覆盖已归档的历史国际物流与物流类采购支出；忽略近期拉取的日期、运输方式及条数。数据读取自本地归档，候选需确认后才建立关联。</p>
+      <p class="ocw-settlement-hint">采购支出先按「服务类采购 → 物流及运输服务」筛选：采购支出＝服务类采购，且服务类采购＝物流及运输服务；不限定海运、空运、快递等下级运输方式。再与历史国际物流匹配，忽略近期拉取的日期及条数。候选需确认后才建立关联。</p>
+      ${scope ? `<p class="ocw-settlement-hint">上次范围核对：国际物流 ${this.escape(scope.logistics)} · 物流类采购支出 ${this.escape(scope.expense)}（审批通过 ${this.escape(scope.approved_expense)}）· 不符合分类 ${this.escape(scope.excluded)}。未通过审批的单据不作为最终核算依据。</p>` : ''}
       ${this.renderSettlementHealth(data)}
       <div class="ocw-settlement-toolbar"><strong>${this.escape(labels[job.status] || "尚未启动")} · ${this.escape(phases[job.phase] || "等待任务")}</strong>
-        <span>已处理 ${this.escape(job.processed_count ?? 0)} / 已发现 ${this.escape(job.item_count ?? 0)} · 失败 ${this.escape(job.failed_count ?? data.failures?.length ?? 0)}</span>
+        <span>已处理 ${this.escape(job.processed_count ?? 0)} / 本轮读取来源 ${this.escape(job.item_count ?? 0)}${job.excluded_count ? ` · 旧清单已排除 ${this.escape(job.excluded_count)}` : ''} · 失败 ${this.escape(job.failed_count ?? data.failures?.length ?? 0)}</span>
         ${!job.id || ["completed"].includes(job.status) ? '<button class="ocw-primary-btn" data-settlement-action="start">一键匹配历史采购支出</button>' : ""}
         ${["running", "queued"].includes(job.status) ? '<button class="ocw-outline-btn" data-settlement-action="pause">暂停</button>' : ""}
         ${["paused", "partial", "failed"].includes(job.status) ? '<button class="ocw-outline-btn" data-settlement-action="retry">继续／重试失败项</button>' : ""}

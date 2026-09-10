@@ -47,6 +47,44 @@ def test_commodity_purchase_with_logistics_text_is_not_settlement():
     assert parse_source(row, logistics_codes={'logistics'})['kind'] == 'unclassified'
 
 
+def test_old_inventory_skips_unrelated_purchase_without_parsing_attachments(store):
+    from overseas_costing.services.logistics_settlement.jobs import start_job, run_step
+    row = source('unrelated')
+    row['raw_payload']['formComponentValues'][1:3] = [{'name': '采购支出', 'value': '商品采购'}]
+    class Archive:
+        def page(self, **kwargs):
+            return {'items': [row, source('E')], 'has_more': False, 'next_cursor': None}
+    prepared = []
+    def prepare(raw):
+        prepared.append(raw['process_instance_id'])
+        return raw
+    job = start_job(store, mode='incremental', actor='u')
+    for _ in range(4):
+        job = run_step(store, Archive(), job['id'], logistics_codes={'logistics'}, prepare_source=prepare)
+    assert prepared == ['E']
+    assert store.count('source') == 1
+    assert job['excluded_count'] == 1
+    assert job['processed_count'] == 1
+
+
+def test_category_loss_of_previous_expense_invalidates_existing_candidate(store):
+    from overseas_costing.services.logistics_settlement.jobs import start_job, run_step
+    ingest(store, source('L', 'logistics'))
+    expense = ingest(store, source('E'))
+    candidate = match_source(store, expense['id'])[0]
+    changed = source('E')
+    changed['updated_at'] = '2026-09-10T00:00:00+00:00'
+    changed['raw_payload']['formComponentValues'][1:3] = [{'name': '采购支出', 'value': '商品采购'}]
+    class Archive:
+        def page(self, **kwargs):
+            return {'items': [changed], 'has_more': False, 'next_cursor': None}
+    job = start_job(store, mode='incremental', actor='u')
+    for _ in range(4):
+        job = run_step(store, Archive(), job['id'], logistics_codes={'logistics'})
+    assert store.get('source', expense['id'])['kind'] == 'unclassified'
+    assert store.get('candidate', candidate['id'])['status'] == 'stale'
+
+
 def test_pending_refused_and_deleted_never_approved():
     for status, result, deleted in [('RUNNING', '', None), ('COMPLETED', 'refuse', None), ('COMPLETED', 'agree', '2026-09-09')]:
         row = {**source('E'), 'status': status, 'result': result, 'deleted_at': deleted}
