@@ -10,6 +10,7 @@ from .freight_matching import current_lines
 from .freight_packing import evidence_goods, text_goods, item_fingerprint
 from .freight_adoption import context, refresh_item_contexts
 from .application import row_meta
+from .item_metadata import compact_cargo, original_value_snapshot, persist_item_meta
 from .writer import locked, clean_copy, clone_version_children, DERIVED_FIELDS
 from .jobs import utcnow
 from .ai_matching import save
@@ -224,24 +225,24 @@ def confirm_selection(store,ledger,batch_name,version_name,preview_id,revision,a
                 oldmeta=row_meta(target)
                 meta={k:deepcopy(value) for k,value in oldmeta.items()
                       if k not in {'settlement_cargo','settlement_valuation','settlement_physical','effective_logistics_source'}}
-                meta['settlement_original_values']=deepcopy(prior_item)
-            cargo={**deepcopy(incoming),'source_snapshot':review['source_snapshot'],'binding_id':review['id']}
+                meta['settlement_original_values']=original_value_snapshot(prior_item)
+            cargo=compact_cargo({**deepcopy(incoming),'source_snapshot':review['source_snapshot'],'binding_id':review['id']})
             values.update({k:incoming.get(k) for k in ('material_code','product_name','spec_model','quantity','unit')})
             values.update({k:v for k,v in incoming.get('physical',{}).items() if k in PHYSICAL and k!='chargeable_weight_kg'})
             values.update(actual_shipped_qty=incoming['quantity'],actual_shipped_qty_mode='EXPLICIT_SOURCE',actual_shipped_qty_source_revision=review['revision'],shipped_uom=incoming.get('unit'),row_no=index,
                           manual_override_flag=0,manual_override_reason='',stable_line_key=(target or {}).get('stable_line_key') or incoming['line_key'])
             meta.update(settlement_cargo=cargo,packing_source_selection=selected['id'],packing_quantity=incoming['quantity'])
             meta['settlement_valuation']=reconcile_replacement_value(
-                {**(target or {}),**values,'extra_json':dumps(meta)}, cargo,
+                {**(target or {}),**values,'extra_json':persist_item_meta(meta)}, cargo,
                 {k:v for k,v in version.items() if k.startswith('fx_')}, prior_item,
             )
             from overseas_costing.services.shipment_cost_service import shipment_value
-            valuation=shipment_value({**(target or {}),**values,'extra_json':dumps(meta)})
+            valuation=shipment_value({**(target or {}),**values,'extra_json':persist_item_meta(meta)})
             values['goods_value']=valuation.get('amount_rmb') if valuation.get('amount_rmb') is not None else 0
             meta['settlement_packing_missing']=[k for k in (*PHYSICAL,'quantity') if values.get(k) is None]
             # Frappe numeric columns are NOT NULL; the explicit mask preserves absence.
             values.update({k:0 for k in meta['settlement_packing_missing']})
-            values.update(batch=batch_name,version=vname,extra_json=dumps(meta),**{k:0 for k in DERIVED_FIELDS})
+            values.update(batch=batch_name,version=vname,extra_json=persist_item_meta(meta),**{k:0 for k in DERIVED_FIELDS})
             saved=ledger.put('item',target['name'],values) if target else ledger.create('item',values);kept.add(saved['name'])
         removed={i['name'] for i in ledger.rows('item',batch=batch_name,version=vname)}-kept
         scope_issues=preserve_selected_scopes(ledger,batch_name,vname,olditems,copies,kept)
@@ -256,8 +257,8 @@ def confirm_selection(store,ledger,batch_name,version_name,preview_id,revision,a
         ctx=refresh_item_contexts(store,ledger,batch_name,vname)
         for item in ledger.rows('item',batch=batch_name,version=vname):
             meta=row_meta(item);meta['settlement_physical']={'source_context_fingerprint':ctx['fingerprint'],'source_snapshot':ctx['source_snapshot'],
-                'values':{k:None if k in meta.get('settlement_packing_missing',[]) else item.get(k) for k in (*PHYSICAL,'shipped_uom')},'evidence':{'review_id':review['id']}}
-            ledger.put('item',item['name'],{'extra_json':dumps(meta)})
+                'values':{k:None if k in meta.get('settlement_packing_missing',[]) else item.get(k) for k in (*PHYSICAL,'shipped_uom')}}
+            ledger.put('item',item['name'],{'extra_json':persist_item_meta(meta)})
         store.audit(batch_name,'packing_source_replaced',actor,preview_id=review['id'],source=selected['source_label'],old_version=version_name,version=vname)
         return {'status':'applied','version':vname,'preview_id':review['id']}
 

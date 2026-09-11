@@ -3,6 +3,7 @@ import re
 from copy import deepcopy
 from .model import digest,dumps,identity,number,fields_of,pick,merchandise_price
 from .application import row_meta
+from .item_metadata import compact_cargo, original_value_snapshot, persist_item_meta
 from .writer import mutable_version,locked,DERIVED_FIELDS
 from .freight_lines import matching_lines,POLICY,WAYBILL_LABELS,APPROVAL_LABELS,label_value
 from .freight_adoption import context,refresh_item_contexts
@@ -143,23 +144,23 @@ def confirm(store,ledger,batch_name,version_name,preview_id,revision,selections,
             incoming=goods[selection['line_key']];old=current.get(selection.get('item_name'))
             target=translated.get((row_meta(old).get('settlement_origin_item') or old['name']) if old else '')
             metadata=row_meta(target or {})
-            metadata.setdefault('packing_source_history',[]).append({'source_snapshot':review['source_snapshot'],'previous':deepcopy(target),'evidence':incoming.get('evidence')})
+            metadata.setdefault('packing_source_history',[]).append({'source_snapshot':review['source_snapshot'],'previous':original_value_snapshot(target or {}),'evidence':incoming.get('evidence')})
             values={k:incoming.get(k) for k in ('material_code','product_name','spec_model','unit','quantity')}
             values.update({k:v for k,v in (incoming.get('physical') or {}).items() if v is not None})
             changed_identity=target and (identity(target.get('material_code'))!=identity(incoming.get('material_code')) or identity(target.get('unit'))!=identity(incoming.get('unit')))
             if changed_identity:
-                metadata.setdefault('settlement_original_values',deepcopy(target))
+                metadata.setdefault('settlement_original_values',original_value_snapshot(target))
                 # Preserve original price/packing in audit; never transfer another SKU's facts.
                 values.update(unit_price=0,goods_value=0,purchase_currency='',unit_price_uom='',gross_weight_kg=0,net_weight_kg=0,volume_m3=0)
                 values.update(incoming.get('physical') or {})
                 metadata['settlement_packing_review']=True
             elif target and str(target.get('quantity'))!=str(incoming.get('quantity')):
                 metadata['settlement_packing_review']=True
-            metadata.update(settlement_line_key=incoming['line_key'],settlement_cargo={**incoming,'source_snapshot':review['source_snapshot'],'binding_id':review['id']})
+            metadata.update(settlement_line_key=incoming['line_key'],settlement_cargo=compact_cargo({**incoming,'source_snapshot':review['source_snapshot'],'binding_id':review['id']}))
             from .valuation import value_final_cargo
-            valuation=value_final_cargo({**(target or {}),**values,'extra_json':dumps(metadata)},metadata['settlement_cargo'],{k:v for k,v in version.items() if k.startswith('fx_')})
+            valuation=value_final_cargo({**(target or {}),**values,'extra_json':persist_item_meta(metadata)},metadata['settlement_cargo'],{k:v for k,v in version.items() if k.startswith('fx_')})
             metadata['settlement_valuation']=valuation
-            values.update(batch=batch_name,version=vname,extra_json=dumps(metadata),stable_line_key=(target or {}).get('stable_line_key') or incoming['line_key'],**{k:0 for k in DERIVED_FIELDS})
+            values.update(batch=batch_name,version=vname,extra_json=persist_item_meta(metadata),stable_line_key=(target or {}).get('stable_line_key') or incoming['line_key'],**{k:0 for k in DERIVED_FIELDS})
             saved=ledger.put('item',target['name'],values) if target else ledger.create('item',values);used.add(saved['name'])
         if complete_confirmed:
             for item in new_items:
@@ -176,8 +177,8 @@ def confirm(store,ledger,batch_name,version_name,preview_id,revision,selections,
         for item in ledger.rows('item',batch=batch_name,version=vname):
             im=row_meta(item)
             im['settlement_physical']={'source_context_fingerprint':ctx['fingerprint'],'source_snapshot':ctx['source_snapshot'],
-                'values':{k:item.get(k) for k in ('actual_shipped_qty','shipped_uom','gross_weight_kg','net_weight_kg','volume_m3','chargeable_weight_kg')},'evidence':{'review_id':review['id']}}
-            ledger.put('item',item['name'],{'extra_json':dumps(im)})
+                'values':{k:item.get(k) for k in ('actual_shipped_qty','shipped_uom','gross_weight_kg','net_weight_kg','volume_m3','chargeable_weight_kg')}}
+            ledger.put('item',item['name'],{'extra_json':persist_item_meta(im)})
         ledger.put('batch',batch_name,{'status':'Dirty','confirm_status':'Pending','is_locked':0})
         store.audit(batch_name,'packing_changes_adopted',actor,preview_id=review['id'],version=vname)
         return {'status':'applied','version':vname,'preview_id':review['id']}

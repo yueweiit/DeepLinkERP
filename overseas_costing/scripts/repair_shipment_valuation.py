@@ -16,6 +16,7 @@ from overseas_costing.services import batch_service, edit_session_service
 from overseas_costing.services.logistics_settlement.application import row_meta
 from overseas_costing.services.logistics_settlement.model import digest
 from overseas_costing.services.logistics_settlement.valuation import reconcile_replacement_value, value_final_cargo
+from overseas_costing.services.logistics_settlement.item_metadata import persist_item_meta, prune_analysis_cache
 from overseas_costing.services.material_input_service import present_material_row
 from overseas_costing.services.shipment_cost_service import number, object_json, shipment_value
 from overseas_costing.utils.field_mapper import normalize_unit
@@ -168,12 +169,12 @@ def _already(item, spec, version):
 
 
 def _persist(item, valuation):
-    meta = deepcopy(row_meta(item))
+    meta = prune_analysis_cache(deepcopy(row_meta(item)))
     key = 'settlement_valuation' if isinstance(meta.get('settlement_cargo'), dict) else 'shipment_valuation'
     meta[key] = valuation
     meta['shipment_value_repair'] = {'key': REPAIR_KEY, 'status': valuation.get('status')}
     amount = valuation.get('amount_rmb')
-    return {'extra_json': json.dumps(meta, ensure_ascii=False, default=str),
+    return {'extra_json': persist_item_meta(meta),
             'goods_value': 0 if amount is None else amount}
 
 

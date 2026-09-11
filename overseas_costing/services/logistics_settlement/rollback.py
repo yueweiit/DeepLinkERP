@@ -4,6 +4,7 @@ from .application import row_meta
 from .jobs import utcnow, pause_job
 from .matching import save_binding
 from .model import dumps
+from .item_metadata import persist_item_meta
 from .writer import clean_copy, GOODS_FIELDS, DERIVED_FIELDS, PACKING_FIELDS, application_context, locked, mutable_version, has_material_supplements
 
 
@@ -62,7 +63,7 @@ def restore_application(store, ledger, application_id, expected_revision, reason
                 meta = restore_source_metadata(item, target)
                 meta['settlement_rollback_application'] = application_id
                 meta['settlement_packing_review'] = True
-                values.update(extra_json=dumps(meta), **{field:0 for field in DERIVED_FIELDS})
+                values.update(extra_json=persist_item_meta(meta), **{field:0 for field in DERIVED_FIELDS})
                 ledger.put('item',item['name'],values)
                 restored.add(key)
             elif meta.get('settlement_created') and not has_material_supplements(item):
@@ -71,7 +72,7 @@ def restore_application(store, ledger, application_id, expected_revision, reason
                 meta.pop('settlement_cargo',None)
                 meta.pop('settlement_valuation',None)
                 meta.update(settlement_packing_review=True, settlement_rollback_application=application_id)
-                ledger.put('item',item['name'],{'extra_json':dumps(meta), 'manual_override_flag':1, **{field:0 for field in DERIVED_FIELDS}})
+                ledger.put('item',item['name'],{'extra_json':persist_item_meta(meta), 'manual_override_flag':1, **{field:0 for field in DERIVED_FIELDS}})
         existing_origins = {origin(i) for i in ledger.rows('item', batch=batch['name'], version=version['name'])}
         for key,target in targets.items():
             if key in existing_origins:
@@ -81,7 +82,7 @@ def restore_application(store, ledger, application_id, expected_revision, reason
             values.update({field:target.get(field) for field in GOODS_FIELDS if field not in {'quantity','unit'}})
             meta = restore_source_metadata(evidence, target)
             meta.update(settlement_origin_item=key, settlement_rollback_application=application_id, settlement_packing_review=True)
-            values.update(version=version['name'], extra_json=dumps(meta), **{field:0 for field in DERIVED_FIELDS})
+            values.update(version=version['name'], extra_json=persist_item_meta(meta), **{field:0 for field in DERIVED_FIELDS})
             ledger.create('item',values)
         # Prior final fees may be restored for review; initial estimates stay disabled.
         for rule in ledger.rows('rule',batch=batch['name'],version=version['name']):

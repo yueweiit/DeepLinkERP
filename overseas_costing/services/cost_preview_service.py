@@ -15,6 +15,8 @@ from overseas_costing.services import fee_allocation_service, fee_service
 from overseas_costing.services.material_input_service import present_material_row
 from overseas_costing.services.effective_source_values import source_context_from_items, project_batch_items, batch_source_context
 from overseas_costing.services.transport_fee_service import assert_no_duplicate_fees, fee_is_active, mark_duplicate_fees
+from overseas_costing.services.logistics_settlement.item_metadata import persist_calculated_item, prune_version_meta
+from overseas_costing.services.shipment_cost_service import object_json
 from overseas_costing.services.logistics_settlement.fee_policy import (
     LEGACY_POOL_CURRENCIES, METADATA_FIELDS, is_final, row_scopes, select_fees, validate_final, supplement_legacy_fees,
 )
@@ -633,8 +635,8 @@ def build_saved_cost_data(
     money = lambda value: _result_money(value, precision)
     assert_no_duplicate_fees(fees)
     result = preview_comprehensive_cost_data(items, fees, fx_context, fee_components=fee_components or [])
-    original_items = items
-    items = [present_material_row(row) for row in items]
+    original_items = [persist_calculated_item(row) for row in items]
+    items = [present_material_row(row) for row in original_items]
     raw_by_key = {_item_key(row): row for row in items}
     fx = _decimal(fx_context.get("fx_rmb_to_mxn"))
     fx = fx if fx is not None and fx > 0 else None
@@ -705,6 +707,7 @@ def build_saved_cost_data(
             "total_cost_rmb": row["total_cost_rmb"],
             "total_unit_rmb": shipping["amount_rmb"] if shipping else None,
             "derived_json": _json(derived),
+            "extra_json": persist_calculated_item(raw)["extra_json"],
         })
     summary = {
         **result["summary"], "calculation_schema": 2,
@@ -791,6 +794,8 @@ class FrappeCostRepository:
             frappe.db.set_value("Overseas Cost Item", row["name"], {k: v for k, v in row.items() if k != "name"}, update_modified=False)
         frappe.db.set_value("Overseas Cost Version", context["version"], {
             "summary_snapshot_json": _json(snapshot), "rule_snapshot_json": _json(result["included_fees"]), "calculated_at": now,
+            "extra_json": _json(prune_version_meta(object_json(
+                frappe.db.get_value("Overseas Cost Version", context["version"], "extra_json")))),
         }, update_modified=True)
         frappe.db.set_value("Overseas Cost Batch", context["batch"], {
             "status": "Calculated", "estimated_total_cost_rmb": snapshot["total_cost_rmb"],

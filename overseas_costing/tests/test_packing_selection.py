@@ -164,6 +164,7 @@ def test_whole_packing_replace_reconciles_exact_match_purchase_value(source_quan
     assert saved['goods_value']==expected_goods
     meta=json.loads(saved['extra_json'])
     assert meta['settlement_original_values']['source_doc_no']=='PUR-1'
+    assert 'extra_json' not in meta['settlement_original_values']
     assert meta['purchase_evidence']=={'document':'PUR-1'}
     if expected_status=='conflict':
         assert valuation['amount_rmb'] is None

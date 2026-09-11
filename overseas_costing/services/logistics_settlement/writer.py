@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from .application import plan_application, row_meta
+from .item_metadata import persist_item_meta
 from .matching import save_binding
 from .model import digest, dumps, timestamp
 from .jobs import utcnow
@@ -34,7 +35,7 @@ def clone_version_children(rows_by_kind, version_name, create, update):
                 values['stable_line_key'] = str(doc.get('stable_line_key') or '').strip() or 'legacy:' + doc['name']
                 meta = row_meta(doc)
                 meta['settlement_origin_item'] = meta.get('settlement_origin_item') or doc['name']
-                values['extra_json'] = dumps(meta)
+                values['extra_json'] = persist_item_meta(meta)
             for field, target in [('item', 'item'), ('fee_rule', 'rule'), ('evidence', 'evidence')]:
                 if values.get(field) in cloned[target]:
                     values[field] = cloned[target][values[field]]
@@ -112,7 +113,7 @@ def prepare_source_switch(store, ledger, binding, expense, batch, actor):
         item_meta.pop('settlement_valuation',None)
         for key in ('settlement_packing_provenance','settlement_packing_candidates','packing_quantity'):
             item_meta.pop(key,None)
-        ledger.put('item',item['name'],{'extra_json':dumps(item_meta), **{key:0 for key in DERIVED_FIELDS}})
+        ledger.put('item',item['name'],{'extra_json':persist_item_meta(item_meta), **{key:0 for key in DERIVED_FIELDS}})
     for rule in ledger.rows('rule',batch=batch['name'],version=version['name']):
         ledger.put('rule',rule['name'],{'is_enabled':0,'is_active':0,'is_final':0})
     for component in ledger.rows('component',batch=batch['name'],version=version['name']):
@@ -190,7 +191,7 @@ def apply_binding(store, ledger, binding_id, actor, *, trusted_review_actor=None
                 meta.pop('settlement_purchase_value_review', None)
             meta['settlement_applied_values'] = dict(values)
             values.update({key: 0 for key in DERIVED_FIELDS})
-            values['extra_json'] = dumps(meta)
+            values['extra_json'] = persist_item_meta(meta)
             ledger.put('item', item['name'], values)
         for index, addition in enumerate(plan['goods_additions']):
             cargo = {**addition['values'], 'binding_id':binding_id, 'source_snapshot':expense['snapshot'], 'line_key':addition['line_key']}
@@ -202,7 +203,7 @@ def apply_binding(store, ledger, binding_id, actor, *, trusted_review_actor=None
             meta['settlement_valuation'] = value_final_cargo(values, cargo, {k:v for k,v in version.items() if k.startswith('fx_')})
             values.update(batch=batch['name'], version=version['name'], row_no=len(items)+index+1,
                           stable_line_key='settlement:'+digest(binding_id,addition['line_key'])[:32],
-                          source_type='oa_logistics', extra_json=dumps(meta))
+                          source_type='oa_logistics', extra_json=persist_item_meta(meta))
             added_items.append(ledger.create('item', values)['name'])
         # Only a positively identified complete table may retire rows. Their full evidence is retained below.
         retired = binding.setdefault('retired_items', {})
@@ -265,17 +266,17 @@ def reverse_binding(store, ledger, old, new, actor):
             if has_material_supplements(item):
                 meta = {k: v for k, v in meta.items() if not k.startswith('settlement_') or k.startswith('settlement_packing_') or k == 'settlement_origin_item'}
                 meta['settlement_packing_review'] = True
-                ledger.put('item', item['name'], {'extra_json': dumps(meta), 'manual_override_flag': 1, **{key: 0 for key in DERIVED_FIELDS}})
+                ledger.put('item', item['name'], {'extra_json': persist_item_meta(meta), 'manual_override_flag': 1, **{key: 0 for key in DERIVED_FIELDS}})
             else:
                 ledger.delete('item', item['name'])
             continue
         original = meta.get('settlement_original_values') or {}
         applied = meta.get('settlement_applied_values') or {}
-        values = {k: v for k, v in original.items() if str(item.get(k) or '') == str(applied.get(k) or '')}
+        values = {k: v for k, v in original.items() if k in GOODS_FIELDS and str(item.get(k) or '') == str(applied.get(k) or '')}
         for key in list(meta):
             if key.startswith('settlement_') and key != 'settlement_origin_item' and not key.startswith('settlement_packing_'):
                 meta.pop(key)
-        values['extra_json'] = dumps(meta)
+        values['extra_json'] = persist_item_meta(meta)
         values.update({key: 0 for key in DERIVED_FIELDS})
         if 'quantity' in values and meta.get('goods_value_source') == 'derived_quantity_unit_price':
             values['goods_value'] = str(Decimal(str(values['quantity'] or 0)) * Decimal(str(item.get('unit_price') or 0)))
@@ -288,10 +289,10 @@ def reverse_binding(store, ledger, old, new, actor):
         if meta.get('settlement_created'):
             continue
         values = clean_copy(retired)
-        values.update(meta.get('settlement_original_values') or {})
+        values.update({k: v for k, v in (meta.get('settlement_original_values') or {}).items() if k in GOODS_FIELDS})
         meta = {k: v for k, v in meta.items() if not k.startswith('settlement_') or k.startswith('settlement_packing_')}
         meta['settlement_origin_item'] = origin
-        values.update(version=version['name'], extra_json=dumps(meta))
+        values.update(version=version['name'], extra_json=persist_item_meta(meta))
         values.update({key: 0 for key in DERIVED_FIELDS})
         ledger.create('item', values)
     for rule in ledger.rows('rule', batch=batch['name'], version=version['name']):
@@ -358,7 +359,7 @@ def refresh_application_state(store, ledger, binding, expense):
                     meta['settlement_purchase_value_review'] = True
                 else:
                     meta.pop('settlement_purchase_value_review',None)
-                ledger.put('item',item['name'],{'extra_json':dumps(meta)})
+                ledger.put('item',item['name'],{'extra_json':persist_item_meta(meta)})
     items = ledger.rows('item', batch=version['batch'], version=version['name'])
     issues = application_issues(ledger, version, expense, items, application.get('plan') or {})
     return pending(store, binding, 'applied_pending' if issues else 'applied', issues)
@@ -409,7 +410,7 @@ def resolve_item_checks(store, ledger, binding_id, expected_revision, selections
             for flag, check in [('settlement_packing_review', 'packing_confirmed'), ('settlement_purchase_value_review', 'goods_value_confirmed')]:
                 if selection.get(check) is True:
                     meta.pop(flag, None)
-            ledger.put('item', item['name'], {'extra_json': dumps(meta)})
+            ledger.put('item', item['name'], {'extra_json': persist_item_meta(meta)})
             store.audit(binding_id, 'verify_item', actor, item_name=item['name'], before=item_review(item), choices=selection, reason=reason)
         resolve_document_checks(store, batch['name'], version['name'], selections, actor, reason, ledger=ledger)
         ledger.put('version', version['name'], {'calculated_at': None, 'summary_snapshot_json': '{}'})

@@ -5,6 +5,7 @@ from datetime import datetime
 from .material_ai_row_selection import PHYSICAL, IDENTITY, FILL_FIELDS, missing
 from .logistics_settlement.model import digest, dumps
 from .logistics_settlement.application import row_meta
+from .logistics_settlement.item_metadata import compact_cargo, original_value_snapshot, persist_item_meta
 from .logistics_settlement.writer import clean_copy, clone_version_children, DERIVED_FIELDS
 from .logistics_settlement.valuation import reconcile_replacement_value, value_final_cargo
 
@@ -33,27 +34,28 @@ def write_rows(store,ledger,preview,context):
         values={k:deepcopy(v) for k,v in incoming.items() if k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','goods_value','source_doc_no','supplier','stable_line_key')}
         meta=deepcopy(source_meta)
         if original:
-            meta.setdefault('ai_fill_original_values',{k:deepcopy(original.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','goods_value','extra_json')})
+            meta.setdefault('ai_fill_original_values', original_value_snapshot(original))
         if preview['mode']=='replace_all' or not original:
             for key in ('settlement_cargo','settlement_valuation','settlement_physical','effective_logistics_source'):
                 meta.pop(key,None)
             if original:
-                meta['settlement_original_values']=deepcopy(original)
+                meta['settlement_original_values']=original_value_snapshot(original)
                 price_meta=incoming.get('_price_metadata') or {}
                 for key, value in price_meta.items():
                     if key not in {'settlement_cargo','settlement_valuation','settlement_physical','effective_logistics_source'}:
                         meta.setdefault(key, deepcopy(value))
-            cargo={k:values.get(k) for k in IDENTITY}
-            cargo.update(quantity=values.get('actual_shipped_qty'),unit=values.get('shipped_uom'),source_snapshot=preview['id'],
-                         binding_id=preview['id'],line_key=incoming.get('stable_line_key'),evidence=source_meta.get('ai_row_selection'))
+            cargo=compact_cargo({**{k:values.get(k) for k in IDENTITY},
+                'quantity':values.get('actual_shipped_qty'),'unit':values.get('shipped_uom'),
+                'source_snapshot':preview['id'],'binding_id':preview['id'],
+                'line_key':incoming.get('stable_line_key')})
             meta['settlement_cargo']=cargo
             meta['settlement_valuation']=reconcile_replacement_value(
-                {**values,'extra_json':dumps(meta)}, cargo,
+                {**values,'extra_json':persist_item_meta(meta)}, cargo,
                 {k:v for k,v in version.items() if k.startswith('fx_')},
                 incoming.get('_verified_prior_item'),
             )
             from .shipment_cost_service import shipment_value
-            effective_valuation=shipment_value({**values,'extra_json':dumps(meta)})
+            effective_valuation=shipment_value({**values,'extra_json':persist_item_meta(meta)})
             values['goods_value']=effective_valuation.get('amount_rmb') if effective_valuation.get('amount_rmb') is not None else 0
             values['actual_shipped_qty_mode']='EXPLICIT_SOURCE';values['actual_shipped_qty_source_revision']=preview['revision']
             # All omitted packing facts are missing, never copied from a previous row.
@@ -65,12 +67,12 @@ def write_rows(store,ledger,preview,context):
             if 'actual_shipped_qty' in changed_fields:
                 values['actual_shipped_qty_mode']='EXPLICIT_SOURCE';values['actual_shipped_qty_source_revision']=preview['revision']
             if meta.get('settlement_cargo') and changed_fields & {'actual_shipped_qty','shipped_uom','unit_price','purchase_currency','unit_price_uom','purchase_uom'}:
-                cargo=deepcopy(meta['settlement_cargo'])
-                cargo.update(quantity=values.get('actual_shipped_qty'),unit=values.get('shipped_uom'))
+                cargo=compact_cargo({**meta['settlement_cargo'],
+                    'quantity':values.get('actual_shipped_qty'),'unit':values.get('shipped_uom')})
                 meta['settlement_cargo']=cargo
-                meta['settlement_valuation']=value_final_cargo({**original,**values,'extra_json':dumps(meta)},cargo,{k:v for k,v in version.items() if k.startswith('fx_')})
+                meta['settlement_valuation']=value_final_cargo({**original,**values,'extra_json':persist_item_meta(meta)},cargo,{k:v for k,v in version.items() if k.startswith('fx_')})
                 from .shipment_cost_service import shipment_value
-                effective_valuation=shipment_value({**original,**values,'extra_json':dumps(meta)})
+                effective_valuation=shipment_value({**original,**values,'extra_json':persist_item_meta(meta)})
                 values['goods_value']=(effective_valuation.get('amount_rmb')
                                        if effective_valuation.get('amount_rmb') is not None else 0)
         if incoming.get('unverified_material_code'):meta['unverified_material_code']=incoming['unverified_material_code']
@@ -87,9 +89,8 @@ def write_rows(store,ledger,preview,context):
             meta['effective_logistics_source']=deepcopy(physical_context)
             meta['settlement_physical']={'source_context_fingerprint':physical_context.get('fingerprint'),
                 'source_snapshot':physical_context.get('source_snapshot'),
-                'values':{k:None if k in mask else values.get(k,incoming.get(k)) for k in projected_fields},
-                'evidence':deepcopy(meta.get('ai_row_fields') or {})}
-        values.update(batch=batch_name,version=version['name'],row_no=index,extra_json=dumps(meta),**{k:0 for k in DERIVED_FIELDS})
+                'values':{k:None if k in mask else values.get(k,incoming.get(k)) for k in projected_fields}}
+        values.update(batch=batch_name,version=version['name'],row_no=index,extra_json=persist_item_meta(meta),**{k:0 for k in DERIVED_FIELDS})
         saved=ledger.put('item',name,values) if name else ledger.create('item',values)
         kept.add(saved['name']);adopted.append(saved)
     removed={i['name'] for i in ledger.rows('item',batch=batch_name,version=version['name'])}-kept
@@ -162,9 +163,8 @@ def apply_selection(run,preview,draft,context):
             meta=row_meta(item)
             if meta.get('ai_row_selection') or (ctx.get('packing') or {}).get('selected_source'):
                 meta['settlement_physical']={'source_context_fingerprint':ctx['fingerprint'],'source_snapshot':ctx['source_snapshot'],
-                    'values':{k:None if k in meta.get('settlement_packing_missing',[]) else effective_items[item['name']].get(k) for k in PHYSICAL_FIELDS},
-                    'evidence':meta.get('ai_row_fields') or {}}
-                ledger.put('item',item['name'],{'extra_json':dumps(meta)})
+                    'values':{k:None if k in meta.get('settlement_packing_missing',[]) else effective_items[item['name']].get(k) for k in PHYSICAL_FIELDS}}
+                ledger.put('item',item['name'],{'extra_json':persist_item_meta(meta)})
         result={'ok':True,'status':'APPLIED','run_id':preview['run_id'],'preview_id':preview['id'],'version_name':version_name,
                 'changed_count':len(preview['changes'])+preview['added_count']+preview['removed_count']+len(preview['fees']),
                 'batch_modified':str(ledger.get('batch',preview['batch']).get('modified') or ''),'message':'所选内容已保存，试算结果待更新。'}
