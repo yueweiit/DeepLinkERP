@@ -101,6 +101,33 @@ def test_archived_dependency_change_blocks_preview_confirmation_even_with_same_m
     assert not repo.writes
 
 
+def test_pending_source_confirmation_uses_estimate_dependency_check_only():
+    repo=Repo();checks=[]
+    repo.capture_row_dependencies=lambda *args,**kwargs:[{'kind':'approval','source_id':'PENDING','fingerprint':'LOCKED'}]
+    repo.assert_row_dependencies=lambda batch,dependencies,**kwargs:checks.append(kwargs.get('purpose','analysis'))
+    repo.assert_adoption_dependencies=lambda *args,**kwargs:(_ for _ in ()).throw(ValueError('审批中，仅供分析'))
+    preview=prepare(repo)
+
+    assert confirm(repo,preview)['ok']
+    assert checks==['analysis','estimate']
+    assert len(repo.writes)==1
+
+
+def test_pending_source_fee_confirmation_still_requires_final_adoption_check():
+    repo=Repo()
+    repo.run['candidates_json'].append({'proposal_id':'F1','proposal_type':'fee_update',
+        'default_selected':True,'payload':{'logical_fee_key':'international_express_fee',
+            'amount':'100','currency':'RMB','amount_status':'ESTIMATED'}})
+    repo.capture_row_dependencies=lambda *args,**kwargs:[{'kind':'approval','source_id':'PENDING','fingerprint':'LOCKED'}]
+    repo.assert_row_dependencies=lambda *args,**kwargs:None
+    repo.assert_adoption_dependencies=lambda *args,**kwargs:(_ for _ in ()).throw(ValueError('审批中，费用不能采用'))
+    preview=prepare(repo,fees=['F1'])
+
+    with pytest.raises(ValueError,match='审批中'):
+        confirm(repo,preview)
+    assert not repo.writes
+
+
 def test_run_dependency_baseline_blocks_reusing_analysis_after_document_changes():
     repo=Repo();repo.run['draft_json']['review_input']={'source_dependencies':[{'hash':'first'}]}
     def validate(*args,**kwargs):raise ValueError('来源内容已更新')

@@ -93,7 +93,8 @@ def write_rows(store,ledger,preview,context):
     if preview['mode']=='replace_all':
         from .material_ai_selected_scope import capture_dependencies
         dependencies=capture_dependencies(preview.get('sources') or [],store=store,ledger=ledger,
-            batch_name=batch_name,source_context=preview['source_context'],inherited=metadata.get('ai_row_adoption'))
+            batch_name=batch_name,source_context=preview['source_context'],inherited=metadata.get('ai_row_adoption'),
+            purpose='estimate')
         metadata['ai_row_adoption']={'id':preview['id'],'revision':preview['revision'],
             'source_context':preview['source_context'],'selected_row_ids':preview['selected_row_ids'],
             'sources':[{k:s.get(k) for k in ('source_id','source_kind','source_hash','content_hash','source_context',

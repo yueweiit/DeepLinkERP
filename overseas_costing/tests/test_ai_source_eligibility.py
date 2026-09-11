@@ -30,6 +30,7 @@ def test_pending_archives_analyze_consistently_and_never_become_approved(kind, s
     sources = deps.annotate_source_eligibility([raw], store=store, ledger=ledger, batch_name=batch['name'])
     assert sources[0]['analysis_allowed'] and sources[0]['final_fee_allowed'] is False
     assert '审批中' in sources[0]['adoption_restriction']
+    assert '物料资料可先填充用于暂估' in sources[0]['adoption_restriction']
     manifest = prepare_source_manifest(sources)
     assert manifest[0]['selected'] and source_progress_manifest(manifest)[0]['analysis_allowed']
     baseline = deps.capture_dependencies(manifest, store=store, ledger=ledger,
@@ -71,6 +72,30 @@ def test_adoption_rechecks_current_status_not_cached_approved_flag():
     with pytest.raises(ValueError, match='审批中'):
         deps.capture_dependencies([{'source_id':'F','source_kind':'approval_form','process_instance_id':'E'}],
             store=store, ledger=ledger, batch_name=batch['name'], source_context={})
+
+
+def test_pending_expense_rows_can_be_saved_for_estimate_without_becoming_final():
+    from overseas_costing.services.effective_logistics_source import load_source_bundle
+    from overseas_costing.services.effective_source_values import project_source_values
+    from overseas_costing.services.material_ai_selection_writer import write_rows
+    from overseas_costing.tests.test_ai_row_review_regressions import preview
+
+    store, ledger, batch, source = pending_archive()
+    version = ledger.rows('version', batch=batch['name'])[0]
+    bundle = load_source_bundle(batch['name'], version['name'], store=store, ledger=ledger)
+    items = ledger.rows('item', batch=batch['name'], version=version['name'])
+    selected = preview(items, [], batch, version, mode='replace_all', source_context=bundle['context'])
+    selected['sources'] = [{'source_id':'FORM','source_kind':'approval_form',
+        'process_instance_id':source['instance'],'selected':True}]
+
+    new_version = write_rows(store, ledger, selected, {})
+
+    current = load_source_bundle(batch['name'], new_version, store=store, ledger=ledger)
+    saved = ledger.rows('item', batch=batch['name'], version=new_version)
+    assert saved and project_source_values(saved[0], current['context'])['material_code'] == items[0]['material_code']
+    assert current['context']['separate_adoption']
+    assert not current['context']['available']
+    assert current['context']['packing']['dependency_issues']
 
 
 def test_public_listing_and_real_repository_worker_use_same_analysis_checks(monkeypatch):

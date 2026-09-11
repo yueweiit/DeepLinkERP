@@ -28,7 +28,10 @@ def approval_eligibility(source):
     approved = readable and status == 'COMPLETED' and result in {'agree', 'approved', 'pass'}
     pending = status == 'RUNNING'
     reason = '' if readable else ('审批已拒绝、撤销或停用，不能用于当前分析。' if source else '本地审批归档缺失，请核对资料。')
-    restriction = '' if approved else ('审批中，仅供分析；不能作为最终结算费用。' if pending else '审批尚未通过，不能作为最终结算费用。')
+    restriction = '' if approved else (
+        '审批中，物料资料可先填充用于暂估；费用不能作为最终结算费用。'
+        if pending else '审批尚未通过，物料资料可先填充用于暂估；费用不能作为最终结算费用。'
+    )
     return {'analysis_allowed': bool(readable), 'analysis_reason': reason,
             'analysis_code': '' if readable else ('SOURCE_INVALID' if source else 'SOURCE_ARCHIVE_MISSING'),
             'adoption_allowed': bool(readable and (source.get('kind') != 'expense' or approved)),
@@ -71,7 +74,7 @@ def _enabled(record):
 
 
 def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpose="adoption"):
-    if purpose not in {"analysis", "adoption"}:
+    if purpose not in {"analysis", "estimate", "adoption"}:
         raise ValueError("来源校验阶段不合法。")
     kind = dependency['kind']
     if kind == 'pending_attachment':
