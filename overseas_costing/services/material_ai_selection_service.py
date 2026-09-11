@@ -30,7 +30,7 @@ def _inputs(repo, batch, run, *, locked=False):
     from . import material_ai_fill_service as ai
     ai._assert_run_batch(run,batch)
     context=repo.get_context(batch,str(ai._record_value(run,'version')))
-    ai.effective_source.require_available(context.get('effective_source') or {})
+    ai.effective_source.require_readable(context.get('effective_source') or {})
     if ai._clarification_changed(repo,batch,run,locked=locked):raise ValueError('说明已变化，请按新说明重新分析。')
     items=repo.get_items(batch,context['version'])
     sources=ai._reload_review_manifest(repo,batch,context['version'],run)

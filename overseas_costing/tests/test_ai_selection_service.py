@@ -40,6 +40,29 @@ def confirm(repo,preview):
     return service.confirm('B1',repo.run['name'],preview['id'],preview['revision'],'TOKEN','M1',repository=repo)
 
 
+def pending_adopted_scope(repo):
+    repo.context['effective_source']={
+        'root_kind':'expense','available':True,'approved':False,'invalid':False,
+        'separate_adoption':True,'fingerprint':'PENDING-SCOPE',
+        'packing':{'selected_source':{'id':'ADOPTED'},'available':True,'approved':False},
+    }
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+
+
+def test_pending_adopted_material_scope_can_reenter_review_prepare_and_confirm():
+    repo=Repo();pending_adopted_scope(repo)
+
+    catalog=service.review_catalog(repo,'B1',repo.run)
+    row_ids=[row['row_id'] for row in catalog['rows'] if row['default_selected']]
+    preview=service.prepare('B1',repo.run['name'],row_ids,[],'fill_missing','V1',repository=repo)['preview']
+
+    assert confirm(repo,preview)['ok']
+    assert len(repo.writes)==1
+
+
 def test_only_server_preview_is_written_and_same_confirmation_reuses_result():
     repo=Repo();preview=prepare(repo)
     public=deepcopy(preview);public['rows'][0]['gross_weight_kg']=999
@@ -102,7 +125,7 @@ def test_archived_dependency_change_blocks_preview_confirmation_even_with_same_m
 
 
 def test_pending_source_confirmation_uses_estimate_dependency_check_only():
-    repo=Repo();checks=[]
+    repo=Repo();pending_adopted_scope(repo);checks=[]
     repo.capture_row_dependencies=lambda *args,**kwargs:[{'kind':'approval','source_id':'PENDING','fingerprint':'LOCKED'}]
     repo.assert_row_dependencies=lambda batch,dependencies,**kwargs:checks.append(kwargs.get('purpose','analysis'))
     repo.assert_adoption_dependencies=lambda *args,**kwargs:(_ for _ in ()).throw(ValueError('审批中，仅供分析'))
@@ -114,7 +137,7 @@ def test_pending_source_confirmation_uses_estimate_dependency_check_only():
 
 
 def test_pending_source_estimated_fee_confirmation_uses_estimate_dependency_check():
-    repo=Repo()
+    repo=Repo();pending_adopted_scope(repo)
     repo.run['candidates_json'].append({'proposal_id':'F1','proposal_type':'fee_update',
         'default_selected':True,'payload':{'logical_fee_key':'international_express_fee',
             'amount':'100','currency':'RMB','amount_status':'ESTIMATED'}})
@@ -130,7 +153,7 @@ def test_pending_source_estimated_fee_confirmation_uses_estimate_dependency_chec
 
 
 def test_pending_source_actual_fee_confirmation_requires_final_adoption_check():
-    repo=Repo()
+    repo=Repo();pending_adopted_scope(repo)
     repo.run['candidates_json'].append({'proposal_id':'F1','proposal_type':'fee_update',
         'default_selected':True,'payload':{'logical_fee_key':'international_express_fee',
             'amount':'100','currency':'RMB','amount_status':'ACTUAL'}})
