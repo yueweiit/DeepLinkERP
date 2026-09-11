@@ -16,7 +16,7 @@ const state=w.ensureMaterialFeeState();w.renderMaterialAIReviewDialog=()=>{};w.r
 w.loadMaterialFeeWorkspace=async()=>true;w.ensureEditSession=async()=>true;
 global.frappe={show_alert:()=>{}};
 const catalog={policy:'ai-row-review-1',fingerprint:'fp',rows:[
- {row_id:'source',origin:'source',values:{material_code:'NEW',gross_weight_kg:0},can_fill:true,can_replace:true,default_selected:true},
+ {row_id:'source',origin:'source',values:{material_code:'NEW',gross_weight_kg:0},can_fill:true,can_replace:true,default_selected:true,default_replace_selected:true},
  {row_id:'current',origin:'current',values:{material_code:'OLD'},can_fill:false,can_replace:true,default_selected:false},
  {row_id:'ambiguous',origin:'source',label:'待核对',values:{material_code:'DUP'},can_fill:false,can_replace:true,blocked_reason:'匹配不唯一'}
 ],fees:[{proposal_id:'fee',payload:{expense_category:'运费',amount:0,currency:'RMB'},can_apply:true,default_selected:true},{proposal_id:'quote',payload:{expense_category:'旧报价',amount:999},can_apply:false,default_selected:true,blocked_reason:'已采用实际费用'}]};
@@ -32,9 +32,9 @@ def test_selections_modes_and_blocked_fees_are_independent():
     run_ui(r"""
 const fill=ready();const review=fill.rowSelection;
 assert.equal(fill.draftVisible,false,'Row selections must never overlay the saved material grid');
-assert.equal(review.mode,'fill_missing');assert.deepEqual([...review.rows],['source']);assert.deepEqual([...review.fees],['fee']);
+assert.equal(review.mode,'replace_all');assert.deepEqual([...review.rows],['source']);assert.deepEqual([...review.fees],['fee']);
 w.scheduleMaterialAIRowPreview=()=>{};
-w.changeMaterialAIRowSelection('rows','ambiguous',true);assert(!review.rows.has('ambiguous'));
+w.changeMaterialAIRowSelection('rows','ambiguous',true);assert(review.rows.has('ambiguous'));
 w.changeMaterialAIRowSelection('fees','quote',true);assert(!review.fees.has('quote'));
 w.changeMaterialAIRowSelection('rows','all',false);assert.equal(review.rows.size,0);assert(review.fees.has('fee'));
 w.changeMaterialAIRowSelection('mode','replace_all');w.changeMaterialAIRowSelection('rows','all',true);
@@ -49,7 +49,7 @@ assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('da
 
 def test_only_latest_server_preview_is_displayed_and_can_be_confirmed():
     run_ui(r"""
-const fill=ready();const pending=[];w.call=(method,args)=>{calls.push({method,args});return new Promise(resolve=>pending.push(resolve))};
+const fill=ready();fill.rowSelection.mode='fill_missing';const pending=[];w.call=(method,args)=>{calls.push({method,args});return new Promise(resolve=>pending.push(resolve))};
 const first=w.previewMaterialAIRowSelection();
 fill.rowSelection.rows.clear();const second=w.previewMaterialAIRowSelection();
 assert.equal(w.canConfirmMaterialAIRowSelection(fill),false);

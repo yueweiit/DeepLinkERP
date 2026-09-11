@@ -10906,8 +10906,8 @@ class OverseasCostWorkbench {
 
   ensureMaterialAIRowSelection(fill) {
     if (!fill.rowSelection) fill.rowSelection = {
-      mode: "fill_missing",
-      rows: new Set((fill.row_review.rows || []).filter(row => row.can_fill && row.default_selected).map(row => String(row.row_id))),
+      mode: "replace_all",
+      rows: new Set((fill.row_review.rows || []).filter(row => row.can_replace && (row.default_replace_selected ?? row.default_selected)).map(row => String(row.row_id))),
       fees: new Set((fill.row_review.fees || []).filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
       request: 0, loading: false, preview: null, error: "", timer: null,
     };
@@ -11022,7 +11022,7 @@ class OverseasCostWorkbench {
     const missingCount = Array.isArray(missing) ? missing.length : Number(missing.count ?? missing) || Object.keys(missing).length;
     const notices = [...(preview?.unresolved || []), ...(Array.isArray(missing) ? missing : [])];
     return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>逐行选择物料，费用单独选择；最终明细由服务器预览。</span></div></header>
-      <main class="ocw-mf-ai-dialog-body"><section class="ocw-mf-ai-row-controls"><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失（默认）</option><option value="replace_all" ${selection.mode === "replace_all" ? "selected" : ""}>按所选行替换整表</option></select></label><p>${selection.mode === "replace_all" ? "所选行将成为本票完整物料表。请勾选需要保留的当前已有行，至少选择一行。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。新识别的物料行将新增。匹配不唯一的行需核对。"}</p></section>
+      <main class="ocw-mf-ai-dialog-body"><section class="ocw-mf-ai-row-controls"><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option><option value="replace_all" ${selection.mode === "replace_all" ? "selected" : ""}>按所选行替换整表（默认）</option></select></label><p>${selection.mode === "replace_all" ? "所选行将成为本票完整物料表。请勾选需要保留的当前已有行，至少选择一行。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。新识别的物料行将新增。匹配不唯一的行需核对。"}</p></section>
       <section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>
       <div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-row-catalog"><thead><tr><th>选择</th><th>行来源</th>${columns.map(([, label]) => `<th>${label}</th>`).join("")}<th>核对提示</th></tr></thead><tbody>${(catalog.rows || []).map(row => {
         const allowed = selection.mode === "replace_all" ? row.can_replace : row.can_fill;

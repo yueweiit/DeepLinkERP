@@ -89,9 +89,14 @@ def catalog(items, proposals, fees, context, *, run_id):
             fillable=False
             reason=reason or '当前物料已有明确值，本行没有可补的空缺。'
         else:fillable=origin=='source' and valid and len(matches)<=1
+        default_replace_selected=bool(
+            origin=='source' and valid and len(matches)<=1
+            and proposal.get('default_selected',False) and not proposal.get('conflict')
+        )
         rows.append({'row_id':row_id,'origin':origin,'label':'当前已有' if origin=='current' else '本次识别',
                      'values':values,'target_item_name':target,'can_fill':fillable,'can_replace':valid,
                      'default_selected':bool(origin=='source' and fillable and proposal.get('default_selected',False) and not proposal.get('conflict')),
+                     'default_replace_selected':default_replace_selected,
                      'blocked_reason':reason,'source_refs':deepcopy(proposal.get('source_refs') or []),
                      'proposal_id':proposal.get('proposal_id'),'proposal_type':proposal.get('proposal_type'),'fields':fill_fields})
         if stable:proposal_rows[stable]=rows[-1]

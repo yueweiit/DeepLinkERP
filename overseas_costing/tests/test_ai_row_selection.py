@@ -37,6 +37,17 @@ def test_explicit_missing_zero_is_fillable():
     assert p['rows'][0]['gross_weight_kg']=='7'
 
 
+def test_catalog_keeps_a_safe_default_for_whole_table_replacement():
+    items=[item(gross_weight_kg='1')]
+    proposal={'proposal_id':'P','proposal_type':'item_update','target_item_name':'I1',
+              'default_selected':True,'payload':{'fields':{'gross_weight_kg':'2'}}}
+
+    selected=next(row for row in catalog(items,[proposal])['rows'] if row['origin']=='source')
+
+    assert not selected['default_selected']
+    assert selected['default_replace_selected']
+
+
 def test_replace_selected_rows_removes_unselected_and_clears_missing():
     rows=[item(gross_weight_kg=9),item('I2','B1')]
     c=catalog(rows,[reconcile([source()])])

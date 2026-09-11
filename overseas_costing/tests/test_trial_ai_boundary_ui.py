@@ -12,7 +12,7 @@ AI_FIXTURE = r"""
 state.materials={items:[{name:'saved',actual_shipped_qty:1}]};
 state.fees={fees:[{name:'actual',amount:'2602.820000',currency:'RMB'}]};
 const fill=state.aiFill={status:'READY',draftVisible:false,run_id:'AI',
-  row_review:{rows:[{row_id:'unadopted',can_fill:true,default_selected:true,values:{actual_shipped_qty:99}}],fees:[]}};
+  row_review:{rows:[{row_id:'unadopted',can_fill:true,can_replace:true,default_selected:true,default_replace_selected:true,values:{actual_shipped_qty:99}}],fees:[]}};
 const selection=workspace.ensureMaterialAIRowSelection(fill);
 selection.preview={id:'preview',revision:1,can_apply:true};
 selection.previewKey=workspace.materialAIRowSelectionKey(fill);

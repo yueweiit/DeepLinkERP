@@ -105,7 +105,12 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
     repo.lock_review_inputs(batch_name,preview['version'])
     if callable(getattr(repo,'assert_row_dependencies',None)):
         repo.assert_row_dependencies(batch_name,preview.get('dependencies') or [],lock=True)
-    if preview.get('selected_fee_ids') and callable(getattr(repo,'assert_adoption_dependencies',None)):
+    selected_fee_ids=preview.get('selected_fee_ids') or []
+    selected_fees=preview.get('fees') or []
+    estimate_only=bool(selected_fee_ids) and len(selected_fees)==len(selected_fee_ids) and all(
+        str((fee.get('payload') or {}).get('amount_status') or '').upper()=='ESTIMATED'
+        for fee in selected_fees)
+    if selected_fee_ids and not estimate_only and callable(getattr(repo,'assert_adoption_dependencies',None)):
         repo.assert_adoption_dependencies(batch_name,preview.get('dependencies') or [],lock=True)
     elif callable(getattr(repo,'assert_row_dependencies',None)):
         repo.assert_row_dependencies(batch_name,preview.get('dependencies') or [],lock=True,purpose='estimate')
