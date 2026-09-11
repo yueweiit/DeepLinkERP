@@ -43,7 +43,7 @@ PURCHASE_CORRECTION_FIELDS = frozenset(
 SHIPMENT_VALUE_EDIT_FIELDS = frozenset({"shipment_value_rmb", "goods_value"})
 SHIPMENT_VALUE_INPUT_FIELDS = frozenset({
     "unit_price", "purchase_currency", "unit_price_uom", "purchase_uom",
-    "quantity", "unit", "actual_shipped_qty", "shipped_uom",
+    "quantity", "unit", "actual_shipped_qty", "shipped_uom", "source_doc_no",
 })
 SERVER_ITEM_METADATA_FIELDS = frozenset(
     {"shipment_valuation", "manual_shipment_valuation", "logistics_row", "autofill_review"}
@@ -1507,12 +1507,27 @@ def update_item_field(
                 'version_name': version_name or item_doc.version, 'message': str(exc)}
     valuation_result = None
     if is_shipment_value:
-        from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+        from overseas_costing.services.shipment_cost_service import (
+            build_legacy_shipment_valuation, build_manual_shipment_valuation,
+        )
         metadata = object_json(item_doc.extra_json)
         if coerced_value == "":
+            if (not any(key in metadata for key in ("shipment_valuation", "settlement_cargo"))
+                    and isinstance(existing_manual, dict)
+                    and shipment_number(item_doc.goods_value) != shipment_number(existing_manual.get("amount_rmb"))):
+                legacy_prior = build_legacy_shipment_valuation(
+                    project_source_values(item_doc.as_dict(), source_context)
+                )
+                if legacy_prior is not None:
+                    metadata["shipment_valuation"] = legacy_prior
             metadata.pop("manual_shipment_valuation", None)
+            item_doc.goods_value = 0
         else:
             current_row = project_source_values(item_doc.as_dict(), source_context)
+            if not any(key in metadata for key in ("shipment_valuation", "settlement_cargo")):
+                legacy_prior = build_legacy_shipment_valuation(current_row)
+                if legacy_prior is not None:
+                    metadata["shipment_valuation"] = legacy_prior
             metadata["manual_shipment_valuation"] = build_manual_shipment_valuation(
                 current_row,
                 coerced_value,

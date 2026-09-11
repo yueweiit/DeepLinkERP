@@ -65,6 +65,28 @@ def build_manual_shipment_valuation(row, amount_rmb, *, actor, reason='', confir
     }
 
 
+def build_legacy_shipment_valuation(row):
+    """Freeze a positive legacy mirror before a server-managed manual override."""
+    amount = number(row.get('goods_value'))
+    if amount is None or amount <= 0:
+        return None
+    inputs = shipment_input(row)
+    return {
+        'amount_rmb': _decimal_text(amount),
+        'currency': 'RMB',
+        'quantity': inputs['quantity'],
+        'uom': inputs['uom'],
+        'input_fingerprint': digest(inputs),
+        'input_evidence': {
+            'legacy_goods_value': _decimal_text(amount),
+            'source_doc_no': str(row.get('source_doc_no') or ''),
+        },
+        'method': 'LEGACY_PURCHASE',
+        'status': 'automatic',
+        'error': '',
+    }
+
+
 def _manual_value(row, manual):
     if not isinstance(manual, dict) or not manual.get('confirmed') or not manual.get('manual'):
         return None
@@ -138,9 +160,9 @@ def shipment_value(row):
     })
     if legacy_manual is not None:
         return legacy_manual
-    shipping = row.get('effective_shipping') or {}
-    qty = shipping.get('quantity', row.get('actual_shipped_qty'))
-    uom = shipping.get('uom') or row.get('shipped_uom') or row.get('unit')
+    inputs = shipment_input(row)
+    qty = inputs['quantity']
+    uom = inputs['uom']
     error = valuation.get('error') or ''
     if not error and (number(qty) != number(valuation.get('quantity')) or normalize_unit(uom) != normalize_unit(valuation.get('uom'))):
         error = 'SHIPMENT_VALUATION_STALE'
