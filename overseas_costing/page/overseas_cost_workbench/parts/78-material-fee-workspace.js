@@ -1073,9 +1073,114 @@
       PARSED: { label: "已解析", tone: "parsed" },
       ANALYZING: { label: "AI 分析中", tone: "running" },
       COMPLETED: { label: "已完成", tone: "complete" },
+      PARTIAL: { label: "部分读取", tone: "partial" },
       FAILED: { label: "失败", tone: "failed" },
       SKIPPED: { label: "跳过", tone: "skipped" },
+      EXCLUDED: { label: "已排除", tone: "skipped" },
+      NO_RESULT: { label: "未产生结果", tone: "skipped" },
+      NEEDS_SELECTION: { label: "待选择 Sheet", tone: "waiting" },
     }[String(value || "WAITING").toUpperCase()] || { label: String(value || "等待"), tone: "waiting" };
+  }
+
+  materialAISourceGroupKey(source, index = 0) {
+    const kind = String(source?.source_kind || "unknown");
+    const sourceId = String(source?.source_id || source?.source_key || source?.id || "").trim();
+    const explicitParent = String(source?.parent_source_id || "").trim();
+    const inferredParent = !explicitParent && /:sheet:[0-9a-f]{20,64}$/i.test(sourceId)
+      ? sourceId.replace(/:sheet:[0-9a-f]{20,64}$/i, "")
+      : "";
+    const logicalSourceId = explicitParent || inferredParent || sourceId || `unidentified:${index}`;
+    return {
+      group_key: JSON.stringify([kind, logicalSourceId]),
+      logical_source_id: logicalSourceId,
+      source_kind: kind,
+    };
+  }
+
+  materialAISourceSheetInfo(source) {
+    const name = String(source?.sheet_name || source?.sheet || "").trim();
+    const sourceId = String(source?.source_id || source?.source_key || source?.id || "").trim();
+    return {
+      name,
+      is_sheet: Boolean(name || source?.parent_source_id || /:sheet:[0-9a-f]{20,64}$/i.test(sourceId)),
+    };
+  }
+
+  materialAISourceGroups(sources) {
+    const grouped = new Map();
+    (Array.isArray(sources) ? sources : []).forEach((source, index) => {
+      const identity = this.materialAISourceGroupKey(source, index);
+      if (!grouped.has(identity.group_key)) grouped.set(identity.group_key, { ...identity, rows: [] });
+      grouped.get(identity.group_key).rows.push(source);
+    });
+    return Array.from(grouped.values()).map((group) => {
+      const sheetRows = group.rows.filter((source) => this.materialAISourceSheetInfo(source).is_sheet);
+      const auditRows = sheetRows.length ? group.rows.filter((source) => {
+        if (this.materialAISourceSheetInfo(source).is_sheet) return false;
+        const readStatus = String(source?.read_status || "").toUpperCase();
+        const status = String(source?.status || "").toUpperCase();
+        return source?.selectable === false
+          || source?.analysis_allowed === false
+          || ["EXCLUDED", "NO_RESULT", "FAILED"].includes(readStatus)
+          || ["EXCLUDED", "SKIPPED", "FAILED"].includes(status);
+      }) : [];
+      const contentRows = group.rows.filter((source) => !auditRows.includes(source));
+      const failedRows = contentRows.filter((source) => String(source?.read_status || "").toUpperCase() === "FAILED"
+        || String(source?.status || "").toUpperCase() === "FAILED");
+      const successfulRows = contentRows.filter((source) => {
+        const readStatus = String(source?.read_status || "").toUpperCase();
+        const status = String(source?.status || "").toUpperCase();
+        return !failedRows.includes(source) && (readStatus === "READ" || ["PARSED", "COMPLETED"].includes(status));
+      });
+      const readRows = successfulRows.filter((source) => {
+        const readStatus = String(source?.read_status || "").toUpperCase();
+        return readStatus === "READ" || !readStatus;
+      });
+      const activeRows = contentRows.filter((source) => ["WAITING", "DOWNLOADING", "READING", "ANALYZING"].includes(String(source?.status || "").toUpperCase()));
+      const primary = readRows[0] || successfulRows[0] || activeRows[0] || failedRows[0] || contentRows[0] || group.rows[0] || {};
+      let status = String(primary?.status || "WAITING").toUpperCase();
+      let readStatus = String(primary?.read_status || "NO_RESULT").toUpperCase();
+      if (successfulRows.length && failedRows.length && !activeRows.length) {
+        status = "PARTIAL";
+        readStatus = "PARTIAL";
+      } else if (activeRows.length) {
+        status = String(activeRows[0]?.status || "WAITING").toUpperCase();
+      } else if (successfulRows.length) {
+        status = successfulRows.some((source) => String(source?.status || "").toUpperCase() === "COMPLETED") ? "COMPLETED" : "PARSED";
+        readStatus = readRows.length ? "READ" : String(primary?.read_status || "NO_RESULT").toUpperCase();
+      } else if (failedRows.length) {
+        status = "FAILED";
+        readStatus = "FAILED";
+      }
+      const metricRows = sheetRows.length ? contentRows.filter((source) => this.materialAISourceSheetInfo(source).is_sheet) : contentRows;
+      const sum = (name, fallback = "") => metricRows.reduce((total, source) => {
+        const value = fallback && source?.[name] == null ? source?.[fallback] : source?.[name];
+        const number = Number(value || 0);
+        return total + (Number.isFinite(number) ? number : 0);
+      }, 0);
+      return {
+        ...group,
+        primary,
+        label: String(primary?.label || group.rows[0]?.label || "未命名资料"),
+        status,
+        read_status: readStatus,
+        sheet_names: [...new Set(sheetRows.map((source) => this.materialAISourceSheetInfo(source).name).filter(Boolean))],
+        field_count: sum("field_count"),
+        candidate_count: sum("candidate_count", "result_count"),
+        result_count: sum("result_count", "candidate_count"),
+        failed_count: failedRows.length,
+        audit_count: auditRows.length,
+        audit_rows: auditRows,
+      };
+    });
+  }
+
+  materialAISourceGroupSummary(groups) {
+    const rows = Array.isArray(groups) ? groups : [];
+    return {
+      source_count: rows.length,
+      failed_source_count: rows.filter((group) => ["FAILED", "PARTIAL"].includes(String(group?.status || "").toUpperCase())).length,
+    };
   }
 
   renderMaterialAIProgressChip() {
@@ -1096,6 +1201,8 @@
     const fill = this.ensureMaterialFeeState().aiFill || {};
     const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
     const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
+    const sourceGroups = this.materialAISourceGroups(sources);
+    const sourceSummary = this.materialAISourceGroupSummary(sourceGroups);
     const summary = fill.completion_summary || {};
     const warning = this.materialAIProgressWarning(fill);
     const ready = fill.status === "READY";
@@ -1107,13 +1214,13 @@
       <main class="ocw-mf-ai-dialog-body">
       <div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i data-mf-ai-progress-bar style="width:${progress}%"></i></div>
       <div class="ocw-mf-ai-progress-summary">
-        <span data-mf-ai-summary="source_count">资料 ${Number(summary.source_count ?? sources.length)} 份</span>
+        <span data-mf-ai-summary="source_count">资料 ${sourceSummary.source_count} 份</span>
         <span data-mf-ai-summary="material_proposal_count">物料 ${Number(summary.material_proposal_count || 0)} 项</span>
         <span data-mf-ai-summary="packing_proposal_count">装箱 ${Number(summary.packing_proposal_count || 0)} 项</span>
         <span data-mf-ai-summary="fee_proposal_count">费用 ${Number(summary.fee_proposal_count || 0)} 项</span>
-        <span class="is-failed" data-mf-ai-summary="failed_source_count" ${Number(summary.failed_source_count || 0) ? "" : "hidden"}>失败 ${Number(summary.failed_source_count || 0)} 份</span>
+        <span class="is-failed" data-mf-ai-summary="failed_source_count" ${sourceSummary.failed_source_count ? "" : "hidden"}>失败 ${sourceSummary.failed_source_count} 份</span>
       </div>
-      <div class="ocw-mf-ai-source-progress" data-mf-ai-source-progress>${sources.map((source, index) => this.renderMaterialAIProgressSourceRow(source, index)).join("")}<div class="ocw-mf-ai-progress-empty" data-mf-ai-progress-empty ${sources.length ? "hidden" : ""}>正在建立当前批次的资料清单…</div></div>
+      <div class="ocw-mf-ai-source-progress" data-mf-ai-source-progress>${sourceGroups.map((group) => this.renderMaterialAIProgressSourceGroup(group)).join("")}<div class="ocw-mf-ai-progress-empty" data-mf-ai-progress-empty ${sourceGroups.length ? "hidden" : ""}>正在建立当前批次的资料清单…</div></div>
       <div class="ocw-mf-ai-progress-warning" data-mf-ai-progress-warning ${warning ? "" : "hidden"}>${this.escape(warning)}</div>
       </main>
       <footer class="ocw-mf-ai-dialog-footer">
@@ -1124,7 +1231,8 @@
   }
 
   materialAIProgressSourceKey(source, index) {
-    return [source?.source_kind, source?.source_id || source?.source_key || source?.id, source?.sheet, index].map((value) => String(value || "")).join(":");
+    if (source?.group_key) return String(source.group_key);
+    return this.materialAISourceGroupKey(source, index).group_key;
   }
 
   materialAIProgressSourceView(source) {
@@ -1145,34 +1253,59 @@
     return `<article class="is-${view.status.tone}" data-mf-ai-source-key="${this.escape(key)}"><i></i><div><strong data-mf-ai-source-label>${this.escape(view.label)}</strong><span data-mf-ai-source-detail>${this.escape(view.detail)}</span><small data-mf-ai-source-restriction ${view.restriction ? "" : "hidden"}>${this.escape(view.restriction)}</small><small data-mf-ai-source-error ${view.error ? "" : "hidden"}>${this.escape(view.error)}</small></div><em data-mf-ai-source-status>${view.status.label}</em></article>`;
   }
 
+  renderMaterialAIProgressSourceRecord(source, auditOnly = false) {
+    const view = this.materialAIProgressSourceView(source);
+    const sheet = this.materialAISourceSheetInfo(source);
+    const identity = sheet.name ? `Sheet ${sheet.name}` : sheet.is_sheet ? "工作表记录" : "附件归档";
+    return `<div class="ocw-mf-ai-source-record is-${view.status.tone}${auditOnly ? " is-audit" : ""}"><i></i><div><strong>${this.escape(identity)}</strong><span>${this.escape([source?.detail, Number(source?.field_count || 0) ? `${Number(source.field_count)} 个字段` : "", Number(source?.candidate_count || source?.result_count || 0) ? `${Number(source.candidate_count || source.result_count)} 个候选` : ""].filter(Boolean).join(" · ") || view.status.label)}</span>${view.error ? `<small>${this.escape(view.error)}</small>` : ""}</div><em>${view.status.label}</em>${auditOnly ? "<b>仅审计</b>" : ""}</div>`;
+  }
+
+  renderMaterialAIProgressSourceGroup(group) {
+    const key = this.materialAIProgressSourceKey(group);
+    const status = this.materialAIProgressStatus(group?.status);
+    const primary = group?.primary || {};
+    const sheets = Array.isArray(group?.sheet_names) ? group.sheet_names : [];
+    const location = sheets.length === 1 ? `Sheet ${sheets[0]}` : sheets.length > 1 ? `${sheets.length} 个 Sheet` : "";
+    const detail = [primary?.approval_no ? `审批 ${primary.approval_no}` : "", location, primary?.detail,
+      Number(group?.field_count || 0) ? `${Number(group.field_count)} 个字段` : "",
+      Number(group?.candidate_count || 0) ? `${Number(group.candidate_count)} 个候选` : "",
+      group?.status === "PARTIAL" ? `${Number(group.failed_count || 0)} 个工作表读取失败` : "",
+    ].filter(Boolean).join(" · ") || status.label;
+    const restriction = this.materialAISourceRestriction(primary);
+    const error = group?.status === "FAILED" && primary?.error ? this.materialAIErrorMessage(primary.error, "资料读取失败") : "";
+    const rows = Array.isArray(group?.rows) ? group.rows : [];
+    const auditRows = Array.isArray(group?.audit_rows) ? group.audit_rows : [];
+    const records = rows.length > 1 ? `<details class="ocw-mf-ai-source-records" data-mf-ai-source-records><summary>同步记录 ${rows.length} 条${auditRows.length ? ` · ${auditRows.length} 条仅审计` : ""}</summary><div>${rows.map((source) => this.renderMaterialAIProgressSourceRecord(source, auditRows.includes(source))).join("")}</div></details>` : "";
+    return `<article class="ocw-mf-ai-source-group is-${status.tone}" data-mf-ai-source-key="${this.escape(key)}"><i></i><div><strong data-mf-ai-source-label>${this.escape(group?.label || "未命名资料")}</strong><span data-mf-ai-source-detail>${this.escape(detail)}</span><small data-mf-ai-source-restriction ${restriction ? "" : "hidden"}>${this.escape(restriction)}</small><small data-mf-ai-source-error ${error ? "" : "hidden"}>${this.escape(error)}</small>${records}</div><em data-mf-ai-source-status>${status.label}</em></article>`;
+  }
+
   updateMaterialAIProgressSources($host, sources) {
     const $list = $host.find("[data-mf-ai-source-progress]");
     if (!$list.length) return;
+    const groups = this.materialAISourceGroups(sources);
     const scrollTop = $list.scrollTop();
     const remaining = new Map();
     $list.children("[data-mf-ai-source-key]").each((_index, element) => {
       const $row = $(element);
       remaining.set(String($row.attr("data-mf-ai-source-key") || ""), $row);
     });
-    sources.forEach((source, index) => {
-      const key = this.materialAIProgressSourceKey(source, index);
-      const view = this.materialAIProgressSourceView(source);
+    groups.forEach((group) => {
+      const key = this.materialAIProgressSourceKey(group);
       let $row = remaining.get(key);
       if (!$row?.length) {
-        $list.find("[data-mf-ai-progress-empty]").before(this.renderMaterialAIProgressSourceRow(source, index));
+        $list.find("[data-mf-ai-progress-empty]").before(this.renderMaterialAIProgressSourceGroup(group));
         $row = $list.children("[data-mf-ai-source-key]").last();
       } else {
         remaining.delete(key);
+        const wasOpen = Boolean($row.find("[data-mf-ai-source-records]").prop("open"));
+        const $next = $(this.renderMaterialAIProgressSourceGroup(group));
+        $row.replaceWith($next);
+        $row = $next;
+        if (wasOpen) $row.find("[data-mf-ai-source-records]").prop("open", true);
       }
-      $row.attr("class", `is-${view.status.tone}`);
-      $row.find("[data-mf-ai-source-label]").text(view.label);
-      $row.find("[data-mf-ai-source-detail]").text(view.detail);
-      $row.find("[data-mf-ai-source-status]").text(view.status.label);
-      $row.find("[data-mf-ai-source-error]").text(view.error).prop("hidden", !view.error);
-      $row.find("[data-mf-ai-source-restriction]").text(view.restriction).prop("hidden", !view.restriction);
     });
     remaining.forEach(($row) => $row.remove());
-    $list.find("[data-mf-ai-progress-empty]").prop("hidden", Boolean(sources.length));
+    $list.find("[data-mf-ai-progress-empty]").prop("hidden", Boolean(groups.length));
     $list.scrollTop(scrollTop);
   }
 
@@ -1280,6 +1413,8 @@
       const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
       const title = ready ? "AI 资料草稿已生成" : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
       const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
+      const sourceGroups = this.materialAISourceGroups(sources);
+      const sourceSummary = this.materialAISourceGroupSummary(sourceGroups);
       const summary = fill.completion_summary || {};
       const warning = this.materialAIProgressWarning(fill);
       $host.find("[data-mf-ai-progress-title]").text(title);
@@ -1287,14 +1422,14 @@
       $host.find("[data-mf-ai-progress-percent]").text(`${progress}%`);
       $host.find("[data-mf-ai-progress-bar]").css("width", `${progress}%`);
       const labels = {
-        source_count: `资料 ${Number(summary.source_count ?? sources.length)} 份`,
+        source_count: `资料 ${sourceSummary.source_count} 份`,
         material_proposal_count: `物料 ${Number(summary.material_proposal_count || 0)} 项`,
         packing_proposal_count: `装箱 ${Number(summary.packing_proposal_count || 0)} 项`,
         fee_proposal_count: `费用 ${Number(summary.fee_proposal_count || 0)} 项`,
-        failed_source_count: `失败 ${Number(summary.failed_source_count || 0)} 份`,
+        failed_source_count: `失败 ${sourceSummary.failed_source_count} 份`,
       };
       Object.entries(labels).forEach(([key, label]) => $host.find(`[data-mf-ai-summary='${key}']`).text(label));
-      $host.find("[data-mf-ai-summary='failed_source_count']").prop("hidden", !Number(summary.failed_source_count || 0));
+      $host.find("[data-mf-ai-summary='failed_source_count']").prop("hidden", !sourceSummary.failed_source_count);
       $host.find("[data-mf-ai-progress-warning]").text(warning).prop("hidden", !warning);
       $host.find("[data-action='mf-ai-progress-retry']").prop("hidden", !(failed || fill.stalled || fill.is_stalled || fill.connection_error || fill.polling_paused));
       this.updateMaterialAIProgressSources($host, sources);
@@ -1319,6 +1454,7 @@
   materialAIReadStatusLabel(source) {
     return {
       READ: "已读取",
+      PARTIAL: "部分读取",
       FAILED: "读取失败",
       NO_RESULT: "未产生结果",
       EXCLUDED: "已排除",
@@ -1330,6 +1466,17 @@
     return Boolean(source) && !source.locked && source.selectable !== false && source.analysis_allowed !== false;
   }
 
+  materialAIAuditSourceRows(sources) {
+    return new Set(this.materialAISourceGroups(sources).flatMap((group) => group.audit_rows || []));
+  }
+
+  materialAISelectedSourceIds(sources) {
+    const rows = Array.isArray(sources) ? sources : [];
+    const auditRows = this.materialAIAuditSourceRows(rows);
+    return rows.filter((source) => !auditRows.has(source) && source.selected && this.materialAICanSelectSource(source))
+      .map((source) => String(source.source_id || "")).filter(Boolean);
+  }
+
   materialAISourceRestriction(source) {
     if (source?.analysis_allowed === false) return `不可分析：${source.analysis_reason || source.adoption_restriction || "当前资料不可用于分析"}`;
     if (source?.adoption_allowed === false) return `仅供分析：${source.adoption_restriction || "当前资料暂不能采用"}`;
@@ -1338,17 +1485,23 @@
 
   renderMaterialAIReviewSources(fill) {
     const sources = Array.isArray(fill?.source_progress) ? fill.source_progress : [];
-    const groups = ["READ", "FAILED", "NO_RESULT", "EXCLUDED", "NEEDS_SELECTION"];
-    return `<details class="ocw-mf-ai-review-sources"><summary>资料来源 <span>${sources.length} 份</span></summary><div>${groups.map((status) => {
-      const rows = sources.filter((source) => String(source.read_status || "NO_RESULT") === status);
-      if (!rows.length) return "";
-      return `<section><h4>${this.materialAIReadStatusLabel({ read_status: status })}（${rows.length}）</h4>${rows.map((source) => {
-        const identity = [source.approval_no || source.source_context?.instance_id ? `审批 ${source.approval_no || source.source_context.instance_id}` : "", source.sheet_name ? `Sheet ${source.sheet_name}` : "", source.actor_name || "", source.occurred_at || ""].filter(Boolean).join(" · ");
+    const groups = this.materialAISourceGroups(sources);
+    const order = { READ: 0, PARTIAL: 1, NEEDS_SELECTION: 2, NO_RESULT: 3, FAILED: 4, EXCLUDED: 5 };
+    const cards = [...groups].sort((left, right) => (order[left.read_status] ?? 9) - (order[right.read_status] ?? 9)).map((group) => {
+      const rows = Array.isArray(group.rows) ? group.rows : [];
+      const auditRows = Array.isArray(group.audit_rows) ? group.audit_rows : [];
+      const records = rows.map((source) => {
+        const auditOnly = auditRows.includes(source);
+        const sheet = this.materialAISourceSheetInfo(source);
+        const identity = [sheet.name ? `Sheet ${sheet.name}` : sheet.is_sheet ? "工作表记录" : "附件归档", source.actor_name || "", source.occurred_at || ""].filter(Boolean).join(" · ");
         const canToggle = this.materialAICanSelectSource(source);
         const restriction = this.materialAISourceRestriction(source);
-        return `<label class="is-${String(status).toLowerCase()}"><input type="checkbox" data-mf-ai-source-select="1" value="${this.escape(source.source_id || "")}" ${source.selected && source.analysis_allowed !== false ? "checked" : ""} ${canToggle ? "" : "disabled"}><span><strong>${this.escape(source.label || source.source_id || "未命名资料")}</strong><small>${this.escape(identity || this.materialAIReadStatusLabel(source))}</small>${restriction ? `<small data-mf-ai-source-restriction>${this.escape(restriction)}</small>` : ""}${source.error ? `<em>${this.escape(this.materialAIErrorMessage(source.error, "资料读取失败"))}</em>` : ""}<i>${Number(source.result_count || source.candidate_count || 0)} 个候选 · ${this.escape(source.parse_method || "NONE")}</i></span>${source.locked ? "<b>锁定纳入</b>" : ""}</label>`;
-      }).join("")}</section>`;
-    }).join("") || `<p>未找到可用资料来源。</p>`}</div></details>`;
+        const input = auditOnly ? "" : `<input type="checkbox" data-mf-ai-source-select="1" value="${this.escape(source.source_id || "")}" ${source.selected && source.analysis_allowed !== false ? "checked" : ""} ${canToggle ? "" : "disabled"}>`;
+        return `<label class="ocw-mf-ai-review-source-record is-${String(source.read_status || "no_result").toLowerCase()}${auditOnly ? " is-audit" : ""}">${input}<span><strong>${this.escape(identity || this.materialAIReadStatusLabel(source))}</strong>${restriction ? `<small data-mf-ai-source-restriction>${this.escape(restriction)}</small>` : ""}${source.error ? `<em>${this.escape(this.materialAIErrorMessage(source.error, "资料读取失败"))}</em>` : ""}<i>${Number(source.result_count || source.candidate_count || 0)} 个候选 · ${this.escape(source.parse_method || "NONE")}</i></span>${auditOnly ? "<b>仅审计</b>" : source.locked ? "<b>锁定纳入</b>" : ""}</label>`;
+      }).join("");
+      return `<article class="ocw-mf-ai-review-source-group is-${String(group.read_status || "no_result").toLowerCase()}"><header><div><strong>${this.escape(group.label)}</strong><small>${this.escape(group.primary?.approval_no ? `审批 ${group.primary.approval_no}` : group.logical_source_id)}</small></div><b>${this.materialAIReadStatusLabel(group)}</b></header><details><summary>同步记录 ${rows.length} 条${auditRows.length ? ` · ${auditRows.length} 条仅审计` : ""}</summary><div>${records}</div></details></article>`;
+    }).join("");
+    return `<details class="ocw-mf-ai-review-sources"><summary>资料来源 <span>${groups.length} 份</span></summary><div>${cards || `<p>未找到可用资料来源。</p>`}</div></details>`;
   }
 
   renderCurrentSourceReviewControls(context = {}, cargo = null, { fees = false, values = {} } = {}) {
@@ -1666,10 +1819,8 @@
 
   async restartMaterialAIWithSources(dialog) {
     const state = this.ensureMaterialFeeState();
-    const selectedSourceIds = (state.aiFill?.source_progress || [])
-      .filter((source) => source.selected && this.materialAICanSelectSource(source))
-      .map((source) => String(source.source_id || ""))
-      .filter(Boolean);
+    const sources = state.aiFill?.source_progress || [];
+    const selectedSourceIds = this.materialAISelectedSourceIds(sources);
     state.aiPendingReady = null;
     dialog.$wrapper.removeClass("is-review");
     await this.startMaterialAIFill({ force: true, restart: true, selectedSourceIds });
@@ -1946,10 +2097,7 @@
       options.restart = true;
       delete options.request_id;
       delete options.requestPayload;
-      if (!Array.isArray(options.selectedSourceIds) && fill?.source_progress?.length) {
-        options.selectedSourceIds = fill.source_progress.filter((source) => source.selected && this.materialAICanSelectSource(source))
-          .map((source) => String(source.source_id || "")).filter(Boolean);
-      }
+      if (fill?.source_progress?.length) options.selectedSourceIds = this.materialAISelectedSourceIds(fill.source_progress);
     }
     return this.startMaterialAIFill(options);
   }
@@ -2024,10 +2172,12 @@
         force: options.force === true ? 1 : 0,
       };
       if (Array.isArray(options.selectedSourceIds)) {
-        const sources = new Map((state.aiFill?.source_progress || []).map((source) => [String(source.source_id || ""), source]));
+        const currentSources = state.aiFill?.source_progress || [];
+        const sources = new Map(currentSources.map((source) => [String(source.source_id || ""), source]));
+        const auditRows = this.materialAIAuditSourceRows(currentSources);
         payload.selected_source_ids_json = JSON.stringify(options.selectedSourceIds.filter((id) => {
           const source = sources.get(String(id));
-          return !source || this.materialAICanSelectSource(source);
+          return !source || (!auditRows.has(source) && this.materialAICanSelectSource(source));
         }));
       }
     }

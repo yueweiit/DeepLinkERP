@@ -147,6 +147,180 @@ console.log(JSON.stringify({review,progress,selected}));
     assert result['selected'] == ['read']
 
 
+def test_source_progress_merges_unreadable_parent_with_successful_sheet():
+    result = _fee_workspace_result(FIXTURE + r"""
+const parent={source_kind:'approval_attachment',source_id:'oa:PROC-1:FILE-9',label:'packing list.xlsx',
+ approval_no:'OA-1',selected:false,selectable:false,analysis_allowed:false,read_status:'EXCLUDED',status:'EXCLUDED',
+ detail:'资料不可读取，请核对来源。',error:'资料不可读取，请核对来源。'};
+const sheet={source_kind:'approval_attachment',source_id:'oa:PROC-1:FILE-9:sheet:0123456789abcdef0123',
+ parent_source_id:'oa:PROC-1:FILE-9',label:'packing list.xlsx',approval_no:'OA-1',sheet_name:'9.4日指环扣双清',
+ sheet:'9.4日指环扣双清',selected:true,selectable:true,analysis_allowed:true,read_status:'READ',status:'COMPLETED',
+ detail:'系统直读完成',field_count:415,candidate_count:40,result_count:40};
+const groups=workspace.materialAISourceGroups([parent,sheet]);
+const summary=workspace.materialAISourceGroupSummary(groups);
+const html=workspace.renderMaterialAIProgressSourceGroup(groups[0]);
+console.log(JSON.stringify({groups,summary,html}));
+""")
+    assert len(result['groups']) == 1
+    group = result['groups'][0]
+    assert group['primary']['source_id'].endswith(':sheet:0123456789abcdef0123')
+    assert group['status'] == 'COMPLETED'
+    assert group['read_status'] == 'READ'
+    assert group['field_count'] == 415
+    assert group['candidate_count'] == 40
+    assert group['audit_count'] == 1
+    assert result['summary'] == {'source_count': 1, 'failed_source_count': 0}
+    assert result['html'].count('packing list.xlsx') == 1
+    for text in ('Sheet 9.4日指环扣双清', '415 个字段', '40 个候选', '同步记录 2 条', '仅审计'):
+        assert text in result['html']
+
+
+def test_source_grouping_supports_historical_sheet_ids_without_merging_same_names():
+    result = _fee_workspace_result(FIXTURE + r"""
+const base='oa:PROC-1:FILE-9';
+const sources=[
+ {source_kind:'approval_attachment',source_id:base,label:'同名.xlsx',read_status:'EXCLUDED',status:'EXCLUDED'},
+ {source_kind:'approval_attachment',source_id:base+':sheet:0123456789abcdef0123',label:'同名.xlsx',read_status:'READ',status:'COMPLETED'},
+ {source_kind:'approval_attachment',source_id:'oa:PROC-2:FILE-8',label:'同名.xlsx',read_status:'READ',status:'COMPLETED'},
+];
+const groups=workspace.materialAISourceGroups(sources);
+console.log(JSON.stringify({keys:groups.map(group=>group.group_key),sizes:groups.map(group=>group.rows.length),audits:groups.map(group=>group.audit_count)}));
+""")
+    assert result['sizes'] == [2, 1]
+    assert result['audits'] == [1, 0]
+    assert len(set(result['keys'])) == 2
+    assert result['keys'][0] != result['keys'][1]
+
+
+def test_source_group_reports_partial_read_for_real_failed_sheet():
+    result = _fee_workspace_result(FIXTURE + r"""
+const base='oa:PROC-1:FILE-9';
+const groups=workspace.materialAISourceGroups([
+ {source_kind:'approval_attachment',source_id:base+':sheet:0123456789abcdef0123',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet A',sheet_name:'Sheet A',read_status:'READ',status:'COMPLETED',candidate_count:3},
+ {source_kind:'approval_attachment',source_id:base+':sheet:abcdef0123456789abcd',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet B',sheet_name:'Sheet B',read_status:'FAILED',status:'FAILED',error:'工作表损坏'},
+]);
+const summary=workspace.materialAISourceGroupSummary(groups);
+const html=workspace.renderMaterialAIProgressSourceGroup(groups[0]);
+console.log(JSON.stringify({group:groups[0],summary,html}));
+""")
+    assert result['group']['status'] == 'PARTIAL'
+    assert result['group']['read_status'] == 'PARTIAL'
+    assert result['group']['failed_count'] == 1
+    assert result['summary'] == {'source_count': 1, 'failed_source_count': 1}
+    assert '部分读取' in result['html']
+    assert 'Sheet B' in result['html']
+    assert '工作表损坏' in result['html']
+    assert '仅审计' not in result['html']
+
+
+def test_historical_failed_sheet_without_sheet_name_is_not_treated_as_audit():
+    result = _fee_workspace_result(FIXTURE + r"""
+const base='oa:PROC-1:FILE-9';
+const groups=workspace.materialAISourceGroups([
+ {source_kind:'approval_attachment',source_id:base+':sheet:0123456789abcdef0123',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet A',read_status:'READ',status:'COMPLETED',candidate_count:3},
+ {source_kind:'approval_attachment',source_id:base+':sheet:abcdef0123456789abcd',parent_source_id:base,
+  label:'packing list.xlsx',read_status:'FAILED',status:'FAILED',error:'历史工作表读取失败'},
+]);
+const html=workspace.renderMaterialAIProgressSourceGroup(groups[0]);
+console.log(JSON.stringify({group:groups[0],html}));
+""")
+    assert result['group']['status'] == 'PARTIAL'
+    assert result['group']['failed_count'] == 1
+    assert result['group']['audit_count'] == 0
+    assert '历史工作表读取失败' in result['html']
+    assert '工作表记录' in result['html']
+    assert '仅审计' not in result['html']
+
+
+def test_completed_source_without_candidates_keeps_no_result_read_status():
+    result = _fee_workspace_result(FIXTURE + r"""
+const groups=workspace.materialAISourceGroups([
+ {source_kind:'approval_attachment',source_id:'oa:PROC-1:FILE-9',label:'empty.xlsx',
+  read_status:'NO_RESULT',status:'COMPLETED',candidate_count:0},
+]);
+const html=workspace.renderMaterialAIReviewSources({source_progress:groups[0].rows});
+console.log(JSON.stringify({group:groups[0],html}));
+""")
+    assert result['group']['read_status'] == 'NO_RESULT'
+    assert '未产生结果' in result['html']
+    assert '已读取' not in result['html']
+
+
+def test_completed_no_result_sheet_plus_failed_sheet_is_partial():
+    result = _fee_workspace_result(FIXTURE + r"""
+const base='oa:PROC-1:FILE-9';
+const groups=workspace.materialAISourceGroups([
+ {source_kind:'approval_attachment',source_id:base+':sheet:0123456789abcdef0123',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet A',read_status:'NO_RESULT',status:'COMPLETED',candidate_count:0},
+ {source_kind:'approval_attachment',source_id:base+':sheet:abcdef0123456789abcd',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet B',read_status:'FAILED',status:'FAILED',error:'工作表损坏'},
+]);
+console.log(JSON.stringify(groups[0]));
+""")
+    assert result['status'] == 'PARTIAL'
+    assert result['read_status'] == 'PARTIAL'
+    assert result['failed_count'] == 1
+
+
+def test_review_source_groups_keep_real_source_ids_and_fold_audit_rows():
+    result = _fee_workspace_result(FIXTURE + r"""
+const base='oa:PROC-1:FILE-9';
+state.aiFill={status:'READY',source_progress:[
+ {source_kind:'approval_attachment',source_id:base,label:'packing list.xlsx',selected:true,
+  read_status:'EXCLUDED',status:'EXCLUDED',error:'空归档'},
+ {source_kind:'approval_attachment',source_id:base+':sheet:0123456789abcdef0123',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet A',sheet_name:'Sheet A',selected:true,selectable:true,analysis_allowed:true,
+  read_status:'READ',status:'COMPLETED',candidate_count:3},
+ {source_kind:'approval_attachment',source_id:base+':sheet:abcdef0123456789abcd',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet B',sheet_name:'Sheet B',selected:false,selectable:true,analysis_allowed:true,
+  read_status:'NO_RESULT',status:'SKIPPED'},
+]};
+const html=workspace.renderMaterialAIReviewSources(state.aiFill);
+let selected;workspace.startMaterialAIFill=async(options)=>{selected=options.selectedSourceIds};
+await workspace.restartMaterialAIWithSources({$wrapper:{removeClass(){}}});
+console.log(JSON.stringify({html,selected}));
+""")
+    assert result['html'].count('packing list.xlsx') == 1
+    assert '同步记录 3 条' in result['html']
+    assert '仅审计' in result['html']
+    assert 'value="oa:PROC-1:FILE-9"' not in result['html']
+    assert 'value="oa:PROC-1:FILE-9:sheet:0123456789abcdef0123"' in result['html']
+    assert 'value="oa:PROC-1:FILE-9:sheet:abcdef0123456789abcd"' in result['html']
+    assert result['selected'] == ['oa:PROC-1:FILE-9:sheet:0123456789abcdef0123']
+
+
+def test_progress_retry_excludes_selected_legacy_audit_parent():
+    result = _fee_workspace_result(FIXTURE + r"""
+const base='oa:PROC-1:FILE-9';
+state.aiFill={status:'FAILED',runId:'R1',source_progress:[
+ {source_kind:'approval_attachment',source_id:base,label:'packing list.xlsx',selected:true,
+  read_status:'EXCLUDED',status:'EXCLUDED',error:'空归档'},
+ {source_kind:'approval_attachment',source_id:base+':sheet:0123456789abcdef0123',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet A',selected:true,selectable:true,analysis_allowed:true,
+  read_status:'READ',status:'COMPLETED'},
+]};
+let selected;workspace.startMaterialAIFill=async(options)=>{selected=options.selectedSourceIds};
+await workspace.retryMaterialAIProgress();
+console.log(JSON.stringify({selected}));
+""")
+    assert result['selected'] == ['oa:PROC-1:FILE-9:sheet:0123456789abcdef0123']
+
+
+def test_progress_refresh_preserves_expanded_logical_source_groups():
+    source = (PARTS / '78-material-fee-workspace.js').read_text(encoding='utf-8')
+    update = source.split('  updateMaterialAIProgressSources(', 1)[1].split(
+        '  openMaterialAIProgressDialog(', 1
+    )[0]
+
+    assert 'materialAISourceGroups(sources)' in update
+    assert 'data-mf-ai-source-records' in update
+    assert '.prop("open")' in update
+    assert '.prop("open", true)' in update
+
+
 def test_material_scrollbar_has_sixteen_pixel_visible_thumb_and_single_track():
     css = (PARTS / '48-material-fee-workspace.css').read_text(encoding='utf-8')
     css = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
