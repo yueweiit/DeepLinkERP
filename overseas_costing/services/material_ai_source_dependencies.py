@@ -34,7 +34,7 @@ def approval_eligibility(source):
     )
     return {'analysis_allowed': bool(readable), 'analysis_reason': reason,
             'analysis_code': '' if readable else ('SOURCE_INVALID' if source else 'SOURCE_ARCHIVE_MISSING'),
-            'adoption_allowed': bool(readable and (source.get('kind') != 'expense' or approved)),
+            'adoption_allowed': bool(readable),
             'final_fee_allowed': bool(approved), 'adoption_restriction': restriction}
 
 
@@ -91,7 +91,7 @@ def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpo
         eligibility = approval_eligibility(source)
         if not eligibility['analysis_allowed']:
             raise SourceEligibilityError(eligibility['analysis_reason'], source=source, code=eligibility['analysis_code'])
-        if purpose == 'adoption' and not eligibility['adoption_allowed']:
+        if purpose == 'adoption' and not eligibility['final_fee_allowed']:
             raise SourceEligibilityError(eligibility['adoption_restriction'], source=source, code='SOURCE_NOT_APPROVED')
         batch = ledger.get('batch', batch_name, lock=lock) or {}
         from .import_service import _get_linked_purchase_approvals_from_extra

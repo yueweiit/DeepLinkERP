@@ -1,5 +1,6 @@
 """Analysis can read pending archives without granting final adoption rights."""
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -28,7 +29,8 @@ def test_pending_archives_analyze_consistently_and_never_become_approved(kind, s
         attachment = ledger.create('attachment', {'batch': batch['name'], 'file_url': '/private/files/a.txt'})
         raw['source_id'] = attachment['name']
     sources = deps.annotate_source_eligibility([raw], store=store, ledger=ledger, batch_name=batch['name'])
-    assert sources[0]['analysis_allowed'] and sources[0]['final_fee_allowed'] is False
+    assert sources[0]['analysis_allowed'] and sources[0]['adoption_allowed']
+    assert sources[0]['final_fee_allowed'] is False
     assert '审批中' in sources[0]['adoption_restriction']
     assert '物料资料可先填充用于暂估' in sources[0]['adoption_restriction']
     manifest = prepare_source_manifest(sources)
@@ -74,9 +76,12 @@ def test_adoption_rechecks_current_status_not_cached_approved_flag():
             store=store, ledger=ledger, batch_name=batch['name'], source_context={})
 
 
-def test_pending_expense_rows_can_be_saved_for_estimate_without_becoming_final():
+def test_pending_expense_rows_can_be_saved_and_reanalyzed_without_becoming_final(monkeypatch):
     from overseas_costing.services.effective_logistics_source import load_source_bundle
     from overseas_costing.services.effective_source_values import project_source_values
+    from overseas_costing.services import packing_snapshot_service as packing
+    from overseas_costing.services.logistics_settlement.store import Store
+    from overseas_costing.services.logistics_settlement import ledger as ledger_module
     from overseas_costing.services.material_ai_selection_writer import write_rows
     from overseas_costing.tests.test_ai_row_review_regressions import preview
 
@@ -94,8 +99,28 @@ def test_pending_expense_rows_can_be_saved_for_estimate_without_becoming_final()
     saved = ledger.rows('item', batch=batch['name'], version=new_version)
     assert saved and project_source_values(saved[0], current['context'])['material_code'] == items[0]['material_code']
     assert current['context']['separate_adoption']
-    assert not current['context']['available']
-    assert current['context']['packing']['dependency_issues']
+    assert current['context']['available']
+    assert not current['context']['approved']
+    assert not current['context']['packing']['dependency_issues']
+
+    monkeypatch.setattr(Store, 'frappe', lambda: store)
+    monkeypatch.setattr(ledger_module, 'FrappeLedger', lambda: ledger)
+    monkeypatch.setattr(packing, '_list_material_ai_sources',
+                        lambda *args, **kwargs: packing.selected_packing_ai_sources(batch['name'], current))
+    listed = packing.list_material_ai_sources(batch['name'], new_version)
+    assert listed[0]['analysis_allowed'] and listed[0]['adoption_allowed']
+    assert listed[0]['final_fee_allowed'] is False
+    manifest = prepare_source_manifest(listed)
+    progress = source_progress_manifest(manifest)
+    assert manifest[0]['selected'] and manifest[0]['selectable']
+    assert progress[0]['analysis_allowed'] and progress[0]['adoption_allowed']
+    assert progress[0]['final_fee_allowed'] is False
+    adoption = json.loads(current['version']['extra_json'])['ai_row_adoption']
+    baseline = deps.capture_dependencies(manifest, store=store, ledger=ledger,
+        batch_name=batch['name'], source_context=current['context'],
+        inherited=adoption, purpose='analysis')
+    assert not deps.dependency_issues({'dependencies': baseline}, store=store, ledger=ledger,
+        batch_name=batch['name'], purpose='analysis')
 
 
 def test_public_listing_and_real_repository_worker_use_same_analysis_checks(monkeypatch):
@@ -111,7 +136,8 @@ def test_public_listing_and_real_repository_worker_use_same_analysis_checks(monk
             'source_hash':'SAME', 'available':True, 'approval_role':'purchase'}]
     monkeypatch.setattr(packing, '_list_material_ai_sources', lambda *a, **kw: deepcopy(raw))
     listed = packing.list_material_ai_sources('B1','V1')
-    assert listed[0]['analysis_allowed'] and not listed[0]['adoption_allowed']
+    assert listed[0]['analysis_allowed'] and listed[0]['adoption_allowed']
+    assert not listed[0]['final_fee_allowed']
 
     class Repo(_LifecycleRepository):
         capture_row_dependencies = ai.FrappeMaterialAIFillRepository.capture_row_dependencies
