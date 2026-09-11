@@ -94,6 +94,7 @@
     if (!(await this.confirmDiscardDetailChanges())) return;
     await this.releaseEditSession();
     this.cleanupSkuScrollControls();
+    this.cleanupMaterialGridScrollControls?.();
     this.detailState.requestId += 1;
     this.detailState.skuRequestId += 1;
     this.detailState.refreshRequestId += 1;
@@ -152,6 +153,7 @@
 
   renderDetailLoading() {
     this.cleanupSkuScrollControls();
+    this.cleanupMaterialGridScrollControls?.();
     this.$root.find("[data-area='detail-screen']").html(`
       <div class="ocw-detail-state"><span class="ocw-spinner"></span><strong>正在加载批次详情</strong><small>不会预加载 SKU 明细</small></div>
     `);
@@ -159,6 +161,7 @@
 
   renderDetailError(error) {
     this.cleanupSkuScrollControls();
+    this.cleanupMaterialGridScrollControls?.();
     this.$root.find("[data-area='detail-screen']").html(`
       <div class="ocw-detail-state is-error">
         <strong>批次详情加载失败</strong>
@@ -174,6 +177,7 @@
 
   renderDetailShell() {
     this.cleanupSkuScrollControls();
+    this.cleanupMaterialGridScrollControls?.();
     const batch = this.getDetailBatch();
     const issue = this.inferDetailIssue(batch);
     const action = OverseasCostWorkbenchState.primaryActionForIssue(issue);
@@ -238,6 +242,7 @@
     ).tab;
     if (allowed !== this.detailState.tab && !(await this.confirmDiscardDetailChanges())) return;
     this.cleanupSkuScrollControls();
+    this.cleanupMaterialGridScrollControls?.();
     this.detailState.tab = allowed;
     this.$root.find("[data-action='switch-detail-tab']").each((_, node) => {
       $(node).toggleClass("is-active", $(node).attr("data-tab") === allowed);
@@ -255,6 +260,7 @@
 
   renderDetailTabLoading(label) {
     this.cleanupSkuScrollControls();
+    this.cleanupMaterialGridScrollControls?.();
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-state"><span class="ocw-spinner"></span><strong>${this.escape(label)}</strong></div>
     `);
@@ -448,6 +454,7 @@
 
   bindSkuScrollControls() {
     this.cleanupSkuScrollControls();
+    this.cleanupMaterialGridScrollControls?.();
     const $table = this.$root.find("[data-role='sku-table-scroll']");
     const $range = this.$root.find("[data-role='sku-scrollbar']");
     const $shell = $table.closest(".ocw-sku-table-shell");

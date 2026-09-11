@@ -70,14 +70,13 @@ def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:
 def test_material_grid_uses_sticky_readable_identity_columns_and_scroll_controls() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
-    assert 'width: 54' in source
-    assert 'width: 220' in source
-    assert 'width: 120' in source
-    assert 'width: 260' in source
     assert "data-action=\"mf-grid-scroll-left\"" in source
     assert "data-action=\"mf-grid-scroll-right\"" in source
     assert "data-mf-grid-scrollbar" in source
-    assert ".ocw-mf-grid-table th:nth-child(-n+4)" in css
+    assert ".ocw-mf-grid-table th:nth-child(-n+4)" not in css
+    assert '[data-mf-grid-field="material_code"]' in css
+    assert '[data-mf-grid-field="product_name"]' in css
+    assert 'is-mf-grid-compact' in css
     assert "position: sticky" in css
 
 

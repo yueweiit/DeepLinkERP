@@ -799,12 +799,10 @@
 
   materialFeeGridColumns() {
     const state = this.ensureMaterialFeeState();
-    const compact = Boolean(globalThis.window?.matchMedia?.("(max-width: 1050px)")?.matches);
     const columns = [
-      { field: "row_no", label: "行", readonly: true, width: 54 },
-      { field: "source_doc_no", label: "采购审批号", readonly: true, width: 220 },
-      { field: "material_code", label: "物料编码", readonly: true, width: 120 },
-      { field: "product_name", label: "物料名称", readonly: true, width: 260 },
+      { field: "row_no", label: "行", readonly: true, width: 40, compactWidth: 32 },
+      { field: "material_code", label: "物料编码", readonly: true, width: 100, compactWidth: 88 },
+      { field: "product_name", label: "物料名称", readonly: true, width: 180, compactWidth: 120 },
       { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
       { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
       { field: "shipped_uom", label: "发货单位", width: 130 },
@@ -814,7 +812,6 @@
       { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true, width: 140 },
       { field: "project_collection", label: "项目归属", width: 180 },
     ];
-    if (compact) [54, 190, 110, 220].forEach((width, index) => { columns[index].width = width; });
     if (state.showAuxiliary) {
       columns.push(
         { field: "goods_value", label: "原采购全额 RMB", numeric: true, purchaseField: true, width: 150 },
@@ -827,6 +824,7 @@
         { field: "source_file_name", label: "来源文件", readonly: true, width: 240 }
       );
     }
+    columns.push({ field: "source_doc_no", label: "采购审批号", readonly: true, width: 220 });
     return columns;
   }
 
@@ -840,15 +838,18 @@
     const page = Number(materialData.page || state.page || 1);
     const pageCount = Math.max(1, Number(materialData.page_count || 1));
     const tableWidth = columns.reduce((sum, column) => sum + Number(column.width || 130), 0);
+    const fixedColumns = columns.filter((column) => column.compactWidth);
+    const widthVariables = fixedColumns.map((column) => `--mf-grid-${column.field}-expanded:${column.width}px;--mf-grid-${column.field}-compact:${column.compactWidth}px`).join(";");
+    const compactReduction = fixedColumns.reduce((sum, column) => sum + column.width - column.compactWidth, 0);
     return `
-      <div class="ocw-mf-grid-shell">
+      <div class="ocw-mf-grid-shell" style="--mf-grid-expanded-width:${tableWidth}px;--mf-grid-compact-reduction:${compactReduction}px;${widthVariables}">
         <div class="ocw-mf-grid-note"><span>${state.aiFill?.status === "READY" && state.aiFill?.draftVisible ? "AI 草稿中，单格修改只更新草稿" : "单格离开或按 Enter 自动保存"}</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
         <div class="ocw-mf-grid-scroll" data-mf-grid-viewport>
-          <table class="ocw-mf-grid-table" style="width:${tableWidth}px;min-width:${tableWidth}px">
-            <colgroup>${columns.map((column) => `<col style="width:${Number(column.width || 130)}px">`).join("")}</colgroup>
-            <thead><tr>${columns.map((column) => `<th>${this.escape(column.label)}</th>`).join("")}</tr></thead>
+          <div class="ocw-mf-grid-track"><table class="ocw-mf-grid-table">
+            <colgroup>${columns.map((column) => `<col style="width:${column.compactWidth ? `var(--mf-grid-${column.field}-width)` : `${Number(column.width || 130)}px`}">`).join("")}</colgroup>
+            <thead><tr>${columns.map((column) => `<th data-mf-grid-field="${column.field}">${this.escape(column.label)}</th>`).join("")}</tr></thead>
             <tbody>${items.length ? items.map((item, index) => item.__aiReplacement ? this.renderMaterialReplacementGridRow(item, columns, index) : this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
-          </table>
+          </table></div>
         </div>
         <div class="ocw-mf-grid-scroll-controls"><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-left" aria-label="向左滚动">‹</button><div class="ocw-mf-grid-scrollbar" data-mf-grid-scrollbar><div style="width:${tableWidth}px"></div></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-right" aria-label="向右滚动">›</button></div>
         <div class="ocw-mf-grid-footer"><span>共 ${items.length !== (materialData.items || []).length ? `${items.length} 行（含 AI 临时明细）` : `${Number(materialData.total || 0)} 行`} · 当前第 ${page}/${pageCount} 页</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page + 1}" ${page >= pageCount ? "disabled" : ""}>下一页</button></div></div>
@@ -909,9 +910,9 @@
     if (fieldname === "actual_shipped_qty") value = item.actual_shipped_qty ?? item.quantity;
     if (fieldname === "shipped_uom") value = item.shipped_uom || item.purchase_uom;
     if (!editable.has(fieldname)) {
-      return `<td class="ocw-mf-cell is-readonly is-ai-replacement" data-mf-column-index="${columnIndex}" title="AI 临时明细，确认后替换原模糊物料行"><span>${this.escape(this.formatValue(value || "--"))}</span></td>`;
+      return `<td class="ocw-mf-cell is-readonly is-ai-replacement" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="AI 临时明细，确认后替换原模糊物料行"><span>${this.escape(this.formatValue(value || "--"))}</span></td>`;
     }
-    return `<td class="ocw-mf-cell is-ai-draft is-ai-replacement" data-mf-column-index="${columnIndex}"><input data-mf-ai-edit="1" data-proposal-id="${this.escape(meta.proposalId || "")}" data-row-index="${Number(meta.rowIndex || 0)}" data-fieldname="${this.escape(fieldname)}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="AI 临时明细 ${this.escape(column.label)}" /><small>AI 临时明细 · 可修改</small></td>`;
+    return `<td class="ocw-mf-cell is-ai-draft is-ai-replacement" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><input data-mf-ai-edit="1" data-proposal-id="${this.escape(meta.proposalId || "")}" data-row-index="${Number(meta.rowIndex || 0)}" data-fieldname="${this.escape(fieldname)}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="AI 临时明细 ${this.escape(column.label)}" /><small>AI 临时明细 · 可修改</small></td>`;
   }
 
   approvalLinkNeedsReview(link) {
@@ -948,19 +949,19 @@
   renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
     let value = item[column.field];
     if (item.source_adoption_state === "historical_pending" && ["material_code", "product_name"].includes(column.field)) {
-      return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}"><span>${this.escape(value ?? "--")}</span><small>历史行 · 当前未采用</small></td>`;
+      return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><span>${this.escape(value ?? "--")}</span><small>历史行 · 当前未采用</small></td>`;
     }
     if (item.adopted_price && ["unit_price", "purchase_currency", "unit_price_uom"].includes(column.field)) {
       const price = item.adopted_price;
       const current = { unit_price: price.value, purchase_currency: price.currency, unit_price_uom: price.unit }[column.field];
-      return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}"><span>${this.escape(current ?? "待补")}</span><small>${price.error ? "商品价待核对" : price.source_type === "expense" ? "采购支出商品价" : "原商品采购价"}</small></td>`;
+      return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><span>${this.escape(current ?? "待补")}</span><small>${price.error ? "商品价待核对" : price.source_type === "expense" ? "采购支出商品价" : "原商品采购价"}</small></td>`;
     }
     const shippingField = ["actual_shipped_qty", "shipped_uom"].includes(column.field);
     if (column.field === "actual_shipped_qty") value = item.effective_shipping_quantity;
     if (column.field === "shipped_uom") value = item.effective_shipping_uom;
     if (shippingField && item.settlement_cargo) {
       const rawPacking = [item.actual_shipped_qty ?? "未识别", item.shipped_uom || "单位待核对"].join(" ");
-      return `<td class="ocw-mf-cell is-readonly ocw-mf-settlement-quantity" data-mf-column-index="${columnIndex}"><span>${this.escape(this.formatValue(value ?? "--"))}</span><small>${item.source_adoption_state === "historical_pending" ? "当前来源待补" : item.source_context?.packing?.selected_source ? "资料来源采用" : "采购支出采用"}</small>${column.field === "actual_shipped_qty" ? `<small>装箱原值 ${this.escape(rawPacking)}</small>` : ""}</td>`;
+      return `<td class="ocw-mf-cell is-readonly ocw-mf-settlement-quantity" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><span>${this.escape(this.formatValue(value ?? "--"))}</span><small>${item.source_adoption_state === "historical_pending" ? "当前来源待补" : item.source_context?.packing?.selected_source ? "资料来源采用" : "采购支出采用"}</small>${column.field === "actual_shipped_qty" ? `<small>装箱原值 ${this.escape(rawPacking)}</small>` : ""}</td>`;
     }
     const originalValue = value;
     const draft = this.materialFeeState?.materialDrafts?.[`${item.name}:${column.field}`];
@@ -990,17 +991,17 @@
         const sourceLabel = valuation.error ? "估值待核对" : ["packing_row_total", "packing_unit_price"].includes(valuation.method)
           ? "装箱货值已取得" : valuation.method === "purchase_unit_price" ? "采购单价 × 本次发货数"
             : valuation.method === "settlement_expense_unit_price" ? "采购支出商品价 × 当前数量" : valuation.method === "settlement_purchase_unit_price" ? "原商品采购价 × 当前数量" : valuation.method === "LEGACY_PURCHASE" ? "历史采购口径" : "本次发货估值";
-        return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(valuation.error_detail || reason)}"><span>${this.escape(fullValue)}</span><small>${this.escape(sourceLabel)}</small></td>`;
+        return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(valuation.error_detail || reason)}"><span>${this.escape(fullValue)}</span><small>${this.escape(sourceLabel)}</small></td>`;
       }
-      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
+      return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
     }
     if (requiresCorrection) {
-      return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="已有有效采购值；修正时需填写原因"><span>${this.escape(this.formatValue(value ?? "--"))}</span><button type="button" class="ocw-mf-purchase-correct" data-action="mf-correct-purchase" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}">修正</button>${this.renderMaterialAICandidates(item.name, column.field, aiCell, false)}</td>`;
+      return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="已有有效采购值；修正时需填写原因"><span>${this.escape(this.formatValue(value ?? "--"))}</span><button type="button" class="ocw-mf-purchase-correct" data-action="mf-correct-purchase" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}">修正</button>${this.renderMaterialAICandidates(item.name, column.field, aiCell, false)}</td>`;
     }
     const editor = Array.isArray(column.options)
       ? `<select data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" aria-label="${this.escape(column.label)}"><option value="">请选择</option>${column.options.map((option) => `<option value="${this.escape(option.value)}" ${String(value || "") === String(option.value) ? "selected" : ""}>${this.escape(option.label)}</option>`).join("")}</select>`
       : `<input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />`;
-    return `<td class="${classes}" data-mf-column-index="${columnIndex}" title="${this.escape(reason)}">${editor}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
+    return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(reason)}">${editor}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
   }
 
   materialAICell(itemName, fieldname) {
@@ -1926,25 +1927,83 @@
     return `<div class="ocw-mf-ai-footer"><span>AI 草稿 · 已选择 ${updateCount} 项${candidateCount ? ` · 共 ${candidateCount} 个提案` : ""}</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${mutating ? "disabled" : ""}>${fill.discarding ? "正在放弃…" : "放弃草稿"}</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canApplyMaterialAIFill(fill) ? "" : "disabled"}>${fill.applying ? "正在保存…" : "确认所选草稿"}</button></div></div>`;
   }
 
+  cleanupMaterialGridScrollControls() {
+    this.materialGridScrollCleanup?.();
+    this.materialGridScrollCleanup = null;
+    this.refreshMaterialGridScroll = null;
+  }
+
   bindMaterialGridScrollControls() {
+    this.cleanupMaterialGridScrollControls();
     const $viewport = this.$root.find("[data-mf-grid-viewport]");
     const $scrollbar = this.$root.find("[data-mf-grid-scrollbar]");
     if (!$viewport.length || !$scrollbar.length) return;
-    let syncing = false;
-    const sync = ($from, $to) => {
-      if (syncing) return;
-      syncing = true;
-      $to.scrollLeft($from.scrollLeft());
-      syncing = false;
+    const viewport = $viewport.get(0);
+    const scrollbar = $scrollbar.get(0);
+    if (!viewport || !scrollbar) return;
+    const shell = viewport.closest(".ocw-mf-grid-shell");
+    const table = viewport.querySelector("table");
+    const spacer = scrollbar.firstElementChild;
+    const leftButton = shell.querySelector("[data-action='mf-grid-scroll-left']");
+    const rightButton = shell.querySelector("[data-action='mf-grid-scroll-right']");
+    let compact = false;
+    let frame = null;
+    let viewportPosition = -1;
+    let scrollbarPosition = -1;
+
+    const sync = (requestedLeft, fromScroll = false) => {
+      const left = Math.max(0, Number(requestedLeft) || 0);
+      const expandedWidth = parseFloat(shell.style.getPropertyValue("--mf-grid-expanded-width"));
+      // A layout refresh must not treat browser scroll clamping as a user scroll.
+      const nextCompact = expandedWidth <= viewport.clientWidth ? false : fromScroll ? left > 0 : compact;
+      if (nextCompact !== compact) {
+        compact = nextCompact;
+        shell.classList.toggle("is-mf-grid-compact", compact);
+      }
+      const max = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      const nextLeft = Math.min(max, left);
+      // Reassigning the current position would interrupt native smooth scrolling.
+      if (viewport.scrollLeft !== nextLeft) viewport.scrollLeft = nextLeft;
+      // The scrollbar is narrower than the viewport because of its arrow buttons.
+      spacer.style.width = `${max + scrollbar.clientWidth}px`;
+      if (scrollbar.scrollLeft !== viewport.scrollLeft) scrollbar.scrollLeft = viewport.scrollLeft;
+      viewportPosition = viewport.scrollLeft;
+      scrollbarPosition = scrollbar.scrollLeft;
+      leftButton.disabled = viewportPosition <= 0;
+      rightButton.disabled = max <= 0 || viewportPosition >= max - 1;
     };
-    $viewport.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => {
+    const onViewportScroll = () => {
+      if (viewport.scrollLeft === viewportPosition) return;
       this.closeMaterialAICandidatePopover();
-      sync($viewport, $scrollbar);
-    });
-    $scrollbar.off(".ocwMfGrid").on("scroll.ocwMfGrid", () => {
+      sync(viewport.scrollLeft, true);
+    };
+    const onScrollbarScroll = () => {
+      if (scrollbar.scrollLeft === scrollbarPosition) return;
       this.closeMaterialAICandidatePopover();
-      sync($scrollbar, $viewport);
-    });
+      sync(scrollbar.scrollLeft, true);
+    };
+    const refresh = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        sync(viewport.scrollLeft);
+      });
+    };
+    viewport.addEventListener("scroll", onViewportScroll, { passive: true });
+    scrollbar.addEventListener("scroll", onScrollbarScroll, { passive: true });
+    window.addEventListener("resize", refresh);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(refresh);
+    observer?.observe(viewport);
+    observer?.observe(table);
+    this.refreshMaterialGridScroll = () => sync(viewport.scrollLeft, true);
+    this.materialGridScrollCleanup = () => {
+      viewport.removeEventListener("scroll", onViewportScroll);
+      scrollbar.removeEventListener("scroll", onScrollbarScroll);
+      window.removeEventListener("resize", refresh);
+      observer?.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+    sync(viewport.scrollLeft, true);
   }
 
   initializeMaterialAIDraft(status) {
@@ -2475,6 +2534,7 @@
     const restore = () => {
       const nextViewport = this.$root.find("[data-mf-grid-viewport]").get(0);
       if (nextViewport) nextViewport.scrollLeft = horizontal;
+      this.refreshMaterialGridScroll?.();
       if (globalThis.window?.scrollTo) globalThis.window.scrollTo({ top: scrollY, behavior: "instant" });
     };
     if (globalThis.window?.requestAnimationFrame) globalThis.window.requestAnimationFrame(restore);
