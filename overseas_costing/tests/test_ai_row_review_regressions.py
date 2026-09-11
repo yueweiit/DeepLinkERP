@@ -97,6 +97,52 @@ def test_filled_shipment_quantity_refreshes_the_adopted_cargo_value():
     assert valuation["amount_rmb"] == "20.000000"
 
 
+def test_fill_missing_persists_goods_value_for_automatic_manual_and_error_results():
+    from overseas_costing.services.logistics_settlement.valuation import value_final_cargo
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    def apply_case(*, item_values, cargo_row, fieldname, value, manual_amount=None, missing_fields=()):
+        store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
+        base = {**item, **item_values}
+        metadata = {"settlement_cargo": cargo_row, "settlement_packing_missing": list(missing_fields),
+                    "settlement_valuation": value_final_cargo(base, cargo_row, {})}
+        if manual_amount is not None:
+            base["extra_json"] = json.dumps(metadata)
+            metadata["manual_shipment_valuation"] = build_manual_shipment_valuation(
+                base, manual_amount, actor="finance", confirmed_at="now")
+        item = ledger.put("item", item["name"], {**item_values, "extra_json": json.dumps(metadata)})
+        proposal = {"proposal_id": "P", "proposal_type": "item_update",
+                    "target_item_name": item["name"], "payload": {"fields": {fieldname: value}}}
+        selected = preview([item], [proposal], batch, version, mode="fill_missing")
+        write_rows(store, ledger, selected, {})
+        return ledger.get("item", item["name"])
+
+    automatic = apply_case(
+        item_values={"actual_shipped_qty": 0, "shipped_uom": "件", "goods_value": 10},
+        cargo_row={"material_code": "A", "quantity": 1, "unit": "件", "source_snapshot": "S"},
+        fieldname="actual_shipped_qty", value=2, missing_fields=("actual_shipped_qty",),
+    )
+    manual = apply_case(
+        item_values={"actual_shipped_qty": 2, "shipped_uom": "件", "unit_price": None,
+                     "goods_value": 25},
+        cargo_row={"material_code": "A", "quantity": 2, "unit": "件", "source_snapshot": "S"},
+        fieldname="unit_price", value=10, manual_amount=25,
+    )
+    invalid = apply_case(
+        item_values={"actual_shipped_qty": 2, "shipped_uom": "件", "unit_price": None,
+                     "purchase_currency": None, "goods_value": 99},
+        cargo_row={"material_code": "A", "quantity": 2, "unit": "件", "source_snapshot": "S"},
+        fieldname="unit_price", value=10,
+    )
+
+    assert str(automatic["goods_value"]) == "20.000000"
+    assert shipment_value(automatic)["status"] == "automatic"
+    assert str(manual["goods_value"]) == "25"
+    assert shipment_value(manual)["status"] == "manual"
+    assert invalid["goods_value"] == 0
+    assert shipment_value(invalid)["status"] == "missing"
+
+
 def test_stable_row_match_does_not_verify_price_for_a_different_specification():
     store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
     item = ledger.put("item", item["name"], {
@@ -165,6 +211,24 @@ def test_replace_exact_match_quarantines_disagreeing_old_and_calculated_values()
     assert valuation["prior_evidence"]["source_doc_no"] == "GOODS-PURCHASE"
     assert valuation["calculated_evidence"]["input_evidence"]["purchase_source"] == "GOODS-PURCHASE"
     assert saved["goods_value"] == 0
+
+
+def test_explicit_zero_automatic_value_conflicts_with_new_positive_calculation():
+    from overseas_costing.services.logistics_settlement.valuation import reconcile_replacement_value, value_final_cargo
+
+    cargo_row = {"material_code": "A", "quantity": 2, "unit": "件", "source_snapshot": "S"}
+    prior = {"material_code": "A", "unit_price": 0, "purchase_currency": "RMB",
+             "purchase_uom": "件", "unit_price_uom": "件", "source_doc_no": "PUR-1"}
+    prior["extra_json"] = json.dumps({"settlement_cargo": cargo_row,
+                                      "settlement_valuation": value_final_cargo(prior, cargo_row, {})})
+    current = {**prior, "unit_price": 10, "extra_json": "{}"}
+
+    result = reconcile_replacement_value(current, cargo_row, {}, prior)
+
+    assert result["status"] == "conflict"
+    assert result["amount_rmb"] is None
+    assert result["prior_amount_rmb"] == "0.000000"
+    assert result["calculated_amount_rmb"] == "20.000000"
 
 
 def test_replace_new_row_does_not_inherit_old_value_or_purchase_evidence():

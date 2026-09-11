@@ -82,18 +82,14 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
 
 
 def public_catalog(catalog):
-    result=deepcopy(catalog)
-    for row in result.get('rows') or []:
-        row.pop('_price_metadata',None)
-    return result
+    from .material_ai_fill_service import _public_ai_payload
+    return _public_ai_payload(catalog)
 
 
 def public_preview(preview):
-    result=deepcopy({k:v for k,v in preview.items() if k not in ('sources','input_fingerprint','source_context','fee_fingerprint','dependencies')})
-    for row in result.get('rows') or []:
-        row.pop('_price_metadata',None)
-        row.pop('_verified_prior_item',None)
-    return result
+    from .material_ai_fill_service import _public_ai_payload
+    return _public_ai_payload({k:v for k,v in preview.items()
+                               if k not in ('sources','input_fingerprint','source_context','fee_fingerprint','dependencies')})
 
 
 def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,*,repository=None):

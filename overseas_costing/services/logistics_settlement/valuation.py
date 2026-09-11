@@ -67,7 +67,7 @@ def reconcile_replacement_value(item, cargo, fx_context, prior_item=None):
     """Compare a newly calculated shipment value with an exactly matched prior row."""
     calculated = value_final_cargo(item, cargo, fx_context)
     prior_amount, prior_evidence = _automatic_prior_value(prior_item or {})
-    has_prior = prior_amount is not None and Decimal(prior_amount) > 0
+    has_prior = prior_amount is not None and Decimal(prior_amount) >= 0
     calculated_amount = number(calculated.get('amount_rmb'))
     agrees = (has_prior and not calculated.get('error') and calculated_amount is not None
               and Decimal(prior_amount) == Decimal(calculated_amount))
@@ -97,10 +97,10 @@ def _automatic_prior_value(item, depth=0):
         manual = any(valuation.get(flag) for flag in ('manual', 'manual_override', 'manual_override_flag'))
         if valuation.get('status') == 'conflict':
             amount = number(valuation.get('prior_amount_rmb'))
-            if amount is not None and Decimal(amount) > 0:
+            if amount is not None and Decimal(amount) >= 0:
                 return amount, valuation.get('prior_evidence') or valuation
         amount = number(valuation.get('amount_rmb'))
-        if not manual and not valuation.get('error') and amount is not None and Decimal(amount) > 0:
+        if not manual and not valuation.get('error') and amount is not None and Decimal(amount) >= 0:
             return amount, valuation
     for key in ('ai_fill_original_values', 'settlement_original_values'):
         original = meta.get(key)

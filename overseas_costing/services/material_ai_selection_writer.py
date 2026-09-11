@@ -69,6 +69,10 @@ def write_rows(store,ledger,preview,context):
                 cargo.update(quantity=values.get('actual_shipped_qty'),unit=values.get('shipped_uom'))
                 meta['settlement_cargo']=cargo
                 meta['settlement_valuation']=value_final_cargo({**original,**values,'extra_json':dumps(meta)},cargo,{k:v for k,v in version.items() if k.startswith('fx_')})
+                from .shipment_cost_service import shipment_value
+                effective_valuation=shipment_value({**original,**values,'extra_json':dumps(meta)})
+                values['goods_value']=(effective_valuation.get('amount_rmb')
+                                       if effective_valuation.get('amount_rmb') is not None else 0)
         if incoming.get('unverified_material_code'):meta['unverified_material_code']=incoming['unverified_material_code']
         # Only numeric columns need zero storage; absence remains explicit in the mask.
         for key in (*PHYSICAL,'quantity','actual_shipped_qty'):

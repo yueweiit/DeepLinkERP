@@ -70,6 +70,37 @@ def test_only_server_preview_is_written_and_same_confirmation_reuses_result():
     assert len(repo.writes)==1 and repo.writes[0]['rows'][0]['gross_weight_kg']==2
 
 
+def test_public_catalog_and_prepare_deeply_hide_purchase_evidence_but_server_preview_keeps_it():
+    repo=Repo()
+    repo.items[0]['extra_json']=json.dumps({
+        'logistics_row':{'identity':'LINE','purchase_fact':{'unit_price':12},
+                         'purchase_fact_history':[{'purchase_fact':{'unit_price':10}}]},
+        'settlement_original_values':{'name':'OLD-ITEM','goods_value':20},
+        'ai_fill_original_values':{'name':'OLDER-ITEM','goods_value':10},
+    })
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+
+    catalog=service.review_catalog(repo,'B1',repo.run)
+    selected=[row['row_id'] for row in catalog['rows'] if row['default_selected']]
+    response=service.prepare('B1',repo.run['name'],selected,[],'replace_all','V1',repository=repo)
+
+    for public_payload in (catalog,response['row_review'],response['preview']):
+        serialized=json.dumps(public_payload,ensure_ascii=False)
+        assert '_review_' not in serialized
+        assert '_price_metadata' not in serialized
+        assert '_verified_prior_item' not in serialized
+        assert 'purchase_fact' not in serialized
+        assert 'settlement_original_values' not in serialized
+        assert 'ai_fill_original_values' not in serialized
+        assert 'OLD-ITEM' not in serialized and 'OLDER-ITEM' not in serialized
+    internal=json.dumps(repo.run['draft_json']['row_previews'],ensure_ascii=False)
+    assert '_price_metadata' in internal
+    assert 'purchase_fact' in internal
+
+
 def test_new_selection_supersedes_older_preview():
     repo=Repo();old=prepare(repo);prepare(repo,ids=[])
     with pytest.raises(ValueError,match='最新预览'):confirm(repo,old)
