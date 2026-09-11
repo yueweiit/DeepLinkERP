@@ -23,7 +23,7 @@ DAILY_NAVIGATION = (
 VOUCHER_NAVIGATION = (
 	("Journal Entry", "记账凭证", "DocType"),
 	("China Accounting Voucher", "中国会计凭证", "DocType"),
-	("Period Closing Voucher", "期末结转", "DocType"),
+	("Period Closing Voucher", "期末结账", "DocType"),
 	("China Closing Run", "期末智能结转", "DocType"),
 )
 
@@ -635,7 +635,7 @@ def _known_navigation_links():
 	return {link[0] for link in (*CORE_NAVIGATION, *ADMIN_NAVIGATION)} | LEGACY_NAVIGATION | {"China Finance"}
 
 
-def _sidebar_link(link_to, label, link_type):
+def _sidebar_link(link_to, label, link_type, sidebar=None):
 	item = {
 		"type": "Link", "label": label, "link_to": link_to, "link_type": link_type,
 		"child": 1, "collapsible": 1, "indent": 0, "keep_closed": 0, "show_arrow": 0,
@@ -643,6 +643,8 @@ def _sidebar_link(link_to, label, link_type):
 	if link_type == "URL":
 		item["url"] = link_to
 		item["link_to"] = None
+	if sidebar:
+		item["route_options"] = json.dumps({"sidebar": sidebar}, ensure_ascii=False)
 	return item
 
 
@@ -668,16 +670,24 @@ def _desired_sidebar_items(custom_links=None):
 			"collapsible": 1, "indent": 0, "keep_closed": 0, "show_arrow": 0,
 			"icon": "landmark",
 		},
-		{**_sidebar_link(*MAPPING_CONSOLE_LINK), "child": 0, "icon": MAPPING_CONSOLE_ICON},
+		{
+			**_sidebar_link(*MAPPING_CONSOLE_LINK, sidebar="China Finance"),
+			"child": 0,
+			"icon": MAPPING_CONSOLE_ICON,
+		},
 	]
 	for label, icon, links in NAVIGATION_SECTIONS:
 		items.append(_sidebar_section(label, icon))
 		for link in links:
-			items.append(_sidebar_link(*link))
+			items.append(_sidebar_link(*link, sidebar="China Finance"))
 	items.append(_sidebar_section("管理与审计", "settings", 1))
 	for label, icon, links in ADMIN_NAVIGATION_GROUPS:
 		items.append(_sidebar_section(label, icon, 1))
-		items.extend(_sidebar_link(*link) for link in links if link[0] != MAPPING_CONSOLE_LINK[0])
+		items.extend(
+			_sidebar_link(*link, sidebar="China Finance")
+			for link in links
+			if link[0] != MAPPING_CONSOLE_LINK[0]
+		)
 	if custom_links:
 		items.append(_sidebar_section("自定义", "folder", 1))
 		items.extend(custom_links)
@@ -728,13 +738,17 @@ def sync_simplified_navigation(navigation_name="China Finance"):
 				custom.append(_sidebar_link(item.link_to, item.label, item.link_type))
 		desired = _desired_sidebar_items(custom)
 		current = [
-			(row.type, row.label, row.link_to, row.link_type, row.child, row.keep_closed, row.icon)
+			(
+				row.type, row.label, row.link_to, row.link_type, row.child,
+				row.keep_closed, row.icon, row.route_options,
+			)
 			for row in sidebar.items
 		]
 		target = [
 			(
 				row.get("type"), row.get("label"), row.get("link_to"), row.get("link_type"),
 				row.get("child", 0), row.get("keep_closed", 0), row.get("icon"),
+				row.get("route_options"),
 			)
 			for row in desired
 		]
