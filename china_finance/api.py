@@ -56,6 +56,7 @@ def _initialize_company(
 		"default_voucher_word": "记",
 		"sequence_reset": "会计期间",
 		"enforce_role_separation": cint(enforce_role_separation),
+		"enable_import_batch_posting": 0,
 		"archive_retention_years": 30,
 		"require_file_hash": 1,
 		"freeze_on_close": 1,

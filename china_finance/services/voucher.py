@@ -26,6 +26,9 @@ FORMAL_VOUCHER_SOURCES = ("Journal Entry", "Payment Entry")
 
 SNAPSHOT_RETRY_ROLES = ("System Manager", "China Finance Manager")
 SNAPSHOT_BACKLINK_DOCTYPES = ("China Accounting Voucher", "China Cash Flow Assignment")
+IMPORT_BATCH_POSTING_ROLES = ("System Manager", "Accounts Manager", "China Finance Manager")
+IMPORT_VOUCHER_TITLE_PREFIX = "Excel导入："
+IMPORT_BATCH_WORKFLOW_STATES = ("Pending Review", "Approved", "Posted")
 
 
 def _get_source_document(source_doctype, source_name):
@@ -67,6 +70,15 @@ def validate_source_approval(doc, method=None):
 	settings = get_company_settings(get_company(doc))
 	if not settings or not settings.enforce_role_separation:
 		return
+	if doc.doctype == "Journal Entry" and getattr(frappe.flags, "china_finance_direct_posting", False):
+		return
+	if (
+		getattr(frappe.flags, "china_finance_import_batch_names", None)
+		and doc.doctype == "Journal Entry"
+		and doc.name in frappe.flags.china_finance_import_batch_names
+		and is_batch_postable_journal_entry(doc)
+	):
+		return
 	posting_date = get_posting_date(doc)
 	if posting_date < getdate(settings.activation_date):
 		return
@@ -79,6 +91,233 @@ def validate_source_approval(doc, method=None):
 	# A small accounting team may have one user complete preparation, review,
 	# and posting. Keep the workflow review record and audit fields, but do not
 	# reject the posting only because the same user performed each step.
+
+
+@frappe.whitelist(methods=["POST"])
+def save_and_post_journal_entry(doc):
+	"""Save and submit a new manual Journal Entry in one explicit action.
+
+	Bank-generated and Excel-imported entries keep their existing workflows. This
+	shortcut is intentionally limited to a new manual entry so existing drafts
+	remain editable and the standard review process is not changed globally.
+	"""
+	if isinstance(doc, str):
+		doc = frappe.parse_json(doc)
+	if not isinstance(doc, dict) or doc.get("doctype") != "Journal Entry":
+		frappe.throw(_("只支持新建记账凭证的保存并记账"))
+
+	journal_entry = frappe.get_doc(doc)
+	if not journal_entry.is_new():
+		frappe.throw(_("保存并记账仅支持新建记账凭证，已有草稿请使用原审核流程"))
+	if journal_entry.docstatus != 0:
+		frappe.throw(_("只能保存并记账草稿凭证"))
+	if is_batch_postable_journal_entry(journal_entry):
+		frappe.throw(_("银行流水或 Excel 导入凭证请使用原有批量审核并记账流程"))
+
+	journal_entry.check_permission("create")
+	journal_entry.check_permission("submit")
+	journal_entry.insert()
+
+	previous_direct_posting = getattr(frappe.flags, "china_finance_direct_posting", None)
+	frappe.flags.china_finance_direct_posting = True
+	try:
+		journal_entry.submit()
+	finally:
+		if previous_direct_posting is None:
+			frappe.flags.pop("china_finance_direct_posting", None)
+		else:
+			frappe.flags.china_finance_direct_posting = previous_direct_posting
+
+	return journal_entry.as_dict()
+
+
+def is_imported_journal_entry(doc):
+	"""Return whether a Journal Entry was created by the Excel import flow."""
+	return (
+		getattr(doc, "doctype", None) == "Journal Entry"
+		and str(doc.get("title") or "").strip().startswith(IMPORT_VOUCHER_TITLE_PREFIX)
+	)
+
+
+def is_bank_journal_entry(doc):
+	"""Return whether a Journal Entry was created from a Bank Transaction."""
+	return (
+		getattr(doc, "doctype", None) == "Journal Entry"
+		and bool(str(doc.get("custom_china_bank_transaction") or "").strip())
+	)
+
+
+def is_batch_postable_journal_entry(doc):
+	"""Return whether the document belongs to a supported batch-posting source."""
+	return is_imported_journal_entry(doc) or is_bank_journal_entry(doc)
+
+
+def _get_import_batch_transition(doc, workflow, next_state):
+	from frappe.model.workflow import get_transitions
+
+	transitions = [
+		transition
+		for transition in get_transitions(doc, workflow, raise_exception=True)
+		if transition.next_state == next_state
+	]
+	if len(transitions) != 1:
+		frappe.throw(
+			_("批量审核并记账无法从 {0} 进入 {1}，请检查 Journal Entry 审批工作流配置").format(
+				doc.get(workflow.workflow_state_field), next_state
+			)
+		)
+	return transitions[0]
+
+
+def _complete_import_batch_workflow(doc):
+	"""Run the configured review path before the standard Journal Entry submit."""
+	from frappe.model.workflow import apply_workflow, get_workflow
+
+	workflow = get_workflow(doc.doctype)
+	workflow_state_field = workflow.workflow_state_field
+	current_state = doc.get(workflow_state_field)
+	if current_state == "Rejected":
+		frappe.throw(_("凭证 {0} 已被退回，请先重新提交审核").format(doc.name))
+	if current_state not in ("Draft", "Pending Review", "Approved"):
+		frappe.throw(_("凭证 {0} 当前状态为 {1}，不能使用批量审核并记账").format(doc.name, current_state))
+
+	for next_state in IMPORT_BATCH_WORKFLOW_STATES:
+		if current_state == next_state:
+			continue
+		transition = _get_import_batch_transition(doc, workflow, next_state)
+		doc = apply_workflow(doc, transition.action)
+		current_state = doc.get(workflow_state_field)
+
+	if doc.docstatus != 1:
+		frappe.throw(_("凭证 {0} 未完成记账，当前状态为 {1}").format(doc.name, current_state))
+	return doc
+
+
+def _validate_import_batch_document(doc):
+	if not is_batch_postable_journal_entry(doc):
+		frappe.throw(
+			_("凭证 {0} 不是 Excel 导入或银行流水生成的凭证，快捷处理已停止").format(doc.name)
+		)
+	if doc.docstatus != 0:
+		frappe.throw(_("凭证 {0} 不是草稿，不能重复处理").format(doc.name))
+	if not doc.accounts:
+		frappe.throw(_("凭证 {0} 没有会计分录").format(doc.name))
+	if is_bank_journal_entry(doc):
+		bank_transaction_name = str(doc.get("custom_china_bank_transaction") or "").strip()
+		bank_transaction = frappe.db.get_value(
+			"Bank Transaction",
+			bank_transaction_name,
+			["company", "docstatus"],
+			as_dict=True,
+		)
+		if not bank_transaction:
+			frappe.throw(_("凭证 {0} 关联的银行流水不存在").format(doc.name))
+		if bank_transaction.company != doc.company:
+			frappe.throw(_("凭证 {0} 与银行流水所属公司不一致").format(doc.name))
+		if bank_transaction.docstatus != 1:
+			frappe.throw(_("凭证 {0} 关联的银行流水尚未提交").format(doc.name))
+
+	doc.set_total_debit_credit()
+	if abs(flt(doc.difference)) > 0.005:
+		frappe.throw(
+			_("凭证 {0} 借贷不平衡，差额为 {1}").format(doc.name, flt(doc.difference, 2))
+		)
+
+	if frappe.db.exists(
+		"China Accounting Voucher",
+		{"source_doctype": "Journal Entry", "source_name": doc.name, "source_event": "Posting"},
+	):
+		frappe.throw(_("凭证 {0} 已经生成中国会计凭证，不能重复处理").format(doc.name))
+
+
+@frappe.whitelist(methods=["POST"])
+def batch_post_imported_journal_entries(names, reason=None):
+	"""Batch review and post supported imported or bank-generated Journal Entries.
+
+	The regular Journal Entry workflow remains unchanged. Each selected entry is
+	processed in its own transaction so a failed entry does not roll back entries
+	that were already posted. The old method name is retained for compatibility
+	with existing clients.
+	"""
+	frappe.only_for(IMPORT_BATCH_POSTING_ROLES)
+
+	if isinstance(names, str):
+		names = frappe.parse_json(names)
+	if not isinstance(names, (list, tuple)):
+		frappe.throw(_("请选择需要处理的凭证"))
+
+	names = list(dict.fromkeys(str(name).strip() for name in names if str(name).strip()))
+	if not names:
+		frappe.throw(_("请选择需要处理的凭证"))
+	if len(names) > 100:
+		frappe.throw(_("一次最多处理 100 张凭证，请分批操作"))
+
+	reason = str(reason or "").strip()
+	if not reason:
+				frappe.throw(_("请填写批量审核并记账的处理原因"))
+	if len(reason) > 500:
+		frappe.throw(_("处理原因不能超过 500 个字符"))
+
+	batch_id = f"IBP-{now_datetime().strftime('%Y%m%d%H%M%S')}-{frappe.generate_hash(length=6).upper()}"
+	results = []
+	for name in names:
+		save_point = f"china_import_batch_{frappe.generate_hash(length=8)}"
+		frappe.db.savepoint(save_point)
+		previous_batch_names = getattr(frappe.flags, "china_finance_import_batch_names", None)
+		try:
+			doc = frappe.get_doc("Journal Entry", name, for_update=True)
+			doc.check_permission("read")
+			doc.check_permission("submit")
+			settings = get_company_settings(doc.company)
+			if not settings or not cint(getattr(settings, "enable_import_batch_posting", 0)):
+				frappe.throw(_("公司 {0} 尚未启用批量审核并记账").format(doc.company))
+			_validate_import_batch_document(doc)
+
+			frappe.flags.china_finance_import_batch_names = {doc.name}
+			workflow_name = frappe.db.get_value(
+				"Workflow", {"document_type": "Journal Entry", "is_active": 1}, "name"
+			)
+			if settings.enforce_role_separation and not workflow_name:
+				frappe.throw(_("{0} 已启用制单审核分离，但 Journal Entry 没有启用审批工作流").format(doc.company))
+			if workflow_name:
+				doc = _complete_import_batch_workflow(doc)
+			else:
+				doc.submit()
+
+			doc.add_comment(
+				"Comment",
+				_("批量审核并记账<br>批次：{0}<br>处理原因：{1}").format(
+					batch_id, frappe.utils.escape_html(reason)
+				),
+			)
+			frappe.db.commit()
+			results.append({"name": name, "status": "success", "message": _("已批量审核并记账")})
+		except Exception as exc:
+			frappe.db.rollback(save_point=save_point)
+			results.append({"name": name, "status": "failed", "message": str(exc)})
+			frappe.log_error(
+				message=frappe.get_traceback(),
+				title=_("导入凭证快捷处理失败：{0}").format(name),
+				reference_doctype="Journal Entry",
+				reference_name=name,
+			)
+		finally:
+			if previous_batch_names is None:
+				frappe.flags.pop("china_finance_import_batch_names", None)
+			else:
+				frappe.flags.china_finance_import_batch_names = previous_batch_names
+			try:
+				frappe.db.release_savepoint(save_point)
+			except Exception:
+				pass
+
+	return {
+		"batch_id": batch_id,
+		"total": len(results),
+		"success_count": sum(result["status"] == "success" for result in results),
+		"failed_count": sum(result["status"] == "failed" for result in results),
+		"results": results,
+	}
 
 
 def on_gl_source_submit(doc, method=None):

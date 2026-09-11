@@ -56,7 +56,10 @@ doctype_js = {
 	"Sales Invoice": ["public/js/sales_invoice_invoice_control.js", "public/js/gl_source_snapshot.js"],
 	"Sales Order": "public/js/sales_order_settlement.js",
 	"Delivery Note": ["public/js/delivery_note_settlement.js", "public/js/gl_source_snapshot.js"],
-	"Journal Entry": "public/js/gl_source_snapshot.js",
+	"Journal Entry": [
+		"public/js/gl_source_snapshot.js",
+		"public/js/journal_entry_direct_post.js",
+	],
 	"Payment Entry": [
 		"public/js/payment_entry_invoice_selector.js",
 		"public/js/gl_source_snapshot.js",
@@ -75,6 +78,7 @@ doctype_js = {
 	"China Financial Statement Mapping": "public/js/china_financial_statement_mapping.js",
 }
 doctype_list_js = {
+	"Bank Transaction": "public/js/bank_transaction_list.js",
 	"Journal Entry": "public/js/source_voucher_number_list.js",
 	"Payment Entry": "public/js/source_voucher_number_list.js",
 	"China Accounting Voucher": "public/js/china_accounting_voucher_list.js",

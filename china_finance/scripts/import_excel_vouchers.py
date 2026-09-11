@@ -26,7 +26,7 @@ VOUCHER_SHEET = "26年凭证"
 EXPECTED_PERIODS = {"2026-05", "2026-06"}
 ACCOUNT_NUMBERS = {
 	"银行存款": "100201",
-	"其他应收款-备用金": "1221",
+	"其他应收款-备用金": "122104",
 	"实收资本": "4001",
 	"本年利润": "4103",
 	"营业外收入": "6301",
@@ -96,7 +96,6 @@ def parse_workbook(file_path):
 
 	vouchers = []
 	current = None
-	active_summary = ""
 	for row_number, raw_row in enumerate(rows, start=2):
 		row = list(raw_row[:7]) + [None] * max(0, 7 - len(raw_row))
 		posting_date_value, voucher_no_value, summary_value, debit_label, credit_label, debit_value, credit_value = row[:7]
@@ -117,14 +116,13 @@ def parse_workbook(file_path):
 				"source_rows": [],
 			}
 			vouchers.append(current)
-			active_summary = ""
 
 		if current is None:
 			frappe.throw(_("Excel 第 {0} 行在任何凭证之前出现了分录").format(row_number))
 
-		line_summary = _text(summary_value) or active_summary
-		if summary_value not in (None, ""):
-			active_summary = _text(summary_value)
+		# An empty workbook summary is intentional. Do not carry the previous
+		# detail's summary onto a bank or other balancing line.
+		line_summary = _text(summary_value)
 		current["source_rows"].append(row_number)
 
 		if not debit_label and not credit_label:
@@ -252,8 +250,12 @@ def preview(file_path, company=COMPANY):
 	}
 
 
-def import_from_file(file_path, company=COMPANY):
-	"""Validate and import the workbook into the requested company."""
+def import_from_file(file_path, company=COMPANY, submit=True):
+	"""Validate and import the workbook into the requested company.
+
+	When submit is false, create reviewed-ready drafts so role-separation
+	controls can be completed through the normal workflow before posting.
+	"""
 	if company != COMPANY:
 		frappe.throw("此 Excel 导入脚本仅允许处理 aaa 的悦为智能技术(东莞)有限公司")
 
@@ -302,13 +304,14 @@ def import_from_file(file_path, company=COMPANY):
 						"account": account.name,
 						"debit_in_account_currency": float(line["debit"]),
 						"credit_in_account_currency": float(line["credit"]),
-						"user_remark": line["summary"] or tag,
+						"user_remark": line["summary"],
 					},
 				)
 			if needs_party_bypass:
 				journal_entry.party_not_required = 1
 			journal_entry.insert(ignore_permissions=True)
-			journal_entry.submit()
+			if submit:
+				journal_entry.submit()
 			frappe.db.set_value("Journal Entry", journal_entry.name, "title", tag, update_modified=False)
 			created.append(journal_entry.name)
 		frappe.db.commit()
@@ -317,7 +320,8 @@ def import_from_file(file_path, company=COMPANY):
 		raise
 
 	return {
-		"status": "imported",
+		"status": "imported" if submit else "drafted",
+		"submitted": bool(submit),
 		"company": company,
 		"file": str(file_path),
 		"journal_entries": created,

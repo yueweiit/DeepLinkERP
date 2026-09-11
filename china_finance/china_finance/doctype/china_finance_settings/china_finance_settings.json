@@ -6,7 +6,7 @@
  "engine": "InnoDB",
  "field_order": [
   "company", "enabled", "activation_date", "accounting_standard", "taxpayer_type", "coa_section", "coa_template", "coa_version", "coa_hash", "coa_initialized_on", "coa_last_checked_on", "coa_integrity_status", "coa_integrity_details",
-  "voucher_section", "voucher_mode", "default_voucher_word", "sequence_reset", "enforce_role_separation",
+  "voucher_section", "voucher_mode", "default_voucher_word", "sequence_reset", "enforce_role_separation", "enable_import_batch_posting",
   "sales_settlement_section", "sales_settlement_mode", "sales_settlement_activation_date", "auto_submit_sales_invoice", "auto_submit_purchase_invoice",
   "cash_flow_section", "cash_flow_assignment_activation_date", "statutory_reporting_section", "statutory_reporting_activation_date", "statement_mapping_activation_date", "report_amount_unit",
   "closing_section", "profit_loss_account", "retained_earnings_account", "freeze_on_close", "reconciliation_tolerance",
@@ -32,6 +32,7 @@
   {"default":"记","fieldname":"default_voucher_word","fieldtype":"Data","label":"默认凭证字","reqd":1},
   {"default":"会计期间","fieldname":"sequence_reset","fieldtype":"Select","label":"流水号重置周期","options":"会计期间\n会计年度","reqd":1},
   {"default":"0","description":"启用前必须为来源单据配置审批工作流。未启用时仍会在结账就绪度中提示。","fieldname":"enforce_role_separation","fieldtype":"Check","label":"强制制单审核分离"},
+  {"default":"0","description":"允许对带有 Excel 导入或银行流水来源标识的记账凭证使用批量审核并记账，普通凭证仍按原审批流程处理。","fieldname":"enable_import_batch_posting","fieldtype":"Check","label":"允许批量审核并记账"},
   {"fieldname":"sales_settlement_section","fieldtype":"Section Break","label":"销售应收确认"},
   {"default":"直接确认应收","fieldname":"sales_settlement_mode","fieldtype":"Select","label":"默认销售结算模式","options":"直接确认应收\n对账结算后确认应收","reqd":1},
   {"fieldname":"sales_settlement_activation_date","fieldtype":"Date","label":"对账结算模式切换生效日期","description":"仅该日期及以后新建的销售订单可按客户规则启用对账结算模式。"},
