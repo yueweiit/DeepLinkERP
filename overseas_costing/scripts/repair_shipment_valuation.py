@@ -57,6 +57,24 @@ def _fields_equal(left, right):
     return _json(left) == _json(right)
 
 
+def _audit_item(row):
+    meta = object_json(row.get('extra_json'))
+    valuation = meta.get('settlement_valuation') or meta.get('shipment_valuation') or {}
+    payload = (row.get('extra_json') or '')
+    if not isinstance(payload, str):
+        payload = _json(payload)
+    return {
+        'name': row.get('name'),
+        'material_code': row.get('material_code'),
+        'goods_value': row.get('goods_value'),
+        'valuation_status': valuation.get('status'),
+        'amount_rmb': valuation.get('amount_rmb'),
+        'prior_amount_rmb': valuation.get('prior_amount_rmb'),
+        'calculated_amount_rmb': valuation.get('calculated_amount_rmb'),
+        'extra_json_sha256': hashlib.sha256(payload.encode()).hexdigest(),
+    }
+
+
 def _qty_key(value):
     amount = number(value)
     return '' if amount is None else format(amount.normalize(), 'f')
@@ -347,7 +365,7 @@ class FrappeRepairRepository:
 
         def audit_snapshot(data):
             return dict(batch={key: data['batch'].get(key) for key in audit_fields},
-                        items=[row for row in data['items'] if row['name'] in changed],
+                        items=[_audit_item(row) for row in data['items'] if row['name'] in changed],
                         rules_sha256=snapshot_hash(data['rules']), version_sha256=snapshot_hash(data['version']))
 
         audit = f.get_doc(dict(

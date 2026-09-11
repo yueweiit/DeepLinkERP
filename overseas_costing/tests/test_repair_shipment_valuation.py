@@ -358,6 +358,9 @@ def test_real_save_accepts_database_coerced_numbers_and_json():
     assert Decimal(str(state["items"][0]["goods_value"])) == Decimal("14496")
     assert json.loads(state["items"][6]["extra_json"])["settlement_valuation"]["status"] == "conflict"
     assert len(audits) == 1
+    assert "packing list" not in audits[0]["old_value"]
+    assert len(audits[0]["old_value"]) < 4000
+    assert json.loads(audits[0]["old_value"])["items"][0]["extra_json_sha256"]
 
 
 @pytest.mark.parametrize("failure,reason", [("drift", "SOURCE_CHANGED"), ("fail_save", "TRANSACTION_FAILED")])
