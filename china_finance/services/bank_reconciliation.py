@@ -33,10 +33,10 @@ DEFAULT_ACCOUNT_MAPPING = {
 	"公积金": "221104",
 	"补缴": "221104",
 	"投资": "4001",
-	"退款": "1221",
-	"退回": "1221",
-	"验证": "1221",
-	"实名": "1221",
+	"退款": "122101",
+	"退回": "122101",
+	"验证": "122101",
+	"实名": "122101",
 }
 
 # Only company-style counterparties are auto-filled into the accounting party
@@ -177,8 +177,9 @@ def _resolve_company_party(counterparty_name, bank_transaction, preferred_party_
 		return {}
 
 	# Prefer the party type accepted by the target account. In particular, the
-	# verification/refund rows use 1221 (Receivable), so both payment and refund
-	# rows must use Customer even though one direction is a bank withdrawal.
+	# verification/refund rows use the 122101 Receivable leaf account, so both
+	# payment and refund rows must use Customer even though one direction is a
+	# bank withdrawal.
 	is_withdrawal = flt(bank_transaction.get("withdrawal")) > 0
 	party_types = (preferred_party_type,) if preferred_party_type else (
 		("Supplier",) if is_withdrawal else ("Customer",)
@@ -346,6 +347,9 @@ def auto_create_voucher_on_submit(doc, method=None):
 		)
 		return
 
+	party_fields = _get_safe_party_fields(expense_account, doc)
+	account_type = frappe.db.get_value("Account", expense_account, "account_type")
+
 	try:
 		je = frappe.new_doc("Journal Entry")
 		je.posting_date = doc.date
@@ -355,6 +359,11 @@ def auto_create_voucher_on_submit(doc, method=None):
 		je.cheque_date = doc.date
 		if je.meta.has_field("custom_china_bank_transaction"):
 			je.custom_china_bank_transaction = doc.name
+		# The unclassified other-receivables leaf is intentionally used for
+		# verification/refund rows, which do not have a real customer or supplier.
+		# Keep those drafts/submissions valid without inventing a party.
+		if account_type in ("Receivable", "Payable") and not party_fields:
+			je.party_not_required = 1
 
 		if is_withdrawal:
 			expense_entry = {
@@ -362,7 +371,7 @@ def auto_create_voucher_on_submit(doc, method=None):
 				"debit_in_account_currency": amount,
 				"credit_in_account_currency": 0,
 			}
-			expense_entry.update(_get_safe_party_fields(expense_account, doc))
+			expense_entry.update(party_fields)
 			je.append("accounts", expense_entry)
 			je.append("accounts", {
 				"account": bank_account_gl,
@@ -380,7 +389,7 @@ def auto_create_voucher_on_submit(doc, method=None):
 				"debit_in_account_currency": 0,
 				"credit_in_account_currency": amount,
 			}
-			expense_entry.update(_get_safe_party_fields(expense_account, doc))
+			expense_entry.update(party_fields)
 			je.append("accounts", expense_entry)
 			if _is_interest_income_account(expense_account):
 				_restore_interest_offset_debit(je, expense_account)
@@ -486,7 +495,7 @@ def repair_unlinked_bank_vouchers(company="悦为智能技术(东莞)有限公�
 	"""Repair the confirmed bank rows that previously had no draft voucher.
 
 	This is an explicit repair operation, not part of normal bank import. It may
-	create the missing Customer/Supplier masters required by the 1221 receivable
+	create the missing Customer/Supplier masters required by the 122101 receivable
 	account, then reuses the normal automatic-voucher path for the selected rows.
 	"""
 	frappe.only_for(("System Manager", "China Finance Manager"))
@@ -591,7 +600,9 @@ def _resolve_account(description, company, reference_number=None, counterparty_n
 	elif "招聘" in search_text and "备用金" in search_text:
 		account_number = "660299"
 	elif "公众号注册退款" in search_text or "企业实名验证" in search_text or "银行账户一分钱打款验证" in search_text:
-		account_number = "1221"
+		# 1221 is a group account in the China Finance chart. Validation and
+		# refund rows must use its unclassified leaf account instead.
+		account_number = "122101"
 	elif "个税" in search_text or "个人所得税" in search_text:
 		account_number = "222112"
 	elif "社保" in search_text:
@@ -629,7 +640,7 @@ def _resolve_account(description, company, reference_number=None, counterparty_n
 	elif "物业" in search_text and "租金" not in search_text:
 		account_number = "660203"
 	elif "验证" in search_text or "实名" in search_text:
-		account_number = "1221"
+		account_number = "122101"
 	else:
 		return None
 

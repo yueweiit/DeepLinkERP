@@ -528,11 +528,11 @@ def _target_account(company, source_name, row, summary, bank_transaction, accoun
 		# cannot be mistaken for individual income tax or social insurance.
 		explicit_numbers = {
 			"ACC-BTN-2026-00175": "660299",
-			"ACC-BTN-2026-00176": "1221",
+			"ACC-BTN-2026-00176": "122101",
 			"ACC-BTN-2026-00190": "222112",
 			"ACC-BTN-2026-00193": "660303",
-			"ACC-BTN-2026-00195": "1221",
-			"ACC-BTN-2026-00200": "1221",
+			"ACC-BTN-2026-00195": "122101",
+			"ACC-BTN-2026-00200": "122101",
 			"ACC-BTN-2026-00209": "221103",
 			"ACC-BTN-2026-00217": "660299",
 		}
@@ -543,12 +543,12 @@ def _target_account(company, source_name, row, summary, bank_transaction, accoun
 		if "招聘" in bank_summary and "备用金" in bank_summary:
 			return _account(company, "660299")
 		if "公众号注册退款" in bank_summary:
-			return _account(company, "1221")
+			return _account(company, "122101")
 	if source_root == "ACC-JV-2026-00164" and number == "660303":
 		return _account(company, "660302")
 	if source_root == "ACC-JV-2026-00145":
 		if source_name == source_root and number == "221101":
-			return _account(company, "1221")
+			return _account(company, "122101")
 		if source_name != source_root and number == "1221":
 			return _account(company, "221101")
 	if source_root == "ACC-JV-2026-00154" and number == "660299":
@@ -593,7 +593,7 @@ def _target_account(company, source_name, row, summary, bank_transaction, accoun
 		if number == "660299" and "报销" in description:
 			return _account(company, "660201")
 		if number == "660299" and any(word in description for word in ("招聘", "退款", "退回", "验证", "实名")):
-			return _account(company, "1221")
+			return _account(company, "122101")
 		if number == "660299" and "社保" in description:
 			return _account(company, "221103")
 		if number == "660299" and any(word in description for word in ("公积金", "补缴")):
@@ -694,7 +694,7 @@ def amend_journal_entry(
 	amended.flags.ignore_permissions = True
 	if amended.meta.has_field("custom_china_voucher_number"):
 		amended.custom_china_voucher_number = None
-	if any(target == _account(company, "1221") for _idx, _old, target in changes):
+	if any(target == _account(company, "122101") for _idx, _old, target in changes):
 		amended.party_not_required = 1
 	if party_changes:
 		amended.party_not_required = 0
