@@ -1486,15 +1486,16 @@ def start_source_ai_review(
     """Start a non-blocking review task. Applying the draft still requires an edit token."""
 
     repo = repository or FrappeMaterialAIFillRepository()
-    context = repo.get_context(str(batch_name), str(version_name))
+    requested_version = None if force else str(version_name)
+    context = repo.get_context(str(batch_name), requested_version)
     if hasattr(repo, "lock_review_scope"):
         repo.lock_review_scope(context["batch"])
-        context = repo.get_context(str(batch_name), str(version_name))
+        context = repo.get_context(str(batch_name), requested_version)
     request_key = str(request_id or '')
     if request_key and not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', request_key):
         raise ValueError('分析请求标识不合法，请重新打开分析。')
     from .logistics_settlement.model import digest
-    request_fingerprint = digest(version_name, clarification_text, expected_clarification_revision,
+    request_fingerprint = digest(context["version"], clarification_text, expected_clarification_revision,
                                  selected_source_ids, force, trigger_mode)
     if request_key and callable(getattr(repo, 'find_start_request', None)):
         requested = repo.find_start_request(context['batch'], context['version'], request_key, request_fingerprint)
@@ -1519,7 +1520,7 @@ def start_source_ai_review(
         if not saved["ok"]:
             return saved
         note = saved["clarification"]
-        context = repo.get_context(str(batch_name), str(version_name))
+        context = repo.get_context(str(batch_name), context["version"])
     if callable(getattr(repo, "get_clarification", None)):
         context["clarification_revision"] = note["revision"]
     items = repo.get_items(context["batch"], context["version"])

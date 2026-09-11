@@ -1130,7 +1130,7 @@ class _StartRepository:
         self.created = []
 
     def get_context(self, batch_name, version_name):
-        assert (batch_name, version_name) == ("B1", "V1")
+        assert batch_name == "B1" and version_name in ("V1", None)
         return {"batch": "B1", "version": "V1", "batch_modified": "M1"}
 
     def get_items(self, batch_name, version_name):

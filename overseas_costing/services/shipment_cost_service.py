@@ -31,12 +31,12 @@ def _decimal_text(value):
 
 
 def shipment_input(row):
-    shipping = row.get('effective_shipping') or {}
-    quantity = row.get('actual_shipped_qty')
-    if quantity in (None, ''):
-        quantity = shipping.get('quantity', row.get('quantity'))
-    uom = row.get('shipped_uom') or shipping.get('uom') or row.get('unit')
-    return {'quantity': _decimal_text(quantity), 'uom': normalize_unit(uom)}
+    shipping = row.get('effective_shipping')
+    if not isinstance(shipping, dict) or not shipping:
+        from overseas_costing.services.material_input_service import resolve_effective_quantity
+        shipping = resolve_effective_quantity(row)
+    return {'quantity': _decimal_text(shipping.get('quantity')),
+            'uom': normalize_unit(shipping.get('uom'))}
 
 
 def shipment_input_fingerprint(row):
@@ -136,7 +136,7 @@ def shipment_value(row):
     if not error and (number(qty) != number(valuation.get('quantity')) or normalize_unit(uom) != normalize_unit(valuation.get('uom'))):
         error = 'SHIPMENT_VALUATION_STALE'
     if not error and (number(valuation.get('amount_rmb')) is None or number(valuation.get('amount_rmb')) < 0
-                      or str(valuation.get('currency') or '').upper() not in {'RMB', 'CNY'}):
+                      or currency(valuation.get('currency')) != 'RMB'):
         error = 'SHIPMENT_VALUATION_INVALID'
     return {**valuation, 'amount_rmb': None if error else valuation.get('amount_rmb'),
             'status': _status(error, valuation), 'error': error}

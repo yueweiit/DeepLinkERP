@@ -776,6 +776,29 @@ def test_quantity_and_unit_edits_stale_manual_value_without_deleting_it(monkeypa
     assert json.loads(items["I1"].extra_json)["manual_shipment_valuation"]["amount_rmb"] == "25"
 
 
+@pytest.mark.parametrize(('initial','fieldname','new_value'), [
+    ({'quantity': 2, 'actual_shipped_qty_mode': 'DEFAULT_PURCHASE'}, 'quantity', '3'),
+    ({'quantity': 2, 'actual_shipped_qty_mode': 'DEFAULT_PURCHASE', 'shipped_uom': '',
+      'purchase_uom': '件', 'unit': '件'}, 'purchase_uom', '箱'),
+    ({'quantity': 2, 'actual_shipped_qty_mode': 'DEFAULT_PURCHASE', 'shipped_uom': '',
+      'purchase_uom': '', 'unit': '件'}, 'unit', '箱'),
+])
+def test_effective_shipping_fallback_edits_stale_manual_value_and_zero_goods(
+    monkeypatch, initial, fieldname, new_value,
+) -> None:
+    items = {'I1': initial}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    service.update_item_field('I1', 'shipment_value_rmb', '25', _skip_edit_check=True)
+
+    result = service.update_item_field('I1', fieldname, new_value, remark='核对发货口径', _skip_edit_check=True)
+
+    assert result['valuation']['status'] == 'stale'
+    assert result['valuation']['amount_rmb'] is None
+    assert result['goods_value'] == 0
+    assert items['I1'].goods_value == 0
+    assert json.loads(items['I1'].extra_json)['manual_shipment_valuation']['amount_rmb'] == '25'
+
+
 def test_batch_update_supports_manual_shipment_value_set_and_clear(monkeypatch) -> None:
     from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
 
@@ -804,6 +827,7 @@ def test_expense_physical_overlay_quantity_edit_stales_manual_value(monkeypatch)
                "fingerprint": "CTX", "source_snapshot": "SOURCE"}
     metadata = {
         "effective_logistics_source": context,
+        "settlement_cargo": {"quantity": 2, "unit": "件", "source_snapshot": "SOURCE"},
         "settlement_physical": {
             "source_context_fingerprint": "CTX", "source_snapshot": "SOURCE",
             "values": {"actual_shipped_qty": 2, "shipped_uom": "件"}, "evidence": {},
@@ -824,3 +848,4 @@ def test_expense_physical_overlay_quantity_edit_stales_manual_value(monkeypatch)
     assert result["goods_value"] == 0
     assert saved_metadata["manual_shipment_valuation"]["amount_rmb"] == "25"
     assert saved_metadata["settlement_physical"]["values"]["actual_shipped_qty"] == 3
+    assert saved_metadata["settlement_cargo"]["quantity"] == 3

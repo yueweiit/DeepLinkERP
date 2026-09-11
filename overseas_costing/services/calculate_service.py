@@ -1534,6 +1534,14 @@ def update_item_field(
                           'remark':edit_remark,'source_context':source_context,'at':_now()})
         except ValueError as exc:
             return {'ok':False,'changed':False,'message':str(exc)}
+        cargo = overlay.get('settlement_cargo')
+        if isinstance(cargo, dict) and cargo:
+            cargo = dict(cargo)
+            if fieldname == 'actual_shipped_qty':
+                cargo['quantity'] = coerced_value
+            elif fieldname == 'shipped_uom':
+                cargo['unit'] = coerced_value
+            overlay['settlement_cargo'] = cargo
         item_doc.extra_json = _json.dumps(overlay,ensure_ascii=False,default=str)
     else:
         setattr(item_doc, fieldname, coerced_value)
@@ -1551,7 +1559,9 @@ def update_item_field(
     elif fieldname == "shipped_uom" and str(coerced_value or "").strip() and not expense_physical:
         companion_updates["cost_output_uom"] = str(coerced_value).strip()
         setattr(item_doc, "cost_output_uom", companion_updates["cost_output_uom"])
-    if not is_shipment_value and fieldname in {"actual_shipped_qty", "shipped_uom"}:
+    if not is_shipment_value and fieldname in {
+        "actual_shipped_qty", "shipped_uom", "quantity", "purchase_uom", "unit",
+    }:
         valuation_result = shipment_value(project_source_values(item_doc.as_dict(), source_context))
         amount = valuation_result.get("amount_rmb")
         item_doc.goods_value = _to_float(amount) if amount is not None else 0

@@ -189,6 +189,38 @@ def test_manual_shipment_valuation_becomes_stale_without_deleting_original_value
     assert json.loads(item['extra_json'])['manual_shipment_valuation']['amount_rmb'] == '25'
 
 
+def test_manual_fingerprint_uses_effective_shipping_before_raw_actual_quantity():
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    row = shipment(actual_shipped_qty=4, shipped_uom='件')
+    row['effective_shipping'] = {'quantity': '6', 'uom': '箱', 'mode': 'EXPLICIT_SOURCE'}
+
+    manual = build_manual_shipment_valuation(row, 25, actor='u', confirmed_at='now')
+
+    assert manual['quantity'] == '6'
+    assert manual['uom'] == '箱'
+
+
+def test_settlement_cargo_change_stales_manual_value_even_when_raw_quantity_is_unchanged():
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    item = shipment(actual_shipped_qty=4, shipped_uom='件', extra_json=json.dumps({'settlement_cargo': cargo(quantity='6')}))
+    manual = build_manual_shipment_valuation(item, 25, actor='u', confirmed_at='now')
+    metadata = json.loads(item['extra_json'])
+    metadata['manual_shipment_valuation'] = manual
+    item['extra_json'] = json.dumps(metadata)
+    assert shipment_value(item)['status'] == 'manual'
+    metadata['settlement_cargo']['quantity'] = '7'
+    item['extra_json'] = json.dumps(metadata)
+
+    value = shipment_value(item)
+
+    assert manual['quantity'] == '6'
+    assert value['status'] == 'stale'
+    assert value['amount_rmb'] is None
+    assert value['prior_amount_rmb'] == '25'
+
+
 def test_shipment_value_normalizes_legacy_metadata_statuses_and_candidates():
     item = shipment(extra_json=json.dumps({'shipment_valuation': {
         'amount_rmb': None, 'currency': 'RMB', 'quantity': '4', 'uom': '件',
@@ -206,6 +238,18 @@ def test_shipment_value_normalizes_legacy_metadata_statuses_and_candidates():
     legacy = shipment_value(shipment(extra_json='{}'))
     assert legacy['status'] == 'automatic'
     assert legacy['amount_rmb'] == 1000
+
+
+def test_existing_shipment_valuation_accepts_settlement_currency_aliases():
+    for alias in ('人民币RMB', '人民币', 'CNY', 'RMB'):
+        item = shipment(extra_json=json.dumps({'shipment_valuation': {
+            'amount_rmb': '40', 'currency': alias, 'quantity': '4', 'uom': '件',
+            'method': 'purchase_unit_price', 'error': '',
+        }}))
+        value = shipment_value(item)
+        assert value['status'] == 'automatic'
+        assert value['amount_rmb'] == '40'
+        assert value['error'] == ''
 
 
 def test_settlement_automatic_value_reports_stale_status_after_evidence_changes():

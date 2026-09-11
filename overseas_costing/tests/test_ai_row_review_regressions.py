@@ -260,11 +260,164 @@ def test_two_consecutive_replace_all_runs_keep_current_values_conflicts_and_vers
     assert shipment_value(final["B"])["status"] == "manual"
     assert shipment_value(final["B"])["amount_rmb"] == "25"
     assert final["B"]["goods_value"] == "25"
+    manual_cleared = deepcopy(final["B"])
+    cleared_metadata = json.loads(manual_cleared["extra_json"])
+    cleared_metadata.pop("manual_shipment_valuation")
+    manual_cleared["extra_json"] = json.dumps(cleared_metadata)
+    assert shipment_value(manual_cleared)["status"] == "automatic"
+    assert shipment_value(manual_cleared)["amount_rmb"] == "20.000000"
     conflict = shipment_value(final["C"])
     assert conflict["status"] == "conflict"
     assert conflict["amount_rmb"] is None and final["C"]["goods_value"] == 0
     assert conflict["prior_amount_rmb"] == "20"
     assert conflict["calculated_amount_rmb"] == "30.000000"
+
+
+def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_value():
+    from copy import deepcopy
+
+    from overseas_costing.services import material_ai_fill_service as ai
+    from overseas_costing.services import material_ai_selection_service as selection
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
+    item = ledger.put("item", item["name"], {
+        "spec_model": "S1", "stable_line_key": "LINE-A", "actual_shipped_qty": 2,
+        "shipped_uom": "件", "unit": "件", "purchase_uom": "件", "unit_price_uom": "件",
+    })
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:REFRESH:form",
+        "source_hash": "SOURCE-1", "approval_role": "international_logistics",
+        "approval_no": "LOG-1", "source_label": "国际物流审批正文",
+        "form_fields": {"货物信息Bienes": [{"物料编码": "A", "物料名称": "A", "规格型号": "S1",
+                                            "数量": 2, "单位": "件"}]},
+    }
+
+    class Repository:
+        def __init__(self):
+            self.sources = [source]
+            self.runs = []
+
+        def get_context(self, batch_name, version_name=None):
+            current = ledger.get("batch", batch_name)["current_version"]
+            selected = str(version_name or current)
+            if selected != current:
+                raise ValueError("只能在当前版本生成 AI 草稿。")
+            return {"batch": batch_name, "version": selected, "batch_modified": "M",
+                    "version_modified": selected, "transport_mode": "SEA",
+                    "effective_source": {}, "fx_rates": {"RMB": "1"}}
+
+        def get_items(self, batch_name, version_name):
+            return deepcopy(ledger.rows("item", batch=batch_name, version=version_name))
+
+        def list_sources(self, *_args):
+            return deepcopy(self.sources)
+
+        def get_fees(self, *_args):
+            return []
+
+        def lock_review_scope(self, *_args):
+            return None
+
+        def lock_review_inputs(self, *_args):
+            return None
+
+        def assert_write(self, *_args):
+            return None
+
+        def find_running_run(self, *_args):
+            return None
+
+        def find_reusable_run(self, _batch, version_name, fingerprint):
+            return next((run for run in reversed(self.runs)
+                         if run["version"] == version_name and run["input_fingerprint"] == fingerprint
+                         and run["status"] in {"QUEUED", "RUNNING", "READY"}), None)
+
+        def supersede_active_runs(self, *_args):
+            return None
+
+        def create_run(self, payload):
+            run = {**deepcopy(payload), "name": f"RUN-{len(self.runs) + 1}"}
+            self.runs.append(run)
+            return run
+
+        def get_run(self, run_id):
+            return next(run for run in self.runs if run["name"] == run_id)
+
+        lock_run = get_run
+
+        def save_row_review_draft(self, run, draft):
+            run["draft_json"] = deepcopy(draft)
+
+        def apply_row_selection(self, run, selected, draft, context):
+            persisted = deepcopy(selected)
+            # The source-refresh contract is exercised through the run manifest;
+            # this in-memory ledger has no archived OA document table to seal here.
+            persisted["sources"] = []
+            new_version = write_rows(store, ledger, persisted, context)
+            result = {"ok": True, "status": "APPLIED", "run_id": run["name"],
+                      "preview_id": selected["id"], "version_name": new_version,
+                      "changed_count": len(selected["changes"]), "batch_modified": "M"}
+            run.update(status="APPLIED", draft_json={**draft, "row_application": result})
+            return result
+
+        def rollback(self):
+            raise AssertionError("selection write unexpectedly rolled back")
+
+    repo = Repository()
+
+    def prepare_and_apply(run_id):
+        run = repo.get_run(run_id)
+        current_items = repo.get_items(batch["name"], run["version"])
+        proposal = build_logistics_reconciliation(current_items, repo.sources[0])
+        run.update(status="READY", candidates_json=[proposal])
+        catalog = selection.review_catalog(repo, batch["name"], run)
+        selected_ids = [row["row_id"] for row in catalog["rows"] if row["origin"] == "source"]
+        prepared = selection.prepare(batch["name"], run_id, selected_ids, [], "replace_all",
+                                     run["version"], repository=repo)["preview"]
+        assert prepared["mode"] == "replace_all"
+        return selection.confirm(batch["name"], run_id, prepared["id"], prepared["revision"],
+                                 "TOKEN", "M", repository=repo)
+
+    first_run = ai.start_source_ai_review(batch["name"], version["name"], force=True,
+                                          repository=repo, enqueue=lambda _run: None)
+    first_result = prepare_and_apply(first_run["run_id"])
+    first_version = first_result["version_name"]
+    first_saved = ledger.rows("item", version=first_version)[0]
+    assert shipment_value(first_saved)["status"] == "automatic"
+    assert shipment_value(first_saved)["amount_rmb"] == "20.000000"
+
+    metadata = json.loads(first_saved["extra_json"])
+    metadata["manual_shipment_valuation"] = build_manual_shipment_valuation(
+        first_saved, 25, actor="finance", reason="confirmed", confirmed_at="now")
+    ledger.put("item", first_saved["name"], {
+        "unit_price": 12, "goods_value": 24, "source_doc_no": "PURCHASE-2",
+        "extra_json": json.dumps(metadata),
+    })
+    repo.sources[0].update(source_hash="SOURCE-2", approval_no="LOG-2")
+    first_before_second = deepcopy(ledger.rows("item", version=first_version))
+
+    second_run = ai.start_source_ai_review(batch["name"], version["name"], force=True,
+                                           repository=repo, enqueue=lambda _run: None)
+    assert repo.get_run(second_run["run_id"])["version"] == first_version
+    assert "SOURCE-2" in str(repo.get_run(second_run["run_id"])["source_manifest_json"])
+    second_result = prepare_and_apply(second_run["run_id"])
+    second_version = second_result["version_name"]
+    final = ledger.rows("item", version=second_version)[0]
+
+    assert ledger.get("batch", batch["name"])["current_version"] == second_version
+    assert ledger.rows("item", version=first_version) == first_before_second
+    assert shipment_value(final)["status"] == "manual"
+    assert shipment_value(final)["amount_rmb"] == "25"
+    assert str(final["goods_value"]) == "25"
+    cleared = deepcopy(final)
+    cleared_meta = json.loads(cleared["extra_json"])
+    cleared_meta.pop("manual_shipment_valuation")
+    cleared["extra_json"] = json.dumps(cleared_meta)
+    fallback = shipment_value(cleared)
+    assert fallback["status"] == "conflict"
+    assert fallback["prior_amount_rmb"] == "20.000000"
+    assert fallback["calculated_amount_rmb"] == "24.000000"
 
 
 def test_next_ai_input_preserves_both_selected_duplicate_sku_rows():

@@ -66,10 +66,7 @@ def value_final_cargo(item, cargo, fx_context):
 def reconcile_replacement_value(item, cargo, fx_context, prior_item=None):
     """Compare a newly calculated shipment value with an exactly matched prior row."""
     calculated = value_final_cargo(item, cargo, fx_context)
-    prior_amount = number((prior_item or {}).get('goods_value'))
-    prior_valuation = row_meta(prior_item or {}).get('settlement_valuation') or {}
-    if (prior_amount is None or Decimal(prior_amount) <= 0) and prior_valuation.get('status') == 'conflict':
-        prior_amount = number(prior_valuation.get('prior_amount_rmb'))
+    prior_amount, prior_evidence = _automatic_prior_value(prior_item or {})
     has_prior = prior_amount is not None and Decimal(prior_amount) > 0
     calculated_amount = number(calculated.get('amount_rmb'))
     agrees = (has_prior and not calculated.get('error') and calculated_amount is not None
@@ -83,6 +80,36 @@ def reconcile_replacement_value(item, cargo, fx_context, prior_item=None):
         'error': 'SETTLEMENT_SHIPMENT_VALUE_CONFLICT',
         'prior_amount_rmb': prior_amount,
         'calculated_amount_rmb': calculated_amount,
-        'prior_evidence': deepcopy(prior_valuation.get('prior_evidence') or prior_item),
+        'prior_evidence': deepcopy(prior_evidence),
         'calculated_evidence': deepcopy(calculated),
     }
+
+
+def _automatic_prior_value(item, depth=0):
+    """Read automatic evidence without mistaking a mirrored manual goods_value for it."""
+    if not isinstance(item, dict) or depth > 3:
+        return None, item
+    meta = row_meta(item)
+    for key in ('settlement_valuation', 'shipment_valuation'):
+        valuation = meta.get(key) or {}
+        if not isinstance(valuation, dict):
+            continue
+        manual = any(valuation.get(flag) for flag in ('manual', 'manual_override', 'manual_override_flag'))
+        if valuation.get('status') == 'conflict':
+            amount = number(valuation.get('prior_amount_rmb'))
+            if amount is not None and Decimal(amount) > 0:
+                return amount, valuation.get('prior_evidence') or valuation
+        amount = number(valuation.get('amount_rmb'))
+        if not manual and not valuation.get('error') and amount is not None and Decimal(amount) > 0:
+            return amount, valuation
+    for key in ('ai_fill_original_values', 'settlement_original_values'):
+        original = meta.get(key)
+        if isinstance(original, dict):
+            amount, evidence = _automatic_prior_value(original, depth + 1)
+            if amount is not None:
+                return amount, evidence
+    if not isinstance(meta.get('manual_shipment_valuation'), dict):
+        amount = number(item.get('goods_value'))
+        if amount is not None and Decimal(amount) > 0:
+            return amount, item
+    return None, item
