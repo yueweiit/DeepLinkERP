@@ -358,7 +358,7 @@ console.log(JSON.stringify({updates:state.aiFill.updates,manual:state.aiFill.man
     }
 
 
-def test_purchase_value_columns_are_editable_but_purchase_identity_stays_readonly() -> None:
+def test_purchase_value_columns_keep_compatibility_value_readonly_and_identity_readonly() -> None:
     result = _fee_workspace_result(r"""
 const workspace=new Harness();workspace.detailState={};
 workspace.materialFeeState={batchName:'',showAuxiliary:true};
@@ -366,7 +366,7 @@ const columns=workspace.materialFeeGridColumns();
 const mapped=Object.fromEntries(columns.map(column=>[column.field,Boolean(column.readonly)]));
 console.log(JSON.stringify(mapped));
 """)
-    assert result["goods_value"] is False
+    assert result["goods_value"] is True
     assert result["unit_price"] is False
     assert result["unit_price_uom"] is False
     assert result["purchase_currency"] is False

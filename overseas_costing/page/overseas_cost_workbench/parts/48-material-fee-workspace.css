@@ -272,8 +272,9 @@
 .ocw-mf-preview-card dt { color: var(--mf-muted); font-weight: 400; }
 .ocw-mf-preview-card dd { margin: 0; font-variant-numeric: tabular-nums; }
 
-.ocw-mf-material-title { align-items: flex-start; }
-.ocw-mf-material-actions { display: flex; flex-wrap: nowrap; justify-content: flex-end; gap: 8px; max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
+.ocw-mf-material-title { align-items: flex-start; flex-wrap: wrap; }
+.ocw-mf-material-title > div:first-child { min-width: 0; }
+.ocw-mf-material-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 100%; overflow: visible; padding-bottom: 2px; }
 .ocw-mf-material-actions button { flex: 0 0 auto; white-space: nowrap; }
 .ocw-mf-material-actions .is-active { border-color: var(--mf-blue); background: var(--mf-blue-soft); color: var(--mf-blue); }
 
@@ -331,6 +332,15 @@
 .ocw-mf-cell.is-saving { background: #fff9e8; }
 .ocw-mf-cell.is-save-error { background: #ffe4e0; box-shadow: inset 0 0 0 2px #d92d20; }
 .ocw-mf-cell.is-save-error::after { content: "保存失败·点击重试"; position: absolute; right: 3px; bottom: 1px; color: #b42318; font-size: 8px; pointer-events: none; }
+.ocw-mf-cell.is-shipment-valuation { padding-bottom: 4px; }
+.ocw-mf-cell.is-shipment-valuation > input { height: 34px; }
+.ocw-mf-cell .ocw-mf-valuation-status { position: static; display: block; padding: 0 8px 4px; color: #667085; font-size: 9px; line-height: 1.35; pointer-events: none; }
+.ocw-mf-cell.is-valuation-manual .ocw-mf-valuation-status { color: #067647; }
+.ocw-mf-cell:is(.is-valuation-conflict, .is-valuation-stale, .is-valuation-missing) { background: #fff8e7; }
+.ocw-mf-cell:is(.is-valuation-conflict, .is-valuation-stale, .is-valuation-missing) .ocw-mf-valuation-status { color: #9a5b00; }
+.ocw-mf-valuation-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 6px 5px; }
+.ocw-mf-valuation-actions button { flex: 1 1 70px; min-width: 0; border: 1px solid #d69e3b; border-radius: 4px; padding: 3px 4px; background: #fff; color: #805000; font-size: 9px; line-height: 1.25; cursor: pointer; }
+.ocw-mf-valuation-actions button:hover { background: #fff2ce; }
 .ocw-mf-cell.is-ai-draft { background: #eaf5ff; box-shadow: inset 0 0 0 1px #65b5ee; }
 .ocw-mf-cell.is-ai-draft :is(input, select) { color: #076fbe; font-weight: 600; }
 .ocw-mf-cell.is-protected-purchase { padding-right: 46px; background: #f8fafc; }

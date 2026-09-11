@@ -72,6 +72,19 @@ def test_grid_constrains_real_frappe_anonymous_body_wrapper_and_native_form():
     assert 'min-width: 0' in css and 'min-height: 0' in css
 
 
+def test_material_toolbar_wraps_without_clipping_actions():
+    css = (PARTS / '48-material-fee-workspace.css').read_text()
+    actions = css.split('.ocw-mf-material-actions {', 1)[1].split('}', 1)[0]
+    title = css.split('.ocw-mf-material-title > div:first-child {', 1)[1].split('}', 1)[0]
+    responsive = css.split('@media (max-width: 1050px)', 1)[1].split('@media (max-width: 640px)', 1)[0]
+    assert 'flex-wrap: wrap' in actions
+    assert 'overflow: visible' in actions
+    assert 'overflow-x: auto' not in actions and 'flex-wrap: nowrap' not in actions
+    assert 'min-width: 0' in title
+    assert '.ocw-mf-material-actions' in responsive
+    assert 'width: 100%' in responsive and 'justify-content: flex-start' in responsive
+
+
 def test_uploaded_xlsx_with_true_grid_uses_same_two_tab_dialog():
     result = _fee_workspace_result('''
     const w=Object.create(Harness.prototype);let configured=0,options;

@@ -118,6 +118,34 @@ assert.equal(state.aiFill,null);assert.equal(w.detailState.versionName,'V2');ass
 """)
 
 
+def test_second_forced_run_drops_first_run_ui_state_and_uses_new_row_review():
+    run_ui(r"""
+const run1=ready();run1.rowSelection.mode='fill_missing';run1.selections=new Set(['legacy']);
+run1.manualUpdates={'I:goods_value':{value:'99'}};run1.draftVisible=true;
+run1.draft={autofill_preview:{items:[{material_code:'OLD'}]}};
+run1.source_progress=[{source_id:'SOURCE-1'}];run1.rowSelection.preview={id:'preview-1',revision:1,can_apply:true};
+run1.rowSelection.previewKey=w.materialAIRowSelectionKey(run1);
+w.openMaterialAIProgressDialog=()=>{};w.updateMaterialAIProgressSurface=()=>{};
+const nextReview={...catalog,fingerprint:'fp-2',rows:[{row_id:'new-source',origin:'source',values:{material_code:'NEW'},can_fill:true,can_replace:true,default_selected:true,default_replace_selected:true}]};
+w.call=async()=>({ok:true,status:'APPLIED',version_name:'V2',batch_modified:'after'});
+w.loadMaterialFeeWorkspace=async()=>{state.aiFill={...run1,status:'APPLIED',source_progress:[{source_id:'SOURCE-1'}]};return true};
+await w.applyMaterialAIFill();assert.equal(w.detailState.versionName,'V2');
+let releaseStart;w.call=()=>new Promise(resolve=>{releaseStart=resolve});
+w.pollMaterialAIFill=async(current)=>{const ready2={ok:true,status:'READY',run_id:'run-2',version_name:'V2',
+  source_progress:[{source_id:'SOURCE-2'}],row_review:nextReview};current.aiFill={...current.aiFill,...ready2,runId:'run-2'};
+  current.aiPendingReady=ready2;w.showMaterialAIReadyDraft()};
+const running=w.startMaterialAIFill({force:true,restart:true});
+assert.deepEqual(state.aiFill.source_progress,[],'STARTING must not retain prior-run source progress or UI state');
+for(const key of ['rowSelection','selections','manualUpdates','draft'])assert.equal(state.aiFill[key],undefined,key);
+releaseStart({ok:true,status:'QUEUED',run_id:'run-2',source_progress:[{source_id:'SOURCE-2'}]});await running;
+const fill=state.aiFill;assert.equal(fill.runId,'run-2');assert.equal(fill.rowSelection.mode,'replace_all');
+assert.deepEqual([...fill.rowSelection.rows],['new-source']);assert.deepEqual(fill.source_progress,[{source_id:'SOURCE-2'}]);
+assert.equal(fill.selections.size,0);assert.deepEqual(fill.manualUpdates,{});
+const html=w.renderMaterialAIReviewDialogContent();assert(html.includes('data-mf-ai-row-select="new-source"'));
+assert(!html.includes('data-mf-ai-autofill-preview'));assert(!html.includes('OLD'));
+""")
+
+
 INLINE = r"""
 const fee={logical_fee_key:'freight',source_binding_id:'claim',source_label:'银行支付流程',amount:80,currency:'RMB'};
 state.fees={fees:[fee]};

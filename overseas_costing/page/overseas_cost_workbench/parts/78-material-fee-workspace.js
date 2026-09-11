@@ -150,6 +150,12 @@
         $button.attr("data-fieldname")
       );
     });
+    this.$root.on("mousedown", "[data-action='mf-shipment-valuation-adopt']", (event) => {
+      event.preventDefault();
+    });
+    this.$root.on("click", "[data-action='mf-shipment-valuation-adopt']", (event) => {
+      this.adoptShipmentValuationCandidate($(event.currentTarget)).catch((error) => this.showError(error));
+    });
     this.$root.on("input", "[data-mf-ai-clarification]", (event) => {
       const state = this.ensureMaterialFeeState();
       state.aiClarification = String($(event.currentTarget).val() || "").slice(0, 4000);
@@ -806,7 +812,7 @@
       { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
       { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
       { field: "shipped_uom", label: "发货单位", width: 130 },
-      { field: "shipment_value_rmb", label: "本次发货货值 RMB", numeric: true, readonly: true, width: 160 },
+      { field: "shipment_value_rmb", label: "本次发货货值 RMB", numeric: true, readonly: false, width: 180 },
       { field: "gross_weight_kg", label: "毛重 kg", numeric: true, width: 130 },
       { field: "volume_m3", label: "体积 m³", numeric: true, width: 130 },
       { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true, width: 140 },
@@ -814,7 +820,7 @@
     ];
     if (state.showAuxiliary) {
       columns.push(
-        { field: "goods_value", label: "原采购全额 RMB", numeric: true, purchaseField: true, width: 150 },
+        { field: "goods_value", label: "货值兼容值 RMB", numeric: true, purchaseField: true, readonly: true, width: 150 },
         { field: "net_weight_kg", label: "净重 kg", numeric: true, width: 130 },
         { field: "unit_price", label: "原币单价", numeric: true, purchaseField: true, width: 130 },
         { field: "purchase_uom", label: "采购单位", purchaseField: true, width: 120 },
@@ -982,17 +988,11 @@
       && !aiUpdate
       && !manualUpdate
     );
-    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", requiresCorrection ? "is-protected-purchase" : "", draft?.error ? "is-save-error" : "", aiUpdate || manualUpdate ? "is-ai-draft" : "", aiCell && !aiUpdate ? "has-ai-candidate" : ""].filter(Boolean).join(" ");
-    const reason = draft?.error || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
+    const valuationStatus = column.field === "shipment_value_rmb" ? this.shipmentValuationStatus(item.shipment_valuation) : "";
+    const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", requiresCorrection ? "is-protected-purchase" : "", draft?.error ? "is-save-error" : "", aiUpdate || manualUpdate ? "is-ai-draft" : "", aiCell && !aiUpdate ? "has-ai-candidate" : "", valuationStatus ? "is-shipment-valuation" : "", valuationStatus ? `is-valuation-${valuationStatus}` : ""].filter(Boolean).join(" ");
+    const reason = draft?.error || (column.field === "shipment_value_rmb" ? item.shipment_valuation?.error_detail : "") || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
       const fullValue = this.formatValue(value ?? "--");
-      if (column.field === "shipment_value_rmb") {
-        const valuation = item.shipment_valuation || {};
-        const sourceLabel = valuation.error ? "估值待核对" : ["packing_row_total", "packing_unit_price"].includes(valuation.method)
-          ? "装箱货值已取得" : valuation.method === "purchase_unit_price" ? "采购单价 × 本次发货数"
-            : valuation.method === "settlement_expense_unit_price" ? "采购支出商品价 × 当前数量" : valuation.method === "settlement_purchase_unit_price" ? "原商品采购价 × 当前数量" : valuation.method === "LEGACY_PURCHASE" ? "历史采购口径" : "本次发货估值";
-        return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(valuation.error_detail || reason)}"><span>${this.escape(fullValue)}</span><small>${this.escape(sourceLabel)}</small></td>`;
-      }
       return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
     }
     if (requiresCorrection) {
@@ -1001,7 +1001,37 @@
     const editor = Array.isArray(column.options)
       ? `<select data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" aria-label="${this.escape(column.label)}"><option value="">请选择</option>${column.options.map((option) => `<option value="${this.escape(option.value)}" ${String(value || "") === String(option.value) ? "selected" : ""}>${this.escape(option.label)}</option>`).join("")}</select>`
       : `<input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />`;
-    return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(reason)}">${editor}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
+    const valuationMeta = column.field === "shipment_value_rmb" ? this.renderShipmentValuationMeta(item.shipment_valuation) : "";
+    return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(reason)}">${editor}${valuationMeta}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
+  }
+
+  shipmentValuationStatus(valuation = {}) {
+    const status = String(valuation?.status || (valuation?.error ? "missing" : "automatic")).toLowerCase();
+    return ["automatic", "manual", "conflict", "missing", "stale"].includes(status) ? status : "missing";
+  }
+
+  renderShipmentValuationMeta(valuation = {}) {
+    const status = this.shipmentValuationStatus(valuation);
+    const labels = {
+      automatic: "自动估值",
+      manual: "人工确认",
+      conflict: "待确认",
+      missing: "待补",
+      stale: "数量或单位已变化",
+    };
+    if (status !== "conflict") return `<small class="ocw-mf-valuation-status">${labels[status]}</small>`;
+    const prior = valuation?.prior_amount_rmb ?? "";
+    const calculated = valuation?.calculated_amount_rmb ?? "";
+    return `<small class="ocw-mf-valuation-status">待确认 · 旧值 ${this.escape(prior)} · 计算值 ${this.escape(calculated)}</small><div class="ocw-mf-valuation-actions"><button type="button" data-action="mf-shipment-valuation-adopt" data-value="${this.escape(prior)}">采用旧值</button><button type="button" data-action="mf-shipment-valuation-adopt" data-value="${this.escape(calculated)}">采用计算值</button></div>`;
+  }
+
+  async adoptShipmentValuationCandidate($button) {
+    if (!$button?.attr) return;
+    const $input = $button.closest(".ocw-mf-cell").find("[data-mf-cell-input]").first();
+    if (!$input?.length) return;
+    $input.val(String($button.attr("data-value") ?? ""));
+    this.updateMaterialDraftFromInput($input);
+    return this.saveMaterialFeeCell($input);
   }
 
   materialAICell(itemName, fieldname) {
@@ -2110,6 +2140,9 @@
 
   failMaterialAIProgress(error, fallback, { resumePolling = false } = {}) {
     const state = this.ensureMaterialFeeState();
+    const retrySources = !resumePolling && !state.aiFill?.runId && Array.isArray(state.aiStartOptions?.sourceProgress)
+      ? state.aiStartOptions.sourceProgress
+      : [];
     state.aiFill = {
       ...(state.aiFill || {}),
       status: resumePolling ? state.aiFill?.status || "RUNNING" : "FAILED",
@@ -2119,6 +2152,7 @@
       connection_error: "",
       polling: false,
       polling_paused: resumePolling,
+      source_progress: state.aiFill?.source_progress?.length ? state.aiFill.source_progress : retrySources,
     };
     this.openMaterialAIProgressDialog();
     this.updateMaterialAIProgressSurface();
@@ -2177,8 +2211,11 @@
       this.openMaterialAIProgressDialog();
       return Promise.resolve();
     }
-    state.aiStartOptions = { ...options, request_id: options.request_id || this.materialAINewRequestId(), ...(Array.isArray(options.selectedSourceIds) ? { selectedSourceIds: [...options.selectedSourceIds] } : {}) };
-    state.aiFill = { status: "STARTING", progress_step: "正在启动分析任务", progress_percent: 0, progress_revision: 0, source_progress: state.aiFill?.source_progress || [] };
+    const sourceProgress = Array.isArray(state.aiFill?.source_progress)
+      ? state.aiFill.source_progress.map((source) => ({ ...source }))
+      : [];
+    state.aiStartOptions = { ...options, sourceProgress, request_id: options.request_id || this.materialAINewRequestId(), ...(Array.isArray(options.selectedSourceIds) ? { selectedSourceIds: [...options.selectedSourceIds] } : {}) };
+    state.aiFill = { status: "STARTING", progress_step: "正在启动分析任务", progress_percent: 0, progress_revision: 0, source_progress: [] };
     state.aiPendingReady = null;
     state.aiProgressMinimized = false;
     const generation = state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
@@ -2231,7 +2268,7 @@
         force: options.force === true ? 1 : 0,
       };
       if (Array.isArray(options.selectedSourceIds)) {
-        const currentSources = state.aiFill?.source_progress || [];
+        const currentSources = options.sourceProgress || state.aiFill?.source_progress || [];
         const sources = new Map(currentSources.map((source) => [String(source.source_id || ""), source]));
         const auditRows = this.materialAIAuditSourceRows(currentSources);
         payload.selected_source_ids_json = JSON.stringify(options.selectedSourceIds.filter((id) => {
@@ -2263,7 +2300,7 @@
     if (!isCurrent()) return;
     if (!started && lastError) throw lastError;
     if (!started?.ok) throw started || new Error("AI 分析任务启动失败。");
-    state.aiFill = { ...started, runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, progress_revision: Number(started.progress_revision || 0), source_progress: started.source_progress || state.aiFill?.source_progress || [], reused: Boolean(started.reused), reuse_reason: started.reuse_reason || "" };
+    state.aiFill = { ...started, runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, progress_revision: Number(started.progress_revision || 0), source_progress: started.source_progress || [], reused: Boolean(started.reused), reuse_reason: started.reuse_reason || "" };
     state.aiPendingReady = null;
     this.openMaterialAIProgressDialog();
     this.updateMaterialAIProgressSurface();
