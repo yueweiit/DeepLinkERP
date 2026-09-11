@@ -2584,7 +2584,8 @@
       let forceSave = false;
       while (this.materialFeeState === state && state.materialCellWriteTargets[key]) {
         const target = state.materialCellWriteTargets[key];
-        const saved = await this.persistMaterialFeeCell(target.input, target.value, { forceSave });
+        const liveInput = this.findMaterialFeeCellInput(itemName, fieldname) || target.input;
+        const saved = await this.persistMaterialFeeCell(liveInput, target.value, { forceSave });
         if (!saved || this.materialFeeState !== state) return false;
         const latest = state.materialCellWriteTargets[key];
         if (!latest || latest.revision === target.revision || latest.value === target.value) {
@@ -2604,6 +2605,19 @@
       if (state.materialCellWrites.get(key) === write) state.materialCellWrites.delete(key);
       delete state.materialCellWriteTargets[key];
     }
+  }
+
+  findMaterialFeeCellInput(itemName, fieldname) {
+    let target = null;
+    this.$root?.find?.("[data-mf-cell-input]")?.each?.((_, element) => {
+      if (target) return;
+      const $element = $(element);
+      if (
+        String($element.attr("data-item-name") || "") === String(itemName || "")
+        && String($element.attr("data-fieldname") || "") === String(fieldname || "")
+      ) target = $element;
+    });
+    return target;
   }
 
   renderMaterialFeeWorkspacePreservingPosition() {
@@ -2724,7 +2738,7 @@
       && this.detailState.tab === "documents";
     const item = this.findMaterialFeeItem(itemName);
     $input.data("saving", true).prop("disabled", true);
-    $cell.addClass("is-saving").removeClass("is-save-error");
+    $cell.addClass("is-saving").removeClass("is-save-error").attr("title", "");
     try {
       if (!item) throw new Error("物料行已变更，请刷新后重试。");
       if (!(await this.ensureMaterialFeeEditSession())) throw new Error("未能获取编辑权，物料未保存。");

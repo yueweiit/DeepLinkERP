@@ -174,6 +174,48 @@ console.log(JSON.stringify({values:calls.map(call=>call.args.value),modified:cal
     }
 
 
+def test_queued_failure_marks_rerendered_live_cell_and_live_retry_succeeds():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'T',expectedModified:'M1'};
+const state=w.ensureMaterialFeeState();state.materials={items:[{name:'I',shipment_value_rmb:'40'}]};
+w.normalizeErrorMessage=error=>error.message;w.ensureMaterialFeeEditSession=async()=>true;
+function makeInput(value,original){const data={};const classes=new Set();const attrs={title:''};const cell={classes,attrs,
+  addClass(name){classes.add(name);return this},removeClass(name){name.split(/\s+/).forEach(value=>classes.delete(value));return this},
+  attr(name,next){if(arguments.length>1){attrs[name]=next;return this}return attrs[name]}};
+  const input={length:1,value,cell,val(next){if(arguments.length){this.value=String(next);return this}return this.value},
+    attr(name){return {'data-original-value':original,'data-item-name':'I','data-fieldname':'shipment_value_rmb'}[name]},
+    data(name,next){if(arguments.length>1){data[name]=next;return this}return data[name]},prop(){return this},closest(){return cell}};
+  return input}
+const oldInput=makeInput('60','40');const liveInput=makeInput('70','60');let currentInput=oldInput;let reloads=0;
+global.$=value=>value;w.$root={find(selector){return selector==='[data-mf-cell-input]'?{each(callback){callback(0,currentInput)}}:{each(){}}}};
+w.loadMaterialFeeWorkspace=async()=>{reloads+=1;if(reloads===1){state.materials.items[0].shipment_value_rmb='60';currentInput=liveInput}return true};
+const calls=[];const releases=[];let active=0,maxActive=0;w.call=async(method,args)=>{calls.push({method,args});active+=1;maxActive=Math.max(maxActive,active);
+  const result=await new Promise(resolve=>releases.push(resolve));active-=1;return result};
+const first=w.saveMaterialFeeCell(oldInput);await new Promise(resolve=>setImmediate(resolve));
+oldInput.value='70';const second=w.saveMaterialFeeCell(oldInput);
+releases.shift()({ok:true,batch_modified:'M2'});await new Promise(resolve=>setImmediate(resolve));
+releases.shift()({ok:false,message:'第二次失败'});await Promise.all([first,second]);
+const afterFailure={liveError:liveInput.cell.classes.has('is-save-error'),liveTitle:liveInput.cell.attrs.title,
+  oldError:oldInput.cell.classes.has('is-save-error'),draft:state.materialDrafts['I:shipment_value_rmb'],pending:state.pendingWrites.size};
+const retry=w.saveMaterialFeeCell(liveInput);await new Promise(resolve=>setImmediate(resolve));
+releases.shift()({ok:true,batch_modified:'M3'});await retry;
+console.log(JSON.stringify({afterFailure,values:calls.map(call=>call.args.value),modified:calls.map(call=>call.args.expected_modified),
+  maxActive,pending:state.pendingWrites.size,drafts:state.materialDrafts,errors:state.materialSaveErrors,
+  liveError:liveInput.cell.classes.has('is-save-error'),liveTitle:liveInput.cell.attrs.title}));
+""")
+    assert result["afterFailure"]["liveError"] is True
+    assert "第二次失败" in result["afterFailure"]["liveTitle"]
+    assert result["afterFailure"]["oldError"] is False
+    assert result["afterFailure"]["draft"]["value"] == "70"
+    assert result["afterFailure"]["draft"]["error"] == "第二次失败"
+    assert result["afterFailure"]["pending"] == 0
+    assert result["values"] == ["60", "70", "70"]
+    assert result["modified"] == ["M1", "M2", "M2"]
+    assert result["maxActive"] == 1
+    assert result["pending"] == 0 and result["drafts"] == {} and result["errors"] == {}
+    assert result["liveError"] is False and result["liveTitle"] == ""
+
+
 def test_shipment_value_is_in_bulk_paste_columns_and_goods_value_is_audit_only():
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={};w.materialFeeState={batchName:'',showAuxiliary:true};
