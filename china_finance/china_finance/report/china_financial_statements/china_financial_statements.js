@@ -1,5 +1,13 @@
 frappe.query_reports["China Financial Statements"] = {
-	after_datatable_render() {
+	get_datatable_options(datatable_options) {
+		// Keep the same fixed-column table behavior as China Voucher Ledger.
+		// Wide statement tables scroll inside the report instead of resizing
+		// individual rows or squeezing the report container.
+		datatable_options.layout = "fixed";
+		datatable_options.cellHeight = 33;
+		return datatable_options;
+	},
+	after_datatable_render(datatable) {
 		const report = frappe.query_report;
 		report.page.main.find(".china-balance-sheet-panels").remove();
 		report.page.main.find(".china-balance-sheet-checks").remove();
@@ -10,7 +18,7 @@ frappe.query_reports["China Financial Statements"] = {
 		const native_statement_types = ["Profit and Loss", "Cash Flow", "Account Activity and Balance"];
 		if (native_statement_types.includes(statement_type)) {
 			report.$report.addClass("china-financial-statements-native-table");
-			bind_native_statement_table_layout(report);
+			bind_native_statement_table_layout(report, datatable);
 		}
 		if (statement_type !== "Balance Sheet") return;
 
@@ -287,7 +295,15 @@ function source_account_link(label, accounts) {
 	return `<a href="#" class="china-finance-source-account-link" title="${title}" data-account="${frappe.utils.escape_html(account)}">${label}</a>`;
 }
 
-function bind_native_statement_table_layout(report) {
+function bind_native_statement_table_layout(report, datatable) {
+	// DataTable.setBodyStyle() writes an inline width based on the first row.
+	// Reapply the full-width layout after every refresh so switching statement
+	// types cannot move the vertical scrollbar into the empty area.
+	const scrollable = datatable?.bodyScrollable;
+	if (scrollable) {
+		scrollable.style.setProperty("width", "100%", "important");
+		scrollable.style.setProperty("min-width", "0", "important");
+	}
 	if (report.__china_financial_statement_layout_bound) return;
 	report.__china_financial_statement_layout_bound = true;
 	report.$report.on("dblclick.china_financial_statement_layout", ".dt-cell__resize-handle", () => {

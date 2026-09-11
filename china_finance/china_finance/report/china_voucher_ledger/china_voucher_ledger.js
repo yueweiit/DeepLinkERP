@@ -61,7 +61,10 @@ frappe.query_reports["China Voucher Ledger"] = {
 			const route = frappe.utils.get_form_link(data.source_doctype, data.source_name);
 			return `<a href="${route}" class="china-voucher-link" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${formatted}</a>`;
 		}
-		if (!data || !["posting_date", "statutory_number", "accounting_period", "remarks"].includes(column.fieldname)) {
+		if (column.fieldname === "source_action" && data?.source_doctype && data?.source_name) {
+			return `<button type="button" class="btn btn-xs btn-default china-voucher-edit-source" data-source-doctype="${encodeURIComponent(data.source_doctype)}" data-source-name="${encodeURIComponent(data.source_name)}">${__("编辑来源凭证")}</button>`;
+		}
+		if (!data || !["posting_date", "statutory_number", "accounting_period"].includes(column.fieldname)) {
 			return formatted;
 		}
 		const index = Number.isInteger(row?._index) ? row._index : frappe.query_report.data?.indexOf(data);
@@ -72,11 +75,16 @@ frappe.query_reports["China Voucher Ledger"] = {
 	onload(report) {
 		report.page.wrapper.addClass("china-voucher-ledger-report");
 		ensure_voucher_ledger_styles();
+		start_voucher_ledger_floating_scroll(report);
 		report.page.wrapper.on("click", ".china-voucher-link", (event) => {
 			event.preventDefault();
 			const source_doctype = decodeURIComponent(event.currentTarget.dataset.sourceDoctype);
 			const source_name = decodeURIComponent(event.currentTarget.dataset.sourceName);
 			frappe.set_route("Form", source_doctype, source_name);
+		});
+		report.page.wrapper.on("click", ".china-voucher-edit-source", (event) => {
+			event.preventDefault();
+			edit_source_voucher(report, event.currentTarget);
 		});
 		report.page.wrapper.on("click", ".china-voucher-snapshot-link", (event) => {
 			event.preventDefault();
@@ -154,11 +162,67 @@ function show_company_selector(report) {
 	dialog.show();
 }
 
+function edit_source_voucher(report, button) {
+	const source_doctype = decodeURIComponent(button.dataset.sourceDoctype);
+	const source_name = decodeURIComponent(button.dataset.sourceName);
+	button.disabled = true;
+	frappe.call({
+		method: "china_finance.services.source_voucher_edit.get_source_edit_status",
+		args: { source_doctype, source_name },
+		freeze: true,
+		freeze_message: __("正在检查凭证修改条件…"),
+		callback: (response) => {
+			button.disabled = false;
+			const status = response.message || {};
+			if (!status.can_edit) {
+				frappe.msgprint({
+					message: status.reason || __("当前凭证不满足修改条件"),
+					indicator: "orange",
+					title: __("不能修改凭证"),
+				});
+				return;
+			}
+			if (status.action === "open_draft") {
+				frappe.set_route("Form", source_doctype, source_name);
+				return;
+			}
+
+			frappe.confirm(
+				__("该凭证已提交。系统会先取消原凭证，再生成修订草稿；原中国会计凭证快照会保留为历史记录。是否继续？"),
+				() => {
+					frappe.call({
+						method: "china_finance.services.source_voucher_edit.prepare_source_voucher_edit",
+						args: { source_doctype, source_name },
+						freeze: true,
+						freeze_message: __("正在生成修订草稿…"),
+						callback: (amend_response) => {
+							const result = amend_response.message || {};
+							if (result.name) {
+								frappe.show_alert({
+									message: result.message || __("修订草稿已生成"),
+									indicator: "green",
+								});
+								frappe.set_route("Form", source_doctype, result.name);
+							}
+						},
+					});
+				},
+			);
+		},
+	});
+}
+
 function ensure_voucher_ledger_styles() {
 	if (document.getElementById("china-voucher-ledger-inline-style")) return;
 	$("<style>")
 		.attr("id", "china-voucher-ledger-inline-style")
 		.text(`
+			.china-voucher-ledger-report .datatable,
+			.china-voucher-ledger-report .dt-header,
+			.china-voucher-ledger-report .dt-scrollable {
+				width: 100%;
+				min-width: 0;
+			}
 			.china-voucher-ledger-report .dt-header,
 			.china-voucher-ledger-report .dt-scrollable { max-width: none; }
 			.china-voucher-ledger-report .dt-row {
@@ -167,6 +231,25 @@ function ensure_voucher_ledger_styles() {
 			}
 			.china-voucher-ledger-report .dt-cell { flex: 0 0 auto; }
 			.china-voucher-ledger-report .dt-scrollable { overflow-x: auto; }
+			.china-voucher-ledger-floating-scroll {
+				position: fixed;
+				z-index: 1030;
+				display: block;
+				height: 16px;
+				padding: 2px 0;
+				overflow-x: auto;
+				overflow-y: hidden;
+				background: var(--card-bg, #fff);
+				border: 1px solid var(--border-color, #d1d8dd);
+				border-radius: 8px;
+				box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+				scrollbar-width: thin;
+			}
+			.china-voucher-ledger-floating-scroll[hidden] { display: none; }
+			.china-voucher-ledger-floating-scroll__content {
+				height: 1px;
+				min-width: 100%;
+			}
 			.china-voucher-ledger-report .dt-cell__content {
 				line-height: 24px;
 				padding-left: 6px;
@@ -178,6 +261,121 @@ function ensure_voucher_ledger_styles() {
 			.china-voucher-ledger-report .dt-row { min-height: 28px; }
 		`)
 		.appendTo(document.head);
+}
+
+function start_voucher_ledger_floating_scroll(report) {
+	if (report._china_voucher_ledger_floating_scroll_watch_started) return;
+	report._china_voucher_ledger_floating_scroll_watch_started = true;
+
+	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
+	if (!page_wrapper) return;
+
+	let attempts = 0;
+	const attach = () => {
+		if (!document.body.contains(page_wrapper)) return;
+		const datatable = report.datatable;
+		if (datatable?.bodyScrollable) {
+			setup_voucher_ledger_floating_scroll(report, datatable);
+			return;
+		}
+		if (attempts++ < 50) window.setTimeout(attach, 100);
+	};
+	attach();
+}
+
+function setup_voucher_ledger_floating_scroll(report, datatable) {
+	const page_wrapper = report?.page?.wrapper?.[0] || report?.page?.wrapper;
+	const scrollable = datatable?.bodyScrollable;
+	if (!page_wrapper || !scrollable) return;
+
+	let state = report._china_voucher_ledger_floating_scroll;
+	if (!state) {
+		const bar = document.createElement("div");
+		bar.className = "china-voucher-ledger-floating-scroll";
+		bar.setAttribute("aria-label", __("凭证表格横向滚动条"));
+		bar.hidden = true;
+
+		const content = document.createElement("div");
+		content.className = "china-voucher-ledger-floating-scroll__content";
+		bar.appendChild(content);
+		document.body.appendChild(bar);
+
+		state = {
+			bar,
+			content,
+			page_wrapper,
+			scrollable: null,
+			syncing: false,
+			update_scheduled: false,
+		};
+		report._china_voucher_ledger_floating_scroll = state;
+
+		state.update = () => {
+			if (state.update_scheduled) return;
+			state.update_scheduled = true;
+			window.requestAnimationFrame(() => {
+				state.update_scheduled = false;
+				update_voucher_ledger_floating_scroll(state);
+			});
+		};
+		state.on_table_scroll = () => {
+			if (state.syncing) return;
+			state.syncing = true;
+			state.bar.scrollLeft = state.scrollable?.scrollLeft || 0;
+			state.syncing = false;
+		};
+		state.on_bar_scroll = () => {
+			if (state.syncing || !state.scrollable) return;
+			state.syncing = true;
+			state.scrollable.scrollLeft = state.bar.scrollLeft;
+			state.syncing = false;
+		};
+
+		bar.addEventListener("scroll", state.on_bar_scroll, { passive: true });
+		window.addEventListener("scroll", state.update, { passive: true });
+		window.addEventListener("resize", state.update, { passive: true });
+	}
+
+	if (state.scrollable !== scrollable) {
+		state.scrollable?.removeEventListener("scroll", state.on_table_scroll);
+		state.scrollable = scrollable;
+		scrollable.addEventListener("scroll", state.on_table_scroll, { passive: true });
+	}
+
+	state.page_wrapper = page_wrapper;
+	state.update();
+}
+
+function update_voucher_ledger_floating_scroll(state) {
+	const { bar, content, page_wrapper, scrollable } = state;
+	if (!bar || !scrollable || !document.body.contains(page_wrapper)) {
+		if (bar) bar.hidden = true;
+		return;
+	}
+
+	const has_horizontal_overflow = scrollable.scrollWidth > scrollable.clientWidth + 2;
+	const rect = scrollable.getBoundingClientRect();
+	const visible_in_viewport = rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0;
+	if (!has_horizontal_overflow || !visible_in_viewport) {
+		bar.hidden = true;
+		return;
+	}
+
+	const left = Math.max(0, rect.left);
+	const width = Math.min(rect.width, window.innerWidth - left);
+	if (width <= 0) {
+		bar.hidden = true;
+		return;
+	}
+
+	content.style.width = `${scrollable.scrollWidth}px`;
+	bar.style.left = `${left}px`;
+	bar.style.width = `${width}px`;
+	bar.style.bottom = "10px";
+	state.syncing = true;
+	bar.scrollLeft = scrollable.scrollLeft;
+	state.syncing = false;
+	bar.hidden = false;
 }
 
 function set_quick_period(report, period) {

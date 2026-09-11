@@ -41,8 +41,11 @@
 		grid-template-columns: 1fr;
 	}
 }
+.china-voucher-ledger-report .datatable,
 .china-voucher-ledger-report .dt-header,
 .china-voucher-ledger-report .dt-scrollable {
+	width: 100%;
+	min-width: 0;
 	max-width: none;
 }
 
@@ -57,6 +60,30 @@
 
 .china-voucher-ledger-report .dt-scrollable {
 	overflow-x: auto;
+}
+
+.china-voucher-ledger-floating-scroll {
+	position: fixed;
+	z-index: 1030;
+	display: block;
+	height: 16px;
+	padding: 2px 0;
+	overflow-x: auto;
+	overflow-y: hidden;
+	background: var(--card-bg, #fff);
+	border: 1px solid var(--border-color, #d1d8dd);
+	border-radius: 8px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+	scrollbar-width: thin;
+}
+
+.china-voucher-ledger-floating-scroll[hidden] {
+	display: none;
+}
+
+.china-voucher-ledger-floating-scroll__content {
+	height: 1px;
+	min-width: 100%;
 }
 
 .china-voucher-ledger-report .dt-cell__content {
@@ -77,19 +104,45 @@
 	width: 100%;
 }
 
+.china-financial-statements-native-table .datatable,
+.china-financial-statements-native-table .dt-header,
+.china-financial-statements-native-table .dt-scrollable {
+	width: 100%;
+	min-width: 0;
+	max-width: none;
+}
+
 .china-financial-statements-native-table .datatable {
-	max-width: 100%;
 	width: 100%;
 }
 
 .china-financial-statements-native-table .dt-scrollable {
-	max-width: 100%;
+	/* Frappe DataTable may set an inline width based on the row content.
+	   Keep the vertical scrollbar at the right edge of the report instead. */
+	width: 100% !important;
 	overflow-x: auto !important;
 }
 
 .china-financial-statements-native-table .dt-row {
 	min-width: 100%;
 	width: max-content;
+}
+
+.china-financial-statements-native-table .dt-cell {
+	flex: 0 0 auto;
+}
+
+.china-financial-statements-native-table .dt-cell__content {
+	line-height: 24px;
+	padding-left: 6px;
+	padding-right: 6px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.china-financial-statements-native-table .dt-row {
+	min-height: 28px;
 }
 
 

@@ -48,10 +48,19 @@ def execute(filters=None):
 			e.idx AS entry_idx,
 			e.account AS account,
 			e.party_type, e.party, e.cost_center, e.project,
-			COALESCE(NULLIF(e.remarks, ''), v.remarks) AS remarks, e.debit, e.credit
+			CASE
+				WHEN v.source_doctype='Journal Entry' THEN jea.user_remark
+				ELSE e.remarks
+			END AS remarks,
+			e.debit, e.credit
 		FROM `tabChina Accounting Voucher` v
 		INNER JOIN `tabChina Accounting Voucher Entry` e ON e.parent=v.name
 		LEFT JOIN `tabJournal Entry` je ON v.source_doctype='Journal Entry' AND je.name=v.source_name
+		LEFT JOIN `tabJournal Entry Account` jea
+			ON v.source_doctype='Journal Entry'
+			AND jea.parent=v.source_name
+			AND jea.parenttype='Journal Entry'
+			AND jea.idx=e.idx
 		LEFT JOIN `tabPayment Entry` pe ON v.source_doctype='Payment Entry' AND pe.name=v.source_name
 		WHERE {' AND '.join(conditions)}
 		ORDER BY v.accounting_period, v.voucher_word, v.posting_date, v.sequence_number, v.name, e.idx
@@ -120,12 +129,8 @@ def _assign_dense_display_numbers(entries):
 def build_tree_data(entries):
 	voucher_rows = {}
 	voucher_order = []
-	summary_cache = {}
 	for entry in entries:
 		voucher_snapshot = entry.voucher_snapshot
-		if voucher_snapshot not in summary_cache:
-			summary_cache[voucher_snapshot] = get_source_summary(entry)
-		summary = summary_cache[voucher_snapshot]
 		if voucher_snapshot not in voucher_rows:
 			voucher_order.append(voucher_snapshot)
 			voucher_rows[voucher_snapshot] = []
@@ -137,7 +142,7 @@ def build_tree_data(entries):
 			"voucher_number": None,
 			"print_voucher": None,
 			"accounting_period": entry.accounting_period if first_line else None,
-			"remarks": summary if first_line else None,
+			"remarks": clean_voucher_summary(entry.remarks),
 			"source_doctype": entry.source_doctype if first_line else None,
 			"source_name": entry.source_name if first_line else None,
 			"source_event": entry.source_event if first_line else None,
@@ -149,33 +154,6 @@ def build_tree_data(entries):
 			"indent": 0,
 		})
 	return [row for voucher_snapshot in voucher_order for row in voucher_rows[voucher_snapshot]]
-
-
-def get_source_summary(entry):
-	"""Use the source document's concise business summary for display only."""
-	if entry.source_doctype == "Journal Entry":
-		remark = frappe.db.get_value("Journal Entry", entry.source_name, "user_remark")
-		if not remark:
-			line = frappe.db.sql(
-				"""
-				SELECT user_remark
-				FROM `tabJournal Entry Account`
-				WHERE parent=%s AND parenttype='Journal Entry'
-					AND TRIM(COALESCE(user_remark, '')) <> ''
-				ORDER BY idx
-				LIMIT 1
-				""",
-				(entry.source_name,),
-				as_dict=True,
-			)
-			remark = line[0].user_remark if line else None
-		return clean_voucher_summary(remark or entry.remarks)
-	if entry.source_doctype == "Payment Entry":
-		payment_type, party = frappe.db.get_value(
-			"Payment Entry", entry.source_name, ["payment_type", "party"]
-		) or (None, None)
-		return f"{'收款' if payment_type == 'Receive' else '付款'} {party or ''}".strip()
-	return clean_voucher_summary(entry.remarks)
 
 
 def clean_voucher_summary(value):
@@ -222,4 +200,5 @@ def get_columns():
 		{"label": _("借方"), "fieldname": "debit", "fieldtype": "Currency", "width": 150},
 		{"label": _("贷方"), "fieldname": "credit", "fieldtype": "Currency", "width": 150},
 		{"label": _("本位币金额"), "fieldname": "base_total_amount", "fieldtype": "Currency", "width": 160},
+		{"label": _("操作"), "fieldname": "source_action", "fieldtype": "Data", "width": 130},
 	]
