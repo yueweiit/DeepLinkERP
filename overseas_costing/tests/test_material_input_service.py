@@ -231,3 +231,22 @@ def test_material_requirements_respect_fee_item_scope() -> None:
 
     assert result["rows"]["A"]["missing_fields"] == []
     assert result["rows"]["B"]["missing_fields"] == ["goods_value", "gross_weight_kg"]
+
+
+def test_manual_zero_is_explicit_but_not_a_positive_goods_allocation_basis() -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    item = {"name": "ITEM-1", "stable_line_key": "A", "actual_shipped_qty": 1,
+            "shipped_uom": "件", "unit": "件", "goods_value": 0}
+    item["extra_json"] = json.dumps({"manual_shipment_valuation": build_manual_shipment_valuation(
+        item, 0, actor="finance", reason="confirmed", confirmed_at="now")})
+
+    without_fee = analyze_material_requirements([item], [])
+    with_fee = analyze_material_requirements([item], [{
+        "logical_fee_key": "freight", "amount_status": "ACTUAL", "amount": 20,
+        "scope_type": "ALL_ITEMS", "allocation_basis": "goods_value",
+    }])
+
+    assert "shipment_value_rmb" not in without_fee["rows"]["A"]["missing_fields"]
+    assert with_fee["rows"]["A"]["missing_fields"] == ["shipment_value_rmb"]
+    assert with_fee["rows"]["A"]["field_reasons"]["shipment_value_rmb"][0]["code"] == "ALLOCATION_BASIS_REQUIRED"

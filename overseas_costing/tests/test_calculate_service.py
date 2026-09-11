@@ -1,6 +1,9 @@
 """中文用途：重算服务测试。"""
 
 import json
+import ast
+from pathlib import Path
+import pytest
 
 from overseas_costing.services.calculate_service import (
     _build_new_item_values,
@@ -29,6 +32,16 @@ def test_new_manual_item_defaults_shipping_quantity_to_purchase_quantity() -> No
     assert values["cost_output_uom"] == "桶"
     assert values["actual_shipped_qty_mode"] == "DEFAULT_PURCHASE"
     assert values.get("actual_shipped_qty") in (None, "")
+
+
+def test_calculate_service_has_single_public_mutation_implementation() -> None:
+    source = Path(__file__).parents[1] / "services" / "calculate_service.py"
+    definitions = [node.name for node in ast.parse(source.read_text(encoding="utf-8")).body
+                   if isinstance(node, ast.FunctionDef)]
+
+    for name in ("update_item_field", "batch_update_items", "recalculate_batch",
+                 "update_allocation_rule", "create_version", "switch_version"):
+        assert definitions.count(name) == 1, f"{name} has an overridden skeleton definition"
 
 
 def test_new_manual_item_keeps_explicit_shipping_quantity() -> None:
@@ -581,3 +594,233 @@ def test_delete_batch_dry_run_returns_preview() -> None:
     assert result["ok"] is True
     assert result["dry_run"] is True
     assert result["batch_name"] == "BATCH-001"
+
+
+def _install_item_edit_frappe(monkeypatch, items):
+    from types import SimpleNamespace
+    from overseas_costing.services import calculate_service as service
+    from overseas_costing.services import effective_source_values
+
+    class DB:
+        def __init__(self):
+            self.commits = 0
+            self.rollbacks = 0
+
+        def sql(self, *_args, **_kwargs):
+            return [{"current_version": "V1", "confirm_status": "Pending",
+                     "writeback_status": "Not Started", "version_status": "Active"}]
+
+        def set_value(self, *_args, **_kwargs):
+            return None
+
+        def get_value(self, doctype, name, fieldname=None, **_kwargs):
+            if doctype == "Overseas Cost Item":
+                return items[name].batch
+            if doctype == "Overseas Cost Batch" and fieldname == ["name"]:
+                return {"name": "B1"}
+            if doctype == "Overseas Cost Batch" and fieldname == "modified":
+                return "2026-09-11 10:00:00"
+            return None
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    class Item:
+        def __init__(self, name, **values):
+            self.name = name
+            self.batch = "B1"
+            self.version = "V1"
+            self.row_no = 1
+            self.actual_shipped_qty = 2
+            self.shipped_uom = "件"
+            self.unit = "件"
+            self.goods_value = 20
+            self.extra_json = "{}"
+            self.manual_override_flag = 0
+            self.manual_override_reason = ""
+            self.__dict__.update(values)
+
+        def as_dict(self):
+            return dict(self.__dict__)
+
+        def save(self, **_kwargs):
+            return self
+
+    normalized = {}
+    for name, values in list(items.items()):
+        normalized[name] = values if isinstance(values, Item) else Item(name, **values)
+    items.clear()
+    items.update(normalized)
+    db = DB()
+    fake = SimpleNamespace(
+        db=db,
+        session=SimpleNamespace(user="finance@example.com"),
+        utils=SimpleNamespace(now=lambda: "2026-09-11 10:00:00"),
+        get_doc=lambda doctype, name=None: items[name] if isinstance(doctype, str) else SimpleNamespace(insert=lambda **_kwargs: None),
+    )
+    monkeypatch.setattr(service, "_frappe", fake)
+    monkeypatch.setattr(service, "_insert_audit_log", lambda **_kwargs: None)
+    monkeypatch.setattr(effective_source_values, "batch_source_context", lambda *_args, **_kwargs: {})
+    return service, db
+
+
+def test_update_virtual_shipment_value_saves_server_manual_metadata(monkeypatch) -> None:
+    items = {"I1": {}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field(
+        "I1", "shipment_value_rmb", "25", version_name="V1", remark="财务核对",
+        _skip_edit_check=True,
+    )
+
+    metadata = json.loads(items["I1"].extra_json)
+    manual = metadata["manual_shipment_valuation"]
+    assert result["ok"] is True and result["changed"] is True
+    assert result["valuation"]["status"] == "manual"
+    assert result["goods_value"] == 25
+    assert result["batch_modified"] == "2026-09-11 10:00:00"
+    assert items["I1"].goods_value == 25
+    assert manual["amount_rmb"] == "25"
+    assert manual["currency"] == "RMB"
+    assert manual["quantity"] == "2" and manual["uom"] == "件"
+    assert manual["input_fingerprint"]
+    assert manual["confirmed"] is True and manual["manual"] is True
+    assert manual["actor"] == "finance@example.com"
+    assert manual["confirmed_at"] == "2026-09-11 10:00:00"
+    assert manual["reason"] == "财务核对"
+
+
+def test_update_virtual_shipment_value_preserves_explicit_zero(monkeypatch) -> None:
+    items = {"I1": {}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field("I1", "shipment_value_rmb", "0", _skip_edit_check=True)
+
+    assert result["valuation"]["status"] == "manual"
+    assert result["valuation"]["amount_rmb"] == "0"
+    assert result["goods_value"] == 0
+    assert items["I1"].goods_value == 0
+
+
+@pytest.mark.parametrize("value", ["-1", "NaN", "Infinity", "1e999", "not-a-number"])
+def test_update_virtual_shipment_value_rejects_invalid_numbers(value) -> None:
+    result = update_item_field("I1", "shipment_value_rmb", value)
+
+    assert result["ok"] is False
+    assert "有限非负数字" in result["message"]
+
+
+def test_clearing_manual_shipment_value_returns_to_automatic_value(monkeypatch) -> None:
+    from overseas_costing.services.logistics_settlement.valuation import value_final_cargo
+
+    item_values = {"source_doc_no": "PUR-1", "unit_price": 10, "purchase_currency": "RMB",
+                   "purchase_uom": "件", "unit_price_uom": "件"}
+    cargo = {"material_code": "", "quantity": 2, "unit": "件", "source_snapshot": "S"}
+    automatic = value_final_cargo({**item_values, "extra_json": "{}"}, cargo, {})
+    items = {"I1": {**item_values, "extra_json": json.dumps({"settlement_cargo": cargo,
+              "settlement_valuation": automatic})}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    service.update_item_field("I1", "shipment_value_rmb", "25", _skip_edit_check=True)
+
+    result = service.update_item_field("I1", "shipment_value_rmb", "", _skip_edit_check=True)
+
+    metadata = json.loads(items["I1"].extra_json)
+    assert "manual_shipment_valuation" not in metadata
+    assert result["valuation"]["status"] == "automatic"
+    assert result["valuation"]["amount_rmb"] == "20.000000"
+    assert result["goods_value"] == 20
+    assert items["I1"].goods_value == 20
+
+
+def test_clearing_manual_shipment_value_returns_to_existing_conflict(monkeypatch) -> None:
+    from overseas_costing.services.logistics_settlement.valuation import reconcile_replacement_value
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    prior = {"goods_value": 20, "source_doc_no": "PUR-1", "unit_price": 10,
+             "purchase_currency": "RMB", "purchase_uom": "件", "unit_price_uom": "件"}
+    current = {**prior, "actual_shipped_qty": 3, "shipped_uom": "件", "unit": "件"}
+    cargo = {"material_code": "", "quantity": 3, "unit": "件", "source_snapshot": "S"}
+    automatic = reconcile_replacement_value(current, cargo, {}, prior)
+    manual = build_manual_shipment_valuation(current, 25, actor="finance", confirmed_at="now")
+    items = {"I1": {**current, "extra_json": json.dumps({"settlement_cargo": cargo,
+              "settlement_valuation": automatic, "manual_shipment_valuation": manual})}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field("I1", "shipment_value_rmb", "", _skip_edit_check=True)
+
+    assert result["valuation"]["status"] == "conflict"
+    assert result["valuation"]["error"] == "SETTLEMENT_SHIPMENT_VALUE_CONFLICT"
+    assert result["valuation"]["prior_amount_rmb"] == "20"
+    assert result["valuation"]["calculated_amount_rmb"] == "30.000000"
+    assert result["goods_value"] == 0 and items["I1"].goods_value == 0
+
+
+def test_quantity_and_unit_edits_stale_manual_value_without_deleting_it(monkeypatch) -> None:
+    items = {"I1": {}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    service.update_item_field("I1", "shipment_value_rmb", "25", _skip_edit_check=True)
+
+    quantity_result = service.update_item_field("I1", "actual_shipped_qty", "3", _skip_edit_check=True)
+    stored_after_quantity = json.loads(items["I1"].extra_json)["manual_shipment_valuation"]
+    unit_result = service.update_item_field("I1", "shipped_uom", "箱", _skip_edit_check=True)
+
+    assert quantity_result["valuation"]["status"] == "stale"
+    assert quantity_result["valuation"]["amount_rmb"] is None
+    assert quantity_result["goods_value"] == 0
+    assert stored_after_quantity["amount_rmb"] == "25"
+    assert unit_result["valuation"]["status"] == "stale"
+    assert items["I1"].goods_value == 0
+    assert json.loads(items["I1"].extra_json)["manual_shipment_valuation"]["amount_rmb"] == "25"
+
+
+def test_batch_update_supports_manual_shipment_value_set_and_clear(monkeypatch) -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    prior_row = {"actual_shipped_qty": 2, "shipped_uom": "件", "unit": "件"}
+    manual = build_manual_shipment_valuation(prior_row, 30, actor="old", confirmed_at="old")
+    items = {"I1": {}, "I2": {"extra_json": json.dumps({"manual_shipment_valuation": manual})}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import edit_session_service
+    monkeypatch.setattr(edit_session_service, "assert_batch_write", lambda *_args, **_kwargs: None)
+
+    result = service.batch_update_items("B1", json.dumps([
+        {"item_name": "I1", "fieldname": "shipment_value_rmb", "value": "12"},
+        {"item_name": "I2", "fieldname": "shipment_value_rmb", "value": ""},
+    ]), version_name="V1", edit_token="TOKEN", expected_modified="OLD")
+
+    assert result["ok"] is True and result["changed_count"] == 2
+    assert result["batch_modified"] == "2026-09-11 10:00:00"
+    assert result["results"][0]["valuation"]["status"] == "manual"
+    assert result["results"][1]["valuation"]["status"] == "automatic"
+    assert items["I1"].goods_value == 12
+    assert items["I2"].goods_value == 20
+
+
+def test_expense_physical_overlay_quantity_edit_stales_manual_value(monkeypatch) -> None:
+    context = {"root_kind": "expense", "available": True, "approved": True, "invalid": False,
+               "fingerprint": "CTX", "source_snapshot": "SOURCE"}
+    metadata = {
+        "effective_logistics_source": context,
+        "settlement_physical": {
+            "source_context_fingerprint": "CTX", "source_snapshot": "SOURCE",
+            "values": {"actual_shipped_qty": 2, "shipped_uom": "件"}, "evidence": {},
+        },
+    }
+    items = {"I1": {"extra_json": json.dumps(metadata)}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import effective_source_values
+    from overseas_costing.services import effective_logistics_source
+    monkeypatch.setattr(effective_source_values, "batch_source_context", lambda *_args, **_kwargs: context)
+    monkeypatch.setattr(effective_logistics_source, "resolve_source_context", lambda *_args, **_kwargs: context)
+    service.update_item_field("I1", "shipment_value_rmb", "25", _skip_edit_check=True)
+
+    result = service.update_item_field("I1", "actual_shipped_qty", "3", _skip_edit_check=True)
+
+    saved_metadata = json.loads(items["I1"].extra_json)
+    assert result["valuation"]["status"] == "stale"
+    assert result["goods_value"] == 0
+    assert saved_metadata["manual_shipment_valuation"]["amount_rmb"] == "25"
+    assert saved_metadata["settlement_physical"]["values"]["actual_shipped_qty"] == 3

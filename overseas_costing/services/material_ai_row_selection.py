@@ -172,13 +172,16 @@ def project(items, catalog, row_ids, fee_ids, mode):
             row={k:deepcopy(incoming.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','unverified_material_code')}
             row['_target']=target;row['stable_line_key']=((original.get(target) or {}).get('stable_line_key') if not duplicate_target else None) or choice['row_id']
             fields=[f for f in choice['fields'] if not missing(incoming,f)]
-            if target and str(incoming.get('material_code') or '').strip().casefold()==str(original[target].get('material_code') or '').strip().casefold() and _unit(incoming)==_unit(original[target]):
+            if (target
+                    and str(incoming.get('material_code') or '').strip().casefold() == str(original[target].get('material_code') or '').strip().casefold()
+                    and str(incoming.get('spec_model') or '').strip().casefold() == str(original[target].get('spec_model') or '').strip().casefold()
+                    and _unit(incoming) == _unit(original[target])):
                 old=original[target]
                 # Preserve price only for a verified identity/unit mapping, independent of packing facts.
                 for f in ('unit_price','purchase_currency','purchase_uom','unit_price_uom','source_doc_no','supplier'):
                     if missing(row,f):row[f]=deepcopy(old.get(f))
-                if json_dict(old.get('extra_json')).get('settlement_valuation'):
-                    row['_price_metadata']=deepcopy(json_dict(old.get('extra_json')))
+                row['_price_metadata']=deepcopy(json_dict(old.get('extra_json')))
+                row['_verified_prior_item']=deepcopy(old)
             else:added+=1
             result.append(row)
         meta=json_dict(row.get('extra_json'));field_refs=meta.setdefault('ai_row_fields',{})

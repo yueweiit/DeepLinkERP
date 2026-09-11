@@ -1,4 +1,5 @@
 import importlib
+import json
 from copy import deepcopy
 import pytest
 from overseas_costing.tests.test_freight_lines import setup_cost, monthly
@@ -133,3 +134,61 @@ def test_repeated_native_source_id_keeps_distinct_rows_with_different_quantities
     applied=p.confirm_selection(s,l,b['name'],v['name'],pr['id'],pr['revision'],'u',replace_all=True)
     current=l.rows('item',batch=b['name'],version=applied['version'])
     assert sorted(row['quantity'] for row in current)==['2','3']
+
+
+@pytest.mark.parametrize(('source_quantity','expected_status','expected_goods'), [
+    ('2', 'automatic', '20.000000'),
+    ('3', 'conflict', 0),
+])
+def test_whole_packing_replace_reconciles_exact_match_purchase_value(source_quantity, expected_status, expected_goods):
+    from overseas_costing.services.shipment_cost_service import shipment_value
+
+    p=selection_service();s,l,b,v,item,ls,e=setup_cost()
+    l.put('item',item['name'],{'spec_model':'S1','goods_value':20,'unit_price':10,
+        'purchase_currency':'人民币RMB','purchase_uom':'件','unit_price_uom':'件','source_doc_no':'PUR-1',
+        'extra_json':dumps({'purchase_evidence':{'document':'PUR-1'}})})
+    raw=source('L','logistics',text='DHL运单号1234567890')
+    row=table_row('exact',code='AA100',quantity=source_quantity)
+    row['rowValue'].append({'name':'规格','value':'S1'})
+    raw['raw_payload']['formComponentValues'].append({'name':'货物明细','componentType':'TableField','value':[row]})
+    s.ingest(parse_source(raw,logistics_codes={'logistics'}))
+    chosen=next(r for r in p.list_sources(s,l,b['name'],v['name'])['sources']
+                if r['source_kind']=='approval_form' and r['row_count']==1)
+    pr=p.preview_selection(s,l,b['name'],v['name'],chosen['id'],chosen['revision'])
+
+    applied=p.confirm_selection(s,l,b['name'],v['name'],pr['id'],pr['revision'],'u',replace_all=True)
+    saved=l.rows('item',version=applied['version'])[0]
+    valuation=shipment_value(saved)
+
+    assert valuation['status']==expected_status
+    assert saved['goods_value']==expected_goods
+    meta=json.loads(saved['extra_json'])
+    assert meta['settlement_original_values']['source_doc_no']=='PUR-1'
+    assert meta['purchase_evidence']=={'document':'PUR-1'}
+    if expected_status=='conflict':
+        assert valuation['amount_rmb'] is None
+        assert valuation['prior_amount_rmb']=='20'
+        assert valuation['calculated_amount_rmb']=='30.000000'
+
+
+def test_whole_packing_replace_new_row_does_not_inherit_purchase_value():
+    from overseas_costing.services.shipment_cost_service import shipment_value
+
+    p=selection_service();s,l,b,v,item,ls,e=setup_cost()
+    l.put('item',item['name'],{'goods_value':20,'unit_price':10,'purchase_currency':'RMB',
+        'purchase_uom':'件','unit_price_uom':'件','source_doc_no':'PUR-1'})
+    raw=source('L','logistics',text='DHL运单号1234567890')
+    raw['raw_payload']['formComponentValues'].append({'name':'货物明细','componentType':'TableField','value':[
+        table_row('new',code='NEW100',quantity='2')]})
+    s.ingest(parse_source(raw,logistics_codes={'logistics'}))
+    chosen=next(r for r in p.list_sources(s,l,b['name'],v['name'])['sources']
+                if r['source_kind']=='approval_form' and r['row_count']==1)
+    pr=p.preview_selection(s,l,b['name'],v['name'],chosen['id'],chosen['revision'])
+
+    applied=p.confirm_selection(s,l,b['name'],v['name'],pr['id'],pr['revision'],'u',replace_all=True)
+    saved=l.rows('item',version=applied['version'])[0]
+
+    assert saved['material_code']=='NEW100' and saved['goods_value']==0
+    assert not saved.get('source_doc_no')
+    assert shipment_value(saved)['status']=='missing'
+    assert 'settlement_original_values' not in json.loads(saved['extra_json'])

@@ -22,76 +22,6 @@ from overseas_costing.services import (
 from overseas_costing.services.material_value_semantics import is_effectively_missing
 
 
-def update_item_field(item_name: str, fieldname: str, value: str, version_name: str | None = None) -> dict:
-    audit_service.build_audit_stub("EDIT", {"item_name": item_name, "fieldname": fieldname})
-    return {
-        "ok": True,
-        "item_name": item_name,
-        "fieldname": fieldname,
-        "value": value,
-        "version_name": version_name,
-        "message": "单字段编辑骨架已创建。",
-    }
-
-
-def batch_update_items(batch_name: str, updates: str, version_name: str | None = None) -> dict:
-    audit_service.build_audit_stub("BATCH_EDIT", {"batch_name": batch_name})
-    return {
-        "ok": True,
-        "batch_name": batch_name,
-        "version_name": version_name,
-        "updates": updates,
-        "message": "批量编辑骨架已创建。",
-    }
-
-
-def recalculate_batch(
-    batch_name: str,
-    version_name: str | None = None,
-    commit_after_recalculate: bool = True,
-) -> dict:
-    summary_snapshot = version_service.build_empty_summary_snapshot()
-    audit_service.build_audit_stub("RECALCULATE", {"batch_name": batch_name})
-    return {
-        "ok": True,
-        "batch_name": batch_name,
-        "version_name": version_name,
-        "summary_snapshot": summary_snapshot,
-        "message": "整票重算骨架已创建，后续补货值比/重量比/费用分摊。",
-    }
-
-
-def update_allocation_rule(batch_name: str, version_name: str, rule_payload: str) -> dict:
-    return {
-        "ok": True,
-        "batch_name": batch_name,
-        "version_name": version_name,
-        "rule_payload": rule_payload,
-        "message": "分摊规则更新骨架已创建。",
-    }
-
-
-def create_version(batch_name: str, source_version_name: str, version_type: str) -> dict:
-    audit_service.build_audit_stub("CREATE_VERSION", {"batch_name": batch_name, "version_type": version_type})
-    return {
-        "ok": True,
-        "batch_name": batch_name,
-        "source_version_name": source_version_name,
-        "version_type": version_type,
-        "message": "版本创建骨架已创建。",
-    }
-
-
-def switch_version(batch_name: str, target_version_name: str) -> dict:
-    audit_service.build_audit_stub("SWITCH_VERSION", {"batch_name": batch_name, "target_version_name": target_version_name})
-    return {
-        "ok": True,
-        "batch_name": batch_name,
-        "target_version_name": target_version_name,
-        "message": "版本切换骨架已创建。",
-    }
-
-
 # --- First usable implementation for the Excel -> recalculate MVP. ---
 
 import json as _json
@@ -110,7 +40,9 @@ DEFAULT_FX_RMB_TO_MXN = 2.6
 PURCHASE_CORRECTION_FIELDS = frozenset(
     {"goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"}
 )
-SERVER_ITEM_METADATA_FIELDS = frozenset({"shipment_valuation", "logistics_row", "autofill_review"})
+SERVER_ITEM_METADATA_FIELDS = frozenset(
+    {"shipment_valuation", "manual_shipment_valuation", "logistics_row", "autofill_review"}
+)
 EDITABLE_ITEM_FIELDS = frozenset(
     {
         "material_code",
@@ -382,6 +314,19 @@ def _coerce_check(value) -> int:
 
 
 def _coerce_edit_value(fieldname: str, value):
+    if fieldname == "shipment_value_rmb":
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return ""
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError("本次发货货值必须是有限非负数字。") from None
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("本次发货货值必须是有限非负数字。")
+        storage_value = float(amount)
+        if not Decimal(str(storage_value)).is_finite():
+            raise ValueError("本次发货货值必须是有限非负数字。")
+        return storage_value
     if fieldname in NUMERIC_ITEM_FIELDS:
         return _to_float(value)
     if fieldname in CHECK_ITEM_FIELDS:
@@ -425,6 +370,8 @@ def assert_server_metadata_unchanged(previous, proposed, *, fields=SERVER_ITEM_M
 def _validate_edit_field(fieldname: str, remark: str = "") -> tuple[bool, str, str]:
     if not fieldname:
         return False, "字段名不能为空。", "missing"
+    if fieldname == "shipment_value_rmb":
+        return True, "", "manual_shipment_valuation"
     if fieldname in EDITABLE_ITEM_FIELDS:
         return True, "", "editable"
     if fieldname in SPECIAL_OVERRIDE_ITEM_FIELDS:
@@ -1408,6 +1355,7 @@ def update_item_field(
     _skip_edit_check: bool = False,
     _skip_commit: bool = False,
 ) -> dict:
+    is_shipment_value = fieldname == "shipment_value_rmb"
     edit_remark = _normalize_edit_remark(remark, manual_override_reason)
     is_allowed, validation_message, edit_mode = _validate_edit_field(fieldname, edit_remark)
     if not is_allowed:
@@ -1484,7 +1432,11 @@ def update_item_field(
             edit_token=edit_token,
             expected_modified=expected_modified,
         )
-    old_value = getattr(item_doc, fieldname, None)
+    from overseas_costing.services.shipment_cost_service import number as shipment_number
+    from overseas_costing.services.shipment_cost_service import object_json, shipment_input_fingerprint, shipment_value
+    existing_metadata = object_json(getattr(item_doc, "extra_json", None))
+    existing_manual = existing_metadata.get("manual_shipment_valuation")
+    old_value = existing_manual.get("amount_rmb") if is_shipment_value and isinstance(existing_manual, dict) else getattr(item_doc, fieldname, None)
     if expense_physical:
         old_value = project_source_values(item_doc.as_dict(),source_context).get(fieldname)
     if (fieldname in {'material_code', 'product_name', 'spec_model'}
@@ -1518,7 +1470,17 @@ def update_item_field(
             "edit_mode": "reason_required",
             "message": f"字段 {fieldname} 已有有效采购值，修改时必须填写修改原因。",
         }
-    if _edit_values_equal(fieldname, old_value, coerced_value):
+    same_value = _edit_values_equal(fieldname, old_value, coerced_value)
+    if is_shipment_value:
+        current_row = project_source_values(item_doc.as_dict(), source_context)
+        if coerced_value == "":
+            same_value = not isinstance(existing_manual, dict)
+        else:
+            same_value = (shipment_number(old_value) == shipment_number(coerced_value)
+                          and isinstance(existing_manual, dict)
+                          and existing_manual.get("input_fingerprint") == shipment_input_fingerprint(current_row))
+    if same_value:
+        current_valuation = shipment_value(project_source_values(item_doc.as_dict(), source_context))
         return {
             "ok": True,
             "changed": False,
@@ -1528,6 +1490,8 @@ def update_item_field(
             "value": coerced_value,
             "version_name": version_name or item_doc.version,
             "edit_mode": edit_mode,
+            "valuation": current_valuation,
+            "goods_value": current_valuation.get("amount_rmb") if current_valuation.get("amount_rmb") is not None else 0,
             "message": "字段值未变化，已跳过保存。",
         }
 
@@ -1536,14 +1500,32 @@ def update_item_field(
     except ValueError as exc:
         return {'ok': False, 'changed': False, 'item_name': item_name, 'fieldname': fieldname,
                 'version_name': version_name or item_doc.version, 'message': str(exc)}
-    if expense_physical:
+    valuation_result = None
+    if is_shipment_value:
+        from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+        metadata = object_json(item_doc.extra_json)
+        if coerced_value == "":
+            metadata.pop("manual_shipment_valuation", None)
+        else:
+            current_row = project_source_values(item_doc.as_dict(), source_context)
+            metadata["manual_shipment_valuation"] = build_manual_shipment_valuation(
+                current_row,
+                coerced_value,
+                actor=getattr(getattr(_frappe, "session", None), "user", ""),
+                reason=edit_remark,
+                confirmed_at=_now(),
+            )
+        item_doc.extra_json = _json.dumps(metadata, ensure_ascii=False, default=str)
+        valuation_result = shipment_value(project_source_values(item_doc.as_dict(), source_context))
+        amount = valuation_result.get("amount_rmb")
+        item_doc.goods_value = _to_float(amount) if amount is not None else 0
+    elif expense_physical:
         from overseas_costing.services.effective_logistics_source import resolve_source_context
         current_context = resolve_source_context(item_doc.batch,item_doc.version,lock=True)
         if current_context != source_context:
             return {'ok':False,'changed':False,'message':'当前采购支出资料已变化，请重新读取资料'}
         adopted_values = {fieldname:coerced_value, **companion_updates}
         if fieldname == 'actual_shipped_qty':
-            from overseas_costing.services.shipment_cost_service import object_json
             cargo = object_json(item_doc.extra_json).get('settlement_cargo') or {}
             adopted_values['shipped_uom'] = cargo.get('unit') or ''
         try:
@@ -1569,6 +1551,10 @@ def update_item_field(
     elif fieldname == "shipped_uom" and str(coerced_value or "").strip() and not expense_physical:
         companion_updates["cost_output_uom"] = str(coerced_value).strip()
         setattr(item_doc, "cost_output_uom", companion_updates["cost_output_uom"])
+    if not is_shipment_value and fieldname in {"actual_shipped_qty", "shipped_uom"}:
+        valuation_result = shipment_value(project_source_values(item_doc.as_dict(), source_context))
+        amount = valuation_result.get("amount_rmb")
+        item_doc.goods_value = _to_float(amount) if amount is not None else 0
     if fieldname != "manual_override_flag":
         item_doc.manual_override_flag = 1
     if edit_remark and fieldname != "manual_override_reason":
@@ -1600,6 +1586,8 @@ def update_item_field(
         "companion_updates": companion_updates,
         "edit_mode": edit_mode,
         "batch_modified": batch_modified,
+        "valuation": valuation_result,
+        "goods_value": getattr(item_doc, "goods_value", None),
         "message": "字段已更新，批次已标记为 Dirty。",
     }
 

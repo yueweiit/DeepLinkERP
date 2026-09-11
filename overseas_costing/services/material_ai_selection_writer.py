@@ -6,7 +6,7 @@ from .material_ai_row_selection import PHYSICAL, IDENTITY, FILL_FIELDS, missing
 from .logistics_settlement.model import digest, dumps
 from .logistics_settlement.application import row_meta
 from .logistics_settlement.writer import clean_copy, clone_version_children, DERIVED_FIELDS
-from .logistics_settlement.valuation import value_final_cargo
+from .logistics_settlement.valuation import reconcile_replacement_value, value_final_cargo
 
 
 def write_rows(store,ledger,preview,context):
@@ -40,14 +40,21 @@ def write_rows(store,ledger,preview,context):
             if original:
                 meta['settlement_original_values']=deepcopy(original)
                 price_meta=incoming.get('_price_metadata') or {}
-                for key in ('logistics_row','goods_value_source'):
-                    if key in price_meta:meta[key]=deepcopy(price_meta[key])
+                for key, value in price_meta.items():
+                    if key not in {'settlement_cargo','settlement_valuation','settlement_physical','effective_logistics_source'}:
+                        meta.setdefault(key, deepcopy(value))
             cargo={k:values.get(k) for k in IDENTITY}
             cargo.update(quantity=values.get('actual_shipped_qty'),unit=values.get('shipped_uom'),source_snapshot=preview['id'],
                          binding_id=preview['id'],line_key=incoming.get('stable_line_key'),evidence=source_meta.get('ai_row_selection'))
             meta['settlement_cargo']=cargo
-            meta['settlement_valuation']=value_final_cargo({**values,'extra_json':dumps(meta)},cargo,{k:v for k,v in version.items() if k.startswith('fx_')})
-            values['goods_value']=meta['settlement_valuation'].get('amount_rmb') or 0
+            meta['settlement_valuation']=reconcile_replacement_value(
+                {**values,'extra_json':dumps(meta)}, cargo,
+                {k:v for k,v in version.items() if k.startswith('fx_')},
+                incoming.get('_verified_prior_item'),
+            )
+            from .shipment_cost_service import shipment_value
+            effective_valuation=shipment_value({**values,'extra_json':dumps(meta)})
+            values['goods_value']=effective_valuation.get('amount_rmb') if effective_valuation.get('amount_rmb') is not None else 0
             values['actual_shipped_qty_mode']='EXPLICIT_SOURCE';values['actual_shipped_qty_source_revision']=preview['revision']
             # All omitted packing facts are missing, never copied from a previous row.
             mask={k for k in (*PHYSICAL,'quantity','actual_shipped_qty') if values.get(k) is None}

@@ -119,6 +119,154 @@ def test_stable_row_match_does_not_verify_price_for_a_different_specification():
     assert valuation["error"]
 
 
+def test_replace_exact_match_preserves_purchase_evidence_when_value_agrees():
+    store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
+    item = ledger.put("item", item["name"], {
+        "spec_model": "S1", "stable_line_key": "LINE", "actual_shipped_qty": 2,
+        "shipped_uom": "件", "extra_json": json.dumps({"purchase_evidence": {"document": "PUR-1"}}),
+    })
+    source = {"material_code": "A", "spec_model": "S1", "stable_line_key": "LINE",
+              "quantity": 2, "actual_shipped_qty": 2, "unit": "件", "shipped_uom": "件",
+              "_review_origin": "source"}
+    proposal = {"proposal_id": "P", "proposal_type": "logistics_reconcile", "payload": {"rows": [source]}}
+    selected = preview([item], [proposal], batch, version, mode="replace_all")
+
+    new_version = write_rows(store, ledger, selected, {})
+    saved = ledger.rows("item", version=new_version)[0]
+    valuation = shipment_value(saved)
+    metadata = json.loads(saved["extra_json"])
+
+    assert valuation["status"] == "automatic"
+    assert valuation["amount_rmb"] == "20.000000"
+    assert str(saved["goods_value"]) == "20.000000"
+    assert metadata["settlement_original_values"]["source_doc_no"] == "GOODS-PURCHASE"
+    assert metadata["purchase_evidence"] == {"document": "PUR-1"}
+
+
+def test_replace_exact_match_quarantines_disagreeing_old_and_calculated_values():
+    store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
+    item = ledger.put("item", item["name"], {
+        "spec_model": "S1", "stable_line_key": "LINE", "actual_shipped_qty": 2, "shipped_uom": "件",
+    })
+    source = {"material_code": "A", "spec_model": "S1", "stable_line_key": "LINE",
+              "quantity": 3, "actual_shipped_qty": 3, "unit": "件", "shipped_uom": "件",
+              "_review_origin": "source"}
+    proposal = {"proposal_id": "P", "proposal_type": "logistics_reconcile", "payload": {"rows": [source]}}
+    selected = preview([item], [proposal], batch, version, mode="replace_all")
+
+    new_version = write_rows(store, ledger, selected, {})
+    saved = ledger.rows("item", version=new_version)[0]
+    valuation = shipment_value(saved)
+
+    assert valuation["status"] == "conflict"
+    assert valuation["amount_rmb"] is None
+    assert valuation["prior_amount_rmb"] == "20"
+    assert valuation["calculated_amount_rmb"] == "30.000000"
+    assert valuation["prior_evidence"]["source_doc_no"] == "GOODS-PURCHASE"
+    assert valuation["calculated_evidence"]["input_evidence"]["purchase_source"] == "GOODS-PURCHASE"
+    assert saved["goods_value"] == 0
+
+
+def test_replace_new_row_does_not_inherit_old_value_or_purchase_evidence():
+    store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
+    source = {"material_code": "NEW", "spec_model": "S2", "stable_line_key": "NEW-LINE",
+              "quantity": 3, "actual_shipped_qty": 3, "unit": "件", "shipped_uom": "件",
+              "_review_origin": "source"}
+    proposal = {"proposal_id": "P", "proposal_type": "logistics_reconcile", "payload": {"rows": [source]}}
+    selected = preview([item], [proposal], batch, version, mode="replace_all")
+
+    new_version = write_rows(store, ledger, selected, {})
+    saved = ledger.rows("item", version=new_version)[0]
+    valuation = shipment_value(saved)
+
+    assert saved["material_code"] == "NEW"
+    assert saved["goods_value"] == 0
+    assert valuation["status"] == "missing"
+    assert valuation["amount_rmb"] is None
+    assert not saved.get("source_doc_no")
+    assert "settlement_original_values" not in json.loads(saved["extra_json"])
+
+
+def test_replace_exact_match_keeps_valid_manual_value_above_automatic_value():
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
+    item = ledger.put("item", item["name"], {
+        "spec_model": "S1", "stable_line_key": "LINE", "actual_shipped_qty": 2, "shipped_uom": "件",
+    })
+    metadata = {"manual_shipment_valuation": build_manual_shipment_valuation(
+        item, 25, actor="finance", reason="confirmed", confirmed_at="now")}
+    item = ledger.put("item", item["name"], {"extra_json": json.dumps(metadata)})
+    source = {"material_code": "A", "spec_model": "S1", "stable_line_key": "LINE",
+              "quantity": 2, "actual_shipped_qty": 2, "unit": "件", "shipped_uom": "件",
+              "_review_origin": "source"}
+    proposal = {"proposal_id": "P", "proposal_type": "logistics_reconcile", "payload": {"rows": [source]}}
+    selected = preview([item], [proposal], batch, version, mode="replace_all")
+
+    new_version = write_rows(store, ledger, selected, {})
+    saved = ledger.rows("item", version=new_version)[0]
+
+    assert shipment_value(saved)["status"] == "manual"
+    assert shipment_value(saved)["amount_rmb"] == "25"
+    assert saved["goods_value"] == "25"
+
+
+def test_two_consecutive_replace_all_runs_keep_current_values_conflicts_and_version_history():
+    from copy import deepcopy
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    store, ledger, batch, version, first, *_ = settlement_fixture.__wrapped__()
+    common = {"spec_model": "S1", "unit": "件", "actual_shipped_qty": 2, "shipped_uom": "件",
+              "quantity": 2, "unit_price": 10, "goods_value": 20, "purchase_currency": "RMB",
+              "purchase_uom": "件", "unit_price_uom": "件", "source_doc_no": "PUR"}
+    first = ledger.put("item", first["name"], {**common, "material_code": "A", "stable_line_key": "LINE-A"})
+    manual_row = {**common, "material_code": "B", "stable_line_key": "LINE-B"}
+    manual_row["extra_json"] = json.dumps({"manual_shipment_valuation": build_manual_shipment_valuation(
+        manual_row, 25, actor="finance", reason="confirmed", confirmed_at="now")})
+    second = ledger.create("item", {**manual_row, "batch": batch["name"], "version": version["name"]})
+    third = ledger.create("item", {**common, "material_code": "C", "stable_line_key": "LINE-C",
+                                   "batch": batch["name"], "version": version["name"]})
+
+    def replace(current, current_version, run_id):
+        source_rows = [
+            {"material_code": row["material_code"], "spec_model": "S1", "stable_line_key": row["stable_line_key"],
+             "quantity": 3 if row["material_code"] == "C" else 2,
+             "actual_shipped_qty": 3 if row["material_code"] == "C" else 2,
+             "unit": "件", "shipped_uom": "件", "_review_origin": "source"}
+            for row in current
+        ]
+        proposal = {"proposal_id": "P-" + run_id, "proposal_type": "logistics_reconcile",
+                    "default_selected": True, "payload": {"rows": source_rows}}
+        catalog = rows.catalog(current, [proposal], [], {}, run_id=run_id)
+        selected_ids = [row["row_id"] for row in catalog["rows"] if row["origin"] == "source"]
+        projected = rows.project(current, catalog, selected_ids, [], "replace_all")
+        assert projected["mode"] == "replace_all"
+        projected.update(batch=batch["name"], version=current_version, id="PREVIEW-" + run_id,
+                         revision="REV-" + run_id, run_id=run_id, source_context={}, sources=[])
+        return write_rows(store, ledger, projected, {})
+
+    original_items = deepcopy(ledger.rows("item", version=version["name"]))
+    first_version = replace([first, second, third], version["name"], "ONE")
+    first_saved = deepcopy(ledger.rows("item", version=first_version))
+    second_version = replace(first_saved, first_version, "TWO")
+    final = {row["material_code"]: row for row in ledger.rows("item", version=second_version)}
+
+    assert first_version != version["name"] and second_version != first_version
+    assert ledger.get("batch", batch["name"])["current_version"] == second_version
+    assert ledger.rows("item", version=version["name"]) == original_items
+    assert ledger.rows("item", version=first_version) == first_saved
+    assert shipment_value(final["A"])["status"] == "automatic"
+    assert shipment_value(final["A"])["amount_rmb"] == "20.000000"
+    assert shipment_value(final["B"])["status"] == "manual"
+    assert shipment_value(final["B"])["amount_rmb"] == "25"
+    assert final["B"]["goods_value"] == "25"
+    conflict = shipment_value(final["C"])
+    assert conflict["status"] == "conflict"
+    assert conflict["amount_rmb"] is None and final["C"]["goods_value"] == 0
+    assert conflict["prior_amount_rmb"] == "20"
+    assert conflict["calculated_amount_rmb"] == "30.000000"
+
+
 def test_next_ai_input_preserves_both_selected_duplicate_sku_rows():
     store, ledger, batch, version, first, *_ = settlement_fixture.__wrapped__()
     first = ledger.put("item", first["name"], {

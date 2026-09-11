@@ -14,7 +14,7 @@ from .writer import locked, clean_copy, clone_version_children, DERIVED_FIELDS
 from .jobs import utcnow
 from .ai_matching import save
 from .document_writer import PHYSICAL_ALIASES
-from .valuation import value_final_cargo
+from .valuation import reconcile_replacement_value
 from overseas_costing.utils.field_mapper import normalize_unit
 
 POLICY = 'packing-selection-1'
@@ -162,7 +162,10 @@ def _key(item):
 def _mapping(goods,items):
     result={};used=set()
     for g in goods:
-        matches=[i for i in items if i['name'] not in used and (i.get('stable_line_key')==g['line_key'] or _key(i)==_key(g))]
+        matches=[i for i in items if i['name'] not in used and _key(i)==_key(g)]
+        if len(matches)>1:
+            stable=[i for i in matches if i.get('stable_line_key')==g['line_key']]
+            matches=stable or matches
         if len(matches)==1:
             result[g['line_key']]=matches[0]['name'];used.add(matches[0]['name'])
     return result
@@ -215,23 +218,26 @@ def confirm_selection(store,ledger,batch_name,version_name,preview_id,revision,a
             oldid=review['mapping'].get(incoming['line_key']);target=ledger.get('item',copies['item'][oldid]) if oldid else None
             # Start from empty packing facts; only the independent price evidence can survive.
             meta={};values={field:None for field in PHYSICAL};values.update(chargeable_weight_kg=None,weight_ratio=0)
+            prior_item=None
             if target:
+                prior_item=next(i for i in olditems if i['name']==oldid)
                 oldmeta=row_meta(target)
-                meta={k:deepcopy(oldmeta[k]) for k in ('logistics_row','settlement_original_values','goods_value_source') if k in oldmeta}
-                meta['settlement_original_values']=deepcopy(next(i for i in olditems if i['name']==oldid))
+                meta={k:deepcopy(value) for k,value in oldmeta.items()
+                      if k not in {'settlement_cargo','settlement_valuation','settlement_physical','effective_logistics_source'}}
+                meta['settlement_original_values']=deepcopy(prior_item)
             cargo={**deepcopy(incoming),'source_snapshot':review['source_snapshot'],'binding_id':review['id']}
             values.update({k:incoming.get(k) for k in ('material_code','product_name','spec_model','quantity','unit')})
             values.update({k:v for k,v in incoming.get('physical',{}).items() if k in PHYSICAL and k!='chargeable_weight_kg'})
             values.update(actual_shipped_qty=incoming['quantity'],actual_shipped_qty_mode='EXPLICIT_SOURCE',actual_shipped_qty_source_revision=review['revision'],shipped_uom=incoming.get('unit'),row_no=index,
                           manual_override_flag=0,manual_override_reason='',stable_line_key=(target or {}).get('stable_line_key') or incoming['line_key'])
             meta.update(settlement_cargo=cargo,packing_source_selection=selected['id'],packing_quantity=incoming['quantity'])
-            meta['settlement_valuation']=value_final_cargo({**(target or {}),**values,'extra_json':dumps(meta)},cargo,{k:v for k,v in version.items() if k.startswith('fx_')})
-            # Shipment-derived merchandise value must follow the adopted quantity.
-            valuation=meta['settlement_valuation']
-            if not valuation['error'] and incoming['quantity'] is not None:
-                price=Decimal(valuation['input_evidence']['price']);qty=Decimal(incoming['quantity'])
-                values['goods_value']=format((price*qty).quantize(Decimal('.000001')),'.6f')
-            else:values['goods_value']=0
+            meta['settlement_valuation']=reconcile_replacement_value(
+                {**(target or {}),**values,'extra_json':dumps(meta)}, cargo,
+                {k:v for k,v in version.items() if k.startswith('fx_')}, prior_item,
+            )
+            from overseas_costing.services.shipment_cost_service import shipment_value
+            valuation=shipment_value({**(target or {}),**values,'extra_json':dumps(meta)})
+            values['goods_value']=valuation.get('amount_rmb') if valuation.get('amount_rmb') is not None else 0
             meta['settlement_packing_missing']=[k for k in (*PHYSICAL,'quantity') if values.get(k) is None]
             # Frappe numeric columns are NOT NULL; the explicit mask preserves absence.
             values.update({k:0 for k in meta['settlement_packing_missing']})

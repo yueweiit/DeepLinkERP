@@ -52,6 +52,16 @@ def test_final_valuation_blocks_missing_currency_or_incompatible_units():
     assert value_final_cargo(shipment(purchase_currency=''),cargo(),{})['error']
     assert value_final_cargo(shipment(unit_price_uom='KG'),cargo(),{})['error']
 
+
+def test_final_valuation_accepts_settlement_currency_aliases():
+    from overseas_costing.services.logistics_settlement.valuation import value_final_cargo
+
+    for alias in ('人民币RMB', '人民币', 'CNY', 'RMB'):
+        valuation = value_final_cargo(shipment(purchase_currency=alias), cargo(), {})
+        assert valuation['error'] == ''
+        assert valuation['amount_rmb'] == '60.000000'
+        assert valuation['input_evidence']['original_currency'] == 'RMB'
+
 from overseas_costing.tests.test_settlement_writer import setup
 
 
@@ -110,6 +120,12 @@ def test_public_metadata_edit_cannot_create_or_remove_final_quantity_overlay():
     with pytest.raises(ValueError,match='服务器来源'):
         assert_server_metadata_unchanged({'settlement_cargo':cargo()}, {})
 
+    manual = {'amount_rmb': '10', 'currency': 'RMB', 'confirmed': True, 'manual': True}
+    with pytest.raises(ValueError, match='服务器来源'):
+        assert_server_metadata_unchanged({}, {'manual_shipment_valuation': manual})
+    with pytest.raises(ValueError, match='服务器来源'):
+        assert_server_metadata_unchanged({'manual_shipment_valuation': manual}, {})
+
 
 def test_reconciliation_cannot_copy_one_final_cargo_identity_to_two_rows():
     from copy import deepcopy
@@ -129,6 +145,98 @@ def test_final_project_summary_keeps_six_decimal_pool():
     assert project_summaries(rows)[0]['allocated_fees_rmb']=='0.00'
     assert project_summaries(rows,precision=6)[0]['allocated_fees_rmb']=='0.000001'
     assert project_summaries(rows,precision=6)[0]['total_cost_rmb']=='10.000001'
+
+
+def test_manual_shipment_valuation_has_priority_and_zero_is_explicit():
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    item = shipment(actual_shipped_qty=4, shipped_uom='件')
+    automatic = {
+        'status': 'automatic', 'amount_rmb': '40', 'currency': 'RMB', 'quantity': '4',
+        'uom': '件', 'method': 'purchase_unit_price', 'input_fingerprint': 'automatic-fingerprint',
+        'error': '',
+    }
+    manual = build_manual_shipment_valuation(item, 0, actor='finance@example.com', reason='财务确认', confirmed_at='2026-09-11T10:00:00')
+    item['extra_json'] = json.dumps({'shipment_valuation': automatic, 'manual_shipment_valuation': manual})
+
+    value = shipment_value(item)
+
+    assert value['status'] == 'manual'
+    assert value['amount_rmb'] == '0'
+    assert value['currency'] == 'RMB'
+    assert value['quantity'] == '4'
+    assert value['uom'] == '件'
+    assert value['confirmed'] is True and value['manual'] is True
+    assert value['actor'] == 'finance@example.com'
+    assert value['confirmed_at'] == '2026-09-11T10:00:00'
+    assert value['reason'] == '财务确认'
+
+
+def test_manual_shipment_valuation_becomes_stale_without_deleting_original_value():
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    item = shipment(actual_shipped_qty=4, shipped_uom='件')
+    manual = build_manual_shipment_valuation(item, '25', actor='u', reason='checked', confirmed_at='now')
+    item['extra_json'] = json.dumps({'manual_shipment_valuation': manual})
+    item['actual_shipped_qty'] = 5
+
+    value = shipment_value(item)
+
+    assert value['status'] == 'stale'
+    assert value['amount_rmb'] is None
+    assert value['error'] == 'MANUAL_SHIPMENT_VALUATION_STALE'
+    assert value['prior_amount_rmb'] == '25'
+    assert json.loads(item['extra_json'])['manual_shipment_valuation']['amount_rmb'] == '25'
+
+
+def test_shipment_value_normalizes_legacy_metadata_statuses_and_candidates():
+    item = shipment(extra_json=json.dumps({'shipment_valuation': {
+        'amount_rmb': None, 'currency': 'RMB', 'quantity': '4', 'uom': '件',
+        'method': 'purchase_unit_price', 'status': 'conflict',
+        'error': 'SETTLEMENT_SHIPMENT_VALUE_CONFLICT', 'prior_amount_rmb': '40',
+        'calculated_amount_rmb': '60',
+    }}))
+
+    value = shipment_value(item)
+
+    assert value['status'] == 'conflict'
+    assert value['amount_rmb'] is None
+    assert value['prior_amount_rmb'] == '40'
+    assert value['calculated_amount_rmb'] == '60'
+    legacy = shipment_value(shipment(extra_json='{}'))
+    assert legacy['status'] == 'automatic'
+    assert legacy['amount_rmb'] == 1000
+
+
+def test_settlement_automatic_value_reports_stale_status_after_evidence_changes():
+    from overseas_costing.services.logistics_settlement.valuation import value_final_cargo
+
+    item = shipment()
+    valuation = value_final_cargo(item, cargo(), {})
+    item['extra_json'] = json.dumps({'settlement_cargo': cargo(), 'settlement_valuation': valuation})
+    item['unit_price'] = 11
+
+    value = shipment_value(item)
+
+    assert value['status'] == 'stale'
+    assert value['amount_rmb'] is None
+    assert value['error'] == 'SETTLEMENT_SHIPMENT_VALUE_STALE'
+
+
+def test_settlement_conflict_keeps_error_and_candidates_while_inputs_are_current():
+    from overseas_costing.services.logistics_settlement.valuation import reconcile_replacement_value
+
+    item = shipment(goods_value=40)
+    valuation = reconcile_replacement_value(item, cargo(), {}, item)
+    item['extra_json'] = json.dumps({'settlement_cargo': cargo(), 'settlement_valuation': valuation})
+
+    value = shipment_value(item)
+
+    assert value['status'] == 'conflict'
+    assert value['error'] == 'SETTLEMENT_SHIPMENT_VALUE_CONFLICT'
+    assert value['amount_rmb'] is None
+    assert value['prior_amount_rmb'] == '40'
+    assert value['calculated_amount_rmb'] == '60.000000'
 
 
 def test_adjustment_remaps_related_evidence_within_the_new_version(setup):

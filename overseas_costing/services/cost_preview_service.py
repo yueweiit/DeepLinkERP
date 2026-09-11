@@ -293,7 +293,9 @@ def preview_comprehensive_cost_data(
     for row in presented_items:
         key = _item_key(row)
         goods_value = _decimal(row.get("shipment_value_rmb"))
-        explicit_zero = goods_value == 0 and row.get("shipment_valuation", {}).get("method") == "settlement_expense_unit_price" and not row.get("shipment_valuation", {}).get("error")
+        explicit_zero = (goods_value == 0 and not row.get("shipment_valuation", {}).get("error")
+                         and (row.get("shipment_valuation", {}).get("method") == "settlement_expense_unit_price"
+                              or row.get("shipment_valuation", {}).get("status") == "manual"))
         if goods_value is None or (goods_value <= 0 and not explicit_zero):
             incomplete_reasons.append(
                 {
