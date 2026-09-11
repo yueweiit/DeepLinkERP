@@ -191,6 +191,7 @@ def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
     """Derive red cells from effective system bases; project ownership is informational."""
 
     from overseas_costing.services import fee_allocation_service
+    from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
 
     presented = [present_material_row(dict(row or {})) for row in (items or [])]
     row_states = {}
@@ -199,11 +200,7 @@ def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
         reasons: dict[str, list[dict]] = {}
         for blocking in (row.get("effective_shipping") or {}).get("blocking") or []:
             reasons.setdefault(str(blocking.get("field") or "actual_shipped_qty"), []).append(blocking)
-        from overseas_costing.services.shipment_cost_service import number
-        current_value = number(row.get("shipment_value_rmb"))
-        explicit_zero = (current_value == 0 and not row["shipment_valuation"].get("error")
-                         and (row["shipment_valuation"].get("method") == "settlement_expense_unit_price"
-                              or row["shipment_valuation"].get("status") == "manual"))
+        explicit_zero = is_explicit_shipment_zero(row["shipment_valuation"])
         if _positive_decimal(row.get("shipment_value_rmb")) is None and not explicit_zero:
             value_field = 'goods_value' if row['shipment_valuation']['method'] == 'LEGACY_PURCHASE' else 'shipment_value_rmb'
             reasons.setdefault(value_field, []).append(

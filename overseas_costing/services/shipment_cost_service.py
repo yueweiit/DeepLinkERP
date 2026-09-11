@@ -91,6 +91,14 @@ def _status(error, value, default='automatic'):
     return default
 
 
+def is_explicit_shipment_zero(valuation):
+    """Only structured, valid automatic/manual evidence can declare a zero value."""
+    return (isinstance(valuation, dict)
+            and number(valuation.get('amount_rmb')) == 0
+            and not valuation.get('error')
+            and valuation.get('status') in {'automatic', 'manual'})
+
+
 def shipment_value(row):
     metadata = object_json(row.get('extra_json'))
     manual = _manual_value(row, metadata.get('manual_shipment_valuation'))
@@ -116,9 +124,10 @@ def shipment_value(row):
     valuation = metadata.get('shipment_valuation')
     if valuation is None:
         amount = number(row.get('goods_value'))
-        valid = amount is not None and amount >= 0
+        valid = amount is not None and amount > 0
         return {'amount_rmb': row.get('goods_value') if valid else None, 'method': 'LEGACY_PURCHASE',
-                'status': 'automatic' if valid else 'missing', 'error': ''}
+                'status': 'automatic' if valid else 'missing',
+                'error': '' if valid else 'GOODS_VALUE_MISSING'}
     if not isinstance(valuation, dict):
         return {'amount_rmb': None, 'method': 'INVALID', 'status':'missing', 'error': 'SHIPMENT_VALUATION_INVALID'}
     legacy_manual = _manual_value(row, {

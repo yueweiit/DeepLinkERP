@@ -250,3 +250,19 @@ def test_manual_zero_is_explicit_but_not_a_positive_goods_allocation_basis() -> 
     assert "shipment_value_rmb" not in without_fee["rows"]["A"]["missing_fields"]
     assert with_fee["rows"]["A"]["missing_fields"] == ["shipment_value_rmb"]
     assert with_fee["rows"]["A"]["field_reasons"]["shipment_value_rmb"][0]["code"] == "ALLOCATION_BASIS_REQUIRED"
+
+
+def test_bare_legacy_zero_is_missing_but_structured_automatic_zero_is_explicit() -> None:
+    base = {"quantity": 1, "purchase_uom": "件", "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+            "shipped_uom": "件", "goods_value": 0}
+    bare = {**base, "name": "ITEM-BARE", "stable_line_key": "BARE", "extra_json": "{}"}
+    automatic = {**base, "name": "ITEM-AUTO", "stable_line_key": "AUTO", "extra_json": json.dumps({
+        "shipment_valuation": {"amount_rmb": "0", "currency": "RMB", "quantity": "1",
+                               "uom": "件", "method": "SYSTEM_EXCEL", "status": "automatic", "error": ""},
+    })}
+
+    result = analyze_material_requirements([bare, automatic], [])
+
+    assert result["rows"]["BARE"]["missing_fields"] == ["goods_value"]
+    assert result["rows"]["BARE"]["field_reasons"]["goods_value"][0]["code"] == "GOODS_VALUE_MISSING"
+    assert result["rows"]["AUTO"]["missing_fields"] == []

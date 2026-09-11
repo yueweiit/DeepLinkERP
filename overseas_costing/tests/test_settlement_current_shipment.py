@@ -240,6 +240,22 @@ def test_shipment_value_normalizes_legacy_metadata_statuses_and_candidates():
     assert legacy['amount_rmb'] == 1000
 
 
+def test_bare_legacy_zero_is_missing_and_not_an_automatic_prior():
+    from overseas_costing.services.logistics_settlement.valuation import reconcile_replacement_value
+
+    prior = shipment(goods_value=0, extra_json='{}')
+
+    value = shipment_value(prior)
+    reconciled = reconcile_replacement_value(shipment(unit_price=10), cargo(quantity=2), {}, prior)
+
+    assert value['status'] == 'missing'
+    assert value['amount_rmb'] is None
+    assert value['error'] == 'GOODS_VALUE_MISSING'
+    assert reconciled['status'] == 'automatic'
+    assert reconciled['amount_rmb'] == '20.000000'
+    assert 'prior_amount_rmb' not in reconciled
+
+
 def test_existing_shipment_valuation_accepts_settlement_currency_aliases():
     for alias in ('人民币RMB', '人民币', 'CNY', 'RMB'):
         item = shipment(extra_json=json.dumps({'shipment_valuation': {

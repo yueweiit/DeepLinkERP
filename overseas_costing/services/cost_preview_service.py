@@ -274,6 +274,8 @@ def preview_comprehensive_cost_data(
 ) -> dict:
     """Calculate a transparent preview from caller-provided snapshots only."""
 
+    from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
+
     source_issues=[]
     try:
         fees = supplement_legacy_fees(items, select_fees(fees, fx_context or {}, source_context=source_context_from_items(items)))
@@ -293,9 +295,7 @@ def preview_comprehensive_cost_data(
     for row in presented_items:
         key = _item_key(row)
         goods_value = _decimal(row.get("shipment_value_rmb"))
-        explicit_zero = (goods_value == 0 and not row.get("shipment_valuation", {}).get("error")
-                         and (row.get("shipment_valuation", {}).get("method") == "settlement_expense_unit_price"
-                              or row.get("shipment_valuation", {}).get("status") == "manual"))
+        explicit_zero = is_explicit_shipment_zero(row.get("shipment_valuation"))
         if goods_value is None or (goods_value <= 0 and not explicit_zero):
             incomplete_reasons.append(
                 {

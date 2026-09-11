@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -239,6 +240,25 @@ def test_empty_materials_cannot_be_a_complete_cost():
     result = preview_comprehensive_cost_data([], [{"amount_status": "NOT_INCURRED"}], {})
     assert result["summary"]["is_complete"] is False
     assert result["incomplete_reasons"][0]["reason_code"] == "MATERIAL_ITEMS_REQUIRED"
+
+
+def test_bare_legacy_zero_blocks_preview_but_structured_automatic_zero_is_explicit():
+    bare = {**_items()[0], "name": "ITEM-BARE", "stable_line_key": "BARE",
+            "goods_value": 0, "extra_json": "{}"}
+    automatic = {**_items()[0], "name": "ITEM-AUTO", "stable_line_key": "AUTO",
+                 "goods_value": 0, "extra_json": json.dumps({"shipment_valuation": {
+                     "amount_rmb": "0", "currency": "RMB", "quantity": "10", "uom": "件",
+                     "method": "SYSTEM_EXCEL", "status": "automatic", "error": "",
+                 }})}
+
+    result = preview_comprehensive_cost_data([bare, automatic], [], {})
+
+    assert result["summary"]["is_complete"] is False
+    missing = [reason for reason in result["incomplete_reasons"]
+               if reason.get("reason_code") == "GOODS_VALUE_MISSING"]
+    assert [reason["item_key"] for reason in missing] == ["BARE"]
+    assert result["items"][0]["valuation_source"]["status"] == "missing"
+    assert result["items"][1]["valuation_source"]["status"] == "automatic"
 
 
 def _import_tax_fee(amount="100", currency="RMB"):

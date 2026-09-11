@@ -40,6 +40,11 @@ DEFAULT_FX_RMB_TO_MXN = 2.6
 PURCHASE_CORRECTION_FIELDS = frozenset(
     {"goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"}
 )
+SHIPMENT_VALUE_EDIT_FIELDS = frozenset({"shipment_value_rmb", "goods_value"})
+SHIPMENT_VALUE_INPUT_FIELDS = frozenset({
+    "unit_price", "purchase_currency", "unit_price_uom", "purchase_uom",
+    "quantity", "unit", "actual_shipped_qty", "shipped_uom",
+})
 SERVER_ITEM_METADATA_FIELDS = frozenset(
     {"shipment_valuation", "manual_shipment_valuation", "logistics_row", "autofill_review"}
 )
@@ -314,7 +319,7 @@ def _coerce_check(value) -> int:
 
 
 def _coerce_edit_value(fieldname: str, value):
-    if fieldname == "shipment_value_rmb":
+    if fieldname in SHIPMENT_VALUE_EDIT_FIELDS:
         if value is None or (isinstance(value, str) and not value.strip()):
             return ""
         try:
@@ -370,7 +375,7 @@ def assert_server_metadata_unchanged(previous, proposed, *, fields=SERVER_ITEM_M
 def _validate_edit_field(fieldname: str, remark: str = "") -> tuple[bool, str, str]:
     if not fieldname:
         return False, "字段名不能为空。", "missing"
-    if fieldname == "shipment_value_rmb":
+    if fieldname in SHIPMENT_VALUE_EDIT_FIELDS:
         return True, "", "manual_shipment_valuation"
     if fieldname in EDITABLE_ITEM_FIELDS:
         return True, "", "editable"
@@ -1355,7 +1360,7 @@ def update_item_field(
     _skip_edit_check: bool = False,
     _skip_commit: bool = False,
 ) -> dict:
-    is_shipment_value = fieldname == "shipment_value_rmb"
+    is_shipment_value = fieldname in SHIPMENT_VALUE_EDIT_FIELDS
     edit_remark = _normalize_edit_remark(remark, manual_override_reason)
     is_allowed, validation_message, edit_mode = _validate_edit_field(fieldname, edit_remark)
     if not is_allowed:
@@ -1559,9 +1564,7 @@ def update_item_field(
     elif fieldname == "shipped_uom" and str(coerced_value or "").strip() and not expense_physical:
         companion_updates["cost_output_uom"] = str(coerced_value).strip()
         setattr(item_doc, "cost_output_uom", companion_updates["cost_output_uom"])
-    if not is_shipment_value and fieldname in {
-        "actual_shipped_qty", "shipped_uom", "quantity", "purchase_uom", "unit",
-    }:
+    if not is_shipment_value and fieldname in SHIPMENT_VALUE_INPUT_FIELDS:
         valuation_result = shipment_value(project_source_values(item_doc.as_dict(), source_context))
         amount = valuation_result.get("amount_rmb")
         item_doc.goods_value = _to_float(amount) if amount is not None else 0

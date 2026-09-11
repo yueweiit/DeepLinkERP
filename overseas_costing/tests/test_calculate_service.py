@@ -667,6 +667,19 @@ def _install_item_edit_frappe(monkeypatch, items):
     return service, db
 
 
+def _automatic_settlement_item(**changes):
+    from overseas_costing.services.logistics_settlement.valuation import value_final_cargo
+
+    values = {"source_doc_no": "PUR-1", "unit_price": 10, "purchase_currency": "RMB",
+              "purchase_uom": "件", "unit_price_uom": "件", "quantity": 2,
+              "actual_shipped_qty": 2, "shipped_uom": "件", "unit": "件", **changes}
+    cargo = {"material_code": "", "quantity": 2, "unit": "件", "source_snapshot": "S"}
+    valuation = value_final_cargo({**values, "extra_json": "{}"}, cargo, {})
+    return {**values, "goods_value": 20, "extra_json": json.dumps({
+        "settlement_cargo": cargo, "settlement_valuation": valuation,
+    })}
+
+
 def test_update_virtual_shipment_value_saves_server_manual_metadata(monkeypatch) -> None:
     items = {"I1": {}}
     service, _db = _install_item_edit_frappe(monkeypatch, items)
@@ -691,6 +704,69 @@ def test_update_virtual_shipment_value_saves_server_manual_metadata(monkeypatch)
     assert manual["actor"] == "finance@example.com"
     assert manual["confirmed_at"] == "2026-09-11 10:00:00"
     assert manual["reason"] == "财务核对"
+
+
+def test_update_legacy_goods_value_routes_to_manual_shipment_valuation(monkeypatch) -> None:
+    from overseas_costing.services.shipment_cost_service import shipment_value
+
+    items = {"I1": _automatic_settlement_item()}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field(
+        "I1", "goods_value", "99", version_name="V1", remark="财务确认", _skip_edit_check=True,
+    )
+
+    valuation = shipment_value(items["I1"].as_dict())
+    metadata = json.loads(items["I1"].extra_json)
+    assert result["ok"] is True and result["fieldname"] == "goods_value"
+    assert result["valuation"]["status"] == "manual"
+    assert result["valuation"]["amount_rmb"] == "99"
+    assert result["goods_value"] == 99 and items["I1"].goods_value == 99
+    assert metadata["manual_shipment_valuation"]["amount_rmb"] == "99"
+    assert valuation["status"] == "manual" and valuation["amount_rmb"] == "99"
+
+    cleared = service.update_item_field(
+        "I1", "goods_value", "", version_name="V1", remark="撤销人工确认", _skip_edit_check=True,
+    )
+    assert "manual_shipment_valuation" not in json.loads(items["I1"].extra_json)
+    assert cleared["valuation"]["status"] == "automatic"
+    assert cleared["valuation"]["amount_rmb"] == "20.000000"
+    assert cleared["goods_value"] == 20 and items["I1"].goods_value == 20
+
+
+@pytest.mark.parametrize(("initial", "fieldname", "new_value", "expected_status", "expected_goods"), [
+    ({}, "unit_price", "12", "stale", 0),
+    ({}, "purchase_currency", "USD", "stale", 0),
+    ({}, "unit_price_uom", "箱", "stale", 0),
+    ({"unit_price_uom": ""}, "purchase_uom", "箱", "stale", 0),
+])
+def test_automatic_valuation_input_edits_resolve_and_sync_goods_value(
+    monkeypatch, initial, fieldname, new_value, expected_status, expected_goods,
+) -> None:
+    items = {"I1": _automatic_settlement_item(**initial)}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field(
+        "I1", fieldname, new_value, remark="采购更正", _skip_edit_check=True,
+    )
+
+    assert result["valuation"]["status"] == expected_status
+    assert result["valuation"]["amount_rmb"] is None
+    assert result["goods_value"] == expected_goods
+    assert items["I1"].goods_value == expected_goods
+
+
+def test_legacy_positive_goods_mirror_survives_unstructured_price_edit(monkeypatch) -> None:
+    items = {"I1": {"goods_value": 20, "unit_price": 10, "extra_json": "{}"}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field(
+        "I1", "unit_price", "12", remark="采购更正", _skip_edit_check=True,
+    )
+
+    assert result["valuation"]["status"] == "automatic"
+    assert result["valuation"]["amount_rmb"] == 20
+    assert result["goods_value"] == 20 and items["I1"].goods_value == 20
 
 
 def test_update_virtual_shipment_value_preserves_explicit_zero(monkeypatch) -> None:
@@ -820,6 +896,25 @@ def test_batch_update_supports_manual_shipment_value_set_and_clear(monkeypatch) 
     assert result["results"][1]["valuation"]["status"] == "automatic"
     assert items["I1"].goods_value == 12
     assert items["I2"].goods_value == 20
+
+
+def test_batch_update_routes_goods_value_and_syncs_automatic_staleness(monkeypatch) -> None:
+    items = {"I1": _automatic_settlement_item(), "I2": _automatic_settlement_item()}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import edit_session_service
+    monkeypatch.setattr(edit_session_service, "assert_batch_write", lambda *_args, **_kwargs: None)
+
+    result = service.batch_update_items("B1", json.dumps([
+        {"item_name": "I1", "fieldname": "goods_value", "value": "99", "remark": "财务确认"},
+        {"item_name": "I2", "fieldname": "unit_price", "value": "12", "remark": "采购更正"},
+    ]), version_name="V1", edit_token="TOKEN", expected_modified="OLD")
+
+    assert result["ok"] is True and result["changed_count"] == 2
+    assert result["results"][0]["valuation"]["status"] == "manual"
+    assert result["results"][0]["valuation"]["amount_rmb"] == "99"
+    assert result["results"][1]["valuation"]["status"] == "stale"
+    assert items["I1"].goods_value == 99
+    assert items["I2"].goods_value == 0
 
 
 def test_expense_physical_overlay_quantity_edit_stales_manual_value(monkeypatch) -> None:
