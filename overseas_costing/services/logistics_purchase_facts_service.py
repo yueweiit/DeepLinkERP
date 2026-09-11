@@ -109,7 +109,8 @@ def _purchase_candidates(sources: list[dict], fx_rates: dict | None = None) -> l
             quantity = _number(mapped.get("quantity"))
             if not code or quantity is None or Decimal(str(quantity)) <= 0:
                 continue
-            row_id = _text(raw.get("_dingtalk_row_number")) or str(table_index)
+            stable_row_id = _text(raw.get("_dingtalk_row_number"))
+            row_id = stable_row_id or str(table_index)
             identity = json.dumps([source["source_id"], table_name, row_id], ensure_ascii=False)
             key = "purchase:" + hashlib.sha256(identity.encode()).hexdigest()[:32]
             if key in seen:
@@ -133,6 +134,8 @@ def _purchase_candidates(sources: list[dict], fx_rates: dict | None = None) -> l
             candidates.append({"purchase_key": key, "material_code": code,
                                "spec_model": _text(mapped.get("spec_model")), "purchase_fact": fact,
                                "purchase_source_id": source["source_id"], "purchase_row_id": row_id,
+                               "purchase_logical_source_id": _text(source.get("logical_source_id") or source.get("process_instance_id")),
+                               "purchase_table_name": table_name, "purchase_row_stable": bool(stable_row_id),
                                "fx_unresolved": (f"{code} 缺少有效的 {currency_code or '采购币种'} 人民币汇率，人民币货值待补。"
                                                  if amount is not None and not usable_rate else "")})
     return candidates
@@ -144,6 +147,9 @@ def _matching_candidates(item: dict, prior: dict, candidates: list[dict]) -> lis
     exact = [row for row in matches if row["purchase_key"] == prior.get("purchase_key")]
     if exact:
         return exact
+    refresh = [row for row in matches if _same_logical_purchase_row(item, prior, row)]
+    if refresh:
+        return refresh
     fact = prior.get("purchase_fact") if isinstance(prior.get("purchase_fact"), dict) else {}
     document = _text(fact.get("source_doc_no") or item.get("source_doc_no")).casefold()
     scoped = [row for row in matches if _text(row["purchase_fact"].get("source_doc_no")).casefold() == document]
@@ -155,6 +161,24 @@ def _matching_candidates(item: dict, prior: dict, candidates: list[dict]) -> lis
     if spec and len(matches) > 1:
         matches = [row for row in matches if not row["spec_model"] or row["spec_model"].casefold() == spec]
     return matches
+
+
+def _same_logical_purchase_row(item: dict, prior: dict, candidate: dict) -> bool:
+    """Permit source refresh only with a stable lineage and source row identity."""
+    lineage = _text(prior.get("purchase_logical_source_id"))
+    if not lineage or lineage != _text(candidate.get("purchase_logical_source_id")):
+        return False
+    if not _same_stable_purchase_row(prior, candidate):
+        return False
+    item_spec = _text(item.get("spec_model")).casefold()
+    candidate_spec = _text(candidate.get("spec_model")).casefold()
+    return not item_spec or not candidate_spec or item_spec == candidate_spec
+
+
+def _same_stable_purchase_row(prior: dict, candidate: dict) -> bool:
+    return bool(prior.get("purchase_row_stable") and candidate.get("purchase_row_stable")
+                and _text(prior.get("purchase_row_id")) == _text(candidate.get("purchase_row_id"))
+                and _text(prior.get("purchase_table_name")) == _text(candidate.get("purchase_table_name")))
 
 
 def enrich_logistics_purchase_facts(items: list[dict], sources: list[dict], *, fx_rates: dict | None = None) -> dict:
@@ -189,18 +213,43 @@ def enrich_logistics_purchase_facts(items: list[dict], sources: list[dict], *, f
                 item["goods_value"] = None
         matches = _matching_candidates(item, prior, candidates)
         selected = matches[0] if len(matches) == 1 else None
+        refreshed = bool(selected and prior.get("purchase_key") and (
+            selected["purchase_key"] == prior.get("purchase_key")
+            and _same_stable_purchase_row(prior, selected)
+            or _same_logical_purchase_row(item, prior, selected)
+        ) and (fact != selected["purchase_fact"]
+               or prior.get("purchase_source_id") != selected["purchase_source_id"]
+               or prior.get("purchase_row_id") != selected["purchase_row_id"]))
         if selected:
             if _missing(fact.get("goods_value")) and selected.get("fx_unresolved") and selected["fx_unresolved"] not in reported:
                 unresolved.append({"item_name": item.get("name"), "material_code": item.get("material_code"),
                                    "message": selected["fx_unresolved"], "purchase_source_ids": [selected["purchase_source_id"]]})
                 reported.add(selected["fx_unresolved"])
-            for field, value in selected["purchase_fact"].items():
-                if _missing(fact.get(field)):
-                    fact[field] = value
+            if refreshed:
+                history = list(prior.get("purchase_fact_history") or [])
+                history.append({"purchase_key": prior.get("purchase_key"),
+                                "purchase_source_id": prior.get("purchase_source_id"),
+                                "purchase_row_id": prior.get("purchase_row_id"),
+                                "purchase_logical_source_id": prior.get("purchase_logical_source_id"),
+                                "purchase_table_name": prior.get("purchase_table_name"),
+                                "purchase_fact": deepcopy(fact),
+                                "replaced_by_source_id": selected["purchase_source_id"],
+                                "replaced_by_row_id": selected["purchase_row_id"]})
+                prior["purchase_fact_history"] = history[-20:]
+                fact = deepcopy(selected["purchase_fact"])
+                prior["purchase_key"] = selected["purchase_key"]
+            else:
+                for field, value in selected["purchase_fact"].items():
+                    if _missing(fact.get(field)):
+                        fact[field] = value
             if not prior.get("purchase_key"):
                 prior["purchase_key"] = (_text(item.get("name")) if manual else "") or selected["purchase_key"]
-            for field in ("purchase_source_id", "purchase_row_id"):
-                prior.setdefault(field, selected[field])
+            for field in ("purchase_source_id", "purchase_row_id", "purchase_logical_source_id",
+                          "purchase_table_name", "purchase_row_stable"):
+                if refreshed:
+                    prior[field] = selected[field]
+                else:
+                    prior.setdefault(field, selected[field])
         elif not prior.get("purchase_key"):
             code = _text(item.get("material_code")) or _text(item.get("name"))
             documents = sorted({_text(row["purchase_fact"]["source_doc_no"]) for row in matches})
@@ -215,10 +264,12 @@ def enrich_logistics_purchase_facts(items: list[dict], sources: list[dict], *, f
         # Never copy an entire purchase total onto each shipment row. Existing
         # apportioned totals and manual corrections remain available to reconcile.
         for field in ("unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"):
-            if _missing(item.get(field)) and not _missing(fact.get(field)):
+            if (refreshed and not manual or _missing(item.get(field))) and not _missing(fact.get(field)):
                 item[field] = fact[field]
         prior.setdefault("purchase_key", "")
         prior["purchase_fact"] = fact
         metadata["logistics_row"] = prior
         item["extra_json"] = json.dumps(metadata, ensure_ascii=False, default=str)
+        if selected:
+            item["_purchase_fact_enriched"] = True
     return {"items": enriched, "unresolved": unresolved}

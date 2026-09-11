@@ -197,6 +197,12 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         metadata["logistics_row"] = {**prior, "identity": key, "source_id": source["source_id"], "approval_no": source.get("approval_no"),
                                       "row_no": index, "purchase_key": purchase_key, "purchase_fact": fact}
         row["extra_json"] = json.dumps(metadata, ensure_ascii=False, default=str)
+        if old.get("_purchase_fact_enriched"):
+            row["_review_purchase_values"] = {
+                field: row.get(field)
+                for field in ("unit_price", "purchase_currency", "purchase_uom", "unit_price_uom")
+            }
+            row["_review_price_metadata"] = deepcopy(metadata)
         row['_review_source_values'] = {key: row.get(key) for key in ('material_code','product_name','spec_model','actual_shipped_qty','shipped_uom','unit','stable_line_key')}
         # Physical fields copied/apportioned above are historical context, not evidence from this approval.
         rows.append(row)

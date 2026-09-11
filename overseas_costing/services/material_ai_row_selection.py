@@ -66,7 +66,7 @@ def catalog(items, proposals, fees, context, *, run_id):
     items=[project_source_values(i,context) for i in items]
     original={str(i['name']):i for i in items}
     rows=[];occurrences=Counter();proposal_rows={}
-    def add(values, proposal, *, origin='source', target='', stable='', fields=None):
+    def add(values, proposal, *, origin='source', target='', stable='', fields=None, price_metadata=None):
         values=deepcopy(values)
         matches=_matches(values,items) if origin=='source' else []
         if target and target in original and (origin=='current' or proposal.get('proposal_type')=='item_update'):
@@ -99,6 +99,8 @@ def catalog(items, proposals, fees, context, *, run_id):
                      'default_replace_selected':default_replace_selected,
                      'blocked_reason':reason,'source_refs':deepcopy(proposal.get('source_refs') or []),
                      'proposal_id':proposal.get('proposal_id'),'proposal_type':proposal.get('proposal_type'),'fields':fill_fields})
+        if price_metadata is not None:
+            rows[-1]['_price_metadata']=deepcopy(price_metadata)
         if stable:proposal_rows[stable]=rows[-1]
     for proposal in proposals:
         kind=proposal.get('proposal_type');payload=proposal.get('payload') or {}
@@ -113,8 +115,14 @@ def catalog(items, proposals, fees, context, *, run_id):
                     evidence_row={**row,**{field:None for field in PHYSICAL}}
                 values=_source_values(evidence_row if evidence_row is not None else row)
                 # Reconciliation copied procurement facts from old rows; those are not evidence of a new price.
-                for field in ('unit_price','purchase_currency','purchase_uom','unit_price_uom'):values.pop(field,None)
-                add(values,proposal,stable=row.get('stable_line_key') or row.get('name'))
+                reviewed_purchase = row.get('_review_purchase_values')
+                if isinstance(reviewed_purchase,dict):
+                    values.update({field:deepcopy(reviewed_purchase.get(field)) for field in
+                                   ('unit_price','purchase_currency','purchase_uom','unit_price_uom')})
+                else:
+                    for field in ('unit_price','purchase_currency','purchase_uom','unit_price_uom'):values.pop(field,None)
+                add(values,proposal,stable=row.get('stable_line_key') or row.get('name'),
+                    price_metadata=row.get('_review_price_metadata'))
         elif kind=='material_replace':
             for row in payload.get('replacement_rows') or []:
                 values=_source_values(row);values['material_code']=''
@@ -180,7 +188,7 @@ def project(items, catalog, row_ids, fee_ids, mode):
                 # Preserve price only for a verified identity/unit mapping, independent of packing facts.
                 for f in ('unit_price','purchase_currency','purchase_uom','unit_price_uom','source_doc_no','supplier'):
                     if missing(row,f):row[f]=deepcopy(old.get(f))
-                row['_price_metadata']=deepcopy(json_dict(old.get('extra_json')))
+                row['_price_metadata']=deepcopy(choice.get('_price_metadata') or json_dict(old.get('extra_json')))
                 row['_verified_prior_item']=deepcopy(old)
             else:added+=1
             result.append(row)

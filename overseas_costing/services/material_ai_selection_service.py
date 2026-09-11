@@ -48,7 +48,7 @@ def _inputs(repo, batch, run, *, locked=False):
 
 
 def review_catalog(repo,batch,run):
-    return _inputs(repo,batch,run)[-1]
+    return public_catalog(_inputs(repo,batch,run)[-1])
 
 
 def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository=None):
@@ -78,11 +78,22 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
         draft['row_previews']=dict(list(previews.items())[-12:])
     draft['current_row_preview']=preview['id']
     repo.save_row_review_draft(run,draft)
-    return {'ok':True,'preview':public_preview(preview),'row_review':catalog}
+    return {'ok':True,'preview':public_preview(preview),'row_review':public_catalog(catalog)}
+
+
+def public_catalog(catalog):
+    result=deepcopy(catalog)
+    for row in result.get('rows') or []:
+        row.pop('_price_metadata',None)
+    return result
 
 
 def public_preview(preview):
-    return {k:v for k,v in preview.items() if k not in ('sources','input_fingerprint','source_context','fee_fingerprint','dependencies')}
+    result=deepcopy({k:v for k,v in preview.items() if k not in ('sources','input_fingerprint','source_context','fee_fingerprint','dependencies')})
+    for row in result.get('rows') or []:
+        row.pop('_price_metadata',None)
+        row.pop('_verified_prior_item',None)
+    return result
 
 
 def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,*,repository=None):

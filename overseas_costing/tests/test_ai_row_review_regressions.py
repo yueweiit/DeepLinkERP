@@ -278,12 +278,14 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
 
     from overseas_costing.services import material_ai_fill_service as ai
     from overseas_costing.services import material_ai_selection_service as selection
+    from overseas_costing.services.logistics_purchase_facts_service import enrich_logistics_purchase_facts
     from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
 
     store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
     item = ledger.put("item", item["name"], {
         "spec_model": "S1", "stable_line_key": "LINE-A", "actual_shipped_qty": 2,
         "shipped_uom": "件", "unit": "件", "purchase_uom": "件", "unit_price_uom": "件",
+        "source_type": "OA_LOGISTICS_ROW",
     })
     source = {
         "source_kind": "approval_form", "source_id": "approval:REFRESH:form",
@@ -292,10 +294,20 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
         "form_fields": {"货物信息Bienes": [{"物料编码": "A", "物料名称": "A", "规格型号": "S1",
                                             "数量": 2, "单位": "件"}]},
     }
+    purchase_source = {
+        "source_kind": "approval_form", "source_id": "SOURCE-1", "source_hash": "PURCHASE-HASH-1",
+        "logical_source_id": "PURCHASE-LOGICAL-1", "approval_role": "purchase",
+        "approval_no": "PURCHASE-1", "selected": True,
+        "form_fields": {"币种Moneda": "RMB", "采购明细": [{"rowNumber": "stable-line-1", "rowValue": [
+            {"label": "物品编码Código", "value": "A"}, {"label": "数量Cantidad", "value": 2},
+            {"label": "总金额Monto Total", "value": 20}, {"label": "单价Precio", "value": 10},
+            {"label": "单位Unidad", "value": "件"},
+        ]}]},
+    }
 
     class Repository:
         def __init__(self):
-            self.sources = [source]
+            self.sources = [source, purchase_source]
             self.runs = []
 
         def get_context(self, batch_name, version_name=None):
@@ -369,13 +381,26 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
     def prepare_and_apply(run_id):
         run = repo.get_run(run_id)
         current_items = repo.get_items(batch["name"], run["version"])
-        proposal = build_logistics_reconciliation(current_items, repo.sources[0])
+        enriched = enrich_logistics_purchase_facts(current_items, repo.sources,
+                                                   fx_rates={"RMB": "1"})
+        proposal = build_logistics_reconciliation(enriched["items"], repo.sources[0])
+        if run_id == "RUN-2":
+            enriched_fact = json.loads(enriched["items"][0]["extra_json"])["logistics_row"]["purchase_fact"]
+            assert float(enriched_fact["unit_price"]) == 12
+            assert float(proposal["payload"]["rows"][0]["_review_purchase_values"]["unit_price"]) == 12
         run.update(status="READY", candidates_json=[proposal])
         catalog = selection.review_catalog(repo, batch["name"], run)
         selected_ids = [row["row_id"] for row in catalog["rows"] if row["origin"] == "source"]
         prepared = selection.prepare(batch["name"], run_id, selected_ids, [], "replace_all",
                                      run["version"], repository=repo)["preview"]
         assert prepared["mode"] == "replace_all"
+        assert "_price_metadata" not in str(prepared)
+        assert "_verified_prior_item" not in str(prepared)
+        if run_id == "RUN-2":
+            server_preview = run["draft_json"]["row_previews"][prepared["id"]]
+            assert float(server_preview["rows"][0]["unit_price"]) == 12
+            price_fact = server_preview["rows"][0]["_price_metadata"]["logistics_row"]["purchase_fact"]
+            assert float(price_fact["unit_price"]) == 12
         return selection.confirm(batch["name"], run_id, prepared["id"], prepared["revision"],
                                  "TOKEN", "M", repository=repo)
 
@@ -391,10 +416,14 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
     metadata["manual_shipment_valuation"] = build_manual_shipment_valuation(
         first_saved, 25, actor="finance", reason="confirmed", confirmed_at="now")
     ledger.put("item", first_saved["name"], {
-        "unit_price": 12, "goods_value": 24, "source_doc_no": "PURCHASE-2",
-        "extra_json": json.dumps(metadata),
+        "goods_value": 25, "extra_json": json.dumps(metadata),
     })
-    repo.sources[0].update(source_hash="SOURCE-2", approval_no="LOG-2")
+    refreshed_purchase = deepcopy(purchase_source)
+    refreshed_purchase.update(source_id="SOURCE-2", source_hash="PURCHASE-HASH-2",
+                              approval_no="PURCHASE-2")
+    refreshed_purchase["form_fields"]["采购明细"][0]["rowValue"][2]["value"] = 24
+    refreshed_purchase["form_fields"]["采购明细"][0]["rowValue"][3]["value"] = 12
+    repo.sources[1] = refreshed_purchase
     first_before_second = deepcopy(ledger.rows("item", version=first_version))
 
     second_run = ai.start_source_ai_review(batch["name"], version["name"], force=True,
@@ -415,7 +444,7 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
     cleared_meta.pop("manual_shipment_valuation")
     cleared["extra_json"] = json.dumps(cleared_meta)
     fallback = shipment_value(cleared)
-    assert fallback["status"] == "conflict"
+    assert fallback["status"] == "conflict", fallback
     assert fallback["prior_amount_rmb"] == "20.000000"
     assert fallback["calculated_amount_rmb"] == "24.000000"
 

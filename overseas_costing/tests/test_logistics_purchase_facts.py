@@ -97,6 +97,83 @@ def test_saved_purchase_fact_and_existing_manual_fields_win_over_new_source():
     assert json.loads(row["extra_json"])["keep"] == "metadata"
 
 
+def test_same_logical_purchase_row_refresh_replaces_fact_and_archives_previous_evidence():
+    purchase_row = [{"rowNumber": "stable-line-1", "rowValue": [
+        {"label": "物品编码Código", "value": "FL000429"},
+        {"label": "数量Cantidad", "value": 2},
+        {"label": "总金额Monto Total", "value": 20},
+        {"label": "单价Precio", "value": 10},
+        {"label": "单位Unidad", "value": "pcs"},
+    ]}]
+    source_one = _source(purchase_row, source_id="SOURCE-1", approval_no="PUR-1")
+    source_one["logical_source_id"] = "PURCHASE-LOGICAL-1"
+    first = _enrich(_items()[:1], [source_one])["items"][0]
+    first_association = _association(first)
+    assert first_association["purchase_source_id"] == "SOURCE-1"
+    assert first_association["purchase_row_id"] == "stable-line-1"
+    assert float(first_association["purchase_fact"]["unit_price"]) == 10
+
+    refreshed_row = deepcopy(purchase_row)
+    refreshed_row[0]["rowValue"][2]["value"] = 24
+    refreshed_row[0]["rowValue"][3]["value"] = 12
+    source_two = _source(refreshed_row, source_id="SOURCE-2", approval_no="PUR-2")
+    source_two["logical_source_id"] = "PURCHASE-LOGICAL-1"
+
+    second = _enrich([first], [source_two])["items"][0]
+    association = _association(second)
+
+    assert association["purchase_source_id"] == "SOURCE-2"
+    assert association["purchase_row_id"] == "stable-line-1"
+    assert float(association["purchase_fact"]["unit_price"]) == 12
+    assert float(association["purchase_fact"]["goods_value"]) == 24
+    assert float(second["unit_price"]) == 12
+    history = association["purchase_fact_history"]
+    assert len(history) == 1
+    assert history[0]["purchase_source_id"] == "SOURCE-1"
+    assert float(history[0]["purchase_fact"]["unit_price"]) == 10
+
+
+@pytest.mark.parametrize("changed", ["logical_source", "row_id"])
+def test_purchase_refresh_requires_same_reliable_logical_row_identity(changed):
+    rows = [{"rowNumber": "stable-line-1", "rowValue": [
+        {"label": "物品编码Código", "value": "FL000429"},
+        {"label": "数量Cantidad", "value": 2},
+        {"label": "总金额Monto Total", "value": 20},
+        {"label": "单价Precio", "value": 10},
+    ]}]
+    source_one = _source(rows, source_id="SOURCE-1", approval_no="PUR-1")
+    source_one["logical_source_id"] = "PURCHASE-LOGICAL-1"
+    first = _enrich(_items()[:1], [source_one])["items"][0]
+    refreshed = deepcopy(rows)
+    refreshed[0]["rowValue"][2]["value"] = 24
+    refreshed[0]["rowValue"][3]["value"] = 12
+    if changed == "row_id":
+        refreshed[0]["rowNumber"] = "different-line"
+    source_two = _source(refreshed, source_id="SOURCE-2", approval_no="PUR-2")
+    source_two["logical_source_id"] = ("OTHER-PURCHASE" if changed == "logical_source"
+                                        else "PURCHASE-LOGICAL-1")
+
+    second = _enrich([first], [source_two])["items"][0]
+    association = _association(second)
+
+    assert association["purchase_source_id"] == "SOURCE-1"
+    assert float(association["purchase_fact"]["unit_price"]) == 10
+    assert not association.get("purchase_fact_history")
+
+
+def test_purchase_refresh_does_not_replace_by_generated_row_position():
+    source = _source([{"物品编码Código": "FL000429", "数量Cantidad": 2,
+                       "总金额Monto Total": 20, "单价Precio": 10}])
+    first = _enrich(_items()[:1], [source])["items"][0]
+    source["form_fields"]["采购明细"][0].update({"总金额Monto Total": 24, "单价Precio": 12})
+
+    second = _enrich([first], [source])["items"][0]
+    association = _association(second)
+
+    assert float(association["purchase_fact"]["unit_price"]) == 10
+    assert not association.get("purchase_fact_history")
+
+
 def test_new_row_manual_purchase_correction_is_not_erased_as_shipping_quantity():
     item = _items()[0]
     item.update(quantity=777, goods_value=888, unit_price=9, manual_override_flag=1)
