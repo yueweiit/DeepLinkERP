@@ -47,6 +47,16 @@ def _same(left, right):
     return number(left) is not None and number(right) is not None and Decimal(number(left)) == Decimal(number(right))
 
 
+def _fields_equal(left, right):
+    if _same(left, right):
+        return True
+    if isinstance(left, (dict, str)) or isinstance(right, (dict, str)):
+        parsed_left, parsed_right = object_json(left), object_json(right)
+        if parsed_left or parsed_right:
+            return parsed_left == parsed_right
+    return _json(left) == _json(right)
+
+
 def _qty_key(value):
     amount = number(value)
     return '' if amount is None else format(amount.normalize(), 'f')
@@ -310,11 +320,26 @@ class FrappeRepairRepository:
             raise RuntimeError('修复不得修改费用或成本版本。')
         if {row['name'] for row in after['items']} != set(originals):
             raise RuntimeError('修复不得新增或删除物料。')
-        for item in after['items']:
-            want = expected[item['name']]
-            ignored = {'modified', 'modified_by'} if item['name'] in changed else set()
-            if any(_json(item.get(key)) != _json(want.get(key)) for key in set(want) - ignored):
-                raise RuntimeError('物料更新超出了已批准的字段范围。')
+        after_items = {row['name']: row for row in after['items']}
+        mutable = {'goods_value', 'extra_json', 'modified', 'modified_by'}
+        for item_name, original in originals.items():
+            current = after_items[item_name]
+            want = expected[item_name]
+            ignored = mutable if item_name in changed else {'modified', 'modified_by'}
+            for field in set(original) | set(current):
+                if field in ignored:
+                    continue
+                if not _fields_equal(original.get(field), current.get(field)):
+                    raise RuntimeError('物料更新超出了已批准的字段范围。')
+            if item_name in changed and not _fields_equal(current.get('goods_value'), want.get('goods_value')):
+                raise RuntimeError('物料货值未按批准口径写入。')
+            if item_name in changed:
+                stored = object_json(current.get('extra_json'))
+                intended = object_json(want.get('extra_json'))
+                stored_val = stored.get('settlement_valuation') or stored.get('shipment_valuation') or {}
+                intended_val = intended.get('settlement_valuation') or intended.get('shipment_valuation') or {}
+                if stored_val.get('status') != intended_val.get('status'):
+                    raise RuntimeError('物料估值状态未按批准口径写入。')
         for field, value in before['batch'].items():
             if field not in {'status', 'modified'} and after['batch'].get(field) != value:
                 raise RuntimeError('批次其他属性发生变化，已停止修复。')

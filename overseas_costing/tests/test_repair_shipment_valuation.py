@@ -324,6 +324,42 @@ def test_apply_writes_audit_and_is_idempotent():
     assert service().run(repository=repo)["ready_count"] == 0
 
 
+def test_real_save_accepts_database_coerced_numbers_and_json():
+    data = snapshot()
+    plan = service().plan_batch_repair(data)
+    state = deepcopy(data)
+    audits = []
+
+    def set_value(doctype, name, values, *args, **kwargs):
+        if doctype == "Overseas Cost Batch":
+            state["batch"].update(values if isinstance(values, dict) else {values: args[0]})
+            state["batch"]["modified"] = "AFTER"
+            return
+        item = next(row for row in state["items"] if row["name"] == name)
+        payload = values if isinstance(values, dict) else {values: args[0]}
+        if "goods_value" in payload:
+            item["goods_value"] = Decimal(str(payload["goods_value"]))
+        if "extra_json" in payload:
+            item["extra_json"] = json.dumps(json.loads(payload["extra_json"]), ensure_ascii=True, indent=2)
+        item["modified"] = "AFTER"
+        item["modified_by"] = "Administrator"
+
+    def get_doc(payload):
+        def insert(**kwargs):
+            audits.append(payload)
+            return SimpleNamespace(name="AUDIT-REAL-SAVE")
+        return SimpleNamespace(insert=insert)
+
+    repo = service().FrappeRepairRepository.__new__(service().FrappeRepairRepository)
+    repo.frappe = SimpleNamespace(db=SimpleNamespace(set_value=set_value),
+                                  session=SimpleNamespace(user="Administrator"), get_doc=get_doc)
+    repo.load = lambda *args, **kwargs: deepcopy(state)
+    assert repo.save(data, plan) == "AUDIT-REAL-SAVE"
+    assert Decimal(str(state["items"][0]["goods_value"])) == Decimal("14496")
+    assert json.loads(state["items"][6]["extra_json"])["settlement_valuation"]["status"] == "conflict"
+    assert len(audits) == 1
+
+
 @pytest.mark.parametrize("failure,reason", [("drift", "SOURCE_CHANGED"), ("fail_save", "TRANSACTION_FAILED")])
 def test_apply_detects_drift_and_rolls_back_partial_failure(failure, reason):
     repo = Repository()
