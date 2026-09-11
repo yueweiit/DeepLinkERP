@@ -79,6 +79,10 @@ def persist_calculated_item(item):
 def compact_row_meta(meta):
     if not isinstance(meta, dict):
         return {}
+    if 'doctype' in meta and 'extra_json' in meta:
+        meta = row_meta(meta)
+    if not isinstance(meta, dict):
+        return {}
     result = dict(meta)
     for key in NESTED_KEYS:
         if isinstance(result.get(key), dict):

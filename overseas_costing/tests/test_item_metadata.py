@@ -71,6 +71,20 @@ def test_persisted_item_meta_compacts_existing_bloated_originals():
     assert len(payload) < len(_bloated_item()["extra_json"]) / 2
 
 
+def test_prune_does_not_treat_a_document_row_as_metadata():
+    item = _bloated_item()
+    item.update(doctype="Overseas Cost Item", batch="B", version="V", extra_json=json.dumps({
+        "settlement_valuation": {"status": "automatic", "amount_rmb": "14496.000000"},
+        "autofill_review": {"source_refs": [{"file": "packing.xlsx"}]},
+    }))
+    pruned = prune_analysis_cache(item)
+    packed = json.dumps(pruned, ensure_ascii=False)
+    assert "doctype" not in pruned
+    assert "autofill_review" not in pruned
+    assert pruned["settlement_valuation"]["amount_rmb"] == "14496.000000"
+    assert "packing.xlsx" not in packed
+
+
 def test_prune_after_calculation_drops_analysis_cache_and_keeps_valuation():
     meta = {
         "settlement_cargo": {"material_code": "FL000429", "quantity": 96000, "unit": "个"},
