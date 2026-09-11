@@ -180,6 +180,22 @@ def test_protected_batches_are_skipped(section, field, value, code):
     assert not result["changes"]
 
 
+def test_padded_decimal_quantities_and_original_values_still_repair():
+    data = snapshot()
+    for item in data["items"]:
+        item["actual_shipped_qty"] = f"{Decimal(str(item['actual_shipped_qty'])):.9f}"
+        extra = json.loads(item["extra_json"])
+        extra.pop("logistics_row", None)
+        extra["settlement_original_values"] = {"goods_value": extra["ai_fill_original_values"]["goods_value"]}
+        item["extra_json"] = json.dumps(extra, ensure_ascii=False)
+        item["unit_price_uom"] = None
+        item["purchase_uom"] = None
+    plan = service().plan_batch_repair(data)
+    assert plan["status"] == "ready"
+    assert [change["kind"] for change in plan["changes"]] == [
+        "restore", "restore", "restore", "restore", "restore", "restore", "conflict", "missing"]
+
+
 def test_row_identity_or_adoption_change_stops_repair():
     moved = snapshot()
     moved["items"][0]["actual_shipped_qty"] = "96001"

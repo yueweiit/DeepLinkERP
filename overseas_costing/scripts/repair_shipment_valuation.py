@@ -47,9 +47,14 @@ def _same(left, right):
     return number(left) is not None and number(right) is not None and Decimal(number(left)) == Decimal(number(right))
 
 
+def _qty_key(value):
+    amount = number(value)
+    return '' if amount is None else format(amount.normalize(), 'f')
+
+
 def _identity(item):
     return (str(item.get('material_code') or '').strip(),
-            str(number(item.get('actual_shipped_qty')) or ''),
+            _qty_key(item.get('actual_shipped_qty')),
             normalize_unit(item.get('shipped_uom') or item.get('unit') or ''))
 
 
@@ -81,7 +86,7 @@ def _match_rows(items):
     remaining = list(items)
     matched = []
     for spec in EXPECTED_ROWS:
-        key = (spec['material_code'], str(number(spec['qty']) or ''), normalize_unit(spec['uom']))
+        key = (spec['material_code'], _qty_key(spec['qty']), normalize_unit(spec['uom']))
         found = [item for item in remaining if _identity(item) == key]
         if len(found) != 1:
             return None
