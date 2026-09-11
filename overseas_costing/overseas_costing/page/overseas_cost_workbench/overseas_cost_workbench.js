@@ -9396,6 +9396,9 @@ class OverseasCostWorkbench {
     if (!Number.isFinite(this.materialFeeState.feeRequestId)) this.materialFeeState.feeRequestId = 0;
     this.materialFeeState.feeDrafts = this.materialFeeState.feeDrafts || {};
     this.materialFeeState.pendingWrites = this.materialFeeState.pendingWrites || new Set();
+    this.materialFeeState.materialCellWrites = this.materialFeeState.materialCellWrites || new Map();
+    this.materialFeeState.materialCellWriteTargets = this.materialFeeState.materialCellWriteTargets || {};
+    if (!Number.isFinite(this.materialFeeState.materialCellWriteRevision)) this.materialFeeState.materialCellWriteRevision = 0;
     this.materialFeeState.materialSaveErrors = this.materialFeeState.materialSaveErrors || {};
     this.materialFeeState.materialDrafts = this.materialFeeState.materialDrafts || {};
     this.materialFeeState.aiFill = this.materialFeeState.aiFill || null;
@@ -11926,7 +11929,47 @@ class OverseasCostWorkbench {
   }
 
   async saveMaterialFeeCell($input) {
-    return this.trackMaterialFeeWrite(() => this.persistMaterialFeeCell($input));
+    const state = this.ensureMaterialFeeState();
+    if (!$input?.length) return false;
+    if (state.aiFill?.status === "READY" && state.aiFill.draftVisible) {
+      return this.trackMaterialFeeWrite(() => this.persistMaterialFeeCell($input));
+    }
+    this.updateMaterialDraftFromInput($input);
+    const itemName = String($input.attr("data-item-name") || "");
+    const fieldname = String($input.attr("data-fieldname") || "");
+    const key = `${itemName}:${fieldname}`;
+    state.materialCellWriteTargets[key] = {
+      input: $input,
+      value: String($input.val() ?? "").trim(),
+      revision: ++state.materialCellWriteRevision,
+    };
+    const currentWrite = state.materialCellWrites.get(key);
+    if (currentWrite) return currentWrite;
+    let write;
+    write = this.trackMaterialFeeWrite(async () => {
+      let forceSave = false;
+      while (this.materialFeeState === state && state.materialCellWriteTargets[key]) {
+        const target = state.materialCellWriteTargets[key];
+        const saved = await this.persistMaterialFeeCell(target.input, target.value, { forceSave });
+        if (!saved || this.materialFeeState !== state) return false;
+        const latest = state.materialCellWriteTargets[key];
+        if (!latest || latest.revision === target.revision || latest.value === target.value) {
+          delete state.materialCellWriteTargets[key];
+          if (state.materialDrafts[key]?.value === target.value) delete state.materialDrafts[key];
+          delete state.materialSaveErrors[key];
+          return true;
+        }
+        forceSave = true;
+      }
+      return false;
+    });
+    state.materialCellWrites.set(key, write);
+    try {
+      return await write;
+    } finally {
+      if (state.materialCellWrites.get(key) === write) state.materialCellWrites.delete(key);
+      delete state.materialCellWriteTargets[key];
+    }
   }
 
   renderMaterialFeeWorkspacePreservingPosition() {
@@ -12015,8 +12058,8 @@ class OverseasCostWorkbench {
     }
   }
 
-  async persistMaterialFeeCell($input) {
-    if (!$input.length || $input.data("saving")) return;
+  async persistMaterialFeeCell($input, queuedValue, { forceSave = false } = {}) {
+    if (!$input.length) return false;
     if (this.ensureMaterialFeeState().aiFill?.status === "READY" && this.ensureMaterialFeeState().aiFill.draftVisible) {
       this.updateMaterialAIDraftFromInput($input);
       const $cell = $input.closest(".ocw-mf-cell");
@@ -12024,20 +12067,20 @@ class OverseasCostWorkbench {
       const fill = this.ensureMaterialFeeState().aiFill;
       const isDraft = Boolean(fill?.updates?.[key] || fill?.manualUpdates?.[key]);
       $cell.toggleClass("is-ai-draft", isDraft);
-      return;
+      return true;
     }
-    this.updateMaterialDraftFromInput($input);
+    if (queuedValue === undefined) this.updateMaterialDraftFromInput($input);
     const original = String($input.attr("data-original-value") ?? "");
-    const value = String($input.val() ?? "").trim();
+    const value = String(queuedValue === undefined ? $input.val() ?? "" : queuedValue).trim();
     const itemName = $input.attr("data-item-name");
     const fieldname = $input.attr("data-fieldname");
     const saveState = this.ensureMaterialFeeState();
     const errorKey = `${itemName}:${fieldname}`;
     const $cell = $input.closest(".ocw-mf-cell");
-    if (value === original) {
+    if (!forceSave && value === original) {
       delete saveState.materialSaveErrors[errorKey];
       $cell.removeClass("is-save-error").attr("title", "");
-      return;
+      return true;
     }
     const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName;
@@ -12051,7 +12094,7 @@ class OverseasCostWorkbench {
     try {
       if (!item) throw new Error("物料行已变更，请刷新后重试。");
       if (!(await this.ensureMaterialFeeEditSession())) throw new Error("未能获取编辑权，物料未保存。");
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       let result;
       if (["actual_shipped_qty", "shipped_uom"].includes(fieldname)) {
         const editingQuantity = fieldname === "actual_shipped_qty";
@@ -12080,20 +12123,26 @@ class OverseasCostWorkbench {
         });
       }
       if (!result || !result.ok) throw new Error(result?.message || "保存失败");
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       delete saveState.materialSaveErrors[errorKey];
       if (saveState.materialDrafts[errorKey]?.value === value) delete saveState.materialDrafts[errorKey];
       this.updateMaterialFeeExpectedModified(result);
       this.detailState.dirty = false;
       frappe.show_alert({ message: "已保存", indicator: "green" });
       await this.loadMaterialFeeWorkspace({ quiet: true });
+      return true;
     } catch (error) {
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       saveState.materialSaveErrors[errorKey] = this.normalizeErrorMessage(error);
       if (saveState.materialDrafts[errorKey]) saveState.materialDrafts[errorKey].error = this.normalizeErrorMessage(error);
-      $input.data("saving", false).prop("disabled", false);
       $cell.removeClass("is-saving").addClass("is-save-error").attr("title", `${this.normalizeErrorMessage(error)}；当前输入已保留，请重试。`);
       frappe.show_alert({ message: "保存失败，当前值已保留", indicator: "red" });
+      return false;
+    } finally {
+      if (isCurrent()) {
+        $input.data("saving", false).prop("disabled", false);
+        $cell.removeClass("is-saving");
+      }
     }
   }
 

@@ -101,6 +101,79 @@ console.log(JSON.stringify({value:input.value,updated,saved}));
     assert result == {"value": "60", "updated": "60", "saved": "60"}
 
 
+MATERIAL_CELL_QUEUE_FIXTURE = r"""
+const w=Object.create(Harness.prototype);w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'T',expectedModified:'M1'};
+const state=w.ensureMaterialFeeState();state.materials={items:[{name:'I',shipment_value_rmb:'40'}]};
+w.normalizeErrorMessage=error=>error.message;w.ensureMaterialFeeEditSession=async()=>true;w.loadMaterialFeeWorkspace=async()=>true;
+const calls=[];const releases=[];let active=0,maxActive=0;
+w.call=async(method,args)=>{calls.push({method,args});active+=1;maxActive=Math.max(maxActive,active);
+  const result=await new Promise(resolve=>releases.push(resolve));active-=1;return result};
+const data={};const classes=new Set();const cell={addClass(name){classes.add(name);return this},removeClass(name){classes.delete(name);return this},attr(){return this},
+  find(selector){return selector==='[data-mf-cell-input]'?{first(){return input}}:{length:0}}};
+const input={length:1,value:'40',val(next){if(arguments.length){this.value=String(next);return this}return this.value},
+  attr(name){return {'data-original-value':'40','data-item-name':'I','data-fieldname':'shipment_value_rmb'}[name]},
+  data(name,next){if(arguments.length>1){data[name]=next;return this}return data[name]},prop(){return this},closest(){return cell}};
+const button=value=>({attr:name=>name==='data-value'?String(value):'',closest:()=>cell});global.$=value=>value;
+"""
+
+
+def test_two_fast_shipment_shortcuts_serialize_and_save_latest_value():
+    result = _fee_workspace_result(MATERIAL_CELL_QUEUE_FIXTURE + r"""
+const first=w.adoptShipmentValuationCandidate(button(60));await new Promise(resolve=>setImmediate(resolve));
+const second=w.adoptShipmentValuationCandidate(button(70));await new Promise(resolve=>setImmediate(resolve));
+assert.deepEqual(calls.map(call=>call.args.value),['60']);
+releases.shift()({ok:true,batch_modified:'M2'});await new Promise(resolve=>setImmediate(resolve));
+assert.deepEqual(calls.map(call=>call.args.value),['60','70']);
+releases.shift()({ok:true,batch_modified:'M3'});await Promise.all([first,second]);
+console.log(JSON.stringify({values:calls.map(call=>call.args.value),modified:calls.map(call=>call.args.expected_modified),
+  maxActive,pending:state.pendingWrites.size,drafts:state.materialDrafts,errors:state.materialSaveErrors}));
+""")
+    assert result == {
+        "values": ["60", "70"],
+        "modified": ["M1", "M2"],
+        "maxActive": 1,
+        "pending": 0,
+        "drafts": {},
+        "errors": {},
+    }
+
+
+def test_queued_shipment_save_failure_preserves_latest_draft_and_error():
+    result = _fee_workspace_result(MATERIAL_CELL_QUEUE_FIXTURE + r"""
+const first=w.adoptShipmentValuationCandidate(button(60));await new Promise(resolve=>setImmediate(resolve));
+const second=w.adoptShipmentValuationCandidate(button(70));
+releases.shift()({ok:true,batch_modified:'M2'});await new Promise(resolve=>setImmediate(resolve));
+releases.shift()({ok:false,message:'并发保存失败'});await Promise.all([first,second]);
+console.log(JSON.stringify({values:calls.map(call=>call.args.value),maxActive,pending:state.pendingWrites.size,
+  draft:state.materialDrafts['I:shipment_value_rmb'],error:state.materialSaveErrors['I:shipment_value_rmb']}));
+""")
+    assert result["values"] == ["60", "70"] and result["maxActive"] == 1
+    assert result["pending"] == 0
+    assert result["draft"]["value"] == "70"
+    assert result["draft"]["error"] == "并发保存失败"
+    assert result["error"] == "并发保存失败"
+
+
+def test_fast_regular_input_returning_to_saved_value_is_serialized_and_clears_draft():
+    result = _fee_workspace_result(MATERIAL_CELL_QUEUE_FIXTURE + r"""
+input.value='60';const first=w.saveMaterialFeeCell(input);await new Promise(resolve=>setImmediate(resolve));
+input.value='40';const second=w.saveMaterialFeeCell(input);
+releases.shift()({ok:true,batch_modified:'M2'});await new Promise(resolve=>setImmediate(resolve));
+assert.deepEqual(calls.map(call=>call.args.value),['60','40']);
+releases.shift()({ok:true,batch_modified:'M3'});await Promise.all([first,second]);
+console.log(JSON.stringify({values:calls.map(call=>call.args.value),modified:calls.map(call=>call.args.expected_modified),
+  maxActive,pending:state.pendingWrites.size,drafts:state.materialDrafts,errors:state.materialSaveErrors}));
+""")
+    assert result == {
+        "values": ["60", "40"],
+        "modified": ["M1", "M2"],
+        "maxActive": 1,
+        "pending": 0,
+        "drafts": {},
+        "errors": {},
+    }
+
+
 def test_shipment_value_is_in_bulk_paste_columns_and_goods_value_is_audit_only():
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={};w.materialFeeState={batchName:'',showAuxiliary:true};
