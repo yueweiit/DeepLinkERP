@@ -1652,6 +1652,31 @@ def _load_json(value: Any, default: Any) -> Any:
     return loaded if isinstance(loaded, type(default)) else default
 
 
+_PUBLIC_AI_HIDDEN_KEYS = frozenset({
+    "_price_metadata", "_verified_prior_item", "purchase_fact", "purchase_fact_history",
+    "settlement_original_values", "ai_fill_original_values",
+})
+
+
+def _public_ai_payload(value: Any) -> Any:
+    """Remove server-only evidence recursively at every public AI status boundary."""
+    if isinstance(value, list):
+        return [_public_ai_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, nested in value.items():
+        key_text = str(key)
+        if key_text.startswith("_review_") or key_text in _PUBLIC_AI_HIDDEN_KEYS:
+            continue
+        if key_text == "extra_json" and isinstance(nested, str):
+            parsed = _load_json(nested, {})
+            result[key] = _json(_public_ai_payload(parsed)) if parsed else nested
+        else:
+            result[key] = _public_ai_payload(nested)
+    return result
+
+
 def _assert_run_batch(run: Any, batch_name: str) -> None:
     if str(_record_value(run, "batch") or "") != str(batch_name or ""):
         raise ValueError("AI 草稿任务不属于当前批次。")
@@ -1723,7 +1748,7 @@ def get_material_ai_fill_status(
                 packing_proposal_count += 1
         else:
             packing_proposal_count += 1
-    return {
+    return _public_ai_payload({
         "ok": True,
         "run_id": str(_record_value(run, "name") or ""),
         "batch_name": str(_record_value(run, "batch") or ""),
@@ -1754,7 +1779,7 @@ def get_material_ai_fill_status(
             "packing_proposal_count": packing_proposal_count,
             "fee_proposal_count": fee_proposal_count,
         },
-    }
+    })
 
 
 def get_source_ai_review_status(
@@ -1813,7 +1838,7 @@ def get_source_ai_review_status(
                       error_message="说明、资料或成本版本已变化，请重新分析；旧草稿不能确认填充。")
     if result.get("unchanged"):
         result["review_mode"] = True
-        return result
+        return _public_ai_payload(result)
     run = repo.get_run(selected_run_id)
     result.update(
         {
@@ -1831,7 +1856,7 @@ def get_source_ai_review_status(
             result["row_review"] = review_catalog(repo, str(batch_name), run)
         except ValueError as error:
             result.update(status="STALE", stale=True, error_message=str(error))
-    return result
+    return _public_ai_payload(result)
 
 
 def apply_material_ai_fill(

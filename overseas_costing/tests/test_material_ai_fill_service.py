@@ -1601,6 +1601,46 @@ def test_status_and_discard_return_public_payload_without_mutating_materials() -
     assert repository.applied == []
 
 
+def test_public_status_payloads_deeply_remove_server_purchase_evidence() -> None:
+    repository = _LifecycleRepository(status="FAILED")
+    private_row = {
+        "material_code": "SKU-1",
+        "_review_purchase_values": {"unit_price": 12},
+        "_review_price_metadata": {"logistics_row": {"purchase_fact": {"unit_price": 12}}},
+        "_verified_prior_item": {"name": "OLD-ITEM", "goods_value": 20},
+        "extra_json": json.dumps({
+            "logistics_row": {"identity": "LINE", "purchase_fact": {"unit_price": 12}},
+            "settlement_original_values": {"name": "OLD-ITEM", "goods_value": 20},
+            "ai_fill_original_values": {"name": "OLDER-ITEM", "goods_value": 10},
+        }),
+    }
+    candidate = {"proposal_id": "P", "proposal_type": "logistics_reconcile",
+                 "payload": {"rows": [private_row]}}
+    repository.run.update(
+        candidates_json=[candidate],
+        draft_json={"proposals": [candidate], "autofill_preview": {"items": [private_row]},
+                    "row_previews": {"PREVIEW": {"rows": [private_row]}}},
+    )
+
+    statuses = [
+        get_material_ai_fill_status("B1", "RUN-1", repository=repository),
+        get_source_ai_review_status("B1", "RUN-1", repository=repository),
+    ]
+
+    for status in statuses:
+        public = json.dumps(status, ensure_ascii=False)
+        assert "_review_" not in public
+        assert "_verified_prior_item" not in public
+        assert "purchase_fact" not in public
+        assert "settlement_original_values" not in public
+        assert "ai_fill_original_values" not in public
+        assert "OLD-ITEM" not in public and "OLDER-ITEM" not in public
+        assert "candidates" in status and "draft" in status
+    assert "proposals" in statuses[1]
+    assert "_review_price_metadata" in json.dumps(repository.run["candidates_json"], ensure_ascii=False)
+    assert "purchase_fact" in json.dumps(repository.run["draft_json"], ensure_ascii=False)
+
+
 def test_status_can_return_unchanged_payload_without_large_draft() -> None:
     repository = _LifecycleRepository(status="RUNNING")
 

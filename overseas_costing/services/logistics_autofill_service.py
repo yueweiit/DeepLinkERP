@@ -199,7 +199,7 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         row["extra_json"] = json.dumps(metadata, ensure_ascii=False, default=str)
         if old.get("_purchase_fact_enriched"):
             row["_review_purchase_values"] = {
-                field: row.get(field)
+                field: fact.get(field)
                 for field in ("unit_price", "purchase_currency", "purchase_uom", "unit_price_uom")
             }
             row["_review_price_metadata"] = deepcopy(metadata)

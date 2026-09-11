@@ -273,13 +273,12 @@ def test_two_consecutive_replace_all_runs_keep_current_values_conflicts_and_vers
     assert conflict["calculated_amount_rmb"] == "30.000000"
 
 
-def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_value():
+def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_value(monkeypatch):
     from copy import deepcopy
 
     from overseas_costing.services import material_ai_fill_service as ai
     from overseas_costing.services import material_ai_selection_service as selection
     from overseas_costing.services.logistics_purchase_facts_service import enrich_logistics_purchase_facts
-    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
 
     store, ledger, batch, version, item, *_ = settlement_fixture.__wrapped__()
     item = ledger.put("item", item["name"], {
@@ -412,12 +411,51 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
     assert shipment_value(first_saved)["status"] == "automatic"
     assert shipment_value(first_saved)["amount_rmb"] == "20.000000"
 
-    metadata = json.loads(first_saved["extra_json"])
-    metadata["manual_shipment_valuation"] = build_manual_shipment_valuation(
-        first_saved, 25, actor="finance", reason="confirmed", confirmed_at="now")
-    ledger.put("item", first_saved["name"], {
-        "goods_value": 25, "extra_json": json.dumps(metadata),
-    })
+    from types import SimpleNamespace
+    from overseas_costing.services import calculate_service, effective_source_values
+
+    class ItemDocument:
+        def __init__(self, name):
+            self.__dict__.update(ledger.get("item", name))
+
+        def as_dict(self):
+            return dict(self.__dict__)
+
+        def save(self, **_kwargs):
+            ledger.put("item", self.name, self.as_dict())
+
+    class EditDB:
+        def sql(self, *_args, **_kwargs):
+            return [{"current_version": ledger.get("batch", batch["name"])["current_version"],
+                     "confirm_status": "Pending", "writeback_status": "Not Started",
+                     "version_status": "Active"}]
+
+        def set_value(self, *_args, **_kwargs):
+            return None
+
+        def get_value(self, doctype, _name, fieldname=None, **_kwargs):
+            return "M" if doctype == "Overseas Cost Batch" and fieldname == "modified" else None
+
+        def commit(self):
+            return None
+
+    fake_frappe = SimpleNamespace(
+        db=EditDB(), session=SimpleNamespace(user="finance@example.com"),
+        utils=SimpleNamespace(now=lambda: "2026-09-11 10:00:00"),
+        get_doc=lambda _doctype, name: ItemDocument(name),
+    )
+    monkeypatch.setattr(calculate_service, "_frappe", fake_frappe)
+    monkeypatch.setattr(calculate_service, "_insert_audit_log", lambda **_kwargs: None)
+    monkeypatch.setattr(effective_source_values, "batch_source_context", lambda *_args, **_kwargs: {})
+
+    manual_result = calculate_service.update_item_field(
+        first_saved["name"], "shipment_value_rmb", "25", version_name=first_version,
+        remark="财务确认", _skip_edit_check=True,
+    )
+    assert manual_result["valuation"]["status"] == "manual"
+    first_saved = ledger.get("item", first_saved["name"])
+    assert first_saved["manual_override_flag"] == 1
+    assert shipment_value(first_saved)["amount_rmb"] == "25"
     refreshed_purchase = deepcopy(purchase_source)
     refreshed_purchase.update(source_id="SOURCE-2", source_hash="PURCHASE-HASH-2",
                               approval_no="PURCHASE-2")
