@@ -1438,10 +1438,14 @@ def update_item_field(
             expected_modified=expected_modified,
         )
     from overseas_costing.services.shipment_cost_service import number as shipment_number
-    from overseas_costing.services.shipment_cost_service import object_json, shipment_input_fingerprint, shipment_value
+    from overseas_costing.services.shipment_cost_service import (
+        legacy_manual_shipment_valuation, object_json, shipment_input_fingerprint, shipment_value,
+    )
     existing_metadata = object_json(getattr(item_doc, "extra_json", None))
     existing_manual = existing_metadata.get("manual_shipment_valuation")
-    old_value = existing_manual.get("amount_rmb") if is_shipment_value and isinstance(existing_manual, dict) else getattr(item_doc, fieldname, None)
+    existing_legacy_manual = legacy_manual_shipment_valuation(existing_metadata)
+    active_manual = existing_manual if isinstance(existing_manual, dict) else existing_legacy_manual
+    old_value = active_manual.get("amount_rmb") if is_shipment_value and isinstance(active_manual, dict) else getattr(item_doc, fieldname, None)
     if expense_physical:
         old_value = project_source_values(item_doc.as_dict(),source_context).get(fieldname)
     if (fieldname in {'material_code', 'product_name', 'spec_model'}
@@ -1479,7 +1483,7 @@ def update_item_field(
     if is_shipment_value:
         current_row = project_source_values(item_doc.as_dict(), source_context)
         if coerced_value == "":
-            same_value = not isinstance(existing_manual, dict)
+            same_value = not isinstance(active_manual, dict)
         else:
             same_value = (shipment_number(old_value) == shipment_number(coerced_value)
                           and isinstance(existing_manual, dict)
@@ -1509,8 +1513,23 @@ def update_item_field(
     if is_shipment_value:
         from overseas_costing.services.shipment_cost_service import (
             build_legacy_shipment_valuation, build_manual_shipment_valuation,
+            restore_legacy_manual_prior,
         )
         metadata = object_json(item_doc.extra_json)
+        had_legacy_manual = isinstance(existing_legacy_manual, dict)
+        if had_legacy_manual:
+            legacy_prior = restore_legacy_manual_prior(
+                project_source_values(item_doc.as_dict(), source_context), existing_legacy_manual,
+            )
+            if (legacy_prior is None
+                    and shipment_number(item_doc.goods_value) != shipment_number(existing_legacy_manual.get("amount_rmb"))):
+                legacy_prior = build_legacy_shipment_valuation(
+                    project_source_values(item_doc.as_dict(), source_context)
+                )
+            if legacy_prior is None:
+                metadata.pop("shipment_valuation", None)
+            else:
+                metadata["shipment_valuation"] = legacy_prior
         if coerced_value == "":
             if (not any(key in metadata for key in ("shipment_valuation", "settlement_cargo"))
                     and isinstance(existing_manual, dict)
@@ -1524,7 +1543,8 @@ def update_item_field(
             item_doc.goods_value = 0
         else:
             current_row = project_source_values(item_doc.as_dict(), source_context)
-            if not any(key in metadata for key in ("shipment_valuation", "settlement_cargo")):
+            if (not had_legacy_manual
+                    and not any(key in metadata for key in ("shipment_valuation", "settlement_cargo"))):
                 legacy_prior = build_legacy_shipment_valuation(current_row)
                 if legacy_prior is not None:
                     metadata["shipment_valuation"] = legacy_prior

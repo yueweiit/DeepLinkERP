@@ -680,6 +680,21 @@ def _automatic_settlement_item(**changes):
     })}
 
 
+def _legacy_manual_item(*, prior=False, manual_flag="manual_override_flag"):
+    valuation = {
+        "amount_rmb": "25", "currency": "RMB", "quantity": "2", "uom": "件",
+        "method": "manual", "status": "manual", "confirmed": True,
+        manual_flag: 1, "error": "",
+    }
+    if prior:
+        valuation.update(
+            prior_amount_rmb="20",
+            prior_evidence={"amount_rmb": "20", "currency": "RMB", "quantity": "2",
+                            "uom": "件", "method": "SYSTEM_EXCEL", "status": "automatic", "error": ""},
+        )
+    return {"goods_value": 25, "extra_json": json.dumps({"shipment_valuation": valuation})}
+
+
 def test_update_virtual_shipment_value_saves_server_manual_metadata(monkeypatch) -> None:
     items = {"I1": {}}
     service, _db = _install_item_edit_frappe(monkeypatch, items)
@@ -797,6 +812,66 @@ def test_clearing_manual_value_with_no_prior_returns_to_missing(monkeypatch, fie
     assert cleared["valuation"]["amount_rmb"] is None
     assert cleared["valuation"]["error"] == "GOODS_VALUE_MISSING"
     assert cleared["goods_value"] == 0 and items["I1"].goods_value == 0
+
+
+@pytest.mark.parametrize("fieldname", ["shipment_value_rmb", "goods_value"])
+@pytest.mark.parametrize("manual_flag", ["manual", "manual_override", "manual_override_flag"])
+def test_clearing_legacy_shipment_valuation_manual_removes_manual_state(
+    monkeypatch, fieldname, manual_flag,
+) -> None:
+    items = {"I1": _legacy_manual_item(manual_flag=manual_flag)}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field(
+        "I1", fieldname, "", remark="撤销历史人工值", _skip_edit_check=True,
+    )
+
+    metadata = json.loads(items["I1"].extra_json)
+    assert result["ok"] is True and result["changed"] is True
+    assert result["old_value"] == "25"
+    assert result["valuation"]["status"] == "missing"
+    assert result["valuation"]["amount_rmb"] is None
+    assert result["goods_value"] == 0 and items["I1"].goods_value == 0
+    assert "shipment_valuation" not in metadata
+
+
+@pytest.mark.parametrize("fieldname", ["shipment_value_rmb", "goods_value"])
+def test_new_manual_override_does_not_resurrect_legacy_manual_after_clear(monkeypatch, fieldname) -> None:
+    items = {"I1": _legacy_manual_item()}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    saved = service.update_item_field(
+        "I1", fieldname, "99", remark="新人工值", _skip_edit_check=True,
+    )
+    cleared = service.update_item_field(
+        "I1", fieldname, "", remark="撤销新人工值", _skip_edit_check=True,
+    )
+
+    assert saved["valuation"]["status"] == "manual"
+    assert saved["valuation"]["amount_rmb"] == "99"
+    assert cleared["valuation"]["status"] == "missing"
+    assert cleared["valuation"]["amount_rmb"] is None
+    assert cleared["goods_value"] == 0 and items["I1"].goods_value == 0
+    assert "shipment_valuation" not in json.loads(items["I1"].extra_json)
+
+
+@pytest.mark.parametrize("fieldname", ["shipment_value_rmb", "goods_value"])
+def test_clearing_legacy_manual_restores_only_structured_automatic_prior(monkeypatch, fieldname) -> None:
+    items = {"I1": _legacy_manual_item(prior=True)}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+
+    result = service.update_item_field(
+        "I1", fieldname, "", remark="恢复系统证据", _skip_edit_check=True,
+    )
+
+    metadata = json.loads(items["I1"].extra_json)
+    assert result["changed"] is True
+    assert result["valuation"]["status"] == "automatic"
+    assert result["valuation"]["amount_rmb"] == "20"
+    assert result["goods_value"] == 20 and items["I1"].goods_value == 20
+    assert metadata["shipment_valuation"]["status"] == "automatic"
+    assert not any(metadata["shipment_valuation"].get(flag)
+                   for flag in ("manual", "manual_override", "manual_override_flag"))
 
 
 def test_legacy_positive_goods_mirror_survives_unstructured_price_edit(monkeypatch) -> None:

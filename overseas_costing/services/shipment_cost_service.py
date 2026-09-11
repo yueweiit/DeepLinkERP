@@ -1,5 +1,6 @@
 """Effective shipment values, without rewriting read-only purchase facts."""
 import json
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from overseas_costing.utils.field_mapper import normalize_unit
 from overseas_costing.services.logistics_settlement.model import currency, digest
@@ -82,6 +83,58 @@ def build_legacy_shipment_valuation(row):
             'source_doc_no': str(row.get('source_doc_no') or ''),
         },
         'method': 'LEGACY_PURCHASE',
+        'status': 'automatic',
+        'error': '',
+    }
+
+
+def legacy_manual_shipment_valuation(metadata):
+    """Return the pre-unification manual value stored in shipment_valuation."""
+    if not isinstance(metadata, dict):
+        return None
+    valuation = metadata.get('shipment_valuation')
+    if not isinstance(valuation, dict):
+        return None
+    return valuation if any(valuation.get(flag) for flag in (
+        'manual', 'manual_override', 'manual_override_flag',
+    )) else None
+
+
+def restore_legacy_manual_prior(row, valuation):
+    """Promote only independently evidenced prior RMB candidates to automatic state."""
+    if not isinstance(valuation, dict):
+        return None
+    evidence = valuation.get('prior_evidence')
+    if not isinstance(evidence, dict) or not evidence:
+        return None
+    if (evidence.get('error')
+            or any(evidence.get(flag) for flag in ('manual', 'manual_override', 'manual_override_flag'))
+            or str(evidence.get('status') or 'automatic') != 'automatic'
+            or not any(key in evidence for key in (
+                'amount_rmb', 'input_fingerprint', 'input_evidence', 'source_doc_no', 'goods_value',
+            ))):
+        return None
+    amount = number(valuation.get('prior_amount_rmb'))
+    if amount is None:
+        amount = number(evidence.get('amount_rmb'))
+    if amount is None or amount < 0:
+        return None
+    inputs = shipment_input(row)
+    quantity = _decimal_text(evidence.get('quantity')) or _decimal_text(valuation.get('quantity')) or inputs['quantity']
+    uom = normalize_unit(evidence.get('uom') or valuation.get('uom')) or inputs['uom']
+    method = str(evidence.get('method') or 'LEGACY_PURCHASE')
+    if method.lower() == 'manual':
+        method = 'LEGACY_PURCHASE'
+    return {
+        'amount_rmb': _decimal_text(amount),
+        'currency': 'RMB',
+        'quantity': quantity,
+        'uom': uom,
+        'input_fingerprint': evidence.get('input_fingerprint') or digest(
+            {'quantity': quantity, 'uom': uom}
+        ),
+        'input_evidence': deepcopy(evidence),
+        'method': method,
         'status': 'automatic',
         'error': '',
     }
