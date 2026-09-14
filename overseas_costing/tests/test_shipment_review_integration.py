@@ -1,4 +1,5 @@
 """Minimal, non-identifying workbook regression from the verified 6262 shipment."""
+import json
 from copy import deepcopy
 from decimal import Decimal
 
@@ -14,8 +15,8 @@ from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepos
 from overseas_costing.utils.excel_workbook import read_packing_grid
 
 
-@pytest.mark.parametrize('already_eight', [False, True])
-def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tmp_path, monkeypatch, already_eight):
+@pytest.mark.parametrize('existing_state', ['fresh', 'protected', 'masked_missing'])
+def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tmp_path, monkeypatch, existing_state):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = '装箱'
@@ -33,10 +34,14 @@ def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tm
     items = existing_items()
     for row in items:
         row.update(unit_price=.13 if row['material_code'] == 'FL003377' else .151, unit='个', purchase_currency='RMB')
-    if already_eight:
+    if existing_state != 'fresh':
         items = build_logistics_reconciliation(items, approval())['payload']['rows']
         for row in items[1:3]:
             row.update(gross_weight_kg=4.85, volume_m3=.00432, manual_override_flag=1)
+            if existing_state == 'masked_missing':
+                metadata = json.loads(row.get('extra_json') or '{}')
+                metadata['settlement_packing_missing'] = ['gross_weight_kg', 'volume_m3']
+                row['extra_json'] = json.dumps(metadata, ensure_ascii=False)
     before = deepcopy(items)
     repo = _LifecycleRepository(status='QUEUED')
     repo.sources = [approval(), {'source_kind':'approval_attachment','source_id':'X','source_hash':'h1',
@@ -67,7 +72,7 @@ def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tm
     assert [Decimal(row['shipment_value_rmb']) for row in preview['items']] == list(map(Decimal,
         ['14496','604','604','14496','15100','15100','2860','10560']))
     assert preview['cost_summary']['total_cost_rmb'] == '81576.20'
-    if already_eight:
+    if existing_state == 'protected':
         assert (preview['items'][2]['gross_weight_kg'], preview['items'][2]['volume_m3']) == (4.85, .00432)
     else:
         assert Decimal(str(preview['items'][2]['gross_weight_kg'])) == 0
@@ -77,6 +82,17 @@ def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tm
     assert [row['allocated_fees_rmb'] for row in preview['project_summary']] == ['5922.77','682.00','1151.43']
     assert len(preview['fees']) == 1
     assert items == before and repo.applied == []
-    if already_eight:
+    if existing_state != 'fresh':
         assert [row['stable_line_key'] for row in preview['items']] == [row['stable_line_key'] for row in items]
+    if existing_state == 'protected':
         assert [(row['gross_weight_kg'],row['volume_m3']) for row in preview['items'][1:3]] == [(4.85,.00432)] * 2
+    if existing_state == 'masked_missing':
+        from overseas_costing.services.material_ai_row_selection import catalog
+        review = catalog(items, repo.run['candidates_json'], repo.get_fees('B1', 'V1'), {},
+                         run_id='RUN-1', sources=manifest)
+        source_rows = [row for row in review['rows'] if row['origin'] == 'source']
+        assert len(source_rows) == 8
+        second = next(row for row in source_rows
+                      if row['values'].get('material_code') == 'FL000429'
+                      and Decimal(str(row['values'].get('actual_shipped_qty'))) == 4000)
+        assert Decimal(str(second['values']['gross_weight_kg'])) == Decimal('9.7')

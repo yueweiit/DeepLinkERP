@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -40,6 +41,22 @@ def _is_zero(value: Any) -> bool:
 def is_effectively_missing(fieldname: str, value: Any, item: dict | None = None) -> bool:
     """Treat UI placeholders and field-specific default zeroes as missing evidence."""
 
+    metadata = (item or {}).get("extra_json")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+    if isinstance(metadata, dict):
+        missing_fields = metadata.get("settlement_packing_missing") or []
+        if isinstance(missing_fields, (list, tuple, set)) and str(fieldname or "") in {
+            str(field or "") for field in missing_fields
+        }:
+            # A source change can intentionally invalidate an old physical value
+            # while leaving that value in legacy columns for audit/history.  The
+            # review engine must agree with the projected grid and treat it as
+            # empty so fresh, trusted packing evidence can fill it.
+            return True
     if is_placeholder_token(value):
         return True
     field = str(fieldname or "")
