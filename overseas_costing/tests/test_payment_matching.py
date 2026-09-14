@@ -45,7 +45,7 @@ def test_mixed_payment_fee_scopes_require_review(label):
     assert logical_fee_key(fee_scope(label), "AIR") is None
 
 
-@pytest.mark.parametrize("title", ["Budget Approval", "Business Travel", "BUY request", "buccaneer"])
+@pytest.mark.parametrize("title", ["Budget Approval", "Business Travel", "BUY request", "buccaneer", "Malibu", "Cebu", "Caribu", "Zebu"])
 def test_bu_fallback_rejects_incidental_letter_sequences(title):
     from overseas_costing.services.logistics_settlement.freight_lines import financial_candidate
     assert financial_candidate({"title": title}, {}) is False
@@ -249,6 +249,37 @@ def test_explicit_reference_ranks_above_ordinary_shared_identifier_with_matching
 
     assert [row['id'] for row in page['sources']]==[explicit['id'],weak['id']]
     assert [row['local_match_score'] for row in page['sources']]==[3000,1000]
+
+
+def test_stale_freight_line_snapshot_is_not_an_exact_source_or_payment_score():
+    from overseas_costing.services.logistics_settlement import freight_matching
+    from overseas_costing.tests.test_freight_lines import monthly
+    import sqlite3
+    store=Store.sqlite(sqlite3.connect(':memory:'));store.install()
+    old_logistics=store.ingest(parse_source(source('old-waybill','logistics',text='DHL运单号1234567890'),logistics_codes={'logistics'}))
+    new_logistics=store.ingest(parse_source(source('new-waybill','logistics',text='DHL运单号1234567892'),logistics_codes={'logistics'}))
+    raw=monthly()
+    first=store.ingest(parse_source(raw,logistics_codes={'logistics'}))
+    raw['settlement_documents'][0]['freight_tables'][0]['rows'][0]['fields']['运单号']='1234567892'
+    raw['updated_at']='2026-09-16T00:00:00+00:00'
+    current=store.ingest(parse_source(raw,logistics_codes={'logistics'}))
+    assert first['snapshot']!=current['snapshot']
+    unrelated_raw=_financial('newer-unrelated','付款',text='办公用品')
+    unrelated_raw['updated_at']='2026-09-17T00:00:00+00:00'
+    unrelated=store.ingest(parse_source(unrelated_raw,logistics_codes={'logistics'}))
+
+    old_sources=freight_matching.payment_pool(store,old_logistics['id'],limit=2)['sources']
+    old_page=next(row for row in old_sources if row['id']==current['id'])
+    new_page=freight_matching.payment_pool(store,new_logistics['id'],limit=1)['sources'][0]
+
+    assert old_sources[0]['id']==unrelated['id']
+    assert old_page['local_match_score']==0
+    assert 'exact' not in ' '.join(old_page['local_match_reasons']).lower()
+    assert current['id'] not in freight_matching._rule_source_ids(store,old_logistics)
+    assert freight_matching.rule_pass(store,old_logistics['id'])==[]
+    assert new_page['local_match_score']>=3000
+    assert current['id'] in freight_matching._rule_source_ids(store,new_logistics)
+    assert freight_matching.rule_pass(store,new_logistics['id'])[0]['expense_id']==current['id']
 
 
 def test_unrelated_payment_does_not_stale_rule_fingerprint():

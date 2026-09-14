@@ -29,8 +29,8 @@ def financial_candidate(row, fields):
     title=str(row.get('process_name') or row.get('template_name') or row.get('title') or (row.get('raw_payload') or {}).get('title') or '')
     text=norm(title+' '+dumps(fields))
     dynamic=row.get('financial_scope') is True or row.get('registered_financial_flow') is True
-    bu=bool(re.search(r'(?:^|[^A-Za-z])BU(?=$|[^A-Za-z])',title,re.I) or
-            re.search(r'(?:[A-Za-z]{2,}|[\u4e00-\u9fff]{2,})BU(?=$|[^A-Za-z])',title,re.I))
+    bu=bool(re.search(r'(?<![A-Za-z])BU(?=$|[^A-Za-z])',title) or
+            re.search(r'[A-Za-z]{2,}BU(?=$|[^A-Za-z])',title))
     registered=dynamic or any(x in norm(title) for x in ('采购支出','运营支出','费用支出','月结','报销','付款','支付')) or bu
     if registered:return True
     financial=any(x in norm(title) for x in ('gastos','pago','reembolso'))

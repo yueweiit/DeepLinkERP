@@ -160,7 +160,7 @@ class Store:
             exact=["EXISTS (SELECT 1 FROM oc_ls_freight_line fl JOIN oc_ls_identifier li "
                    "ON li.source_id=%s AND ((li.token_type='waybill' AND fl.waybill=li.token) "
                    "OR (li.token_type='approval' AND fl.approval_no=li.token)) "
-                   "WHERE fl.source_id=oc_ls_source.id)"]
+                   "WHERE fl.source_id=oc_ls_source.id AND fl.snapshot=oc_ls_source.snapshot)"]
             exact_params=[logistics_source_id]
             if logistics_instance:
                 exact.append("EXISTS (SELECT 1 FROM oc_ls_reference r WHERE r.source_id=oc_ls_source.id "

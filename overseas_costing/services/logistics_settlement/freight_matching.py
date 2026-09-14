@@ -34,6 +34,13 @@ def current_lines_many(store,sources):
     return result
 
 
+def _current_line_source_ids(store,column,token):
+    if column not in ('waybill','approval_no'):raise ValueError('未知物流标识类型')
+    return {row['source_id'] for row in store.sql(
+        f'SELECT fl.source_id FROM oc_ls_freight_line fl JOIN oc_ls_source s '
+        f'ON s.id=fl.source_id AND s.snapshot=fl.snapshot WHERE fl.{column}=%s',(token,))}
+
+
 def candidates(store,logistics_id):
     logistics=store.get('source',logistics_id)
     if not logistics or logistics.get('invalid'): return []
@@ -80,7 +87,7 @@ def _rule_source_ids(store,logistics):
     for kind,token in logistics['identifiers']:
         column='approval_no' if kind=='approval' else 'waybill' if kind=='waybill' else None
         if column:
-            source_ids.update(r['source_id'] for r in store.find('freight_line',**{column:token}))
+            source_ids.update(_current_line_source_ids(store,column,token))
             source_ids.update(r['source_id'] for r in store.find('identifier',corp=logistics['corp'],token=token,token_type=kind))
     source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
     return source_ids
@@ -90,7 +97,7 @@ def _ranking_priority_source_ids(store,logistics):
     source_ids=set()
     for kind,token in logistics['identifiers']:
         column='approval_no' if kind=='approval' else 'waybill' if kind=='waybill' else None
-        if column:source_ids.update(r['source_id'] for r in store.find('freight_line',**{column:token}))
+        if column:source_ids.update(_current_line_source_ids(store,column,token))
     source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
     return source_ids
 
@@ -223,7 +230,7 @@ def input_state(store,logistics_id):
     for kind,token in logistics.get('identifiers') or []:
         related_ids.update(r['source_id'] for r in store.find('identifier',corp=logistics['corp'],token=token))
         if kind in ('waybill','approval'):
-            related_ids.update(r['source_id'] for r in store.find('freight_line',**{'waybill' if kind=='waybill' else 'approval_no':token}))
+            related_ids.update(_current_line_source_ids(store,'waybill' if kind=='waybill' else 'approval_no',token))
     related_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
     expenses=[s for sid in sorted(related_ids) if (s:=store.get('source',sid)) and s['kind']=='expense' and s['corp']==logistics['corp'] and not s['invalid']]
     decisions=[(c['id'],c['revision'],c['status']) for c in candidates(store,logistics_id) if c['status']=='rejected']
