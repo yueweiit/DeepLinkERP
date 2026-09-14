@@ -3,12 +3,16 @@
   }
 
   renderFreightStrip(data) {
-    const claims = data.freight?.claims || [];
+    const unified = Array.isArray(data.payment_claims) || Array.isArray(data.payment_candidates) || !!data.payment_matching;
+    const readOnly = unified && this.paymentReadOnly(data);
+    const claims = unified ? (data.payment_claims || []).filter(row => row.active === true
+      || (!Object.hasOwn(row, 'active') && !['revoked', 'inactive'].includes(String(row.status || '').toLowerCase())))
+      : data.freight?.claims || [];
     const amount = claims.length ? claims.map(r => `${r.applied_amount ?? r.amount} ${r.currency}`).join(" + ") : "待查找／待确认";
-    return `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "历史版本" : "本票"}当前采用运费：${this.escape(amount)}</strong>
+    return `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "历史版本" : "本票"}当前采用${unified ? '实际费用' : '运费'}：${this.escape(amount)}</strong>
       <small>装箱：${this.escape(data.packing?.message || "保留当前资料，变更单独核对")}</small>
-      ${(data.freight?.issues || []).map(v => `<small class="ocw-settlement-notice">${this.escape(v)}</small>`).join("")}</div>
-      <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.historical ? "查看历史运费／装箱" : "查找实际运费／装箱变更"}</button>
+      ${(data.payment_blocking_reasons || data.freight?.issues || []).map(v => `<small class="ocw-settlement-notice">${this.escape(v)}</small>`).join("")}</div>
+      <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${readOnly ? "查看历史支付流程/装箱变更" : "实际支付流程/装箱变更"}</button>
       ${data.logistics?.open_url ? '<button class="ocw-outline-btn" data-settlement-strip-action="source">打开国际物流原单</button>' : ""}</div></div>`;
   }
 
@@ -24,19 +28,49 @@
     return `<button type="button" class="${primary ? 'ocw-primary-btn' : 'ocw-outline-btn'}" data-settlement-action="${action}" ${attributes} ${disabled ? 'disabled' : ''}>${label}</button>`;
   }
 
+  paymentReadOnly(data = {}) {
+    const confirmed = String(data.confirm_status || data.version_status || '').toLowerCase();
+    const writeback = String(data.writeback_status || '').toLowerCase();
+    return !!(data.historical || data.readonly || data.locked
+      || this.detailState?.readonly === true
+      || ['confirmed', 'archived', 'final'].includes(confirmed)
+      || ['success', 'completed', 'posted'].includes(writeback));
+  }
+
+  async ensurePaymentWriteSession(state) {
+    if (this.paymentReadOnly(state.data || {})) throw new Error('当前版本只读，不能修改实际支付资料');
+    if (this.detailState?.batchName !== state.batchName || typeof this.ensureEditSession !== 'function') {
+      throw new Error('未取得当前批次编辑上下文，请返回批次详情后重试');
+    }
+    const draft = state.freightDraft;
+    if (!(await this.ensureEditSession())) {
+      state.freightDraft = draft;
+      throw new Error('未取得当前批次编辑权，输入已保留，请稍后重试');
+    }
+    if (!this.detailState.editToken || !this.detailState.expectedModified) {
+      state.freightDraft = draft;
+      throw new Error('编辑权资料不完整，输入已保留，请重新获取编辑权');
+    }
+    return true;
+  }
+
   renderFreightContent(data, state = {}) {
     const tab = state.freightTab || 'freight';
-    const tabs = [['freight', '运费'], ['packing', '装箱来源'], ['audit', '操作记录']];
+    const unified = Array.isArray(data.payment_claims) || Array.isArray(data.payment_candidates) || !!data.payment_matching;
+    const tabs = unified ? [['freight', '实际支付流程'], ['packing', '装箱变更'], ['audit', '操作记录']]
+      : [['freight', '运费'], ['packing', '装箱来源'], ['audit', '操作记录']];
     const view = state.freightView;
+    const paymentViewBlocked = this.paymentReadOnly(data) && view?.kind?.startsWith('payment-');
     let body;
     if (view?.kind === 'evidence') body = this.renderFreightInlineEvidence(state);
     else if (tab === 'packing') body = this.renderFreightPackingSources(data, state);
     else if (tab === 'audit') body = this.renderFreightAudit(data);
     else if (view?.kind === 'search') body = this.renderFreightSearch(state);
+    else if (view?.kind?.startsWith('payment-') && !paymentViewBlocked) body = this.renderPaymentEditor(data, state);
     else if (view) body = this.renderFreightEditor(data, state);
     else body = this.renderFreightFees(data);
     return `<div class="ocw-freight-workspace"><div class="ocw-freight-heading"><div><small>本票国际物流</small><strong>${this.escape(data.logistics?.approval_no || state.batchName || '来源待整理')}</strong></div>${this.freightActionButton('refresh', '刷新', '', false, !!state.freightWriting)}</div>
-      <nav class="ocw-freight-tabs" role="tablist" aria-label="运费与装箱核对">${tabs.map(([key, label]) => this.freightActionButton('freight-tab', label, `data-freight-tab="${key}" role="tab" aria-selected="${key === tab}"`, false, !!state.freightWriting)).join('')}</nav>
+      <nav class="ocw-freight-tabs" role="tablist" aria-label="实际支付流程与装箱变更">${tabs.map(([key, label]) => this.freightActionButton('freight-tab', label, `data-freight-tab="${key}" role="tab" aria-selected="${key === tab}"`, false, !!state.freightWriting)).join('')}</nav>
       ${data.historical ? '<p class="ocw-settlement-hint">历史版本仅供追溯，展示采用时的资料与证据。</p>' : ''}
       ${state.freightMessage ? `<p class="ocw-settlement-notice" role="status">${this.escape(state.freightMessage)}</p>` : ''}
       ${state.freightError ? `<p class="ocw-settlement-notice is-error" role="alert">${this.escape(state.freightError)}</p>` : ''}
@@ -44,6 +78,7 @@
   }
 
   renderFreightFees(data) {
+    if (Array.isArray(data.payment_claims) || Array.isArray(data.payment_candidates) || data.payment_matching) return this.renderPaymentFees(data);
     const claims = data.freight?.claims || [];
     const header = '<thead><tr><th>费用名称</th><th>运单号</th><th>原始金额</th><th>当前采用金额</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>';
     return `<section><h4 class="ocw-freight-section-title">已审批运费</h4><div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table ocw-freight-fee-table">${header}<tbody>${claims.map(row => `<tr><td>${this.escape(row.label || '运输费')}</td><td>${this.escape(row.waybill || '原单明确关联')}</td><td class="ocw-freight-money">${this.freightMoney(row.original_amount ?? (row.manual_corrected ? null : row.amount), row.currency)}</td><td class="ocw-freight-money"><strong>${this.freightMoney(row.applied_amount ?? row.amount, row.currency)}</strong></td><td>${this.freightSourceCell(row)}</td><td><span class="ocw-freight-status">${row.manual_corrected ? '人工更正' : '已采用'}</span></td><td><div class="ocw-freight-row-actions">${row.line_id ? this.freightActionButton('freight-evidence', '查看证据', `data-line="${this.escape(row.line_id)}"`) : ''}${!data.historical ? ['amount', 'replace', 'revoke'].map((action, index) => this.freightActionButton(`freight-${action}`, ['改金额', '换来源', '撤销采用'][index], `data-claim="${this.escape(row.id)}"`)).join('') : ''}</div></td></tr>`).join('') || '<tr><td colspan="7">尚未采用本票实际运费</td></tr>'}</tbody></table></div>
@@ -56,6 +91,93 @@
         ${(candidate.issues || []).map(issue => `<p class="ocw-settlement-notice">${this.escape(issue)}</p>`).join('')}<div class="ocw-settlement-toolbar">${(candidate.lines || []).length ? this.freightActionButton('freight-review', '核对本票费用', `data-id="${this.escape(candidate.id)}"`, true) : ''}${candidate.packing_available ? this.freightActionButton('packing-review', '查看装箱来源', `data-id="${this.escape(candidate.id)}"`) : ''}${this.freightActionButton('freight-reject', '不是本票', `data-id="${this.escape(candidate.id)}"`)}</div></section>`).join('')}`}`;
   }
 
+  paymentFeeOptions(data = {}) {
+    const mode = String(data.transport_mode || '').toUpperCase();
+    const freight = mode === 'AIR' ? ['international_air_freight', '国际空运费'] : mode === 'EXPRESS'
+      ? ['international_express_fee', '国际快递费'] : ['international_sea_freight', '国际海运费'];
+    return [freight, ['customs_clearance_fee', '清关费'], ['import_tax', '进口税费'], ['destination_delivery', '目的地配送']];
+  }
+
+  paymentFeeLabel(key, data = {}) {
+    return Object.fromEntries(this.paymentFeeOptions(data))[key] || key || '待分类费用';
+  }
+
+  paymentMethodLabel(candidate = {}) {
+    return candidate.method === 'deepseek' ? 'AI匹配（DeepSeek）' : candidate.method === 'manual' || candidate.method === 'reopened'
+      ? '人工匹配' : '规则匹配';
+  }
+
+  paymentConfidence(candidate = {}) {
+    const value = Number(candidate.confidence);
+    return Number.isFinite(value) ? `${Math.round(value * 100)}%` : '—';
+  }
+
+  renderPaymentMatching(data, state = {}) {
+    const rules = data.matching || {};
+    const ai = data.payment_matching || {};
+    const aiRunning = ['queued', 'running'].includes(ai.status);
+    const showForm = state.paymentAiOpen === true;
+    const range = ai.id ? `本轮候选范围 ${this.escape((ai.offset || 0) + 1)}–${this.escape((ai.offset || 0) + (ai.limit || ai.total || 0))}` : '本轮候选范围待选择';
+    return `<section class="ocw-payment-matching"><div class="ocw-payment-match-actions"><div><strong>本票支付来源匹配</strong><small>打开只读取本地缓存；DeepSeek 仅在明确点击后调用。</small></div><div class="ocw-freight-row-actions">
+      ${this.freightActionButton('payment-rule-match', '规则匹配', '', false, !!state.freightLoading)}
+      ${this.freightActionButton('payment-ai-open', 'AI匹配（DeepSeek）', '', true, aiRunning || !!state.freightLoading)}</div></div>
+      <div class="ocw-payment-match-status"><span>规则：${this.escape(rules.status || '未运行')} · 推荐 ${this.escape(rules.recommended ?? 0)}</span><span>AI：${this.escape(ai.status || '未运行')} · 模型 ${this.escape(ai.model || '尚未调用')}</span><span>${range}</span></div>
+      ${ai.error ? `<p class="ocw-settlement-notice is-error">${this.escape(ai.error)}</p>` : ''}
+      ${showForm ? this.renderPaymentAiForm(data, state) : ''}
+      ${ai.has_more ? `<div class="ocw-payment-expand">${state.paymentAiExpandPending ? '<span>将分析下一批最多 50 个同企业已审批候选，会产生新的 DeepSeek 调用。</span>' : ''}${this.freightActionButton(state.paymentAiExpandPending ? 'payment-ai-more-confirm' : 'payment-ai-more', state.paymentAiExpandPending ? '确认扩大候选范围' : '扩大候选范围', '', false, aiRunning)}</div>` : ''}</section>`;
+  }
+
+  renderPaymentAiForm(data, state = {}) {
+    const draft = state.freightDraft || {};
+    return `<div class="ocw-payment-ai-form"><p class="ocw-settlement-hint">可选提示只用于缩小同企业本地候选，AI 只提供建议，不会写入费用或装箱数据。</p><div class="ocw-payment-hint-grid">
+      ${[['waybill','运单号'],['supplier','供应商'],['project','项目'],['date','日期'],['description','说明']].map(([key,label]) => `<label>${label}<input data-freight-field="${key}" value="${this.escape(draft[key] || '')}"></label>`).join('')}
+      <label>本轮最多候选<input type="number" min="1" max="50" data-freight-field="ai_limit" value="${this.escape(draft.ai_limit || data.payment_matching?.limit || 30)}"></label></div>
+      <div class="ocw-freight-row-actions">${this.freightActionButton('payment-ai-run', '开始 AI 匹配', '', true, !!state.freightLoading)}</div></div>`;
+  }
+
+  renderPaymentClaims(data) {
+    const claims = data.payment_claims || [];
+    const pending = data.payment_evidence_pending || [];
+    const readOnly = this.paymentReadOnly(data);
+    return `<section><h4 class="ocw-freight-section-title">已认领实际费用</h4><div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table ocw-payment-claim-table"><thead><tr><th>费用分类</th><th>金额</th><th>来源审批</th><th>状态</th><th>操作</th></tr></thead><tbody>${claims.map(row => {
+      const evidencePending = pending.some(item => item.claim_id === row.id || item.logical_fee_key === row.logical_fee_key);
+      const actions = readOnly ? [] : row.available_actions || [];
+      return `<tr><td>${this.escape(this.paymentFeeLabel(row.logical_fee_key, data))}</td><td class="ocw-freight-money"><strong>${this.freightMoney(row.amount, row.currency)}</strong><small>${this.escape(row.amount_status || 'ACTUAL')}</small></td><td>${this.escape(row.source_approval_no || row.source_title || '付款流程')}</td><td><span class="ocw-freight-status ${row.stale ? 'is-stale' : ''}">${row.stale ? '来源已变更／待复核' : row.active ? '已认领' : this.escape(row.status || '已撤销')}</span>${evidencePending ? '<small class="ocw-freight-missing">附件待归档／可重试</small>' : ''}</td><td><div class="ocw-freight-row-actions">${actions.map(action => this.freightActionButton('payment-amend', ({amount:'改金额',currency:'改币种',status:'改状态',reclassify:'重分类',revoke:'撤销认领'})[action] || action, `data-claim="${this.escape(row.id)}" data-payment-action="${this.escape(action)}"`, false, !!data.historical)).join('')}</div></td></tr>`;
+    }).join('') || '<tr><td colspan="5">尚未认领本票实际支付费用</td></tr>'}</tbody></table></div></section>`;
+  }
+
+  renderPaymentAttachmentList(attachments = [], selectedKeys = [], data = {}, readOnly = false) {
+    const origin = value => value === 'Comment' ? '评论附件' : '表单附件';
+    const editable = selectedKeys.length > 0 && !readOnly;
+    const validKeys = new Set(selectedKeys);
+    return `<div class="ocw-payment-attachments"><strong>费用凭证建议</strong>${attachments.map(row => {
+      const currentKeys = (row.logical_fee_keys || row.suggested_logical_fee_keys || selectedKeys).filter(key => !editable || validKeys.has(key));
+      const options = editable ? `<select multiple aria-label="附件对应费用项" data-payment-attachment-keys="${this.escape(row.document_id)}">${this.paymentFeeOptions(data).filter(([key]) => validKeys.has(key)).map(([key, label]) => `<option value="${key}" ${currentKeys.includes(key) ? 'selected' : ''}>${label}</option>`).join('')}</select>` : '';
+      return `<label class="ocw-payment-attachment ${row.availability !== 'available' ? 'is-pending' : ''}"><input type="checkbox" data-payment-attachment="${this.escape(row.document_id)}" ${row.selected ?? row.default_selected ? 'checked' : ''} ${row.required || readOnly ? 'disabled' : ''}><span><b>${this.escape(row.file_name || '附件')}</b><small>${origin(row.origin)} · ${this.escape(row.attachment_type || '其他')} · ${this.escape(row.status || '待归档')}</small>${row.blocker ? `<small>${this.escape(row.blocker)}</small>` : ''}${options}</span></label>`;
+    }).join('') || '<p class="ocw-settlement-hint">当前付款来源没有可建议关联的附件。</p>'}</div>`;
+  }
+
+  renderPaymentCandidate(candidate, data, state = {}) {
+    const source = candidate.expense || {};
+    const model = candidate.model || (candidate.method === 'deepseek' ? data.payment_matching?.model : '');
+    const total = candidate.approval_total ?? source.amount;
+    const currency = candidate.approval_currency || source.currency;
+    return `<article class="ocw-payment-candidate"><div class="ocw-freight-heading"><div><small>${this.escape(source.process_code || '支付流程')}</small><strong>${this.escape(source.title || '支付流程')}</strong><span>${this.escape(source.approval_no || source.instance || '')}</span></div>${source.open_url ? this.freightActionButton('freight-source', '打开支付原单', `data-id="${this.escape(candidate.id)}"`) : ''}</div>
+      <div class="ocw-payment-candidate-grid"><div><small>审批总额</small><strong>${this.freightMoney(total, currency)}</strong></div><div><small>来源额度</small><strong>已认领 ${this.escape(candidate.active_claimed_amount ?? candidate.claimed ?? 0)} · 剩余 ${this.escape(candidate.remaining_amount ?? candidate.remaining ?? '待复核')}</strong></div><div><small>匹配方式／置信度</small><strong>${this.paymentMethodLabel(candidate)} · ${this.paymentConfidence(candidate)}</strong></div><div><small>模型／来源版本</small><strong>${this.escape(model || '不使用模型')} · ${this.escape(candidate.source_revision || source.snapshot || '待核对')}</strong></div></div>
+      <p>${this.escape(candidate.reason || '请核对本票与支付流程的对应关系')}</p>${this.renderPaymentAttachmentList(candidate.attachments || [])}
+      ${this.paymentReadOnly(data) ? '' : `<div class="ocw-freight-row-actions">${this.freightActionButton('payment-review', '预览并认领费用', `data-id="${this.escape(candidate.id)}"`, true, source.approved === false)}${this.freightActionButton('payment-reject', '不是本票', `data-id="${this.escape(candidate.id)}"`)}</div>`}</article>`;
+  }
+
+  renderPaymentFees(data, state = this.batchSettlementState || {}) {
+    const candidates = data.payment_candidates || data.candidates || [];
+    const rejected = data.payment_rejected_candidates || [];
+    const readOnly = this.paymentReadOnly(data);
+    return `${this.renderPaymentClaims(data)}${readOnly ? '' : this.renderPaymentMatching(data, state)}
+      <section><div class="ocw-settlement-toolbar"><h4 class="ocw-freight-section-title">待确认支付候选</h4></div>${candidates.map(row => this.renderPaymentCandidate(row, data, state)).join('') || '<p class="ocw-settlement-hint">尚未找到可靠候选。可先运行规则匹配，再按需使用 AI。</p>'}</section>
+      ${rejected.length ? `<details class="ocw-payment-rejected"><summary>已否决候选 ${rejected.length}</summary>${rejected.map(row => `<p>${this.escape(row.expense?.approval_no || row.expense?.title || '支付流程')} · ${this.escape(row.rejection_reason || '已否决')} ${readOnly ? '' : this.freightActionButton('payment-reopen', '重新纳入', `data-id="${this.escape(row.id)}"`)}</p>`).join('')}</details>` : ''}
+      ${(data.payment_blocking_reasons || []).map(message => `<p class="ocw-settlement-notice is-error">${this.escape(message)}</p>`).join('')}`;
+  }
+
   freightSelectedLines(state) {
     const draft = state.freightDraft || {};
     const candidate = (state.data.candidates || []).find(row => row.id === draft.candidate_id);
@@ -63,6 +185,7 @@
   }
 
   freightNeedsNegative(state) {
+    if (state.freightView?.kind === 'payment-amend' && state.freightView?.action === 'amount') return Number(state.freightDraft?.amount) < 0;
     return state.freightView?.kind === 'amount' ? Number(state.freightDraft?.amount) < 0 : this.freightSelectedLines(state).lines.some(row => Number(row.amount) < 0);
   }
 
@@ -77,6 +200,94 @@
     let difference = '';
     if (claim && Object.keys(totals).length === 1 && Object.hasOwn(totals, claim.currency)) difference = this.freightMoney(Number((totals[claim.currency] - Number(claim.applied_amount ?? claim.amount)).toFixed(6)), claim.currency);
     return `<div class="ocw-freight-change-summary">${claim ? `<div><small>更正前</small><strong>${this.freightMoney(claim.applied_amount ?? claim.amount, claim.currency)}</strong><small>${this.escape(claim.approval_no || '')}</small></div>` : ''}<div><small>${claim ? '更正后' : '所选费用合计'}</small><strong>${after}</strong></div>${difference ? `<div><small>差额</small><strong>${difference}</strong></div>` : ''}</div>`;
+  }
+
+  paymentInitialRows(candidate, data) {
+    const allowed = this.paymentFeeOptions(data);
+    const firstKey = allowed[0][0];
+    const lines = candidate.lines || [];
+    if (!lines.length) return [{ source_line_id: 'approval_total', logical_fee_key: firstKey,
+      amount: String(candidate.remaining_amount ?? candidate.remaining ?? ''), currency: candidate.approval_currency || candidate.expense?.currency || 'RMB',
+      amount_status: 'ACTUAL', replace_claim_ids: [] }];
+    return lines.filter(row => !row.adopted).map(row => ({ source_line_id: row.id,
+      logical_fee_key: row.logical_fee_key || firstKey, amount: String(row.amount ?? ''), currency: row.currency || candidate.approval_currency || 'RMB',
+      amount_status: 'ACTUAL', replace_claim_ids: [], _structured: true, _scope: row.scope || 'review', _label: row.label || '' }));
+  }
+
+  paymentPublicRows(draft = {}) {
+    return (draft.payment_rows || []).map(row => ({ source_line_id: row.source_line_id,
+      logical_fee_key: row.logical_fee_key, amount: String(row.amount ?? '').trim(), currency: String(row.currency || '').toUpperCase(),
+      amount_status: String(row.amount_status || 'ACTUAL').toUpperCase(), replace_claim_ids: row.replace_claim_ids || [] }));
+  }
+
+  validatePaymentDraft(state) {
+    const rows = this.paymentPublicRows(state.freightDraft || {});
+    if (!rows.length) throw new Error('请至少保留一条本票费用');
+    const seen = new Set(); let total = 0;
+    for (const row of rows) {
+      const amount = Number(row.amount);
+      if (!row.logical_fee_key || !Number.isFinite(amount)) throw new Error('请填写有效的费用分类和金额');
+      const key = `${row.source_line_id}:${row.logical_fee_key}`;
+      if (seen.has(key)) throw new Error('同一来源明细不能重复使用同一费用分类');
+      seen.add(key); total += Math.abs(amount);
+    }
+    const candidate = (state.data.payment_candidates || state.data.candidates || []).find(row => row.id === state.freightDraft.candidate_id);
+    const remaining = Number(candidate?.remaining_amount ?? candidate?.remaining);
+    if (Number.isFinite(remaining) && total > remaining + 0.000001) throw new Error(`本票认领金额超过来源剩余可认领金额 ${remaining}`);
+    if (rows.some(row => row.replace_claim_ids.length) && !String(state.freightDraft?.reason || '').trim()) throw new Error('替换已有认领必须填写原因');
+    if (rows.some(row => Number(row.amount) < 0) && state.freightDraft.negative_confirmed !== true) throw new Error('请先确认负数冲抵／折扣');
+    return rows;
+  }
+
+  renderPaymentRow(row, index, data) {
+    const fixed = row._structured && row._scope !== 'review';
+    const options = this.paymentFeeOptions(data).map(([key, label]) => `<option value="${key}" ${row.logical_fee_key === key ? 'selected' : ''}>${label}</option>`).join('');
+    const firstForKey = (data.payment_rows || []).findIndex(item => item.logical_fee_key === row.logical_fee_key) === index;
+    const replaceable = firstForKey ? (data.payment_claims || []).filter(claim => claim.active === true && claim.logical_fee_key === row.logical_fee_key) : [];
+    const replacementChoices = replaceable.length ? `<div class="ocw-payment-replacements"><strong>替换现有认领</strong>${replaceable.map(claim => `<label><input type="checkbox" data-payment-replace-row="${index}" data-payment-replace-claim="${this.escape(claim.id)}" ${(row.replace_claim_ids || []).includes(claim.id) ? 'checked' : ''}>替换此认领：${this.escape(this.paymentFeeLabel(claim.logical_fee_key, data))} ${this.freightMoney(claim.amount, claim.currency)} · ${this.escape(claim.source_approval_no || claim.source_title || '已有来源')}</label>`).join('')}<small>只有明确勾选的现有认领会被替换；必须填写下方说明。</small></div>` : '';
+    return `<tr data-payment-row="${index}"><td>${this.escape(row._label || (row.source_line_id === 'approval_total' ? '审批总额／人工拆分' : row.source_line_id))}</td><td><select data-payment-row-field="logical_fee_key" data-payment-row-index="${index}" ${fixed ? 'disabled' : ''}>${options}</select>${fixed ? `<small>来源明细已明确分类</small>` : ''}</td>
+      <td><input type="number" step="any" data-payment-row-field="amount" data-payment-row-index="${index}" value="${this.escape(row.amount ?? '')}" ${row._structured ? 'readonly' : ''}></td><td><select data-payment-row-field="currency" data-payment-row-index="${index}" ${row._structured ? 'disabled' : ''}>${['RMB','USD','MXN'].map(value => `<option ${row.currency === value ? 'selected' : ''}>${value}</option>`).join('')}</select></td>
+      <td><select data-payment-row-field="amount_status" data-payment-row-index="${index}">${[['ACTUAL','实际'],['ESTIMATED','暂估'],['NOT_INCURRED','未发生'],['INCLUDED','已包含']].map(([value,label]) => `<option value="${value}" ${row.amount_status === value ? 'selected' : ''}>${label}</option>`).join('')}</select></td><td>${row.source_line_id === 'approval_total' ? this.freightActionButton('payment-split-remove', '删除拆分', `data-row-index="${index}"`, false, (data.payment_rows || []).length === 1) : '结构化明细金额只读'}${replacementChoices}</td></tr>`;
+  }
+
+  renderPaymentAdoptionEditor(data, state) {
+    const draft = state.freightDraft || {};
+    const candidate = (data.payment_candidates || data.candidates || []).find(row => row.id === draft.candidate_id) || {};
+    const rows = draft.payment_rows || [];
+    const remaining = candidate.remaining_amount ?? candidate.remaining;
+    return `<h4 class="ocw-freight-section-title">预览并认领本票费用</h4><p>${this.escape(candidate.expense?.title || '支付流程')} · ${this.escape(candidate.expense?.approval_no || '')}</p>
+      <p class="ocw-settlement-hint">审批总额 ${this.freightMoney(candidate.approval_total ?? candidate.expense?.amount, candidate.approval_currency || candidate.expense?.currency)} · 已认领 ${this.escape(candidate.active_claimed_amount ?? candidate.claimed ?? 0)} · 剩余 ${this.escape(remaining ?? '待复核')}。结构化明细不可改金额；只有审批总额时可人工拆分。</p>
+      <div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table ocw-payment-adoption-table"><thead><tr><th>来源明细</th><th>费用分类</th><th>本票认领金额</th><th>币种</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map((row,index) => this.renderPaymentRow(row,index,{...data,payment_rows:rows})).join('')}</tbody></table></div>
+      ${rows.some(row => row.source_line_id === 'approval_total') ? this.freightActionButton('payment-split-add', '新增费用拆分') : ''}
+      ${this.renderPaymentAttachmentList(draft.attachments || candidate.attachments || [], rows.map(row => row.logical_fee_key), data)}
+      <label class="ocw-freight-negative"><input type="checkbox" data-freight-field="negative_confirmed" ${draft.negative_confirmed ? 'checked' : ''}>已核对负数冲抵／折扣</label>
+      <label class="ocw-freight-field">替换或特殊处理说明<textarea rows="2" data-freight-field="reason">${this.escape(draft.reason || '')}</textarea></label>`;
+  }
+
+  renderPaymentPreview(state) {
+    const preview = state.paymentPreview || {};
+    return `<h4 class="ocw-freight-section-title">确认费用差异预览</h4><p class="ocw-settlement-hint">预览仅保存服务端令牌，未修改本票费用。确认时将重新校验来源、额度、附件、版本和编辑租约。</p><div class="ocw-freight-change-summary">${(preview.impacted_fees || []).map(row => `<div><small>${this.escape(this.paymentFeeLabel(row.logical_fee_key, state.data))}</small><strong>${this.freightMoney(row.amount, row.currency)}</strong><small>${this.escape(row.amount_status || 'ACTUAL')}</small></div>`).join('')}</div>
+      <p>来源剩余：${this.freightMoney(preview.remaining, preview.source_currency)}</p>${(preview.warnings || preview.payment_blocking_reasons || []).map(message => `<p class="ocw-settlement-notice is-error">${this.escape(message)}</p>`).join('')}${this.renderPaymentAttachmentList(preview.attachments || [], [], state.data, true)}<p class="ocw-settlement-hint">修改附件选择需返回候选重新预览。</p>`;
+  }
+
+  renderPaymentAmendEditor(data, state) {
+    const draft = state.freightDraft || {}; const claim = (data.payment_claims || []).find(row => row.id === state.freightView?.claim_id) || {};
+    const action = state.freightView?.action; const labels = {amount:'修改认领金额',currency:'修改币种',status:'修改金额状态',reclassify:'重新分类',revoke:'撤销认领'};
+    return `<h4 class="ocw-freight-section-title">${labels[action] || '费用更正'}</h4><p>${this.escape(this.paymentFeeLabel(claim.logical_fee_key, data))} · ${this.freightMoney(claim.amount, claim.currency)} · ${this.escape(claim.source_approval_no || '')}</p>
+      ${action === 'amount' ? `<label class="ocw-freight-field">金额<input type="number" step="any" data-freight-field="amount" value="${this.escape(draft.amount ?? claim.amount ?? '')}"></label>` : ''}
+      ${action === 'amount' ? `<label class="ocw-freight-negative"><input type="checkbox" data-freight-field="negative_confirmed" ${draft.negative_confirmed ? 'checked' : ''}>若金额为负数，确认这是冲抵／折扣</label>` : ''}
+      ${action === 'currency' ? `<label class="ocw-freight-field">币种<select data-freight-field="currency">${['RMB','USD','MXN'].map(value => `<option ${draft.currency === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label>` : ''}
+      ${['currency','status'].includes(action) ? `<label class="ocw-freight-field">金额状态<select data-freight-field="amount_status">${['ACTUAL','ESTIMATED','NOT_INCURRED','INCLUDED'].map(value => `<option ${draft.amount_status === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label>` : ''}
+      ${action === 'reclassify' ? `<label class="ocw-freight-field">费用分类<select data-freight-field="logical_fee_key">${this.paymentFeeOptions(data).map(([key,label]) => `<option value="${key}" ${draft.logical_fee_key === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : ''}
+      ${action === 'revoke' ? '<p class="ocw-settlement-notice">撤销后释放来源可认领余额，并保留完整审计记录。</p>' : ''}
+      <label class="ocw-freight-field">更正原因（必填）<textarea rows="3" data-freight-field="reason">${this.escape(draft.reason || '')}</textarea></label>`;
+  }
+
+  renderPaymentEditor(data, state) {
+    if (state.freightView?.kind === 'payment-preview') return this.renderPaymentPreview(state);
+    if (state.freightView?.kind === 'payment-amend') return this.renderPaymentAmendEditor(data, state);
+    if (state.freightView?.kind === 'payment-decision') return `<h4 class="ocw-freight-section-title">${state.freightView.action === 'reopen' ? '重新纳入付款候选' : '否决付款候选'}</h4><p>${this.escape(state.freightView.label || '付款候选')}</p><label class="ocw-freight-field">核对依据（必填）<textarea rows="3" data-freight-field="reason">${this.escape(state.freightDraft?.reason || '')}</textarea></label>`;
+    return this.renderPaymentAdoptionEditor(data, state);
   }
 
   renderFreightEditor(data, state) {
@@ -157,9 +368,14 @@
     this.settlementBody(state, this.renderFreightContent(state.data || {}, state));
     const view = state.freightView;
     const disabled = !!(state.freightWriting || state.freightLoading);
+    const paymentWritable = !this.paymentReadOnly(state.data || {});
     let actions = '';
-    if (view) actions += this.freightActionButton('freight-back', view.kind === 'evidence' ? '返回核对' : '返回列表', '', false, disabled);
+    if (view) actions += this.freightActionButton('freight-back', view.kind === 'evidence' ? '返回核对' : view.kind === 'payment-preview' ? '返回修改附件／费用' : '返回列表', '', false, disabled);
     if (view?.kind === 'evidence' && state.freightEvidenceRow?.source?.open_url) actions += this.freightActionButton('freight-evidence-source', '打开支付原单');
+    if (paymentWritable && view?.kind === 'payment-adopt') actions += this.freightActionButton('payment-preview', '生成费用差异预览', '', true, disabled);
+    if (paymentWritable && view?.kind === 'payment-preview') actions += this.freightActionButton('payment-confirm', '确认认领费用', '', true, disabled || !!(state.paymentPreview?.payment_blocking_reasons || []).length);
+    if (paymentWritable && view?.kind === 'payment-amend') actions += this.freightActionButton('payment-amend-save', '保存费用更正', '', true, disabled);
+    if (paymentWritable && view?.kind === 'payment-decision') actions += this.freightActionButton('payment-decision-save', '保存核对记录', '', true, disabled);
     if (!state.data?.historical && view && ['amount','replace','revoke','adopt','reject','checks'].includes(view.kind)) actions += this.freightActionButton('freight-save', ({amount:'保存金额更正',replace:'确认更换来源',revoke:'确认撤销采用',adopt:'确认采用所选费用',reject:'保存否决记录',checks:'确认所选装箱资料适用'})[view.kind], '', true, disabled);
     if (state.freightTab === 'packing' && !view && this.canAdoptFreightPacking(state)) actions += this.freightActionButton('packing-source-confirm', '采用此来源并替换本票装箱资料', '', true, disabled);
     this.settlementActions(state, `<div class="ocw-freight-footer"><span>${state.freightWriting ? '正在保存，请稍候…' : state.data?.historical ? '历史版本 · 只读' : '费用与装箱资料分别核对、分别采用'}</span><div class="ocw-freight-row-actions">${actions}</div></div>`);
@@ -170,17 +386,57 @@
     const $wrapper = state.dialog.$wrapper;
     const draft = state.freightDraft ||= {};
     $wrapper.find('[data-freight-field]').each((_, element) => { const key = element.getAttribute('data-freight-field'); draft[key] = element.type === 'checkbox' ? element.checked : element.value; });
+    $wrapper.find('[data-payment-row-field]').each((_, element) => { const index = Number(element.getAttribute('data-payment-row-index')); const key = element.getAttribute('data-payment-row-field'); if (draft.payment_rows?.[index]) draft.payment_rows[index][key] = element.value; });
+    if ($wrapper.find('[data-payment-replace-claim]').length) {
+      const publicClaims = new Map((state.data?.payment_claims || []).filter(row => row.active === true).map(row => [String(row.id), row]));
+      for (const row of draft.payment_rows || []) row.replace_claim_ids = [];
+      $wrapper.find('[data-payment-replace-claim]:checked').each((_, element) => {
+        const index = Number(element.getAttribute('data-payment-replace-row'));
+        const claimId = String(element.getAttribute('data-payment-replace-claim') || '');
+        const row = draft.payment_rows?.[index]; const claim = publicClaims.get(claimId);
+        if (row && claim?.logical_fee_key === row.logical_fee_key) row.replace_claim_ids.push(claimId);
+      });
+    }
+    if ($wrapper.find('[data-payment-attachment]').length) {
+      const candidate = (state.data?.payment_candidates || state.data?.candidates || []).find(row => row.id === draft.candidate_id) || {};
+      const source = draft.attachments || candidate.attachments || [];
+      const controls = {};
+      $wrapper.find('[data-payment-attachment]').each((_, element) => {
+        const id = element.getAttribute('data-payment-attachment');
+        controls[id] = { ...(controls[id] || {}), selected: !!element.checked };
+      });
+      $wrapper.find('[data-payment-attachment-keys]').each((_, element) => {
+        const id = element.getAttribute('data-payment-attachment-keys');
+        controls[id] = { ...(controls[id] || {}), logical_fee_keys: Array.from(element.selectedOptions || []).map(option => option.value) };
+      });
+      draft.attachments = source.map(row => {
+        const choice = controls[String(row.document_id)] || {};
+        const selected = row.required || !!choice.selected;
+        const defaults = (row.suggested_logical_fee_keys || []).filter(key => (draft.payment_rows || []).some(item => item.logical_fee_key === key));
+        const logicalFeeKeys = choice.logical_fee_keys || defaults;
+        return { ...row, selected, logical_fee_keys: logicalFeeKeys.length ? logicalFeeKeys : [...new Set((draft.payment_rows || []).map(item => item.logical_fee_key).filter(Boolean))] };
+      });
+    }
     if ($wrapper.find('[data-freight-line]').length) draft.line_ids = $wrapper.find('[data-freight-line]:checked').map((_, element) => element.getAttribute('data-freight-line')).get();
     if ($wrapper.find('[data-freight-check]').length) draft.check_ids = $wrapper.find('[data-freight-check]:checked').map((_, element) => element.getAttribute('data-freight-check')).get();
   }
 
   bindFreightInputs(state) {
     const $wrapper = state.dialog.$wrapper;
-    $wrapper.off('input.ocwFreight change.ocwFreight').on('input.ocwFreight change.ocwFreight', '[data-freight-field],[data-freight-line],[data-freight-check]', event => {
+    $wrapper.off('input.ocwFreight change.ocwFreight').on('input.ocwFreight change.ocwFreight', '[data-freight-field],[data-freight-line],[data-freight-check],[data-payment-row-field],[data-payment-attachment],[data-payment-attachment-keys],[data-payment-replace-claim]', event => {
       if (state.busy || state.freightWriting) return;
       this.captureFreightDraft(state);
       const key = event.currentTarget.getAttribute('data-freight-field');
+      const paymentRowKey = event.currentTarget.getAttribute('data-payment-row-field');
       if (key === 'candidate_id') { state.freightDraft.line_ids = []; state.freightDraft.negative_confirmed = false; this.renderFreightWorkspace(state); }
+      else if (paymentRowKey === 'logical_fee_key') {
+        const validKeys = [...new Set((state.freightDraft.payment_rows || []).map(row => row.logical_fee_key).filter(Boolean))];
+        state.freightDraft.attachments = (state.freightDraft.attachments || []).map(row => {
+          const keys = (row.logical_fee_keys || []).filter(value => validKeys.includes(value));
+          return { ...row, logical_fee_keys: row.selected && !keys.length ? validKeys : keys };
+        });
+        this.renderFreightWorkspace(state);
+      }
       else {
         if (!this.freightNeedsNegative(state)) { state.freightDraft.negative_confirmed = false; $wrapper.find('[data-freight-field="negative_confirmed"]').prop('checked', false); }
         $wrapper.find('[data-freight-negative]').prop('hidden', !this.freightNeedsNegative(state));
@@ -214,6 +470,7 @@
       const result = await this.settlementWrite(state, () => this.settlementApi(action, args));
       if (!result?.ok) throw new Error(result?.message || '操作未保存，请核对后重试');
       if (!this.isBatchSettlementCurrent(state) || version !== state.versionName) return;
+      if (result.batch_modified && this.detailState?.batchName === state.batchName) this.detailState.expectedModified = result.batch_modified;
       state.freightView = null; state.freightDraft = {}; state.packingSources = null; state.packingPreview = null; state.packingSelected = null;
       state.freightMessage = result.message || (result.status === 'queued' ? '已保存确认，当前编辑结束后处理。' : '已保存，请核对当前资料并重新试算。');
       try { await this.refreshSettlementBatch(state.batchName, result.version); }
@@ -236,7 +493,10 @@
     }
     if (action === 'freight-back') {
       state.freightRequest = (state.freightRequest || 0) + 1; state.freightLoading = false;
-      state.freightView = state.freightView?.kind === 'evidence' ? state.freightReturnView || null : null;
+      if (state.freightView?.kind === 'payment-preview') {
+        state.paymentPreview = null;
+        state.freightView = { kind: 'payment-adopt', candidate_id: state.freightDraft?.candidate_id || '' };
+      } else state.freightView = state.freightView?.kind === 'evidence' ? state.freightReturnView || null : null;
       state.freightReturnView = null; state.freightError = ''; return this.renderFreightWorkspace(state);
     }
     if (action === 'freight-source') return this.openSettlementSource((data.candidates || []).find(row => row.id === $button.attr('data-id'))?.expense);
@@ -257,6 +517,129 @@
     }
     if (data.historical) throw new Error('历史版本仅供追溯，请返回当前调整草稿处理。');
     if (!this.isBatchSettlementCurrent(state)) throw new Error('当前批次或版本已变化，请重新打开本票资料。');
+    if (action === 'payment-rule-match') {
+      await this.ensurePaymentWriteSession(state);
+      state.freightLoading = true; state.freightError = ''; this.renderFreightWorkspace(state);
+      try {
+        const result = await this.settlementApi('run_payment_rule_matching', { batch_name: state.batchName, version_name: state.versionName });
+        if (!result?.ok) throw new Error(result?.message || '规则匹配未完成');
+        if (this.isBatchSettlementCurrent(state)) state.data = { ...state.data, matching: result.matching || state.data.matching,
+          payment_candidates: result.payment_candidates || result.candidates || state.data.payment_candidates,
+          candidates: result.payment_candidates || result.candidates || state.data.candidates };
+      } catch (error) { state.freightError = error.message || '规则匹配失败'; throw error; }
+      finally { state.freightLoading = false; if (state.open) this.renderFreightWorkspace(state); }
+      return;
+    }
+    if (action === 'payment-ai-open') {
+      state.paymentAiOpen = true; state.paymentAiExpandPending = false;
+      state.freightDraft = { ...(state.freightDraft || {}), ai_limit: Math.min(50, Number(data.payment_matching?.limit) || 30) };
+      return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-ai-more') { state.paymentAiOpen = true; state.paymentAiExpandPending = true; return this.renderFreightWorkspace(state); }
+    if (action === 'payment-ai-run' || action === 'payment-ai-more-confirm') {
+      const previous = data.payment_matching || {};
+      const hints = Object.fromEntries(['waybill','supplier','project','date','description'].map(key => [key, String(state.freightDraft?.[key] || '').trim()]));
+      const limit = Math.max(1, Math.min(50, Number(state.freightDraft?.ai_limit) || Number(previous.limit) || 30));
+      const offset = action === 'payment-ai-more-confirm' ? (Number(previous.offset) || 0) + (Number(previous.limit) || limit) : 0;
+      await this.ensurePaymentWriteSession(state);
+      state.freightLoading = true; state.freightError = ''; this.renderFreightWorkspace(state);
+      try {
+        const result = await this.settlementApi('start_payment_ai_matching', { batch_name: state.batchName, version_name: state.versionName, hints: JSON.stringify(hints), offset, limit });
+        if (!result?.ok) throw new Error(result?.message || 'AI 匹配未启动');
+        if (this.isBatchSettlementCurrent(state)) {
+          state.data = { ...state.data, payment_matching: result.payment_matching || {} };
+          state.paymentAiExpandPending = false;
+          if (['queued', 'running'].includes(state.data.payment_matching.status)) {
+            clearTimeout(state.timer);
+            state.timer = setTimeout(() => this.loadBatchSettlementDialog(state), 3000);
+          }
+        }
+      } catch (error) { state.freightError = error.message || 'AI 匹配失败'; throw error; }
+      finally { state.freightLoading = false; if (state.open) this.renderFreightWorkspace(state); }
+      return;
+    }
+    if (action === 'payment-split-add') {
+      const rows = state.freightDraft?.payment_rows || [];
+      const used = new Set(rows.map(row => row.logical_fee_key)); const option = this.paymentFeeOptions(data).find(([key]) => !used.has(key)) || this.paymentFeeOptions(data)[0];
+      rows.push({ source_line_id: 'approval_total', logical_fee_key: option[0], amount: '', currency: rows[0]?.currency || 'RMB', amount_status: 'ACTUAL', replace_claim_ids: [] });
+      return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-split-remove') {
+      const index = Number($button.attr('data-row-index')); if ((state.freightDraft?.payment_rows || []).length <= 1) throw new Error('请至少保留一条费用');
+      state.freightDraft.payment_rows.splice(index, 1); return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-review') {
+      const candidate = (data.payment_candidates || data.candidates || []).find(row => row.id === $button.attr('data-id'));
+      if (!candidate) throw new Error('付款候选已变化，请刷新');
+      state.freightView = { kind: 'payment-adopt', candidate_id: candidate.id }; state.paymentPreview = null;
+      state.freightDraft = { candidate_id: candidate.id, payment_rows: this.paymentInitialRows(candidate, data),
+        attachments: (candidate.attachments || []).map(row => ({ ...row, selected: row.selected ?? row.default_selected })), reason: '', negative_confirmed: false };
+      return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-preview') {
+      const draft = state.freightDraft || {}; const rows = this.validatePaymentDraft(state);
+      const candidateId = draft.candidate_id || state.freightView?.candidate_id;
+      const candidate = (data.payment_candidates || data.candidates || []).find(row => row.id === candidateId);
+      if (!candidate) throw new Error('付款候选已变化，请刷新');
+      const currentKeys = [...new Set(rows.map(item => item.logical_fee_key).filter(Boolean))];
+      const attachmentSelections = (draft.attachments || []).map(row => {
+        const mappedKeys = (row.logical_fee_keys || []).filter(key => currentKeys.includes(key));
+        return { document_id: row.document_id, selected: !!row.selected,
+          logical_fee_keys: row.selected ? (mappedKeys.length ? mappedKeys : currentKeys) : [] };
+      });
+      const args = { batch_name: state.batchName, version_name: state.versionName, candidate_id: candidate.id,
+        candidate_revision: candidate.revision, selections: JSON.stringify(rows), reason: String(draft.reason || '').trim(),
+        negative_confirmed: draft.negative_confirmed === true, attachment_selections: JSON.stringify(attachmentSelections) };
+      await this.ensurePaymentWriteSession(state);
+      const result = await this.settlementWrite(state, () => this.settlementApi('preview_payment_adoption', args));
+      if (!result?.ok || !result.preview) throw new Error(result?.message || '未生成有效费用预览');
+      state.paymentPreview = result.preview; state.freightView = { kind: 'payment-preview' }; return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-confirm') {
+      const preview = state.paymentPreview;
+      if (!preview?.preview_id || !preview?.revision) throw new Error('付款预览已失效，请重新预览');
+      await this.ensurePaymentWriteSession(state);
+      return this.writeFreightWorkspace(state, 'confirm_payment_adoption', { batch_name: state.batchName, preview_id: preview.preview_id,
+        revision: preview.revision, edit_token: this.detailState?.editToken || null,
+        expected_modified: this.detailState?.expectedModified || null }, afterWrite);
+    }
+    if (action === 'payment-amend') {
+      const claim = (data.payment_claims || []).find(row => row.id === $button.attr('data-claim'));
+      const amendAction = $button.attr('data-payment-action');
+      if (!claim || !(claim.available_actions || []).includes(amendAction)) throw new Error('该费用不允许当前更正，请刷新');
+      state.freightView = { kind: 'payment-amend', claim_id: claim.id, expected_revision: claim.revision, action: amendAction };
+      state.freightDraft = { amount: claim.amount, currency: claim.currency, amount_status: claim.amount_status || 'ACTUAL', logical_fee_key: claim.logical_fee_key, reason: '' };
+      return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-amend-save') {
+      const view = state.freightView || {}; const draft = state.freightDraft || {}; const reason = String(draft.reason || '').trim();
+      if (!reason) throw new Error('请填写更正原因');
+      if (view.action === 'amount' && Number(draft.amount) < 0 && draft.negative_confirmed !== true) throw new Error('请先确认负数冲抵／折扣');
+      const editKeys = { amount:['amount'], currency:['currency','amount_status'], status:['amount_status'], reclassify:['logical_fee_key'], revoke:[] };
+      const edits = Object.fromEntries((editKeys[view.action] || []).map(key => [key, draft[key]]));
+      if (view.action === 'amount' && Number(draft.amount) < 0) edits.negative_confirmed = draft.negative_confirmed === true;
+      await this.ensurePaymentWriteSession(state);
+      return this.writeFreightWorkspace(state, 'amend_payment_claim', { batch_name: state.batchName, version_name: state.versionName,
+        claim_id: view.claim_id, expected_revision: view.expected_revision, action: view.action, reason, edits: JSON.stringify(edits),
+        edit_token: this.detailState?.editToken || null, expected_modified: this.detailState?.expectedModified || null }, afterWrite);
+    }
+    if (action === 'payment-reject' || action === 'payment-reopen') {
+      const source = action === 'payment-reopen' ? data.payment_rejected_candidates || [] : data.payment_candidates || data.candidates || [];
+      const candidate = source.find(row => row.id === $button.attr('data-id'));
+      if (!candidate) throw new Error('付款候选已变化，请刷新');
+      state.freightView = { kind: 'payment-decision', action: action === 'payment-reopen' ? 'reopen' : 'reject', candidate_id: candidate.id,
+        revision: candidate.revision, label: candidate.expense?.approval_no || candidate.expense?.title || '' };
+      state.freightDraft = { reason: '' }; return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-decision-save') {
+      const view = state.freightView || {}; const reason = String(state.freightDraft?.reason || '').trim();
+      if (!reason) throw new Error('请填写核对依据');
+      const method = view.action === 'reopen' ? 'reopen_payment_candidate' : 'reject_payment_candidate';
+      await this.ensurePaymentWriteSession(state);
+      return this.writeFreightWorkspace(state, method, { batch_name: state.batchName, version_name: state.versionName,
+        candidate_id: view.candidate_id, revision: view.revision, reason,
+        edit_token: this.detailState?.editToken || null, expected_modified: this.detailState?.expectedModified || null }, afterWrite);
+    }
     if (action === 'retry-matching') return this.startBatchSettlementMatching(state, true);
     if (action === 'search') { state.freightTab = 'freight'; state.freightView = { kind: 'search' }; state.freightDraft = { query: '', reason: '' }; state.freightSearch = {}; return this.renderFreightWorkspace(state); }
     if (['freight-search-run', 'freight-search-next', 'freight-search-previous'].includes(action)) {

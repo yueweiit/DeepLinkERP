@@ -132,20 +132,27 @@ def test_global_ai_entry_does_not_schedule_freight_payment_ai(batch_api, monkeyp
     assert role_checks == []
 
 
-def test_reopen_payment_candidate_api_requires_batch_write_permission(batch_api, monkeypatch):
+def test_payment_candidate_decision_apis_forward_version_and_edit_lease(batch_api, monkeypatch):
     calls=[]
     monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
     monkeypatch.setattr(batch_api,'require_batch_permission',lambda batch,permission='read':calls.append((batch,permission)) or batch)
+    from overseas_costing.services import edit_session_service
     from overseas_costing.services.logistics_settlement import freight_runtime
-    monkeypatch.setattr(freight_runtime,'reopen_candidate',lambda db,ledger,batch,cid,revision,reason,actor:{'id':cid,'revision':'new','status':'reopened'})
-    result=batch_api.reopen_payment_candidate('B','candidate','old','人工重新核对')
-    assert calls==[('B','write')]
-    assert result=={'ok':True,'candidate':{'id':'candidate','revision':'new','status':'reopened'}}
+    monkeypatch.setattr(edit_session_service,'assert_batch_write',lambda *args,**kwargs:None)
+    monkeypatch.setattr(freight_runtime,'decide_payment_candidate',lambda db,ledger,batch,version,cid,revision,action,reason,actor,**kwargs:
+                        calls.append((version,cid,revision,action,reason,kwargs['edit_token'],kwargs['expected_modified'],kwargs['lease_check']))
+                        or {'candidate':{'id':cid,'revision':'new','status':'reopened' if action=='reopen' else 'rejected'},'batch_modified':'m2'})
+    reopened=batch_api.reopen_payment_candidate('B','V','candidate','old','人工重新核对','token','m1')
+    rejected=batch_api.reject_payment_candidate('B','V','candidate','old','人工否决','token','m1')
+    assert calls[:2]==[('B','write'),('V','candidate','old','reopen','人工重新核对','token','m1',edit_session_service.assert_batch_write)]
+    assert calls[2:4]==[('B','write'),('V','candidate','old','reject','人工否决','token','m1',edit_session_service.assert_batch_write)]
+    assert reopened['candidate']['status']=='reopened' and reopened['batch_modified']=='m2'
+    assert rejected['candidate']['status']=='rejected' and rejected['batch_modified']=='m2'
 
 
 def test_rule_reject_reopen_is_safe_in_freight_history_and_matching_status(batch_api, monkeypatch):
     from overseas_costing.tests.test_freight_lines import setup_cost
-    from overseas_costing.services.logistics_settlement import freight_matching
+    from overseas_costing.services.logistics_settlement import freight_matching, freight_runtime
     store,ledger,batch,_version,_item,logistics,_expense=setup_cost()
     candidate=freight_matching.rule_pass(store,logistics['id'])[0]
     monkeypatch.setattr(batch_api.runtime,'store',lambda:store)
@@ -154,7 +161,7 @@ def test_rule_reject_reopen_is_safe_in_freight_history_and_matching_status(batch
     monkeypatch.setattr(batch_api.frappe,'only_for',lambda _role:None,raising=False)
 
     assert batch_api.reject_freight_candidate(batch['name'],candidate['id'],candidate['revision'],'人工否决')['ok']
-    reopened=batch_api.reopen_payment_candidate(batch['name'],candidate['id'],candidate['revision'],'重新核对')['candidate']
+    reopened=freight_runtime.reopen_candidate(store,ledger,batch['name'],candidate['id'],candidate['revision'],'重新核对','u')
     result=batch_api.get_matching_status()
 
     assert reopened['status']=='reopened'

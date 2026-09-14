@@ -264,12 +264,15 @@ def prepare_manual_candidate(batch_name, expense_id, reason, expected_revision=N
 
 
 @frappe.whitelist(methods=['POST'])
-def reopen_payment_candidate(batch_name,candidate_id,revision,reason):
+@_review_validation
+def reopen_payment_candidate(batch_name,version_name,candidate_id,revision,reason,edit_token,expected_modified):
     if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
     batch_name=require_batch_permission(batch_name,'write')
-    from overseas_costing.services.logistics_settlement.freight_runtime import reopen_candidate
-    candidate=reopen_candidate(runtime.store(),FrappeLedger(),batch_name,candidate_id,revision,str(reason or ''),frappe.session.user)
-    return {'ok':True,'candidate':candidate}
+    from overseas_costing.services import edit_session_service
+    from overseas_costing.services.logistics_settlement.freight_runtime import decide_payment_candidate
+    return {'ok':True,**decide_payment_candidate(runtime.store(),FrappeLedger(),batch_name,version_name,candidate_id,
+        revision,'reopen',str(reason or ''),frappe.session.user,lease_check=edit_session_service.assert_batch_write,
+        edit_token=edit_token,expected_modified=expected_modified)}
 
 
 @frappe.whitelist(methods=['POST'])
@@ -379,6 +382,19 @@ def confirm_freight_packing(batch_name,version_name,preview_id,revision,selectio
     from overseas_costing.services.logistics_settlement.freight_packing import confirm
     return {'ok':True,**confirm(runtime.store(),FrappeLedger(),batch_name,version_name,preview_id,revision,_decode(selections,list),frappe.session.user,
                               complete_confirmed=complete_confirmed in (True,1,'1','true'))}
+
+
+@frappe.whitelist(methods=['POST'])
+@_review_validation
+def reject_payment_candidate(batch_name,version_name,candidate_id,revision,reason,edit_token,expected_modified):
+    """Unified-payment name; retain the freight endpoint below for older clients."""
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services import edit_session_service
+    from overseas_costing.services.logistics_settlement.freight_runtime import decide_payment_candidate
+    return {'ok':True,**decide_payment_candidate(runtime.store(),FrappeLedger(),batch_name,version_name,candidate_id,
+        revision,'reject',str(reason or ''),frappe.session.user,lease_check=edit_session_service.assert_batch_write,
+        edit_token=edit_token,expected_modified=expected_modified)}
 
 
 @frappe.whitelist(methods=['POST'])

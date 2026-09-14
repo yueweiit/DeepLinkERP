@@ -362,7 +362,7 @@
 
   async openBatchSettlementDialog(batchName, viewedVersion = null, initialTab = 'freight') {
     if (this.batchSettlementState?.open) this.stopSettlementDialog(this.batchSettlementState);
-    const state = this.settlementDialog("本票运费与装箱核对");
+    const state = this.settlementDialog("实际支付流程/装箱变更");
     this.batchSettlementState = state;
     state.batchName = batchName;
     state.freightTab = ['freight', 'packing', 'audit'].includes(initialTab) ? initialTab : 'freight';
@@ -426,10 +426,11 @@
       this.renderBatchSettlementDialog(state, data);
       const autoMatch = !state.autoMatchChecked;
       state.autoMatchChecked = true;
-      if (autoMatch && !data.binding && !data.historical && ["not_started", "stale"].includes(data.matching?.status)) {
+      if (!data.freight_mode && autoMatch && !data.binding && !data.historical && ["not_started", "stale"].includes(data.matching?.status)) {
         return this.startBatchSettlementMatching(state);
       }
-      if (!data.binding && !data.historical && ["queued", "running"].includes(data.matching?.status)) {
+      if (!data.historical && (["queued", "running"].includes(data.payment_matching?.status)
+          || (!data.binding && ["queued", "running"].includes(data.matching?.status)))) {
         state.timer = setTimeout(() => this.loadBatchSettlementDialog(state), 3000);
       }
     } catch (error) {

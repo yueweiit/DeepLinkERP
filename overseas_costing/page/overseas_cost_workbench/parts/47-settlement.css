@@ -86,10 +86,43 @@
 .ocw-freight-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 0; border-top: 1px solid #dce7ef; }
 .ocw-freight-footer > span { color: #66788a; font-size: 12px; }
 .ocw-freight-modal button:disabled { opacity: .5; cursor: not-allowed; }
+.ocw-payment-matching { padding: 14px 16px; margin: 14px 0 18px; border: 1px solid #dce7ef; border-radius: 10px; background: #f8fbfe; }
+.ocw-payment-match-actions { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.ocw-payment-match-actions strong, .ocw-payment-match-actions small { display: block; }
+.ocw-payment-match-actions small { margin-top: 4px; color: #66788a; }
+.ocw-payment-match-status { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 12px; color: #52687a; font-size: 12px; }
+.ocw-payment-ai-form { padding: 14px; margin-top: 14px; border: 1px solid #cfe1ee; border-radius: 8px; background: #fff; }
+.ocw-payment-hint-grid { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 12px; }
+.ocw-payment-hint-grid label { color: #52687a; font-size: 12px; }
+.ocw-payment-hint-grid input, .ocw-payment-adoption-table input, .ocw-payment-adoption-table select { display: block; width: 100%; min-height: 34px; margin-top: 5px; padding: 6px 8px; border: 1px solid #cad7e0; border-radius: 6px; background: #fff; color: #243b4c; }
+.ocw-payment-expand { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 12px; color: #765619; font-size: 12px; }
+.ocw-payment-candidate { padding: 16px; margin: 12px 0; border: 1px solid #dce7ef; border-radius: 10px; background: #fff; box-shadow: 0 3px 12px #213b4f08; }
+.ocw-payment-candidate-grid { display: grid; grid-template-columns: repeat(4, minmax(145px, 1fr)); gap: 10px; margin: 12px 0; }
+.ocw-payment-candidate-grid > div { padding: 10px 12px; border-radius: 7px; background: #f5f8fb; }
+.ocw-payment-candidate-grid small, .ocw-payment-candidate-grid strong { display: block; overflow-wrap: anywhere; }
+.ocw-payment-candidate-grid small { margin-bottom: 5px; color: #66788a; }
+.ocw-payment-attachments { display: grid; gap: 7px; margin: 12px 0; }
+.ocw-payment-attachment { display: flex; align-items: flex-start; gap: 9px; padding: 9px 11px; border: 1px solid #e3eaf0; border-radius: 7px; background: #fbfdff; font-weight: 400; }
+.ocw-payment-attachment.is-pending { border-color: #ecd7aa; background: #fffaf0; }
+.ocw-payment-attachment input { width: 16px; height: 16px; margin-top: 2px; accent-color: #0b8cf0; }
+.ocw-payment-attachment span, .ocw-payment-attachment b, .ocw-payment-attachment small { display: block; }
+.ocw-payment-attachment span { flex: 1; min-width: 0; }
+.ocw-payment-attachment select { width: 100%; min-height: 54px; margin-top: 7px; padding: 5px 7px; border: 1px solid #cad7e0; border-radius: 6px; background: #fff; color: #243b4c; }
+.ocw-payment-replacements { display: grid; gap: 6px; min-width: 210px; margin-top: 10px; padding-top: 9px; border-top: 1px solid #e2e9ef; }
+.ocw-payment-replacements label { display: flex; align-items: flex-start; gap: 7px; color: #344e61; font-weight: 400; }
+.ocw-payment-replacements input { flex: 0 0 auto; width: 16px; height: 16px; min-height: 0; margin: 2px 0 0; accent-color: #0b8cf0; }
+.ocw-payment-replacements small { color: #765619; }
+.ocw-payment-claim-table { min-width: 760px; }
+.ocw-payment-adoption-table { min-width: 850px; }
+.ocw-freight-status.is-stale { color: #8c5a16; background: #fff3d8; }
+.ocw-payment-rejected { margin: 15px 0; }
 @media (max-width: 720px) {
   .ocw-freight-modal .modal-dialog { width: calc(100vw - 16px); margin: 8px; }
   .ocw-freight-tabs { gap: 18px; }
   .ocw-freight-footer { align-items: flex-start; flex-direction: column; }
   .ocw-freight-footer .ocw-freight-row-actions { width: 100%; }
   .ocw-freight-footer .ocw-primary-btn { flex: 1; }
+  .ocw-payment-match-actions { align-items: flex-start; flex-direction: column; }
+  .ocw-payment-hint-grid, .ocw-payment-candidate-grid { grid-template-columns: 1fr; }
+  .ocw-payment-match-actions .ocw-freight-row-actions, .ocw-payment-match-actions button { width: 100%; }
 }

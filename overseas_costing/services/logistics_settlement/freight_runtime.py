@@ -3,6 +3,7 @@ from . import freight_adoption as adoption, freight_matching as matching, freigh
 from .model import digest,dumps
 from .application import row_meta
 from .ai_matching import save
+from .jobs import utcnow
 
 
 def financial_summary(source):
@@ -72,19 +73,23 @@ def batch_status(store,ledger,batch_name,version_name=None):
     historical=vname!=batch.get('current_version')
     maps=store.find('batch_map',batch=batch_name)
     base={'ok':True,'freight_mode':True,'mapped':bool(maps),'historical':historical,'viewed_version':vname,
+          'transport_mode':batch.get('transport_mode'),
           'confirm_status':batch.get('confirm_status'),'writeback_status':batch.get('writeback_status'),
           'binding':None,'candidates':[],
-          'payment_candidates':[],'matching':{'status':'not_started'},'payment_matching':{'status':'not_started'},
+          'payment_candidates':[],'payment_rejected_candidates':[],
+          'matching':{'status':'not_started'},'payment_matching':{'status':'not_started'},
           'sync':store.get('state','sync') or {},'health':store.get('state','health') or {}}
     from .payment_adoption import public_payment_context
     base.update(public_payment_context(store,ledger,batch_name,vname))
     if not maps:return base
     logistics=store.get('source',maps[0]['source_id'])
-    candidates=[candidate_view(store,c,batch.get('transport_mode'),ledger) for c in matching.candidates(store,logistics['id']) if c['status']!='rejected'] if not historical else []
+    current_candidates=matching.candidates(store,logistics['id']) if not historical else []
+    candidates=[candidate_view(store,c,batch.get('transport_mode'),ledger) for c in current_candidates if c['status']!='rejected']
+    rejected=[candidate_view(store,c,batch.get('transport_mode'),ledger) for c in current_candidates if c['status']=='rejected']
     from . import payment_ai_matching
     base.update(logistics=source_summary(logistics),matching=matching.rule_status(store,logistics['id']) if not historical else {'status':'historical'},
         payment_matching=payment_ai_matching.status(store,logistics['id'],current_version=lambda _batch:batch.get('current_version')) if not historical else {'status':'historical'},
-        candidates=candidates,payment_candidates=candidates,
+        candidates=candidates,payment_candidates=candidates,payment_rejected_candidates=rejected,
         freight=adoption.context(store,ledger,batch_name,vname),source_context=resolve_source_context(batch_name,vname,store=store,ledger=ledger))
     ctx=base['source_context'];review=store.get('packing_review',base['freight'].get('packing_review_id') or '')
     base['packing']={'status':'adopted' if review else 'unverified','message':'已独立采用装箱变更；原始资料保留在操作记录' if review else '装箱沿用当前资料；尚未确认是否有变更',
@@ -135,6 +140,72 @@ def reopen_candidate(store,ledger,batch_name,candidate_id,revision,reason,actor)
         store.audit(batch_name,'payment_candidate_reopened',actor,candidate_id=candidate_id,old_revision=old_revision,
                     new_revision=candidate['revision'],reason=str(reason).strip())
         return candidate
+
+
+def decide_payment_candidate(store,ledger,batch_name,version_name,candidate_id,revision,action,reason,actor,
+                             *,lease_check=None,edit_token=None,expected_modified=None):
+    """CAS a unified-payment candidate decision under the batch edit lease.
+
+    The legacy freight endpoints intentionally keep their historical contract.  New
+    payment clients must use this path so a stale browser cannot reject or reopen a
+    candidate after the batch version or its trusted source relation has changed.
+    """
+    reason=str(reason or '').strip()
+    if action not in ('reject','reopen') or not reason:
+        raise ValueError('请选择候选操作并填写核对依据')
+    if not lease_check or not edit_token or expected_modified in (None,''):
+        raise ValueError('候选状态修改需要有效编辑租约')
+    with store.atomic():
+        store.get('state','match_lock',lock=True)
+        lease_check(batch_name,edit_token=edit_token,expected_modified=expected_modified)
+        batch=ledger.get('batch',batch_name,lock=True) or {}
+        version=ledger.get('version',version_name,lock=True) or {}
+        if (not batch or version.get('batch')!=batch_name
+                or batch.get('current_version')!=version_name):
+            raise ValueError('当前版本已变化，请刷新后重试')
+        if (version.get('status') in ('Confirmed','Archived')
+                or batch.get('confirm_status')=='Confirmed'
+                or batch.get('writeback_status')=='Success' or batch.get('is_locked')):
+            raise ValueError('历史、已确认、已回写或锁定版本不可修改')
+
+        candidate=store.get('freight_candidate',candidate_id,lock=True)
+        if not candidate or candidate.get('revision')!=revision:
+            raise ValueError('付款候选已变化，请刷新后重试')
+        maps=store.find('batch_map',batch=batch_name,source_id=candidate.get('logistics_id'))
+        if not maps:
+            raise ValueError('付款候选不属于当前批次')
+        for mapping in maps:
+            store.get('batch_map',mapping['id'],lock=True)
+        logistics=store.get('source',candidate.get('logistics_id'),lock=True) or {}
+        expense=store.get('source',candidate.get('expense_id'),lock=True) or {}
+        if (logistics.get('kind')!='logistics' or logistics.get('invalid')
+                or expense.get('kind')!='expense' or expense.get('invalid') or not expense.get('approved')
+                or logistics.get('corp')!=expense.get('corp')
+                or candidate.get('logistics_snapshot')!=logistics.get('snapshot')
+                or candidate.get('expense_snapshot')!=expense.get('snapshot')):
+            raise ValueError('付款候选来源关系已变化，请重新匹配')
+        for line_id in candidate.get('line_ids') or []:
+            line=store.get('freight_line',line_id,lock=True) or {}
+            if line.get('source_id')!=expense.get('id') or line.get('snapshot')!=expense.get('snapshot'):
+                raise ValueError('付款候选明细已变化，请重新匹配')
+
+        status=candidate.get('status')
+        if action=='reopen' and status!='rejected':
+            raise ValueError('只能重新纳入已否决候选')
+        if action=='reject' and status not in ('pending','conflict','reopened'):
+            raise ValueError('当前付款候选不可否决')
+        old_revision=candidate['revision']
+        if action=='reopen':
+            candidate.update(status='reopened',method='reopened',reason=reason,reopened_by=actor,
+                             reopened_at=utcnow(),revision=digest('payment-candidate-reopened',old_revision,reason,actor))
+        else:
+            candidate.update(status='rejected',rejection_reason=reason,rejected_by=actor,
+                             rejected_at=utcnow(),revision=digest('payment-candidate-rejected',old_revision,reason,actor))
+        store.put('freight_candidate',{k:candidate[k] for k in ('id','logistics_id','expense_id','status')}|{'data':dumps(candidate)})
+        store.audit(batch_name,f'payment_candidate_{action}ed',actor,candidate_id=candidate_id,
+                    version=version_name,old_revision=old_revision,new_revision=candidate['revision'],reason=reason)
+        touched=ledger.put('batch',batch_name,{'status':batch.get('status')}) or ledger.get('batch',batch_name,lock=True) or batch
+        return {'candidate':candidate,'batch_modified':str(touched.get('modified') or '')}
 
 
 def resume(store,ledger):

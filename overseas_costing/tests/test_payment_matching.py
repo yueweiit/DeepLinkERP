@@ -593,6 +593,45 @@ def test_reopen_payment_candidate_requires_revision_and_allows_regeneration():
     assert store.find('audit',binding_id=batch['name'])[-1]['action']=='payment_candidate_reopened'
 
 
+def test_payment_candidate_decision_requires_lease_current_version_and_cas():
+    from overseas_costing.services.logistics_settlement import freight_matching, freight_runtime
+    store, ledger, batch, version, _item, logistics, _expense = setup_cost()
+    ledger.put('batch', batch['name'], {'modified': 'm1'})
+    candidate = freight_matching.rule_pass(store, logistics['id'])[0]
+
+    with pytest.raises(ValueError, match='编辑租约'):
+        freight_runtime.decide_payment_candidate(
+            store, ledger, batch['name'], version['name'], candidate['id'], candidate['revision'],
+            'reject', '人工否决', 'user', edit_token='', expected_modified='m1')
+
+    def lease(batch_name, *, edit_token, expected_modified):
+        assert (batch_name, edit_token, expected_modified) == (batch['name'], 'token', 'm1')
+        return ledger.get('batch', batch_name, lock=True)
+
+    ledger.put('batch', batch['name'], {'current_version': 'other-version'})
+    with pytest.raises(ValueError, match='当前版本'):
+        freight_runtime.decide_payment_candidate(
+            store, ledger, batch['name'], version['name'], candidate['id'], candidate['revision'],
+            'reject', '人工否决', 'user', lease_check=lease, edit_token='token', expected_modified='m1')
+
+    ledger.put('batch', batch['name'], {'current_version': version['name']})
+    rejected = freight_runtime.decide_payment_candidate(
+        store, ledger, batch['name'], version['name'], candidate['id'], candidate['revision'],
+        'reject', '人工否决', 'user', lease_check=lease, edit_token='token', expected_modified='m1')
+    assert rejected['candidate']['status'] == 'rejected'
+    assert rejected['candidate']['revision'] != candidate['revision']
+    assert rejected['batch_modified'] == 'm1'
+
+    reopened = freight_runtime.decide_payment_candidate(
+        store, ledger, batch['name'], version['name'], candidate['id'], rejected['candidate']['revision'],
+        'reopen', '重新核对', 'user', lease_check=lease, edit_token='token', expected_modified='m1')
+    assert reopened['candidate']['status'] == 'reopened'
+    with pytest.raises(ValueError, match='变化'):
+        freight_runtime.decide_payment_candidate(
+            store, ledger, batch['name'], version['name'], candidate['id'], rejected['candidate']['revision'],
+            'reject', '并发旧请求', 'user', lease_check=lease, edit_token='token', expected_modified='m1')
+
+
 def test_runtime_only_queues_the_explicit_payment_ai_action(monkeypatch):
     from overseas_costing.services import allocation_service
     from overseas_costing.services.logistics_settlement import runtime
