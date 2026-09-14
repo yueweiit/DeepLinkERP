@@ -231,7 +231,17 @@ console.log(JSON.stringify({editable:columns.filter(column=>!column.readonly).ma
     assert result["goods"]["label"] == "货值兼容值 RMB"
 
 
-def test_packing_group_renders_true_rowspan_and_group_actions_once():
+def test_material_grid_starts_with_selection_and_row_number_without_actions_column():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={};w.ensureMaterialFeeState();
+const columns=w.materialFeeGridColumns();
+console.log(JSON.stringify({fields:columns.map(column=>column.field)}));
+""")
+    assert result["fields"][:4] == ["__group_select", "row_no", "material_code", "product_name"]
+    assert "__actions" not in result["fields"]
+
+
+def test_packing_group_renders_true_rowspan_without_per_row_actions():
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={};const state=w.ensureMaterialFeeState();
 w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');w.materialAICell=()=>null;
@@ -242,14 +252,12 @@ const second={name:'I2',stable_line_key:'L2',packing_group_id:'G1',packing_group
 const columns=w.materialFeeGridColumns();const physical=columns.filter(c=>['package_count','net_weight_kg','gross_weight_kg','volume_m3'].includes(c.field));
 const rendered=physical.map((column,index)=>w.renderMaterialFeeGridCell(first,column,new Set(),index)).join('');
 const hidden=physical.map((column,index)=>w.renderMaterialFeeGridCell(second,column,new Set(),index)).join('');
-const actions=w.renderMaterialFeeGridCell(first,columns.find(c=>c.field==='__actions'),new Set(),99);
-console.log(JSON.stringify({rendered,hidden,actions,fields:physical.map(c=>c.field)}));
+console.log(JSON.stringify({rendered,hidden,fields:physical.map(c=>c.field)}));
 """)
     assert result["fields"] == ["package_count", "net_weight_kg", "gross_weight_kg", "volume_m3"]
     assert result["rendered"].count('rowspan="3"') == 4
     assert all(value in result["rendered"] for value in ["21", "389", "397.7", "0.40884"])
     assert result["hidden"] == ""
-    assert "编辑组" in result["actions"] and "解除组" in result["actions"]
 
 
 def test_historical_material_grid_disables_packing_group_edits():
@@ -259,11 +267,99 @@ state.materials={packing_group_editable:false};w.escape=v=>String(v??'');w.forma
 const item={name:'I1',stable_line_key:'L1',packing_group_id:'G1',packing_group_position:0,packing_group_size:2,packing_group:{group_id:'G1'}};
 const columns=w.materialFeeGridColumns();
 const select=w.renderMaterialFeeGridCell(item,columns.find(c=>c.field==='__group_select'),new Set(),3);
-const actions=w.renderMaterialFeeGridCell(item,columns.find(c=>c.field==='__actions'),new Set(),99);
-console.log(JSON.stringify({select,actions}));
+console.log(JSON.stringify({select,fields:columns.map(column=>column.field)}));
 """)
     assert 'disabled' in result['select']
-    assert '编辑组' not in result['actions'] and '解除组' not in result['actions']
+    assert '__actions' not in result['fields']
+
+
+def test_material_selection_expands_whole_group_and_toolbar_enforces_action_matrix():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+state.materials={packing_group_editable:true,items:[
+  {stable_line_key:'L1',row_no:1,packing_group_id:'G1'},
+  {stable_line_key:'L2',row_no:2,packing_group_id:'G1'},
+  {stable_line_key:'L3',row_no:3},{stable_line_key:'L4',row_no:4}],
+  packing_groups:[{group_id:'G1',member_keys:['L1','L2','LX'],status:'confirmed'}]};
+state.packingGroupSelections=new Set();
+w.toggleMaterialSelection('L1',true);
+const group=w.materialSelectionContext();
+w.toggleMaterialSelection('L2',false);
+const cleared=[...state.packingGroupSelections];
+state.packingGroupSelections=new Set(['L3','L4']);
+const merge=w.materialSelectionContext();
+state.packingGroupSelections=new Set(['L1','L2','LX','L3']);
+const mixed=w.materialSelectionContext();
+console.log(JSON.stringify({group:{selected:[...group.selectedKeys],cross:group.crossPageCount,
+  edit:group.actions.edit.enabled,unmerge:group.actions.unmerge.enabled,merge:group.actions.merge.enabled},
+  cleared,merge:merge.actions.merge,mixed:{edit:mixed.actions.edit,unmerge:mixed.actions.unmerge,
+  remove:mixed.actions.remove}}));
+""")
+    assert result['group']['selected'] == ['L1', 'L2', 'LX']
+    assert result['group']['cross'] == 1
+    assert result['group']['edit'] is True and result['group']['unmerge'] is True
+    assert result['group']['merge'] is False
+    assert result['cleared'] == []
+    assert result['merge']['enabled'] is True
+    assert result['mixed']['edit']['enabled'] is False
+    assert result['mixed']['unmerge']['enabled'] is False
+    assert result['mixed']['remove']['enabled'] is True
+
+
+def test_material_page_checkbox_is_tristate_and_toolbar_is_always_rendered():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:false};const state=w.ensureMaterialFeeState();
+w.escape=v=>String(v??'');
+state.materials={packing_group_editable:true,items:[
+  {stable_line_key:'L1',row_no:1},{stable_line_key:'L2',row_no:2}],packing_groups:[]};
+state.packingGroupSelections=new Set(['L1']);
+const partial=w.materialPageSelectionState();
+const toolbar=w.renderMaterialSelectionToolbar();
+w.toggleMaterialPageSelection(true);
+const all=w.materialPageSelectionState();
+w.toggleMaterialPageSelection(false);
+const none=w.materialPageSelectionState();
+console.log(JSON.stringify({partial,all,none,toolbar}));
+""")
+    assert result['partial']['indeterminate'] is True and result['partial']['checked'] is False
+    assert result['all']['checked'] is True and result['all']['indeterminate'] is False
+    assert result['none']['checked'] is False and result['none']['indeterminate'] is False
+    for label in ['已选 1 行', '新增物料', '合并装箱组', '编辑装箱组', '解除合并', '删除所选', '清除选择']:
+        assert label in result['toolbar']
+
+
+def test_top_toolbar_uses_atomic_batch_endpoints_and_clears_only_after_success():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={batchName:'B',versionName:'V',expectedModified:'M'};
+const state=w.ensureMaterialFeeState();state.materials={packing_group_editable:true,items:[
+  {name:'I1',stable_line_key:'L1',packing_group_id:'G1'},
+  {name:'I2',stable_line_key:'L2',packing_group_id:'G1'}],
+  packing_groups:[{group_id:'G1',member_keys:['L1','L2'],status:'confirmed'}]};
+state.fees={};state.preview={};state.packingGroupSelections=new Set(['L1','L2']);
+const calls=[];w.ensureEditSession=async()=>true;w.updateMaterialFeeExpectedModified=()=>{};
+w.loadMaterialFeeWorkspace=async()=>true;w.showError=()=>{};
+frappe.confirm=(message,yes)=>yes();
+w.call=async(method,args)=>{calls.push({method,args});
+  if(method.endsWith('preview_material_packing_group_batch')) return {ok:true,preview_id:'P',revision:'R',affected_member_keys:['L1','L2']};
+  return {ok:true,removed_group_ids:['G1'],excluded_count:2,batch_modified:'M2'};};
+await w.removeSelectedPackingGroups();
+const afterUnmerge=state.packingGroupSelections.size;
+state.packingGroupSelections=new Set(['L1','L2']);
+await w.excludeSelectedMaterials();
+const afterDelete=state.packingGroupSelections.size;
+state.packingGroupSelections=new Set(['L1','L2']);
+w.call=async()=>({ok:false,message:'network failed'});
+await w.excludeSelectedMaterials();
+console.log(JSON.stringify({methods:calls.map(call=>call.method),afterUnmerge,afterDelete,
+  afterFailure:[...state.packingGroupSelections]}));
+""")
+    assert result['methods'] == [
+        'overseas_costing.api.materials.preview_material_packing_group_batch',
+        'overseas_costing.api.materials.confirm_material_packing_group_batch',
+        'overseas_costing.api.materials.exclude_material_items',
+    ]
+    assert result['afterUnmerge'] == 0 and result['afterDelete'] == 0
+    assert result['afterFailure'] == ['L1', 'L2']
 
 
 def test_nonblocking_purchase_and_manual_notes_are_folded():

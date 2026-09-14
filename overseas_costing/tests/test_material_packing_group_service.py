@@ -7,7 +7,9 @@ from overseas_costing.services.material_packing_group_service import (
     adopt_xlsx_group_candidates,
     allocate_group_values,
     build_group_preview,
+    confirm_group_batch_preview,
     confirm_group_preview,
+    prepare_group_batch_preview,
     prepare_group_preview,
     project_packing_groups,
 )
@@ -168,3 +170,56 @@ def test_server_held_group_preview_confirms_once_and_rejects_stale_state():
     with pytest.raises(ValueError, match='已变化'):
         confirm_group_preview('B1', stale['preview_id'], stale['revision'],
                               'TOKEN', 'BM1', repository=stale_repo, actor='user@example.com')
+
+
+def _confirmed_group(member_keys, version='V1'):
+    group = build_group_preview(rows(), [], member_keys, action='create', version=version)['group']
+    group['status'] = 'confirmed'
+    return group
+
+
+def test_batch_group_remove_previews_complete_members_and_confirms_atomically():
+    repo = Repo()
+    repo.state['groups'] = [
+        _confirmed_group(['L1', 'L2']),
+        _confirmed_group(['L3', 'L4']),
+    ]
+    group_ids = [group['group_id'] for group in repo.state['groups']]
+
+    prepared = prepare_group_batch_preview(
+        'B1', 'V1', group_ids, reason='批量解除装箱组', repository=repo,
+    )
+
+    assert prepared['affected_member_keys'] == ['L1', 'L2', 'L3', 'L4']
+    assert repo.saved == []
+    result = confirm_group_batch_preview(
+        'B1', prepared['preview_id'], prepared['revision'], 'TOKEN', 'BM1',
+        repository=repo, actor='user@example.com',
+    )
+
+    assert result['removed_group_ids'] == group_ids
+    assert all(group['status'] == 'removed' for group in repo.state['groups'])
+    assert repo.saved == [prepared['preview_id']]
+
+
+def test_batch_group_remove_rejects_missing_or_changed_group_without_partial_save():
+    repo = Repo()
+    repo.state['groups'] = [_confirmed_group(['L1', 'L2'])]
+    group_id = repo.state['groups'][0]['group_id']
+
+    with pytest.raises(ValueError, match='已变化'):
+        prepare_group_batch_preview(
+            'B1', 'V1', [group_id, 'MISSING'], reason='批量解除装箱组', repository=repo,
+        )
+    assert repo.saved == []
+
+    prepared = prepare_group_batch_preview(
+        'B1', 'V1', [group_id], reason='批量解除装箱组', repository=repo,
+    )
+    repo.state['groups'][0]['member_keys'].append('L3')
+    with pytest.raises(ValueError, match='已变化'):
+        confirm_group_batch_preview(
+            'B1', prepared['preview_id'], prepared['revision'], 'TOKEN', 'BM1',
+            repository=repo, actor='user@example.com',
+        )
+    assert repo.saved == []

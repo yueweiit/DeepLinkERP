@@ -1578,21 +1578,23 @@ console.log(JSON.stringify({value:html.includes('value="2"'),original:html.inclu
     assert result["draft"]["value"] == "2"
 
 
-def test_material_grid_exposes_add_soft_exclude_restore_and_failed_cell_retry():
+def test_material_grid_exposes_top_bulk_actions_restore_and_failed_cell_retry():
     result = _fee_workspace_result(r"""
 const workspace=new Harness();workspace.escape=value=>String(value??'');workspace.formatValue=value=>String(value??'');
 workspace.detailState={batchName:'B',versionName:'V',tab:'documents'};const state=workspace.ensureMaterialFeeState();
 state.materialDrafts={'I:gross_weight_kg':{itemName:'I',fieldname:'gross_weight_kg',value:'9.7',error:'并发冲突'}};
 const columns=workspace.materialFeeGridColumns();
 const cell=workspace.renderMaterialFeeGridCell({name:'I',gross_weight_kg:null,requirements:{missing_fields:['gross_weight_kg']}},columns.find(row=>row.field==='gross_weight_kg'),new Set(['gross_weight_kg']),1);
-const action=workspace.renderMaterialFeeGridCell({name:'I',material_code:'SKU',product_name:'物料'},columns.find(row=>row.field==='__actions'),new Set(),columns.length-1);
-console.log(JSON.stringify({fields:columns.map(row=>row.field),cell,action}));
+state.materials={packing_group_editable:true,items:[{name:'I',stable_line_key:'L1'}],packing_groups:[]};
+const toolbar=workspace.renderMaterialSelectionToolbar();
+console.log(JSON.stringify({fields:columns.map(row=>row.field),cell,toolbar}));
 """)
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
-    assert result["fields"][-1] == "__actions"
+    assert result["fields"][:2] == ["__group_select", "row_no"]
+    assert "__actions" not in result["fields"]
     assert 'value="9.7"' in result["cell"] and 'data-action="mf-retry-cell"' in result["cell"]
-    assert 'data-action="mf-exclude-item"' in result["action"]
-    assert 'data-action="mf-add-material"' in source
+    assert 'data-action="mf-exclude-selected"' in result["toolbar"]
+    assert 'data-action="mf-add-material"' in result["toolbar"]
     assert 'data-action="mf-excluded-materials"' in source
 
 

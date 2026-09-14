@@ -1,6 +1,7 @@
 """Server-owned material packing groups and count-once calculation projection."""
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
@@ -262,6 +263,85 @@ def confirm_group_preview(batch_name, preview_id, revision, edit_token, expected
             'version_name':state['version'], 'batch_modified':modified}
 
 
+def prepare_group_batch_preview(batch_name, version_name, group_ids, *, reason='', repository=None):
+    """Build one server-held preview for atomically removing complete packing groups."""
+    repo = repository or FrappeMaterialPackingGroupRepository()
+    requested = [str(value or '').strip() for value in group_ids or []]
+    if not requested or any(not value for value in requested):
+        raise ValueError('请选择至少一个装箱组。')
+    if len(requested) != len(set(requested)):
+        raise ValueError('装箱组选择存在重复。')
+    if len(requested) > 100:
+        raise ValueError('一次最多解除 100 个装箱组。')
+    if not str(reason or '').strip():
+        raise ValueError('解除装箱组时请填写原因。')
+    state = repo.load(batch_name, version_name, lock=False)
+    if not state.get('editable'):
+        raise ValueError('历史、已确认或已回写版本不能修改装箱组。')
+    active = {str(group.get('group_id') or ''):deepcopy(group)
+              for group in state.get('groups') or [] if group.get('status') != 'removed'}
+    if any(group_id not in active for group_id in requested):
+        raise ValueError('装箱组已变化，请刷新后重新选择。')
+    all_keys = [_key(row) for row in state.get('items') or [] if _key(row)]
+    key_counts = Counter(all_keys)
+    available_keys = {key for key, count in key_counts.items() if count == 1}
+    selected_groups = [active[group_id] for group_id in requested]
+    members = []
+    for group in selected_groups:
+        group_members = [str(key or '').strip() for key in group.get('member_keys') or []]
+        if len(group_members) < 2 or any(not key or key not in available_keys for key in group_members):
+            raise ValueError('装箱组成员已变化，请刷新后重新选择。')
+        members.extend(group_members)
+    if len(members) != len(set(members)):
+        raise ValueError('装箱组成员重复，请先修复分组。')
+    fingerprint = _state_fingerprint(state)
+    preview = {
+        'ok':True, 'action':'batch_remove', 'batch':state['batch'], 'version':state['version'],
+        'group_ids':requested, 'before_groups':selected_groups, 'affected_member_keys':members,
+        'reason':str(reason or '').strip(), 'state_fingerprint':fingerprint,
+        'batch_modified':state['batch_modified'], 'version_modified':state['version_modified'],
+    }
+    preview['revision'] = digest('material-packing-group-batch-preview-1', preview)
+    preview['preview_id'] = digest('material-packing-group-batch-preview-id', preview['revision'])
+    repo.save_preview(deepcopy(preview))
+    return deepcopy(preview)
+
+
+def confirm_group_batch_preview(batch_name, preview_id, revision, edit_token, expected_modified, *, repository=None,
+                                actor=''):
+    """Remove all previewed groups in one save or reject the whole request."""
+    repo = repository or FrappeMaterialPackingGroupRepository()
+    preview = repo.get_preview(preview_id)
+    if (not preview or preview.get('action') != 'batch_remove' or preview.get('batch') != batch_name
+            or preview.get('revision') != revision):
+        raise ValueError('装箱组预览已失效，请重新预览。')
+    repo.assert_write(batch_name, edit_token, expected_modified)
+    state = repo.load(batch_name, preview['version'], lock=True)
+    if not state.get('editable') or _state_fingerprint(state) != preview.get('state_fingerprint'):
+        raise ValueError('物料、装箱组或版本已变化，请重新预览。')
+    requested = set(preview.get('group_ids') or [])
+    now = datetime.now().isoformat(timespec='seconds')
+    removed = []
+    groups = []
+    for raw_group in state.get('groups') or []:
+        group = deepcopy(raw_group)
+        if group.get('group_id') in requested:
+            group.update(status='removed', modification_reason=preview.get('reason') or '',
+                         confirmed_by=str(actor or ''), confirmed_at=now, last_preview_id=preview_id)
+            removed.append(group.get('group_id'))
+        groups.append(group)
+    if set(removed) != requested:
+        raise ValueError('装箱组已变化，请重新预览。')
+    modified = repo.save_groups(state, groups, preview, actor)
+    return {
+        'ok':True, 'status':'CONFIRMED', 'action':'batch_remove',
+        'removed_group_ids':[group_id for group_id in preview.get('group_ids') or []],
+        'affected_member_keys':list(preview.get('affected_member_keys') or []),
+        'packing_groups':[group for group in groups if group.get('status') != 'removed'],
+        'version_name':state['version'], 'batch_modified':modified,
+    }
+
+
 class FrappeMaterialPackingGroupRepository:
     CACHE_PREFIX = 'overseas-costing:material-packing-group:'
 
@@ -327,25 +407,31 @@ class FrappeMaterialPackingGroupRepository:
         return str(frappe.db.get_value('Overseas Cost Batch', state['batch'], 'modified') or '')
 
 
-def mark_member_changed(frappe, version_name, stable_line_key, action):
-    """Invalidate a saved group when one of its members is excluded or restored."""
-    if not str(stable_line_key or '').strip():
-        return False
+def mark_members_changed(frappe, version_name, stable_line_keys, action):
+    """Invalidate saved groups touched by excluded or restored members in one metadata write."""
+    keys = {str(value or '').strip() for value in stable_line_keys or [] if str(value or '').strip()}
+    if not keys:
+        return []
     version = frappe.db.get_value('Overseas Cost Version', version_name,
                                   ['name','extra_json'], as_dict=True) or {}
     groups = groups_from_version(version)
-    changed = False
+    affected = []
     for group in groups:
         if (group.get('status') != 'removed'
-                and str(stable_line_key or '') in [str(key) for key in group.get('member_keys') or []]):
+                and keys.intersection(str(key) for key in group.get('member_keys') or [])):
             group['status'] = 'needs_reconfirmation'
             group['member_change'] = str(action or '')
-            changed = True
-    if changed:
+            affected.append(str(group.get('group_id') or ''))
+    if affected:
         metadata = version_metadata_with_groups(version, groups)
         frappe.db.set_value('Overseas Cost Version', version_name, 'extra_json',
                             json.dumps(metadata, ensure_ascii=False, default=str), update_modified=True)
-    return changed
+    return affected
+
+
+def mark_member_changed(frappe, version_name, stable_line_key, action):
+    """Backward-compatible single-member invalidation helper."""
+    return bool(mark_members_changed(frappe, version_name, [stable_line_key], action))
 
 
 def adopt_xlsx_group_candidates(items, existing_groups, candidates, preview_id, *, actor='', confirmed_member_keys=None):

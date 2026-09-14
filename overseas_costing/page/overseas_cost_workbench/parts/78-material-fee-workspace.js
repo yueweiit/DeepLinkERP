@@ -48,13 +48,17 @@
   }
 
   bindMaterialFeeWorkspaceEvents() {
-    this.$root.on("click", "[data-action='mf-reload']", () => this.loadMaterialFeeWorkspace());
+    this.$root.on("click", "[data-action='mf-reload']", () => {
+      this.clearMaterialSelection(false);
+      this.loadMaterialFeeWorkspace();
+    });
     this.$root.on("click", "[data-action='mf-view-settlement-source']", () => {
       this.openBatchSettlementDialog(this.detailState.batchName, this.detailState.versionName || null);
     });
     this.$root.on("click", "[data-action='mf-toggle-missing']", () => {
       const state = this.ensureMaterialFeeState();
       state.onlyMissing = !state.onlyMissing;
+      this.clearMaterialSelection(false);
       this.renderMaterialFeeWorkspace();
     });
     this.$root.on("click", "[data-action='mf-toggle-aux']", () => {
@@ -66,6 +70,7 @@
       this.closeMaterialAICandidatePopover();
       const state = this.ensureMaterialFeeState();
       state.page = Math.max(1, Number($(event.currentTarget).attr("data-page") || 1));
+      this.clearMaterialSelection(false);
       this.loadMaterialFeeWorkspace();
     });
     this.$root.on("click", "[data-action='mf-edit-fee']", (event) => {
@@ -116,28 +121,30 @@
       this.openExcludedMaterialsDialog().catch((error) => this.showError(error));
     });
     this.$root.on("change", "[data-mf-packing-group-select]", (event) => {
-      const state = this.ensureMaterialFeeState();
       const key = String($(event.currentTarget).attr("data-mf-packing-group-select") || "");
-      if ($(event.currentTarget).prop("checked")) state.packingGroupSelections.add(key);
-      else state.packingGroupSelections.delete(key);
+      this.toggleMaterialSelection(key, $(event.currentTarget).prop("checked"));
+      this.renderMaterialFeeWorkspacePreservingPosition();
+    });
+    this.$root.on("change", "[data-mf-page-select]", (event) => {
+      this.toggleMaterialPageSelection($(event.currentTarget).prop("checked"));
       this.renderMaterialFeeWorkspacePreservingPosition();
     });
     this.$root.on("click", "[data-action='mf-create-packing-group']", () => {
       this.openMaterialPackingGroupDialog("create").catch((error) => this.showError(error));
     });
-    this.$root.on("click", "[data-action='mf-edit-packing-group']", (event) => {
-      this.openMaterialPackingGroupDialog("update", $(event.currentTarget).attr("data-group-id")).catch((error) => this.showError(error));
+    this.$root.on("click", "[data-action='mf-edit-selected-packing-group']", () => {
+      const context = this.materialSelectionContext();
+      if (!context.actions.edit.enabled) return;
+      this.openMaterialPackingGroupDialog("update", context.selectedGroupIds[0]).catch((error) => this.showError(error));
     });
-    this.$root.on("click", "[data-action='mf-remove-packing-group']", (event) => {
-      this.openMaterialPackingGroupDialog("remove", $(event.currentTarget).attr("data-group-id")).catch((error) => this.showError(error));
+    this.$root.on("click", "[data-action='mf-remove-selected-packing-groups']", () => {
+      this.removeSelectedPackingGroups().catch((error) => this.showError(error));
     });
-    this.$root.on("click", "[data-action='mf-exclude-item']", (event) => {
-      const $button = $(event.currentTarget);
-      this.confirmDeleteMaterial(
-        this.detailState.batchName,
-        $button.attr("data-item-name"),
-        $button.attr("data-item-label")
-      );
+    this.$root.on("click", "[data-action='mf-exclude-selected']", () => {
+      this.excludeSelectedMaterials().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-clear-selection']", () => {
+      this.clearMaterialSelection();
     });
     this.$root.on("click", "[data-action='mf-retry-cell']", (event) => {
       event.preventDefault();
@@ -459,6 +466,12 @@
         || this.detailState.tab !== "documents"
       ) return false;
       this.applyMaterialFeeHeaderSnapshot(detail, batchName);
+      const loadedSelectionVersion = String(materials?.version_name || this.detailState.versionName || batch.current_version || "");
+      if (state.packingGroupSelectionVersion !== undefined
+          && state.packingGroupSelectionVersion !== loadedSelectionVersion) {
+        state.packingGroupSelections.clear();
+      }
+      state.packingGroupSelectionVersion = loadedSelectionVersion;
       state.materials = materials;
       state.fees = fees;
       state.preview = preview;
@@ -551,11 +564,9 @@
 
   renderMaterialFeeWorkspace() {
     const state = this.ensureMaterialFeeState();
-    const packingGroupSelections = state.packingGroupSelections || new Set();
     if (!state.materials || !state.fees || !state.preview) return;
     this.closeMaterialAICandidatePopover();
     const materialSummary = state.materials || {};
-    const packingGroupEditable = materialSummary.packing_group_editable !== false && !this.detailState?.readOnly;
     const hasSettlementCargo = (materialSummary.items || []).some((item) => item.settlement_cargo);
     const blockingPackingGroups = (materialSummary.packing_groups || []).filter(group => group.blocking || group.status === "needs_reconfirmation");
     const feeSummary = state.fees.summary || {};
@@ -585,8 +596,6 @@
             <div class="ocw-mf-material-actions">
               <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
               <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
-              <button class="ocw-outline-btn" type="button" data-action="mf-add-material">新增物料</button>
-              <button class="ocw-outline-btn" type="button" data-action="mf-create-packing-group" ${packingGroupEditable && packingGroupSelections.size >= 2 ? "" : "disabled"}>合并装箱组${packingGroupSelections.size ? `（${packingGroupSelections.size}）` : ""}</button>
               <button class="ocw-outline-btn" type="button" data-action="mf-excluded-materials">已排除物料</button>
               <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
               <button class="ocw-outline-btn" type="button" data-action="mf-recover-material-rows">恢复误删物料</button>
@@ -594,8 +603,9 @@
               <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (state.aiFill?.status === "READY" ? "查看填充预览" : "查看填充进度") : "自动填充资料"}</button>
             </div>
           </div>
-          ${blockingPackingGroups.length ? `<div class="ocw-mf-dialog-note"><strong>装箱组待重新确认</strong><span>组内物料曾被删除或恢复，试算已阻止。</span>${blockingPackingGroups.map(group => `<button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-remove-packing-group" data-group-id="${this.escape(group.group_id)}">解除失效组</button>`).join("")}</div>` : ""}
+          ${blockingPackingGroups.length ? `<div class="ocw-mf-dialog-note"><strong>装箱组待重新确认</strong><span>组内物料曾被删除或恢复，试算已阻止。请勾选完整装箱组后从顶部操作条处理。</span></div>` : ""}
           ${this.renderMaterialAIClarification()}
+          ${this.renderMaterialSelectionToolbar()}
           ${this.renderMaterialFeeGrid()}
           <div class="ocw-mf-ai-candidate-popover" data-mf-ai-candidate-popover="1" role="dialog" aria-label="AI 候选详情" hidden></div>
         </section>
@@ -611,6 +621,7 @@
     `);
     this.loadSettlementStrip?.(state.batchName, state.settlementData);
     this.bindMaterialGridScrollControls();
+    this.syncMaterialPageCheckboxState();
     this.restoreMaterialFeeInputFocus();
   }
 
@@ -885,10 +896,10 @@
   materialFeeGridColumns() {
     const state = this.ensureMaterialFeeState();
     const columns = [
+      { field: "__group_select", label: "选择", readonly: true, width: 48, compactWidth: 42 },
       { field: "row_no", label: "行", readonly: true, width: 40, compactWidth: 32 },
       { field: "material_code", label: "物料编码", readonly: true, width: 100, compactWidth: 88 },
       { field: "product_name", label: "物料名称", readonly: true, width: 180, compactWidth: 120 },
-      { field: "__group_select", label: "共箱", readonly: true, width: 48 },
       { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
       { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
       { field: "shipped_uom", label: "发货单位", width: 130 },
@@ -913,8 +924,146 @@
       );
     }
     columns.push({ field: "source_doc_no", label: "采购审批号", readonly: true, width: 220 });
-    columns.push({ field: "__actions", label: "操作", readonly: true, width: 180 });
     return columns;
+  }
+
+  materialPackingGroups() {
+    const state = this.ensureMaterialFeeState();
+    const groups = new Map();
+    (state.materials?.packing_groups || []).forEach((group) => {
+      if (group?.group_id && group.status !== "removed") groups.set(String(group.group_id), group);
+    });
+    (state.materials?.items || []).forEach((item) => {
+      const group = item.packing_group;
+      if (item.packing_group_id && group?.member_keys && !groups.has(String(item.packing_group_id))) {
+        groups.set(String(item.packing_group_id), group);
+      }
+    });
+    return groups;
+  }
+
+  materialRowIsSelectable(item) {
+    const state = this.ensureMaterialFeeState();
+    return Boolean(item && !item.__aiReplacement && String(item.stable_line_key || "")
+      && state.materials?.packing_group_editable !== false && !this.detailState?.readOnly);
+  }
+
+  toggleMaterialSelection(stableLineKey, checked) {
+    const state = this.ensureMaterialFeeState();
+    state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
+    const key = String(stableLineKey || "");
+    if (!key) return;
+    const group = [...this.materialPackingGroups().values()].find((value) =>
+      (value.member_keys || []).map(String).includes(key));
+    const keys = group ? (group.member_keys || []).map(String) : [key];
+    keys.forEach((value) => checked ? state.packingGroupSelections.add(value) : state.packingGroupSelections.delete(value));
+  }
+
+  materialPageSelectableRows() {
+    return this.materialFeeVisibleItems().filter((item) => this.materialRowIsSelectable(item));
+  }
+
+  materialPageSelectionState() {
+    const state = this.ensureMaterialFeeState();
+    state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
+    const selections = state.packingGroupSelections;
+    const keys = [...new Set(this.materialPageSelectableRows().map((item) => String(item.stable_line_key || "")).filter(Boolean))];
+    const selected = keys.filter((key) => selections.has(key)).length;
+    return { total:keys.length, selected, checked:Boolean(keys.length && selected === keys.length),
+      indeterminate:Boolean(selected && selected < keys.length) };
+  }
+
+  toggleMaterialPageSelection(checked) {
+    const keys = [...new Set(this.materialPageSelectableRows().map((item) => String(item.stable_line_key || "")).filter(Boolean))];
+    keys.forEach((key) => this.toggleMaterialSelection(key, checked));
+  }
+
+  syncMaterialPageCheckboxState() {
+    const checkbox = this.$root?.find?.("[data-mf-page-select]")?.get?.(0);
+    if (!checkbox) return;
+    const page = this.materialPageSelectionState();
+    checkbox.checked = page.checked;
+    checkbox.indeterminate = page.indeterminate;
+  }
+
+  clearMaterialSelection(render = true) {
+    const state = this.ensureMaterialFeeState();
+    state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
+    state.packingGroupSelections.clear();
+    if (render && state.materials && state.fees && state.preview) this.renderMaterialFeeWorkspacePreservingPosition();
+  }
+
+  materialSelectionContext() {
+    const state = this.ensureMaterialFeeState();
+    state.packingGroupSelections = state.packingGroupSelections instanceof Set ? state.packingGroupSelections : new Set();
+    const selectedKeys = new Set([...state.packingGroupSelections].map(String));
+    const pageRows = state.materials?.items || [];
+    const pageKeys = new Set(pageRows.map((row) => String(row.stable_line_key || "")).filter(Boolean));
+    const selectablePageKeys = new Set(this.materialPageSelectableRows()
+      .map((row) => String(row.stable_line_key || "")).filter(Boolean));
+    const groups = this.materialPackingGroups();
+    const groupByMember = new Map();
+    groups.forEach((group, groupId) => (group.member_keys || []).forEach((key) => groupByMember.set(String(key), groupId)));
+    const knownKeys = new Set([...pageKeys, ...groupByMember.keys()]);
+    const unknownKeys = [...selectedKeys].filter((key) => !knownKeys.has(key));
+    const lockedPageKeys = [...selectedKeys].filter((key) => pageKeys.has(key) && !selectablePageKeys.has(key));
+    const selectedGroupIds = [];
+    const incompleteGroupIds = [];
+    groups.forEach((group, groupId) => {
+      const members = (group.member_keys || []).map(String);
+      const selectedCount = members.filter((key) => selectedKeys.has(key)).length;
+      if (selectedCount === members.length && members.length) selectedGroupIds.push(groupId);
+      else if (selectedCount) incompleteGroupIds.push(groupId);
+    });
+    const ungroupedKeys = [...selectedKeys].filter((key) => knownKeys.has(key) && !groupByMember.has(key));
+    const selectedMemberKeys = [...selectedGroupIds].flatMap((groupId) => (groups.get(groupId)?.member_keys || []).map(String));
+    const selectedCount = selectedKeys.size;
+    const crossPageCount = [...selectedKeys].filter((key) => !pageKeys.has(key)).length;
+    const editable = state.materials?.packing_group_editable !== false && !this.detailState?.readOnly;
+    const orderedKeys = pageRows.map((row) => String(row.stable_line_key || ""));
+    const positions = ungroupedKeys.map((key) => orderedKeys.indexOf(key)).sort((a, b) => a - b);
+    const contiguous = positions.length >= 2 && positions.every((position, index) =>
+      position >= 0 && (index === 0 || position === positions[index - 1] + 1));
+    const completeSelection = !unknownKeys.length && !lockedPageKeys.length && !incompleteGroupIds.length;
+    const readonlyReason = "历史、已确认、已回写或锁定版本不可编辑";
+    const mergeEnabled = editable && completeSelection && selectedGroupIds.length === 0
+      && ungroupedKeys.length === selectedCount && contiguous;
+    const editEnabled = editable && completeSelection && selectedGroupIds.length === 1
+      && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
+    const unmergeEnabled = editable && completeSelection && selectedGroupIds.length >= 1
+      && !ungroupedKeys.length && selectedMemberKeys.length === selectedCount;
+    const removeEnabled = editable && completeSelection && selectedCount > 0;
+    return {
+      selectedKeys, selectedCount, crossPageCount, selectedGroupIds, incompleteGroupIds, ungroupedKeys, lockedPageKeys,
+      actions: {
+        add:{enabled:editable, reason:editable ? "" : readonlyReason},
+        merge:{enabled:mergeEnabled, reason:mergeEnabled ? "" : !editable ? readonlyReason
+          : "请选择至少两条连续、未分组的物料"},
+        edit:{enabled:editEnabled, reason:editEnabled ? "" : !editable ? readonlyReason
+          : "请只选择一个完整装箱组"},
+        unmerge:{enabled:unmergeEnabled, reason:unmergeEnabled ? "" : !editable ? readonlyReason
+          : "请选择一个或多个完整装箱组"},
+        remove:{enabled:removeEnabled, reason:removeEnabled ? "" : !editable ? readonlyReason
+          : lockedPageKeys.length ? "当前选择包含不可操作的 AI 替换草稿行"
+          : incompleteGroupIds.length ? "删除组员前请先解除合并" : "请先选择物料"},
+        clear:{enabled:selectedCount > 0, reason:selectedCount ? "" : "当前没有选中物料"},
+      },
+    };
+  }
+
+  renderMaterialSelectionToolbar() {
+    const context = this.materialSelectionContext();
+    const button = (label, action, spec, kind = "ocw-outline-btn") =>
+      `<button class="${kind}" type="button" data-action="${action}" ${spec.enabled ? "" : "disabled"} title="${this.escape(spec.reason || label)}">${label}</button>`;
+    return `<div class="ocw-mf-selection-toolbar" aria-label="物料批量操作">
+      <span class="ocw-mf-selection-count">已选 ${context.selectedCount} 行${context.crossPageCount ? `<small>含 ${context.crossPageCount} 个跨页成员</small>` : ""}</span>
+      ${button("新增物料", "mf-add-material", context.actions.add)}
+      ${button("合并装箱组", "mf-create-packing-group", context.actions.merge)}
+      ${button("编辑装箱组", "mf-edit-selected-packing-group", context.actions.edit)}
+      ${button("解除合并", "mf-remove-selected-packing-groups", context.actions.unmerge)}
+      ${button("删除所选", "mf-exclude-selected", context.actions.remove, "ocw-outline-btn is-danger")}
+      ${button("清除选择", "mf-clear-selection", context.actions.clear)}
+    </div>`;
   }
 
   async openMaterialPackingGroupDialog(action = "create", groupId = "") {
@@ -984,18 +1133,76 @@
     }, () => resolve(false)));
   }
 
+  async removeSelectedPackingGroups() {
+    const context = this.materialSelectionContext();
+    if (!context.actions.unmerge.enabled) throw new Error(context.actions.unmerge.reason);
+    const preview = await this.call("overseas_costing.api.materials.preview_material_packing_group_batch", {
+      batch_name:this.detailState.batchName, version_name:this.detailState.versionName,
+      group_ids_json:JSON.stringify(context.selectedGroupIds), reason:"人工批量解除装箱组",
+    }, false);
+    if (!preview?.ok) throw new Error(preview?.message || "装箱组预览失败。");
+    return new Promise((resolve) => frappe.confirm(
+      `确认解除 ${context.selectedGroupIds.length} 个装箱组，共影响 ${Number(preview.affected_member_keys?.length || 0)} 行物料？`,
+      async () => {
+        try {
+          if (!(await this.ensureEditSession())) return resolve(false);
+          const result = await this.call("overseas_costing.api.materials.confirm_material_packing_group_batch", {
+            batch_name:this.detailState.batchName, preview_id:preview.preview_id, revision:preview.revision,
+            edit_token:this.detailState.editToken, expected_modified:this.detailState.expectedModified,
+          }, false);
+          if (!result?.ok) throw new Error(result?.message || "装箱组未解除。");
+          this.updateMaterialFeeExpectedModified(result);
+          this.clearMaterialSelection(false);
+          await this.loadMaterialFeeWorkspace({quiet:true});
+          frappe.show_alert({message:`已解除 ${result.removed_group_ids?.length || context.selectedGroupIds.length} 个装箱组`, indicator:"green"});
+          resolve(true);
+        } catch (error) { this.showError(error); resolve(false); }
+      }, () => resolve(false),
+    ));
+  }
+
+  async excludeSelectedMaterials() {
+    const context = this.materialSelectionContext();
+    if (!context.actions.remove.enabled) throw new Error(context.actions.remove.reason);
+    const keys = [...context.selectedKeys];
+    return new Promise((resolve) => frappe.confirm(
+      `确认软删除所选 ${keys.length} 行物料？删除后可在“已排除物料”中恢复。`,
+      async () => {
+        try {
+          if (!(await this.ensureEditSession())) return resolve(false);
+          const result = await this.call("overseas_costing.api.materials.exclude_material_items", {
+            batch_name:this.detailState.batchName, version_name:this.detailState.versionName,
+            stable_line_keys_json:JSON.stringify(keys), reason:`顶部批量操作软排除 ${keys.length} 行物料`,
+            edit_token:this.detailState.editToken, expected_modified:this.detailState.expectedModified,
+          }, false);
+          if (!result?.ok) throw new Error(result?.message || "所选物料未删除。");
+          this.updateMaterialFeeExpectedModified(result);
+          this.clearMaterialSelection(false);
+          await this.loadMaterialFeeWorkspace({quiet:true});
+          frappe.show_alert({message:`已软排除 ${result.excluded_count || keys.length} 行物料`, indicator:"green"});
+          resolve(true);
+        } catch (error) { this.showError(error); resolve(false); }
+      }, () => resolve(false),
+    ));
+  }
+
+  materialFeeVisibleItems() {
+    const state = this.ensureMaterialFeeState();
+    let items = this.materialReplacementRows(state.materials?.items || []);
+    if (state.onlyMissing) {
+      const missingGroups = new Set(items.filter((row) => (row.requirements?.missing_fields || []).length)
+        .map((row) => row.packing_group_id).filter(Boolean));
+      items = items.filter((row) => row.__aiReplacement || (row.requirements?.missing_fields || []).length
+        || missingGroups.has(row.packing_group_id));
+    }
+    return items;
+  }
+
   renderMaterialFeeGrid() {
     const state = this.ensureMaterialFeeState();
     const materialData = state.materials || {};
     const columns = this.materialFeeGridColumns();
-    let items = materialData.items || [];
-    items = this.materialReplacementRows(items);
-    if (state.onlyMissing) {
-      const missingGroups = new Set(items.filter(row => (row.requirements?.missing_fields || []).length)
-        .map(row => row.packing_group_id).filter(Boolean));
-      items = items.filter((row) => row.__aiReplacement || (row.requirements?.missing_fields || []).length
-        || missingGroups.has(row.packing_group_id));
-    }
+    const items = this.materialFeeVisibleItems();
     const page = Number(materialData.page || state.page || 1);
     const pageCount = Math.max(1, Number(materialData.page_count || 1));
     const tableWidth = columns.reduce((sum, column) => sum + Number(column.width || 130), 0);
@@ -1008,7 +1215,9 @@
         <div class="ocw-mf-grid-scroll" data-mf-grid-viewport>
           <div class="ocw-mf-grid-track"><table class="ocw-mf-grid-table">
             <colgroup>${columns.map((column) => `<col style="width:${column.compactWidth ? `var(--mf-grid-${column.field}-width)` : `${Number(column.width || 130)}px`}">`).join("")}</colgroup>
-            <thead><tr>${columns.map((column) => `<th data-mf-grid-field="${column.field}">${this.escape(column.label)}</th>`).join("")}</tr></thead>
+            <thead><tr>${columns.map((column) => column.field === "__group_select"
+              ? `<th data-mf-grid-field="__group_select"><input type="checkbox" data-mf-page-select="1" aria-label="选择当前页可操作物料" ${this.materialPageSelectionState().checked ? "checked" : ""} ${this.materialPageSelectionState().total ? "" : "disabled"}></th>`
+              : `<th data-mf-grid-field="${column.field}">${this.escape(column.label)}</th>`).join("")}</tr></thead>
             <tbody>${items.length ? items.map((item, index) => item.__aiReplacement ? this.renderMaterialReplacementGridRow(item, columns, index) : this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
           </table></div>
         </div>
@@ -1058,6 +1267,9 @@
 
   renderMaterialReplacementGridCell(item, column, columnIndex) {
     const meta = item.__aiReplacement || {};
+    if (column.field === "__group_select") {
+      return `<td class="ocw-mf-cell ocw-mf-group-select is-readonly" data-mf-column-index="${columnIndex}" data-mf-grid-field="__group_select"><input type="checkbox" disabled aria-label="AI 替换草稿行不可选择"></td>`;
+    }
     const editable = new Set([
       "product_name", "spec_model", "quantity", "purchase_uom", "unit_price",
       "unit_price_uom", "purchase_currency", "goods_value", "actual_shipped_qty",
@@ -1121,14 +1333,7 @@
       const key = String(item.stable_line_key || "");
       const checked = this.ensureMaterialFeeState().packingGroupSelections.has(key);
       const editable = this.ensureMaterialFeeState().materials?.packing_group_editable !== false && !this.detailState?.readOnly;
-      return `<td class="ocw-mf-cell ocw-mf-group-select" data-mf-column-index="${columnIndex}" data-mf-grid-field="__group_select"><input type="checkbox" data-mf-packing-group-select="${this.escape(key)}" ${checked ? "checked" : ""} ${item.__aiReplacement || !key || !editable ? "disabled" : ""} aria-label="选择物料行建立装箱组"></td>`;
-    }
-    if (column.field === "__actions") {
-      const label = [item.material_code, item.product_name].filter(Boolean).join(" ") || item.name;
-      const groupEditable = this.ensureMaterialFeeState().materials?.packing_group_editable !== false && !this.detailState?.readOnly;
-      const groupActions = groupEditable && item.packing_group_id && Number(item.packing_group_position || 0) === 0
-        ? `<button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-edit-packing-group" data-group-id="${this.escape(item.packing_group_id)}">编辑组</button><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-remove-packing-group" data-group-id="${this.escape(item.packing_group_id)}">解除组</button>` : "";
-      return `<td class="ocw-mf-cell ocw-mf-actions-cell" data-mf-column-index="${columnIndex}" data-mf-grid-field="__actions">${groupActions}<button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-exclude-item" data-item-name="${this.escape(item.name || "")}" data-item-label="${this.escape(label)}">删除</button></td>`;
+      return `<td class="ocw-mf-cell ocw-mf-group-select" data-mf-column-index="${columnIndex}" data-mf-grid-field="__group_select"><input type="checkbox" data-mf-packing-group-select="${this.escape(key)}" ${checked ? "checked" : ""} ${item.__aiReplacement || !key || !editable ? "disabled" : ""} aria-label="选择物料行"></td>`;
     }
     const packingFields = new Set(["package_count", "packaging_type", "net_weight_kg", "gross_weight_kg", "volume_m3"]);
     if (item.packing_group_id && packingFields.has(column.field)) {

@@ -129,6 +129,51 @@ def confirm_material_packing_group(batch_name, preview_id, revision, edit_token,
         return {'ok':False,'code':'PACKING_GROUP_REVIEW_REQUIRED','message':str(error)}
 
 
+@frappe.whitelist(methods=['POST'])
+def preview_material_packing_group_batch(batch_name, version_name, group_ids_json, reason=None):
+    batch_name = require_batch_permission(batch_name, 'write')
+    from overseas_costing.services.material_packing_group_service import prepare_group_batch_preview
+    try:
+        return prepare_group_batch_preview(
+            batch_name, str(version_name or ''),
+            _ai_review_payload(group_ids_json, list, '装箱组'), reason=str(reason or '')[:1000],
+        )
+    except ValueError as error:
+        frappe.db.rollback()
+        return {'ok':False,'code':'PACKING_GROUP_REVIEW_REQUIRED','message':str(error)}
+
+
+@frappe.whitelist(methods=['POST'])
+def confirm_material_packing_group_batch(batch_name, preview_id, revision, edit_token, expected_modified):
+    batch_name = require_batch_permission(batch_name, 'write')
+    from overseas_costing.services.material_packing_group_service import confirm_group_batch_preview
+    try:
+        return confirm_group_batch_preview(
+            batch_name, str(preview_id or ''), str(revision or ''),
+            str(edit_token or '')[:200], str(expected_modified or '')[:200], actor=frappe.session.user,
+        )
+    except ValueError as error:
+        frappe.db.rollback()
+        return {'ok':False,'code':'PACKING_GROUP_REVIEW_REQUIRED','message':str(error)}
+
+
+@frappe.whitelist(methods=['POST'])
+def exclude_material_items(batch_name, version_name, stable_line_keys_json, reason,
+                           edit_token, expected_modified):
+    batch_name = require_batch_permission(batch_name, 'write')
+    from overseas_costing.services.material_bulk_edit_service import bulk_exclude_materials
+    try:
+        return bulk_exclude_materials(
+            batch_name, str(version_name or ''),
+            _ai_review_payload(stable_line_keys_json, list, '物料行'),
+            str(edit_token or '')[:200], str(expected_modified or '')[:200],
+            reason=str(reason or '')[:1000], actor=frappe.session.user,
+        )
+    except ValueError as error:
+        frappe.db.rollback()
+        return {'ok':False,'code':'MATERIAL_SELECTION_STALE','message':str(error)}
+
+
 @frappe.whitelist()
 def preview_material_import(batch_name, source_kind, source_id, sheet_name=None, merge_reviews_json=None):
     batch_name = require_batch_permission(batch_name, "read")

@@ -202,6 +202,7 @@
       );
       if (!result.ok) throw new Error(result.message || "新增物料失败");
       if (inDetail) this.updateMaterialFeeExpectedModified(result);
+      if (inDetail) this.materialFeeState?.packingGroupSelections?.clear();
       this.markBatchDirty(batch.name);
       this.resetFilterValues();
       if (inDetail && this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });

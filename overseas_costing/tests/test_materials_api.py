@@ -284,3 +284,49 @@ def test_packing_group_api_keeps_server_preview_and_confirm_separate(monkeypatch
     assert calls[2] == ('permission', 'write')
     assert calls[3][1] == ('B1','P','R','TOKEN','MOD')
     assert calls[3][2]['actor'] == 'finance-user'
+
+
+def test_batch_group_remove_api_uses_server_preview_and_confirm(monkeypatch):
+    api = _load_api(monkeypatch)
+    from overseas_costing.services import material_packing_group_service as groups
+    calls = []
+    api.frappe.db = SimpleNamespace(rollback=lambda: calls.append(('rollback',)))
+    api.frappe.session = SimpleNamespace(user='finance-user')
+    monkeypatch.setattr(api, 'require_batch_permission',
+                        lambda batch, permission: calls.append(('permission', permission)) or 'B1')
+    monkeypatch.setattr(groups, 'prepare_group_batch_preview',
+                        lambda *args, **kwargs: calls.append(('preview', args, kwargs)) or {'ok':True,'preview_id':'P'})
+    monkeypatch.setattr(groups, 'confirm_group_batch_preview',
+                        lambda *args, **kwargs: calls.append(('confirm', args, kwargs)) or {'ok':True})
+
+    preview = api.preview_material_packing_group_batch(
+        'B', 'V1', '["G1","G2"]', reason='批量解除')
+    confirmed = api.confirm_material_packing_group_batch('B', 'P', 'R', 'TOKEN', 'MOD')
+
+    assert preview['preview_id'] == 'P' and confirmed['ok']
+    assert calls[0] == ('permission', 'write')
+    assert calls[1][1] == ('B1', 'V1', ['G1', 'G2'])
+    assert calls[1][2]['reason'] == '批量解除'
+    assert calls[2] == ('permission', 'write')
+    assert calls[3][1] == ('B1', 'P', 'R', 'TOKEN', 'MOD')
+    assert calls[3][2]['actor'] == 'finance-user'
+
+
+def test_bulk_material_exclusion_api_parses_stable_keys_and_uses_edit_lease(monkeypatch):
+    api = _load_api(monkeypatch)
+    from overseas_costing.services import material_bulk_edit_service as edits
+    calls = []
+    api.frappe.db = SimpleNamespace(rollback=lambda: calls.append(('rollback',)))
+    api.frappe.session = SimpleNamespace(user='finance-user')
+    monkeypatch.setattr(api, 'require_batch_permission',
+                        lambda batch, permission: calls.append(('permission', permission)) or 'B1')
+    monkeypatch.setattr(edits, 'bulk_exclude_materials',
+                        lambda *args, **kwargs: calls.append(('exclude', args, kwargs)) or {'ok':True,'excluded_count':2})
+
+    result = api.exclude_material_items(
+        'B', 'V1', '["L1","L2"]', '批量软删除', 'TOKEN', 'MOD')
+
+    assert result['excluded_count'] == 2
+    assert calls[0] == ('permission', 'write')
+    assert calls[1][1] == ('B1', 'V1', ['L1', 'L2'], 'TOKEN', 'MOD')
+    assert calls[1][2] == {'reason':'批量软删除', 'actor':'finance-user'}
