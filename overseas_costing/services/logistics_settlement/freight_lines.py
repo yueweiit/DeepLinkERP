@@ -28,7 +28,9 @@ def identifiers_in(value):
 def financial_candidate(row, fields):
     title=str(row.get('process_name') or row.get('template_name') or row.get('title') or (row.get('raw_payload') or {}).get('title') or '')
     text=norm(title+' '+dumps(fields))
-    financial=any(x in norm(title) for x in ('采购支出','运营支出','费用支出','月结','报销','付款','支付','gastos','pago','reembolso')) or bool(re.search(r'bu(?:$|[^a-z])|(?:^|[^a-z])bu',title,re.I))
+    registered=any(x in norm(title) for x in ('采购支出','运营支出','费用支出','月结','报销','付款','支付')) or bool(re.search(r'bu(?:$|[^a-z])|(?:^|[^a-z])bu',title,re.I))
+    if registered:return True
+    financial=any(x in norm(title) for x in ('gastos','pago','reembolso'))
     transport=any(norm(x) in text for x in ('物流','运费','运输','快递','freight','transporte','envio','dhl','fedex','ups','paqueteria','运单','提单','国际物流'))
     return financial and transport
 

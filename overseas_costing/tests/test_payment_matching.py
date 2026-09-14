@@ -65,6 +65,24 @@ def test_payment_pool_covers_registered_financial_flows_and_filters_unsafe_sourc
     assert all(row["approved"] and not row["invalid"] and row["corp"] == "C" for row in pool["sources"])
 
 
+@pytest.mark.parametrize(
+    "title",
+    ["采购支出", "费用支出", "运营支出", "付款", "报销", "月结", "TiffanyBU", "NellyBU", "欧洲BU日常支出"],
+)
+def test_registered_financial_flow_names_do_not_require_logistics_body_keywords(title):
+    import sqlite3
+
+    row = _financial("registered-name", title, text="日常费用结算")
+    store = Store.sqlite(sqlite3.connect(":memory:"))
+    store.install()
+    logistics = store.ingest(parse_source(source("registered-logistics", "logistics", text="本票装箱"), logistics_codes={"logistics"}))
+    expense = store.ingest(parse_source(row, logistics_codes={"logistics"}))
+
+    assert expense["kind"] == "expense"
+    from overseas_costing.services.logistics_settlement.freight_matching import payment_pool
+    assert expense["id"] in {item["id"] for item in payment_pool(store, logistics["id"])["sources"]}
+
+
 def test_payment_pool_paginates_with_hard_limit_and_sanitizes_hints():
     from overseas_costing.services.logistics_settlement.freight_matching import payment_pool
 
@@ -187,6 +205,45 @@ def test_rejected_payment_pair_is_not_recommended_again():
     stored = store.get("state", job["id"])
 
     assert expense["id"] not in {row["id"] for row in stored["input"]["sources"]}
+
+
+def test_deepseek_rejected_pair_stays_rejected_when_rules_find_new_evidence():
+    from overseas_costing.services.logistics_settlement import freight_matching
+
+    store, _ledger, _batch, _version, _item, logistics, expense = setup_cost()
+    own_line = next(line for line in freight_matching.current_lines(store, expense) if line["waybill"] == "1234567890")
+    candidate = freight_matching.save_candidate(
+        store, logistics, expense, [own_line], "deepseek", "AI 先前建议", model="deepseek-test", confidence="0.9"
+    )
+    store.put("freight_candidate", {"id": candidate["id"], "status": "rejected"})
+
+    assert freight_matching.rule_pass(store, logistics["id"]) == []
+    current = store.get("freight_candidate", candidate["id"])
+    assert current["status"] == "rejected"
+    assert current["method"] == "deepseek"
+
+
+@pytest.mark.parametrize("secret", ["12345678901", "GB82WEST12345698765432", "BOFAUS3NXXX"])
+def test_sensitive_source_labels_drop_the_entire_value_from_ai_payload(secret):
+    from overseas_costing.services.logistics_settlement import payment_ai_matching
+
+    store, _ledger, batch, version, _item, logistics, _monthly = setup_cost()
+    row = _financial("sensitive", "付款", text="安全说明")
+    row["financial_scope"] = True
+    row["raw_payload"]["formComponentValues"].extend([
+        {"name": "供应商银行账号", "value": secret},
+        {"name": "项目说明", "value": "可公开的项目甲"},
+    ])
+    row["raw_payload"]["api_token"] = "RAW_PRIVATE_TOKEN"
+    row["attachments"] = [{"file_id": "private", "private_url": "https://private.example/secret"}]
+    expense = store.ingest(parse_source(row, logistics_codes={"logistics"}))
+    job = payment_ai_matching.start(store, logistics["id"], batch["name"], version["name"], "user")
+
+    payload = dumps(store.get("state", job["id"])["input"])
+    assert expense["id"] in payload and "可公开的项目甲" in payload
+    assert secret not in payload
+    assert "供应商银行账号" not in payload
+    assert "RAW_PRIVATE_TOKEN" not in payload and "private.example" not in payload
 
 
 def test_payment_public_view_is_additive_and_claim_totals_are_real():

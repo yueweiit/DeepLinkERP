@@ -104,6 +104,24 @@ def test_per_batch_payment_apis_separate_rules_from_explicit_ai(batch_api, monke
     assert permissions == ["write", "write", "write"]
 
 
+def test_global_ai_entry_does_not_schedule_freight_payment_ai(batch_api, monkeypatch):
+    role_checks = []
+    monkeypatch.setattr(batch_api.frappe, "only_for", role_checks.append, raising=False)
+    monkeypatch.setattr(batch_api.runtime, "freight_enabled", lambda: True)
+    monkeypatch.setattr(
+        batch_api.runtime,
+        "start_payment_ai_matching",
+        lambda *_args, **_kwargs: pytest.fail("global entry scheduled per-batch payment AI"),
+    )
+
+    result = batch_api.start_ai_matching()
+
+    assert result["ok"] is False
+    assert result["code"] == "PER_BATCH_AI_REQUIRED"
+    assert "start_payment_ai_matching" in result["message"]
+    assert role_checks == []
+
+
 def test_manual_selection_of_current_expense_preserves_confirmed_candidate(setup, monkeypatch):
     s,l,b,v,i,r,binding=setup
     fake=ModuleType('frappe');fake.whitelist=lambda *args,**kwargs:lambda fn:fn

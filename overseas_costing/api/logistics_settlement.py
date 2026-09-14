@@ -78,15 +78,10 @@ def start_history_matching():
 
 @frappe.whitelist(methods=['POST'])
 def start_ai_matching():
-    frappe.only_for('System Manager')
     if runtime.freight_enabled():
-        from overseas_costing.services.logistics_settlement.freight_matching import candidates
-        scheduled=0
-        for mapping in runtime.store().find('batch_map'):
-            cs=candidates(runtime.store(),mapping['source_id'])
-            if cs and all(c['status'] in ('pending','rejected') for c in cs):continue
-            runtime.start_payment_ai_matching(mapping['batch']);scheduled+=1
-        return {'ok':True,'message':f'已为 {scheduled} 票未解决或冲突物流安排本票分析'}
+        return {'ok':False,'code':'PER_BATCH_AI_REQUIRED',
+                'message':'付款 AI 匹配必须在具体批次中显式调用 start_payment_ai_matching；全局入口不会排队。'}
+    frappe.only_for('System Manager')
     from overseas_costing.services.logistics_settlement import ai_matching
     from overseas_costing.services import allocation_service
     db = runtime.store()

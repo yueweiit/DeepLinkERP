@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import uuid
 
-from .ai_matching import safe_text, save
+from .ai_matching import SENSITIVE, safe_text, save
 from .freight_lines import logical_fee_key
 from .freight_matching import current_lines, payment_pool, save_candidate
 from .jobs import utcnow
@@ -45,9 +45,12 @@ def _source_summary(store,source):
     evidence=[]
     for label,value in (source.get('fields') or {}).items():
         if not isinstance(value,(str,int,float)):continue
+        label=str(label or '')
+        if SENSITIVE.search(label):continue
         clean=safe_text(value,300)
-        if clean and any(token in str(label).casefold() for token in ('说明','描述','物流','运输','货物','项目','供应商','日期','description','project','supplier','fecha')):
-            evidence.append({'label':safe_text(label,60),'value':clean})
+        clean_label=safe_text(label,60)
+        if clean and clean_label and any(token in label.casefold() for token in ('说明','描述','物流','运输','货物','项目','供应商','日期','description','project','supplier','fecha')):
+            evidence.append({'label':clean_label,'value':clean})
     return {key:source.get(key) for key in ('id','status','approved','invalid','amount','currency','snapshot')} | {
         'approval_no':safe_text(source.get('approval_no'),160),'title':safe_text(source.get('title'),200),
         'identifiers':[(kind,safe_text(value,160)) for kind,value in source.get('identifiers',[])[:15] if safe_text(value,160)],

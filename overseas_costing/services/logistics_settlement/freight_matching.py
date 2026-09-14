@@ -37,7 +37,9 @@ def save_candidate(store,logistics,expense,lines,method,reason,*,model='',confid
     cid=digest(POLICY,logistics['id'],expense['id'])
     revision=digest(POLICY,logistics['snapshot'],expense['snapshot'],[r['id'] for r in lines],method,model,str(confidence),reason)
     prior=store.get('freight_candidate',cid)
-    if prior and prior['revision']==revision and prior['status']=='rejected': return prior
+    # A human rejection belongs to the pair, not one evidence revision. Only a
+    # future explicit human re-inclusion action may lift it.
+    if prior and prior['status']=='rejected': return prior
     issues=[]
     for line in lines:
         if line.get('ambiguous'): issues.append('重复凭证或明细行身份不唯一，待核对')
