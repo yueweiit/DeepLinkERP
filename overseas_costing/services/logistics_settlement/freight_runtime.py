@@ -140,7 +140,7 @@ def history_status(store,job_id=None):
     from .runtime import source_summary
     job=store.get('job',job_id or (store.get('state','latest_job') or {}).get('job_id',''))
     logistics=[s for s in store.find('source',kind='logistics') if not s['invalid']]
-    rows=[];counts={'pending':0,'conflict':0,'confirmed':0,'rejected':0,'unmatched':0}
+    rows=[];counts={'pending':0,'conflict':0,'confirmed':0,'rejected':0,'reopened':0,'unmatched':0}
     matched=set();adopted=set()
     for source in logistics:
         cs=matching.candidates(store,source['id']);active=[c for c in cs if c['status']!='rejected']

@@ -143,6 +143,27 @@ def test_reopen_payment_candidate_api_requires_batch_write_permission(batch_api,
     assert result=={'ok':True,'candidate':{'id':'candidate','revision':'new','status':'reopened'}}
 
 
+def test_rule_reject_reopen_is_safe_in_freight_history_and_matching_status(batch_api, monkeypatch):
+    from overseas_costing.tests.test_freight_lines import setup_cost
+    from overseas_costing.services.logistics_settlement import freight_matching
+    store,ledger,batch,_version,_item,logistics,_expense=setup_cost()
+    candidate=freight_matching.rule_pass(store,logistics['id'])[0]
+    monkeypatch.setattr(batch_api.runtime,'store',lambda:store)
+    monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
+    monkeypatch.setattr(batch_api,'FrappeLedger',lambda:ledger)
+    monkeypatch.setattr(batch_api.frappe,'only_for',lambda _role:None,raising=False)
+
+    assert batch_api.reject_freight_candidate(batch['name'],candidate['id'],candidate['revision'],'人工否决')['ok']
+    reopened=batch_api.reopen_payment_candidate(batch['name'],candidate['id'],candidate['revision'],'重新核对')['candidate']
+    result=batch_api.get_matching_status()
+
+    assert reopened['status']=='reopened'
+    assert result['counts']['reopened']==1
+    assert result['counts']['pending']==0 and result['counts']['rejected']==0
+    assert result['shipments'][0]['candidate_count']==1
+    assert result['shipments'][0]['status']=='pending'
+
+
 def test_manual_selection_of_current_expense_preserves_confirmed_candidate(setup, monkeypatch):
     s,l,b,v,i,r,binding=setup
     fake=ModuleType('frappe');fake.whitelist=lambda *args,**kwargs:lambda fn:fn
