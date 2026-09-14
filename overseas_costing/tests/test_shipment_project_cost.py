@@ -1,6 +1,7 @@
 from copy import deepcopy
 from decimal import Decimal
 import json
+from pathlib import Path
 import pytest
 
 from overseas_costing.services import cost_preview_service, fee_allocation_service, fee_service
@@ -100,6 +101,15 @@ def test_both_grid_and_cost_read_persisted_shipment_metadata():
     from overseas_costing.services.material_input_service import GRID_FIELDS
     assert 'extra_json' in GRID_FIELDS
     assert 'extra_json' in cost_preview_service.COST_INPUT_FIELDS
+
+
+def test_cost_queries_only_request_physical_item_columns():
+    doctype_path = Path(__file__).resolve().parents[1] / 'doctype/overseas_cost_item/overseas_cost_item.json'
+    fields = {row['fieldname'] for row in json.loads(doctype_path.read_text(encoding='utf-8'))['fields']}
+
+    assert set(cost_preview_service.COST_INPUT_FIELDS) <= fields | {'name', 'modified'}
+    assert 'package_count' not in cost_preview_service.COST_INPUT_FIELDS
+    assert 'packaging_type' not in cost_preview_service.COST_INPUT_FIELDS
 
 
 def test_review_binding_serializes_excel_date_evidence():
