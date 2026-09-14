@@ -104,8 +104,24 @@ def select_fees(fees, fx_context=None, *, source_context=None):
         return list(fees)
     for fee in finals:
         validate_final(fee, fx_context)
-    if len({(fee['source_binding_id'], fee['source_snapshot']) for fee in finals}) != 1:
-        raise ValueError('最终费用来源重叠或快照不一致')
+    logical_keys = [str(fee.get('logical_fee_key') or '').strip() for fee in finals]
+    explicit_keys = [key for key in logical_keys if key]
+    if len(set(explicit_keys)) != len(explicit_keys):
+        raise ValueError('最终来源费用分类重复，请先更正认领或费用凭证')
+    scope_owners = {}
+    component_credit = lambda row: 'credit' in ' '.join(
+        str(row.get(field) or '').lower() for field in ('logical_fee_key', 'rule_code'))
+    for fee in finals:
+        scopes = row_scopes(fee)
+        owner = (fee.get('source_binding_id'), fee.get('source_snapshot'))
+        for scope in scopes:
+            previous = scope_owners.get(scope)
+            same_owned_credit_component = (previous and previous[0] == owner
+                                           and (component_credit(previous[1]) or component_credit(fee)))
+            if previous and not same_owned_credit_component:
+                raise ValueError('最终费用覆盖范围重叠，请先更正来源费用')
+        for scope in scopes:
+            scope_owners.setdefault(scope, (owner, fee))
     covered = covered_scopes(finals)
     selected = []
     for fee in fees:

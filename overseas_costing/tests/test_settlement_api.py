@@ -200,3 +200,44 @@ def test_database_concurrency_conflict_has_safe_inline_error(batch_api, monkeypa
     result=batch_api.amend_freight_claim('B','V','claim','old','amount','review',amount='10')
     assert not result['ok'] and result['code']=='REVIEW_CONFLICT' and '未保存' in result['message']
     assert 'private' not in str(result)
+
+
+def test_payment_preview_api_requires_write_but_confirm_also_asserts_edit_lease(batch_api, monkeypatch):
+    from overseas_costing.services.logistics_settlement import payment_adoption
+    from overseas_costing.services import edit_session_service
+    calls=[]
+    monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
+    monkeypatch.setattr(batch_api,'require_batch_permission',lambda batch,permission='read':calls.append(('permission',batch,permission)) or batch)
+    monkeypatch.setattr(payment_adoption,'preview_payment_adoption',lambda *args,**kwargs:{'preview_id':'p','revision':'r'})
+    def confirm(*args,**kwargs):
+        kwargs['lease_check'](args[2],edit_token=kwargs['edit_token'],expected_modified=kwargs['expected_modified'])
+        return {'status':'applied'}
+    monkeypatch.setattr(payment_adoption,'confirm_payment_adoption',confirm)
+    monkeypatch.setattr(edit_session_service,'assert_batch_write',lambda batch_name,edit_token,expected_modified:
+                        calls.append(('lease',batch_name,edit_token,expected_modified)) or {'name':batch_name})
+
+    preview=batch_api.preview_payment_adoption('B','V','C','CR','[{"source_line_id":"approval_total","logical_fee_key":"import_tax","amount":"1","currency":"RMB"}]')
+    confirmed=batch_api.confirm_payment_adoption('B','p','r','token','modified')
+
+    assert preview['preview']['preview_id']=='p' and confirmed['status']=='applied'
+    assert calls==[('permission','B','write'),('permission','B','write'),('lease','B','token','modified')]
+
+
+def test_payment_amend_api_asserts_lease_and_forwards_only_decoded_edits(batch_api, monkeypatch):
+    from overseas_costing.services.logistics_settlement import payment_adoption
+    from overseas_costing.services import edit_session_service
+    calls=[]
+    monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
+    monkeypatch.setattr(batch_api,'require_batch_permission',lambda batch,permission='read':calls.append(('permission',permission)) or batch)
+    monkeypatch.setattr(edit_session_service,'assert_batch_write',lambda batch_name,edit_token,expected_modified:
+                        calls.append(('lease',edit_token,expected_modified)) or {'name':batch_name})
+    def amend(*args,**kwargs):
+        kwargs['lease_check'](args[2],edit_token=kwargs['edit_token'],expected_modified=kwargs['expected_modified'])
+        calls.append(('service',args[6],args[8]))
+        return {'status':'applied'}
+    monkeypatch.setattr(payment_adoption,'amend_payment_claim',amend)
+
+    result=batch_api.amend_payment_claim('B','V','claim','rev','status','已复核','{"amount_status":"ESTIMATED"}','token','modified')
+
+    assert result['status']=='applied'
+    assert calls==[('permission','write'),('lease','token','modified'),('service','status',{'amount_status':'ESTIMATED'})]

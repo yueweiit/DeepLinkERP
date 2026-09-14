@@ -74,7 +74,8 @@ def calculation_blockers(batch_name, version_name=None, *, for_calculation=False
         from .freight_adoption import blockers
         db=store();ledger=FrappeLedger()
         version=ledger.get('version',version_name or (ledger.get('batch',batch_name) or {}).get('current_version')) or {}
-        if row_meta(version).get('freight_settlement') or not for_batch(batch_name):
+        active_payment_claims=db.find('payment_claim',batch=batch_name,version=version.get('name'),status='active')
+        if row_meta(version).get('freight_settlement') or active_payment_claims or not for_batch(batch_name):
             issues=blockers(db,ledger,batch_name,version.get('name'),for_calculation)
             from overseas_costing.services.effective_logistics_source import resolve_source_context
             ctx=resolve_source_context(batch_name,version.get('name'),store=db,ledger=ledger,lock=lock)

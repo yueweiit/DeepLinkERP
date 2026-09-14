@@ -67,6 +67,12 @@ def confirm(store,ledger,batch_name,version_name,candidate_id,candidate_revision
         if not maps: raise ValueError('候选不属于当前批次')
         batch=ledger.get('batch',batch_name,lock=True)
         if batch['current_version']!=version_name: raise ValueError('成本版本已变化，请刷新')
+        payment_claims=store.find('payment_claim',batch=batch_name,version=version_name,status='active')
+        if payment_claims:
+            from overseas_costing.services.transport_fee_service import primary_freight_definition
+            freight_key=primary_freight_definition(batch.get('transport_mode'))['logical_fee_key']
+            if any(row.get('logical_fee_key')==freight_key for row in payment_claims):
+                raise ValueError('新旧运费认领不能混用，请通过统一付款流程更正或撤销')
         source=store.get('source',c['expense_id'],lock=True);logistics=store.get('source',c['logistics_id'],lock=True)
         if not source or source['snapshot']!=c['expense_snapshot'] or logistics['snapshot']!=c['logistics_snapshot']:
             raise ValueError('来源快照已变化，请重新核对')
@@ -93,7 +99,10 @@ def confirm(store,ledger,batch_name,version_name,candidate_id,candidate_revision
             if prior_claim and any(prior_claim.get(k)!=v for k,v in {'source_snapshot':source['snapshot'],'line_id':line_id,'logistics_snapshot':logistics['snapshot']}.items()) and (claim_id not in replace_claim_ids or not reason.strip() or expected_revision!=previous['revision']):
                 raise ValueError('已采用费用发生变化，请选择旧采用记录并填写更正原因')
             occupied=store.find('freight_claim',charge_key=line['charge_key'])
-            if any(o['id']!=claim_id and o['id'] not in replace_claim_ids for o in occupied): raise ValueError('这笔费用已采用，不能重复计费')
+            payment_occupied=[o for o in store.find('payment_claim',source_id=source['id'])
+                              if o.get('status')=='active' and o.get('source_line_id')==line_id]
+            if payment_occupied or any(o['id']!=claim_id and o['id'] not in replace_claim_ids for o in occupied):
+                raise ValueError('这笔费用已采用，不能重复计费')
             claim={'id':claim_id,'batch':batch_name,'logistics_id':c['logistics_id'],'source_id':source['id'],
                 'line_id':line_id,'source_snapshot':source['snapshot'],'logistics_snapshot':logistics['snapshot'],'charge_key':line['charge_key'],
                 'amount':line['amount'],'currency':line['currency'],'label':line['label'],'evidence':line['evidence'],
@@ -215,14 +224,20 @@ def amend(store, ledger, batch_name, version_name, claim_id, expected_revision, 
 
 def blockers(store,ledger,batch_name,version_name,for_calculation=False):
     ctx=context(store,ledger,batch_name,version_name,live=True)
+    from .payment_adoption import payment_claim_blockers, payment_freight_adoption_status
+    payment_issues=payment_claim_blockers(store,ledger,batch_name,version_name)
+    payment_freight=payment_freight_adoption_status(store,ledger,batch_name,version_name)
+    payment_issues+=payment_freight['issues']
     packing_issues=['物料或数量变化后，保留的装箱重量、体积待核对'] if any(row_meta(i).get('settlement_packing_review') for i in ledger.rows('item',batch=batch_name,version=version_name)) else []
     from .packing_selection import scope_blockers
     packing_issues += scope_blockers(ledger,batch_name,version_name)
-    if not ctx['selected']: return packing_issues + ([] if for_calculation else ['尚未采用审批通过的本票实际运费'])
-    if ctx['issues']: return ctx['issues']
-    if not ctx['claims']: return ['本票实际运费待核对，不能恢复旧暂估']
+    if not ctx['selected']:
+        missing=[] if for_calculation or payment_freight['selected'] else ['尚未采用审批通过的本票实际运费']
+        return sorted(set(payment_issues + packing_issues + missing))
+    if ctx['issues']: return sorted(set(payment_issues + ctx['issues']))
+    if not ctx['claims']: return sorted(set(payment_issues + ['本票实际运费待核对，不能恢复旧暂估']))
     rules=ledger.rows('rule',batch=batch_name,version=ctx['version'])
-    issues=list(packing_issues)
+    issues=list(payment_issues + packing_issues)
     for claim in ctx['claims']:
         matches=[r for r in rules if r.get('is_final') and r.get('source_binding_id')==claim['id'] and r.get('source_snapshot')==claim['source_snapshot']]
         if len(matches)!=1 or str(matches[0].get('currency'))!=claim['currency'] or Decimal(str(matches[0].get('amount') or 0))!=Decimal(claim.get('applied_amount',claim['amount'])):

@@ -13,29 +13,37 @@ def financial_summary(source):
     return {k:v for k,v in source_summary(source).items() if k in allowed}
 
 
-def candidate_view(store,candidate,transport_mode=''):
+def candidate_view(store,candidate,transport_mode='',ledger=None):
     from decimal import Decimal, InvalidOperation
     from .freight_lines import logical_fee_key
     from .runtime import source_summary
     source=store.get('source',candidate['expense_id'])
+    payment_claims=[claim for claim in store.find('payment_claim',source_id=source['id']) if claim.get('status')=='active']
+    if ledger:
+        payment_claims=[claim for claim in payment_claims
+            if not (ledger.get('batch',claim.get('batch')) or {}).get('current_version')
+            or (ledger.get('batch',claim.get('batch')) or {}).get('current_version')==claim.get('version')]
     lines=[]
     for lid in candidate['line_ids']:
         line=store.get('freight_line',lid)
         if not line:continue
         occupied=store.find('freight_claim',charge_key=line['charge_key'])
+        payment_occupied=[claim for claim in payment_claims if claim.get('source_line_id')==lid]
         lines.append({**line,'logical_fee_key':logical_fee_key(line.get('scope'),transport_mode),
             'available':source['approved'] and not source['invalid'] and not line.get('ambiguous') and line['scope']=='freight'
-            and not any(c['logistics_id']!=candidate['logistics_id'] for c in occupied),
-            'adopted':any(c['logistics_id']==candidate['logistics_id'] and c['line_id']==lid for c in occupied)})
+            and not any(c['logistics_id']!=candidate['logistics_id'] for c in occupied+payment_occupied),
+            'adopted':any(c['logistics_id']==candidate['logistics_id'] and (c.get('line_id')==lid or c.get('source_line_id')==lid)
+                          for c in occupied+payment_occupied)})
     all_claims=store.find('freight_claim',source_id=source['id'])
+    all_claims += payment_claims
     active_claims=[claim for claim in all_claims if claim.get('source_snapshot')==source['snapshot'] and claim.get('currency')==source.get('currency')]
     stale_claims=[claim for claim in all_claims if claim not in active_claims]
     try:
-        claimed=sum((Decimal(str(claim['amount'])) for claim in active_claims),Decimal('0'))
+        claimed=sum((abs(Decimal(str(claim['amount']))) for claim in active_claims),Decimal('0'))
         stale_totals={}
         for claim in stale_claims:
             currency=str(claim.get('currency') or '')
-            stale_totals[currency]=stale_totals.get(currency,Decimal('0'))+Decimal(str(claim['amount']))
+            stale_totals[currency]=stale_totals.get(currency,Decimal('0'))+abs(Decimal(str(claim['amount'])))
         stale_claimed=stale_totals.get(str(source.get('currency') or ''),Decimal('0')) if set(stale_totals)<={str(source.get('currency') or '')} else None
         total=Decimal(str(source['amount'])) if source.get('amount') is not None else None
         remaining=total-claimed if total is not None and not stale_claims else None
@@ -60,12 +68,16 @@ def batch_status(store,ledger,batch_name,version_name=None):
     if version.get('batch')!=batch_name:raise ValueError('版本不属于当前批次')
     historical=vname!=batch.get('current_version')
     maps=store.find('batch_map',batch=batch_name)
-    base={'ok':True,'freight_mode':True,'mapped':bool(maps),'historical':historical,'viewed_version':vname,'binding':None,'candidates':[],
+    base={'ok':True,'freight_mode':True,'mapped':bool(maps),'historical':historical,'viewed_version':vname,
+          'confirm_status':batch.get('confirm_status'),'writeback_status':batch.get('writeback_status'),
+          'binding':None,'candidates':[],
           'payment_candidates':[],'matching':{'status':'not_started'},'payment_matching':{'status':'not_started'},
           'sync':store.get('state','sync') or {},'health':store.get('state','health') or {}}
+    from .payment_adoption import public_payment_context
+    base.update(public_payment_context(store,ledger,batch_name,vname))
     if not maps:return base
     logistics=store.get('source',maps[0]['source_id'])
-    candidates=[candidate_view(store,c,batch.get('transport_mode')) for c in matching.candidates(store,logistics['id']) if c['status']!='rejected'] if not historical else []
+    candidates=[candidate_view(store,c,batch.get('transport_mode'),ledger) for c in matching.candidates(store,logistics['id']) if c['status']!='rejected'] if not historical else []
     from . import payment_ai_matching
     base.update(logistics=source_summary(logistics),matching=matching.rule_status(store,logistics['id']) if not historical else {'status':'historical'},
         payment_matching=payment_ai_matching.status(store,logistics['id'],current_version=lambda _batch:batch.get('current_version')) if not historical else {'status':'historical'},

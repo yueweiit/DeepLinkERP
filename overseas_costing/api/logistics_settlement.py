@@ -325,6 +325,45 @@ def amend_freight_claim(batch_name,version_name,claim_id,expected_revision,actio
 
 
 @frappe.whitelist(methods=['POST'])
+@_review_validation
+def preview_payment_adoption(batch_name, version_name, candidate_id, candidate_revision, selections,
+                             reason='', negative_confirmed=False):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.logistics_settlement.payment_adoption import preview_payment_adoption as preview
+    result=preview(runtime.store(),FrappeLedger(),batch_name,version_name,candidate_id,candidate_revision,
+                   _decode(selections,list),frappe.session.user,reason=str(reason or ''),
+                   negative_confirmed=negative_confirmed in (True,1,'1','true'))
+    return {'ok':True,'preview':result}
+
+
+@frappe.whitelist(methods=['POST'])
+@_review_validation
+def confirm_payment_adoption(batch_name, preview_id, revision, edit_token, expected_modified):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services import edit_session_service
+    from overseas_costing.services.logistics_settlement.payment_adoption import confirm_payment_adoption as confirm
+    return {'ok':True,**confirm(runtime.store(),FrappeLedger(),batch_name,preview_id,revision,frappe.session.user,
+                               lease_check=edit_session_service.assert_batch_write,edit_token=edit_token,
+                               expected_modified=expected_modified)}
+
+
+@frappe.whitelist(methods=['POST'])
+@_review_validation
+def amend_payment_claim(batch_name, version_name, claim_id, expected_revision, action, reason, edits,
+                        edit_token, expected_modified):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services import edit_session_service
+    from overseas_costing.services.logistics_settlement.payment_adoption import amend_payment_claim as amend
+    return {'ok':True,**amend(runtime.store(),FrappeLedger(),batch_name,version_name,claim_id,expected_revision,
+                             action,str(reason or ''),_decode(edits,dict),frappe.session.user,
+                             lease_check=edit_session_service.assert_batch_write,edit_token=edit_token,
+                             expected_modified=expected_modified)}
+
+
+@frappe.whitelist(methods=['POST'])
 def preview_freight_packing(batch_name,version_name,candidate_id,candidate_revision):
     if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
     batch_name=require_batch_permission(batch_name,'write')
