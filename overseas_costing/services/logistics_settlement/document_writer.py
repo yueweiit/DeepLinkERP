@@ -269,13 +269,15 @@ def attachment_values(source, document, batch, version, reviews, *, audit_only=F
             'parse_result_json': dumps(parsed), 'mapped_result_json': dumps({'settlement_document': descriptor}), 'remark': '；'.join(notes)}
 
 
-def save_attachment(store, ledger, source, document, batch, version, reviews, register_file, **flags):
+def save_attachment(store, ledger, source, document, batch, version, reviews, register_file,
+                    *, values_factory=None, **flags):
+    values_factory = values_factory or attachment_values
     key = digest(document['id'], version)
     mapped = store.get('attachment_map', key)
     current = ledger.get('attachment', mapped['attachment']) if mapped else None
     if reviews is None:
         reviews = ((json.loads(current.get('parse_result_json') or '{}').get('settlement_document') or {}).get('reviews') or []) if current else []
-    values = attachment_values(source, document, batch, version, reviews, **flags)
+    values = values_factory(source, document, batch, version, reviews, **flags)
     if current is None:
         current = ledger.create('attachment', values)
         register_file(current, document)

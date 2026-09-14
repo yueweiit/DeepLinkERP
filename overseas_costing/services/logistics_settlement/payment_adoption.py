@@ -11,7 +11,7 @@ from .jobs import utcnow
 from .model import digest, dumps
 
 
-POLICY = "payment-adoption-1"
+POLICY = "payment-adoption-2"
 AMOUNT_STATUSES = {"ACTUAL", "ESTIMATED", "MISSING", "NOT_INCURRED", "INCLUDED"}
 CURRENCIES = {"RMB", "USD", "MXN"}
 SELECTION_FIELDS = {"source_line_id", "logical_fee_key", "amount", "currency", "amount_status", "replace_claim_ids"}
@@ -213,6 +213,7 @@ def _selection_plan(store, ledger, batch, version, candidate, source, logistics,
         selected.append({"selection_index": index, "source_line_id": line["id"], "line_key": line["line_key"],
             "line_revision": line["revision"], "logical_fee_key": key, "amount": _text(value), "currency": currency,
             "amount_status": amount_status, "exclusive": exclusive, "charge_key": line.get("charge_key"),
+            "evidence_document_id": str((line.get("evidence") or {}).get("document_id") or ""),
             "label": line.get("label"), "waybill": line.get("waybill") or "", "replace_claim_ids": replacements})
     if len({(row["source_line_id"], row["logical_fee_key"]) for row in selected}) != len(selected):
         raise ValueError("同一来源明细不能重复选择同一费用分类")
@@ -262,12 +263,15 @@ def _selection_plan(store, ledger, batch, version, candidate, source, logistics,
 
 
 def preview_payment_adoption(store, ledger, batch_name, version_name, candidate_id, candidate_revision,
-                             selections, actor, *, reason="", negative_confirmed=False, now=None):
+                             selections, actor, *, reason="", negative_confirmed=False, now=None,
+                             attachment_selections=None):
     batch, version, candidate, source, logistics, lines = _resolve_context(
         store, ledger, batch_name, version_name, candidate_id, candidate_revision)
     selected, replace_claims, balance, definitions, remaining, replace_rule_names = _selection_plan(
         store, ledger, batch, version, candidate, source, logistics, lines, selections,
         reason=reason, negative_confirmed=bool(negative_confirmed))
+    from .payment_evidence import plan_attachment_selections
+    attachment_plan = plan_attachment_selections(source, lines, selected, attachment_selections)
     keys = {row["logical_fee_key"] for row in selected}
     dependencies = {
         "batch_modified": str(batch.get("modified") or ""), "current_version": batch.get("current_version"),
@@ -276,12 +280,14 @@ def preview_payment_adoption(store, ledger, batch_name, version_name, candidate_
         "line_revisions": sorted((row["source_line_id"], row["line_revision"]) for row in selected),
         "claim_fingerprint": balance["fingerprint"],
         "rule_fingerprint": _rule_signature(ledger, batch_name, version_name, keys),
+        "attachment_fingerprints": attachment_plan["dependency"],
     }
     created = _time(now); expires = created + timedelta(minutes=30)
     preview_id = uuid.uuid4().hex
-    private = {"id": preview_id, "batch": batch_name, "version": version_name, "logistics_id": logistics["id"],
+    private = {"id": preview_id, "policy": POLICY, "batch": batch_name, "version": version_name, "logistics_id": logistics["id"],
         "source_id": source["id"], "candidate_id": candidate["id"], "candidate_revision": candidate["revision"],
         "source_snapshot": source["snapshot"], "logistics_snapshot": logistics["snapshot"], "selections": selected,
+        "attachment_plan": attachment_plan,
         "replace_claim_ids": sorted({cid for row in selected for cid in row["replace_claim_ids"]}),
         "replace_rule_names": replace_rule_names,
         "dependencies": dependencies, "status": "pending", "created_at": created.isoformat(),
@@ -298,14 +304,18 @@ def preview_payment_adoption(store, ledger, batch_name, version_name, candidate_
         "source_total": private["source_total"], "source_currency": private["source_currency"],
         "active_claimed": _text(balance["claimed"]), "stale_claimed": bool(balance["stale"]),
         "remaining": _text(remaining) if remaining is not None else None, "impacted_fees": impacts,
-        "replace_claim_ids": private["replace_claim_ids"], "warnings": list(balance["blocking"]),
+        "replace_claim_ids": private["replace_claim_ids"],
+        "attachments": attachment_plan["public"],
+        "warnings": sorted(set(list(balance["blocking"]) + attachment_plan["blockers"])),
         "replace_rules": replace_rule_names,
-        "payment_blocking_reasons": list(balance["blocking"])}
+        "payment_blocking_reasons": sorted(set(list(balance["blocking"]) + attachment_plan["blockers"]))}
 
 
 def _validate_preview(store, ledger, preview, now):
     if preview.get("status") == "applied":
         return "applied"
+    if preview.get("policy") != POLICY:
+        raise ValueError("付款预览策略已更新，请重新预览")
     if _time(now) > _parse_time(preview["expires_at"]):
         raise ValueError("付款预览已过期，请重新预览")
     batch = ledger.get("batch", preview["batch"], lock=True) or {}
@@ -343,6 +353,11 @@ def _validate_preview(store, ledger, preview, now):
         raise ValueError("付款认领余额已变化，请重新预览")
     if balance["blocking"]:
         raise ValueError(balance["blocking"][0])
+    from .payment_evidence import validate_attachment_dependencies
+    validate_attachment_dependencies(source, preview.get("attachment_plan") or {
+        "dependency": preview.get("dependencies", {}).get("attachment_fingerprints") or [],
+        "selected": [], "blockers": [],
+    })
     keys = {row["logical_fee_key"] for row in preview["selections"]}
     if _rule_signature(ledger, preview["batch"], preview["version"], keys) != preview["dependencies"]["rule_fingerprint"]:
         raise ValueError("当前费用规则已变化，请重新预览")
@@ -414,19 +429,202 @@ def _disable_claim_rule(ledger, batch, version, claim_id, actor, reason):
                 "status_change_reason": reason, "status_changed_by": actor, "status_changed_at": utcnow()})
 
 
+def _payment_evidence_bindings(store, ledger, batch_name, version_name, application_claims):
+    """Resolve the current claim/rule authority used by deferred evidence retries."""
+    requested_keys = set()
+    for expected in application_claims:
+        claim = store.get("payment_claim", expected.get("id") or "", lock=True) or {}
+        if (claim.get("status") != "active" or claim.get("batch") != batch_name
+                or claim.get("version") != version_name):
+            raise ValueError("付款认领已变化，不能重试附件")
+        requested_keys.add(claim.get("logical_fee_key"))
+    grouped = {key: [row for row in _active_claims(store, batch=batch_name, version=version_name)
+                     if row.get("logical_fee_key") == key]
+               for key in requested_keys}
+    result = {}
+    for key, claims in grouped.items():
+        rules = [row for row in ledger.rows("rule", batch=batch_name, version=version_name)
+                 if row.get("logical_fee_key") == key
+                 and str(row.get("rule_code") or "").startswith("payment_")
+                 and row.get("is_active") not in (0, False, "0")
+                 and row.get("is_enabled") not in (0, False, "0")]
+        bindings = {claim.get("rule_binding_id") or claim.get("id") for claim in claims}
+        if len(rules) != 1 or len(bindings) != 1 or rules[0].get("source_binding_id") not in bindings:
+            raise ValueError("付款费用规则与认领绑定已变化，不能重试附件")
+        rule = rules[0]
+        result[key] = {
+            "claim_ids": sorted(claim["id"] for claim in claims),
+            "claim_fingerprint": digest("payment-evidence-claims-1", sorted(
+                [_claim_signature(claim) | {"rule_binding_id": claim.get("rule_binding_id")} for claim in claims],
+                key=lambda row: str(row.get("id")))),
+            "rule_name": rule["name"], "rule_binding_id": rule.get("source_binding_id"),
+            "rule_fingerprint": digest("payment-evidence-rule-1", {field: rule.get(field) for field in (
+                "name", "logical_fee_key", "amount", "currency", "amount_status", "source_binding_id",
+                "source_snapshot", "is_final", "is_enabled", "is_active", "covered_scopes",
+            )}),
+        }
+    return result
+
+
+def _payment_evidence_rows(claims):
+    return [{
+        "selection_index": index, "source_line_id": claim.get("source_line_id"),
+        "line_revision": claim.get("source_line_revision"), "logical_fee_key": claim.get("logical_fee_key"),
+        "amount": claim.get("amount"), "currency": claim.get("currency"),
+        "amount_status": claim.get("amount_status"), "evidence_document_id": claim.get("evidence_document_id") or "",
+    } for index, claim in enumerate(sorted(claims, key=lambda row: str(row.get("id"))))]
+
+
+def _refresh_archive_only_payment_source(store, ledger, batch_name, version_name, source, bindings,
+                                         application, actor):
+    """Adopt a verified archive-only source snapshot without relaxing normal stale checks.
+
+    The caller must first validate the persisted pending document's business, content,
+    identity and source-relation fingerprints. This migration is private to evidence retry.
+    """
+    affected_ids = {claim_id for binding in bindings.values()
+                    for claim_id in (binding.get("claim_ids") or [])}
+    current_claims = [store.get("payment_claim", claim_id, lock=True) for claim_id in sorted(affected_ids)]
+    source_claims = [claim for claim in _active_claims(store, batch=batch_name, version=version_name)
+                     if claim.get("source_id") == source.get("id")]
+    if not source_claims or all(claim.get("source_snapshot") == source.get("snapshot")
+                                for claim in source_claims):
+        return bindings, _payment_evidence_rows([claim for claim in current_claims if claim])
+
+    affected_keys = set(bindings) | {claim.get("logical_fee_key") for claim in source_claims}
+    changed_claim_ids = set()
+    for claim in source_claims:
+        claim["source_snapshot"] = source["snapshot"]
+        claim["revision"] = digest(POLICY, claim.get("revision"), "archive-source-refresh", source["snapshot"])
+        _store_claim(store, claim)
+        changed_claim_ids.add(claim["id"])
+
+    # Membership is unchanged, so update rules in place and preserve any existing
+    # evidence links while moving the current source authority.
+    for key in sorted(affected_keys):
+        claims = [row for row in _active_claims(store, batch=batch_name, version=version_name)
+                  if row.get("logical_fee_key") == key]
+        binding_id = _rule_binding_id(batch_name, version_name, key, claims)
+        for claim in claims:
+            if claim.get("rule_binding_id") != binding_id:
+                claim["rule_binding_id"] = binding_id
+                _store_claim(store, claim)
+        rules = [row for row in ledger.rows("rule", batch=batch_name, version=version_name)
+                 if row.get("logical_fee_key") == key
+                 and str(row.get("rule_code") or "").startswith("payment_")
+                 and row.get("is_active") not in (0, False, "0")
+                 and row.get("is_enabled") not in (0, False, "0")]
+        if len(rules) != 1:
+            raise ValueError("付款费用规则与认领绑定已变化，不能重试附件")
+        snapshots = {claim.get("source_snapshot") for claim in claims}
+        rule_snapshot = (next(iter(snapshots)) if len(snapshots) == 1
+                         else digest(POLICY, "source-group", sorted(snapshots)))
+        ledger.put("rule", rules[0]["name"], {
+            "source_binding_id": binding_id, "rule_code": "payment_" + binding_id[:24],
+            "source_snapshot": rule_snapshot, "status_change_reason": "付款附件归档快照刷新",
+            "status_changed_by": actor, "status_changed_at": utcnow(),
+        })
+
+    refreshed_claims = [row for row in _active_claims(store, batch=batch_name, version=version_name)
+                        if row.get("logical_fee_key") in affected_keys]
+    refreshed_bindings = _payment_evidence_bindings(
+        store, ledger, batch_name, version_name, [{"id": row["id"]} for row in refreshed_claims])
+    selected_rows = _payment_evidence_rows(refreshed_claims)
+
+    from .payment_evidence import refresh_pending_evidence_groups
+    refresh_pending_evidence_groups(
+        store, batch_name, version_name, refreshed_bindings, selected_rows, actor,
+        "付款附件归档快照刷新", source=source)
+
+    # Update embedded current-claim projections in every affected application.
+    current_rows = {row["id"]: row for row in _active_claims(
+        store, batch=batch_name, version=version_name)}
+    for current in store.find("payment_application", batch=batch_name, version=version_name, status="applied"):
+        result = current.get("result") or {}
+        embedded = result.get("claims") or []
+        if not any(row.get("id") in changed_claim_ids for row in embedded):
+            continue
+        result["claims"] = [current_rows.get(row.get("id"), row) for row in embedded]
+        result["revision"] = digest(POLICY, batch_name, version_name,
+                                    [_claim_signature(row) for row in current_rows.values()])
+        current.update(result=result, source_snapshot=source["snapshot"],
+                       source_snapshot_revision=digest("payment-application-source-1", source["snapshot"],
+                                                       sorted(changed_claim_ids)))
+        store.put("payment_application", {key: current[key] for key in (
+            "id", "batch", "version", "preview_id", "status", "revision"
+        )} | {"data": dumps(current)})
+        if current.get("id") == application.get("id"):
+            application.clear()
+            application.update(current)
+    return refreshed_bindings, selected_rows
+
+
 def confirm_payment_adoption(store, ledger, batch_name, preview_id, revision, actor, *, now=None,
-                             lease_check=None, edit_token=None, expected_modified=None):
+                             lease_check=None, edit_token=None, expected_modified=None, register_file=None):
     with store.atomic():
         store.get("state", "match_lock", lock=True)
         batch = ledger.get("batch", batch_name, lock=True) or {}
         preview = store.get("payment_preview", preview_id, lock=True)
         if not preview or preview.get("batch") != batch_name or preview.get("revision") != revision:
             raise ValueError("付款预览不属于当前批次或已变化")
-        if preview.get("actor") != actor:
+        if preview.get("actor") != actor and preview.get("status") != "applied":
             raise ValueError("付款预览属于其他操作人，请当前用户重新预览")
         if preview.get("status") == "applied":
             application = store.get("payment_application", preview.get("application_id") or "")
             if application:
+                pending_rows = [row for row in store.find(
+                    "payment_evidence_pending", batch=batch_name, version=preview["version"], status="pending")
+                    if row.get("preview_id") == preview.get("id") or row.get("application_id") == application.get("id")]
+                if pending_rows:
+                    if preview.get("actor") != actor and not lease_check:
+                        raise ValueError("接续归档付款附件需要有效的编辑租约")
+                    if lease_check:
+                        lease_check(batch_name, edit_token=edit_token, expected_modified=expected_modified)
+                    current_batch = ledger.get("batch", batch_name, lock=True) or {}
+                    current_version = ledger.get("version", preview["version"], lock=True) or {}
+                    _editable(current_batch, current_version)
+                    source = store.get("source", preview["source_id"], lock=True) or {}
+                    logistics = store.get("source", preview["logistics_id"], lock=True) or {}
+                    if (not source.get("approved") or source.get("invalid") or source.get("kind") != "expense"
+                            or logistics.get("invalid") or logistics.get("kind") != "logistics"
+                            or source.get("corp") != logistics.get("corp")):
+                        raise ValueError("付款来源未批准、已失效、类型或企业已变化")
+                    from .document_writer import register_private_file
+                    from .payment_evidence import materialize_payment_evidence, validate_pending_evidence_retry
+                    seed_claim_ids = sorted({claim_id for row in pending_rows
+                                             for claim_id in (row.get("claim_ids") or [])})
+                    retry_claims = [{"id": claim_id} for claim_id in seed_claim_ids]
+                    bindings = _payment_evidence_bindings(
+                        store, ledger, batch_name, current_version["name"], retry_claims)
+                    claim_ids = sorted({claim_id for binding in bindings.values()
+                                        for claim_id in (binding.get("claim_ids") or [])})
+                    selected_rows = _payment_evidence_rows([
+                        store.get("payment_claim", claim_id, lock=True) for claim_id in claim_ids])
+                    retry_plan = validate_pending_evidence_retry(
+                        store, source, current_batch, current_version["name"], preview, application, bindings,
+                        selected_rows)
+                    bindings, selected_rows = _refresh_archive_only_payment_source(
+                        store, ledger, batch_name, current_version["name"], source, bindings,
+                        application, actor)
+                    retry_register = register_file or (
+                        lambda attachment, document: register_private_file(ledger, attachment, document))
+                    attachments = materialize_payment_evidence(
+                        store, ledger, source, current_batch, current_version["name"],
+                        retry_plan, selected_rows, actor, retry_register,
+                        pending_context={"preview_id": preview["id"], "application_id": application["id"],
+                                         "bindings": bindings},
+                    )
+                    attachment_results = {row["document_id"]: row for row in application["result"].get("attachments") or []}
+                    attachment_results.update({row["document_id"]: row for row in attachments})
+                    application["result"] = {**application["result"],
+                                             "attachments": list(attachment_results.values())}
+                    store.put("payment_application", {key: application[key] for key in (
+                        "id", "batch", "version", "preview_id", "status", "revision"
+                    )} | {"data": dumps(application)})
+                    store.audit(batch_name, "payment_evidence_retried", actor, preview_id=preview_id,
+                                application_id=application["id"], document_ids=sorted(
+                                    row["document_id"] for row in attachments),
+                                statuses={row["document_id"]: row["status"] for row in attachments})
                 return {**application["result"], "cached": True}
             raise ValueError("付款预览已处理，请刷新")
         if lease_check:
@@ -468,6 +666,7 @@ def confirm_payment_adoption(store, ledger, batch_name, preview_id, revision, ac
                 "logistics_id": preview["logistics_id"], "logistics_snapshot": preview["logistics_snapshot"],
                 "source_id": source["id"], "source_snapshot": source["snapshot"], "source_line_id": row["source_line_id"],
                 "source_line_revision": row["line_revision"], "logical_fee_key": row["logical_fee_key"],
+                "evidence_document_id": row.get("evidence_document_id") or "",
                 "amount": row["amount"], "currency": row["currency"], "amount_status": row["amount_status"],
                 "status": "active", "active": True, "exclusive": 1 if row["exclusive"] else 0,
                 "claim_key": claim_key, "revision": digest(POLICY, claim_id, row, source["snapshot"]),
@@ -481,12 +680,22 @@ def confirm_payment_adoption(store, ledger, batch_name, preview_id, revision, ac
             claims.append(claim)
         _sync_rule_groups(store, ledger, batch_name, version["name"], selected_keys, definitions, actor, "采用已核对付款金额")
         claims = [store.get("payment_claim", claim["id"]) for claim in claims]
+        from .document_writer import register_private_file
+        from .payment_evidence import materialize_payment_evidence
+        register_file = register_file or (lambda attachment, document: register_private_file(ledger, attachment, document))
+        application_id = digest(POLICY, "application", preview_id, revision)
+        evidence_bindings = _payment_evidence_bindings(store, ledger, batch_name, version["name"], claims)
+        attachments = materialize_payment_evidence(
+            store, ledger, source, batch, version["name"], preview.get("attachment_plan") or {},
+            preview["selections"], actor, register_file,
+            pending_context={"preview_id": preview_id, "application_id": application_id,
+                             "bindings": evidence_bindings},
+        )
         payment_revision = digest(POLICY, batch_name, version["name"], [_claim_signature(row) for row in _active_claims(store, batch=batch_name, version=version["name"])])
         ledger.put("version", version["name"], {"calculated_at": None, "summary_snapshot_json": "{}", "rule_snapshot_json": "[]"})
         ledger.put("batch", batch_name, {"status": "Dirty", "confirm_status": "Pending", "is_locked": 0})
-        application_id = digest(POLICY, "application", preview_id, revision)
         result = {"status": "applied", "version": version["name"], "revision": payment_revision,
-                  "application_id": application_id, "claims": claims}
+                  "application_id": application_id, "claims": claims, "attachments": attachments}
         application = {"id": application_id, "batch": batch_name, "version": version["name"], "preview_id": preview_id,
             "status": "applied", "revision": revision, "result": result, "actor": actor, "applied_at": utcnow(),
             "replaced_claim_ids": sorted(replace_ids)}
@@ -605,11 +814,29 @@ def amend_payment_claim(store, ledger, batch_name, version_name, claim_id, expec
             _assert_claim_capacity(store, ledger, claim, source, _amount(claim["amount"]), claim["currency"])
         claim.update(revision=digest(POLICY, before["revision"], action, edits, str(reason).strip()),
                      correction_reason=str(reason).strip(), corrected_by=actor, corrected_at=utcnow())
+        from .payment_evidence import (
+            capture_current_rule_evidence,
+            migrate_current_rule_evidence,
+            update_pending_evidence_for_claim,
+        )
+        captured_evidence = capture_current_rule_evidence(ledger, batch_name, version_name, affected_keys)
         _store_claim(store, claim)
         _disable_claim_rule(ledger, batch_name, version_name, claim_id, actor, str(reason).strip())
         _sync_rule_groups(store, ledger, batch_name, version_name, affected_keys, _allowed_keys(batch), actor,
                           str(reason).strip())
+        evidence_aliases = ({claim["logical_fee_key"]: before["logical_fee_key"]}
+                            if action == "reclassify" else {})
+        migrate_current_rule_evidence(ledger, batch_name, version_name, captured_evidence, actor,
+                                      str(reason).strip(), aliases=evidence_aliases)
         claim = store.get("payment_claim", claim_id)
+        active_affected_claims = [row for row in _active_claims(
+            store, batch=batch_name, version=version_name) if row.get("logical_fee_key") in affected_keys]
+        pending_bindings = (_payment_evidence_bindings(
+            store, ledger, batch_name, version_name,
+            [{"id": row["id"]} for row in active_affected_claims]) if active_affected_claims else {})
+        update_pending_evidence_for_claim(
+            store, batch_name, version_name, before, claim, action, pending_bindings,
+            _payment_evidence_rows(active_affected_claims), actor, str(reason).strip())
         ledger.put("version", version_name, {"calculated_at": None, "summary_snapshot_json": "{}", "rule_snapshot_json": "[]"})
         ledger.put("batch", batch_name, {"status": "Dirty", "confirm_status": "Pending", "is_locked": 0})
         app_revision = digest(POLICY, "amend", claim_id, claim["revision"])
@@ -774,5 +1001,8 @@ def public_payment_context(store, ledger, batch_name, version_name):
     active = [_claim_signature(row) for row in claims if row.get("status") == "active"]
     active += [{key: row.get(key) for key in ("id", "source_id", "source_snapshot", "amount", "currency")}
                for row in legacy_context.get("claims") or []]
-    return {"payment_claims": projected, "payment_revision": digest(POLICY, batch_name, version_name, active),
+    from .payment_evidence import public_pending_evidence
+    return {"payment_claims": projected,
+            "payment_evidence_pending": public_pending_evidence(store, batch_name, version_name),
+            "payment_revision": digest(POLICY, batch_name, version_name, active),
             "payment_blocking_reasons": sorted(set(blocking + payment_claim_blockers(store, ledger, batch_name, version_name)))}

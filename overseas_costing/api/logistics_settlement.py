@@ -327,13 +327,14 @@ def amend_freight_claim(batch_name,version_name,claim_id,expected_revision,actio
 @frappe.whitelist(methods=['POST'])
 @_review_validation
 def preview_payment_adoption(batch_name, version_name, candidate_id, candidate_revision, selections,
-                             reason='', negative_confirmed=False):
+                             reason='', negative_confirmed=False, attachment_selections=None):
     if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
     batch_name=require_batch_permission(batch_name,'write')
     from overseas_costing.services.logistics_settlement.payment_adoption import preview_payment_adoption as preview
     result=preview(runtime.store(),FrappeLedger(),batch_name,version_name,candidate_id,candidate_revision,
                    _decode(selections,list),frappe.session.user,reason=str(reason or ''),
-                   negative_confirmed=negative_confirmed in (True,1,'1','true'))
+                   negative_confirmed=negative_confirmed in (True,1,'1','true'),
+                   attachment_selections=_decode(attachment_selections,list) if attachment_selections is not None else None)
     return {'ok':True,'preview':result}
 
 

@@ -208,7 +208,10 @@ def test_payment_preview_api_requires_write_but_confirm_also_asserts_edit_lease(
     calls=[]
     monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
     monkeypatch.setattr(batch_api,'require_batch_permission',lambda batch,permission='read':calls.append(('permission',batch,permission)) or batch)
-    monkeypatch.setattr(payment_adoption,'preview_payment_adoption',lambda *args,**kwargs:{'preview_id':'p','revision':'r'})
+    def payment_preview(*args,**kwargs):
+        calls.append(('attachments',kwargs.get('attachment_selections')))
+        return {'preview_id':'p','revision':'r'}
+    monkeypatch.setattr(payment_adoption,'preview_payment_adoption',payment_preview)
     def confirm(*args,**kwargs):
         kwargs['lease_check'](args[2],edit_token=kwargs['edit_token'],expected_modified=kwargs['expected_modified'])
         return {'status':'applied'}
@@ -216,11 +219,13 @@ def test_payment_preview_api_requires_write_but_confirm_also_asserts_edit_lease(
     monkeypatch.setattr(edit_session_service,'assert_batch_write',lambda batch_name,edit_token,expected_modified:
                         calls.append(('lease',batch_name,edit_token,expected_modified)) or {'name':batch_name})
 
-    preview=batch_api.preview_payment_adoption('B','V','C','CR','[{"source_line_id":"approval_total","logical_fee_key":"import_tax","amount":"1","currency":"RMB"}]')
+    preview=batch_api.preview_payment_adoption('B','V','C','CR','[{"source_line_id":"approval_total","logical_fee_key":"import_tax","amount":"1","currency":"RMB"}]',
+                                               attachment_selections='[{"document_id":"D","selected":false,"logical_fee_keys":[]}]')
     confirmed=batch_api.confirm_payment_adoption('B','p','r','token','modified')
 
     assert preview['preview']['preview_id']=='p' and confirmed['status']=='applied'
-    assert calls==[('permission','B','write'),('permission','B','write'),('lease','B','token','modified')]
+    assert calls==[('permission','B','write'),('attachments',[{'document_id':'D','selected':False,'logical_fee_keys':[]}]),
+                   ('permission','B','write'),('lease','B','token','modified')]
 
 
 def test_payment_amend_api_asserts_lease_and_forwards_only_decoded_edits(batch_api, monkeypatch):

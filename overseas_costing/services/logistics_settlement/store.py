@@ -15,6 +15,7 @@ TABLES = {
     'payment_preview': 'batch VARCHAR(140) NOT NULL, version VARCHAR(140) NOT NULL, logistics_id VARCHAR(64) NOT NULL, source_id VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, revision VARCHAR(64) NOT NULL, expires_at VARCHAR(64) NOT NULL',
     'payment_claim': 'batch VARCHAR(140) NOT NULL, version VARCHAR(140) NOT NULL, logistics_id VARCHAR(64) NOT NULL, source_id VARCHAR(64) NOT NULL, source_snapshot VARCHAR(64) NOT NULL, source_line_id VARCHAR(64) NOT NULL, logical_fee_key VARCHAR(96) NOT NULL, amount VARCHAR(64) NOT NULL, currency VARCHAR(16) NOT NULL, status VARCHAR(32) NOT NULL, exclusive INTEGER NOT NULL, claim_key VARCHAR(160) NOT NULL UNIQUE, revision VARCHAR(64) NOT NULL',
     'payment_application': 'batch VARCHAR(140) NOT NULL, version VARCHAR(140) NOT NULL, preview_id VARCHAR(96) NOT NULL, status VARCHAR(32) NOT NULL, revision VARCHAR(64) NOT NULL, UNIQUE(preview_id, revision)',
+    'payment_evidence_pending': 'batch VARCHAR(140) NOT NULL, version VARCHAR(140) NOT NULL, source_id VARCHAR(64) NOT NULL, document_id VARCHAR(64) NOT NULL, logical_fee_key VARCHAR(96) NOT NULL, status VARCHAR(32) NOT NULL, revision VARCHAR(64) NOT NULL',
     'packing_review': 'batch VARCHAR(140) NOT NULL, version VARCHAR(140) NOT NULL, source_id VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL',
     'source': 'corp VARCHAR(128) NOT NULL, instance VARCHAR(160) NOT NULL, kind VARCHAR(32) NOT NULL, snapshot VARCHAR(64) NOT NULL, match_hash VARCHAR(64) NOT NULL, updated_at VARCHAR(64) NOT NULL, UNIQUE(corp, instance)',
     'snapshot': 'source_id VARCHAR(64) NOT NULL, fingerprint VARCHAR(64) NOT NULL, UNIQUE(source_id, fingerprint)',
@@ -80,6 +81,7 @@ class Store:
             ('payment_claim_source', 'payment_claim', 'source_id, status, currency'),
             ('payment_claim_batch', 'payment_claim', 'batch, version, status'),
             ('payment_application_batch', 'payment_application', 'batch, version, status'),
+            ('payment_evidence_pending_batch', 'payment_evidence_pending', 'batch, version, status'),
         )
         for name, table, columns in payment_indexes:
             index_name = 'oc_ls_' + name

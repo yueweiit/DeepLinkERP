@@ -50,8 +50,11 @@ def candidate_view(store,candidate,transport_mode='',ledger=None):
     except (InvalidOperation,ValueError,TypeError):
         claimed=stale_claimed=remaining=None;stale_totals={}
     claim_status='stale_review' if stale_claims else 'current'
+    from .payment_evidence import candidate_attachment_summaries
+    attachments = candidate_attachment_summaries(source, lines, transport_mode)
     return {**candidate,'source_revision':candidate.get('source_revision') or candidate.get('expense_snapshot'),
             'expense':financial_summary(source),'lines':lines,'approval_total':source.get('amount'),'approval_currency':source.get('currency'),
+            'attachments':attachments,
             'claimed':str(claimed) if claimed is not None else None,'remaining':str(remaining) if remaining is not None else None,
             'active_claimed_amount':str(claimed) if claimed is not None else None,
             'stale_claimed_amount':str(stale_claimed) if stale_claimed is not None else None,
