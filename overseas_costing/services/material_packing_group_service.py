@@ -10,6 +10,11 @@ from .logistics_settlement.model import digest
 
 
 GROUP_FIELDS = ('package_count', 'net_weight_kg', 'gross_weight_kg', 'volume_m3')
+PACKING_REPOSITORY_ITEM_FIELDS = (
+    'name', 'stable_line_key', 'row_no', 'is_excluded', 'net_weight_kg',
+    'gross_weight_kg', 'volume_m3', 'actual_shipped_qty', 'quantity',
+    'goods_value', 'extra_json',
+)
 MONEY_FIELDS = ('net_weight_kg', 'gross_weight_kg', 'volume_m3')
 META_KEY = 'material_packing_groups'
 
@@ -280,10 +285,11 @@ class FrappeMaterialPackingGroupRepository:
             ['name','batch','modified','status','extra_json'], as_dict=True) or {}
         if version_row.get('batch') != batch:
             raise ValueError('成本版本不属于当前批次。')
-        fields = ['name','stable_line_key','row_no','is_excluded','package_count','packaging_type',
-                  'net_weight_kg','gross_weight_kg','volume_m3','actual_shipped_qty','quantity','goods_value','extra_json']
-        items = frappe.get_all('Overseas Cost Item', filters={'batch':batch,'version':version}, fields=fields,
+        items = frappe.get_all('Overseas Cost Item', filters={'batch':batch,'version':version},
+                               fields=list(PACKING_REPOSITORY_ITEM_FIELDS),
                                order_by='row_no asc, name asc', limit_page_length=10000)
+        from overseas_costing.services.effective_source_values import project_batch_items
+        items, _source_context = project_batch_items(items, batch, version)
         editable = (current.get('current_version') == version and version_row.get('status') == 'Active'
                     and current.get('confirm_status') != 'Confirmed'
                     and current.get('writeback_status') != 'Success' and not current.get('is_locked'))

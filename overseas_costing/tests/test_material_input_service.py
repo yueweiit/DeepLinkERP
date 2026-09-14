@@ -168,6 +168,16 @@ def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:
     assert "net_weight_kg" in GRID_FIELDS
 
 
+def test_grid_query_only_requests_physical_item_columns() -> None:
+    source_path = ROOT / "doctype/overseas_cost_item/overseas_cost_item.json"
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    physical_fields = {row["fieldname"] for row in source["fields"]}
+
+    assert set(GRID_FIELDS) <= physical_fields | {"name", "modified"}
+    assert "package_count" not in GRID_FIELDS
+    assert "packaging_type" not in GRID_FIELDS
+
+
 def test_material_requirements_mark_only_active_contextual_missing_cells() -> None:
     result = analyze_material_requirements(
         [

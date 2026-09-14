@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from overseas_costing.services.material_packing_group_service import (
+    PACKING_REPOSITORY_ITEM_FIELDS,
     adopt_xlsx_group_candidates,
     allocate_group_values,
     build_group_preview,
@@ -10,6 +11,12 @@ from overseas_costing.services.material_packing_group_service import (
     prepare_group_preview,
     project_packing_groups,
 )
+
+
+def test_packing_repository_queries_only_physical_item_columns():
+    assert 'package_count' not in PACKING_REPOSITORY_ITEM_FIELDS
+    assert 'packaging_type' not in PACKING_REPOSITORY_ITEM_FIELDS
+    assert 'extra_json' in PACKING_REPOSITORY_ITEM_FIELDS
 
 
 def rows():
