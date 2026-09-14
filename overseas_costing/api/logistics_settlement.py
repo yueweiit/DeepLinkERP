@@ -234,13 +234,13 @@ def find_expenses(batch_name, query='', after=None):
 
 
 @frappe.whitelist(methods=['POST'])
-def prepare_manual_candidate(batch_name, expense_id, reason):
+def prepare_manual_candidate(batch_name, expense_id, reason, expected_revision=None):
     batch_name = require_batch_permission(batch_name, 'write')
     if not str(reason).strip():
         raise ValueError('请填写人工核对依据')
     if runtime.freight_enabled():
         from overseas_costing.services.logistics_settlement.freight_runtime import manual_candidate
-        return {'ok':True,'candidate':manual_candidate(runtime.store(),FrappeLedger(),batch_name,expense_id,str(reason)),'freight_mode':True}
+        return {'ok':True,'candidate':manual_candidate(runtime.store(),FrappeLedger(),batch_name,expense_id,str(reason),expected_revision=expected_revision),'freight_mode':True}
     db = runtime.store()
     db.get('state', 'match_lock', lock=True)
     mapping = db.find('batch_map', batch=batch_name, limit=1)
@@ -261,6 +261,15 @@ def prepare_manual_candidate(batch_name, expense_id, reason):
                  'revision': digest(logistics['snapshot'], expense['snapshot'], evidence_hash), 'reason': reason}
     save_candidate(db, candidate)
     return {'ok': True, 'candidate': runtime.candidate_view(db, candidate)}
+
+
+@frappe.whitelist(methods=['POST'])
+def reopen_payment_candidate(batch_name,candidate_id,revision,reason):
+    if not runtime.freight_enabled():raise ValueError('本票费用明细功能尚未启用')
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.logistics_settlement.freight_runtime import reopen_candidate
+    candidate=reopen_candidate(runtime.store(),FrappeLedger(),batch_name,candidate_id,revision,str(reason or ''),frappe.session.user)
+    return {'ok':True,'candidate':candidate}
 
 
 @frappe.whitelist(methods=['POST'])

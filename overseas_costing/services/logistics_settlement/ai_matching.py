@@ -1,6 +1,7 @@
 """A cached second pass over unresolved local sources; AI never adopts or binds data."""
 import re
 import uuid
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -15,9 +16,20 @@ SENSITIVE = re.compile(r'账[号户]|帐[号户]|银行卡|开户行|口令|密�
                        r'cuenta|bancari|contrase[ñn]a|clave|authorization|bearer|\b\d{12,19}\b', re.I)
 
 
+def _secret_text(text):
+    normalized=unicodedata.normalize('NFKC',str(text or ''))
+    compact=re.sub(r'[\s\-_.]+','',normalized)
+    if SENSITIVE.search(normalized) or SENSITIVE.search(compact):return True
+    if re.search(r'\d{11,19}',compact):return True
+    if re.search(r'[A-Z]{2}\d{2}[A-Z0-9]{11,30}',compact,re.I):return True
+    if re.fullmatch(r'[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?',compact,re.I):return True
+    if re.search(r'sk(?:live|test)[A-Z0-9]{6,}',compact,re.I):return True
+    return False
+
+
 def safe_text(value, limit=400):
-    text = str(value or '')
-    if SENSITIVE.search(text):
+    text = unicodedata.normalize('NFKC',str(value or ''))
+    if _secret_text(text):
         return ''
     return re.sub(r'https?://\S+', '[链接]', text)[:limit]
 

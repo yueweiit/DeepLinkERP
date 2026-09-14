@@ -104,6 +104,16 @@ def test_per_batch_payment_apis_separate_rules_from_explicit_ai(batch_api, monke
     assert permissions == ["write", "write", "write"]
 
 
+def test_manual_payment_candidate_forwards_expected_revision(batch_api, monkeypatch):
+    monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
+    from overseas_costing.services.logistics_settlement import freight_runtime
+    calls=[]
+    monkeypatch.setattr(freight_runtime,'manual_candidate',lambda db,ledger,batch,expense,reason,expected_revision=None:
+                        calls.append(expected_revision) or {'id':'candidate','revision':'new'})
+    result=batch_api.prepare_manual_candidate('B','expense','人工核对',expected_revision='old')
+    assert result['candidate']['revision']=='new' and calls==['old']
+
+
 def test_global_ai_entry_does_not_schedule_freight_payment_ai(batch_api, monkeypatch):
     role_checks = []
     monkeypatch.setattr(batch_api.frappe, "only_for", role_checks.append, raising=False)
@@ -120,6 +130,17 @@ def test_global_ai_entry_does_not_schedule_freight_payment_ai(batch_api, monkeyp
     assert result["code"] == "PER_BATCH_AI_REQUIRED"
     assert "start_payment_ai_matching" in result["message"]
     assert role_checks == []
+
+
+def test_reopen_payment_candidate_api_requires_batch_write_permission(batch_api, monkeypatch):
+    calls=[]
+    monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
+    monkeypatch.setattr(batch_api,'require_batch_permission',lambda batch,permission='read':calls.append((batch,permission)) or batch)
+    from overseas_costing.services.logistics_settlement import freight_runtime
+    monkeypatch.setattr(freight_runtime,'reopen_candidate',lambda db,ledger,batch,cid,revision,reason,actor:{'id':cid,'revision':'new','status':'reopened'})
+    result=batch_api.reopen_payment_candidate('B','candidate','old','人工重新核对')
+    assert calls==[('B','write')]
+    assert result=={'ok':True,'candidate':{'id':'candidate','revision':'new','status':'reopened'}}
 
 
 def test_manual_selection_of_current_expense_preserves_confirmed_candidate(setup, monkeypatch):

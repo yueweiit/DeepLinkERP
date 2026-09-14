@@ -28,7 +28,10 @@ def identifiers_in(value):
 def financial_candidate(row, fields):
     title=str(row.get('process_name') or row.get('template_name') or row.get('title') or (row.get('raw_payload') or {}).get('title') or '')
     text=norm(title+' '+dumps(fields))
-    registered=any(x in norm(title) for x in ('采购支出','运营支出','费用支出','月结','报销','付款','支付')) or bool(re.search(r'bu(?:$|[^a-z])|(?:^|[^a-z])bu',title,re.I))
+    dynamic=row.get('financial_scope') is True or row.get('registered_financial_flow') is True
+    bu=bool(re.search(r'(?:^|[^A-Za-z])BU(?=$|[^A-Za-z])',title,re.I) or
+            re.search(r'(?:[A-Za-z]{2,}|[\u4e00-\u9fff]{2,})BU(?=$|[^A-Za-z])',title,re.I))
+    registered=dynamic or any(x in norm(title) for x in ('采购支出','运营支出','费用支出','月结','报销','付款','支付')) or bu
     if registered:return True
     financial=any(x in norm(title) for x in ('gastos','pago','reembolso'))
     transport=any(norm(x) in text for x in ('物流','运费','运输','快递','freight','transporte','envio','dhl','fedex','ups','paqueteria','运单','提单','国际物流'))
@@ -62,9 +65,12 @@ def statement_tables(sheets):
 def fee_scope(label):
     text=norm(label)
     if any(norm(t) in text for t in ('双清','包税','ddp')): return 'review'
-    if any(norm(t) in text for t in CUSTOMS_LABELS): return 'customs'
-    if any(norm(t) in text for t in TAX_LABELS): return 'tax'
-    if any(norm(t) in text for t in MEXICO_INLAND_LABELS): return 'mexico_inland'
+    scopes=set()
+    if any(norm(t) in text for t in CUSTOMS_LABELS): scopes.add('customs')
+    if any(norm(t) in text for t in TAX_LABELS): scopes.add('tax')
+    if any(norm(t) in text for t in MEXICO_INLAND_LABELS): scopes.add('mexico_inland')
+    if len(scopes)>1:return 'review'
+    if scopes:return next(iter(scopes))
     return 'freight' if any(norm(t) in text for t in ('运费','物流','海运','空运','快递','freight','flete','transporte','dhl','fedex','燃油','附加','surcharge','冲抵','折扣','credit')) else 'review'
 
 

@@ -314,6 +314,7 @@ def run_payment_rule_matching(batch_name,version_name=None):
     if version_name and version_name!=batch.get('current_version'):raise ValueError('历史版本只读，请返回当前版本匹配')
     source=ensure_batch_source(db,batch_name)
     with db.atomic():
+        db.get('state','match_lock',lock=True)
         current=ledger.get('batch',batch_name,lock=True) or {}
         if version_name and version_name!=current.get('current_version'):raise ValueError('成本版本已变化，请刷新当前版本后匹配')
         job=freight_matching.record_rule_pass(db,source['id'],frappe.session.user)
@@ -334,7 +335,7 @@ def start_payment_ai_matching(batch_name,version_name=None,hints=None,offset=0,l
         if (ledger.get('batch',batch_name,lock=True) or {}).get('current_version')!=version_name:
             raise ValueError('成本版本已变化，请刷新当前版本后匹配')
         job=payment_ai_matching.start(db,source['id'],batch_name,version_name,frappe.session.user,hints=hints,offset=offset,limit=limit)
-    if job.get('status')=='queued':
+    if job.get('status')=='queued' and job.get('enqueue_required'):
         frappe.enqueue('overseas_costing.services.logistics_settlement.runtime.run_payment_ai_matching',queue='long',timeout=600,
             payment_ai_job_id=job['id'],enqueue_after_commit=True)
     return {'ok':True,'payment_matching':job,'message':job.get('message')}

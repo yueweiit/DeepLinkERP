@@ -8,6 +8,7 @@ from .jobs import utcnow
 
 RULE_POLICY = 'shipment-payment-rules-1'
 HINT_LIMITS = {'waybill':160, 'supplier':200, 'project':200, 'date':80, 'description':500}
+CANDIDATE_PRIORITY = {'manual':400, 'explicit':300, 'identifier':200, 'deepseek':100, 'reopened':0}
 
 
 def index_source(store, source):
@@ -22,6 +23,17 @@ def current_lines(store,source):
     return store.find('freight_line',source_id=source['id'],snapshot=source['snapshot'])
 
 
+def current_lines_many(store,sources):
+    if not sources:return {}
+    snapshots={source['id']:source['snapshot'] for source in sources}
+    marks=','.join(['%s']*len(snapshots))
+    rows=[store.unpack(row) for row in store.sql(f'SELECT * FROM oc_ls_freight_line WHERE source_id IN ({marks}) ORDER BY id',tuple(snapshots))]
+    result={source_id:[] for source_id in snapshots}
+    for row in rows:
+        if snapshots.get(row['source_id'])==row.get('snapshot'):result[row['source_id']].append(row)
+    return result
+
+
 def candidates(store,logistics_id):
     logistics=store.get('source',logistics_id)
     if not logistics or logistics.get('invalid'): return []
@@ -33,32 +45,37 @@ def candidates(store,logistics_id):
     return result
 
 
-def save_candidate(store,logistics,expense,lines,method,reason,*,model='',confidence=None):
+def save_candidate(store,logistics,expense,lines,method,reason,*,model='',confidence=None,expected_revision=None):
     cid=digest(POLICY,logistics['id'],expense['id'])
     revision=digest(POLICY,logistics['snapshot'],expense['snapshot'],[r['id'] for r in lines],method,model,str(confidence),reason)
-    prior=store.get('freight_candidate',cid)
-    # A human rejection belongs to the pair, not one evidence revision. Only a
-    # future explicit human re-inclusion action may lift it.
-    if prior and prior['status']=='rejected': return prior
-    issues=[]
-    for line in lines:
-        if line.get('ambiguous'): issues.append('重复凭证或明细行身份不唯一，待核对')
-        if line.get('identifier_conflict'):issues.append('运单与审批编号指向不同票，请核对')
-        claims=store.find('freight_claim',charge_key=line['charge_key'])
-        if any(c['logistics_id']!=logistics['id'] for c in claims): issues.append('本笔费用已用于其他票')
-    c={'id':cid,'logistics_id':logistics['id'],'expense_id':expense['id'],'status':'conflict' if issues else 'pending',
-       'revision':revision,'expense_snapshot':expense['snapshot'],'logistics_snapshot':logistics['snapshot'],
-       'line_ids':[r['id'] for r in lines],'method':method,'reason':reason,'issues':sorted(set(issues)),
-       'model':str(model or ''),'confidence':None if confidence is None else str(confidence),
-       'source_revision':expense['snapshot'],'amount_pending':not bool(lines)}
-    store.put('freight_candidate',{k:c[k] for k in ('id','logistics_id','expense_id','status')}|{'data':dumps(c)})
-    return c
+    with store.atomic():
+        store.get('state','match_lock',lock=True)
+        prior=store.get('freight_candidate',cid,lock=True)
+        if expected_revision=='' and prior:
+            raise ValueError('候选已存在，请刷新后重试')
+        if expected_revision not in (None,'') and (prior or {}).get('revision')!=expected_revision:
+            raise ValueError('候选已变化，请刷新后重试')
+        # Rejection permanently protects a pair until the explicit reopen path.
+        if prior and prior.get('status') in ('rejected','confirmed'):return prior
+        if prior and CANDIDATE_PRIORITY.get(method,0)<CANDIDATE_PRIORITY.get(prior.get('method'),0):return prior
+        if prior and method=='manual' and prior.get('method')=='manual' and expected_revision is None:
+            raise ValueError('人工候选已存在，请提供候选版本后重试')
+        issues=[]
+        for line in lines:
+            if line.get('ambiguous'): issues.append('重复凭证或明细行身份不唯一，待核对')
+            if line.get('identifier_conflict'):issues.append('运单与审批编号指向不同票，请核对')
+            claims=store.find('freight_claim',charge_key=line['charge_key'])
+            if any(c['logistics_id']!=logistics['id'] for c in claims): issues.append('本笔费用已用于其他票')
+        c={'id':cid,'logistics_id':logistics['id'],'expense_id':expense['id'],'status':'conflict' if issues else 'pending',
+           'revision':revision,'expense_snapshot':expense['snapshot'],'logistics_snapshot':logistics['snapshot'],
+           'line_ids':[r['id'] for r in lines],'method':method,'reason':reason,'issues':sorted(set(issues)),
+           'model':str(model or ''),'confidence':None if confidence is None else str(confidence),
+           'source_revision':expense['snapshot'],'amount_pending':not bool(lines)}
+        store.put('freight_candidate',{k:c[k] for k in ('id','logistics_id','expense_id','status')}|{'data':dumps(c)})
+        return c
 
 
-def rule_pass(store,logistics_id):
-    logistics=store.get('source',logistics_id)
-    if not logistics or logistics['invalid']: raise ValueError('本票国际物流来源已失效')
-    # Indexed exact line identifiers plus explicit source links. No other logistics bodies.
+def _rule_source_ids(store,logistics):
     source_ids=set()
     for kind,token in logistics['identifiers']:
         column='approval_no' if kind=='approval' else 'waybill' if kind=='waybill' else None
@@ -66,6 +83,14 @@ def rule_pass(store,logistics_id):
             source_ids.update(r['source_id'] for r in store.find('freight_line',**{column:token}))
             source_ids.update(r['source_id'] for r in store.find('identifier',corp=logistics['corp'],token=token))
     source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
+    return source_ids
+
+
+def rule_pass(store,logistics_id):
+    logistics=store.get('source',logistics_id)
+    if not logistics or logistics['invalid']: raise ValueError('本票国际物流来源已失效')
+    # Indexed exact line identifiers plus explicit source links. No other logistics bodies.
+    source_ids=_rule_source_ids(store,logistics)
     for eid in sorted(source_ids):
         source=store.get('source',eid)
         if not source or source['kind']!='expense' or source['invalid'] or not source['approved'] or source['corp']!=logistics['corp']: continue
@@ -117,18 +142,30 @@ def payment_pool(store,logistics_id,hints=None,offset=0,limit=30):
     limit=max(1,min(50,limit))
     clean=sanitize_hints(hints)
     rejected={c['expense_id'] for c in store.find('freight_candidate',logistics_id=logistics_id) if c.get('status')=='rejected'}
-    eligible=[s for s in store.find('source',kind='expense') if s.get('corp')==logistics['corp'] and s.get('approved') and not s.get('invalid') and s['id'] not in rejected]
+    eligible=[s for s in store.approved_expenses(logistics['corp']) if s['id'] not in rejected]
     ranked=[]
     for source in eligible:
         score,reasons=_score_payment_source(logistics,source,clean)
         ranked.append(({**source,'local_match_score':score,'local_match_reasons':reasons},score))
     ranked.sort(key=lambda item:(-item[1],item[0]['id']))
     sources=[item[0] for item in ranked]
-    fingerprint=digest('shipment-payment-pool-1',logistics['snapshot'],[(s['id'],s['snapshot']) for s in eligible],
-        sorted((c['expense_id'],c.get('status'),c.get('revision')) for c in store.find('freight_candidate',logistics_id=logistics_id) if c.get('status')=='rejected'),clean,offset,limit)
+    candidate_state=sorted((c['id'],c.get('revision'),c.get('status'),c.get('method')) for c in store.find('freight_candidate',logistics_id=logistics_id))
+    snapshot={'logistics':(logistics['id'],logistics['snapshot']),'sources':sorted((s['id'],s['snapshot']) for s in eligible),
+              'candidates':candidate_state}
+    fingerprint=digest('shipment-payment-pool-2',snapshot,clean,offset,limit)
     page=sources[offset:offset+limit]
     return {'logistics':logistics,'sources':page,'hints':clean,'offset':offset,'limit':limit,
-            'has_more':offset+len(page)<len(sources),'total':len(sources),'fingerprint':fingerprint}
+            'has_more':offset+len(page)<len(sources),'total':len(sources),'fingerprint':fingerprint,'pool_snapshot':snapshot}
+
+
+def payment_pool_fresh(store,logistics_id,pool_snapshot):
+    logistics=store.get('source',logistics_id)
+    if not logistics or logistics.get('invalid') or (logistics['id'],logistics['snapshot'])!=tuple(pool_snapshot.get('logistics') or ()):return False
+    sources=store.approved_expenses(logistics['corp'])
+    rejected={c['expense_id'] for c in store.find('freight_candidate',logistics_id=logistics_id) if c.get('status')=='rejected'}
+    current_sources=sorted((s['id'],s['snapshot']) for s in sources if s['id'] not in rejected)
+    current_candidates=sorted((c['id'],c.get('revision'),c.get('status'),c.get('method')) for c in store.find('freight_candidate',logistics_id=logistics_id))
+    return current_sources==[tuple(row) for row in pool_snapshot.get('sources',[])] and current_candidates==[tuple(row) for row in pool_snapshot.get('candidates',[])]
 
 
 def record_rule_pass(store,logistics_id,actor=''):
@@ -144,7 +181,11 @@ def record_rule_pass(store,logistics_id,actor=''):
 
 
 def _rule_fingerprint(store,logistics):
-    expenses=[s for s in store.find('source',kind='expense') if s.get('corp')==logistics['corp'] and s.get('approved') and not s.get('invalid')]
+    expenses=[]
+    for source_id in sorted(_rule_source_ids(store,logistics)):
+        source=store.get('source',source_id)
+        if source and source.get('kind')=='expense' and source.get('corp')==logistics['corp'] and source.get('approved') and not source.get('invalid'):
+            expenses.append(source)
     return digest(RULE_POLICY,logistics['snapshot'],[(s['id'],s['snapshot']) for s in expenses]),expenses
 
 

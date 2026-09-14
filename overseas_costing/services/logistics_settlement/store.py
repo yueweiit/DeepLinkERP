@@ -57,7 +57,7 @@ class Store:
     def install(self):
         for table, fields in TABLES.items():
             self.sql(f'CREATE TABLE IF NOT EXISTS oc_ls_{table} (id VARCHAR(64) PRIMARY KEY, data LONGTEXT NOT NULL, {fields})')
-        for name, table, columns in [('token', 'identifier', 'corp, token'), ('candidate_status', 'candidate', 'status'), ('job_status', 'job_item', 'job_id, status'), ('source_kind', 'source', 'kind'), ('reference_target', 'reference', 'corp, target_instance'), ('detail_snapshot', 'detail', 'snapshot, detail_type'), ('audit_binding', 'audit', 'binding_id, created_at'), ('document_sync_status', 'document_sync', 'status, source_id')]:
+        for name, table, columns in [('token', 'identifier', 'corp, token'), ('candidate_status', 'candidate', 'status'), ('job_status', 'job_item', 'job_id, status'), ('source_kind', 'source', 'kind'), ('source_corp_kind', 'source', 'corp, kind'), ('reference_target', 'reference', 'corp, target_instance'), ('detail_snapshot', 'detail', 'snapshot, detail_type'), ('audit_binding', 'audit', 'binding_id, created_at'), ('document_sync_status', 'document_sync', 'status, source_id')]:
             if self.is_sqlite:
                 self.sql(f'CREATE INDEX IF NOT EXISTS oc_ls_{name} ON oc_ls_{table} ({columns})')
             elif not self.sql(f"SHOW INDEX FROM oc_ls_{table} WHERE Key_name=%s", (f'oc_ls_{name}',)):
@@ -138,6 +138,14 @@ class Store:
         self.validate_columns(table, filters)
         where = ' AND '.join(k+'=%s' for k in filters) or '1=1'
         return self.sql(f'SELECT COUNT(*) AS n FROM oc_ls_{table} WHERE {where}', list(filters.values()))[0]['n']
+
+    def approved_expenses(self, corp):
+        if self.is_sqlite:
+            predicate="json_extract(data,'$.approved')=1 AND COALESCE(json_extract(data,'$.invalid'),0)=0"
+        else:
+            predicate="CAST(JSON_EXTRACT(data,'$.approved') AS CHAR) IN ('true','1') AND CAST(JSON_EXTRACT(data,'$.invalid') AS CHAR) IN ('false','0')"
+        return [self.unpack(row) for row in self.sql(
+            f"SELECT * FROM oc_ls_source WHERE corp=%s AND kind='expense' AND {predicate} ORDER BY id",(corp,))]
 
     def audit(self, binding_id, action, actor, **details):
         from .jobs import utcnow

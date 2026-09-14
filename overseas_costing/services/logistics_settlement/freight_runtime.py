@@ -27,16 +27,28 @@ def candidate_view(store,candidate,transport_mode=''):
             'available':source['approved'] and not source['invalid'] and not line.get('ambiguous') and line['scope']=='freight'
             and not any(c['logistics_id']!=candidate['logistics_id'] for c in occupied),
             'adopted':any(c['logistics_id']==candidate['logistics_id'] and c['line_id']==lid for c in occupied)})
-    claims=[claim for claim in store.find('freight_claim',source_id=source['id']) if claim.get('source_snapshot')==source['snapshot']]
+    all_claims=store.find('freight_claim',source_id=source['id'])
+    active_claims=[claim for claim in all_claims if claim.get('source_snapshot')==source['snapshot'] and claim.get('currency')==source.get('currency')]
+    stale_claims=[claim for claim in all_claims if claim not in active_claims]
     try:
-        claimed=sum((Decimal(str(claim['amount'])) for claim in claims if claim.get('currency')==source.get('currency')),Decimal('0'))
+        claimed=sum((Decimal(str(claim['amount'])) for claim in active_claims),Decimal('0'))
+        stale_totals={}
+        for claim in stale_claims:
+            currency=str(claim.get('currency') or '')
+            stale_totals[currency]=stale_totals.get(currency,Decimal('0'))+Decimal(str(claim['amount']))
+        stale_claimed=stale_totals.get(str(source.get('currency') or ''),Decimal('0')) if set(stale_totals)<={str(source.get('currency') or '')} else None
         total=Decimal(str(source['amount'])) if source.get('amount') is not None else None
-        remaining=total-claimed if total is not None and all(claim.get('currency')==source.get('currency') for claim in claims) else None
+        remaining=total-claimed if total is not None and not stale_claims else None
     except (InvalidOperation,ValueError,TypeError):
-        claimed=remaining=None
+        claimed=stale_claimed=remaining=None;stale_totals={}
+    claim_status='stale_review' if stale_claims else 'current'
     return {**candidate,'source_revision':candidate.get('source_revision') or candidate.get('expense_snapshot'),
             'expense':financial_summary(source),'lines':lines,'approval_total':source.get('amount'),'approval_currency':source.get('currency'),
             'claimed':str(claimed) if claimed is not None else None,'remaining':str(remaining) if remaining is not None else None,
+            'active_claimed_amount':str(claimed) if claimed is not None else None,
+            'stale_claimed_amount':str(stale_claimed) if stale_claimed is not None else None,
+            'stale_claimed_by_currency':{currency:str(amount) for currency,amount in stale_totals.items()},
+            'remaining_amount':str(remaining) if remaining is not None else None,'claim_status':claim_status,
             'packing_available':any(l.get('cargo_text') for l in lines) or bool(source.get('goods')) or any(d.get('tables') for d in source.get('documents') or [])}
 
 
@@ -73,7 +85,7 @@ def batch_status(store,ledger,batch_name,version_name=None):
     return base
 
 
-def manual_candidate(store,ledger,batch_name,expense_id,reason):
+def manual_candidate(store,ledger,batch_name,expense_id,reason,expected_revision=None):
     maps=store.find('batch_map',batch=batch_name)
     if not maps:raise ValueError('请先开始本票匹配')
     logistics=store.get('source',maps[0]['source_id']);expense=store.get('source',expense_id)
@@ -82,7 +94,26 @@ def manual_candidate(store,ledger,batch_name,expense_id,reason):
     lines=matching.current_lines(store,expense);own=matching_lines(logistics,lines)
     # Manual relation still cannot expose an explicitly different shipment as an adoptable line.
     own += [r for r in lines if not r.get('waybill') and not r.get('approval_no')]
-    return candidate_view(store,matching.save_candidate(store,logistics,expense,own,'manual',reason))
+    return candidate_view(store,matching.save_candidate(store,logistics,expense,own,'manual',reason,expected_revision=expected_revision))
+
+
+def reopen_candidate(store,ledger,batch_name,candidate_id,revision,reason,actor):
+    if not str(reason or '').strip():raise ValueError('请填写重新纳入原因')
+    with store.atomic():
+        store.get('state','match_lock',lock=True)
+        candidate=store.get('freight_candidate',candidate_id,lock=True)
+        maps=store.find('batch_map',batch=batch_name)
+        if not candidate or not any(row['source_id']==candidate.get('logistics_id') for row in maps):
+            raise ValueError('候选不属于当前批次')
+        if candidate.get('revision')!=revision:raise ValueError('候选已变化，请刷新后重试')
+        if candidate.get('status')!='rejected':raise ValueError('只能重新纳入已否决候选')
+        old_revision=candidate['revision']
+        candidate.update(status='reopened',method='reopened',reason=str(reason).strip(),
+                         revision=digest('payment-candidate-reopened',old_revision,str(reason).strip(),actor))
+        store.put('freight_candidate',{k:candidate[k] for k in ('id','logistics_id','expense_id','status')}|{'data':dumps(candidate)})
+        store.audit(batch_name,'payment_candidate_reopened',actor,candidate_id=candidate_id,old_revision=old_revision,
+                    new_revision=candidate['revision'],reason=str(reason).strip())
+        return candidate
 
 
 def resume(store,ledger):
