@@ -101,6 +101,15 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: python .github/scripts/preflight_deepseek.py
 
+      - name: Reclaim unused Docker build cache
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "docker builder prune --all --force && docker image prune --force"
+
       - name: Preflight document parsing runtime
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
