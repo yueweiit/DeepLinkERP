@@ -240,7 +240,11 @@ EXCEL_COLUMNS = [
     {"excel_col": "AS", "fieldname": "mexico_misc_mxn", "label": "墨西哥杂费 MXN"},
     {"excel_col": "AT", "fieldname": "mexico_inland_misc_rmb", "label": "墨西哥内陆运输+杂费 RMB"},
     {"excel_col": "AU", "fieldname": "china_to_mexico_freight_rmb", "label": "中国到墨西哥运费 RMB"},
+    {"excel_col": "AU1", "fieldname": "package_count", "label": "箱数"},
+    {"excel_col": "AU2", "fieldname": "packaging_type", "label": "包装类型"},
+    {"excel_col": "AU3", "fieldname": "net_weight_kg", "label": "货重净重 KG"},
     {"excel_col": "AV", "fieldname": "gross_weight_kg", "label": "货重毛重 KG"},
+    {"excel_col": "AV1", "fieldname": "volume_m3", "label": "体积 m³"},
     {"excel_col": "AW", "fieldname": "weight_ratio", "label": "分摊比例（重量比）"},
     {"excel_col": "AX", "fieldname": "freight_alloc_rmb", "label": "运输费用分摊 RMB"},
     {"excel_col": "AY", "fieldname": "freight_alloc_mxn", "label": "运输费用分摊 MXN"},
@@ -1666,6 +1670,11 @@ def get_batch_items(
     ) or {}
     from overseas_costing.services.effective_source_values import project_source_values
     items = [project_source_values(item) for item in items]
+    from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
+    version_row = frappe.db.get_value("Overseas Cost Version", resolved_version_name,
+                                      ["extra_json"], as_dict=True) or {}
+    packing = project_packing_groups(items, groups_from_version(version_row), strict=False)
+    items = packing['items']
     for item in items: item.pop("extra_json", None)
     batch_business_type = _resolve_batch_business_type(batch_header)
     for item in items:
@@ -1678,6 +1687,7 @@ def get_batch_items(
         "filters": query_filters,
         "columns": EXCEL_COLUMNS,
         "items": items,
+        "packing_groups": packing['groups'],
         "total": len(items),
     }
 
@@ -2049,7 +2059,7 @@ def _merge_repeated_export_cells(sheet, columns: list[dict], rows: list[list], m
             previous_value = current_value
 
 
-def _build_export_xlsx_content(columns: list[dict], rows: list[list]) -> bytes:
+def _build_export_xlsx_content(columns: list[dict], rows: list[list], packing_merge_ranges: list[dict] | None = None) -> bytes:
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -2105,6 +2115,19 @@ def _build_export_xlsx_content(columns: list[dict], rows: list[list]) -> bytes:
                 cell.number_format = '#,##0.######'
 
     _merge_repeated_export_cells(sheet, columns, rows, merged_alignment, cell_border)
+    packing_fields = {"package_count", "packaging_type", "net_weight_kg", "gross_weight_kg", "volume_m3"}
+    packing_columns = [index for index, column in enumerate(columns, start=1)
+                       if column.get("fieldname") in packing_fields]
+    for region in packing_merge_ranges or []:
+        start, end = int(region.get("start") or 0) + 2, int(region.get("end") or 0) + 2
+        if end <= start:
+            continue
+        for column_index in packing_columns:
+            sheet.merge_cells(start_row=start, start_column=column_index,
+                              end_row=end, end_column=column_index)
+            cell = sheet.cell(row=start, column=column_index)
+            cell.alignment = merged_alignment
+            cell.border = cell_border
 
     for index, header in enumerate(headers, start=1):
         fieldname = columns[index - 1].get("fieldname") if index - 1 < len(columns) else ""
@@ -2129,6 +2152,7 @@ def export_current_result_xlsx(batch_names_json=None, transport_label: str | Non
         return {"ok": False, "message": "当前没有可导出的批次。"}
 
     export_rows = []
+    packing_merge_ranges = []
     for batch_name in batch_names:
         batch_doc_name = _resolve_batch_name(batch_name)
         if not batch_doc_name:
@@ -2155,13 +2179,28 @@ def export_current_result_xlsx(batch_names_json=None, transport_label: str | Non
         )
         if not detail.get("ok"):
             continue
-        for item in detail.get("items") or []:
-            export_rows.append([_export_cell_value(item, batch, column) for column in EXCEL_COLUMNS])
+        detail_items = detail.get("items") or []
+        group_starts = {}
+        for item in detail_items:
+            export_item = dict(item)
+            group = item.get('packing_group') or {}
+            if item.get('packing_group_id'):
+                if int(item.get('packing_group_position') or 0) == 0:
+                    for field in ('package_count','packaging_type','net_weight_kg','gross_weight_kg','volume_m3'):
+                        export_item[field] = group.get(field)
+                    group_starts[item['packing_group_id']] = len(export_rows)
+                else:
+                    for field in ('package_count','packaging_type','net_weight_kg','gross_weight_kg','volume_m3'):
+                        export_item[field] = None
+                    if int(item.get('packing_group_position') or 0) == int(item.get('packing_group_size') or 1) - 1:
+                        packing_merge_ranges.append({'start':group_starts.get(item['packing_group_id'], len(export_rows)),
+                                                     'end':len(export_rows)})
+            export_rows.append([_export_cell_value(export_item, batch, column) for column in EXCEL_COLUMNS])
 
     if not export_rows:
         return {"ok": False, "message": "当前批次没有可导出的 SKU 明细。"}
 
-    content = _build_export_xlsx_content(EXCEL_COLUMNS, export_rows)
+    content = _build_export_xlsx_content(EXCEL_COLUMNS, export_rows, packing_merge_ranges)
     label = _clean_export_filename_part(transport_label or "全部")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"海外采购综合成本核算_{label}_{stamp}.xlsx"

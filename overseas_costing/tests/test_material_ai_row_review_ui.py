@@ -15,7 +15,7 @@ w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'token',e
 const state=w.ensureMaterialFeeState();w.renderMaterialAIReviewDialog=()=>{};w.renderMaterialFeeWorkspacePreservingPosition=()=>{};
 w.loadMaterialFeeWorkspace=async()=>true;w.ensureEditSession=async()=>true;
 global.frappe={show_alert:()=>{}};
-const catalog={policy:'ai-row-review-2',fingerprint:'fp',rows:[
+const catalog={policy:'ai-row-review-3',fingerprint:'fp',rows:[
  {row_id:'source',origin:'source',action:'update',values:{material_code:'NEW',gross_weight_kg:0},can_fill:true,can_update:true,can_add:false,can_replace:true,default_selected:true,default_update_selected:true,default_replace_selected:true},
  {row_id:'current',origin:'current',action:'retain',values:{material_code:'OLD'},can_fill:false,can_update:false,can_add:false,can_replace:true,default_selected:false},
  {row_id:'ambiguous',origin:'source',action:'review',label:'待核对',values:{material_code:'DUP'},can_fill:false,can_update:false,can_add:false,can_replace:true,blocked_reason:'匹配不唯一'}
@@ -190,6 +190,31 @@ assert(html.includes('当前无有效实际装箱匹配，采用流程装箱单�
 assert(html.includes('data-mf-ai-source-group="packing" open'));
 assert(html.includes('与更高优先级来源冲突'));
 assert(html.includes('当前已有'));
+""")
+
+
+def test_row_review_candidate_and_final_tables_show_server_valuations():
+    run_ui(r"""
+const fill=ready();fill.row_review.rows[0].values={...fill.row_review.rows[0].values,
+  unit_price:'4.40',purchase_currency:'RMB',shipment_value_rmb:'10560'};
+fill.rowSelection.preview={id:'P',revision:'R',can_apply:true,rows:[fill.row_review.rows[0].values]};
+fill.rowSelection.previewKey=w.materialAIRowSelectionKey(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','10560'])assert(html.includes(text),text);
+""")
+
+
+def test_row_review_displays_server_packing_group_candidates_and_autofill_price_columns():
+    run_ui(r"""
+const fill=ready();fill.rowSelection.preview={id:'P',revision:'R',can_apply:true,rows:[],
+  packing_group_candidates:[{candidate_id:'G1',member_keys:['L1','L2','L3'],package_count:'21',
+    net_weight_kg:'389',gross_weight_kg:'397.7',volume_m3:'0.40884',sheet_name:'Packing'}]};
+fill.rowSelection.previewKey=w.materialAIRowSelectionKey(fill);
+let html=w.renderMaterialAIReviewDialogContent();
+for(const text of ['装箱组候选','3 行','21','389','397.7','0.40884'])assert(html.includes(text),text);
+fill.draft={autofill_preview:{items:[{unit_price:'4.40',purchase_currency:'RMB',shipment_value_rmb:'10560'}],fees:[],notes:[],project_summary:[],unresolved:[]}};
+html=w.renderMaterialAIAutofillPreview(fill);
+for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','10560'])assert(html.includes(text),text);
 """)
 
 

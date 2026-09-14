@@ -9,10 +9,10 @@ from .effective_logistics_source import json_dict
 from .logistics_settlement.model import digest
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-row-review-2'
+POLICY = 'ai-row-review-3'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
-FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom')
+FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')
 MISSING_LABELS = {'material_code':'SKU','actual_shipped_qty':'数量','shipped_uom':'单位','gross_weight_kg':'毛重','volume_m3':'体积'}
 
 
@@ -35,7 +35,18 @@ def _matches(row, items):
         return exact
     code = str(row.get('material_code') or '').strip().casefold()
     if code:
-        return [i for i in items if str(i.get('material_code') or '').strip().casefold()==code]
+        candidates = [i for i in items if str(i.get('material_code') or '').strip().casefold()==code]
+        if len(candidates) > 1 and row.get('actual_shipped_qty') not in (None, ''):
+            try:
+                quantity = Decimal(str(row.get('actual_shipped_qty')))
+                narrowed = [item for item in candidates if Decimal(str(
+                    item.get('actual_shipped_qty') if item.get('actual_shipped_qty') not in (None, '')
+                    else item.get('quantity'))) == quantity]
+                if narrowed:
+                    candidates = narrowed
+            except (InvalidOperation, TypeError, ValueError):
+                pass
+        return candidates
     name = str(row.get('product_name') or '').strip().casefold()
     return [i for i in items if name and str(i.get('product_name') or '').strip().casefold()==name
             and str(row.get('spec_model') or '').strip().casefold()==str(i.get('spec_model') or '').strip().casefold()
@@ -56,7 +67,27 @@ def _source_values(row):
     values['unit']=values.get('unit') or values['shipped_uom']
     for field in PHYSICAL:
         if missing(row,field):values[field]=None
+    valuation = json_dict(row.get('extra_json')).get('shipment_valuation') or {}
+    _apply_valuation_values(values, valuation)
     return values
+
+
+def _apply_valuation_values(values, valuation):
+    if (isinstance(valuation, dict) and valuation.get('amount_rmb') is not None
+            and not valuation.get('error')):
+        values['shipment_value_rmb'] = str(valuation['amount_rmb'])
+        values['shipment_valuation_status'] = str(valuation.get('status') or 'automatic')
+        values['shipment_valuation_ref'] = digest(
+            'shipment-valuation-summary-1', valuation.get('amount_rmb'), valuation.get('unit_price'),
+            valuation.get('currency'), valuation.get('quantity'), valuation.get('uom'),
+            valuation.get('source_hash'), valuation.get('source_refs') or valuation.get('source'))
+        refs = valuation.get('source_refs') or []
+        values['shipment_value_source'] = deepcopy(
+            valuation.get('source') or (refs[0] if refs else {}))
+        if valuation.get('unit_price') is not None:
+            values['unit_price'] = valuation.get('unit_price')
+        if valuation.get('currency'):
+            values['purchase_currency'] = valuation.get('currency')
 
 
 def _source_groups(catalog_rows, sources):
@@ -124,9 +155,16 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
     """Do not expose inherited purchase values as newly recognized packing evidence."""
     from .effective_source_values import project_source_values
     items=[project_source_values(i,context) for i in items]
+    from .shipment_cost_service import shipment_value
+    for item in items:
+        current_valuation = shipment_value(item)
+        item['shipment_value_rmb'] = current_valuation.get('amount_rmb')
+        item['shipment_valuation_status'] = current_valuation.get('status')
+        item['shipment_value_source'] = deepcopy((current_valuation.get('source_refs') or [{}])[0])
     original={str(i['name']):i for i in items}
     rows=[];occurrences=Counter();proposal_rows={}
-    def add(values, proposal, *, origin='source', target='', stable='', fields=None, price_metadata=None):
+    def add(values, proposal, *, origin='source', target='', stable='', fields=None, price_metadata=None,
+            shipment_valuation=None):
         values=deepcopy(values)
         matches=_matches(values,items) if origin=='source' else []
         if target and target in original and (origin=='current' or proposal.get('proposal_type')=='item_update'):
@@ -168,6 +206,8 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                      'proposal_id':proposal.get('proposal_id'),'proposal_type':proposal.get('proposal_type'),'fields':fill_fields})
         if price_metadata is not None:
             rows[-1]['_price_metadata']=deepcopy(price_metadata)
+        if shipment_valuation is not None:
+            rows[-1]['_shipment_valuation']=deepcopy(shipment_valuation)
         if stable:proposal_rows[stable]=rows[-1]
     for proposal in proposals:
         kind=proposal.get('proposal_type');payload=proposal.get('payload') or {}
@@ -180,7 +220,12 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                 if evidence_row is None and '_review_origin' not in row:
                     # Older reconciliation rows contained copied/apportioned historical weights.
                     evidence_row={**row,**{field:None for field in PHYSICAL}}
-                values=_source_values(evidence_row if evidence_row is not None else row)
+                evidence = evidence_row if evidence_row is not None else row
+                values=_source_values(evidence)
+                values['stable_line_key'] = values.get('stable_line_key') or row.get('stable_line_key')
+                shipment_valuation=(json_dict(evidence.get('extra_json')).get('shipment_valuation')
+                                    or json_dict(row.get('extra_json')).get('shipment_valuation'))
+                _apply_valuation_values(values, shipment_valuation)
                 # Reconciliation copied procurement facts from old rows; those are not evidence of a new price.
                 reviewed_purchase = row.get('_review_purchase_values')
                 if isinstance(reviewed_purchase,dict):
@@ -189,7 +234,7 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                 else:
                     for field in ('unit_price','purchase_currency','purchase_uom','unit_price_uom'):values.pop(field,None)
                 add(values,proposal,stable=row.get('stable_line_key') or row.get('name'),
-                    price_metadata=row.get('_review_price_metadata'))
+                    price_metadata=row.get('_review_price_metadata'), shipment_valuation=shipment_valuation)
         elif kind=='material_replace':
             for row in payload.get('replacement_rows') or []:
                 values=_source_values(row);values['material_code']=''
@@ -273,6 +318,8 @@ def project(items, catalog, row_ids, fee_ids, mode):
             # Keep the trusted purchase lineage server-side so a later source
             # refresh can detect and audit changed prices for the same row.
             row['_price_metadata']=deepcopy(choice['_price_metadata'])
+        if ('shipment_value_rmb' in fields and choice.get('_shipment_valuation') is not None):
+            row['_shipment_valuation']=deepcopy(choice['_shipment_valuation'])
         for field in fields:
             before=row.get(field)
             row[field]=deepcopy(incoming[field]);field_refs[field]={'row_id':choice['row_id'],'source_refs':refs}

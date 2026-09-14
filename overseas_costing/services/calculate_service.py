@@ -2066,6 +2066,8 @@ def delete_item(
     item_doc.excluded_by = str(getattr(getattr(_frappe, "session", None), "user", "") or "")
     item_doc.exclusion_reason = str(remark or "手工排除物料").strip()
     item_doc.save(ignore_permissions=True)
+    from overseas_costing.services.material_packing_group_service import mark_member_changed
+    mark_member_changed(_frappe, item_doc.version, getattr(item_doc, 'stable_line_key', ''), 'excluded')
     _frappe.db.set_value("Overseas Cost Batch", batch_doc_name, "status", "Dirty", update_modified=True)
     _insert_audit_log(
         batch_doc_name=batch_doc_name,
@@ -2133,6 +2135,8 @@ def restore_item(
     item_doc.excluded_by = ""
     item_doc.exclusion_reason = ""
     item_doc.save(ignore_permissions=True)
+    from overseas_costing.services.material_packing_group_service import mark_member_changed
+    mark_member_changed(_frappe, item_doc.version, getattr(item_doc, 'stable_line_key', ''), 'restored')
     _frappe.db.set_value("Overseas Cost Batch", item_doc.batch, "status", "Dirty", update_modified=True)
     _insert_audit_log(
         batch_doc_name=item_doc.batch,

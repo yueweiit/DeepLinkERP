@@ -35,6 +35,7 @@
     if (!Number.isFinite(this.materialFeeState.materialCellWriteRevision)) this.materialFeeState.materialCellWriteRevision = 0;
     this.materialFeeState.materialSaveErrors = this.materialFeeState.materialSaveErrors || {};
     this.materialFeeState.materialDrafts = this.materialFeeState.materialDrafts || {};
+    this.materialFeeState.packingGroupSelections = this.materialFeeState.packingGroupSelections || new Set();
     this.materialFeeState.aiFill = this.materialFeeState.aiFill || null;
     this.materialFeeState.aiPendingReady = this.materialFeeState.aiPendingReady || null;
     if (this.materialFeeState.aiClarification === undefined) this.materialFeeState.aiClarification = "";
@@ -113,6 +114,22 @@
     });
     this.$root.on("click", "[data-action='mf-excluded-materials']", () => {
       this.openExcludedMaterialsDialog().catch((error) => this.showError(error));
+    });
+    this.$root.on("change", "[data-mf-packing-group-select]", (event) => {
+      const state = this.ensureMaterialFeeState();
+      const key = String($(event.currentTarget).attr("data-mf-packing-group-select") || "");
+      if ($(event.currentTarget).prop("checked")) state.packingGroupSelections.add(key);
+      else state.packingGroupSelections.delete(key);
+      this.renderMaterialFeeWorkspacePreservingPosition();
+    });
+    this.$root.on("click", "[data-action='mf-create-packing-group']", () => {
+      this.openMaterialPackingGroupDialog("create").catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-edit-packing-group']", (event) => {
+      this.openMaterialPackingGroupDialog("update", $(event.currentTarget).attr("data-group-id")).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-remove-packing-group']", (event) => {
+      this.openMaterialPackingGroupDialog("remove", $(event.currentTarget).attr("data-group-id")).catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='mf-exclude-item']", (event) => {
       const $button = $(event.currentTarget);
@@ -534,10 +551,13 @@
 
   renderMaterialFeeWorkspace() {
     const state = this.ensureMaterialFeeState();
+    const packingGroupSelections = state.packingGroupSelections || new Set();
     if (!state.materials || !state.fees || !state.preview) return;
     this.closeMaterialAICandidatePopover();
     const materialSummary = state.materials || {};
+    const packingGroupEditable = materialSummary.packing_group_editable !== false && !this.detailState?.readOnly;
     const hasSettlementCargo = (materialSummary.items || []).some((item) => item.settlement_cargo);
+    const blockingPackingGroups = (materialSummary.packing_groups || []).filter(group => group.blocking || group.status === "needs_reconfirmation");
     const feeSummary = state.fees.summary || {};
     const evidencePending = Number(feeSummary.missing_evidence_fee_count || 0);
     const aiActive = ["STARTING", "QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""));
@@ -566,6 +586,7 @@
               <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
               <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
               <button class="ocw-outline-btn" type="button" data-action="mf-add-material">新增物料</button>
+              <button class="ocw-outline-btn" type="button" data-action="mf-create-packing-group" ${packingGroupEditable && packingGroupSelections.size >= 2 ? "" : "disabled"}>合并装箱组${packingGroupSelections.size ? `（${packingGroupSelections.size}）` : ""}</button>
               <button class="ocw-outline-btn" type="button" data-action="mf-excluded-materials">已排除物料</button>
               <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
               <button class="ocw-outline-btn" type="button" data-action="mf-recover-material-rows">恢复误删物料</button>
@@ -573,6 +594,7 @@
               <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (state.aiFill?.status === "READY" ? "查看填充预览" : "查看填充进度") : "自动填充资料"}</button>
             </div>
           </div>
+          ${blockingPackingGroups.length ? `<div class="ocw-mf-dialog-note"><strong>装箱组待重新确认</strong><span>组内物料曾被删除或恢复，试算已阻止。</span>${blockingPackingGroups.map(group => `<button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-remove-packing-group" data-group-id="${this.escape(group.group_id)}">解除失效组</button>`).join("")}</div>` : ""}
           ${this.renderMaterialAIClarification()}
           ${this.renderMaterialFeeGrid()}
           <div class="ocw-mf-ai-candidate-popover" data-mf-ai-candidate-popover="1" role="dialog" aria-label="AI 候选详情" hidden></div>
@@ -866,10 +888,13 @@
       { field: "row_no", label: "行", readonly: true, width: 40, compactWidth: 32 },
       { field: "material_code", label: "物料编码", readonly: true, width: 100, compactWidth: 88 },
       { field: "product_name", label: "物料名称", readonly: true, width: 180, compactWidth: 120 },
+      { field: "__group_select", label: "共箱", readonly: true, width: 48 },
       { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
       { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
       { field: "shipped_uom", label: "发货单位", width: 130 },
       { field: "shipment_value_rmb", label: "本次发货货值 RMB", numeric: true, readonly: false, width: 180 },
+      { field: "package_count", label: "箱数", numeric: true, width: 90 },
+      { field: "net_weight_kg", label: "净重 kg", numeric: true, width: 120 },
       { field: "gross_weight_kg", label: "毛重 kg", numeric: true, width: 130 },
       { field: "volume_m3", label: "体积 m³", numeric: true, width: 130 },
       { field: "chargeable_weight_kg", label: "计费重 kg", numeric: true, width: 140 },
@@ -878,7 +903,7 @@
     if (state.showAuxiliary) {
       columns.push(
         { field: "goods_value", label: "货值兼容值 RMB", numeric: true, purchaseField: true, readonly: true, width: 150 },
-        { field: "net_weight_kg", label: "净重 kg", numeric: true, width: 130 },
+        { field: "packaging_type", label: "包装类型", width: 130 },
         { field: "unit_price", label: "原币单价", numeric: true, purchaseField: true, width: 130 },
         { field: "purchase_uom", label: "采购单位", purchaseField: true, width: 120 },
         { field: "unit_price_uom", label: "计价单位", purchaseField: true, width: 120 },
@@ -888,8 +913,75 @@
       );
     }
     columns.push({ field: "source_doc_no", label: "采购审批号", readonly: true, width: 220 });
-    columns.push({ field: "__actions", label: "操作", readonly: true, width: 86 });
+    columns.push({ field: "__actions", label: "操作", readonly: true, width: 180 });
     return columns;
+  }
+
+  async openMaterialPackingGroupDialog(action = "create", groupId = "") {
+    const state = this.ensureMaterialFeeState();
+    const groups = state.materials?.packing_groups || [];
+    const group = groups.find((row) => String(row.group_id || "") === String(groupId || ""));
+    const memberKeys = action === "create" ? [...state.packingGroupSelections] : [...(group?.member_keys || [])];
+    if (action !== "create" && !group) throw new Error("装箱组已变化，请刷新后重试。");
+    if (memberKeys.length < 2) throw new Error("请先勾选至少两行连续物料。");
+    if (action === "remove") {
+      const preview = await this.previewMaterialPackingGroup(action, groupId, memberKeys, {}, "人工解除装箱组");
+      return this.confirmMaterialPackingGroupPreview(preview, `确认解除这个 ${memberKeys.length} 行装箱组？解除后各行恢复独立装箱字段。`);
+    }
+    const initial = await this.previewMaterialPackingGroup(action, groupId, memberKeys,
+      action === "update" ? group : {}, action === "create" ? "人工合并连续物料行" : "人工修改装箱组");
+    const defaults = initial.group || {};
+    const dialog = new frappe.ui.Dialog({
+      title: action === "create" ? `合并装箱组（${memberKeys.length} 行）` : "编辑装箱组",
+      fields: [
+        {fieldtype:"HTML", fieldname:"summary", options:`<p>所选物料将共用一组箱数、净重、毛重和体积；货值仍按行保存。</p>`},
+        {fieldtype:"Float", fieldname:"package_count", label:"箱数", reqd:1, default:defaults.package_count},
+        {fieldtype:"Data", fieldname:"packaging_type", label:"包装类型", default:defaults.packaging_type},
+        {fieldtype:"Float", fieldname:"net_weight_kg", label:"净重 kg", reqd:1, default:defaults.net_weight_kg},
+        {fieldtype:"Float", fieldname:"gross_weight_kg", label:"毛重 kg", reqd:1, default:defaults.gross_weight_kg},
+        {fieldtype:"Float", fieldname:"volume_m3", label:"体积 m³", reqd:1, default:defaults.volume_m3},
+        {fieldtype:"Small Text", fieldname:"reason", label:"修改说明", default:action === "create" ? "多行共用同一装箱" : "调整装箱组"},
+      ],
+      primary_action_label: "预览并确认",
+      primary_action: async (values) => {
+        try {
+          const preview = await this.previewMaterialPackingGroup(action, groupId, memberKeys, values, values.reason);
+          const g = preview.group || {};
+          const message = `确认后 ${memberKeys.length} 行共用：箱数 ${g.package_count}，净重 ${g.net_weight_kg} kg，毛重 ${g.gross_weight_kg} kg，体积 ${g.volume_m3} m³。`;
+          const saved = await this.confirmMaterialPackingGroupPreview(preview, message);
+          if (saved) dialog.hide();
+        } catch (error) { this.showError(error); }
+      },
+    });
+    dialog.show();
+  }
+
+  async previewMaterialPackingGroup(action, groupId, memberKeys, values, reason) {
+    const result = await this.call("overseas_costing.api.materials.preview_material_packing_group", {
+      batch_name:this.detailState.batchName, version_name:this.detailState.versionName,
+      member_keys_json:JSON.stringify(memberKeys), action, group_id:groupId || "",
+      values_json:JSON.stringify(values || {}), reason:reason || "",
+    }, false);
+    if (!result?.ok) throw new Error(result?.message || "装箱组预览失败。");
+    return result;
+  }
+
+  async confirmMaterialPackingGroupPreview(preview, message) {
+    return new Promise((resolve) => frappe.confirm(message, async () => {
+      try {
+        if (!(await this.ensureEditSession())) return resolve(false);
+        const result = await this.call("overseas_costing.api.materials.confirm_material_packing_group", {
+          batch_name:this.detailState.batchName, preview_id:preview.preview_id, revision:preview.revision,
+          edit_token:this.detailState.editToken, expected_modified:this.detailState.expectedModified,
+        }, false);
+        if (!result?.ok) throw new Error(result?.message || "装箱组未保存。");
+        this.updateMaterialFeeExpectedModified(result);
+        this.ensureMaterialFeeState().packingGroupSelections.clear();
+        await this.loadMaterialFeeWorkspace({quiet:true});
+        frappe.show_alert({message:preview.action === "remove" ? "装箱组已解除" : "装箱组已保存", indicator:"green"});
+        resolve(true);
+      } catch (error) { this.showError(error); resolve(false); }
+    }, () => resolve(false)));
   }
 
   renderMaterialFeeGrid() {
@@ -898,7 +990,12 @@
     const columns = this.materialFeeGridColumns();
     let items = materialData.items || [];
     items = this.materialReplacementRows(items);
-    if (state.onlyMissing) items = items.filter((row) => row.__aiReplacement || (row.requirements?.missing_fields || []).length);
+    if (state.onlyMissing) {
+      const missingGroups = new Set(items.filter(row => (row.requirements?.missing_fields || []).length)
+        .map(row => row.packing_group_id).filter(Boolean));
+      items = items.filter((row) => row.__aiReplacement || (row.requirements?.missing_fields || []).length
+        || missingGroups.has(row.packing_group_id));
+    }
     const page = Number(materialData.page || state.page || 1);
     const pageCount = Math.max(1, Number(materialData.page_count || 1));
     const tableWidth = columns.reduce((sum, column) => sum + Number(column.width || 130), 0);
@@ -1020,9 +1117,24 @@
   }
 
   renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
+    if (column.field === "__group_select") {
+      const key = String(item.stable_line_key || "");
+      const checked = this.ensureMaterialFeeState().packingGroupSelections.has(key);
+      const editable = this.ensureMaterialFeeState().materials?.packing_group_editable !== false && !this.detailState?.readOnly;
+      return `<td class="ocw-mf-cell ocw-mf-group-select" data-mf-column-index="${columnIndex}" data-mf-grid-field="__group_select"><input type="checkbox" data-mf-packing-group-select="${this.escape(key)}" ${checked ? "checked" : ""} ${item.__aiReplacement || !key || !editable ? "disabled" : ""} aria-label="选择物料行建立装箱组"></td>`;
+    }
     if (column.field === "__actions") {
       const label = [item.material_code, item.product_name].filter(Boolean).join(" ") || item.name;
-      return `<td class="ocw-mf-cell ocw-mf-actions-cell" data-mf-column-index="${columnIndex}" data-mf-grid-field="__actions"><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-exclude-item" data-item-name="${this.escape(item.name || "")}" data-item-label="${this.escape(label)}">删除</button></td>`;
+      const groupEditable = this.ensureMaterialFeeState().materials?.packing_group_editable !== false && !this.detailState?.readOnly;
+      const groupActions = groupEditable && item.packing_group_id && Number(item.packing_group_position || 0) === 0
+        ? `<button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-edit-packing-group" data-group-id="${this.escape(item.packing_group_id)}">编辑组</button><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-remove-packing-group" data-group-id="${this.escape(item.packing_group_id)}">解除组</button>` : "";
+      return `<td class="ocw-mf-cell ocw-mf-actions-cell" data-mf-column-index="${columnIndex}" data-mf-grid-field="__actions">${groupActions}<button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-exclude-item" data-item-name="${this.escape(item.name || "")}" data-item-label="${this.escape(label)}">删除</button></td>`;
+    }
+    const packingFields = new Set(["package_count", "packaging_type", "net_weight_kg", "gross_weight_kg", "volume_m3"]);
+    if (item.packing_group_id && packingFields.has(column.field)) {
+      if (Number(item.packing_group_position || 0) > 0) return "";
+      const group = item.packing_group || {};
+      return `<td class="ocw-mf-cell is-packing-group" rowspan="${Number(group.rowspan || item.packing_group_size || 1)}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${this.escape(column.field)}"><span>${this.escape(this.formatValue(group[column.field] ?? "--"))}</span><small>装箱组共用 · ${Number(item.packing_group_size || 0)} 行</small></td>`;
     }
     let value = item[column.field];
     if (item.source_adoption_state === "historical_pending" && ["material_code", "product_name"].includes(column.field)) {
@@ -1761,7 +1873,7 @@
     const catalog = fill.row_review;
     const preview = selection.previewKey === this.materialAIRowSelectionKey(fill) ? selection.preview : null;
     const value = input => this.escape(input === null || input === undefined || input === "" ? "—" : input);
-    const columns = [["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "单位"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["project_collection", "项目归属"]];
+    const columns = [["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "单位"], ["unit_price", "采购单价"], ["purchase_currency", "币种"], ["shipment_value_rmb", "本次发货货值 RMB"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["project_collection", "项目归属"]];
     const cells = row => columns.map(([field]) => `<td>${value(row[field])}</td>`).join("");
     const busy = fill.applying || fill.discarding ? "disabled" : "";
     const missing = preview?.missing_fields || [];
@@ -1769,6 +1881,8 @@
     const notices = [...(preview?.unresolved || []), ...(Array.isArray(missing) ? missing : [])];
     const mergedAmountGroups = preview?.merged_amount_groups || fill.draft?.merged_amount_groups || [];
     const mergedAmountSummary = mergedAmountGroups.length ? `<section class="ocw-mf-ai-preview-section"><h4>合并金额校验</h4><ul>${mergedAmountGroups.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · 第 ${this.escape(group.source_range?.start_row ?? group.source_row ?? "--")}-${this.escape(group.source_range?.end_row ?? group.source_row ?? "--")} 行 · 组总额 ${this.escape(group.control_total_rmb ?? "--")} · 独立行合计 ${this.escape(group.computed_total_rmb ?? "--")} · ${group.status === "verified" ? "已校验" : "待人工分摊"}</li>`).join("")}</ul></section>` : "";
+    const packingGroupCandidates = preview?.packing_group_candidates || fill.draft?.packing_group_candidates || [];
+    const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>仅 Excel 真实合并范围会随本次资料确认建立；已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · ${Number(group.member_keys?.length || 0)} 行 · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³</li>`).join("")}</ul></section>` : "";
     const fieldLabels = Object.fromEntries(columns);
     const renderCandidateRows = rows => rows.map(row => {
       const allowed = selection.mode === "update_selected" ? row.can_update : selection.mode === "add_selected" ? row.can_add : row.can_fill;
@@ -1800,7 +1914,7 @@
         const values = fee.payload || fee;
         return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${selection.mode === "add_selected" || !fee.can_apply || fill.applying ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${value(fee.previous_amount ?? values.previous_amount)}</td><td>${value(fee.blocked_reason || values.remark || values.source_label || fee.reason || "")}${!fee.can_apply ? "<small>只读 · 不可采用</small>" : selection.mode === "add_selected" ? "<small>新增物料需单独确认</small>" : ""}</td></tr>`;
       }).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>
-      ${mergedAmountSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
+      ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
       <details class="ocw-mf-ai-review-advanced"><summary>资料来源与报价记录</summary>${this.renderMaterialAIReviewSources(fill)}${(catalog.fees || []).map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
@@ -1890,7 +2004,7 @@
 
   renderMaterialAIAutofillPreview(fill) {
     const preview = this.materialAIAutofillPreview(fill);
-    const columns = [["row_no", "行"], ["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "发运单位"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["shipment_value_rmb", "本次发货货值 RMB"], ["project_collection", "项目归属"]];
+    const columns = [["row_no", "行"], ["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "发运单位"], ["unit_price", "采购单价"], ["purchase_currency", "币种"], ["shipment_value_rmb", "本次发货货值 RMB"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["project_collection", "项目归属"]];
     const value = (input) => this.escape(input === null || input === undefined || input === "" ? "—" : input);
     const money = (input) => {
       if (input === null || input === undefined || String(input).trim() === "") return "—";

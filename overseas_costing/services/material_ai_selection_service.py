@@ -73,6 +73,7 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
     merged_amount_groups=deepcopy(draft.get('merged_amount_groups') or [])
     allocation_required=any(group.get('status')!='verified' for group in merged_amount_groups)
     projection['merged_amount_groups']=merged_amount_groups
+    projection['packing_group_candidates']=deepcopy(draft.get('packing_group_candidates') or [])
     projection['merged_amount_blocking']=allocation_required
     if allocation_required:
         projection['can_apply']=False
@@ -80,7 +81,8 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
             'code':'MERGED_AMOUNT_ALLOCATION_REQUIRED',
             'message':'合并金额组缺少独立单价或合计不一致，请完成人工分摊后重新预览。',
         })
-    revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],row_ids,fee_ids,mode,dependencies)
+    revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],row_ids,fee_ids,mode,dependencies,
+                    merged_amount_groups,projection['packing_group_candidates'])
     preview={**projection,'id':digest(run_id,revision),'revision':revision,'run_id':run_id,'batch':batch_name,
              'version':context['version'],'source_context':context.get('effective_source') or {},
              'original_source_reanalysis':ai._run_uses_original_sources(run),
@@ -142,7 +144,8 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
         repo.assert_row_dependencies(batch_name,preview.get('dependencies') or [],lock=True,purpose='estimate')
     context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     current=rows.project(items,catalog,preview['selected_row_ids'],preview['selected_fee_ids'],preview['mode'])
-    revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],preview['selected_row_ids'],preview['selected_fee_ids'],preview['mode'],preview.get('dependencies') or [])
+    revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],preview['selected_row_ids'],preview['selected_fee_ids'],preview['mode'],preview.get('dependencies') or [],
+                    preview.get('merged_amount_groups') or [], preview.get('packing_group_candidates') or [])
     if revision!=preview_revision:raise ValueError('来源、费用或物料已变化，请刷新预览；本次未保存。')
     if not current['can_apply']:raise ValueError('请选择需要填充的物料或费用。')
     fees.assert_allowed(current['fees'],current_fees,context.get('effective_source') or {})

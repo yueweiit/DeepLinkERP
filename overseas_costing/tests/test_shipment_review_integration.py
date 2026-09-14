@@ -96,3 +96,16 @@ def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tm
                       if row['values'].get('material_code') == 'FL000429'
                       and Decimal(str(row['values'].get('actual_shipped_qty'))) == 4000)
         assert Decimal(str(second['values']['gross_weight_kg'])) == Decimal('9.7')
+    from overseas_costing.services.material_ai_row_selection import catalog, project
+    review = catalog(items, repo.run['candidates_json'], repo.get_fees('B1', 'V1'), {},
+                     run_id='RUN-1', sources=manifest)
+    source_rows = [row for row in review['rows'] if row['origin'] == 'source'
+                   and row['values'].get('shipment_value_rmb') is not None]
+    assert [Decimal(row['values']['shipment_value_rmb']) for row in source_rows] == list(map(Decimal,
+        ['14496','604','604','14496','15100','15100','2860','10560']))
+    selected = [row['row_id'] for row in source_rows if row['can_update']]
+    final = project(items, review, selected, [], 'update_selected')
+    if existing_state != 'fresh':
+        assert [Decimal(str(row['shipment_value_rmb'])) for row in final['rows']] == list(map(Decimal,
+            ['14496','604','604','14496','15100','15100','2860','10560']))
+        assert sum(Decimal(str(row['shipment_value_rmb'])) for row in final['rows']) == Decimal('73820')

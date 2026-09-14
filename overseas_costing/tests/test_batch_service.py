@@ -553,6 +553,24 @@ def test_build_export_xlsx_content_merges_repeated_batch_level_cells() -> None:
     assert sheet["B2"].alignment.vertical == "center"
 
 
+def test_build_export_xlsx_content_merges_only_packing_fields_for_a_group() -> None:
+    content = _build_export_xlsx_content(
+        columns=[
+            {"fieldname":"material_code","label":"物料编码"},
+            {"fieldname":"package_count","label":"箱数"},
+            {"fieldname":"net_weight_kg","label":"净重"},
+            {"fieldname":"gross_weight_kg","label":"毛重"},
+            {"fieldname":"volume_m3","label":"体积"},
+        ],
+        rows=[["A",21,389,397.7,.40884],["B","","","",""],["C","","","",""]],
+        packing_merge_ranges=[{'start':0,'end':2}],
+    )
+    sheet = load_workbook(BytesIO(content)).active
+    merged = {str(value) for value in sheet.merged_cells.ranges}
+    assert 'A2:A4' not in merged
+    assert {'B2:B4','C2:C4','D2:D4','E2:E4'} <= merged
+
+
 def test_build_export_xlsx_content_expands_long_text_columns() -> None:
     content = _build_export_xlsx_content(
         columns=[

@@ -44,6 +44,8 @@ GRID_FIELDS = (
     "shipped_uom",
     "cost_output_uom",
     "goods_value",
+    "package_count",
+    "packaging_type",
     "net_weight_kg",
     "gross_weight_kg",
     "volume_m3",
@@ -294,29 +296,42 @@ def get_material_grid(
         filters=filters,
         fields=list(GRID_FIELDS),
         order_by="row_no asc, name asc",
-        limit_start=(normalized_page - 1) * normalized_length,
-        limit_page_length=normalized_length,
+        limit_page_length=10000,
     )
     from overseas_costing.services.approval_link_service import attach_approval_links
 
     from overseas_costing.services.effective_source_values import project_batch_items, project_source_values
     raw_items, source_context = project_batch_items(raw_items,resolved_batch,resolved_version)
-    items = attach_approval_links(resolved_batch, [present_material_row(item) for item in raw_items])
-    all_items = items
-    if total > len(items):
-        all_items = [
-            present_material_row(project_source_values(item,source_context))
-            for item in frappe.get_all(
-                "Overseas Cost Item",
-                filters=filters,
-                fields=list(GRID_FIELDS),
-                order_by="row_no asc, name asc",
-                limit_page_length=10000,
-            )
-        ]
+    all_items = [present_material_row(item) for item in raw_items]
+    from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
+    version_meta = frappe.db.get_value("Overseas Cost Version", resolved_version,
+                                       ["extra_json", "status"], as_dict=True) or {}
+    if not isinstance(version_meta, dict):
+        version_meta = {}
+    packing = project_packing_groups(all_items, groups_from_version(version_meta), strict=False)
+    all_items = packing['items']
+    start = (normalized_page - 1) * normalized_length
+    page_items = all_items[start:start + normalized_length]
+    page_groups = {}
+    for item in page_items:
+        if item.get('packing_group_id'):
+            page_groups.setdefault(item['packing_group_id'], []).append(item)
+    for members in page_groups.values():
+        for position, item in enumerate(members):
+            item['packing_group_absolute_position'] = item.get('packing_group_position')
+            item['packing_group_position'] = position
+            item['packing_group_size_on_page'] = len(members)
+            item['packing_group'] = {**(item.get('packing_group') or {}),
+                                     'rowspan':len(members) if position == 0 else 0}
+    items = attach_approval_links(resolved_batch, page_items)
     from overseas_costing.services import fee_service
 
-    transport_mode = frappe.db.get_value("Overseas Cost Batch", resolved_batch, "transport_mode") or "SEA"
+    batch_meta = frappe.db.get_value(
+        "Overseas Cost Batch", resolved_batch,
+        ["transport_mode", "current_version", "confirm_status", "writeback_status", "is_locked"],
+        as_dict=True,
+    ) or {}
+    transport_mode = (batch_meta.get("transport_mode") if isinstance(batch_meta, dict) else batch_meta) or "SEA"
     fees = fee_service.compose_fee_worklist_rows(
         fee_service._query_rules(resolved_batch, resolved_version),
         transport_mode, **({"source_context":source_context} if source_context else {}),
@@ -336,6 +351,15 @@ def get_material_grid(
         "source_context": source_context,
         "missing_cell_count": requirements["missing_cell_count"],
         "affected_row_count": requirements["affected_row_count"],
+        "packing_groups": packing['groups'],
+        "packing_group_editable": bool(
+            isinstance(batch_meta, dict)
+            and str(version_meta.get('status') or '') == 'Active'
+            and str(batch_meta.get('current_version') or '') == str(resolved_version)
+            and str(batch_meta.get('confirm_status') or '') != 'Confirmed'
+            and str(batch_meta.get('writeback_status') or '') != 'Success'
+            and not batch_meta.get('is_locked')
+        ),
     }
 
 

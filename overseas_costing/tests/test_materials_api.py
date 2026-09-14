@@ -258,3 +258,29 @@ def test_material_row_recovery_api_keeps_preview_and_confirm_separate(monkeypatc
 
     assert confirmed['version_name'] == 'V2' and confirmed['batch_modified'] == 'MOD-2'
     assert [call[0] for call in calls] == ['permission', 'preview', 'permission', 'edit', 'confirm']
+
+
+def test_packing_group_api_keeps_server_preview_and_confirm_separate(monkeypatch):
+    api = _load_api(monkeypatch)
+    from overseas_costing.services import material_packing_group_service as groups
+    calls = []
+    api.frappe.db = SimpleNamespace(rollback=lambda: calls.append(('rollback',)))
+    api.frappe.session = SimpleNamespace(user='finance-user')
+    monkeypatch.setattr(api, 'require_batch_permission',
+                        lambda batch, permission: calls.append(('permission', permission)) or 'B1')
+    monkeypatch.setattr(groups, 'prepare_group_preview',
+                        lambda *args, **kwargs: calls.append(('preview', args, kwargs)) or {'ok':True,'preview_id':'P'})
+    monkeypatch.setattr(groups, 'confirm_group_preview',
+                        lambda *args, **kwargs: calls.append(('confirm', args, kwargs)) or {'ok':True})
+
+    preview = api.preview_material_packing_group(
+        'B', 'V1', '["L1","L2"]', 'create', values_json='{"gross_weight_kg":"12"}', reason='共箱')
+    confirmed = api.confirm_material_packing_group('B', 'P', 'R', 'TOKEN', 'MOD')
+
+    assert preview['preview_id'] == 'P' and confirmed['ok']
+    assert calls[0] == ('permission', 'write')
+    assert calls[1][1][2] == ['L1','L2']
+    assert calls[1][2]['values'] == {'gross_weight_kg':'12'}
+    assert calls[2] == ('permission', 'write')
+    assert calls[3][1] == ('B1','P','R','TOKEN','MOD')
+    assert calls[3][2]['actor'] == 'finance-user'

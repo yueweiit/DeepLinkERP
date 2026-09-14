@@ -185,6 +185,14 @@ def shipment_value(row):
         if not isinstance(cargo, dict) or not isinstance(valuation, dict):
             return {'amount_rmb':None, 'method':'SETTLEMENT_FINAL', 'status':'missing',
                     'error':'SETTLEMENT_SHIPMENT_VALUE_REQUIRED'}
+        if valuation.get('trusted_shipment_source') is True:
+            qty_matches = number(valuation.get('quantity')) == number(row.get('actual_shipped_qty'))
+            uom_matches = normalize_unit(valuation.get('uom')) == normalize_unit(
+                row.get('shipped_uom') or row.get('unit'))
+            error = valuation.get('error') or ('' if qty_matches and uom_matches
+                                                else 'SETTLEMENT_SHIPMENT_VALUE_STALE')
+            return {**valuation, 'amount_rmb': None if error else valuation.get('amount_rmb'),
+                    'status': _status(error, valuation), 'error': error}
         from overseas_costing.services.logistics_settlement.valuation import value_final_cargo
         expected = value_final_cargo(row, cargo, valuation.get('fx_context') or {})
         if expected['input_fingerprint'] != valuation.get('input_fingerprint'):

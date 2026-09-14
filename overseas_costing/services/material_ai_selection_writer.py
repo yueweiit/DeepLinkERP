@@ -93,6 +93,17 @@ def write_rows(store,ledger,preview,context):
                 effective_valuation=shipment_value({**original,**values,'extra_json':persist_item_meta(meta)})
                 values['goods_value']=(effective_valuation.get('amount_rmb')
                                        if effective_valuation.get('amount_rmb') is not None else 0)
+        trusted_valuation=incoming.get('_shipment_valuation')
+        if trusted_valuation is not None:
+            amount=trusted_valuation.get('amount_rmb') if isinstance(trusted_valuation,dict) else None
+            if (amount is None or trusted_valuation.get('error')
+                    or str(amount) != str(incoming.get('shipment_value_rmb'))):
+                raise ValueError('发货货值凭据已变化，请重新预览。')
+            valuation=deepcopy(trusted_valuation)
+            valuation.update(status='automatic',trusted_shipment_source=True)
+            meta['shipment_valuation']=deepcopy(valuation)
+            meta['settlement_valuation']=deepcopy(valuation)
+            values['goods_value']=str(amount)
         if incoming.get('unverified_material_code'):meta['unverified_material_code']=incoming['unverified_material_code']
         # Only numeric columns need zero storage; absence remains explicit in the mask.
         for key in (*PHYSICAL,'quantity','actual_shipped_qty'):
@@ -119,6 +130,15 @@ def write_rows(store,ledger,preview,context):
         for name in removed:ledger.delete('item',name)
         ledger.put('version',old_version['name'],{'is_current':0})
     metadata=row_meta(version)
+    if preview.get('packing_group_candidates'):
+        from .material_packing_group_service import adopt_xlsx_group_candidates, groups_from_version, META_KEY
+        confirmed_member_keys = {
+            str(row.get('stable_line_key') or '') for row in preview.get('rows') or []
+            if row.get('_row_action') == 'source' and row.get('stable_line_key')
+        }
+        metadata[META_KEY]=adopt_xlsx_group_candidates(
+            adopted, groups_from_version({'extra_json':metadata}), preview.get('packing_group_candidates') or [],
+            preview['id'], confirmed_member_keys=confirmed_member_keys)
     metadata['packing_scope_issues']=(metadata.get('packing_scope_issues') or [])+issues
     if preview['mode']=='replace_all':
         from .material_ai_selected_scope import capture_dependencies

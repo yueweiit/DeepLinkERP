@@ -1,9 +1,38 @@
 from copy import deepcopy
+import json
 from overseas_costing.tests.test_freight_lines import setup_cost
 from overseas_costing.services import material_ai_row_selection as rows
 from overseas_costing.services.material_ai_selection_writer import write_rows
 from overseas_costing.services.effective_logistics_source import load_source_bundle
 from overseas_costing.services.logistics_settlement.model import dumps
+
+
+def valuation_selection(items, ctx, version, batch):
+    target = items[0]
+    row = {
+        'name': 'draft-valued',
+        'material_code': target['material_code'],
+        'product_name': target['product_name'],
+        'actual_shipped_qty': '2400',
+        'unit': '个',
+        '_review_origin': 'source',
+        'extra_json': dumps({'shipment_valuation': {
+            'amount_rmb': '10560',
+            'unit_price': '4.40',
+            'currency': 'RMB',
+            'quantity': '2400',
+            'status': 'confirmed_source',
+            'source': {'kind': 'packing_attachment', 'file_id': 'FILE-PACKING-1'},
+        }}),
+    }
+    proposal = {'proposal_id': 'VALUED', 'proposal_type': 'logistics_reconcile',
+        'default_selected': True, 'payload': {'rows': [row]}}
+    catalog = rows.catalog(items, [proposal], [], ctx, run_id='R-VALUED')
+    candidate = next(value for value in catalog['rows'] if value['origin'] == 'source')
+    plan = rows.project(items, catalog, [candidate['row_id']], [], 'update_selected')
+    return catalog, {**plan, 'id': 'valued-preview', 'revision': 'valued-revision',
+        'batch': batch, 'version': version, 'run_id': 'R-VALUED',
+        'source_context': ctx, 'sources': []}
 
 
 def selection(items,ctx,version,batch,mode='replace_all'):
@@ -103,3 +132,34 @@ def test_frozen_version_write_is_rejected():
     p=selection(ledger.rows('item',version=v['name']),ctx,v['name'],b['name'])
     ledger.put('version',v['name'],{'status':'Confirmed'})
     with pytest.raises(ValueError,match='冻结'):write_rows(store,ledger,p,ctx)
+
+
+def test_structured_attachment_valuation_survives_row_review_and_is_persisted_without_purchase_link():
+    store, ledger, batch, version, item, *_ = setup_cost()
+    item['material_code'] = 'CW000191'
+    item['product_name'] = '宠物项圈'
+    ledger.put('item', item['name'], {
+        'material_code': 'CW000191', 'product_name': '宠物项圈',
+        'actual_shipped_qty': 2400, 'quantity': 2400, 'unit': '个',
+        'shipped_uom': '个', 'unit_price': 0, 'goods_value': 0,
+    })
+    current = ledger.rows('item', version=version['name'])
+    ctx = load_source_bundle(batch['name'], version['name'], store=store, ledger=ledger)['context']
+
+    catalog, preview = valuation_selection(current, ctx, version['name'], batch['name'])
+    candidate = next(row for row in catalog['rows'] if row['origin'] == 'source')
+
+    assert candidate['values']['shipment_value_rmb'] == '10560'
+    assert candidate['values']['shipment_valuation_status'] == 'confirmed_source'
+    assert candidate['values']['shipment_valuation_ref']
+    assert candidate['values']['shipment_value_source']['kind'] == 'packing_attachment'
+    assert '_shipment_valuation' in candidate
+
+    write_rows(store, ledger, preview, ctx)
+
+    saved = ledger.get('item', item['name'])
+    assert saved['goods_value'] == '10560'
+    metadata = json.loads(saved['extra_json'])
+    assert metadata['shipment_valuation']['amount_rmb'] == '10560'
+    assert metadata['settlement_valuation']['amount_rmb'] == '10560'
+    assert metadata['shipment_valuation']['source']['file_id'] == 'FILE-PACKING-1'

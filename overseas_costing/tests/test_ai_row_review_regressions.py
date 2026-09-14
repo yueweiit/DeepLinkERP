@@ -2,6 +2,7 @@
 import json
 
 from overseas_costing.services import material_ai_row_selection as rows
+from overseas_costing.services.material_ai_fill_service import _projection_candidates
 from overseas_costing.services.effective_logistics_source import load_source_bundle, project_ai_items
 from overseas_costing.services.effective_source_values import project_source_values
 from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
@@ -647,3 +648,34 @@ def test_bound_source_fill_updates_the_effective_overlay_at_write_time():
     selected.update(batch=batch['name'],version=version['name'],id='PREVIEW',revision='REV',run_id='RUN',source_context=context)
     write_rows(store,ledger,selected,{})
     assert project_source_values(ledger.get('item',item['name']))['gross_weight_kg']==10
+
+
+def test_real_xlsx_physical_merge_becomes_a_stable_packing_group_candidate():
+    items = [
+        {'name':'I1','stable_line_key':'L1','row_no':1,'material_code':'A','actual_shipped_qty':2,
+         'unit':'件','shipped_uom':'件','extra_json':json.dumps({'logistics_row':{'identity':{'material_code':'A'}}})},
+        {'name':'I2','stable_line_key':'L2','row_no':2,'material_code':'B','actual_shipped_qty':3,
+         'unit':'件','shipped_uom':'件','extra_json':json.dumps({'logistics_row':{'identity':{'material_code':'B'}}})},
+    ]
+    preview = {
+        'ok':True,'source':{'sheet_name':'Packing','merge_ranges_available':True},
+        'validation':{'blocking':[]},
+        'material_rows':[
+            {'source_row':2,'material_code':'A','quantity':'2','unit':'件','gross_weight_kg':'5',
+             'field_ranges':{'gross_weight_kg':{'start_row':2,'end_row':3,'start_column':8,'end_column':8}}},
+            {'source_row':3,'material_code':'B','quantity':'3','unit':'件','gross_weight_kg':'5',
+             'field_ranges':{'gross_weight_kg':{'start_row':2,'end_row':3,'start_column':8,'end_column':8}}},
+        ],
+        'groups':[{'group_id':'package-1','row_numbers':[2,3],
+                   'package_count':{'value':'1'},'net_weight_kg':{'value':'4'},
+                   'gross_weight_kg':{'value':'5'},'volume_m3':{'value':'0.1'},
+                   'needs_confirmation':False,
+                   'evidence':[{'kind':'xlsx_merge','field':'gross_weight_kg','start_row':2,'end_row':3}]}],
+    }
+
+    _projection_candidates(items, {'source_id':'ATTACHMENT','source_hash':'HASH'}, preview)
+
+    candidates = preview['shipment_fill']['packing_group_candidates']
+    assert len(candidates) == 1
+    assert candidates[0]['member_keys'] == ['L1','L2']
+    assert candidates[0]['sheet_name'] == 'Packing'

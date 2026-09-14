@@ -569,9 +569,11 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
     version_row = frappe.db.get_value(
         "Overseas Cost Version",
         version,
-        ["fx_usd_to_rmb", "fx_rmb_to_mxn"],
+        ["fx_usd_to_rmb", "fx_rmb_to_mxn", "extra_json"],
         as_dict=True,
     ) or {}
+    from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
+    raw_items = project_packing_groups(raw_items, groups_from_version(version_row))['items']
     fee_components = frappe.get_all(
         "Overseas Cost Fee SKU Component",
         filters={"batch": batch_name, "version": version, "status": "CONFIRMED", "is_active": 1},
@@ -741,7 +743,7 @@ class FrappeCostRepository:
         version = version_name or batch.get("current_version")
         frappe.db.sql("SELECT name FROM `tabOverseas Cost Version` WHERE name=%s AND batch=%s FOR UPDATE", (version, name))
         version_row = frappe.db.get_value("Overseas Cost Version", version,
-            ["name", "batch", "status", "modified", "fx_usd_to_rmb", "fx_rmb_to_mxn"], as_dict=True) or {}
+            ["name", "batch", "status", "modified", "fx_usd_to_rmb", "fx_rmb_to_mxn", "extra_json"], as_dict=True) or {}
         if version_row.get("batch") != name:
             raise ValueError("成本版本不属于当前批次。")
         for doctype in ("Overseas Cost Item", "Overseas Cost Allocation Rule"):
@@ -755,6 +757,8 @@ class FrappeCostRepository:
         if not mode:
             raise ValueError("请先确认批次运输方式。")
         items, source_context = project_batch_items(items,name,version)
+        from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
+        items = project_packing_groups(items, groups_from_version(version_row))['items']
         fees = fee_service.compose_fee_worklist_rows(fee_service._query_rules(name, version), mode,source_context=source_context)
         fx = {key: version_row.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
         context = {**batch, "transport_mode": mode, "batch": name, "version": version, "batch_modified": str(batch["modified"]),
@@ -819,7 +823,8 @@ COST_INPUT_FIELDS = [
     "name", "row_no", "stable_line_key", "material_code", "product_name", "unit", "purchase_uom",
     "unit_price", "purchase_currency", "source_doc_no",
     "unit_price_uom", "quantity", "actual_shipped_qty", "actual_shipped_qty_mode",
-    "actual_shipped_qty_source_revision", "shipped_uom", "goods_value", "gross_weight_kg", "volume_m3",
+    "actual_shipped_qty_source_revision", "shipped_uom", "goods_value", "package_count", "packaging_type",
+    "net_weight_kg", "gross_weight_kg", "volume_m3",
     "volume_weight_kg", "chargeable_weight_kg", "project_collection", "dingtalk_instance_id", "source_type",
     "igi_amount", "iva_amount", "dta", "prv_duty", "prv_iva", "import_tax_total",
     *LEGACY_CUSTOMS_SERVICE_FIELDS,

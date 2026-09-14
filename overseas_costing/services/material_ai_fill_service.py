@@ -1677,7 +1677,7 @@ def _load_json(value: Any, default: Any) -> Any:
 
 _PUBLIC_AI_HIDDEN_KEYS = frozenset({
     "_price_metadata", "_verified_prior_item", "purchase_fact", "purchase_fact_history",
-    "settlement_original_values", "ai_fill_original_values",
+    "settlement_original_values", "ai_fill_original_values", "_shipment_valuation",
 })
 
 
@@ -2374,6 +2374,7 @@ def _ensure_local_attachment(source: dict) -> dict:
 def _projection_candidates(items: list[dict], source: dict, preview: dict) -> list[dict]:
     from overseas_costing.services import material_import_service
     from overseas_costing.services.logistics_autofill_service import extra
+    from overseas_costing.services.logistics_settlement.model import digest
 
     logistics_rows = any(extra(item).get("logistics_row", {}).get("identity") or
                          str(item.get("stable_line_key") or "").startswith("logistics:") for item in items)
@@ -2473,6 +2474,28 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
                 for item in matched_items if any(row.get('project_collection') for row in grouped[item['stable_line_key']])}}
         original_preview['shipment_fill'] = shipment_fill
         shipment_fill['attempted_item_names'] = [item['name'] for item in matched_items] if has_values else []
+        sheet_name = str((preview.get('source') or {}).get('sheet_name') or source.get('sheet_name') or '')
+        row_keys = {int(row.get('source_row')):row.get('_target_stable_line_key')
+                    for row in preview.get('material_rows') or [] if row.get('source_row')}
+        shipment_fill['packing_group_candidates'] = [
+            {'candidate_id':digest('xlsx-packing-group', source.get('source_hash'), sheet_name,
+                                   group.get('group_id'), group.get('row_numbers')),
+             'member_keys':[row_keys[number] for number in group.get('row_numbers') or [] if row_keys.get(number)],
+             'package_count':(group.get('package_count') or {}).get('value'),
+             'net_weight_kg':(group.get('net_weight_kg') or {}).get('value'),
+             'gross_weight_kg':(group.get('gross_weight_kg') or {}).get('value'),
+             'volume_m3':(group.get('volume_m3') or {}).get('value'),
+             'source_fingerprint':source.get('source_hash') or source.get('content_hash'),
+             'creation_method':'xlsx_merge','source_id':source.get('source_id'),
+             'sheet_name':sheet_name,'evidence':deepcopy(group.get('evidence') or [])}
+            for group in preview.get('groups') or []
+            if not group.get('needs_confirmation')
+            and len(group.get('row_numbers') or []) > 1
+            and any(str(evidence.get('kind') or '') == 'xlsx_merge'
+                    for evidence in group.get('evidence') or [])
+            and len([row_keys[number] for number in group.get('row_numbers') or [] if row_keys.get(number)])
+                == len(group.get('row_numbers') or [])
+        ]
         original_preview.setdefault('autofill_warnings', []).extend(shipment_fill['warnings'])
         for name, project in shipment_fill['projects'].items():
             target = next(item for item in matched_items if item['name'] == name)
@@ -3753,6 +3776,14 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             ]
             draft["merged_amount_groups"] = merged_amount_groups
             draft["autofill_preview"]["merged_amount_groups"] = deepcopy(merged_amount_groups)
+            packing_group_candidates = [
+                deepcopy(candidate)
+                for document in documents
+                for fill in document.get('shipment_fills') or []
+                for candidate in fill.get('packing_group_candidates') or []
+            ]
+            draft['packing_group_candidates'] = packing_group_candidates
+            draft['autofill_preview']['packing_group_candidates'] = deepcopy(packing_group_candidates)
             cargo_reviews = [review for document in documents for review in document.get('cargo_reviews') or []]
             if bound_source:
                 draft['source_context'] = effective_source.public_context(context.get('effective_source') or {})

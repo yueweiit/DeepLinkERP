@@ -231,6 +231,41 @@ console.log(JSON.stringify({editable:columns.filter(column=>!column.readonly).ma
     assert result["goods"]["label"] == "货值兼容值 RMB"
 
 
+def test_packing_group_renders_true_rowspan_and_group_actions_once():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={};const state=w.ensureMaterialFeeState();
+w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');w.materialAICell=()=>null;
+const group={group_id:'G1',member_keys:['L1','L2','L3'],package_count:'21',net_weight_kg:'389',
+ gross_weight_kg:'397.7',volume_m3:'0.40884',rowspan:3};
+const first={name:'I1',stable_line_key:'L1',packing_group_id:'G1',packing_group_position:0,packing_group_size:3,packing_group:group};
+const second={name:'I2',stable_line_key:'L2',packing_group_id:'G1',packing_group_position:1,packing_group_size:3,packing_group:{...group,rowspan:0}};
+const columns=w.materialFeeGridColumns();const physical=columns.filter(c=>['package_count','net_weight_kg','gross_weight_kg','volume_m3'].includes(c.field));
+const rendered=physical.map((column,index)=>w.renderMaterialFeeGridCell(first,column,new Set(),index)).join('');
+const hidden=physical.map((column,index)=>w.renderMaterialFeeGridCell(second,column,new Set(),index)).join('');
+const actions=w.renderMaterialFeeGridCell(first,columns.find(c=>c.field==='__actions'),new Set(),99);
+console.log(JSON.stringify({rendered,hidden,actions,fields:physical.map(c=>c.field)}));
+""")
+    assert result["fields"] == ["package_count", "net_weight_kg", "gross_weight_kg", "volume_m3"]
+    assert result["rendered"].count('rowspan="3"') == 4
+    assert all(value in result["rendered"] for value in ["21", "389", "397.7", "0.40884"])
+    assert result["hidden"] == ""
+    assert "编辑组" in result["actions"] and "解除组" in result["actions"]
+
+
+def test_historical_material_grid_disables_packing_group_edits():
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={readOnly:true};const state=w.ensureMaterialFeeState();
+state.materials={packing_group_editable:false};w.escape=v=>String(v??'');w.formatValue=v=>String(v??'');
+const item={name:'I1',stable_line_key:'L1',packing_group_id:'G1',packing_group_position:0,packing_group_size:2,packing_group:{group_id:'G1'}};
+const columns=w.materialFeeGridColumns();
+const select=w.renderMaterialFeeGridCell(item,columns.find(c=>c.field==='__group_select'),new Set(),3);
+const actions=w.renderMaterialFeeGridCell(item,columns.find(c=>c.field==='__actions'),new Set(),99);
+console.log(JSON.stringify({select,actions}));
+""")
+    assert 'disabled' in result['select']
+    assert '编辑组' not in result['actions'] and '解除组' not in result['actions']
+
+
 def test_nonblocking_purchase_and_manual_notes_are_folded():
     html=_frontend_result(FRONTEND_SETUP + """
 h.escape=x=>String(x ?? '');
