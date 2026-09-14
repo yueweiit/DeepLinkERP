@@ -10926,20 +10926,23 @@ class OverseasCostWorkbench {
       const contentRows = group.rows.filter((source) => !auditRows.includes(source));
       const failedRows = contentRows.filter((source) => String(source?.read_status || "").toUpperCase() === "FAILED"
         || String(source?.status || "").toUpperCase() === "FAILED");
+      const partialRows = contentRows.filter((source) => String(source?.read_status || "").toUpperCase() === "PARTIAL"
+        || String(source?.status || "").toUpperCase() === "PARTIAL");
       const successfulRows = contentRows.filter((source) => {
         const readStatus = String(source?.read_status || "").toUpperCase();
         const status = String(source?.status || "").toUpperCase();
-        return !failedRows.includes(source) && (readStatus === "READ" || ["PARSED", "COMPLETED"].includes(status));
+        return !failedRows.includes(source) && !partialRows.includes(source)
+          && (readStatus === "READ" || ["PARSED", "COMPLETED"].includes(status));
       });
       const readRows = successfulRows.filter((source) => {
         const readStatus = String(source?.read_status || "").toUpperCase();
         return readStatus === "READ" || !readStatus;
       });
       const activeRows = contentRows.filter((source) => ["WAITING", "DOWNLOADING", "READING", "ANALYZING"].includes(String(source?.status || "").toUpperCase()));
-      const primary = readRows[0] || successfulRows[0] || activeRows[0] || failedRows[0] || contentRows[0] || group.rows[0] || {};
+      const primary = readRows[0] || successfulRows[0] || partialRows[0] || activeRows[0] || failedRows[0] || contentRows[0] || group.rows[0] || {};
       let status = String(primary?.status || "WAITING").toUpperCase();
       let readStatus = String(primary?.read_status || "NO_RESULT").toUpperCase();
-      if (successfulRows.length && failedRows.length && !activeRows.length) {
+      if ((partialRows.length || (successfulRows.length && failedRows.length)) && !activeRows.length) {
         status = "PARTIAL";
         readStatus = "PARTIAL";
       } else if (activeRows.length) {
@@ -10978,7 +10981,8 @@ class OverseasCostWorkbench {
     const rows = Array.isArray(groups) ? groups : [];
     return {
       source_count: rows.length,
-      failed_source_count: rows.filter((group) => ["FAILED", "PARTIAL"].includes(String(group?.status || "").toUpperCase())).length,
+      partial_source_count: rows.filter((group) => String(group?.status || "").toUpperCase() === "PARTIAL").length,
+      failed_source_count: rows.filter((group) => String(group?.status || "").toUpperCase() === "FAILED").length,
     };
   }
 
@@ -11017,6 +11021,7 @@ class OverseasCostWorkbench {
         <span data-mf-ai-summary="material_proposal_count">物料 ${Number(summary.material_proposal_count || 0)} 项</span>
         <span data-mf-ai-summary="packing_proposal_count">装箱 ${Number(summary.packing_proposal_count || 0)} 项</span>
         <span data-mf-ai-summary="fee_proposal_count">费用 ${Number(summary.fee_proposal_count || 0)} 项</span>
+        <span class="is-partial" data-mf-ai-summary="partial_source_count" ${sourceSummary.partial_source_count ? "" : "hidden"}>部分读取 ${sourceSummary.partial_source_count} 份</span>
         <span class="is-failed" data-mf-ai-summary="failed_source_count" ${sourceSummary.failed_source_count ? "" : "hidden"}>失败 ${sourceSummary.failed_source_count} 份</span>
       </div>
       <div class="ocw-mf-ai-source-progress" data-mf-ai-source-progress>${sourceGroups.map((group) => this.renderMaterialAIProgressSourceGroup(group)).join("")}<div class="ocw-mf-ai-progress-empty" data-mf-ai-progress-empty ${sourceGroups.length ? "hidden" : ""}>正在建立当前批次的资料清单…</div></div>
@@ -11225,9 +11230,11 @@ class OverseasCostWorkbench {
         material_proposal_count: `物料 ${Number(summary.material_proposal_count || 0)} 项`,
         packing_proposal_count: `装箱 ${Number(summary.packing_proposal_count || 0)} 项`,
         fee_proposal_count: `费用 ${Number(summary.fee_proposal_count || 0)} 项`,
+        partial_source_count: `部分读取 ${sourceSummary.partial_source_count} 份`,
         failed_source_count: `失败 ${sourceSummary.failed_source_count} 份`,
       };
       Object.entries(labels).forEach(([key, label]) => $host.find(`[data-mf-ai-summary='${key}']`).text(label));
+      $host.find("[data-mf-ai-summary='partial_source_count']").prop("hidden", !sourceSummary.partial_source_count);
       $host.find("[data-mf-ai-summary='failed_source_count']").prop("hidden", !sourceSummary.failed_source_count);
       $host.find("[data-mf-ai-progress-warning]").text(warning).prop("hidden", !warning);
       $host.find("[data-action='mf-ai-progress-retry']").prop("hidden", !(failed || fill.stalled || fill.is_stalled || fill.connection_error || fill.polling_paused));

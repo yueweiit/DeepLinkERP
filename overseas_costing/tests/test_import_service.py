@@ -1830,6 +1830,91 @@ def test_download_oa_attachment_reports_archive_state(monkeypatch, status, expec
     assert result["source_lag_seconds"] >= 0
 
 
+@pytest.mark.parametrize("archive_error", [
+    "You do not have permission to access this file",
+    "403 Forbidden",
+])
+def test_minio_access_denied_is_reported_as_actionable_chinese_message(monkeypatch, archive_error) -> None:
+    from overseas_costing.services import import_service
+
+    class Attachment:
+        parse_status = "Queued"
+        remark = ""
+        parse_result_json = "{}"
+
+        def save(self, **_kwargs):
+            return self
+
+    class Source:
+        @staticmethod
+        def get_attachment_manifest(*_args):
+            return {
+                "archive_status": "archived",
+                "object_key": "corp/proc/file",
+                "updated_at": "2026-09-04T04:00:00+00:00",
+            }
+
+    class Archive:
+        @staticmethod
+        def download(_manifest):
+            raise RuntimeError(archive_error)
+
+    monkeypatch.setattr(import_service, "_get_oa_postgres_source", lambda: Source())
+    monkeypatch.setattr(import_service, "_get_minio_archive_client", lambda: Archive())
+
+    result = import_service._download_oa_attachment_from_archive(
+        attachment_doc=Attachment(), attachment_name="ATTACH-1", parse_snapshot={},
+        process_instance_id="PROC-1", file_id="FILE-1", file_name="packing.xlsx",
+    )
+
+    assert result["ok"] is False
+    assert result["needs_manual_upload"] is True
+    assert "MinIO 归档账号无权读取" in result["message"]
+    assert "人工上传" in result["message"]
+    assert archive_error not in result["message"]
+
+
+def test_manual_required_access_denied_manifest_hides_raw_archive_error(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class Attachment:
+        parse_status = "Queued"
+        remark = ""
+        parse_result_json = "{}"
+
+        def save(self, **_kwargs):
+            return self
+
+    class Source:
+        @staticmethod
+        def get_attachment_manifest(*_args):
+            return {
+                "archive_status": "manual_required",
+                "last_error": "AccessDenied: You do not have permission to access this file",
+                "updated_at": "2026-09-04T04:00:00+00:00",
+            }
+
+    class FakeFrappe:
+        class db:
+            @staticmethod
+            def commit():
+                return None
+
+    monkeypatch.setattr(import_service, "_get_oa_postgres_source", lambda: Source())
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    result = import_service._download_oa_attachment_from_archive(
+        attachment_doc=Attachment(), attachment_name="ATTACH-1", parse_snapshot={},
+        process_instance_id="PROC-1", file_id="FILE-1", file_name="packing.xlsx",
+    )
+
+    assert result["ok"] is False
+    assert result["error_type"] == "minio_archive_access_denied"
+    assert result["needs_manual_upload"] is True
+    assert "MinIO 归档账号无权读取" in result["message"]
+    assert "AccessDenied" not in result["message"]
+
+
 def test_fetch_dingtalk_attachment_content_passes_signed_headers(monkeypatch) -> None:
     from overseas_costing.services import import_service
 

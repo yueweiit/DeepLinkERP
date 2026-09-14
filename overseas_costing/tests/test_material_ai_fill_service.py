@@ -2335,6 +2335,135 @@ def test_unified_worker_requires_sheet_selection_when_multiple_sheets_produce_re
     assert all(len(row["sheet_options"]) == 2 for row in progress)
 
 
+def test_unified_worker_preserves_partial_status_during_sheet_arbitration(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "manual_attachment",
+            "source_id": "ATT-1",
+            "logical_source_id": "ATT-1",
+            "source_hash": "file-hash",
+            "source_label": "multi.xlsx",
+            "file_name": "multi.xlsx",
+            "sheet_name": sheet,
+        }
+        for sheet in ("Sheet A", "Sheet B")
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        {
+            "proposal_version": 1,
+            "source_manifest_json": manifest,
+            "input_fingerprint": service._source_review_fingerprint(
+                "B1", "V1", _items(), manifest, ""
+            ),
+        }
+    )
+
+    def read_source(_items_arg, source):
+        document = {
+            "source_ref": {
+                "source": "manual_attachment",
+                "file": "multi.xlsx",
+                "sheet": source["sheet_name"],
+            },
+            "ai_eligible": False,
+        }
+        if source["sheet_name"] == "Sheet A":
+            document.update({
+                "structured_rows": [{"source_row": 8, "gross_weight_kg": "12.5"}],
+                "warnings": ["采购单价单位 pieza 与发货单位 个不一致"],
+            })
+            return [_candidate("ITEM-1", "gross_weight_kg", "12.5", source="multi.xlsx")], document
+        return [], document
+
+    monkeypatch.setattr(service, "_read_source", read_source)
+    monkeypatch.setattr(
+        service,
+        "_call_source_review_ai",
+        lambda *_args, **_kwargs: {"ok": False, "proposals": [], "warning": ""},
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    progress = {row["sheet_name"]: row for row in repository.run["source_progress_json"]}
+    assert progress["Sheet A"]["status"] == "PARTIAL"
+    assert progress["Sheet A"]["read_status"] == "PARTIAL"
+    assert progress["Sheet B"]["status"] == "NO_RESULT"
+
+
+def test_unified_worker_blocks_when_required_source_has_no_usable_content(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [{
+        "source_kind": "approval_form",
+        "source_id": "approval:PROC-1:form",
+        "logical_source_id": "approval:PROC-1:form",
+        "source_hash": "approval-hash",
+        "source_label": "国际物流审批正文",
+        "approval_role": "international_logistics",
+        "analysis_required": True,
+        "form_fields": {},
+    }]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update({
+        "proposal_version": 1,
+        "source_manifest_json": manifest,
+        "input_fingerprint": service._source_review_fingerprint(
+            "B1", "V1", _items(), manifest, ""
+        ),
+    })
+    monkeypatch.setattr(service, "_read_source", lambda *_args, **_kwargs: (
+        [], {"source_ref": {"source": "approval_form"}, "ai_eligible": False}
+    ))
+    monkeypatch.setattr(service, "_call_source_review_ai", lambda *_args, **_kwargs: {
+        "ok": True, "proposals": [], "warning": "",
+    })
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "FAILED"
+    assert repository.run["status"] == "FAILED"
+    assert "未发现可识别内容" in repository.run["error_message"]
+
+
+def test_unified_worker_blocks_when_all_selected_optional_sources_are_unusable(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [{
+        "source_kind": "manual_attachment",
+        "source_id": "ATT-EMPTY",
+        "logical_source_id": "ATT-EMPTY",
+        "source_hash": "empty-hash",
+        "source_label": "empty.xlsx",
+        "file_name": "empty.xlsx",
+    }]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update({
+        "proposal_version": 1,
+        "source_manifest_json": manifest,
+        "input_fingerprint": service._source_review_fingerprint(
+            "B1", "V1", _items(), manifest, ""
+        ),
+    })
+    monkeypatch.setattr(service, "_read_source", lambda *_args, **_kwargs: (
+        [], {"source_ref": {"source": "manual_attachment"}, "ai_eligible": False}
+    ))
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "FAILED"
+    assert "所有已选资料均未发现可识别内容" in repository.run["error_message"]
+
+
 @pytest.mark.parametrize('initial_status',['QUEUED','RUNNING'])
 def test_repository_discard_active_run_fences_late_worker_progress_and_completion(monkeypatch,initial_status):
     from types import SimpleNamespace

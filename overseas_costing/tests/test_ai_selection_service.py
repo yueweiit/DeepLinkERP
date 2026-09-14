@@ -184,6 +184,27 @@ def test_archived_dependency_change_blocks_preview_confirmation_even_with_same_m
     assert not repo.writes
 
 
+def test_prepare_reuses_successful_analysis_dependencies_without_recapturing_failed_optional_sources():
+    repo = Repo()
+    successful = [{"kind": "attachment", "attachment_id": "READY", "fingerprint": "SEALED"}]
+    repo.run["draft_json"]["review_input"] = {"source_dependencies": deepcopy(successful)}
+    checks = []
+    repo.assert_row_dependencies = lambda batch, dependencies, **kwargs: checks.append(
+        (deepcopy(dependencies), kwargs.get("lock", False))
+    )
+    repo.capture_row_dependencies = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("failed optional sources must not be recaptured")
+    )
+
+    preview = prepare(repo)
+
+    assert checks
+    assert all(dependencies == successful for dependencies, _locked in checks)
+    assert any(locked for _dependencies, locked in checks)
+    internal = repo.run["draft_json"]["row_previews"][preview["id"]]
+    assert internal["dependencies"] == successful
+
+
 def test_pending_source_confirmation_uses_estimate_dependency_check_only():
     repo=Repo();pending_adopted_scope(repo);checks=[]
     repo.capture_row_dependencies=lambda *args,**kwargs:[{'kind':'approval','source_id':'PENDING','fingerprint':'LOCKED'}]

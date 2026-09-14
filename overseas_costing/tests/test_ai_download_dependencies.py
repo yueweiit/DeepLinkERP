@@ -102,3 +102,109 @@ def test_worker_seals_downloaded_file_before_read_and_rechecks_it(monkeypatch, t
         ledger.put('attachment', local['name'], {'file_name': 'after-ready.txt'})
         with pytest.raises(ValueError, match='来源'):
             repo.assert_row_dependencies('B1', final)
+
+
+def test_failed_optional_download_does_not_block_ready_draft_from_readable_source(monkeypatch):
+    store, ledger, *_ = settlement_fixture.__wrapped__()
+    readable = {
+        'source_kind': 'approval_comment', 'source_id': 'COMMENT-1',
+        'logical_source_id': 'COMMENT-1', 'process_instance_id': 'E',
+        'source_label': '物流说明', 'comment_text': '本批次空运',
+        'available': True,
+    }
+
+    class Repo(_LifecycleRepository):
+        def __init__(self):
+            super().__init__(status='QUEUED')
+            self.sources = [readable, pending_source()]
+
+        def create_run(self, payload):
+            self.run = super().create_run(payload)
+            return self.run
+
+        def capture_row_dependencies(self, sources, context, *, allow_pending=False):
+            return capture_dependencies(sources, store=store, ledger=ledger, batch_name='B1',
+                                        source_context={}, allow_pending=allow_pending)
+
+        def assert_row_dependencies(self, batch, dependencies, *, lock=False, purpose='analysis'):
+            if dependency_issues({'dependencies': dependencies}, store=store, ledger=ledger,
+                                 batch_name=batch, lock=lock, purpose=purpose):
+                raise ValueError('来源内容已更新')
+
+    repo = Repo()
+    monkeypatch.setattr(ai, '_ensure_local_attachment', lambda source: (_ for _ in ()).throw(
+        ValueError('MinIO 归档读取失败：You do not have permission to access this file')
+    ))
+    monkeypatch.setattr(ai, '_call_source_review_ai', lambda *args, **kwargs: {
+        'ok': True, 'proposals': [], 'warning': '',
+    })
+
+    started = ai.start_source_ai_review('B1', 'V1', repository=repo, enqueue=lambda _run: None)
+    result = ai.execute_material_ai_fill(started['run_id'], repository=repo)
+
+    assert result['status'] == 'READY', repo.run.get('error_message')
+    progress = {row['label']: row for row in repo.run['source_progress_json']}
+    assert progress['物流说明']['status'] == 'COMPLETED'
+    assert progress['packing.txt']['status'] == 'FAILED'
+    final = ai._load_json(repo.run['draft_json'], {})['review_input']['source_dependencies']
+    assert {row['kind'] for row in final} == {'approval'}
+
+
+def test_failed_local_optional_attachment_is_removed_from_ready_dependencies(monkeypatch, tmp_path):
+    store, ledger, *_ = settlement_fixture.__wrapped__()
+    corrupt_path = tmp_path / 'corrupt.xlsx'
+    corrupt_path.write_bytes(b'not an excel workbook')
+    attachment = ledger.create('attachment', {
+        'batch': 'B1', 'version': 'V1', 'file_url': str(corrupt_path),
+        'file_name': 'corrupt.xlsx', 'parse_result_json': '{}',
+    })
+    readable = {
+        'source_kind': 'approval_comment', 'source_id': 'COMMENT-1',
+        'logical_source_id': 'COMMENT-1', 'process_instance_id': 'E',
+        'source_label': '物流说明', 'comment_text': '本批次空运', 'available': True,
+    }
+    corrupt = {
+        'source_kind': 'manual_attachment', 'source_id': attachment['name'],
+        'logical_source_id': attachment['name'], 'source_label': 'corrupt.xlsx',
+        'file_name': 'corrupt.xlsx', 'available': True, 'download_required': False,
+    }
+
+    class Repo(_LifecycleRepository):
+        def __init__(self):
+            super().__init__(status='QUEUED')
+            self.sources = [readable, corrupt]
+
+        def create_run(self, payload):
+            self.run = super().create_run(payload)
+            return self.run
+
+        def capture_row_dependencies(self, sources, context, *, allow_pending=False):
+            return capture_dependencies(sources, store=store, ledger=ledger, batch_name='B1',
+                                        source_context={}, allow_pending=allow_pending)
+
+        def assert_row_dependencies(self, batch, dependencies, *, lock=False, purpose='analysis'):
+            if dependency_issues({'dependencies': dependencies}, store=store, ledger=ledger,
+                                 batch_name=batch, lock=lock, purpose=purpose):
+                raise ValueError('来源内容已更新')
+
+    repo = Repo()
+    original_read_source = ai._read_source
+
+    def read_source(items, source, **kwargs):
+        if source.get('source_id') == attachment['name']:
+            raise ValueError('工作簿损坏')
+        return original_read_source(items, source, **kwargs)
+
+    monkeypatch.setattr(ai, '_read_source', read_source)
+    monkeypatch.setattr(ai, '_call_source_review_ai', lambda *args, **kwargs: {
+        'ok': True, 'proposals': [], 'warning': '',
+    })
+
+    started = ai.start_source_ai_review('B1', 'V1', repository=repo, enqueue=lambda _run: None)
+    result = ai.execute_material_ai_fill(started['run_id'], repository=repo)
+
+    assert result['status'] == 'READY', repo.run.get('error_message')
+    progress = {row['label']: row for row in repo.run['source_progress_json']}
+    assert progress['corrupt.xlsx']['status'] == 'FAILED'
+    final = ai._load_json(repo.run['draft_json'], {})['review_input']['source_dependencies']
+    assert {row['kind'] for row in final} == {'approval'}

@@ -1408,6 +1408,22 @@ def _source_lag_seconds(value) -> int | None:
     return max(0, int((now - parsed).total_seconds()))
 
 
+def _is_minio_access_denied(error) -> bool:
+    values = [str(error or ""), str(getattr(error, "code", "") or "")]
+    text = " ".join(values).casefold()
+    return any(marker in text for marker in (
+        "accessdenied", "access denied", "permission to access", "not authorized",
+        "403 forbidden", "status code: 403", "statuscode: 403",
+    ))
+
+
+def _minio_access_denied_message() -> str:
+    return (
+        "MinIO 归档账号无权读取该附件，请联系管理员核对对象读取权限，"
+        "或从钉钉原单下载后人工上传。"
+    )
+
+
 def _download_oa_attachment_from_archive(
     *,
     attachment_doc,
@@ -1438,9 +1454,13 @@ def _download_oa_attachment_from_archive(
     }
     if archive_status != "archived":
         manual_required = archive_status == "manual_required"
+        access_denied = manual_required and _is_minio_access_denied(manifest.get("last_error"))
         if manual_required:
-            reason = str(manifest.get("last_error") or "归档服务已标记为需要人工补传")
-            message = f"附件无法自动归档：{reason}。请从钉钉原单手动下载后上传。"
+            if access_denied:
+                message = _minio_access_denied_message()
+            else:
+                reason = str(manifest.get("last_error") or "归档服务已标记为需要人工补传")
+                message = f"附件无法自动归档：{reason}。请从钉钉原单手动下载后上传。"
             attachment_doc.parse_status = "Failed"
         else:
             message = "附件正在归档，请稍后重试。"
@@ -1460,6 +1480,7 @@ def _download_oa_attachment_from_archive(
             "archive_status": archive_status,
             "fallback_used": False,
             "needs_manual_upload": manual_required,
+            **({"error_type": "minio_archive_access_denied"} if access_denied else {}),
             "message": message,
         }
 
@@ -1484,6 +1505,8 @@ def _download_oa_attachment_from_archive(
             "message": f"归档附件校验失败：{exc}",
         }
     except Exception as exc:
+        message = str(exc)
+        access_denied = _is_minio_access_denied(exc)
         return {
             "ok": False,
             "downloaded": False,
@@ -1494,7 +1517,12 @@ def _download_oa_attachment_from_archive(
             "source_lag_seconds": source_lag_seconds,
             "archive_status": archive_status,
             "fallback_used": False,
-            "message": f"MinIO 归档读取失败：{exc}",
+            **({"error_type": "minio_archive_access_denied", "needs_manual_upload": True}
+               if access_denied else {}),
+            "message": (
+                _minio_access_denied_message()
+                if access_denied else f"MinIO 归档读取失败：{message}"
+            ),
         }
 
     file_url = _get_doc_value(file_doc, "file_url") or ""

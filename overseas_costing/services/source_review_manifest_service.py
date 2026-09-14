@@ -13,7 +13,7 @@ from pathlib import PurePath
 from typing import Any, Iterable, Optional
 
 
-READ_STATUSES = frozenset({"READ", "FAILED", "NO_RESULT", "EXCLUDED", "NEEDS_SELECTION"})
+READ_STATUSES = frozenset({"READ", "PARTIAL", "FAILED", "NO_RESULT", "EXCLUDED", "NEEDS_SELECTION"})
 PARSE_METHODS = frozenset(
     {"SYSTEM_APPROVAL", "SYSTEM_EXCEL", "AI_TEXT", "AI_VISION", "NONE"}
 )

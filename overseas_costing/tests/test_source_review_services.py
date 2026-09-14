@@ -117,6 +117,17 @@ def test_progress_manifest_exposes_only_safe_source_metadata() -> None:
     assert "secret.pdf" not in str(progress[0])
 
 
+def test_progress_manifest_preserves_partial_read_status() -> None:
+    manifest = prepare_source_manifest(
+        [{"source_kind": "manual_attachment", "source_id": "ATT-1", "file_name": "packing.xlsx"}]
+    )
+    manifest[0]["read_status"] = "PARTIAL"
+
+    progress = source_progress_manifest(manifest)
+
+    assert progress[0]["read_status"] == "PARTIAL"
+
+
 def test_allocate_gross_weight_uses_decimal_and_last_row_absorbs_rounding() -> None:
     result = allocate_gross_weight(
         Decimal("4200"),

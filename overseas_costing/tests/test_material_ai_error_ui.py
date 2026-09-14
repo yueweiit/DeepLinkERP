@@ -185,7 +185,7 @@ console.log(JSON.stringify({groups,summary,html}));
     assert group['field_count'] == 415
     assert group['candidate_count'] == 40
     assert group['audit_count'] == 1
-    assert result['summary'] == {'source_count': 1, 'failed_source_count': 0}
+    assert result['summary'] == {'source_count': 1, 'partial_source_count': 0, 'failed_source_count': 0}
     assert result['html'].count('packing list.xlsx') == 1
     for text in ('Sheet 9.4日指环扣双清', '415 个字段', '40 个候选', '同步记录 2 条', '仅审计'):
         assert text in result['html']
@@ -224,11 +224,40 @@ console.log(JSON.stringify({group:groups[0],summary,html}));
     assert result['group']['status'] == 'PARTIAL'
     assert result['group']['read_status'] == 'PARTIAL'
     assert result['group']['failed_count'] == 1
-    assert result['summary'] == {'source_count': 1, 'failed_source_count': 1}
+    assert result['summary'] == {'source_count': 1, 'partial_source_count': 1, 'failed_source_count': 0}
     assert '部分读取' in result['html']
     assert 'Sheet B' in result['html']
     assert '工作表损坏' in result['html']
     assert '仅审计' not in result['html']
+
+
+def test_source_group_reports_partial_when_a_sheet_has_warnings():
+    result = _fee_workspace_result(FIXTURE + r"""
+const base='oa:PROC-1:FILE-9';
+const groups=workspace.materialAISourceGroups([
+ {source_kind:'approval_attachment',source_id:base+':sheet:0123456789abcdef0123',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet A',sheet_name:'Sheet A',read_status:'READ',status:'COMPLETED',candidate_count:3},
+ {source_kind:'approval_attachment',source_id:base+':sheet:abcdef0123456789abcd',parent_source_id:base,
+  label:'packing list.xlsx',sheet:'Sheet B',sheet_name:'Sheet B',read_status:'PARTIAL',status:'PARTIAL',error:'部分字段待核对'},
+]);
+const summary=workspace.materialAISourceGroupSummary(groups);
+console.log(JSON.stringify({group:groups[0],summary}));
+""")
+    assert result['group']['status'] == 'PARTIAL'
+    assert result['group']['read_status'] == 'PARTIAL'
+    assert result['summary'] == {'source_count': 1, 'partial_source_count': 1, 'failed_source_count': 0}
+
+
+def test_partial_sources_have_their_own_summary_instead_of_failure_count():
+    result = _fee_workspace_result(FIXTURE + r"""
+state.aiFill={status:'RUNNING',progress_percent:90,source_progress:[
+ {source_kind:'approval_attachment',source_id:'A',label:'packing.xlsx',read_status:'PARTIAL',status:'PARTIAL',error:'部分字段待核对'},
+]};
+console.log(JSON.stringify({html:workspace.renderMaterialAIProgressDialogContent()}));
+""")
+    assert 'data-mf-ai-summary="partial_source_count"' in result['html']
+    assert '部分读取 1 份' in result['html']
+    assert 'data-mf-ai-summary="failed_source_count" hidden' in result['html']
 
 
 def test_historical_failed_sheet_without_sheet_name_is_not_treated_as_audit():

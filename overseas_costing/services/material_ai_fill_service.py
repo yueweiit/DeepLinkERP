@@ -201,6 +201,8 @@ def _update_source_progress(
     read_status = progress[index].get("read_status")
     if status_value == "FAILED":
         read_status = "FAILED"
+    elif status_value == "PARTIAL":
+        read_status = "PARTIAL"
     elif status_value in {"SKIPPED", "NO_RESULT"}:
         read_status = "NO_RESULT"
     elif status_value in {"PARSED", "ANALYZING", "COMPLETED", "READ"}:
@@ -2671,7 +2673,7 @@ def _read_source(items: list[dict], source: dict, *, attachment_ready=None) -> t
                     semantic_document.setdefault('shipment_fills', []).append({
                         'source_id':source.get('source_id'), 'sheet_name':sheet_name, **preview['shipment_fill']})
                 if preview.get("autofill_warnings"):
-                    semantic_document.setdefault("parse_errors", []).extend(preview["autofill_warnings"])
+                    semantic_document.setdefault("warnings", []).extend(preview["autofill_warnings"])
                 if not preview.get("material_rows"):
                     errors = (preview.get("validation") or {}).get("blocking") or []
                     raise ValueError("；".join(str(error.get("message") or error) for error in errors) or "未识别到装箱物料表头或明细。")
@@ -3397,6 +3399,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         selected_excel_sheets = set()
         documents: list[dict] = []
         source_errors = []
+        source_warnings = []
+        completed_sources: list[dict] = []
+        materialized_sources: dict[str, dict] = {}
         supplement_started = None
 
         def read_review_source(source):
@@ -3409,6 +3414,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 repo.assert_row_dependencies(batch_name, dependency_baseline, lock=True)
                 local_source = {**source, 'resolver_source_id': attachment.get('name') or attachment['source_id'],
                                 'available': True, 'download_required': False}
+                materialized_sources[str(source.get('source_id') or '')] = local_source
                 sealed = repo.capture_row_dependencies([local_source], context)
                 from .logistics_settlement.model import digest
                 merged = {digest({k:v for k,v in d.items() if k != 'fingerprint'}): d for d in dependency_baseline}
@@ -3455,6 +3461,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     source_candidates, document = read_review_source(source)
                 deterministic.extend(source_candidates)
                 has_document_evidence = _document_has_evidence(document)
+                if has_document_evidence or source_candidates:
+                    completed_sources.append(source)
                 if has_document_evidence:
                     document = {**document, "document_id": f"DOC-{len(documents) + 1}"}
                     documents.append(document)
@@ -3494,10 +3502,14 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         page_count=page_count,
                         candidate_count=len(source_candidates),
                     )
-                    if document.get("parse_errors"):
-                        error = "；".join(document["parse_errors"])
-                        _update_source_progress(source_progress, source_index, status="FAILED", detail="部分装箱行未读取", error=error[:1000], candidate_count=len(source_candidates))
-                        source_errors.append({"source": source.get("source_label") or source.get("source_id"), "message": error})
+                    warnings = [str(value) for value in document.get("warnings") or []]
+                    parse_errors = [str(value) for value in document.get("parse_errors") or []]
+                    notices = [*warnings, *parse_errors]
+                    if notices:
+                        error = "；".join(notices)
+                        _update_source_progress(source_progress, source_index, status="PARTIAL", detail="已读取，部分字段待核对", error=error[:1000], candidate_count=len(source_candidates))
+                        collection = source_errors if parse_errors else source_warnings
+                        collection.append({"source": source.get("source_label") or source.get("source_id"), "message": error})
                     if has_document_evidence and unified_review and source.get("source_kind") == "approval_form":
                         from overseas_costing.services.source_review_extract_service import (
                             build_system_approval_proposals,
@@ -3523,6 +3535,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                                 ref["document_id"] = document["document_id"]
                             deterministic_proposals.append(proposal)
                 else:
+                    if source.get("analysis_required"):
+                        raise ValueError("必需资料未发现可识别内容。")
                     _update_source_progress(
                         source_progress,
                         source_index,
@@ -3544,6 +3558,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         "message": str(exc),
                     }
                 )
+                if source.get("analysis_required"):
+                    raise
 
             partial = ([reconciliation] if reconciliation else []) + deterministic_proposals
             persist(source_progress_json=source_progress,
@@ -3559,7 +3575,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             fruitful = [entry for entry in group if entry[2]]
             if not fruitful:
                 for source_index, _source, _proposals in group:
-                    if source_progress[source_index].get("status") == "FAILED":
+                    if source_progress[source_index].get("status") in {"FAILED", "PARTIAL"}:
                         continue
                     _update_source_progress(
                         source_progress,
@@ -3575,12 +3591,17 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 _update_source_progress(
                     source_progress,
                     fruitful_index,
-                    status="FAILED" if source_progress[fruitful_index].get("error") else "COMPLETED",
+                    status=(
+                        source_progress[fruitful_index].get("status")
+                        if source_progress[fruitful_index].get("status") in {"FAILED", "PARTIAL"}
+                        else "COMPLETED"
+                    ),
                     detail=f"已唯一匹配工作表 {fruitful_source.get('sheet_name')}",
                     candidate_count=len(proposals),
                 )
                 for source_index, _source, empty_proposals in group:
-                    if empty_proposals or source_index == fruitful_index or source_progress[source_index].get("status") == "FAILED":
+                    if (empty_proposals or source_index == fruitful_index
+                            or source_progress[source_index].get("status") in {"FAILED", "PARTIAL"}):
                         continue
                     _update_source_progress(
                         source_progress,
@@ -3752,6 +3773,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     f"{row['source']}：{row['message']}" for row in source_errors[:10]
                 )
             )
+        if source_warnings:
+            warning_parts.append(
+                "部分资料待核对：" + "；".join(
+                    f"{row['source']}：{row['message']}" for row in source_warnings[:10]
+                )
+            )
         if unified_review:
             from .material_ai_fee_policy import decorate
             from .material_ai_selection_service import material_fingerprint
@@ -3794,7 +3821,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             draft["autofill_preview"]["unresolved"].extend(
                 {"source_id": entry.get("source_id"), "message": f"{entry.get('label') or '装箱资料'}：{entry.get('error') or entry.get('detail')}"}
                 for entry in source_progress if entry.get("parse_method") == "SYSTEM_EXCEL"
-                and entry.get("status") in {"FAILED", "NEEDS_SELECTION"}
+                and entry.get("status") in {"PARTIAL", "FAILED", "NEEDS_SELECTION"}
             )
         else:
             draft = build_material_ai_draft(read_items, candidates)
@@ -3862,10 +3889,22 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     refreshed_sources, source_progress, candidates
                 )
             sources = refreshed_sources
-        if unified_review and dependency_baseline is not None and any(d.get('kind') == 'pending_attachment' for d in dependency_baseline):
+        if (unified_review
+                and any(source.get("selected") is not False for source in sources)
+                and not completed_sources):
+            raise ValueError("所有已选资料均未发现可识别内容，无法生成草稿。")
+        if unified_review and dependency_baseline is not None:
             try:
                 repo.assert_row_dependencies(batch_name, dependency_baseline, lock=True)
-                dependency_baseline = repo.capture_row_dependencies(sources, refreshed_context)
+                ready_sources = []
+                seen_ready_sources = set()
+                for source in completed_sources:
+                    source_id = str(source.get('source_id') or '')
+                    if source_id in seen_ready_sources:
+                        continue
+                    seen_ready_sources.add(source_id)
+                    ready_sources.append(materialized_sources.get(source_id, source))
+                dependency_baseline = repo.capture_row_dependencies(ready_sources, refreshed_context)
             except ValueError as error:
                 persist(status='STALE', progress_step='来源未完成归档或已变化', error_message=str(error), completed_at=_now())
                 return {'ok':False, 'run_id':str(run_id), 'status':'STALE'}
@@ -3885,7 +3924,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             source_progress_json=source_progress,
             candidates_json=candidates,
             draft_json=draft,
-            source_completeness="PARTIAL" if source_errors or any(
+            source_completeness="PARTIAL" if source_errors or source_warnings or any(
                 row.get('available') is False and (row.get('source_context') or {}).get('root_kind') == 'expense' for row in sources
             ) else "COMPLETE",
             completed_at=_now(),

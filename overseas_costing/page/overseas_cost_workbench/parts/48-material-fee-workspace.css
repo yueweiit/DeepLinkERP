@@ -530,6 +530,7 @@
 .ocw-mf-ai-progress-dialog > header b { color: #076fbe; font-size: 20px; font-variant-numeric: tabular-nums; }
 .ocw-mf-ai-progress-summary { display: flex; flex-wrap: wrap; gap: 7px; }
 .ocw-mf-ai-progress-summary span { padding: 4px 8px; border-radius: 999px; background: #eef6fd; color: #475467; font-size: 11px; }
+.ocw-mf-ai-progress-summary span.is-partial { background: #fff3dd; color: #9a5b00; }
 .ocw-mf-ai-progress-summary span.is-failed { background: #fff0ee; color: #b42318; }
 .ocw-mf-ai-source-progress { display: grid; align-content: start; gap: 8px; min-height: 260px; }
 .ocw-mf-ai-source-progress article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 10px 12px; border: 1px solid #e3e9f1; border-radius: 8px; background: #fff; }

@@ -42,7 +42,7 @@ def test_unknown_parse_blocker_does_not_autofill_any_fields():
     assert preview["autofill_warnings"] == ["文件结构损坏"]
 
 
-def test_excel_reader_preserves_validation_error_with_partial_results(monkeypatch, tmp_path):
+def test_excel_reader_separates_business_warnings_from_parse_errors(monkeypatch, tmp_path):
     from overseas_costing.services import attachment_parse_service, packing_source_service
     path = tmp_path / "packing.xlsx"
     source = {"source_id": "X", "source_kind": "local_attachment", "sheet_name": "装箱"}
@@ -54,29 +54,32 @@ def test_excel_reader_preserves_validation_error_with_partial_results(monkeypatc
     rows = build_logistics_reconciliation(existing_items(), approval())["payload"]["rows"]
     candidates, document = service._read_source(rows, source)
     assert [r["fieldname"] for r in candidates] == ["net_weight_kg"]
-    assert document["parse_errors"] == ["毛重明细100与合计200不一致"]
+    assert document["warnings"] == ["毛重明细100与合计200不一致"]
+    assert not document.get("parse_errors")
 
 
-def test_partial_excel_error_reaches_ready_unresolved_without_business_write(monkeypatch):
+def test_partial_excel_warning_reaches_ready_unresolved_without_business_write(monkeypatch):
     from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepository
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
     repo = _LifecycleRepository(status="QUEUED")
-    repo.sources = [approval(), {"source_kind": "manual_attachment", "source_id": "X", "file_name": "packing.xlsx",
-                                "source_hash": "h1", "sheet_name": "装箱", "source_label": "装箱单"}]
+    repo.sources = [{"source_kind": "manual_attachment", "source_id": "X", "file_name": "packing.xlsx",
+                     "source_hash": "h1", "sheet_name": "装箱", "source_label": "装箱单"}]
     repo.get_items = lambda *args: existing_items()
     manifest = prepare_source_manifest(repo.sources)
     repo.run.update(proposal_version=1, source_manifest_json=manifest,
                     input_fingerprint=service._source_review_fingerprint("B1", "V1", existing_items(), manifest, ""))
-    read = service._read_source
     def read_source(items, source):
-        if source.get("source_kind") == "approval_form":
-            return read(items, source)
         return [], {"source_ref": service._source_reference(source), "structured_rows": [{"material_code": "FL000428"}],
-                    "parse_errors": ["毛重明细100与合计200不一致"], "ai_eligible": False}
+                    "warnings": ["毛重明细100与合计200不一致"], "ai_eligible": False}
     monkeypatch.setattr(service, "_read_source", read_source)
     monkeypatch.setattr(service, "_call_source_review_ai", lambda *a, **kw: {"ok": False, "proposals": []})
     result = service.execute_material_ai_fill("RUN-1", repository=repo)
     assert result["status"] == "READY"
     assert any("毛重明细100与合计200不一致" in row["message"]
                for row in repo.run["draft_json"]["autofill_preview"]["unresolved"])
+    progress = next(row for row in repo.run["source_progress_json"] if row["source_kind"] == "manual_attachment")
+    assert progress["status"] == "PARTIAL"
+    assert progress["read_status"] == "PARTIAL"
+    assert "部分资料待核对" in repo.run["ai_warning"]
+    assert "部分资料读取失败" not in repo.run["ai_warning"]
     assert repo.applied == []

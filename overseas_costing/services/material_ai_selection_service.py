@@ -64,12 +64,16 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
     if ai._record_value(run,'status')!='READY':raise ValueError('此分析已经处理或过期，请重新读取草稿。')
     context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     if expected_version!=context['version']:raise ValueError('当前成本版本已变化，请刷新。')
-    dependencies=repo.capture_row_dependencies(sources,context) if callable(getattr(repo,'capture_row_dependencies',None)) else []
+    draft=ai._load_json(ai._record_value(run,'draft_json'),{})
+    saved_dependencies=(draft.get('review_input') or {}).get('source_dependencies')
+    if saved_dependencies is not None:
+        dependencies=deepcopy(saved_dependencies)
+    else:
+        dependencies=repo.capture_row_dependencies(sources,context) if callable(getattr(repo,'capture_row_dependencies',None)) else []
     # Re-read under the newly held evidence locks before saving any preview.
     if dependencies:
         context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     projection=rows.project(items,catalog,row_ids,fee_ids,mode)
-    draft=ai._load_json(ai._record_value(run,'draft_json'),{})
     merged_amount_groups=deepcopy(draft.get('merged_amount_groups') or [])
     allocation_required=any(group.get('status')!='verified' for group in merged_amount_groups)
     projection['merged_amount_groups']=merged_amount_groups
