@@ -678,6 +678,82 @@ def test_material_ai_source_manifest_uses_current_version_and_marks_audit_only_e
     assert "UNRELATED" not in repr(result)
 
 
+def test_original_source_reread_keeps_materialized_workflow_attachment_from_older_version(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    file_name = "指环扣+亮甲包装袋2.0+宠物用品发货清单-packing list2026.9.5.xlsx"
+    detail = {
+        "main_approval": {
+            "instance_id": "MAIN",
+            "business_id": "OA-1",
+            "attachments": [],
+        },
+        "linked_purchase_approvals": [],
+    }
+    approval_source = {
+        "source_kind": "approval_attachment",
+        "source_id": "ATT-OLD",
+        "attachment_name": "ATT-OLD",
+        "source_label": file_name,
+        "file_name": file_name,
+        "process_instance_id": "MAIN",
+        "file_id": "FILE-PACKING",
+        "source_field": "装箱单附件（Excel）",
+        "workflow_field_id": "PACKING-FIELD",
+        "available": True,
+        "can_download": False,
+        "download_required": False,
+        "sheets": ["9.4日发货清单"],
+    }
+    old_local_row = {
+        "name": "ATT-OLD",
+        "version": "V1",
+        "source_type": "OA",
+        "oa_attachment_origin": "Form",
+        "file_name": file_name,
+        "file_url": "/private/files/packing.xlsx",
+        "modified": "2026-09-05",
+        "parse_result_json": json.dumps({
+            "process_instance_id": "MAIN",
+            "file_id": "FILE-PACKING",
+            "source_field": "装箱单附件（Excel）",
+            "workflow_field_id": "PACKING-FIELD",
+        }, ensure_ascii=False),
+    }
+
+    monkeypatch.setattr(service, "frappe", SimpleNamespace(get_list=lambda *_args, **_kwargs: [old_local_row]))
+    monkeypatch.setattr(service.effective_source, "original_source_bundle", lambda *_args: None)
+    monkeypatch.setattr(
+        service.packing_source_service.dingtalk_approval_service,
+        "get_batch_dingtalk_approval_detail",
+        lambda _batch: detail,
+    )
+    monkeypatch.setattr(
+        service,
+        "list_packing_sources",
+        lambda *_args, **_kwargs: {"wiki_workbooks": [], "approval_sources": [approval_source]},
+    )
+    monkeypatch.setattr(service, "get_current_packing_snapshot", lambda *_args: {})
+    monkeypatch.setattr(service, "_list_approval_body_ai_sources", lambda *_args, **_kwargs: [{
+        "source_kind": "approval_form",
+        "source_id": "approval:MAIN:form",
+        "source_label": "国际物流审批正文",
+        "process_instance_id": "MAIN",
+        "approval_role": "international_logistics",
+        "form_fields": {"装箱单附件（Excel）": file_name},
+    }])
+
+    result = service._list_material_ai_sources("B1", "V2", original_scope=True)
+
+    workbook_sources = [row for row in result if row.get("file_name") == file_name]
+    assert len(workbook_sources) == 1
+    assert workbook_sources[0]["sheet_name"] == "9.4日发货清单"
+    assert workbook_sources[0]["source_field"] == "装箱单附件（Excel）"
+    assert workbook_sources[0]["priority"] == 1
+    assert workbook_sources[0]["priority_reason"] == "当前无有效实际装箱匹配，采用流程装箱单附件"
+
+
 @pytest.mark.parametrize('audit_first', [True, False])
 def test_material_ai_duplicate_audit_copy_cannot_hide_readable_attachment(monkeypatch, audit_first):
     import json

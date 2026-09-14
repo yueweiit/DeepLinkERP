@@ -1106,9 +1106,10 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
         packing_fields = {key: value for key, value in (owning.get("form_fields") or {}).items() if "装箱单附件" in key}
         source = {**source, "approval_role": owning.get("approval_role") or source.get("approval_role"),
                   "dedicated_packing": bool(packing_fields and str(source.get("file_name") or source.get("source_label") or "--") in _json(packing_fields))}
-        is_unmaterialized = str(source.get("source_id") or "").startswith("oa:") or not source.get("attachment_name")
-        if source.get("source_kind") != "approval_comment" and not is_unmaterialized:
-            continue
+        # The approval/file identity remains an original source even when its
+        # local cache was created under an older batch version.  Append it from
+        # the trusted approval inventory here; the local-row pass below is only
+        # a cache supplement and append_source deduplicates the same OA file.
         if source.get("source_kind") == "approval_comment" or not source.get("sheets"):
             append_source(source)
         else:
