@@ -11700,7 +11700,15 @@ class OverseasCostWorkbench {
       options.restart = true;
       delete options.request_id;
       delete options.requestPayload;
-      if (fill?.source_progress?.length) options.selectedSourceIds = this.materialAISelectedSourceIds(fill.source_progress);
+      if (options.reanalyzeOriginalSources) {
+        // An explicit original-source reread must rebuild its selection from the
+        // latest trusted manifest.  Attachment materialization can replace a
+        // pending public id with sheet ids while the first run is active; reusing
+        // that stale id would make the safety validator reject the retry.
+        delete options.selectedSourceIds;
+      } else if (fill?.source_progress?.length) {
+        options.selectedSourceIds = this.materialAISelectedSourceIds(fill.source_progress);
+      }
     }
     return this.startMaterialAIFill(options);
   }

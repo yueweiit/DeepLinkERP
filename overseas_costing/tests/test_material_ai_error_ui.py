@@ -128,6 +128,22 @@ console.log(JSON.stringify({requests,runId:state.aiFill.runId}));
     assert result['runId'] == 'NEW'
 
 
+def test_original_source_reread_retry_resets_stale_source_selection():
+    result = _fee_workspace_result(FIXTURE + r"""
+state.aiFill={status:'FAILED',runId:'OLD',source_progress:[{source_id:'oa:OLD-FILE',selected:true}]};
+state.aiStartOptions={force:true,restart:true,reanalyzeOriginalSources:true};
+workspace.pollMaterialAIFill=async()=>{};
+const requests=[];workspace.call=async(method,args)=>{requests.push({method,args});return {ok:true,run_id:'NEW',status:'QUEUED'}};
+if(workspace.retryMaterialAIProgress)await workspace.retryMaterialAIProgress();
+console.log(JSON.stringify({requests,runId:state.aiFill.runId}));
+""")
+    assert len(result['requests']) == 1
+    args = result['requests'][0]['args']
+    assert args['reanalyze_original_sources'] == 1
+    assert 'selected_source_ids_json' not in args
+    assert result['runId'] == 'NEW'
+
+
 def test_source_restrictions_are_visible_and_unusable_sources_cannot_be_selected_for_rerun():
     result = _fee_workspace_result(FIXTURE + r"""
 const excluded={source_id:'bad',selected:true,selectable:true,analysis_allowed:false,adoption_allowed:false,
