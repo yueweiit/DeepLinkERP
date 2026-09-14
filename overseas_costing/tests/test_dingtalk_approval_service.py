@@ -251,8 +251,9 @@ def test_batch_detail_enriches_archive_attachment_from_approval_component(monkey
                         "status": "COMPLETED",
                         "formComponentValues": [{
                             "name": "装箱单附件（Excel）",
-                            "componentId": "PACKING-FIELD",
-                            "value": json.dumps([{
+                            "id": "PACKING-FIELD",
+                            "componentType": "DDAttachment",
+                            "extValue": json.dumps([{
                                 "fileName": "任意文件名.xlsx",
                                 "fileId": "FILE-1",
                                 "spaceId": "SPACE-SECRET",
@@ -282,6 +283,91 @@ def test_batch_detail_enriches_archive_attachment_from_approval_component(monkey
     assert attachment["workflow_field_id"] == "PACKING-FIELD"
     assert attachment["packing_candidate"] is True
     assert "SECRET" not in repr(attachment)
+
+
+def test_batch_detail_discovers_unindexed_workflow_attachment_from_approval_component(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    file_name = "指环扣+亮甲包装袋2.0+宠物用品发货清单-packing list2026.9.5.xlsx"
+
+    class DB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {
+                "name": "B1", "batch_no": "OA-1", "source_type": "oa_logistics",
+                "source_approval_no": "OA-1", "source_instance_id": "MAIN", "extra_json": "{}",
+            }
+
+    class Source:
+        archive_ready = False
+
+        @staticmethod
+        def get_instance_bundle(_ids):
+            return {
+                "instances": {
+                    "MAIN": {
+                        "processInstanceId": "MAIN",
+                        "businessId": "OA-1",
+                        "status": "COMPLETED",
+                        "formComponentValues": [{
+                            "name": "装箱单附件（Excel）",
+                            "componentId": "PACKING-FIELD",
+                            "componentType": "DDAttachment",
+                            "extValue": json.dumps([{
+                                "fileName": file_name,
+                                "fileId": "FILE-PACKING",
+                                "spaceId": "SPACE-PACKING",
+                                "fileSize": 9876,
+                                "authMediaId": "AUTH-SECRET",
+                            }], ensure_ascii=False),
+                        }],
+                    },
+                },
+                # The authoritative form already exposes the file, but the archive
+                # index has not produced its row yet.
+                "attachments": [],
+                "health": {},
+            }
+
+        @staticmethod
+        def get_attachment_manifest(process_instance_id, file_id):
+            assert (process_instance_id, file_id) == ("MAIN", "FILE-PACKING")
+            if not Source.archive_ready:
+                return None
+            return {
+                "process_instance_id": process_instance_id,
+                "file_id": file_id,
+                "archive_status": "archived",
+                "archive_method": "dingtalk_original",
+                "content_quality": "original",
+            }
+
+    monkeypatch.setattr(service, "frappe", type("F", (), {"db": DB()})())
+    monkeypatch.setattr(service, "_get_approval_source", lambda: Source())
+
+    result = service.get_batch_dingtalk_approval_detail("B1")
+
+    assert result["ok"] is True
+    assert len(result["main_approval"]["attachments"]) == 1
+    attachment = result["main_approval"]["attachments"][0]
+    assert attachment["file_name"] == file_name
+    assert attachment["file_id"] == "FILE-PACKING"
+    assert attachment["space_id"] == "SPACE-PACKING"
+    assert attachment["source_field"] == "装箱单附件（Excel）"
+    assert attachment["workflow_field_id"] == "PACKING-FIELD"
+    assert attachment["archive_status"] == "pending"
+    assert attachment["packing_candidate"] is True
+    assert attachment["downloadable"] is False
+    assert attachment["declared_size"] == 9876
+    assert "AUTH-SECRET" not in repr(attachment)
+
+    Source.archive_ready = True
+    refreshed = service.get_batch_dingtalk_approval_detail("B1")
+    archived = refreshed["main_approval"]["attachments"][0]
+    assert archived["archive_status"] == "archived"
+    assert archived["archive_method"] == "dingtalk_original"
+    assert archived["content_quality"] == "original"
+    assert archived["downloadable"] is True
 
 
 def test_batch_detail_resolves_actor_names_and_audits_excluded_linked_approval(monkeypatch) -> None:

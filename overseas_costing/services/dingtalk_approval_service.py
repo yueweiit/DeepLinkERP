@@ -155,15 +155,17 @@ def _form_fields(payload: dict) -> list[dict]:
     ]
 
 
-def _attachment_field_identities(payload: dict) -> dict[str, dict[str, str]]:
-    """Map archived file IDs back to their trusted approval form components.
+def _attachment_field_records(payload: dict, process_instance_id: str = "") -> list[dict]:
+    """Extract a safe attachment manifest from trusted approval components.
 
-    Attachment archive rows intentionally do not need to duplicate the complete
-    approval form.  The approval payload is the authority for deciding which
-    component supplied a file; filenames are display data only.
+    The approval payload can expose a file before the archive index has created
+    its row.  Keep enough identity to show and later materialize that pending
+    file, without returning download credentials or private media tokens.
     """
 
-    identities: dict[str, dict[str, str]] = {}
+    from overseas_costing.scripts.import_oa_logistics import extract_form_attachments
+
+    records: dict[str, dict] = {}
     fields = _json_list(payload.get("formComponentValues") or payload.get("form_component_values"))
     for row in fields:
         if not isinstance(row, dict):
@@ -176,31 +178,39 @@ def _attachment_field_identities(payload: dict) -> dict[str, dict[str, str]]:
             or row.get("component_key")
             or row.get("fieldId")
             or row.get("field_id")
+            or row.get("id")
             or ""
         ).strip()
-        value = row.get("value")
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except (TypeError, ValueError):
-                continue
-
-        pending = [value]
-        while pending:
-            candidate = pending.pop()
-            if isinstance(candidate, list):
-                pending.extend(candidate)
-                continue
-            if not isinstance(candidate, dict):
-                continue
-            file_id = str(candidate.get("fileId") or candidate.get("file_id") or "").strip()
+        # Reuse the importer parser so value/extValue, DingTalk aliases and
+        # component types stay consistent with the archive producer.
+        candidates = extract_form_attachments({"formComponentValues": [row]})
+        for candidate in candidates:
+            file_id = str(candidate.get("file_id") or "").strip()
             if file_id:
-                identities[file_id] = {
+                records[file_id] = {
+                    "process_instance_id": str(process_instance_id or ""),
+                    "file_id": file_id,
+                    "space_id": str(candidate.get("space_id") or "").strip(),
+                    "file_name": str(candidate.get("file_name") or file_id).strip(),
+                    "declared_size": candidate.get("file_size"),
+                    "attachment_origin": "form",
+                    "archive_status": "pending",
                     "source_field": source_field,
                     "workflow_field_id": workflow_field_id,
                 }
-            pending.extend(candidate.values())
-    return identities
+    return list(records.values())
+
+
+def _attachment_field_identities(payload: dict) -> dict[str, dict[str, str]]:
+    """Map archived file IDs back to their trusted approval form components."""
+
+    return {
+        str(record["file_id"]): {
+            "source_field": str(record.get("source_field") or ""),
+            "workflow_field_id": str(record.get("workflow_field_id") or ""),
+        }
+        for record in _attachment_field_records(payload)
+    }
 
 
 def _actor_identity(
@@ -495,16 +505,30 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
     actors = bundle.get("actors") or {}
     manifests_by_instance: dict[str, list[dict]] = defaultdict(list)
     local_by_file = _local_attachment_map(batch.get("name") or batch_name)
-    field_identities_by_instance = {
-        instance_id: _attachment_field_identities(payload)
+    field_records_by_instance = {
+        instance_id: _attachment_field_records(payload, instance_id)
         for instance_id, payload in instances.items()
         if isinstance(payload, dict)
     }
+    field_identities_by_instance = {
+        instance_id: {
+            str(record.get("file_id") or ""): {
+                "source_field": str(record.get("source_field") or ""),
+                "workflow_field_id": str(record.get("workflow_field_id") or ""),
+            }
+            for record in records
+            if str(record.get("file_id") or "")
+        }
+        for instance_id, records in field_records_by_instance.items()
+    }
+    indexed_attachment_ids: set[tuple[str, str]] = set()
     for row in bundle.get("attachments") or []:
         if not isinstance(row, dict):
             continue
         instance_id = str(row.get("process_instance_id") or "")
         file_id = str(row.get("file_id") or "")
+        if instance_id and file_id:
+            indexed_attachment_ids.add((instance_id, file_id))
         trusted_identity = field_identities_by_instance.get(instance_id, {}).get(file_id) or {}
         enriched_row = {
             **row,
@@ -513,6 +537,37 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
         manifests_by_instance[instance_id].append(
             _attachment_item(enriched_row, local_by_file.get((instance_id, file_id)), actors)
         )
+
+    # An attachment declared in a trusted workflow component must remain visible
+    # even while its asynchronous archive row is missing.  If the source can
+    # already resolve the archive manifest, merge it immediately so the same
+    # preview can download the file; otherwise expose an explicit pending row.
+    manifest_reader = getattr(source, "get_attachment_manifest", None)
+    scoped_instance_ids = {main_id, *trusted_linked_ids}
+    for instance_id in scoped_instance_ids:
+        for field_record in field_records_by_instance.get(instance_id, []):
+            file_id = str(field_record.get("file_id") or "")
+            identity = (instance_id, file_id)
+            if not file_id or identity in indexed_attachment_ids:
+                continue
+            archive_manifest = None
+            if callable(manifest_reader):
+                try:
+                    archive_manifest = manifest_reader(instance_id, file_id)
+                except Exception:
+                    archive_manifest = None
+            resolved_row = {
+                **field_record,
+                **(archive_manifest if isinstance(archive_manifest, dict) else {}),
+                "process_instance_id": instance_id,
+                "file_id": file_id,
+                "source_field": field_record.get("source_field") or "",
+                "workflow_field_id": field_record.get("workflow_field_id") or "",
+            }
+            manifests_by_instance[instance_id].append(
+                _attachment_item(resolved_row, local_by_file.get(identity), actors)
+            )
+            indexed_attachment_ids.add(identity)
     linked_ids = trusted_linked_ids
     health = bundle.get("health") or {}
     archive_rows = [row for rows in manifests_by_instance.values() for row in rows]
