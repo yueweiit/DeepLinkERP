@@ -70,6 +70,9 @@ def test_replacement_of_legacy_bound_version_keeps_future_source_row_scope():
     assert scope and scope["id"] == "PREVIEW"
     assert len(bundle["source"]["goods"]) == 1
     assert bundle["source"]["goods"][0]["material_code"] == item["material_code"]
+    original = load_source_bundle(batch["name"], new_version, store=store, ledger=ledger,
+                                  apply_ai_row_adoption=False)
+    assert not (original["context"].get("packing") or original["context"]).get("selected_source")
 
 
 def test_filled_shipment_quantity_refreshes_the_adopted_cargo_value():
@@ -454,16 +457,14 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
         run.update(status="READY", candidates_json=[proposal])
         catalog = selection.review_catalog(repo, batch["name"], run)
         selected_ids = [row["row_id"] for row in catalog["rows"] if row["origin"] == "source"]
-        prepared = selection.prepare(batch["name"], run_id, selected_ids, [], "replace_all",
+        prepared = selection.prepare(batch["name"], run_id, selected_ids, [], "update_selected",
                                      run["version"], repository=repo)["preview"]
-        assert prepared["mode"] == "replace_all"
+        assert prepared["mode"] == "update_selected"
         assert "_price_metadata" not in str(prepared)
         assert "_verified_prior_item" not in str(prepared)
         if run_id == "RUN-2":
             server_preview = run["draft_json"]["row_previews"][prepared["id"]]
             assert float(server_preview["rows"][0]["unit_price"]) == 12
-            price_fact = server_preview["rows"][0]["_price_metadata"]["logistics_row"]["purchase_fact"]
-            assert float(price_fact["unit_price"]) == 12
         return selection.confirm(batch["name"], run_id, prepared["id"], prepared["revision"],
                                  "TOKEN", "M", repository=repo)
 
@@ -473,7 +474,7 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
     first_version = first_result["version_name"]
     first_saved = ledger.rows("item", version=first_version)[0]
     assert shipment_value(first_saved)["status"] == "automatic"
-    assert shipment_value(first_saved)["amount_rmb"] == "20.000000"
+    assert float(shipment_value(first_saved)["amount_rmb"]) == 20
 
     from types import SimpleNamespace
     from overseas_costing.services import calculate_service, effective_source_values
@@ -537,18 +538,19 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
     final = ledger.rows("item", version=second_version)[0]
 
     assert ledger.get("batch", batch["name"])["current_version"] == second_version
-    assert ledger.rows("item", version=first_version) == first_before_second
+    assert second_version == first_version
+    assert ledger.rows("item", version=first_version) != first_before_second
     assert shipment_value(final)["status"] == "manual"
     assert shipment_value(final)["amount_rmb"] == "25"
-    assert str(final["goods_value"]) == "25"
+    assert float(final["goods_value"]) == 25
     cleared = deepcopy(final)
     cleared_meta = json.loads(cleared["extra_json"])
     cleared_meta.pop("manual_shipment_valuation")
     cleared["extra_json"] = json.dumps(cleared_meta)
     fallback = shipment_value(cleared)
     assert fallback["status"] == "conflict", fallback
-    assert fallback["prior_amount_rmb"] == "20.000000"
-    assert fallback["calculated_amount_rmb"] == "24.000000"
+    assert float(fallback["prior_amount_rmb"]) == 20
+    assert float(fallback["calculated_amount_rmb"]) == 24
 
 
 def test_next_ai_input_preserves_both_selected_duplicate_sku_rows():

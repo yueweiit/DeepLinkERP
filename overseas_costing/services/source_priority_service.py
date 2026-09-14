@@ -62,3 +62,27 @@ def get_field_source_label(field_group: str) -> str:
     if not rule:
         return "按来源优先级取数"
     return f"{rule['label']}：{rule['authoritative_source']}优先"
+
+
+def material_packing_source_priority(source: dict) -> tuple[int, str, str, str]:
+    """Deterministic material/packing evidence order shared by listing and review."""
+
+    source = source or {}
+    kind = str(source.get("source_kind") or "")
+    role = str(source.get("approval_role") or "")
+    if source.get("dedicated_packing") and kind == "approval_attachment":
+        rank = 0
+    elif role == "international_logistics" and kind == "approval_form":
+        rank = 1
+    elif source.get("dedicated_packing"):
+        rank = 2
+    elif kind == "approval_form":
+        rank = 3
+    else:
+        rank = 4
+    return (
+        rank,
+        kind,
+        str(source.get("source_id") or ""),
+        str(source.get("sheet_name") or ""),
+    )

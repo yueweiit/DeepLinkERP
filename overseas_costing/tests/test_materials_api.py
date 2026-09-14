@@ -3,6 +3,7 @@
 import importlib
 import sys
 from types import ModuleType
+from types import SimpleNamespace
 
 import pytest
 
@@ -215,9 +216,45 @@ def test_selected_row_preview_and_confirm_use_ids_write_permission_and_inline_co
     api.frappe.db=SimpleNamespace(rollback=lambda:rollbacks.append(True))
     monkeypatch.setattr(api,'require_batch_permission',lambda batch,permission:calls.append((batch,permission)) or 'B')
     monkeypatch.setattr(selection,'prepare',lambda *args:calls.append(args) or {'ok':True})
-    assert api.preview_source_ai_selection('BATCH','RUN','["ROW"]','[]','replace_all','V')['ok']
-    assert calls==[('BATCH','write'),('B','RUN',['ROW'],[],'replace_all','V')]
+    assert api.preview_source_ai_selection('BATCH','RUN','["ROW"]','[]','update_selected','V')['ok']
+    assert calls==[('BATCH','write'),('B','RUN',['ROW'],[],'update_selected','V')]
     def expired(*args):raise ValueError('来源已更新，请重新预览')
     monkeypatch.setattr(selection,'confirm',expired)
     result=api.confirm_source_ai_selection('BATCH','RUN','PREVIEW','REV','TOKEN','MOD')
     assert not result['ok'] and result['code']=='REVIEW_REQUIRED' and rollbacks
+
+
+def test_source_reanalysis_flag_is_server_boolean(monkeypatch):
+    api = _load_api(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(api, 'require_batch_permission', lambda batch, _permission: batch)
+    monkeypatch.setattr(api.material_ai_fill_service, 'start_source_ai_review',
+                        lambda *args, **kwargs: captured.update(kwargs) or {'ok': True})
+
+    api.start_source_ai_review('B', 'V', reanalyze_original_sources='true')
+
+    assert captured['reanalyze_original_sources'] is True
+
+
+def test_material_row_recovery_api_keeps_preview_and_confirm_separate(monkeypatch):
+    api = _load_api(monkeypatch)
+    from overseas_costing.services import material_ai_row_recovery as recovery
+    from overseas_costing.services import edit_session_service
+    from overseas_costing.services.logistics_settlement.store import Store
+    from overseas_costing.services.logistics_settlement import ledger as ledger_module
+    calls = []
+    api.frappe.db = SimpleNamespace(rollback=lambda: None, get_value=lambda *args: 'MOD-2')
+    api.frappe.session = SimpleNamespace(user='finance-user')
+    monkeypatch.setattr(api, 'require_batch_permission', lambda batch, permission: calls.append(('permission', permission)) or 'B1')
+    monkeypatch.setattr(Store, 'frappe', lambda: 'STORE')
+    monkeypatch.setattr(ledger_module, 'FrappeLedger', lambda: 'LEDGER')
+    monkeypatch.setattr(recovery, 'preview_recovery', lambda *args: calls.append(('preview', args)) or {'ok': True, 'id': 'P'})
+    monkeypatch.setattr(recovery, 'confirm_recovery', lambda *args: calls.append(('confirm', args)) or {'ok': True, 'version_name': 'V2'})
+    monkeypatch.setattr(edit_session_service, 'assert_batch_write',
+                        lambda *args, **kwargs: calls.append(('edit', args, kwargs)))
+
+    assert api.preview_material_row_recovery('B', 'V1')['id'] == 'P'
+    confirmed = api.confirm_material_row_recovery('B', 'V1', 'P', 'R', 'TOKEN', 'MOD-1')
+
+    assert confirmed['version_name'] == 'V2' and confirmed['batch_modified'] == 'MOD-2'
+    assert [call[0] for call in calls] == ['permission', 'preview', 'permission', 'edit', 'confirm']

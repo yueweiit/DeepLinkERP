@@ -225,39 +225,26 @@ const openPacking=()=>handlers["click[data-action='mf-import-wiki']"]();
 '''
 
 
-def test_unknown_freight_mode_waits_for_server_before_opening_the_packing_entry():
+def test_packing_plan_entry_opens_dingtalk_picker_without_reading_freight_mode():
     result = _fee_workspace_result(PACKING_ENTRY + r'''
-let release;
-workspace.settlementApi=(method,args)=>{requests.push({method,args});return new Promise(resolve=>{release=resolve})};
-const pending=openPacking();
-const openedBeforeResponse=[...opened];
-release({ok:true,freight_mode:true,viewed_version:'V1'});await pending;
-console.log(JSON.stringify({openedBeforeResponse,opened,errors,requests,cachedMode:state.settlementData.freight_mode}));
-''')
-    assert result['openedBeforeResponse'] == []
-    assert result['opened'] == [{'kind': 'freight', 'args': ['B1', 'V1', 'packing']}]
-    assert result['requests'] == [{'method': 'get_batch_settlement', 'args': {'batch_name': 'B1', 'version_name': 'V1'}}]
-    assert result['cachedMode'] is True and result['errors'] == []
-
-
-def test_confirmed_legacy_mode_opens_legacy_picker_only_after_the_mode_read():
-    result = _fee_workspace_result(PACKING_ENTRY + r'''
-let release;
-workspace.settlementApi=()=>new Promise(resolve=>{release=resolve});
-const pending=openPacking();const openedBeforeResponse=[...opened];
-release({ok:true,freight_mode:false});await pending;
-console.log(JSON.stringify({openedBeforeResponse,opened,errors}));
-''')
-    assert result == {'openedBeforeResponse': [], 'opened': [{'kind': 'legacy'}], 'errors': []}
-
-
-def test_failed_or_outdated_mode_read_never_falls_back_to_legacy_picker():
-    result = _fee_workspace_result(PACKING_ENTRY + r'''
-workspace.settlementApi=async()=>({ok:false,message:'来源读取失败'});
+workspace.settlementApi=(method,args)=>{requests.push({method,args});throw Error('must not read freight mode')};
 await openPacking();
-let release;workspace.settlementApi=()=>new Promise(resolve=>{release=resolve});
-const pending=openPacking();workspace.detailState.batchName='B2';
-release({ok:true,freight_mode:true});await pending;
-console.log(JSON.stringify({opened,errors,cached:state.settlementData||null}));
+console.log(JSON.stringify({opened,errors,requests}));
 ''')
-    assert result == {'opened': [], 'errors': ['来源读取失败'], 'cached': None}
+    assert result == {'opened': [{'kind': 'legacy'}], 'errors': [], 'requests': []}
+
+
+def test_packing_plan_entry_ignores_cached_freight_mode():
+    result = _fee_workspace_result(PACKING_ENTRY + r'''
+state.settlementData={ok:true,freight_mode:true};await openPacking();
+console.log(JSON.stringify({opened,errors}));
+''')
+    assert result == {'opened': [{'kind': 'legacy'}], 'errors': []}
+
+
+def test_packing_plan_picker_failure_is_reported_without_opening_settlement():
+    result = _fee_workspace_result(PACKING_ENTRY + r'''
+workspace.openWikiMaterialImportDialog=async()=>{throw Error('装箱计划读取失败')};
+await openPacking();console.log(JSON.stringify({opened,errors}));
+''')
+    assert result == {'opened': [], 'errors': ['装箱计划读取失败']}

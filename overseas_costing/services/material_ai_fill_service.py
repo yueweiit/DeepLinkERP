@@ -1440,11 +1440,27 @@ def _selected_ids_from_run_manifest(value: Any) -> list[str] | None:
     ]
 
 
+def _run_uses_original_sources(run: Any) -> bool:
+    return str(_record_value(run, "trigger_mode") or "").upper() == "SOURCE_REANALYSIS"
+
+
+def _review_context(repo: Any, batch_name: str, version_name: str | None, *, original_sources: bool = False) -> dict:
+    reader = getattr(repo, "get_original_context", None) if original_sources else None
+    return reader(batch_name, version_name) if callable(reader) else repo.get_context(batch_name, version_name)
+
+
+def _review_sources(repo: Any, batch_name: str, version_name: str, *, original_sources: bool = False) -> list[dict]:
+    reader = getattr(repo, "list_original_sources", None) if original_sources else None
+    return reader(batch_name, version_name) if callable(reader) else repo.list_sources(batch_name, version_name)
+
+
 def _reload_review_manifest(repo: Any, batch_name: str, version_name: str, run: Any) -> list[dict]:
     selected_ids = _selected_ids_from_run_manifest(
         _record_value(run, "source_manifest_json")
     )
-    raw_sources = repo.list_sources(batch_name, version_name)
+    raw_sources = _review_sources(
+        repo, batch_name, version_name, original_sources=_run_uses_original_sources(run)
+    )
     if selected_ids is None:
         # Runs created before selectable manifests were introduced remain readable.
         return raw_sources
@@ -1482,15 +1498,20 @@ def start_source_ai_review(
     repository: Any | None = None,
     enqueue: Callable[[str], None] | None = None,
     trigger_mode: str = "MANUAL",
+    reanalyze_original_sources: bool = False,
 ) -> dict:
     """Start a non-blocking review task. Applying the draft still requires an edit token."""
 
     repo = repository or FrappeMaterialAIFillRepository()
+    if reanalyze_original_sources:
+        trigger_mode = "SOURCE_REANALYSIS"
     requested_version = None if force else str(version_name)
-    context = repo.get_context(str(batch_name), requested_version)
+    context = _review_context(repo, str(batch_name), requested_version,
+                              original_sources=reanalyze_original_sources)
     if hasattr(repo, "lock_review_scope"):
         repo.lock_review_scope(context["batch"])
-        context = repo.get_context(str(batch_name), requested_version)
+        context = _review_context(repo, str(batch_name), requested_version,
+                                  original_sources=reanalyze_original_sources)
     request_key = str(request_id or '')
     if request_key and not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', request_key):
         raise ValueError('分析请求标识不合法，请重新打开分析。')
@@ -1520,12 +1541,14 @@ def start_source_ai_review(
         if not saved["ok"]:
             return saved
         note = saved["clarification"]
-        context = repo.get_context(str(batch_name), context["version"])
+        context = _review_context(repo, str(batch_name), context["version"],
+                                  original_sources=reanalyze_original_sources)
     if callable(getattr(repo, "get_clarification", None)):
         context["clarification_revision"] = note["revision"]
     items = repo.get_items(context["batch"], context["version"])
     sources = prepare_source_manifest(
-        repo.list_sources(context["batch"], context["version"]),
+        _review_sources(repo, context["batch"], context["version"],
+                        original_sources=reanalyze_original_sources),
         selected_source_ids=selected_source_ids,
     )
     source_dependencies = repo.capture_row_dependencies(sources,context,allow_pending=True) if callable(getattr(repo,'capture_row_dependencies',None)) else None
@@ -3236,7 +3259,8 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             )
         batch_name = str(_record_value(run, "batch") or "")
         version_name = str(_record_value(run, "version") or "")
-        context = repo.get_context(batch_name, version_name)
+        original_sources = _run_uses_original_sources(run)
+        context = _review_context(repo, batch_name, version_name, original_sources=original_sources)
         items = repo.get_items(context["batch"], context["version"])
         unified_review = bool(_record_value(run, "proposal_version", 0))
         if unified_review and _clarification_changed(repo, batch_name, run):
@@ -3280,6 +3304,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     ),
                     repository=repo,
                     trigger_mode="INPUT_CHANGED",
+                    reanalyze_original_sources=original_sources,
                 )
                 return str(replacement.get("run_id") or "")
             except Exception as schedule_error:
@@ -3322,7 +3347,10 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation, autofill_preview, extra, run_supplement
         reconciliation = None
         read_items = items
-        effective_bundle = effective_source.current_source_bundle(context['batch'], context['version'])
+        original_bundle_reader = getattr(repo, 'get_original_source_bundle', None)
+        effective_bundle = (original_bundle_reader(context['batch'], context['version'])
+                            if original_sources and callable(original_bundle_reader)
+                            else effective_source.current_source_bundle(context['batch'], context['version']))
         bound_source = bool(effective_bundle and (effective_bundle['context']['root_kind'] == 'expense' or (effective_bundle['context'].get('packing') or {}).get('selected_source')))
         if bound_source:
             read_items = effective_source.project_ai_items(items, effective_bundle)
@@ -3565,7 +3593,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         )
         if unified_review:
             remaining = 60 - (time.monotonic() - supplement_started) if supplement_started else 60
-            latest_context = repo.get_context(batch_name, version_name)
+            latest_context = _review_context(repo, batch_name, version_name, original_sources=original_sources)
             if _source_review_context(latest_context) != _source_review_context(context):
                 persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
                 return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
@@ -3655,7 +3683,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             elif reconciliation:
                 candidates = [reconciliation, *candidates]
         else:
-            latest_context = repo.get_context(batch_name, version_name)
+            latest_context = _review_context(repo, batch_name, version_name, original_sources=original_sources)
             if _source_review_context(latest_context) != _source_review_context(context):
                 persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
                 return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
@@ -3734,7 +3762,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         try:
             if hasattr(repo, 'lock_review_scope'):
                 repo.lock_review_scope(batch_name)
-            refreshed_context = repo.get_context(batch_name, version_name)
+            refreshed_context = _review_context(repo, batch_name, version_name, original_sources=original_sources)
             refreshed_items = repo.get_items(refreshed_context["batch"], refreshed_context["version"])
             refreshed_sources = (
                 _reload_review_manifest(repo, refreshed_context["batch"], refreshed_context["version"], run)
@@ -4019,7 +4047,7 @@ class FrappeMaterialAIFillRepository:
             WHERE batch=%s AND proposal_version>0 AND status IN ('QUEUED','RUNNING','READY')
         """, ("说明已变化", "说明已保存，请按新说明重新分析。", _now(), batch_name))
 
-    def get_context(self, batch_name: str, version_name: str | None = None) -> dict:
+    def _get_context(self, batch_name: str, version_name: str | None = None, *, original_sources=False) -> dict:
         if frappe is None:
             raise RuntimeError("当前未连接 Frappe。")
         from overseas_costing.services import batch_service
@@ -4049,7 +4077,8 @@ class FrappeMaterialAIFillRepository:
             "clarification_revision": self.get_clarification(resolved)["revision"],
             "version_modified": str(version.get("modified") or ""),
             "transport_mode": str(batch.get("transport_mode") or ""),
-            "effective_source": (effective_source.current_source_bundle(resolved, selected_version) or {}).get('context') or {},
+            "effective_source": ((effective_source.original_source_bundle(resolved, selected_version)
+                                  if original_sources else effective_source.current_source_bundle(resolved, selected_version)) or {}).get('context') or {},
             "fx_rates": {
                 "USD": str(version.get("fx_usd_to_rmb") or ""),
                 "MXN": (
@@ -4060,6 +4089,15 @@ class FrappeMaterialAIFillRepository:
                 "RMB": "1",
             },
         }
+
+    def get_context(self, batch_name: str, version_name: str | None = None) -> dict:
+        return self._get_context(batch_name, version_name)
+
+    def get_original_context(self, batch_name: str, version_name: str | None = None) -> dict:
+        return self._get_context(batch_name, version_name, original_sources=True)
+
+    def get_original_source_bundle(self, batch_name: str, version_name: str | None = None) -> dict | None:
+        return effective_source.original_source_bundle(batch_name, version_name)
 
     def get_items(self, batch_name: str, version_name: str) -> list[dict]:
         from overseas_costing.services.material_input_service import GRID_FIELDS
@@ -4076,6 +4114,11 @@ class FrappeMaterialAIFillRepository:
         from overseas_costing.services.packing_snapshot_service import list_material_ai_sources
 
         return list_material_ai_sources(batch_name, version_name=version_name)
+
+    def list_original_sources(self, batch_name: str, version_name: str) -> list[dict]:
+        from overseas_costing.services.packing_snapshot_service import list_material_ai_sources
+
+        return list_material_ai_sources(batch_name, version_name=version_name, original_scope=True)
 
     def get_fees(self, batch_name: str, version_name: str) -> list[dict]:
         from overseas_costing.services import fee_service

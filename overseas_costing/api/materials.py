@@ -216,6 +216,7 @@ def start_source_ai_review(
     selected_source_ids_json=None,
     expected_clarification_revision=None,
     request_id=None,
+    reanalyze_original_sources=False,
 ):
     batch_name = require_batch_permission(batch_name, "write")
     return material_ai_fill_service.start_source_ai_review(
@@ -231,6 +232,8 @@ def start_source_ai_review(
             if selected_source_ids_json is not None
             else None
         ),
+        **({"reanalyze_original_sources": True}
+           if str(reanalyze_original_sources).strip().lower() in {"1", "true", "yes"} else {}),
     )
 
 
@@ -286,6 +289,36 @@ def confirm_source_ai_selection(batch_name,run_id,preview_id,preview_revision,ed
     from overseas_costing.services.material_ai_selection_service import confirm
     try:
         return confirm(batch_name,str(run_id),str(preview_id),str(preview_revision),str(edit_token),str(expected_modified))
+    except ValueError as error:
+        frappe.db.rollback()
+        return {'ok':False,'code':'REVIEW_REQUIRED','message':str(error)}
+
+
+@frappe.whitelist(methods=['POST'])
+def preview_material_row_recovery(batch_name,version_name):
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services.material_ai_row_recovery import preview_recovery
+    from overseas_costing.services.logistics_settlement.store import Store
+    from overseas_costing.services.logistics_settlement.ledger import FrappeLedger
+    try:
+        return preview_recovery(Store.frappe(),FrappeLedger(),batch_name,str(version_name))
+    except ValueError as error:
+        frappe.db.rollback()
+        return {'ok':False,'code':'RECOVERY_UNAVAILABLE','message':str(error)}
+
+
+@frappe.whitelist(methods=['POST'])
+def confirm_material_row_recovery(batch_name,version_name,preview_id,revision,edit_token,expected_modified):
+    batch_name=require_batch_permission(batch_name,'write')
+    from overseas_costing.services import edit_session_service
+    from overseas_costing.services.material_ai_row_recovery import confirm_recovery
+    from overseas_costing.services.logistics_settlement.store import Store
+    from overseas_costing.services.logistics_settlement.ledger import FrappeLedger
+    try:
+        edit_session_service.assert_batch_write(batch_name,edit_token=str(edit_token),expected_modified=str(expected_modified))
+        result=confirm_recovery(Store.frappe(),FrappeLedger(),batch_name,str(version_name),str(preview_id),str(revision),frappe.session.user)
+        result['batch_modified']=str(frappe.db.get_value('Overseas Cost Batch',batch_name,'modified') or '')
+        return result
     except ValueError as error:
         frappe.db.rollback()
         return {'ok':False,'code':'REVIEW_REQUIRED','message':str(error)}

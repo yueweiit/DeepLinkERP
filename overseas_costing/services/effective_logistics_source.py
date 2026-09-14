@@ -93,7 +93,8 @@ def _legacy_source_bundle(batch_name, version_name=None, *, store=None, ledger=N
             'source': source, 'binding': binding, 'batch': batch, 'version': version}
 
 
-def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None, lock=False):
+def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None, lock=False,
+                       apply_ai_row_adoption=True):
     if store is None:
         from .logistics_settlement.runtime import installed
         if installed():
@@ -106,7 +107,7 @@ def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None
     if store is None:return bundle
     version=bundle['version'] or {};meta=json_dict(version.get('extra_json'))
     if bundle.get('binding') and not meta.get('freight_settlement'):
-        if meta.get('ai_row_adoption'):
+        if apply_ai_row_adoption and meta.get('ai_row_adoption'):
             from .material_ai_selected_scope import apply_scope
             return apply_scope(bundle,meta['ai_row_adoption'],historical=version.get('name')!=bundle['batch'].get('current_version'),store=store,ledger=ledger,batch_name=batch_name)
         return bundle
@@ -152,7 +153,7 @@ def load_source_bundle(batch_name, version_name=None, *, store=None, ledger=None
     ctx.update(policy_version='shipment-sources-2' if packing.get('selected_source') else 'shipment-sources-1',separate_adoption=True,freight=freight,packing=packing)
     ctx['fingerprint']=digest({k:v for k,v in ctx.items() if k not in ('fingerprint','freight')}, {k:v for k,v in freight.items() if k!='historical'})
     bundle['context']=ctx
-    if meta.get('ai_row_adoption'):
+    if apply_ai_row_adoption and meta.get('ai_row_adoption'):
         from .material_ai_selected_scope import apply_scope
         bundle=apply_scope(bundle,meta['ai_row_adoption'],historical=freight['historical'],store=store,ledger=ledger,batch_name=batch_name)
     return bundle
@@ -166,6 +167,13 @@ def current_source_bundle(batch_name, version_name=None, *, lock=False):
     """Legacy sites without the local settlement schema retain their old resolver."""
     from .logistics_settlement.runtime import installed
     return load_source_bundle(batch_name, version_name, lock=lock) if installed() else None
+
+
+def original_source_bundle(batch_name, version_name=None, *, lock=False):
+    """Explicit AI reanalysis root before a prior per-row adoption narrowed it."""
+    from .logistics_settlement.runtime import installed
+    return (load_source_bundle(batch_name, version_name, lock=lock, apply_ai_row_adoption=False)
+            if installed() else None)
 
 
 def require_available(context):

@@ -33,6 +33,11 @@ def write_rows(store,ledger,preview,context):
             kept.add(name);adopted.append(ledger.get('item',name));continue
         values={k:deepcopy(v) for k,v in incoming.items() if k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','goods_value','source_doc_no','supplier','stable_line_key')}
         meta=deepcopy(source_meta)
+        if preview['mode']=='update_selected' and original and incoming.get('_price_metadata'):
+            # The catalog derives this only from trusted purchase evidence and
+            # public payload sanitization removes it before returning previews.
+            for key,value in incoming['_price_metadata'].items():
+                meta[key]=deepcopy(value)
         if original:
             meta.setdefault('ai_fill_original_values', original_value_snapshot(original))
         if preview['mode']=='replace_all' or not original:
@@ -66,11 +71,24 @@ def write_rows(store,ledger,preview,context):
             changed_fields={c['fieldname'] for c in preview['changes'] if c.get('item_name')==target}
             if 'actual_shipped_qty' in changed_fields:
                 values['actual_shipped_qty_mode']='EXPLICIT_SOURCE';values['actual_shipped_qty_source_revision']=preview['revision']
-            if meta.get('settlement_cargo') and changed_fields & {'actual_shipped_qty','shipped_uom','unit_price','purchase_currency','unit_price_uom','purchase_uom'}:
-                cargo=compact_cargo({**meta['settlement_cargo'],
-                    'quantity':values.get('actual_shipped_qty'),'unit':values.get('shipped_uom')})
+            valuation_fields={'actual_shipped_qty','shipped_uom','unit_price','purchase_currency','unit_price_uom','purchase_uom'}
+            trusted_price_refresh=bool(incoming.get('_price_metadata') and changed_fields & valuation_fields)
+            if (meta.get('settlement_cargo') or trusted_price_refresh) and changed_fields & valuation_fields:
+                cargo=compact_cargo({**(meta.get('settlement_cargo') or {}),
+                    **{k:values.get(k) or original.get(k) for k in IDENTITY},
+                    'quantity':values.get('actual_shipped_qty'),'unit':values.get('shipped_uom'),
+                    'source_snapshot':(meta.get('settlement_cargo') or {}).get('source_snapshot') or preview['id'],
+                    'binding_id':(meta.get('settlement_cargo') or {}).get('binding_id') or preview['id'],
+                    'line_key':incoming.get('stable_line_key') or original.get('stable_line_key')})
                 meta['settlement_cargo']=cargo
-                meta['settlement_valuation']=value_final_cargo({**original,**values,'extra_json':persist_item_meta(meta)},cargo,{k:v for k,v in version.items() if k.startswith('fx_')})
+                item_for_valuation={**original,**values,'extra_json':persist_item_meta(meta)}
+                meta['settlement_valuation']=(
+                    reconcile_replacement_value(item_for_valuation,cargo,
+                        {k:v for k,v in version.items() if k.startswith('fx_')},original)
+                    if trusted_price_refresh
+                    else value_final_cargo(item_for_valuation,cargo,
+                        {k:v for k,v in version.items() if k.startswith('fx_')})
+                )
                 from .shipment_cost_service import shipment_value
                 effective_valuation=shipment_value({**original,**values,'extra_json':persist_item_meta(meta)})
                 values['goods_value']=(effective_valuation.get('amount_rmb')
@@ -113,10 +131,13 @@ def write_rows(store,ledger,preview,context):
                 'resolver_source_id','logical_source_id','parent_source_id','attachment_name','document_id','sheet_name',
                 'process_instance_id','approval_no','selected','locked','scoped_packing','selected_source')} for s in preview.get('sources') or []],
             'dependencies':dependencies,'goods':scoped_goods(adopted),'complete':False}
+    elif preview.get('original_source_reanalysis'):
+        metadata.pop('ai_row_adoption',None)
     elif metadata.get('ai_row_adoption'):
         metadata['ai_row_adoption'].update(revision=preview['revision'],goods=scoped_goods(adopted))
     metadata.setdefault('ai_row_applications',[]).append({'preview_id':preview['id'],'run_id':preview['run_id'],'mode':preview['mode'],
-        'selected_row_ids':preview['selected_row_ids'],'changes':preview['changes']})
+        'selected_row_ids':preview['selected_row_ids'],'changes':preview['changes'],
+        'actual_sources':preview.get('actual_sources') or []})
     ledger.put('version',version['name'],{'extra_json':dumps(metadata),'calculated_at':None,'summary_snapshot_json':'{}','rule_snapshot_json':'[]'})
     ledger.put('batch',batch_name,{'current_version':version['name'],'status':'Dirty','confirm_status':'Pending','writeback_status':'Not Started',
         'version_count':len(ledger.rows('version',batch=batch_name)),'item_count':len(kept)})
@@ -172,5 +193,6 @@ def apply_selection(run,preview,draft,context):
         frappe.db.set_value('Overseas Cost Material AI Run',ai._record_value(run,'name'),{'status':'APPLIED','draft_json':ai._json(draft),
             'progress_step':'所选行已采用','applied_at':ai._now(),'completed_at':ai._now()},update_modified=True)
         store.audit(preview['batch'],'ai_rows_adopted',frappe.session.user,run_id=preview['run_id'],preview_id=preview['id'],
-            mode=preview['mode'],old_version=preview['version'],version=version_name,selected_row_ids=preview['selected_row_ids'],selected_fee_ids=preview['selected_fee_ids'])
+            mode=preview['mode'],old_version=preview['version'],version=version_name,selected_row_ids=preview['selected_row_ids'],
+            selected_fee_ids=preview['selected_fee_ids'],actual_sources=preview.get('actual_sources') or [])
         return result

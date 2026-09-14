@@ -29,7 +29,8 @@ def material_fingerprint(items,sources,context):
 def _inputs(repo, batch, run, *, locked=False):
     from . import material_ai_fill_service as ai
     ai._assert_run_batch(run,batch)
-    context=repo.get_context(batch,str(ai._record_value(run,'version')))
+    context=ai._review_context(repo,batch,str(ai._record_value(run,'version')),
+        original_sources=ai._run_uses_original_sources(run))
     ai.effective_source.require_readable(context.get('effective_source') or {})
     if ai._clarification_changed(repo,batch,run,locked=locked):raise ValueError('说明已变化，请按新说明重新分析。')
     items=repo.get_items(batch,context['version'])
@@ -43,7 +44,8 @@ def _inputs(repo, batch, run, *, locked=False):
         repo.assert_row_dependencies(batch,baseline,lock=locked)
     current_fees=repo.get_fees(batch,context['version'])
     proposals=ai._load_json(ai._record_value(run,'candidates_json'),[])
-    result=rows.catalog(items,proposals,current_fees,context.get('effective_source') or {},run_id=ai._record_value(run,'name'))
+    result=rows.catalog(items,proposals,current_fees,context.get('effective_source') or {},
+                        run_id=ai._record_value(run,'name'),sources=sources)
     return context,items,sources,current_fees,result
 
 
@@ -53,6 +55,8 @@ def review_catalog(repo,batch,run):
 
 def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository=None):
     from . import material_ai_fill_service as ai
+    if mode == 'replace_all':
+        raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
     repo=repository or ai.FrappeMaterialAIFillRepository()
     initial=repo.get_run(run_id);ai._assert_run_batch(initial,batch_name)
     repo.lock_review_scope(batch_name)
@@ -68,6 +72,7 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
     revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],row_ids,fee_ids,mode,dependencies)
     preview={**projection,'id':digest(run_id,revision),'revision':revision,'run_id':run_id,'batch':batch_name,
              'version':context['version'],'source_context':context.get('effective_source') or {},
+             'original_source_reanalysis':ai._run_uses_original_sources(run),
              'input_fingerprint':ai._record_value(run,'input_fingerprint'),
              'fee_fingerprint':digest(current_fees),'sources':deepcopy(sources),'dependencies':dependencies}
     draft=ai._load_json(ai._record_value(run,'draft_json'),{})
@@ -102,6 +107,8 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
     draft=ai._load_json(ai._record_value(run,'draft_json'),{})
     preview=(draft.get('row_previews') or {}).get(preview_id)
     if not preview or preview.get('revision')!=preview_revision:raise ValueError('所选预览已变化，请刷新预览后确认。')
+    if preview.get('mode') == 'replace_all':
+        raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
     applied=draft.get('row_application') or {}
     if ai._record_value(run,'status')=='APPLIED':
         if applied.get('preview_id')!=preview_id:raise ValueError('此分析已按其他选择采用，不能重复确认。')

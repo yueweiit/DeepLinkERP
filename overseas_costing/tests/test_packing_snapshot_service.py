@@ -717,6 +717,18 @@ def test_material_ai_duplicate_audit_copy_cannot_hide_readable_attachment(monkey
         prepare_source_manifest(excluded, selected_source_ids=[selected_id])
 
 
+def test_international_logistics_packing_attachment_precedes_approval_body():
+    from overseas_costing.services.source_priority_service import material_packing_source_priority
+
+    sources = [
+        {'source_id': 'OA', 'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
+        {'source_id': 'PACK', 'source_kind': 'approval_attachment',
+         'approval_role': 'international_logistics', 'dedicated_packing': True},
+    ]
+
+    assert [source['source_id'] for source in sorted(sources, key=material_packing_source_priority)] == ['PACK', 'OA']
+
+
 def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(monkeypatch):
     from types import SimpleNamespace
 

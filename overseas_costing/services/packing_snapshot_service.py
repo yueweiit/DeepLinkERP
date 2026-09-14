@@ -538,12 +538,14 @@ def get_current_packing_snapshot(batch_name: str, version_name: str | None = Non
     return snapshot
 
 
-def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None, include_wiki: bool = True) -> dict[str, Any]:
+def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None, include_wiki: bool = True,
+                         original_scope: bool = False) -> dict[str, Any]:
     """返回受控来源 ID；不返回服务器路径、对象键、原始审批 JSON 或任何凭据。"""
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
-    bundle = effective_source.current_source_bundle(batch_name)
+    bundle = (effective_source.original_source_bundle(batch_name)
+              if original_scope else effective_source.current_source_bundle(batch_name))
     if bundle and (bundle['context'].get('packing') or {}).get('selected_source'):
         selected=selected_packing_ai_sources(batch_name,bundle)
         return {'approval_sources':[{k:v for k,v in row.items() if k not in ('scoped_goods','scoped_text','form_fields')} for row in selected],
@@ -892,26 +894,30 @@ def selected_packing_ai_sources(batch_name, bundle):
              'form_fields':{},'approval_decisions':[],'can_download':False}]
 
 
-def list_material_ai_sources(batch_name: str, version_name: str | None = None) -> list[dict[str, Any]]:
+def list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
+                             original_scope: bool = False) -> list[dict[str, Any]]:
     from .material_ai_source_dependencies import annotate_source_eligibility
     from .logistics_settlement.store import Store
     from .logistics_settlement.ledger import FrappeLedger
-    return annotate_source_eligibility(_list_material_ai_sources(batch_name, version_name),
+    return annotate_source_eligibility(_list_material_ai_sources(batch_name, version_name, original_scope=original_scope),
         store=Store.frappe(), ledger=FrappeLedger(), batch_name=batch_name)
 
 
-def _list_material_ai_sources(batch_name: str, version_name: str | None = None) -> list[dict[str, Any]]:
+def _list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
+                              original_scope: bool = False) -> list[dict[str, Any]]:
     """Return a stable manifest of every trusted source the material AI task may read."""
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
-    bundle = effective_source.current_source_bundle(batch_name, version_name)
+    bundle = (effective_source.original_source_bundle(batch_name, version_name)
+              if original_scope else effective_source.current_source_bundle(batch_name, version_name))
     if bundle and (bundle['context'].get('packing') or {}).get('selected_source'):
         return selected_packing_ai_sources(batch_name,bundle)
     if bundle and bundle['context']['root_kind'] == 'expense':
         return _bound_material_sources(batch_name, bundle)
     detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
-    packing = list_packing_sources(str(batch_name), approval_detail=detail, include_wiki=False)
+    packing = list_packing_sources(str(batch_name), approval_detail=detail, include_wiki=False,
+                                   original_scope=original_scope)
     comment_index = {str(row.get("source_id") or ""): row for approval in
         [detail.get("main_approval") or {}, *(detail.get("linked_purchase_approvals") or [])]
         for row in approval.get("timeline") or [] if isinstance(row, dict)}
@@ -1150,16 +1156,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None) 
                 append_source(source, sheet_name=sheet_name)
         else:
             append_source(source)
-    return sorted(
-        result,
-        key=lambda row: (
-            0 if row.get("approval_role") == "international_logistics" and row.get("source_kind") == "approval_form" else
-            1 if row.get("dedicated_packing") else 2 if row.get("source_kind") == "approval_form" else 3,
-            str(row.get("source_kind") or ""),
-            str(row.get("source_id") or ""),
-            str(row.get("sheet_name") or ""),
-        ),
-    )
+    from .source_priority_service import material_packing_source_priority
+    return sorted(result, key=material_packing_source_priority)
 
 
 def _bound_material_sources(batch_name, bundle):

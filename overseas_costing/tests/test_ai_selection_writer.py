@@ -44,6 +44,59 @@ def test_fill_retains_unselected_existing_rows_byte_for_byte():
     assert current['gross_weight_kg']==before['gross_weight_kg'] and current['volume_m3']==before['volume_m3']
 
 
+def test_update_selected_persists_one_row_and_keeps_all_other_rows():
+    store,ledger,b,v,i,ls,e=setup_cost()
+    for index in range(2,9):
+        ledger.create('item',{'batch':b['name'],'version':v['name'],'material_code':f'SKU-{index}',
+            'product_name':f'Product {index}','unit':'件','quantity':index,'gross_weight_kg':index})
+    before={row['name']:deepcopy(row) for row in ledger.rows('item',version=v['name'])}
+    ctx=load_source_bundle(b['name'],v['name'],store=store,ledger=ledger)['context']
+    p=selection(list(before.values()),ctx,v['name'],b['name'],'update_selected')
+
+    new=write_rows(store,ledger,p,ctx)
+
+    after={row['name']:row for row in ledger.rows('item',version=v['name'])}
+    assert new==v['name'] and len(after)==8
+    assert after[i['name']]['actual_shipped_qty']=='2'
+    for name,row in before.items():
+        if name!=i['name']:
+            assert after[name]==row
+
+
+def test_original_source_reanalysis_clears_legacy_selected_row_scope_after_update():
+    store,ledger,b,v,i,ls,e=setup_cost()
+    ledger.put('version',v['name'],{'extra_json':dumps({'ai_row_adoption':{
+        'id':'OLD','revision':'OLD-R','selected_row_ids':['ONE'],'goods':[]}})})
+    ctx=load_source_bundle(b['name'],v['name'],store=store,ledger=ledger,
+                           apply_ai_row_adoption=False)['context']
+    p=selection(ledger.rows('item',version=v['name']),ctx,v['name'],b['name'],'update_selected')
+    p['original_source_reanalysis']=True
+
+    write_rows(store,ledger,p,ctx)
+
+    assert 'ai_row_adoption' not in dumps(ledger.get('version',v['name']))
+
+
+def test_separate_add_selected_mode_is_the_only_nonreplace_path_that_adds_a_row():
+    store,ledger,b,v,i,ls,e=setup_cost()
+    existing=ledger.rows('item',version=v['name'])
+    proposal={'proposal_id':'NEW','proposal_type':'logistics_reconcile','default_selected':True,
+        'payload':{'rows':[{'name':'draft-new','material_code':'SKU-NEW','product_name':'New',
+            'actual_shipped_qty':3,'unit':'件','_review_origin':'source'}]}}
+    catalog=rows.catalog(existing,[proposal],[],{},run_id='R')
+    candidate=next(row for row in catalog['rows'] if row['origin']=='source')
+    projected=rows.project(existing,catalog,[candidate['row_id']],[],'add_selected')
+    projected.update(id='ADD',revision='ADD-R',batch=b['name'],version=v['name'],run_id='R',
+        source_context={},sources=[])
+
+    written=write_rows(store,ledger,projected,{})
+
+    assert written==v['name']
+    saved=ledger.rows('item',version=v['name'])
+    assert len(saved)==2
+    assert {row['material_code'] for row in saved}=={i['material_code'],'SKU-NEW'}
+
+
 def test_frozen_version_write_is_rejected():
     import pytest
     store,ledger,b,v,i,ls,e=setup_cost();ctx=load_source_bundle(b['name'],v['name'],store=store,ledger=ledger)['context']

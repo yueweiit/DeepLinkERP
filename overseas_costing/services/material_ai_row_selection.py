@@ -9,7 +9,7 @@ from .effective_logistics_source import json_dict
 from .logistics_settlement.model import digest
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-row-review-1'
+POLICY = 'ai-row-review-2'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
 FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom')
@@ -30,15 +30,14 @@ def _unit(row):
 
 def _matches(row, items):
     stable = row.get('stable_line_key')
-    exact = [i for i in items if stable and i.get('stable_line_key') == stable
-             and str(i.get('material_code') or '').casefold()==str(row.get('material_code') or '').casefold()
-             and str(i.get('spec_model') or '').casefold()==str(row.get('spec_model') or '').casefold() and _unit(i)==_unit(row)]
+    exact = [i for i in items if stable and i.get('stable_line_key') == stable]
     if exact:
         return exact
     code = str(row.get('material_code') or '').strip().casefold()
+    if code:
+        return [i for i in items if str(i.get('material_code') or '').strip().casefold()==code]
     name = str(row.get('product_name') or '').strip().casefold()
-    return [i for i in items if ((code and str(i.get('material_code') or '').strip().casefold()==code)
-            or (not code and name and str(i.get('product_name') or '').strip().casefold()==name))
+    return [i for i in items if name and str(i.get('product_name') or '').strip().casefold()==name
             and str(row.get('spec_model') or '').strip().casefold()==str(i.get('spec_model') or '').strip().casefold()
             and _unit(row)==_unit(i)]
 
@@ -60,7 +59,60 @@ def _source_values(row):
     return values
 
 
-def catalog(items, proposals, fees, context, *, run_id):
+def _source_groups(catalog_rows, sources):
+    if not sources:
+        return []
+    from .source_priority_service import material_packing_source_priority
+    ordered=sorted((deepcopy(source) for source in sources or []),key=material_packing_source_priority)
+    groups=[];by_key={};aliases={}
+    for source in ordered:
+        source_id=str(source.get('source_id') or '')
+        key=str(source.get('parent_source_id') or source.get('logical_source_id') or source_id)
+        if not key:continue
+        if key not in by_key:
+            group={'group_id':digest(POLICY,'source-group',key),'source_id':key,
+                   'source_label':str(source.get('source_label') or source.get('file_name') or key),
+                   'source_kind':str(source.get('source_kind') or ''),'source_updated_at':str(source.get('source_updated_at') or source.get('occurred_at') or ''),
+                   'priority':len(groups)+1,'row_ids':[],'source_ids':[],'has_conflicts':False}
+            by_key[key]=group;groups.append(group)
+        group=by_key[key]
+        group['source_ids'].append(source_id)
+        for alias in (source_id,source.get('resolver_source_id'),source.get('logical_source_id'),source.get('parent_source_id')):
+            if str(alias or ''):aliases[str(alias)]=group
+    for row in catalog_rows:
+        if row.get('origin')!='source':continue
+        matched=[]
+        for ref in row.get('source_refs') or []:
+            group=aliases.get(str(ref.get('source_id') or ''))
+            if group and group not in matched:matched.append(group)
+        group=min(matched,key=lambda value:value['priority']) if matched else None
+        if group:
+            row.update(source_group_id=group['group_id'],source_priority=group['priority'],source_label=group['source_label'])
+            group['row_ids'].append(row['row_id'])
+        else:
+            row.update(source_group_id='',source_priority=len(groups)+1,source_label='其他识别结果')
+        row['conflict_fields']=[]
+    targets={str(row.get('target_item_name') or '') for row in catalog_rows if row.get('can_update')}
+    for target in targets:
+        seen=set();highest=None
+        candidates=sorted((row for row in catalog_rows if row.get('can_update') and str(row.get('target_item_name') or '')==target),
+                          key=lambda row:(int(row.get('source_priority') or 999999),str(row.get('row_id') or '')))
+        for row in candidates:
+            present={field for field in row.get('fields') or [] if not missing(row.get('values') or {},field)}
+            overlap=sorted(present & seen)
+            row['conflict_fields']=overlap
+            row['lower_priority']=highest is not None and int(row.get('source_priority') or 999999)>highest
+            if overlap:
+                row['default_update_selected']=False
+                group=next((value for value in groups if value['group_id']==row.get('source_group_id')),None)
+                if group:group['has_conflicts']=True
+            if row.get('default_update_selected'):
+                seen.update(present)
+                if highest is None:highest=int(row.get('source_priority') or 999999)
+    return groups
+
+
+def catalog(items, proposals, fees, context, *, run_id, sources=None):
     """Do not expose inherited purchase values as newly recognized packing evidence."""
     from .effective_source_values import project_source_values
     items=[project_source_values(i,context) for i in items]
@@ -88,14 +140,21 @@ def catalog(items, proposals, fees, context, *, run_id):
         if origin=='source' and target and not any(not missing(values,f) and missing(original[target],f) for f in fill_fields):
             fillable=False
             reason=reason or '当前物料已有明确值，本行没有可补的空缺。'
-        else:fillable=origin=='source' and valid and len(matches)<=1
+        else:fillable=bool(origin=='source' and valid and len(matches)==1 and target)
+        updateable=bool(origin=='source' and valid and len(matches)==1 and target)
+        addable=bool(origin=='source' and valid and not matches)
+        action=('retain' if origin=='current' else 'update' if updateable else 'add_candidate' if valid and not matches else 'review')
+        if origin=='source' and action=='add_candidate':
+            reason=reason or '未匹配当前物料；请使用单独确认新增。'
         default_replace_selected=bool(
             origin=='source' and valid and len(matches)<=1
             and proposal.get('default_selected',False) and not proposal.get('conflict')
         )
         rows.append({'row_id':row_id,'origin':origin,'label':'当前已有' if origin=='current' else '本次识别',
-                     'values':values,'target_item_name':target,'can_fill':fillable,'can_replace':valid,
+                     'values':values,'target_item_name':target,'action':action,
+                     'can_fill':fillable,'can_update':updateable,'can_add':addable,'can_replace':valid,
                      'default_selected':bool(origin=='source' and fillable and proposal.get('default_selected',False) and not proposal.get('conflict')),
+                     'default_update_selected':bool(updateable and proposal.get('default_selected',False) and not proposal.get('conflict')),
                      'default_replace_selected':default_replace_selected,
                      'blocked_reason':reason,'source_refs':deepcopy(proposal.get('source_refs') or []),
                      'proposal_id':proposal.get('proposal_id'),'proposal_type':proposal.get('proposal_type'),'fields':fill_fields})
@@ -138,21 +197,29 @@ def catalog(items, proposals, fees, context, *, run_id):
             add(values,proposal,target=target,fields=list(fields))
     for item in items:
         add(deepcopy(item),{'proposal_id':'current:'+item['name']},origin='current',target=item['name'],stable=item['name'],fields=[])
+    source_groups=_source_groups(rows,sources)
     fee_rows=[p for p in material_ai_fee_policy.decorate(proposals,fees,context) if p.get('proposal_type')=='fee_update']
-    return {'policy':POLICY,'rows':rows,'fees':fee_rows,'fingerprint':digest(POLICY,run_id,rows,fee_rows)}
+    return {'policy':POLICY,'rows':rows,'fees':fee_rows,'source_groups':source_groups,
+            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups)}
 
 
 def project(items, catalog, row_ids, fee_ids, mode):
-    if mode not in ('fill_missing','replace_all'):raise ValueError('请选择填充空缺或替换整票。')
+    if mode not in ('fill_missing','update_selected','add_selected','replace_all'):raise ValueError('请选择补充空缺、更新所选行、单独新增或替换整票。')
     if not isinstance(row_ids,list) or not isinstance(fee_ids,list):raise ValueError('请选择有效的物料行和费用。')
     if any(not isinstance(i,str) for i in row_ids+fee_ids) or len(row_ids)!=len(set(row_ids)) or len(fee_ids)!=len(set(fee_ids)):
         raise ValueError('选择包含重复或无效行。')
+    if mode=='add_selected' and fee_ids:
+        raise ValueError('新增物料必须单独确认，不能同时采用费用。')
     rows_by_id={r['row_id']:r for r in catalog['rows']};fees_by_id={r['proposal_id']:r for r in catalog['fees']}
     if set(row_ids)-rows_by_id.keys() or set(fee_ids)-fees_by_id.keys():raise ValueError('所选内容不属于当前草稿，请刷新预览。')
     chosen=[r for r in catalog['rows'] if r['row_id'] in row_ids]
+    if mode=='update_selected':
+        chosen.sort(key=lambda row:(int(row.get('source_priority') or 999999),str(row.get('row_id') or '')))
     selected_fees=[r for r in catalog['fees'] if r['proposal_id'] in fee_ids]
     for row in chosen:
-        if not row['can_fill' if mode=='fill_missing' else 'can_replace']:raise ValueError(row['blocked_reason'] or '本行不可采用。')
+        allowed_key=('can_fill' if mode=='fill_missing' else 'can_update' if mode=='update_selected'
+                     else 'can_add' if mode=='add_selected' else 'can_replace')
+        if not row.get(allowed_key):raise ValueError(row['blocked_reason'] or '本行不可采用。')
     for fee in selected_fees:
         if not fee['can_apply']:raise ValueError(fee['blocked_reason'])
     fee_keys=[str((fee.get('payload') or {}).get('logical_fee_key') or '') for fee in selected_fees]
@@ -162,20 +229,21 @@ def project(items, catalog, row_ids, fee_ids, mode):
     if mode=='replace_all' and not chosen:raise ValueError('至少选择一条物料，不能用空结果清空整票。')
     effective={r['target_item_name']:r['values'] for r in catalog['rows'] if r['origin']=='current'}
     items=[deepcopy(effective.get(i['name'],i)) for i in items]
-    result=[{**deepcopy(i),'_row_action':'retain'} for i in items] if mode=='fill_missing' else []
+    result=[{**deepcopy(i),'_row_action':'retain'} for i in items] if mode in ('fill_missing','update_selected','add_selected') else []
     original={i['name']:i for i in items};used=set();used_choices={};changes=[];added=0
     for choice in chosen:
         incoming=choice['values'];target=choice['target_item_name'];refs=choice['source_refs']
         duplicate_target=False
         if mode=='replace_all' and target and target in used:
             previous=used_choices[target]
-            duplicate_target=(choice['proposal_type']=='logistics_reconcile' and previous['proposal_id']==choice['proposal_id'])
+            duplicate_target=(mode=='replace_all' and choice['proposal_type']=='logistics_reconcile' and previous['proposal_id']==choice['proposal_id'])
             if not duplicate_target:raise ValueError('所选多行对应同一现有物料，请仅选择一种来源。')
         if choice['origin']=='current':
             row=deepcopy(original[target]);row.update(_target=target,_row_action='retain');used.add(target);used_choices[target]=choice;result.append(row);continue
-        if mode=='fill_missing' and target:
+        if mode in ('fill_missing','update_selected') and target:
             row=next(r for r in result if r['name']==target)
-            fields=[f for f in choice['fields'] if not missing(incoming,f) and missing(row,f)]
+            fields=[f for f in choice['fields'] if not missing(incoming,f)
+                    and (mode=='update_selected' or missing(row,f))]
         else:
             row={k:deepcopy(incoming.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','unverified_material_code')}
             row['_target']=target;row['stable_line_key']=((original.get(target) or {}).get('stable_line_key') if not duplicate_target else None) or choice['row_id']
@@ -193,10 +261,17 @@ def project(items, catalog, row_ids, fee_ids, mode):
             else:added+=1
             result.append(row)
         meta=json_dict(row.get('extra_json'));field_refs=meta.setdefault('ai_row_fields',{})
+        if mode=='update_selected' and choice.get('_price_metadata') is not None:
+            # Keep the trusted purchase lineage server-side so a later source
+            # refresh can detect and audit changed prices for the same row.
+            row['_price_metadata']=deepcopy(choice['_price_metadata'])
         for field in fields:
             before=row.get(field)
             row[field]=deepcopy(incoming[field]);field_refs[field]={'row_id':choice['row_id'],'source_refs':refs}
-            changes.append({'row_id':choice['row_id'],'item_name':target,'fieldname':field,'previous_value':before,'value':row[field]})
+            changes.append({'row_id':choice['row_id'],'item_name':target,'fieldname':field,
+                'previous_value':before,'value':row[field],'source_refs':deepcopy(refs),
+                'source_group_id':choice.get('source_group_id'),'source_priority':choice.get('source_priority'),
+                'conflict_override':field in (choice.get('conflict_fields') or [])})
         mask=set(meta.get('settlement_packing_missing') or [])
         for field in fields:mask.discard(field)
         if 'actual_shipped_qty' in fields:mask.discard('quantity')
@@ -208,9 +283,16 @@ def project(items, catalog, row_ids, fee_ids, mode):
         if target:used.add(target);used_choices[target]=choice
     for index,row in enumerate(result,1):row['row_no']=index
     removed=len(items)-len(used) if mode=='replace_all' else 0
+    actual_by_field={}
+    for change in changes:
+        audit_target=str(change.get('item_name') or change.get('row_id') or '')
+        actual_by_field[(audit_target,change['fieldname'])]={
+            key:deepcopy(change.get(key)) for key in
+            ('item_name','fieldname','row_id','source_refs','source_group_id','source_priority','conflict_override')}
     missing_fields=sorted({label for row in result for field,label in MISSING_LABELS.items() if missing(row,field)})
     return {'policy':POLICY,'mode':mode,'rows':result,'fees':selected_fees,'changes':changes,
             'selected_row_ids':row_ids,'selected_fee_ids':fee_ids,'added_count':added,'removed_count':removed,
             'updated_count':len({c['item_name'] for c in changes if c['item_name']}),
+            'actual_sources':list(actual_by_field.values()),
             'missing_fields':missing_fields,'unresolved':(['来源完整性未确认，缺失资料请继续补充。'] if mode=='replace_all' else []),
             'can_apply':bool(chosen or selected_fees),'catalog_fingerprint':catalog['fingerprint']}

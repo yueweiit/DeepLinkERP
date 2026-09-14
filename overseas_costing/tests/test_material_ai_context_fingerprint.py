@@ -1,6 +1,7 @@
 """Drafts must bind the calculation context as well as item/source data."""
 
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -62,6 +63,36 @@ class ContextRepository:
 
 def start(repo):
     return service.start_source_ai_review("B1", "V1", repository=repo, enqueue=lambda _run: None)
+
+
+def test_explicit_source_reanalysis_uses_original_sources_instead_of_adopted_row_scope():
+    repo = ContextRepository()
+    repo.context['effective_source'] = {
+        'root_kind': 'logistics',
+        'packing': {'selected_source': {'id': 'ONE-ROW'}},
+        'fingerprint': 'SCOPED',
+    }
+    repo.list_sources = lambda *_args: [{'source_id': 'ONE-ROW', 'source_kind': 'approval_form'}]
+    repo.get_original_context = lambda *_args: {
+        **deepcopy(repo.context),
+        'effective_source': {'root_kind': 'logistics', 'fingerprint': 'ORIGINAL'},
+    }
+    repo.list_original_sources = lambda *_args: [
+        {'source_id': 'PACKING-LIST', 'source_kind': 'approval_attachment'},
+        {'source_id': 'LOGISTICS-OA', 'source_kind': 'approval_form'},
+    ]
+
+    started = service.start_source_ai_review(
+        'B1', 'V1', repository=repo, enqueue=lambda _run: None,
+        force=True, reanalyze_original_sources=True,
+    )
+
+    assert started['ok'] and not started['reused']
+    assert repo.run['trigger_mode'] == 'SOURCE_REANALYSIS'
+    assert [row['source_id'] for row in json.loads(repo.run['source_manifest_json'])] == [
+        'PACKING-LIST', 'LOGISTICS-OA',
+    ]
+    assert service._reload_review_manifest(repo, 'B1', 'V1', repo.run)[0]['source_id'] == 'PACKING-LIST'
 
 
 CHANGES = [

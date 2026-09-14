@@ -15,11 +15,11 @@ w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'token',e
 const state=w.ensureMaterialFeeState();w.renderMaterialAIReviewDialog=()=>{};w.renderMaterialFeeWorkspacePreservingPosition=()=>{};
 w.loadMaterialFeeWorkspace=async()=>true;w.ensureEditSession=async()=>true;
 global.frappe={show_alert:()=>{}};
-const catalog={policy:'ai-row-review-1',fingerprint:'fp',rows:[
- {row_id:'source',origin:'source',values:{material_code:'NEW',gross_weight_kg:0},can_fill:true,can_replace:true,default_selected:true,default_replace_selected:true},
- {row_id:'current',origin:'current',values:{material_code:'OLD'},can_fill:false,can_replace:true,default_selected:false},
- {row_id:'ambiguous',origin:'source',label:'待核对',values:{material_code:'DUP'},can_fill:false,can_replace:true,blocked_reason:'匹配不唯一'}
-],fees:[{proposal_id:'fee',payload:{expense_category:'运费',amount:0,currency:'RMB'},can_apply:true,default_selected:true},{proposal_id:'quote',payload:{expense_category:'旧报价',amount:999},can_apply:false,default_selected:true,blocked_reason:'已采用实际费用'}]};
+const catalog={policy:'ai-row-review-2',fingerprint:'fp',rows:[
+ {row_id:'source',origin:'source',action:'update',values:{material_code:'NEW',gross_weight_kg:0},can_fill:true,can_update:true,can_add:false,can_replace:true,default_selected:true,default_update_selected:true,default_replace_selected:true},
+ {row_id:'current',origin:'current',action:'retain',values:{material_code:'OLD'},can_fill:false,can_update:false,can_add:false,can_replace:true,default_selected:false},
+ {row_id:'ambiguous',origin:'source',action:'review',label:'待核对',values:{material_code:'DUP'},can_fill:false,can_update:false,can_add:false,can_replace:true,blocked_reason:'匹配不唯一'}
+],source_groups:[{group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,row_ids:['source'],has_conflicts:false}],fees:[{proposal_id:'fee',payload:{expense_category:'运费',amount:0,currency:'RMB'},can_apply:true,default_selected:true},{proposal_id:'quote',payload:{expense_category:'旧报价',amount:999},can_apply:false,default_selected:true,blocked_reason:'已采用实际费用'}]};
 const ready=()=>{state.aiFill=w.initializeMaterialAIDraft({status:'READY',run_id:'run',row_review:catalog});return state.aiFill};
 const calls=[];
 """
@@ -32,16 +32,17 @@ def test_selections_modes_and_blocked_fees_are_independent():
     run_ui(r"""
 const fill=ready();const review=fill.rowSelection;
 assert.equal(fill.draftVisible,false,'Row selections must never overlay the saved material grid');
-assert.equal(review.mode,'replace_all');assert.deepEqual([...review.rows],['source']);assert.deepEqual([...review.fees],['fee']);
+assert.equal(review.mode,'update_selected');assert.deepEqual([...review.rows],['source']);assert.deepEqual([...review.fees],['fee']);
 w.scheduleMaterialAIRowPreview=()=>{};
-w.changeMaterialAIRowSelection('rows','ambiguous',true);assert(review.rows.has('ambiguous'));
+w.changeMaterialAIRowSelection('rows','ambiguous',true);assert(!review.rows.has('ambiguous'));
 w.changeMaterialAIRowSelection('fees','quote',true);assert(!review.fees.has('quote'));
 w.changeMaterialAIRowSelection('rows','all',false);assert.equal(review.rows.size,0);assert(review.fees.has('fee'));
-w.changeMaterialAIRowSelection('mode','replace_all');w.changeMaterialAIRowSelection('rows','all',true);
-assert.deepEqual([...review.rows],['source','current','ambiguous']);
+w.changeMaterialAIRowSelection('mode','update_selected');w.changeMaterialAIRowSelection('rows','all',true);
+assert.deepEqual([...review.rows],['source']);
 w.changeMaterialAIRowSelection('mode','fill_missing');assert.deepEqual([...review.rows],['source']);
 const html=w.renderMaterialAIReviewDialogContent();
-for(const text of ['本次识别','当前已有','待核对','只补缺失','替换整表','已采用实际费用','全选','全不选'])assert(html.includes(text),text);
+for(const text of ['本次识别','当前已有','待核对','只补缺失','更新所选行','已采用实际费用','全选','全不选'])assert(html.includes(text),text);
+assert(!html.includes('替换整表'));
 assert(!html.includes('data-mf-ai-proposal-select'));assert(!html.includes('data-mf-ai-edit'));
 assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('data-mf-ai-fee-select="quote" disabled'));
 """)
@@ -64,6 +65,20 @@ w.scheduleMaterialAIRowPreview();assert.equal(w.canConfirmMaterialAIRowSelection
 """)
 
 
+def test_unmatched_material_requires_separate_add_mode_and_clears_fees():
+    run_ui(r"""
+const fill=ready();fill.row_review.rows.push({row_id:'new-row',origin:'source',action:'add_candidate',
+  values:{material_code:'SKU-NEW'},can_fill:false,can_update:false,can_add:true,blocked_reason:'请单独确认新增'});
+w.scheduleMaterialAIRowPreview=()=>{};delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+let html=w.renderMaterialAIReviewDialogContent();assert(html.includes('单独确认新增'));
+w.changeMaterialAIRowSelection('rows','new-row',true);assert(!selection.rows.has('new-row'));
+w.changeMaterialAIRowSelection('mode','add_selected');assert.equal(selection.fees.size,0);
+w.changeMaterialAIRowSelection('rows','new-row',true);assert.deepEqual([...selection.rows],['new-row']);
+html=w.renderMaterialAIReviewDialogContent();assert(html.includes('确认新增'));
+assert(html.includes('data-mf-ai-fee-select="fee" disabled'));
+""")
+
+
 def test_preview_failure_and_version_change_keep_selection_without_stale_confirmation():
     run_ui(r"""
 const fill=ready();w.call=async()=>({ok:false,message:'来源已变化'});await w.previewMaterialAIRowSelection();
@@ -81,8 +96,8 @@ fill.rowSelection.rows.add('source');fill.rowSelection.fees.clear();const latest
 assert.equal(calls.length,1);pending[0]({ok:true,preview:{id:'old',revision:1,can_apply:true}});await first;await middle;
 assert.equal(calls.length,2);assert.equal(calls[1].args.fee_ids_json,'[]');assert.equal(calls[1].args.row_ids_json,'["source"]');
 pending[1]({ok:true,preview:{id:'latest',revision:2,can_apply:true}});await latest;assert(w.canConfirmMaterialAIRowSelection(fill));
-fill.rowSelection.mode='replace_all';fill.rowSelection.rows.clear();fill.rowSelection.previewKey=w.materialAIRowSelectionKey(fill);
-assert.equal(w.canConfirmMaterialAIRowSelection(fill),false);
+fill.rowSelection.mode='update_selected';fill.rowSelection.rows.clear();fill.rowSelection.previewKey=w.materialAIRowSelectionKey(fill);
+assert.equal(w.canConfirmMaterialAIRowSelection(fill),true,'A fee-only preview may be confirmed without a material row');
 """)
 
 
@@ -126,7 +141,7 @@ run1.draft={autofill_preview:{items:[{material_code:'OLD'}]}};
 run1.source_progress=[{source_id:'SOURCE-1'}];run1.rowSelection.preview={id:'preview-1',revision:1,can_apply:true};
 run1.rowSelection.previewKey=w.materialAIRowSelectionKey(run1);
 w.openMaterialAIProgressDialog=()=>{};w.updateMaterialAIProgressSurface=()=>{};
-const nextReview={...catalog,fingerprint:'fp-2',rows:[{row_id:'new-source',origin:'source',values:{material_code:'NEW'},can_fill:true,can_replace:true,default_selected:true,default_replace_selected:true}]};
+const nextReview={...catalog,fingerprint:'fp-2',rows:[{row_id:'new-source',origin:'source',action:'update',values:{material_code:'NEW'},can_fill:true,can_update:true,can_replace:true,default_selected:true,default_update_selected:true,default_replace_selected:true}]};
 w.call=async()=>({ok:true,status:'APPLIED',version_name:'V2',batch_modified:'after'});
 w.loadMaterialFeeWorkspace=async()=>{state.aiFill={...run1,status:'APPLIED',source_progress:[{source_id:'SOURCE-1'}]};return true};
 await w.applyMaterialAIFill();assert.equal(w.detailState.versionName,'V2');
@@ -138,11 +153,56 @@ const running=w.startMaterialAIFill({force:true,restart:true});
 assert.deepEqual(state.aiFill.source_progress,[],'STARTING must not retain prior-run source progress or UI state');
 for(const key of ['rowSelection','selections','manualUpdates','draft'])assert.equal(state.aiFill[key],undefined,key);
 releaseStart({ok:true,status:'QUEUED',run_id:'run-2',source_progress:[{source_id:'SOURCE-2'}]});await running;
-const fill=state.aiFill;assert.equal(fill.runId,'run-2');assert.equal(fill.rowSelection.mode,'replace_all');
+const fill=state.aiFill;assert.equal(fill.runId,'run-2');assert.equal(fill.rowSelection.mode,'update_selected');
 assert.deepEqual([...fill.rowSelection.rows],['new-source']);assert.deepEqual(fill.source_progress,[{source_id:'SOURCE-2'}]);
 assert.equal(fill.selections.size,0);assert.deepEqual(fill.manualUpdates,{});
 const html=w.renderMaterialAIReviewDialogContent();assert(html.includes('data-mf-ai-row-select="new-source"'));
 assert(!html.includes('data-mf-ai-autofill-preview'));assert(!html.includes('OLD'));
+""")
+
+
+def test_explicit_reread_starts_a_fresh_original_source_analysis():
+    run_ui(r"""
+ready();w.openMaterialAIProgressDialog=()=>{};w.pollMaterialAIFill=async()=>{};
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,status:'QUEUED',run_id:'fresh',progress_revision:0}};
+await w.restartMaterialAIFromOriginalSources();
+assert.equal(calls[0].method,'overseas_costing.api.materials.start_source_ai_review');
+assert.equal(calls[0].args.force,1);assert.equal(calls[0].args.reanalyze_original_sources,1);
+assert(!('selected_source_ids_json' in calls[0].args));
+""")
+
+
+def test_material_candidates_render_as_expandable_priority_source_tables():
+    run_ui(r"""
+const fill=ready();
+fill.row_review={...fill.row_review,rows:[
+ {...fill.row_review.rows[0],source_group_id:'packing',source_priority:1,source_label:'国际物流装箱清单.xlsx'},
+ {...fill.row_review.rows[0],row_id:'lower',source_group_id:'oa',source_priority:2,source_label:'国际物流审批',lower_priority:true,conflict_fields:['gross_weight_kg'],default_update_selected:false},
+ fill.row_review.rows[1]
+],source_groups:[
+ {group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,row_ids:['source'],has_conflicts:false},
+ {group_id:'oa',source_id:'LOGISTICS-OA',source_label:'国际物流审批',priority:2,row_ids:['lower'],has_conflicts:true}
+]};
+delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+assert(html.includes('来源 1'));assert(html.includes('来源 2'));assert(html.includes('国际物流装箱清单.xlsx'));
+assert(html.includes('data-mf-ai-source-group="packing" open'));
+assert(html.includes('与更高优先级来源冲突'));
+assert(html.includes('当前已有'));
+""")
+
+
+def test_material_row_recovery_is_previewed_before_confirming_new_version():
+    run_ui(r"""
+let confirmation='';global.frappe.confirm=(html,yes)=>{confirmation=html;yes()};
+w.call=async(method,args)=>{calls.push({method,args});if(method.endsWith('preview_material_row_recovery'))return {ok:true,can_confirm:true,id:'restore',revision:'r1',current_version:'V',current_count:1,restored_count:7,before_rows:[{action:'current',material_code:'A'}],after_rows:[{action:'keep_updated',material_code:'A'},{action:'restore',material_code:'B'}]};return {ok:true,version_name:'V2',batch_modified:'after',restored_count:7,item_count:8}};
+await w.previewMaterialRowRecovery();
+assert(confirmation.includes('将恢复 7 行'));assert(confirmation.includes('A'));assert(confirmation.includes('B'));
+assert(confirmation.includes('恢复前'));assert(confirmation.includes('恢复后'));
+assert(calls[0].method.endsWith('preview_material_row_recovery'));
+assert(calls[1].method.endsWith('confirm_material_row_recovery'));
+assert.deepEqual(calls[1].args,{batch_name:'B',version_name:'V',preview_id:'restore',revision:'r1',edit_token:'token',expected_modified:'before'});
+assert.equal(w.detailState.versionName,'V2');assert.equal(w.detailState.expectedModified,'after');
 """)
 
 

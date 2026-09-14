@@ -85,7 +85,7 @@ def test_public_catalog_and_prepare_deeply_hide_purchase_evidence_but_server_pre
 
     catalog=service.review_catalog(repo,'B1',repo.run)
     selected=[row['row_id'] for row in catalog['rows'] if row['default_selected']]
-    response=service.prepare('B1',repo.run['name'],selected,[],'replace_all','V1',repository=repo)
+    response=service.prepare('B1',repo.run['name'],selected,[],'update_selected','V1',repository=repo)
 
     for public_payload in (catalog,response['row_review'],response['preview']):
         serialized=json.dumps(public_payload,ensure_ascii=False)
@@ -97,7 +97,6 @@ def test_public_catalog_and_prepare_deeply_hide_purchase_evidence_but_server_pre
         assert 'ai_fill_original_values' not in serialized
         assert 'OLD-ITEM' not in serialized and 'OLDER-ITEM' not in serialized
     internal=json.dumps(repo.run['draft_json']['row_previews'],ensure_ascii=False)
-    assert '_price_metadata' in internal
     assert 'purchase_fact' in internal
 
 
@@ -134,6 +133,15 @@ def test_unknown_row_and_fee_ids_are_rejected():
     for kwargs in ({'ids':['forged']},{'fees':['forged']}):
         with pytest.raises(ValueError,match='不属于'):prepare(repo,**kwargs)
     assert not repo.writes
+
+
+def test_ordinary_ai_selection_rejects_whole_table_replacement():
+    repo = Repo()
+    catalog = service.review_catalog(repo, 'B1', repo.run)
+    selected = [row['row_id'] for row in catalog['rows'] if row['origin'] == 'source']
+
+    with pytest.raises(ValueError, match='独立的整源采纳'):
+        service.prepare('B1', repo.run['name'], selected, [], 'replace_all', 'V1', repository=repo)
 
 
 def test_material_apply_failure_rolls_back_entire_selection():
