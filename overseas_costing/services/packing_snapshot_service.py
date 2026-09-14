@@ -539,13 +539,15 @@ def get_current_packing_snapshot(batch_name: str, version_name: str | None = Non
 
 
 def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None, include_wiki: bool = True,
-                         original_scope: bool = False) -> dict[str, Any]:
+                         original_scope: bool = False, _ignore_effective_context: bool = False) -> dict[str, Any]:
     """返回受控来源 ID；不返回服务器路径、对象键、原始审批 JSON 或任何凭据。"""
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
-    bundle = (effective_source.original_source_bundle(batch_name)
-              if original_scope else effective_source.current_source_bundle(batch_name))
+    bundle = None if _ignore_effective_context else (
+        effective_source.original_source_bundle(batch_name)
+        if original_scope else effective_source.current_source_bundle(batch_name)
+    )
     if bundle and (bundle['context'].get('packing') or {}).get('selected_source'):
         selected=selected_packing_ai_sources(batch_name,bundle)
         return {'approval_sources':[{k:v for k,v in row.items() if k not in ('scoped_goods','scoped_text','form_fields')} for row in selected],
@@ -589,6 +591,8 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
             "attachment_type": row.get("attachment_type") or "",
             "content_hash": str(download.get("sha256") or archive.get("sha256") or ""),
             "sheets": sheets,
+            "source_field": str(snapshot.get("source_field") or ""),
+            "workflow_field_id": str(snapshot.get("workflow_field_id") or snapshot.get("component_id") or ""),
         }
         if str(row.get("source_type") or "").upper() == "OA":
             item.update({
@@ -659,6 +663,8 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
                     or approval_row.get("create_time")
                     or ""
                 ),
+                "source_field": str(attachment.get("source_field") or ""),
+                "workflow_field_id": str(attachment.get("workflow_field_id") or ""),
                 "excluded": approval_excluded,
                 "exclude_reason": approval_exclusion_reason,
             }
@@ -884,14 +890,49 @@ def selected_packing_ai_sources(batch_name, bundle):
     context=bundle['context'];source=bundle['source'];selected=context['packing']['selected_source']
     rows=[{**g,**(g.get('physical') or {}),'source_row':(g.get('evidence') or {}).get('row') or g.get('source_position') or index}
           for index,g in enumerate(source.get('goods') or [],1)]
+    status = ('invalid' if context.get('invalid') or not context.get('approved')
+              else 'stale' if not context.get('available') else 'matched')
     return [{'source_id':selected['id'],'logical_source_id':selected['id'],'source_kind':selected['source_kind'],
              'source_label':selected['source_label'],'file_name':(selected.get('evidence') or {}).get('file_name') or selected['source_label'],
              'sheet_name':selected.get('sheet',''),'approval_no':selected['approval_no'],'process_instance_id':context['instance_id'],
              'batch':batch_name,'source_context':context,'source_hash':selected['revision'],'content_hash':selected['revision'],
              'source_updated_at':selected.get('occurred_at',''),'actor_name':selected.get('actor_name',''),
              'available':bool(context['available']),'excluded':not context['available'],'approval_role':'logistics_expense',
+             'actual_packing_source':True,'actual_packing_match_status':status,
+             'actual_packing_match_id':str(context.get('binding_id') or selected['id']),
+             'actual_packing_match_revision':str(context.get('binding_revision') or selected.get('revision') or ''),
              'selected_source':selected,'scoped_packing':True,'scoped_goods':rows,'scoped_text':source.get('scoped_text',''),
              'form_fields':{},'approval_decisions':[],'can_download':False}]
+
+
+def _combine_actual_packing_with_fallbacks(actual_sources, fallback_sources, context):
+    """Keep verified workflow evidence as a lower-priority supplement to an applied match."""
+
+    from .source_priority_service import is_workflow_packing_attachment, rank_material_packing_sources
+
+    actual = [dict(row or {}) for row in actual_sources or []]
+    identities = {
+        str(row.get('logical_source_id') or row.get('source_id') or '')
+        for row in actual
+    }
+    supplemental = []
+    for source in fallback_sources or []:
+        # Crossing from the currently bound expense back to the original
+        # logistics process is deliberately narrow: only the trusted workflow
+        # packing component may fill gaps. Bodies, comments and manual uploads
+        # stay isolated from the bound source.
+        if not is_workflow_packing_attachment(source):
+            continue
+        identity = str(source.get('logical_source_id') or source.get('source_id') or '')
+        if not identity or identity in identities:
+            continue
+        supplemental.append({
+            **source,
+            'source_context': context,
+            'supplemental_for_actual_packing': True,
+        })
+        identities.add(identity)
+    return rank_material_packing_sources([*actual, *supplemental])
 
 
 def list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
@@ -904,20 +945,32 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
 
 
 def _list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
-                              original_scope: bool = False) -> list[dict[str, Any]]:
+                              original_scope: bool = False,
+                              _ignore_effective_context: bool = False) -> list[dict[str, Any]]:
     """Return a stable manifest of every trusted source the material AI task may read."""
 
     if frappe is None:
         raise RuntimeError("当前环境未连接 Frappe。")
-    bundle = (effective_source.original_source_bundle(batch_name, version_name)
-              if original_scope else effective_source.current_source_bundle(batch_name, version_name))
+    bundle = None if _ignore_effective_context else (
+        effective_source.original_source_bundle(batch_name, version_name)
+        if original_scope else effective_source.current_source_bundle(batch_name, version_name)
+    )
     if bundle and (bundle['context'].get('packing') or {}).get('selected_source'):
-        return selected_packing_ai_sources(batch_name,bundle)
+        actual = selected_packing_ai_sources(batch_name, bundle)
+        fallbacks = _list_material_ai_sources(
+            batch_name,
+            version_name,
+            original_scope=original_scope,
+            _ignore_effective_context=True,
+        )
+        return _combine_actual_packing_with_fallbacks(actual, fallbacks, bundle['context'])
     if bundle and bundle['context']['root_kind'] == 'expense':
-        return _bound_material_sources(batch_name, bundle)
+        from .source_priority_service import rank_material_packing_sources
+        return rank_material_packing_sources(_bound_material_sources(batch_name, bundle))
     detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
     packing = list_packing_sources(str(batch_name), approval_detail=detail, include_wiki=False,
-                                   original_scope=original_scope)
+                                   original_scope=original_scope,
+                                   _ignore_effective_context=_ignore_effective_context)
     comment_index = {str(row.get("source_id") or ""): row for approval in
         [detail.get("main_approval") or {}, *(detail.get("linked_purchase_approvals") or [])]
         for row in approval.get("timeline") or [] if isinstance(row, dict)}
@@ -965,6 +1018,9 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             "form_fields": source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {},
             "approval_decisions": source.get("approval_decisions") or [],
             "dedicated_packing": bool(source.get("dedicated_packing")),
+            "dedicated_packing_attachment": bool(source.get("dedicated_packing_attachment")),
+            "source_field": str(source.get("source_field") or ""),
+            "workflow_field_id": str(source.get("workflow_field_id") or ""),
             "content_hash": str(
                 source.get("content_hash")
                 or source.get("content_sha256")
@@ -1149,6 +1205,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
                 ).get("sha256")
                 or packing_source_service._attachment_hash(row)
             )),
+            "source_field": str(snapshot.get("source_field") or ""),
+            "workflow_field_id": str(snapshot.get("workflow_field_id") or snapshot.get("component_id") or ""),
         }
         sheets = _attachment_sheet_names(row) if file_name.lower().endswith((".xlsx", ".xlsm")) else []
         if sheets:
@@ -1156,8 +1214,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
                 append_source(source, sheet_name=sheet_name)
         else:
             append_source(source)
-    from .source_priority_service import material_packing_source_priority
-    return sorted(result, key=material_packing_source_priority)
+    from .source_priority_service import rank_material_packing_sources
+    return rank_material_packing_sources(result)
 
 
 def _bound_material_sources(batch_name, bundle):
@@ -1252,7 +1310,7 @@ def _packing_batch_context(batch_name: str, detail: dict[str, Any]) -> dict[str,
     ) or {}
     items = frappe.get_list(
         "Overseas Cost Item",
-        filters={"batch": str(batch.get("name") or batch_name)},
+        filters={"batch": str(batch.get("name") or batch_name), "is_excluded": 0},
         fields=["material_code", "product_name", "source_doc_no"],
         limit_page_length=5000,
     )

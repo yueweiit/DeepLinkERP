@@ -208,7 +208,10 @@ def _grouped_case():
              60400 if index == 1 else 2860 if index == 7 else 10560 if index == 8 else None,
              "超队1.0项目" if index <= 6 else "亮甲2.0项目" if index == 7 else "TK宠物用品项目"]
             for index, (code, qty) in enumerate(zip(codes, quantities), 1)]
-    return items, _match(_preview(rows), items)
+    return items, _match(_preview(rows, mergeRanges=[
+        {"startRow": 2, "endRow": 7, "startColumn": 4, "endColumn": 4},
+        {"startRow": 2, "endRow": 7, "startColumn": 5, "endColumn": 5},
+    ]), items)
 
 
 def test_set_price_only_controls_independently_valued_six_row_project_and_total_73820():
@@ -225,7 +228,24 @@ def test_set_price_only_controls_independently_valued_six_row_project_and_total_
         assert control is not None
         assert control["amount_rmb"] == "60400" and control["role"] == "control_only"
         assert control["verified_row_numbers"] == [2, 3, 4, 5, 6, 7]
-        assert control["source_range"]["start_row"] == control["source_range"]["end_row"] == 2
+        assert control["source_range"]["start_row"] == 2
+        assert control["source_range"]["end_row"] == 7
+    assert result["merged_amount_groups"] == [{
+        "status": "verified",
+        "source_row": 2,
+        "source_range": {
+            "start_row": 2,
+            "end_row": 7,
+            "start_column": 5,
+            "end_column": 5,
+            "evidence_kind": "dingtalk_merge",
+        },
+        "control_total_rmb": "60400",
+        "computed_total_rmb": "60400",
+        "difference_rmb": "0",
+        "member_item_names": [f"ITEM-{index}" for index in range(1, 7)],
+        "member_row_numbers": [2, 3, 4, 5, 6, 7],
+    }]
     assert result["projects"]["ITEM-8"] == "TK宠物用品项目"
     assert result["warnings"] == []
 

@@ -213,7 +213,7 @@ def save_profit_inputs(batch_name: str, version_name: str | None, rows_payload) 
     resolved_version, fx_usd_to_rmb, fx_rmb_to_mxn = _version_rates(resolved_batch, version_name)
     allowed = _frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": resolved_batch, "version": resolved_version},
+        filters={"batch": resolved_batch, "version": resolved_version, "is_excluded": 0},
         fields=["name", "row_no", "batch", "version", "total_unit_rmb", *SALES_INPUT_FIELDS],
         limit_page_length=10000,
     )

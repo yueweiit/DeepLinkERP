@@ -432,7 +432,7 @@ def test_multicell_paste_uses_transactional_manual_ai_updates_and_protects_purch
         "findMaterialFee(feeKey)", 1
     )[0]
     assert "materialPurchaseCorrectionFields" in preview
-    assert "已有有效采购值" in preview
+    assert "已有有效值" in preview
     assert "updateMaterialAIDraftValue" in apply
     assert "fill.updates[`${item_name}:${fieldname}`]" not in apply
 

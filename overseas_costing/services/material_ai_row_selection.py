@@ -73,7 +73,15 @@ def _source_groups(catalog_rows, sources):
             group={'group_id':digest(POLICY,'source-group',key),'source_id':key,
                    'source_label':str(source.get('source_label') or source.get('file_name') or key),
                    'source_kind':str(source.get('source_kind') or ''),'source_updated_at':str(source.get('source_updated_at') or source.get('occurred_at') or ''),
-                   'priority':len(groups)+1,'row_ids':[],'source_ids':[],'has_conflicts':False}
+                   'priority':int(source.get('priority') or len(groups)+1),
+                   'priority_reason':str(source.get('priority_reason') or ''),
+                   'actual_packing_match_status':str(source.get('actual_packing_match_status') or 'none'),
+                   'actual_packing_match_id':str(source.get('actual_packing_match_id') or ''),
+                   'actual_packing_match_revision':str(source.get('actual_packing_match_revision') or ''),
+                   'source_field':str(source.get('source_field') or ''),
+                   'workflow_field_id':str(source.get('workflow_field_id') or ''),
+                   'dedicated_packing_attachment':bool(source.get('dedicated_packing_attachment')),
+                   'row_ids':[],'source_ids':[],'has_conflicts':False}
             by_key[key]=group;groups.append(group)
         group=by_key[key]
         group['source_ids'].append(source_id)

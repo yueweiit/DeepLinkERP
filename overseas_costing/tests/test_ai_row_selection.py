@@ -147,7 +147,8 @@ def test_catalog_groups_sources_by_priority_and_marks_lower_priority_conflicts()
         {'source_id': 'LOGISTICS-OA', 'source_kind': 'approval_form',
          'source_label': '国际物流审批', 'approval_role': 'international_logistics'},
         {'source_id': 'PACKING-LIST', 'source_kind': 'approval_attachment',
-         'source_label': '装箱清单.xlsx', 'approval_role': 'international_logistics', 'dedicated_packing': True},
+         'source_label': '装箱清单.xlsx', 'approval_role': 'international_logistics',
+         'source_field': '装箱单附件（Excel）'},
     ]
     proposals = [
         {'proposal_id': 'HIGH', 'proposal_type': 'item_update', 'target_item_name': 'I1',
@@ -179,7 +180,8 @@ def test_catalog_groups_sources_by_priority_and_marks_lower_priority_conflicts()
 def test_lower_priority_source_is_preselected_only_when_it_fills_a_higher_source_gap():
     items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
     sources = [
-        {'source_id': 'PACK', 'source_kind': 'approval_attachment', 'dedicated_packing': True},
+        {'source_id': 'PACK', 'source_kind': 'approval_attachment',
+         'source_field': '装箱单附件（Excel）'},
         {'source_id': 'OA', 'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
     ]
     proposals = [
@@ -197,6 +199,29 @@ def test_lower_priority_source_is_preselected_only_when_it_fills_a_higher_source
     assert candidates['PACK']['default_update_selected']
     assert candidates['OA']['default_update_selected']
     assert not candidates['OA']['conflict_fields']
+
+
+def test_source_groups_expose_server_priority_reason_and_actual_match_status():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = rank_material_packing_sources([
+        {'source_id': 'ACTUAL', 'source_kind': 'approval_attachment',
+         'actual_packing_source': True, 'actual_packing_match_status': 'matched'},
+        {'source_id': 'FLOW', 'source_kind': 'approval_attachment',
+         'source_field': '装箱单附件（Excel）'},
+    ])
+    proposals = [{
+        'proposal_id': 'ACTUAL', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+        'default_selected': True, 'source_refs': [{'source_id': 'ACTUAL'}],
+        'payload': {'fields': {'gross_weight_kg': 9}},
+    }]
+
+    review = catalog(items, proposals, sources)
+
+    assert review['source_groups'][0]['source_id'] == 'ACTUAL'
+    assert review['source_groups'][0]['priority_reason'] == '实际运费／装箱变更已匹配当前单据'
+    assert review['source_groups'][0]['actual_packing_match_status'] == 'matched'
 
 
 def test_replace_selected_rows_removes_unselected_and_clears_missing():

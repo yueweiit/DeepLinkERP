@@ -41,7 +41,8 @@ h.escape=x=>String(x ?? '');h.formatValue=x=>String(x);h.materialAICell=()=>null
 console.log(JSON.stringify(h.renderMaterialFeeGridCell({name:'I',shipment_value_rmb:'10560',
 shipment_valuation:{method:'packing_row_total',status:'automatic',error:''}}, {field:'shipment_value_rmb',label:'本次发货货值 RMB',numeric:true,readonly:false},new Set(),0)));
 """)
-    assert 'value="10560"' in result and '自动估值' in result
+    assert '>10560<' in result and '自动估值' in result
+    assert 'data-action="mf-correct-purchase"' in result and '<input' not in result
 
 
 def test_shipment_value_is_editable_and_renders_all_escaped_valuation_states():
@@ -58,8 +59,9 @@ console.log(JSON.stringify({column,automatic:make('automatic','12.5'),manual:mak
   missing:make('missing',''),stale:make('stale',null,{prior_amount_rmb:'25'})}));
 """)
     assert result["column"]["readonly"] is False
-    assert 'data-mf-cell-input="1"' in result["automatic"] and "自动估值" in result["automatic"]
-    assert 'value="0"' in result["manual"] and "人工确认" in result["manual"]
+    assert 'data-mf-cell-input="1"' not in result["automatic"] and "自动估值" in result["automatic"]
+    assert 'data-action="mf-correct-purchase"' in result["automatic"]
+    assert '>0<' in result["manual"] and "人工确认" in result["manual"]
     assert "待确认" in result["conflict"]
     assert "采用旧值" in result["conflict"] and "采用计算值" in result["conflict"]
     assert "&lt;旧值&gt;" in result["conflict"] and "60&amp;新值" in result["conflict"]

@@ -329,14 +329,23 @@ def test_settled_placeholder_cannot_be_replaced_by_material_ai():
     assert not _is_unverified_placeholder_item(item)
 
 
-def test_public_delete_cannot_remove_final_source_row(monkeypatch):
+def test_public_delete_soft_excludes_final_source_row_without_erasing_source(monkeypatch):
     from types import SimpleNamespace
     from overseas_costing.services import calculate_service, edit_session_service
     row=shipment(extra_json=json.dumps({'settlement_cargo':cargo()}),batch='B',version='V')
-    monkeypatch.setattr(calculate_service,'_frappe',SimpleNamespace(get_doc=lambda *a:SimpleNamespace(**row)))
+    item=SimpleNamespace(**{**row,'is_excluded':0,'name':'I','row_no':1,'material_code':'A',
+                            'product_name':'Item','quantity':1,'goods_value':1})
+    item.save=lambda **kw:None
+    db=SimpleNamespace(set_value=lambda *a,**kw:None,get_value=lambda *a,**kw:'M2',commit=lambda:None)
+    fake=SimpleNamespace(get_doc=lambda *a:item,db=db,session=SimpleNamespace(user='tester'))
+    monkeypatch.setattr(calculate_service,'_frappe',fake)
     monkeypatch.setattr(edit_session_service,'assert_batch_write',lambda *a,**kw:None)
+    monkeypatch.setattr(calculate_service,'_assert_current_item_version',lambda *a,**kw:None)
+    monkeypatch.setattr(calculate_service,'_insert_audit_log',lambda **kw:None)
     result=calculate_service.delete_item('I')
-    assert not result['ok'] and '结算' in result['message']
+    assert result['ok'] and result['soft_excluded']
+    assert item.is_excluded == 1
+    assert 'settlement_cargo' in json.loads(item.extra_json)
 
 
 def test_public_identity_edit_cannot_replace_final_source_identity(monkeypatch):

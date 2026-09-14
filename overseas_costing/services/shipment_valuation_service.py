@@ -68,10 +68,15 @@ def build_shipment_valuations(items: list[dict], preview: dict, source: dict) ->
                 warnings.append(f"{label} {purchase_reason}")
         if value is not None:
             valuations[name] = value
-    verified_rows = _verify_group_controls(items, rows, valuations, warnings)
+    verified_rows, merged_amount_groups = _verify_group_controls(items, rows, valuations, warnings)
     resolved_warnings = {packing_warnings.get(number) for number in verified_rows}
     warnings = [message for message in warnings if message not in resolved_warnings]
-    return {"valuations": valuations, "projects": projects, "warnings": list(dict.fromkeys(warnings))}
+    return {
+        "valuations": valuations,
+        "projects": projects,
+        "warnings": list(dict.fromkeys(warnings)),
+        "merged_amount_groups": merged_amount_groups,
+    }
 
 
 def _shipment_inputs(item, row):
@@ -148,6 +153,7 @@ def _verify_group_controls(items, rows, valuations, warnings):
     ordered = sorted(rows, key=lambda row: row.get("source_row") or 0)
     names = {_text(item.get("stable_line_key")): _text(item.get("name")) for item in items}
     verified_rows = set()
+    controls = []
     for index, row in enumerate(ordered):
         amount = _number(row.get("total_amount"))
         if amount is None or amount < 0 or _currency(row.get("currency")) != "RMB":
@@ -176,13 +182,26 @@ def _verify_group_controls(items, rows, valuations, warnings):
         project = _text(row.get("project_collection"))
         row_numbers = [member.get("source_row") for member in members]
         values = [valuations.get(names.get(_text(member.get("_target_stable_line_key")), "")) for member in members]
+        member_names = [names.get(_text(member.get("_target_stable_line_key")), "") for member in members]
         verified = (len(members) > 1 and len(members) == expected_count and project
                     and row_numbers == list(range(number, number + expected_count))
                     and all(_text(member.get("project_collection")) == project for member in members)
                     and all(value and value.get("method") == "purchase_unit_price" for value in values))
-        if verified:
+        total = None
+        if all(value and _number(value.get("amount_rmb")) is not None for value in values):
             total = sum((_number(value["amount_rmb"]) for value in values), Decimal("0"))
+        if verified:
             verified = abs(total - amount) <= MONEY_TOLERANCE
+        controls.append({
+            "status": "verified" if verified else "needs_allocation",
+            "source_row": number,
+            "source_range": deepcopy(region),
+            "control_total_rmb": _decimal(amount),
+            "computed_total_rmb": _decimal(total) if total is not None else None,
+            "difference_rmb": _decimal(total - amount) if total is not None else None,
+            "member_item_names": member_names,
+            "member_row_numbers": row_numbers,
+        })
         if not verified:
             warnings.append(f"第 {number} 行金额 {_decimal(amount)} 未通过同项目完整采购估值加总，不能确认组控制范围或分摊。")
             continue
@@ -192,7 +211,7 @@ def _verify_group_controls(items, rows, valuations, warnings):
         for value in values:
             value["input_evidence"]["group_control"] = deepcopy(control)
         verified_rows.update(row_numbers)
-    return verified_rows
+    return verified_rows, controls
 
 
 def _shared_field(row, field):

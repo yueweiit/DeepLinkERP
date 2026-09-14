@@ -71,7 +71,7 @@ def _get_batch_source_meta(batch_name: str) -> dict:
             try:
                 item_rows = frappe.get_all(
                     "Overseas Cost Item",
-                    filters={"batch": meta.get("name")},
+                    filters={"batch": meta.get("name"), "is_excluded": 0},
                     fields=["source_doc_no", "dingtalk_instance_id", "dingtalk_official_url"],
                     limit_page_length=50,
                 )
@@ -676,7 +676,7 @@ def _build_item_query_args(
 ) -> tuple[list[list[str]], list[list[str]]]:
     query_filters = _normalize_item_query_filters(filters)
     keyword_value = _clean_query_value(keyword or query_filters.pop("keyword", ""))
-    db_filters = [["batch", "=", batch_doc_name], ["version", "=", version_name]]
+    db_filters = [["batch", "=", batch_doc_name], ["version", "=", version_name], ["is_excluded", "=", 0]]
 
     for fieldname in ITEM_FILTER_FIELDS:
         value = query_filters.get(fieldname)
@@ -1257,7 +1257,7 @@ def _keyword_item_batch_names(keyword: str, authorized_names: list[str]) -> list
     like_keyword = f"%{keyword}%"
     rows = frappe.get_all(
         "Overseas Cost Item",
-        filters=[["batch", "in", authorized_names]],
+        filters=[["batch", "in", authorized_names], ["is_excluded", "=", 0]],
         or_filters=[
             ["material_code", "like", like_keyword],
             ["product_name", "like", like_keyword],
@@ -2958,7 +2958,7 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
 
     batch["summary_snapshot"] = _load_json(version.get("summary_snapshot_json"))
 
-    item_filters = {"batch": batch_doc_name}
+    item_filters = {"batch": batch_doc_name, "is_excluded": 0}
     if resolved_version_name:
         item_filters["version"] = resolved_version_name
     items = frappe.get_all(

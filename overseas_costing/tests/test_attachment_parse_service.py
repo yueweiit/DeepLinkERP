@@ -106,7 +106,7 @@ def test_sync_tax_certificate_identity_fills_empty_batch_and_item_customs_number
         @staticmethod
         def get_all(doctype, filters=None, **_kwargs):
             assert doctype == "Overseas Cost Item"
-            assert filters == {"batch": "BATCH-001", "version": "VER-001"}
+            assert filters == {"batch": "BATCH-001", "version": "VER-001", "is_excluded": 0}
             return [
                 {"name": "ITEM-EMPTY", "customs_no": ""},
                 {"name": "ITEM-KEEP", "customs_no": "26 16 1681 6000001"},

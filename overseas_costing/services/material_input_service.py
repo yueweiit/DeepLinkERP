@@ -57,6 +57,10 @@ GRID_FIELDS = (
     "source_file_name",
     "source_attachment_id",
     "parse_status",
+    "is_excluded",
+    "excluded_at",
+    "excluded_by",
+    "exclusion_reason",
 )
 
 
@@ -283,7 +287,7 @@ def get_material_grid(
     if not resolved_version:
         raise ValueError("当前批次没有可用成本版本。")
 
-    filters = {"batch": resolved_batch, "version": resolved_version}
+    filters = {"batch": resolved_batch, "version": resolved_version, "is_excluded": 0}
     total = int(frappe.db.count("Overseas Cost Item", filters=filters) or 0)
     raw_items = frappe.get_all(
         "Overseas Cost Item",
@@ -333,6 +337,27 @@ def get_material_grid(
         "missing_cell_count": requirements["missing_cell_count"],
         "affected_row_count": requirements["affected_row_count"],
     }
+
+
+def get_excluded_materials(batch_name: str, version_name: str | None = None) -> dict:
+    """返回当前活动版本中可恢复的软排除物料。"""
+    if frappe is None:
+        return {"ok": True, "dry_run": True, "batch_name": batch_name,
+                "version_name": version_name, "items": []}
+    from overseas_costing.services import batch_service
+    resolved_batch = batch_service._resolve_batch_name(str(batch_name or ""))
+    if not resolved_batch:
+        raise ValueError(f"未找到批次：{batch_name}")
+    resolved_version = batch_service._resolve_version_name(resolved_batch, version_name)
+    if not resolved_version:
+        raise ValueError("当前批次没有可用成本版本。")
+    rows = frappe.get_all(
+        "Overseas Cost Item",
+        filters={"batch": resolved_batch, "version": resolved_version, "is_excluded": 1},
+        fields=list(GRID_FIELDS), order_by="row_no asc, name asc", limit_page_length=10000,
+    )
+    return {"ok": True, "batch_name": resolved_batch, "version_name": resolved_version,
+            "items": [present_material_row(row) for row in rows]}
 def build_shipping_quantity_updates(
     item: dict,
     *,

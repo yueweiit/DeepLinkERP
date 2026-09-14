@@ -448,6 +448,46 @@ def test_existing_purchase_value_requires_reason_before_server_save(monkeypatch)
     assert "修改原因" in result["message"]
 
 
+def test_existing_physical_value_requires_reason_before_server_save(monkeypatch) -> None:
+    from overseas_costing.services import calculate_service as service
+
+    class Item:
+        batch = "B1"
+        version = "V1"
+        row_no = 1
+        gross_weight_kg = 388
+        extra_json = "{}"
+        is_excluded = 0
+
+        def as_dict(self):
+            return vars(self.__class__).copy()
+
+        def save(self, **_kwargs):
+            raise AssertionError("missing correction reason must not save")
+
+    class FakeFrappe:
+        @staticmethod
+        def get_doc(*_args):
+            return Item()
+
+    monkeypatch.setattr(service, "_frappe", FakeFrappe)
+    monkeypatch.setattr(
+        "overseas_costing.services.effective_source_values.batch_source_context",
+        lambda *_args, **_kwargs: {},
+    )
+
+    result = update_item_field(
+        "ITEM-1",
+        "gross_weight_kg",
+        "390",
+        _skip_edit_check=True,
+    )
+
+    assert result["ok"] is False
+    assert result["edit_mode"] == "reason_required"
+    assert "修改原因" in result["message"]
+
+
 def test_net_weight_is_an_editable_numeric_material_field() -> None:
     result = update_item_field(
         item_name="ITEM-1",
@@ -586,6 +626,30 @@ def test_delete_item_dry_run_returns_preview() -> None:
     assert result["ok"] is True
     assert result["dry_run"] is True
     assert result["item_name"] == "ITEM-1"
+
+
+def test_delete_item_soft_excludes_and_restore_reverses_it(monkeypatch) -> None:
+    items = {"I1": {"extra_json": json.dumps({"settlement_cargo": {"quantity": 2}})}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import edit_session_service
+    monkeypatch.setattr(edit_session_service, "assert_batch_write", lambda *_args, **_kwargs: None)
+
+    excluded = service.delete_item(
+        "I1", batch_name="B1", version_name="V1", remark="不属于本票",
+        edit_token="TOKEN", expected_modified="OLD",
+    )
+    restored = service.restore_item(
+        "I1", batch_name="B1", version_name="V1", remark="已核对",
+        edit_token="TOKEN", expected_modified="2026-09-11 10:00:00",
+    )
+
+    assert excluded["ok"] is True and excluded["soft_excluded"] is True
+    assert excluded["batch_modified"] == "2026-09-11 10:00:00"
+    assert restored["ok"] is True and restored["restored"] is True
+    assert items["I1"].is_excluded == 0
+    assert items["I1"].excluded_at is None
+    assert items["I1"].excluded_by == ""
+    assert items["I1"].exclusion_reason == ""
 
 
 def test_delete_batch_dry_run_returns_preview() -> None:
@@ -1088,3 +1152,24 @@ def test_expense_physical_overlay_quantity_edit_stales_manual_value(monkeypatch)
     assert saved_metadata["manual_shipment_valuation"]["amount_rmb"] == "25"
     assert saved_metadata["settlement_physical"]["values"]["actual_shipped_qty"] == 3
     assert saved_metadata["settlement_cargo"]["quantity"] == 3
+
+
+def test_missing_expense_physical_cell_can_attach_current_context_and_save(monkeypatch) -> None:
+    context = {"root_kind": "expense", "available": True, "approved": True, "invalid": False,
+               "fingerprint": "CTX", "source_snapshot": "SOURCE",
+               "packing": {"selected_source": "PACKING-1"}}
+    items = {"I1": {"extra_json": "{}", "gross_weight_kg": None}}
+    service, _db = _install_item_edit_frappe(monkeypatch, items)
+    from overseas_costing.services import effective_source_values
+    from overseas_costing.services import effective_logistics_source
+    monkeypatch.setattr(effective_source_values, "batch_source_context", lambda *_args, **_kwargs: context)
+    monkeypatch.setattr(effective_logistics_source, "resolve_source_context", lambda *_args, **_kwargs: context)
+
+    result = service.update_item_field("I1", "gross_weight_kg", "9.7", _skip_edit_check=True)
+
+    metadata = json.loads(items["I1"].extra_json)
+    assert result["ok"] is True and result["changed"] is True
+    assert metadata["effective_logistics_source"]["fingerprint"] == "CTX"
+    assert metadata["settlement_physical"]["values"]["gross_weight_kg"] == 9.7
+    assert metadata["settlement_physical"]["evidence"]["gross_weight_kg"]["kind"] == "manual_override"
+    assert effective_source_values.project_source_values(items["I1"].as_dict(), context)["gross_weight_kg"] == 9.7

@@ -69,13 +69,23 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
     if dependencies:
         context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     projection=rows.project(items,catalog,row_ids,fee_ids,mode)
+    draft=ai._load_json(ai._record_value(run,'draft_json'),{})
+    merged_amount_groups=deepcopy(draft.get('merged_amount_groups') or [])
+    allocation_required=any(group.get('status')!='verified' for group in merged_amount_groups)
+    projection['merged_amount_groups']=merged_amount_groups
+    projection['merged_amount_blocking']=allocation_required
+    if allocation_required:
+        projection['can_apply']=False
+        projection.setdefault('unresolved',[]).append({
+            'code':'MERGED_AMOUNT_ALLOCATION_REQUIRED',
+            'message':'合并金额组缺少独立单价或合计不一致，请完成人工分摊后重新预览。',
+        })
     revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],row_ids,fee_ids,mode,dependencies)
     preview={**projection,'id':digest(run_id,revision),'revision':revision,'run_id':run_id,'batch':batch_name,
              'version':context['version'],'source_context':context.get('effective_source') or {},
              'original_source_reanalysis':ai._run_uses_original_sources(run),
              'input_fingerprint':ai._record_value(run,'input_fingerprint'),
              'fee_fingerprint':digest(current_fees),'sources':deepcopy(sources),'dependencies':dependencies}
-    draft=ai._load_json(ai._record_value(run,'draft_json'),{})
     previews=draft.setdefault('row_previews',{})
     # Keep only bounded recent previews; the latest one is required for confirmation.
     previews[preview['id']]=preview
@@ -115,6 +125,8 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
         return {**applied,'ok':True,'idempotent':True}
     if ai._record_value(run,'status')!='READY' or draft.get('current_row_preview')!=preview_id:
         raise ValueError('草稿或选择已变化，请使用最新预览。')
+    if preview.get('merged_amount_blocking'):
+        raise ValueError('合并金额组尚未完成人工分摊或合计校验，本次未保存。')
     repo.assert_write(batch_name,edit_token,expected_modified)
     repo.lock_review_inputs(batch_name,preview['version'])
     if callable(getattr(repo,'assert_row_dependencies',None)):

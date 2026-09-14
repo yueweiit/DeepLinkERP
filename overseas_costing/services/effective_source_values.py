@@ -33,12 +33,19 @@ def source_context_from_items(items):
     return contexts[0] if contexts else {}
 
 
-def physical_overlay_update(item, context, values, *, evidence):
+def physical_overlay_update(item, context, values, *, evidence, adopt_current_context=False):
     """Called only after a trusted source/lease check; returns metadata to persist."""
     from .effective_logistics_source import require_available
     require_available(context)
     meta = deepcopy(object_json(item.get('extra_json')))
-    if (meta.get('effective_logistics_source') or {}).get('fingerprint') != context.get('fingerprint'):
+    adopted_context = meta.get('effective_logistics_source') or {}
+    if adopted_context.get('fingerprint') != context.get('fingerprint') and adopt_current_context:
+        # A user may fill a missing physical value before the source has written any
+        # row-level overlay. The locked, server-resolved context becomes the audit
+        # parent for that manual value; callers cannot supply this context directly.
+        meta['effective_logistics_source'] = deepcopy(context)
+        adopted_context = meta['effective_logistics_source']
+    if adopted_context.get('fingerprint') != context.get('fingerprint'):
         raise ValueError('当前采购支出尚未应用或资料已变化，请重新读取资料')
     previous = meta.get('settlement_physical') or {}
     current = previous if previous.get('source_context_fingerprint') == context.get('fingerprint') else {}

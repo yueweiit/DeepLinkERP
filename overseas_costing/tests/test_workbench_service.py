@@ -626,7 +626,7 @@ def test_result_preview_queries_only_current_version_and_lightweight_fields(monk
         "total_unit_rmb",
     }
     item_call = next(call for call in calls if call[0] == "Overseas Cost Item")
-    assert item_call[1]["filters"] == {"batch": "BATCH-DOC", "version": "VER-1"}
+    assert item_call[1]["filters"] == {"batch": "BATCH-DOC", "version": "VER-1", "is_excluded": 0}
     assert item_call[1]["fields"] == workbench_service.RESULT_PREVIEW_ITEM_FIELDS
     assert item_call[1]["limit_page_length"] == 0
     assert "raw_excel_json" not in item_call[1]["fields"]

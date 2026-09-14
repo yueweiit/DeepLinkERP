@@ -73,7 +73,8 @@ def prepare_source_manifest(
     if contexts:
         context = contexts[0]
         if any((row.get('source_context') or {}).get('fingerprint') != context.get('fingerprint')
-               or row.get('process_instance_id') != context.get('instance_id')
+               or (row.get('process_instance_id') != context.get('instance_id')
+                   and not row.get('supplemental_for_actual_packing'))
                or row.get('source_kind') == 'manual_attachment' for row in raw_sources):
             raise ValueError('资料来源不属于同一当前采购支出，请刷新来源。')
     prepared: list[dict] = []
@@ -177,6 +178,14 @@ def source_progress_manifest(manifest: Iterable[dict]) -> list[dict]:
                 "occurred_at": _text(source.get("occurred_at"), 100),
                 "sheet_name": _text(source.get("sheet_name"), 200),
                 "sheet": _text(source.get("sheet_name"), 200),
+                "priority": int(source.get("priority") or 0),
+                "priority_reason": _text(source.get("priority_reason"), 500),
+                "actual_packing_match_status": _text(source.get("actual_packing_match_status"), 40),
+                "actual_packing_match_id": _text(source.get("actual_packing_match_id"), 500),
+                "actual_packing_match_revision": _text(source.get("actual_packing_match_revision"), 500),
+                "source_field": _text(source.get("source_field"), 500),
+                "workflow_field_id": _text(source.get("workflow_field_id"), 500),
+                "dedicated_packing_attachment": bool(source.get("dedicated_packing_attachment")),
                 "selected": bool(source.get("selected")),
                 "locked": bool(source.get("locked")),
                 "selectable": bool(source.get("selectable")),

@@ -472,7 +472,7 @@ def get_batch_result_preview(batch_name: str, page=1, page_length=20) -> dict:
 
     items = frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": version_name},
+        filters={"batch": batch_doc_name, "version": version_name, "is_excluded": 0},
         fields=RESULT_PREVIEW_ITEM_FIELDS,
         order_by="row_no asc, name asc",
         limit_page_length=0,
@@ -519,7 +519,7 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
                 filters={"batch": ["in", names], "name": ["in", versions]},
                 fields=["name", "batch", "version_code", "status", "fx_usd_to_rmb", "fx_rmb_to_mxn",
                         "calculated_at", "summary_snapshot_json"], limit_page_length=0)
-            item_rows = frappe.get_all("Overseas Cost Item", filters=filters,
+            item_rows = frappe.get_all("Overseas Cost Item", filters={**filters, "is_excluded": 0},
                 fields=["batch", "version", *cost_preview_service.COST_INPUT_FIELDS, *cost_review_service.SAVED_ITEM_OUTPUT_FIELDS],
                 order_by="row_no asc, name asc", limit_page_length=0)
             rule_rows = frappe.get_all("Overseas Cost Allocation Rule", filters=filters,
@@ -781,7 +781,7 @@ def locate_batch_item(
     fields = list(dict.fromkeys(["name", "row_no", "excel_row_no"] + batch_service.EXCEL_FIELDNAMES))
     items = frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": resolved_version},
+        filters={"batch": batch_doc_name, "version": resolved_version, "is_excluded": 0},
         fields=fields,
         order_by="row_no asc, name asc",
         limit_page_length=0,

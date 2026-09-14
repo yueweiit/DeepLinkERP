@@ -144,6 +144,27 @@ def test_ordinary_ai_selection_rejects_whole_table_replacement():
         service.prepare('B1', repo.run['name'], selected, [], 'replace_all', 'V1', repository=repo)
 
 
+def test_unverified_merged_amount_group_blocks_confirmation_without_writing():
+    repo = Repo()
+    repo.run['draft_json']['merged_amount_groups'] = [{
+        'sheet_name': '装箱单',
+        'unit_price_range': 'Z2:Z7',
+        'total_amount_range': 'AA2:AA7',
+        'control_total': 60400,
+        'computed_total': 59800,
+        'status': 'needs_allocation',
+    }]
+
+    preview = prepare(repo)
+
+    assert preview['merged_amount_blocking'] is True
+    assert preview['can_apply'] is False
+    assert preview['unresolved'][0]['code'] == 'MERGED_AMOUNT_ALLOCATION_REQUIRED'
+    with pytest.raises(ValueError, match='人工分摊'):
+        confirm(repo, preview)
+    assert not repo.writes
+
+
 def test_material_apply_failure_rolls_back_entire_selection():
     repo=Repo();preview=prepare(repo)
     def fail(*args):repo.writes.append('partial');raise RuntimeError('persist failure')

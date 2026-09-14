@@ -96,6 +96,12 @@ def get_material_grid(batch_name, version_name=None, page=1, page_length=100):
 
 
 @frappe.whitelist()
+def get_excluded_materials(batch_name, version_name=None):
+    batch_name = require_batch_permission(batch_name, "read")
+    return material_input_service.get_excluded_materials(batch_name, version_name=version_name)
+
+
+@frappe.whitelist()
 def preview_material_import(batch_name, source_kind, source_id, sheet_name=None, merge_reviews_json=None):
     batch_name = require_batch_permission(batch_name, "read")
     return material_import_service.preview_material_import(

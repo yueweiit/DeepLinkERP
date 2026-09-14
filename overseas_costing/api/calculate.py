@@ -122,10 +122,32 @@ def delete_item(
     edit_token: str | None = None,
     expected_modified: str | None = None,
 ) -> dict:
-    """删除一条物料明细，并写审计日志。"""
+    """软排除一条物料明细，并写审计日志。"""
 
-    require_doctype_permission("Overseas Cost Item", "delete", doc=item_name)
+    require_doctype_permission("Overseas Cost Item", "write", doc=item_name)
     return calculate_service.delete_item(
+        item_name=item_name,
+        batch_name=batch_name,
+        version_name=version_name,
+        remark=remark,
+        edit_token=edit_token,
+        expected_modified=expected_modified,
+    )
+
+
+@frappe.whitelist()
+def restore_item(
+    item_name: str,
+    batch_name: str | None = None,
+    version_name: str | None = None,
+    remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
+) -> dict:
+    """恢复一条被软排除的物料明细。"""
+
+    require_doctype_permission("Overseas Cost Item", "write", doc=item_name)
+    return calculate_service.restore_item(
         item_name=item_name,
         batch_name=batch_name,
         version_name=version_name,

@@ -12,9 +12,9 @@ def test_approval_column_stays_last_with_auxiliary_columns():
     ''')
     for fields in result.values():
         assert fields[:3] == ['row_no', 'material_code', 'product_name']
-        assert fields[-1] == 'source_doc_no'
+        assert fields[-2:] == ['source_doc_no', '__actions']
         assert fields.count('source_doc_no') == 1
-    assert result['auxiliary'][-2] == 'source_file_name'
+    assert result['auxiliary'][-3] == 'source_file_name'
 
 
 def test_normal_and_ai_rows_identify_cells_by_field_after_reordering():

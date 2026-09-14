@@ -15,7 +15,7 @@ def batch_context(name, *, dirty=False, confirmed=False, estimated=False):
     context["batch"].update(name=name, current_version=f"V-{name}")
     context["version"].update(name=f"V-{name}", batch=name)
     for row in context["items"]:
-        row.update(name=f"I-{name}", batch=name, version=f"V-{name}")
+        row.update(name=f"I-{name}", batch=name, version=f"V-{name}", is_excluded=0)
     for index, row in enumerate(context["fees"]):
         row.update(name=f"F-{name}-{index}", batch=name, version=f"V-{name}")
     if estimated:
@@ -114,6 +114,8 @@ def test_readiness_queries_are_bounded_by_chunks_and_only_authorized_batch_ids(m
         selected_ids = kwargs["filters"]["batch"][1]
         assert set(selected_ids) <= set(allowed)
         assert len(selected_ids) <= 200
+        if _doctype == "Overseas Cost Item":
+            assert kwargs["filters"]["is_excluded"] == 0
         assert kwargs["limit_page_length"] == 0
 
 

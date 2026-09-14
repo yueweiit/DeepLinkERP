@@ -180,12 +180,13 @@ fill.row_review={...fill.row_review,rows:[
  {...fill.row_review.rows[0],row_id:'lower',source_group_id:'oa',source_priority:2,source_label:'国际物流审批',lower_priority:true,conflict_fields:['gross_weight_kg'],default_update_selected:false},
  fill.row_review.rows[1]
 ],source_groups:[
- {group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,row_ids:['source'],has_conflicts:false},
+ {group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,priority_reason:'当前无有效实际装箱匹配，采用流程装箱单附件',actual_packing_match_status:'none',row_ids:['source'],has_conflicts:false},
  {group_id:'oa',source_id:'LOGISTICS-OA',source_label:'国际物流审批',priority:2,row_ids:['lower'],has_conflicts:true}
 ]};
 delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
 const html=w.renderMaterialAIReviewDialogContent();
 assert(html.includes('来源 1'));assert(html.includes('来源 2'));assert(html.includes('国际物流装箱清单.xlsx'));
+assert(html.includes('当前无有效实际装箱匹配，采用流程装箱单附件'));
 assert(html.includes('data-mf-ai-source-group="packing" open'));
 assert(html.includes('与更高优先级来源冲突'));
 assert(html.includes('当前已有'));

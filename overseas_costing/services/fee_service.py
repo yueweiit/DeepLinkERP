@@ -949,7 +949,7 @@ def get_fee_worklist(batch_name: str, version_name: str | None = None) -> dict:
     rules = compose_fee_worklist_rows(_query_rules(batch_name, version), transport_mode,source_context=source_context)
     raw_items = frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_name, "version": version},
+        filters={"batch": batch_name, "version": version, "is_excluded": 0},
         fields=[
             "name",
             "stable_line_key",

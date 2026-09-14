@@ -3745,6 +3745,14 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "fee_fingerprint": hashlib.sha256(_json(existing_fees).encode()).hexdigest(),
                 "material_input_fingerprint": material_fingerprint(items,sources,context),
             }
+            merged_amount_groups = [
+                {"source_id": fill.get("source_id"), "sheet_name": fill.get("sheet_name"), **group}
+                for document in documents
+                for fill in document.get("shipment_fills") or []
+                for group in fill.get("merged_amount_groups") or []
+            ]
+            draft["merged_amount_groups"] = merged_amount_groups
+            draft["autofill_preview"]["merged_amount_groups"] = deepcopy(merged_amount_groups)
             cargo_reviews = [review for document in documents for review in document.get('cargo_reviews') or []]
             if bound_source:
                 draft['source_context'] = effective_source.public_context(context.get('effective_source') or {})
@@ -4104,7 +4112,7 @@ class FrappeMaterialAIFillRepository:
 
         return frappe.get_all(
             "Overseas Cost Item",
-            filters={"batch": batch_name, "version": version_name},
+            filters={"batch": batch_name, "version": version_name, "is_excluded": 0},
             fields=list(dict.fromkeys([*GRID_FIELDS, "extra_json", "manual_override_flag", "manual_override_reason"])),
             order_by="row_no asc, name asc",
             limit_page_length=10000,
@@ -4477,7 +4485,7 @@ class FrappeMaterialAIFillRepository:
         before = {
             "items": frappe.get_all(
                 "Overseas Cost Item",
-                filters={"batch": audit["batch"], "version": audit["version"]},
+                filters={"batch": audit["batch"], "version": audit["version"], "is_excluded": 0},
                 fields=["*"],
                 order_by="row_no asc, name asc",
                 limit_page_length=10000,
@@ -4607,7 +4615,7 @@ class FrappeMaterialAIFillRepository:
             after = {
                 "items": frappe.get_all(
                     "Overseas Cost Item",
-                    filters={"batch": audit["batch"], "version": audit["version"]},
+                    filters={"batch": audit["batch"], "version": audit["version"], "is_excluded": 0},
                     fields=["*"],
                     order_by="row_no asc, name asc",
                     limit_page_length=10000,

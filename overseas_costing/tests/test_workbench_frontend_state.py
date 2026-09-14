@@ -68,6 +68,21 @@ def _detail_workspace_result(script: str) -> dict:
     return json.loads(completed.stdout)
 
 
+def test_existing_physical_cells_use_reasoned_correction_while_blank_cells_stay_editable() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    fields = source.split("materialPurchaseCorrectionFields()", 1)[1].split(
+        "renderMaterialFeeGridCell", 1
+    )[0]
+    renderer = source.split("renderMaterialFeeGridCell", 1)[1].split(
+        "shipmentValuationStatus", 1
+    )[0]
+
+    assert '"gross_weight_kg"' in fields
+    assert '"volume_m3"' in fields
+    assert "this.materialPurchaseCorrectionFields().has(column.field)" in renderer
+    assert "!this.materialValueIsPlaceholder(column.field, originalValue, item)" in renderer
+
+
 FEE_INPUT_FIXTURE = r"""
 function makeFeeInput({amount, currency, originalAmount, originalCurrency, forceActual=false, feeKey='international_sea_freight'}) {
   const classes = new Set();
@@ -1561,6 +1576,24 @@ console.log(JSON.stringify({value:html.includes('value="2"'),original:html.inclu
 """)
     assert result["value"] is True and result["original"] is True
     assert result["draft"]["value"] == "2"
+
+
+def test_material_grid_exposes_add_soft_exclude_restore_and_failed_cell_retry():
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();workspace.escape=value=>String(value??'');workspace.formatValue=value=>String(value??'');
+workspace.detailState={batchName:'B',versionName:'V',tab:'documents'};const state=workspace.ensureMaterialFeeState();
+state.materialDrafts={'I:gross_weight_kg':{itemName:'I',fieldname:'gross_weight_kg',value:'9.7',error:'并发冲突'}};
+const columns=workspace.materialFeeGridColumns();
+const cell=workspace.renderMaterialFeeGridCell({name:'I',gross_weight_kg:null,requirements:{missing_fields:['gross_weight_kg']}},columns.find(row=>row.field==='gross_weight_kg'),new Set(['gross_weight_kg']),1);
+const action=workspace.renderMaterialFeeGridCell({name:'I',material_code:'SKU',product_name:'物料'},columns.find(row=>row.field==='__actions'),new Set(),columns.length-1);
+console.log(JSON.stringify({fields:columns.map(row=>row.field),cell,action}));
+""")
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    assert result["fields"][-1] == "__actions"
+    assert 'value="9.7"' in result["cell"] and 'data-action="mf-retry-cell"' in result["cell"]
+    assert 'data-action="mf-exclude-item"' in result["action"]
+    assert 'data-action="mf-add-material"' in source
+    assert 'data-action="mf-excluded-materials"' in source
 
 
 def test_trial_saves_material_draft_before_reading_cost():

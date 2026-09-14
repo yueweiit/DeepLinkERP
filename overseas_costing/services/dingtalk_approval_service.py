@@ -155,6 +155,54 @@ def _form_fields(payload: dict) -> list[dict]:
     ]
 
 
+def _attachment_field_identities(payload: dict) -> dict[str, dict[str, str]]:
+    """Map archived file IDs back to their trusted approval form components.
+
+    Attachment archive rows intentionally do not need to duplicate the complete
+    approval form.  The approval payload is the authority for deciding which
+    component supplied a file; filenames are display data only.
+    """
+
+    identities: dict[str, dict[str, str]] = {}
+    fields = _json_list(payload.get("formComponentValues") or payload.get("form_component_values"))
+    for row in fields:
+        if not isinstance(row, dict):
+            continue
+        source_field = str(row.get("name") or row.get("label") or row.get("componentName") or "").strip()
+        workflow_field_id = str(
+            row.get("componentId")
+            or row.get("component_id")
+            or row.get("componentKey")
+            or row.get("component_key")
+            or row.get("fieldId")
+            or row.get("field_id")
+            or ""
+        ).strip()
+        value = row.get("value")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+
+        pending = [value]
+        while pending:
+            candidate = pending.pop()
+            if isinstance(candidate, list):
+                pending.extend(candidate)
+                continue
+            if not isinstance(candidate, dict):
+                continue
+            file_id = str(candidate.get("fileId") or candidate.get("file_id") or "").strip()
+            if file_id:
+                identities[file_id] = {
+                    "source_field": source_field,
+                    "workflow_field_id": workflow_field_id,
+                }
+            pending.extend(candidate.values())
+    return identities
+
+
 def _actor_identity(
     *,
     corp_id: str,
@@ -250,11 +298,28 @@ def _attachment_item(row: dict, local: dict | None, actors: dict | None = None) 
     file_name = str(row.get("file_name") or row.get("file_id") or "")
     archive_status = str(row.get("archive_status") or "pending")
     file_url = str((local or {}).get("file_url") or "")
+    local_snapshot = _json_dict((local or {}).get("parse_result_json"))
+    source_field = str(
+        row.get("source_field")
+        or row.get("field_name")
+        or local_snapshot.get("source_field")
+        or ""
+    )
+    workflow_field_id = str(
+        row.get("workflow_field_id")
+        or row.get("component_id")
+        or row.get("component_key")
+        or row.get("field_id")
+        or local_snapshot.get("workflow_field_id")
+        or ""
+    )
     normalized_name = file_name.lower()
     suffix = Path(file_name).suffix.lower()
     packing_candidate = any(keyword in normalized_name for keyword in PACKING_NAME_KEYWORDS)
     if suffix in {".xlsx", ".xlsm"}:
         packing_candidate = packing_candidate or "packing" in normalized_name or "清单" in normalized_name
+    normalized_field = source_field.replace("（", "(").replace("）", ")").replace(" ", "").lower()
+    packing_candidate = packing_candidate or "装箱单附件" in normalized_field
     failure_code = str(row.get("failure_code") or "")
     failure_reason = str(row.get("last_error") or "")
     if failure_code == "userNotExist" or "userNotExist" in failure_reason:
@@ -280,6 +345,8 @@ def _attachment_item(row: dict, local: dict | None, actors: dict | None = None) 
         "process_instance_id": str(row.get("process_instance_id") or ""),
         "space_id": str(row.get("space_id") or ""),
         "file_name": file_name,
+        "source_field": source_field,
+        "workflow_field_id": workflow_field_id,
         "declared_size": row.get("declared_size"),
         "actual_size": row.get("actual_size"),
         "origin": "Comment" if str(row.get("attachment_origin")) == "comment" else "Form",
@@ -428,13 +495,23 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
     actors = bundle.get("actors") or {}
     manifests_by_instance: dict[str, list[dict]] = defaultdict(list)
     local_by_file = _local_attachment_map(batch.get("name") or batch_name)
+    field_identities_by_instance = {
+        instance_id: _attachment_field_identities(payload)
+        for instance_id, payload in instances.items()
+        if isinstance(payload, dict)
+    }
     for row in bundle.get("attachments") or []:
         if not isinstance(row, dict):
             continue
         instance_id = str(row.get("process_instance_id") or "")
         file_id = str(row.get("file_id") or "")
+        trusted_identity = field_identities_by_instance.get(instance_id, {}).get(file_id) or {}
+        enriched_row = {
+            **row,
+            **trusted_identity,
+        }
         manifests_by_instance[instance_id].append(
-            _attachment_item(row, local_by_file.get((instance_id, file_id)), actors)
+            _attachment_item(enriched_row, local_by_file.get((instance_id, file_id)), actors)
         )
     linked_ids = trusted_linked_ids
     health = bundle.get("health") or {}
@@ -567,6 +644,8 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
         "process_instance_id": process_instance_id,
         "file_id": file_id,
         "space_id": source.get("space_id") or "",
+        "source_field": source.get("source_field") or "",
+        "workflow_field_id": source.get("workflow_field_id") or "",
         "attachment_origin": source.get("origin") or "Form",
         "comment_user_name": source.get("comment_user_name") or "",
         "comment_time": source.get("comment_time") or "",

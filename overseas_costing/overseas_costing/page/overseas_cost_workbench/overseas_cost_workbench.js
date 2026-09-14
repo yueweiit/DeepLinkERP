@@ -9474,6 +9474,26 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='mf-recover-material-rows']", () => {
       this.previewMaterialRowRecovery().catch((error) => this.showError(error));
     });
+    this.$root.on("click", "[data-action='mf-add-material']", () => {
+      this.openAddMaterialDialog(this.detailState.batchName);
+    });
+    this.$root.on("click", "[data-action='mf-excluded-materials']", () => {
+      this.openExcludedMaterialsDialog().catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-exclude-item']", (event) => {
+      const $button = $(event.currentTarget);
+      this.confirmDeleteMaterial(
+        this.detailState.batchName,
+        $button.attr("data-item-name"),
+        $button.attr("data-item-label")
+      );
+    });
+    this.$root.on("click", "[data-action='mf-retry-cell']", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const $input = $(event.currentTarget).closest(".ocw-mf-cell").find("[data-mf-cell-input]").first();
+      this.saveMaterialFeeCell($input).catch((error) => this.showError(error));
+    });
     this.$root.on("click", "[data-action='mf-ai-fill']", () => {
       const fill = this.ensureMaterialFeeState().aiFill;
       if (["STARTING", "QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
@@ -9911,6 +9931,8 @@ class OverseasCostWorkbench {
             <div class="ocw-mf-material-actions">
               <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
               <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
+              <button class="ocw-outline-btn" type="button" data-action="mf-add-material">新增物料</button>
+              <button class="ocw-outline-btn" type="button" data-action="mf-excluded-materials">已排除物料</button>
               <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
               <button class="ocw-outline-btn" type="button" data-action="mf-recover-material-rows">恢复误删物料</button>
               ${this.renderMaterialAIProgressChip()}
@@ -9939,6 +9961,46 @@ class OverseasCostWorkbench {
   renderMaterialFeeMetric(label, value, tone) {
     const number = Number(value || 0);
     return `<div class="ocw-mf-metric is-${this.escape(tone)}"><span>${this.escape(label)}</span><strong>${this.escape(String(number))}</strong><em>${number ? "待处理" : "已清零"}</em></div>`;
+  }
+
+  async openExcludedMaterialsDialog() {
+    const result = await this.call("overseas_costing.api.materials.get_excluded_materials", {
+      batch_name: this.detailState.batchName,
+      version_name: this.detailState.versionName || null,
+    }, true);
+    if (!result?.ok) throw new Error(result?.message || "已排除物料读取失败");
+    const rows = result.items || [];
+    const html = rows.length
+      ? `<div class="ocw-mf-excluded-list">${rows.map((item) => `<div><span><strong>${this.escape(item.material_code || "--")}</strong> ${this.escape(item.product_name || "")}</span><small>${this.escape(item.exclusion_reason || "未填写原因")} · ${this.escape(item.excluded_by || "--")}</small><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-restore-excluded" data-item-name="${this.escape(item.name)}">恢复</button></div>`).join("")}</div>`
+      : `<div class="ocw-detail-empty"><strong>当前没有已排除物料</strong></div>`;
+    const dialog = new frappe.ui.Dialog({
+      title: "已排除物料",
+      fields: [{ fieldtype: "HTML", fieldname: "rows", options: html }],
+    });
+    dialog.show();
+    dialog.$wrapper.on("click", "[data-action='mf-restore-excluded']", async (event) => {
+      const $button = $(event.currentTarget);
+      $button.prop("disabled", true);
+      try {
+        if (!(await this.ensureMaterialFeeEditSession())) return;
+        const restored = await this.call("overseas_costing.api.calculate.restore_item", {
+          item_name: $button.attr("data-item-name"),
+          batch_name: this.detailState.batchName,
+          version_name: this.detailState.versionName || null,
+          remark: "前端恢复已排除物料",
+          edit_token: this.detailState.editToken,
+          expected_modified: this.detailState.expectedModified,
+        }, true);
+        if (!restored?.ok) throw new Error(restored?.message || "物料恢复失败");
+        this.updateMaterialFeeExpectedModified(restored);
+        dialog.hide();
+        await this.loadMaterialFeeWorkspace({ quiet: true });
+        frappe.show_alert({ message: restored.message || "物料已恢复", indicator: "green" });
+      } catch (error) {
+        $button.prop("disabled", false);
+        this.showError(error);
+      }
+    });
   }
 
   renderMaterialFeeTable(fees) {
@@ -10192,6 +10254,7 @@ class OverseasCostWorkbench {
       );
     }
     columns.push({ field: "source_doc_no", label: "采购审批号", readonly: true, width: 220 });
+    columns.push({ field: "__actions", label: "操作", readonly: true, width: 86 });
     return columns;
   }
 
@@ -10300,6 +10363,11 @@ class OverseasCostWorkbench {
     if (value === null || value === undefined) return true;
     const text = String(value).trim().replace(/\s+/g, " ").toLowerCase();
     if (["", "-", "--", "/", "\\", "n/a", "na", "null", "none", "无", "暂无"].includes(text)) return true;
+    if (["actual_shipped_qty", "shipped_uom"].includes(String(fieldname || ""))) {
+      const mode = String(item.actual_shipped_qty_mode || item.effective_shipping?.mode || "").toUpperCase();
+      if (["DEFAULT_PURCHASE", "LEGACY_UNVERIFIED"].includes(mode)) return true;
+    }
+    if (fieldname === "shipment_value_rmb" && (item.shipment_valuation?.error || item.shipment_valuation?.status === "missing")) return true;
     const zeroMissing = ["goods_value", "unit_price", "net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg"];
     if (zeroMissing.includes(String(fieldname || "")) && Number(text) === 0) return true;
     if (fieldname === "actual_shipped_qty" && Number(text) === 0) {
@@ -10310,10 +10378,18 @@ class OverseasCostWorkbench {
   }
 
   materialPurchaseCorrectionFields() {
-    return new Set(["goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"]);
+    return new Set([
+      "goods_value", "shipment_value_rmb", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom",
+      "actual_shipped_qty", "shipped_uom", "net_weight_kg", "gross_weight_kg", "volume_m3",
+      "chargeable_weight_kg", "project_collection",
+    ]);
   }
 
   renderMaterialFeeGridCell(item, column, missingFields, columnIndex) {
+    if (column.field === "__actions") {
+      const label = [item.material_code, item.product_name].filter(Boolean).join(" ") || item.name;
+      return `<td class="ocw-mf-cell ocw-mf-actions-cell" data-mf-column-index="${columnIndex}" data-mf-grid-field="__actions"><button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-exclude-item" data-item-name="${this.escape(item.name || "")}" data-item-label="${this.escape(label)}">删除</button></td>`;
+    }
     let value = item[column.field];
     if (item.source_adoption_state === "historical_pending" && ["material_code", "product_name"].includes(column.field)) {
       return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><span>${this.escape(value ?? "--")}</span><small>历史行 · 当前未采用</small></td>`;
@@ -10343,13 +10419,14 @@ class OverseasCostWorkbench {
     const isMissing = missingFields.has(column.field);
     const isDefault = shippingField && item.effective_shipping?.is_default;
     const requiresCorrection = Boolean(
-      column.purchaseField
+      this.materialPurchaseCorrectionFields().has(column.field)
       && !this.materialValueIsPlaceholder(column.field, originalValue, item)
       && !draft
       && !aiUpdate
       && !manualUpdate
     );
     const valuationStatus = column.field === "shipment_value_rmb" ? this.shipmentValuationStatus(item.shipment_valuation) : "";
+    const valuationMeta = column.field === "shipment_value_rmb" ? this.renderShipmentValuationMeta(item.shipment_valuation, item.name) : "";
     const classes = ["ocw-mf-cell", isMissing ? "is-missing" : "", isDefault ? "is-default" : "", column.readonly ? "is-readonly" : "", requiresCorrection ? "is-protected-purchase" : "", draft?.error ? "is-save-error" : "", aiUpdate || manualUpdate ? "is-ai-draft" : "", aiCell && !aiUpdate ? "has-ai-candidate" : "", valuationStatus ? "is-shipment-valuation" : "", valuationStatus ? `is-valuation-${valuationStatus}` : ""].filter(Boolean).join(" ");
     const reason = draft?.error || (column.field === "shipment_value_rmb" ? item.shipment_valuation?.error_detail : "") || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
@@ -10357,13 +10434,13 @@ class OverseasCostWorkbench {
       return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
     }
     if (requiresCorrection) {
-      return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="已有有效采购值；修正时需填写原因"><span>${this.escape(this.formatValue(value ?? "--"))}</span><button type="button" class="ocw-mf-purchase-correct" data-action="mf-correct-purchase" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}">修正</button>${this.renderMaterialAICandidates(item.name, column.field, aiCell, false)}</td>`;
+      return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="已有有效值；修正时需填写原因"><span>${this.escape(this.formatValue(value ?? "--"))}</span>${valuationMeta}<button type="button" class="ocw-mf-purchase-correct" data-action="mf-correct-purchase" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}">修正</button>${this.renderMaterialAICandidates(item.name, column.field, aiCell, false)}</td>`;
     }
     const editor = Array.isArray(column.options)
       ? `<select data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" aria-label="${this.escape(column.label)}"><option value="">请选择</option>${column.options.map((option) => `<option value="${this.escape(option.value)}" ${String(value || "") === String(option.value) ? "selected" : ""}>${this.escape(option.label)}</option>`).join("")}</select>`
       : `<input data-mf-cell-input="1" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}" data-original-value="${this.escape(originalValue ?? "")}" value="${this.escape(value ?? "")}" ${column.numeric ? 'inputmode="decimal"' : ""} aria-label="${this.escape(column.label)}" />`;
-    const valuationMeta = column.field === "shipment_value_rmb" ? this.renderShipmentValuationMeta(item.shipment_valuation) : "";
-    return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(reason)}">${editor}${valuationMeta}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
+    const retry = draft?.error ? `<button type="button" class="ocw-mf-cell-retry" data-action="mf-retry-cell">重试</button>` : "";
+    return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(reason)}">${editor}${valuationMeta}${retry}${aiUpdate ? `<small>AI 草稿${aiUpdate.user_edited ? " · 已修改" : ""}</small>` : manualUpdate ? `<small>人工草稿</small>` : isDefault && column.field === "actual_shipped_qty" ? `<small>默认=采购数</small>` : ""}${this.renderMaterialAICandidates(item.name, column.field, aiCell, Boolean(aiUpdate))}</td>`;
   }
 
   shipmentValuationStatus(valuation = {}) {
@@ -10371,7 +10448,7 @@ class OverseasCostWorkbench {
     return ["automatic", "manual", "conflict", "missing", "stale"].includes(status) ? status : "missing";
   }
 
-  renderShipmentValuationMeta(valuation = {}) {
+  renderShipmentValuationMeta(valuation = {}, itemName = "") {
     const status = this.shipmentValuationStatus(valuation);
     const labels = {
       automatic: "自动估值",
@@ -10383,13 +10460,20 @@ class OverseasCostWorkbench {
     if (status !== "conflict") return `<small class="ocw-mf-valuation-status">${labels[status]}</small>`;
     const prior = valuation?.prior_amount_rmb ?? "";
     const calculated = valuation?.calculated_amount_rmb ?? "";
-    return `<small class="ocw-mf-valuation-status">待确认 · 旧值 ${this.escape(prior)} · 计算值 ${this.escape(calculated)}</small><div class="ocw-mf-valuation-actions"><button type="button" data-action="mf-shipment-valuation-adopt" data-value="${this.escape(prior)}">采用旧值</button><button type="button" data-action="mf-shipment-valuation-adopt" data-value="${this.escape(calculated)}">采用计算值</button></div>`;
+    return `<small class="ocw-mf-valuation-status">待确认 · 旧值 ${this.escape(prior)} · 计算值 ${this.escape(calculated)}</small><div class="ocw-mf-valuation-actions"><button type="button" data-action="mf-shipment-valuation-adopt" data-item-name="${this.escape(itemName)}" data-value="${this.escape(prior)}">采用旧值</button><button type="button" data-action="mf-shipment-valuation-adopt" data-item-name="${this.escape(itemName)}" data-value="${this.escape(calculated)}">采用计算值</button></div>`;
   }
 
   async adoptShipmentValuationCandidate($button) {
     if (!$button?.attr) return;
     const $input = $button.closest(".ocw-mf-cell").find("[data-mf-cell-input]").first();
-    if (!$input?.length) return;
+    if (!$input?.length) {
+      this.openMaterialPurchaseCorrectionDialog(
+        String($button.attr("data-item-name") || ""),
+        "shipment_value_rmb",
+        String($button.attr("data-value") ?? "")
+      );
+      return;
+    }
     $input.val(String($button.attr("data-value") ?? ""));
     this.updateMaterialDraftFromInput($input);
     return this.saveMaterialFeeCell($input);
@@ -11049,6 +11133,8 @@ class OverseasCostWorkbench {
     const missing = preview?.missing_fields || [];
     const missingCount = Array.isArray(missing) ? missing.length : Number(missing.count ?? missing) || Object.keys(missing).length;
     const notices = [...(preview?.unresolved || []), ...(Array.isArray(missing) ? missing : [])];
+    const mergedAmountGroups = preview?.merged_amount_groups || fill.draft?.merged_amount_groups || [];
+    const mergedAmountSummary = mergedAmountGroups.length ? `<section class="ocw-mf-ai-preview-section"><h4>合并金额校验</h4><ul>${mergedAmountGroups.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · 第 ${this.escape(group.source_range?.start_row ?? group.source_row ?? "--")}-${this.escape(group.source_range?.end_row ?? group.source_row ?? "--")} 行 · 组总额 ${this.escape(group.control_total_rmb ?? "--")} · 独立行合计 ${this.escape(group.computed_total_rmb ?? "--")} · ${group.status === "verified" ? "已校验" : "待人工分摊"}</li>`).join("")}</ul></section>` : "";
     const fieldLabels = Object.fromEntries(columns);
     const renderCandidateRows = rows => rows.map(row => {
       const allowed = selection.mode === "update_selected" ? row.can_update : selection.mode === "add_selected" ? row.can_add : row.can_fill;
@@ -11063,7 +11149,8 @@ class OverseasCostWorkbench {
     const groupedIds = new Set(sourceGroups.flatMap(group => group.row_ids || []).map(String));
     const sourceTables = sourceGroups.map((group, index) => {
       const groupRows = (group.row_ids || []).map(id => rowsById.get(String(id))).filter(Boolean);
-      return `<details class="ocw-mf-ai-source-candidate-group${group.has_conflicts ? " has-conflicts" : ""}" data-mf-ai-source-group="${this.escape(group.group_id)}" ${index === 0 ? "open" : ""}><summary><strong>来源 ${index + 1} · ${this.escape(group.source_label || group.source_id || "未命名来源")}</strong><span>优先级 ${Number(group.priority || index + 1)} · ${groupRows.length} 行${group.has_conflicts ? " · 有冲突" : ""}</span></summary>${renderCandidateTable(groupRows)}</details>`;
+      const priorityReason = group.priority_reason ? `<p class="ocw-mf-ai-source-priority-reason">${this.escape(group.priority_reason)}</p>` : "";
+      return `<details class="ocw-mf-ai-source-candidate-group${group.has_conflicts ? " has-conflicts" : ""}" data-mf-ai-source-group="${this.escape(group.group_id)}" ${index === 0 ? "open" : ""}><summary><strong>来源 ${index + 1} · ${this.escape(group.source_label || group.source_id || "未命名来源")}</strong><span>优先级 ${Number(group.priority || index + 1)} · ${groupRows.length} 行${group.has_conflicts ? " · 有冲突" : ""}</span></summary>${priorityReason}${renderCandidateTable(groupRows)}</details>`;
     }).join("");
     const otherSourceRows = (catalog.rows || []).filter(row => row.origin === "source" && !groupedIds.has(String(row.row_id)));
     const currentRows = (catalog.rows || []).filter(row => row.origin === "current");
@@ -11079,7 +11166,7 @@ class OverseasCostWorkbench {
         const values = fee.payload || fee;
         return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${selection.mode === "add_selected" || !fee.can_apply || fill.applying ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${value(fee.previous_amount ?? values.previous_amount)}</td><td>${value(fee.blocked_reason || values.remark || values.source_label || fee.reason || "")}${!fee.can_apply ? "<small>只读 · 不可采用</small>" : selection.mode === "add_selected" ? "<small>新增物料需单独确认</small>" : ""}</td></tr>`;
       }).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>
-      <section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
+      ${mergedAmountSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
       <details class="ocw-mf-ai-review-advanced"><summary>资料来源与报价记录</summary>${this.renderMaterialAIReviewSources(fill)}${(catalog.fees || []).map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
@@ -12056,7 +12143,7 @@ class OverseasCostWorkbench {
     else restore();
   }
 
-  openMaterialPurchaseCorrectionDialog(itemName, fieldname) {
+  openMaterialPurchaseCorrectionDialog(itemName, fieldname, suggestedValue = undefined) {
     const item = this.findMaterialFeeItem(itemName);
     if (!item) {
       frappe.show_alert({ message: "物料行已变化，请刷新后重试", indicator: "red" });
@@ -12064,8 +12151,8 @@ class OverseasCostWorkbench {
     }
     const column = this.materialFeeGridColumns().find((entry) => entry.field === fieldname) || { label: fieldname };
     const valueField = column.options
-      ? { fieldtype: "Select", fieldname: "value", label: column.label, options: column.options.map((option) => option.value).join("\n"), default: item[fieldname] || "" }
-      : { fieldtype: column.numeric ? "Float" : "Data", fieldname: "value", label: column.label, default: item[fieldname] ?? "", reqd: 1 };
+      ? { fieldtype: "Select", fieldname: "value", label: column.label, options: column.options.map((option) => option.value).join("\n"), default: suggestedValue ?? item[fieldname] ?? "" }
+      : { fieldtype: column.numeric ? "Float" : "Data", fieldname: "value", label: column.label, default: suggestedValue ?? item[fieldname] ?? "", reqd: 1 };
     const dialog = new frappe.ui.Dialog({
       title: `修正${column.label}`,
       fields: [
@@ -12096,10 +12183,10 @@ class OverseasCostWorkbench {
           edit_token: this.detailState.editToken,
           expected_modified: this.detailState.expectedModified,
         }, true);
-        if (!result?.ok) throw new Error(result?.message || "采购字段修正失败");
+        if (!result?.ok) throw new Error(result?.message || "物料字段修正失败");
         this.updateMaterialFeeExpectedModified(result);
         dialog.hide();
-        frappe.show_alert({ message: "采购字段修正已保存", indicator: "green" });
+        frappe.show_alert({ message: "物料字段修正已保存", indicator: "green" });
         await this.loadMaterialFeeWorkspace({ quiet: true });
       },
     });
@@ -12248,7 +12335,7 @@ class OverseasCostWorkbench {
       });
     });
     if (protectedPurchaseCorrections.length) {
-      frappe.show_alert({ message: "粘贴内容包含已有有效采购值，请在对应单元格使用“修正”并填写原因。", indicator: "orange" });
+      frappe.show_alert({ message: "粘贴内容包含已有有效值，请在对应单元格使用“修正”并填写原因。", indicator: "orange" });
       return;
     }
     if (!updates.length) {
@@ -18536,22 +18623,33 @@ class OverseasCostWorkbench {
   }
 
   async createMaterial(batch, itemPayload) {
+    let acquired = null;
     try {
+      const inDetail = this.detailState?.batchName === batch.name;
+      if (inDetail && !(await this.ensureMaterialFeeEditSession())) return false;
+      if (!inDetail) {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "无法获取编辑权。");
+      }
       const result = await this.call(
         "overseas_costing.api.calculate.create_item",
         {
           batch_name: batch.name,
-          version_name: batch.current_version,
+          version_name: inDetail ? this.detailState.versionName : batch.current_version,
           item_payload: JSON.stringify(itemPayload),
           remark: "前端添加新物料",
+          edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+          expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
         true
       );
       if (!result.ok) throw new Error(result.message || "新增物料失败");
+      if (inDetail) this.updateMaterialFeeExpectedModified(result);
       this.markBatchDirty(batch.name);
       this.resetFilterValues();
-      await this.loadBatchItems(batch.name, batch.current_version, true);
-      await this.loadAuditLogs(batch.name, batch.current_version);
+      if (inDetail && this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });
+      else await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, inDetail ? this.detailState.versionName : batch.current_version);
       this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.updateSearchResult();
@@ -18560,6 +18658,10 @@ class OverseasCostWorkbench {
     } catch (error) {
       this.showError(error);
       return false;
+    } finally {
+      if (acquired?.edit_token) {
+        await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token }).catch(() => {});
+      }
     }
   }
 
@@ -18569,9 +18671,9 @@ class OverseasCostWorkbench {
     frappe.confirm(
       `
         <div class="ocw-confirm-copy">
-          <h4>确认删除物料？</h4>
-          <p>将从 ${this.escape(batch.waybill_no || batch.batch_no || batch.name)} 下删除物料：${this.escape(itemLabel || itemName)}。</p>
-          <div class="ocw-confirm-note">删除后批次会标记为 Dirty，并写入修改记录。</div>
+          <h4>确认排除物料？</h4>
+          <p>将从 ${this.escape(batch.waybill_no || batch.batch_no || batch.name)} 的当前表中排除：${this.escape(itemLabel || itemName)}。</p>
+          <div class="ocw-confirm-note">该操作不会物理删除来源和历史，可从“已排除物料”恢复。</div>
         </div>
       `,
       async () => {
@@ -18581,26 +18683,41 @@ class OverseasCostWorkbench {
   }
 
   async deleteMaterial(batch, itemName, itemLabel) {
+    let acquired = null;
     try {
+      const inDetail = this.detailState?.batchName === batch.name;
+      if (inDetail && !(await this.ensureMaterialFeeEditSession())) return;
+      if (!inDetail) {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "无法获取编辑权。");
+      }
       const result = await this.call(
         "overseas_costing.api.calculate.delete_item",
         {
           item_name: itemName,
           batch_name: batch.name,
-          version_name: batch.current_version,
-          remark: `前端删除物料：${itemLabel || itemName}`,
+          version_name: inDetail ? this.detailState.versionName : batch.current_version,
+          remark: `前端软排除物料：${itemLabel || itemName}`,
+          edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+          expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
         true
       );
-      if (!result.ok) throw new Error(result.message || "删除物料失败");
+      if (!result.ok) throw new Error(result.message || "排除物料失败");
+      if (inDetail) this.updateMaterialFeeExpectedModified(result);
       this.markBatchDirty(batch.name);
-      await this.loadBatchItems(batch.name, batch.current_version, true);
-      await this.loadAuditLogs(batch.name, batch.current_version);
+      if (inDetail && this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });
+      else await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, inDetail ? this.detailState.versionName : batch.current_version);
       this.expandedBatchNames.add(batch.name);
       this.renderTable();
-      frappe.show_alert({ message: result.message || "物料已删除", indicator: "green" });
+      frappe.show_alert({ message: result.message || "物料已排除，可恢复", indicator: "green" });
     } catch (error) {
       this.showError(error);
+    } finally {
+      if (acquired?.edit_token) {
+        await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token }).catch(() => {});
+      }
     }
   }
 

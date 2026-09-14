@@ -499,7 +499,10 @@ const quantity=w.renderMaterialFeeGridCell(item,{field:'actual_shipped_qty',labe
 const unit=w.renderMaterialFeeGridCell(item,{field:'shipped_uom',label:'发货单位'},new Set(),2);
 assert(quantity.includes('采购支出采用'));assert(quantity.includes('6'));assert(quantity.includes('装箱原值 4 箱'));
 assert(!quantity.includes('<input'));assert(!unit.includes('<input'));assert(unit.includes('件'));
-assert(w.renderMaterialFeeGridCell({...item,settlement_cargo:null},{field:'actual_shipped_qty',label:'发货数量'},new Set(),1).includes('<input'));
+const existing=w.renderMaterialFeeGridCell({...item,settlement_cargo:null},{field:'actual_shipped_qty',label:'发货数量'},new Set(),1);
+assert(!existing.includes('<input'));assert(existing.includes('修正'));
+const blank=w.renderMaterialFeeGridCell({...item,actual_shipped_qty:null,effective_shipping_quantity:null,settlement_cargo:null},{field:'actual_shipped_qty',label:'发货数量'},new Set(),1);
+assert(blank.includes('<input'));
 ''')
 
 

@@ -180,22 +180,33 @@
   }
 
   async createMaterial(batch, itemPayload) {
+    let acquired = null;
     try {
+      const inDetail = this.detailState?.batchName === batch.name;
+      if (inDetail && !(await this.ensureMaterialFeeEditSession())) return false;
+      if (!inDetail) {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "无法获取编辑权。");
+      }
       const result = await this.call(
         "overseas_costing.api.calculate.create_item",
         {
           batch_name: batch.name,
-          version_name: batch.current_version,
+          version_name: inDetail ? this.detailState.versionName : batch.current_version,
           item_payload: JSON.stringify(itemPayload),
           remark: "前端添加新物料",
+          edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+          expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
         true
       );
       if (!result.ok) throw new Error(result.message || "新增物料失败");
+      if (inDetail) this.updateMaterialFeeExpectedModified(result);
       this.markBatchDirty(batch.name);
       this.resetFilterValues();
-      await this.loadBatchItems(batch.name, batch.current_version, true);
-      await this.loadAuditLogs(batch.name, batch.current_version);
+      if (inDetail && this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });
+      else await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, inDetail ? this.detailState.versionName : batch.current_version);
       this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.updateSearchResult();
@@ -204,6 +215,10 @@
     } catch (error) {
       this.showError(error);
       return false;
+    } finally {
+      if (acquired?.edit_token) {
+        await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token }).catch(() => {});
+      }
     }
   }
 
@@ -213,9 +228,9 @@
     frappe.confirm(
       `
         <div class="ocw-confirm-copy">
-          <h4>确认删除物料？</h4>
-          <p>将从 ${this.escape(batch.waybill_no || batch.batch_no || batch.name)} 下删除物料：${this.escape(itemLabel || itemName)}。</p>
-          <div class="ocw-confirm-note">删除后批次会标记为 Dirty，并写入修改记录。</div>
+          <h4>确认排除物料？</h4>
+          <p>将从 ${this.escape(batch.waybill_no || batch.batch_no || batch.name)} 的当前表中排除：${this.escape(itemLabel || itemName)}。</p>
+          <div class="ocw-confirm-note">该操作不会物理删除来源和历史，可从“已排除物料”恢复。</div>
         </div>
       `,
       async () => {
@@ -225,26 +240,41 @@
   }
 
   async deleteMaterial(batch, itemName, itemLabel) {
+    let acquired = null;
     try {
+      const inDetail = this.detailState?.batchName === batch.name;
+      if (inDetail && !(await this.ensureMaterialFeeEditSession())) return;
+      if (!inDetail) {
+        acquired = await this.call("overseas_costing.api.edit_session.acquire", { batch_name: batch.name });
+        if (!acquired?.ok) throw new Error(acquired?.message || "无法获取编辑权。");
+      }
       const result = await this.call(
         "overseas_costing.api.calculate.delete_item",
         {
           item_name: itemName,
           batch_name: batch.name,
-          version_name: batch.current_version,
-          remark: `前端删除物料：${itemLabel || itemName}`,
+          version_name: inDetail ? this.detailState.versionName : batch.current_version,
+          remark: `前端软排除物料：${itemLabel || itemName}`,
+          edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
+          expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
         true
       );
-      if (!result.ok) throw new Error(result.message || "删除物料失败");
+      if (!result.ok) throw new Error(result.message || "排除物料失败");
+      if (inDetail) this.updateMaterialFeeExpectedModified(result);
       this.markBatchDirty(batch.name);
-      await this.loadBatchItems(batch.name, batch.current_version, true);
-      await this.loadAuditLogs(batch.name, batch.current_version);
+      if (inDetail && this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });
+      else await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, inDetail ? this.detailState.versionName : batch.current_version);
       this.expandedBatchNames.add(batch.name);
       this.renderTable();
-      frappe.show_alert({ message: result.message || "物料已删除", indicator: "green" });
+      frappe.show_alert({ message: result.message || "物料已排除，可恢复", indicator: "green" });
     } catch (error) {
       this.showError(error);
+    } finally {
+      if (acquired?.edit_token) {
+        await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token }).catch(() => {});
+      }
     }
   }
 

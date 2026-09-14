@@ -184,6 +184,106 @@ def test_form_fields_render_structured_values_without_download_credentials() -> 
     assert "SECRET" not in rendered
 
 
+def test_attachment_item_keeps_workflow_field_identity_without_exposing_credentials() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    item = service._attachment_item({
+        "process_instance_id": "PROC-1",
+        "file_id": "FILE-1",
+        "file_name": "任意名称.xlsx",
+        "source_field": "装箱单附件（Excel）",
+        "component_id": "COMPONENT-1",
+        "auth_media_id": "SECRET",
+        "archive_status": "archived",
+    }, None)
+
+    assert item["source_field"] == "装箱单附件（Excel）"
+    assert item["workflow_field_id"] == "COMPONENT-1"
+    assert "SECRET" not in repr(item)
+
+
+def test_attachment_field_identity_is_resolved_from_trusted_approval_component() -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    payload = {
+        "formComponentValues": [{
+            "name": "装箱单附件（Excel）",
+            "componentId": "COMPONENT-PACKING-EXCEL",
+            "value": json.dumps([{
+                "fileName": "指环扣+亮甲包装袋2.0+宠物用品发货清单-packing list2026.9.5.xlsx",
+                "fileId": "FILE-PACKING-1",
+                "spaceId": "SPACE-SECRET",
+                "authMediaId": "AUTH-SECRET",
+            }], ensure_ascii=False),
+        }],
+    }
+
+    identities = service._attachment_field_identities(payload)
+
+    assert identities == {
+        "FILE-PACKING-1": {
+            "source_field": "装箱单附件（Excel）",
+            "workflow_field_id": "COMPONENT-PACKING-EXCEL",
+        },
+    }
+    assert "SECRET" not in repr(identities)
+
+
+def test_batch_detail_enriches_archive_attachment_from_approval_component(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    class DB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {
+                "name": "B1", "batch_no": "OA-1", "source_type": "oa_logistics",
+                "source_approval_no": "OA-1", "source_instance_id": "MAIN", "extra_json": "{}",
+            }
+
+    class Source:
+        @staticmethod
+        def get_instance_bundle(_ids):
+            return {
+                "instances": {
+                    "MAIN": {
+                        "processInstanceId": "MAIN",
+                        "businessId": "OA-1",
+                        "status": "COMPLETED",
+                        "formComponentValues": [{
+                            "name": "装箱单附件（Excel）",
+                            "componentId": "PACKING-FIELD",
+                            "value": json.dumps([{
+                                "fileName": "任意文件名.xlsx",
+                                "fileId": "FILE-1",
+                                "spaceId": "SPACE-SECRET",
+                            }], ensure_ascii=False),
+                        }],
+                    },
+                },
+                "attachments": [{
+                    "process_instance_id": "MAIN",
+                    "file_id": "FILE-1",
+                    "file_name": "任意文件名.xlsx",
+                    "source_field": "其他附件",
+                    "component_id": "WRONG-FIELD",
+                    "attachment_origin": "form",
+                    "archive_status": "archived",
+                }],
+                "health": {},
+            }
+
+    monkeypatch.setattr(service, "frappe", type("F", (), {"db": DB()})())
+    monkeypatch.setattr(service, "_get_approval_source", lambda: Source())
+
+    result = service.get_batch_dingtalk_approval_detail("B1")
+
+    attachment = result["main_approval"]["attachments"][0]
+    assert attachment["source_field"] == "装箱单附件（Excel）"
+    assert attachment["workflow_field_id"] == "PACKING-FIELD"
+    assert attachment["packing_candidate"] is True
+    assert "SECRET" not in repr(attachment)
+
+
 def test_batch_detail_resolves_actor_names_and_audits_excluded_linked_approval(monkeypatch) -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

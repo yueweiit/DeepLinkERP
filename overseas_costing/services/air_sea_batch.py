@@ -90,7 +90,7 @@ def load_batch(batch_name):
     if not version or frappe.db.get_value("Overseas Cost Version", version, "batch") != batch_name:
         raise ValueError("当前批次没有有效的成本版本。")
     available_fields = {field.fieldname for field in frappe.get_meta("Overseas Cost Item").fields} | {"name", "modified"}
-    items = frappe.get_all("Overseas Cost Item", filters={"batch": batch_name, "version": version},
+    items = frappe.get_all("Overseas Cost Item", filters={"batch": batch_name, "version": version, "is_excluded": 0},
         fields=[field for field in ITEM_FIELDS if field in available_fields],
         order_by="row_no asc, name asc", limit_page_length=5001)
     if len(items) > 5000:

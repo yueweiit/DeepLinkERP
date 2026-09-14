@@ -117,7 +117,7 @@ def _resolve_version_name(batch_doc_name: str, version_name: str | None = None) 
 def _fetch_batch_items(batch_doc_name: str, version_name: str, limit: int) -> list[dict]:
     return frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": version_name},
+        filters={"batch": batch_doc_name, "version": version_name, "is_excluded": 0},
         fields=ITEM_FIELDS,
         order_by="row_no asc",
         limit_page_length=limit,

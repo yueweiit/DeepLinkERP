@@ -1192,7 +1192,7 @@ def build_tax_certificate_reconciliation_preview(parsed: dict, batch_name: str |
             requested_batch_name=batch_name,
         )
 
-    filters = {"batch": batch["name"]}
+    filters = {"batch": batch["name"], "is_excluded": 0}
     if batch.get("current_version"):
         filters["version"] = batch["current_version"]
 
@@ -1468,7 +1468,7 @@ def _sync_tax_certificate_identity(*, parsed: dict, batch: dict, source_name: st
     if version_name:
         items = frappe.get_all(
             "Overseas Cost Item",
-            filters={"batch": batch_name, "version": version_name},
+            filters={"batch": batch_name, "version": version_name, "is_excluded": 0},
             fields=["name", "customs_no"],
             limit_page_length=10000,
         )

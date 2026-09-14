@@ -40,6 +40,13 @@ DEFAULT_FX_RMB_TO_MXN = 2.6
 PURCHASE_CORRECTION_FIELDS = frozenset(
     {"goods_value", "unit_price", "purchase_currency", "purchase_uom", "unit_price_uom"}
 )
+REASON_REQUIRED_ITEM_FIELDS = PURCHASE_CORRECTION_FIELDS | frozenset({
+    "net_weight_kg",
+    "gross_weight_kg",
+    "volume_m3",
+    "chargeable_weight_kg",
+    "project_collection",
+})
 SHIPMENT_VALUE_EDIT_FIELDS = frozenset({"shipment_value_rmb", "goods_value"})
 SHIPMENT_VALUE_INPUT_FIELDS = frozenset({
     "unit_price", "purchase_currency", "unit_price_uom", "purchase_uom",
@@ -1267,7 +1274,7 @@ def _get_version_context(version_name: str) -> dict:
 def _get_items(batch_doc_name: str, version_name: str) -> list[dict]:
     return _frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": version_name},
+        filters={"batch": batch_doc_name, "version": version_name, "is_excluded": 0},
         fields=ITEM_QUERY_FIELDS,
         order_by="row_no asc",
         limit_page_length=10000,
@@ -1426,6 +1433,9 @@ def update_item_field(
         }
 
     item_doc = _frappe.get_doc("Overseas Cost Item", item_name)
+    if int(getattr(item_doc, "is_excluded", 0) or 0):
+        return {"ok": False, "changed": False, "item_name": item_name,
+                "message": "该物料已被软排除，请先恢复后再编辑。"}
     from overseas_costing.services.effective_source_values import PHYSICAL_FIELDS, batch_source_context, project_source_values, physical_overlay_update
     source_context = batch_source_context(item_doc.batch,item_doc.version,lock=True)
     expense_physical = (source_context.get('root_kind') == 'expense' or (source_context.get('packing') or {}).get('selected_source')) and fieldname in PHYSICAL_FIELDS
@@ -1465,7 +1475,7 @@ def update_item_field(
                 "edit_mode": "server_metadata", "message": str(exc),
             }
     if (
-        fieldname in PURCHASE_CORRECTION_FIELDS
+        fieldname in REASON_REQUIRED_ITEM_FIELDS
         and not _edit_values_equal(fieldname, old_value, coerced_value)
         and not is_effectively_missing(fieldname, old_value, item_doc.as_dict() if hasattr(item_doc, "as_dict") else vars(item_doc))
         and not edit_remark
@@ -1477,7 +1487,7 @@ def update_item_field(
             "fieldname": fieldname,
             "version_name": version_name or item_doc.version,
             "edit_mode": "reason_required",
-            "message": f"字段 {fieldname} 已有有效采购值，修改时必须填写修改原因。",
+            "message": f"字段 {fieldname} 已有有效值，修改时必须填写修改原因。",
         }
     same_value = _edit_values_equal(fieldname, old_value, coerced_value)
     if is_shipment_value:
@@ -1570,8 +1580,9 @@ def update_item_field(
             adopted_values['shipped_uom'] = cargo.get('unit') or ''
         try:
             overlay = physical_overlay_update(item_doc.as_dict(),source_context,adopted_values,
-                evidence={'kind':'confirmed_current_source', 'actor':_frappe.session.user,
-                          'remark':edit_remark,'source_context':source_context,'at':_now()})
+                evidence={'kind':'manual_override', 'actor':_frappe.session.user,
+                          'remark':edit_remark,'source_context':source_context,'at':_now()},
+                adopt_current_context=True)
         except ValueError as exc:
             return {'ok':False,'changed':False,'message':str(exc)}
         cargo = overlay.get('settlement_cargo')
@@ -1817,7 +1828,7 @@ def confirm_actual_shipped_qty_from_quantity(
 
     items = _frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": resolved_version_name},
+        filters={"batch": batch_doc_name, "version": resolved_version_name, "is_excluded": 0},
         fields=["name", "row_no", "material_code", "product_name", "quantity", "actual_shipped_qty"],
         order_by="row_no asc",
         limit_page_length=10000,
@@ -1986,6 +1997,7 @@ def create_item(
         "version_name": resolved_version_name,
         "item_name": item_doc.name,
         "row_no": next_row_no,
+        "batch_modified": _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified"),
         "message": "物料已新增，批次已标记为 Dirty。",
     }
 
@@ -2002,14 +2014,15 @@ def delete_item(
         return {"ok": False, "dry_run": _frappe is None, "message": "缺少要删除的物料明细。"}
 
     if _frappe is None:
-        audit_service.build_audit_stub("BATCH_EDIT", {"item_name": item_name, "action": "DELETE_ITEM"})
+        audit_service.build_audit_stub("BATCH_EDIT", {"item_name": item_name, "action": "EXCLUDE_ITEM"})
         return {
             "ok": True,
             "dry_run": True,
             "item_name": item_name,
             "batch_name": batch_name,
             "version_name": version_name,
-            "message": "当前未连接 Frappe，已返回删除物料预览。",
+            "soft_excluded": True,
+            "message": "当前未连接 Frappe，已返回软排除物料预览。",
         }
 
     item_doc = _frappe.get_doc("Overseas Cost Item", item_name)
@@ -2025,14 +2038,16 @@ def delete_item(
         if batch_doc_name and item_doc.batch != batch_doc_name:
             return {"ok": False, "message": f"物料 {item_name} 不属于批次 {batch_doc_name}。"}
 
-    if 'settlement_cargo' in _server_metadata_fields(getattr(item_doc, 'extra_json', None)):
-        return {'ok': False, 'item_name': item_name,
-                'message': '已采用物流结算采购支出的物料不能直接删除，请更正来源明细或关联。'}
-
     try:
         _assert_current_item_version(item_doc.batch, item_doc.version, version_name)
     except ValueError as exc:
         return {'ok': False, 'item_name': item_name, 'message': str(exc)}
+
+    if int(getattr(item_doc, "is_excluded", 0) or 0):
+        return {"ok": True, "changed": False, "soft_excluded": True, "item_name": item_name,
+                "batch_name": item_doc.batch, "version_name": version_name or item_doc.version,
+                "batch_modified": _frappe.db.get_value("Overseas Cost Batch", item_doc.batch, "modified"),
+                "message": "该物料已在已排除列表中。"}
 
     old_snapshot = {
         "name": item_doc.name,
@@ -2046,7 +2061,11 @@ def delete_item(
     resolved_version_name = version_name or item_doc.version
     row_no = getattr(item_doc, "row_no", None)
 
-    _frappe.delete_doc("Overseas Cost Item", item_name, ignore_permissions=True)
+    item_doc.is_excluded = 1
+    item_doc.excluded_at = _now()
+    item_doc.excluded_by = str(getattr(getattr(_frappe, "session", None), "user", "") or "")
+    item_doc.exclusion_reason = str(remark or "手工排除物料").strip()
+    item_doc.save(ignore_permissions=True)
     _frappe.db.set_value("Overseas Cost Batch", batch_doc_name, "status", "Dirty", update_modified=True)
     _insert_audit_log(
         batch_doc_name=batch_doc_name,
@@ -2055,7 +2074,10 @@ def delete_item(
         field_name="item",
         row_no=row_no,
         old_value=_json_dumps(old_snapshot),
-        action_remark=remark or "删除物料",
+        new_value=_json_dumps({"is_excluded": 1, "excluded_at": item_doc.excluded_at,
+                               "excluded_by": item_doc.excluded_by,
+                               "exclusion_reason": item_doc.exclusion_reason}),
+        action_remark=remark or "软排除物料",
     )
     _frappe.db.commit()
 
@@ -2064,8 +2086,69 @@ def delete_item(
         "item_name": item_name,
         "batch_name": batch_doc_name,
         "version_name": resolved_version_name,
-        "message": "物料已删除，批次已标记为 Dirty。",
+        "soft_excluded": True,
+        "batch_modified": _frappe.db.get_value("Overseas Cost Batch", batch_doc_name, "modified"),
+        "message": "物料已软排除，可在“已排除物料”中恢复。",
     }
+
+
+def restore_item(
+    item_name: str,
+    batch_name: str | None = None,
+    version_name: str | None = None,
+    remark: str | None = None,
+    edit_token: str | None = None,
+    expected_modified: str | None = None,
+) -> dict:
+    if not item_name:
+        return {"ok": False, "dry_run": _frappe is None, "message": "缺少要恢复的物料明细。"}
+    if _frappe is None:
+        audit_service.build_audit_stub("BATCH_EDIT", {"item_name": item_name, "action": "RESTORE_ITEM"})
+        return {"ok": True, "dry_run": True, "restored": True, "item_name": item_name,
+                "batch_name": batch_name, "version_name": version_name,
+                "message": "当前未连接 Frappe，已返回恢复物料预览。"}
+
+    item_doc = _frappe.get_doc("Overseas Cost Item", item_name)
+    from overseas_costing.services import edit_session_service
+    edit_session_service.assert_batch_write(
+        item_doc.batch, edit_token=edit_token, expected_modified=expected_modified,
+    )
+    if batch_name:
+        resolved_batch = _resolve_batch_name(batch_name)
+        if resolved_batch and item_doc.batch != resolved_batch:
+            return {"ok": False, "message": f"物料 {item_name} 不属于批次 {resolved_batch}。"}
+    try:
+        _assert_current_item_version(item_doc.batch, item_doc.version, version_name)
+    except ValueError as exc:
+        return {"ok": False, "item_name": item_name, "message": str(exc)}
+    if not int(getattr(item_doc, "is_excluded", 0) or 0):
+        return {"ok": False, "item_name": item_name, "message": "该物料当前未被排除。"}
+
+    old_value = _json_dumps({"is_excluded": 1,
+                             "excluded_at": getattr(item_doc, "excluded_at", None),
+                             "excluded_by": getattr(item_doc, "excluded_by", ""),
+                             "exclusion_reason": getattr(item_doc, "exclusion_reason", "")})
+    item_doc.is_excluded = 0
+    item_doc.excluded_at = None
+    item_doc.excluded_by = ""
+    item_doc.exclusion_reason = ""
+    item_doc.save(ignore_permissions=True)
+    _frappe.db.set_value("Overseas Cost Batch", item_doc.batch, "status", "Dirty", update_modified=True)
+    _insert_audit_log(
+        batch_doc_name=item_doc.batch,
+        version_name=version_name or item_doc.version,
+        action_type="BATCH_EDIT",
+        field_name="item",
+        row_no=getattr(item_doc, "row_no", None),
+        old_value=old_value,
+        new_value=_json_dumps({"is_excluded": 0}),
+        action_remark=remark or "恢复软排除物料",
+    )
+    _frappe.db.commit()
+    return {"ok": True, "restored": True, "item_name": item_name,
+            "batch_name": item_doc.batch, "version_name": version_name or item_doc.version,
+            "batch_modified": _frappe.db.get_value("Overseas Cost Batch", item_doc.batch, "modified"),
+            "message": "物料已恢复到当前表。"}
 
 
 def delete_batch(batch_name: str, remark: str | None = None) -> dict:

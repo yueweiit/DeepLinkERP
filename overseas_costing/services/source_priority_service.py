@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+import re
+
 
 SOURCE_PRIORITY_RULES = {
     "tax_fee": {
@@ -64,13 +67,135 @@ def get_field_source_label(field_group: str) -> str:
     return f"{rule['label']}：{rule['authoritative_source']}优先"
 
 
+ACTUAL_PACKING_MATCH_STATUSES = frozenset({"matched", "none", "ambiguous", "stale", "invalid"})
+
+
+def _packing_field_name(value: object) -> str:
+    return re.sub(r"[\s（）()_\-]+", "", str(value or "")).casefold()
+
+
+def is_workflow_packing_attachment(source: dict) -> bool:
+    """Recognize the workflow component, independent of the attachment filename."""
+
+    source = source or {}
+    if str(source.get("source_kind") or "") != "approval_attachment":
+        return False
+    field = _packing_field_name(
+        source.get("source_field")
+        or source.get("workflow_field_name")
+        or source.get("flow_field_name")
+    )
+    return "装箱单附件" in field and ("excel" in field or field == "装箱单附件")
+
+
+def _actual_match_identity(source: dict) -> str:
+    return str(
+        source.get("actual_packing_match_id")
+        or source.get("logical_source_id")
+        or source.get("source_id")
+        or ""
+    )
+
+
+def _global_actual_match_status(sources: list[dict]) -> tuple[str, str]:
+    actual = [source for source in sources if source.get("actual_packing_source")]
+    valid = [
+        source
+        for source in actual
+        if str(source.get("actual_packing_match_status") or "").lower() == "matched"
+        and bool(source.get("available", True))
+        and not bool(source.get("excluded"))
+    ]
+    identities = {_actual_match_identity(source) for source in valid if _actual_match_identity(source)}
+    if len(identities) == 1:
+        return "matched", next(iter(identities))
+    if len(identities) > 1 or any(
+        str(source.get("actual_packing_match_status") or "").lower() == "ambiguous"
+        for source in actual
+    ):
+        return "ambiguous", ""
+    statuses = [str(source.get("actual_packing_match_status") or "").lower() for source in actual]
+    if "stale" in statuses:
+        return "stale", ""
+    if "invalid" in statuses:
+        return "invalid", ""
+    return "none", ""
+
+
+def rank_material_packing_sources(sources: list[dict]) -> list[dict]:
+    """Apply one server-owned, explainable priority order to material sources."""
+
+    rows = [deepcopy(source or {}) for source in sources or []]
+    status, matched_identity = _global_actual_match_status(rows)
+    for row in rows:
+        workflow_attachment = is_workflow_packing_attachment(row)
+        dedicated = bool(
+            row.get("dedicated_packing_attachment")
+            or row.get("dedicated_packing")
+            or workflow_attachment
+        )
+        row["dedicated_packing_attachment"] = dedicated
+        row["dedicated_packing"] = dedicated
+        row["actual_packing_match_status"] = status
+        is_matched = bool(
+            status == "matched"
+            and row.get("actual_packing_source")
+            and _actual_match_identity(row) == matched_identity
+        )
+        if status == "ambiguous" and row.get("actual_packing_source"):
+            row.update(
+                analysis_allowed=False,
+                selectable=False,
+                needs_selection=True,
+                analysis_code="ACTUAL_PACKING_MATCH_AMBIGUOUS",
+                analysis_reason="多个实际装箱候选匹配当前单据，请先完成唯一匹配后重新预览。",
+                adoption_allowed=False,
+                adoption_restriction="实际装箱来源尚未唯一确认。",
+            )
+        if is_matched:
+            rank = 0
+            reason = "实际运费／装箱变更已匹配当前单据"
+        elif workflow_attachment:
+            rank = 1 if status == "matched" else 0
+            reason = (
+                "实际装箱匹配未提供的字段由流程装箱单附件补充"
+                if status == "matched"
+                else "当前无有效实际装箱匹配，采用流程装箱单附件"
+            )
+        else:
+            kind = str(row.get("source_kind") or "")
+            role = str(row.get("approval_role") or "")
+            if role == "international_logistics" and kind == "approval_form":
+                rank = 2
+            elif kind == "approval_form":
+                rank = 3
+            else:
+                rank = 4
+            reason = "按服务端资料源顺序补充高优先级缺失字段"
+        row["source_priority_rank"] = rank
+        row["priority_reason"] = reason
+
+    ordered = sorted(rows, key=material_packing_source_priority)
+    priorities: dict[str, int] = {}
+    for row in ordered:
+        identity = str(row.get("parent_source_id") or row.get("logical_source_id") or row.get("source_id") or "")
+        if identity not in priorities:
+            priorities[identity] = len(priorities) + 1
+        row["priority"] = priorities[identity]
+    return ordered
+
+
 def material_packing_source_priority(source: dict) -> tuple[int, str, str, str]:
     """Deterministic material/packing evidence order shared by listing and review."""
 
     source = source or {}
     kind = str(source.get("source_kind") or "")
     role = str(source.get("approval_role") or "")
-    if source.get("dedicated_packing") and kind == "approval_attachment":
+    if source.get("source_priority_rank") is not None:
+        rank = int(source.get("source_priority_rank"))
+    elif source.get("actual_packing_source") and str(source.get("actual_packing_match_status") or "").lower() == "matched":
+        rank = 0
+    elif is_workflow_packing_attachment(source):
         rank = 0
     elif role == "international_logistics" and kind == "approval_form":
         rank = 1

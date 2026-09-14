@@ -354,7 +354,7 @@ def test_list_sources_recommends_cached_sheet_without_submitting_refresh(monkeyp
             if doctype == "Overseas Cost Attachment":
                 return []
             assert doctype == "Overseas Cost Item"
-            assert filters == {"batch": "BATCH-1"}
+            assert filters == {"batch": "BATCH-1", "is_excluded": 0}
             self.item_queries += 1
             return [
                 {"material_code": code, "product_name": "指环扣", "source_doc_no": "PO-001"}
@@ -723,10 +723,142 @@ def test_international_logistics_packing_attachment_precedes_approval_body():
     sources = [
         {'source_id': 'OA', 'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
         {'source_id': 'PACK', 'source_kind': 'approval_attachment',
-         'approval_role': 'international_logistics', 'dedicated_packing': True},
+         'approval_role': 'international_logistics', 'source_field': '装箱单附件（Excel）'},
     ]
 
     assert [source['source_id'] for source in sorted(sources, key=material_packing_source_priority)] == ['PACK', 'OA']
+
+
+def test_actual_packing_match_precedes_workflow_packing_attachment_and_exposes_reason():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([
+        {
+            'source_id': 'FLOW-PACK',
+            'source_kind': 'approval_attachment',
+            'source_field': '装箱单附件（Excel）',
+        },
+        {
+            'source_id': 'ACTUAL-PACK',
+            'source_kind': 'approval_attachment',
+            'actual_packing_source': True,
+            'actual_packing_match_status': 'matched',
+        },
+    ])
+
+    assert [row['source_id'] for row in ranked] == ['ACTUAL-PACK', 'FLOW-PACK']
+    assert ranked[0]['priority'] == 1
+    assert ranked[0]['priority_reason'] == '实际运费／装箱变更已匹配当前单据'
+    assert ranked[0]['actual_packing_match_status'] == 'matched'
+    assert ranked[1]['dedicated_packing_attachment'] is True
+
+
+def test_workflow_packing_attachment_is_first_when_actual_match_is_not_valid():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([
+        {
+            'source_id': 'STALE-ACTUAL',
+            'source_kind': 'approval_attachment',
+            'actual_packing_source': True,
+            'actual_packing_match_status': 'stale',
+        },
+        {
+            'source_id': 'FLOW-PACK',
+            'source_kind': 'approval_attachment',
+            'source_field': '装箱单附件（Excel）',
+        },
+    ])
+
+    assert ranked[0]['source_id'] == 'FLOW-PACK'
+    assert ranked[0]['priority_reason'] == '当前无有效实际装箱匹配，采用流程装箱单附件'
+    assert ranked[0]['actual_packing_match_status'] == 'stale'
+
+
+def test_filename_or_generic_dedicated_flag_cannot_outrank_workflow_field_attachment():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([
+        {'source_id': 'A-GENERIC', 'source_kind': 'approval_attachment',
+         'file_name': '装箱单.xlsx', 'dedicated_packing': True},
+        {'source_id': 'Z-FLOW-PACK', 'source_kind': 'approval_attachment',
+         'source_field': '装箱单附件（Excel）', 'workflow_field_id': 'packing_excel'},
+    ])
+
+    assert [row['source_id'] for row in ranked] == ['Z-FLOW-PACK', 'A-GENERIC']
+    assert ranked[1]['priority_reason'] == '按服务端资料源顺序补充高优先级缺失字段'
+
+
+def test_multiple_actual_packing_matches_are_ambiguous_and_do_not_outrank_workflow_attachment():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([
+        {'source_id': 'ACTUAL-1', 'actual_packing_source': True, 'actual_packing_match_status': 'matched'},
+        {'source_id': 'ACTUAL-2', 'actual_packing_source': True, 'actual_packing_match_status': 'matched'},
+        {'source_id': 'FLOW-PACK', 'source_kind': 'approval_attachment', 'source_field': '装箱单附件(Excel)'},
+    ])
+
+    assert ranked[0]['source_id'] == 'FLOW-PACK'
+    assert all(row['actual_packing_match_status'] == 'ambiguous' for row in ranked)
+    ambiguous = [row for row in ranked if row.get('actual_packing_source')]
+    assert all(row['analysis_allowed'] is False for row in ambiguous)
+    assert all(row['selectable'] is False for row in ambiguous)
+    assert all('唯一匹配' in row['analysis_reason'] for row in ambiguous)
+
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+    manifest = prepare_source_manifest(ranked)
+    unresolved = [row for row in manifest if row.get('actual_packing_source')]
+    assert all(row['selected'] is False for row in unresolved)
+    assert all(row['read_status'] == 'EXCLUDED' for row in unresolved)
+
+
+def test_selected_actual_packing_keeps_workflow_attachment_as_trusted_fallback():
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    context = {
+        'root_kind': 'expense',
+        'instance_id': 'EXPENSE',
+        'fingerprint': 'context-fingerprint',
+        'available': True,
+        'approved': True,
+        'invalid': False,
+    }
+    actual = [{
+        'source_id': 'ACTUAL',
+        'logical_source_id': 'ACTUAL',
+        'source_kind': 'approval_attachment',
+        'process_instance_id': 'EXPENSE',
+        'source_context': context,
+        'actual_packing_source': True,
+        'actual_packing_match_status': 'matched',
+        'available': True,
+    }]
+    fallbacks = [{
+        'source_id': 'FLOW-PACK',
+        'logical_source_id': 'oa:LOGISTICS:FILE-1',
+        'source_kind': 'approval_attachment',
+        'process_instance_id': 'LOGISTICS',
+        'source_field': '装箱单附件（Excel）',
+        'available': True,
+    }, {
+        'source_id': 'MANUAL',
+        'source_kind': 'manual_attachment',
+        'available': True,
+    }, {
+        'source_id': 'OLD-BODY',
+        'source_kind': 'approval_form',
+        'approval_role': 'international_logistics',
+        'available': True,
+    }]
+
+    combined = service._combine_actual_packing_with_fallbacks(actual, fallbacks, context)
+
+    assert [row['source_id'] for row in combined] == ['ACTUAL', 'FLOW-PACK']
+    assert combined[1]['supplemental_for_actual_packing'] is True
+    assert combined[1]['source_context'] == context
+    manifest = prepare_source_manifest(combined)
+    assert all(row['selected'] for row in manifest)
+
 
 
 def test_material_ai_manifest_fingerprint_includes_trusted_wiki_content_hash(monkeypatch):

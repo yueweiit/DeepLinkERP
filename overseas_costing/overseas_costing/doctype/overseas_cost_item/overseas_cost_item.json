@@ -109,6 +109,10 @@
     "source_file_name",
     "source_attachment_id",
     "parse_status",
+    "is_excluded",
+    "excluded_at",
+    "excluded_by",
+    "exclusion_reason",
     "manual_override_flag",
     "manual_override_reason",
     "dingtalk_instance_id",
@@ -657,6 +661,31 @@
       "label": "解析状态",
       "options": "PENDING\nSUCCESS\nPARTIAL\nFAILED\nMANUAL",
       "default": "PENDING"
+    },
+    {
+      "fieldname": "is_excluded",
+      "fieldtype": "Check",
+      "label": "已软排除",
+      "default": "0",
+      "read_only": 1
+    },
+    {
+      "fieldname": "excluded_at",
+      "fieldtype": "Datetime",
+      "label": "排除时间",
+      "read_only": 1
+    },
+    {
+      "fieldname": "excluded_by",
+      "fieldtype": "Data",
+      "label": "排除人",
+      "read_only": 1
+    },
+    {
+      "fieldname": "exclusion_reason",
+      "fieldtype": "Small Text",
+      "label": "排除原因",
+      "read_only": 1
     },
     {
       "fieldname": "manual_override_flag",

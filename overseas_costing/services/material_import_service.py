@@ -1169,7 +1169,7 @@ class FrappeMaterialImportRepository:
         )
         rows = frappe.get_all(
             "Overseas Cost Item",
-            filters={"batch": batch_name, "version": version_name},
+            filters={"batch": batch_name, "version": version_name, "is_excluded": 0},
             fields=fields,
             order_by="row_no asc, name asc",
             limit_page_length=10000,

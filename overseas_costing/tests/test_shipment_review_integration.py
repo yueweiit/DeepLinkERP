@@ -25,7 +25,10 @@ def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tm
             60400 if index == 0 else 2860 if index == 6 else 10560 if index == 7 else None,
             '超队1.0项目' if index < 6 else '亮甲2.0项目' if index == 6 else 'TK宠物用品项目',
             [388,9.7,0,32,150,89,77,130][index], [.4002,.00864,0,.032016,.0828,.04071,.16687,.507375][index]])
-    path = tmp_path / 'packing.xlsx'
+    sheet.merge_cells(start_row=2, end_row=7, start_column=4, end_column=4)
+    sheet.merge_cells(start_row=2, end_row=7, start_column=5, end_column=5)
+    file_name = '指环扣+亮甲包装袋2.0+宠物用品发货清单-packing list2026.9.5.xlsx'
+    path = tmp_path / file_name
     workbook.save(path)
     items = existing_items()
     for row in items:
@@ -36,8 +39,10 @@ def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tm
             row.update(gross_weight_kg=4.85, volume_m3=.00432, manual_override_flag=1)
     before = deepcopy(items)
     repo = _LifecycleRepository(status='QUEUED')
-    repo.sources = [approval(), {'source_kind':'manual_attachment','source_id':'X','source_hash':'h1',
-        'file_name':'packing.xlsx','source_label':'packing.xlsx','sheet_name':'装箱','dedicated_packing':True}]
+    repo.sources = [approval(), {'source_kind':'approval_attachment','source_id':'X','source_hash':'h1',
+        'approval_instance_id':'PROC-LOGISTICS', 'source_field':'装箱单附件（Excel）',
+        'workflow_field_id':'packing_list_excel', 'file_id':'FILE-PACKING-1',
+        'file_name':file_name,'source_label':file_name,'sheet_name':'装箱','dedicated_packing':True}]
     context = {'batch':'B1','version':'V1','transport_mode':'SEA','fx_rates':{'RMB':'1'}}
     repo.get_context = lambda *args: deepcopy(context)
     repo.get_items = lambda *args: deepcopy(items)
@@ -55,9 +60,20 @@ def test_real_minimal_workbook_worker_previews_values_projects_without_writes(tm
     result = service.execute_material_ai_fill('RUN-1',repository=repo)
     assert result['status'] == 'READY', repo.run.get('error_message')
     preview = repo.run['draft_json']['autofill_preview']
+    amount_groups = preview['merged_amount_groups']
+    assert amount_groups[0]['status'] == 'verified'
+    assert amount_groups[0]['control_total_rmb'] == '60400'
+    assert amount_groups[0]['computed_total_rmb'] == '60400'
     assert [Decimal(row['shipment_value_rmb']) for row in preview['items']] == list(map(Decimal,
         ['14496','604','604','14496','15100','15100','2860','10560']))
     assert preview['cost_summary']['total_cost_rmb'] == '81576.20'
+    if already_eight:
+        assert (preview['items'][2]['gross_weight_kg'], preview['items'][2]['volume_m3']) == (4.85, .00432)
+    else:
+        assert Decimal(str(preview['items'][2]['gross_weight_kg'])) == 0
+        assert Decimal(str(preview['items'][2]['volume_m3'])) == 0
+        assert Decimal(str(preview['items'][1]['gross_weight_kg'])) == Decimal('9.7')
+        assert Decimal(str(preview['items'][1]['volume_m3'])) == Decimal('0.00864')
     assert [row['allocated_fees_rmb'] for row in preview['project_summary']] == ['5922.77','682.00','1151.43']
     assert len(preview['fees']) == 1
     assert items == before and repo.applied == []

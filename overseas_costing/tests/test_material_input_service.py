@@ -157,6 +157,10 @@ def test_item_doctype_mirrors_include_quantity_provenance_fields() -> None:
         "actual_shipped_qty_mode",
         "actual_shipped_qty_source_revision",
         "net_weight_kg",
+        "is_excluded",
+        "excluded_at",
+        "excluded_by",
+        "exclusion_reason",
     } <= fields.keys()
     assert fields["stable_line_key"]["read_only"] == 1
     assert fields["cost_output_uom"]["read_only"] == 1

@@ -556,7 +556,7 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
     transport_mode = frappe.db.get_value("Overseas Cost Batch", batch_name, "transport_mode") or ""
     raw_items = frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_name, "version": version},
+        filters={"batch": batch_name, "version": version, "is_excluded": 0},
         fields=COST_INPUT_FIELDS,
         order_by="row_no asc, name asc",
         limit_page_length=10000,
@@ -746,7 +746,7 @@ class FrappeCostRepository:
             raise ValueError("成本版本不属于当前批次。")
         for doctype in ("Overseas Cost Item", "Overseas Cost Allocation Rule"):
             frappe.db.sql(f"SELECT name FROM `tab{doctype}` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE", (name, version))
-        items = frappe.get_all("Overseas Cost Item", filters={"batch": name, "version": version},
+        items = frappe.get_all("Overseas Cost Item", filters={"batch": name, "version": version, "is_excluded": 0},
             fields=COST_INPUT_FIELDS, order_by="row_no asc, name asc", limit_page_length=10000)
         invalid = batch_service._build_invalid_business_state(batch, items)
         if invalid.get("invalid"):

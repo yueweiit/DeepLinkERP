@@ -747,7 +747,7 @@ def _validate_batch_supplement_items(
         return {"ok": True, "matches": []}
     existing_rows = frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": version_name},
+        filters={"batch": batch_doc_name, "version": version_name, "is_excluded": 0},
         fields=["name", "row_no", "material_code"],
         limit_page_length=0,
     )
@@ -4133,7 +4133,7 @@ def _get_batch_items(batch_doc_name: str, version_name: str | None) -> list[dict
 
     return frappe.get_all(
         "Overseas Cost Item",
-        filters={"batch": batch_doc_name, "version": version_name},
+        filters={"batch": batch_doc_name, "version": version_name, "is_excluded": 0},
         fields=[
             "name",
             "row_no",
