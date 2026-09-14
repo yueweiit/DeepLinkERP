@@ -9,7 +9,9 @@ POLICY = 'shipment-freight-1'
 WAYBILL_LABELS = ('运单号','快递单号','提单号','waybill','awb','trackingnumber','numerodeguia','guia')
 APPROVAL_LABELS = ('钉钉流程','国际物流审批号','物流审批号','审批编号','approvalnumber')
 AMOUNT_LABELS = ('运费金额','运费','快递费','费用金额','金额','importe','monto','freightamount','shippingcost')
-OTHER_SCOPES = ('清关','关税','税费','进口税','提货','末端','派送','内陆','aduana','despacho','arancel','impuesto','inland','lastmile','fletelocal')
+CUSTOMS_LABELS = ('清关', '清关费', 'aduana', 'despacho')
+TAX_LABELS = ('关税', '税费', '进口税', 'impuesto', 'arancel')
+MEXICO_INLAND_LABELS = ('末端', '派送', '当地配送', '内陆', 'last mile', 'flete local', 'inland')
 
 
 def identifiers_in(value):
@@ -26,7 +28,7 @@ def identifiers_in(value):
 def financial_candidate(row, fields):
     title=str(row.get('process_name') or row.get('template_name') or row.get('title') or (row.get('raw_payload') or {}).get('title') or '')
     text=norm(title+' '+dumps(fields))
-    financial=any(x in norm(title) for x in ('采购支出','运营支出','费用支出','月结付款','报销','付款','支付','gastos','pago','reembolso')) or bool(re.search(r'\bbu\b',title,re.I))
+    financial=any(x in norm(title) for x in ('采购支出','运营支出','费用支出','月结','报销','付款','支付','gastos','pago','reembolso')) or bool(re.search(r'bu(?:$|[^a-z])|(?:^|[^a-z])bu',title,re.I))
     transport=any(norm(x) in text for x in ('物流','运费','运输','快递','freight','transporte','envio','dhl','fedex','ups','paqueteria','运单','提单','国际物流'))
     return financial and transport
 
@@ -58,8 +60,22 @@ def statement_tables(sheets):
 def fee_scope(label):
     text=norm(label)
     if any(norm(t) in text for t in ('双清','包税','ddp')): return 'review'
-    if any(norm(t) in text for t in OTHER_SCOPES): return 'excluded'
+    if any(norm(t) in text for t in CUSTOMS_LABELS): return 'customs'
+    if any(norm(t) in text for t in TAX_LABELS): return 'tax'
+    if any(norm(t) in text for t in MEXICO_INLAND_LABELS): return 'mexico_inland'
     return 'freight' if any(norm(t) in text for t in ('运费','物流','海运','空运','快递','freight','flete','transporte','dhl','fedex','燃油','附加','surcharge','冲抵','折扣','credit')) else 'review'
+
+
+def logical_fee_key(scope, transport_mode=None):
+    if scope == 'customs': return 'customs_clearance_fee'
+    if scope == 'tax': return 'import_tax'
+    if scope == 'mexico_inland': return 'destination_delivery'
+    if scope != 'freight': return None
+    try:
+        from overseas_costing.services.transport_fee_service import primary_freight_definition
+        return primary_freight_definition(transport_mode)['logical_fee_key']
+    except ValueError:
+        return None
 
 
 def row_line(source, fields, *, document_id='', document_hash='', file_id='', file_name='', sheet='', position=None, native_id=None):

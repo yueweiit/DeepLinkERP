@@ -73,6 +73,37 @@ def test_ai_rpc_enqueues_unresolved_second_pass_with_nonreserved_worker_argument
         sys.modules.pop(module_name,None)
 
 
+def test_per_batch_payment_apis_separate_rules_from_explicit_ai(batch_api, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        batch_api.runtime,
+        "run_payment_rule_matching",
+        lambda batch, version=None: calls.append(("rules", batch, version)) or {"ok": True, "matching": {"status": "completed"}},
+    )
+    monkeypatch.setattr(
+        batch_api.runtime,
+        "start_batch_matching",
+        lambda batch, version=None: calls.append(("rules", batch, version)) or {"ok": True, "matching": {"status": "completed"}},
+    )
+    monkeypatch.setattr(
+        batch_api.runtime,
+        "start_payment_ai_matching",
+        lambda batch, version=None, hints=None, offset=0, limit=30: calls.append(("ai", batch, version, hints, offset, limit))
+        or {"ok": True, "payment_matching": {"status": "queued"}},
+    )
+    permissions = []
+    monkeypatch.setattr(batch_api, "require_batch_permission", lambda batch, permission="read": permissions.append(permission) or batch)
+
+    legacy = batch_api.start_batch_matching("B", "V")
+    direct = batch_api.run_payment_rule_matching("B", "V")
+    ai = batch_api.start_payment_ai_matching("B", "V", '{"project":"P"}', "2", "7")
+
+    assert legacy["matching"]["status"] == direct["matching"]["status"] == "completed"
+    assert ai["payment_matching"]["status"] == "queued"
+    assert calls == [("rules", "B", "V"), ("rules", "B", "V"), ("ai", "B", "V", {"project": "P"}, 2, 7)]
+    assert permissions == ["write", "write", "write"]
+
+
 def test_manual_selection_of_current_expense_preserves_confirmed_candidate(setup, monkeypatch):
     s,l,b,v,i,r,binding=setup
     fake=ModuleType('frappe');fake.whitelist=lambda *args,**kwargs:lambda fn:fn

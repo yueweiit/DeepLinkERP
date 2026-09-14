@@ -6,6 +6,9 @@ from .freight_lines import POLICY, lines_for_source, matching_lines
 from .ai_matching import save, safe_text
 from .jobs import utcnow
 
+RULE_POLICY = 'shipment-payment-rules-1'
+HINT_LIMITS = {'waybill':160, 'supplier':200, 'project':200, 'date':80, 'description':500}
+
 
 def index_source(store, source):
     for line in lines_for_source(source):
@@ -25,14 +28,14 @@ def candidates(store,logistics_id):
     result=[]
     for c in store.find('freight_candidate',logistics_id=logistics_id):
         source=store.get('source',c['expense_id'])
-        if source and not source['invalid'] and source['kind']=='expense' and source['corp']==logistics['corp'] and c['expense_snapshot']==source['snapshot'] and c['logistics_snapshot']==logistics['snapshot']:
+        if source and source.get('approved') and not source['invalid'] and source['kind']=='expense' and source['corp']==logistics['corp'] and c['expense_snapshot']==source['snapshot'] and c['logistics_snapshot']==logistics['snapshot']:
             result.append(c)
     return result
 
 
-def save_candidate(store,logistics,expense,lines,method,reason):
+def save_candidate(store,logistics,expense,lines,method,reason,*,model='',confidence=None):
     cid=digest(POLICY,logistics['id'],expense['id'])
-    revision=digest(POLICY,logistics['snapshot'],expense['snapshot'],[r['id'] for r in lines])
+    revision=digest(POLICY,logistics['snapshot'],expense['snapshot'],[r['id'] for r in lines],method,model,str(confidence),reason)
     prior=store.get('freight_candidate',cid)
     if prior and prior['revision']==revision and prior['status']=='rejected': return prior
     issues=[]
@@ -44,7 +47,8 @@ def save_candidate(store,logistics,expense,lines,method,reason):
     c={'id':cid,'logistics_id':logistics['id'],'expense_id':expense['id'],'status':'conflict' if issues else 'pending',
        'revision':revision,'expense_snapshot':expense['snapshot'],'logistics_snapshot':logistics['snapshot'],
        'line_ids':[r['id'] for r in lines],'method':method,'reason':reason,'issues':sorted(set(issues)),
-       'amount_pending':not bool(lines)}
+       'model':str(model or ''),'confidence':None if confidence is None else str(confidence),
+       'source_revision':expense['snapshot'],'amount_pending':not bool(lines)}
     store.put('freight_candidate',{k:c[k] for k in ('id','logistics_id','expense_id','status')}|{'data':dumps(c)})
     return c
 
@@ -62,7 +66,7 @@ def rule_pass(store,logistics_id):
     source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
     for eid in sorted(source_ids):
         source=store.get('source',eid)
-        if not source or source['kind']!='expense' or source['invalid'] or source['corp']!=logistics['corp']: continue
+        if not source or source['kind']!='expense' or source['invalid'] or not source['approved'] or source['corp']!=logistics['corp']: continue
         all_lines=current_lines(store,source); lines=matching_lines(logistics,all_lines)
         explicit=logistics['instance'] in source['related']
         shared=set(map(tuple,logistics['identifiers'])) & set(map(tuple,source['identifiers']))
@@ -72,6 +76,85 @@ def rule_pass(store,logistics_id):
             save_candidate(store,logistics,source,lines,'explicit' if explicit else 'identifier',
                            '原单明确关联本票' if explicit else '本票运单／审批号与明细一致')
     return [c for c in candidates(store,logistics_id) if c['status']!='rejected']
+
+
+def sanitize_hints(hints=None):
+    if hints is None: return {key:'' for key in HINT_LIMITS}
+    if not isinstance(hints,dict): raise ValueError('hints 参数格式错误')
+    result={}
+    for key,limit in HINT_LIMITS.items():
+        value=hints.get(key,'')
+        if value is not None and not isinstance(value,str): raise ValueError(f'hints.{key} 参数格式错误')
+        result[key]=safe_text(str(value or '').strip(),limit)
+    return result
+
+
+def _score_payment_source(logistics, source, hints):
+    identifiers=set(map(tuple,logistics.get('identifiers') or [])) & set(map(tuple,source.get('identifiers') or []))
+    text=norm(' '.join([str(source.get('title') or ''),str(source.get('approval_no') or ''),
+        ' '.join(str(v) for v in (source.get('fields') or {}).values() if isinstance(v,(str,int,float))) ]))
+    logistics_text=norm(' '.join(str(v) for v in (logistics.get('fields') or {}).values() if isinstance(v,(str,int,float))))
+    score=1000*len(identifiers);reasons=[]
+    if identifiers:reasons.append('精确物流标识一致')
+    for key,weight in [('waybill',400),('supplier',80),('project',120),('date',60),('description',40)]:
+        value=norm(hints.get(key))
+        if value and value in text:score+=weight;reasons.append(f'{key} 提示命中')
+    # Local-only ranking may use non-sensitive normalized business descriptions.
+    tokens={token for token in re.findall(r'[a-z0-9]{4,}|[\u4e00-\u9fff]{2,}',logistics_text) if len(token)>=2}
+    overlap=sum(1 for token in tokens if token in text)
+    if overlap:score+=min(100,overlap*10);reasons.append('本票业务描述相关')
+    return score,reasons
+
+
+def payment_pool(store,logistics_id,hints=None,offset=0,limit=30):
+    logistics=store.get('source',logistics_id)
+    if not logistics or logistics.get('invalid') or logistics.get('kind')!='logistics':raise ValueError('当前国际物流来源缺失或失效')
+    try:offset=int(offset);limit=int(limit)
+    except (TypeError,ValueError):raise ValueError('offset/limit 参数格式错误')
+    if offset<0 or offset>10000:raise ValueError('offset 必须在 0 至 10000 之间')
+    limit=max(1,min(50,limit))
+    clean=sanitize_hints(hints)
+    rejected={c['expense_id'] for c in store.find('freight_candidate',logistics_id=logistics_id) if c.get('status')=='rejected'}
+    eligible=[s for s in store.find('source',kind='expense') if s.get('corp')==logistics['corp'] and s.get('approved') and not s.get('invalid') and s['id'] not in rejected]
+    ranked=[]
+    for source in eligible:
+        score,reasons=_score_payment_source(logistics,source,clean)
+        ranked.append(({**source,'local_match_score':score,'local_match_reasons':reasons},score))
+    ranked.sort(key=lambda item:(-item[1],item[0]['id']))
+    sources=[item[0] for item in ranked]
+    fingerprint=digest('shipment-payment-pool-1',logistics['snapshot'],[(s['id'],s['snapshot']) for s in eligible],
+        sorted((c['expense_id'],c.get('status'),c.get('revision')) for c in store.find('freight_candidate',logistics_id=logistics_id) if c.get('status')=='rejected'),clean,offset,limit)
+    page=sources[offset:offset+limit]
+    return {'logistics':logistics,'sources':page,'hints':clean,'offset':offset,'limit':limit,
+            'has_more':offset+len(page)<len(sources),'total':len(sources),'fingerprint':fingerprint}
+
+
+def record_rule_pass(store,logistics_id,actor=''):
+    logistics=store.get('source',logistics_id)
+    if not logistics or logistics.get('invalid'):raise ValueError('当前国际物流来源缺失或失效')
+    key,expenses=_rule_fingerprint(store,logistics)
+    result=rule_pass(store,logistics_id)
+    job={'id':digest(RULE_POLICY,logistics_id,key),'kind':'payment_rules','status':'completed','stage':'saved',
+         'logistics_id':logistics_id,'approval_no':logistics.get('approval_no'),'actor':actor,'fingerprint':key,
+         'total':len(expenses),'processed':len(expenses),'recommended':len(result),'failed':0,'finished_at':utcnow()}
+    save(store,job);save(store,{'id':digest(RULE_POLICY,'job',logistics_id),'job_id':job['id']})
+    return rule_status(store,logistics_id)
+
+
+def _rule_fingerprint(store,logistics):
+    expenses=[s for s in store.find('source',kind='expense') if s.get('corp')==logistics['corp'] and s.get('approved') and not s.get('invalid')]
+    return digest(RULE_POLICY,logistics['snapshot'],[(s['id'],s['snapshot']) for s in expenses]),expenses
+
+
+def rule_status(store,logistics_id):
+    pointer=store.get('state',digest(RULE_POLICY,'job',logistics_id)) or {}
+    job=store.get('state',pointer.get('job_id','')) or {}
+    if not job:return {'status':'not_started','cached':False}
+    logistics=store.get('source',logistics_id)
+    if not logistics or logistics.get('invalid'):return {**job,'status':'stale','cached':False}
+    key,_=_rule_fingerprint(store,logistics)
+    if job.get('fingerprint')!=key:return {**job,'status':'stale','cached':False}
+    return {k:v for k,v in {**job,'cached':True}.items() if k not in ('responses','results')}
 
 
 def input_state(store,logistics_id):

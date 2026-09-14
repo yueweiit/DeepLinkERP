@@ -13,7 +13,9 @@ def financial_summary(source):
     return {k:v for k,v in source_summary(source).items() if k in allowed}
 
 
-def candidate_view(store,candidate):
+def candidate_view(store,candidate,transport_mode=''):
+    from decimal import Decimal, InvalidOperation
+    from .freight_lines import logical_fee_key
     from .runtime import source_summary
     source=store.get('source',candidate['expense_id'])
     lines=[]
@@ -21,10 +23,20 @@ def candidate_view(store,candidate):
         line=store.get('freight_line',lid)
         if not line:continue
         occupied=store.find('freight_claim',charge_key=line['charge_key'])
-        lines.append({**line,'available':source['approved'] and not source['invalid'] and not line.get('ambiguous') and line['scope']=='freight'
+        lines.append({**line,'logical_fee_key':logical_fee_key(line.get('scope'),transport_mode),
+            'available':source['approved'] and not source['invalid'] and not line.get('ambiguous') and line['scope']=='freight'
             and not any(c['logistics_id']!=candidate['logistics_id'] for c in occupied),
             'adopted':any(c['logistics_id']==candidate['logistics_id'] and c['line_id']==lid for c in occupied)})
-    return {**candidate,'expense':financial_summary(source),'lines':lines,
+    claims=[claim for claim in store.find('freight_claim',source_id=source['id']) if claim.get('source_snapshot')==source['snapshot']]
+    try:
+        claimed=sum((Decimal(str(claim['amount'])) for claim in claims if claim.get('currency')==source.get('currency')),Decimal('0'))
+        total=Decimal(str(source['amount'])) if source.get('amount') is not None else None
+        remaining=total-claimed if total is not None and all(claim.get('currency')==source.get('currency') for claim in claims) else None
+    except (InvalidOperation,ValueError,TypeError):
+        claimed=remaining=None
+    return {**candidate,'source_revision':candidate.get('source_revision') or candidate.get('expense_snapshot'),
+            'expense':financial_summary(source),'lines':lines,'approval_total':source.get('amount'),'approval_currency':source.get('currency'),
+            'claimed':str(claimed) if claimed is not None else None,'remaining':str(remaining) if remaining is not None else None,
             'packing_available':any(l.get('cargo_text') for l in lines) or bool(source.get('goods')) or any(d.get('tables') for d in source.get('documents') or [])}
 
 
@@ -37,11 +49,15 @@ def batch_status(store,ledger,batch_name,version_name=None):
     historical=vname!=batch.get('current_version')
     maps=store.find('batch_map',batch=batch_name)
     base={'ok':True,'freight_mode':True,'mapped':bool(maps),'historical':historical,'viewed_version':vname,'binding':None,'candidates':[],
-          'matching':{'status':'not_started'},'sync':store.get('state','sync') or {},'health':store.get('state','health') or {}}
+          'payment_candidates':[],'matching':{'status':'not_started'},'payment_matching':{'status':'not_started'},
+          'sync':store.get('state','sync') or {},'health':store.get('state','health') or {}}
     if not maps:return base
     logistics=store.get('source',maps[0]['source_id'])
-    base.update(logistics=source_summary(logistics),matching=matching.status(store,logistics['id']) if not historical else {'status':'historical'},
-        candidates=[candidate_view(store,c) for c in matching.candidates(store,logistics['id']) if c['status']!='rejected'] if not historical else [],
+    candidates=[candidate_view(store,c,batch.get('transport_mode')) for c in matching.candidates(store,logistics['id']) if c['status']!='rejected'] if not historical else []
+    from . import payment_ai_matching
+    base.update(logistics=source_summary(logistics),matching=matching.rule_status(store,logistics['id']) if not historical else {'status':'historical'},
+        payment_matching=payment_ai_matching.status(store,logistics['id'],current_version=lambda _batch:batch.get('current_version')) if not historical else {'status':'historical'},
+        candidates=candidates,payment_candidates=candidates,
         freight=adoption.context(store,ledger,batch_name,vname),source_context=resolve_source_context(batch_name,vname,store=store,ledger=ledger))
     ctx=base['source_context'];review=store.get('packing_review',base['freight'].get('packing_review_id') or '')
     base['packing']={'status':'adopted' if review else 'unverified','message':'已独立采用装箱变更；原始资料保留在操作记录' if review else '装箱沿用当前资料；尚未确认是否有变更',

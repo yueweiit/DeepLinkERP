@@ -54,7 +54,20 @@ def get_batch_settlement(batch_name, version_name=None):
 
 @frappe.whitelist(methods=['POST'])
 def start_batch_matching(batch_name, version_name=None):
-    return runtime.start_batch_matching(require_batch_permission(batch_name, 'write'), version_name)
+    return runtime.run_payment_rule_matching(require_batch_permission(batch_name, 'write'), version_name) if runtime.freight_enabled() else runtime.start_batch_matching(require_batch_permission(batch_name, 'write'), version_name)
+
+
+@frappe.whitelist(methods=['POST'])
+def run_payment_rule_matching(batch_name, version_name=None):
+    return runtime.run_payment_rule_matching(require_batch_permission(batch_name, 'write'), version_name)
+
+
+@frappe.whitelist(methods=['POST'])
+def start_payment_ai_matching(batch_name, version_name=None, hints=None, offset=0, limit=30):
+    hints={} if hints in (None,'') else _decode(hints,dict)
+    try:offset=int(offset);limit=int(limit)
+    except (TypeError,ValueError):raise ValueError('offset/limit 参数格式错误')
+    return runtime.start_payment_ai_matching(require_batch_permission(batch_name, 'write'),version_name,hints,offset,limit)
 
 
 @frappe.whitelist(methods=['POST'])
@@ -72,7 +85,7 @@ def start_ai_matching():
         for mapping in runtime.store().find('batch_map'):
             cs=candidates(runtime.store(),mapping['source_id'])
             if cs and all(c['status'] in ('pending','rejected') for c in cs):continue
-            runtime.start_batch_matching(mapping['batch']);scheduled+=1
+            runtime.start_payment_ai_matching(mapping['batch']);scheduled+=1
         return {'ok':True,'message':f'已为 {scheduled} 票未解决或冲突物流安排本票分析'}
     from overseas_costing.services.logistics_settlement import ai_matching
     from overseas_costing.services import allocation_service

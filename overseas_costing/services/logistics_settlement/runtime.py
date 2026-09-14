@@ -286,9 +286,9 @@ def ensure_batch_source(db, batch_name):
 
 
 def start_batch_matching(batch_name, version_name=None):
-    from . import batch_matching
     if freight_enabled():
-        from . import freight_matching as batch_matching
+        return run_payment_rule_matching(batch_name,version_name)
+    from . import batch_matching
     db = store()
     batch = FrappeLedger().get('batch', batch_name) or {}
     if version_name and version_name != batch.get('current_version'):
@@ -306,10 +306,52 @@ def start_batch_matching(batch_name, version_name=None):
     return {'ok': True, 'matching': job}
 
 
+def run_payment_rule_matching(batch_name,version_name=None):
+    """Refresh one batch's deterministic local candidates without a model call."""
+    if not freight_enabled():raise ValueError('当前模式不支持付款明细匹配')
+    from . import freight_matching
+    db=store();ledger=FrappeLedger();batch=ledger.get('batch',batch_name) or {}
+    if version_name and version_name!=batch.get('current_version'):raise ValueError('历史版本只读，请返回当前版本匹配')
+    source=ensure_batch_source(db,batch_name)
+    with db.atomic():
+        current=ledger.get('batch',batch_name,lock=True) or {}
+        if version_name and version_name!=current.get('current_version'):raise ValueError('成本版本已变化，请刷新当前版本后匹配')
+        job=freight_matching.record_rule_pass(db,source['id'],frappe.session.user)
+    db.commit()
+    from .freight_runtime import candidate_view
+    rows=[candidate_view(db,c,batch.get('transport_mode')) for c in freight_matching.candidates(db,source['id']) if c['status']!='rejected']
+    return {'ok':True,'matching':job,'payment_candidates':rows,'candidates':rows}
+
+
+def start_payment_ai_matching(batch_name,version_name=None,hints=None,offset=0,limit=30):
+    if not freight_enabled():raise ValueError('当前模式不支持付款明细 AI 匹配')
+    from . import payment_ai_matching
+    db=store();ledger=FrappeLedger();batch=ledger.get('batch',batch_name) or {};current=batch.get('current_version')
+    version_name=version_name or current
+    if version_name!=current:raise ValueError('历史版本只读，请返回当前版本匹配')
+    source=ensure_batch_source(db,batch_name)
+    with db.atomic():
+        if (ledger.get('batch',batch_name,lock=True) or {}).get('current_version')!=version_name:
+            raise ValueError('成本版本已变化，请刷新当前版本后匹配')
+        job=payment_ai_matching.start(db,source['id'],batch_name,version_name,frappe.session.user,hints=hints,offset=offset,limit=limit)
+    if job.get('status')=='queued':
+        frappe.enqueue('overseas_costing.services.logistics_settlement.runtime.run_payment_ai_matching',queue='long',timeout=600,
+            payment_ai_job_id=job['id'],enqueue_after_commit=True)
+    return {'ok':True,'payment_matching':job,'message':job.get('message')}
+
+
 def run_batch_matching(batch_matching_job_id):
     from . import batch_matching
     if freight_enabled():
-        from . import freight_matching as batch_matching
+        # Compatibility for jobs queued before payment matching was split. Never
+        # pass those jobs to a model: they are completed as deterministic rules.
+        from . import freight_matching
+        db=store();job=db.get('state',batch_matching_job_id) or {}
+        if not job.get('logistics_id'):return job
+        result=freight_matching.record_rule_pass(db,job['logistics_id'],job.get('actor',''))
+        job.update(status='completed',stage='saved',finished_at=utcnow())
+        db.put('state',{'id':job['id'],'updated_at':utcnow(),'data':dumps(job)});db.commit()
+        return result
     from overseas_costing.services import allocation_service
     config = allocation_service._ai_config()
     config['timeout'] = min(120, max(60, float(config.get('timeout') or 60)))
@@ -318,6 +360,17 @@ def run_batch_matching(batch_matching_job_id):
             raise ValueError('未配置 DeepSeek API 密钥，规则候选已保存，可人工搜索关联')
         return allocation_service._extract_json_object(allocation_service._call_chat_completions(config, messages))
     return batch_matching.run(store(), batch_matching_job_id, call_model, config.get('model', ''))
+
+
+def run_payment_ai_matching(payment_ai_job_id):
+    from . import payment_ai_matching
+    from overseas_costing.services import allocation_service
+    config=allocation_service._ai_config();config['timeout']=min(120,max(60,float(config.get('timeout') or 60)))
+    def call_model(messages):
+        if not config.get('api_key'):raise ValueError('未配置 DeepSeek API 密钥')
+        return allocation_service._extract_json_object(allocation_service._call_chat_completions(config,messages))
+    return payment_ai_matching.run(store(),payment_ai_job_id,call_model,config.get('model',''),
+        current_version=lambda batch:(FrappeLedger().get('batch',batch) or {}).get('current_version'))
 
 
 def ensure_batch(db, source):
