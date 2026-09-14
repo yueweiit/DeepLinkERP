@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import pickle
+import re
 import secrets
 from urllib.parse import urlencode, urlsplit
 
@@ -29,16 +30,30 @@ EIMS_ENTRY_QUERY_PARAM = "from_eims"
 EIMS_STATE_PREFIX = "eims_oauth_state:"
 EIMS_BROWSER_NONCE_COOKIE = "eims_oauth_nonce"
 EIMS_STATE_TTL_SECONDS = 10 * 60
+DINGTALK_PROVIDER_CONFIG_KEY = "dingtalk_social_login_key"
+DINGTALK_PROVIDER_FALLBACK = "dingtalk"
+DINGTALK_START_PATH = "/api/method/custom_filters.overrides.oauth.start_dingtalk_login"
+DINGTALK_STATE_PREFIX = "dingtalk_oauth_state:"
+DINGTALK_BROWSER_NONCE_COOKIE = "dingtalk_oauth_nonce"
+DINGTALK_STATE_TTL_SECONDS = 10 * 60
+DINGTALK_USERINFO_URL = "https://api.dingtalk.com/v1.0/contact/users/me"
+DINGTALK_UNION_ID_FIELD = "custom_dingtalk_union_id"
+DINGTALK_OPEN_ID_FIELD = "custom_dingtalk_open_id"
+DINGTALK_AUTO_BIND_CONFIG_KEY = "dingtalk_auto_bind_by_email_or_mobile"
 OAUTH_REQUEST_TIMEOUT = 15
 SSO_START_RATE_LIMIT = 10
 SSO_CALLBACK_RATE_LIMIT = 10
 SSO_RATE_LIMIT_SECONDS = 60
 _SENSITIVE_LOG_KEY_PARTS = ("password", "passwd", "secret", "token", "authorization")
-_SENSITIVE_LOG_KEYS = {"code", "state", "code_verifier"}
+_SENSITIVE_LOG_KEYS = {"code", "authcode", "auth_code", "state", "code_verifier"}
 
 
 class EIMSUserBindingError(Exception):
 	"""The EIMS identity is valid but has no usable ERP user binding."""
+
+
+class DingTalkUserBindingError(Exception):
+	"""The DingTalk identity is valid but has no usable ERP user binding."""
 
 
 @frappe.whitelist(allow_guest=True, methods=["GET"])
@@ -223,6 +238,212 @@ def login_via_eims(code: str, state: str):
 		return
 
 
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+@rate_limit(limit=SSO_START_RATE_LIMIT, seconds=SSO_RATE_LIMIT_SECONDS)
+def start_dingtalk_login(redirect_to: str | None = None):
+	"""Create the server-side state and start DingTalk's unified web login."""
+	provider = _get_dingtalk_provider()
+	provider_config = (get_oauth2_providers().get(provider) or {})
+	if not provider_config:
+		frappe.throw(_("未找到配置的钉钉 Social Login Key：{0}").format(provider))
+
+	flow = get_oauth2_flow(provider)
+	if not flow.client_id or not flow.client_secret:
+		frappe.throw(_("钉钉 Social Login Key 未配置 Client ID 或 Client Secret"))
+
+	state = secrets.token_urlsafe(32)
+	browser_nonce = secrets.token_urlsafe(32)
+	state_digest = _state_digest(state)
+	redirect_to = sanitize_redirect(redirect_to) if redirect_to else None
+
+	frappe.cache.set_value(
+		f"{DINGTALK_STATE_PREFIX}{state_digest}",
+		{
+			"state_digest": state_digest,
+			"browser_nonce_digest": _state_digest(browser_nonce),
+			"redirect_to": redirect_to,
+			"session_id": getattr(frappe.local.session, "sid", None),
+		},
+		expires_in_sec=DINGTALK_STATE_TTL_SECONDS,
+	)
+	frappe.local.cookie_manager.set_cookie(
+		DINGTALK_BROWSER_NONCE_COOKIE,
+		browser_nonce,
+		max_age=DINGTALK_STATE_TTL_SECONDS,
+		httponly=True,
+		samesite="Lax",
+	)
+
+	auth_url_data = provider_config.get("auth_url_data", {}) or {}
+	authorize_params = {
+		"redirect_uri": get_redirect_uri(provider),
+		# DingTalk's web authorization page expects this parameter in camelCase.
+		"responseType": "code",
+		# Keep the RFC-style spelling as well for older DingTalk authorization
+		# page versions; both values are fixed by the server.
+		"response_type": "code",
+		"client_id": flow.client_id,
+		"scope": auth_url_data.get("scope", "openid"),
+		"state": state,
+		"prompt": auth_url_data.get("prompt", "consent"),
+	}
+
+	# Allow optional DingTalk parameters such as corpid/exclusiveLogin, while
+	# keeping all protocol and CSRF parameters under server control.
+	for key, value in auth_url_data.items():
+		if key not in {
+			"client_id",
+			"client_secret",
+			"redirect_uri",
+			"response_type",
+			"responseType",
+			"state",
+			"scope",
+			"prompt",
+		}:
+			authorize_params[key] = value
+
+	authorize_url = flow.get_authorize_url(**authorize_params)
+	frappe.local.response["type"] = "redirect"
+	frappe.local.response["location"] = authorize_url
+
+
+@frappe.whitelist(allow_guest=True, methods=["GET"])
+@rate_limit(limit=SSO_CALLBACK_RATE_LIMIT, seconds=SSO_RATE_LIMIT_SECONDS)
+def login_via_dingtalk(
+	authCode: str | None = None,
+	state: str | None = None,
+	code: str | None = None,
+	error: str | None = None,
+	error_description: str | None = None,
+):
+	"""Exchange DingTalk's one-time authCode, bind the identity, and log in."""
+	try:
+		if not state:
+			raise RuntimeError("钉钉 OAuth 回调缺少 state 参数")
+
+		# Restart callbacks created by an old cached Frappe login page. Those
+		# states do not have a server-side nonce and must never be exchanged.
+		legacy_state = _decode_legacy_frappe_state(state)
+		if legacy_state:
+			redirect_to = legacy_state.get("redirect_to")
+			redirect_to = sanitize_redirect(redirect_to) if redirect_to else None
+			frappe.local.response["type"] = "redirect"
+			frappe.local.response["location"] = _build_dingtalk_start_url(redirect_to)
+			return
+
+		state_data = _consume_dingtalk_state(state)
+		if error:
+			raise RuntimeError(
+				f"钉钉授权被取消或失败：{_safe_log_text(error)}"
+				f" {_safe_log_text(error_description) if error_description else ''}".strip()
+			)
+
+		auth_code = authCode or code
+		if not isinstance(auth_code, str) or not auth_code.strip():
+			raise RuntimeError("钉钉 OAuth 回调缺少授权码")
+
+		provider = _get_dingtalk_provider()
+		provider_config = get_oauth2_providers().get(provider) or {}
+		if not provider_config:
+			frappe.throw(_("未找到配置的钉钉 Social Login Key：{0}").format(provider))
+
+		flow = get_oauth2_flow(provider)
+		token_url = flow.access_token_url
+		if not token_url:
+			frappe.throw(_("钉钉 Social Login Key 未配置 Access Token URL"))
+
+		# DingTalk's current endpoint is OAuth-like but not RFC 6749 wire
+		# compatible: it expects camelCase JSON fields and no redirect_uri.
+		token_response = requests.post(
+			token_url,
+			json={
+				"clientId": flow.client_id,
+				"clientSecret": flow.client_secret,
+				"code": auth_code.strip(),
+				"grantType": "authorization_code",
+			},
+			headers={"Accept": "application/json", "Content-Type": "application/json"},
+			timeout=OAUTH_REQUEST_TIMEOUT,
+		)
+		token_data = _parse_json_response(token_response, "DingTalk Token")
+		access_token = token_data.get("accessToken")
+		if token_response.status_code >= 400 or not access_token:
+			raise RuntimeError(
+				f"钉钉 Token 请求失败（HTTP {token_response.status_code}）："
+				f"{_get_error_message(token_data)}"
+			)
+
+		userinfo_response = requests.get(
+			DINGTALK_USERINFO_URL,
+			headers={
+				"Accept": "application/json",
+				"x-acs-dingtalk-access-token": access_token,
+			},
+			timeout=OAUTH_REQUEST_TIMEOUT,
+		)
+		info = _parse_json_response(userinfo_response, "DingTalk UserInfo")
+		if userinfo_response.status_code >= 400:
+			raise RuntimeError(
+				f"钉钉 UserInfo 请求失败（HTTP {userinfo_response.status_code}）："
+				f"{_get_error_message(info)}"
+			)
+
+		if isinstance(info.get("data"), dict):
+			info = info["data"]
+		union_id = _normalize_identity(info.get("unionId") or info.get("unionid"))
+		open_id = _normalize_identity(info.get("openId") or info.get("openid"))
+		if not union_id and not open_id:
+			raise RuntimeError("钉钉用户信息未返回 Union ID 或 Open ID")
+		user = _get_user_by_dingtalk_identity(union_id, open_id, info)
+
+		frappe.local.login_manager.login_as(user.name)
+		frappe.db.commit()
+		redirect_post_login(
+			desk_user=user.user_type == "System User",
+			redirect_to=state_data.get("redirect_to"),
+			provider=provider,
+		)
+
+	except DingTalkUserBindingError as e:
+		frappe.log_error(f"DingTalk SSO user binding failed: {e}", "DingTalk OAuth SSO")
+		frappe.respond_as_web_page(
+			_("ERP 未绑定钉钉账号"),
+			_("当前钉钉账号未绑定对应的 ERP 用户，请联系管理员绑定钉钉 Union ID 后重试。"),
+			http_status_code=403,
+			primary_action="/login",
+			primary_label=_("返回登录页"),
+			fullpage=True,
+		)
+
+	except Exception as e:
+		frappe.log_error(f"DingTalk SSO login failed: {e}", "DingTalk OAuth SSO")
+		frappe.respond_as_web_page(
+			_("钉钉登录失败"),
+			_("钉钉登录未完成，请返回登录页重试；如问题持续请联系管理员。"),
+			http_status_code=417,
+			primary_action="/login",
+			primary_label=_("返回登录页"),
+			fullpage=True,
+		)
+
+
+def update_website_context(context):
+	"""Make the configured EIMS/DingTalk buttons enter secure custom flows."""
+	request_path = getattr(frappe.local.request, "path", "").rstrip("/")
+	if request_path != "/login":
+		return
+
+	redirect_to = frappe.local.request.args.get("redirect-to")
+	eims_provider = _get_eims_provider()
+	dingtalk_provider = _get_dingtalk_provider()
+	for provider in context.get("provider_logins", []):
+		if provider.get("name") == eims_provider:
+			provider["auth_url"] = _build_start_url(redirect_to)
+		elif provider.get("name") == dingtalk_provider:
+			provider["auth_url"] = _build_dingtalk_start_url(redirect_to)
+
+
 def _decode_legacy_frappe_state(state):
 	"""Return the old Frappe OAuth state, if this is a stale login-page flow."""
 	if not isinstance(state, str):
@@ -244,19 +465,6 @@ def _decode_legacy_frappe_state(state):
 		return None
 
 	return payload
-
-
-def update_website_context(context):
-	"""Make Frappe's EIMS login button enter our backend start endpoint."""
-	request_path = getattr(frappe.local.request, "path", "").rstrip("/")
-	if request_path != "/login":
-		return
-
-	provider_name = _get_eims_provider()
-	redirect_to = frappe.local.request.args.get("redirect-to")
-	for provider in context.get("provider_logins", []):
-		if provider.get("name") == provider_name:
-			provider["auth_url"] = _build_start_url(redirect_to)
 
 
 def scrub_sensitive_oauth_request_log(response=None, request=None):
@@ -373,8 +581,23 @@ def _get_eims_provider() -> str:
 	return EIMS_PROVIDER_FALLBACK
 
 
+def _get_dingtalk_provider() -> str:
+	"""Return the configured Social Login Key document name for DingTalk."""
+	provider = frappe.conf.get(DINGTALK_PROVIDER_CONFIG_KEY)
+	if isinstance(provider, str) and provider.strip():
+		return provider.strip()
+	return DINGTALK_PROVIDER_FALLBACK
+
+
 def _build_start_url(redirect_to: str | None = None) -> str:
 	url = EIMS_START_PATH
+	if redirect_to:
+		url += "?" + urlencode({"redirect_to": redirect_to})
+	return url
+
+
+def _build_dingtalk_start_url(redirect_to: str | None = None) -> str:
+	url = DINGTALK_START_PATH
 	if redirect_to:
 		url += "?" + urlencode({"redirect_to": redirect_to})
 	return url
@@ -417,6 +640,44 @@ def _consume_state(state: str) -> dict:
 		raise RuntimeError("EIMS OAuth state 缺少 PKCE verifier")
 
 	frappe.local.cookie_manager.delete_cookie(EIMS_BROWSER_NONCE_COOKIE)
+	redirect_to = state_data.get("redirect_to")
+	state_data["redirect_to"] = sanitize_redirect(redirect_to) if redirect_to else None
+	return state_data
+
+
+def _consume_dingtalk_state(state: str) -> dict:
+	"""Read and immediately consume the one-time DingTalk login state."""
+	if not isinstance(state, str) or not state:
+		raise RuntimeError("钉钉 OAuth 回调缺少 state 参数")
+
+	state_digest = _state_digest(state)
+	cache_key = f"{DINGTALK_STATE_PREFIX}{state_digest}"
+	state_data = _get_and_delete_cache_value(cache_key)
+	if not isinstance(state_data, dict):
+		raise RuntimeError("钉钉 OAuth state 已失效或未找到")
+
+	stored_digest = state_data.get("state_digest")
+	if not isinstance(stored_digest, str) or not hmac.compare_digest(state_digest, stored_digest):
+		raise RuntimeError("钉钉 OAuth state 校验失败")
+
+	stored_session_id = state_data.get("session_id")
+	current_session_id = getattr(frappe.local.session, "sid", None)
+	if stored_session_id and (
+		not current_session_id
+		or not hmac.compare_digest(str(stored_session_id), str(current_session_id))
+	):
+		raise RuntimeError("钉钉 OAuth state 与当前会话不匹配")
+
+	stored_browser_nonce_digest = state_data.get("browser_nonce_digest")
+	browser_nonce = _get_request_cookie(DINGTALK_BROWSER_NONCE_COOKIE)
+	if (
+		not isinstance(stored_browser_nonce_digest, str)
+		or not browser_nonce
+		or not hmac.compare_digest(_state_digest(browser_nonce), stored_browser_nonce_digest)
+	):
+		raise RuntimeError("钉钉 OAuth state 与当前浏览器不匹配")
+
+	frappe.local.cookie_manager.delete_cookie(DINGTALK_BROWSER_NONCE_COOKIE)
 	redirect_to = state_data.get("redirect_to")
 	state_data["redirect_to"] = sanitize_redirect(redirect_to) if redirect_to else None
 	return state_data
@@ -476,19 +737,19 @@ def _parse_json_response(response, endpoint: str) -> dict:
 	try:
 		data = response.json()
 	except ValueError as e:
-		raise RuntimeError(f"EIMS {endpoint} 返回了非 JSON 响应（HTTP {response.status_code}）") from e
+		raise RuntimeError(f"{endpoint} 返回了非 JSON 响应（HTTP {response.status_code}）") from e
 
 	if not isinstance(data, dict):
-		raise RuntimeError(f"EIMS {endpoint} 返回的 JSON 格式无效")
+		raise RuntimeError(f"{endpoint} 返回的 JSON 格式无效")
 	return data
 
 
 def _get_error_message(data: dict):
-	for key in ("msg", "error_description", "error", "message"):
+	for key in ("msg", "error_description", "error", "message", "errorMessage", "errmsg"):
 		value = data.get(key)
 		if value is not None:
 			return _safe_log_text(value)
-	return "EIMS provider returned an unspecified error"
+	return "OAuth provider returned an unspecified error"
 
 
 def _safe_log_text(value, max_length: int = 300) -> str:
@@ -540,3 +801,150 @@ def _get_user_by_eims_app_user_id(app_user_id: str):
 	if not user.enabled:
 		raise EIMSUserBindingError(f"ERP User {user.name} is disabled")
 	return user
+
+
+def _normalize_identity(value: str | None) -> str | None:
+	"""Normalize a provider identity without coercing it to another type."""
+	if value is None:
+		return None
+	if not isinstance(value, str):
+		raise RuntimeError("钉钉用户信息中的身份标识格式无效")
+
+	value = value.strip()
+	return value or None
+
+
+def _get_user_by_dingtalk_identity(union_id: str | None, open_id: str | None, info: dict):
+	"""Resolve a DingTalk identity to one enabled ERP user.
+
+	Explicit Union ID/Open ID fields are authoritative. Optional contact matching
+	can be enabled during rollout, but new ERP users are never created by SSO.
+	"""
+	user_meta = frappe.get_meta("User")
+	for fieldname in (DINGTALK_UNION_ID_FIELD, DINGTALK_OPEN_ID_FIELD):
+		if not user_meta.has_field(fieldname):
+			frappe.throw(_("ERP 尚未创建钉钉身份字段，请先执行 migrate"))
+
+	matches = set()
+	for fieldname, identity in (
+		(DINGTALK_UNION_ID_FIELD, union_id),
+		(DINGTALK_OPEN_ID_FIELD, open_id),
+	):
+		if not identity:
+			continue
+		user_names = frappe.get_all(
+			"User",
+			filters={fieldname: identity},
+			pluck="name",
+			limit_page_length=2,
+		)
+		if len(user_names) > 1:
+			raise DingTalkUserBindingError(
+				f"DingTalk identity {fieldname} matches multiple ERP Users"
+			)
+		matches.update(user_names)
+
+	if len(matches) > 1:
+		raise DingTalkUserBindingError("DingTalk Union ID and Open ID are bound to different ERP Users")
+
+	if not matches and _is_dingtalk_auto_bind_enabled():
+		user = _find_user_by_dingtalk_contact(info)
+		if user:
+			_bind_dingtalk_identity(user, union_id, open_id)
+			return user
+
+	if not matches:
+		identity = union_id or open_id or "unknown"
+		raise DingTalkUserBindingError(f"DingTalk identity {identity} has no corresponding ERP User")
+
+	user = frappe.get_doc("User", next(iter(matches)))
+	if not user.enabled:
+		raise DingTalkUserBindingError(f"ERP User {user.name} is disabled")
+
+	_bind_dingtalk_identity(user, union_id, open_id)
+	return user
+
+
+def _is_dingtalk_auto_bind_enabled() -> bool:
+	value = frappe.conf.get(DINGTALK_AUTO_BIND_CONFIG_KEY)
+	return value is True or value == 1 or str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def _find_user_by_dingtalk_contact(info: dict):
+	"""Find one enabled user by an exact email or normalized phone number."""
+	candidates = set()
+
+	email = info.get("email")
+	if isinstance(email, str) and email.strip():
+		candidates.update(
+			frappe.get_all(
+				"User",
+				filters={"email": email.strip().lower(), "enabled": 1},
+				pluck="name",
+				limit_page_length=2,
+			)
+		)
+
+	dingtalk_mobile = info.get("mobile")
+	if isinstance(dingtalk_mobile, str) and dingtalk_mobile.strip():
+		users = frappe.get_all(
+			"User",
+			filters={"enabled": 1, "mobile_no": ["is", "set"]},
+			fields=["name", "mobile_no"],
+			limit_page_length=0,
+		)
+		candidates.update(
+			user.name
+			for user in users
+			if _phone_numbers_match(dingtalk_mobile, user.mobile_no, info.get("stateCode"))
+		)
+
+	if len(candidates) > 1:
+		raise DingTalkUserBindingError("DingTalk email/mobile matches multiple ERP Users")
+	if not candidates:
+		return None
+
+	return frappe.get_doc("User", next(iter(candidates)))
+
+
+def _phone_numbers_match(first: str, second: str, country_code: str | None = None) -> bool:
+	first_variants = _phone_variants(first, country_code)
+	second_variants = _phone_variants(second)
+	if first_variants & second_variants:
+		return True
+
+	return any(
+		len(left) >= 7 and len(right) >= 7 and (left.endswith(right) or right.endswith(left))
+		for left in first_variants
+		for right in second_variants
+	)
+
+
+def _phone_variants(value: str, country_code: str | None = None) -> set[str]:
+	digits = re.sub(r"\D", "", str(value))
+	if not digits:
+		return set()
+
+	variants = {digits}
+	if digits.startswith("0"):
+		variants.add(digits.lstrip("0"))
+	if country_code:
+		code = re.sub(r"\D", "", str(country_code))
+		if code:
+			variants.add(code + digits)
+			if digits.startswith(code):
+				variants.add(digits[len(code) :])
+	return variants
+
+
+def _bind_dingtalk_identity(user, union_id: str | None, open_id: str | None):
+	"""Complete an existing binding without overwriting a different identity."""
+	updates = {}
+	if union_id and not getattr(user, DINGTALK_UNION_ID_FIELD, None):
+		updates[DINGTALK_UNION_ID_FIELD] = union_id
+	if open_id and not getattr(user, DINGTALK_OPEN_ID_FIELD, None):
+		updates[DINGTALK_OPEN_ID_FIELD] = open_id
+	if updates:
+		frappe.db.set_value("User", user.name, updates, update_modified=False)
+		for fieldname, value in updates.items():
+			setattr(user, fieldname, value)

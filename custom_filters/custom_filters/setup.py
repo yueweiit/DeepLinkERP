@@ -16,7 +16,26 @@ def after_migrate():
 					"insert_after": "username",
 					"unique": 1,
 					"in_list_view": 1,
-				}
+				},
+				{
+					"fieldname": "custom_dingtalk_union_id",
+					"fieldtype": "Data",
+					"length": 140,
+					"label": "DingTalk Union ID",
+					"description": "DingTalk Union ID used to bind the ERP User for SSO login.",
+					"insert_after": "custom_eims_app_user_id",
+					"unique": 1,
+					"in_list_view": 1,
+				},
+				{
+					"fieldname": "custom_dingtalk_open_id",
+					"fieldtype": "Data",
+					"length": 140,
+					"label": "DingTalk Open ID",
+					"description": "DingTalk Open ID used as a fallback identity for SSO login.",
+					"insert_after": "custom_dingtalk_union_id",
+					"unique": 1,
+				},
 			],
 			"Buying Settings": [
 				{

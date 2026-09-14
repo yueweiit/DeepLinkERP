@@ -244,12 +244,14 @@ class TestEIMSOAuth(TestCase):
 				}
 			),
 			"code": "authorization-code",
+			"authCode": "authorization-code",
 			"state": "oauth-state",
 		}
 		with patch.object(oauth.frappe, "local", SimpleNamespace(form_dict=form_dict)):
 			oauth.scrub_sensitive_oauth_request_log()
 
 		self.assertEqual(form_dict["code"], "[REDACTED]")
+		self.assertEqual(form_dict["authCode"], "[REDACTED]")
 		self.assertEqual(form_dict["state"], "[REDACTED]")
 		self.assertEqual(form_dict["doc"]["client_secret"], "[REDACTED]")
 		self.assertEqual(form_dict["doc"]["code"], "[REDACTED]")
@@ -328,7 +330,8 @@ class TestEIMSOAuth(TestCase):
 		post.return_value = Mock(status_code=200, json=Mock(return_value={"access_token": "token"}))
 		get.return_value = Mock(status_code=200, json=Mock(return_value={"app_user_id": 12}))
 
-		oauth.login_via_eims("code", "state")
+		with patch.object(oauth, "_get_eims_provider", return_value="eims"):
+			oauth.login_via_eims("code", "state")
 
 		respond_as_web_page.assert_called_once_with(
 			"ERP 未绑定 EIMS 账号",
@@ -377,9 +380,9 @@ class TestEIMSOAuth(TestCase):
 
 		login_manager = Mock()
 		db = SimpleNamespace(commit=Mock())
-		with patch.object(oauth.frappe, "local", SimpleNamespace(login_manager=login_manager)), patch.object(
-			oauth.frappe, "db", db
-		):
+		with patch.object(oauth, "_get_eims_provider", return_value="eims"), patch.object(
+			oauth.frappe, "local", SimpleNamespace(login_manager=login_manager)
+		), patch.object(oauth.frappe, "db", db):
 			oauth.login_via_eims(" code ", "state")
 
 		post.assert_called_once()
@@ -398,3 +401,201 @@ class TestEIMSOAuth(TestCase):
 			redirect_to="/app",
 			provider="eims",
 		)
+
+
+class TestDingTalkOAuth(TestCase):
+	def test_start_generates_server_state_and_dingtalk_authorization_url(self):
+		flow = SimpleNamespace(
+			client_id="ding-client",
+			client_secret="server-secret",
+			get_authorize_url=Mock(return_value="https://login.dingtalk.com/oauth2/auth?..."),
+		)
+		cache = Mock()
+		local = SimpleNamespace(
+			session=SimpleNamespace(sid="guest-session"),
+			response={},
+			cookie_manager=Mock(),
+		)
+		provider_config = {
+			"api_endpoint": oauth.DINGTALK_USERINFO_URL,
+			"flow_params": {"authorize_url": "https://login.dingtalk.com/oauth2/auth"},
+			"auth_url_data": {"scope": "openid", "prompt": "consent", "corpId": "corp-001"},
+		}
+
+		with patch.object(oauth, "_get_dingtalk_provider", return_value="dingtalk"), patch.object(
+			oauth, "get_oauth2_providers", return_value={"dingtalk": provider_config}
+		), patch.object(oauth, "get_oauth2_flow", return_value=flow), patch.object(
+			oauth, "get_redirect_uri", return_value="https://erp.example.com/dingtalk/callback"
+		), patch.object(oauth, "sanitize_redirect", side_effect=lambda value: value), patch.object(
+			oauth.frappe, "cache", cache
+		), patch.object(oauth.frappe, "local", local), patch.object(
+			oauth.frappe, "conf", {"encryption_key": "test-key"}
+		):
+			oauth.start_dingtalk_login("/desk")
+
+		params = flow.get_authorize_url.call_args.kwargs
+		self.assertEqual(params["client_id"], "ding-client")
+		self.assertEqual(params["redirect_uri"], "https://erp.example.com/dingtalk/callback")
+		self.assertEqual(params["responseType"], "code")
+		self.assertEqual(params["response_type"], "code")
+		self.assertEqual(params["scope"], "openid")
+		self.assertEqual(params["prompt"], "consent")
+		self.assertEqual(params["corpId"], "corp-001")
+		self.assertNotIn("client_secret", params)
+		self.assertEqual(len(params["state"]), 43)
+		cache.set_value.assert_called_once()
+		self.assertEqual(cache.set_value.call_args.kwargs["expires_in_sec"], oauth.DINGTALK_STATE_TTL_SECONDS)
+		self.assertEqual(cache.set_value.call_args.args[1]["session_id"], "guest-session")
+		local.cookie_manager.set_cookie.assert_called_once_with(
+			oauth.DINGTALK_BROWSER_NONCE_COOKIE,
+			local.cookie_manager.set_cookie.call_args.args[1],
+			max_age=oauth.DINGTALK_STATE_TTL_SECONDS,
+			httponly=True,
+			samesite="Lax",
+		)
+		self.assertEqual(local.response["type"], "redirect")
+
+	def test_dingtalk_state_is_consumed_once_and_requires_browser_nonce(self):
+		state = "one-time-state"
+		browser_nonce = "browser-nonce"
+		cache = Mock()
+		cache.make_key.return_value = b"cache-key"
+		cache.getdel.side_effect = [
+			pickle.dumps(
+				{
+					"state_digest": "placeholder",
+					"browser_nonce_digest": "placeholder",
+					"session_id": "guest-session",
+				}
+			),
+			None,
+		]
+		local = SimpleNamespace(
+			session=SimpleNamespace(sid="guest-session"),
+			request=SimpleNamespace(cookies={oauth.DINGTALK_BROWSER_NONCE_COOKIE: browser_nonce}),
+			cookie_manager=Mock(),
+		)
+
+		with patch.object(oauth.frappe, "cache", cache), patch.object(oauth.frappe, "local", local), patch.object(
+			oauth.frappe, "conf", {"encryption_key": "test-key"}
+		):
+			state_digest = oauth._state_digest(state)
+			cache.getdel.side_effect = [
+				pickle.dumps(
+					{
+						"state_digest": state_digest,
+						"browser_nonce_digest": oauth._state_digest(browser_nonce),
+						"session_id": "guest-session",
+					}
+				),
+				None,
+			]
+			self.assertEqual(oauth._consume_dingtalk_state(state)["session_id"], "guest-session")
+			with self.assertRaises(RuntimeError):
+				oauth._consume_dingtalk_state(state)
+
+		local.cookie_manager.delete_cookie.assert_called_once_with(oauth.DINGTALK_BROWSER_NONCE_COOKIE)
+
+	@patch.object(oauth, "redirect_post_login")
+	@patch.object(oauth, "_get_user_by_dingtalk_identity")
+	@patch.object(
+		oauth,
+		"_consume_dingtalk_state",
+		return_value={"redirect_to": "/desk"},
+	)
+	@patch.object(oauth, "_get_dingtalk_provider", return_value="dingtalk")
+	@patch.object(
+		oauth,
+		"get_oauth2_providers",
+		return_value={"dingtalk": {"api_endpoint": oauth.DINGTALK_USERINFO_URL}},
+	)
+	@patch.object(oauth, "get_oauth2_flow")
+	@patch.object(oauth.requests, "get")
+	@patch.object(oauth.requests, "post")
+	def test_callback_exchanges_dingtalk_code_then_fetches_userinfo(
+		self,
+		post,
+		get,
+		get_oauth2_flow,
+		_get_oauth2_providers,
+		_get_provider,
+		_consume_state,
+		get_user,
+		redirect_post_login,
+	):
+		get_oauth2_flow.return_value = SimpleNamespace(
+			client_id="ding-client",
+			client_secret="server-secret",
+			access_token_url="https://api.dingtalk.com/v1.0/oauth2/userAccessToken",
+		)
+		post.return_value = Mock(status_code=200, json=Mock(return_value={"accessToken": "user-token"}))
+		get.return_value = Mock(
+			status_code=200,
+			json=Mock(return_value={"unionId": "union-001", "openId": "open-001"}),
+		)
+		get_user.return_value = SimpleNamespace(
+			name="user@example.com",
+			enabled=1,
+			user_type="System User",
+			custom_dingtalk_union_id="union-001",
+			custom_dingtalk_open_id="open-001",
+		)
+		login_manager = Mock()
+		db = SimpleNamespace(commit=Mock())
+
+		with patch.object(oauth.frappe, "local", SimpleNamespace(login_manager=login_manager)), patch.object(
+			oauth.frappe, "db", db
+		):
+			oauth.login_via_dingtalk(authCode="auth-code", state="state")
+
+		post.assert_called_once_with(
+			"https://api.dingtalk.com/v1.0/oauth2/userAccessToken",
+			json={
+				"clientId": "ding-client",
+				"clientSecret": "server-secret",
+				"code": "auth-code",
+				"grantType": "authorization_code",
+			},
+			headers={"Accept": "application/json", "Content-Type": "application/json"},
+			timeout=oauth.OAUTH_REQUEST_TIMEOUT,
+		)
+		get.assert_called_once_with(
+			oauth.DINGTALK_USERINFO_URL,
+			headers={"Accept": "application/json", "x-acs-dingtalk-access-token": "user-token"},
+			timeout=oauth.OAUTH_REQUEST_TIMEOUT,
+		)
+		get_user.assert_called_once_with("union-001", "open-001", {"unionId": "union-001", "openId": "open-001"})
+		login_manager.login_as.assert_called_once_with("user@example.com")
+		db.commit.assert_called_once_with()
+		redirect_post_login.assert_called_once_with(
+			desk_user=True,
+			redirect_to="/desk",
+			provider="dingtalk",
+		)
+
+	def test_dingtalk_identity_lookup_prefers_explicit_ids(self):
+		user = SimpleNamespace(
+			name="user@example.com",
+			enabled=1,
+			custom_dingtalk_union_id="union-001",
+			custom_dingtalk_open_id="open-001",
+		)
+		meta = Mock()
+		meta.has_field.return_value = True
+
+		with patch.object(oauth.frappe, "get_meta", return_value=meta), patch.object(
+			oauth.frappe, "get_all", side_effect=[["user@example.com"], ["user@example.com"]]
+		), patch.object(oauth.frappe, "get_doc", return_value=user):
+			with patch.object(oauth, "_is_dingtalk_auto_bind_enabled", return_value=False):
+				with patch.object(oauth, "_bind_dingtalk_identity") as bind:
+					self.assertIs(
+						oauth._get_user_by_dingtalk_identity(
+							"union-001", "open-001", {"unionId": "union-001", "openId": "open-001"}
+						),
+						user,
+					)
+				bind.assert_called_once_with(user, "union-001", "open-001")
+
+	def test_phone_numbers_match_with_dingtalk_country_code(self):
+		self.assertTrue(oauth._phone_numbers_match("13800138000", "+86 13800138000", "86"))
+		self.assertFalse(oauth._phone_numbers_match("13800138000", "13900139000", "86"))
