@@ -39,13 +39,55 @@ def test_detached_autofill_modal_buttons_have_readable_explicit_colors(button_cl
         assert declarations.get("cursor") == "not-allowed"
 
 
-def test_toolbar_has_one_upload_entry_and_ai_action_on_one_line() -> None:
+def test_material_toolbar_groups_view_and_data_actions_with_ai_as_only_primary() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     render = source.split("\n  renderMaterialFeeWorkspace() {", 1)[1].split("\n  renderMaterialFeeMetric", 1)[0]
+    toolbar = render.split('class="ocw-mf-material-toolrow"', 1)[1].split(
+        "${this.renderMaterialAIClarification()}", 1
+    )[0]
+
+    assert render.index("ocw-mf-material-title") < render.index(
+        'class="ocw-mf-material-toolrow"'
+    ) < render.index("${this.renderMaterialAIClarification()}")
+    assert 'class="ocw-mf-material-toolgroup is-view"' in toolbar
+    assert 'class="ocw-mf-material-toolgroup is-data"' in toolbar
+    assert 'class="ocw-mf-material-tool-label">视图' in toolbar
+    assert 'class="ocw-mf-material-tool-label">资料' in toolbar
     assert "获取装箱资料" in render
-    assert "自动填充资料" in render
+    assert 'class="ocw-outline-btn" type="button" data-action="mf-import-wiki"' in toolbar
+    assert 'class="ocw-primary-btn" type="button" data-action="mf-ai-fill"' in toolbar
+    assert "AI填充资料" in source
+    assert "自动填充资料" not in source
+    assert "查看填充进度" in source
+    assert "查看填充预览" in source
     assert "导入 Excel 补资料" not in render
     assert "mf-import-xlsx" not in render
+
+
+def test_material_toolbar_wraps_and_checkbox_keeps_native_fixed_size() -> None:
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+
+    assert ".ocw-mf-material-toolrow" in css
+    assert "justify-content: space-between" in css
+    assert ".ocw-mf-material-toolgroup.is-data" in css
+    assert "@media (max-width: 700px)" in css
+    assert "flex-direction: column" in css
+    assert ".ocw-mf-cell :is(input:not([type=\"checkbox\"]), select)" in css
+    assert ".ocw-mf-cell :is(input, select)" not in css
+
+    checkbox_rule = css.split(
+        '.ocw-mf-group-select input[type="checkbox"]', 1
+    )[1].split("}", 1)[0]
+    for declaration in (
+        "width: 16px",
+        "min-width: 16px",
+        "max-width: 16px",
+        "height: 16px",
+        "min-height: 16px",
+        "max-height: 16px",
+        "background-repeat: no-repeat",
+    ):
+        assert declaration in checkbox_rule
 
 
 def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:

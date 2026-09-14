@@ -593,14 +593,20 @@
         <section class="ocw-mf-section ocw-mf-material-section">
           <div class="ocw-mf-section-title ocw-mf-material-title">
             <div><span>01</span><h3>物料与装箱数据</h3><p>采购标识与数量保持只读；缺失的采购金额、币种和单位可直接补录。${hasSettlementCargo ? "发货数量按结算采购支出采用，原装箱数量单独保留。" : "蓝色发货数量默认等于采购数量。"}</p></div>
-            <div class="ocw-mf-material-actions">
-              <button class="ocw-outline-btn ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
-              <button class="ocw-outline-btn ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
-              <button class="ocw-outline-btn" type="button" data-action="mf-excluded-materials">已排除物料</button>
-              <button class="ocw-primary-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
-              <button class="ocw-outline-btn" type="button" data-action="mf-recover-material-rows">恢复误删物料</button>
+          </div>
+          <div class="ocw-mf-material-toolrow" aria-label="物料资料与视图工具">
+            <div class="ocw-mf-material-toolgroup is-view">
+              <span class="ocw-mf-material-tool-label">视图</span>
+              <button class="ocw-outline-btn ocw-mf-tool-quiet ${state.onlyMissing ? "is-active" : ""}" type="button" data-action="mf-toggle-missing">只看缺项</button>
+              <button class="ocw-outline-btn ocw-mf-tool-quiet ${state.showAuxiliary ? "is-active" : ""}" type="button" data-action="mf-toggle-aux">展开辅助列</button>
+              <button class="ocw-outline-btn ocw-mf-tool-quiet" type="button" data-action="mf-excluded-materials">已排除物料</button>
+            </div>
+            <div class="ocw-mf-material-toolgroup is-data">
+              <span class="ocw-mf-material-tool-label">资料</span>
+              <button class="ocw-outline-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
+              <button class="ocw-outline-btn ocw-mf-tool-quiet" type="button" data-action="mf-recover-material-rows">恢复误删物料</button>
               ${this.renderMaterialAIProgressChip()}
-              <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (state.aiFill?.status === "READY" ? "查看填充预览" : "查看填充进度") : "自动填充资料"}</button>
+              <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (state.aiFill?.status === "READY" ? "查看填充预览" : "查看填充进度") : "AI填充资料"}</button>
             </div>
           </div>
           ${blockingPackingGroups.length ? `<div class="ocw-mf-dialog-note"><strong>装箱组待重新确认</strong><span>组内物料曾被删除或恢复，试算已阻止。请勾选完整装箱组后从顶部操作条处理。</span></div>` : ""}
@@ -1742,7 +1748,7 @@
     state.aiProgressMinimized = false;
     if (!state.aiProgressDialog) {
       const dialog = new frappe.ui.Dialog({
-        title: "自动填充资料",
+        title: "AI填充资料",
         fields: [{ fieldtype: "HTML", fieldname: "progress_html", options: this.renderMaterialAIProgressDialogContent() }],
       });
       state.aiProgressDialog = dialog;
@@ -1829,7 +1835,7 @@
     const $button = this.$root?.find?.("[data-action='mf-ai-fill']");
     if ($button?.length) {
       const status = String(state.aiFill?.status || "");
-      $button.text(status === "READY" ? "查看填充预览" : ["STARTING", "QUEUED", "RUNNING"].includes(status) ? "查看填充进度" : "自动填充资料");
+      $button.text(status === "READY" ? "查看填充预览" : ["STARTING", "QUEUED", "RUNNING"].includes(status) ? "查看填充进度" : "AI填充资料");
     }
     const dialog = state.aiProgressDialog;
     if (dialog?.$wrapper?.length) {

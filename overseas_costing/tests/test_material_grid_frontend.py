@@ -74,14 +74,17 @@ def test_grid_constrains_real_frappe_anonymous_body_wrapper_and_native_form():
 
 def test_material_toolbar_wraps_without_clipping_actions():
     css = (PARTS / '48-material-fee-workspace.css').read_text()
-    actions = css.split('.ocw-mf-material-actions {', 1)[1].split('}', 1)[0]
+    actions = css.split('.ocw-mf-material-toolrow {', 1)[1].split('}', 1)[0]
+    groups = css.split('.ocw-mf-material-toolgroup {', 1)[1].split('}', 1)[0]
     title = css.split('.ocw-mf-material-title > div:first-child {', 1)[1].split('}', 1)[0]
-    responsive = css.split('@media (max-width: 1050px)', 1)[1].split('@media (max-width: 640px)', 1)[0]
+    responsive = css.split('@media (max-width: 700px) {', 1)[1].split('.ocw-mf-selection-toolbar', 1)[0]
     assert 'flex-wrap: wrap' in actions
-    assert 'overflow: visible' in actions
-    assert 'overflow-x: auto' not in actions and 'flex-wrap: nowrap' not in actions
+    assert 'justify-content: space-between' in actions
+    assert 'overflow: hidden' not in actions and 'flex-wrap: nowrap' not in actions
+    assert 'flex-wrap: wrap' in groups and 'min-width: 0' in groups
     assert 'min-width: 0' in title
-    assert '.ocw-mf-material-actions' in responsive
+    assert '.ocw-mf-material-toolrow' in responsive and 'flex-direction: column' in responsive
+    assert '.ocw-mf-material-toolgroup.is-data' in responsive
     assert 'width: 100%' in responsive and 'justify-content: flex-start' in responsive
 
 

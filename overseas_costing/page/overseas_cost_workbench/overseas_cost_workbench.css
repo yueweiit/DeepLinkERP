@@ -7286,11 +7286,22 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-preview-card dt { color: var(--mf-muted); font-weight: 400; }
 .ocw-mf-preview-card dd { margin: 0; font-variant-numeric: tabular-nums; }
 
-.ocw-mf-material-title { align-items: flex-start; flex-wrap: wrap; }
+.ocw-mf-material-title { align-items: flex-start; }
 .ocw-mf-material-title > div:first-child { min-width: 0; }
-.ocw-mf-material-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 100%; overflow: visible; padding-bottom: 2px; }
-.ocw-mf-material-actions button { flex: 0 0 auto; white-space: nowrap; }
-.ocw-mf-material-actions .is-active { border-color: var(--mf-blue); background: var(--mf-blue-soft); color: var(--mf-blue); }
+.ocw-mf-material-toolrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 18px; padding: 10px 14px; border-bottom: 1px solid #e3eaf3; background: #fafcff; }
+.ocw-mf-material-toolgroup { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; }
+.ocw-mf-material-toolgroup.is-data { justify-content: flex-end; margin-left: auto; }
+.ocw-mf-material-tool-label { color: #98a2b3; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; white-space: nowrap; }
+.ocw-mf-material-toolrow button { flex: 0 0 auto; min-height: 32px; white-space: nowrap; }
+.ocw-mf-material-toolrow .ocw-mf-tool-quiet { border-color: transparent; background: transparent; color: #475467; font-weight: 600; }
+.ocw-mf-material-toolrow .ocw-mf-tool-quiet:hover:not(:disabled) { border-color: #d2dfec; background: #f1f6fb; color: #175f99; }
+.ocw-mf-material-toolrow .ocw-mf-tool-quiet.is-active { border-color: #8bc4f1; background: var(--mf-blue-soft); color: var(--mf-blue); }
+
+@media (max-width: 700px) {
+  .ocw-mf-material-toolrow { flex-direction: column; align-items: stretch; }
+  .ocw-mf-material-toolgroup,
+  .ocw-mf-material-toolgroup.is-data { justify-content: flex-start; width: 100%; margin-left: 0; }
+}
 
 .ocw-mf-selection-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #e3eaf3; border-bottom: 1px solid #d8e2ef; background: #f7fbff; }
 .ocw-mf-selection-toolbar button { flex: 0 0 auto; white-space: nowrap; }
@@ -7343,10 +7354,11 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-grid-table td[data-mf-grid-field="product_name"] > span { cursor: help; }
 .ocw-mf-grid-table td > span { display: block; overflow: hidden; padding: 9px 8px; text-overflow: ellipsis; white-space: nowrap; }
 .ocw-mf-grid-table td:is([data-mf-grid-field="row_no"], [data-mf-grid-field="material_code"], [data-mf-grid-field="product_name"]) > :is(span, input) { padding-inline: var(--mf-grid-fixed-padding); }
-.ocw-mf-group-select input, .ocw-mf-grid-table th[data-mf-grid-field="__group_select"] input { width: 16px; height: 16px; margin: 0; accent-color: var(--mf-blue); cursor: pointer; }
-.ocw-mf-group-select input:disabled, .ocw-mf-grid-table th[data-mf-grid-field="__group_select"] input:disabled { cursor: not-allowed; }
-.ocw-mf-cell :is(input, select) { width: 100%; height: 38px; border: 0; border-radius: 0; padding: 7px 8px; background: transparent; color: #172033; outline: 0; font: inherit; font-variant-numeric: tabular-nums; }
-.ocw-mf-cell :is(input, select):focus { box-shadow: inset 0 0 0 2px var(--mf-blue); background: #fff; }
+.ocw-mf-group-select input[type="checkbox"], .ocw-mf-grid-table th[data-mf-grid-field="__group_select"] input[type="checkbox"] { display: inline-block; width: 16px; min-width: 16px; max-width: 16px; height: 16px; min-height: 16px; max-height: 16px; margin: 0; padding: 0; background-repeat: no-repeat; background-position: center; accent-color: var(--mf-blue); cursor: pointer; }
+.ocw-mf-group-select input[type="checkbox"]:focus-visible, .ocw-mf-grid-table th[data-mf-grid-field="__group_select"] input[type="checkbox"]:focus-visible { outline: 2px solid rgba(11, 140, 240, 0.35); outline-offset: 2px; }
+.ocw-mf-group-select input[type="checkbox"]:disabled, .ocw-mf-grid-table th[data-mf-grid-field="__group_select"] input[type="checkbox"]:disabled { cursor: not-allowed; }
+.ocw-mf-cell :is(input:not([type="checkbox"]), select) { width: 100%; height: 38px; border: 0; border-radius: 0; padding: 7px 8px; background: transparent; color: #172033; outline: 0; font: inherit; font-variant-numeric: tabular-nums; }
+.ocw-mf-cell :is(input:not([type="checkbox"]), select):focus { box-shadow: inset 0 0 0 2px var(--mf-blue); background: #fff; }
 .ocw-mf-cell small { position: absolute; right: 3px; bottom: 1px; color: #1673b9; font-size: 8px; pointer-events: none; }
 .ocw-mf-cell { position: relative; }
 .ocw-mf-cell.is-readonly { background: #f8fafc; color: #475467; }
@@ -7716,8 +7728,6 @@ input[type="range"].ocw-result-scrollbar:disabled {
   .ocw-mf-fee-layout { grid-template-columns: 1fr; }
   .ocw-mf-preview-card { position: static; }
   .ocw-mf-alert-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .ocw-mf-material-title { display: grid; }
-  .ocw-mf-material-actions { justify-content: flex-start; width: 100%; }
   .ocw-mf-allocation-row { grid-template-columns: 1fr 1fr; }
 }
 
