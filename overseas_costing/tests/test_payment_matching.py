@@ -155,6 +155,102 @@ def test_payment_pool_queries_only_same_corp_expenses_and_installs_compound_inde
     assert [row["name"] for row in indexed] == ["corp", "kind"]
 
 
+def test_payment_pool_materializes_only_requested_page_across_thousand_sources(monkeypatch):
+    from overseas_costing.services.logistics_settlement.freight_matching import payment_pool, payment_pool_fresh
+    from overseas_costing.services.logistics_settlement.model import digest
+    import sqlite3
+    store=Store.sqlite(sqlite3.connect(':memory:'));store.install()
+    logistics=store.ingest(parse_source(source('large-pool','logistics'),logistics_codes={'logistics'}))
+    expense_ids=set();candidate_ids=set()
+    for index in range(1005):
+        sid=digest('bulk-expense',index);snapshot=digest('bulk-snapshot',index)
+        expense_ids.add(sid)
+        data={'id':sid,'corp':'C','instance':f'E{index:04}','kind':'expense','snapshot':snapshot,'approved':True,'invalid':False,
+              'title':'付款','fields':{'项目说明':f'P{index:04}'},'identifiers':[],'status':'COMPLETED','amount':'1','currency':'RMB'}
+        store.insert('source',{'id':sid,'corp':'C','instance':data['instance'],'kind':'expense','snapshot':snapshot,
+                     'match_hash':snapshot,'updated_at':'2026-01-01','data':dumps(data)})
+        cid=digest('bulk-candidate',index);candidate_ids.add(cid)
+        candidate={'id':cid,'logistics_id':logistics['id'],'expense_id':sid,'status':'pending','revision':digest(cid,'r'),'method':'identifier'}
+        store.insert('freight_candidate',{'id':cid,'logistics_id':logistics['id'],'expense_id':sid,'status':'pending','data':dumps(candidate)})
+    unpacked=[];original=store.unpack
+    monkeypatch.setattr(store,'unpack',lambda row:unpacked.append(row['id']) or original(row))
+    page=payment_pool(store,logistics['id'],hints={'project':'P0999'},offset=100,limit=17)
+    assert page['total']==1005 and len(page['sources'])==17 and page['has_more']
+    assert len([sid for sid in unpacked if sid in expense_ids])<=17
+    assert len([sid for sid in unpacked if sid in candidate_ids])<=17
+    unpacked.clear()
+    assert payment_pool_fresh(store,logistics['id'],page['pool_snapshot'])
+    assert len([sid for sid in unpacked if sid in expense_ids])<=17
+    assert len([sid for sid in unpacked if sid in candidate_ids])<=17
+    seen=[]
+    for offset in range(0,1005,50):
+        seen.extend(row['id'] for row in payment_pool(store,logistics['id'],offset=offset,limit=50)['sources'])
+    assert len(seen)==len(set(seen))==1005
+
+
+def test_sql_page_ranking_normalizes_hint_separators_before_limit():
+    from overseas_costing.services.logistics_settlement.freight_matching import payment_pool
+    import sqlite3
+    store=Store.sqlite(sqlite3.connect(':memory:'));store.install()
+    logistics=store.ingest(parse_source(source('ranked-pool','logistics'),logistics_codes={'logistics'}))
+    for index in range(60):
+        sid=f'{index:064x}';snapshot=f'{index+100:064x}'
+        data={'id':sid,'corp':'C','instance':f'low-{index}','kind':'expense','snapshot':snapshot,'approved':True,'invalid':False,
+              'title':'付款','fields':{'项目说明':'unrelated'},'identifiers':[],'status':'COMPLETED'}
+        store.insert('source',{'id':sid,'corp':'C','instance':data['instance'],'kind':'expense','snapshot':snapshot,
+                     'match_hash':snapshot,'updated_at':'2026-01-01','data':dumps(data)})
+    high_id='f'*64;high={**data,'id':high_id,'instance':'high','snapshot':'e'*64,'fields':{'项目说明':'DHL 123'}}
+    store.insert('source',{'id':high_id,'corp':'C','instance':'high','kind':'expense','snapshot':high['snapshot'],
+                 'match_hash':high['snapshot'],'updated_at':'2026-01-01','data':dumps(high)})
+    page=payment_pool(store,logistics['id'],hints={'waybill':'DHL-123'},limit=5)
+    assert page['sources'][0]['id']==high_id
+
+
+def test_sql_page_ranking_does_not_truncate_exact_reference_sources():
+    from overseas_costing.services.logistics_settlement.freight_matching import _rule_source_ids, payment_pool
+    from overseas_costing.services.logistics_settlement.model import digest
+    import sqlite3
+    store=Store.sqlite(sqlite3.connect(':memory:'));store.install()
+    logistics=store.ingest(parse_source(source('many-exact','logistics'),logistics_codes={'logistics'}))
+    for index in range(101):
+        sid=digest('exact-expense',index);snapshot=digest('exact-snapshot',index)
+        data={'id':sid,'corp':'C','instance':f'exact-{index}','kind':'expense','snapshot':snapshot,'approved':True,'invalid':False,
+              'title':'付款','fields':{},'identifiers':[],'related':[logistics['instance']],'status':'COMPLETED'}
+        store.insert('source',{'id':sid,'corp':'C','instance':data['instance'],'kind':'expense','snapshot':snapshot,
+                     'match_hash':snapshot,'updated_at':'2020-01-01','data':dumps(data)})
+        store.insert('reference',{'id':digest('exact-reference',index),'source_id':sid,'corp':'C',
+                     'target_instance':logistics['instance'],'data':'{}'})
+    # Reproduce the former arbitrary list(set)[:100] boundary: the omitted exact
+    # source should rank first by recency among equally authoritative references.
+    omitted=list(_rule_source_ids(store,logistics))[100]
+    store.sql("UPDATE oc_ls_source SET updated_at='2030-01-01' WHERE id=%s",(omitted,))
+
+    page=payment_pool(store,logistics['id'],limit=50)
+
+    assert page['sources'][0]['id']==omitted
+
+
+def test_explicit_reference_ranks_above_ordinary_shared_identifier_with_matching_public_score():
+    from overseas_costing.services.logistics_settlement.freight_matching import payment_pool
+    from overseas_costing.services.logistics_settlement.model import digest
+    import sqlite3
+    store=Store.sqlite(sqlite3.connect(':memory:'));store.install()
+    parsed_logistics=parse_source(source('ranking-authority','logistics'),logistics_codes={'logistics'})
+    parsed_logistics['identifiers']=[('material','SKU12345')]
+    logistics=store.ingest(parsed_logistics)
+    weak_parsed=parse_source(_financial('weak-shared','付款',text='日常结算'),logistics_codes={'logistics'})
+    weak_parsed['identifiers']=[('material','SKU12345')]
+    weak=store.ingest(weak_parsed)
+    explicit=store.ingest(parse_source(_financial('explicit-reference','付款',text='日常结算'),logistics_codes={'logistics'}))
+    store.insert('reference',{'id':digest('ranking-reference'),'source_id':explicit['id'],'corp':'C',
+                 'target_instance':logistics['instance'],'data':'{}'})
+
+    page=payment_pool(store,logistics['id'],limit=2)
+
+    assert [row['id'] for row in page['sources']]==[explicit['id'],weak['id']]
+    assert [row['local_match_score'] for row in page['sources']]==[3000,1000]
+
+
 def test_unrelated_payment_does_not_stale_rule_fingerprint():
     from overseas_costing.services.logistics_settlement import freight_matching
     store, _ledger, _batch, _version, _item, logistics, _monthly = setup_cost()
@@ -290,11 +386,21 @@ def test_candidate_authority_and_revision_cas_are_enforced():
     store, _ledger, _batch, _version, _item, logistics, expense = setup_cost()
     line = freight_matching.current_lines(store, expense)[0]
     ai = freight_matching.save_candidate(store, logistics, expense, [line], "deepseek", "AI")
-    manual = freight_matching.save_candidate(store, logistics, expense, [line], "manual", "人工")
+    manual = freight_matching.save_candidate(store, logistics, expense, [line], "manual", "人工", expected_revision=ai['revision'])
     ignored = freight_matching.save_candidate(store, logistics, expense, [], "identifier", "标识", expected_revision=manual["revision"])
     assert manual["method"] == ignored["method"] == "manual"
     with pytest.raises(ValueError, match="变化"):
         freight_matching.save_candidate(store, logistics, expense, [], "manual", "新人工", expected_revision=ai["revision"])
+
+
+def test_existing_identifier_candidate_requires_revision_before_manual_upgrade():
+    from overseas_costing.services.logistics_settlement import freight_matching, freight_runtime
+    store,ledger,batch,_version,_item,logistics,_expense=setup_cost()
+    identifier=freight_matching.rule_pass(store,logistics['id'])[0]
+    with pytest.raises(ValueError,match='版本'):
+        freight_runtime.manual_candidate(store,ledger,batch['name'],identifier['expense_id'],'人工升级')
+    manual=freight_runtime.manual_candidate(store,ledger,batch['name'],identifier['expense_id'],'人工升级',expected_revision=identifier['revision'])
+    assert manual['method']=='manual'
 
 
 def test_equal_manual_candidate_update_requires_revision_cas():
@@ -374,6 +480,21 @@ def test_sensitive_values_are_removed_even_under_harmless_business_labels(secret
     job = payment_ai_matching.start(store, logistics["id"], batch["name"], version["name"], "user")
     assert secret not in dumps(store.get("state", job["id"])["input"])
     assert sanitize_hints({"description": secret})["description"] == ""
+
+
+@pytest.mark.parametrize('secret',[
+    '6222‑0212/3456.7890','IBAN: GB82 WEST/1234-5698_7654.32','SWIFT: BOFA-US-3N/XXX','BIC: DEUT DE FF',
+    'AKIAIOSFODNN7EXAMPLE','sk / live / SECRET123','-----BEGIN PRIVATE KEY----- ABC','access / token = PRIVATE123',
+    '6222(0212)3456(7890)','6222\u200b0212\u200b3456\u200b7890',
+    'DE89\u200b3704\u200b0044\u200b0532\u200b0130\u200b00','-----BEGIN PRIVATE\u200bKEY----- ABC',
+])
+def test_payment_sanitizer_blocks_unicode_separators_and_common_credentials(secret):
+    from overseas_costing.services.logistics_settlement.ai_matching import safe_text
+    from overseas_costing.services.logistics_settlement.freight_matching import sanitize_hints
+    from overseas_costing.services.logistics_settlement.payment_ai_matching import _line_summary
+    assert safe_text(secret)==''
+    assert sanitize_hints({'description':secret})['description']==''
+    assert _line_summary({'cargo_text':secret})['cargo_text']==''
 
 
 def test_payment_public_view_is_additive_and_claim_totals_are_real():
@@ -492,6 +613,55 @@ def test_rule_runtime_locks_match_state_before_batch(monkeypatch):
     monkeypatch.setattr(runtime,'frappe',SimpleNamespace(session=SimpleNamespace(user='user')))
     runtime.run_payment_rule_matching(batch['name'],version['name'])
     assert events.index('match_lock') < events.index('batch_lock')
+
+
+def test_legacy_freight_worker_never_revives_failed_job_or_consumes_payment_job(monkeypatch):
+    from overseas_costing.services.logistics_settlement import ai_matching, freight_matching, payment_ai_matching, runtime
+    store,ledger,batch,version,_item,logistics,_expense=setup_cost()
+    monkeypatch.setattr(runtime,'freight_enabled',lambda:True);monkeypatch.setattr(runtime,'store',lambda:store)
+    monkeypatch.setattr(runtime,'FrappeLedger',lambda:ledger)
+    _,_,fingerprint=freight_matching.input_state(store,logistics['id'])
+    failed={'id':'failed-legacy','status':'failed','logistics_id':logistics['id'],'fingerprint':fingerprint,'actor':'user'};ai_matching.save(store,failed)
+    before=store.find('freight_candidate')
+    runtime.run_batch_matching(failed['id'])
+    assert store.get('state',failed['id'])['status']=='failed' and store.find('freight_candidate')==before
+    payment=payment_ai_matching.start(store,logistics['id'],batch['name'],version['name'],'user')
+    runtime.run_batch_matching(payment['id'])
+    assert store.get('state',payment['id'])['status']=='queued' and store.find('freight_candidate')==before
+
+
+def test_payment_ai_transactions_lock_batch_before_job_and_candidates(monkeypatch):
+    from overseas_costing.services.logistics_settlement import payment_ai_matching
+    store,ledger,batch,version,_item,logistics,_expense=setup_cost();events=[]
+    job=payment_ai_matching.start(store,logistics['id'],batch['name'],version['name'],'user')
+    original=store.get
+    def observed(table,key,lock=False):
+        if lock and table=='state' and key=='match_lock':events.append('match')
+        elif lock and table=='state' and key==job['id']:events.append('job')
+        elif lock and table=='freight_candidate':events.append('candidate')
+        return original(table,key,lock=lock)
+    monkeypatch.setattr(store,'get',observed)
+    def current(_batch,lock=False):
+        if lock:events.append('batch')
+        return (ledger.get('batch',batch['name'],lock=lock) or {}).get('current_version')
+    payment_ai_matching.run(store,job['id'],lambda _messages:{'matches':[]},current_version=current)
+    assert events[:3]==['match','batch','job']
+    final_match=max(i for i,value in enumerate(events) if value=='match')
+    assert events[final_match:final_match+3]==['match','batch','job']
+
+
+def test_payment_ai_version_change_during_model_call_is_stale_without_candidate_write():
+    from overseas_costing.services.logistics_settlement import payment_ai_matching
+    store,ledger,batch,version,_item,logistics,_expense=setup_cost()
+    expense=store.ingest(parse_source(_financial('version-race','付款'),logistics_codes={'logistics'}))
+    job=payment_ai_matching.start(store,logistics['id'],batch['name'],version['name'],'user')
+    def response(_messages):
+        ledger.put('batch',batch['name'],{'current_version':'changed-version'})
+        return {'matches':[{'expense_id':expense['id'],'confidence':1,'reason':'旧版本结果','line_ids':[]}]}
+    result=payment_ai_matching.run(store,job['id'],response,
+        current_version=lambda name,lock=False:(ledger.get('batch',name,lock=lock) or {}).get('current_version'))
+    assert result['status']=='stale'
+    assert not store.find('freight_candidate',expense_id=expense['id'])
 
 
 def test_financial_archive_uses_registered_process_scope_not_filenames():

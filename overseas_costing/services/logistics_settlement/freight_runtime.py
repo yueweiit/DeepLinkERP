@@ -86,15 +86,21 @@ def batch_status(store,ledger,batch_name,version_name=None):
 
 
 def manual_candidate(store,ledger,batch_name,expense_id,reason,expected_revision=None):
-    maps=store.find('batch_map',batch=batch_name)
-    if not maps:raise ValueError('请先开始本票匹配')
-    logistics=store.get('source',maps[0]['source_id']);expense=store.get('source',expense_id)
-    if not expense or expense['corp']!=logistics['corp'] or expense['invalid'] or expense['kind']!='expense':raise ValueError('来源企业、类型或状态不符')
-    from .freight_lines import matching_lines
-    lines=matching.current_lines(store,expense);own=matching_lines(logistics,lines)
-    # Manual relation still cannot expose an explicitly different shipment as an adoptable line.
-    own += [r for r in lines if not r.get('waybill') and not r.get('approval_no')]
-    return candidate_view(store,matching.save_candidate(store,logistics,expense,own,'manual',reason,expected_revision=expected_revision))
+    with store.atomic():
+        store.get('state','match_lock',lock=True)
+        maps=store.find('batch_map',batch=batch_name)
+        if not maps:raise ValueError('请先开始本票匹配')
+        candidate_id=digest(matching.POLICY,maps[0]['source_id'],expense_id)
+        store.get('freight_candidate',candidate_id,lock=True)
+        logistics=store.get('source',maps[0]['source_id'],lock=True);expense=store.get('source',expense_id,lock=True)
+        if not expense or expense['corp']!=logistics['corp'] or expense['invalid'] or not expense.get('approved') or expense['kind']!='expense':
+            raise ValueError('来源企业、类型或状态不符')
+        from .freight_lines import matching_lines
+        lines=matching.current_lines(store,expense);own=matching_lines(logistics,lines)
+        # Manual relation still cannot expose an explicitly different shipment as an adoptable line.
+        own += [r for r in lines if not r.get('waybill') and not r.get('approval_no')]
+        candidate=matching.save_candidate(store,logistics,expense,own,'manual',reason,expected_revision=expected_revision)
+    return candidate_view(store,candidate)
 
 
 def reopen_candidate(store,ledger,batch_name,candidate_id,revision,reason,actor):

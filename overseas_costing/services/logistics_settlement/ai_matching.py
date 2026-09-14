@@ -13,16 +13,20 @@ POLICY = 'settlement-ai-match-1'
 LATEST = 'latest_matching_ai'
 SENSITIVE = re.compile(r'账[号户]|帐[号户]|银行卡|开户行|口令|密码|密钥|凭证|身份证|护照|'
                        r'account|bank|password|passwd|secret|token|api[_ -]?key|credential|'
-                       r'cuenta|bancari|contrase[ñn]a|clave|authorization|bearer|\b\d{12,19}\b', re.I)
+                       r'cuenta|bancari|contrase[ñn]a|clave|authorization|bearer|\bswift\b|\bbic\b|'
+                       r'private\s*key|\b\d{12,19}\b', re.I)
 
 
 def _secret_text(text):
     normalized=unicodedata.normalize('NFKC',str(text or ''))
-    compact=re.sub(r'[\s\-_.]+','',normalized)
+    # Detection uses an alphanumeric-only copy so punctuation, Unicode format
+    # controls and zero-width separators cannot split credentials.
+    compact=''.join(character for character in normalized if character.isalnum())
     if SENSITIVE.search(normalized) or SENSITIVE.search(compact):return True
     if re.search(r'\d{11,19}',compact):return True
     if re.search(r'[A-Z]{2}\d{2}[A-Z0-9]{11,30}',compact,re.I):return True
     if re.fullmatch(r'[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?',compact,re.I):return True
+    if re.search(r'AKIA[0-9A-Z]{16}',compact):return True
     if re.search(r'sk(?:live|test)[A-Z0-9]{6,}',compact,re.I):return True
     return False
 

@@ -347,12 +347,18 @@ def run_batch_matching(batch_matching_job_id):
         # Compatibility for jobs queued before payment matching was split. Never
         # pass those jobs to a model: they are completed as deterministic rules.
         from . import freight_matching
-        db=store();job=db.get('state',batch_matching_job_id) or {}
-        if not job.get('logistics_id'):return job
-        result=freight_matching.record_rule_pass(db,job['logistics_id'],job.get('actor',''))
-        job.update(status='completed',stage='saved',finished_at=utcnow())
-        db.put('state',{'id':job['id'],'updated_at':utcnow(),'data':dumps(job)});db.commit()
-        return result
+        db=store()
+        with db.atomic():
+            db.get('state','match_lock',lock=True)
+            job=db.get('state',batch_matching_job_id,lock=True) or {}
+            if job.get('kind') not in (None,'') or job.get('status')!='queued' or not job.get('logistics_id'):return job
+            try:fingerprint=freight_matching.input_state(db,job['logistics_id'])[2]
+            except ValueError:return job
+            if job.get('fingerprint')!=fingerprint:return job
+            result=freight_matching.record_rule_pass(db,job['logistics_id'],job.get('actor',''))
+            job.update(status='completed',stage='saved',finished_at=utcnow())
+            db.put('state',{'id':job['id'],'updated_at':utcnow(),'data':dumps(job)})
+        db.commit();return result
     from overseas_costing.services import allocation_service
     config = allocation_service._ai_config()
     config['timeout'] = min(120, max(60, float(config.get('timeout') or 60)))
@@ -371,7 +377,7 @@ def run_payment_ai_matching(payment_ai_job_id):
         if not config.get('api_key'):raise ValueError('未配置 DeepSeek API 密钥')
         return allocation_service._extract_json_object(allocation_service._call_chat_completions(config,messages))
     return payment_ai_matching.run(store(),payment_ai_job_id,call_model,config.get('model',''),
-        current_version=lambda batch:(FrappeLedger().get('batch',batch) or {}).get('current_version'))
+        current_version=lambda batch,lock=False:(FrappeLedger().get('batch',batch,lock=lock) or {}).get('current_version'))
 
 
 def ensure_batch(db, source):

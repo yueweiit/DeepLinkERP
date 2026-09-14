@@ -55,11 +55,11 @@ def save_candidate(store,logistics,expense,lines,method,reason,*,model='',confid
             raise ValueError('候选已存在，请刷新后重试')
         if expected_revision not in (None,'') and (prior or {}).get('revision')!=expected_revision:
             raise ValueError('候选已变化，请刷新后重试')
+        if prior and method=='manual' and expected_revision is None:
+            raise ValueError('候选已存在，请提供匹配的候选版本后重试')
         # Rejection permanently protects a pair until the explicit reopen path.
         if prior and prior.get('status') in ('rejected','confirmed'):return prior
         if prior and CANDIDATE_PRIORITY.get(method,0)<CANDIDATE_PRIORITY.get(prior.get('method'),0):return prior
-        if prior and method=='manual' and prior.get('method')=='manual' and expected_revision is None:
-            raise ValueError('人工候选已存在，请提供候选版本后重试')
         issues=[]
         for line in lines:
             if line.get('ambiguous'): issues.append('重复凭证或明细行身份不唯一，待核对')
@@ -81,7 +81,16 @@ def _rule_source_ids(store,logistics):
         column='approval_no' if kind=='approval' else 'waybill' if kind=='waybill' else None
         if column:
             source_ids.update(r['source_id'] for r in store.find('freight_line',**{column:token}))
-            source_ids.update(r['source_id'] for r in store.find('identifier',corp=logistics['corp'],token=token))
+            source_ids.update(r['source_id'] for r in store.find('identifier',corp=logistics['corp'],token=token,token_type=kind))
+    source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
+    return source_ids
+
+
+def _ranking_priority_source_ids(store,logistics):
+    source_ids=set()
+    for kind,token in logistics['identifiers']:
+        column='approval_no' if kind=='approval' else 'waybill' if kind=='waybill' else None
+        if column:source_ids.update(r['source_id'] for r in store.find('freight_line',**{column:token}))
     source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
     return source_ids
 
@@ -116,21 +125,26 @@ def sanitize_hints(hints=None):
     return result
 
 
-def _score_payment_source(logistics, source, hints):
+def _score_payment_source(logistics, source, hints,priority_ids=None):
     identifiers=set(map(tuple,logistics.get('identifiers') or [])) & set(map(tuple,source.get('identifiers') or []))
-    text=norm(' '.join([str(source.get('title') or ''),str(source.get('approval_no') or ''),
-        ' '.join(str(v) for v in (source.get('fields') or {}).values() if isinstance(v,(str,int,float))) ]))
-    logistics_text=norm(' '.join(str(v) for v in (logistics.get('fields') or {}).values() if isinstance(v,(str,int,float))))
-    score=1000*len(identifiers);reasons=[]
+    text=norm(dumps(source));score=3000 if source['id'] in set(priority_ids or ()) else 0
+    score+=1000*len(identifiers);reasons=[]
+    if source['id'] in set(priority_ids or ()):reasons.append('精确引用或明细标识命中')
     if identifiers:reasons.append('精确物流标识一致')
     for key,weight in [('waybill',400),('supplier',80),('project',120),('date',60),('description',40)]:
         value=norm(hints.get(key))
         if value and value in text:score+=weight;reasons.append(f'{key} 提示命中')
-    # Local-only ranking may use non-sensitive normalized business descriptions.
-    tokens={token for token in re.findall(r'[a-z0-9]{4,}|[\u4e00-\u9fff]{2,}',logistics_text) if len(token)>=2}
-    overlap=sum(1 for token in tokens if token in text)
-    if overlap:score+=min(100,overlap*10);reasons.append('本票业务描述相关')
     return score,reasons
+
+
+def payment_candidate_state(store,logistics_id,expense_ids):
+    expense_ids=list(dict.fromkeys(expense_ids))[:50]
+    if not expense_ids:return []
+    marks=','.join(['%s']*len(expense_ids))
+    rows=[store.unpack(row) for row in store.sql(
+        f'SELECT * FROM oc_ls_freight_candidate WHERE logistics_id=%s AND expense_id IN ({marks}) ORDER BY id',
+        [logistics_id,*expense_ids])]
+    return sorted((c['id'],c.get('revision'),c.get('status'),c.get('method')) for c in rows)
 
 
 def payment_pool(store,logistics_id,hints=None,offset=0,limit=30):
@@ -141,30 +155,32 @@ def payment_pool(store,logistics_id,hints=None,offset=0,limit=30):
     if offset<0 or offset>10000:raise ValueError('offset 必须在 0 至 10000 之间')
     limit=max(1,min(50,limit))
     clean=sanitize_hints(hints)
-    rejected={c['expense_id'] for c in store.find('freight_candidate',logistics_id=logistics_id) if c.get('status')=='rejected'}
-    eligible=[s for s in store.approved_expenses(logistics['corp']) if s['id'] not in rejected]
+    priority_ids=_ranking_priority_source_ids(store,logistics)
+    eligible=store.approved_expenses(logistics['corp'],offset=offset,limit=limit,hints=clean,
+                                     logistics_id=logistics_id,logistics_source_id=logistics_id,
+                                     logistics_instance=logistics.get('instance'))
     ranked=[]
     for source in eligible:
-        score,reasons=_score_payment_source(logistics,source,clean)
+        score,reasons=_score_payment_source(logistics,source,clean,priority_ids)
         ranked.append(({**source,'local_match_score':score,'local_match_reasons':reasons},score))
-    ranked.sort(key=lambda item:(-item[1],item[0]['id']))
     sources=[item[0] for item in ranked]
-    candidate_state=sorted((c['id'],c.get('revision'),c.get('status'),c.get('method')) for c in store.find('freight_candidate',logistics_id=logistics_id))
+    candidate_state=payment_candidate_state(store,logistics_id,[source['id'] for source in eligible])
     snapshot={'logistics':(logistics['id'],logistics['snapshot']),'sources':sorted((s['id'],s['snapshot']) for s in eligible),
-              'candidates':candidate_state}
+              'candidates':candidate_state,'hints':clean,'offset':offset,'limit':limit}
     fingerprint=digest('shipment-payment-pool-2',snapshot,clean,offset,limit)
-    page=sources[offset:offset+limit]
-    return {'logistics':logistics,'sources':page,'hints':clean,'offset':offset,'limit':limit,
-            'has_more':offset+len(page)<len(sources),'total':len(sources),'fingerprint':fingerprint,'pool_snapshot':snapshot}
+    total=store.approved_expense_count(logistics['corp'],logistics_id=logistics_id)
+    return {'logistics':logistics,'sources':sources,'hints':clean,'offset':offset,'limit':limit,
+            'has_more':offset+len(sources)<total,'total':total,'fingerprint':fingerprint,'pool_snapshot':snapshot}
 
 
 def payment_pool_fresh(store,logistics_id,pool_snapshot):
     logistics=store.get('source',logistics_id)
     if not logistics or logistics.get('invalid') or (logistics['id'],logistics['snapshot'])!=tuple(pool_snapshot.get('logistics') or ()):return False
-    sources=store.approved_expenses(logistics['corp'])
-    rejected={c['expense_id'] for c in store.find('freight_candidate',logistics_id=logistics_id) if c.get('status')=='rejected'}
-    current_sources=sorted((s['id'],s['snapshot']) for s in sources if s['id'] not in rejected)
-    current_candidates=sorted((c['id'],c.get('revision'),c.get('status'),c.get('method')) for c in store.find('freight_candidate',logistics_id=logistics_id))
+    sources=store.approved_expenses(logistics['corp'],offset=pool_snapshot.get('offset',0),limit=pool_snapshot.get('limit',30),
+        hints=pool_snapshot.get('hints') or {},logistics_id=logistics_id,logistics_source_id=logistics_id,
+        logistics_instance=logistics.get('instance'))
+    current_sources=sorted((s['id'],s['snapshot']) for s in sources)
+    current_candidates=payment_candidate_state(store,logistics_id,[source['id'] for source in sources])
     return current_sources==[tuple(row) for row in pool_snapshot.get('sources',[])] and current_candidates==[tuple(row) for row in pool_snapshot.get('candidates',[])]
 
 

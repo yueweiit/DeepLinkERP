@@ -5,7 +5,7 @@ import uuid
 
 from .ai_matching import SENSITIVE, safe_text, save
 from .freight_lines import logical_fee_key
-from .freight_matching import current_lines_many, payment_pool, payment_pool_fresh, save_candidate
+from .freight_matching import current_lines_many, payment_candidate_state, payment_pool, payment_pool_fresh, save_candidate
 from .jobs import utcnow
 from .model import digest, dumps
 
@@ -115,28 +115,44 @@ def messages(payload):
         {'role':'user','content':dumps(payload)}]
 
 
-def _fresh(store,job,current_version):
-    if current_version and current_version(job['batch_name'])!=job['version_name']:return False
+def _version(current_version,batch_name,*,lock=False):
+    if not current_version:return None
+    try:return current_version(batch_name,lock=lock)
+    except TypeError:return current_version(batch_name)
+
+
+def _fresh(store,job,current_version,*,version_checked=False):
+    if not version_checked and current_version and _version(current_version,job['batch_name'])!=job['version_name']:return False
+    expected=digest('shipment-payment-pool-2',job['pool_snapshot'],job['input']['hints'],job['offset'],job['limit'])
+    if expected!=job.get('fingerprint'):return False
     try:return payment_pool_fresh(store,job['logistics_id'],job['pool_snapshot'])
     except (ValueError,KeyError):return False
 
 
 def run(store,job_id,call_model,model='',current_version=None):
+    hint=store.get('state',job_id) or {}
+    if hint.get('kind')!='payment_ai':return public(hint)
     with store.atomic():
         store.get('state','match_lock',lock=True)
+        version_ok=not current_version or _version(current_version,hint.get('batch_name'),lock=True)==hint.get('version_name')
         job=store.get('state',job_id,lock=True)
         if not job or job.get('kind')!='payment_ai' or job.get('status')!='queued':return public(job or {})
-        if not _fresh(store,job,current_version):
+        version_ok=version_ok and job.get('batch_name')==hint.get('batch_name') and job.get('version_name')==hint.get('version_name')
+        if not version_ok or not _fresh(store,job,current_version,version_checked=True):
             _terminal(store,job,'stale','来源或成本版本已变化，未发送至 AI');return public(job)
         claim=uuid.uuid4().hex;job.update(status='running',claim=claim,model=str(model or ''));save(store,job)
     store.commit()
     try:
         response=call_model(messages(job['input']))
+        hint=store.get('state',job_id) or job
         with store.atomic():
             store.get('state','match_lock',lock=True)
+            version_ok=not current_version or _version(current_version,hint.get('batch_name'),lock=True)==hint.get('version_name')
             current=store.get('state',job_id,lock=True)
             if not current or current.get('status')!='running' or current.get('claim')!=claim:return public(current or {})
-            if not _fresh(store,job,current_version):
+            version_ok=version_ok and current.get('batch_name')==hint.get('batch_name') and current.get('version_name')==hint.get('version_name')
+            job=current
+            if not version_ok or not _fresh(store,job,current_version,version_checked=True):
                 _terminal(store,job,'stale','来源或成本版本已变化，AI 结果已丢弃')
             else:
                 proposals=response.get('matches',[]) if isinstance(response,dict) else []
@@ -155,12 +171,14 @@ def run(store,job_id,call_model,model='',current_version=None):
                         if not isinstance(line_ids,list) or len(line_ids)>50 or len(set(line_ids))!=len(line_ids):raise ValueError('AI 明细选择无效')
                         valid={line['id'] for line in source_summary['lines']}
                         if set(line_ids)-valid:raise ValueError('AI 选择了未授权明细')
-                        source=store.get('source',proposal['expense_id']);logistics=store.get('source',job['logistics_id'])
-                        if not source or not logistics or source.get('invalid') or not source.get('approved') or source.get('corp')!=logistics.get('corp'):
+                        source=store.get('source',proposal['expense_id'],lock=True);logistics=store.get('source',job['logistics_id'],lock=True)
+                        if (not source or not logistics or source.get('invalid') or not source.get('approved') or
+                                source.get('corp')!=logistics.get('corp') or source.get('snapshot')!=source_summary.get('snapshot') or
+                                (logistics.get('id'),logistics.get('snapshot'))!=tuple(job['pool_snapshot'].get('logistics') or ())):
                             raise ValueError('AI 来源已失效、未批准或企业不一致')
                         if any(c.get('status')=='rejected' for c in store.find('freight_candidate',logistics_id=logistics['id']) if c['expense_id']==source['id']):
                             raise ValueError('该组合已被人工否决')
-                        lines=[store.get('freight_line',line_id) for line_id in line_ids]
+                        lines=[store.get('freight_line',line_id,lock=True) for line_id in line_ids]
                         save_candidate(store,logistics,source,lines,'deepseek',reason,model=job['model'],confidence=confidence)
                         job['recommended']+=1
                     except (ValueError,InvalidOperation) as exc:
@@ -168,9 +186,10 @@ def run(store,job_id,call_model,model='',current_version=None):
                 job['processed']=len(allowed);job['no_match']+=len(allowed)-len(seen)
                 # The worker's own candidate writes become the new freshness
                 # baseline; later human/rule changes still invalidate the job.
-                job['pool_snapshot']['candidates']=sorted(
-                    (c['id'],c.get('revision'),c.get('status'),c.get('method'))
-                    for c in store.find('freight_candidate',logistics_id=job['logistics_id']))
+                job['pool_snapshot']['candidates']=payment_candidate_state(
+                    store,job['logistics_id'],[row['id'] for row in job['input']['sources']])
+                job['fingerprint']=digest('shipment-payment-pool-2',job['pool_snapshot'],job['input']['hints'],job['offset'],job['limit'])
+                job['input']['fingerprint']=job['fingerprint']
                 job.update(status='partial' if job['failed'] else 'completed',finished_at=utcnow(),enqueue_required=False,response={
                     'matches':[{'expense_id':safe_text(row.get('expense_id'),64),'confidence':safe_text(row.get('confidence'),32),
                         'reason':safe_text(row.get('reason'),1000),'line_ids':[safe_text(value,64) for value in row.get('line_ids',[])[:50] if isinstance(value,str)],
@@ -180,7 +199,10 @@ def run(store,job_id,call_model,model='',current_version=None):
                 _terminal(store,job,job['status'],job.get('error',''))
         store.commit()
     except Exception as exc:
+        hint=store.get('state',job_id) or job
         with store.atomic():
+            store.get('state','match_lock',lock=True)
+            if current_version:_version(current_version,hint.get('batch_name'),lock=True)
             current=store.get('state',job_id,lock=True)
             if current and current.get('status')=='running' and current.get('claim')==claim:
                 _terminal(store,job,'failed',str(exc)[:500])

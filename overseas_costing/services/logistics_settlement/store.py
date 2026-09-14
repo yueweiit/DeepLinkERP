@@ -5,7 +5,7 @@ import json
 import uuid
 import re
 
-from .model import digest, dumps
+from .model import digest, dumps, norm
 
 TABLES = {
     'freight_line': 'source_id VARCHAR(64) NOT NULL, snapshot VARCHAR(64) NOT NULL, line_key VARCHAR(64) NOT NULL, waybill VARCHAR(160) NOT NULL, approval_no VARCHAR(160) NOT NULL, charge_key VARCHAR(64) NOT NULL',
@@ -41,6 +41,7 @@ class Store:
     def sqlite(cls, connection):
         import sqlite3
         connection.row_factory = sqlite3.Row
+        connection.create_function('OC_LS_NORM',1,norm,deterministic=True)
         return cls(connection, True)
 
     @classmethod
@@ -139,13 +140,59 @@ class Store:
         where = ' AND '.join(k+'=%s' for k in filters) or '1=1'
         return self.sql(f'SELECT COUNT(*) AS n FROM oc_ls_{table} WHERE {where}', list(filters.values()))[0]['n']
 
-    def approved_expenses(self, corp):
+    def _approved_expense_where(self, corp, logistics_id=None):
         if self.is_sqlite:
             predicate="json_extract(data,'$.approved')=1 AND COALESCE(json_extract(data,'$.invalid'),0)=0"
         else:
             predicate="CAST(JSON_EXTRACT(data,'$.approved') AS CHAR) IN ('true','1') AND CAST(JSON_EXTRACT(data,'$.invalid') AS CHAR) IN ('false','0')"
+        where=f"corp=%s AND kind='expense' AND {predicate}";params=[corp]
+        if logistics_id:
+            where+=" AND NOT EXISTS (SELECT 1 FROM oc_ls_freight_candidate c WHERE c.logistics_id=%s AND c.expense_id=oc_ls_source.id AND c.status='rejected')"
+            params.append(logistics_id)
+        return where,params
+
+    def approved_expenses(self, corp, *, offset=0, limit=50, hints=None, logistics_id=None,
+                          logistics_source_id=None, logistics_instance=None):
+        offset=max(0,int(offset));limit=max(1,min(50,int(limit)))
+        where,params=self._approved_expense_where(corp,logistics_id)
+        scores=[];score_params=[]
+        if logistics_source_id:
+            exact=["EXISTS (SELECT 1 FROM oc_ls_freight_line fl JOIN oc_ls_identifier li "
+                   "ON li.source_id=%s AND ((li.token_type='waybill' AND fl.waybill=li.token) "
+                   "OR (li.token_type='approval' AND fl.approval_no=li.token)) "
+                   "WHERE fl.source_id=oc_ls_source.id)"]
+            exact_params=[logistics_source_id]
+            if logistics_instance:
+                exact.append("EXISTS (SELECT 1 FROM oc_ls_reference r WHERE r.source_id=oc_ls_source.id "
+                             "AND r.corp=%s AND r.target_instance=%s)")
+                exact_params.extend([corp,logistics_instance])
+            scores.append('(CASE WHEN '+' OR '.join(exact)+' THEN 3000 ELSE 0 END)')
+            score_params.extend(exact_params)
+            scores.append("(1000 * (SELECT COUNT(*) FROM oc_ls_identifier si WHERE si.source_id=oc_ls_source.id "
+                          "AND EXISTS (SELECT 1 FROM oc_ls_identifier li WHERE li.source_id=%s "
+                          "AND li.token_type=si.token_type AND li.token=si.token)))")
+            score_params.append(logistics_source_id)
+        if self.is_sqlite:
+            searchable='OC_LS_NORM(data)'
+        else:
+            searchable='LOWER(data)'
+            for accented,plain in zip('áéíóúüñ','aeiouun'):
+                searchable=f"REPLACE({searchable},'{accented}','{plain}')"
+            searchable=f"REGEXP_REPLACE({searchable}, '[^a-z0-9一-鿿]', '')"
+        weights={'waybill':400,'supplier':80,'project':120,'date':60,'description':40}
+        for key,value in (hints or {}).items():
+            if value:
+                scores.append(f"(CASE WHEN {searchable} LIKE %s ESCAPE '!' THEN {weights.get(key,1)} ELSE 0 END)")
+                normalized=norm(value)
+                score_params.append('%'+normalized.replace('!','!!').replace('%','!%').replace('_','!_')+'%')
+        order=(' + '.join(scores) if scores else '0')+' DESC, updated_at DESC, id'
+        params.extend(score_params+[limit,offset])
         return [self.unpack(row) for row in self.sql(
-            f"SELECT * FROM oc_ls_source WHERE corp=%s AND kind='expense' AND {predicate} ORDER BY id",(corp,))]
+            f"SELECT * FROM oc_ls_source WHERE {where} ORDER BY {order} LIMIT %s OFFSET %s",params)]
+
+    def approved_expense_count(self, corp, *, logistics_id=None):
+        where,params=self._approved_expense_where(corp,logistics_id)
+        return self.sql(f'SELECT COUNT(*) AS n FROM oc_ls_source WHERE {where}',params)[0]['n']
 
     def audit(self, binding_id, action, actor, **details):
         from .jobs import utcnow
