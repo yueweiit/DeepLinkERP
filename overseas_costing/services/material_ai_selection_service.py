@@ -26,6 +26,42 @@ _SAFE_SKIP_REASON_TEXT = {
     'PARSE_TIMEOUT': '资料文件解析超时。',
     'DUPLICATE_EVIDENCE': '该资料本次已读取。',
 }
+_PUBLIC_PROGRESS_STATUSES = frozenset({
+    'WAITING', 'DOWNLOADING', 'READING', 'READ', 'PARSED', 'ANALYZING',
+    'COMPLETED', 'PARTIAL', 'FAILED', 'SKIPPED', 'UNREADABLE', 'EXCLUDED',
+    'NO_RESULT', 'NEEDS_SELECTION',
+})
+_PUBLIC_READ_STATUSES = frozenset({
+    'READ', 'PARTIAL', 'FAILED', 'SKIPPED', 'UNREADABLE', 'NO_RESULT',
+    'EXCLUDED', 'NEEDS_SELECTION',
+})
+_PUBLIC_PROGRESS_DETAIL = {
+    'WAITING':'等待读取','DOWNLOADING':'正在获取资料','READING':'正在读取资料',
+    'READ':'资料已读取','PARSED':'资料已解析','ANALYZING':'正在分析资料',
+    'COMPLETED':'读取完成','PARTIAL':'部分资料已读取','EXCLUDED':'已排除',
+    'NO_RESULT':'未产生候选','NEEDS_SELECTION':'多个工作表待选择',
+}
+_PUBLIC_PROGRESS_STRING_FIELDS = {
+    'source_id':500,'evidence_id':500,'parent_source_id':500,
+    'source_kind':60,'evidence_kind':60,'label':500,'approval_no':200,
+    'actor_name':200,'occurred_at':100,'sheet_name':200,'sheet':200,
+    'priority_reason':500,'workflow_stage':60,
+    'actual_packing_match_status':40,'actual_packing_match_id':500,
+    'actual_packing_match_revision':500,'source_field':500,
+    'workflow_field_id':500,'analysis_reason':1000,'adoption_restriction':1000,
+}
+_PUBLIC_PROGRESS_SECRET_PATTERN = re.compile(
+    r'(?:\bbearer\s+\S+|https?://\S*(?:[?&](?:access_?token|token|signature|sig|credential|auth)=)\S*)',
+    re.IGNORECASE,
+)
+
+
+def _bounded_nonnegative_int(value, maximum):
+    try:
+        number=int(value or 0)
+    except (TypeError,ValueError,OverflowError):
+        return 0
+    return min(max(number,0),maximum)
 
 
 def _safe_skip_metadata(status_row):
@@ -33,10 +69,11 @@ def _safe_skip_metadata(status_row):
 
     from . import material_ai_fill_service as ai
 
-    status = str(
-        status_row.get('read_status') or status_row.get('status') or ''
-    ).strip().upper()
-    if status not in _SKIPPED_PROGRESS_STATUSES:
+    statuses={
+        str(status_row.get(key) or '').strip().upper()
+        for key in ('read_status','status')
+    }
+    if not (statuses & _SKIPPED_PROGRESS_STATUSES):
         return {}
     raw_code = str(status_row.get('skip_reason_code') or '').strip().upper()
     code = raw_code if re.fullmatch(r'[A-Z][A-Z0-9_]{0,79}', raw_code) else ''
@@ -45,10 +82,7 @@ def _safe_skip_metadata(status_row):
     # Unknown/legacy reasons deliberately fall back to the generic UI copy;
     # arbitrary document text must never become an error explanation.
     safe_reason = ai._safe_public_text(safe_reason) if safe_reason else ''
-    try:
-        elapsed_ms = max(0, min(int(status_row.get('elapsed_ms') or 0), 3_600_000))
-    except (TypeError, ValueError):
-        elapsed_ms = 0
+    elapsed_ms=_bounded_nonnegative_int(status_row.get('elapsed_ms'),3_600_000)
     return {
         'skip_reason_code': code if safe_reason else '',
         'skip_reason_text': safe_reason,
@@ -56,11 +90,89 @@ def _safe_skip_metadata(status_row):
     }
 
 
+def _public_progress_text(value, limit, fallback=''):
+    from . import material_ai_fill_service as ai
+
+    text=str(value or '').strip()[:limit]
+    if not text or _PUBLIC_PROGRESS_SECRET_PATTERN.search(text):
+        return fallback
+    safe=ai._safe_public_text(text)
+    return fallback if safe==ai.SERVER_PREVIEW_FAILURE_MESSAGE else safe
+
+
+def _public_source_progress(progress):
+    """Project persisted worker progress into a polling-safe public schema."""
+
+    rows=[]
+    for source in progress or []:
+        if not isinstance(source,dict):
+            continue
+        status=str(source.get('status') or 'WAITING').strip().upper()
+        if status not in _PUBLIC_PROGRESS_STATUSES:
+            status='WAITING'
+        read_status=str(source.get('read_status') or '').strip().upper()
+        if read_status not in _PUBLIC_READ_STATUSES:
+            read_status=(status if status in _PUBLIC_READ_STATUSES else 'NO_RESULT')
+        row={
+            key:_public_progress_text(source.get(key),limit)
+            for key,limit in _PUBLIC_PROGRESS_STRING_FIELDS.items()
+            if source.get(key) not in (None,'')
+        }
+        if not row.get('evidence_id') and row.get('source_id'):
+            row['evidence_id']=row['source_id']
+        row.update({
+            'status':status,'read_status':read_status,
+            'parse_method':(
+                str(source.get('parse_method') or 'NONE').strip().upper()
+                if str(source.get('parse_method') or 'NONE').strip().upper()
+                in {'SYSTEM_APPROVAL','SYSTEM_EXCEL','AI_TEXT','AI_VISION','NONE'}
+                else 'NONE'
+            ),
+            'field_count':_bounded_nonnegative_int(source.get('field_count'),1_000_000),
+            'page_count':_bounded_nonnegative_int(source.get('page_count'),1_000_000),
+            'candidate_count':_bounded_nonnegative_int(source.get('candidate_count'),1_000_000),
+            'result_count':_bounded_nonnegative_int(source.get('result_count'),1_000_000),
+            'error':'',
+        })
+        for key in (
+            'selected','locked','selectable','analysis_allowed','adoption_allowed',
+            'final_fee_allowed','dedicated_packing_attachment',
+        ):
+            if key in source:
+                row[key]=bool(source.get(key))
+        for key,maximum in (
+            ('priority',1_000_000),('workflow_rank',100),('evidence_rank',100),
+        ):
+            if key in source:
+                row[key]=_bounded_nonnegative_int(source.get(key),maximum)
+        sheet_options=[]
+        for option in source.get('sheet_options') or []:
+            if not isinstance(option,dict):
+                continue
+            sheet_options.append({
+                'source_id':_public_progress_text(option.get('source_id'),500),
+                'sheet_name':_public_progress_text(option.get('sheet_name'),200),
+            })
+        if sheet_options:
+            row['sheet_options']=sheet_options
+        skip_metadata=_safe_skip_metadata(source)
+        if skip_metadata:
+            row.update(skip_metadata)
+            reason=skip_metadata.get('skip_reason_text') or '资料无法读取。'
+            row['detail']=f'{reason}已跳过，继续读取下一资料。'
+        else:
+            row['detail']=_PUBLIC_PROGRESS_DETAIL.get(status,'等待读取')
+        rows.append(row)
+    return rows
+
+
 def _sources_with_progress(sources, progress):
     """Reattach browser-safe run outcomes to freshly locked source metadata."""
 
     by_id={}
     for row in progress or []:
+        if not isinstance(row,dict):
+            continue
         for key in ('source_id','parent_source_id'):
             source_id=str(row.get(key) or '')
             if source_id:
@@ -80,8 +192,10 @@ def _sources_with_progress(sources, progress):
             current['read_status']=str(status_row.get('read_status') or status_row.get('status') or 'NO_RESULT')
             skip_metadata=_safe_skip_metadata(status_row)
             current['error']=str(skip_metadata.get('skip_reason_text') or '')
-            current['result_count']=int(status_row.get('result_count')
-                                        or status_row.get('candidate_count') or 0)
+            current['result_count']=_bounded_nonnegative_int(
+                status_row.get('result_count') or status_row.get('candidate_count'),
+                1_000_000,
+            )
             if status_row.get('evidence_kind'):
                 current['evidence_kind']=str(status_row['evidence_kind'])[:60]
             current.update(skip_metadata)

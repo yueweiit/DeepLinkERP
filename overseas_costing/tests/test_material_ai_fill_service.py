@@ -4514,6 +4514,79 @@ def test_public_status_recursively_sanitizes_legacy_nested_failure_details() -> 
     assert "traceback" not in public.casefold()
 
 
+def test_public_status_rebuilds_source_progress_from_safe_server_fields() -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="RUNNING")
+    repository.run["source_progress_json"] = [
+        {
+            "source_id": "BROKEN",
+            "evidence_id": "BROKEN",
+            "source_kind": "approval_attachment",
+            "evidence_kind": "attachment",
+            "label": "packing.xlsx",
+            "status": "SKIPPED",
+            "read_status": "SKIPPED",
+            "skip_reason_code": "CORRUPT_DOCUMENT",
+            "skip_reason_text": "https://files.example.invalid/a?token=SECRET",
+            "detail": "Bearer VERY-SECRET-TOKEN",
+            "error": "https://files.example.invalid/error?access_token=SECRET",
+            "document_text": "Bearer SOURCE-BODY-SECRET",
+            "elapsed_ms": 15321,
+            "candidate_count": 0,
+        },
+        {
+            "source_id": "ACTIVE",
+            "source_kind": "approval_form",
+            "evidence_kind": "approval_form",
+            "label": "国际物流审批正文",
+            "status": "ANALYZING",
+            "read_status": "READ",
+            "detail": "Bearer ACTIVE-SECRET",
+            "error": "https://service.invalid/?token=ACTIVE-SECRET",
+            "skip_reason_code": "SHOULD_NOT_LEAK",
+            "skip_reason_text": "https://service.invalid/body?token=ACTIVE-SECRET",
+            "elapsed_ms": 9,
+            "field_count": 3,
+        },
+        {
+            "source_id": "LEGACY",
+            "status": "UNREADABLE",
+            "read_status": "UNREADABLE",
+            "detail": "Bearer LEGACY-SECRET",
+            "error": "https://legacy.invalid/?token=LEGACY-SECRET",
+            "skip_reason_text": "https://legacy.invalid/body?token=LEGACY-SECRET",
+        },
+    ]
+
+    payload = get_material_ai_fill_status("B1", "RUN-1", repository=repository)
+    skipped, active, legacy = payload["source_progress"]
+
+    assert skipped["status"] == "SKIPPED"
+    assert skipped["read_status"] == "SKIPPED"
+    assert skipped["skip_reason_code"] == "CORRUPT_DOCUMENT"
+    assert skipped["skip_reason_text"] == "资料文件已损坏。"
+    assert skipped["detail"] == "资料文件已损坏。已跳过，继续读取下一资料。"
+    assert skipped["error"] == ""
+    assert skipped["elapsed_ms"] == 15321
+    assert active["status"] == "ANALYZING"
+    assert active["read_status"] == "READ"
+    assert active["detail"] == "正在分析资料"
+    assert active["error"] == ""
+    assert active["field_count"] == 3
+    assert not ({"skip_reason_code", "skip_reason_text", "elapsed_ms"} & active.keys())
+    assert legacy["status"] == "UNREADABLE"
+    assert legacy["skip_reason_code"] == ""
+    assert legacy["skip_reason_text"] == ""
+    assert legacy["detail"] == "资料无法读取。已跳过，继续读取下一资料。"
+    assert legacy["error"] == ""
+    public = json.dumps(payload, ensure_ascii=False)
+    for secret in (
+        "Bearer", "VERY-SECRET", "ACTIVE-SECRET", "LEGACY-SECRET",
+        "SOURCE-BODY-SECRET", "token=", "access_token=",
+    ):
+        assert secret.casefold() not in public.casefold()
+
+
 @pytest.mark.parametrize(
     "private_text",
     [

@@ -664,6 +664,37 @@ def test_review_catalog_rebuilds_safe_skip_metadata_from_server_progress_only():
     assert 'skip_reason_code' not in json.dumps(receipt,ensure_ascii=False)
 
 
+@pytest.mark.parametrize(
+    ('elapsed_ms','result_count'),
+    [
+        (float('inf'), float('nan')),
+        (float('nan'), 'Infinity'),
+        ('Infinity', 'not-a-number'),
+    ],
+)
+def test_progress_merge_ignores_non_dict_rows_and_invalid_numbers(
+    elapsed_ms,result_count,
+):
+    sources=[{'source_id':'DOC','source_kind':'approval_attachment'}]
+    progress=[
+        None,
+        'not-a-progress-row',
+        42,
+        {
+            'source_id':'DOC','status':'SKIPPED','read_status':'SKIPPED',
+            'skip_reason_code':'PARSE_TIMEOUT','skip_reason_text':'raw',
+            'elapsed_ms':elapsed_ms,'result_count':result_count,
+        },
+    ]
+
+    merged=service._sources_with_progress(sources,progress)
+
+    assert merged[0]['read_status']=='SKIPPED'
+    assert merged[0]['skip_reason_text']=='资料文件解析超时。'
+    assert merged[0]['elapsed_ms']==0
+    assert merged[0]['result_count']==0
+
+
 @pytest.mark.parametrize('change',['fee','item','source','note'])
 def test_changes_after_preview_block_all_writes(change):
     repo=Repo();preview=prepare(repo)

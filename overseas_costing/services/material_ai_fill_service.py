@@ -2607,7 +2607,10 @@ def get_material_ai_fill_status(
         }
     candidates = _load_json(_record_value(run, "candidates_json"), [])
     draft = _load_json(_record_value(run, "draft_json"), {})
-    source_progress = _load_json(_record_value(run, "source_progress_json"), [])
+    from .material_ai_selection_service import _public_source_progress
+    source_progress = _public_source_progress(
+        _load_json(_record_value(run, "source_progress_json"), [])
+    )
     proposal_count = int(draft.get("proposal_count", len(candidates)) or 0)
     selected_count = int(
         draft.get(
