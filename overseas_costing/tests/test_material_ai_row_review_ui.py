@@ -129,6 +129,30 @@ const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&!apply
 """)
 
 
+def test_ready_with_warnings_uses_server_can_apply_for_confirm_and_safe_status_copy():
+    run_ui(r"""
+const fill=w.initializeMaterialAIDraft({status:'READY_WITH_WARNINGS',run_id:'run-warning',source_completeness:'PARTIAL',row_review:catalog});
+state.aiFill=fill;
+const selection=w.ensureMaterialAIRowSelection(fill);
+selection.preview={id:'P',revision:'R',can_apply:true,rows:[]};
+selection.previewKey=w.materialAIRowSelectionKey(fill);
+assert(w.canConfirmMaterialAIRowSelection(fill));
+assert(w.canApplyMaterialAIFill(fill));
+let review=w.renderMaterialAIReviewDialogContent();
+let apply=review.match(/data-action="mf-ai-apply"([^>]*)>/);
+assert(apply&&!apply[1].includes('disabled'));
+let html=w.renderMaterialAIProgressDialogContent();
+assert(html.includes('草稿已生成（部分资料已跳过）'));
+selection.preview={id:'P2',revision:'R2',can_apply:false,rows:[]};
+selection.previewKey=w.materialAIRowSelectionKey(fill);
+assert.equal(w.canConfirmMaterialAIRowSelection(fill),false);
+assert.equal(w.canApplyMaterialAIFill(fill),false);
+review=w.renderMaterialAIReviewDialogContent();
+apply=review.match(/data-action="mf-ai-apply"([^>]*)>/);
+assert(apply&&apply[1].includes('disabled'));
+""")
+
+
 def test_real_catalog_renders_safe_skip_causes_and_legacy_generic_fallback():
     from copy import deepcopy
     from overseas_costing.services import material_ai_fill_service as ai

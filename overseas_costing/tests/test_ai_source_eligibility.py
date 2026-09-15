@@ -156,7 +156,7 @@ def test_public_listing_and_real_repository_worker_use_same_analysis_checks(monk
     started=ai.start_source_ai_review('B1','V1',repository=repo,enqueue=lambda run:None)
     assert started['status']=='QUEUED'
     result=ai.execute_material_ai_fill('RUN-1',repository=repo)
-    assert result['status']=='READY',repo.run.get('error_message')
+    assert result['status']=='READY_WITH_WARNINGS',repo.run.get('error_message')
     assert requests and '本票指环扣' in str(requests)
     assert '相邻票' not in str(requests)
     baseline=ai._load_json(repo.run['draft_json'],{})['review_input']['source_dependencies']

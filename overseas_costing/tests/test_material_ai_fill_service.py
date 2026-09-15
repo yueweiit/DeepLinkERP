@@ -71,6 +71,7 @@ def test_material_ai_run_schema_accepts_unavailable_source_completeness() -> Non
         "PARTIAL",
         "COMPLETE",
     ]
+    assert "READY_WITH_WARNINGS" in fields["status"]["options"].splitlines()
 
 
 @pytest.mark.parametrize(
@@ -2952,6 +2953,43 @@ def test_apply_revalidates_fingerprint_and_marks_changed_sources_stale() -> None
     assert repository.applied == []
 
 
+def test_legacy_material_apply_rejects_ready_with_warnings_that_require_server_selection() -> None:
+    repository = _LifecycleRepository(status="READY_WITH_WARNINGS")
+    repository.run.update(
+        source_completeness="PARTIAL",
+        candidates_json=[{"target_item_name": "ITEM-1", "fieldname": "gross_weight_kg"}],
+    )
+
+    with pytest.raises(ValueError, match="逐项选择"):
+        apply_material_ai_fill(
+            "B1",
+            "RUN-1",
+            [{"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 12}],
+            "TOKEN",
+            "M1",
+            repository=repository,
+        )
+
+    assert repository.applied == []
+
+
+def test_legacy_material_apply_rejects_unavailable_warning_draft_even_with_client_updates() -> None:
+    repository = _LifecycleRepository(status="READY_WITH_WARNINGS")
+    repository.run.update(source_completeness="UNAVAILABLE", candidates_json=[])
+
+    with pytest.raises(ValueError, match="没有可采用内容"):
+        apply_material_ai_fill(
+            "B1",
+            "RUN-1",
+            [{"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 12}],
+            "TOKEN",
+            "M1",
+            repository=repository,
+        )
+
+    assert repository.applied == []
+
+
 def test_unified_apply_marks_removed_selected_source_stale() -> None:
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
 
@@ -3296,6 +3334,18 @@ def test_terminal_status_returns_complete_draft_even_at_same_revision() -> None:
 
     assert status["unchanged"] is False
     assert status["status"] == "READY"
+    assert status["draft"] == {"rows": {}}
+
+
+def test_ready_with_warnings_status_returns_viewable_draft_even_at_same_revision() -> None:
+    repository = _LifecycleRepository(status="READY_WITH_WARNINGS")
+
+    status = get_material_ai_fill_status(
+        "B1", "RUN-1", after_revision=3, repository=repository
+    )
+
+    assert status["unchanged"] is False
+    assert status["status"] == "READY_WITH_WARNINGS"
     assert status["draft"] == {"rows": {}}
 
 
@@ -3659,7 +3709,7 @@ def test_unified_worker_rejects_vision_rate_as_fee_total(monkeypatch) -> None:
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY", repository.run.get("error_message")
+    assert result["status"] == "READY_WITH_WARNINGS", repository.run.get("error_message")
     assert repository.run["candidates_json"] == []
 
 
@@ -4067,7 +4117,7 @@ def test_unified_worker_requires_sheet_selection_when_multiple_sheets_produce_re
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY", repository.run.get("error_message")
+    assert result["status"] == "READY_WITH_WARNINGS", repository.run.get("error_message")
     assert repository.run["candidates_json"] == []
     progress = repository.run["source_progress_json"]
     assert {row["read_status"] for row in progress} == {"NEEDS_SELECTION"}
@@ -4128,7 +4178,7 @@ def test_unified_worker_preserves_partial_status_during_sheet_arbitration(monkey
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY", repository.run.get("error_message")
+    assert result["status"] == "READY_WITH_WARNINGS", repository.run.get("error_message")
     progress = {row["sheet_name"]: row for row in repository.run["source_progress_json"]}
     assert progress["Sheet A"]["status"] == "PARTIAL"
     assert progress["Sheet A"]["read_status"] == "PARTIAL"
@@ -4167,8 +4217,8 @@ def test_unified_worker_is_ready_unavailable_when_required_source_has_no_usable_
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY"
-    assert repository.run["status"] == "READY"
+    assert result["status"] == "READY_WITH_WARNINGS"
+    assert repository.run["status"] == "READY_WITH_WARNINGS"
     assert repository.run["source_completeness"] == "UNAVAILABLE"
     assert repository.run["candidates_json"] == []
     assert repository.run["source_progress_json"][0]["status"] == "SKIPPED"
@@ -4229,7 +4279,7 @@ def test_unified_worker_falls_back_after_higher_priority_required_source_fails(m
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY", repository.run.get("error_message")
+    assert result["status"] == "READY_WITH_WARNINGS", repository.run.get("error_message")
     progress = {row["source_id"]: row for row in repository.run["source_progress_json"]}
     assert progress["approval:PAYMENT:form"]["status"] == "SKIPPED"
     assert progress["approval:PAYMENT:form"]["read_status"] == "SKIPPED"
@@ -4267,7 +4317,7 @@ def test_unified_worker_is_ready_unavailable_when_all_selected_optional_sources_
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY"
+    assert result["status"] == "READY_WITH_WARNINGS"
     assert repository.run["source_completeness"] == "UNAVAILABLE"
     assert repository.run["candidates_json"] == []
     assert repository.run["source_progress_json"][0]["status"] == "SKIPPED"
@@ -4334,7 +4384,7 @@ def test_worker_reads_each_evidence_once_continues_and_gives_ai_an_independent_b
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY", repository.run.get("error_message")
+    assert result["status"] == "READY_WITH_WARNINGS", repository.run.get("error_message")
     assert reads == ["approval:PAYMENT:form", "COMMENT-LOGISTICS"]
     assert budgets == [15.0, 15.0, 60.0]
     assert len(ai_documents) == 1
@@ -4362,7 +4412,7 @@ def test_worker_skips_duplicate_logical_evidence_but_keeps_distinct_sources(monk
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY"
+    assert result["status"] == "READY_WITH_WARNINGS"
     assert reads == ["COMMENT-A", "COMMENT-C"]
     progress = {row["source_id"]: row for row in repository.run["source_progress_json"]}
     assert progress["COMMENT-B"]["status"] == "SKIPPED"
@@ -4678,7 +4728,7 @@ def test_ai_semantic_runner_rethrows_real_dbapi_integrity_errors() -> None:
         )
 
 
-def test_ai_semantic_model_failure_keeps_ready_with_fixed_safe_warning(monkeypatch) -> None:
+def test_ai_semantic_model_failure_keeps_ready_with_warnings_and_fixed_safe_warning(monkeypatch) -> None:
     service = material_ai_fill_service
     repository = _LifecycleRepository(status="QUEUED")
     monkeypatch.setattr(
@@ -4703,7 +4753,7 @@ def test_ai_semantic_model_failure_keeps_ready_with_fixed_safe_warning(monkeypat
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY"
+    assert result["status"] == "READY_WITH_WARNINGS"
     assert repository.run["ai_warning"] == service.AI_SAFE_FAILURE_WARNING
     assert "html" not in repository.run["ai_warning"].lower()
     assert "/private/" not in repository.run["ai_warning"]
@@ -4737,13 +4787,13 @@ def test_readable_evidence_without_final_candidates_is_ready_unavailable(monkeyp
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "READY"
+    assert result["status"] == "READY_WITH_WARNINGS"
     assert repository.run["candidates_json"] == []
     assert repository.run["source_completeness"] == "UNAVAILABLE"
     assert repository.run["source_progress_json"][0]["read_status"] == "READ"
 
 
-@pytest.mark.parametrize('initial_status',['QUEUED','RUNNING'])
+@pytest.mark.parametrize('initial_status',['QUEUED','RUNNING','READY','READY_WITH_WARNINGS'])
 def test_repository_discard_active_run_fences_late_worker_progress_and_completion(monkeypatch,initial_status):
     from types import SimpleNamespace
     service=material_ai_fill_service

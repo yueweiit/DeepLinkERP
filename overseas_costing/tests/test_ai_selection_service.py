@@ -108,6 +108,36 @@ def test_pending_adopted_material_scope_can_reenter_review_prepare_and_confirm()
     assert len(repo.writes)==1
 
 
+def test_ready_with_warnings_can_prepare_and_confirm_when_server_projection_is_applicable():
+    repo=Repo();repo.run['status']='READY_WITH_WARNINGS';repo.run['source_completeness']='PARTIAL'
+
+    preview=prepare(repo)
+
+    assert preview['can_apply'] is True
+    assert confirm(repo,preview)['ok'] is True
+
+
+def test_ready_with_warnings_without_candidates_is_viewable_but_not_confirmable():
+    repo=Repo();repo.run['status']='READY_WITH_WARNINGS';repo.run['source_completeness']='UNAVAILABLE'
+    repo.run['candidates_json']=[]
+
+    response=service.prepare(
+        'B1',repo.run['name'],[],[],'fill_missing','V1',repository=repo,
+    )
+
+    assert response['preview']['can_apply'] is False
+    with pytest.raises(ValueError,match='请选择需要填充'):
+        confirm(repo,response['preview'])
+
+
+def test_ready_with_warnings_does_not_bypass_outdated_preview_policy():
+    repo=Repo();repo.run['status']='READY_WITH_WARNINGS'
+    repo.run['draft_json']['processing_version']='outdated-policy'
+
+    with pytest.raises(ValueError,match='规则已升级'):
+        prepare(repo)
+
+
 def test_confirmation_recomputes_preview_cleans_receipt_and_reuses_result():
     repo=Repo();preview=prepare(repo)
     public=deepcopy(preview);public['rows'][0]['gross_weight_kg']=999

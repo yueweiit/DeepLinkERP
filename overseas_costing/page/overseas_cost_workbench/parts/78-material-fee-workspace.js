@@ -156,7 +156,7 @@
     });
     this.$root.on("click", "[data-action='mf-ai-fill']", () => {
       const fill = this.ensureMaterialFeeState().aiFill;
-      if (["STARTING", "QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
+      if (["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
         this.openMaterialAIProgressDialog();
         return;
       }
@@ -311,7 +311,7 @@
   invalidateMaterialAIClarification(note) {
     const state = this.ensureMaterialFeeState();
     if (Number(note.revision || 0) > Number(state.aiFill?.clarification_revision ?? state.aiClarificationRevision ?? 0) && state.aiFill
-        && ["STARTING","QUEUED","RUNNING","READY"].includes(state.aiFill.status)) {
+        && ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(state.aiFill.status)) {
       state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
       state.aiFill = { ...state.aiFill, status: "STALE", draftVisible: false, stale: true };
       state.aiPendingReady = null;
@@ -481,9 +481,9 @@
       this.acceptMaterialAIClarification(savedClarification?.clarification || latestAI?.clarification);
       if (!state.aiFill && restoreGeneration === (state.aiRunGeneration || 0) && latestAI?.ok && latestAI.status && latestAI.status !== "NONE") {
         if (Number(latestAI.clarification_revision || 0) < Number(state.aiClarificationRevision || 0)
-            && ["QUEUED","RUNNING","READY"].includes(latestAI.status)) latestAI.status = "STALE";
+            && ["QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(latestAI.status)) latestAI.status = "STALE";
         state.aiFill = { ...latestAI, runId: latestAI.run_id, draftVisible: false };
-        state.aiPendingReady = latestAI.status === "READY" ? latestAI : null;
+        state.aiPendingReady = this.isMaterialAIReadyStatus(latestAI.status) ? latestAI : null;
       }
       state.loading = false;
       this.renderMaterialFeeWorkspace();
@@ -521,6 +521,16 @@
       direct: "指定物料直接承担",
       zero_amount: "金额为 0，无需分摊",
     }[String(value || "")] || String(value || "--");
+  }
+
+  isMaterialAIReadyStatus(status) {
+    return ["READY", "READY_WITH_WARNINGS"].includes(String(status || ""));
+  }
+
+  materialAIReadyTitle(status) {
+    return String(status || "") === "READY_WITH_WARNINGS"
+      ? "草稿已生成（部分资料已跳过）"
+      : "AI 资料草稿已生成";
   }
 
   materialFeeCurrencyOptions() {
@@ -573,7 +583,7 @@
     const blockingPackingGroups = (materialSummary.packing_groups || []).filter(group => group.blocking || group.status === "needs_reconfirmation");
     const feeSummary = state.fees.summary || {};
     const evidencePending = Number(feeSummary.missing_evidence_fee_count || 0);
-    const aiActive = ["STARTING", "QUEUED", "RUNNING", "READY"].includes(String(state.aiFill?.status || ""));
+    const aiActive = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(String(state.aiFill?.status || ""));
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
       <div class="ocw-mf-workspace">
@@ -608,7 +618,7 @@
               <button class="ocw-outline-btn" type="button" data-action="mf-import-wiki">获取装箱资料</button>
               <button class="ocw-outline-btn ocw-mf-tool-quiet" type="button" data-action="mf-recover-material-rows">恢复误删物料</button>
               ${this.renderMaterialAIProgressChip()}
-              <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (state.aiFill?.status === "READY" ? "查看填充预览" : "查看填充进度") : "AI填充资料"}</button>
+              <button class="ocw-primary-btn" type="button" data-action="mf-ai-fill">${aiActive ? (this.isMaterialAIReadyStatus(state.aiFill?.status) ? "查看填充预览" : "查看填充进度") : "AI填充资料"}</button>
             </div>
           </div>
           ${blockingPackingGroups.length ? `<div class="ocw-mf-dialog-note"><strong>装箱组待重新确认</strong><span>组内物料曾被删除或恢复，试算已阻止。请勾选完整装箱组后从顶部操作条处理。</span></div>` : ""}
@@ -706,7 +716,7 @@
     const feeKey = String(fee.logical_fee_key || fee.fee_key || "");
     const sourceOwned = Boolean(fee.source_binding_id);
     const aiFill = this.materialFeeState?.aiFill;
-    const aiFeeProposal = !sourceOwned && !aiFill?.row_review && aiFill?.status === "READY" && aiFill.draftVisible
+    const aiFeeProposal = !sourceOwned && !aiFill?.row_review && this.isMaterialAIReadyStatus(aiFill?.status) && aiFill.draftVisible
       ? (aiFill.proposals || []).find((proposal) => proposal.proposal_type === "fee_update" && String(proposal.payload?.logical_fee_key || "") === feeKey)
       : null;
     const aiFeeEdit = aiFeeProposal ? aiFill.edits?.[String(aiFeeProposal.proposal_id || "")] : null;
@@ -1219,7 +1229,7 @@
     const compactReduction = fixedColumns.reduce((sum, column) => sum + column.width - column.compactWidth, 0);
     return `
       <div class="ocw-mf-grid-shell" style="--mf-grid-expanded-width:${tableWidth}px;--mf-grid-compact-reduction:${compactReduction}px;${widthVariables}">
-        <div class="ocw-mf-grid-note"><span>${state.aiFill?.status === "READY" && state.aiFill?.draftVisible ? "AI 草稿中，单格修改只更新草稿" : "单格离开或按 Enter 自动保存"}</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
+        <div class="ocw-mf-grid-note"><span>${this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill?.draftVisible ? "AI 草稿中，单格修改只更新草稿" : "单格离开或按 Enter 自动保存"}</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
         <div class="ocw-mf-grid-scroll" data-mf-grid-viewport>
           <div class="ocw-mf-grid-track"><table class="ocw-mf-grid-table">
             <colgroup>${columns.map((column) => `<col style="width:${column.compactWidth ? `var(--mf-grid-${column.field}-width)` : `${Number(column.width || 130)}px`}">`).join("")}</colgroup>
@@ -1237,7 +1247,7 @@
 
   materialReplacementRows(items = []) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY" || !fill.draftVisible || !fill.review_mode) return items;
+    if (!this.isMaterialAIReadyStatus(fill?.status) || !fill.draftVisible || !fill.review_mode) return items;
     const replacements = new Map();
     (fill.proposals || []).filter((proposal) => proposal.proposal_type === "material_replace").forEach((proposal) => {
       const proposalId = String(proposal.proposal_id || "");
@@ -1369,7 +1379,7 @@
     const draft = this.materialFeeState?.materialDrafts?.[`${item.name}:${column.field}`];
     if (draft && !column.readonly) value = draft.value;
     const aiFill = this.materialFeeState?.aiFill;
-    const aiVisible = aiFill?.status === "READY" && aiFill.draftVisible;
+    const aiVisible = this.isMaterialAIReadyStatus(aiFill?.status) && aiFill.draftVisible;
     const aiCell = this.materialAICell(item.name, column.field);
     const aiUpdate = aiVisible ? aiFill.updates?.[`${item.name}:${column.field}`] : null;
     const manualUpdate = aiVisible ? aiFill.manualUpdates?.[`${item.name}:${column.field}`] : null;
@@ -1440,7 +1450,7 @@
 
   materialAICell(itemName, fieldname) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY" || !fill.draftVisible) return null;
+    if (!this.isMaterialAIReadyStatus(fill?.status) || !fill.draftVisible) return null;
     return fill.draft?.rows?.[String(itemName)]?.[String(fieldname)] || null;
   }
 
@@ -1496,7 +1506,7 @@
     const steps = ["读取资料", "解析/OCR", "DeepSeek 识别", "合并候选"];
     const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
     const warning = fill.ai_warning || fill.error_message || "";
-    const title = fill.status === "READY" ? "AI 资料审核草稿已生成" : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : "正在分析当前批次资料";
+    const title = this.isMaterialAIReadyStatus(fill.status) ? this.materialAIReadyTitle(fill.status) : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : "正在分析当前批次资料";
     return `<div class="ocw-mf-ai-banner is-${this.escape(String(fill.status || "running").toLowerCase())}"><div><strong>${title}</strong><span>${this.escape(fill.progress_step || "读取资料")}</span></div><div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i style="width:${progress}%"></i></div><div class="ocw-mf-ai-steps">${steps.map((step) => `<span class="${step === fill.progress_step ? "active" : ""}">${step}</span>`).join("")}</div>${warning ? `<p>${this.escape(warning)}</p>` : ""}</div>`;
   }
 
@@ -1624,10 +1634,10 @@
 
   renderMaterialAIProgressChip() {
     const fill = this.ensureMaterialFeeState().aiFill;
-    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill?.status || ""));
+    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill?.status || ""));
     const minimized = Boolean(this.ensureMaterialFeeState().aiProgressMinimized);
-    const label = fill?.status === "READY"
-      ? "AI 草稿待查看"
+    const label = this.isMaterialAIReadyStatus(fill?.status)
+      ? (fill?.status === "READY_WITH_WARNINGS" ? "AI 草稿待查看 · 部分资料已跳过" : "AI 草稿待查看")
       : fill?.status === "FAILED"
         ? "AI 分析失败"
         : fill?.status === "STALE"
@@ -1644,10 +1654,10 @@
     const sourceSummary = this.materialAISourceGroupSummary(sourceGroups);
     const summary = fill.completion_summary || {};
     const warning = this.materialAIProgressWarning(fill);
-    const ready = fill.status === "READY";
+    const ready = this.isMaterialAIReadyStatus(fill.status);
     const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
     const canRetry = failed || Boolean(fill.stalled || fill.is_stalled || fill.connection_error || fill.polling_paused);
-    const title = ready ? "AI 资料草稿已生成" : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+    const title = ready ? this.materialAIReadyTitle(fill.status) : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
     return `<div class="ocw-mf-ai-progress-dialog" data-mf-ai-progress-host="1">
       <header><div><strong data-mf-ai-progress-title>${this.escape(title)}</strong><span data-mf-ai-progress-step>${this.escape(fill.progress_step || "等待读取资料")}</span></div><b data-mf-ai-progress-percent>${progress}%</b></header>
       <main class="ocw-mf-ai-dialog-body">
@@ -1822,21 +1832,21 @@
         });
     } else {
       state.aiProgressDialog.show();
-      if (state.aiFill?.status !== "READY" && !state.aiProgressDialog.$wrapper.find("[data-mf-ai-progress-host]").length) {
+      if (!this.isMaterialAIReadyStatus(state.aiFill?.status) && !state.aiProgressDialog.$wrapper.find("[data-mf-ai-progress-host]").length) {
         state.aiProgressDialog.$wrapper.removeClass("is-review");
         state.aiProgressDialog.fields_dict.progress_html.$wrapper.html(this.renderMaterialAIProgressDialogContent());
       }
     }
     this.updateMaterialAIProgressSurface();
-    if (state.aiFill?.status === "READY") this.showMaterialAIReadyDraft();
+    if (this.isMaterialAIReadyStatus(state.aiFill?.status)) this.showMaterialAIReadyDraft();
   }
 
   updateMaterialAIProgressSurface() {
     const state = this.ensureMaterialFeeState();
     const $chip = this.$root?.find?.("[data-mf-ai-progress-chip]");
     const fill = state.aiFill || {};
-    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "FAILED", "STALE"].includes(String(fill.status || ""));
-    const chipLabel = fill.status === "READY" ? "AI 草稿待查看" : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : `AI ${Math.max(0, Math.min(100, Number(fill.progress_percent || 0)))}%`;
+    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill.status || ""));
+    const chipLabel = this.isMaterialAIReadyStatus(fill.status) ? (fill.status === "READY_WITH_WARNINGS" ? "AI 草稿待查看 · 部分资料已跳过" : "AI 草稿待查看") : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : `AI ${Math.max(0, Math.min(100, Number(fill.progress_percent || 0)))}%`;
     if ($chip?.length) {
       $chip.prop("hidden", !(active && state.aiProgressMinimized));
       $chip.find("span").text(chipLabel);
@@ -1844,16 +1854,16 @@
     const $button = this.$root?.find?.("[data-action='mf-ai-fill']");
     if ($button?.length) {
       const status = String(state.aiFill?.status || "");
-      $button.text(status === "READY" ? "查看填充预览" : ["STARTING", "QUEUED", "RUNNING"].includes(status) ? "查看填充进度" : "AI填充资料");
+      $button.text(this.isMaterialAIReadyStatus(status) ? "查看填充预览" : ["STARTING", "QUEUED", "RUNNING"].includes(status) ? "查看填充进度" : "AI填充资料");
     }
     const dialog = state.aiProgressDialog;
     if (dialog?.$wrapper?.length) {
       const $host = dialog.$wrapper.find("[data-mf-ai-progress-host]");
       if (!$host.length) return;
       const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
-      const ready = fill.status === "READY";
+      const ready = this.isMaterialAIReadyStatus(fill.status);
       const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
-      const title = ready ? "AI 资料草稿已生成" : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+      const title = ready ? this.materialAIReadyTitle(fill.status) : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
       const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
       const sourceGroups = this.materialAISourceGroups(sources);
       const sourceSummary = this.materialAISourceGroupSummary(sourceGroups);
@@ -1883,7 +1893,7 @@
   showMaterialAIReadyDraft() {
     const state = this.ensureMaterialFeeState();
     const ready = state.aiPendingReady || state.aiFill;
-    if (ready?.status !== "READY") return;
+    if (!this.isMaterialAIReadyStatus(ready?.status)) return;
     state.aiFill = ready.selections instanceof Set
       ? ready
       : this.initializeMaterialAIDraft({ ...ready, draftVisible: true });
@@ -2163,7 +2173,7 @@
 
   canConfirmMaterialAIRowSelection(fill) {
     const selection = this.ensureMaterialAIRowSelection(fill);
-    return fill.status === "READY" && !this.isMaterialFeeCalculationBusy() && !fill.applying && !fill.discarding && !selection.loading
+    return this.isMaterialAIReadyStatus(fill.status) && !this.isMaterialFeeCalculationBusy() && !fill.applying && !fill.discarding && !selection.loading
       && selection.preview?.can_apply === true && selection.previewKey === this.materialAIRowSelectionKey(fill);
   }
 
@@ -2607,7 +2617,7 @@
   renderMaterialAIReviewDialog() {
     const state = this.ensureMaterialFeeState();
     const dialog = state.aiProgressDialog;
-    if (!dialog?.$wrapper?.length || state.aiFill?.status !== "READY") return;
+    if (!dialog?.$wrapper?.length || !this.isMaterialAIReadyStatus(state.aiFill?.status)) return;
     const scrollTop = dialog.$wrapper.find(".ocw-mf-ai-dialog-body").scrollTop?.() || 0;
     const tableScroll = [];
     dialog.$wrapper.find(".ocw-mf-ai-preview-table").each?.((index, element) => { tableScroll[index] = $(element).scrollLeft(); });
@@ -2691,7 +2701,7 @@
 
   renderSourceAIReviewProposals(forDialog = false) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (!forDialog || fill?.status !== "READY" || !fill.draftVisible || !Array.isArray(fill.proposals)) return "";
+    if (!forDialog || !this.isMaterialAIReadyStatus(fill?.status) || !fill.draftVisible || !Array.isArray(fill.proposals)) return "";
     if (!fill.proposals.length) return `<div class="ocw-mf-ai-proposals is-empty">当前资料没有形成可保存候选，请补充说明或资料后重新分析。</div>`;
     return `<div class="ocw-mf-ai-proposals">${fill.proposals.map((proposal) => {
       const selected = fill.selections?.has(String(proposal.proposal_id || ""));
@@ -2752,7 +2762,7 @@
 
   updateSourceAIReviewEdit($input) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY") return;
+    if (!this.isMaterialAIReadyStatus(fill?.status)) return;
     const proposalId = String($input.attr("data-proposal-id") || "");
     const fieldname = String($input.attr("data-fieldname") || "");
     const proposal = (fill.proposals || []).find((row) => String(row.proposal_id) === proposalId);
@@ -2778,7 +2788,7 @@
 
   renderMaterialAIFillFooter() {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY" || !fill.draftVisible) return "";
+    if (!this.isMaterialAIReadyStatus(fill?.status) || !fill.draftVisible) return "";
     const updateCount = (fill.selections?.size ?? 0) + Object.keys(fill.manualUpdates || {}).length;
     const candidateCount = Number(fill.draft?.proposal_count || fill.draft?.candidate_count || 0);
     const mutating = Boolean(fill.applying || fill.discarding);
@@ -2994,7 +3004,7 @@
     const fill = state.aiFill;
     const workerStalled = Boolean(fill?.stalled || fill?.is_stalled);
     if (state.aiPollRetryPromise && !workerStalled) return state.aiPollRetryPromise;
-    if (fill?.runId && !workerStalled && !["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(fill.status)) {
+    if (fill?.runId && !workerStalled && !["READY", "READY_WITH_WARNINGS", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(fill.status)) {
       const generation = state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
       fill.polling_paused = false;
       delete fill.connection_error;
@@ -3046,7 +3056,7 @@
       return state.aiStartPromise;
     }
     const currentStatus = String(state.aiFill?.status || "");
-    if (!options.restart && ["STARTING", "QUEUED", "RUNNING", "READY"].includes(currentStatus)) {
+    if (!options.restart && ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(currentStatus)) {
       this.openMaterialAIProgressDialog();
       return Promise.resolve();
     }
@@ -3201,12 +3211,12 @@
           continue;
         }
         state.aiFill = { ...state.aiFill, ...status, runId, polling: true, draftVisible: false };
-        if (status.status === "READY") {
+        if (this.isMaterialAIReadyStatus(status.status)) {
           state.aiPendingReady = status;
           this.showMaterialAIReadyDraft();
         }
         this.updateMaterialAIProgressSurface();
-        if (["READY", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
+        if (["READY", "READY_WITH_WARNINGS", "FAILED", "STALE", "DISCARDED", "APPLIED"].includes(status.status)) return;
         await new Promise((resolve) => window.setTimeout(resolve, 1200));
       }
       if (isCurrent()) this.failMaterialAIProgress(new Error("状态读取等待时间较长，点击重试继续查看当前任务。"), undefined, { resumePolling: true });
@@ -3225,7 +3235,7 @@
 
   updateMaterialAIDraftValue(itemName, fieldname, value, original = "") {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status !== "READY") return false;
+    if (!this.isMaterialAIReadyStatus(fill?.status)) return false;
     if (String(itemName || "").startsWith("draft-")) return false;
     const key = `${itemName}:${fieldname}`;
     const proposalUpdate = fill.updates?.[key];
@@ -3402,7 +3412,7 @@
   async saveMaterialFeeCell($input) {
     const state = this.ensureMaterialFeeState();
     if (!$input?.length) return false;
-    if (state.aiFill?.status === "READY" && state.aiFill.draftVisible) {
+    if (this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill.draftVisible) {
       return this.trackMaterialFeeWrite(() => this.persistMaterialFeeCell($input));
     }
     this.updateMaterialDraftFromInput($input);
@@ -3495,7 +3505,7 @@
         if (!reason) return;
         const state = this.ensureMaterialFeeState();
         const key = `${itemName}:${fieldname}`;
-        if (state.aiFill?.status === "READY" && state.aiFill.draftVisible) {
+        if (this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill.draftVisible) {
           state.aiFill.manualUpdates = state.aiFill.manualUpdates || {};
           state.aiFill.manualUpdates[key] = { item_name: itemName, fieldname, value, reason };
           dialog.hide();
@@ -3524,7 +3534,7 @@
 
   updateMaterialDraftFromInput($input) {
     const state = this.ensureMaterialFeeState();
-    if (state.aiFill?.status === "READY" && state.aiFill.draftVisible) {
+    if (this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill.draftVisible) {
       this.updateMaterialAIDraftFromInput($input);
       return;
     }
@@ -3545,7 +3555,7 @@
 
   async persistMaterialFeeCell($input, queuedValue, { forceSave = false } = {}) {
     if (!$input.length) return false;
-    if (this.ensureMaterialFeeState().aiFill?.status === "READY" && this.ensureMaterialFeeState().aiFill.draftVisible) {
+    if (this.isMaterialAIReadyStatus(this.ensureMaterialFeeState().aiFill?.status) && this.ensureMaterialFeeState().aiFill.draftVisible) {
       this.updateMaterialAIDraftFromInput($input);
       const $cell = $input.closest(".ocw-mf-cell");
       const key = `${$input.attr("data-item-name")}:${$input.attr("data-fieldname")}`;
@@ -3685,7 +3695,7 @@
 
   async applyMaterialPaste(dialog, updates) {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (fill?.status === "READY" && fill.draftVisible) {
+    if (this.isMaterialAIReadyStatus(fill?.status) && fill.draftVisible) {
       updates.forEach(({ item_name, fieldname, value, old_value }) => {
         this.updateMaterialAIDraftValue(
           String(item_name || ""),
@@ -4518,7 +4528,7 @@
   }
 
   canApplyMaterialAIFill(fill) {
-    if (fill?.status !== "READY" || fill.applying || fill.discarding || this.isMaterialFeeCalculationBusy()) return false;
+    if (!this.isMaterialAIReadyStatus(fill?.status) || fill.applying || fill.discarding || this.isMaterialFeeCalculationBusy()) return false;
     if (fill.row_review) return this.canConfirmMaterialAIRowSelection(fill);
     return (fill.selections?.size || 0) + Object.keys(fill.manualUpdates || {}).length > 0;
   }

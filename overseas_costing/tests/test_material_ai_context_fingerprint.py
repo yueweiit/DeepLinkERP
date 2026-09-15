@@ -33,7 +33,7 @@ class ContextRepository:
         return self.run if self.run and self.run["status"] in {"QUEUED", "RUNNING"} else None
 
     def find_reusable_run(self, _batch, _version, fingerprint):
-        return self.run if self.run and self.run["status"] in {"QUEUED", "RUNNING", "READY"} and self.run["input_fingerprint"] == fingerprint else None
+        return self.run if self.run and self.run["status"] in service.ACTIVE_STATES and self.run["input_fingerprint"] == fingerprint else None
 
     def supersede_active_runs(self, *_args):
         if self.run:
@@ -199,7 +199,7 @@ def test_unchanged_context_can_still_generate_and_confirm(monkeypatch):
     start(repo)
     monkeypatch.setattr(service, "_call_source_review_ai", lambda *_args, **_kwargs: {"ok": True, "proposals": []})
     ready = service.execute_material_ai_fill(repo.run["name"], repository=repo)
-    assert ready["status"] == "READY", repo.run.get("error_message")
+    assert ready["status"] == "READY_WITH_WARNINGS", repo.run.get("error_message")
 
     applied = service.apply_source_ai_review(
         "B1", repo.run["name"], [], {}, "TOKEN", "M1", repository=repo,

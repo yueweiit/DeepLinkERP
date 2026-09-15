@@ -242,6 +242,28 @@ console.log(JSON.stringify({surfaceUpdates,calls,pending:state.aiPendingReady?.s
     assert result["calls"][2]["args"]["after_revision"] == 5
 
 
+def test_ai_poll_opens_ready_with_warnings_as_a_terminal_preview() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=new Harness();
+const state={aiFill:{status:'RUNNING',progress_revision:1},aiPendingReady:null};
+workspace.materialFeeState=state;
+workspace.detailState={batchName:'B1',versionName:'V1',tab:'documents'};
+let calls=0;let opens=0;
+workspace.call=async()=>{calls+=1;return {ok:true,status:'READY_WITH_WARNINGS',source_completeness:'PARTIAL',progress_revision:2,progress_percent:100,run_id:'R1'};};
+workspace.showMaterialAIReadyDraft=()=>{opens+=1};
+workspace.updateMaterialAIProgressSurface=()=>{};
+global.window={setTimeout:(resolve)=>resolve()};
+await workspace.pollMaterialAIFill(state,'B1','V1','R1');
+console.log(JSON.stringify({calls,opens,pending:state.aiPendingReady?.status,status:state.aiFill.status}));
+""")
+    assert result == {
+        "calls": 1,
+        "opens": 1,
+        "pending": "READY_WITH_WARNINGS",
+        "status": "READY_WITH_WARNINGS",
+    }
+
+
 def test_ai_poll_retries_transient_status_errors_inside_progress_surface() -> None:
     result = _fee_workspace_result(r"""
 const workspace=new Harness();

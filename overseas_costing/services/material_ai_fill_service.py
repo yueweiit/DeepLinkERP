@@ -67,7 +67,8 @@ NUMERIC_FIELDS = frozenset(
         "chargeable_weight_kg",
     }
 )
-ACTIVE_STATES = ("QUEUED", "RUNNING", "READY")
+PREVIEW_READY_STATES = ("READY", "READY_WITH_WARNINGS")
+ACTIVE_STATES = ("QUEUED", "RUNNING", *PREVIEW_READY_STATES)
 RUNNING_STATES = ("QUEUED", "RUNNING")
 TERMINAL_STATES = ("APPLIED", "DISCARDED", "STALE", "FAILED")
 AUTO_ADOPT_CONFIDENCE = Decimal("0.90")
@@ -99,6 +100,12 @@ REVIEW_ITEM_FIELDS = frozenset(
         *ALLOWED_FIELDS,
     }
 )
+
+
+def is_material_ai_preview_ready(status: Any) -> bool:
+    return str(status or "") in PREVIEW_READY_STATES
+
+
 REVIEW_REPLACEMENT_FIELDS = REVIEW_ITEM_FIELDS
 REVIEW_ITEM_UPDATE_FIELDS = frozenset(
     {
@@ -2708,7 +2715,7 @@ def get_source_ai_review_status(
     run = repo.get_run(selected_run_id)
     _assert_run_batch(run, batch_name)
     changed = _clarification_changed(repo, str(batch_name), run)
-    if not changed and _record_value(run,'status') == 'READY':
+    if not changed and is_material_ai_preview_ready(_record_value(run, 'status')):
         try:
             current=repo.get_context(str(batch_name),str(_record_value(run,'version') or ''))
             if callable(getattr(repo,'get_clarification',None)):
@@ -2746,7 +2753,7 @@ def get_source_ai_review_status(
             "proposals": result.get("candidates") or [],
         }
     )
-    if result.get("status") == "READY" and getattr(repo, "supports_row_selection", False):
+    if is_material_ai_preview_ready(result.get("status")) and getattr(repo, "supports_row_selection", False):
         from .material_ai_selection_service import review_catalog
         try:
             result["row_review"] = review_catalog(repo, str(batch_name), run)
@@ -2775,8 +2782,13 @@ def apply_material_ai_fill(
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     run = repo.lock_run(str(run_id or ""))
     _assert_run_batch(run, batch_name)
-    if str(_record_value(run, "status") or "") != "READY":
+    run_status = str(_record_value(run, "status") or "")
+    if not is_material_ai_preview_ready(run_status):
         raise ValueError("AI 草稿尚未准备完成或已经处理。")
+    if str(_record_value(run, "source_completeness") or "") == "UNAVAILABLE":
+        raise ValueError("当前 AI 草稿没有可采用内容，请补充资料后重新分析。")
+    if run_status == "READY_WITH_WARNINGS":
+        raise ValueError("部分资料已跳过，请通过逐项选择预览确认。")
     items = repo.get_items(context["batch"], context["version"])
     sources = repo.list_sources(context["batch"], context["version"])
     current_fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources, context=context)
@@ -2887,7 +2899,7 @@ def apply_source_ai_review(
         repo.save_run(run, status="STALE", progress_step="说明已变化",
                       error_message="保存的说明已变化，请按新说明重新分析。", completed_at=_now())
         return {"ok": False, "stale": True, "run_id": str(run_id), "status": "STALE"}
-    if str(_record_value(run, "status") or "") != "READY":
+    if not is_material_ai_preview_ready(_record_value(run, "status")):
         raise ValueError("AI 资料审核草稿尚未准备完成或已经处理。")
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     if hasattr(repo, "lock_review_inputs"):
@@ -2969,7 +2981,11 @@ def apply_source_ai_review(
             repo.rollback()
         raise
     if applied.get('ok') is False:
-        return {**applied,'run_id':str(run_id),'status':'READY'}
+        return {
+            **applied,
+            'run_id': str(run_id),
+            'status': str(_record_value(run, 'status') or 'READY'),
+        }
     return {
         "ok": True,
         "run_id": str(run_id),
@@ -5014,8 +5030,17 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             )
             else "COMPLETE"
         )
-        persist(status="READY",
-            progress_step="草稿已生成",
+        ready_status = (
+            "READY_WITH_WARNINGS"
+            if source_completeness in {"PARTIAL", "UNAVAILABLE"}
+            else "READY"
+        )
+        persist(status=ready_status,
+            progress_step=(
+                "草稿已生成（部分资料已跳过）"
+                if ready_status == "READY_WITH_WARNINGS"
+                else "草稿已生成"
+            ),
             progress_percent=100,
             model=ai_result.get("model") or "",
             vision_model=ai_result.get("vision_model") or "",
@@ -5030,7 +5055,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             source_completeness=source_completeness,
             completed_at=_now(),
         )
-        return {"ok": True, "run_id": str(run_id), "status": "READY", "candidate_count": len(candidates)}
+        return {
+            "ok": True,
+            "run_id": str(run_id),
+            "status": ready_status,
+            "candidate_count": len(candidates),
+        }
     except _MaterialAIRunClaimLost:
         current = repo.get_run(str(run_id))
         return {
@@ -5259,7 +5289,8 @@ class FrappeMaterialAIFillRepository:
             UPDATE `tabOverseas Cost Material AI Run`
             SET status='STALE', progress_step=%s, error_message=%s, completed_at=%s,
                 progress_revision=COALESCE(progress_revision, 0)+1
-            WHERE batch=%s AND proposal_version>0 AND status IN ('QUEUED','RUNNING','READY')
+            WHERE batch=%s AND proposal_version>0
+              AND status IN ('QUEUED','RUNNING','READY','READY_WITH_WARNINGS')
         """, ("说明已变化", "说明已保存，请按新说明重新分析。", _now(), batch_name))
 
     def _get_context(self, batch_name: str, version_name: str | None = None, *, original_sources=False) -> dict:
@@ -5541,7 +5572,7 @@ class FrappeMaterialAIFillRepository:
         if status == "APPLIED":
             frappe.db.rollback()
             raise ValueError("已保存的 AI 草稿不能放弃。")
-        if status not in {"QUEUED", "RUNNING", "READY", "DISCARDED"}:
+        if status not in {"QUEUED", "RUNNING", *PREVIEW_READY_STATES, "DISCARDED"}:
             frappe.db.rollback()
             raise ValueError("AI 草稿尚未准备完成或已经处理。")
         if status != "DISCARDED":
@@ -5603,7 +5634,7 @@ class FrappeMaterialAIFillRepository:
                 "SELECT name FROM `tabOverseas Cost Item` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
                 (audit["batch"], audit["version"]),
             )
-        if str(_record_value(run, "status") or "") != "READY":
+        if not is_material_ai_preview_ready(_record_value(run, "status")):
             raise ValueError("AI 草稿尚未准备完成或已经处理。")
         changed = 0
         try:

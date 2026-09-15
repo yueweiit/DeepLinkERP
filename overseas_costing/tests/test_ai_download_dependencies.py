@@ -88,7 +88,7 @@ def test_worker_seals_downloaded_file_before_read_and_rechecks_it(monkeypatch, t
     started = ai.start_source_ai_review('B1', 'V1', repository=repo, enqueue=queued.append)
     assert started['status'] == 'QUEUED' and queued == ['RUN-1']
     result = ai.execute_material_ai_fill('RUN-1', repository=repo)
-    assert result['status'] == ('STALE' if change else 'READY'), repo.run.get('error_message')
+    assert result['status'] == ('STALE' if change else 'READY_WITH_WARNINGS'), repo.run.get('error_message')
     assert read_baselines == ([] if change == 'during_download' else [True])
     if not change:
         from overseas_costing.services.material_ai_selection_service import material_fingerprint
@@ -142,7 +142,7 @@ def test_failed_optional_download_does_not_block_ready_draft_from_readable_sourc
     started = ai.start_source_ai_review('B1', 'V1', repository=repo, enqueue=lambda _run: None)
     result = ai.execute_material_ai_fill(started['run_id'], repository=repo)
 
-    assert result['status'] == 'READY', repo.run.get('error_message')
+    assert result['status'] == 'READY_WITH_WARNINGS', repo.run.get('error_message')
     progress = {row['label']: row for row in repo.run['source_progress_json']}
     assert progress['物流说明']['status'] == 'COMPLETED'
     assert progress['packing.txt']['status'] == 'SKIPPED'
@@ -207,7 +207,7 @@ def test_failed_local_optional_attachment_is_removed_from_ready_dependencies(mon
     started = ai.start_source_ai_review('B1', 'V1', repository=repo, enqueue=lambda _run: None)
     result = ai.execute_material_ai_fill(started['run_id'], repository=repo)
 
-    assert result['status'] == 'READY', repo.run.get('error_message')
+    assert result['status'] == 'READY_WITH_WARNINGS', repo.run.get('error_message')
     progress = {row['label']: row for row in repo.run['source_progress_json']}
     assert progress['corrupt.xlsx']['status'] == 'SKIPPED'
     assert progress['corrupt.xlsx']['skip_reason_code'] == 'CORRUPT_DOCUMENT'

@@ -421,7 +421,8 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choi
     initial=repo.get_run(run_id);ai._assert_run_batch(initial,batch_name)
     repo.lock_review_scope(batch_name)
     run=repo.lock_run(run_id)
-    if ai._record_value(run,'status')!='READY':raise ValueError('此分析已经处理或过期，请重新读取草稿。')
+    if not ai.is_material_ai_preview_ready(ai._record_value(run,'status')):
+        raise ValueError('此分析已经处理或过期，请重新读取草稿。')
     context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     if expected_version!=context['version']:raise ValueError('当前成本版本已变化，请刷新。')
     draft=ai._load_json(ai._record_value(run,'draft_json'),{})
@@ -539,7 +540,8 @@ def _confirm_locked(batch_name,run_id,preview_id,preview_revision,edit_token,exp
         raise ValueError('实际付款流程匹配已变化，请刷新预览；本次未保存。')
     if receipt.get('mode') == 'replace_all':
         raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
-    if ai._record_value(run,'status')!='READY' or draft.get('current_row_preview')!=preview_id:
+    if (not ai.is_material_ai_preview_ready(ai._record_value(run,'status'))
+            or draft.get('current_row_preview')!=preview_id):
         raise ValueError('草稿或选择已变化，请使用最新预览。')
     if (receipt.get('id')!=preview_id or receipt.get('run_id')!=run_id
             or receipt.get('batch')!=batch_name):

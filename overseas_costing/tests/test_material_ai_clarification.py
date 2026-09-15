@@ -66,7 +66,7 @@ def test_concurrent_note_save_rejects_stale_revision_without_losing_saved_note()
     assert len(repo.note_writes) == 1
 
 
-@pytest.mark.parametrize('status', ['QUEUED', 'RUNNING', 'READY'])
+@pytest.mark.parametrize('status', ['QUEUED', 'RUNNING', 'READY', 'READY_WITH_WARNINGS'])
 def test_saving_new_note_invalidates_old_runs_and_same_input_rerun_reuses_result(status):
     repo = NoteRepository()
     save(repo, '旧说明')
@@ -152,7 +152,7 @@ def test_worker_retains_revision_metadata_when_draft_becomes_ready(monkeypatch):
     save(repo, '当前说明')
     start(repo)
     monkeypatch.setattr(service, '_call_source_review_ai', lambda *_a, **_k: {'ok': True, 'proposals': []})
-    assert service.execute_material_ai_fill(repo.run['name'], repository=repo)['status'] == 'READY'
+    assert service.execute_material_ai_fill(repo.run['name'], repository=repo)['status'] == 'READY_WITH_WARNINGS'
     assert repo.run['draft_json']['review_input']['clarification_revision'] == 1
 
 
@@ -230,7 +230,7 @@ def test_worker_preserves_input_revision_during_partial_source_progress(monkeypa
     start(repo)
     monkeypatch.setattr(service, '_call_source_review_ai', lambda *_a, **_k: {'ok': True, 'proposals': []})
     result = service.execute_material_ai_fill(repo.run['name'], repository=repo)
-    assert result['status'] == 'READY'
+    assert result['status'] == 'READY_WITH_WARNINGS'
     assert repo.run['draft_json']['review_input']['clarification_revision'] == 1
 
 

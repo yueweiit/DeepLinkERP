@@ -200,7 +200,7 @@ def test_ai_complete_deepseek_payload_excludes_old_values_and_has_expense_body(m
     monkeypatch.setattr(allocation_service, '_call_chat_completions', lambda config, messages: captured.append(copy.deepcopy(messages)) or '{"proposals":[]}')
     monkeypatch.setattr(ai, '_call_vision_style_descriptions', lambda documents: {'observations': []})
     result = ai.execute_material_ai_fill('RUN-1', repository=repo)
-    assert result['status'] == 'READY', repo.run.get('error_message')
+    assert result['status'] == 'READY_WITH_WARNINGS', repo.run.get('error_message')
     assert captured
     text = json.dumps(captured, ensure_ascii=False)
     assert 'OLD_INTL' not in text

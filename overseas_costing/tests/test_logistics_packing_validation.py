@@ -74,7 +74,7 @@ def test_partial_excel_warning_reaches_ready_unresolved_without_business_write(m
     monkeypatch.setattr(service, "_read_source", read_source)
     monkeypatch.setattr(service, "_call_source_review_ai", lambda *a, **kw: {"ok": False, "proposals": []})
     result = service.execute_material_ai_fill("RUN-1", repository=repo)
-    assert result["status"] == "READY"
+    assert result["status"] == "READY_WITH_WARNINGS"
     assert any("毛重明细100与合计200不一致" in row["message"]
                for row in repo.run["draft_json"]["autofill_preview"]["unresolved"])
     progress = next(row for row in repo.run["source_progress_json"] if row["source_kind"] == "manual_attachment")
