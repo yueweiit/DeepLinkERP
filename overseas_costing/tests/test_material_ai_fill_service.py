@@ -1204,10 +1204,81 @@ def test_document_fee_parser_extracts_explicit_freight_components_and_total() ->
         assert by_amount[amount]["parent_proposal_id"] == by_amount["10347"]["proposal_id"]
 
 
+def test_freight_arbitration_deduplicates_same_money_span_across_fee_keys() -> None:
+    source = {"source_id": "COMMENT", "source_label": "评论 · 李仲华"}
+    document = _fee_document(
+        "DOC-28",
+        "贸易项目应付运费¥9,367.46元",
+        "港杂与货代费¥948.60元",
+        "PDD项目应付运费¥30.93元",
+        "合计应付货款¥10,347.00元",
+    )
+    deterministic = build_document_fee_proposals(
+        source, document, transport_mode="AIR"
+    )
+    deterministic_port = next(
+        row for row in deterministic if row["payload"]["amount"] == "948.6"
+    )
+    ai_duplicate = copy.deepcopy(deterministic_port)
+    ai_duplicate.update(proposal_id="AI-PORT", result_origin="AI")
+    ai_duplicate["payload"]["logical_fee_key"] = "international_air_freight"
+    ai_duplicate["payload"]["expense_category"] = "国际空运费"
+
+    normalized = normalize_source_review_proposals(
+        [*deterministic, ai_duplicate],
+        _items(),
+        [document],
+        transport_mode="AIR",
+        trusted_system_proposal_ids={row["proposal_id"] for row in deterministic},
+    )
+    by_amount = {}
+    for row in normalized:
+        by_amount.setdefault(row["payload"]["amount"], []).append(row)
+
+    assert len(by_amount["948.6"]) == 1
+    assert by_amount["948.6"][0]["result_origin"] == "SYSTEM"
+    assert by_amount["10347"][0]["selection_role"] == "primary_total"
+
+
+def test_document_fee_parser_maps_port_charges_without_a_total_to_component_key() -> None:
+    source = {"source_id": "COMMENT", "source_label": "运费评论"}
+    document = _fee_document(
+        "DOC-1", "国际空运费 RMB 60", "港杂与货代费 RMB 40"
+    )
+
+    proposals = build_document_fee_proposals(
+        source, document, transport_mode="AIR"
+    )
+    by_amount = {row["payload"]["amount"]: row for row in proposals}
+
+    assert by_amount["60"]["payload"]["logical_fee_key"] == "international_air_freight"
+    assert by_amount["40"]["payload"]["logical_fee_key"] == "port_and_forwarder_charges"
+    assert by_amount["40"]["payload"]["expense_category"] == "港杂与货代费"
+
+
 def test_document_fee_parser_does_not_promote_purchase_unit_price() -> None:
     source = {"source_id": "COMMENT", "source_label": "采购评论"}
     document = _fee_document("DOC-1", "物料单价 1.2元，数量 500件")
 
+    assert build_document_fee_proposals(
+        source, document, transport_mode="AIR"
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "国内运费 1.2元/件",
+        "空运费 RMB100/箱",
+        "物流费 USD25/票",
+        "运费 RMB100，优惠 RMB10",
+    ],
+)
+def test_document_fee_parser_rejects_rates_and_multi_amount_fee_lines(line) -> None:
+    source = {"source_id": "COMMENT", "source_label": "运费评论"}
+    document = _fee_document("DOC-1", line)
+
+    assert _looks_like_quote_amount_line(line) is False
     assert build_document_fee_proposals(
         source, document, transport_mode="AIR"
     ) == []

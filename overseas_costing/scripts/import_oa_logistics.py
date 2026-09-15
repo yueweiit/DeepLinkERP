@@ -2280,7 +2280,8 @@ def _quote_money_amount_matches(text: str) -> list[tuple[str, tuple[int, int]]]:
     )
     rejected_suffix = re.compile(
         r"^(?:m[3³]|cbm\b|kgs?\b|公斤|方|立方|件|pcs?\b|[%％]|"
-        r"/(?:方|立方|cbm|m[3³]|kg|kgs?)\b|[/\-]\s*\d)",
+        r"/(?:方|立方|箱|票|件|公斤|cbm|m[3³]|kg|kgs?|pcs?|packages?|shipments?)"
+        r"(?![A-Za-z0-9_])|[/\-]\s*\d)",
         re.IGNORECASE,
     )
     matches = []
@@ -2315,7 +2316,18 @@ def _quote_money_amount_matches(text: str) -> list[tuple[str, tuple[int, int]]]:
                 continue
             seen_spans.add(span)
             matches.append((match.group("number"), span))
-    return sorted(matches, key=lambda value: value[1])
+    distinct = []
+    for amount, span in sorted(matches, key=lambda value: value[1]):
+        amount_key = amount.replace(",", "").lstrip("+")
+        if any(
+            amount_key == existing_amount.replace(",", "").lstrip("+")
+            and span[0] < existing_span[1]
+            and existing_span[0] < span[1]
+            for existing_amount, existing_span in distinct
+        ):
+            continue
+        distinct.append((amount, span))
+    return distinct
 
 
 def _looks_like_quote_amount_line(line: str) -> bool:
@@ -2324,24 +2336,29 @@ def _looks_like_quote_amount_line(line: str) -> bool:
     text = _clean(line)
     if not text:
         return False
-    if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", text, re.IGNORECASE) and "=" not in text:
+    if re.search(
+        r"/(?:方|立方|箱|票|件|公斤|cbm|m3|kg|kgs?|pcs?|packages?|shipments?)",
+        text,
+        re.IGNORECASE,
+    ) and "=" not in text:
         return False
+    amount_text = text.rsplit("=", 1)[1] if "=" in text else text
+    money_matches = _quote_money_amount_matches(amount_text)
     if re.search(
         r"(?:合计|总计|总额|总费用|总价|grand\s+total|total(?:\s+amount)?)",
         text,
         re.IGNORECASE,
     ):
-        return bool(_quote_money_amount_matches(text))
+        return len(money_matches) == 1
     if re.search(
         r"(?:运费|物流费|空运费|海运费|快递费|港杂|货代|附加费|freight|shipping(?:\s+fee)?)",
         text,
         re.IGNORECASE,
     ):
-        return bool(_quote_money_amount_matches(text))
+        return len(money_matches) == 1
     if "=" not in text:
         return False
-    after_equals = text.rsplit("=", 1)[1]
-    return bool(_quote_money_amount_matches(after_equals))
+    return len(money_matches) == 1
 
 
 def _parse_direct_quote_line(line: str) -> dict | None:

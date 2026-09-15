@@ -1272,7 +1272,12 @@ def normalize_source_review_proposals(
         identity = (
             (
                 proposal_type,
-                payload.get("logical_fee_key"),
+                (
+                    "freight"
+                    if str(payload.get("logical_fee_key") or "")
+                    in _REVIEW_FREIGHT_CANDIDATE_KEYS
+                    else payload.get("logical_fee_key")
+                ),
                 payload.get("amount"),
                 payload.get("currency"),
                 tuple(sorted(
@@ -2586,6 +2591,21 @@ def build_document_fee_proposals(
             }
         ]
         payload = proposal.get("payload") or {}
+        evidence_line = lines[line_index][0] if 0 <= line_index < len(lines) else ""
+        if re.search(r"(?:港杂|货代|port\s+charge|forwarder)", evidence_line, re.IGNORECASE):
+            payload.update(
+                logical_fee_key="port_and_forwarder_charges",
+                expense_category="港杂与货代费",
+            )
+        elif re.search(
+            r"(?:快递[^\n]{0,20}附加费|附加费[^\n]{0,20}快递|express[^\n]{0,20}surcharge)",
+            evidence_line,
+            re.IGNORECASE,
+        ):
+            payload.update(
+                logical_fee_key="express_surcharge",
+                expense_category="快递附加费",
+            )
         payload["remark"] = "来自服务器读取的物流报价附件，待确认。"
     return proposals
 
