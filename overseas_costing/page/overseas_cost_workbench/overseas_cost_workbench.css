@@ -7700,6 +7700,13 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-ai-stage-other-fees { border-top: 1px solid #e4ebf3; background: #fbfcfe; }
 .ocw-mf-ai-stage-other-fees > .ocw-mf-ai-preview-table { margin: 0 12px 12px; }
 .ocw-mf-ai-stage-other-fees td > small { display: block; margin-top: 4px; color: #8a5700; font-size: 10px; }
+.ocw-mf-ai-unclassified { margin-top: 10px; overflow: hidden; border: 1px dashed #c7d3e1; border-radius: 9px; background: #fbfcfe; }
+.ocw-mf-ai-unclassified > summary { display: flex; justify-content: space-between; gap: 10px; padding: 11px 13px; cursor: pointer; color: #475467; font-size: 11px; font-weight: 600; }
+.ocw-mf-ai-unclassified > summary span { color: #667085; font-weight: 400; }
+.ocw-mf-ai-unclassified > .ocw-mf-ai-preview-table { border-width: 1px 0 0; border-radius: 0; }
+.ocw-mf-ai-unclassified td { max-width: 280px; white-space: normal; overflow-wrap: anywhere; }
+.ocw-mf-ai-unclassified td > select { width: 100%; min-width: 180px; min-height: 34px; padding: 5px 8px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; color: #1f344f; }
+.ocw-mf-ai-unclassified td > span { color: #667085; font-size: 10px; }
 .ocw-mf-ai-source-candidate-group { margin: 10px 0; border: 1px solid #d8e5f5; border-radius: 10px; background: #fff; overflow: hidden; }
 .ocw-mf-ai-source-candidate-group > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; cursor: pointer; background: #f7faff; color: #344054; }
 .ocw-mf-ai-source-candidate-group > summary span { color: #667085; font-size: 12px; font-weight: 400; }

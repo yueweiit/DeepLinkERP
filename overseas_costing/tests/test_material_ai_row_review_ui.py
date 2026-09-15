@@ -195,6 +195,52 @@ assert(!('fees' in calls[0].args));
 """)
 
 
+def test_lower_stage_approved_quote_does_not_hide_higher_stage_server_default():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[],fees:[
+ {proposal_id:'PAY-DEFAULT',workflow_stage:'payment',workflow_rank:0,selection_role:'ambiguous',payload:{logical_fee_key:'international_air_freight',expense_category:'支付运费',amount:'110',currency:'RMB'},can_apply:true,default_selected:true},
+ {proposal_id:'LOG-APPROVED',workflow_stage:'international_logistics',workflow_rank:1,selection_role:'approved_quote',payload:{logical_fee_key:'international_air_freight',expense_category:'物流报价',amount:'100',currency:'RMB'},can_apply:true,default_selected:false},
+],stage_snapshots:[
+ {stage:'payment',status:'UNAVAILABLE',rows:[],processes:[]},{stage:'international_logistics',status:'UNAVAILABLE',rows:[],processes:[]},{stage:'purchase',status:'UNAVAILABLE',rows:[],processes:[]},
+],fee_stage_snapshots:[
+ {stage:'payment',status:'AVAILABLE',processes:[],fees:[{proposal_id:'PAY-DEFAULT'}]},
+ {stage:'international_logistics',status:'AVAILABLE',processes:[],fees:[{proposal_id:'LOG-APPROVED'}]},
+]};
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+assert.deepEqual([...selection.fees],['PAY-DEFAULT']);
+const html=w.renderMaterialAIReviewDialogContent();
+const payment=html.slice(html.indexOf('data-mf-ai-fee-stage="payment"'),html.indexOf('data-mf-ai-fee-stage="international_logistics"'));
+assert(payment.includes('data-mf-ai-fee-select="PAY-DEFAULT"'));assert(payment.includes('checked'));assert(payment.includes('110'));
+const logistics=html.slice(html.indexOf('data-mf-ai-fee-stage="international_logistics"'));
+assert(logistics.includes('data-mf-ai-fee-select="LOG-APPROVED"'));assert(logistics.includes('100'));
+""")
+
+
+def test_current_policy_keeps_unclassified_packing_and_fee_candidates_auditable_and_selectable_by_server_flags():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[
+ {candidate_id:'OTHER-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'12.5',workflow_stage:'other',source_label:'历史资料',can_apply:true,default_selected:true,resolution_reason:'未分类候选'},
+ {candidate_id:'OTHER-RO',item_name:'I1',fieldname:'volume_m3',suggested_value:'0.2',workflow_stage:'other',source_label:'旧附件',can_apply:false,default_selected:false,resolution_reason:'仅供核对'},
+],fees:[
+ {proposal_id:'LEGACY-FEE',workflow_stage:'other',selection_role:'ambiguous',payload:{logical_fee_key:'customs_clearance_fee',expense_category:'历史清关费',amount:'88',currency:'RMB'},can_apply:true,default_selected:true},
+ {proposal_id:'AUDIT-FEE',workflow_stage:'other',selection_role:'alternative',payload:{logical_fee_key:'international_air_freight',expense_category:'旧运费记录',amount:'66',currency:'RMB'},can_apply:false,default_selected:false,blocked_reason:'只读记录'},
+],stage_snapshots:[
+ {stage:'payment',status:'UNAVAILABLE',rows:[],processes:[]},{stage:'international_logistics',status:'UNAVAILABLE',rows:[],processes:[]},{stage:'purchase',status:'UNAVAILABLE',rows:[],processes:[]},
+],fee_stage_snapshots:[
+ {stage:'payment',status:'UNAVAILABLE',processes:[],fees:[]},{stage:'international_logistics',status:'UNAVAILABLE',processes:[],fees:[]},
+]};
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+assert.deepEqual([...selection.fields.entries()],[['I1:gross_weight_kg','OTHER-W']]);assert.deepEqual([...selection.fees],['LEGACY-FEE']);
+const html=w.renderMaterialAIReviewDialogContent();
+assert(html.includes('data-mf-ai-unclassified-packing'));
+assert(html.includes('value="OTHER-W"'));assert(html.includes('12.5'));assert(html.includes('OTHER-RO'));assert(html.includes('0.2'));assert(html.includes('只读'));
+assert(html.includes('data-mf-ai-unclassified-fees'));
+assert(html.includes('data-mf-ai-fee-select="LEGACY-FEE"'));assert(html.includes('checked'));assert(html.includes('历史清关费'));
+assert(html.includes('AUDIT-FEE'));assert(html.includes('旧运费记录'));assert(html.includes('只读记录'));
+assert.equal((html.match(/data-mf-ai-fee-select="LEGACY-FEE"/g)||[]).length,1);
+""")
+
+
 def test_ambiguous_fees_remain_visible_and_are_single_choice_without_resolved_total():
     run_ui(r"""
 const fill=ready();fill.row_review.fees=[
@@ -203,9 +249,23 @@ const fill=ready();fill.row_review.fees=[
 ];
 delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
 let html=w.renderMaterialAIReviewDialogContent();
-for(const id of ['A','B'])assert(html.includes(`type="radio" data-mf-ai-fee-select="${id}"`),id);
+for(const id of ['A','B'])assert(html.includes(`type="checkbox" data-mf-ai-fee-select="${id}"`),id);
 w.changeMaterialAIRowSelection('fees','A',true);assert.deepEqual([...selection.fees],['A']);
 w.changeMaterialAIRowSelection('fees','B',true);assert.deepEqual([...selection.fees],['B']);
+""")
+
+
+def test_ambiguous_fees_only_replace_overlapping_coverage_and_keep_other_scopes():
+    run_ui(r"""
+const fill=ready();fill.row_review.fees=[
+ {proposal_id:'FREIGHT',selection_role:'ambiguous',workflow_stage:'payment',payload:{logical_fee_key:'international_air_freight',amount:'100',currency:'RMB'},can_apply:true,default_selected:false},
+ {proposal_id:'CUSTOMS',selection_role:'ambiguous',workflow_stage:'payment',payload:{logical_fee_key:'customs_clearance_fee',amount:'20',currency:'RMB'},can_apply:true,default_selected:false},
+];
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
+w.changeMaterialAIRowSelection('fees','FREIGHT',true);w.changeMaterialAIRowSelection('fees','CUSTOMS',true);
+assert.deepEqual([...selection.fees].sort(),['CUSTOMS','FREIGHT']);
+const html=w.renderMaterialAIReviewDialogContent();
+for(const id of ['FREIGHT','CUSTOMS'])assert(html.includes(`type="checkbox" data-mf-ai-fee-select="${id}"`),id);
 """)
 
 
