@@ -2309,6 +2309,10 @@ _HTML_MARKUP_PATTERN = re.compile(
 _HTML_ATTRIBUTE_TAG_PATTERN = re.compile(
     r"<\s*/?\s*[a-z][\w:-]*\s+[a-z_:][\w:.-]*\s*=", re.IGNORECASE
 )
+_HTML_OPEN_TAG_WITH_BODY_PATTERN = re.compile(
+    r"^\s*<([a-z][\w:-]*)(?:\s+[^<>]*)?>\s*\S", re.IGNORECASE | re.DOTALL
+)
+_BUSINESS_PLACEHOLDER_TAGS = frozenset({"BODY", "CODE"})
 _ERROR_PAGE_PATTERN = re.compile(
     r"(?:\btraceback\b|\binternal\s+server\s+error\b|\bbad\s+gateway\b|"
     r"\bservice\s+unavailable\b)",
@@ -2375,6 +2379,10 @@ def _safe_public_text(value: str) -> str:
     """Keep business copy, but never return markup, stack traces, or server paths."""
 
     text = str(value or "")
+    open_tag = _HTML_OPEN_TAG_WITH_BODY_PATTERN.search(text)
+    unsafe_open_tag = bool(
+        open_tag and open_tag.group(1) not in _BUSINESS_PLACEHOLDER_TAGS
+    )
     unsafe = any(
         pattern.search(text)
         for pattern in (
@@ -2384,7 +2392,7 @@ def _safe_public_text(value: str) -> str:
             _ERROR_PAGE_PATTERN,
             _SERVER_PATH_PATTERN,
         )
-    )
+    ) or unsafe_open_tag
     return SERVER_PREVIEW_FAILURE_MESSAGE if unsafe else text
 
 

@@ -4143,6 +4143,8 @@ def test_public_status_recursively_sanitizes_legacy_nested_failure_details() -> 
     "private_text",
     [
         "<span>500 secret</span>",
+        "<html>500 secret",
+        "<p>proxy details",
         "<html",
         '<p class="server-error"',
         "500 Internal Server Error",
@@ -4202,6 +4204,8 @@ def test_public_payload_extra_json_is_parsed_allowlisted_and_never_falls_back_to
         "物料编码 <P-100> 不匹配",
         "产品规格 <BODY> 待核对",
         "物料编码 <CODE> 待核对",
+        "<BODY>",
+        "<CODE>",
         "5 < 10 > 3",
         "https://example.com/help",
     ],
