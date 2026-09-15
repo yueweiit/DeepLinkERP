@@ -340,6 +340,66 @@ def test_payment_logistics_purchase_priority_is_applied_per_field_and_lower_valu
     assert projected['rows'][0]['volume_m3'] == 2
 
 
+def test_unreadable_higher_priority_source_does_not_block_lower_priority_default():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'PAYMENT-FAILED', 'source_kind': 'approval_attachment',
+         'source_label': '费用支出附件.xlsx', 'approval_role': 'logistics_expense',
+         'approval_title': '费用支出', 'read_status': 'FAILED', 'error': '无权读取'},
+        {'source_id': 'LOGISTICS', 'source_kind': 'approval_form',
+         'source_label': '国际物流审批正文', 'approval_role': 'international_logistics',
+         'approval_title': '国际物流审批', 'read_status': 'READ'},
+    ]
+    proposals = [
+        {'proposal_id': 'LOGISTICS', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'default_selected': True, 'source_refs': [{'source_id': 'LOGISTICS'}],
+         'payload': {'fields': {'gross_weight_kg': 8}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates = [row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg']
+
+    assert len(candidates) == 1
+    assert candidates[0]['workflow_stage'] == 'international_logistics'
+    assert candidates[0]['default_selected'] is True
+
+
+def test_evidence_priority_is_applied_per_field_within_one_workflow_source():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
+    sources = [
+        {'source_id': 'PAY-ATTACHMENT', 'parent_source_id': 'PAY',
+         'source_kind': 'approval_attachment', 'source_field': '装箱单附件（Excel）',
+         'source_label': '费用支出·装箱单.xlsx', 'approval_role': 'logistics_expense'},
+        {'source_id': 'PAY-COMMENT', 'parent_source_id': 'PAY',
+         'source_kind': 'approval_comment', 'source_label': '费用支出·评论',
+         'approval_role': 'logistics_expense'},
+    ]
+    proposals = [
+        {'proposal_id': 'ATTACHMENT', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'default_selected': True,
+         'source_refs': [{'source_id': 'PAY-ATTACHMENT'}],
+         'payload': {'fields': {'gross_weight_kg': 9}}},
+        {'proposal_id': 'COMMENT', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'default_selected': True,
+         'source_refs': [{'source_id': 'PAY-COMMENT'}],
+         'payload': {'fields': {'gross_weight_kg': 8, 'volume_m3': 2}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_field = {}
+    for candidate in review['field_candidates']:
+        by_field.setdefault(candidate['fieldname'], []).append(candidate)
+
+    gross_default = next(row for row in by_field['gross_weight_kg'] if row['default_selected'])
+    volume_default = next(row for row in by_field['volume_m3'] if row['default_selected'])
+    comment_gross = next(row for row in by_field['gross_weight_kg'] if row['row_id'] != gross_default['row_id'])
+    assert gross_default['evidence_kind'] == 'dedicated_attachment'
+    assert volume_default['evidence_kind'] == 'comment'
+    assert comment_gross['evidence_kind'] == 'comment'
+    assert comment_gross['can_apply'] is True
+    assert len(review['source_groups']) == 1
+
+
 def test_same_rank_conflicting_values_require_manual_field_choice():
     items = [item('I1', 'SKU-1', gross_weight_kg=None)]
     sources = [

@@ -51,13 +51,20 @@ assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('da
 def test_per_field_defaults_show_source_metadata_and_submit_only_candidate_ids():
     run_ui(r"""
 const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-1',field_candidates:[
- {candidate_id:'PAY-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'9',source_label:'费用支出正文',workflow_stage:'payment',evidence_kind:'approval_form',can_apply:true,default_selected:true,resolution_reason:'支付申请默认'},
- {candidate_id:'LOG-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'8',source_label:'国际物流附件',workflow_stage:'international_logistics',evidence_kind:'dedicated_attachment',can_apply:true,default_selected:false,resolution_reason:'低优先级可改选'},
- {candidate_id:'LOG-V',item_name:'I1',fieldname:'volume_m3',suggested_value:'2',source_label:'国际物流附件',workflow_stage:'international_logistics',evidence_kind:'dedicated_attachment',can_apply:true,default_selected:true,resolution_reason:'高层缺失时补值'},
+ {candidate_id:'PAY-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'9',source_group_id:'PAY',source_label:'费用支出正文',workflow_stage:'payment',workflow_rank:0,evidence_kind:'approval_form',evidence_rank:1,can_apply:true,default_selected:true,resolution_reason:'支付申请默认'},
+ {candidate_id:'LOG-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'8',source_group_id:'LOG',source_label:'国际物流附件',workflow_stage:'international_logistics',workflow_rank:1,evidence_kind:'dedicated_attachment',evidence_rank:0,can_apply:true,default_selected:false,resolution_reason:'低优先级可改选'},
+ {candidate_id:'LOG-V',item_name:'I1',fieldname:'volume_m3',suggested_value:'2',source_group_id:'LOG',source_label:'国际物流附件',workflow_stage:'international_logistics',workflow_rank:1,evidence_kind:'dedicated_attachment',evidence_rank:0,can_apply:true,default_selected:true,resolution_reason:'高层缺失时补值'},
 ]};delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
 assert.deepEqual([...selection.fields.entries()].sort(),[['I1:gross_weight_kg','PAY-W'],['I1:volume_m3','LOG-V']]);
 let html=w.renderMaterialAIReviewDialogContent();
-for(const text of ['逐字段默认值','费用支出正文','支付申请','审批正文','2 个候选'])assert(html.includes(text),text);
+for(const text of ['装箱资料候选（按来源优先级）','来源 1 · 费用支出正文','来源 2 · 国际物流附件','支付申请','审批正文','国际物流审批','专用附件','来源读取失败或字段无效时自动回退到下一来源'])assert(html.includes(text),text);
+assert(html.indexOf('来源 1 · 费用支出正文') < html.indexOf('来源 2 · 国际物流附件'));
+assert.equal((html.match(/data-mf-ai-field-source-group=/g)||[]).length,2);
+const payment=html.slice(html.indexOf('data-mf-ai-field-source-group="PAY"'),html.indexOf('data-mf-ai-field-source-group="LOG"'));
+assert(payment.includes(' open>'));assert(payment.includes('<th>物料</th>'));assert(payment.includes('<th>毛重 kg</th>'));
+const logistics=html.slice(html.indexOf('data-mf-ai-field-source-group="LOG"'));
+assert(!logistics.slice(0,logistics.indexOf('<summary>')).includes(' open>'));
+assert(logistics.includes('<th>体积 m³</th>'));assert(logistics.includes('value="LOG-W"'));
 w.scheduleMaterialAIRowPreview=()=>{};w.changeMaterialAIRowSelection('fields','I1:gross_weight_kg','LOG-W');
 assert.equal(selection.fields.get('I1:gross_weight_kg'),'LOG-W');
 w.call=async(method,args)=>{calls.push({method,args});return {ok:true,preview:{id:'P',revision:'R',can_apply:true,rows:[]}}};

@@ -173,7 +173,12 @@ def _selected_packing_groups(items, candidates, selected_ids):
         [item for item in items or [] if not int(item.get('is_excluded') or 0)],
         key=lambda item:(int(item.get('row_no') or 0),str(item.get('name') or '')),
     )
-    stable_keys=[str(item.get('stable_line_key') or '') for item in ordered_items]
+    # Legacy material rows predate the persisted stable_line_key column.  The
+    # rest of the material import/review pipeline exposes their immutable
+    # document name as ``legacy:<name>``; use the same identity here so one
+    # unrelated legacy row cannot invalidate an otherwise verified XLSX group.
+    stable_keys=[str(item.get('stable_line_key') or (
+        f"legacy:{item.get('name')}" if item.get('name') else '')) for item in ordered_items]
     if selected_ids and (any(not key for key in stable_keys) or len(stable_keys)!=len(set(stable_keys))):
         raise ValueError('装箱组物料身份不稳定，请刷新后重新分析。')
     occupied=set();selected=[]

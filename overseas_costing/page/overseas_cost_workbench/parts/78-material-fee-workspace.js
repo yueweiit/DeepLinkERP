@@ -2177,16 +2177,51 @@
       if (!fieldGroups.has(key)) fieldGroups.set(key, []);
       fieldGroups.get(key).push(candidate);
     });
-    const fieldChoiceRows = [...fieldGroups.entries()].map(([key, candidates]) => {
-      const selectedId = selection.fields.get(key) || "";
-      const selected = candidates.find(candidate => String(candidate.candidate_id) === String(selectedId));
-      const options = [`<option value="">不采用 / 待选择</option>`, ...candidates.filter(candidate => candidate.can_apply).map(candidate =>
-        `<option value="${this.escape(candidate.candidate_id)}" ${String(candidate.candidate_id) === String(selectedId) ? "selected" : ""}>${value(candidate.suggested_value)} · ${this.escape(candidate.source_label || "未命名来源")}</option>`)].join("");
-      const item = (catalog.rows || []).find(row => row.origin === "current" && String(row.target_item_name || row.values?.name || "") === String(candidates[0]?.item_name || ""));
-      const source = selected ? `${workflowLabels[selected.workflow_stage] || selected.workflow_stage || "其他来源"} · ${evidenceLabels[selected.evidence_kind] || selected.evidence_kind || "其他证据"} · ${selected.source_label || ""}` : "同级冲突，请选择";
-      return `<tr><td>${value(item?.values?.material_code || item?.values?.product_name || candidates[0]?.item_name)}</td><td>${value(fieldLabels[candidates[0]?.fieldname] || candidates[0]?.fieldname)}</td><td><select data-mf-ai-field-select="${this.escape(key)}" ${busy}>${options}</select></td><td>${this.escape(source)}<small>${this.escape(selected?.resolution_reason || candidates[0]?.resolution_reason || "")}</small></td><td>${candidates.length} 个候选</td></tr>`;
-    }).join("");
-    const fieldChoiceSection = fieldCandidates.length ? `<section class="ocw-mf-ai-preview-section" data-mf-ai-field-candidates><h4>逐字段默认值 <span>已选 ${selection.fields.size} / ${fieldGroups.size}</span></h4><p>优先级只决定默认值；每个字段都可单独改选低优先级的合法候选。</p><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>物料</th><th>字段</th><th>采用值</th><th>流程来源 / 证据</th><th>候选数</th></tr></thead><tbody>${fieldChoiceRows}</tbody></table></div></section>` : "";
+    const fieldSourceGroups = new Map();
+    fieldCandidates.forEach(candidate => {
+      const refId = (candidate.source_refs || []).map(ref => ref.source_id).find(Boolean);
+      const sourceKey = String(candidate.source_group_id || refId || `${candidate.workflow_stage || "other"}:${candidate.evidence_kind || "other"}:${candidate.source_label || "未命名来源"}`);
+      if (!fieldSourceGroups.has(sourceKey)) fieldSourceGroups.set(sourceKey, { sourceKey, candidates: [] });
+      fieldSourceGroups.get(sourceKey).candidates.push(candidate);
+    });
+    const rankedFieldSources = [...fieldSourceGroups.values()].map(group => {
+      const workflowRank = Math.min(...group.candidates.map(candidate => Number(candidate.workflow_rank ?? ({ payment: 0, international_logistics: 1, purchase: 2, other: 3 }[candidate.workflow_stage] ?? 3))));
+      const evidenceRank = Math.min(...group.candidates.map(candidate => Number(candidate.evidence_rank ?? ({ dedicated_attachment: 0, approval_form: 1, attachment: 2, comment: 3, other: 4 }[candidate.evidence_kind] ?? 4))));
+      const representative = [...group.candidates].sort((left, right) => Number(left.workflow_rank ?? 3) - Number(right.workflow_rank ?? 3) || Number(left.evidence_rank ?? 4) - Number(right.evidence_rank ?? 4))[0] || {};
+      const evidenceKinds = [...new Set([...group.candidates].sort((left, right) => Number(left.evidence_rank ?? 4) - Number(right.evidence_rank ?? 4)).map(candidate => candidate.evidence_kind || "other"))];
+      return { ...group, workflowRank, evidenceRank, sourceLabel: representative.source_label || "未命名来源", workflowStage: representative.workflow_stage || "other", evidenceKinds, priorityReason: representative.priority_reason || "" };
+    }).sort((left, right) => left.workflowRank - right.workflowRank || left.evidenceRank - right.evidenceRank || String(left.sourceLabel).localeCompare(String(right.sourceLabel), "zh-CN"));
+    const fieldColumnOrder = [...columns, ["purchase_uom", "采购单位"], ["unit_price_uom", "单价单位"], ["volume_weight_kg", "体积重 kg"], ["chargeable_weight_kg", "计费重 kg"], ["weight_ratio", "重量占比"], ["packaging_type", "包装类型"]];
+    fieldColumnOrder.forEach(([fieldname, label]) => { fieldLabels[fieldname] = label; });
+    const currentItems = catalog.rows || [];
+    const itemLabel = itemName => {
+      const row = currentItems.find(candidate => candidate.origin === "current" && String(candidate.target_item_name || candidate.values?.name || "") === String(itemName || ""));
+      const code = row?.values?.material_code;
+      const name = row?.values?.product_name;
+      return [code, name && String(name) !== String(code) ? name : ""].filter(Boolean).join(" · ") || itemName;
+    };
+    const renderFieldSource = (group, index) => {
+      const sourceFields = new Set(group.candidates.map(candidate => String(candidate.fieldname || "")));
+      const sourceColumns = fieldColumnOrder.filter(([fieldname]) => sourceFields.has(fieldname));
+      const sourceItems = [...new Set(group.candidates.map(candidate => String(candidate.item_name || "")))];
+      const selectedCount = group.candidates.filter(candidate => String(selection.fields.get(`${candidate.item_name}:${candidate.fieldname}`) || "") === String(candidate.candidate_id)).length;
+      const rows = sourceItems.map(itemName => `<tr><th scope="row">${value(itemLabel(itemName))}</th>${sourceColumns.map(([fieldname]) => {
+        const key = `${itemName}:${fieldname}`;
+        const candidates = group.candidates.filter(candidate => String(candidate.item_name || "") === itemName && String(candidate.fieldname || "") === fieldname);
+        if (!candidates.length) return '<td class="is-empty">—</td>';
+        const applicable = candidates.filter(candidate => candidate.can_apply);
+        const selectedId = String(selection.fields.get(key) || "");
+        const localSelected = candidates.find(candidate => String(candidate.candidate_id) === selectedId);
+        const reason = localSelected?.resolution_reason || candidates[0]?.resolution_reason || "";
+        if (!applicable.length) return `<td><span class="ocw-mf-ai-field-readonly">${candidates.map(candidate => value(candidate.suggested_value)).join(" / ")}<b>只读</b></span>${reason ? `<small>${this.escape(reason)}</small>` : ""}</td>`;
+        const options = [`<option value="" ${localSelected ? "" : "selected"}>不采用此来源</option>`, ...applicable.map(candidate => `<option value="${this.escape(candidate.candidate_id)}" ${String(candidate.candidate_id) === selectedId ? "selected" : ""}>${value(candidate.suggested_value)} · ${this.escape(evidenceLabels[candidate.evidence_kind] || candidate.evidence_kind || "其他证据")}</option>`)].join("");
+        return `<td><select data-mf-ai-field-select="${this.escape(key)}" aria-label="${this.escape(itemLabel(itemName))} ${this.escape(fieldLabels[fieldname] || fieldname)}" ${busy}>${options}</select>${reason ? `<small>${this.escape(reason)}</small>` : ""}${candidates.length > 1 ? `<em>${candidates.length} 个同来源候选</em>` : ""}</td>`;
+      }).join("")}</tr>`).join("");
+      const workflow = workflowLabels[group.workflowStage] || group.workflowStage || "其他来源";
+      const evidence = group.evidenceKinds.map(kind => evidenceLabels[kind] || kind || "其他证据").join(" / ");
+      return `<details class="ocw-mf-ai-field-source-group" data-mf-ai-field-source-group="${this.escape(group.sourceKey)}" ${index === 0 ? "open" : ""}><summary><strong>来源 ${index + 1} · ${this.escape(group.sourceLabel)}</strong><span>${this.escape(workflow)} · ${this.escape(evidence)} · 已采用 ${selectedCount} 个字段</span></summary>${group.priorityReason ? `<p>${this.escape(group.priorityReason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-field-source-matrix"><thead><tr><th>物料</th>${sourceColumns.map(([, label]) => `<th>${this.escape(label)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
+    };
+    const fieldChoiceSection = fieldCandidates.length ? `<section class="ocw-mf-ai-preview-section" data-mf-ai-field-candidates><h4>装箱资料候选（按来源优先级） <span>已选 ${selection.fields.size} / ${fieldGroups.size}</span></h4><p>来源读取失败或字段无效时自动回退到下一来源；优先级只决定默认值，每个字段仍可单独改选低优先级候选。</p>${rankedFieldSources.map(renderFieldSource).join("")}</section>` : "";
     const renderCandidateRows = rows => rows.map(row => {
       const allowed = selection.mode === "update_selected" ? row.can_update : selection.mode === "add_selected" ? row.can_add : row.can_fill;
       const origin = row.origin === "current" ? "当前已有" : row.action === "add_candidate" ? "待新增" : "本次识别";
@@ -2252,7 +2287,7 @@
       <section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${mainFees.length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${mainFees.map(renderMainFee).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>
       ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
-      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${fieldCandidates.length ? groupedTables : ""}${otherFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
+      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${otherFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
   }
 

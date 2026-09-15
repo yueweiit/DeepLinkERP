@@ -844,6 +844,24 @@ def test_transport_purchase_expense_is_payment_but_product_purchase_is_purchase(
     assert ranked[1]['workflow_stage'] == 'purchase'
 
 
+def test_explicit_international_logistics_is_not_promoted_by_linked_purchase_fields():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([{
+        'source_id': 'LOGISTICS',
+        'source_kind': 'approval_form',
+        'approval_role': 'international_logistics',
+        'approval_title': '李仲华提交的国际物流Logística Internacional',
+        'form_fields': {
+            '关联采购支出': '202606220952000179521',
+            '运输方式': '正常空运',
+        },
+    }])
+
+    assert ranked[0]['workflow_stage'] == 'international_logistics'
+    assert ranked[0]['workflow_rank'] == 1
+
+
 def test_actual_packing_match_precedes_workflow_packing_attachment_and_exposes_reason():
     from overseas_costing.services.source_priority_service import rank_material_packing_sources
 

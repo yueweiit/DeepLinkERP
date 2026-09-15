@@ -93,7 +93,7 @@ def _apply_valuation_values(values, valuation):
 def _source_groups(catalog_rows, sources):
     from .source_priority_service import rank_material_packing_sources
     ordered=rank_material_packing_sources(sources or [])
-    groups=[];by_key={};aliases={}
+    groups=[];by_key={};aliases={};sources_by_alias={}
     for source in ordered:
         source_id=str(source.get('source_id') or '')
         key=str(source.get('parent_source_id') or source.get('logical_source_id') or source_id)
@@ -119,19 +119,31 @@ def _source_groups(catalog_rows, sources):
         group=by_key[key]
         group['source_ids'].append(source_id)
         for alias in (source_id,source.get('resolver_source_id'),source.get('logical_source_id'),source.get('parent_source_id')):
-            if str(alias or ''):aliases[str(alias)]=group
+            if str(alias or ''):
+                alias=str(alias)
+                aliases[alias]=group
+                sources_by_alias.setdefault(alias,[]).append(source)
     for row in catalog_rows:
         if row.get('origin')!='source':continue
-        matched=[]
+        matched=[];matched_sources=[]
         for ref in row.get('source_refs') or []:
-            group=aliases.get(str(ref.get('source_id') or ''))
+            ref_id=str(ref.get('source_id') or '')
+            group=aliases.get(ref_id)
             if group and group not in matched:matched.append(group)
+            for source in sources_by_alias.get(ref_id,[]):
+                if source not in matched_sources:matched_sources.append(source)
         group=min(matched,key=lambda value:value['priority']) if matched else None
         if group:
+            evidence=min(matched_sources,key=lambda value:(
+                int(value.get('workflow_rank') if value.get('workflow_rank') is not None else 3),
+                int(value.get('evidence_rank') if value.get('evidence_rank') is not None else 4),
+                int(value.get('priority') or 999999),
+                str(value.get('source_id') or ''),
+            )) if matched_sources else group
             row.update(source_group_id=group['group_id'],source_priority=group['priority'],source_label=group['source_label'],
-                       workflow_stage=group['workflow_stage'],workflow_rank=group['workflow_rank'],
-                       evidence_kind=group['evidence_kind'],evidence_rank=group['evidence_rank'],
-                       priority_reason=group['priority_reason'])
+                       workflow_stage=evidence['workflow_stage'],workflow_rank=evidence['workflow_rank'],
+                       evidence_kind=evidence['evidence_kind'],evidence_rank=evidence['evidence_rank'],
+                       priority_reason=evidence['priority_reason'])
             group['row_ids'].append(row['row_id'])
         else:
             row.update(source_group_id='',source_priority=len(groups)+1,source_label='其他识别结果',

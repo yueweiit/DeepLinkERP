@@ -131,6 +131,14 @@ def _source_business_text(source: dict) -> str:
     return _packing_field_name(" ".join(str(value or "") for value in parts))
 
 
+def _workflow_identity_text(source: dict) -> str:
+    """Return process identity without linked-record values from the form."""
+
+    return _packing_field_name(" ".join(str(source.get(key) or "") for key in (
+        "approval_title", "process_title", "process_name", "source_label", "expense_type",
+    )))
+
+
 def _purchase_expense_type_text(source: dict) -> str:
     fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
     typed_values = [
@@ -148,17 +156,23 @@ def classify_workflow_stage(source: dict) -> str:
 
     source = source or {}
     role = str(source.get("approval_role") or "").strip().casefold()
+    identity_text = _workflow_identity_text(source)
     text = _source_business_text(source)
     if source.get("actual_packing_source") and str(source.get("actual_packing_match_status") or "").lower() == "matched":
         return "payment"
     if role in {"logistics_expense", "payment", "expense", "settlement"}:
         return "payment"
-    if any(_packing_field_name(marker) in text for marker in _PAYMENT_TITLE_MARKERS):
+    if any(_packing_field_name(marker) in identity_text for marker in _PAYMENT_TITLE_MARKERS):
         return "payment"
-    if role == "purchase" or "采购支出" in text:
+    # A logistics approval often links purchase-expense records inside its
+    # form.  Those related values describe dependencies, not the authority of
+    # the current workflow, so explicit logistics identity must win first.
+    if role == "international_logistics" or "国际物流" in identity_text or is_workflow_packing_attachment(source):
+        return "international_logistics"
+    if role == "purchase" or "采购支出" in identity_text or "采购支出" in text:
         typed_text = _purchase_expense_type_text(source)
         return "payment" if any(_packing_field_name(marker) in typed_text for marker in _TRANSPORT_PAYMENT_MARKERS) else "purchase"
-    if role == "international_logistics" or "国际物流" in text or is_workflow_packing_attachment(source):
+    if "国际物流" in text:
         return "international_logistics"
     return "other"
 
