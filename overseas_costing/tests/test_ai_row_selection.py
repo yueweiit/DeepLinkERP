@@ -1178,7 +1178,71 @@ def test_single_proposal_referencing_payment_and_purchase_is_a_conflict_in_both_
 
 
 def test_row_review_policy_is_stage_snapshot_version():
-    assert service.POLICY == 'ai-field-review-2'
+    assert service.POLICY == 'ai-field-review-3'
+
+
+def test_fee_stage_snapshots_are_fixed_even_when_no_fee_source_exists():
+    review = catalog([item()], [], [])
+
+    assert [(stage['stage'], stage['stage_rank'], stage['status'])
+            for stage in review['fee_stage_snapshots']] == [
+        ('payment', 0, 'UNAVAILABLE'),
+        ('international_logistics', 1, 'UNAVAILABLE'),
+    ]
+    assert all(stage['processes'] == [] for stage in review['fee_stage_snapshots'])
+    assert all(stage['fees'] == [] for stage in review['fee_stage_snapshots'])
+    assert 'fee_stage_snapshots' in review
+
+
+def test_fee_stage_snapshots_group_safe_summaries_and_exclude_purchase():
+    sources = [
+        {'source_id': 'PAY-FORM', 'process_instance_id': 'PAY-1',
+         'source_kind': 'approval_form', 'approval_role': 'payment',
+         'approval_title': '月结付款', 'read_status': 'COMPLETED'},
+        {'source_id': 'LOG-FORM', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics',
+         'approval_title': '国际物流审批', 'read_status': 'COMPLETED'},
+        {'source_id': 'PUR-FORM', 'process_instance_id': 'PUR-1',
+         'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '商品采购支出', 'read_status': 'COMPLETED'},
+    ]
+    proposals = [
+        {'proposal_id': 'PAY', 'proposal_type': 'fee_update', 'confidence': .99,
+         'workflow_stage': 'payment', 'workflow_rank': 0,
+         'source_refs': [{'source_id': 'PAY-FORM', 'process_instance_id': 'PAY-1',
+                          'workflow_stage': 'payment', 'workflow_rank': 0,
+                          'evidence_kind': 'approval_form', 'evidence_rank': 1}],
+         'payload': {'logical_fee_key': 'international_air_freight',
+                     'expense_category': '国际空运费', 'amount': '120', 'currency': 'RMB'}},
+        {'proposal_id': 'LOG', 'proposal_type': 'fee_update', 'confidence': .99,
+         'workflow_stage': 'international_logistics', 'workflow_rank': 1,
+         'source_refs': [{'source_id': 'LOG-FORM', 'process_instance_id': 'LOG-1',
+                          'workflow_stage': 'international_logistics', 'workflow_rank': 1,
+                          'evidence_kind': 'approval_form', 'evidence_rank': 1}],
+         'payload': {'logical_fee_key': 'international_air_freight',
+                     'expense_category': '国际空运费', 'amount': '100', 'currency': 'RMB'}},
+        {'proposal_id': 'PUR', 'proposal_type': 'fee_update', 'confidence': .99,
+         'workflow_stage': 'purchase', 'workflow_rank': 2,
+         'source_refs': [{'source_id': 'PUR-FORM', 'process_instance_id': 'PUR-1',
+                          'workflow_stage': 'purchase', 'workflow_rank': 2,
+                          'evidence_kind': 'approval_form', 'evidence_rank': 1}],
+         'payload': {'logical_fee_key': 'customs_clearance_fee',
+                     'expense_category': '清关费', 'amount': '20', 'currency': 'RMB'}},
+    ]
+
+    review = catalog([], proposals, sources)
+    payment, logistics = review['fee_stage_snapshots']
+
+    assert payment['status'] == 'AVAILABLE'
+    assert payment['processes'][0]['process_instance_id'] == 'PAY-1'
+    assert [fee['proposal_id'] for fee in payment['fees']] == ['PAY']
+    assert payment['fees'][0]['amount'] == '120'
+    assert payment['fees'][0]['currency'] == 'RMB'
+    assert [fee['proposal_id'] for fee in logistics['fees']] == ['LOG']
+    assert all(fee['proposal_id'] != 'PUR'
+               for stage in review['fee_stage_snapshots'] for fee in stage['fees'])
+    assert all('source_refs' not in fee and 'payload' not in fee
+               for stage in review['fee_stage_snapshots'] for fee in stage['fees'])
 
 
 def test_more_complete_unsafe_candidate_is_not_promoted():

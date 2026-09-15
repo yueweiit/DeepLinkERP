@@ -1381,20 +1381,59 @@ def _arbitrate_review_freight_totals(
     )
 
 
-def _proposal_source_authority(proposal: dict) -> tuple[int, int]:
-    refs = [ref for ref in proposal.get("source_refs") or [] if isinstance(ref, dict)]
-    ranks = []
-    for ref in refs:
-        try:
-            workflow_rank = int(ref.get("workflow_rank"))
-        except (TypeError, ValueError):
-            workflow_rank = 3
-        try:
-            evidence_rank = int(ref.get("evidence_rank"))
-        except (TypeError, ValueError):
-            evidence_rank = 4
-        ranks.append((workflow_rank, evidence_rank))
-    return min(ranks) if ranks else (3, 4)
+def _annotate_review_fee_sources(proposals: list[dict]) -> None:
+    """Bind fee authority to canonical server evidence, never model claims."""
+
+    from .source_priority_service import EVIDENCE_RANKS, WORKFLOW_RANKS
+
+    known_stages = set(WORKFLOW_RANKS)
+    for proposal in proposals:
+        if proposal.get("proposal_type") != "fee_update":
+            continue
+        refs = [ref for ref in proposal.get("source_refs") or [] if isinstance(ref, dict)]
+        stage_refs = [
+            ref for ref in refs
+            if str(ref.get("workflow_stage") or "") in known_stages
+        ]
+        stages = {str(ref.get("workflow_stage") or "") for ref in stage_refs}
+        process_ids = {
+            str(ref.get("process_instance_id") or "")
+            for ref in stage_refs
+            if str(ref.get("process_instance_id") or "")
+        }
+        stage_conflict = len(stages) != 1 or len(process_ids) > 1
+        stage = next(iter(stages)) if len(stages) == 1 else "other"
+        stage_rank = WORKFLOW_RANKS.get(stage, WORKFLOW_RANKS["other"])
+        matching = [ref for ref in stage_refs if str(ref.get("workflow_stage") or "") == stage]
+        evidence_kinds = {
+            str(ref.get("evidence_kind") or "other")
+            for ref in matching
+        }
+        evidence_kind = (
+            next(iter(evidence_kinds)) if len(evidence_kinds) == 1 else "other"
+        )
+        evidence_rank = min(
+            (EVIDENCE_RANKS.get(str(ref.get("evidence_kind") or "other"), EVIDENCE_RANKS["other"])
+             for ref in matching),
+            default=EVIDENCE_RANKS["other"],
+        )
+        priority_reason = next(
+            (str(ref.get("priority_reason") or "") for ref in matching
+             if str(ref.get("priority_reason") or "")),
+            "",
+        )
+        proposal.update(
+            workflow_stage=stage,
+            workflow_rank=stage_rank,
+            evidence_kind=evidence_kind,
+            evidence_rank=evidence_rank,
+            process_instance_id=(next(iter(process_ids)) if len(process_ids) == 1 else ""),
+            process_instance_ids=sorted(process_ids),
+            source_stage_conflict=stage_conflict,
+            priority_reason=priority_reason,
+            source_authority_present=bool(stage_refs),
+            source_priority_classified=(len(stages) == 1),
+        )
 
 
 def _arbitrate_review_fee_sources(proposals: list[dict]) -> None:
@@ -1402,66 +1441,97 @@ def _arbitrate_review_fee_sources(proposals: list[dict]) -> None:
 
     from .logistics_settlement.fee_policy import row_scopes
 
+    _annotate_review_fee_sources(proposals)
     fee_proposals = [row for row in proposals if row.get("proposal_type") == "fee_update"]
     grouped: dict[tuple[str, ...], list[dict]] = {}
     for proposal in fee_proposals:
-        workflow_rank, evidence_rank = _proposal_source_authority(proposal)
-        ref = next((row for row in proposal.get("source_refs") or [] if isinstance(row, dict)), {})
-        proposal.update(
-            workflow_stage=str(ref.get("workflow_stage") or "other"),
-            workflow_rank=workflow_rank,
-            evidence_kind=str(ref.get("evidence_kind") or "other"),
-            evidence_rank=evidence_rank,
-            priority_reason=str(ref.get("priority_reason") or ""),
-            source_priority_classified=(
-                ref.get("workflow_rank") is not None
-                and str(ref.get("workflow_stage") or "") in {"payment", "international_logistics", "purchase", "other"}
-            ),
-        )
         scopes = tuple(sorted(row_scopes(proposal.get("payload") or {})))
         grouped.setdefault(scopes or (str((proposal.get("payload") or {}).get("logical_fee_key") or ""),), []).append(proposal)
 
     for candidates in grouped.values():
-        if any(str(row.get("selection_role") or "") in {"primary_total", "approved_quote", "component"} for row in candidates):
-            continue
+        classified = [row for row in candidates if row.get("source_authority_present")]
         for proposal in candidates:
-            scopes = row_scopes(proposal.get("payload") or {})
-            if proposal.get("workflow_stage") == "purchase" and "freight" not in scopes:
+            stage = proposal.get("workflow_stage")
+            if stage == "purchase":
                 proposal.update(
                     selection_role="alternative",
                     default_selected=False,
                     recommended=False,
-                    source_policy_blocked="清关费、税费等其他费用不从商品采购支出默认采用；请使用支付申请或国际物流审批来源。",
-                    resolution_reason="商品采购支出不是该类费用的可采用来源。",
+                    source_policy_blocked="费用只能从支付申请或国际物流审批采用；商品采购支出仅供货物价值核对。",
+                    resolution_reason="商品采购支出不是可采用的费用来源。",
                 )
-        eligible = [
-            row for row in candidates
-            if not row.get("source_policy_blocked") and row.get("source_priority_classified")
-            and float(row.get("confidence") or 0) >= 0.9
-        ]
-        if not eligible:
+            elif classified and stage not in {"payment", "international_logistics"}:
+                proposal.update(
+                    selection_role="alternative",
+                    default_selected=False,
+                    recommended=False,
+                    source_policy_blocked="该费用来源阶段不属于支付申请或国际物流审批，不能采用。",
+                    resolution_reason="费用来源阶段无法校验。",
+                )
+
+        # Old saved drafts without canonical stage metadata remain readable;
+        # the new two-stage policy is applied only to server-classified evidence.
+        if not classified:
             continue
-        best_rank = min((row["workflow_rank"], row["evidence_rank"]) for row in eligible)
-        best = [row for row in eligible if (row["workflow_rank"], row["evidence_rank"]) == best_rank]
-        values = {
-            (_canonical_value("amount", (row.get("payload") or {}).get("amount")),
-             str((row.get("payload") or {}).get("currency") or ""))
-            for row in best
-        }
         for row in candidates:
-            if not row.get("source_policy_blocked"):
-                row.update(selection_role=str(row.get("selection_role") or "ambiguous"), default_selected=False)
-        if len(values) != 1:
-            for row in best:
-                row["resolution_reason"] = "同级来源的费用金额冲突，请人工选择。"
+            if (not row.get("source_policy_blocked")
+                    and str(row.get("selection_role") or "") != "component"):
+                row["default_selected"] = False
+
+        winner = None
+        fallback = False
+        for stage in ("payment", "international_logistics"):
+            stage_rows = [
+                row for row in candidates
+                if row.get("workflow_stage") == stage
+                and not row.get("source_policy_blocked")
+                and not row.get("source_stage_conflict")
+                and str(row.get("selection_role") or "") != "component"
+                and str(row.get("selection_role") or "") != "alternative"
+                and float(row.get("confidence") or 0) >= 0.9
+            ]
+            if not stage_rows:
+                if any(row.get("workflow_stage") == stage for row in candidates):
+                    fallback = True
+                continue
+            process_ids = {
+                str(row.get("process_instance_id") or "")
+                for row in stage_rows
+                if str(row.get("process_instance_id") or "")
+            }
+            values = {
+                (_canonical_value("amount", (row.get("payload") or {}).get("amount")),
+                 str((row.get("payload") or {}).get("currency") or ""))
+                for row in stage_rows
+            }
+            if len(values) != 1 or len(process_ids) > 1:
+                for row in stage_rows:
+                    row["resolution_reason"] = "同级支付流程或费用金额冲突，未武断选值；已继续查找下一阶段。"
+                fallback = True
+                continue
+            winner = min(
+                stage_rows,
+                key=lambda row: (
+                    0 if str(row.get("selection_role") or "") in {"primary_total", "approved_quote"} else 1,
+                    -float(row.get("confidence") or 0),
+                    str(row.get("proposal_id") or ""),
+                ),
+            )
+            break
+        if winner is None:
+            for row in candidates:
+                if (row.get("source_stage_conflict")
+                        and not row.get("source_policy_blocked")):
+                    row["resolution_reason"] = "费用候选同时引用多个流程或阶段，请人工核对。"
             continue
-        winner = min(best, key=lambda row: (-float(row.get("confidence") or 0), str(row.get("proposal_id") or "")))
         winner.update(default_selected=True, recommended=True)
         winner["resolution_reason"] = (
-            f"{winner.get('priority_reason') or '按流程与证据优先级'} 已设为本费用范围默认值。"
+            f"{winner.get('priority_reason') or '按流程阶段优先级'} "
+            f"{'高优先级无有效唯一值，已回退到本阶段。' if fallback else '已设为本费用范围默认值。'}"
         )
         for row in candidates:
-            if row is not winner and not row.get("source_policy_blocked"):
+            if (row is not winner and not row.get("source_policy_blocked")
+                    and not row.get("resolution_reason")):
                 row["resolution_reason"] = "优先级较低，保留为可手工改选的费用候选。"
 
 
@@ -1691,6 +1761,7 @@ def normalize_source_review_proposals(
             proposal["conflict_group"] = (
                 f"item:{proposal.get('target_item_name') or ''}:{','.join(fields)}"
             )
+    _annotate_review_fee_sources(normalized)
     _arbitrate_review_freight_totals(normalized, evidence)
     _arbitrate_review_fee_sources(normalized)
     return normalized
@@ -2017,7 +2088,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-2'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-3'
 
 
 def _source_review_fingerprint(

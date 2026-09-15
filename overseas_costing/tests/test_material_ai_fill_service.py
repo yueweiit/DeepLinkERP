@@ -1493,6 +1493,190 @@ def test_fee_default_uses_workflow_priority_but_keeps_lower_freight_selectable()
     assert decorated["LOG"]["can_apply"] is True
 
 
+def test_fee_default_falls_back_to_logistics_when_payment_stage_conflicts() -> None:
+    payment = _fee_document("DOC-PAY", "应付运费 RMB 120", "应付运费 RMB 130")
+    payment["source_ref"].update(
+        source_id="PAY-FORM", process_instance_id="PAY-1",
+        workflow_stage="payment", workflow_rank=0,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    logistics = _fee_document("DOC-LOG", "国际运费 RMB 100")
+    logistics["source_ref"].update(
+        source_id="LOG-FORM", process_instance_id="LOG-1",
+        workflow_stage="international_logistics", workflow_rank=1,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    proposals = [
+        _review_fee("PAY-1", "120", "international_air_freight", "DOC-PAY", 1),
+        _review_fee("PAY-2", "130", "international_air_freight", "DOC-PAY", 2),
+        _review_fee("LOG", "100", "international_air_freight", "DOC-LOG", 1),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [payment, logistics], transport_mode="AIR"
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["PAY-1"]["default_selected"] is False
+    assert by_id["PAY-2"]["default_selected"] is False
+    assert "同级" in by_id["PAY-1"]["resolution_reason"]
+    assert by_id["LOG"]["default_selected"] is True
+    assert "回退" in by_id["LOG"]["resolution_reason"]
+    decorated = {
+        row["proposal_id"]: row
+        for row in material_ai_fill_service.material_ai_fee_policy.decorate(
+            normalized, [], {}
+        )
+    }
+    assert all(decorated[key]["can_apply"] for key in ("PAY-1", "PAY-2", "LOG"))
+
+
+def test_two_payment_processes_do_not_win_arbitrarily_even_with_same_amount() -> None:
+    documents = []
+    proposals = []
+    for suffix in ("A", "B"):
+        document = _fee_document(f"DOC-PAY-{suffix}", "应付运费 RMB 120")
+        document["source_ref"].update(
+            source_id=f"PAY-{suffix}", process_instance_id=f"PAY-{suffix}",
+            workflow_stage="payment", workflow_rank=0,
+            evidence_kind="approval_form", evidence_rank=1,
+        )
+        documents.append(document)
+        proposals.append(_review_fee(
+            f"PAY-{suffix}", "120", "international_air_freight",
+            f"DOC-PAY-{suffix}", 1,
+        ))
+    logistics = _fee_document("DOC-LOG", "国际运费 RMB 100")
+    logistics["source_ref"].update(
+        source_id="LOG", process_instance_id="LOG",
+        workflow_stage="international_logistics", workflow_rank=1,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    documents.append(logistics)
+    proposals.append(_review_fee(
+        "LOG", "100", "international_air_freight", "DOC-LOG", 1
+    ))
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), documents, transport_mode="AIR"
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["PAY-A"]["default_selected"] is False
+    assert by_id["PAY-B"]["default_selected"] is False
+    assert by_id["LOG"]["default_selected"] is True
+
+
+def test_fee_default_falls_back_to_logistics_when_payment_confidence_is_low() -> None:
+    payment = _fee_document("DOC-PAY", "应付运费 RMB 120")
+    payment["source_ref"].update(
+        source_id="PAY-FORM", process_instance_id="PAY-1",
+        workflow_stage="payment", workflow_rank=0,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    logistics = _fee_document("DOC-LOG", "国际运费 RMB 100")
+    logistics["source_ref"].update(
+        source_id="LOG-FORM", process_instance_id="LOG-1",
+        workflow_stage="international_logistics", workflow_rank=1,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    pay = _review_fee("PAY", "120", "international_air_freight", "DOC-PAY", 1)
+    pay["confidence"] = .7
+
+    normalized = normalize_source_review_proposals(
+        [pay, _review_fee("LOG", "100", "international_air_freight", "DOC-LOG", 1)],
+        _items(), [payment, logistics], transport_mode="AIR",
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["PAY"]["default_selected"] is False
+    assert by_id["LOG"]["default_selected"] is True
+
+
+def test_product_purchase_freight_is_not_a_selectable_fee_source() -> None:
+    document = _fee_document("DOC-PURCHASE", "国际运费 RMB 100")
+    document["source_ref"].update(
+        source_id="PUR-FORM", process_instance_id="PUR-1",
+        workflow_stage="purchase", workflow_rank=2,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    proposal = _review_fee(
+        "FREIGHT", "100", "international_air_freight", "DOC-PURCHASE", 1
+    )
+
+    normalized = normalize_source_review_proposals(
+        [proposal], _items(), [document], transport_mode="AIR"
+    )
+    decorated = material_ai_fill_service.material_ai_fee_policy.decorate(
+        normalized, [], {}
+    )
+
+    assert decorated[0]["default_selected"] is False
+    assert decorated[0]["can_apply"] is False
+    assert "采购支出" in decorated[0]["blocked_reason"]
+
+
+def test_ai_cannot_forge_payment_authority_over_server_document_source() -> None:
+    payment = _fee_document("DOC-PAY", "应付运费 RMB 120")
+    payment["source_ref"].update(
+        source_id="PAY-FORM", process_instance_id="PAY-1",
+        workflow_stage="payment", workflow_rank=0,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    logistics = _fee_document("DOC-LOG", "国际运费 RMB 100")
+    logistics["source_ref"].update(
+        source_id="LOG-FORM", process_instance_id="LOG-1",
+        workflow_stage="international_logistics", workflow_rank=1,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    forged = _review_fee(
+        "FORGED", "100", "international_air_freight", "DOC-LOG", 1
+    )
+    forged["source_refs"][0].update(workflow_stage="payment", workflow_rank=0)
+
+    normalized = normalize_source_review_proposals(
+        [_review_fee("PAY", "120", "international_air_freight", "DOC-PAY", 1), forged],
+        _items(), [payment, logistics], transport_mode="AIR",
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["PAY"]["default_selected"] is True
+    assert by_id["FORGED"]["workflow_stage"] == "international_logistics"
+    assert by_id["FORGED"]["workflow_rank"] == 1
+    assert by_id["FORGED"]["default_selected"] is False
+
+
+def test_fee_candidate_spanning_payment_and_logistics_is_not_applicable() -> None:
+    payment = _fee_document("DOC-PAY", "应付运费 RMB 120")
+    payment["source_ref"].update(
+        source_id="PAY-FORM", process_instance_id="PAY-1",
+        workflow_stage="payment", workflow_rank=0,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    logistics = _fee_document("DOC-LOG", "国际运费 RMB 120")
+    logistics["source_ref"].update(
+        source_id="LOG-FORM", process_instance_id="LOG-1",
+        workflow_stage="international_logistics", workflow_rank=1,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    proposal = _review_fee(
+        "CROSS-STAGE", "120", "international_air_freight", "DOC-PAY", 1
+    )
+    proposal["source_refs"].append({"document_id": "DOC-LOG", "row": 1})
+
+    normalized = normalize_source_review_proposals(
+        [proposal], _items(), [payment, logistics], transport_mode="AIR"
+    )
+    decorated = material_ai_fill_service.material_ai_fee_policy.decorate(
+        normalized, [], {}
+    )
+
+    assert decorated[0]["source_stage_conflict"] is True
+    assert decorated[0]["default_selected"] is False
+    assert decorated[0]["can_apply"] is False
+    assert "阶段" in decorated[0]["blocked_reason"]
+
+
 def test_product_purchase_cannot_default_other_fee() -> None:
     document = _fee_document("DOC-PURCHASE", "清关费 RMB 100")
     document["source_ref"].update(

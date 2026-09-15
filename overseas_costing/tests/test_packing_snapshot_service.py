@@ -886,6 +886,21 @@ def test_actual_packing_match_precedes_workflow_packing_attachment_and_exposes_r
     assert ranked[1]['dedicated_packing_attachment'] is True
 
 
+@pytest.mark.parametrize('status', ['pending', 'rejected', 'ambiguous'])
+def test_unconfirmed_actual_payment_match_is_not_promoted_to_payment_source(status):
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([{
+        'source_id': 'UNCONFIRMED',
+        'source_kind': 'approval_attachment',
+        'actual_packing_source': True,
+        'actual_packing_match_status': status,
+    }])
+
+    assert ranked[0]['workflow_stage'] == 'other'
+    assert ranked[0]['workflow_rank'] == 3
+
+
 def test_workflow_packing_attachment_is_first_when_actual_match_is_not_valid():
     from overseas_costing.services.source_priority_service import rank_material_packing_sources
 

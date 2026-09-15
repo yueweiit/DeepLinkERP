@@ -11,7 +11,7 @@ from .logistics_settlement.model import digest
 from .material_value_semantics import is_effectively_missing
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-field-review-2'
+POLICY = 'ai-field-review-3'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
 FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')
@@ -21,6 +21,7 @@ STAGE_SPECS = (
     ('international_logistics', 1, '国际物流'),
     ('purchase', 2, '采购支出'),
 )
+FEE_STAGE_SPECS = STAGE_SPECS[:2]
 DEFAULT_WORKFLOW_STAGES = frozenset(stage for stage,_rank,_label in STAGE_SPECS)
 EXPLICIT_CORRECTION_MARKERS = ('更正', '改为', '以此为准', '原值错误')
 CORRECTION_FIELD_MARKERS = {
@@ -562,6 +563,7 @@ def _field_candidates(catalog_rows):
                 'candidate_id':candidate_id,'item_name':row.get('target_item_name'),'fieldname':fieldname,
                 'suggested_value':deepcopy(value),'row_id':row.get('row_id'),'source_group_id':row.get('source_group_id'),
                 'source_label':row.get('source_label'),'source_refs':deepcopy(row.get('source_refs') or []),
+                'source_priority':int(row.get('source_priority') or 999999),
                 'workflow_stage':row.get('workflow_stage') or 'other','workflow_rank':int(row.get('workflow_rank') or 0),
                 'evidence_kind':('comment' if correction_evidence else row.get('evidence_kind') or 'other'),
                 'evidence_rank':(3 if correction_evidence else int(row.get('evidence_rank') or 0)),
@@ -627,7 +629,9 @@ def _field_candidates(catalog_rows):
         for process_candidates in by_process.values():
             stream=sorted(process_candidates,key=lambda candidate:(
                 1 if candidate['evidence_kind']=='comment' else 0,
-                candidate['_review_occurred_at'],candidate['_review_primary_source_id'],candidate['candidate_id'],
+                candidate['_review_occurred_at'],candidate['_review_primary_source_id'],
+                1 if candidate['correction_kind']=='explicit' else 0,
+                candidate['candidate_id'],
             ))
             effective=[]
             for candidate in stream:
@@ -656,7 +660,8 @@ def _field_candidates(catalog_rows):
                 for candidate in stage:
                     candidate['resolution_reason']='同级来源存在冲突，服务端不武断选值，继续检查下一优先级。'
                 continue
-            winner=min(stage,key=lambda candidate:(-candidate['confidence'],candidate['candidate_id']))
+            winner=min(stage,key=lambda candidate:(
+                candidate['source_priority'],-candidate['confidence'],candidate['candidate_id']))
             break
         if winner:
             winner['default_selected']=True
@@ -905,6 +910,138 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
     return snapshots
 
 
+def _fee_stage_snapshots(fees, sources):
+    """Return fixed, safe fee summaries for payment and logistics stages."""
+
+    from .source_priority_service import rank_material_packing_sources
+
+    ordered = rank_material_packing_sources(sources or [])
+    snapshots = []
+    for stage, stage_rank, stage_label in FEE_STAGE_SPECS:
+        stage_sources = [source for source in ordered if source.get('workflow_stage') == stage]
+        stage_fees = [fee for fee in fees if fee.get('workflow_stage') == stage]
+        process_map = {}
+        for source in stage_sources:
+            process_id = _process_instance_id(source)
+            if not process_id:
+                continue
+            process = process_map.setdefault(process_id, {
+                'process_instance_id': process_id,
+                'label': str(source.get('approval_title') or source.get('process_title')
+                             or source.get('process_name') or source.get('source_label')
+                             or source.get('file_name') or process_id),
+                'approval_no': str(source.get('approval_no') or ''),
+                'source_ids': [], 'evidence': [], 'fee_ids': [],
+                'status': 'UNAVAILABLE', 'has_conflicts': False, 'warnings': [],
+            })
+            source_id = str(source.get('source_id') or '')
+            if source_id and source_id not in process['source_ids']:
+                process['source_ids'].append(source_id)
+            evidence = _evidence_record(source)
+            if evidence not in process['evidence']:
+                process['evidence'].append(evidence)
+
+        fee_summaries = []
+        for fee in sorted(stage_fees, key=lambda row: str(row.get('proposal_id') or '')):
+            payload = fee.get('payload') or {}
+            process_ids = sorted({
+                str(ref.get('process_instance_id') or '')
+                for ref in fee.get('source_refs') or []
+                if isinstance(ref, dict)
+                and ref.get('workflow_stage') == stage
+                and str(ref.get('process_instance_id') or '')
+            })
+            process_conflict = bool(fee.get('source_stage_conflict') or len(process_ids) > 1)
+            summary = {
+                'proposal_id': str(fee.get('proposal_id') or ''),
+                'process_instance_id': process_ids[0] if len(process_ids) == 1 else '',
+                'process_instance_ids': process_ids,
+                'process_conflict': process_conflict,
+                'logical_fee_key': str(payload.get('logical_fee_key') or ''),
+                'expense_category': str(payload.get('expense_category') or ''),
+                'amount': payload.get('amount'),
+                'currency': str(payload.get('currency') or ''),
+                'amount_status': str(payload.get('amount_status') or ''),
+                'selection_role': str(fee.get('selection_role') or 'ambiguous'),
+                'parent_proposal_id': str(fee.get('parent_proposal_id') or ''),
+                'can_apply': bool(fee.get('can_apply')),
+                'default_selected': bool(fee.get('default_selected')),
+                'conflict': bool(fee.get('conflict') or process_conflict),
+                'confidence': float(fee.get('confidence') or 0),
+                'resolution_reason': str(fee.get('resolution_reason') or ''),
+                'blocked_reason': str(fee.get('blocked_reason') or ''),
+            }
+            fee_summaries.append(summary)
+            for process_id in process_ids:
+                process = process_map.setdefault(process_id, {
+                    'process_instance_id': process_id, 'label': process_id,
+                    'approval_no': '', 'source_ids': [], 'evidence': [],
+                    'fee_ids': [], 'status': 'UNAVAILABLE',
+                    'has_conflicts': False, 'warnings': [],
+                })
+                if summary['proposal_id'] not in process['fee_ids']:
+                    process['fee_ids'].append(summary['proposal_id'])
+                if process_conflict or fee.get('conflict'):
+                    process['has_conflicts'] = True
+
+        warnings = []
+        unreadable = []
+        readable = []
+        fee_source_ids = {
+            str(ref.get('source_id') or '')
+            for fee in stage_fees
+            for ref in fee.get('source_refs') or []
+            if isinstance(ref, dict)
+        }
+        for source in stage_sources:
+            status = _source_status(source)
+            if status in UNREADABLE_SOURCE_STATUSES:
+                unreadable.append(source)
+            if (status in READABLE_SOURCE_STATUSES
+                    or str(source.get('source_id') or '') in fee_source_ids):
+                readable.append(source)
+            error = str(source.get('error') or source.get('analysis_reason') or '').strip()
+            if status in UNREADABLE_SOURCE_STATUSES or (status == 'PARTIAL' and error):
+                label = str(source.get('source_label') or source.get('file_name')
+                            or source.get('source_id') or '资料')
+                warnings.append(f"{label}：{error or '未能读取，已跳过。'}")
+        evidence = [_evidence_record(source) for source in stage_sources]
+        status = _availability_status(evidence, has_rows=bool(fee_summaries))
+        for process in process_map.values():
+            process['source_ids'].sort()
+            process['evidence'].sort(key=lambda row: (
+                row.get('occurred_at') or '', row.get('evidence_id') or '',
+            ))
+            process['fee_ids'].sort()
+            process['status'] = _availability_status(
+                process['evidence'], has_rows=bool(process['fee_ids']))
+        by_kind = Counter(str(source.get('evidence_kind') or 'other')
+                          for source in stage_sources)
+        fallback_reason = (
+            '部分资料不可读，已跳过并继续使用本阶段可用候选。'
+            if status == 'PARTIAL' else
+            '本阶段未找到有效费用资料，默认值将从下一优先级阶段补充。'
+            if status == 'UNAVAILABLE' and stage_rank < FEE_STAGE_SPECS[-1][1] else
+            '本阶段未找到有效费用资料。'
+            if status == 'UNAVAILABLE' else ''
+        )
+        snapshots.append({
+            'stage_snapshot_id': digest(POLICY, 'fee-stage-snapshot', stage),
+            'stage': stage, 'stage_rank': stage_rank, 'rank': stage_rank,
+            'stage_label': stage_label, 'status': status,
+            'processes': sorted(process_map.values(),
+                                key=lambda row: row['process_instance_id']),
+            'fees': fee_summaries,
+            'evidence_summary': {
+                'total': len(stage_sources), 'readable': len(readable),
+                'unreadable': len(unreadable), 'candidate_count': len(fee_summaries),
+                'by_kind': dict(sorted(by_kind.items())),
+            },
+            'fallback_reason': fallback_reason, 'warnings': warnings,
+        })
+    return snapshots
+
+
 def catalog(items, proposals, fees, context, *, run_id, sources=None):
     """Do not expose inherited purchase values as newly recognized packing evidence."""
     from .effective_source_values import project_source_values
@@ -1017,9 +1154,12 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
     field_candidates=_field_candidates(rows)
     stage_snapshots=_stage_snapshots(rows,field_candidates,sources)
     fee_rows=[p for p in material_ai_fee_policy.decorate(proposals,fees,context) if p.get('proposal_type')=='fee_update']
+    fee_stage_snapshots=_fee_stage_snapshots(fee_rows,sources or [])
     return {'policy':POLICY,'rows':rows,'fees':fee_rows,'source_groups':source_groups,
             'field_candidates':field_candidates,'stage_snapshots':stage_snapshots,
-            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups,field_candidates,stage_snapshots)}
+            'fee_stage_snapshots':fee_stage_snapshots,
+            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups,field_candidates,
+                                 stage_snapshots,fee_stage_snapshots)}
 
 
 def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):

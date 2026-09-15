@@ -158,6 +158,10 @@ def classify_workflow_stage(source: dict) -> str:
     role = str(source.get("approval_role") or "").strip().casefold()
     identity_text = _workflow_identity_text(source)
     text = _source_business_text(source)
+    # Only a relation already confirmed by the settlement workflow is payment
+    # authority here.  A pending recommendation cannot be adopted atomically by
+    # the AI preview confirmation path, so it remains outside the stage until
+    # the existing "actual payment / packing change" workflow confirms it.
     if source.get("actual_packing_source") and str(source.get("actual_packing_match_status") or "").lower() == "matched":
         return "payment"
     if role in {"logistics_expense", "payment", "expense", "settlement"}:
