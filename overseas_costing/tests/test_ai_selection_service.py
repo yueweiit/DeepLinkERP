@@ -598,9 +598,70 @@ def test_review_catalog_merges_run_progress_into_stage_availability_and_warnings
 
     assert payment['status']=='UNAVAILABLE'
     assert payment['evidence_summary']['unreadable']==1
-    assert payment['warnings']==['PAY：附件已失效']
+    assert payment['warnings']==['PAY：未能读取，已跳过。']
     assert logistics['status']=='AVAILABLE'
     assert logistics['evidence_summary']['readable']==1
+
+
+def test_review_catalog_rebuilds_safe_skip_metadata_from_server_progress_only():
+    repo=Repo()
+    repo.sources=[
+        {'source_id':'FORM','process_instance_id':'LOG-1','source_kind':'approval_form',
+         'approval_role':'international_logistics','approval_title':'国际物流审批',
+         'skip_reason_code':'FORGED_SOURCE_VALUE','skip_reason_text':'FILE BODY SECRET',
+         'elapsed_ms':999},
+        {'source_id':'CORRUPT','process_instance_id':'LOG-1','source_kind':'approval_attachment',
+         'evidence_kind':'attachment','source_label':'packing.xlsx',
+         'approval_role':'international_logistics','approval_title':'国际物流审批'},
+        {'source_id':'TIMEOUT','process_instance_id':'LOG-1','source_kind':'approval_comment_attachment',
+         'evidence_kind':'comment_attachment','source_label':'quote.pdf',
+         'approval_role':'international_logistics','approval_title':'国际物流审批'},
+    ]
+    repo.run['source_manifest_json']=deepcopy(repo.sources)
+    repo.run['source_progress_json']=[
+        {'source_id':'FORM','read_status':'COMPLETED','status':'COMPLETED',
+         'skip_reason_code':'SHOULD_NOT_LEAK','skip_reason_text':'FILE BODY SECRET',
+         'elapsed_ms':1},
+        {'source_id':'CORRUPT','evidence_id':'CORRUPT','evidence_kind':'attachment',
+         'read_status':'SKIPPED','status':'SKIPPED','skip_reason_code':'CORRUPT_DOCUMENT',
+         'skip_reason_text':'<html>500 /private/files/secret.xlsx</html>','elapsed_ms':15321,
+         'detail':'<html>raw failure</html>','error':'Traceback secret'},
+        {'source_id':'TIMEOUT','evidence_id':'TIMEOUT','evidence_kind':'comment_attachment',
+         'read_status':'SKIPPED','status':'SKIPPED','skip_reason_code':'PARSE_TIMEOUT',
+         'skip_reason_text':'https://files.example.invalid/a?token=SECRET','elapsed_ms':15000},
+    ]
+    repo.run['candidates_json']=[{
+        'proposal_id':'FORM','proposal_type':'item_update','target_item_name':'I1',
+        'confidence':.99,'source_refs':[{'source_id':'FORM'}],
+        'payload':{'fields':{'gross_weight_kg':2}},
+    }]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+
+    catalog=service.review_catalog(repo,'B1',repo.run)
+    logistics=catalog['stage_snapshots'][1]
+    evidence={record['evidence_id']:record
+              for process in logistics['processes'] for record in process['evidence']}
+
+    assert evidence['CORRUPT']['skip_reason_code']=='CORRUPT_DOCUMENT'
+    assert evidence['CORRUPT']['skip_reason_text']=='资料文件已损坏。'
+    assert evidence['CORRUPT']['elapsed_ms']==15321
+    assert evidence['TIMEOUT']['skip_reason_code']=='PARSE_TIMEOUT'
+    assert evidence['TIMEOUT']['skip_reason_text']=='资料文件解析超时。'
+    assert evidence['TIMEOUT']['elapsed_ms']==15000
+    assert not ({'skip_reason_code','skip_reason_text','elapsed_ms'} & evidence['FORM'].keys())
+    assert logistics['evidence_summary']['records']==list(evidence.values())
+    assert catalog['fee_stage_snapshots'][1]['evidence_summary']['records']==list(evidence.values())
+    public=json.dumps(catalog,ensure_ascii=False)
+    for secret in ('html','Traceback','/private/','token=','FILE BODY SECRET'):
+        assert secret.casefold() not in public.casefold()
+
+    response=service.prepare(
+        'B1',repo.run['name'],[],[],'fill_missing','V1',repository=repo)
+    receipt=repo.run['draft_json']['row_previews'][response['preview']['id']]
+    assert 'skip_reason_code' not in json.dumps(receipt,ensure_ascii=False)
 
 
 @pytest.mark.parametrize('change',['fee','item','source','note'])

@@ -1,11 +1,59 @@
 """Prepare and confirm immutable, server-held AI row selections."""
 from copy import deepcopy
+import re
 
 from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
 RECEIPT_POLICY = 'ai-field-preview-receipt-4'
+
+_SKIPPED_PROGRESS_STATUSES = frozenset({
+    'FAILED', 'SKIPPED', 'UNREADABLE', 'TIMEOUT', 'FORBIDDEN', 'MISSING',
+    'UNSUPPORTED', 'CORRUPT',
+})
+_SAFE_SKIP_REASON_TEXT = {
+    'FILE_NOT_FOUND': '资料文件不存在。',
+    'SOURCE_PERMISSION_DENIED': '资料文件无读取权限。',
+    'SOURCE_URL_EXPIRED': '资料链接已失效。',
+    'UNSUPPORTED_FORMAT': '资料格式暂不支持。',
+    'CORRUPT_DOCUMENT': '资料文件已损坏。',
+    'OCR_FAILED': '资料图像无法识别。',
+    'NO_RECOGNIZABLE_CONTENT': '资料中未发现可识别内容。',
+    'DOWNLOAD_FAILED': '资料文件下载或归档失败。',
+    'PARSE_FAILED': '资料文件无法解析。',
+    'DOWNLOAD_TIMEOUT': '资料文件获取超时。',
+    'PARSE_TIMEOUT': '资料文件解析超时。',
+    'DUPLICATE_EVIDENCE': '该资料本次已读取。',
+}
+
+
+def _safe_skip_metadata(status_row):
+    """Rebuild public skip metadata from server-owned progress only."""
+
+    from . import material_ai_fill_service as ai
+
+    status = str(
+        status_row.get('read_status') or status_row.get('status') or ''
+    ).strip().upper()
+    if status not in _SKIPPED_PROGRESS_STATUSES:
+        return {}
+    raw_code = str(status_row.get('skip_reason_code') or '').strip().upper()
+    code = raw_code if re.fullmatch(r'[A-Z][A-Z0-9_]{0,79}', raw_code) else ''
+    safe_reason = _SAFE_SKIP_REASON_TEXT.get(code, '')
+    # Always pass the server-owned reason through the public text boundary.
+    # Unknown/legacy reasons deliberately fall back to the generic UI copy;
+    # arbitrary document text must never become an error explanation.
+    safe_reason = ai._safe_public_text(safe_reason) if safe_reason else ''
+    try:
+        elapsed_ms = max(0, min(int(status_row.get('elapsed_ms') or 0), 3_600_000))
+    except (TypeError, ValueError):
+        elapsed_ms = 0
+    return {
+        'skip_reason_code': code if safe_reason else '',
+        'skip_reason_text': safe_reason,
+        'elapsed_ms': elapsed_ms,
+    }
 
 
 def _sources_with_progress(sources, progress):
@@ -20,14 +68,23 @@ def _sources_with_progress(sources, progress):
     result=[]
     for source in sources or []:
         current=deepcopy(source)
+        for transient in (
+            'skip_reason_code', 'skip_reason_text', 'elapsed_ms', 'error',
+            'result_count',
+        ):
+            current.pop(transient,None)
         status_row=next((by_id.get(str(source.get(key) or '')) for key in (
             'source_id','logical_source_id','parent_source_id','resolver_source_id',
         ) if by_id.get(str(source.get(key) or ''))),None)
         if status_row:
             current['read_status']=str(status_row.get('read_status') or status_row.get('status') or 'NO_RESULT')
-            current['error']=str(status_row.get('error') or '')
+            skip_metadata=_safe_skip_metadata(status_row)
+            current['error']=str(skip_metadata.get('skip_reason_text') or '')
             current['result_count']=int(status_row.get('result_count')
                                         or status_row.get('candidate_count') or 0)
+            if status_row.get('evidence_kind'):
+                current['evidence_kind']=str(status_row['evidence_kind'])[:60]
+            current.update(skip_metadata)
         result.append(current)
     return result
 

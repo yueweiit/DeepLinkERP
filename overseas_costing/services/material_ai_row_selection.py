@@ -54,7 +54,10 @@ DIRECTIONAL_ARROW_PATTERN = re.compile(
     r'(?<![\d.])[-+]?\d[\d,]*(?:\.\d+)?\s*(?:→|->|=>)\s*[-+]?\d[\d,]*(?:\.\d+)?'
 )
 READABLE_SOURCE_STATUSES = frozenset({'READ', 'PARSED', 'COMPLETED', 'PARTIAL', 'AVAILABLE'})
-UNREADABLE_SOURCE_STATUSES = frozenset({'FAILED', 'SKIPPED', 'UNREADABLE'})
+UNREADABLE_SOURCE_STATUSES = frozenset({
+    'FAILED', 'SKIPPED', 'UNREADABLE', 'TIMEOUT', 'FORBIDDEN', 'MISSING',
+    'UNSUPPORTED', 'CORRUPT',
+})
 
 
 def missing(row, field):
@@ -152,13 +155,25 @@ def _source_status(source):
 
 def _evidence_record(source):
     source=source or {}
-    return {
-        'evidence_id':str(source.get('source_id') or ''),
+    record={
+        'evidence_id':str(source.get('evidence_id') or source.get('source_id') or ''),
         'evidence_kind':str(source.get('evidence_kind') or 'other'),
         'source_label':str(source.get('source_label') or source.get('file_name') or source.get('source_id') or ''),
         'occurred_at':str(source.get('occurred_at') or source.get('source_updated_at') or ''),
         'read_status':_source_status(source) or 'NO_RESULT',
     }
+    if record['read_status'] in UNREADABLE_SOURCE_STATUSES:
+        code=str(source.get('skip_reason_code') or '').strip().upper()
+        record['skip_reason_code']=(
+            code if re.fullmatch(r'[A-Z][A-Z0-9_]{0,79}',code) else '')
+        reason=str(source.get('skip_reason_text') or '').strip()
+        record['skip_reason_text']=reason
+        try:
+            elapsed_ms=max(0,int(source.get('elapsed_ms') or 0))
+        except (TypeError,ValueError):
+            elapsed_ms=0
+        record['elapsed_ms']=elapsed_ms
+    return record
 
 
 def _correction_text(source):
@@ -870,11 +885,18 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
         warnings=list(process_conflict_warnings)
         for source in stage_sources:
             status=_source_status(source)
-            error=str(source.get('error') or source.get('analysis_reason') or '').strip()
+            error=str(
+                source.get('skip_reason_text')
+                if status in UNREADABLE_SOURCE_STATUSES
+                else source.get('error') or source.get('analysis_reason') or ''
+            ).strip()
             if status in UNREADABLE_SOURCE_STATUSES or (status=='PARTIAL' and error):
                 label=str(source.get('source_label') or source.get('file_name') or source.get('source_id') or '资料')
                 warnings.append(f"{label}：{error or '未能读取，已跳过。'}")
-        stage_evidence=[_evidence_record(source) for source in stage_sources]
+        stage_evidence=sorted(
+            (_evidence_record(source) for source in stage_sources),
+            key=lambda evidence:(evidence.get('occurred_at') or '',evidence.get('evidence_id') or ''),
+        )
         status=_availability_status(stage_evidence,has_rows=bool(snapshot_rows))
         for process in process_map.values():
             process['source_ids'].sort()
@@ -904,6 +926,7 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                 'total':len(stage_sources),'readable':len(readable),'unreadable':len(unreadable),
                 'candidate_count':sum(len(candidates_by_row.get(str(row.get('row_id') or ''),[])) for row in stage_rows),
                 'by_kind':dict(sorted(by_kind.items())),
+                'records':stage_evidence,
             },
             'fallback_reason':fallback_reason,'warnings':warnings,
         })
@@ -1000,12 +1023,19 @@ def _fee_stage_snapshots(fees, sources):
             if (status in READABLE_SOURCE_STATUSES
                     or str(source.get('source_id') or '') in fee_source_ids):
                 readable.append(source)
-            error = str(source.get('error') or source.get('analysis_reason') or '').strip()
+            error = str(
+                source.get('skip_reason_text')
+                if status in UNREADABLE_SOURCE_STATUSES
+                else source.get('error') or source.get('analysis_reason') or ''
+            ).strip()
             if status in UNREADABLE_SOURCE_STATUSES or (status == 'PARTIAL' and error):
                 label = str(source.get('source_label') or source.get('file_name')
                             or source.get('source_id') or '资料')
                 warnings.append(f"{label}：{error or '未能读取，已跳过。'}")
-        evidence = [_evidence_record(source) for source in stage_sources]
+        evidence = sorted(
+            (_evidence_record(source) for source in stage_sources),
+            key=lambda row:(row.get('occurred_at') or '',row.get('evidence_id') or ''),
+        )
         status = _availability_status(evidence, has_rows=bool(fee_summaries))
         for process in process_map.values():
             process['source_ids'].sort()
@@ -1036,6 +1066,7 @@ def _fee_stage_snapshots(fees, sources):
                 'total': len(stage_sources), 'readable': len(readable),
                 'unreadable': len(unreadable), 'candidate_count': len(fee_summaries),
                 'by_kind': dict(sorted(by_kind.items())),
+                'records': evidence,
             },
             'fallback_reason': fallback_reason, 'warnings': warnings,
         })

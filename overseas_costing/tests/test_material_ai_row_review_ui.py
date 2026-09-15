@@ -129,6 +129,58 @@ const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&!apply
 """)
 
 
+def test_real_catalog_renders_safe_skip_causes_and_legacy_generic_fallback():
+    from copy import deepcopy
+    from overseas_costing.services import material_ai_fill_service as ai
+    from overseas_costing.services import material_ai_selection_service as selection
+    from overseas_costing.tests.test_ai_selection_service import Repo
+
+    repo=Repo()
+    repo.sources=[
+        {'source_id':'FORM','process_instance_id':'LOG-1','source_kind':'approval_form',
+         'approval_role':'international_logistics','approval_title':'国际物流审批'},
+        {'source_id':'CORRUPT','process_instance_id':'LOG-1','source_kind':'approval_attachment',
+         'evidence_kind':'attachment','source_label':'packing.xlsx',
+         'approval_role':'international_logistics','approval_title':'国际物流审批'},
+        {'source_id':'TIMEOUT','process_instance_id':'LOG-1','source_kind':'approval_comment_attachment',
+         'evidence_kind':'comment_attachment','source_label':'quote.pdf',
+         'approval_role':'international_logistics','approval_title':'国际物流审批'},
+        {'source_id':'LEGACY','process_instance_id':'LOG-1','source_kind':'approval_attachment',
+         'evidence_kind':'attachment','source_label':'legacy.xls',
+         'approval_role':'international_logistics','approval_title':'国际物流审批'},
+    ]
+    repo.run['source_manifest_json']=deepcopy(repo.sources)
+    repo.run['source_progress_json']=[
+        {'source_id':'FORM','read_status':'COMPLETED','status':'COMPLETED'},
+        {'source_id':'CORRUPT','read_status':'SKIPPED','status':'SKIPPED',
+         'skip_reason_code':'CORRUPT_DOCUMENT','skip_reason_text':'<html>secret</html>',
+         'elapsed_ms':120},
+        {'source_id':'TIMEOUT','read_status':'SKIPPED','status':'SKIPPED',
+         'skip_reason_code':'PARSE_TIMEOUT','skip_reason_text':'Traceback secret',
+         'elapsed_ms':15000},
+        {'source_id':'LEGACY','read_status':'SKIPPED','status':'SKIPPED'},
+    ]
+    repo.run['candidates_json']=[{
+        'proposal_id':'FORM','proposal_type':'item_update','target_item_name':'I1',
+        'confidence':.99,'source_refs':[{'source_id':'FORM'}],
+        'payload':{'fields':{'gross_weight_kg':2}},
+    }]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=selection.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    catalog=selection.review_catalog(repo,'B1',repo.run)
+
+    run_ui(f"""
+const fill=ready();fill.row_review={json.dumps(catalog, ensure_ascii=False)};
+delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+for(const text of ['资料文件已损坏','资料文件解析超时','未能读取该资料'])assert(html.includes(text),text);
+assert((html.match(/已跳过，继续读取下一资料/g)||[]).length>=3);
+for(const secret of ['<html>','secret','Traceback','/private/','token='])assert(!html.includes(secret),secret);
+""")
+
+
 def test_fee_roles_render_totals_components_and_alternatives_in_their_review_levels():
     run_ui(r"""
 const fill=ready();fill.row_review.fees=[
