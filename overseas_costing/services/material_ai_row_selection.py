@@ -164,22 +164,49 @@ def _is_explicit_correction(source):
 
 
 def _explicit_correction_clauses(text):
-    return [
-        clause.strip().casefold()
-        for clause in re.split(r'[\r\n；;。！!？?]+',str(text or ''))
-        if clause.strip() and any(marker in clause for marker in EXPLICIT_CORRECTION_MARKERS)
+    parts=[
+        value.strip().casefold()
+        for value in re.split(
+            r'[\r\n；;。！!？?]+|(?<!\d)[,，]|[,，](?!\d)',str(text or ''))
+        if value.strip()
     ]
+    clauses=[]
+    for index,part in enumerate(parts):
+        markers=[marker for marker in EXPLICIT_CORRECTION_MARKERS if marker in part]
+        if not markers:
+            continue
+        marker_end=max(part.rfind(marker)+len(marker) for marker in markers)
+        suffix=part[marker_end:].strip().lstrip(':：').strip()
+        clause=(f'{part} {parts[index+1]}'
+                if not suffix and index+1<len(parts) else part)
+        clauses.append(clause)
+    return clauses
 
 
-def _identifier_in_clause(identifier, clause):
+def _identifier_spans(identifier, clause):
     identifier=str(identifier or '').strip().casefold()
     if not identifier:
-        return False
+        return []
     if identifier.isascii() and re.search(r'[a-z0-9]',identifier):
-        return bool(re.search(
+        return [match.span() for match in re.finditer(
             rf'(?<![a-z0-9]){re.escape(identifier)}(?![a-z0-9])',clause,
-        ))
-    return identifier in clause
+        )]
+    return [match.span() for match in re.finditer(re.escape(identifier),clause)]
+
+
+def _longest_identifier_matches(clause, identifiers):
+    matches=[
+        (identifier,start,end)
+        for identifier in identifiers
+        for start,end in _identifier_spans(identifier,clause)
+    ]
+    return {
+        identifier for identifier,start,end in matches
+        if not any(
+            other_start<=start and end<=other_end and len(other)>len(identifier)
+            for other,other_start,other_end in matches
+        )
+    }
 
 
 def _correction_value_in_clause(clause, fieldname, value):
@@ -232,9 +259,11 @@ def _matching_correction_evidence(row, fieldname, value, identifier_counts):
     matches=[]
     for evidence in row.get('_review_correction_evidence') or []:
         for clause in _explicit_correction_clauses(evidence.get('text')):
+            longest_matches=_longest_identifier_matches(
+                clause,identifier_counts.keys())
             unique_target=any(
                 identifier_counts.get(identifier)==1
-                and _identifier_in_clause(identifier,clause)
+                and identifier in longest_matches
                 for identifier in identifiers
             )
             if unique_target and _correction_value_in_clause(clause,fieldname,value):

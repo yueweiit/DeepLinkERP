@@ -700,6 +700,45 @@ def test_comment_correction_is_local_to_the_target_material_and_field_clause():
     )
 
 
+def test_comma_separated_comment_correction_is_local_to_the_correct_material():
+    items = [
+        item('I1', 'SKU-1', gross_weight_kg=None),
+        item('I2', 'SKU-2', gross_weight_kg=None),
+    ]
+    sources = [
+        {'source_id': 'FORM', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_form',
+         'approval_role': 'international_logistics'},
+        {'source_id': 'COMMENT', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_comment',
+         'approval_role': 'international_logistics',
+         'comment_text': 'SKU-1 毛重8，更正 SKU-2 毛重改为9'},
+    ]
+    proposals = [
+        {'proposal_id': proposal_id, 'proposal_type': 'item_update',
+         'target_item_name': target, 'confidence': .99,
+         'source_refs': [{'source_id': source_id}],
+         'payload': {'fields': {'gross_weight_kg': value}}}
+        for proposal_id,target,source_id,value in (
+            ('FORM-I1', 'I1', 'FORM', 7), ('COMMENT-I1', 'I1', 'COMMENT', 8),
+            ('FORM-I2', 'I2', 'FORM', 7), ('COMMENT-I2', 'I2', 'COMMENT', 9),
+        )
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert by_proposal['COMMENT-I1']['correction_kind'] == 'none'
+    assert by_proposal['COMMENT-I2']['correction_kind'] == 'explicit'
+    assert by_proposal['COMMENT-I2']['default_selected'] is True
+    assert not any(
+        by_proposal[proposal_id]['default_selected']
+        for proposal_id in ('FORM-I1', 'COMMENT-I1')
+    )
+
+
 def test_comment_correction_uses_boundary_safe_sku_matching():
     items = [
         item('I1', 'SKU-1', gross_weight_kg=None),
@@ -721,6 +760,35 @@ def test_comment_correction_uses_boundary_safe_sku_matching():
     candidate = next(row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg')
 
     assert candidate['correction_kind'] == 'none'
+
+
+def test_comment_correction_prefers_longest_matching_chinese_material_name():
+    items = [
+        item('SHORT', 'SHORT-SKU', product_name='螺栓', gross_weight_kg=None),
+        item('LONG', 'LONG-SKU', product_name='螺栓M8', gross_weight_kg=None),
+    ]
+    sources = [{
+        'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+        'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+        'comment_text': '更正 螺栓M8 毛重改为9',
+    }]
+    proposals = [
+        {'proposal_id': proposal_id, 'proposal_type': 'item_update',
+         'target_item_name': target, 'confidence': .99,
+         'source_refs': [{'source_id': 'COMMENT'}],
+         'payload': {'fields': {'gross_weight_kg': 9}}}
+        for proposal_id,target in (('SHORT', 'SHORT'), ('LONG', 'LONG'))
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert by_proposal['SHORT']['correction_kind'] == 'none'
+    assert by_proposal['LONG']['correction_kind'] == 'explicit'
 
 
 def test_multi_ref_comment_corrections_use_comment_evidence_time_and_last_value():
