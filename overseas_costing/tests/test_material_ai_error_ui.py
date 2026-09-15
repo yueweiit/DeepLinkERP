@@ -68,6 +68,8 @@ console.log(JSON.stringify({{message:workspace.materialAIErrorMessage({expressio
 @pytest.mark.parametrize('message', [
     '物料编码 <P-100> 不匹配',
     '金额必须 <p 上限',
+    '物料编码 <P> 不匹配',
+    '产品规格 <BODY> 待核对',
 ])
 def test_angle_bracket_business_text_is_not_mistaken_for_html(message):
     result = _fee_workspace_result(FIXTURE + f"""

@@ -815,6 +815,34 @@ def test_freight_total_arbitration_requires_explicit_currency_on_every_participa
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_freight_total_arbitration_keeps_other_currency_as_read_only_alternative() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "合计费用 RMB 100",
+        "空运费 RMB 60",
+        "港杂费 RMB 40",
+        "USD 参考报价 USD 15",
+    )
+    proposals = [
+        _review_fee("TOTAL", "100", "international_air_freight", "DOC-1", 1, "RMB"),
+        _review_fee("PART-1", "60", "international_air_freight", "DOC-1", 2, "RMB"),
+        _review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-1", 3, "RMB"),
+        _review_fee("USD-REFERENCE", "15", "international_air_freight", "DOC-1", 4, "USD"),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["TOTAL"]["selection_role"] == "primary_total"
+    assert by_id["TOTAL"]["default_selected"] is True
+    assert by_id["PART-1"]["selection_role"] == "component"
+    assert by_id["PART-2"]["selection_role"] == "component"
+    assert by_id["USD-REFERENCE"]["selection_role"] == "alternative"
+    assert by_id["USD-REFERENCE"]["default_selected"] is False
+
+
 def test_freight_arbitration_does_not_treat_a_date_fragment_as_declared_total() -> None:
     document = _fee_document(
         "DOC-1",
@@ -920,6 +948,29 @@ def test_freight_arbitration_validates_currency_inside_the_money_span() -> None:
     )
 
     assert all(row["selection_role"] == "ambiguous" for row in normalized)
+
+
+def test_freight_arbitration_validates_each_component_amount_at_its_evidence_ref() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "合计费用 RMB 100",
+        "空运费 RMB 50",
+        "港杂费 RMB 30",
+        "税费 RMB 20",
+    )
+    proposals = [
+        _review_fee("TOTAL", "100", "international_air_freight", "DOC-1", 1),
+        _review_fee("FORGED-1", "60", "international_air_freight", "DOC-1", 2),
+        _review_fee("FORGED-2", "40", "port_and_forwarder_charges", "DOC-1", 3),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert normalized
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
 
 
 def test_freight_total_cannot_borrow_money_from_another_cell_in_the_row() -> None:

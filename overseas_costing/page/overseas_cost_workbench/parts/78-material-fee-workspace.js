@@ -2643,7 +2643,7 @@
     if (/QueryDeadlockError|changed since last read|\(1020\)/i.test(message)) {
       return "任务状态正在同步，请稍后重试。";
     }
-    if (/<\s*!doctype(?:\s+[^<>]*?)?\s*>|<\s*\/\s*(?:html|body|title|h1|p)\s*>|<\s*(?:html|body|title|h1|p)(?:\s+[^<>]*?)?\s*\/?>/i.test(message)) return fallback;
+    if (/<\s*!doctype(?:\s+[^<>]*?)?\s*>|<\s*(html|body|title|h1|p)\b[^>]*>[\s\S]*<\s*\/\s*\1\s*>/i.test(message)) return fallback;
     if (!message || message === "操作失败" || /^\s*[\[{]/.test(message) || /\[object Object\]|Traceback|frappe\.exceptions/i.test(message)) return fallback;
     return message.slice(0, 500);
   }

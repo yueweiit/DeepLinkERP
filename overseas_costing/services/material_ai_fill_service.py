@@ -993,8 +993,13 @@ def _review_ref_total_lines(line: str, locator: dict, refs: list[dict]) -> list[
     )
 
 
-def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool:
-    """Require the proposal amount on its own explicit money-total evidence line."""
+def _has_evidence_money_amount(
+    proposal: dict,
+    evidence: dict[str, dict],
+    *,
+    require_declared_total: bool = False,
+) -> bool:
+    """Require an exact amount/currency money span at the proposal's evidence ref."""
 
     document_id = _review_fee_document_id(proposal)
     document = evidence.get(document_id) or {}
@@ -1009,7 +1014,7 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
     ]
     from overseas_costing.scripts.import_oa_logistics import _quote_money_amount_matches
     for line, locator in _document_fee_lines(document):
-        if not _DECLARED_TOTAL_PATTERN.search(line):
+        if require_declared_total and not _DECLARED_TOTAL_PATTERN.search(line):
             continue
         for evidence_line in _review_ref_total_lines(line, locator, refs):
             line_amounts = {
@@ -1020,6 +1025,14 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
             if amount_key in line_amounts:
                 return True
     return False
+
+
+def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool:
+    """Require the proposal amount on its own explicit money-total evidence line."""
+
+    return _has_evidence_money_amount(
+        proposal, evidence, require_declared_total=True
+    )
 
 
 def _fee_ref_identity(ref: dict, evidence: dict[str, dict]) -> tuple[str, ...]:
@@ -1086,12 +1099,15 @@ def _arbitrate_review_freight_totals(
         if proposal is not total
         and _review_fee_document_id(proposal) == document_id
     ]
+    components = [
+        proposal for proposal in same_document_candidates
+        if str((proposal.get("payload") or {}).get("currency") or "") == currency
+    ]
     if (currency not in REVIEW_CURRENCIES
-            or len(same_document_candidates) < 2
-            or any(str((proposal.get("payload") or {}).get("currency") or "") != currency
-                   for proposal in same_document_candidates)):
+            or len(components) < 2
+            or any(not _has_evidence_money_amount(proposal, evidence)
+                   for proposal in components)):
         return
-    components = same_document_candidates
     total_amount = _decimal((total.get("payload") or {}).get("amount"))
     component_amounts = [
         _decimal((proposal.get("payload") or {}).get("amount"))
