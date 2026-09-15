@@ -229,8 +229,9 @@ def test_ai_ready_draft_stales_on_binding_revision_with_identical_items_and_sour
     repo.run.update(proposal_version=1, source_manifest_json=manifest,
         input_fingerprint=ai._source_review_fingerprint('B1', 'V1', repo.get_items('B1','V1'), manifest, '', context=context))
     context['effective_source']['fingerprint'] = 'after'
-    result = ai.apply_source_ai_review('B1', 'RUN-1', [], {}, 'TOKEN', 'M1', repository=repo)
-    assert result['status'] == 'STALE' and not repo.applied
+    with pytest.raises(ValueError, match='重新分析'):
+        ai.apply_source_ai_review('B1', 'RUN-1', [], {}, 'TOKEN', 'M1', repository=repo)
+    assert not repo.applied
 
 
 def test_manifest_rejects_mixed_roots_before_reading():
@@ -391,6 +392,6 @@ def test_pending_source_ai_candidates_cannot_be_applied():
     manifest = prepare_source_manifest(repo.sources)
     repo.run.update(proposal_version=1, source_manifest_json=manifest,
         input_fingerprint=ai._source_review_fingerprint('B1', 'V1', repo.get_items('B1','V1'), manifest, '', context=context))
-    with pytest.raises(ValueError, match='未批准'):
+    with pytest.raises(ValueError, match='重新分析'):
         ai.apply_source_ai_review('B1', 'RUN-1', [], {}, 'TOKEN', 'M1', repository=repo)
     assert not repo.applied

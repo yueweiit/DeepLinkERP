@@ -127,17 +127,19 @@ def test_ai_review_ui_exposes_progress_candidates_and_single_confirmation_surfac
     for endpoint in (
         "start_source_ai_review",
         "get_source_ai_review_status",
-        "apply_source_ai_review",
+        "preview_source_ai_selection",
+        "confirm_source_ai_selection",
         "discard_source_ai_review",
     ):
         assert endpoint in source
+    assert "apply_source_ai_review" not in source
     for step in ("读取资料", "解析/OCR", "DeepSeek 识别", "合并候选"):
         assert step in source
     assert "AI 草稿" in source
     assert "告诉 AI 如何理解" in source
     assert "确认填充" in source
     assert 'data-action="mf-ai-review-cancel"' in source
-    assert "renderSourceAIReviewProposals(true)" in source
+    assert "renderMaterialAIRowReview" in source
     assert "data-action=\"mf-ai-adopt-candidate\"" in source
     assert ".is-ai-draft" in (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
     workspace = source.split("renderMaterialFeeWorkspace()", 1)[1].split("renderMaterialFeeMetric", 1)[0]
@@ -365,9 +367,10 @@ def test_apply_does_not_reclassify_automatic_ai_values_as_manual_edits() -> None
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     apply_method = source.split("async applyMaterialAIFill()", 1)[1].split("async discardMaterialAIFill()", 1)[0]
     assert 'find("[data-mf-cell-input]").each' not in apply_method
-    assert "result?.stale" in apply_method
-    assert "const isCurrent" in apply_method
-    assert "manual_updates_json" in apply_method
+    assert "confirmMaterialAIRowSelection" in apply_method
+    assert "重新分析资料" in apply_method
+    assert "manual_updates_json" not in apply_method
+    assert "apply_source_ai_review" not in apply_method
     discard_method = source.split("async discardMaterialAIFill()", 1)[1].split("findMaterialFeeItem", 1)[0]
     assert "const isCurrent" in discard_method
     assert "fill.discarding = true" in discard_method
@@ -541,20 +544,14 @@ class _AutofillHTML(HTMLParser):
 def test_autofill_ready_renders_full_table_without_visible_candidate_checkboxes() -> None:
     result = _fee_workspace_result(AUTOFILL_FIXTURE + "console.log(JSON.stringify({html:workspace.renderMaterialAIReviewDialogContent(),selected:[...state.aiFill.selections]}));")
     markup = result["html"]
-    assert "data-mf-ai-autofill-preview" in markup
-    for content in ("SKU1", "SKU2", "完整第二行", "实发数量", "净重", "毛重", "体积", "货值", "国际运费", "25", "20"):
-        assert content in markup
-    assert "&lt;img src=x onerror=alert(1)&gt;" in markup
-    assert "&lt;需要核对&gt;" in markup
-    assert "&lt;承运人&gt;" in markup
-    assert "<img" not in markup
-    assert "高级：来源与其他方案" in markup
+    assert "草稿规则已升级" in markup
+    assert "重新分析资料" in markup
+    assert "data-mf-ai-autofill-preview" not in markup
     assert _AutofillHTML(markup).visible_checkboxes == 0
-    assert "确认填充" in markup
-    assert "已选" not in markup
-    assert "确认写入（" not in markup
+    assert "确认填充" not in markup
+    assert "mf-ai-apply" not in _AutofillHTML(markup).actions
+    assert "mf-ai-row-preview" in _AutofillHTML(markup).actions
     assert result["selected"] == ["logistics", "packing"]
-    assert "disabled" not in _AutofillHTML(markup).actions["mf-ai-apply"]
 
 
 def test_autofill_preview_distinguishes_purchase_and_shipment_quantities():
@@ -629,11 +626,10 @@ state.aiFill.selections.delete('packing');
 const after=workspace.renderMaterialAIReviewDialogContent();
 console.log(JSON.stringify({before,after,original:state.materials.items[0].net_weight_kg}));
 """)
-    before = result["before"].split("<details", 1)[0]
-    after = result["after"].split("<details", 1)[0]
-    assert "SKU1" in before
-    assert ">18<" in before
-    assert ">18<" not in after
+    assert "草稿规则已升级" in result["before"]
+    assert "重新分析" in result["before"]
+    assert "SKU1" not in result["before"]
+    assert result["after"] == result["before"]
     assert result["original"] == "1"
 
 
@@ -663,12 +659,11 @@ workspace.updateMaterialFeeExpectedModified=()=>{};
 workspace.loadMaterialFeeWorkspace=async()=>{refreshes+=1};
 workspace.call=async(method,args)=>{submitted={method,args};return {ok:true}};
 await workspace.applyMaterialAIFill();
-console.log(JSON.stringify({submitted,refreshes,fill:state.aiFill}));
+console.log(JSON.stringify({submitted:submitted||null,refreshes,fill:state.aiFill}));
 """)
-    assert result["submitted"]["method"].endswith("apply_source_ai_review")
-    assert result["submitted"]["args"]["selections_json"] == '["logistics","packing"]'
-    assert result["refreshes"] == 1
-    assert result["fill"] is None
+    assert result["submitted"] is None
+    assert result["refreshes"] == 0
+    assert result["fill"]["status"] == "READY"
 
 
 def test_autofill_stalled_retry_starts_new_run_despite_previous_start_promise() -> None:
@@ -714,11 +709,12 @@ workspace.ensureEditSession=async()=>true;
 workspace.renderMaterialAIReviewDialog=()=>{};
 let progressOpens=0;
 workspace.openMaterialAIProgressDialog=()=>{progressOpens+=1};
-workspace.call=async()=>({ok:false,stale:true,message:'资料已经变化'});
+let calls=0;
+workspace.call=async()=>{calls+=1;return {ok:false,stale:true,message:'资料已经变化'}};
 await workspace.applyMaterialAIFill();
-console.log(JSON.stringify({status:state.aiFill.status,applying:state.aiFill.applying,progressOpens}));
+console.log(JSON.stringify({status:state.aiFill.status,calls,progressOpens}));
 """)
-    assert result == {"status": "STALE", "applying": False, "progressOpens": 1}
+    assert result == {"status": "READY", "calls": 0, "progressOpens": 0}
 
 
 def test_autofill_editing_alternative_replaces_conflicting_default_and_updates_preview() -> None:
@@ -864,15 +860,9 @@ state.aiFill.selections.add('approved-fee');
 console.log(JSON.stringify({html:workspace.renderMaterialAIReviewDialogContent(),selected:[...state.aiFill.selections]}));
 """)
     markup = result["html"]
-    assert "data-mf-ai-alternative-quotes" in markup
-    quotes = markup.split('data-mf-ai-alternative-quotes="1"', 1)[1].split("</section>", 1)[0]
-    assert "报价记录（只读）" in quotes
-    for text in ("审批采用", "其他报价", "7756.2", "9982.98", "3100", "3420", "体积", "物流报价", "第 3 行", "&lt;SISA&gt;", "&lt;报价原文&gt;"):
-        assert text in quotes
-    assert "<input" not in quotes
-    assert "<button" not in quotes
-    assert "<SISA>" not in quotes
-    assert markup.index("高级：来源与其他方案") < markup.index("data-mf-ai-alternative-quotes")
+    assert "草稿规则已升级" in markup
+    assert "data-mf-ai-alternative-quotes" not in markup
+    assert "7756.2" not in markup
     assert _AutofillHTML(markup).visible_checkboxes == 0
     assert result["selected"] == ["logistics", "packing", "approved-fee"]
 

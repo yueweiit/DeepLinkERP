@@ -63,7 +63,6 @@
     {"fieldname": "applied_at", "fieldtype": "Datetime", "label": "应用时间"}
   ],
   "permissions": [
-    {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1},
-    {"role": "海外成本核算用户", "read": 1, "write": 1, "create": 1}
+    {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1}
   ]
 }

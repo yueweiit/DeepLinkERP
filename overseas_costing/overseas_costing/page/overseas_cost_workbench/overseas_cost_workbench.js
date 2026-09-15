@@ -11297,7 +11297,7 @@ class OverseasCostWorkbench {
     state.aiFill = ready.selections instanceof Set
       ? ready
       : this.initializeMaterialAIDraft({ ...ready, draftVisible: true });
-    state.aiFill.draftVisible = !state.aiFill.row_review;
+    state.aiFill.draftVisible = false;
     state.aiFill.reviewDialogVisible = true;
     state.aiPendingReady = null;
     state.aiProgressMinimized = false;
@@ -11385,11 +11385,7 @@ class OverseasCostWorkbench {
   renderMaterialAIReviewDialogContent() {
     const fill = this.ensureMaterialFeeState().aiFill || {};
     if (fill.row_review) return this.renderMaterialAIRowReview(fill);
-    const physical = this.materialAIPhysicalSummary(fill);
-    const physicalSummary = physical.itemCount
-      ? `<div class="ocw-mf-ai-physical-summary"><b>明细 ${physical.itemCount} 条</b><b>净重 ${this.escape(physical.netWeight)} kg</b><b>毛重 ${this.escape(physical.grossWeight)} kg</b></div>`
-      : "";
-    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>请核对物料和费用，确认后一次填充到当前批次。</span></div></header><main class="ocw-mf-ai-dialog-body">${physicalSummary}${fill.ai_warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(fill.ai_warning)}</div>` : ""}<div data-mf-ai-autofill-preview="1">${this.renderMaterialAIAutofillPreview(fill)}</div>${this.renderCurrentSourceReviewControls(fill.source_context || fill.draft?.source_context || {}, fill.draft?.cargo_review, { fees: (fill.proposals || []).some(p => p.proposal_type === "fee_update"), values: fill.edits?._source_review || {} })}<details class="ocw-mf-ai-review-advanced"><summary>高级：来源与其他方案</summary><div>${this.renderMaterialAIReviewSources(fill)}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${fill.applying ? "disabled" : ""}>更换来源并重新生成</button>${this.renderSourceAIReviewProposals(true)}</div></details></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${fill.applying ? "disabled" : ""}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${fill.applying ? "disabled" : ""}>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canApplyMaterialAIFill(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : "确认填充"}</button></div></footer></div>`;
+    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>草稿规则已升级</strong><span>旧版草稿不能按新规则确认。</span></div></header><main class="ocw-mf-ai-dialog-body"><div class="ocw-mf-ai-progress-warning"><strong>请重新分析资料</strong><span>重新分析后可在逐项预览中核对并确认，本次不会采用旧草稿中的字段。</span></div></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel">取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard">放弃旧草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-row-preview">重新分析</button></div></footer></div>`;
   }
 
   materialAIFeesOverlap(left, right) {
@@ -12188,7 +12184,7 @@ class OverseasCostWorkbench {
 
   renderMaterialAIFillFooter() {
     const fill = this.ensureMaterialFeeState().aiFill;
-    if (!this.isMaterialAIReadyStatus(fill?.status) || !fill.draftVisible) return "";
+    if (!this.isMaterialAIReadyStatus(fill?.status) || !fill.draftVisible || !fill.row_review) return "";
     const updateCount = (fill.selections?.size ?? 0) + Object.keys(fill.manualUpdates || {}).length;
     const candidateCount = Number(fill.draft?.proposal_count || fill.draft?.candidate_count || 0);
     const mutating = Boolean(fill.applying || fill.discarding);
@@ -12684,65 +12680,10 @@ class OverseasCostWorkbench {
   }
 
   async applyMaterialAIFill() {
-    const state = this.ensureMaterialFeeState();
-    const fill = state.aiFill;
+    const fill = this.ensureMaterialFeeState().aiFill;
     if (fill?.row_review) return this.confirmMaterialAIRowSelection();
-    if (!this.canApplyMaterialAIFill(fill)) return;
-    const batchName = String(this.detailState.batchName || "");
-    const versionName = String(this.detailState.versionName || "");
-    const isCurrent = () => this.materialFeeState === state
-      && state.aiFill === fill
-      && String(this.detailState.batchName || "") === batchName
-      && String(this.detailState.versionName || "") === versionName
-      && this.detailState.tab === "documents";
-    if (state.aiProgressDialog?.$wrapper?.find("[data-current-source-review]").length) {
-      fill.edits = { ...(fill.edits || {}), _source_review: this.collectCurrentSourceReviewControls(state.aiProgressDialog.$wrapper) };
-    }
-    fill.applying = true;
-    this.updateMaterialFeeWriteControls(state);
-    this.renderMaterialAIReviewDialog();
-    try {
-      if (!(await this.ensureEditSession())) {
-        fill.applying = false;
-        if (isCurrent()) this.renderMaterialAIReviewDialog();
-        return;
-      }
-      if (!isCurrent()) return;
-      const result = await this.call("overseas_costing.api.materials.apply_source_ai_review", {
-        batch_name: batchName,
-        run_id: fill.runId || fill.run_id,
-        selections_json: JSON.stringify(Array.from(fill.selections || [])),
-        edits_json: JSON.stringify(fill.edits || {}),
-        manual_updates_json: JSON.stringify(Object.values(fill.manualUpdates || {})),
-        edit_token: this.detailState.editToken,
-        expected_modified: this.detailState.expectedModified,
-      });
-      if (!isCurrent()) return;
-      if (!result?.ok && result?.stale) {
-        fill.applying = false;
-        fill.status = "STALE";
-        fill.error_message = result.message || "资料或物料数据已变化，请重新运行 AI 填充。";
-        this.openMaterialAIProgressDialog();
-        return;
-      }
-      if (!result?.ok) throw new Error(result?.message || "AI 草稿保存失败。 ");
-      this.updateMaterialFeeExpectedModified(result);
-      if (state.aiProgressDialog) {
-        state.aiProgressDialog.hide();
-        state.aiProgressDialog = null;
-      }
-      state.aiFill = null;
-      frappe.show_alert({ message: result.message || "所选 AI 资料草稿已保存", indicator: "green" });
-      await this.loadMaterialFeeWorkspace({ quiet: true });
-    } catch (error) {
-      fill.applying = false;
-      if (!isCurrent()) return;
-      this.renderMaterialAIReviewDialog();
-      throw error;
-    } finally {
-      fill.applying = false;
-      this.updateMaterialFeeWriteControls(state);
-    }
+    frappe.show_alert?.({ message: "草稿规则已升级，请重新分析资料。", indicator: "orange" });
+    return false;
   }
 
   async discardMaterialAIFill() {
@@ -13929,8 +13870,7 @@ class OverseasCostWorkbench {
 
   canApplyMaterialAIFill(fill) {
     if (!this.isMaterialAIReadyStatus(fill?.status) || fill.applying || fill.discarding || this.isMaterialFeeCalculationBusy()) return false;
-    if (fill.row_review) return this.canConfirmMaterialAIRowSelection(fill);
-    return (fill.selections?.size || 0) + Object.keys(fill.manualUpdates || {}).length > 0;
+    return Boolean(fill.row_review) && this.canConfirmMaterialAIRowSelection(fill);
   }
 
   updateMaterialFeeWriteControls(state) {

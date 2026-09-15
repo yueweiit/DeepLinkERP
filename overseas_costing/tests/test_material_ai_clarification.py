@@ -142,8 +142,8 @@ def test_status_and_apply_reject_old_note_even_if_eager_invalidation_was_missed(
     assert status['status'] == 'STALE'
     assert status['clarification_text'] == '旧说明'  # historical input stays inspectable
     assert status['clarification']['text'] == '新说明'
-    result = service.apply_source_ai_review('B1', repo.run['name'], [], {}, 'TOKEN', 'M1', repository=repo)
-    assert result['status'] == 'STALE'
+    with pytest.raises(ValueError, match='重新分析'):
+        service.apply_source_ai_review('B1', repo.run['name'], [], {}, 'TOKEN', 'M1', repository=repo)
     assert repo.writes == []
 
 
@@ -250,5 +250,6 @@ def test_apply_checks_current_locked_note_after_waiting_for_batch_lock():
     start(repo)
     repo.run.update(status='READY', candidates_json=[])
     repo.get_locked_clarification = lambda *_: {'text': '并发保存的说明', 'revision': 2}
-    result = service.apply_source_ai_review('B1', repo.run['name'], [], {}, 'TOKEN', 'M1', repository=repo)
-    assert result['status'] == 'STALE' and repo.writes == []
+    with pytest.raises(ValueError, match='重新分析'):
+        service.apply_source_ai_review('B1', repo.run['name'], [], {}, 'TOKEN', 'M1', repository=repo)
+    assert repo.writes == []

@@ -263,7 +263,7 @@ def test_transaction_rolls_back_row_reconciliation_when_fee_write_fails(monkeypa
     monkeypatch.setattr(fee_service, "_query_rules", lambda *args: [])
     monkeypatch.setattr(fee_service, "normalize_fee_payload", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("fee failed")))
     proposals = [build_logistics_reconciliation(original, approval()), {"proposal_type": "fee_update", "payload": {"amount": "7756.20"}}]
-    with pytest.raises(ValueError, match="fee failed"):
+    with pytest.raises(ValueError, match="重新分析"):
         service.FrappeMaterialAIFillRepository().apply_source_review(
             SimpleNamespace(name="R1", status="READY", source_completeness="COMPLETE"),
             proposals,
@@ -271,7 +271,7 @@ def test_transaction_rolls_back_row_reconciliation_when_fee_write_fails(monkeypa
             {"batch": "B1", "version": "V1"},
         )
     assert state["items"] == original
-    assert state["writes"] > 0 and state["rollbacks"] == 1 and state["commits"] == 0
+    assert state["writes"] == 0 and state["rollbacks"] == 0 and state["commits"] == 0
 
 
 def test_main_approval_archived_labelled_text_preserves_all_eight_rows():

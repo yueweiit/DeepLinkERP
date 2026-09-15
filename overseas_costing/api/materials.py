@@ -231,13 +231,8 @@ def set_shipping_quantity(
 
 @frappe.whitelist()
 def start_material_ai_fill(batch_name, version_name, edit_token, expected_modified):
-    batch_name = require_batch_permission(batch_name, "write")
-    return material_ai_fill_service.start_material_ai_fill(
-        batch_name,
-        str(version_name or "")[:200],
-        str(edit_token or "")[:200],
-        str(expected_modified or "")[:200],
-    )
+    require_batch_permission(batch_name, "write")
+    raise ValueError(material_ai_fill_service.LEGACY_AI_FLOW_DISABLED_MESSAGE)
 
 
 @frappe.whitelist()
@@ -252,14 +247,8 @@ def get_material_ai_fill_status(batch_name, run_id, after_revision=None):
 
 @frappe.whitelist()
 def apply_material_ai_fill(batch_name, run_id, updates_json, edit_token, expected_modified):
-    batch_name = require_batch_permission(batch_name, "write")
-    return material_ai_fill_service.apply_material_ai_fill(
-        batch_name,
-        str(run_id or "")[:200],
-        _ai_updates_payload(updates_json),
-        str(edit_token or "")[:200],
-        str(expected_modified or "")[:200],
-    )
+    require_batch_permission(batch_name, "write")
+    raise ValueError(material_ai_fill_service.LEGACY_AI_FLOW_DISABLED_MESSAGE)
 
 
 @frappe.whitelist()
@@ -338,16 +327,8 @@ def apply_source_ai_review(
     expected_modified,
     manual_updates_json=None,
 ):
-    batch_name = require_batch_permission(batch_name, "write")
-    return material_ai_fill_service.apply_source_ai_review(
-        batch_name,
-        str(run_id or "")[:200],
-        _ai_review_payload(selections_json, list, "AI 草稿选择"),
-        _ai_review_payload(edits_json, dict, "AI 草稿编辑"),
-        str(edit_token or "")[:200],
-        str(expected_modified or "")[:200],
-        _ai_review_payload(manual_updates_json, list, "人工草稿更新"),
-    )
+    require_batch_permission(batch_name, "write")
+    raise ValueError(material_ai_fill_service.LEGACY_AI_FLOW_DISABLED_MESSAGE)
 
 
 @frappe.whitelist(methods=['POST'])

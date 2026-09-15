@@ -100,9 +100,9 @@ def test_legacy_ai_confirmation_is_disabled_during_trial():
 state.aiFill={status:'READY',selections:new Set(['fee']),manualUpdates:{},draftVisible:true};
 state.previewRunning=true;await workspace.applyMaterialAIFill();
 console.log(JSON.stringify({calls:workspace.calls,html:workspace.renderMaterialAIFillFooter()}));
-""")
+    """)
     assert result["calls"] == 0
-    assert 'data-action="mf-ai-apply" disabled' in result["html"]
+    assert result["html"] == ""
 
 
 def test_other_recalculate_entry_allows_ready_ai_and_reserves_write_guard():

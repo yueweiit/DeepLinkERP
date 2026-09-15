@@ -186,6 +186,22 @@ for(const row of cases){
 """)
 
 
+def test_legacy_ready_draft_only_offers_reanalysis_and_never_calls_raw_apply():
+    run_ui(r"""
+const fill=w.initializeMaterialAIDraft({status:'READY',run_id:'legacy',proposals:[{proposal_id:'P',default_selected:true}],draft:{proposal_count:1}});
+state.aiFill=fill;fill.selections=new Set(['P']);fill.manualUpdates={'I:gross_weight_kg':{item_name:'I',fieldname:'gross_weight_kg',value:999}};
+const html=w.renderMaterialAIReviewDialogContent();
+assert(html.includes('草稿规则已升级'));
+assert(html.includes('重新分析'));
+assert(html.includes('data-action="mf-ai-row-preview"'));
+assert(!html.includes('data-action="mf-ai-apply"'));
+assert.equal(w.canApplyMaterialAIFill(fill),false);
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true}};
+await w.applyMaterialAIFill();
+assert.deepEqual(calls,[]);
+""")
+
+
 def test_real_catalog_renders_safe_skip_causes_and_legacy_generic_fallback():
     from copy import deepcopy
     from overseas_costing.services import material_ai_fill_service as ai

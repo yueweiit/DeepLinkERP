@@ -71,6 +71,9 @@ PREVIEW_READY_STATES = ("READY", "READY_WITH_WARNINGS")
 ACTIVE_STATES = ("QUEUED", "RUNNING", *PREVIEW_READY_STATES)
 RUNNING_STATES = ("QUEUED", "RUNNING")
 TERMINAL_STATES = ("APPLIED", "DISCARDED", "STALE", "FAILED")
+LEGACY_AI_FLOW_DISABLED_MESSAGE = (
+    "AI 填充规则已升级，请重新分析资料后在逐项预览中确认。"
+)
 AUTO_ADOPT_CONFIDENCE = Decimal("0.90")
 MAX_UPDATES = 5000
 MAX_AI_DOCUMENT_CHARS = 200_000
@@ -106,20 +109,8 @@ def is_material_ai_preview_ready(status: Any) -> bool:
     return str(status or "") in PREVIEW_READY_STATES
 
 
-def _assert_legacy_raw_apply_allowed(
-    run: Any, *, not_ready_message: str = "AI 草稿尚未准备完成或已经处理。"
-) -> None:
-    status = str(_record_value(run, "status") or "")
-    source_completeness = str(
-        _record_value(run, "source_completeness") or ""
-    ).upper()
-    if status == "READY_WITH_WARNINGS" or source_completeness in {
-        "PARTIAL",
-        "UNAVAILABLE",
-    }:
-        raise ValueError("当前草稿需通过逐项选择预览确认，不能直接提交字段值。")
-    if status != "READY":
-        raise ValueError(not_ready_message)
+def _reject_legacy_ai_flow() -> None:
+    raise ValueError(LEGACY_AI_FLOW_DISABLED_MESSAGE)
 
 
 REVIEW_REPLACEMENT_FIELDS = REVIEW_ITEM_FIELDS
@@ -2049,6 +2040,7 @@ def start_material_ai_fill(
     repository: Any | None = None,
     enqueue: Callable[[str], None] | None = None,
 ) -> dict:
+    _reject_legacy_ai_flow()
     repo = repository or FrappeMaterialAIFillRepository()
     context = repo.get_context(str(batch_name), str(version_name))
     # assert_write locks the batch row FOR UPDATE. Keep that transaction open through
@@ -2787,6 +2779,7 @@ def apply_material_ai_fill(
     *,
     repository: Any | None = None,
 ) -> dict:
+    _reject_legacy_ai_flow()
     repo = repository or FrappeMaterialAIFillRepository()
     initial_run = repo.get_run(str(run_id or ""))
     _assert_run_batch(initial_run, batch_name)
@@ -2798,7 +2791,6 @@ def apply_material_ai_fill(
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     run = repo.lock_run(str(run_id or ""))
     _assert_run_batch(run, batch_name)
-    _assert_legacy_raw_apply_allowed(run)
     items = repo.get_items(context["batch"], context["version"])
     sources = repo.list_sources(context["batch"], context["version"])
     current_fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources, context=context)
@@ -2868,6 +2860,7 @@ def apply_source_ai_review(
     *,
     repository: Any | None = None,
 ) -> dict:
+    _reject_legacy_ai_flow()
     repo = repository or FrappeMaterialAIFillRepository()
     loaded_selections = _load_json(selections, []) if isinstance(selections, str) else selections
     loaded_edits = _load_json(edits, {}) if isinstance(edits, str) else edits
@@ -2909,9 +2902,6 @@ def apply_source_ai_review(
         repo.save_run(run, status="STALE", progress_step="说明已变化",
                       error_message="保存的说明已变化，请按新说明重新分析。", completed_at=_now())
         return {"ok": False, "stale": True, "run_id": str(run_id), "status": "STALE"}
-    _assert_legacy_raw_apply_allowed(
-        run, not_ready_message="AI 资料审核草稿尚未准备完成或已经处理。"
-    )
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     if hasattr(repo, "lock_review_inputs"):
         repo.lock_review_inputs(context["batch"], context["version"])
@@ -5646,7 +5636,7 @@ class FrappeMaterialAIFillRepository:
         frappe.db.set_value('Overseas Cost Item', item_name, values, update_modified=False)
 
     def apply_run(self, run: Any, updates: list[dict], audit: dict) -> dict:
-        _assert_legacy_raw_apply_allowed(run)
+        _reject_legacy_ai_flow()
         from overseas_costing.services import calculate_service, usage_service
 
         bundle=effective_source.current_source_bundle(audit['batch'],audit['version'],lock=True)
@@ -5714,9 +5704,7 @@ class FrappeMaterialAIFillRepository:
     ) -> dict:
         """Apply selected purchase, packing and fee proposals in one database transaction."""
 
-        _assert_legacy_raw_apply_allowed(
-            run, not_ready_message="AI 资料审核草稿尚未准备完成或已经处理。"
-        )
+        _reject_legacy_ai_flow()
         from overseas_costing.services import calculate_service, fee_service, usage_service
 
         bundle = effective_source.current_source_bundle(audit['batch'],audit['version'],lock=True)

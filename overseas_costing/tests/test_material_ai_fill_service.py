@@ -72,6 +72,7 @@ def test_material_ai_run_schema_accepts_unavailable_source_completeness() -> Non
         "COMPLETE",
     ]
     assert "READY_WITH_WARNINGS" in fields["status"]["options"].splitlines()
+    assert [row["role"] for row in metadata["permissions"]] == ["System Manager"]
 
 
 @pytest.mark.parametrize(
@@ -2787,21 +2788,25 @@ class _StartRepository:
 def test_duplicate_start_reuses_same_active_task_and_only_new_task_is_enqueued() -> None:
     queued = []
     repository = _StartRepository(existing={"name": "RUN-OLD", "status": "RUNNING"})
-    reused = start_material_ai_fill(
-        "B1", "V1", "TOKEN", "M1", repository=repository, enqueue=queued.append
-    )
-    assert reused == {"ok": True, "run_id": "RUN-OLD", "status": "RUNNING", "reused": True}
+    with pytest.raises(ValueError, match="重新分析"):
+        start_material_ai_fill(
+            "B1", "V1", "TOKEN", "M1", repository=repository, enqueue=queued.append
+        )
     assert queued == []
+    assert repository.created == []
 
-    fresh_repo = _StartRepository()
-    fresh = start_material_ai_fill(
-        "B1", "V1", "TOKEN", "M1", repository=fresh_repo, enqueue=queued.append
-    )
-    assert fresh["run_id"] == "RUN-1"
-    assert fresh["status"] == "QUEUED"
-    assert fresh["reused"] is False
-    assert queued == ["RUN-1"]
-    assert fresh_repo.created[0]["input_fingerprint"]
+
+def test_legacy_material_start_is_disabled_before_create_or_enqueue() -> None:
+    queued = []
+    repository = _StartRepository()
+
+    with pytest.raises(ValueError, match="重新分析"):
+        start_material_ai_fill(
+            "B1", "V1", "TOKEN", "M1", repository=repository, enqueue=queued.append
+        )
+
+    assert repository.created == []
+    assert queued == []
 
 
 def test_unified_start_fingerprints_clarification_and_does_not_require_edit_lease() -> None:
@@ -2939,17 +2944,16 @@ class _LifecycleRepository(_StartRepository):
 def test_apply_revalidates_fingerprint_and_marks_changed_sources_stale() -> None:
     repository = _LifecycleRepository()
     repository.sources[0]["source_hash"] = "changed"
-    result = apply_material_ai_fill(
-        "B1",
-        "RUN-1",
-        [{"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 12}],
-        "TOKEN",
-        "M1",
-        repository=repository,
-    )
-    assert result["ok"] is False
-    assert result["stale"] is True
-    assert repository.run["status"] == "STALE"
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_material_ai_fill(
+            "B1",
+            "RUN-1",
+            [{"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 12}],
+            "TOKEN",
+            "M1",
+            repository=repository,
+        )
+    assert repository.run["status"] == "READY"
     assert repository.applied == []
 
 
@@ -2960,7 +2964,7 @@ def test_legacy_material_apply_rejects_ready_with_warnings_that_require_server_s
         candidates_json=[{"target_item_name": "ITEM-1", "fieldname": "gross_weight_kg"}],
     )
 
-    with pytest.raises(ValueError, match="逐项选择"):
+    with pytest.raises(ValueError, match="重新分析"):
         apply_material_ai_fill(
             "B1",
             "RUN-1",
@@ -2977,7 +2981,7 @@ def test_legacy_material_apply_rejects_deployed_ready_partial_draft() -> None:
     repository = _LifecycleRepository(status="READY")
     repository.run.update(source_completeness="PARTIAL")
 
-    with pytest.raises(ValueError, match="逐项选择"):
+    with pytest.raises(ValueError, match="重新分析"):
         apply_material_ai_fill(
             "B1",
             "RUN-1",
@@ -2994,7 +2998,7 @@ def test_legacy_material_apply_rejects_unavailable_warning_draft_even_with_clien
     repository = _LifecycleRepository(status="READY_WITH_WARNINGS")
     repository.run.update(source_completeness="UNAVAILABLE", candidates_json=[])
 
-    with pytest.raises(ValueError, match="逐项选择"):
+    with pytest.raises(ValueError, match="重新分析"):
         apply_material_ai_fill(
             "B1",
             "RUN-1",
@@ -3021,7 +3025,7 @@ def test_legacy_source_review_apply_rejects_partial_draft_without_row_selection(
         (args, kwargs)
     ) or {"changed_count": 1, "batch_modified": "M2"}
 
-    with pytest.raises(ValueError, match="逐项选择"):
+    with pytest.raises(ValueError, match="重新分析"):
         apply_source_ai_review(
             "B1",
             "RUN-1",
@@ -3056,41 +3060,72 @@ def test_unified_apply_marks_removed_selected_source_stale() -> None:
         {"source_kind": "manual_attachment", "source_id": "B", "source_hash": "h2"}
     ]
 
-    result = apply_source_ai_review(
-        "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
-    )
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_source_ai_review(
+            "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
+        )
 
-    assert result["status"] == "STALE"
-    assert result["stale"] is True
-    assert repository.run["status"] == "STALE"
+    assert repository.run["status"] == "READY"
 
 
 def test_apply_is_one_repository_transaction_and_preserves_user_edit_marker() -> None:
     repository = _LifecycleRepository()
-    result = apply_material_ai_fill(
-        "B1",
-        "RUN-1",
-        [
-            {
-                "item_name": "ITEM-1",
-                "fieldname": "actual_shipped_qty",
-                "value": "990",
-                "user_edited": True,
-            }
-        ],
-        "TOKEN",
-        "M1",
-        repository=repository,
-    )
-    assert result == {
-        "ok": True,
-        "run_id": "RUN-1",
-        "status": "APPLIED",
-        "changed_count": 1,
-        "batch_modified": "M2",
-        "message": "AI 装箱草稿已整批保存，试算结果保持待更新。",
-    }
-    assert repository.applied[0][1][0]["user_edited"] is True
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_material_ai_fill(
+            "B1",
+            "RUN-1",
+            [{"item_name": "ITEM-1", "fieldname": "actual_shipped_qty", "value": "990", "user_edited": True}],
+            "TOKEN",
+            "M1",
+            repository=repository,
+        )
+    assert repository.applied == []
+
+
+@pytest.mark.parametrize(
+    ("status", "source_completeness"),
+    [
+        ("READY", "COMPLETE"),
+        ("READY", "PARTIAL"),
+        ("READY_WITH_WARNINGS", "PARTIAL"),
+    ],
+)
+def test_all_legacy_raw_apply_flows_are_disabled_without_repository_writes(
+    status: str, source_completeness: str
+) -> None:
+    material_repo = _LifecycleRepository(status=status)
+    material_repo.run["source_completeness"] = source_completeness
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_material_ai_fill(
+            "B1",
+            "RUN-1",
+            [{"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 999}],
+            "TOKEN",
+            "M1",
+            repository=material_repo,
+        )
+    assert material_repo.applied == []
+
+    source_repo = _LifecycleRepository(status=status)
+    source_repo.run["source_completeness"] = source_completeness
+    source_repo.source_applied = []
+    source_repo.apply_source_review = lambda *args, **kwargs: source_repo.source_applied.append(
+        (args, kwargs)
+    ) or {"changed_count": 1, "batch_modified": "M2"}
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_source_ai_review(
+            "B1",
+            "RUN-1",
+            ["CLIENT-PROPOSAL"],
+            {"CLIENT-PROPOSAL": {"amount": 999}},
+            "TOKEN",
+            "M1",
+            manual_updates=[
+                {"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 999}
+            ],
+            repository=source_repo,
+        )
+    assert source_repo.source_applied == []
 
 
 def test_unified_apply_sends_only_selected_server_proposals_to_one_transaction() -> None:
@@ -3136,15 +3171,13 @@ def test_unified_apply_sends_only_selected_server_proposals_to_one_transaction()
         or {"changed_count": len(selected), "batch_modified": "M2"}
     )
 
-    result = apply_source_ai_review(
-        "B1", "RUN-1", ["P-FEE"], {"P-FEE": {"amount": "251"}}, "TOKEN", "M1",
-        repository=repository,
-    )
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_source_ai_review(
+            "B1", "RUN-1", ["P-FEE"], {"P-FEE": {"amount": "251"}}, "TOKEN", "M1",
+            repository=repository,
+        )
 
-    assert result["ok"] is True
-    assert result["changed_count"] == 1
-    assert repository.source_applied[0][0][0]["proposal_id"] == "P-FEE"
-    assert repository.source_applied[0][1] == []
+    assert repository.source_applied == []
 
 
 def test_unified_apply_sends_manual_grid_edits_through_same_transaction() -> None:
@@ -3168,23 +3201,21 @@ def test_unified_apply_sends_manual_grid_edits_through_same_transaction() -> Non
         or {"changed_count": len(selected) + len(manual_updates), "batch_modified": "M2"}
     )
 
-    result = apply_source_ai_review(
-        "B1",
-        "RUN-1",
-        [],
-        {},
-        "TOKEN",
-        "M1",
-        manual_updates=[
-            {"item_name": "ITEM-1", "fieldname": "goods_value", "value": "120"}
-        ],
-        repository=repository,
-    )
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_source_ai_review(
+            "B1",
+            "RUN-1",
+            [],
+            {},
+            "TOKEN",
+            "M1",
+            manual_updates=[
+                {"item_name": "ITEM-1", "fieldname": "goods_value", "value": "120"}
+            ],
+            repository=repository,
+        )
 
-    assert result["ok"] is True
-    assert result["changed_count"] == 1
-    assert repository.source_applied[0][0] == []
-    assert repository.source_applied[0][1][0]["fieldname"] == "goods_value"
+    assert repository.source_applied == []
 
 
 def test_unified_apply_is_idempotent_for_same_request_and_rejects_different_retry() -> None:
@@ -3215,31 +3246,16 @@ def test_unified_apply_is_idempotent_for_same_request_and_rejects_different_retr
 
     repository.apply_source_review = apply_once
 
-    first = apply_source_ai_review(
-        "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
-    )
-    repeated = apply_source_ai_review(
-        "B1", "RUN-1", [], {}, "OLD-TOKEN", "OLD-MODIFIED", repository=repository
-    )
-
-    assert first["ok"] is True
-    assert repeated["ok"] is True
-    assert repeated["idempotent"] is True
-    assert len(calls) == 1
-
-    with pytest.raises(ValueError, match="不同"):
+    with pytest.raises(ValueError, match="重新分析"):
         apply_source_ai_review(
-            "B1",
-            "RUN-1",
-            [],
-            {},
-            "OLD-TOKEN",
-            "OLD-MODIFIED",
-            manual_updates=[
-                {"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": "1"}
-            ],
-            repository=repository,
+            "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
         )
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_source_ai_review(
+            "B1", "RUN-1", [], {}, "OLD-TOKEN", "OLD-MODIFIED", repository=repository
+        )
+
+    assert calls == []
 
 
 def test_unified_apply_rolls_back_when_transaction_write_fails() -> None:
@@ -3262,12 +3278,12 @@ def test_unified_apply_rolls_back_when_transaction_write_fails() -> None:
         RuntimeError("写入失败")
     )
 
-    with pytest.raises(RuntimeError, match="写入失败"):
+    with pytest.raises(ValueError, match="重新分析"):
         apply_source_ai_review(
             "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
         )
 
-    assert repository.rollbacks == 1
+    assert repository.rollbacks == 0
 
 
 def test_unified_apply_locks_batch_before_run_to_match_regeneration_order() -> None:
@@ -3292,11 +3308,12 @@ def test_unified_apply_locks_batch_before_run_to_match_regeneration_order() -> N
         "batch_modified": "M2",
     }
 
-    apply_source_ai_review(
-        "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
-    )
+    with pytest.raises(ValueError, match="重新分析"):
+        apply_source_ai_review(
+            "B1", "RUN-1", [], {}, "TOKEN", "M1", repository=repository
+        )
 
-    assert lock_order == [("batch", "B1"), ("run", "RUN-1")]
+    assert lock_order == []
 
 def test_status_and_discard_return_public_payload_without_mutating_materials() -> None:
     repository = _LifecycleRepository()
@@ -3503,7 +3520,7 @@ def test_apply_rechecks_ready_state_after_acquiring_run_lock() -> None:
     repository = _LifecycleRepository()
     repository.run["status"] = "DISCARDED"
 
-    with pytest.raises(ValueError, match="已经处理"):
+    with pytest.raises(ValueError, match="重新分析"):
         apply_material_ai_fill(
             "B1",
             "RUN-1",
@@ -4852,9 +4869,9 @@ def test_repository_raw_writers_reject_warning_before_business_mutation() -> Non
     run = {"status": "READY_WITH_WARNINGS", "source_completeness": "PARTIAL"}
     audit = {"batch": "B1", "version": "V1"}
 
-    with pytest.raises(ValueError, match="逐项选择"):
+    with pytest.raises(ValueError, match="重新分析"):
         repository.apply_run(run, [], audit)
-    with pytest.raises(ValueError, match="逐项选择"):
+    with pytest.raises(ValueError, match="重新分析"):
         repository.apply_source_review(run, [], [], audit)
 
 

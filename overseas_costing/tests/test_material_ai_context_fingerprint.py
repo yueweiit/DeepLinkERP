@@ -172,11 +172,10 @@ def test_apply_rejects_context_changes_including_after_input_lock(change, timing
     else:
         repo.lock_review_inputs = lambda *_args: repo.context.update(change)
 
-    result = service.apply_source_ai_review(
-        "B1", repo.run["name"], ["L1"], {}, "TOKEN", "M1", repository=repo,
-    )
-
-    assert result["status"] == "STALE"
+    with pytest.raises(ValueError, match="重新分析"):
+        service.apply_source_ai_review(
+            "B1", repo.run["name"], ["L1"], {}, "TOKEN", "M1", repository=repo,
+        )
     assert repo.writes == []
 
 
@@ -186,11 +185,10 @@ def test_apply_rejects_updated_material_specification():
     repo.run.update(status="READY", candidates_json=[])
     repo.items[0]["spec_model"] = "New"
 
-    result = service.apply_source_ai_review(
-        "B1", repo.run["name"], [], {}, "TOKEN", "M1", repository=repo,
-    )
-
-    assert result["status"] == "STALE"
+    with pytest.raises(ValueError, match="重新分析"):
+        service.apply_source_ai_review(
+            "B1", repo.run["name"], [], {}, "TOKEN", "M1", repository=repo,
+        )
     assert repo.writes == []
 
 
@@ -201,7 +199,7 @@ def test_raw_source_apply_cannot_confirm_warning_draft_without_selection_receipt
     ready = service.execute_material_ai_fill(repo.run["name"], repository=repo)
     assert ready["status"] == "READY_WITH_WARNINGS", repo.run.get("error_message")
 
-    with pytest.raises(ValueError, match="逐项选择"):
+    with pytest.raises(ValueError, match="重新分析"):
         service.apply_source_ai_review(
             "B1", repo.run["name"], [], {}, "TOKEN", "M1", repository=repo,
         )
