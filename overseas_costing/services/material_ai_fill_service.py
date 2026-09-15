@@ -2297,8 +2297,8 @@ _PUBLIC_AI_HIDDEN_KEYS = frozenset({
 })
 _PUBLIC_PROCESS_ID_PATTERN = re.compile(r"proc_[0-9a-f]{64}")
 _UNSAFE_PUBLIC_DETAIL_PATTERN = re.compile(
-    r"(?:<!doctype\b|</?(?:html|head|body|title|h[1-6]|p|div|pre|script|style)\b|"
-    r"\btraceback\b|/(?:private|var|users|home|tmp)/|[a-z]:\\)",
+    r"(?:<[^<>]+>|\btraceback\b|file://|"
+    r"(?<![:/\w.])/(?:[^/\s<>]+/)+[^/\s<>]+|[a-z]:\\)",
     re.IGNORECASE,
 )
 
@@ -2360,6 +2360,24 @@ def _safe_public_text(value: str) -> str:
     return SERVER_PREVIEW_FAILURE_MESSAGE if _UNSAFE_PUBLIC_DETAIL_PATTERN.search(text) else text
 
 
+def _public_extra_json(value: Any, replacements: dict[str, str]) -> dict:
+    """Expose only metadata required by the review UI, never arbitrary stored JSON."""
+
+    parsed = _load_json(value, {}) if isinstance(value, str) else value
+    if not isinstance(parsed, dict):
+        return {}
+    logistics_row = parsed.get("logistics_row")
+    packing = logistics_row.get("packing") if isinstance(logistics_row, dict) else None
+    if not isinstance(packing, dict) or "package_count" not in packing:
+        return {}
+    package_count = _public_ai_payload_with_process_ids(
+        packing.get("package_count"), replacements
+    )
+    if package_count == SERVER_PREVIEW_FAILURE_MESSAGE:
+        return {}
+    return {"logistics_row": {"packing": {"package_count": package_count}}}
+
+
 def _public_ai_payload_with_process_ids(value: Any, replacements: dict[str, str]) -> Any:
     if isinstance(value, list):
         return [_public_ai_payload_with_process_ids(item, replacements) for item in value]
@@ -2374,10 +2392,8 @@ def _public_ai_payload_with_process_ids(value: Any, replacements: dict[str, str]
         key_text = str(key)
         if key_text.startswith("_review_") or key_text in _PUBLIC_AI_HIDDEN_KEYS:
             continue
-        if key_text == "extra_json" and isinstance(nested, str):
-            parsed = _load_json(nested, {})
-            result[key] = (_json(_public_ai_payload_with_process_ids(parsed, replacements))
-                           if parsed else nested)
+        if key_text == "extra_json":
+            result[key] = _public_extra_json(nested, replacements)
         else:
             result[key] = _public_ai_payload_with_process_ids(nested, replacements)
     return result

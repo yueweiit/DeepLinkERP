@@ -4139,6 +4139,73 @@ def test_public_status_recursively_sanitizes_legacy_nested_failure_details() -> 
     assert "traceback" not in public.casefold()
 
 
+@pytest.mark.parametrize(
+    "private_text",
+    [
+        "<span>500 secret</span>",
+        "/srv/app/config.py contains secret",
+        "/private/files/secret.pdf",
+        "Traceback (most recent call last): secret",
+        "file:///opt/app/secret.txt",
+        r"C:\\server\\private\\secret.txt",
+    ],
+)
+def test_public_payload_sanitizes_unsafe_text_at_any_dict_or_list_depth(private_text) -> None:
+    service = material_ai_fill_service
+
+    result = service._public_ai_payload(
+        {"nested": [{"deeper": {"detail": private_text}}]}
+    )
+
+    assert result["nested"][0]["deeper"]["detail"] == service.SERVER_PREVIEW_FAILURE_MESSAGE
+
+
+def test_public_payload_extra_json_is_parsed_allowlisted_and_never_falls_back_to_raw_text() -> None:
+    service = material_ai_fill_service
+
+    invalid = service._public_ai_payload(
+        {"nested": {"extra_json": "<html>/private/files/secret</html>"}}
+    )
+    valid = service._public_ai_payload(
+        {
+            "nested": {
+                "extra_json": json.dumps(
+                    {
+                        "logistics_row": {
+                            "packing": {"package_count": 3, "server_path": "/srv/app/secret"},
+                            "purchase_fact": {"unit_price": 99},
+                        },
+                        "customer_note": "private metadata",
+                    }
+                )
+            }
+        }
+    )
+
+    assert invalid == {"nested": {"extra_json": {}}}
+    assert valid == {
+        "nested": {"extra_json": {"logistics_row": {"packing": {"package_count": 3}}}}
+    }
+
+
+@pytest.mark.parametrize(
+    "business_text",
+    [
+        "资料与当前批次不一致",
+        "packing-list.xlsx",
+        "TF33304775/TF33304774",
+        "物料 P-100 待核对",
+        "https://example.com/help",
+    ],
+)
+def test_public_payload_keeps_plain_business_text_and_relative_names(business_text) -> None:
+    result = material_ai_fill_service._public_ai_payload(
+        {"nested": [business_text]}
+    )
+
+    assert result == {"nested": [business_text]}
+
+
 def test_ai_semantic_runner_rethrows_real_dbapi_integrity_errors() -> None:
     service = material_ai_fill_service
 
