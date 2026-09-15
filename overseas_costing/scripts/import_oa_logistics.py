@@ -2208,6 +2208,7 @@ _ENGLISH_MONTH = (
     r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
     r"nov(?:ember)?|dec(?:ember)?)"
 )
+_MONEY_CONTEXT_WINDOW = 64
 
 
 def _money_match_is_date(
@@ -2227,16 +2228,24 @@ def _money_match_is_date(
         else:
             return True
 
-    after_number = text[match.end("number"):]
+    number_start = match.start("number")
+    number_end = match.end("number")
+    after_number = text[number_end:number_end + _MONEY_CONTEXT_WINDOW]
     if re.match(r"\s*(?:年|月|日(?!期)|[./\-]\s*\d)", after_number):
         return True
+    if re.match(
+        rf"\s*(?:[-./]\s*)?{_ENGLISH_MONTH}\b\s*[-./,]?\s*\d{{4}}\b",
+        after_number,
+        re.IGNORECASE,
+    ):
+        return True
 
-    before_number = text[:match.start("number")]
+    before_number = text[max(0, number_start - _MONEY_CONTEXT_WINDOW):number_start]
     nearest_before_number = before_number.rstrip()[-1:]
     if number_before_currency and nearest_before_number and nearest_before_number in "./-":
         return True
 
-    prefix = text[max(0, match.start() - 48):match.start()].rstrip()
+    prefix = text[max(0, match.start() - _MONEY_CONTEXT_WINDOW):match.start()].rstrip()
     if re.search(r"(?:日期|日期为|date(?:d)?)\s*[:：]?\s*$", prefix, re.IGNORECASE):
         return True
     if re.search(
@@ -2285,8 +2294,14 @@ def _quote_money_amount_matches(text: str) -> list[tuple[str, tuple[int, int]]]:
                 continue
             # Inspect after the complete greedy number match in Python rather
             # than a regex lookahead that may backtrack 2026 to 202, etc.
-            after_number = text[match.end("number"):].lstrip()
-            after_money = text[match.end():].lstrip()
+            number_end = match.end("number")
+            money_end = match.end()
+            after_number = text[
+                number_end:number_end + _MONEY_CONTEXT_WINDOW
+            ].lstrip()
+            after_money = text[
+                money_end:money_end + _MONEY_CONTEXT_WINDOW
+            ].lstrip()
             if rejected_suffix.search(after_number) or rejected_suffix.search(after_money):
                 continue
             span = match.span()

@@ -796,9 +796,12 @@ def _canonical_review_ref(claimed: dict, documents: dict[str, dict]) -> dict | N
             for value in matches
             for cell_value in value.get("cells") or []
             if isinstance(cell_value, dict)
+            and str(cell_value.get("cell") or "").strip()
         }
         if cell and cell not in known_cells:
             return None
+        if not cell and len(known_cells) == 1:
+            cell = next(iter(known_cells))
         ref.update({"sheet": sheet, "row": row, "page": None, "cell": cell})
         sheet_source_id = str((document.get("sheet_source_ids") or {}).get(sheet) or "")
         if sheet_source_id:
@@ -952,6 +955,37 @@ def _review_ref_matches_locator(ref: dict, locator: dict) -> bool:
     return True
 
 
+def _review_ref_total_lines(line: str, locator: dict, refs: list[dict]) -> list[str]:
+    """Limit cell-addressed evidence to the exact referenced cell value."""
+
+    matching_refs = [ref for ref in refs if _review_ref_matches_locator(ref, locator)]
+    if refs and not matching_refs:
+        return []
+    if not refs:
+        return [line]
+    expected_cells = {
+        str(ref.get("cell") or "").strip().upper()
+        for ref in matching_refs
+        if str(ref.get("cell") or "").strip()
+    }
+    if not expected_cells:
+        return [line]
+    cells = locator.get("cells") if isinstance(locator.get("cells"), list) else []
+    if cells:
+        return [
+            str(cell.get("value") or "").strip()
+            for cell in cells
+            if isinstance(cell, dict)
+            and str(cell.get("cell") or "").strip().upper() in expected_cells
+            and str(cell.get("value") or "").strip()
+        ]
+    return (
+        [line]
+        if str(locator.get("cell") or "").strip().upper() in expected_cells
+        else []
+    )
+
+
 def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool:
     """Require the proposal amount on its own explicit money-total evidence line."""
 
@@ -968,18 +1002,38 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
     ]
     from overseas_costing.scripts.import_oa_logistics import _quote_money_amount_matches
     for line, locator in _document_fee_lines(document):
-        if refs and not any(_review_ref_matches_locator(ref, locator) for ref in refs):
-            continue
-        if not _DECLARED_TOTAL_PATTERN.search(line):
-            continue
-        line_amounts = {
-            _fee_amount_key(matched_amount)
-            for matched_amount, span in _quote_money_amount_matches(line)
-            if currency_pattern.search(line[span[0]:span[1]])
-        }
-        if amount_key in line_amounts:
-            return True
+        for evidence_line in _review_ref_total_lines(line, locator, refs):
+            if not _DECLARED_TOTAL_PATTERN.search(evidence_line):
+                continue
+            line_amounts = {
+                _fee_amount_key(matched_amount)
+                for matched_amount, span in _quote_money_amount_matches(evidence_line)
+                if currency_pattern.search(evidence_line[span[0]:span[1]])
+            }
+            if amount_key in line_amounts:
+                return True
     return False
+
+
+def _fee_ref_identity(ref: dict, evidence: dict[str, dict]) -> tuple[str, ...]:
+    """Normalize equivalent source locations before fee proposal deduplication."""
+
+    document_id = str(ref.get("document_id") or "")
+    page = _positive_location(ref.get("page"))
+    document = evidence.get(document_id) or {}
+    text = str(document.get("text") or "")
+    if page in {None, 1} and text and not re.search(
+        r"^\s*---\s*Page\s+\d+\s*---\s*$", text, re.IGNORECASE | re.MULTILINE
+    ):
+        page = 1
+    return (
+        document_id,
+        str(ref.get("field") or ""),
+        str(ref.get("sheet") or ""),
+        str(page or ""),
+        str(_positive_location(ref.get("row")) or ""),
+        str(ref.get("cell") or "").strip().upper(),
+    )
 
 
 def _arbitrate_review_freight_totals(
@@ -1067,12 +1121,16 @@ def normalize_source_review_proposals(
     fx_rates: dict | None = None,
     existing_fees: list[dict] | None = None,
     transport_mode: str = "",
+    trusted_approved_proposal_ids: set[str] | frozenset[str] | None = None,
 ) -> list[dict]:
     """Validate model proposals against server-issued items and evidence documents."""
 
     items_by_name = {str(row.get("name") or ""): row for row in items or []}
     item_names = set(items_by_name)
     evidence = {str(row.get("document_id") or ""): row for row in documents or [] if row.get("document_id")}
+    trusted_approved_ids = {
+        str(proposal_id) for proposal_id in trusted_approved_proposal_ids or set()
+    }
     normalized = []
     seen = set()
     seen_payloads = set()
@@ -1177,9 +1235,10 @@ def normalize_source_review_proposals(
                 payload.get("amount"),
                 payload.get("currency"),
                 tuple(sorted(
-                    tuple(str(ref.get(fieldname) or "") for fieldname in
-                          ("document_id", "field", "sheet", "page", "row", "cell"))
-                    for ref in refs
+                    {
+                        _fee_ref_identity(ref, evidence)
+                        for ref in refs
+                    }
                 )),
             )
             if proposal_type == "fee_update"
@@ -1208,7 +1267,7 @@ def normalize_source_review_proposals(
                 "conflict_group": str(raw.get("conflict_group") or "")[:200],
                 "recommended": bool(raw.get("recommended")),
                 "carrier": str(raw.get("carrier") or "")[:100],
-                "approved_carrier": bool(raw.get("approved_carrier")) and system_origin,
+                "approved_carrier": proposal_id in trusted_approved_ids,
                 "alternatives": raw.get("alternatives") or [],
                 "default_selected": bool(raw.get("default_selected", confidence >= 0.9)) and confidence >= 0.9 and not conflict,
                 "payload": payload,
@@ -3841,6 +3900,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 enhanced_by_id.get(str(document.get("document_id") or ""), document)
                 for document in documents
             ]
+            trusted_approved_proposal_ids = {
+                str(proposal.get("proposal_id") or "")
+                for proposal in deterministic_proposals
+                if proposal.get("approved_carrier")
+                and str(proposal.get("proposal_id") or "")
+            }
             approved = {p["payload"]["logical_fee_key"]: p for p in deterministic_proposals if p.get("approved_carrier")}
             system_fields = {(p.get("target_item_name"), field) for p in deterministic_proposals if p.get("proposal_type") == "item_update" for field in p.get("payload", {}).get("fields", {})}
             supplemental_proposals = [deepcopy(p) for p in (ai_result.get("proposals") or []) if isinstance(p, dict) and isinstance(p.get("payload"), dict)]
@@ -3860,6 +3925,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 fx_rates=context.get("fx_rates") or {},
                 existing_fees=existing_fees,
                 transport_mode=str(context.get("transport_mode") or ""),
+                trusted_approved_proposal_ids=trusted_approved_proposal_ids,
             )
             # Bind policy only from deterministic server proposals, never model output.
             server_policies = {p['proposal_id']:p['_project_policy'] for p in deterministic_proposals if p.get('_project_policy')}

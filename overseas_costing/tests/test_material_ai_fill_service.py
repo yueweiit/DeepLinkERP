@@ -35,7 +35,10 @@ from overseas_costing.services.material_ai_fill_service import (
     validate_source_review_manual_updates,
     build_document_fee_proposals,
 )
-from overseas_costing.scripts.import_oa_logistics import _looks_like_quote_amount_line
+from overseas_costing.scripts.import_oa_logistics import (
+    _looks_like_quote_amount_line,
+    _quote_money_amount_matches,
+)
 
 
 def test_material_ai_timestamps_are_mariadb_datetime_compatible(monkeypatch) -> None:
@@ -639,18 +642,82 @@ def test_same_value_and_same_evidence_location_still_deduplicates_system_and_ai(
     assert normalized[0]["result_origin"] == "SYSTEM"
 
 
+def test_equivalent_unpaginated_refs_deduplicate_as_a_set() -> None:
+    document = {
+        "document_id": "DOC-1",
+        "source_ref": {"source": "approval_attachment", "file": "freight.pdf"},
+        "text": "air freight RMB 100",
+        "ai_eligible": False,
+    }
+    system = _review_fee(
+        "SYSTEM", "100", "international_air_freight", "DOC-1", None
+    )
+    system["result_origin"] = "SYSTEM"
+    system["source_refs"] = [
+        {"document_id": "DOC-1", "page": None},
+        {"document_id": "DOC-1", "page": None},
+    ]
+    ai = _review_fee("AI", "100", "international_air_freight", "DOC-1", None)
+    ai["source_refs"] = [{"document_id": "DOC-1", "page": 1}]
+
+    normalized = normalize_source_review_proposals(
+        [system, ai], _items(), [document], transport_mode="AIR"
+    )
+
+    assert [row["proposal_id"] for row in normalized] == ["SYSTEM"]
+
+
+def test_unique_semantic_cell_is_canonical_for_implicit_and_explicit_refs() -> None:
+    document = _fee_document("DOC-1", "air freight RMB 100")
+    document["ai_eligible"] = False
+    implicit = _review_fee(
+        "SYSTEM", "100", "international_air_freight", "DOC-1", 1
+    )
+    implicit["result_origin"] = "SYSTEM"
+    explicit = _review_fee("AI", "100", "international_air_freight", "DOC-1", 1)
+    explicit["source_refs"][0]["cell"] = "A1"
+
+    normalized = normalize_source_review_proposals(
+        [implicit, explicit], _items(), [document], transport_mode="AIR"
+    )
+
+    assert [row["proposal_id"] for row in normalized] == ["SYSTEM"]
+    assert normalized[0]["source_refs"][0]["cell"] == "A1"
+
+
 def test_ai_cannot_forge_an_approved_carrier_to_bypass_total_arbitration() -> None:
     document = _fee_document("DOC-1", "运费 RMB 100")
+    document["ai_eligible"] = False
     proposal = _review_fee("AI", "100", "international_air_freight", "DOC-1", 1)
     proposal["approved_carrier"] = True
+    proposal["result_origin"] = "SYSTEM"
 
     normalized = normalize_source_review_proposals(
         [proposal], _items(), [document], transport_mode="AIR"
     )
 
     assert normalized[0]["approved_carrier"] is False
+    assert normalized[0]["result_origin"] == "SYSTEM"
     assert normalized[0]["selection_role"] == "ambiguous"
     assert normalized[0]["default_selected"] is False
+
+
+def test_only_server_trusted_proposal_id_can_become_approved_quote() -> None:
+    document = _fee_document("DOC-1", "运费 RMB 100")
+    proposal = _review_fee("SYSTEM", "100", "international_air_freight", "DOC-1", 1)
+    proposal["approved_carrier"] = True
+
+    normalized = normalize_source_review_proposals(
+        [proposal],
+        _items(),
+        [document],
+        transport_mode="AIR",
+        trusted_approved_proposal_ids={"SYSTEM"},
+    )
+
+    assert normalized[0]["approved_carrier"] is True
+    assert normalized[0]["selection_role"] == "approved_quote"
+    assert normalized[0]["default_selected"] is True
 
 
 @pytest.mark.parametrize(
@@ -766,6 +833,47 @@ def test_freight_arbitration_validates_currency_inside_the_money_span() -> None:
     assert all(row["selection_role"] == "ambiguous" for row in normalized)
 
 
+def test_freight_total_cannot_borrow_money_from_another_cell_in_the_row() -> None:
+    document = {
+        "document_id": "DOC-1",
+        "source_ref": {"source": "approval_attachment", "file": "freight.xlsx"},
+        "semantic_rows": [
+            {
+                "sheet": "费用",
+                "source_row": 1,
+                "cells": [
+                    {"cell": "A1", "value": "合计费用 RMB 100"},
+                    {"cell": "B1", "value": "备注"},
+                ],
+            },
+            {
+                "sheet": "费用",
+                "source_row": 2,
+                "cells": [{"cell": "A2", "value": "空运费 RMB 60"}],
+            },
+            {
+                "sheet": "费用",
+                "source_row": 3,
+                "cells": [{"cell": "A3", "value": "港杂费 RMB 40"}],
+            },
+        ],
+    }
+    proposals = [
+        _review_fee("TOTAL", "100", "international_air_freight", "DOC-1", 1),
+        _review_fee("PART-1", "60", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-1", 3),
+    ]
+    proposals[0]["source_refs"][0]["cell"] = "B1"
+    proposals[0]["source_refs"].append({"document_id": "DOC-1", "row": 1})
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
 def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_validation() -> None:
     document = {
         "document_id": "DOC-PDF",
@@ -815,6 +923,8 @@ def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_v
         "total amount 2026 / 09 / 15 USD",
         "total amount USD 2026.09.15",
         "合计金额 RMB 2026.09.15",
+        "total amount USD 15 Sep 2026",
+        "USD 15-SEP-2026 total amount",
     ],
 )
 def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:
@@ -841,6 +951,35 @@ def test_document_fee_parser_keeps_normal_two_decimal_money_total() -> None:
     proposals = build_document_fee_proposals(source, document, transport_mode="AIR")
 
     assert [row["payload"]["amount"] for row in proposals] == ["10347"]
+
+
+def test_quote_money_matcher_only_takes_bounded_context_slices() -> None:
+    class TrackingText(str):
+        def __new__(cls, value):
+            instance = super().__new__(cls, value)
+            instance.slices = []
+            return instance
+
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                self.slices.append(key)
+            return super().__getitem__(key)
+
+    text = TrackingText(
+        ("description " * 10_000) + "total amount USD 100" + (" notes" * 10_000)
+    )
+
+    assert _quote_money_amount_matches(text) == [
+        ("100", (len("description " * 10_000) + 13, len("description " * 10_000) + 20))
+    ]
+    slice_widths = [
+        (len(text) if value.stop is None else value.stop)
+        - (0 if value.start is None else value.start)
+        for value in text.slices
+        if value.step in (None, 1)
+    ]
+    assert slice_widths
+    assert max(slice_widths) <= 64
 
 
 @pytest.mark.parametrize(
@@ -2477,6 +2616,9 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
             "source_label": "国际物流审批正文",
             "process_instance_id": "PROC-1",
             "form_fields": {"物流报价Cotización de logística": "DHL报价，251元"},
+            "approval_decisions": [
+                {"operation_result": "AGREE", "remark": "走DHL", "operation_time": "2026-09-15"}
+            ],
         }
     ]
     original_context = repository.get_context
@@ -2521,7 +2663,27 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
                     "confidence": 0.95,
                     "payload": {"fields": {"project_collection": "ADURO"}},
                     "source_refs": [{"document_id": documents[0]["document_id"], "field": "物流报价Cotización de logística"}],
-                }
+                },
+                {
+                    "proposal_id": "approval-fee:PROC-1:1",
+                    "proposal_type": "fee_update",
+                    "confidence": 0.99,
+                    "default_selected": True,
+                    "approved_carrier": True,
+                    "result_origin": "SYSTEM",
+                    "payload": {
+                        "logical_fee_key": "international_express_fee",
+                        "amount": "999",
+                        "currency": "RMB",
+                        "amount_status": "ESTIMATED",
+                    },
+                    "source_refs": [
+                        {
+                            "document_id": documents[0]["document_id"],
+                            "field": "物流报价Cotización de logística",
+                        }
+                    ],
+                },
             ],
             "warning": "",
         },
@@ -2532,11 +2694,16 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
     assert result["status"] == "READY", repository.run.get("error_message")
     proposals = repository.run["candidates_json"]
     assert {row["proposal_type"] for row in proposals} == {"item_update", "fee_update"}
+    assert {row["proposal_id"] for row in proposals} == {
+        "P-MATERIAL",
+        "approval-fee:PROC-1:1",
+    }
     fee = next(row for row in proposals if row["proposal_type"] == "fee_update")
     assert fee["payload"]["amount"] == "251"
-    assert fee["selection_role"] == "ambiguous"
-    assert fee["default_selected"] is False
-    assert repository.run["draft_json"]["selected_count"] == 1
+    assert fee["selection_role"] == "approved_quote"
+    assert fee["approved_carrier"] is True
+    assert fee["default_selected"] is True
+    assert repository.run["draft_json"]["selected_count"] == 2
 
 
 def test_deterministic_excel_candidate_preserves_sheet_row_and_cell_reference() -> None:
