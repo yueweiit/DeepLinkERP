@@ -2187,56 +2187,64 @@ def extract_logistics_fee_from_approval(item: dict) -> dict:
 
 
 def _parse_quote_total_amount(value: Any) -> float | None:
-    """报价合计行优先取等号后的总额，否则取最后一个金额。"""
+    """报价合计行优先取等号后经验证的总额。"""
 
     text = _clean(value).replace("，", ",")
     if not text:
         return None
-    numbers = re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?", text)
-    if not numbers:
+    amount_text = text.rsplit("=", 1)[1] if "=" in text else text
+    matches = _quote_money_amount_matches(amount_text)
+    if not matches:
         return None
-    if "=" in text:
-        after_equals = re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?", text.rsplit("=", 1)[1])
-        if after_equals:
-            numbers = after_equals
     try:
-        amount = float(numbers[-1].replace(",", ""))
+        amount = float(matches[-1][0].replace(",", ""))
     except ValueError:
         return None
     return amount if amount > 0 else None
 
 
-def _quote_money_amount_spans(text: str) -> list[tuple[int, int]]:
-    """Return complete currency/number spans that are not physical values or dates."""
+def _quote_money_amount_matches(text: str) -> list[tuple[str, tuple[int, int]]]:
+    """Return validated money text and span, excluding unit/date suffix matches."""
 
     currency_token = r"(?:元|rmb|cny|¥|￥|usd|us\$|美金|美元|mxn|peso|比索)"
     number_token = r"[-+]?\d[\d,]*(?:\.\d+)?"
     patterns = (
-        re.compile(
+        (re.compile(
             rf"(?P<currency>{currency_token})\s*[:：]?\s*(?P<number>{number_token})",
             re.IGNORECASE,
-        ),
-        re.compile(
+        ), False),
+        (re.compile(
             rf"(?P<number>{number_token})\s*(?P<currency>{currency_token})",
             re.IGNORECASE,
-        ),
+        ), True),
     )
     rejected_suffix = re.compile(
         r"^(?:m[3³]|cbm\b|kgs?\b|公斤|方|立方|件|pcs?\b|[%％]|"
         r"/(?:方|立方|cbm|m[3³]|kg|kgs?)\b|[/\-]\s*\d)",
         re.IGNORECASE,
     )
-    spans = []
-    for pattern in patterns:
+    matches = []
+    seen_spans = set()
+    for pattern, number_before_currency in patterns:
         for match in pattern.finditer(text):
+            if number_before_currency:
+                before_number = text[:match.start("number")].rstrip()
+                if before_number:
+                    previous = before_number[-1]
+                    if previous.isalnum() or previous in "._,/-/%％":
+                        continue
             # Inspect after the complete greedy number match in Python rather
             # than a regex lookahead that may backtrack 2026 to 202, etc.
             after_number = text[match.end("number"):].lstrip()
             after_money = text[match.end():].lstrip()
             if rejected_suffix.search(after_number) or rejected_suffix.search(after_money):
                 continue
-            spans.append(match.span())
-    return spans
+            span = match.span()
+            if span in seen_spans:
+                continue
+            seen_spans.add(span)
+            matches.append((match.group("number"), span))
+    return sorted(matches, key=lambda value: value[1])
 
 
 def _looks_like_quote_amount_line(line: str) -> bool:
@@ -2252,11 +2260,11 @@ def _looks_like_quote_amount_line(line: str) -> bool:
         text,
         re.IGNORECASE,
     ):
-        return bool(_quote_money_amount_spans(text))
+        return bool(_quote_money_amount_matches(text))
     if "=" not in text:
         return False
     after_equals = text.rsplit("=", 1)[1]
-    return bool(_quote_money_amount_spans(after_equals))
+    return bool(_quote_money_amount_matches(after_equals))
 
 
 def _parse_direct_quote_line(line: str) -> dict | None:
