@@ -322,3 +322,113 @@ def test_payment_match_sources_are_server_scoped_and_contain_stable_reference_on
     assert all(row["scoped_packing"] for row in sources)
     assert all("payment_match_status" not in row for row in sources)
     assert all("amount" not in row and "currency" not in row for row in sources)
+
+
+def test_payment_preview_uses_only_matched_line_when_catalog_row_is_unreadable(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import packing_selection
+
+    store, ledger, batch, version, logistics, source, candidate = payment_setup(
+        structured=True,
+        scope="freight",
+        amount="44075.13",
+        mode="EXPRESS",
+    )
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        amount="3322.784523",
+        currency="RMB",
+        label="DHL 快递运费",
+        billing_weight="42.05",
+        cargo_text="MWV101144 IP17PRO TPU 1pcs",
+        evidence={
+            "document_id": "payment-document-1",
+            "file_name": "DHL(6.29-7.24)快递明细.xlsx",
+            "sheet": "DHL",
+            "row": 8,
+        },
+    )
+    store.put(
+        "freight_line",
+        {
+            "id": line["id"],
+            "source_id": line["source_id"],
+            "snapshot": line["snapshot"],
+            "line_key": line["line_key"],
+            "waybill": line["waybill"],
+            "approval_no": line["approval_no"],
+            "charge_key": line["charge_key"],
+            "data": dumps(line),
+        },
+    )
+    candidate.update(method="explicit", issues=[])
+    store.put("freight_candidate", _candidate_values(candidate))
+    monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, []))
+
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    sources = service.preview_sources(
+        store, ledger, batch["name"], version["name"], reference, freight_mode=True
+    )
+
+    assert len(sources) == 1
+    preview = sources[0]
+    assert preview["workflow_stage"] == "payment"
+    assert preview["process_instance_id"] == source["instance"]
+    assert preview["source_kind"] == "approval_attachment"
+    assert preview["selected_source"]["document_id"] == "payment-document-1"
+    assert preview["scoped_goods"][0]["material_code"] == "MWV101144"
+    assert preview["scoped_goods"][0]["quantity"] == "1"
+    assert "运费金额: 3322.784523 RMB" in preview["scoped_text"]
+    assert "计费重量: 42.05 kg" in preview["scoped_text"]
+    assert "MWV101144 IP17PRO TPU 1pcs" in preview["scoped_text"]
+    assert "44075.13" not in preview["scoped_text"]
+
+
+def test_payment_preview_merges_matched_fee_line_into_same_document_snapshot(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import packing_selection
+
+    store, ledger, batch, version, logistics, source, candidate = payment_setup(
+        structured=True, scope="freight", amount="3322.784523", mode="EXPRESS"
+    )
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        label="DHL 快递运费",
+        evidence={"document_id": "doc", "file_name": "DHL.xlsx", "sheet": "DHL", "row": 8},
+    )
+    store.put(
+        "freight_line",
+        {
+            "id": line["id"], "source_id": line["source_id"], "snapshot": line["snapshot"],
+            "line_key": line["line_key"], "waybill": line["waybill"],
+            "approval_no": line["approval_no"], "charge_key": line["charge_key"],
+            "data": dumps(line),
+        },
+    )
+    candidate.update(method="explicit", issues=[])
+    store.put("freight_candidate", _candidate_values(candidate))
+    catalog_row = {
+        "id": "catalog-row", "source_id": source["id"], "source_kind": "approval_attachment",
+        "source_label": "DHL.xlsx · DHL", "approval_no": source["approval_no"],
+        "source_snapshot": source["snapshot"], "process_instance_id": source["instance"],
+        "evidence": {"document_id": "doc", "file_name": "DHL.xlsx", "sheet": "DHL"},
+        "document_id": "doc", "sheet": "DHL", "revision": "catalog-revision",
+        "goods": [{"material_code": "MWV101144", "quantity": "1"}],
+        "text": "装箱资料",
+    }
+    monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, [catalog_row]))
+
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    sources = service.preview_sources(
+        store, ledger, batch["name"], version["name"], reference, freight_mode=True
+    )
+
+    assert len(sources) == 1
+    assert sources[0]["scoped_goods"] == catalog_row["goods"]
+    assert sources[0]["scoped_text"].splitlines() == [
+        "装箱资料", "费用项目: DHL 快递运费", "运费金额: 3322.784523 RMB", "运单号: WB-1",
+    ]

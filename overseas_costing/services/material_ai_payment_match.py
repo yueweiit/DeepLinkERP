@@ -236,13 +236,18 @@ def preview_sources(
     if not source:
         return []
     from .logistics_settlement.packing_selection import _catalog
+    from .logistics_settlement.freight_packing import text_goods
 
     _logistics, catalog = _catalog(store, ledger, batch_name, version_name)
     rows = [row for row in catalog if row.get("source_id") == source.get("id")]
     result = []
+    covered_documents = {}
     for row in rows:
         if not (row.get("goods") or str(row.get("text") or "").strip()):
             continue
+        row_evidence = row.get("evidence") or {}
+        document_id = str(row.get("document_id") or row_evidence.get("document_id") or "")
+        document_key = (document_id, str(row.get("sheet") or row_evidence.get("sheet") or ""))
         evidence_id = digest(POLICY, clean, row.get("id"), row.get("revision"))
         selected_source = {
             key: deepcopy(row.get(key))
@@ -291,6 +296,113 @@ def preview_sources(
                 "scoped_goods": deepcopy(row.get("goods") or []),
                 "scoped_text": str(row.get("text") or ""),
                 "form_fields": {},
+                "approval_decisions": [],
+                "can_download": False,
+                "source_hash": evidence_id,
+                "content_hash": evidence_id,
+            }
+        )
+        if document_id:
+            covered_documents[document_key] = len(result) - 1
+    # A monthly payment attachment may have a valid, shipment-scoped freight
+    # line even when its packing catalog row is not readable (for example an
+    # older archive marked ``review`` instead of ``original``).  Reuse only the
+    # exact line IDs authenticated by the matcher.  Never expose the payment
+    # approval total or the other shipments in the monthly source.
+    for line_id in candidate.get("line_ids") or []:
+        line = store.get("freight_line", line_id) or {}
+        if (line.get("source_id") != source.get("id")
+                or line.get("snapshot") != source.get("snapshot")):
+            continue
+        evidence = deepcopy(line.get("evidence") or {})
+        document_id = str(evidence.get("document_id") or "")
+        sheet = str(evidence.get("sheet") or "")
+        cargo_text = str(line.get("cargo_text") or "").strip()
+        amount = line.get("amount")
+        billing_weight = line.get("billing_weight")
+        text_lines = []
+        if line.get("label"):
+            text_lines.append(f"费用项目: {line['label']}")
+        if amount is not None and str(amount).strip():
+            amount_label = "运费金额" if str(line.get("scope") or "") == "freight" else "费用金额"
+            text_lines.append(
+                f"{amount_label}: {amount} {str(line.get('currency') or source.get('currency') or '').strip()}".rstrip()
+            )
+        if line.get("waybill"):
+            text_lines.append(f"运单号: {line['waybill']}")
+        if line.get("approval_no"):
+            text_lines.append(f"关联审批号: {line['approval_no']}")
+        if billing_weight is not None and str(billing_weight).strip():
+            text_lines.append(f"计费重量: {billing_weight} kg")
+        if cargo_text:
+            text_lines.append(f"发货明细: {cargo_text}")
+        if not text_lines:
+            continue
+        if document_id and (document_id, sheet) in covered_documents:
+            existing = result[covered_documents[(document_id, sheet)]]
+            existing_text = str(existing.get("scoped_text") or "").strip()
+            matched_text = "\n".join(text_lines)
+            existing["scoped_text"] = "\n".join(filter(None, (existing_text, matched_text)))
+            existing["content_hash"] = digest(
+                existing.get("content_hash"), line_id, line.get("line_key"), matched_text
+            )
+            continue
+        source_kind = (
+            "approval_comment_attachment" if document_id and evidence.get("comment_id")
+            else "approval_attachment" if document_id
+            else "approval_comment" if evidence.get("comment_id")
+            else "approval_form"
+        )
+        file_name = str(evidence.get("file_name") or "")
+        source_label = file_name or str(source.get("title") or "实际付款流程")
+        if sheet:
+            source_label += f" · {sheet}"
+        evidence_id = digest(POLICY, clean, "freight_line", line_id, line.get("line_key"), evidence)
+        selected_source = {
+            "id": evidence_id,
+            "source_id": str(source.get("id") or ""),
+            "source_kind": source_kind,
+            "source_label": source_label,
+            "approval_no": str(source.get("approval_no") or ""),
+            "source_snapshot": str(source.get("snapshot") or ""),
+            "process_instance_id": str(source.get("instance") or ""),
+            "occurred_at": str(source.get("source_updated_at") or ""),
+            "evidence": evidence,
+            "revision": evidence_id,
+        }
+        if document_id:
+            selected_source["document_id"] = document_id
+        if sheet:
+            selected_source["sheet"] = sheet
+        scoped_text = "\n".join(text_lines)
+        scoped_goods = text_goods(cargo_text, evidence) if cargo_text else []
+        result.append(
+            {
+                "source_id": evidence_id,
+                "logical_source_id": evidence_id,
+                "source_kind": source_kind,
+                "source_label": source_label,
+                "file_name": file_name,
+                "sheet_name": sheet,
+                "approval_no": str(source.get("approval_no") or ""),
+                "process_instance_id": str(source.get("instance") or ""),
+                "approval_role": "payment",
+                "approval_title": str(source.get("title") or "实际付款流程"),
+                "source_updated_at": str(source.get("source_updated_at") or ""),
+                "available": True,
+                "excluded": False,
+                "selected": True,
+                "workflow_stage": "payment",
+                "workflow_rank": 0,
+                "payment_match_candidate": True,
+                "payment_match_candidate_id": clean["candidate_id"],
+                "payment_match_candidate_revision": clean["revision"],
+                "payment_match_version": clean["version"],
+                "selected_source": selected_source,
+                "scoped_packing": True,
+                "scoped_goods": scoped_goods,
+                "scoped_text": scoped_text,
+                "form_fields": {"物流报价": scoped_text} if source_kind == "approval_form" else {},
                 "approval_decisions": [],
                 "can_download": False,
                 "source_hash": evidence_id,
