@@ -2206,6 +2206,39 @@ def _parse_quote_total_amount(value: Any) -> float | None:
     return amount if amount > 0 else None
 
 
+def _quote_money_amount_spans(text: str) -> list[tuple[int, int]]:
+    """Return complete currency/number spans that are not physical values or dates."""
+
+    currency_token = r"(?:元|rmb|cny|¥|￥|usd|us\$|美金|美元|mxn|peso|比索)"
+    number_token = r"[-+]?\d[\d,]*(?:\.\d+)?"
+    patterns = (
+        re.compile(
+            rf"(?P<currency>{currency_token})\s*[:：]?\s*(?P<number>{number_token})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(?P<number>{number_token})\s*(?P<currency>{currency_token})",
+            re.IGNORECASE,
+        ),
+    )
+    rejected_suffix = re.compile(
+        r"^(?:m[3³]|cbm\b|kgs?\b|公斤|方|立方|件|pcs?\b|[%％]|"
+        r"/(?:方|立方|cbm|m[3³]|kg|kgs?)\b|[/\-]\s*\d)",
+        re.IGNORECASE,
+    )
+    spans = []
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            # Inspect after the complete greedy number match in Python rather
+            # than a regex lookahead that may backtrack 2026 to 202, etc.
+            after_number = text[match.end("number"):].lstrip()
+            after_money = text[match.end():].lstrip()
+            if rejected_suffix.search(after_number) or rejected_suffix.search(after_money):
+                continue
+            spans.append(match.span())
+    return spans
+
+
 def _looks_like_quote_amount_line(line: str) -> bool:
     """识别物流报价里的金额行，避免把重量、日期、型号误当成费用。"""
 
@@ -2214,38 +2247,16 @@ def _looks_like_quote_amount_line(line: str) -> bool:
         return False
     if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", text, re.IGNORECASE) and "=" not in text:
         return False
-    currency_token = r"(?:元|rmb|cny|¥|￥|usd|us\$|美金|美元|mxn|peso|比索)"
-    number_token = r"[-+]?\d[\d,]*(?:\.\d+)?"
-    money_amount = bool(
-        re.search(
-            rf"(?:{currency_token}\s*[:：]?\s*{number_token}|{number_token}\s*{currency_token})",
-            text,
-            re.IGNORECASE,
-        )
-    )
-    financial = bool(
-        re.search(
-            r"(?:应付|运费|费用|货款|金额|价款|价格|总额|总价|freight|shipping|amount|payable|price)",
-            text,
-            re.IGNORECASE,
-        )
-    )
     if re.search(
         r"(?:合计|总计|总额|总费用|总价|grand\s+total|total(?:\s+amount)?)",
         text,
         re.IGNORECASE,
     ):
-        return financial and money_amount
+        return bool(_quote_money_amount_spans(text))
     if "=" not in text:
         return False
     after_equals = text.rsplit("=", 1)[1]
-    if not re.search(
-        rf"(?:{currency_token}\s*[:：]?\s*{number_token}|{number_token}\s*{currency_token})",
-        after_equals,
-        re.IGNORECASE,
-    ):
-        return False
-    return bool(re.search(number_token, after_equals))
+    return bool(_quote_money_amount_spans(after_equals))
 
 
 def _parse_direct_quote_line(line: str) -> dict | None:

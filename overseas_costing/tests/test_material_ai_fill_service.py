@@ -717,6 +717,10 @@ def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_v
         "合计折扣 5%，币种 RMB",
         "合计日期 2026-09-15，币种 RMB",
         "合计金额 1.2m³，币种 RMB",
+        "合计金额 RMB 1.2m³",
+        "合计费用 RMB 98kg",
+        "合计金额 RMB 5%",
+        "total amount USD 2026/09/15",
     ],
 )
 def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:
@@ -734,6 +738,14 @@ def test_document_fee_parser_keeps_explicit_payable_money_total() -> None:
     proposals = build_document_fee_proposals(source, document, transport_mode="AIR")
 
     assert [row["payload"]["amount"] for row in proposals] == ["10347"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["合计 RMB 100", "总计 USD 100", "grand total USD 100"],
+)
+def test_quote_amount_line_accepts_bare_total_marker_with_adjacent_money(line) -> None:
+    assert _looks_like_quote_amount_line(line) is True
 
 
 def test_item_update_cannot_modify_readonly_purchase_identity_or_quantity() -> None:
