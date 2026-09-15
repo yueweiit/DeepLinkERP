@@ -312,6 +312,21 @@ for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','1056
 """)
 
 
+def test_unmatched_xlsx_group_is_read_only_and_not_default_selected():
+    run_ui(r"""
+const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G-NEW',member_keys:['L1','logistics:new'],
+    gross_weight_kg:'42.05',sheet_name:'Packing',default_selected:false,can_apply:false,
+    needs_member_confirmation:true,resolution_reason:'装箱组包含尚未确认新增的物料，成员未全部匹配现有物料。',
+    evidence:[{kind:'xlsx_merge'}]}]};
+fill.rowSelection=null;w.ensureMaterialAIRowSelection(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+assert(!fill.rowSelection.packingGroups.has('G-NEW'));
+assert(html.includes('data-mf-ai-packing-group-select="G-NEW"'));
+assert(html.includes('disabled'));
+assert(html.includes('成员未全部匹配现有物料'));
+""")
+
+
 def test_material_row_recovery_is_previewed_before_confirming_new_version():
     run_ui(r"""
 let confirmation='';global.frappe.confirm=(html,yes)=>{confirmation=html;yes()};

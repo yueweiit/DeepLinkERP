@@ -159,11 +159,8 @@ def _selected_packing_groups(items, candidates, selected_ids):
     if any(not candidate_id for candidate_id in by_id) or len(by_id)!=len(candidates):
         raise ValueError('装箱组候选标识无效，请重新分析。')
     if selected_ids is None:
-        selected_ids=[candidate_id for candidate_id,candidate in by_id.items() if (
-            candidate.get('default_selected') and candidate.get('can_apply')
-            or any(str(evidence.get('kind') or '') == 'xlsx_merge'
-                   for evidence in candidate.get('evidence') or [])
-        )]
+        selected_ids=[candidate_id for candidate_id,candidate in by_id.items()
+                      if candidate.get('default_selected') and candidate.get('can_apply')]
     if (not isinstance(selected_ids,list) or any(not isinstance(value,str) for value in selected_ids)
             or len(selected_ids)!=len(set(selected_ids))):
         raise ValueError('装箱组选择格式不正确。')
@@ -184,9 +181,7 @@ def _selected_packing_groups(items, candidates, selected_ids):
     occupied=set();selected=[]
     for candidate_id in selected_ids:
         candidate=by_id[candidate_id]
-        xlsx_merge=any(str(evidence.get('kind') or '') == 'xlsx_merge'
-                       for evidence in candidate.get('evidence') or [])
-        if not xlsx_merge and not candidate.get('can_apply'):
+        if not candidate.get('can_apply'):
             raise ValueError(candidate.get('resolution_reason') or '该装箱组成员尚未确认，不能采用。')
         members=[str(value or '') for value in candidate.get('member_keys') or []]
         if len(members)<2 or len(members)!=len(set(members)) or any(member not in stable_keys for member in members):

@@ -252,6 +252,32 @@ def test_packing_group_selection_tolerates_unrelated_legacy_rows_without_stored_
     assert preview['packing_group_candidates'][0]['member_keys']==['LINE-1','LINE-2']
 
 
+def test_unmatched_xlsx_group_is_not_implicitly_selected():
+    repo=Repo()
+    repo.items=[
+        {**repo.items[0],'stable_line_key':'LINE-1','row_no':1},
+        {'name':'I2','material_code':'SKU2','stable_line_key':'LINE-2','row_no':2,
+         'quantity':1,'actual_shipped_qty':1,'unit':'件','shipped_uom':'件'},
+    ]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'GROUP-NEW','member_keys':['LINE-1','logistics:new'],
+        'gross_weight_kg':'42.05','package_count':None,
+        'default_selected':False,'can_apply':False,
+        'needs_member_confirmation':True,
+        'resolution_reason':'装箱组包含尚未确认新增的物料，成员未全部匹配现有物料。',
+        'evidence':[{'kind':'xlsx_merge'}],
+    }]
+
+    preview=prepare(repo,ids=[],mode='update_selected')
+
+    assert preview['selected_packing_group_ids']==[]
+    assert preview['packing_group_candidates']==[]
+
+
 def test_preview_cleanup_shallow_copies_top_level_without_copying_large_nested_draft():
     payload='x'*1024
     large_analysis=[

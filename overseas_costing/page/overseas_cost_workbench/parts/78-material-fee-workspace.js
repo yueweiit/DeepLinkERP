@@ -1999,7 +1999,7 @@
     const feePolicy = this.materialAIReviewFeePolicy(fill);
     const fieldCandidates = Array.isArray(fill.row_review.field_candidates) ? fill.row_review.field_candidates : [];
     const packingCandidates = Array.isArray(fill.draft?.packing_group_candidates) ? fill.draft.packing_group_candidates : [];
-    const packingAllowed = candidate => candidate.can_apply || (candidate.evidence || []).some(row => String(row.kind || "") === "xlsx_merge");
+    const packingAllowed = candidate => Boolean(candidate.can_apply);
     if (!fill.rowSelection) fill.rowSelection = {
       mode: "update_selected",
       rows: new Set(fieldCandidates.length ? [] : (fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
@@ -2051,8 +2051,7 @@
       }
       if (id !== "add_selected" && !selection.packingGroups.size) {
         (fill.draft?.packing_group_candidates || []).filter(candidate =>
-          (candidate.can_apply && candidate.default_selected)
-          || (candidate.evidence || []).some(row => String(row.kind || "") === "xlsx_merge"))
+          candidate.can_apply && candidate.default_selected)
           .forEach(candidate => selection.packingGroups.add(String(candidate.candidate_id)));
       }
     } else if (kind === "fields") {
@@ -2063,7 +2062,7 @@
       }
     } else if (kind === "packingGroups") {
       const candidate = (fill.draft?.packing_group_candidates || []).find(row => String(row.candidate_id) === String(id));
-      const allowed = candidate?.can_apply || (candidate?.evidence || []).some(row => String(row.kind || "") === "xlsx_merge");
+      const allowed = Boolean(candidate?.can_apply);
       if (checked && allowed && selection.mode !== "add_selected") selection.packingGroups.add(String(id));
       else selection.packingGroups.delete(String(id));
     } else {
@@ -2166,7 +2165,7 @@
     const mergedAmountGroups = preview?.merged_amount_groups || fill.draft?.merged_amount_groups || [];
     const mergedAmountSummary = mergedAmountGroups.length ? `<section class="ocw-mf-ai-preview-section"><h4>合并金额校验</h4><ul>${mergedAmountGroups.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · 第 ${this.escape(group.source_range?.start_row ?? group.source_row ?? "--")}-${this.escape(group.source_range?.end_row ?? group.source_row ?? "--")} 行 · 组总额 ${this.escape(group.control_total_rmb ?? "--")} · 独立行合计 ${this.escape(group.computed_total_rmb ?? "--")} · ${group.status === "verified" ? "已校验" : "待人工分摊"}</li>`).join("")}</ul></section>` : "";
     const packingGroupCandidates = fill.draft?.packing_group_candidates || preview?.packing_group_candidates || [];
-    const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>默认仅采用 Excel 真实合并范围或服务端唯一匹配的评论组；可在确认前单独取消。已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => { const allowed = group.can_apply || (group.evidence || []).some(row => String(row.kind || "") === "xlsx_merge"); return `<li><label><input type="checkbox" data-mf-ai-packing-group-select="${this.escape(group.candidate_id)}" ${selection.packingGroups.has(String(group.candidate_id)) ? "checked" : ""} ${!allowed || busy ? "disabled" : ""}> ${this.escape(group.source_label || group.sheet_name || group.source_id || "装箱单")}</label> · ${Number(group.member_keys?.length || 0)} 行 · 成员 ${this.escape((group.member_labels || group.member_keys || []).join("、") || "待选择")} · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³${group.weight_basis === "inferred_unqualified_weight_as_gross" ? " · 未注明口径，按组毛重候选" : ""}<small>${this.escape(group.resolution_reason || "")}</small></li>`; }).join("")}</ul></section>` : "";
+    const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>默认仅采用已完整匹配现有物料的 Excel 合并范围或评论组；成员未确认的组只读展示。已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => { const allowed = Boolean(group.can_apply); return `<li><label><input type="checkbox" data-mf-ai-packing-group-select="${this.escape(group.candidate_id)}" ${selection.packingGroups.has(String(group.candidate_id)) ? "checked" : ""} ${!allowed || busy ? "disabled" : ""}> ${this.escape(group.source_label || group.sheet_name || group.source_id || "装箱单")}</label> · ${Number(group.member_keys?.length || 0)} 行 · 成员 ${this.escape((group.member_labels || group.member_keys || []).join("、") || "待选择")} · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³${group.weight_basis === "inferred_unqualified_weight_as_gross" ? " · 未注明口径，按组毛重候选" : ""}<small>${this.escape(group.resolution_reason || "")}</small></li>`; }).join("")}</ul></section>` : "";
     const fieldLabels = Object.fromEntries(columns);
     const workflowLabels = { payment: "支付申请", international_logistics: "国际物流审批", purchase: "商品采购支出", other: "其他来源" };
     const evidenceLabels = { dedicated_attachment: "专用附件", approval_form: "审批正文", attachment: "其他相关附件", comment: "评论", other: "其他证据" };

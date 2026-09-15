@@ -2889,40 +2889,68 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
         original_preview['shipment_fill'] = shipment_fill
         shipment_fill['attempted_item_names'] = [item['name'] for item in matched_items] if has_values else []
         sheet_name = str((preview.get('source') or {}).get('sheet_name') or source.get('sheet_name') or '')
-        def persisted_member_key(target_key):
+        def persisted_member(target_key):
             target = next(
                 (item for item in items if item.get('stable_line_key') == target_key),
                 {},
             )
             existing_name = str(target.get('_existing_name') or '').strip()
             if existing_name and '_existing_stable_line_key' in target:
-                return (
+                key = (
                     str(target.get('_existing_stable_line_key') or '').strip()
                     or f'legacy:{existing_name}'
                 )
-            return str(target_key or '').strip()
+                persisted = True
+            else:
+                key = str(target_key or '').strip()
+                # Reconciliation rows explicitly carry ``_existing_name``.
+                # An empty value means the row is only a proposed addition and
+                # cannot be a member of a group while updating existing rows.
+                persisted = bool(target) and (
+                    '_existing_name' not in target or bool(existing_name)
+                )
+            label = str(
+                target.get('material_code')
+                or target.get('product_name')
+                or existing_name
+                or key
+            )
+            return {'key': key, 'label': label, 'persisted': persisted}
 
-        row_keys = {int(row.get('source_row')):persisted_member_key(row.get('_target_stable_line_key'))
+        row_members = {int(row.get('source_row')):persisted_member(row.get('_target_stable_line_key'))
                     for row in preview.get('material_rows') or [] if row.get('source_row')}
-        shipment_fill['packing_group_candidates'] = [
-            {'candidate_id':digest('xlsx-packing-group', source.get('source_hash'), sheet_name,
-                                   group.get('group_id'), group.get('row_numbers')),
-             'member_keys':[row_keys[number] for number in group.get('row_numbers') or [] if row_keys.get(number)],
-             'package_count':(group.get('package_count') or {}).get('value'),
-             'net_weight_kg':(group.get('net_weight_kg') or {}).get('value'),
-             'gross_weight_kg':(group.get('gross_weight_kg') or {}).get('value'),
-             'volume_m3':(group.get('volume_m3') or {}).get('value'),
-             'source_fingerprint':source.get('source_hash') or source.get('content_hash'),
-             'creation_method':'xlsx_merge','source_id':source.get('source_id'),
-             'sheet_name':sheet_name,'evidence':deepcopy(group.get('evidence') or [])}
-            for group in preview.get('groups') or []
-            if not group.get('needs_confirmation')
-            and len(group.get('row_numbers') or []) > 1
-            and any(str(evidence.get('kind') or '') == 'xlsx_merge'
-                    for evidence in group.get('evidence') or [])
-            and len([row_keys[number] for number in group.get('row_numbers') or [] if row_keys.get(number)])
-                == len(group.get('row_numbers') or [])
-        ]
+        packing_group_candidates = []
+        for group in preview.get('groups') or []:
+            row_numbers = group.get('row_numbers') or []
+            if (group.get('needs_confirmation') or len(row_numbers) <= 1
+                    or not any(str(evidence.get('kind') or '') == 'xlsx_merge'
+                               for evidence in group.get('evidence') or [])
+                    or len([number for number in row_numbers if row_members.get(number)])
+                       != len(row_numbers)):
+                continue
+            members = [row_members[number] for number in row_numbers]
+            can_apply = all(member['persisted'] for member in members)
+            packing_group_candidates.append({
+                'candidate_id':digest('xlsx-packing-group', source.get('source_hash'), sheet_name,
+                                      group.get('group_id'), row_numbers),
+                'member_keys':[member['key'] for member in members],
+                'member_labels':[member['label'] for member in members],
+                'package_count':(group.get('package_count') or {}).get('value'),
+                'net_weight_kg':(group.get('net_weight_kg') or {}).get('value'),
+                'gross_weight_kg':(group.get('gross_weight_kg') or {}).get('value'),
+                'volume_m3':(group.get('volume_m3') or {}).get('value'),
+                'source_fingerprint':source.get('source_hash') or source.get('content_hash'),
+                'creation_method':'xlsx_merge','source_id':source.get('source_id'),
+                'sheet_name':sheet_name,'evidence':deepcopy(group.get('evidence') or []),
+                'can_apply':can_apply,'default_selected':can_apply,
+                'needs_member_confirmation':not can_apply,
+                'resolution_reason':(
+                    'Excel 合并范围已匹配到现有物料，可作为装箱组采用。'
+                    if can_apply else
+                    'Excel 合并范围包含尚未确认新增的物料，成员未全部匹配现有物料；请先确认新增物料或手工选择成员。'
+                ),
+            })
+        shipment_fill['packing_group_candidates'] = packing_group_candidates
         original_preview.setdefault('autofill_warnings', []).extend(shipment_fill['warnings'])
         for name, project in shipment_fill['projects'].items():
             target = next(item for item in matched_items if item['name'] == name)
