@@ -136,7 +136,7 @@ const fill=ready();fill.row_review.fees=[
  {proposal_id:'AIR',selection_role:'component',parent_proposal_id:'TOTAL',payload:{expense_category:'国际空运费',amount:'9367.46',currency:'RMB',source_label:'费用明细',remark:'空运分项'},can_apply:false,default_selected:false,blocked_reason:'已裁决总额的分项'},
  {proposal_id:'PORT',selection_role:'component',parent_proposal_id:'TOTAL',payload:{expense_category:'港杂与货代费',amount:'979.53',currency:'RMB',remark:'港杂分项'},can_apply:false,default_selected:false},
  {proposal_id:'ALT',selection_role:'alternative',payload:{expense_category:'其他空运报价',amount:'613.90',currency:'RMB',source_label:'历史报价'},can_apply:false,default_selected:false,blocked_reason:'已有明确总额，该报价不可采用'},
- {proposal_id:'AMB',selection_role:'ambiguous',payload:{expense_category:'待核对运费',amount:'700',currency:'RMB'},can_apply:true,default_selected:false},
+ {proposal_id:'AMB',selection_role:'ambiguous',payload:{expense_category:'待核对运费',amount:'700',currency:'RMB'},can_apply:false,default_selected:false},
  {proposal_id:'APPROVED',selection_role:'approved_quote',payload:{expense_category:'审批采用报价',amount:'800',currency:'RMB'},can_apply:true,default_selected:true},
  {proposal_id:'PLAIN',payload:{expense_category:'普通候选',amount:'12',currency:'RMB'},can_apply:true,default_selected:false},
 ];
@@ -216,6 +216,26 @@ assert(logistics.includes('data-mf-ai-fee-select="LOG-APPROVED"'));assert(logist
 """)
 
 
+def test_higher_stage_resolved_fee_keeps_lower_stage_server_candidate_and_switches_both_ways():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[],fees:[
+ {proposal_id:'PAY-APPROVED',workflow_stage:'payment',workflow_rank:0,selection_role:'approved_quote',payload:{logical_fee_key:'international_air_freight',expense_category:'支付运费',amount:'110',currency:'RMB'},can_apply:true,default_selected:true},
+ {proposal_id:'LOG-AMBIGUOUS',workflow_stage:'international_logistics',workflow_rank:1,selection_role:'ambiguous',payload:{logical_fee_key:'international_air_freight',expense_category:'物流运费',amount:'100',currency:'RMB'},can_apply:true,default_selected:false},
+],stage_snapshots:[
+ {stage:'payment',status:'UNAVAILABLE',rows:[],processes:[]},{stage:'international_logistics',status:'UNAVAILABLE',rows:[],processes:[]},{stage:'purchase',status:'UNAVAILABLE',rows:[],processes:[]},
+],fee_stage_snapshots:[
+ {stage:'payment',status:'AVAILABLE',processes:[],fees:[{proposal_id:'PAY-APPROVED'}]},
+ {stage:'international_logistics',status:'AVAILABLE',processes:[],fees:[{proposal_id:'LOG-AMBIGUOUS'}]},
+]};
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
+assert.deepEqual([...selection.fees],['PAY-APPROVED']);
+const html=w.renderMaterialAIReviewDialogContent();
+for(const id of ['PAY-APPROVED','LOG-AMBIGUOUS'])assert(html.includes(`data-mf-ai-fee-select="${id}"`),id);
+w.changeMaterialAIRowSelection('fees','LOG-AMBIGUOUS',true);assert.deepEqual([...selection.fees],['LOG-AMBIGUOUS']);
+w.changeMaterialAIRowSelection('fees','PAY-APPROVED',true);assert.deepEqual([...selection.fees],['PAY-APPROVED']);
+""")
+
+
 def test_current_policy_keeps_unclassified_packing_and_fee_candidates_auditable_and_selectable_by_server_flags():
     run_ui(r"""
 const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[
@@ -269,11 +289,11 @@ for(const id of ['FREIGHT','CUSTOMS'])assert(html.includes(`type="checkbox" data
 """)
 
 
-def test_resolved_fee_total_excludes_ambiguous_and_unknown_roles_from_all_selection_paths():
+def test_server_blocked_ambiguous_and_unknown_roles_are_excluded_from_all_selection_paths():
     run_ui(r"""
 const fill=ready();fill.row_review.fees=[
  {proposal_id:'TOTAL',selection_role:'primary_total',payload:{expense_category:'已裁决总额',amount:'200',currency:'RMB'},can_apply:true,default_selected:true},
- {proposal_id:'AMB',selection_role:'ambiguous',payload:{expense_category:'歧义运费',amount:'199',currency:'RMB'},can_apply:true,default_selected:true,blocked_reason:'已有裁决总额'},
+ {proposal_id:'AMB',selection_role:'ambiguous',payload:{expense_category:'歧义运费',amount:'199',currency:'RMB'},can_apply:false,default_selected:true,blocked_reason:'已有裁决总额'},
  {proposal_id:'FUTURE',selection_role:'future_role',payload:{expense_category:'未知角色费用',amount:'88',currency:'RMB'},can_apply:true,default_selected:true},
 ];
 delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};

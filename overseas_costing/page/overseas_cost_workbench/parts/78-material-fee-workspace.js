@@ -1995,26 +1995,15 @@
 
   materialAIReviewFeePolicy(fill) {
     const fees = fill?.row_review?.fees || [];
-    const resolvedFees = fees.filter(fee => ["primary_total", "approved_quote"].includes(String(fee.selection_role || "")));
-    const stageRank = fee => {
-      const rawRank = fee.workflow_rank;
-      const explicit = rawRank === null || rawRank === undefined || String(rawRank).trim() === "" ? NaN : Number(rawRank);
-      if (Number.isFinite(explicit)) return explicit;
-      return ({ payment: 0, international_logistics: 1, purchase: 2, other: 3 }[String(fee.workflow_stage || "other")] ?? 3);
-    };
-    const resolvedBlockedIds = new Set(fees.filter(fee => String(fee.selection_role || "") === "ambiguous")
-      .filter(fee => resolvedFees.some(resolved => resolved !== fee && this.materialAIFeesOverlap(fee, resolved) && stageRank(resolved) <= stageRank(fee)))
-      .map(fee => String(fee.proposal_id)));
     const mainFees = fees.filter(fee => {
       const role = String(fee.selection_role || "");
       if (["", "primary_total", "approved_quote"].includes(role)) return true;
-      if (role !== "ambiguous") return false;
-      return !resolvedBlockedIds.has(String(fee.proposal_id));
+      return role === "ambiguous" && fee.can_apply;
     });
     const mainIds = new Set(mainFees.map(fee => String(fee.proposal_id)));
     const selectableIds = new Set(mainFees.filter(fee => fee.can_apply).map(fee => String(fee.proposal_id)));
     const otherFees = fees.filter(fee => String(fee.selection_role || "") !== "component" && !mainIds.has(String(fee.proposal_id)));
-    return { fees, mainFees, selectableIds, otherFees, resolvedBlockedIds };
+    return { fees, mainFees, selectableIds, otherFees };
   }
 
   ensureMaterialAIRowSelection(fill) {
@@ -2484,7 +2473,7 @@
     };
     const otherFeeRecords = otherFees.length ? `<section class="ocw-mf-ai-other-fees" data-mf-ai-other-fees="1"><h4>其他费用记录（只读 · 不可采用）</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>金额</th><th>币种</th><th>来源 / 说明</th><th>不可采用原因</th></tr></thead><tbody>${otherFees.map(fee => {
       const values = fee.payload || fee;
-      const reason = fee.blocked_reason || (feePolicy.resolvedBlockedIds.has(String(fee.proposal_id)) ? "已有同或更高阶段的同范围裁决总额，该歧义候选不可采用。" : "该记录角色不可采用，仅供参考。");
+      const reason = fee.blocked_reason || "服务器已将该记录标记为不可采用，仅供参考。";
       return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(reason)}</td></tr>`;
     }).join("")}</tbody></table></div></section>` : "";
     const hasFeeStages = Array.isArray(catalog.fee_stage_snapshots);
