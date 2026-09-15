@@ -269,6 +269,13 @@ def rank_material_packing_sources(sources: list[dict]) -> list[dict]:
             and row.get("actual_packing_source")
             and _actual_match_identity(row) == matched_identity
         )
+        if row.get("actual_packing_source") and not is_matched:
+            row.update(
+                workflow_stage="other",
+                workflow_rank=WORKFLOW_RANKS["other"],
+                evidence_kind="other",
+                evidence_rank=EVIDENCE_RANKS["other"],
+            )
         if status == "ambiguous" and row.get("actual_packing_source"):
             row.update(
                 analysis_allowed=False,

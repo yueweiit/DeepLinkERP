@@ -671,6 +671,7 @@ def test_freight_pdf_attachment_keeps_totals_and_never_emits_unit_rates() -> Non
         ],
         _items(),
         [document],
+        trusted_system_proposal_ids={row["proposal_id"] for row in deterministic},
     )
 
     assert [row["payload"]["amount"] for row in normalized] == ["58350", "105000"]
@@ -778,10 +779,11 @@ def test_review_freight_total_arbitration_corrects_air_key_and_marks_full_candid
     )
     by_id = {row["proposal_id"]: row for row in normalized}
 
-    for proposal_id in ("TOTAL", "AIR", "VOLUME", "OTHER"):
+    for proposal_id in ("TOTAL", "AIR", "OTHER"):
         assert by_id[proposal_id]["payload"]["logical_fee_key"] == "international_air_freight"
         assert by_id[proposal_id]["payload"]["expense_category"] == "国际空运费"
         assert by_id[proposal_id]["payload"]["allocation_basis"] == "chargeable_weight"
+    assert "VOLUME" not in by_id  # 1.2m³ is not money at the cited locator.
     assert by_id["PORT"]["payload"]["logical_fee_key"] == "port_and_forwarder_charges"
     assert by_id["SURCHARGE"]["payload"]["logical_fee_key"] == "express_surcharge"
     assert by_id["TOTAL"]["selection_role"] == "primary_total"
@@ -793,7 +795,7 @@ def test_review_freight_total_arbitration_corrects_air_key_and_marks_full_candid
         assert by_id[proposal_id]["selection_role"] == "component"
         assert by_id[proposal_id]["parent_proposal_id"] == "TOTAL"
         assert by_id[proposal_id]["default_selected"] is False
-    for proposal_id in ("VOLUME", "OTHER"):
+    for proposal_id in ("OTHER",):
         assert by_id[proposal_id]["selection_role"] == "alternative"
         assert by_id[proposal_id]["default_selected"] is False
     decorated = {
@@ -803,7 +805,7 @@ def test_review_freight_total_arbitration_corrects_air_key_and_marks_full_candid
         )
     }
     assert decorated["TOTAL"]["can_apply"] is True
-    for proposal_id in ("AIR", "PORT", "SURCHARGE", "VOLUME", "OTHER"):
+    for proposal_id in ("AIR", "PORT", "SURCHARGE", "OTHER"):
         assert decorated[proposal_id]["can_apply"] is False
         assert "只读" in decorated[proposal_id]["blocked_reason"]
 
@@ -1086,6 +1088,9 @@ def test_freight_total_arbitration_requires_explicit_currency_on_every_participa
         proposals, _items(), [document], transport_mode="AIR"
     )
 
+    if all(currency is None for currency in currencies):
+        assert normalized == []
+        return
     assert normalized
     assert all(row["selection_role"] == "ambiguous" for row in normalized)
     assert all(row["default_selected"] is False for row in normalized)
@@ -1247,6 +1252,75 @@ def test_freight_arbitration_validates_each_component_amount_at_its_evidence_ref
     assert normalized
     assert all(row["selection_role"] == "ambiguous" for row in normalized)
     assert all(row["default_selected"] is False for row in normalized)
+
+
+def test_ai_fee_amount_must_exist_at_its_canonical_evidence_locator() -> None:
+    document = _fee_document("DOC-1", "国际运费 RMB 120")
+    forged = _review_fee(
+        "FORGED", "999999", "international_air_freight", "DOC-1", 1
+    )
+    forged["result_origin"] = "SYSTEM"
+
+    normalized = normalize_source_review_proposals(
+        [forged], _items(), [document], transport_mode="AIR"
+    )
+
+    assert normalized == []
+
+
+def test_server_marked_deterministic_fee_can_bypass_text_locator_validation() -> None:
+    document = _fee_document("DOC-1", "承运商报价已由系统解析")
+    proposal = _review_fee(
+        "SYSTEM", "120", "international_air_freight", "DOC-1", 1
+    )
+
+    normalized = normalize_source_review_proposals(
+        [proposal], _items(), [document], transport_mode="AIR",
+        trusted_system_proposal_ids={"SYSTEM"},
+    )
+
+    assert [row["proposal_id"] for row in normalized] == ["SYSTEM"]
+
+
+def test_fee_with_two_payment_process_refs_is_blocked_from_manual_selection() -> None:
+    first = _fee_document("DOC-PAY-1", "应付运费 RMB 120")
+    first["source_ref"].update(
+        process_instance_id="PAY-1", workflow_stage="payment",
+        workflow_rank=0, evidence_kind="approval_form", evidence_rank=1,
+    )
+    second = _fee_document("DOC-PAY-2", "应付运费 RMB 120")
+    second["source_ref"].update(
+        process_instance_id="PAY-2", workflow_stage="payment",
+        workflow_rank=0, evidence_kind="approval_form", evidence_rank=1,
+    )
+    proposal = _review_fee(
+        "MULTI-PAY", "120", "international_air_freight", "DOC-PAY-1", 1
+    )
+    proposal["source_refs"].append({"document_id": "DOC-PAY-2", "row": 1})
+
+    normalized = normalize_source_review_proposals(
+        [proposal], _items(), [first, second], transport_mode="AIR"
+    )
+    decorated = material_ai_fill_service.material_ai_fee_policy.decorate(
+        normalized, [], {}
+    )
+
+    assert normalized[0]["source_stage_conflict"] is True
+    assert normalized[0]["default_selected"] is False
+    assert normalized[0]["source_policy_blocked"]
+    assert decorated[0]["can_apply"] is False
+
+
+def test_ai_recommended_flag_is_cleared_when_server_has_no_winner() -> None:
+    document = _fee_document("DOC-1", "清关费 RMB 120")
+    proposal = _review_fee("AI", "120", "customs_clearance_fee", "DOC-1", 1)
+    proposal["recommended"] = True
+
+    normalized = normalize_source_review_proposals(
+        [proposal], _items(), [document], transport_mode="AIR"
+    )
+
+    assert normalized[0]["recommended"] is False
 
 
 def test_freight_total_cannot_borrow_money_from_another_cell_in_the_row() -> None:

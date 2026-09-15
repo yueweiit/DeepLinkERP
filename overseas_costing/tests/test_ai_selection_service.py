@@ -140,6 +140,69 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
     assert receipt['revision']==response['preview']['revision']
 
 
+def test_payment_match_receipt_contains_only_server_candidate_reference():
+    repo=Repo()
+    repo.sources[0].update(
+        payment_match_candidate=True,
+        payment_match_candidate_id='FC-1',
+        payment_match_candidate_revision='FR-1',
+        payment_match_version='V1',
+        scoped_text='应付运费 RMB 120',
+        scoped_goods=[{'material_code':'SECRET-SKU','quantity':2}],
+    )
+    repo.run['source_manifest_json']=deepcopy(repo.sources)
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+
+    response=service.prepare('B1',repo.run['name'],[],[],'fill_missing','V1',repository=repo)
+    public=response['preview']['payment_match_candidate']
+    receipt=repo.run['draft_json']['row_previews'][response['preview']['id']]
+
+    assert public=={'candidate_id':'FC-1','revision':'FR-1','version':'V1'}
+    assert receipt['payment_match_candidate']==public
+    serialized=json.dumps(receipt,ensure_ascii=False)
+    assert '120' not in serialized and 'SECRET-SKU' not in serialized
+
+
+def test_conflicting_payment_candidate_references_are_not_authenticated():
+    repo=Repo()
+    first={
+        **repo.sources[0],
+        'source_id':'PAY-1',
+        'payment_match_candidate':True,
+        'payment_match_candidate_id':'FC-1',
+        'payment_match_candidate_revision':'FR-1',
+        'payment_match_version':'V1',
+    }
+    second={
+        **first,
+        'source_id':'PAY-2',
+        'payment_match_candidate_id':'FC-2',
+        'payment_match_candidate_revision':'FR-2',
+    }
+    repo.sources=[first,second]
+    repo.run['source_manifest_json']=deepcopy(repo.sources)
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+
+    preview=service.prepare('B1',repo.run['name'],[],[],'fill_missing','V1',repository=repo)['preview']
+
+    assert preview.get('payment_match_candidate') is None
+
+
+def test_old_lightweight_receipt_policy_must_be_repreviewed():
+    repo=Repo();preview=prepare(repo)
+    receipt=repo.run['draft_json']['row_previews'][preview['id']]
+    receipt['receipt_policy']='ai-field-preview-receipt-2'
+
+    with pytest.raises(ValueError,match='规则已升级'):
+        confirm(repo,preview)
+
+
 def test_public_catalog_and_preview_replace_process_instance_ids_with_stable_opaque_ids():
     repo = Repo()
     raw_process_id = 'SECRET-PROCESS-INSTANCE-123'

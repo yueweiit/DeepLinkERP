@@ -181,6 +181,25 @@ def scoped_goods(items):
     return goods
 
 
+def _confirm_and_reconstruct_payment_match(store,ledger,run,preview,draft,context,actor,*,repository=None,freight_mode=None):
+    reference=preview.get('payment_match_candidate')
+    if not reference:
+        return preview,context
+    from . import material_ai_payment_match, material_ai_selection_service
+    from .logistics_settlement import runtime
+    enabled=runtime.freight_enabled() if freight_mode is None else bool(freight_mode)
+    material_ai_payment_match.confirm_preview_candidate(
+        store,ledger,preview['batch'],reference,actor,freight_mode=enabled)
+    # Confirmation changes settlement authority. Re-read all sources and
+    # rebuild rows/fees before any business record is written, within the same
+    # savepoint that owns the candidate transition.
+    if repository is None:
+        from .material_ai_fill_service import FrappeMaterialAIFillRepository
+        repository=FrappeMaterialAIFillRepository()
+    return material_ai_selection_service.reconstruct_after_payment_match(
+        repository,run,preview,draft)
+
+
 def apply_selection(run,preview,draft,context):
     import frappe
     from . import material_ai_fill_service as ai, fee_service
@@ -190,6 +209,8 @@ def apply_selection(run,preview,draft,context):
     from .logistics_settlement.freight_adoption import refresh_item_contexts
     store=Store.frappe();ledger=FrappeLedger()
     with store.atomic():
+        preview,context=_confirm_and_reconstruct_payment_match(
+            store,ledger,run,preview,draft,context,frappe.session.user)
         version_name=write_rows(store,ledger,preview,context) if (
             preview['selected_row_ids'] or preview.get('selected_field_choices')
             or any(candidate.get('default_selected') and candidate.get('can_apply')

@@ -2,7 +2,7 @@ from copy import deepcopy
 import json
 from overseas_costing.tests.test_freight_lines import setup_cost
 from overseas_costing.services import material_ai_row_selection as rows
-from overseas_costing.services.material_ai_selection_writer import write_rows
+from overseas_costing.services.material_ai_selection_writer import write_rows, _confirm_and_reconstruct_payment_match
 from overseas_costing.services.effective_logistics_source import load_source_bundle
 from overseas_costing.services.logistics_settlement.model import dumps
 
@@ -132,6 +132,32 @@ def test_frozen_version_write_is_rejected():
     p=selection(ledger.rows('item',version=v['name']),ctx,v['name'],b['name'])
     ledger.put('version',v['name'],{'status':'Confirmed'})
     with pytest.raises(ValueError,match='冻结'):write_rows(store,ledger,p,ctx)
+
+
+def test_pending_payment_match_is_confirmed_before_locked_preview_is_recomputed(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match, material_ai_selection_service
+
+    events=[]
+    preview={'batch':'B1','payment_match_candidate':{
+        'candidate_id':'FC-1','revision':'FR-1','version':'V1'}}
+    refreshed={**preview,'recomputed':True}
+    monkeypatch.setattr(material_ai_payment_match,'confirm_preview_candidate',
+        lambda store,ledger,batch,reference,actor,freight_mode: events.append(
+            ('confirm',batch,reference,actor,freight_mode)))
+    def reconstruct(repository,run,current,draft):
+        assert events and events[0][0]=='confirm'
+        events.append(('recompute',repository))
+        return refreshed,{'locked':True}
+    monkeypatch.setattr(material_ai_selection_service,'reconstruct_after_payment_match',reconstruct)
+
+    result,context=_confirm_and_reconstruct_payment_match(
+        object(),object(),{'name':'RUN'},preview,{}, {},'user',repository='repo',freight_mode=True)
+
+    assert result is refreshed and context=={'locked':True}
+    assert events==[
+        ('confirm','B1',preview['payment_match_candidate'],'user',True),
+        ('recompute','repo'),
+    ]
 
 
 def test_structured_attachment_valuation_survives_row_review_and_is_persisted_without_purchase_link():

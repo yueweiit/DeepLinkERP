@@ -5,7 +5,7 @@ from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
-RECEIPT_POLICY = 'ai-field-preview-receipt-2'
+RECEIPT_POLICY = 'ai-field-preview-receipt-3'
 
 
 def _sources_with_progress(sources, progress):
@@ -157,7 +157,27 @@ def _preview_revision(context,items,sources,current_fees,catalog,selection,depen
         rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],
         selection['selected_row_ids'],selection['selected_fee_ids'],selection.get('selected_field_choices'),selection['mode'],dependencies,
         selection.get('merged_amount_groups') or [],selection.get('selected_packing_group_ids') or [],
+        selection.get('payment_match_candidate'),
     )
+
+
+def _payment_match_reference(sources, version):
+    references={
+        (
+            str(source.get('payment_match_candidate_id') or ''),
+            str(source.get('payment_match_candidate_revision') or ''),
+            str(source.get('payment_match_version') or ''),
+        )
+        for source in sources or []
+        if source.get('payment_match_candidate')
+    }
+    references.discard(('', '', ''))
+    if len(references)!=1:
+        return None
+    candidate_id,revision,candidate_version=next(iter(references))
+    if not candidate_id or not revision or candidate_version!=str(version or ''):
+        return None
+    return {'candidate_id':candidate_id,'revision':revision,'version':candidate_version}
 
 
 def _preview_receipt(preview):
@@ -166,7 +186,7 @@ def _preview_receipt(preview):
         'id','revision','run_id','batch','version','mode','selected_row_ids','selected_fee_ids',
         'selected_field_choices',
         'dependencies','input_fingerprint','fee_fingerprint','catalog_fingerprint',
-        'selected_packing_group_ids',
+        'selected_packing_group_ids','payment_match_candidate',
     )
     return {'receipt_policy':RECEIPT_POLICY,
             **{key:deepcopy(preview.get(key)) for key in keys}}
@@ -246,6 +266,7 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choi
         rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices),
         draft.get('merged_amount_groups') or [],selected_packing_groups)
     projection['selected_packing_group_ids']=selected_packing_group_ids
+    projection['payment_match_candidate']=_payment_match_reference(sources,context['version'])
     revision=_preview_revision(context,items,sources,current_fees,catalog,projection,dependencies)
     preview={**projection,'id':digest(run_id,revision),'revision':revision,'run_id':run_id,'batch':batch_name,
              'version':context['version'],'source_context':context.get('effective_source') or {},
@@ -271,6 +292,60 @@ def public_preview(preview):
                                if k not in ('sources','input_fingerprint','source_context','fee_fingerprint','dependencies')})
 
 
+def _reconstruct_locked_preview(repo,batch_name,run,receipt,draft):
+    """Rebuild an authenticated selection from locked server state."""
+
+    from . import material_ai_fill_service as ai
+    dependencies=deepcopy(receipt.get('dependencies') or [])
+    if callable(getattr(repo,'assert_row_dependencies',None)):
+        repo.assert_row_dependencies(batch_name,dependencies,lock=True)
+    context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
+    selected_group_ids=set(receipt.get('selected_packing_group_ids') or [])
+    if not selected_group_ids and receipt.get('packing_group_candidates'):
+        selected_group_ids={str(candidate.get('candidate_id') or '') for candidate in receipt.get('packing_group_candidates') or []}
+    selected_packing_groups,validated_group_ids=_selected_packing_groups(
+        items,draft.get('packing_group_candidates') or [],sorted(selected_group_ids))
+    current=_attach_control_metadata(
+        rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode'],
+                     field_choices=receipt.get('selected_field_choices')),
+        draft.get('merged_amount_groups') or receipt.get('merged_amount_groups') or [],selected_packing_groups)
+    current['selected_packing_group_ids']=validated_group_ids
+    current['payment_match_candidate']=_payment_match_reference(sources,context['version'])
+    if current.get('payment_match_candidate') != receipt.get('payment_match_candidate'):
+        raise ValueError('实际付款流程匹配已变化，请刷新预览；本次未保存。')
+    revision=_preview_revision(context,items,sources,current_fees,catalog,current,dependencies)
+    if revision!=receipt['revision']:
+        raise ValueError('来源、费用或物料已变化，请刷新预览；本次未保存。')
+    if current.get('merged_amount_blocking'):
+        raise ValueError('合并金额组尚未完成人工分摊或合计校验，本次未保存。')
+    selected_fee_ids=current.get('selected_fee_ids') or []
+    selected_fees=current.get('fees') or []
+    estimate_only=bool(selected_fee_ids) and len(selected_fees)==len(selected_fee_ids) and all(
+        str((fee.get('payload') or {}).get('amount_status') or '').upper()=='ESTIMATED'
+        for fee in selected_fees)
+    if selected_fee_ids and not estimate_only and callable(getattr(repo,'assert_adoption_dependencies',None)):
+        repo.assert_adoption_dependencies(batch_name,dependencies,lock=True)
+    elif callable(getattr(repo,'assert_row_dependencies',None)):
+        repo.assert_row_dependencies(batch_name,dependencies,lock=True,purpose='estimate')
+    if not current['can_apply']:
+        raise ValueError('请选择需要填充的物料或费用。')
+    fees.assert_allowed(current['fees'],current_fees,context.get('effective_source') or {})
+    verified={**current,'id':receipt['id'],'revision':revision,'run_id':receipt['run_id'],'batch':batch_name,
+              'version':context['version'],'source_context':context.get('effective_source') or {},
+              'original_source_reanalysis':ai._run_uses_original_sources(run),
+              'input_fingerprint':ai._record_value(run,'input_fingerprint'),
+              'fee_fingerprint':digest(current_fees),'sources':deepcopy(sources),
+              'dependencies':dependencies}
+    return verified,context
+
+
+def reconstruct_after_payment_match(repository,run,preview,draft):
+    """Recompute after an atomic pending->confirmed match transition."""
+
+    return _reconstruct_locked_preview(
+        repository,preview['batch'],run,_preview_receipt(preview),draft)
+
+
 def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,*,repository=None):
     from . import material_ai_fill_service as ai
     repo=repository or ai.FrappeMaterialAIFillRepository()
@@ -286,6 +361,8 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
     receipt=(draft.get('row_previews') or {}).get(preview_id)
     if not receipt or receipt.get('revision')!=preview_revision:
         raise ValueError('所选预览已变化，请刷新预览并使用最新预览后确认。')
+    if receipt.get('receipt_policy')!=RECEIPT_POLICY:
+        raise ValueError('AI 预览规则已升级，请重新分析资料。')
     if receipt.get('mode') == 'replace_all':
         raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
     if ai._record_value(run,'status')!='READY' or draft.get('current_row_preview')!=preview_id:
@@ -295,42 +372,7 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
         raise ValueError('所选预览与当前分析不一致，请刷新预览后确认。')
     repo.assert_write(batch_name,edit_token,expected_modified)
     repo.lock_review_inputs(batch_name,receipt['version'])
-    dependencies=deepcopy(receipt.get('dependencies') or [])
-    if callable(getattr(repo,'assert_row_dependencies',None)):
-        repo.assert_row_dependencies(batch_name,dependencies,lock=True)
-    context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
-    selected_group_ids=set(receipt.get('selected_packing_group_ids') or [])
-    if not selected_group_ids and receipt.get('packing_group_candidates'):
-        selected_group_ids={str(candidate.get('candidate_id') or '') for candidate in receipt.get('packing_group_candidates') or []}
-    selected_packing_groups,validated_group_ids=_selected_packing_groups(
-        items,draft.get('packing_group_candidates') or [],sorted(selected_group_ids))
-    current=_attach_control_metadata(
-        rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode'],
-                     field_choices=receipt.get('selected_field_choices')),
-        draft.get('merged_amount_groups') or receipt.get('merged_amount_groups') or [],selected_packing_groups)
-    current['selected_packing_group_ids']=validated_group_ids
-    revision=_preview_revision(context,items,sources,current_fees,catalog,current,dependencies)
-    if revision!=preview_revision:
-        raise ValueError('来源、费用或物料已变化，请刷新预览；本次未保存。')
-    if current.get('merged_amount_blocking'):
-        raise ValueError('合并金额组尚未完成人工分摊或合计校验，本次未保存。')
-    selected_fee_ids=current.get('selected_fee_ids') or []
-    selected_fees=current.get('fees') or []
-    estimate_only=bool(selected_fee_ids) and len(selected_fees)==len(selected_fee_ids) and all(
-        str((fee.get('payload') or {}).get('amount_status') or '').upper()=='ESTIMATED'
-        for fee in selected_fees)
-    if selected_fee_ids and not estimate_only and callable(getattr(repo,'assert_adoption_dependencies',None)):
-        repo.assert_adoption_dependencies(batch_name,dependencies,lock=True)
-    elif callable(getattr(repo,'assert_row_dependencies',None)):
-        repo.assert_row_dependencies(batch_name,dependencies,lock=True,purpose='estimate')
-    if not current['can_apply']:raise ValueError('请选择需要填充的物料或费用。')
-    fees.assert_allowed(current['fees'],current_fees,context.get('effective_source') or {})
-    verified={**current,'id':preview_id,'revision':revision,'run_id':run_id,'batch':batch_name,
-              'version':context['version'],'source_context':context.get('effective_source') or {},
-              'original_source_reanalysis':ai._run_uses_original_sources(run),
-              'input_fingerprint':ai._record_value(run,'input_fingerprint'),
-              'fee_fingerprint':digest(current_fees),'sources':deepcopy(sources),
-              'dependencies':dependencies}
+    verified,context=_reconstruct_locked_preview(repo,batch_name,run,receipt,draft)
     cleaned_draft=_clean_preview_draft(draft)
     try:
         return repo.apply_row_selection(run,verified,cleaned_draft,context)

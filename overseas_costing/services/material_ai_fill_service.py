@@ -1264,6 +1264,19 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
     )
 
 
+def _all_fee_refs_have_evidence_amount(
+    payload: dict, refs: list[dict], evidence: dict[str, dict]
+) -> bool:
+    """Verify every model-cited locator contains the proposed money value."""
+
+    return bool(refs) and all(
+        _has_evidence_money_amount(
+            {"payload": payload, "source_refs": [ref]}, evidence
+        )
+        for ref in refs
+    )
+
+
 def _fee_ref_identity(ref: dict, evidence: dict[str, dict]) -> tuple[str, ...]:
     """Normalize equivalent source locations before fee proposal deduplication."""
 
@@ -1414,7 +1427,9 @@ def _annotate_review_fee_sources(proposals: list[dict]) -> None:
             for ref in stage_refs
             if str(ref.get("process_instance_id") or "")
         }
-        stage_conflict = len(stages) != 1 or len(process_ids) > 1
+        # Legacy evidence has no workflow metadata.  Absence is not a
+        # cross-process conflict; two or more authoritative refs are.
+        stage_conflict = bool(stage_refs) and (len(stages) != 1 or len(process_ids) > 1)
         stage = next(iter(stages)) if len(stages) == 1 else "other"
         stage_rank = WORKFLOW_RANKS.get(stage, WORKFLOW_RANKS["other"])
         matching = [ref for ref in stage_refs if str(ref.get("workflow_stage") or "") == stage]
@@ -1465,7 +1480,15 @@ def _arbitrate_review_fee_sources(proposals: list[dict]) -> None:
         classified = [row for row in candidates if row.get("source_authority_present")]
         for proposal in candidates:
             stage = proposal.get("workflow_stage")
-            if stage == "purchase":
+            if proposal.get("source_stage_conflict"):
+                proposal.update(
+                    selection_role="alternative",
+                    default_selected=False,
+                    recommended=False,
+                    source_policy_blocked="费用候选同时引用多个流程或阶段，不能采用。",
+                    resolution_reason="费用来源流程不唯一，请分别核对后重新分析。",
+                )
+            elif stage == "purchase":
                 proposal.update(
                     selection_role="alternative",
                     default_selected=False,
@@ -1640,6 +1663,11 @@ def normalize_source_review_proposals(
                     payload.get("amount"), refs, evidence
                 ):
                     continue
+                if (
+                    proposal_id not in trusted_system_ids
+                    and not _all_fee_refs_have_evidence_amount(payload, refs, evidence)
+                ):
+                    continue
         except ValueError:
             continue
         confidence = float(_confidence(raw.get("confidence")))
@@ -1722,7 +1750,10 @@ def normalize_source_review_proposals(
                 "existing_value_conflict_fields": existing_value_conflict_fields,
                 "result_origin": "SYSTEM" if system_origin else "AI",
                 "conflict_group": str(raw.get("conflict_group") or "")[:200],
-                "recommended": bool(raw.get("recommended")),
+                # A model cannot self-elect a fee. Deterministic proposal IDs
+                # are explicitly supplied by the server and retain their
+                # parser recommendation until the server arbitrators run.
+                "recommended": bool(raw.get("recommended")) if system_origin else False,
                 "carrier": str(raw.get("carrier") or "")[:100],
                 "approved_carrier": (
                     proposal_id in trusted_system_ids
@@ -2101,7 +2132,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-3'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-4'
 
 
 def _source_review_fingerprint(
