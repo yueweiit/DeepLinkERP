@@ -759,7 +759,12 @@ def build_source_review_messages(
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def _canonical_review_ref(claimed: dict, documents: dict[str, dict]) -> dict | None:
+def _canonical_review_ref(
+    claimed: dict,
+    documents: dict[str, dict],
+    *,
+    require_cell: bool = False,
+) -> dict | None:
     document = documents.get(str(claimed.get("document_id") or ""))
     if not document:
         return None
@@ -802,6 +807,8 @@ def _canonical_review_ref(claimed: dict, documents: dict[str, dict]) -> dict | N
             return None
         if not cell and len(known_cells) == 1:
             cell = next(iter(known_cells))
+        if not cell and require_cell:
+            return None
         ref.update({"sheet": sheet, "row": row, "page": None, "cell": cell})
         sheet_source_id = str((document.get("sheet_source_ids") or {}).get(sheet) or "")
         if sheet_source_id:
@@ -1002,9 +1009,9 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
     ]
     from overseas_costing.scripts.import_oa_logistics import _quote_money_amount_matches
     for line, locator in _document_fee_lines(document):
+        if not _DECLARED_TOTAL_PATTERN.search(line):
+            continue
         for evidence_line in _review_ref_total_lines(line, locator, refs):
-            if not _DECLARED_TOTAL_PATTERN.search(evidence_line):
-                continue
             line_amounts = {
                 _fee_amount_key(matched_amount)
                 for matched_amount, span in _quote_money_amount_matches(evidence_line)
@@ -1121,6 +1128,7 @@ def normalize_source_review_proposals(
     fx_rates: dict | None = None,
     existing_fees: list[dict] | None = None,
     transport_mode: str = "",
+    trusted_system_proposal_ids: set[str] | frozenset[str] | None = None,
     trusted_approved_proposal_ids: set[str] | frozenset[str] | None = None,
 ) -> list[dict]:
     """Validate model proposals against server-issued items and evidence documents."""
@@ -1130,6 +1138,9 @@ def normalize_source_review_proposals(
     evidence = {str(row.get("document_id") or ""): row for row in documents or [] if row.get("document_id")}
     trusted_approved_ids = {
         str(proposal_id) for proposal_id in trusted_approved_proposal_ids or set()
+    }
+    trusted_system_ids = {
+        str(proposal_id) for proposal_id in trusted_system_proposal_ids or set()
     }
     normalized = []
     seen = set()
@@ -1143,7 +1154,16 @@ def normalize_source_review_proposals(
         if proposal_type not in REVIEW_PROPOSAL_TYPES:
             continue
         refs = [
-            bound for bound in (_canonical_review_ref(ref, evidence) for ref in raw.get("source_refs") or [] if isinstance(ref, dict))
+            bound
+            for bound in (
+                _canonical_review_ref(
+                    ref,
+                    evidence,
+                    require_cell=proposal_type == "fee_update",
+                )
+                for ref in raw.get("source_refs") or []
+                if isinstance(ref, dict)
+            )
             if bound
         ]
         if not refs:
@@ -1247,13 +1267,7 @@ def normalize_source_review_proposals(
         if identity in seen_payloads:
             continue
         seen_payloads.add(identity)
-        system_origin = str(raw.get("result_origin") or "").upper() == "SYSTEM" and all(
-            (evidence.get(str(ref.get("document_id") or "")) or {}).get(
-                "ai_eligible", True
-            )
-            is False
-            for ref in refs
-        )
+        system_origin = proposal_id in trusted_system_ids
         normalized.append(
             {
                 "proposal_id": proposal_id,
@@ -1267,7 +1281,10 @@ def normalize_source_review_proposals(
                 "conflict_group": str(raw.get("conflict_group") or "")[:200],
                 "recommended": bool(raw.get("recommended")),
                 "carrier": str(raw.get("carrier") or "")[:100],
-                "approved_carrier": proposal_id in trusted_approved_ids,
+                "approved_carrier": (
+                    proposal_id in trusted_system_ids
+                    and proposal_id in trusted_approved_ids
+                ),
                 "alternatives": raw.get("alternatives") or [],
                 "default_selected": bool(raw.get("default_selected", confidence >= 0.9)) and confidence >= 0.9 and not conflict,
                 "payload": payload,
@@ -3906,6 +3923,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 if proposal.get("approved_carrier")
                 and str(proposal.get("proposal_id") or "")
             }
+            trusted_system_proposal_ids = {
+                str(proposal.get("proposal_id") or "")
+                for proposal in deterministic_proposals
+                if str(proposal.get("proposal_id") or "")
+            }
             approved = {p["payload"]["logical_fee_key"]: p for p in deterministic_proposals if p.get("approved_carrier")}
             system_fields = {(p.get("target_item_name"), field) for p in deterministic_proposals if p.get("proposal_type") == "item_update" for field in p.get("payload", {}).get("fields", {})}
             supplemental_proposals = [deepcopy(p) for p in (ai_result.get("proposals") or []) if isinstance(p, dict) and isinstance(p.get("payload"), dict)]
@@ -3925,6 +3947,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 fx_rates=context.get("fx_rates") or {},
                 existing_fees=existing_fees,
                 transport_mode=str(context.get("transport_mode") or ""),
+                trusted_system_proposal_ids=trusted_system_proposal_ids,
                 trusted_approved_proposal_ids=trusted_approved_proposal_ids,
             )
             # Bind policy only from deterministic server proposals, never model output.

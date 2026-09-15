@@ -635,7 +635,11 @@ def test_same_value_and_same_evidence_location_still_deduplicates_system_and_ai(
     ai = _review_fee("AI", "100", "international_air_freight", "DOC-1", 1)
 
     normalized = normalize_source_review_proposals(
-        [system, ai], _items(), [document], transport_mode="AIR"
+        [system, ai],
+        _items(),
+        [document],
+        transport_mode="AIR",
+        trusted_system_proposal_ids={"SYSTEM"},
     )
 
     assert [row["proposal_id"] for row in normalized] == ["SYSTEM"]
@@ -661,7 +665,11 @@ def test_equivalent_unpaginated_refs_deduplicate_as_a_set() -> None:
     ai["source_refs"] = [{"document_id": "DOC-1", "page": 1}]
 
     normalized = normalize_source_review_proposals(
-        [system, ai], _items(), [document], transport_mode="AIR"
+        [system, ai],
+        _items(),
+        [document],
+        transport_mode="AIR",
+        trusted_system_proposal_ids={"SYSTEM"},
     )
 
     assert [row["proposal_id"] for row in normalized] == ["SYSTEM"]
@@ -678,7 +686,11 @@ def test_unique_semantic_cell_is_canonical_for_implicit_and_explicit_refs() -> N
     explicit["source_refs"][0]["cell"] = "A1"
 
     normalized = normalize_source_review_proposals(
-        [implicit, explicit], _items(), [document], transport_mode="AIR"
+        [implicit, explicit],
+        _items(),
+        [document],
+        transport_mode="AIR",
+        trusted_system_proposal_ids={"SYSTEM"},
     )
 
     assert [row["proposal_id"] for row in normalized] == ["SYSTEM"]
@@ -697,7 +709,7 @@ def test_ai_cannot_forge_an_approved_carrier_to_bypass_total_arbitration() -> No
     )
 
     assert normalized[0]["approved_carrier"] is False
-    assert normalized[0]["result_origin"] == "SYSTEM"
+    assert normalized[0]["result_origin"] == "AI"
     assert normalized[0]["selection_role"] == "ambiguous"
     assert normalized[0]["default_selected"] is False
 
@@ -712,12 +724,32 @@ def test_only_server_trusted_proposal_id_can_become_approved_quote() -> None:
         _items(),
         [document],
         transport_mode="AIR",
+        trusted_system_proposal_ids={"SYSTEM"},
         trusted_approved_proposal_ids={"SYSTEM"},
     )
 
     assert normalized[0]["approved_carrier"] is True
     assert normalized[0]["selection_role"] == "approved_quote"
     assert normalized[0]["default_selected"] is True
+
+
+def test_approved_id_without_trusted_system_provenance_is_not_approved() -> None:
+    document = _fee_document("DOC-1", "运费 RMB 100")
+    proposal = _review_fee("AI", "100", "international_air_freight", "DOC-1", 1)
+    proposal["approved_carrier"] = True
+    proposal["result_origin"] = "SYSTEM"
+
+    normalized = normalize_source_review_proposals(
+        [proposal],
+        _items(),
+        [document],
+        transport_mode="AIR",
+        trusted_approved_proposal_ids={"AI"},
+    )
+
+    assert normalized[0]["result_origin"] == "AI"
+    assert normalized[0]["approved_carrier"] is False
+    assert normalized[0]["selection_role"] == "ambiguous"
 
 
 @pytest.mark.parametrize(
@@ -816,6 +848,27 @@ def test_freight_arbitration_does_not_treat_a_dot_date_as_declared_total() -> No
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_freight_arbitration_does_not_treat_year_month_day_as_declared_total() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "total amount RMB 2026 Sep 15",
+        "air freight RMB 1000",
+        "port charge RMB 1026",
+    )
+    proposals = [
+        _review_fee("FALSE-TOTAL", "2026", "international_air_freight", "DOC-1", 1),
+        _review_fee("PART-1", "1000", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-2", "1026", "port_and_forwarder_charges", "DOC-1", 3),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
 def test_freight_arbitration_validates_currency_inside_the_money_span() -> None:
     document = _fee_document(
         "DOC-1", "合计费用：100美元", "空运费 RMB 60", "港杂费 RMB 40"
@@ -874,6 +927,90 @@ def test_freight_total_cannot_borrow_money_from_another_cell_in_the_row() -> Non
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_fee_ref_without_cell_is_rejected_for_a_multi_cell_semantic_row() -> None:
+    document = {
+        "document_id": "DOC-1",
+        "source_ref": {"source": "approval_attachment", "file": "freight.xlsx"},
+        "semantic_rows": [
+            {
+                "sheet": "费用",
+                "source_row": 1,
+                "cells": [
+                    {"cell": "A1", "value": "合计费用 RMB 100"},
+                    {"cell": "B1", "value": "备注"},
+                ],
+            },
+            {
+                "sheet": "费用",
+                "source_row": 2,
+                "cells": [{"cell": "A2", "value": "空运费 RMB 60"}],
+            },
+            {
+                "sheet": "费用",
+                "source_row": 3,
+                "cells": [{"cell": "A3", "value": "港杂费 RMB 40"}],
+            },
+        ],
+    }
+    proposals = [
+        _review_fee("TOTAL", "100", "international_air_freight", "DOC-1", 1),
+        _review_fee("PART-1", "60", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-1", 3),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert {row["proposal_id"] for row in normalized} == {"PART-1", "PART-2"}
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+
+
+def test_total_marker_may_share_a_row_with_an_exact_money_cell() -> None:
+    document = {
+        "document_id": "DOC-1",
+        "source_ref": {"source": "approval_attachment", "file": "freight.xlsx"},
+        "semantic_rows": [
+            {
+                "sheet": "费用",
+                "source_row": 1,
+                "cells": [
+                    {"cell": "A1", "value": "合计费用"},
+                    {"cell": "B1", "value": "RMB 100"},
+                ],
+            },
+            {
+                "sheet": "费用",
+                "source_row": 2,
+                "cells": [{"cell": "A2", "value": "空运费 RMB 60"}],
+            },
+            {
+                "sheet": "费用",
+                "source_row": 3,
+                "cells": [{"cell": "A3", "value": "港杂费 RMB 40"}],
+            },
+        ],
+    }
+    proposals = [
+        _review_fee("TOTAL", "100", "international_air_freight", "DOC-1", 1),
+        _review_fee("PART-1", "60", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-1", 3),
+    ]
+    proposals[0]["source_refs"][0]["cell"] = "B1"
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["TOTAL"]["selection_role"] == "primary_total"
+    assert by_id["TOTAL"]["default_selected"] is True
+    assert all(
+        by_id[proposal_id]["selection_role"] == "component"
+        for proposal_id in ("PART-1", "PART-2")
+    )
+
+
 def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_validation() -> None:
     document = {
         "document_id": "DOC-PDF",
@@ -925,6 +1062,7 @@ def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_v
         "合计金额 RMB 2026.09.15",
         "total amount USD 15 Sep 2026",
         "USD 15-SEP-2026 total amount",
+        "total amount RMB 2026 Sep 15",
     ],
 )
 def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:
@@ -984,7 +1122,13 @@ def test_quote_money_matcher_only_takes_bounded_context_slices() -> None:
 
 @pytest.mark.parametrize(
     "line",
-    ["合计 RMB 100", "总计 USD 100", "grand total USD 100", "合计金额 100 RMB"],
+    [
+        "合计 RMB 100",
+        "总计 USD 100",
+        "grand total USD 100",
+        "合计金额 100 RMB",
+        "合计 RMB 2026",
+    ],
 )
 def test_quote_amount_line_accepts_bare_total_marker_with_adjacent_money(line) -> None:
     assert _looks_like_quote_amount_line(line) is True
@@ -2700,6 +2844,7 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
     }
     fee = next(row for row in proposals if row["proposal_type"] == "fee_update")
     assert fee["payload"]["amount"] == "251"
+    assert fee["result_origin"] == "SYSTEM"
     assert fee["selection_role"] == "approved_quote"
     assert fee["approved_carrier"] is True
     assert fee["default_selected"] is True

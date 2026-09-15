@@ -2239,6 +2239,12 @@ def _money_match_is_date(
         re.IGNORECASE,
     ):
         return True
+    if re.fullmatch(r"\d{4}", number_text) and re.match(
+        rf"\s*{_ENGLISH_MONTH}\b\s+\d{{1,2}}\b",
+        after_number,
+        re.IGNORECASE,
+    ):
+        return True
 
     before_number = text[max(0, number_start - _MONEY_CONTEXT_WINDOW):number_start]
     nearest_before_number = before_number.rstrip()[-1:]
