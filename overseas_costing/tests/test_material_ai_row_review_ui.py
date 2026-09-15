@@ -74,6 +74,61 @@ assert.equal(calls[0].args.row_ids_json,'[]');
 """)
 
 
+def test_current_policy_renders_exactly_three_packing_stage_matrices_and_changes_one_field_only():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[
+ {candidate_id:'PAY-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'9',workflow_stage:'payment',can_apply:true,default_selected:true,resolution_reason:'支付默认'},
+ {candidate_id:'LOG-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'8',workflow_stage:'international_logistics',can_apply:true,default_selected:false,resolution_reason:'低阶段可改选'},
+ {candidate_id:'LOG-V',item_name:'I1',fieldname:'volume_m3',suggested_value:'2',workflow_stage:'international_logistics',can_apply:true,default_selected:true,resolution_reason:'上层缺失时补值'},
+ {candidate_id:'PUR-Q',item_name:'I2',fieldname:'actual_shipped_qty',suggested_value:'3',workflow_stage:'purchase',can_apply:true,default_selected:true,resolution_reason:'采购补值'},
+]};
+fill.row_review.stage_snapshots=[
+ {stage_snapshot_id:'SP',stage:'payment',stage_rank:0,stage_label:'支付申请',status:'AVAILABLE',fallback_reason:'',warnings:[],
+  processes:[{process_instance_id:'PP',label:'月结付款 2026-07',approval_no:'PAY-1',status:'AVAILABLE',evidence:[{evidence_id:'EF',evidence_kind:'approval_form',source_label:'月结正文',read_status:'COMPLETED'}]}],
+  rows:[{row_id:'SRP',process_instance_id:'PP',item_name:'I1',material_code:'SKU-1',product_name:'物料1',field_candidates:{gross_weight_kg:['PAY-W']}}]},
+ {stage_snapshot_id:'SL',stage:'international_logistics',stage_rank:1,stage_label:'国际物流',status:'PARTIAL',fallback_reason:'部分资料不可读，已跳过并继续使用本阶段可用候选。',warnings:[],
+  processes:[{process_instance_id:'PL',label:'国际物流审批',approval_no:'LOG-1',status:'PARTIAL',evidence:[{evidence_id:'EA',evidence_kind:'attachment',source_label:'装箱单.xlsx',read_status:'SKIPPED',skip_reason_text:'文件已损坏'}]}],
+  rows:[{row_id:'SRL',process_instance_id:'PL',item_name:'I1',material_code:'SKU-1',product_name:'物料1',field_candidates:{gross_weight_kg:['LOG-W'],volume_m3:['LOG-V']}}]},
+ {stage_snapshot_id:'SU',stage:'purchase',stage_rank:2,stage_label:'采购支出',status:'AVAILABLE',fallback_reason:'',warnings:[],
+  processes:[{process_instance_id:'PU1',label:'采购支出 1',approval_no:'PUR-1',status:'AVAILABLE',evidence:[]},{process_instance_id:'PU2',label:'采购支出 2',approval_no:'PUR-2',status:'AVAILABLE',evidence:[]}],
+  rows:[{row_id:'SRU',process_instance_id:'PU2',item_name:'I2',material_code:'SKU-2',product_name:'物料2',field_candidates:{actual_shipped_qty:['PUR-Q']}}]},
+];
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
+let html=w.renderMaterialAIReviewDialogContent();
+assert.equal((html.match(/data-mf-ai-packing-stage=/g)||[]).length,3);
+for(const pair of [['payment','支付申请 · 优先级 1'],['international_logistics','国际物流 · 优先级 2'],['purchase','采购支出 · 优先级 3']]){
+ assert(html.includes(`data-mf-ai-packing-stage="${pair[0]}"`));assert(html.includes(pair[1]));
+}
+assert.equal((html.match(/class="ocw-mf-ai-stage-matrix"/g)||[]).length,3);
+assert(html.includes('月结付款 2026-07'));assert(html.includes('采购支出 1'));assert(html.includes('采购支出 2'));
+assert(html.includes('未采用此阶段'));assert(html.includes('value="LOG-W"'));
+assert(!html.includes('来源 1 · 月结正文'));assert(!html.includes('来源 2 · 装箱单.xlsx'));
+const before=[...selection.fields.entries()].sort();
+w.changeMaterialAIRowSelection('fields','I1:gross_weight_kg','LOG-W');
+assert.deepEqual([...selection.fields.entries()].sort(),[['I1:gross_weight_kg','LOG-W'],['I1:volume_m3','LOG-V'],['I2:actual_shipped_qty','PUR-Q']]);
+assert.notDeepEqual([...selection.fields.entries()].sort(),before);
+""")
+
+
+def test_current_policy_shows_empty_and_skipped_stage_evidence_without_disabling_server_approved_confirm():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[
+ {candidate_id:'LOG-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'8',workflow_stage:'international_logistics',can_apply:true,default_selected:true},
+],stage_snapshots:[
+ {stage:'payment',stage_rank:0,stage_label:'支付申请',status:'UNAVAILABLE',rows:[],processes:[],warnings:[],fallback_reason:'本阶段未找到有效资料，默认值将从下一优先级阶段补充。'},
+ {stage:'international_logistics',stage_rank:1,stage_label:'国际物流',status:'PARTIAL',fallback_reason:'部分资料不可读。',warnings:['<html><h1>Internal Server Error</h1></html>'],rows:[{row_id:'R',process_instance_id:'P',item_name:'I1',material_code:'SKU-1',field_candidates:{gross_weight_kg:['LOG-W']}}],processes:[{process_instance_id:'P',label:'国际物流',status:'PARTIAL',evidence:[{evidence_id:'BAD',evidence_kind:'attachment',source_label:'bad.pdf',read_status:'UNREADABLE',skip_reason_text:'文件格式不支持'},{evidence_id:'HTML',evidence_kind:'attachment',source_label:'server.pdf',read_status:'SKIPPED',skip_reason_text:'<html><h1>Internal Server Error</h1></html>'}]}]},
+ {stage:'purchase',stage_rank:2,stage_label:'采购支出',status:'UNAVAILABLE',rows:[],processes:[],warnings:[],fallback_reason:'本阶段未找到有效资料。'},
+],fee_stage_snapshots:[]};
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+selection.preview={id:'P',revision:'R',can_apply:true,rows:[]};selection.previewKey=w.materialAIRowSelectionKey(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+assert(html.includes('未找到有效资料'));assert(html.includes('部分可用'));
+assert(html.includes('文件格式不支持'));assert(html.includes('已跳过，继续读取下一资料'));
+assert(!html.includes('Internal Server Error'));assert(!html.includes('&lt;html'));assert(w.canConfirmMaterialAIRowSelection(fill));
+const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&!apply[1].includes('disabled'));
+""")
+
+
 def test_fee_roles_render_totals_components_and_alternatives_in_their_review_levels():
     run_ui(r"""
 const fill=ready();fill.row_review.fees=[
@@ -97,6 +152,46 @@ assert(!html.includes('data-mf-ai-fee-select="AIR"'));assert(!html.includes('dat
 const advanced=html.slice(html.indexOf('资料来源与其他记录'));
 for(const text of ['其他空运报价','613.90','历史报价','待核对运费','不可采用'])assert(advanced.includes(text),text);
 assert(!advanced.includes('国际空运费'));
+""")
+
+
+def test_current_policy_renders_two_fee_stages_with_total_components_and_other_records():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[],fees:[
+ {proposal_id:'TOTAL',workflow_stage:'payment',selection_role:'primary_total',payload:{logical_fee_key:'international_air_freight',expense_category:'国际空运费',amount:'10347',currency:'RMB',source_label:'月结付款'},can_apply:true,default_selected:true,resolution_reason:'分项合计 10346.99，差额 0.01 RMB'},
+ {proposal_id:'AIR',workflow_stage:'payment',selection_role:'component',parent_proposal_id:'TOTAL',payload:{expense_category:'贸易项目运费',amount:'9367.46',currency:'RMB'},can_apply:false,default_selected:false},
+ {proposal_id:'SHOP',workflow_stage:'payment',selection_role:'component',parent_proposal_id:'TOTAL',payload:{expense_category:'工业品电商运费',amount:'948.60',currency:'RMB'},can_apply:false,default_selected:false},
+ {proposal_id:'PDD',workflow_stage:'payment',selection_role:'component',parent_proposal_id:'TOTAL',payload:{expense_category:'PDD运费',amount:'30.93',currency:'RMB'},can_apply:false,default_selected:false},
+ {proposal_id:'NOISE',workflow_stage:'payment',selection_role:'alternative',payload:{expense_category:'其他记录',amount:'1.2',currency:'RMB'},can_apply:false,default_selected:false,blocked_reason:'无关金额'},
+ {proposal_id:'CUSTOMS',workflow_stage:'payment',selection_role:'',payload:{logical_fee_key:'customs_clearance_fee',expense_category:'清关费',amount:'500',currency:'RMB'},can_apply:true,default_selected:true},
+ {proposal_id:'LOG',workflow_stage:'international_logistics',selection_role:'approved_quote',payload:{logical_fee_key:'international_air_freight',expense_category:'国际空运费',amount:'10000',currency:'RMB'},can_apply:true,default_selected:false,resolution_reason:'低阶段可改选'},
+]};
+fill.row_review.stage_snapshots=[
+ {stage:'payment',stage_rank:0,stage_label:'支付申请',status:'UNAVAILABLE',rows:[],processes:[],warnings:[],fallback_reason:'未找到有效资料'},
+ {stage:'international_logistics',stage_rank:1,stage_label:'国际物流',status:'UNAVAILABLE',rows:[],processes:[],warnings:[],fallback_reason:'未找到有效资料'},
+ {stage:'purchase',stage_rank:2,stage_label:'采购支出',status:'UNAVAILABLE',rows:[],processes:[],warnings:[],fallback_reason:'未找到有效资料'},
+];
+fill.row_review.fee_stage_snapshots=[
+ {stage:'payment',stage_rank:0,stage_label:'支付申请',status:'AVAILABLE',fallback_reason:'',warnings:[],processes:[{process_instance_id:'P',label:'月结付款',status:'AVAILABLE',evidence:[]}],fees:['TOTAL','AIR','SHOP','PDD','NOISE','CUSTOMS'].map(proposal_id=>({proposal_id}))},
+ {stage:'international_logistics',stage_rank:1,stage_label:'国际物流',status:'AVAILABLE',fallback_reason:'',warnings:[],processes:[{process_instance_id:'L',label:'国际物流审批',status:'AVAILABLE',evidence:[]}],fees:[{proposal_id:'LOG'}]},
+];
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
+let html=w.renderMaterialAIReviewDialogContent();
+assert.equal((html.match(/data-mf-ai-fee-stage=/g)||[]).length,2);
+assert(!html.includes('来源 1 · 国际物流装箱清单.xlsx'));
+assert(html.indexOf('data-mf-ai-fee-stage="payment"')<html.indexOf('data-mf-ai-fee-stage="international_logistics"'));
+const payment=html.slice(html.indexOf('data-mf-ai-fee-stage="payment"'),html.indexOf('data-mf-ai-fee-stage="international_logistics"'));
+for(const text of ['10347','9367.46','948.60','30.93','总额分项（只读）'])assert(payment.includes(text),text);
+assert(payment.includes('data-mf-ai-fee-select="TOTAL"')&&payment.includes('checked'));
+assert(!payment.includes('data-mf-ai-fee-select="AIR"'));assert(!payment.includes('data-mf-ai-fee-select="NOISE"'));
+assert(html.includes('其他记录'));assert(html.includes('1.2'));assert(html.includes('只读 · 不可采用'));
+const logistics=html.slice(html.indexOf('data-mf-ai-fee-stage="international_logistics"'));
+assert(logistics.includes('data-mf-ai-fee-select="LOG"'));assert(!logistics.includes('checked'));
+ w.changeMaterialAIRowSelection('fees','LOG',true);assert.deepEqual([...selection.fees].sort(),['CUSTOMS','LOG']);
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,preview:{id:'P',revision:'R',can_apply:true,rows:[]}}};
+await w.previewMaterialAIRowSelection();
+assert.deepEqual(JSON.parse(calls[0].args.fee_ids_json).sort(),['CUSTOMS','LOG']);
+assert(!('fees' in calls[0].args));
 """)
 
 
