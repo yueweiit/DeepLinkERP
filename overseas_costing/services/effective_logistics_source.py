@@ -5,10 +5,15 @@ from copy import deepcopy
 from urllib.parse import urlparse, parse_qs
 
 from .logistics_settlement.model import digest
+from .source_read_errors import SourceIntegrityError
 
 POLICY_VERSION = 'procurement-source-2'
 CONTEXT_FIELDS = ('selected_source', 'separate_adoption', 'freight', 'packing', 'policy_version', 'batch', 'cost_version', 'root_kind', 'root_source_id', 'corp_id', 'instance_id',
                   'binding_id', 'binding_revision', 'source_snapshot', 'approved', 'invalid', 'available', 'fingerprint')
+
+
+class EffectiveSourceIntegrityError(SourceIntegrityError, ValueError):
+    """The effective source no longer matches its server-owned batch context."""
 
 
 def public_context(context):
@@ -61,7 +66,7 @@ def _legacy_source_bundle(batch_name, version_name=None, *, store=None, ledger=N
     version_name = version_name or batch.get('current_version') or ''
     version = ledger.get('version', version_name, lock=lock) if version_name else None
     if version and version.get('batch') != batch_name:
-        raise ValueError('版本不属于当前批次。')
+        raise EffectiveSourceIntegrityError('版本不属于当前批次。')
     if version and version_name != batch.get('current_version'):
         frozen = json_dict(version.get('extra_json')).get('effective_logistics_source') or {}
         if frozen and frozen.get('policy_version') == POLICY_VERSION:
@@ -180,12 +185,12 @@ def require_available(context):
     if (context.get('root_kind') == 'expense' or (context.get('packing') or {}).get('selected_source')) and (
         not context.get('available') or not context.get('approved') or context.get('invalid')
     ):
-        raise ValueError('当前关联采购支出缺失、未批准或已失效，不能使用资料；请核对当前来源。')
+        raise EffectiveSourceIntegrityError('当前关联采购支出缺失、未批准或已失效，不能使用资料；请核对当前来源。')
 
 
 def require_readable(context):
     if (context.get('root_kind') == 'expense' or (context.get('packing') or {}).get('selected_source')) and not context.get('available'):
-        raise ValueError('当前关联采购支出缺少本地归档，暂时无法分析；请等待同步。')
+        raise EffectiveSourceIntegrityError('当前关联采购支出缺少本地归档，暂时无法分析；请等待同步。')
 
 
 def json_dict(value):
@@ -281,14 +286,14 @@ def validate_packing_source(batch_name, kind, source_id, *, attachment=None, bun
     require_readable(bundle['context'])
     if kind in {'manual_attachment', 'approval_attachment'}:
         if not attachment or not attachment_allowed(attachment, bundle, for_analysis=True):
-            raise ValueError('所选附件不属于当前关联采购支出及成本版本。')
+            raise EffectiveSourceIntegrityError('所选附件不属于当前关联采购支出及成本版本。')
     elif kind == 'wiki_sheet':
         if source_id not in explicit_wiki_sources(bundle.get('source')):
-            raise ValueError('该装箱计划表没有由当前关联采购支出明确链接。')
+            raise EffectiveSourceIntegrityError('该装箱计划表没有由当前关联采购支出明确链接。')
     elif kind == 'approval_comment':
         comments = approval_detail_for_bundle(bundle)['main_approval']['timeline']
         if not any(row.get('source_id') == source_id for row in comments):
-            raise ValueError('所选评论不属于当前关联采购支出。')
+            raise EffectiveSourceIntegrityError('所选评论不属于当前关联采购支出。')
     return bundle
 
 

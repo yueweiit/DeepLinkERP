@@ -71,14 +71,61 @@ def test_bound_manifest_reads_only_expense_body_comments_and_current_documents(m
 
 def test_bound_direct_attachment_and_wiki_ids_are_rejected_before_read(monkeypatch, setup):
     from overseas_costing.services import effective_logistics_source as effective, packing_source_service as packing
+    from overseas_costing.services.source_read_errors import SourceIntegrityError
     store, ledger, batch, version, *_ = setup
     bundle = effective.load_source_bundle(batch['name'], store=store, ledger=ledger)
     monkeypatch.setattr(effective, 'current_source_bundle', lambda *a, **kw: bundle)
     monkeypatch.setattr(packing, '_attachment_source_v2', lambda *a: {'name': 'OLD', 'file_url': '/never', 'source_type': 'OA', 'parse_result_json': '{}'})
     monkeypatch.setattr(packing.import_service, '_resolve_excel_file_path', lambda **kw: pytest.fail('read old bytes'))
     for kind, id in [('approval_attachment', 'OLD'), ('manual_attachment', 'OLD'), ('wiki_sheet', 'OLD:sheet')]:
-        with pytest.raises(ValueError, match='当前|关联'):
+        with pytest.raises(SourceIntegrityError, match='当前|关联'):
             packing.resolve_trusted_packing_source(batch_name=batch['name'], source_kind=kind, source_id=id)
+
+
+def test_effective_source_missing_archive_and_foreign_evidence_are_integrity_errors():
+    from overseas_costing.services import effective_logistics_source as effective
+    from overseas_costing.services.source_read_errors import SourceIntegrityError
+
+    context = {
+        'root_kind': 'expense',
+        'available': False,
+        'approved': True,
+        'invalid': False,
+        'cost_version': 'V1',
+        'root_source_id': 'EXPENSE-1',
+        'instance_id': 'PROC-1',
+        'corp_id': 'CORP-1',
+    }
+    source = {'raw': {}, 'documents': []}
+
+    with pytest.raises(SourceIntegrityError, match='本地归档'):
+        effective.require_readable(context)
+    with pytest.raises(SourceIntegrityError, match='缺失|失效'):
+        effective.require_available(context)
+
+    available = {'context': {**context, 'available': True}, 'source': source}
+    for kind, source_id, attachment in [
+        ('approval_attachment', 'ATTACHMENT-OTHER', {'name': 'ATTACHMENT-OTHER'}),
+        ('wiki_sheet', 'WORKBOOK-OTHER:SHEET-OTHER', None),
+        ('approval_comment', 'COMMENT-OTHER', None),
+    ]:
+        with pytest.raises(SourceIntegrityError):
+            effective.validate_packing_source(
+                'B1', kind, source_id, attachment=attachment, bundle=available
+            )
+
+
+def test_effective_source_rejects_cost_version_from_another_batch_as_integrity_error(setup):
+    from overseas_costing.services import effective_logistics_source as effective
+    from overseas_costing.services.source_read_errors import SourceIntegrityError
+
+    store, ledger, batch, version, *_ = setup
+    ledger.put('version', version['name'], {'batch': 'OTHER-BATCH'})
+
+    with pytest.raises(SourceIntegrityError, match='版本不属于当前批次'):
+        effective.load_source_bundle(
+            batch['name'], version['name'], store=store, ledger=ledger
+        )
 
 
 def test_packing_preview_revision_changes_on_binding_revision_even_same_bytes(monkeypatch, setup):

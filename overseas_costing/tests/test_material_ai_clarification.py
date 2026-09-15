@@ -205,6 +205,23 @@ def test_background_schedule_uses_saved_note(monkeypatch):
     assert repo.note['revision'] == 1
 
 
+def test_background_schedule_failure_returns_fixed_safe_message(monkeypatch):
+    monkeypatch.setattr(
+        service,
+        'start_source_ai_review',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError('<html>500 /private/files/secret.pdf</html>')
+        ),
+    )
+
+    result = service.schedule_source_ai_review('B1', 'V1')
+
+    assert result == {
+        'ok': False,
+        'message': service.SERVER_PREVIEW_FAILURE_MESSAGE,
+    }
+
+
 def test_worker_preserves_input_revision_during_partial_source_progress(monkeypatch):
     repo = NoteRepository()
     repo.list_sources = lambda *_: [{'source_kind': 'approval_form', 'source_id': 'FORM1',

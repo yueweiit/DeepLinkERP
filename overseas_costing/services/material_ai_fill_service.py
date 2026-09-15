@@ -82,6 +82,8 @@ AI_SEMANTIC_TIMEOUT_SECONDS = 60.0
 EVIDENCE_SKIP_DETAIL = "已跳过，继续读取下一资料。"
 AI_SAFE_FAILURE_WARNING = "AI 语义分析未完成，已保留服务器规则解析结果。"
 VISION_SAFE_FAILURE_WARNING = "视觉识别未完成，已继续使用文字资料。"
+SERVER_PREVIEW_FAILURE_MESSAGE = "服务器预览失败，本次未保存，请稍后重试。"
+SOURCE_STALE_MESSAGE = "资料来源已变化，请重新分析。"
 REVIEW_PROPOSAL_TYPES = frozenset({"material_replace", "item_update", "fee_update", "logistics_reconcile"})
 REVIEW_ITEM_FIELDS = frozenset(
     {
@@ -215,6 +217,14 @@ def _classify_evidence_exception(error: Exception, phase: str) -> EvidenceReadSk
     if isinstance(error, EvidenceReadSkipped):
         return error
     module = type(error).__module__.casefold()
+    name = type(error).__name__.casefold()
+    if phase == "download" and module.startswith("frappe"):
+        if name == "permissionerror":
+            return EvidenceReadSkipped(
+                "SOURCE_PERMISSION_DENIED", "资料文件无读取权限。"
+            )
+        if name == "doesnotexisterror":
+            return EvidenceReadSkipped("FILE_NOT_FOUND", "资料文件不存在。")
     if isinstance(error, PermissionError) and not module.startswith("frappe"):
         return EvidenceReadSkipped("SOURCE_PERMISSION_DENIED", "资料文件无读取权限。")
     if _is_fatal_system_exception(error):
@@ -2268,7 +2278,7 @@ def schedule_source_ai_review(
                 )
             except Exception:
                 pass
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "message": SERVER_PREVIEW_FAILURE_MESSAGE}
 
 
 def _load_json(value: Any, default: Any) -> Any:
@@ -2286,6 +2296,11 @@ _PUBLIC_AI_HIDDEN_KEYS = frozenset({
     "settlement_original_values", "ai_fill_original_values", "_shipment_valuation",
 })
 _PUBLIC_PROCESS_ID_PATTERN = re.compile(r"proc_[0-9a-f]{64}")
+_UNSAFE_PUBLIC_DETAIL_PATTERN = re.compile(
+    r"(?:<!doctype\b|</?(?:html|head|body|title|h[1-6]|p|div|pre|script|style)\b|"
+    r"\btraceback\b|/(?:private|var|users|home|tmp)/|[a-z]:\\)",
+    re.IGNORECASE,
+)
 
 
 def _is_opaque_public_process_id(value: Any) -> bool:
@@ -2338,11 +2353,22 @@ def _replace_public_process_ids(value: str, replacements: dict[str, str]) -> str
     return result
 
 
+def _safe_public_text(value: str) -> str:
+    """Keep business copy, but never return markup, stack traces, or server paths."""
+
+    text = str(value or "")
+    return SERVER_PREVIEW_FAILURE_MESSAGE if _UNSAFE_PUBLIC_DETAIL_PATTERN.search(text) else text
+
+
 def _public_ai_payload_with_process_ids(value: Any, replacements: dict[str, str]) -> Any:
     if isinstance(value, list):
         return [_public_ai_payload_with_process_ids(item, replacements) for item in value]
     if not isinstance(value, dict):
-        return _replace_public_process_ids(value, replacements) if isinstance(value, str) else value
+        return (
+            _safe_public_text(_replace_public_process_ids(value, replacements))
+            if isinstance(value, str)
+            else value
+        )
     result = {}
     for key, nested in value.items():
         key_text = str(key)
@@ -2454,7 +2480,11 @@ def get_material_ai_fill_status(
         "model": str(_record_value(run, "model") or ""),
         "ai_completed": bool(_record_value(run, "ai_completed", 0)),
         "ai_warning": str(_record_value(run, "ai_warning") or ""),
-        "error_message": str(_record_value(run, "error_message") or ""),
+        "error_message": (
+            SERVER_PREVIEW_FAILURE_MESSAGE
+            if status_value == "FAILED"
+            else str(_record_value(run, "error_message") or "")
+        ),
         "candidates": candidates,
         "draft": draft,
         "source_progress": source_progress,
@@ -4832,14 +4862,14 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             "status": str(_record_value(current, "status") or ""),
             "claimed": False,
         }
-    except EvidenceIntegrityError as exc:
+    except SourceIntegrityError:
         if hasattr(repo, "rollback"):
             repo.rollback()
         try:
             persist(
                 status="STALE",
                 progress_step="来源已变化",
-                error_message=str(exc)[:2000],
+                error_message=SOURCE_STALE_MESSAGE,
                 completed_at=_now(),
             )
         except Exception:
@@ -4848,15 +4878,28 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
     except Exception as exc:
         if hasattr(repo, "rollback"):
             repo.rollback()
+        if frappe is not None:
+            try:
+                frappe.log_error(
+                    title="Overseas Cost Material AI Preview Failed",
+                    message=str(exc),
+                )
+            except Exception:
+                pass
         try:
             persist(status="FAILED",
                 progress_step="任务失败",
-                error_message=str(exc)[:2000],
+                error_message=SERVER_PREVIEW_FAILURE_MESSAGE,
                 completed_at=_now(),
             )
         except Exception:
             pass
-        return {"ok": False, "run_id": str(run_id), "status": "FAILED", "message": str(exc)}
+        return {
+            "ok": False,
+            "run_id": str(run_id),
+            "status": "FAILED",
+            "message": SERVER_PREVIEW_FAILURE_MESSAGE,
+        }
 
 
 def verify_material_ai_runtime(check_connection: bool = True) -> dict:

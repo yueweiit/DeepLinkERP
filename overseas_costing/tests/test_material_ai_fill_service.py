@@ -330,7 +330,7 @@ def test_attachment_materialization_raises_typed_integrity_error_for_missing_ser
         )
 
 
-def test_frappe_errors_remain_fatal_even_inside_download_budget() -> None:
+def test_frappe_file_errors_skip_only_during_download_budget() -> None:
     service = material_ai_fill_service
 
     FrappePermissionError = type("PermissionError", (RuntimeError,), {"__module__": "frappe.exceptions"})
@@ -338,12 +338,12 @@ def test_frappe_errors_remain_fatal_even_inside_download_budget() -> None:
         "DoesNotExistError", (RuntimeError,), {"__module__": "frappe.exceptions"}
     )
 
-    with pytest.raises(FrappePermissionError):
+    with pytest.raises(service.EvidenceReadSkipped) as denied:
         service._run_evidence_step(
             lambda: (_ for _ in ()).throw(FrappePermissionError("Not permitted")),
             phase="download",
         )
-    with pytest.raises(FrappeDoesNotExistError):
+    with pytest.raises(service.EvidenceReadSkipped) as missing:
         service._run_evidence_step(
             lambda: (_ for _ in ()).throw(FrappeDoesNotExistError("File does not exist")),
             phase="download",
@@ -353,6 +353,14 @@ def test_frappe_errors_remain_fatal_even_inside_download_budget() -> None:
             lambda: (_ for _ in ()).throw(FrappePermissionError("System permission denied")),
             phase="parse",
         )
+    with pytest.raises(FrappeDoesNotExistError):
+        service._run_evidence_step(
+            lambda: (_ for _ in ()).throw(FrappeDoesNotExistError("File disappeared")),
+            phase="parse",
+        )
+
+    assert denied.value.code == "SOURCE_PERMISSION_DENIED"
+    assert missing.value.code == "FILE_NOT_FOUND"
 
 
 def test_excel_sheet_reader_does_not_turn_database_failure_into_parse_error(monkeypatch, tmp_path) -> None:
@@ -4026,6 +4034,22 @@ def test_worker_marks_explicit_packing_source_integrity_failure_stale(monkeypatc
     assert repository.run["source_progress_json"][0]["status"] != "SKIPPED"
 
 
+def test_effective_source_integrity_failure_before_evidence_read_is_stale() -> None:
+    from overseas_costing.services import effective_logistics_source as effective
+
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.get_context = lambda *_args, **_kwargs: effective.require_readable(
+        {"root_kind": "expense", "available": False}
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "STALE"
+    assert repository.run["status"] == "STALE"
+    assert repository.run["error_message"] == service.SOURCE_STALE_MESSAGE
+
+
 def test_ai_semantic_database_failure_fails_the_run(monkeypatch) -> None:
     service = material_ai_fill_service
     repository = _LifecycleRepository(status="QUEUED")
@@ -4057,6 +4081,62 @@ def test_ai_semantic_database_failure_fails_the_run(monkeypatch) -> None:
 
     assert result["status"] == "FAILED"
     assert repository.run["status"] == "FAILED"
+
+
+def test_fatal_worker_and_status_payloads_never_expose_exception_details(monkeypatch) -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+    private_error = "<html>500 /private/files/secret.pdf</html>"
+
+    class DatabaseError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(DatabaseError(private_error)),
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+    status = get_material_ai_fill_status("B1", "RUN-1", repository=repository)
+    review_status = get_source_ai_review_status("B1", "RUN-1", repository=repository)
+
+    assert result == {
+        "ok": False,
+        "run_id": "RUN-1",
+        "status": "FAILED",
+        "message": service.SERVER_PREVIEW_FAILURE_MESSAGE,
+    }
+    assert repository.run["error_message"] == service.SERVER_PREVIEW_FAILURE_MESSAGE
+    for payload in (result, status, review_status):
+        public = json.dumps(payload, ensure_ascii=False)
+        assert "html" not in public.casefold()
+        assert "/private/" not in public
+        assert "secret.pdf" not in public
+
+
+def test_public_status_recursively_sanitizes_legacy_nested_failure_details() -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="FAILED")
+    repository.run.update(
+        error_message="<html>500 /private/files/secret.pdf</html>",
+        ai_warning="<html>gateway</html>",
+        source_progress_json=[
+            {
+                "status": "FAILED",
+                "detail": "Traceback /private/files/source.xlsx",
+                "skip_reason_text": "<html>forbidden</html>",
+            }
+        ],
+    )
+
+    payload = get_material_ai_fill_status("B1", "RUN-1", repository=repository)
+    public = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["error_message"] == service.SERVER_PREVIEW_FAILURE_MESSAGE
+    assert "html" not in public.casefold()
+    assert "/private/" not in public
+    assert "traceback" not in public.casefold()
 
 
 def test_ai_semantic_runner_rethrows_real_dbapi_integrity_errors() -> None:
