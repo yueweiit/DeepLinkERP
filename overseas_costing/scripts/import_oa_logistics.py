@@ -2228,12 +2228,12 @@ def _money_match_is_date(
             return True
 
     after_number = text[match.end("number"):]
-    if re.match(r"\s*(?:年|月|日(?!期)|[/\-]\s*\d)", after_number):
+    if re.match(r"\s*(?:年|月|日(?!期)|[./\-]\s*\d)", after_number):
         return True
 
     before_number = text[:match.start("number")]
     nearest_before_number = before_number.rstrip()[-1:]
-    if number_before_currency and nearest_before_number and nearest_before_number in "/-":
+    if number_before_currency and nearest_before_number and nearest_before_number in "./-":
         return True
 
     prefix = text[max(0, match.start() - 48):match.start()].rstrip()

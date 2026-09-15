@@ -722,6 +722,33 @@ def test_freight_arbitration_does_not_treat_a_date_year_as_declared_total() -> N
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_freight_arbitration_does_not_treat_a_dot_date_as_declared_total() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "total amount USD 2026.09.15",
+        "air freight USD 1000",
+        "port charge USD 1026.09",
+    )
+    proposals = [
+        _review_fee(
+            "FALSE-TOTAL", "2026.09", "international_air_freight", "DOC-1", 1, "USD"
+        ),
+        _review_fee(
+            "PART-1", "1000", "international_air_freight", "DOC-1", 2, "USD"
+        ),
+        _review_fee(
+            "PART-2", "1026.09", "port_and_forwarder_charges", "DOC-1", 3, "USD"
+        ),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
 def test_freight_arbitration_validates_currency_inside_the_money_span() -> None:
     document = _fee_document(
         "DOC-1", "合计费用：100美元", "空运费 RMB 60", "港杂费 RMB 40"
@@ -786,6 +813,8 @@ def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_v
         "合计日期 RMB 20260915",
         "total amount September 15, 2026 USD",
         "total amount 2026 / 09 / 15 USD",
+        "total amount USD 2026.09.15",
+        "合计金额 RMB 2026.09.15",
     ],
 )
 def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:
@@ -799,6 +828,15 @@ def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:
 def test_document_fee_parser_keeps_explicit_payable_money_total() -> None:
     source = {"source_id": "ATT", "source_label": "运费账单.pdf"}
     document = _fee_document("DOC-1", "合计应付货款¥10,347.00元")
+
+    proposals = build_document_fee_proposals(source, document, transport_mode="AIR")
+
+    assert [row["payload"]["amount"] for row in proposals] == ["10347"]
+
+
+def test_document_fee_parser_keeps_normal_two_decimal_money_total() -> None:
+    source = {"source_id": "ATT", "source_label": "运费账单.pdf"}
+    document = _fee_document("DOC-1", "合计金额 RMB 10347.00")
 
     proposals = build_document_fee_proposals(source, document, transport_mode="AIR")
 
