@@ -701,6 +701,27 @@ def test_freight_arbitration_does_not_treat_a_date_fragment_as_declared_total() 
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_freight_arbitration_does_not_treat_a_date_year_as_declared_total() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "合计日期 RMB 2026年09月15日",
+        "空运费 RMB 1000",
+        "港杂费 RMB 1026",
+    )
+    proposals = [
+        _review_fee("FALSE-TOTAL", "2026", "international_air_freight", "DOC-1", 1),
+        _review_fee("PART-1", "1000", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-2", "1026", "port_and_forwarder_charges", "DOC-1", 3),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
 def test_freight_arbitration_validates_currency_inside_the_money_span() -> None:
     document = _fee_document(
         "DOC-1", "合计费用：100美元", "空运费 RMB 60", "港杂费 RMB 40"
@@ -761,6 +782,10 @@ def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_v
         "total amount USD 2026/09/15",
         "合计金额 1.2m3 RMB",
         "total amount 2026/09/15 USD",
+        "合计日期 RMB 2026年09月15日",
+        "合计日期 RMB 20260915",
+        "total amount September 15, 2026 USD",
+        "total amount 2026 / 09 / 15 USD",
     ],
 )
 def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:

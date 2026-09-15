@@ -2203,6 +2203,51 @@ def _parse_quote_total_amount(value: Any) -> float | None:
     return amount if amount > 0 else None
 
 
+_ENGLISH_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+    r"nov(?:ember)?|dec(?:ember)?)"
+)
+
+
+def _money_match_is_date(
+    text: str,
+    match: re.Match,
+    *,
+    number_before_currency: bool,
+) -> bool:
+    """Return whether this money-shaped candidate is actually part of a date."""
+
+    number_text = match.group("number").lstrip("+-").replace(",", "")
+    if re.fullmatch(r"\d{8}", number_text):
+        try:
+            datetime.strptime(number_text, "%Y%m%d")
+        except ValueError:
+            pass
+        else:
+            return True
+
+    after_number = text[match.end("number"):]
+    if re.match(r"\s*(?:年|月|日(?!期)|[/\-]\s*\d)", after_number):
+        return True
+
+    before_number = text[:match.start("number")]
+    nearest_before_number = before_number.rstrip()[-1:]
+    if number_before_currency and nearest_before_number and nearest_before_number in "/-":
+        return True
+
+    prefix = text[max(0, match.start() - 48):match.start()].rstrip()
+    if re.search(r"(?:日期|日期为|date(?:d)?)\s*[:：]?\s*$", prefix, re.IGNORECASE):
+        return True
+    if re.search(
+        rf"{_ENGLISH_MONTH}\s+\d{{1,2}}\s*,?\s*$|{_ENGLISH_MONTH}\s*$|[年月日]\s*$",
+        prefix,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 def _quote_money_amount_matches(text: str) -> list[tuple[str, tuple[int, int]]]:
     """Return validated money text and span, excluding unit/date suffix matches."""
 
@@ -2234,6 +2279,10 @@ def _quote_money_amount_matches(text: str) -> list[tuple[str, tuple[int, int]]]:
                     if (not previous.isspace()
                             and (previous.isalnum() or previous in "._,/-/%％")):
                         continue
+            if _money_match_is_date(
+                text, match, number_before_currency=number_before_currency
+            ):
+                continue
             # Inspect after the complete greedy number match in Python rather
             # than a regex lookahead that may backtrack 2026 to 202, etc.
             after_number = text[match.end("number"):].lstrip()
