@@ -1542,7 +1542,20 @@ def _arbitrate_review_fee_sources(proposals: list[dict]) -> None:
                 and not row.get("source_stage_conflict")
                 and str(row.get("selection_role") or "") != "component"
                 and str(row.get("selection_role") or "") != "alternative"
-                and float(row.get("confidence") or 0) >= 0.9
+                and (
+                    float(row.get("confidence") or 0) >= 0.9
+                    or (
+                        str(row.get("result_origin") or "") == "SYSTEM"
+                        and not row.get("conflict")
+                        and (
+                            str(row.get("selection_role") or "") == "primary_total"
+                            or (
+                                str(row.get("selection_role") or "") == "approved_quote"
+                                and row.get("approved_carrier")
+                            )
+                        )
+                    )
+                )
             ]
             if not stage_rows:
                 if any(row.get("workflow_stage") == stage for row in candidates):

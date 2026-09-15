@@ -1835,6 +1835,72 @@ def test_document_fee_parser_extracts_explicit_freight_components_and_total() ->
         assert by_amount[amount]["parent_proposal_id"] == by_amount["10347"]["proposal_id"]
 
 
+def test_server_reconciled_total_remains_default_when_existing_estimate_lowers_confidence() -> None:
+    source = {
+        "source_kind": "approval_comment",
+        "source_id": "COMMENT-LOG-1",
+        "source_label": "评论 · 周汉琴",
+        "process_instance_id": "LOG-1",
+        "workflow_stage": "international_logistics",
+        "workflow_rank": 1,
+        "evidence_kind": "comment",
+        "evidence_rank": 3,
+        "priority_reason": "国际物流审批阶段",
+    }
+    document = _fee_document(
+        "DOC-28",
+        "贸易项目 90.85KG，占比90.53%，应付运费¥9,367.46元",
+        "工业品电商项目 9.2KG，占比9.17%，应付运费¥948.60元",
+        "PDD项目 0.3KG，占比0.30%，应付运费¥30.93元",
+        "合计应付货款¥10,347.00元",
+    )
+    document["source_ref"].update(source)
+    existing_fees = [{
+        "logical_fee_key": "international_air_freight",
+        "amount_status": "ESTIMATED",
+        "amount": "10302",
+    }]
+    proposals = build_document_fee_proposals(
+        source,
+        document,
+        transport_mode="AIR",
+        existing_fees=existing_fees,
+    )
+    assert all(row["confidence"] == 0.65 for row in proposals)
+
+    untrusted = normalize_source_review_proposals(
+        proposals,
+        _items(),
+        [document],
+        existing_fees=existing_fees,
+        transport_mode="AIR",
+    )
+    untrusted_total = next(
+        row for row in untrusted if row["payload"]["amount"] == "10347"
+    )
+    assert untrusted_total["result_origin"] == "AI"
+    assert untrusted_total["default_selected"] is False
+
+    normalized = normalize_source_review_proposals(
+        proposals,
+        _items(),
+        [document],
+        existing_fees=existing_fees,
+        transport_mode="AIR",
+        trusted_system_proposal_ids={row["proposal_id"] for row in proposals},
+    )
+    by_amount = {row["payload"]["amount"]: row for row in normalized}
+
+    assert by_amount["10347"]["result_origin"] == "SYSTEM"
+    assert by_amount["10347"]["selection_role"] == "primary_total"
+    assert by_amount["10347"]["workflow_stage"] == "international_logistics"
+    assert by_amount["10347"]["default_selected"] is True
+    assert sum(bool(row["default_selected"]) for row in normalized) == 1
+    for amount in ("9367.46", "948.6", "30.93"):
+        assert by_amount[amount]["selection_role"] == "component"
+        assert by_amount[amount]["default_selected"] is False
+
+
 def test_freight_arbitration_deduplicates_same_money_span_across_fee_keys() -> None:
     source = {"source_id": "COMMENT", "source_label": "评论 · 李仲华"}
     document = _fee_document(
