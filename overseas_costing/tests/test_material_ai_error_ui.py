@@ -54,6 +54,7 @@ console.log(JSON.stringify({{message:workspace.materialAIErrorMessage({expressio
 @pytest.mark.parametrize('expression', [
     "({status:500,responseText:'<!DOCTYPE html><html><head><title>Internal Server Error</title></head><body><h1>Server Error</h1><p>secret traceback</p></body></html>'})",
     "('<html><body><h1>Bad Gateway</h1><p>proxy details</p></body></html>')",
+    "('<p class=\"server-error\">proxy details</p>')",
 ])
 def test_html_and_http_500_errors_are_never_shown_verbatim(expression):
     result = _fee_workspace_result(FIXTURE + f"""
@@ -62,6 +63,17 @@ console.log(JSON.stringify({{message:workspace.materialAIErrorMessage({expressio
     assert result['message'] in ('服务器处理失败，请稍后重试。', '可读的默认提示')
     for leaked in ('html', 'doctype', 'Internal Server Error', 'Server Error', 'secret traceback', 'Bad Gateway', 'proxy details'):
         assert leaked.lower() not in result['message'].lower()
+
+
+@pytest.mark.parametrize('message', [
+    '物料编码 <P-100> 不匹配',
+    '金额必须 <p 上限',
+])
+def test_angle_bracket_business_text_is_not_mistaken_for_html(message):
+    result = _fee_workspace_result(FIXTURE + f"""
+console.log(JSON.stringify({{message:workspace.materialAIErrorMessage(new Error({json.dumps(message, ensure_ascii=False)}),'默认提示')}}));
+""")
+    assert result['message'] == message
 
 
 def test_plain_business_error_remains_readable_while_preview_uses_safe_server_failure_copy():
