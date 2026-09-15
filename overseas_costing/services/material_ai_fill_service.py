@@ -2082,12 +2082,57 @@ _PUBLIC_AI_HIDDEN_KEYS = frozenset({
 })
 
 
-def _public_ai_payload(value: Any) -> Any:
-    """Remove server-only evidence recursively at every public AI status boundary."""
+def _collect_public_process_ids(value: Any, result: set[str]) -> None:
     if isinstance(value, list):
-        return [_public_ai_payload(item) for item in value]
+        for item in value:
+            _collect_public_process_ids(item, result)
+        return
     if not isinstance(value, dict):
+        return
+    for key, nested in value.items():
+        key_text = str(key)
+        if key_text == "process_instance_id":
+            process_id = str(nested or "")
+            if process_id and not process_id.startswith("proc_"):
+                result.add(process_id)
+        elif key_text == "process_instance_ids" and isinstance(nested, list):
+            result.update(
+                str(process_id) for process_id in nested
+                if process_id and not str(process_id).startswith("proc_")
+            )
+        elif key_text == "extra_json" and isinstance(nested, str):
+            _collect_public_process_ids(_load_json(nested, {}), result)
+        else:
+            _collect_public_process_ids(nested, result)
+
+
+def _opaque_public_process_id(process_id: str) -> str:
+    from .material_ai_row_selection import POLICY
+
+    value = str(process_id or "")
+    if not value or value.startswith("proc_"):
         return value
+    raw = json.dumps(
+        [POLICY, "public-process", value], ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return f"proc_{hashlib.sha256(raw).hexdigest()}"
+
+
+def _replace_public_process_ids(value: str, replacements: dict[str, str]) -> str:
+    result = str(value)
+    for raw, opaque in sorted(replacements.items(), key=lambda item: -len(item[0])):
+        if result == raw:
+            return opaque
+        if len(raw) >= 6 and raw in result:
+            result = result.replace(raw, opaque)
+    return result
+
+
+def _public_ai_payload_with_process_ids(value: Any, replacements: dict[str, str]) -> Any:
+    if isinstance(value, list):
+        return [_public_ai_payload_with_process_ids(item, replacements) for item in value]
+    if not isinstance(value, dict):
+        return _replace_public_process_ids(value, replacements) if isinstance(value, str) else value
     result = {}
     for key, nested in value.items():
         key_text = str(key)
@@ -2095,10 +2140,23 @@ def _public_ai_payload(value: Any) -> Any:
             continue
         if key_text == "extra_json" and isinstance(nested, str):
             parsed = _load_json(nested, {})
-            result[key] = _json(_public_ai_payload(parsed)) if parsed else nested
+            result[key] = (_json(_public_ai_payload_with_process_ids(parsed, replacements))
+                           if parsed else nested)
         else:
-            result[key] = _public_ai_payload(nested)
+            result[key] = _public_ai_payload_with_process_ids(nested, replacements)
     return result
+
+
+def _public_ai_payload(value: Any) -> Any:
+    """Remove private evidence and replace internal process IDs at public boundaries."""
+
+    process_ids = set()
+    _collect_public_process_ids(value, process_ids)
+    replacements = {
+        process_id: _opaque_public_process_id(process_id)
+        for process_id in process_ids
+    }
+    return _public_ai_payload_with_process_ids(value, replacements)
 
 
 def _assert_run_batch(run: Any, batch_name: str) -> None:

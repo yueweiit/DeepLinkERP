@@ -41,6 +41,14 @@ CORRECTION_FIELD_MARKERS = {
     'unit_price_uom': ('单价单位',),
     'shipment_value_rmb': ('本次发货货值', '货值'),
 }
+_FIELD_MARKER_TO_FIELDS = {}
+for _field_name, _field_markers in CORRECTION_FIELD_MARKERS.items():
+    for _field_marker in _field_markers:
+        _FIELD_MARKER_TO_FIELDS.setdefault(str(_field_marker).casefold(), []).append(_field_name)
+_FIELD_MARKER_PATTERN = re.compile('|'.join(
+    re.escape(marker)
+    for marker in sorted(_FIELD_MARKER_TO_FIELDS, key=lambda value: (-len(value), value))
+))
 DIRECTIONAL_ARROW_PATTERN = re.compile(
     r'(?<![\d.])[-+]?\d[\d,]*(?:\.\d+)?\s*(?:→|->|=>)\s*[-+]?\d[\d,]*(?:\.\d+)?'
 )
@@ -182,6 +190,7 @@ def _has_directional_arrow_correction(text):
 
 
 def _explicit_correction_clauses(text, identifiers=()):
+    identifier_index = identifiers if isinstance(identifiers, dict) else None
     parts=[
         value.strip().casefold()
         for value in re.split(
@@ -203,7 +212,11 @@ def _explicit_correction_clauses(text, identifiers=()):
             for field_markers in CORRECTION_FIELD_MARKERS.values()
             for field_marker in field_markers
         )
-        has_identifier=any(_identifier_spans(identifier,part) for identifier in identifiers)
+        has_identifier=(
+            bool(_indexed_identifier_matches(part, identifier_index))
+            if identifier_index is not None
+            else any(_identifier_spans(identifier,part) for identifier in identifiers)
+        )
         clause_parts=[]
         if not has_field and not has_identifier and index>0:
             clause_parts.append(parts[index-1])
@@ -240,13 +253,50 @@ def _longest_identifier_matches(clause, identifiers):
     }
 
 
-def _correction_value_in_clause(clause, fieldname, value):
-    for marker in CORRECTION_FIELD_MARKERS.get(fieldname,(fieldname,)):
-        marker=str(marker).casefold()
-        position=clause.find(marker)
-        if position < 0:
-            continue
-        field_tail=clause[position+len(marker):]
+def _identifier_index(identifiers):
+    """Build one bounded matcher for the material identifiers in this catalog."""
+
+    normalized=sorted(
+        {str(identifier or '').strip().casefold() for identifier in identifiers if str(identifier or '').strip()},
+        key=lambda value:(-len(value),value),
+    )
+    alternatives=[]
+    for identifier in normalized:
+        escaped=re.escape(identifier)
+        if identifier.isascii() and re.search(r'[a-z0-9]',identifier):
+            escaped=rf'(?<![a-z0-9]){escaped}(?![a-z0-9])'
+        alternatives.append(escaped)
+    return {
+        'pattern':re.compile('|'.join(alternatives)) if alternatives else None,
+        'identifiers':frozenset(normalized),
+    }
+
+
+def _indexed_identifier_matches(clause, identifier_index):
+    pattern=(identifier_index or {}).get('pattern')
+    if pattern is None:
+        return set()
+    return {
+        match.group(0).casefold()
+        for match in pattern.finditer(str(clause or '').casefold())
+    }
+
+
+def _field_marker_matches(clause):
+    """Return only the longest field marker at each text position."""
+
+    result={}
+    for match in _FIELD_MARKER_PATTERN.finditer(str(clause or '').casefold()):
+        marker=match.group(0).casefold()
+        for fieldname in _FIELD_MARKER_TO_FIELDS.get(marker,()):
+            result.setdefault(fieldname,[]).append((match.start(),match.end(),marker))
+    return result
+
+
+def _correction_value_in_clause(clause, fieldname, value, field_matches=None):
+    matches=(field_matches if field_matches is not None else _field_marker_matches(clause)).get(fieldname,())
+    for position,end,_marker in matches:
+        field_tail=clause[end:]
         direction=re.search(
             r'(?:更正为|改为|改成|调整为|变更为|以此为准)\s*[:：]?|(?:→|->|=>)',
             field_tail,
@@ -293,7 +343,29 @@ def _material_identifier_counts(catalog_rows):
     return counts
 
 
-def _matching_correction_evidence(row, fieldname, value, identifier_counts):
+def _correction_clause_cache(catalog_rows, identifier_counts):
+    """Parse each comment once for this catalog; never retain business text globally."""
+
+    identifiers=_identifier_index(identifier_counts)
+    parsed={}
+    for row in catalog_rows:
+        for evidence in row.get('_review_correction_evidence') or []:
+            key=(str(evidence.get('source_id') or ''),str(evidence.get('occurred_at') or ''),
+                 str(evidence.get('text') or ''))
+            if key in parsed:
+                continue
+            parsed[key]=[
+                {
+                    'text':clause,
+                    'identifiers':_indexed_identifier_matches(clause,identifiers),
+                    'fields':_field_marker_matches(clause),
+                }
+                for clause in _explicit_correction_clauses(evidence.get('text'),identifiers)
+            ]
+    return parsed
+
+
+def _matching_correction_evidence(row, fieldname, value, identifier_counts, clause_cache):
     values=row.get('values') or {}
     identifiers={
         str(values.get(key) or '').strip().casefold()
@@ -301,27 +373,38 @@ def _matching_correction_evidence(row, fieldname, value, identifier_counts):
         if len(str(values.get(key) or '').strip()) >= 2
     }
     matches=[]
+    field_mismatch=False
     for evidence in row.get('_review_correction_evidence') or []:
-        for clause in _explicit_correction_clauses(
-                evidence.get('text'),identifier_counts.keys()):
-            longest_matches=_longest_identifier_matches(
-                clause,identifier_counts.keys())
+        key=(str(evidence.get('source_id') or ''),str(evidence.get('occurred_at') or ''),
+             str(evidence.get('text') or ''))
+        for parsed in clause_cache.get(key,()):
+            clause=parsed['text']
+            longest_matches=parsed['identifiers']
             unique_target=any(
                 identifier_counts.get(identifier)==1
                 and identifier in longest_matches
                 for identifier in identifiers
             )
-            if unique_target and _correction_value_in_clause(clause,fieldname,value):
+            if unique_target and _correction_value_in_clause(
+                    clause,fieldname,value,parsed['fields']):
                 matches.append(evidence)
                 break
-    return max(matches,key=lambda evidence:(
+            if unique_target and fieldname not in parsed['fields'] and any(
+                    _correction_value_in_clause(clause,other_field,value,parsed['fields'])
+                    for other_field in parsed['fields']):
+                field_mismatch=True
+    match=max(matches,key=lambda evidence:(
         str(evidence.get('occurred_at') or ''),str(evidence.get('source_id') or ''),
     )) if matches else None
+    return match,field_mismatch
 
 
 def _source_groups(catalog_rows, sources):
     from .source_priority_service import rank_material_packing_sources
     ordered=rank_material_packing_sources(sources or [])
+    explicit_correction_by_source={
+        id(source):_is_explicit_correction(source) for source in ordered
+    }
     groups=[];by_key={};aliases={};sources_by_alias={}
     for source in ordered:
         source_id=str(source.get('source_id') or '')
@@ -376,17 +459,23 @@ def _source_groups(catalog_rows, sources):
                 _process_instance_id(value),str(value.get('occurred_at') or value.get('source_updated_at') or ''),
                 str(value.get('source_id') or ''),
             ))]
-            correction_sources=[value for value in matched_sources if _is_explicit_correction(value)]
+            correction_sources=[
+                value for value in matched_sources
+                if explicit_correction_by_source.get(id(value),False)
+            ]
             correction_source=max(correction_sources,key=lambda value:(
                 str(value.get('occurred_at') or value.get('source_updated_at') or ''),
                 str(value.get('source_id') or ''),
             )) if correction_sources else None
-            process_ids=sorted({
-                _process_instance_id(value) for value in matched_sources
-                if value.get('workflow_stage')==evidence['workflow_stage']
+            process_targets=sorted({
+                (str(value.get('workflow_stage') or 'other'),_process_instance_id(value))
+                for value in matched_sources
+                if value.get('workflow_stage') in DEFAULT_WORKFLOW_STAGES
                 and _process_instance_id(value)
             })
-            process_conflict_ids=process_ids if len(process_ids)>1 else []
+            process_ids=sorted({process_id for _stage,process_id in process_targets})
+            process_conflict=len(process_targets)>1
+            process_conflict_ids=process_ids if process_conflict else []
             row.update(source_group_id=group['group_id'],source_priority=group['priority'],source_label=group['source_label'],
                        workflow_stage=evidence['workflow_stage'],workflow_rank=evidence['workflow_rank'],
                        evidence_kind=evidence['evidence_kind'],evidence_rank=evidence['evidence_rank'],
@@ -396,9 +485,15 @@ def _source_groups(catalog_rows, sources):
                        stage_snapshot_id=(
                            _stage_snapshot_id(evidence['workflow_stage'])
                            if evidence['workflow_stage'] in DEFAULT_WORKFLOW_STAGES
+                           and not process_conflict
                            else ''),
-                       process_instance_id=('' if process_conflict_ids else _process_instance_id(evidence)),
+                       process_instance_id=('' if process_conflict else _process_instance_id(evidence)),
                        _review_process_conflict_ids=process_conflict_ids,
+                       _review_process_conflict=process_conflict,
+                       _review_process_targets=[
+                           {'workflow_stage':stage,'process_instance_id':process_id}
+                           for stage,process_id in process_targets
+                       ],
                        _review_evidence_chain=evidence_chain,
                        _review_correction_explicit=bool(correction_source),
                        _review_correction_text=_correction_text(correction_source),
@@ -417,6 +512,7 @@ def _source_groups(catalog_rows, sources):
                        priority_reason='来源未分类，不作为高优先级默认值。',
                        stage_snapshot_id='',process_instance_id='',
                        _review_process_conflict_ids=[],
+                       _review_process_conflict=False,_review_process_targets=[],
                        _review_evidence_chain=[],_review_correction_explicit=False,
                        _review_correction_text='',_review_correction_evidence=[],
                        _review_occurred_at='',_review_primary_source_id='')
@@ -446,6 +542,7 @@ def _field_candidates(catalog_rows):
     result=[]
     rows_by_id={str(row.get('row_id') or ''):row for row in catalog_rows}
     identifier_counts=_material_identifier_counts(catalog_rows)
+    correction_clause_cache=_correction_clause_cache(catalog_rows,identifier_counts)
     default_stages=DEFAULT_WORKFLOW_STAGES
     for row in catalog_rows:
         if row.get('origin')!='source' or not row.get('can_update'):
@@ -455,9 +552,10 @@ def _field_candidates(catalog_rows):
             value=(row.get('values') or {}).get(fieldname)
             if missing(row.get('values') or {},fieldname):
                 continue
-            correction_evidence=_matching_correction_evidence(
-                row,fieldname,value,identifier_counts)
+            correction_evidence,field_mismatch=_matching_correction_evidence(
+                row,fieldname,value,identifier_counts,correction_clause_cache)
             process_conflict_ids=sorted(set(row.get('_review_process_conflict_ids') or []))
+            process_conflict=bool(row.get('_review_process_conflict') or process_conflict_ids)
             candidate_id=digest(POLICY,'field-candidate',row.get('row_id'),row.get('target_item_name'),fieldname)
             can_apply=bool(row.get('candidate_can_apply'))
             result.append({
@@ -469,7 +567,8 @@ def _field_candidates(catalog_rows):
                 'evidence_rank':(3 if correction_evidence else int(row.get('evidence_rank') or 0)),
                 'priority_reason':row.get('priority_reason') or '','confidence':confidence,
                 'default_eligible':(
-                    not process_conflict_ids
+                    not process_conflict
+                    and not field_mismatch
                     and fieldname not in set(row.get('existing_value_conflict_fields') or [])),
                 'stage_snapshot_id':(
                     (row.get('stage_snapshot_id') or _stage_snapshot_id(row.get('workflow_stage')))
@@ -478,7 +577,7 @@ def _field_candidates(catalog_rows):
                 'process_instance_ids':(
                     process_conflict_ids or ([row.get('process_instance_id')]
                                              if row.get('process_instance_id') else [])),
-                'process_conflict':bool(process_conflict_ids),
+                'process_conflict':process_conflict,
                 'evidence_chain':deepcopy(row.get('_review_evidence_chain') or []),
                 'value_evidence_id':str(
                     (correction_evidence or {}).get('source_id')
@@ -488,8 +587,11 @@ def _field_candidates(catalog_rows):
                 'supersedes_candidate_id':'','effective_in_stage':False,
                 'can_apply':can_apply,'default_selected':False,'resolution_reason':(
                     '候选同时引用多个流程，保留手工核对但不作为默认值。'
-                    if process_conflict_ids else
+                    if process_conflict else
+                    '更正评论指向其他字段，本候选不作为默认值。'
+                    if field_mismatch else
                     '服务端已校验，可手工改选。' if can_apply else '证据置信度不足，仅供核对。'),
+                '_review_field_mismatch':field_mismatch,
                 '_review_occurred_at':str(
                     (correction_evidence or {}).get('occurred_at')
                     or row.get('_review_occurred_at') or ''),
@@ -512,14 +614,13 @@ def _field_candidates(catalog_rows):
     for candidate in result:
         grouped.setdefault((candidate['item_name'],candidate['fieldname']),[]).append(candidate)
     for candidates in grouped.values():
-        eligible=[candidate for candidate in candidates
-                  if candidate['workflow_stage'] in default_stages
-                  and candidate['can_apply'] and candidate['default_eligible']
-                  and candidate['confidence']>=0.9]
-        if not eligible:
+        processable=[candidate for candidate in candidates
+                     if candidate['workflow_stage'] in default_stages
+                     and candidate['can_apply'] and candidate['default_eligible']]
+        if not processable:
             continue
         by_process={}
-        for candidate in eligible:
+        for candidate in processable:
             process_key=(candidate['workflow_rank'],candidate['workflow_stage'],
                          candidate['process_instance_id'] or candidate['row_id'])
             by_process.setdefault(process_key,[]).append(candidate)
@@ -540,6 +641,7 @@ def _field_candidates(catalog_rows):
                 else:
                     effective.append(candidate)
                 candidate['effective_in_stage']=True
+        eligible=[candidate for candidate in processable if candidate['confidence']>=0.9]
         winner=None
         conflicted_rank=None
         for stage_rank in sorted({candidate['workflow_rank'] for candidate in eligible}):
@@ -569,6 +671,8 @@ def _field_candidates(catalog_rows):
                 continue
             if candidate.get('process_conflict'):
                 candidate['resolution_reason']='候选同时引用多个流程，无法安全归属；保留手工核对但不作为默认值。'
+            elif candidate.get('_review_field_mismatch'):
+                candidate['resolution_reason']='更正评论明确指向其他字段，本候选仅供人工核对。'
             elif not candidate['default_eligible']:
                 candidate['resolution_reason']='当前已有受保护的明确值，本候选仅可人工核对。'
             elif candidate['confidence']<0.9:
@@ -583,6 +687,7 @@ def _field_candidates(catalog_rows):
         if row.get('origin')!='source':
             continue
         if (row.get('workflow_stage') not in default_stages
+                or row.get('_review_process_conflict')
                 or row.get('_review_process_conflict_ids')):
             row['default_replace_selected']=False
         count=sum(1 for candidate in result if candidate['row_id']==row_id and candidate['default_selected'])
@@ -640,7 +745,11 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
         stage_sources=[source for source in ordered if source.get('workflow_stage')==stage]
         stage_rows=sorted(
             (row for row in catalog_rows
-             if row.get('origin')=='source' and row.get('workflow_stage')==stage),
+             if row.get('origin')=='source' and (
+                 row.get('workflow_stage')==stage
+                 or any(target.get('workflow_stage')==stage
+                        for target in row.get('_review_process_targets') or [])
+             )),
             key=lambda row:(str(row.get('process_instance_id') or ''),str(row.get('row_id') or '')),
         )
         process_map={}
@@ -670,12 +779,21 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                                   key=lambda candidate:(candidate['fieldname'],candidate['candidate_id']))
             material_key=_stage_row_material_key(row)
             values=row.get('values') or {}
-            process_ids=(sorted(set(row.get('_review_process_conflict_ids') or []))
-                         or [str(row.get('process_instance_id') or '')])
-            process_conflict=len(process_ids)>1
+            process_targets=row.get('_review_process_targets') or []
+            all_process_ids=(sorted(set(row.get('_review_process_conflict_ids') or []))
+                             or [str(row.get('process_instance_id') or '')])
+            process_ids=sorted({
+                str(target.get('process_instance_id') or '')
+                for target in process_targets
+                if target.get('workflow_stage')==stage
+                and str(target.get('process_instance_id') or '')
+            }) or ([str(row.get('process_instance_id') or '')]
+                   if row.get('workflow_stage')==stage else [])
+            process_conflict=bool(
+                row.get('_review_process_conflict') or len(all_process_ids)>1)
             warning=(
                 f"{row.get('target_item_name') or values.get('material_code') or '该物料'} "
-                f"候选同时引用 {', '.join(process_ids)}，无法确定字段归属，已取消默认。"
+                "候选同时引用多个流程，无法确定字段归属，已取消默认。"
                 if process_conflict else '')
             if warning and warning not in process_conflict_warnings:
                 process_conflict_warnings.append(warning)
@@ -688,13 +806,13 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                     'material_code':values.get('material_code') or '',
                     'product_name':values.get('product_name') or '',
                     'spec_model':values.get('spec_model') or '',
-                    'process_instance_ids':process_ids,'process_conflict':process_conflict,
+                    'process_instance_ids':all_process_ids,'process_conflict':process_conflict,
                     'source_row_ids':[],'field_candidates':{},'evidence_chain':[],
                 })
                 snapshot_row['process_conflict']=bool(
                     snapshot_row['process_conflict'] or process_conflict)
                 snapshot_row['process_instance_ids']=sorted(set(
-                    snapshot_row['process_instance_ids']+process_ids))
+                    snapshot_row['process_instance_ids']+all_process_ids))
                 source_row_id=str(row.get('row_id') or '')
                 if source_row_id and source_row_id not in snapshot_row['source_row_ids']:
                     snapshot_row['source_row_ids'].append(source_row_id)

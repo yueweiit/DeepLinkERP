@@ -139,6 +139,34 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
     assert receipt['revision']==response['preview']['revision']
 
 
+def test_public_catalog_and_preview_replace_process_instance_ids_with_stable_opaque_ids():
+    repo = Repo()
+    raw_process_id = 'SECRET-PROCESS-INSTANCE-123'
+    repo.sources[0].update(
+        process_instance_id=raw_process_id,
+        parent_source_id=raw_process_id,
+        approval_title='国际物流审批',
+    )
+    repo.run['source_manifest_json'] = deepcopy(repo.sources)
+    repo.run['candidates_json'][0]['source_refs'][0]['process_instance_id'] = raw_process_id
+    repo.run['input_fingerprint'] = ai._source_review_fingerprint(
+        'B1', 'V1', repo.items, repo.sources, '', context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint'] = service.material_fingerprint(
+        repo.items, repo.sources, repo.context)
+
+    first_catalog = service.review_catalog(repo, 'B1', repo.run)
+    second_catalog = service.review_catalog(repo, 'B1', repo.run)
+    preview = prepare(repo)
+
+    for payload in (first_catalog, second_catalog, preview):
+        assert raw_process_id not in json.dumps(payload, ensure_ascii=False)
+    first_process_id = first_catalog['stage_snapshots'][1]['processes'][0]['process_instance_id']
+    second_process_id = second_catalog['stage_snapshots'][1]['processes'][0]['process_instance_id']
+    candidate_process_id = first_catalog['field_candidates'][0]['process_instance_id']
+    assert first_process_id.startswith('proc_')
+    assert first_process_id == second_process_id == candidate_process_id
+
+
 def test_field_choices_are_authenticated_without_persisting_business_values():
     repo = Repo()
     catalog = service.review_catalog(repo, 'B1', repo.run)

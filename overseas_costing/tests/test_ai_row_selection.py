@@ -883,6 +883,110 @@ def test_bare_arrow_without_unique_material_and_field_is_not_a_correction(commen
     assert candidate['correction_kind'] == 'none'
 
 
+@pytest.mark.parametrize(('comment_text', 'wrong_field', 'correct_field', 'value'), [
+    ('更正 SKU-1 体积重改为9kg', 'volume_m3', 'volume_weight_kg', 9),
+    ('更正 SKU-1 采购单位改为箱', 'shipped_uom', 'purchase_uom', '箱'),
+])
+def test_longest_field_marker_prevents_cross_field_correction(
+        comment_text, wrong_field, correct_field, value):
+    items = [item('I1', 'SKU-1', **{wrong_field: None, correct_field: None})]
+    sources = [{
+        'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+        'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+        'comment_text': comment_text,
+    }]
+    proposals = [
+        {'proposal_id': proposal_id, 'proposal_type': 'item_update',
+         'target_item_name': 'I1', 'confidence': .99,
+         'source_refs': [{'source_id': 'COMMENT'}],
+         'payload': {'fields': {fieldname: value}}}
+        for proposal_id, fieldname in (('WRONG', wrong_field), ('CORRECT', correct_field))
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert by_proposal['WRONG']['correction_kind'] == 'none'
+    assert by_proposal['WRONG']['default_selected'] is False
+    assert by_proposal['CORRECT']['correction_kind'] == 'explicit'
+    assert by_proposal['CORRECT']['default_selected'] is True
+
+
+def test_low_confidence_explicit_correction_blocks_the_superseded_default():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'FORM', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
+        {'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+         'occurred_at': '2026-09-01T09:00:00',
+         'comment_text': '更正 SKU-1 毛重改为9kg'},
+    ]
+    proposals = [
+        {'proposal_id': 'FORM', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'source_refs': [{'source_id': 'FORM'}],
+         'payload': {'fields': {'gross_weight_kg': 7}}},
+        {'proposal_id': 'COMMENT', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .89, 'source_refs': [{'source_id': 'COMMENT'}],
+         'payload': {'fields': {'gross_weight_kg': 9}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert by_proposal['COMMENT']['correction_kind'] == 'explicit'
+    assert by_proposal['COMMENT']['default_selected'] is False
+    assert by_proposal['FORM']['effective_in_stage'] is False
+    assert by_proposal['FORM']['default_selected'] is False
+
+
+def test_shared_comment_is_classified_and_parsed_once_for_two_hundred_rows(monkeypatch):
+    items = [
+        item(f'I{index}', f'SKU-{index:03d}', gross_weight_kg=None)
+        for index in range(200)
+    ]
+    sources = [{
+        'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+        'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+        'comment_text': '更正 SKU-000 毛重改为9kg',
+    }]
+    proposals = [
+        {'proposal_id': f'P{index}', 'proposal_type': 'item_update',
+         'target_item_name': f'I{index}', 'confidence': .99,
+         'source_refs': [{'source_id': 'COMMENT'}],
+         'payload': {'fields': {'gross_weight_kg': 9}}}
+        for index in range(200)
+    ]
+    calls = {'classified': 0, 'parsed': 0}
+    original_classify = service._is_explicit_correction
+    original_parse = service._explicit_correction_clauses
+
+    def counted_classify(*args, **kwargs):
+        calls['classified'] += 1
+        return original_classify(*args, **kwargs)
+
+    def counted_parse(*args, **kwargs):
+        calls['parsed'] += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(service, '_is_explicit_correction', counted_classify)
+    monkeypatch.setattr(service, '_explicit_correction_clauses', counted_parse)
+
+    review = catalog(items, proposals, sources)
+
+    assert len(review['field_candidates']) == 200
+    assert calls['classified'] <= len(sources)
+    assert calls['parsed'] <= len(sources)
+
+
 def test_multi_ref_comment_corrections_use_comment_evidence_time_and_last_value():
     items = [item('I1', 'SKU-1', gross_weight_kg=None)]
     sources = [
@@ -1036,6 +1140,40 @@ def test_single_proposal_referencing_two_purchase_processes_is_visible_in_both_w
     assert candidate['process_instance_ids'] == ['PUR-1', 'PUR-2']
     assert candidate['process_conflict'] is True
     assert candidate['can_apply'] is True
+    assert candidate['default_selected'] is False
+
+
+def test_single_proposal_referencing_payment_and_purchase_is_a_conflict_in_both_stages():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'PAY-FORM', 'process_instance_id': 'PAY-1',
+         'source_kind': 'approval_form', 'approval_role': 'logistics_expense',
+         'approval_title': '运输费用支付'},
+        {'source_id': 'PUR-FORM', 'process_instance_id': 'PUR-1',
+         'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '商品采购支出'},
+    ]
+    proposals = [{
+        'proposal_id': 'MULTI-STAGE', 'proposal_type': 'item_update',
+        'target_item_name': 'I1', 'confidence': .99,
+        'source_refs': [{'source_id': 'PAY-FORM'}, {'source_id': 'PUR-FORM'}],
+        'payload': {'fields': {'gross_weight_kg': 7}},
+    }]
+
+    review = catalog(items, proposals, sources)
+    payment, _logistics, purchase = review['stage_snapshots']
+    candidate = next(row for row in review['field_candidates']
+                     if row['fieldname'] == 'gross_weight_kg')
+
+    assert {process['process_instance_id'] for process in payment['processes']} == {'PAY-1'}
+    assert {process['process_instance_id'] for process in purchase['processes']} == {'PUR-1'}
+    assert {row['process_instance_id'] for row in payment['rows']} == {'PAY-1'}
+    assert {row['process_instance_id'] for row in purchase['rows']} == {'PUR-1'}
+    assert payment['processes'][0]['has_conflicts'] is True
+    assert purchase['processes'][0]['has_conflicts'] is True
+    assert candidate['process_conflict'] is True
+    assert candidate['process_instance_id'] == ''
+    assert candidate['process_instance_ids'] == ['PAY-1', 'PUR-1']
     assert candidate['default_selected'] is False
 
 
