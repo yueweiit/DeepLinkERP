@@ -108,7 +108,7 @@ jobs:
         run: |
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "docker builder prune --all --force && docker image prune --force"
+            "docker builder prune --all --force && docker image prune --all --force"
 
       - name: Preflight document parsing runtime
         env:
