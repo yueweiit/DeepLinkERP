@@ -15,7 +15,7 @@ w.detailState={batchName:'B',versionName:'V',tab:'documents',editToken:'token',e
 const state=w.ensureMaterialFeeState();w.renderMaterialAIReviewDialog=()=>{};w.renderMaterialFeeWorkspacePreservingPosition=()=>{};
 w.loadMaterialFeeWorkspace=async()=>true;w.ensureEditSession=async()=>true;
 global.frappe={show_alert:()=>{}};
-const catalog={policy:'ai-row-review-3',fingerprint:'fp',rows:[
+const catalog={policy:'ai-row-review-4',fingerprint:'fp',rows:[
  {row_id:'source',origin:'source',action:'update',values:{material_code:'NEW',gross_weight_kg:0},can_fill:true,can_update:true,can_add:false,can_replace:true,default_selected:true,default_update_selected:true,default_replace_selected:true},
  {row_id:'current',origin:'current',action:'retain',values:{material_code:'OLD'},can_fill:false,can_update:false,can_add:false,can_replace:true,default_selected:false},
  {row_id:'ambiguous',origin:'source',action:'review',label:'待核对',values:{material_code:'DUP'},can_fill:false,can_update:false,can_add:false,can_replace:true,blocked_reason:'匹配不唯一'}
@@ -176,8 +176,11 @@ def test_material_candidates_render_as_expandable_priority_source_tables():
     run_ui(r"""
 const fill=ready();
 fill.row_review={...fill.row_review,rows:[
- {...fill.row_review.rows[0],source_group_id:'packing',source_priority:1,source_label:'国际物流装箱清单.xlsx'},
- {...fill.row_review.rows[0],row_id:'lower',source_group_id:'oa',source_priority:2,source_label:'国际物流审批',lower_priority:true,conflict_fields:['gross_weight_kg'],default_update_selected:false},
+ {...fill.row_review.rows[0],source_group_id:'packing',source_priority:1,source_label:'国际物流装箱清单.xlsx',meaningful_field_count:2,
+   default_update_selected:false,default_selection_reason:'同物料存在更完整的候选，未默认选择。'},
+ {...fill.row_review.rows[0],row_id:'lower',source_group_id:'oa',source_priority:2,source_label:'国际物流审批',lower_priority:true,
+   conflict_fields:['gross_weight_kg'],meaningful_field_count:7,default_update_selected:true,
+   default_selection_reason:'有效字段 7 项，为同物料候选中最完整，已默认选择。'},
  fill.row_review.rows[1]
 ],source_groups:[
  {group_id:'packing',source_id:'PACKING-LIST',source_label:'国际物流装箱清单.xlsx',priority:1,priority_reason:'当前无有效实际装箱匹配，采用流程装箱单附件',actual_packing_match_status:'none',row_ids:['source'],has_conflicts:false},
@@ -185,11 +188,16 @@ fill.row_review={...fill.row_review,rows:[
 ]};
 delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
 const html=w.renderMaterialAIReviewDialogContent();
+assert.deepEqual([...fill.rowSelection.rows],['lower']);
 assert(html.includes('来源 1'));assert(html.includes('来源 2'));assert(html.includes('国际物流装箱清单.xlsx'));
 assert(html.includes('当前无有效实际装箱匹配，采用流程装箱单附件'));
 assert(html.includes('data-mf-ai-source-group="packing" open'));
-assert(html.includes('与更高优先级来源冲突'));
+assert(html.includes('有效字段 7 项，为同物料候选中最完整，已默认选择。'));
+assert(html.includes('与更高优先级来源存在差异：毛重 kg'));
+assert(!html.includes('勾选即人工覆盖'));
 assert(html.includes('当前已有'));
+w.scheduleMaterialAIRowPreview=()=>{};w.changeMaterialAIRowSelection('rows','source',true);
+assert.deepEqual([...fill.rowSelection.rows].sort(),['lower','source']);
 """)
 
 

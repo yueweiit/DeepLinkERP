@@ -11474,8 +11474,12 @@ class OverseasCostWorkbench {
       const allowed = selection.mode === "update_selected" ? row.can_update : selection.mode === "add_selected" ? row.can_add : row.can_fill;
       const origin = row.origin === "current" ? "当前已有" : row.action === "add_candidate" ? "待新增" : "本次识别";
       const conflicts = (row.conflict_fields || []).map(field => fieldLabels[field] || field);
-      const reason = conflicts.length ? `与更高优先级来源冲突：${conflicts.join("、")}；勾选即人工覆盖。` : row.blocked_reason || row.label || "";
-      return `<tr class="${allowed ? conflicts.length ? "is-review is-conflict" : "" : "is-review"}"><td><input type="checkbox" data-mf-ai-row-select="${this.escape(row.row_id)}" ${!allowed || fill.applying ? "disabled" : ""} ${selection.rows.has(String(row.row_id)) ? "checked" : ""} aria-label="选择 ${this.escape(row.values?.product_name || row.values?.material_code || row.row_id)}"></td><td>${origin}${row.label === "待核对" || reason && row.origin !== "current" ? "<small>待核对</small>" : ""}</td>${cells(row.values || {})}<td>${value(reason)}</td></tr>`;
+      const conflictReason = conflicts.length ? `与更高优先级来源存在差异：${conflicts.join("、")}。` : "";
+      const manualReason = conflicts.length && !row.default_update_selected ? "如手工勾选，将按整行采用。" : "";
+      const blockedReason = row.blocked_reason || (row.label === "待核对" ? row.label : "");
+      const reason = [row.default_selection_reason, conflictReason, manualReason, blockedReason].filter(Boolean).join(" ");
+      const needsReview = row.label === "待核对" || Boolean(row.blocked_reason) || conflicts.length > 0;
+      return `<tr class="${allowed ? conflicts.length ? "is-review is-conflict" : "" : "is-review"}"><td><input type="checkbox" data-mf-ai-row-select="${this.escape(row.row_id)}" ${!allowed || fill.applying ? "disabled" : ""} ${selection.rows.has(String(row.row_id)) ? "checked" : ""} aria-label="选择 ${this.escape(row.values?.product_name || row.values?.material_code || row.row_id)}"></td><td>${origin}${needsReview && row.origin !== "current" ? "<small>待核对</small>" : ""}</td>${cells(row.values || {})}<td>${value(reason)}</td></tr>`;
     }).join("");
     const renderCandidateTable = rows => `<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-row-catalog"><thead><tr><th>选择</th><th>行来源</th>${columns.map(([, label]) => `<th>${label}</th>`).join("")}<th>核对提示</th></tr></thead><tbody>${renderCandidateRows(rows) || `<tr><td colspan="${columns.length + 3}">没有可选物料行</td></tr>`}</tbody></table></div>`;
     const sourceGroups = Array.isArray(catalog.source_groups) ? [...catalog.source_groups].sort((left, right) => Number(left.priority || 999) - Number(right.priority || 999)) : [];

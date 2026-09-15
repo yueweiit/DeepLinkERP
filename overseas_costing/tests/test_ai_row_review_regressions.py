@@ -594,7 +594,7 @@ def test_fillability_uses_current_source_blank_instead_of_historical_raw_weight(
     assert recognized["can_fill"], "A raw historical value is not an effective current-source value"
 
 
-def test_fillability_preserves_real_zero_in_current_source_overlay():
+def test_fillability_treats_current_source_weight_zero_as_placeholder():
     context = {"root_kind": "expense", "available": True, "approved": True,
                "invalid": False, "source_snapshot": "CURRENT", "fingerprint": "CTX"}
     item = {"name": "ITEM", "material_code": "A", "unit": "件", "shipped_uom": "件",
@@ -610,7 +610,7 @@ def test_fillability_preserves_real_zero_in_current_source_overlay():
     catalog = rows.catalog([item], [proposal], [], context, run_id="RUN")
     recognized = next(row for row in catalog["rows"] if row["origin"] == "source")
 
-    assert not recognized["can_fill"], "A real current-source zero must not be fillable"
+    assert recognized["can_fill"], "A zero weight is not meaningful packing evidence"
 
 
 def test_retained_rows_publish_effective_packing_values_to_next_ai_scope():

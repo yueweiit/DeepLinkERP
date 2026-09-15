@@ -7,9 +7,10 @@ import re
 from . import material_ai_fee_policy
 from .effective_logistics_source import json_dict
 from .logistics_settlement.model import digest
+from .material_value_semantics import is_effectively_missing
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-row-review-3'
+POLICY = 'ai-row-review-4'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
 FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')
@@ -17,11 +18,9 @@ MISSING_LABELS = {'material_code':'SKU','actual_shipped_qty':'数量','shipped_u
 
 
 def missing(row, field):
-    value = row.get(field)
-    if value is None or (isinstance(value,str) and not value.strip()):
-        return True
     mask = json_dict(row.get('extra_json')).get('settlement_packing_missing') or []
-    return field in mask or (field == 'actual_shipped_qty' and 'quantity' in mask)
+    return (is_effectively_missing(field,row.get(field),row)
+            or (field == 'actual_shipped_qty' and 'quantity' in mask))
 
 
 def _unit(row):
@@ -54,7 +53,7 @@ def _matches(row, items):
 
 
 def _source_values(row):
-    values = {k:deepcopy(row.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','stable_line_key')}
+    values = {k:deepcopy(row.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','stable_line_key','actual_shipped_qty_mode')}
     code = str(values.get('material_code') or '')
     if re.search(r'[/／、,，+＋;；]',code):
         values['material_code']=''
@@ -91,8 +90,6 @@ def _apply_valuation_values(values, valuation):
 
 
 def _source_groups(catalog_rows, sources):
-    if not sources:
-        return []
     from .source_priority_service import material_packing_source_priority
     ordered=sorted((deepcopy(source) for source in sources or []),key=material_packing_source_priority)
     groups=[];by_key={};aliases={}
@@ -136,18 +133,43 @@ def _source_groups(catalog_rows, sources):
         seen=set();highest=None
         candidates=sorted((row for row in catalog_rows if row.get('can_update') and str(row.get('target_item_name') or '')==target),
                           key=lambda row:(int(row.get('source_priority') or 999999),str(row.get('row_id') or '')))
+        eligible=[]
         for row in candidates:
             present={field for field in row.get('fields') or [] if not missing(row.get('values') or {},field)}
             overlap=sorted(present & seen)
+            row['meaningful_field_count']=len(present)
             row['conflict_fields']=overlap
             row['lower_priority']=highest is not None and int(row.get('source_priority') or 999999)>highest
             if overlap:
-                row['default_update_selected']=False
                 group=next((value for value in groups if value['group_id']==row.get('source_group_id')),None)
                 if group:group['has_conflicts']=True
             if row.get('default_update_selected'):
+                if present:eligible.append(row)
                 seen.update(present)
                 if highest is None:highest=int(row.get('source_priority') or 999999)
+            row['default_update_selected']=False
+        if not eligible:continue
+        winner=min(eligible,key=lambda row:(-int(row['meaningful_field_count']),
+            int(row.get('source_priority') or 999999),str(row.get('row_id') or '')))
+        winner['default_update_selected']=True
+        count=int(winner['meaningful_field_count'])
+        equally_complete=[row for row in eligible if int(row['meaningful_field_count'])==count]
+        same_priority=[row for row in equally_complete
+                       if int(row.get('source_priority') or 999999)==int(winner.get('source_priority') or 999999)]
+        if len(same_priority)>1:
+            winner['default_selection_reason']=f'有效字段 {count} 项；完整度和来源优先级并列，按稳定行标识默认选择。'
+        elif len(equally_complete)>1:
+            winner['default_selection_reason']=f'有效字段 {count} 项；完整度并列，按来源优先级默认选择。'
+        else:
+            winner['default_selection_reason']=f'有效字段 {count} 项，为同物料候选中最完整，已默认选择。'
+        for row in eligible:
+            if row is winner:continue
+            if int(row['meaningful_field_count'])<count:
+                row['default_selection_reason']='同物料存在更完整的候选，未默认选择。'
+            elif int(row.get('source_priority') or 999999)>int(winner.get('source_priority') or 999999):
+                row['default_selection_reason']='完整度并列，来源优先级较低，未默认选择。'
+            else:
+                row['default_selection_reason']='完整度和来源优先级并列，按稳定行标识未默认选择。'
     return groups
 
 
@@ -177,7 +199,7 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
         reason='物料对应多条现有明细，不能确定要补充哪一行。' if len(matches)>1 else ''
         try:
             quantity=values.get('actual_shipped_qty')
-            if quantity is not None and (not Decimal(str(quantity)).is_finite() or Decimal(str(quantity))<0):
+            if not missing(values,'actual_shipped_qty') and (not Decimal(str(quantity)).is_finite() or Decimal(str(quantity))<0):
                 valid=False;reason='数量无效或为负数，请核对来源。'
         except (InvalidOperation,ValueError):valid=False;reason='数量格式无法识别。'
         if proposal.get('blocked'):
@@ -202,6 +224,8 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                      'default_selected':bool(origin=='source' and fillable and proposal.get('default_selected',False) and not proposal.get('conflict')),
                      'default_update_selected':bool(updateable and proposal.get('default_selected',False) and not proposal.get('conflict')),
                      'default_replace_selected':default_replace_selected,
+                     'meaningful_field_count':sum(not missing(values,field) for field in fill_fields),
+                     'default_selection_reason':'',
                      'blocked_reason':reason,'source_refs':deepcopy(proposal.get('source_refs') or []),
                      'proposal_id':proposal.get('proposal_id'),'proposal_type':proposal.get('proposal_type'),'fields':fill_fields})
         if price_metadata is not None:
@@ -222,6 +246,8 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                     evidence_row={**row,**{field:None for field in PHYSICAL}}
                 evidence = evidence_row if evidence_row is not None else row
                 values=_source_values(evidence)
+                values['actual_shipped_qty_mode']=(evidence.get('actual_shipped_qty_mode')
+                                                    or row.get('actual_shipped_qty_mode'))
                 values['stable_line_key'] = values.get('stable_line_key') or row.get('stable_line_key')
                 shipment_valuation=(json_dict(evidence.get('extra_json')).get('shipment_valuation')
                                     or json_dict(row.get('extra_json')).get('shipment_valuation'))
@@ -247,6 +273,8 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
             if not existing:continue
             values={k:existing.get(k) for k in (*IDENTITY,'unit','shipped_uom','stable_line_key')}
             values.update(fields)
+            if 'actual_shipped_qty' in fields and proposal.get('result_origin')=='SYSTEM':
+                values['actual_shipped_qty_mode']='EXPLICIT_SOURCE'
             add(values,proposal,target=target,fields=list(fields))
     for item in items:
         add(deepcopy(item),{'proposal_id':'current:'+item['name']},origin='current',target=item['name'],stable=item['name'],fields=[])
