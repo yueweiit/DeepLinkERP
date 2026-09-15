@@ -286,3 +286,16 @@ def test_mutually_exclusive_fee_quotes_cannot_both_be_adopted():
     fees=[{'proposal_id':f'F{i}','proposal_type':'fee_update','payload':{'logical_fee_key':'international_express_fee','amount':amount,'currency':'RMB'}} for i,amount in enumerate(['100','200'])]
     c=service.catalog([],fees,[],{},run_id='R')
     with pytest.raises(ValueError,match='只选择一份'):service.project([],c,[],['F0','F1'],'fill_missing')
+
+
+def test_different_fee_keys_covering_same_scope_cannot_both_be_adopted():
+    fees = [
+        {'proposal_id': 'AIR', 'proposal_type': 'fee_update',
+         'payload': {'logical_fee_key': 'international_air_freight', 'amount': '100', 'currency': 'RMB'}},
+        {'proposal_id': 'SURCHARGE', 'proposal_type': 'fee_update',
+         'payload': {'logical_fee_key': 'express_surcharge', 'amount': '20', 'currency': 'RMB'}},
+    ]
+    review = service.catalog([], fees, [], {}, run_id='R')
+
+    with pytest.raises(ValueError, match='只选择一份'):
+        service.project([], review, [], ['AIR', 'SURCHARGE'], 'fill_missing')

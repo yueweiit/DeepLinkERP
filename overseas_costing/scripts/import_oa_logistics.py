@@ -2214,8 +2214,19 @@ def _looks_like_quote_amount_line(line: str) -> bool:
         return False
     if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", text, re.IGNORECASE) and "=" not in text:
         return False
-    if re.search(r"(?:合计|总计|总费用|总价)", text, re.IGNORECASE):
-        return True
+    money = bool(
+        re.search(
+            r"(?:元|rmb|cny|¥|￥|usd|us\$|美金|美元|mxn|peso|比索)",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if re.search(
+        r"(?:合计|总计|总额|总费用|总价|grand\s+total|total(?:\s+amount)?)",
+        text,
+        re.IGNORECASE,
+    ):
+        return money and bool(re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", text))
     if "=" not in text:
         return False
     if not re.search(r"(?:元|rmb|cny|¥|￥|usd|美金|美元|mxn|peso|比索)", text, re.IGNORECASE):

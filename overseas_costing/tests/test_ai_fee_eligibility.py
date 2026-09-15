@@ -29,3 +29,22 @@ def test_selected_disabled_fee_is_rejected_at_application_boundary():
     import pytest
     with pytest.raises(ValueError,match='停用'):
         policy.assert_allowed([proposal()],[{'logical_fee_key':'international_express_fee','is_active':0}],{})
+
+
+def test_total_components_and_other_alternatives_are_read_only_in_catalog():
+    total = {**proposal('international_air_freight'), 'proposal_id': 'TOTAL',
+             'selection_role': 'primary_total'}
+    component = {**proposal('port_and_forwarder_charges'), 'proposal_id': 'COMPONENT',
+                 'selection_role': 'component', 'parent_proposal_id': 'TOTAL'}
+    alternative = {**proposal('express_surcharge'), 'proposal_id': 'ALTERNATIVE',
+                   'selection_role': 'alternative'}
+
+    result = {row['proposal_id']: row for row in policy.decorate(
+        [total, component, alternative], [], {}
+    )}
+
+    assert result['TOTAL']['can_apply'] is True
+    for proposal_id in ('COMPONENT', 'ALTERNATIVE'):
+        assert result[proposal_id]['can_apply'] is False
+        assert result[proposal_id]['default_selected'] is False
+        assert '只读' in result[proposal_id]['blocked_reason']

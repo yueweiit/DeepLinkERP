@@ -905,12 +905,154 @@ def _normalize_fee_values(values: Any, *, partial: bool = False) -> dict:
     return normalized
 
 
+_PRIMARY_REVIEW_FREIGHT_KEYS = frozenset(
+    {
+        "international_sea_freight",
+        "international_air_freight",
+        "international_express_fee",
+    }
+)
+_REVIEW_FREIGHT_CANDIDATE_KEYS = frozenset(
+    {*_PRIMARY_REVIEW_FREIGHT_KEYS, "port_and_forwarder_charges", "express_surcharge"}
+)
+_DECLARED_TOTAL_PATTERN = re.compile(
+    r"(?:合计|总计|总额|总费用|总价|grand\s+total|total(?:\s+amount)?)",
+    re.IGNORECASE,
+)
+_CURRENCY_LINE_PATTERNS = {
+    "RMB": re.compile(r"(?:rmb|cny|¥|￥|元)", re.IGNORECASE),
+    "USD": re.compile(r"(?:usd|us\$|美金|美元)", re.IGNORECASE),
+    "MXN": re.compile(r"(?:mxn|peso|比索)", re.IGNORECASE),
+}
+
+
+def _review_fee_document_id(proposal: dict) -> str:
+    document_ids = {
+        str(ref.get("document_id") or "")
+        for ref in proposal.get("source_refs") or []
+        if str(ref.get("document_id") or "")
+    }
+    return next(iter(document_ids)) if len(document_ids) == 1 else ""
+
+
+def _review_ref_matches_locator(ref: dict, locator: dict) -> bool:
+    for fieldname in ("field", "sheet"):
+        expected = str(ref.get(fieldname) or "")
+        actual = str(locator.get(fieldname) or "")
+        if expected and expected != actual:
+            return False
+    for fieldname in ("row", "page"):
+        expected = _positive_location(ref.get(fieldname))
+        actual = _positive_location(locator.get(fieldname))
+        if expected and expected != actual:
+            return False
+    return True
+
+
+def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool:
+    """Require the proposal amount on its own explicit money-total evidence line."""
+
+    document_id = _review_fee_document_id(proposal)
+    document = evidence.get(document_id) or {}
+    amount_key = _fee_amount_key((proposal.get("payload") or {}).get("amount"))
+    currency = str((proposal.get("payload") or {}).get("currency") or "RMB")
+    currency_pattern = _CURRENCY_LINE_PATTERNS.get(currency)
+    if not document_id or not amount_key or currency_pattern is None:
+        return False
+    refs = [
+        ref for ref in proposal.get("source_refs") or []
+        if str(ref.get("document_id") or "") == document_id
+    ]
+    for line, locator in _document_fee_lines(document):
+        if refs and not any(_review_ref_matches_locator(ref, locator) for ref in refs):
+            continue
+        if not _DECLARED_TOTAL_PATTERN.search(line) or not currency_pattern.search(line):
+            continue
+        line_amounts = {
+            _fee_amount_key(match)
+            for match in re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?", line)
+        }
+        if amount_key in line_amounts:
+            return True
+    return False
+
+
+def _arbitrate_review_freight_totals(
+    proposals: list[dict], evidence: dict[str, dict]
+) -> None:
+    """Resolve only one document/currency total against all of its fee components."""
+
+    freight = [
+        proposal for proposal in proposals
+        if proposal.get("proposal_type") == "fee_update"
+        and str((proposal.get("payload") or {}).get("logical_fee_key") or "")
+        in _REVIEW_FREIGHT_CANDIDATE_KEYS
+    ]
+    if not freight:
+        return
+    for proposal in freight:
+        proposal["selection_role"] = "ambiguous"
+        proposal["default_selected"] = False
+    declared_totals = [
+        proposal for proposal in freight
+        if str((proposal.get("payload") or {}).get("logical_fee_key") or "")
+        in _PRIMARY_REVIEW_FREIGHT_KEYS
+        and _has_declared_money_total(proposal, evidence)
+    ]
+    if len(declared_totals) != 1:
+        return
+    total = declared_totals[0]
+    document_id = _review_fee_document_id(total)
+    currency = str((total.get("payload") or {}).get("currency") or "")
+    components = [
+        proposal for proposal in freight
+        if proposal is not total
+        and _review_fee_document_id(proposal) == document_id
+        and str((proposal.get("payload") or {}).get("currency") or "") == currency
+    ]
+    if len(components) < 2:
+        return
+    total_amount = _decimal((total.get("payload") or {}).get("amount"))
+    component_amounts = [
+        _decimal((proposal.get("payload") or {}).get("amount"))
+        for proposal in components
+    ]
+    if total_amount is None or any(amount is None for amount in component_amounts):
+        return
+    component_sum = sum(component_amounts, Decimal("0"))
+    difference = abs(total_amount - component_sum)
+    minimum_unit = Decimal("0.01")
+    if difference > minimum_unit:
+        return
+    for proposal in freight:
+        proposal.update(selection_role="alternative", default_selected=False, recommended=False)
+    for component in components:
+        component.update(
+            selection_role="component",
+            parent_proposal_id=total["proposal_id"],
+            default_selected=False,
+            recommended=False,
+        )
+    total.update(
+        selection_role="primary_total",
+        recommended=True,
+        default_selected=True,
+        conflict=False,
+        resolution_reason=(
+            f"同一单据、同一币种的明确总额与 {len(components)} 笔全部分项核对一致；"
+            f"分项合计 {format(component_sum, 'f')}，差额 {format(difference, '.2f')} {currency}，"
+            f"最小单位 {format(minimum_unit, '.2f')}。"
+        ),
+    )
+
+
 def normalize_source_review_proposals(
     proposals: list[dict],
     items: list[dict],
     documents: list[dict],
     fx_rates: dict | None = None,
     existing_fees: list[dict] | None = None,
+    transport_mode: str = "",
 ) -> list[dict]:
     """Validate model proposals against server-issued items and evidence documents."""
 
@@ -966,6 +1108,15 @@ def normalize_source_review_proposals(
                     continue
             else:
                 payload = _normalize_fee_values(raw.get("payload") or {})
+                fee_key = str(payload.get("logical_fee_key") or "")
+                if fee_key in _PRIMARY_REVIEW_FREIGHT_KEYS and transport_mode:
+                    from overseas_costing.services.transport_fee_service import (
+                        primary_freight_definition,
+                    )
+                    try:
+                        payload.update(primary_freight_definition(transport_mode))
+                    except ValueError:
+                        pass
                 if _fee_amount_is_rate_only(
                     payload.get("amount"), refs, evidence
                 ):
@@ -1079,6 +1230,7 @@ def normalize_source_review_proposals(
             proposal["conflict_group"] = (
                 f"item:{proposal.get('target_item_name') or ''}:{','.join(fields)}"
             )
+    _arbitrate_review_freight_totals(normalized, evidence)
     return normalized
 
 
@@ -2250,10 +2402,17 @@ def build_document_fee_proposals(
 
     lines = _document_fee_lines(document)
     combined = "\n".join(line for line, _locator in lines)
-    if not combined or not re.search(
-        r"(?:物流|运费|freight|shipping|报价|体积方案|重量方案|/(?:方|立方|cbm|m3|kg|kgs?))",
-        combined,
-        re.IGNORECASE,
+    from overseas_costing.scripts.import_oa_logistics import (
+        _looks_like_quote_amount_line,
+    )
+    has_money_total = any(_looks_like_quote_amount_line(line) for line, _ in lines)
+    if not combined or not (
+        has_money_total
+        or re.search(
+            r"(?:物流|运费|freight|shipping|报价|体积方案|重量方案|/(?:方|立方|cbm|m3|kg|kgs?))",
+            combined,
+            re.IGNORECASE,
+        )
     ):
         return []
     synthetic = {
@@ -3675,6 +3834,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 validation_documents,
                 fx_rates=context.get("fx_rates") or {},
                 existing_fees=existing_fees,
+                transport_mode=str(context.get("transport_mode") or ""),
             )
             # Bind policy only from deterministic server proposals, never model output.
             server_policies = {p['proposal_id']:p['_project_policy'] for p in deterministic_proposals if p.get('_project_policy')}

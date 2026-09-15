@@ -35,6 +35,7 @@ from overseas_costing.services.material_ai_fill_service import (
     validate_source_review_manual_updates,
     build_document_fee_proposals,
 )
+from overseas_costing.scripts.import_oa_logistics import _looks_like_quote_amount_line
 
 
 def test_material_ai_timestamps_are_mariadb_datetime_compatible(monkeypatch) -> None:
@@ -437,6 +438,166 @@ def test_freight_excel_attachment_is_parsed_deterministically() -> None:
     assert [row["payload"]["amount"] for row in proposals] == ["58350", "105000"]
     assert [row["source_refs"][0]["row"] for row in proposals] == [8, 9]
     assert [row["source_refs"][0]["cell"] for row in proposals] == ["A8", "A9"]
+
+
+def _review_fee(proposal_id, amount, key, document_id, row, currency="RMB"):
+    return {
+        "proposal_id": proposal_id,
+        "proposal_type": "fee_update",
+        "confidence": 0.99,
+        "default_selected": True,
+        "recommended": True,
+        "payload": {
+            "logical_fee_key": key,
+            "expense_category": "AI fee",
+            "amount_status": "ESTIMATED",
+            "amount": amount,
+            "currency": currency,
+            "scope_type": "ALL_ITEMS",
+            "allocation_basis": "goods_value",
+        },
+        "source_refs": [{"document_id": document_id, "row": row}],
+    }
+
+
+def _fee_document(document_id, *lines):
+    return {
+        "document_id": document_id,
+        "source_ref": {"source": "approval_attachment", "file": f"{document_id}.pdf"},
+        "semantic_rows": [
+            {"sheet": "费用", "source_row": index,
+             "cells": [{"cell": f"A{index}", "value": line}]}
+            for index, line in enumerate(lines, start=1)
+        ],
+    }
+
+
+def test_review_freight_total_arbitration_corrects_air_key_and_marks_full_candidate_set() -> None:
+    documents = [
+        _fee_document(
+            "DOC-MAIN",
+            "合计应付货款¥10,347.00元",
+            "国际空运费 RMB 9,367.46",
+            "港杂与货代费 RMB 948.60",
+            "快递附加费 RMB 30.93",
+        ),
+        _fee_document("DOC-OTHER", "合计体积 1.2m³", "其他运费 RMB 613.90"),
+    ]
+    proposals = [
+        _review_fee("TOTAL", "10347", "international_express_fee", "DOC-MAIN", 1),
+        _review_fee("AIR", "9367.46", "international_sea_freight", "DOC-MAIN", 2),
+        _review_fee("PORT", "948.60", "port_and_forwarder_charges", "DOC-MAIN", 3),
+        _review_fee("SURCHARGE", "30.93", "express_surcharge", "DOC-MAIN", 4),
+        _review_fee("VOLUME", "1.2", "international_sea_freight", "DOC-OTHER", 1),
+        _review_fee("OTHER", "613.9", "international_express_fee", "DOC-OTHER", 2),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), documents, transport_mode="AIR"
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    for proposal_id in ("TOTAL", "AIR", "VOLUME", "OTHER"):
+        assert by_id[proposal_id]["payload"]["logical_fee_key"] == "international_air_freight"
+        assert by_id[proposal_id]["payload"]["expense_category"] == "国际空运费"
+        assert by_id[proposal_id]["payload"]["allocation_basis"] == "chargeable_weight"
+    assert by_id["PORT"]["payload"]["logical_fee_key"] == "port_and_forwarder_charges"
+    assert by_id["SURCHARGE"]["payload"]["logical_fee_key"] == "express_surcharge"
+    assert by_id["TOTAL"]["selection_role"] == "primary_total"
+    assert by_id["TOTAL"]["recommended"] is True
+    assert by_id["TOTAL"]["default_selected"] is True
+    assert by_id["TOTAL"]["conflict"] is False
+    assert "0.01" in by_id["TOTAL"]["resolution_reason"]
+    for proposal_id in ("AIR", "PORT", "SURCHARGE"):
+        assert by_id[proposal_id]["selection_role"] == "component"
+        assert by_id[proposal_id]["parent_proposal_id"] == "TOTAL"
+        assert by_id[proposal_id]["default_selected"] is False
+    for proposal_id in ("VOLUME", "OTHER"):
+        assert by_id[proposal_id]["selection_role"] == "alternative"
+        assert by_id[proposal_id]["default_selected"] is False
+    decorated = {
+        row["proposal_id"]: row
+        for row in material_ai_fill_service.material_ai_fee_policy.decorate(
+            normalized, [], {}
+        )
+    }
+    assert decorated["TOTAL"]["can_apply"] is True
+    for proposal_id in ("AIR", "PORT", "SURCHARGE", "VOLUME", "OTHER"):
+        assert decorated[proposal_id]["can_apply"] is False
+        assert "只读" in decorated[proposal_id]["blocked_reason"]
+
+
+@pytest.mark.parametrize(
+    ("lines", "currencies"),
+    [
+        (("国际空运费 RMB 60", "港杂费 RMB 40"), ("RMB", "RMB", "RMB")),
+        (("合计应付 RMB 100", "合计总额 RMB 101", "空运费 RMB 60", "港杂费 RMB 40"), ("RMB",) * 4),
+        (("合计应付 RMB 100",), ("RMB", "RMB", "RMB")),
+        (("合计应付 RMB 100", "空运费 USD 60", "港杂费 USD 40"), ("RMB", "USD", "USD")),
+        (("合计应付 RMB 100", "空运费 RMB 60", "港杂费 RMB 39.98"), ("RMB", "RMB", "RMB")),
+    ],
+    ids=["no-total", "multiple-totals", "cross-document", "different-currency", "over-tolerance"],
+)
+def test_review_freight_arbitration_leaves_unsafe_cases_ambiguous(lines, currencies) -> None:
+    if len(lines) == 1:
+        documents = [
+            _fee_document("DOC-TOTAL", lines[0]),
+            _fee_document("DOC-COMPONENTS", "空运费 RMB 60", "港杂费 RMB 40"),
+        ]
+        refs = [("DOC-TOTAL", 1), ("DOC-COMPONENTS", 1), ("DOC-COMPONENTS", 2)]
+        amounts = ("100", "60", "40")
+    else:
+        documents = [_fee_document("DOC-1", *lines)]
+        refs = [("DOC-1", index) for index in range(1, len(currencies) + 1)]
+        amounts = (
+            ("60", "40") if len(currencies) == 3 and not lines[0].startswith("合计")
+            else ("100", "101", "60", "40") if len(currencies) == 4
+            else ("100", "60", "40") if currencies[-1] != "RMB"
+            else ("100", "60", "39.98")
+        )
+    proposals = [
+        _review_fee(
+            f"F{index}", amount,
+            "international_air_freight" if index < 2 else "port_and_forwarder_charges",
+            document_id, row, currency,
+        )
+        for index, (amount, (document_id, row), currency) in enumerate(zip(amounts, refs, currencies))
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), documents, transport_mode="AIR"
+    )
+
+    assert normalized
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "合计体积 1.2m³",
+        "合计重量 98kg",
+        "合计件数 20件",
+        "合计折扣 5%",
+        "合计日期 2026-09-15",
+    ],
+)
+def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:
+    source = {"source_id": "ATT", "source_label": "运费账单.pdf"}
+    document = _fee_document("DOC-1", line)
+
+    assert _looks_like_quote_amount_line(line) is False
+    assert build_document_fee_proposals(source, document, transport_mode="AIR") == []
+
+
+def test_document_fee_parser_keeps_explicit_payable_money_total() -> None:
+    source = {"source_id": "ATT", "source_label": "运费账单.pdf"}
+    document = _fee_document("DOC-1", "合计应付货款¥10,347.00元")
+
+    proposals = build_document_fee_proposals(source, document, transport_mode="AIR")
+
+    assert [row["payload"]["amount"] for row in proposals] == ["10347"]
 
 
 def test_item_update_cannot_modify_readonly_purchase_identity_or_quantity() -> None:
@@ -2104,7 +2265,9 @@ def test_unified_worker_merges_approval_fee_and_deepseek_material_proposals(monk
     assert {row["proposal_type"] for row in proposals} == {"item_update", "fee_update"}
     fee = next(row for row in proposals if row["proposal_type"] == "fee_update")
     assert fee["payload"]["amount"] == "251"
-    assert repository.run["draft_json"]["selected_count"] == 2
+    assert fee["selection_role"] == "ambiguous"
+    assert fee["default_selected"] is False
+    assert repository.run["draft_json"]["selected_count"] == 1
 
 
 def test_deterministic_excel_candidate_preserves_sheet_row_and_cell_reference() -> None:

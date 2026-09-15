@@ -6,6 +6,7 @@ import re
 
 from . import material_ai_fee_policy
 from .effective_logistics_source import json_dict
+from .logistics_settlement.fee_policy import row_scopes
 from .logistics_settlement.model import digest
 from overseas_costing.utils.field_mapper import normalize_unit
 
@@ -277,7 +278,14 @@ def project(items, catalog, row_ids, fee_ids, mode):
         if not fee['can_apply']:raise ValueError(fee['blocked_reason'])
     fee_keys=[str((fee.get('payload') or {}).get('logical_fee_key') or '') for fee in selected_fees]
     fee_groups=[fee['conflict_group'] for fee in selected_fees if fee.get('conflict_group')]
-    if len(fee_keys)!=len(set(fee_keys)) or len(fee_groups)!=len(set(fee_groups)):
+    selected_scopes=[row_scopes(fee.get('payload') or {}) for fee in selected_fees]
+    overlapping_scopes=set()
+    covered_scopes=set()
+    for scopes in selected_scopes:
+        overlapping_scopes.update(covered_scopes & scopes)
+        covered_scopes.update(scopes)
+    if (len(fee_keys)!=len(set(fee_keys)) or len(fee_groups)!=len(set(fee_groups))
+            or overlapping_scopes):
         raise ValueError('同一费用有多份报价，请只选择一份；其他报价保留参考。')
     if mode=='replace_all' and not chosen:raise ValueError('至少选择一条物料，不能用空结果清空整票。')
     effective={r['target_item_name']:r['values'] for r in catalog['rows'] if r['origin']=='current'}
