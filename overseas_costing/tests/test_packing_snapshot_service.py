@@ -930,6 +930,32 @@ def test_unavailable_or_excluded_actual_match_is_not_payment_authority(availabil
     assert ranked[0]['workflow_rank'] == 3
 
 
+def test_actual_match_availability_is_evaluated_for_each_source_row():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    shared = {
+        'source_kind': 'approval_attachment',
+        'actual_packing_source': True,
+        'actual_packing_match_status': 'matched',
+        'actual_packing_match_id': 'MATCH-1',
+        'approval_role': 'payment',
+        'approval_title': '月结付款',
+    }
+    ranked = rank_material_packing_sources([
+        {**shared, 'source_id': 'AVAILABLE', 'available': True, 'excluded': False},
+        {**shared, 'source_id': 'UNAVAILABLE', 'available': False, 'excluded': False},
+        {**shared, 'source_id': 'EXCLUDED', 'available': True, 'excluded': True},
+    ])
+
+    by_id = {row['source_id']: row for row in ranked}
+    assert by_id['AVAILABLE']['workflow_stage'] == 'payment'
+    assert by_id['AVAILABLE']['workflow_rank'] == 0
+    assert by_id['UNAVAILABLE']['workflow_stage'] == 'other'
+    assert by_id['UNAVAILABLE']['workflow_rank'] == 3
+    assert by_id['EXCLUDED']['workflow_stage'] == 'other'
+    assert by_id['EXCLUDED']['workflow_rank'] == 3
+
+
 def test_workflow_packing_attachment_is_first_when_actual_match_is_not_valid():
     from overseas_costing.services.source_priority_service import rank_material_packing_sources
 

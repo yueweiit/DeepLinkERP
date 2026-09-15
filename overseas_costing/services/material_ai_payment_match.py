@@ -114,6 +114,10 @@ def confirm_preview_candidate(
         raise ValueError("当前模式不支持付款明细匹配")
     version_name = str((reference or {}).get("version") or "")
     clean = _validate_reference(reference, version_name)
+    # Serialize candidate arbitration with freight_matching.save_candidate.
+    # The caller owns the surrounding transaction, so this row lock remains
+    # held through the unique-candidate check and the downstream AI writes.
+    store.get("state", "match_lock", lock=True)
     from .logistics_settlement.payment_adoption import _resolve_context
 
     _batch, _version, candidate, _source, _logistics, _lines = _resolve_context(

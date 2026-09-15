@@ -268,6 +268,8 @@ def rank_material_packing_sources(sources: list[dict]) -> list[dict]:
             status == "matched"
             and row.get("actual_packing_source")
             and _actual_match_identity(row) == matched_identity
+            and bool(row.get("available", True))
+            and not bool(row.get("excluded"))
         )
         if row.get("actual_packing_source") and not is_matched:
             row.update(

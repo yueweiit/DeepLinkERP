@@ -130,6 +130,34 @@ def test_server_confirmation_is_revision_fenced_and_atomic():
     assert store.get("freight_candidate", candidate["id"])["status"] == "confirmed"
 
 
+def test_confirmation_locks_match_arbitration_before_candidate_context(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match as service
+
+    store, ledger, batch, version, _logistics, _source, candidate = _strong_context()
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    original_get = store.get
+    locked_reads = []
+
+    def traced_get(table, row_id, lock=False):
+        if lock:
+            locked_reads.append((table, row_id))
+        return original_get(table, row_id, lock=lock)
+
+    monkeypatch.setattr(store, "get", traced_get)
+
+    with store.atomic():
+        service.confirm_preview_candidate(
+            store, ledger, batch["name"], reference, "user", freight_mode=True
+        )
+
+    assert locked_reads[0] == ("state", "match_lock")
+    assert locked_reads.index(("state", "match_lock")) < locked_reads.index(
+        ("freight_candidate", candidate["id"])
+    )
+
+
 def test_cross_ticket_candidate_cannot_be_confirmed():
     from overseas_costing.services import material_ai_payment_match as service
 
