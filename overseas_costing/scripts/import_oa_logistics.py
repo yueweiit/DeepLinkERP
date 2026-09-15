@@ -2332,6 +2332,12 @@ def _looks_like_quote_amount_line(line: str) -> bool:
         re.IGNORECASE,
     ):
         return bool(_quote_money_amount_matches(text))
+    if re.search(
+        r"(?:运费|物流费|空运费|海运费|快递费|港杂|货代|附加费|freight|shipping(?:\s+fee)?)",
+        text,
+        re.IGNORECASE,
+    ):
+        return bool(_quote_money_amount_matches(text))
     if "=" not in text:
         return False
     after_equals = text.rsplit("=", 1)[1]

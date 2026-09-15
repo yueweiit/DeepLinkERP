@@ -1175,6 +1175,44 @@ def test_document_fee_parser_keeps_explicit_payable_money_total() -> None:
     assert [row["payload"]["amount"] for row in proposals] == ["10347"]
 
 
+def test_document_fee_parser_extracts_explicit_freight_components_and_total() -> None:
+    source = {"source_id": "COMMENT", "source_label": "评论 · 李仲华"}
+    document = _fee_document(
+        "DOC-28",
+        "贸易项目 90.85KG，占比90.53%，应付运费¥9,367.46元",
+        "工业品电商项目 9.2KG，占比9.17%，应付运费¥948.60元",
+        "PDD项目 0.3KG，占比0.30%，应付运费¥30.93元",
+        "合计应付货款¥10,347.00元",
+    )
+
+    proposals = build_document_fee_proposals(
+        source, document, transport_mode="AIR"
+    )
+    assert [row["payload"]["amount"] for row in proposals] == [
+        "9367.46", "948.6", "30.93", "10347"
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR",
+        trusted_system_proposal_ids={row["proposal_id"] for row in proposals},
+    )
+    by_amount = {row["payload"]["amount"]: row for row in normalized}
+    assert by_amount["10347"]["selection_role"] == "primary_total"
+    assert by_amount["10347"]["default_selected"] is True
+    for amount in ("9367.46", "948.6", "30.93"):
+        assert by_amount[amount]["selection_role"] == "component"
+        assert by_amount[amount]["parent_proposal_id"] == by_amount["10347"]["proposal_id"]
+
+
+def test_document_fee_parser_does_not_promote_purchase_unit_price() -> None:
+    source = {"source_id": "COMMENT", "source_label": "采购评论"}
+    document = _fee_document("DOC-1", "物料单价 1.2元，数量 500件")
+
+    assert build_document_fee_proposals(
+        source, document, transport_mode="AIR"
+    ) == []
+
+
 def test_document_fee_parser_keeps_normal_two_decimal_money_total() -> None:
     source = {"source_id": "ATT", "source_label": "运费账单.pdf"}
     document = _fee_document("DOC-1", "合计金额 RMB 10347.00")
