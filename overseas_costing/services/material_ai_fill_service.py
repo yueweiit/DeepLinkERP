@@ -1061,8 +1061,13 @@ def _arbitrate_review_freight_totals(
         if proposal in approved:
             proposal["selection_role"] = "approved_quote"
             continue
-        proposal["selection_role"] = "ambiguous"
+        proposal["selection_role"] = "alternative" if approved else "ambiguous"
         proposal["default_selected"] = False
+        if approved:
+            proposal["recommended"] = False
+            proposal["resolution_reason"] = (
+                "已有服务端确认的承运商报价，其他 freight 范围记录仅供参考，不能单独采用。"
+            )
     if approved:
         return
     declared_totals = [

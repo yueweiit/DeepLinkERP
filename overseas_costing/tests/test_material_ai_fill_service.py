@@ -733,6 +733,42 @@ def test_only_server_trusted_proposal_id_can_become_approved_quote() -> None:
     assert normalized[0]["default_selected"] is True
 
 
+def test_approved_quote_makes_other_freight_candidates_read_only_alternatives() -> None:
+    document = _fee_document(
+        "DOC-1", "承运商已批准运费 RMB 100", "港杂费 RMB 20"
+    )
+    approved = _review_fee(
+        "APPROVED", "100", "international_express_fee", "DOC-1", 1
+    )
+    approved["approved_carrier"] = True
+    other = _review_fee(
+        "OTHER", "20", "port_and_forwarder_charges", "DOC-1", 2
+    )
+
+    normalized = normalize_source_review_proposals(
+        [approved, other],
+        _items(),
+        [document],
+        transport_mode="EXPRESS",
+        trusted_system_proposal_ids={"APPROVED"},
+        trusted_approved_proposal_ids={"APPROVED"},
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["APPROVED"]["selection_role"] == "approved_quote"
+    assert by_id["APPROVED"]["default_selected"] is True
+    assert by_id["OTHER"]["selection_role"] == "alternative"
+    assert by_id["OTHER"]["default_selected"] is False
+    assert by_id["OTHER"]["recommended"] is False
+    decorated = {
+        row["proposal_id"]: row
+        for row in material_ai_fill_service.material_ai_fee_policy.decorate(
+            normalized, [], {}
+        )
+    }
+    assert decorated["OTHER"]["can_apply"] is False
+
+
 def test_approved_id_without_trusted_system_provenance_is_not_approved() -> None:
     document = _fee_document("DOC-1", "运费 RMB 100")
     proposal = _review_fee("AI", "100", "international_air_freight", "DOC-1", 1)

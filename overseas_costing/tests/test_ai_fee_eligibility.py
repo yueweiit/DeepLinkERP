@@ -48,3 +48,11 @@ def test_total_components_and_other_alternatives_are_read_only_in_catalog():
         assert result[proposal_id]['can_apply'] is False
         assert result[proposal_id]['default_selected'] is False
         assert '只读' in result[proposal_id]['blocked_reason']
+
+
+def test_read_only_fee_roles_are_rejected_at_application_boundary():
+    import pytest
+
+    for role in ('component', 'alternative'):
+        with pytest.raises(ValueError, match='只读'):
+            policy.assert_allowed([{**proposal(), 'selection_role': role}], [], {})
