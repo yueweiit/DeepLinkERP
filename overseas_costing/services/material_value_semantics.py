@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
 PLACEHOLDER_TOKENS = frozenset(
-    {"", "-", "--", "/", "\\", "n/a", "na", "null", "none", "无", "暂无"}
+    {"", "-", "--", "—", "–", "/", "\\", "n/a", "na", "null", "none", "无", "暂无"}
 )
 ZERO_IS_MISSING_FIELDS = frozenset(
     {
         "goods_value",
         "unit_price",
+        "shipment_value_rmb",
+        "package_count",
         "net_weight_kg",
         "gross_weight_kg",
         "volume_m3",
+        "volume_weight_kg",
         "chargeable_weight_kg",
+        "weight_ratio",
     }
 )
 PROTECTED_ZERO_SHIPPING_MODES = frozenset({"MANUAL_CONFIRMED", "EXPLICIT_SOURCE"})
@@ -28,7 +33,8 @@ def is_placeholder_token(value: Any) -> bool:
         return True
     if not isinstance(value, str):
         return False
-    return " ".join(value.strip().split()).casefold() in PLACEHOLDER_TOKENS
+    normalized = unicodedata.normalize("NFKC", value)
+    return " ".join(normalized.strip().split()).casefold() in PLACEHOLDER_TOKENS
 
 
 def _is_zero(value: Any) -> bool:

@@ -86,6 +86,10 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
         repo.items,repo.sources,repo.context)
 
     catalog=service.review_catalog(repo,'B1',repo.run)
+    source_row=next(row for row in catalog['rows'] if row['origin']=='source')
+    assert catalog['policy']=='ai-row-review-4'
+    assert source_row['meaningful_field_count']==1
+    assert '已默认选择' in source_row['default_selection_reason']
     selected=[row['row_id'] for row in catalog['rows'] if row['default_selected']]
     response=service.prepare('B1',repo.run['name'],selected,[],'update_selected','V1',repository=repo)
 
@@ -171,6 +175,18 @@ def test_preview_cleanup_shallow_copies_top_level_without_copying_large_nested_d
     assert 'row_previews' not in cleaned and 'current_row_preview' not in cleaned
     cleaned['row_application']={'preview_id':'P1'}
     assert 'row_application' not in draft
+
+
+def test_policy_upgrade_rejects_preview_created_by_previous_row_policy(monkeypatch):
+    repo=Repo()
+    monkeypatch.setattr(service.rows,'POLICY','ai-row-review-3')
+    preview=prepare(repo)
+    monkeypatch.setattr(service.rows,'POLICY','ai-row-review-4')
+
+    with pytest.raises(ValueError,match='(?:不属于|刷新预览)'):
+        confirm(repo,preview)
+
+    assert not repo.writes
 
 
 @pytest.mark.parametrize('change',['fee','item','source','note'])

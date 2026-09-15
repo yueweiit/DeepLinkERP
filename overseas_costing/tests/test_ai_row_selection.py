@@ -20,14 +20,56 @@ def source(code='A1', **fields):
     return item('draft-'+code,code,_review_origin='source',**fields)
 
 
-def test_fill_missing_preserves_real_zero_and_existing_quantity():
+def test_fill_missing_replaces_weight_placeholder_zero_and_preserves_quantity():
     rows=[item(gross_weight_kg=0,volume_m3=None)]
     c=catalog(rows,[reconcile([source(actual_shipped_qty='4',gross_weight_kg='7',volume_m3='2')])])
     selected=next(r for r in c['rows'] if r['origin']=='source')
     p=service.project(rows,c,[selected['row_id']],[],'fill_missing')
     assert p['rows'][0]['actual_shipped_qty']=='1'
-    assert p['rows'][0]['gross_weight_kg']==0
+    assert p['rows'][0]['gross_weight_kg']=='7'
     assert p['rows'][0]['volume_m3']=='2'
+
+
+def test_fill_missing_preserves_explicitly_confirmed_zero_shipped_quantity():
+    rows=[item(actual_shipped_qty=0,actual_shipped_qty_mode='MANUAL_CONFIRMED',gross_weight_kg=None)]
+    c=catalog(rows,[reconcile([source(actual_shipped_qty='4',gross_weight_kg='7')])])
+    selected=next(r for r in c['rows'] if r['origin']=='source')
+
+    projected=service.project(rows,c,[selected['row_id']],[],'fill_missing')
+
+    assert projected['rows'][0]['actual_shipped_qty']==0
+    assert projected['rows'][0]['gross_weight_kg']=='7'
+
+
+@pytest.mark.parametrize('proposal', [
+    reconcile([source(actual_shipped_qty=0,actual_shipped_qty_mode='EXPLICIT_SOURCE',gross_weight_kg=7)]),
+    {'proposal_id':'SYSTEM','proposal_type':'item_update','target_item_name':'I1',
+     'default_selected':True,'result_origin':'SYSTEM',
+     'payload':{'fields':{'actual_shipped_qty':0,'gross_weight_kg':7}}},
+])
+def test_explicit_source_zero_quantity_counts_and_projects_as_meaningful(proposal):
+    rows=[item(actual_shipped_qty=3,gross_weight_kg=None)]
+
+    review=catalog(rows,[proposal])
+    selected=next(row for row in review['rows'] if row['origin']=='source')
+    projected=service.project(rows,review,[selected['row_id']],[],'update_selected')
+
+    assert selected['meaningful_field_count'] >= 2
+    assert projected['rows'][0]['actual_shipped_qty']==0
+    assert projected['rows'][0]['gross_weight_kg']==7
+
+
+def test_placeholder_quantity_does_not_block_other_meaningful_fields():
+    rows=[item(actual_shipped_qty=3,gross_weight_kg=None)]
+
+    review=catalog(rows,[reconcile([source(actual_shipped_qty='/',gross_weight_kg=7)])])
+    selected=next(row for row in review['rows'] if row['origin']=='source')
+    projected=service.project(rows,review,[selected['row_id']],[],'update_selected')
+
+    assert selected['can_update']
+    assert selected['default_update_selected']
+    assert projected['rows'][0]['actual_shipped_qty']==3
+    assert projected['rows'][0]['gross_weight_kg']==7
 
 
 def test_explicit_missing_zero_is_fillable():
@@ -164,8 +206,11 @@ def test_catalog_groups_sources_by_priority_and_marks_lower_priority_conflicts()
 
     assert [group['source_id'] for group in review['source_groups'][:2]] == ['PACKING-LIST', 'LOGISTICS-OA']
     assert source_rows['HIGH']['source_priority'] < source_rows['LOW']['source_priority']
-    assert source_rows['HIGH']['default_update_selected']
-    assert not source_rows['LOW']['default_update_selected']
+    assert not source_rows['HIGH']['default_update_selected']
+    assert source_rows['LOW']['default_update_selected']
+    assert source_rows['HIGH']['meaningful_field_count'] == 1
+    assert source_rows['LOW']['meaningful_field_count'] == 2
+    assert '最完整' in source_rows['LOW']['default_selection_reason']
     assert source_rows['LOW']['conflict_fields'] == ['gross_weight_kg']
 
     projected = service.project(items, review,
@@ -177,7 +222,7 @@ def test_catalog_groups_sources_by_priority_and_marks_lower_priority_conflicts()
     assert adopted[('I1', 'gross_weight_kg')]['conflict_override']
 
 
-def test_lower_priority_source_is_preselected_only_when_it_fills_a_higher_source_gap():
+def test_equal_completeness_uses_source_priority_instead_of_combining_rows():
     items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
     sources = [
         {'source_id': 'PACK', 'source_kind': 'approval_attachment',
@@ -197,8 +242,94 @@ def test_lower_priority_source_is_preselected_only_when_it_fills_a_higher_source
     candidates = {row['proposal_id']: row for row in review['rows'] if row['origin'] == 'source'}
 
     assert candidates['PACK']['default_update_selected']
-    assert candidates['OA']['default_update_selected']
+    assert not candidates['OA']['default_update_selected']
+    assert candidates['PACK']['meaningful_field_count'] == 1
+    assert candidates['OA']['meaningful_field_count'] == 1
+    assert '完整度并列' in candidates['PACK']['default_selection_reason']
     assert not candidates['OA']['conflict_fields']
+
+
+def test_more_complete_lower_priority_row_wins_when_higher_row_has_placeholders():
+    items = [item('I1', 'FL004107', gross_weight_kg=None, volume_m3=None)]
+    sources = [
+        {'source_id': 'PACK', 'source_kind': 'approval_attachment',
+         'source_field': '装箱单附件（Excel）'},
+        {'source_id': 'OA', 'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
+    ]
+    proposals = [
+        {'proposal_id': 'PACK', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'default_selected': True, 'source_refs': [{'source_id': 'PACK'}],
+         'payload': {'fields': {'actual_shipped_qty': 200, 'shipped_uom': '个',
+                                'package_count': 0, 'net_weight_kg': '-',
+                                'gross_weight_kg': '/', 'volume_m3': '—'}}},
+        {'proposal_id': 'OA', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'default_selected': True, 'source_refs': [{'source_id': 'OA'}],
+         'payload': {'fields': {'actual_shipped_qty': 500, 'shipped_uom': '个',
+                                'package_count': 1, 'net_weight_kg': 12.9,
+                                'gross_weight_kg': 13.4, 'volume_m3': 0.03528,
+                                'project_collection': '贸易项目'}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates = {row['proposal_id']: row for row in review['rows'] if row['origin'] == 'source'}
+
+    assert candidates['PACK']['meaningful_field_count'] == 2
+    assert candidates['OA']['meaningful_field_count'] == 7
+    assert not candidates['PACK']['default_update_selected']
+    assert candidates['OA']['default_update_selected']
+
+    projected = service.project(items, review, [candidates['OA']['row_id']], [], 'update_selected')
+    assert projected['rows'][0]['actual_shipped_qty'] == 500
+    assert projected['rows'][0]['package_count'] == 1
+    assert projected['rows'][0]['gross_weight_kg'] == 13.4
+
+    placeholder_projection = service.project(items, review, [candidates['PACK']['row_id']], [], 'update_selected')
+    assert placeholder_projection['rows'][0]['actual_shipped_qty'] == 200
+    assert placeholder_projection['rows'][0].get('package_count') is None
+    assert placeholder_projection['rows'][0].get('net_weight_kg') is None
+    assert placeholder_projection['rows'][0].get('gross_weight_kg') is None
+    assert placeholder_projection['rows'][0].get('volume_m3') is None
+
+
+def test_completeness_tie_uses_stable_row_id_within_one_source():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
+    sources = [{'source_id': 'PACK', 'source_kind': 'approval_attachment',
+                'source_field': '装箱单附件（Excel）'}]
+    proposals = [
+        {'proposal_id': proposal_id, 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'default_selected': True, 'source_refs': [{'source_id': 'PACK'}],
+         'payload': {'fields': {'gross_weight_kg': value}}}
+        for proposal_id, value in [('FIRST', 9), ('SECOND', 8)]
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates = [row for row in review['rows'] if row['origin'] == 'source']
+
+    expected = min(candidates, key=lambda row: row['row_id'])
+    assert [row['row_id'] for row in candidates if row['default_update_selected']] == [expected['row_id']]
+
+
+def test_more_complete_unsafe_candidate_is_not_promoted():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
+    sources = [
+        {'source_id': 'PACK', 'source_kind': 'approval_attachment',
+         'source_field': '装箱单附件（Excel）'},
+        {'source_id': 'OA', 'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
+    ]
+    proposals = [
+        {'proposal_id': 'SAFE', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'default_selected': True, 'source_refs': [{'source_id': 'PACK'}],
+         'payload': {'fields': {'gross_weight_kg': 9}}},
+        {'proposal_id': 'UNSAFE', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'default_selected': False, 'source_refs': [{'source_id': 'OA'}],
+         'payload': {'fields': {'gross_weight_kg': 8, 'volume_m3': 2}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates = {row['proposal_id']: row for row in review['rows'] if row['origin'] == 'source'}
+
+    assert candidates['SAFE']['default_update_selected']
+    assert not candidates['UNSAFE']['default_update_selected']
 
 
 def test_source_groups_expose_server_priority_reason_and_actual_match_status():
