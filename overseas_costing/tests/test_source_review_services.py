@@ -128,6 +128,32 @@ def test_progress_manifest_preserves_partial_read_status() -> None:
     assert progress[0]["read_status"] == "PARTIAL"
 
 
+def test_progress_manifest_exposes_safe_skipped_evidence_metadata() -> None:
+    manifest = prepare_source_manifest(
+        [{"source_kind": "approval_attachment", "source_id": "ATT-1", "file_name": "packing.xlsx"}]
+    )
+    manifest[0].update(
+        read_status="SKIPPED",
+        skip_reason_code="FILE_NOT_FOUND",
+        skip_reason_text="资料文件不存在。",
+        elapsed_ms=37,
+        error="<html>Internal Server Error /private/files/secret.xlsx</html>",
+    )
+
+    progress = source_progress_manifest(manifest)
+
+    assert progress[0]["status"] == "SKIPPED"
+    assert progress[0]["read_status"] == "SKIPPED"
+    assert progress[0]["evidence_id"] == "ATT-1"
+    assert progress[0]["evidence_kind"] == "attachment"
+    assert progress[0]["skip_reason_code"] == "FILE_NOT_FOUND"
+    assert progress[0]["skip_reason_text"] == "资料文件不存在。"
+    assert progress[0]["elapsed_ms"] == 37
+    assert progress[0]["detail"] == "资料文件不存在。已跳过，继续读取下一资料。"
+    assert "html" not in str(progress[0]).lower()
+    assert "/private/" not in str(progress[0])
+
+
 def test_allocate_gross_weight_uses_decimal_and_last_row_absorbs_rounding() -> None:
     result = allocate_gross_weight(
         Decimal("4200"),

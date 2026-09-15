@@ -13,7 +13,9 @@ from pathlib import PurePath
 from typing import Any, Iterable, Optional
 
 
-READ_STATUSES = frozenset({"READ", "PARTIAL", "FAILED", "NO_RESULT", "EXCLUDED", "NEEDS_SELECTION"})
+READ_STATUSES = frozenset(
+    {"READ", "PARTIAL", "FAILED", "SKIPPED", "UNREADABLE", "NO_RESULT", "EXCLUDED", "NEEDS_SELECTION"}
+)
 PARSE_METHODS = frozenset(
     {"SYSTEM_APPROVAL", "SYSTEM_EXCEL", "AI_TEXT", "AI_VISION", "NONE"}
 )
@@ -161,9 +163,22 @@ def source_progress_manifest(manifest: Iterable[dict]) -> list[dict]:
         if parse_method not in PARSE_METHODS:
             parse_method = "NONE"
         excluded_reason = _text(source.get("exclude_reason"), 1000)
+        evidence_kind = _text(source.get("evidence_kind"), 60)
+        if not evidence_kind:
+            evidence_kind = {
+                "approval_form": "approval_form",
+                "approval_comment": "approval_comment",
+                "wiki_sheet": "sheet",
+                "approval_attachment": "attachment",
+                "approval_comment_attachment": "attachment",
+                "manual_attachment": "attachment",
+            }.get(_text(source.get("source_kind"), 60), "other")
+        skip_reason_text = _text(source.get("skip_reason_text"), 300)
+        skipped = read_status in {"SKIPPED", "UNREADABLE"}
         rows.append(
             {
                 "source_id": _text(source.get("source_id"), 500),
+                "evidence_id": _text(source.get("source_id"), 500),
                 "parent_source_id": _text(source.get("parent_source_id"), 500),
                 "source_kind": _text(source.get("source_kind"), 60),
                 "source_context": public_context(source.get('source_context') or {}),
@@ -182,7 +197,7 @@ def source_progress_manifest(manifest: Iterable[dict]) -> list[dict]:
                 "priority_reason": _text(source.get("priority_reason"), 500),
                 "workflow_stage": _text(source.get("workflow_stage"), 60),
                 "workflow_rank": int(source.get("workflow_rank") if source.get("workflow_rank") is not None else 3),
-                "evidence_kind": _text(source.get("evidence_kind"), 60),
+                "evidence_kind": evidence_kind,
                 "evidence_rank": int(source.get("evidence_rank") if source.get("evidence_rank") is not None else 4),
                 "actual_packing_match_status": _text(source.get("actual_packing_match_status"), 40),
                 "actual_packing_match_id": _text(source.get("actual_packing_match_id"), 500),
@@ -201,11 +216,18 @@ def source_progress_manifest(manifest: Iterable[dict]) -> list[dict]:
                 "read_status": read_status,
                 "parse_method": parse_method,
                 "result_count": int(source.get("result_count") or 0),
-                "error": _text(source.get("error") or excluded_reason, 1000),
+                "error": "" if skipped else _text(source.get("error") or excluded_reason, 1000),
+                "skip_reason_code": _text(source.get("skip_reason_code"), 80),
+                "skip_reason_text": skip_reason_text,
+                "elapsed_ms": max(0, int(source.get("elapsed_ms") or 0)),
                 "sheet_options": deepcopy(source.get("sheet_options") or []),
                 # Kept during rollout for older progress renderers.
                 "status": "WAITING" if read_status == "NO_RESULT" and source.get("selected") else read_status,
-                "detail": excluded_reason or ("等待读取" if source.get("selected") else "已排除"),
+                "detail": (
+                    f"{skip_reason_text or '资料无法读取。'}已跳过，继续读取下一资料。"
+                    if skipped
+                    else excluded_reason or ("等待读取" if source.get("selected") else "已排除")
+                ),
                 "field_count": len(source.get("form_fields") or {})
                 if isinstance(source.get("form_fields"), dict)
                 else 0,

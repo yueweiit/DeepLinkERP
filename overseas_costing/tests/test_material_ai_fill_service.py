@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import time
 
 import pytest
 
@@ -158,7 +159,9 @@ def test_source_progress_exposes_safe_document_metadata() -> None:
     assert progress == [
         {
             "source_id": "approval:PROC-1:form",
+            "evidence_id": "approval:PROC-1:form",
             "source_kind": "approval_form",
+            "evidence_kind": "approval_form",
             "label": "国际物流审批正文",
             "sheet": "",
             "status": "WAITING",
@@ -167,10 +170,15 @@ def test_source_progress_exposes_safe_document_metadata() -> None:
             "page_count": 0,
             "candidate_count": 0,
             "error": "",
+            "skip_reason_code": "",
+            "skip_reason_text": "",
+            "elapsed_ms": 0,
         },
         {
             "source_id": "ATT-1",
+            "evidence_id": "ATT-1",
             "source_kind": "approval_attachment",
+            "evidence_kind": "attachment",
             "label": "采购明细.xlsx",
             "sheet": "Sheet1",
             "status": "WAITING",
@@ -179,9 +187,182 @@ def test_source_progress_exposes_safe_document_metadata() -> None:
             "page_count": 0,
             "candidate_count": 0,
             "error": "",
+            "skip_reason_code": "",
+            "skip_reason_text": "",
+            "elapsed_ms": 0,
         },
     ]
     assert "secret.xlsx" not in str(progress)
+
+
+def test_completed_evidence_without_candidates_is_still_recorded_as_read() -> None:
+    progress = build_source_progress(
+        [
+            {
+                "source_kind": "approval_form",
+                "source_id": "approval:PROC-1:form",
+                "source_label": "国际物流审批正文",
+                "form_fields": {"运输方式": "空运"},
+            }
+        ]
+    )
+
+    material_ai_fill_service._update_source_progress(
+        progress,
+        0,
+        status="COMPLETED",
+        detail="已读取",
+        candidate_count=0,
+    )
+
+    assert progress[0]["read_status"] == "READ"
+
+
+def test_evidence_download_and_parse_steps_have_independent_hard_timeouts(monkeypatch) -> None:
+    service = material_ai_fill_service
+    monkeypatch.setattr(service, "EVIDENCE_DOWNLOAD_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service, "EVIDENCE_PARSE_TIMEOUT_SECONDS", 0.02)
+
+    def swallows_exception_but_not_hard_deadline():
+        try:
+            time.sleep(0.05)
+        except Exception:
+            return "incorrectly swallowed"
+
+    with pytest.raises(service.EvidenceReadSkipped) as download:
+        service._run_evidence_step(lambda: time.sleep(0.05), phase="download")
+    with pytest.raises(service.EvidenceReadSkipped) as parse:
+        service._run_evidence_step(swallows_exception_but_not_hard_deadline, phase="parse")
+
+    assert download.value.code == "DOWNLOAD_TIMEOUT"
+    assert parse.value.code == "PARSE_TIMEOUT"
+
+
+@pytest.mark.parametrize(
+    ("phase", "error", "code"),
+    [
+        ("download", FileNotFoundError("/private/files/secret.pdf"), "FILE_NOT_FOUND"),
+        ("download", PermissionError("permission denied: /private/files/secret.pdf"), "SOURCE_PERMISSION_DENIED"),
+        ("download", ValueError("remote returned 404 <html>not found</html>"), "FILE_NOT_FOUND"),
+        ("download", RuntimeError("remote returned 403 Forbidden"), "SOURCE_PERMISSION_DENIED"),
+        ("download", ValueError("signed URL expired"), "SOURCE_URL_EXPIRED"),
+        ("download", RuntimeError("remote returned 410 Gone"), "SOURCE_URL_EXPIRED"),
+        ("parse", ValueError("工作簿损坏"), "CORRUPT_DOCUMENT"),
+        ("parse", ValueError("旧版 .xls 暂不支持"), "UNSUPPORTED_FORMAT"),
+        ("parse", RuntimeError("OCR failed to recognize content"), "OCR_FAILED"),
+        ("parse", ValueError("未发现可识别内容"), "NO_RECOGNIZABLE_CONTENT"),
+    ],
+)
+def test_evidence_failures_are_classified_without_leaking_raw_details(phase, error, code) -> None:
+    service = material_ai_fill_service
+
+    with pytest.raises(service.EvidenceReadSkipped) as caught:
+        service._run_evidence_step(lambda: (_ for _ in ()).throw(error), phase=phase)
+
+    assert caught.value.code == code
+    assert "html" not in caught.value.safe_text.lower()
+    assert "/private/" not in caught.value.safe_text
+
+
+def test_database_and_source_integrity_failures_are_not_downgraded_to_evidence_skip() -> None:
+    service = material_ai_fill_service
+
+    class DatabaseError(RuntimeError):
+        pass
+
+    with pytest.raises(DatabaseError):
+        service._run_evidence_step(
+            lambda: (_ for _ in ()).throw(DatabaseError("database transaction failed")),
+            phase="parse",
+        )
+    with pytest.raises(service.EvidenceIntegrityError):
+        service._run_evidence_step(
+            lambda: (_ for _ in ()).throw(service.EvidenceIntegrityError("来源指纹已变化")),
+            phase="download",
+        )
+    with pytest.raises(ValueError) as missing_identity:
+        service._run_evidence_step(
+            lambda: (_ for _ in ()).throw(ValueError("钉钉附件缺少审批实例或文件标识")),
+            phase="download",
+        )
+    assert not isinstance(missing_identity.value, service.EvidenceReadSkipped)
+
+
+def test_frappe_file_download_errors_are_skipped_but_frappe_system_permissions_remain_fatal() -> None:
+    service = material_ai_fill_service
+
+    FrappePermissionError = type("PermissionError", (RuntimeError,), {"__module__": "frappe.exceptions"})
+    FrappeDoesNotExistError = type(
+        "DoesNotExistError", (RuntimeError,), {"__module__": "frappe.exceptions"}
+    )
+
+    with pytest.raises(service.EvidenceReadSkipped) as denied:
+        service._run_evidence_step(
+            lambda: (_ for _ in ()).throw(FrappePermissionError("Not permitted")),
+            phase="download",
+        )
+    with pytest.raises(service.EvidenceReadSkipped) as missing:
+        service._run_evidence_step(
+            lambda: (_ for _ in ()).throw(FrappeDoesNotExistError("File does not exist")),
+            phase="download",
+        )
+    with pytest.raises(FrappePermissionError):
+        service._run_evidence_step(
+            lambda: (_ for _ in ()).throw(FrappePermissionError("System permission denied")),
+            phase="parse",
+        )
+
+    assert denied.value.code == "SOURCE_PERMISSION_DENIED"
+    assert missing.value.code == "FILE_NOT_FOUND"
+
+
+def test_excel_sheet_reader_does_not_turn_database_failure_into_parse_error(monkeypatch, tmp_path) -> None:
+    from overseas_costing.services import attachment_parse_service, packing_source_service
+
+    service = material_ai_fill_service
+
+    class DatabaseError(RuntimeError):
+        pass
+
+    path = tmp_path / "packing.xlsx"
+    path.write_bytes(b"placeholder")
+    monkeypatch.setattr(attachment_parse_service, "_resolve_source_file_path", lambda **_kwargs: path)
+    monkeypatch.setattr(service, "_read_excel_semantic_document", lambda *_args: {"semantic_rows": []})
+    monkeypatch.setattr(
+        packing_source_service,
+        "resolve_trusted_packing_source",
+        lambda **_kwargs: (_ for _ in ()).throw(DatabaseError("database transaction failed")),
+    )
+
+    with pytest.raises(DatabaseError):
+        service._read_source(
+            [],
+            {
+                "source_kind": "approval_attachment",
+                "source_id": "ATT-1",
+                "source_label": "packing.xlsx",
+                "file_name": "packing.xlsx",
+                "sheet_name": "Sheet1",
+                "batch": "B1",
+            },
+            prepared_attachment={
+                "source_id": "ATT-1",
+                "file_name": "packing.xlsx",
+                "file_url": str(path),
+            },
+        )
+
+
+def test_evidence_attempt_identity_deduplicates_a_file_but_not_distinct_workbook_sheets() -> None:
+    service = material_ai_fill_service
+    base = {"logical_source_id": "oa:PROC:FILE", "source_kind": "approval_attachment"}
+
+    assert service._evidence_attempt_key({**base, "source_id": "alias-a"}) == service._evidence_attempt_key(
+        {**base, "source_id": "alias-b"}
+    )
+    assert service._evidence_attempt_key({**base, "sheet_name": "Sheet A"}) != service._evidence_attempt_key(
+        {**base, "sheet_name": "Sheet B"}
+    )
 
 
 def test_manual_review_updates_allow_missing_purchase_value_and_require_reason_for_existing_value() -> None:
@@ -3480,7 +3661,7 @@ def test_unified_worker_preserves_partial_status_during_sheet_arbitration(monkey
     assert progress["Sheet B"]["status"] == "NO_RESULT"
 
 
-def test_unified_worker_blocks_when_required_source_has_no_usable_content(monkeypatch) -> None:
+def test_unified_worker_is_ready_unavailable_when_required_source_has_no_usable_content(monkeypatch) -> None:
     from overseas_costing.services import material_ai_fill_service as service
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
 
@@ -3512,9 +3693,12 @@ def test_unified_worker_blocks_when_required_source_has_no_usable_content(monkey
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
-    assert result["status"] == "FAILED"
-    assert repository.run["status"] == "FAILED"
-    assert "未发现可识别内容" in repository.run["error_message"]
+    assert result["status"] == "READY"
+    assert repository.run["status"] == "READY"
+    assert repository.run["source_completeness"] == "UNAVAILABLE"
+    assert repository.run["candidates_json"] == []
+    assert repository.run["source_progress_json"][0]["status"] == "SKIPPED"
+    assert "部分资料已跳过" in repository.run["ai_warning"]
 
 
 def test_unified_worker_falls_back_after_higher_priority_required_source_fails(monkeypatch) -> None:
@@ -3573,12 +3757,16 @@ def test_unified_worker_falls_back_after_higher_priority_required_source_fails(m
 
     assert result["status"] == "READY", repository.run.get("error_message")
     progress = {row["source_id"]: row for row in repository.run["source_progress_json"]}
-    assert progress["approval:PAYMENT:form"]["status"] == "FAILED"
+    assert progress["approval:PAYMENT:form"]["status"] == "SKIPPED"
+    assert progress["approval:PAYMENT:form"]["read_status"] == "SKIPPED"
+    assert progress["approval:PAYMENT:form"]["skip_reason_code"] == "SOURCE_PERMISSION_DENIED"
+    assert progress["approval:PAYMENT:form"]["detail"].endswith("已跳过，继续读取下一资料。")
     assert progress["LOGISTICS-PACKING"]["status"] in {"PARSED", "PARTIAL", "COMPLETED"}
     assert repository.run["candidates_json"]
+    assert repository.run["source_completeness"] == "PARTIAL"
 
 
-def test_unified_worker_blocks_when_all_selected_optional_sources_are_unusable(monkeypatch) -> None:
+def test_unified_worker_is_ready_unavailable_when_all_selected_optional_sources_are_unusable(monkeypatch) -> None:
     from overseas_costing.services import material_ai_fill_service as service
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
 
@@ -3605,8 +3793,124 @@ def test_unified_worker_blocks_when_all_selected_optional_sources_are_unusable(m
 
     result = execute_material_ai_fill("RUN-1", repository=repository)
 
+    assert result["status"] == "READY"
+    assert repository.run["source_completeness"] == "UNAVAILABLE"
+    assert repository.run["candidates_json"] == []
+    assert repository.run["source_progress_json"][0]["status"] == "SKIPPED"
+
+
+def test_worker_reads_each_evidence_once_continues_and_gives_ai_an_independent_budget(monkeypatch) -> None:
+    from overseas_costing.services import logistics_autofill_service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "approval_form",
+            "source_id": "approval:PAYMENT:form",
+            "logical_source_id": "approval:PAYMENT:form",
+            "source_hash": "payment-hash",
+            "source_label": "支付申请正文",
+            "approval_role": "logistics_expense",
+            "form_fields": {},
+        },
+        {
+            "source_kind": "approval_comment",
+            "source_id": "COMMENT-LOGISTICS",
+            "logical_source_id": "COMMENT-LOGISTICS",
+            "source_hash": "comment-hash",
+            "source_label": "国际物流评论",
+            "comment_text": "本票毛重 12.5kg",
+        },
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update(
+        proposal_version=1,
+        source_manifest_json=manifest,
+        input_fingerprint=service._source_review_fingerprint("B1", "V1", _items(), manifest, ""),
+    )
+    reads = []
+
+    def read_source(_items_arg, source, **_kwargs):
+        reads.append(source["source_id"])
+        if source["source_id"] == "approval:PAYMENT:form":
+            raise PermissionError("permission denied: /private/files/payment.html")
+        return [], {
+            "source_ref": {"source": "approval_comment", "source_id": source["source_id"]},
+            "text": "本票毛重 12.5kg",
+            "ai_eligible": True,
+        }
+
+    budgets = []
+
+    def bounded(callback, *, seconds):
+        budgets.append(seconds)
+        return callback()
+
+    ai_documents = []
+
+    def semantic(_items_arg, documents, **_kwargs):
+        ai_documents.extend(copy.deepcopy(documents))
+        return {"ok": True, "proposals": [], "warning": ""}
+
+    monkeypatch.setattr(service, "_read_source", read_source)
+    monkeypatch.setattr(service, "_call_source_review_ai", semantic)
+    monkeypatch.setattr(logistics_autofill_service, "run_supplement", bounded)
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    assert reads == ["approval:PAYMENT:form", "COMMENT-LOGISTICS"]
+    assert budgets == [15.0, 15.0, 60.0]
+    assert len(ai_documents) == 1
+    assert ai_documents[0]["source_ref"]["source_id"] == "COMMENT-LOGISTICS"
+    assert repository.run["source_completeness"] == "PARTIAL"
+
+
+def test_worker_skips_duplicate_logical_evidence_but_keeps_distinct_sources(monkeypatch) -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {"source_kind": "approval_comment", "source_id": "COMMENT-A", "logical_source_id": "COMMENT-SAME", "comment_text": "A"},
+        {"source_kind": "approval_comment", "source_id": "COMMENT-B", "logical_source_id": "COMMENT-SAME", "comment_text": "B"},
+        {"source_kind": "approval_comment", "source_id": "COMMENT-C", "logical_source_id": "COMMENT-C", "comment_text": "C"},
+    ]
+    repository.run["input_fingerprint"] = build_input_fingerprint("B1", "V1", _items(), repository.sources)
+    reads = []
+
+    def read_source(_items_arg, source, **_kwargs):
+        reads.append(source["source_id"])
+        return [], {"source_ref": {"source_id": source["source_id"]}, "text": source["comment_text"], "ai_eligible": True}
+
+    monkeypatch.setattr(service, "_read_source", read_source)
+    monkeypatch.setattr(service, "_call_material_ai", lambda *_args: {"ok": True, "candidates": []})
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY"
+    assert reads == ["COMMENT-A", "COMMENT-C"]
+    progress = {row["source_id"]: row for row in repository.run["source_progress_json"]}
+    assert progress["COMMENT-B"]["status"] == "SKIPPED"
+    assert progress["COMMENT-B"]["skip_reason_code"] == "DUPLICATE_EVIDENCE"
+
+
+def test_worker_does_not_downgrade_database_failure_to_skipped_source(monkeypatch) -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+
+    class DatabaseError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(service, "_read_source", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        DatabaseError("database transaction failed")
+    ))
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
     assert result["status"] == "FAILED"
-    assert "所有已选资料均未发现可识别内容" in repository.run["error_message"]
+    assert repository.run["status"] == "FAILED"
+    assert repository.run["source_progress_json"][0]["status"] != "SKIPPED"
 
 
 @pytest.mark.parametrize('initial_status',['QUEUED','RUNNING'])

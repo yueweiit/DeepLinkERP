@@ -145,7 +145,11 @@ def test_failed_optional_download_does_not_block_ready_draft_from_readable_sourc
     assert result['status'] == 'READY', repo.run.get('error_message')
     progress = {row['label']: row for row in repo.run['source_progress_json']}
     assert progress['物流说明']['status'] == 'COMPLETED'
-    assert progress['packing.txt']['status'] == 'FAILED'
+    assert progress['packing.txt']['status'] == 'SKIPPED'
+    assert progress['packing.txt']['read_status'] == 'SKIPPED'
+    assert progress['packing.txt']['skip_reason_code'] == 'SOURCE_PERMISSION_DENIED'
+    assert progress['packing.txt']['detail'].endswith('已跳过，继续读取下一资料。')
+    assert repo.run['source_completeness'] == 'PARTIAL'
     final = ai._load_json(repo.run['draft_json'], {})['review_input']['source_dependencies']
     assert {row['kind'] for row in final} == {'approval'}
 
@@ -205,6 +209,8 @@ def test_failed_local_optional_attachment_is_removed_from_ready_dependencies(mon
 
     assert result['status'] == 'READY', repo.run.get('error_message')
     progress = {row['label']: row for row in repo.run['source_progress_json']}
-    assert progress['corrupt.xlsx']['status'] == 'FAILED'
+    assert progress['corrupt.xlsx']['status'] == 'SKIPPED'
+    assert progress['corrupt.xlsx']['skip_reason_code'] == 'CORRUPT_DOCUMENT'
+    assert repo.run['source_completeness'] == 'PARTIAL'
     final = ai._load_json(repo.run['draft_json'], {})['review_input']['source_dependencies']
     assert {row['kind'] for row in final} == {'approval'}

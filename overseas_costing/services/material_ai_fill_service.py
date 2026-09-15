@@ -75,6 +75,10 @@ MAX_SOURCE_BYTES = 25 * 1024 * 1024
 MAX_VISION_IMAGES = 20
 MAX_VISION_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_DEEPSEEK_VISION_MODEL = "deepseek-v4-flash-vision-exp"
+EVIDENCE_DOWNLOAD_TIMEOUT_SECONDS = 10.0
+EVIDENCE_PARSE_TIMEOUT_SECONDS = 15.0
+AI_SEMANTIC_TIMEOUT_SECONDS = 60.0
+EVIDENCE_SKIP_DETAIL = "已跳过，继续读取下一资料。"
 REVIEW_PROPOSAL_TYPES = frozenset({"material_replace", "item_update", "fee_update", "logistics_reconcile"})
 REVIEW_ITEM_FIELDS = frozenset(
     {
@@ -136,6 +140,147 @@ PURCHASE_CORRECTION_FIELDS = frozenset(
 )
 
 
+class EvidenceReadSkipped(ValueError):
+    """A single unusable evidence unit; safe to expose and continue past."""
+
+    def __init__(self, code: str, safe_text: str):
+        self.code = str(code or "EVIDENCE_UNREADABLE")[:80]
+        self.safe_text = str(safe_text or "资料无法读取。")[:300]
+        super().__init__(self.safe_text)
+
+
+class EvidenceIntegrityError(RuntimeError):
+    """A stale or inconsistent server-owned source must fail the whole run."""
+
+
+class _EvidenceSystemFailure(BaseException):
+    """Escape broad client catches while preserving a fatal infrastructure error."""
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+
+def _evidence_attempt_key(source: dict) -> tuple[str, str]:
+    """Deduplicate one logical evidence unit while preserving distinct sheets."""
+
+    identity = str(
+        source.get("logical_source_id")
+        or source.get("parent_source_id")
+        or source.get("source_id")
+        or source.get("resolver_source_id")
+        or ""
+    ).strip()
+    sheet = str(source.get("sheet_name") or source.get("sheet") or "").strip().casefold()
+    return identity, sheet
+
+
+def _classify_evidence_exception(error: Exception, phase: str) -> EvidenceReadSkipped | None:
+    """Return a safe evidence failure, or ``None`` for fatal run-control errors."""
+
+    if isinstance(error, EvidenceReadSkipped):
+        return error
+    if isinstance(error, EvidenceIntegrityError):
+        return None
+    module = type(error).__module__.casefold()
+    name = type(error).__name__.casefold()
+    message = str(error or "").casefold()
+    if phase == "download" and module.startswith("frappe"):
+        if name == "permissionerror":
+            return EvidenceReadSkipped(
+                "SOURCE_PERMISSION_DENIED", "资料文件无读取权限。"
+            )
+        if name == "doesnotexisterror":
+            return EvidenceReadSkipped("FILE_NOT_FOUND", "资料文件不存在。")
+    if module.startswith("frappe") or any(
+        marker in name
+        for marker in ("databaseerror", "operationalerror", "transaction", "deadlock", "locktimeout")
+    ):
+        return None
+    if any(
+        marker in message
+        for marker in (
+            "来源已变化",
+            "来源内容已变化",
+            "指纹已变化",
+            "版本已变化",
+            "不属于当前批次",
+            "不属于当前采购支出",
+            "缺少审批实例或文件标识",
+            "来源依赖",
+            "execution claim",
+            "run claim",
+        )
+    ):
+        return None
+    if isinstance(error, FileNotFoundError) or "404" in message or "not found" in message or "不存在" in message:
+        return EvidenceReadSkipped("FILE_NOT_FOUND", "资料文件不存在。")
+    if isinstance(error, PermissionError) or any(
+        marker in message
+        for marker in (
+            "permission denied",
+            "access denied",
+            "you do not have permission",
+            "403 forbidden",
+            "无权读取",
+            "没有权限",
+        )
+    ):
+        return EvidenceReadSkipped("SOURCE_PERMISSION_DENIED", "资料文件无读取权限。")
+    if (
+        "expired" in message
+        or "410 gone" in message
+        or "链接失效" in message
+        or "url 失效" in message
+    ):
+        return EvidenceReadSkipped("SOURCE_URL_EXPIRED", "资料链接已失效。")
+    if any(marker in message for marker in ("不支持", "unsupported", "暂不支持")):
+        return EvidenceReadSkipped("UNSUPPORTED_FORMAT", "资料格式暂不支持。")
+    if any(marker in message for marker in ("损坏", "corrupt", "bad zip", "invalid workbook")):
+        return EvidenceReadSkipped("CORRUPT_DOCUMENT", "资料文件已损坏。")
+    if "ocr" in message and any(marker in message for marker in ("fail", "error", "失败", "无法")):
+        return EvidenceReadSkipped("OCR_FAILED", "资料图像无法识别。")
+    if any(marker in message for marker in ("未发现可识别", "未识别到", "未读取到", "no recognizable")):
+        return EvidenceReadSkipped("NO_RECOGNIZABLE_CONTENT", "资料中未发现可识别内容。")
+    if phase == "download" and isinstance(error, (ValueError, OSError)):
+        return EvidenceReadSkipped("DOWNLOAD_FAILED", "资料文件下载或归档失败。")
+    if phase == "parse" and isinstance(error, (ValueError, UnicodeError, OSError)):
+        return EvidenceReadSkipped("PARSE_FAILED", "资料文件无法解析。")
+    return None
+
+
+def _run_evidence_step(callback: Callable[[], Any], *, phase: str) -> Any:
+    """Run one evidence operation once under a hard, phase-specific deadline."""
+
+    from overseas_costing.services.logistics_autofill_service import run_supplement
+
+    seconds = (
+        EVIDENCE_DOWNLOAD_TIMEOUT_SECONDS
+        if phase == "download"
+        else EVIDENCE_PARSE_TIMEOUT_SECONDS
+    )
+
+    def invoke() -> dict:
+        try:
+            return {"step_ok": True, "result": callback()}
+        except Exception as error:
+            skipped = _classify_evidence_exception(error, phase)
+            if skipped is not None:
+                return {"step_ok": False, "skipped": skipped}
+            raise _EvidenceSystemFailure(error)
+
+    try:
+        bounded = run_supplement(invoke, seconds=seconds)
+    except _EvidenceSystemFailure as fatal:
+        raise fatal.error
+    if not bounded.get("ok", True):
+        code = "DOWNLOAD_TIMEOUT" if phase == "download" else "PARSE_TIMEOUT"
+        text = "资料文件下载超时。" if phase == "download" else "资料文件解析超时。"
+        raise EvidenceReadSkipped(code, text)
+    if not bounded.get("step_ok"):
+        raise bounded["skipped"]
+    return bounded.get("result")
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -156,7 +301,16 @@ def build_source_progress(sources: list[dict]) -> list[dict]:
         progress.append(
             {
                 "source_id": str(source.get("source_id") or "")[:500],
+                "evidence_id": str(source.get("source_id") or "")[:500],
                 "source_kind": str(source.get("source_kind") or "")[:60],
+                "evidence_kind": str(source.get("evidence_kind") or {
+                    "approval_form": "approval_form",
+                    "approval_comment": "approval_comment",
+                    "wiki_sheet": "sheet",
+                    "approval_attachment": "attachment",
+                    "approval_comment_attachment": "attachment",
+                    "manual_attachment": "attachment",
+                }.get(str(source.get("source_kind") or ""), "other"))[:60],
                 **({"approval_no": str(source['approval_no'])[:200]} if source.get('approval_no') else {}),
                 "label": str(
                     source.get("source_label")
@@ -171,6 +325,9 @@ def build_source_progress(sources: list[dict]) -> list[dict]:
                 "page_count": 0,
                 "candidate_count": 0,
                 "error": "",
+                "skip_reason_code": "",
+                "skip_reason_text": "",
+                "elapsed_ms": 0,
             }
         )
     return progress
@@ -203,11 +360,12 @@ def _update_source_progress(
         read_status = "FAILED"
     elif status_value == "PARTIAL":
         read_status = "PARTIAL"
-    elif status_value in {"SKIPPED", "NO_RESULT"}:
+    elif status_value == "SKIPPED":
+        read_status = "SKIPPED"
+    elif status_value == "NO_RESULT":
         read_status = "NO_RESULT"
     elif status_value in {"PARSED", "ANALYZING", "COMPLETED", "READ"}:
-        candidate_count = int(values.get("candidate_count") or progress[index].get("candidate_count") or 0)
-        read_status = "READ" if candidate_count else "NO_RESULT"
+        read_status = "READ"
     elif status_value in {"EXCLUDED", "NEEDS_SELECTION"}:
         read_status = status_value
     progress[index].update(
@@ -215,7 +373,10 @@ def _update_source_progress(
             "status": status_value,
             "read_status": read_status or "NO_RESULT",
             "detail": str(detail or "")[:500],
-            **{key: value for key, value in values.items() if key in {"field_count", "page_count", "candidate_count", "result_count", "error"}},
+            **{key: value for key, value in values.items() if key in {
+                "field_count", "page_count", "candidate_count", "result_count", "error",
+                "evidence_id", "evidence_kind", "skip_reason_code", "skip_reason_text", "elapsed_ms",
+            }},
         }
     )
     progress[index]["result_count"] = int(
@@ -247,6 +408,8 @@ def _reconcile_source_progress(
             continue
         if old and str(old.get("read_status") or "") in {
             "FAILED",
+            "SKIPPED",
+            "UNREADABLE",
             "EXCLUDED",
             "NEEDS_SELECTION",
         }:
@@ -3097,7 +3260,13 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
     return candidates
 
 
-def _read_source(items: list[dict], source: dict, *, attachment_ready=None) -> tuple[list[dict], dict]:
+def _read_source(
+    items: list[dict],
+    source: dict,
+    *,
+    attachment_ready=None,
+    prepared_attachment: dict | None = None,
+) -> tuple[list[dict], dict]:
     """Return deterministic candidates and a bounded document for semantic matching."""
 
     from overseas_costing.services import attachment_parse_service, packing_source_service
@@ -3158,7 +3327,7 @@ def _read_source(items: list[dict], source: dict, *, attachment_ready=None) -> t
                 if (source.get('source_context') or {}).get('root_kind') == 'expense' else [],
         }
 
-    attachment = _ensure_local_attachment(source)
+    attachment = prepared_attachment if prepared_attachment is not None else _ensure_local_attachment(source)
     if attachment_ready is not None:
         attachment_ready(attachment)
     file_name = str(attachment.get("file_name") or source.get("file_name") or "")
@@ -3215,7 +3384,12 @@ def _read_source(items: list[dict], source: dict, *, attachment_ready=None) -> t
                     raise ValueError("；".join(str(error.get("message") or error) for error in errors) or "未识别到装箱物料表头或明细。")
                 structured_rows.extend((preview.get("material_rows") or [])[:1000])
             except Exception as exc:
-                semantic_document.setdefault("parse_errors", []).append(f"{sheet_name}: {exc}")
+                skipped = _classify_evidence_exception(exc, "parse")
+                if skipped is None:
+                    raise
+                semantic_document.setdefault("parse_errors", []).append(
+                    f"{sheet_name}: {skipped.safe_text}"
+                )
         if not structured_rows and semantic_document.get("parse_errors"):
             raise ValueError("；".join(semantic_document["parse_errors"]))
         semantic_document["structured_rows"] = structured_rows[:2000]
@@ -3993,33 +4167,69 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         source_warnings = []
         completed_sources: list[dict] = []
         materialized_sources: dict[str, dict] = {}
-        supplement_started = None
+        attempted_evidence: set[tuple[str, str]] = set()
 
-        def read_review_source(source):
-            if not (unified_review and source.get('download_required') and dependency_baseline is not None
+        def seal_attachment(source, attachment):
+            nonlocal dependency_baseline
+            if (unified_review and dependency_baseline is not None
                     and callable(getattr(repo, 'capture_row_dependencies', None))):
-                return _read_source(read_items, source)
-
-            def seal_attachment(attachment):
-                nonlocal dependency_baseline
-                repo.assert_row_dependencies(batch_name, dependency_baseline, lock=True)
+                try:
+                    repo.assert_row_dependencies(batch_name, dependency_baseline, lock=True)
+                except ValueError as error:
+                    raise EvidenceIntegrityError(str(error)) from error
                 local_source = {**source, 'resolver_source_id': attachment.get('name') or attachment['source_id'],
                                 'available': True, 'download_required': False}
                 materialized_sources[str(source.get('source_id') or '')] = local_source
-                sealed = repo.capture_row_dependencies([local_source], context)
+                try:
+                    sealed = repo.capture_row_dependencies([local_source], context)
+                except ValueError as error:
+                    raise EvidenceIntegrityError(str(error)) from error
                 from .logistics_settlement.model import digest
                 merged = {digest({k:v for k,v in d.items() if k != 'fingerprint'}): d for d in dependency_baseline}
                 for dependency in sealed:
                     key = digest({k:v for k,v in dependency.items() if k != 'fingerprint'})
                     if key in merged and merged[key] != dependency:
-                        raise ValueError('下载期间来源内容已变化，请重新分析。')
+                        raise EvidenceIntegrityError('下载期间来源内容已变化，请重新分析。')
                     merged[key] = dependency
                 dependency_baseline = list(merged.values())
                 # Persist the local baseline before any bytes are parsed. Later
                 # reads and READY/preview/confirm all validate this same evidence.
                 persist(draft_json=_load_json(_record_value(run, 'draft_json'), {}))
 
-            return _read_source(read_items, source, attachment_ready=seal_attachment)
+        def read_review_source(source):
+            prepared_attachment = None
+            if source.get('download_required'):
+                prepared_attachment = _run_evidence_step(
+                    lambda: _ensure_local_attachment(source), phase="download"
+                )
+                seal_attachment(source, prepared_attachment)
+            return _run_evidence_step(
+                lambda: _read_source(
+                    read_items,
+                    source,
+                    **(
+                        {"prepared_attachment": prepared_attachment}
+                        if prepared_attachment is not None
+                        else {}
+                    ),
+                ),
+                phase="parse",
+            )
+
+        def skip_evidence(source_index, source, error, elapsed_ms):
+            _update_source_progress(
+                source_progress,
+                source_index,
+                status="SKIPPED",
+                detail=f"{error.safe_text}{EVIDENCE_SKIP_DETAIL}",
+                error="",
+                evidence_id=str(source.get("source_id") or "")[:500],
+                evidence_kind=str(source.get("evidence_kind") or source_progress[source_index].get("evidence_kind") or "other")[:60],
+                skip_reason_code=error.code,
+                skip_reason_text=error.safe_text,
+                elapsed_ms=max(0, int(elapsed_ms)),
+            )
+            source_errors.append({"source": "", "message": error.safe_text})
 
         for source_index, source in enumerate(sources):
             if unified_review and source.get("selected") is False:
@@ -4031,6 +4241,16 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     error=str(source.get("exclude_reason") or ""),
                 )
                 continue
+            attempt_key = _evidence_attempt_key(source)
+            if attempt_key in attempted_evidence:
+                skip_evidence(
+                    source_index,
+                    source,
+                    EvidenceReadSkipped("DUPLICATE_EVIDENCE", "该资料本次已读取。"),
+                    0,
+                )
+                continue
+            attempted_evidence.add(attempt_key)
             reading_status = "DOWNLOADING" if source.get("download_required") else "READING"
             reading_detail = "正在归档并下载" if reading_status == "DOWNLOADING" else "正在读取"
             _update_source_progress(
@@ -4039,17 +4259,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             persist(progress_step=f"读取资料 · {source_progress[source_index]['label']}",
                 source_progress_json=source_progress,
             )
+            evidence_started = time.monotonic()
             try:
-                supplemental = unified_review and source.get("source_kind") != "approval_form" and source.get("parse_method") != "SYSTEM_EXCEL"
-                if supplemental:
-                    supplement_started = supplement_started or time.monotonic()
-                    remaining = 60 - (time.monotonic() - supplement_started)
-                    bounded = run_supplement(lambda: {"ok": True, "result": read_review_source(source)}, seconds=max(0.001, remaining)) if remaining > 0 else {"ok": False, "warning": "补充资料读取已达 60 秒，保留系统直读结果。"}
-                    if not bounded.get("ok"):
-                        raise ValueError(bounded["warning"])
-                    source_candidates, document = bounded["result"]
-                else:
-                    source_candidates, document = read_review_source(source)
+                source_candidates, document = read_review_source(source)
                 deterministic.extend(source_candidates)
                 has_document_evidence = _document_has_evidence(document)
                 if has_document_evidence or source_candidates:
@@ -4126,26 +4338,20 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                                 ref["document_id"] = document["document_id"]
                             deterministic_proposals.append(proposal)
                 else:
-                    _update_source_progress(
-                        source_progress,
+                    skip_evidence(
                         source_index,
-                        status="SKIPPED",
-                        detail="未发现可识别内容",
-                        candidate_count=len(source_candidates),
+                        source,
+                        EvidenceReadSkipped(
+                            "NO_RECOGNIZABLE_CONTENT", "资料中未发现可识别内容。"
+                        ),
+                        (time.monotonic() - evidence_started) * 1000,
                     )
-            except Exception as exc:
-                _update_source_progress(
-                    source_progress,
+            except EvidenceReadSkipped as error:
+                skip_evidence(
                     source_index,
-                    status="FAILED",
-                    detail="读取失败",
-                    error=str(exc)[:1000],
-                )
-                source_errors.append(
-                    {
-                        "source": source.get("source_label") or source.get("source_id"),
-                        "message": str(exc),
-                    }
+                    source,
+                    error,
+                    (time.monotonic() - evidence_started) * 1000,
                 )
 
             partial = ([reconciliation] if reconciliation else []) + deterministic_proposals
@@ -4223,18 +4429,24 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             source_progress_json=source_progress,
         )
         if unified_review:
-            remaining = 60 - (time.monotonic() - supplement_started) if supplement_started else 60
             latest_context = _review_context(repo, batch_name, version_name, original_sources=original_sources)
             if _source_review_context(latest_context) != _source_review_context(context):
                 persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
                 return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
-            ai_result = run_supplement(lambda: _call_source_review_ai(
-                read_items,
-                documents,
-                clarification_text=clarification_text,
-                fx_rates=context.get("fx_rates") or {},
-                fee_policy=material_ai_fee_policy.prompt_policy(existing_fees, context.get("effective_source") or {}, REVIEW_FEE_KEYS),
-            ), seconds=max(0.001, remaining)) if remaining > 0 else {"ok": False, "proposals": [], "warning": "补充识别已达 60 秒，已保留系统直读结果。"}
+            ai_result = run_supplement(
+                lambda: _call_source_review_ai(
+                    read_items,
+                    documents,
+                    clarification_text=clarification_text,
+                    fx_rates=context.get("fx_rates") or {},
+                    fee_policy=material_ai_fee_policy.prompt_policy(
+                        existing_fees,
+                        context.get("effective_source") or {},
+                        REVIEW_FEE_KEYS,
+                    ),
+                ),
+                seconds=AI_SEMANTIC_TIMEOUT_SECONDS,
+            )
             enhanced_by_id = {
                 str(document.get("document_id") or ""): document
                 for document in ai_result.get("evidence_documents") or []
@@ -4322,7 +4534,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 candidates = [reconciliation, *retained]
                 from overseas_costing.services.shipment_review_service import merge_shipment_fills
                 failed_packing = any(source.get('dedicated_packing') and source.get('selected')
-                    and source_progress[index].get('status') == 'FAILED' for index, source in enumerate(sources))
+                    and source_progress[index].get('status') in {'FAILED', 'SKIPPED'} for index, source in enumerate(sources))
                 merge_shipment_fills(reconciliation, documents, selected_excel_sheets,
                     required_item_names=rows_by_name if failed_packing else ())
             elif reconciliation:
@@ -4332,7 +4544,14 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             if _source_review_context(latest_context) != _source_review_context(context):
                 persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
                 return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
-            ai_result = _call_material_ai(read_items, documents)
+            ai_result = (
+                run_supplement(
+                    lambda: _call_material_ai(read_items, documents),
+                    seconds=AI_SEMANTIC_TIMEOUT_SECONDS,
+                )
+                if documents or deterministic
+                else {"ok": False, "candidates": [], "warning": ""}
+            )
             candidates = normalize_candidates(deterministic + (ai_result.get("candidates") or []), items)
         for index, entry in enumerate(source_progress):
             if entry.get("status") not in {"ANALYZING", "PARSED"}:
@@ -4367,19 +4586,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         )
         warning_parts = [str(ai_result.get("warning") or "")]
         if not sources:
-            warning_parts.append("当前批次没有可识别的装箱资料，请先获取或上传装箱资料。")
+            warning_parts.append("当前未找到可识别资料，已保留当前物料预览。")
         if source_errors:
-            warning_parts.append(
-                "部分资料读取失败：" + "；".join(
-                    f"{row['source']}：{row['message']}" for row in source_errors[:10]
-                )
-            )
+            warning_parts.append("部分资料已跳过。")
         if source_warnings:
-            warning_parts.append(
-                "部分资料待核对：" + "；".join(
-                    f"{row['source']}：{row['message']}" for row in source_warnings[:10]
-                )
-            )
+            warning_parts.append("部分资料待核对。")
         if unified_review:
             from .material_ai_fee_policy import decorate
             from .material_ai_selection_service import material_fingerprint
@@ -4429,7 +4640,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             draft["autofill_preview"]["unresolved"].extend(
                 {"source_id": entry.get("source_id"), "message": f"{entry.get('label') or '装箱资料'}：{entry.get('error') or entry.get('detail')}"}
                 for entry in source_progress if entry.get("parse_method") == "SYSTEM_EXCEL"
-                and entry.get("status") in {"PARTIAL", "FAILED", "NEEDS_SELECTION"}
+                and entry.get("status") in {"PARTIAL", "FAILED", "SKIPPED", "NEEDS_SELECTION"}
             )
         else:
             draft = build_material_ai_draft(read_items, candidates)
@@ -4497,10 +4708,6 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     refreshed_sources, source_progress, candidates
                 )
             sources = refreshed_sources
-        if (unified_review
-                and any(source.get("selected") is not False for source in sources)
-                and not completed_sources):
-            raise ValueError("所有已选资料均未发现可识别内容，无法生成草稿。")
         if unified_review and dependency_baseline is not None:
             try:
                 repo.assert_row_dependencies(batch_name, dependency_baseline, lock=True)
@@ -4519,6 +4726,25 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         if unified_review:
             draft['material_input_fingerprint'] = material_fingerprint(refreshed_items, sources, refreshed_context)
             draft["review_input"] = deepcopy(_load_json(_record_value(run, "draft_json"), {}).get("review_input") or {})
+        selected_progress = [
+            source_progress[index]
+            for index, source in enumerate(sources)
+            if source.get("selected") is not False and index < len(source_progress)
+        ]
+        source_completeness = (
+            "UNAVAILABLE"
+            if not completed_sources
+            else "PARTIAL"
+            if source_errors or source_warnings or any(
+                str(row.get("status") or "") in {"SKIPPED", "FAILED", "PARTIAL", "NO_RESULT"}
+                for row in selected_progress
+            ) or any(
+                row.get('available') is False
+                and (row.get('source_context') or {}).get('root_kind') == 'expense'
+                for row in sources
+            )
+            else "COMPLETE"
+        )
         persist(status="READY",
             progress_step="草稿已生成",
             progress_percent=100,
@@ -4532,9 +4758,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             source_progress_json=source_progress,
             candidates_json=candidates,
             draft_json=draft,
-            source_completeness="PARTIAL" if source_errors or source_warnings or any(
-                row.get('available') is False and (row.get('source_context') or {}).get('root_kind') == 'expense' for row in sources
-            ) else "COMPLETE",
+            source_completeness=source_completeness,
             completed_at=_now(),
         )
         return {"ok": True, "run_id": str(run_id), "status": "READY", "candidate_count": len(candidates)}
@@ -4546,6 +4770,19 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             "status": str(_record_value(current, "status") or ""),
             "claimed": False,
         }
+    except EvidenceIntegrityError as exc:
+        if hasattr(repo, "rollback"):
+            repo.rollback()
+        try:
+            persist(
+                status="STALE",
+                progress_step="来源已变化",
+                error_message=str(exc)[:2000],
+                completed_at=_now(),
+            )
+        except Exception:
+            pass
+        return {"ok": False, "run_id": str(run_id), "status": "STALE"}
     except Exception as exc:
         if hasattr(repo, "rollback"):
             repo.rollback()
