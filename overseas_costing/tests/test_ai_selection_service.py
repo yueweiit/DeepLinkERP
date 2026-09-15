@@ -1,6 +1,7 @@
 """Server preview fences, idempotence and fee-only reuse without an AI call."""
 from copy import deepcopy
 import json
+import re
 import pytest
 from overseas_costing.services import material_ai_selection_service as service, material_ai_fill_service as ai
 from overseas_costing.tests.test_material_ai_context_fingerprint import ContextRepository
@@ -165,6 +166,41 @@ def test_public_catalog_and_preview_replace_process_instance_ids_with_stable_opa
     candidate_process_id = first_catalog['field_candidates'][0]['process_instance_id']
     assert first_process_id.startswith('proc_')
     assert first_process_id == second_process_id == candidate_process_id
+
+
+def test_public_process_id_prefix_cannot_bypass_opaque_digest_validation():
+    repo = Repo()
+    raw_process_id = 'proc_external-dingtalk-instance-secret'
+    repo.sources[0].update(
+        process_instance_id=raw_process_id,
+        parent_source_id=raw_process_id,
+        approval_title='国际物流审批',
+    )
+    repo.run['source_manifest_json'] = deepcopy(repo.sources)
+    repo.run['candidates_json'][0]['source_refs'][0]['process_instance_id'] = raw_process_id
+    repo.run['input_fingerprint'] = ai._source_review_fingerprint(
+        'B1', 'V1', repo.items, repo.sources, '', context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint'] = service.material_fingerprint(
+        repo.items, repo.sources, repo.context)
+
+    first_catalog = service.review_catalog(repo, 'B1', repo.run)
+    second_catalog = service.review_catalog(repo, 'B1', repo.run)
+    preview = prepare(repo)
+
+    for payload in (first_catalog, second_catalog, preview):
+        assert raw_process_id not in json.dumps(payload, ensure_ascii=False)
+    first_process_id = first_catalog['stage_snapshots'][1]['processes'][0]['process_instance_id']
+    second_process_id = second_catalog['stage_snapshots'][1]['processes'][0]['process_instance_id']
+    assert re.fullmatch(r'proc_[0-9a-f]{64}', first_process_id)
+    assert first_process_id == second_process_id
+
+
+def test_valid_public_process_digest_is_not_digested_again():
+    opaque_process_id = 'proc_' + ('a' * 64)
+
+    public = ai._public_ai_payload({'process_instance_id': opaque_process_id})
+
+    assert public['process_instance_id'] == opaque_process_id
 
 
 def test_field_choices_are_authenticated_without_persisting_business_values():

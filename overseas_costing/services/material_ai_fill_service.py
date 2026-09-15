@@ -2080,6 +2080,11 @@ _PUBLIC_AI_HIDDEN_KEYS = frozenset({
     "_price_metadata", "_verified_prior_item", "purchase_fact", "purchase_fact_history",
     "settlement_original_values", "ai_fill_original_values", "_shipment_valuation",
 })
+_PUBLIC_PROCESS_ID_PATTERN = re.compile(r"proc_[0-9a-f]{64}")
+
+
+def _is_opaque_public_process_id(value: Any) -> bool:
+    return bool(_PUBLIC_PROCESS_ID_PATTERN.fullmatch(str(value or "")))
 
 
 def _collect_public_process_ids(value: Any, result: set[str]) -> None:
@@ -2093,12 +2098,12 @@ def _collect_public_process_ids(value: Any, result: set[str]) -> None:
         key_text = str(key)
         if key_text == "process_instance_id":
             process_id = str(nested or "")
-            if process_id and not process_id.startswith("proc_"):
+            if process_id and not _is_opaque_public_process_id(process_id):
                 result.add(process_id)
         elif key_text == "process_instance_ids" and isinstance(nested, list):
             result.update(
                 str(process_id) for process_id in nested
-                if process_id and not str(process_id).startswith("proc_")
+                if process_id and not _is_opaque_public_process_id(process_id)
             )
         elif key_text == "extra_json" and isinstance(nested, str):
             _collect_public_process_ids(_load_json(nested, {}), result)
@@ -2110,7 +2115,7 @@ def _opaque_public_process_id(process_id: str) -> str:
     from .material_ai_row_selection import POLICY
 
     value = str(process_id or "")
-    if not value or value.startswith("proc_"):
+    if not value or _is_opaque_public_process_id(value):
         return value
     raw = json.dumps(
         [POLICY, "public-process", value], ensure_ascii=False, separators=(",", ":")
