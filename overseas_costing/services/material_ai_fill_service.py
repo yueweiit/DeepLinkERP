@@ -2301,12 +2301,9 @@ _HTML_PAIRED_TAG_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _HTML_MARKUP_PATTERN = re.compile(
-    r"(?:<!doctype\b|<!--|<\?xml\b|"
-    r"<\s*/?\s*(?:html|head|body|title|meta|link|script|style|pre|code|"
-    r"div|span|table|thead|tbody|tfoot|tr|th|td|form|input|button|select|"
-    r"option|textarea|label|iframe|object|embed|img|svg|canvas|p|br|hr|"
-    r"ul|ol|li|dl|dt|dd|section|article|header|footer|main|nav)"
-    r"(?![-\w:]))",
+    r"(?:<!doctype\b|<!--|<\?xml\b|</\s*[a-z][\w:-]*\s*>|"
+    r"<\s*[a-z][\w:-]*(?:\s+[^<>]*)?/\s*>|"
+    r"<\s*[a-z][\w:-]*(?:\s+[^<>]*)?$)",
     re.IGNORECASE,
 )
 _HTML_ATTRIBUTE_TAG_PATTERN = re.compile(

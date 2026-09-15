@@ -4200,6 +4200,8 @@ def test_public_payload_extra_json_is_parsed_allowlisted_and_never_falls_back_to
         "TF33304775/TF33304774",
         "物料 P-100 待核对",
         "物料编码 <P-100> 不匹配",
+        "产品规格 <BODY> 待核对",
+        "物料编码 <CODE> 待核对",
         "5 < 10 > 3",
         "https://example.com/help",
     ],
