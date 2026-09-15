@@ -17,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -5154,6 +5155,16 @@ def _now() -> str:
 
 class FrappeMaterialAIFillRepository:
     supports_row_selection = True
+
+    @contextmanager
+    def payment_match_confirmation_scope(self):
+        """Serialize payment arbitration before locking any review records."""
+
+        from .logistics_settlement.store import Store
+        store=Store.frappe()
+        with store.atomic():
+            store.get('state','match_lock',lock=True)
+            yield
 
     def find_start_request(self, batch, version, request_id, fingerprint):
         from .logistics_settlement.store import Store

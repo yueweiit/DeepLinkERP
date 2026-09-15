@@ -346,10 +346,9 @@ def reconstruct_after_payment_match(repository,run,preview,draft):
         repository,preview['batch'],run,_preview_receipt(preview),draft)
 
 
-def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,*,repository=None):
+def _confirm_locked(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,
+                    *,repo,payment_match_lock_held=False,rollback_on_error=True):
     from . import material_ai_fill_service as ai
-    repo=repository or ai.FrappeMaterialAIFillRepository()
-    initial=repo.get_run(run_id);ai._assert_run_batch(initial,batch_name)
     repo.lock_review_scope(batch_name)
     run=repo.lock_run(run_id)
     ai._assert_run_batch(run,batch_name)
@@ -363,6 +362,8 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
         raise ValueError('所选预览已变化，请刷新预览并使用最新预览后确认。')
     if receipt.get('receipt_policy')!=RECEIPT_POLICY:
         raise ValueError('AI 预览规则已升级，请重新分析资料。')
+    if receipt.get('payment_match_candidate') and not payment_match_lock_held:
+        raise ValueError('实际付款流程匹配已变化，请刷新预览；本次未保存。')
     if receipt.get('mode') == 'replace_all':
         raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
     if ai._record_value(run,'status')!='READY' or draft.get('current_row_preview')!=preview_id:
@@ -377,5 +378,34 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
     try:
         return repo.apply_row_selection(run,verified,cleaned_draft,context)
     except Exception:
-        repo.rollback()
+        if rollback_on_error:
+            repo.rollback()
         raise
+
+
+def _payment_match_receipt_hint(run,preview_id):
+    """Route locking only; authority is re-read from the locked run below."""
+
+    from . import material_ai_fill_service as ai
+    draft=ai._load_json(ai._record_value(run,'draft_json'),{})
+    receipt=(draft.get('row_previews') or {}).get(preview_id)
+    return bool(isinstance(receipt,dict) and receipt.get('payment_match_candidate'))
+
+
+def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,*,repository=None):
+    from . import material_ai_fill_service as ai
+    repo=repository or ai.FrappeMaterialAIFillRepository()
+    initial=repo.get_run(run_id);ai._assert_run_batch(initial,batch_name)
+    if _payment_match_receipt_hint(initial,preview_id):
+        scope=getattr(repo,'payment_match_confirmation_scope',None)
+        if not callable(scope):
+            raise RuntimeError('当前存储不支持付款匹配原子确认')
+        # The scope starts a savepoint and acquires match_lock before any
+        # batch/version/review lock.  The locked run is then authoritative.
+        with scope():
+            return _confirm_locked(
+                batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,
+                repo=repo,payment_match_lock_held=True,rollback_on_error=False)
+    return _confirm_locked(
+        batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,
+        repo=repo)

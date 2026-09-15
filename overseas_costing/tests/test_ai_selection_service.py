@@ -1,4 +1,5 @@
 """Server preview fences, idempotence and fee-only reuse without an AI call."""
+from contextlib import contextmanager
 from copy import deepcopy
 import json
 import re
@@ -48,6 +49,21 @@ def prepare(repo,ids=None,fees=None,mode='fill_missing',packing_group_ids=None):
 
 def confirm(repo,preview):
     return service.confirm('B1',repo.run['name'],preview['id'],preview['revision'],'TOKEN','M1',repository=repo)
+
+
+def payment_match_preview(repo):
+    repo.sources[0].update(
+        payment_match_candidate=True,
+        payment_match_candidate_id='FC-1',
+        payment_match_candidate_revision='FR-1',
+        payment_match_version='V1',
+    )
+    repo.run['source_manifest_json']=deepcopy(repo.sources)
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    return prepare(repo)
 
 
 def pending_adopted_scope(repo):
@@ -164,6 +180,85 @@ def test_payment_match_receipt_contains_only_server_candidate_reference():
     assert receipt['payment_match_candidate']==public
     serialized=json.dumps(receipt,ensure_ascii=False)
     assert '120' not in serialized and 'SECRET-SKU' not in serialized
+
+
+def test_payment_match_confirmation_locks_arbitration_before_review_scope():
+    repo=Repo();preview=payment_match_preview(repo);events=[]
+    original_get_run=repo.get_run
+    original_apply=repo.apply_row_selection
+
+    repo.get_run=lambda run_id:(events.append('initial_read') or original_get_run(run_id))
+    repo.lock_run=lambda run_id:(events.append('run_lock') or original_get_run(run_id))
+    repo.lock_review_scope=lambda *_args:events.append('review_scope')
+    repo.lock_review_inputs=lambda *_args:events.append('review_inputs')
+    repo.apply_row_selection=lambda *args:(events.append('apply') or original_apply(*args))
+
+    @contextmanager
+    def payment_scope():
+        events.extend(('transaction_begin','match_lock'))
+        try:
+            yield
+        except Exception:
+            events.append('transaction_rollback')
+            raise
+        else:
+            events.append('transaction_commit')
+
+    repo.payment_match_confirmation_scope=payment_scope
+
+    assert confirm(repo,preview)['ok']
+    assert events == [
+        'initial_read','transaction_begin','match_lock','review_scope','run_lock',
+        'review_inputs','apply','transaction_commit',
+    ]
+
+
+def test_payment_match_confirmation_revalidates_receipt_after_arbitration_lock():
+    repo=Repo();preview=payment_match_preview(repo);events=[]
+
+    @contextmanager
+    def payment_scope():
+        events.append('match_lock')
+        receipt=repo.run['draft_json']['row_previews'][preview['id']]
+        receipt['revision']='CHANGED-WHILE-WAITING'
+        yield
+
+    repo.payment_match_confirmation_scope=payment_scope
+    repo.lock_review_scope=lambda *_args:events.append('review_scope')
+
+    with pytest.raises(ValueError,match='预览已变化'):
+        confirm(repo,preview)
+    assert events[:2] == ['match_lock','review_scope']
+    assert not repo.writes
+
+
+def test_payment_match_confirmation_failure_rolls_back_outer_transaction():
+    repo=Repo();preview=payment_match_preview(repo)
+    repo.payment_state='pending'
+
+    @contextmanager
+    def payment_scope():
+        before_state=repo.payment_state
+        before_writes=deepcopy(repo.writes)
+        try:
+            yield
+        except Exception:
+            repo.payment_state=before_state
+            repo.writes=before_writes
+            raise
+
+    def fail_after_payment_confirmation(*_args):
+        repo.payment_state='confirmed'
+        repo.writes.append('partial')
+        raise RuntimeError('downstream failed')
+
+    repo.payment_match_confirmation_scope=payment_scope
+    repo.apply_row_selection=fail_after_payment_confirmation
+
+    with pytest.raises(RuntimeError,match='downstream failed'):
+        confirm(repo,preview)
+    assert repo.payment_state == 'pending'
+    assert not repo.writes
 
 
 def test_conflicting_payment_candidate_references_are_not_authenticated():
