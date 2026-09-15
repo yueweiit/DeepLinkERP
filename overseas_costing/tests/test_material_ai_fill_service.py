@@ -1271,6 +1271,8 @@ def test_document_fee_parser_does_not_promote_purchase_unit_price() -> None:
         "国内运费 1.2元/件",
         "空运费 RMB100/箱",
         "物流费 USD25/票",
+        "DHL报价：100 RMB/箱",
+        "DHL物流报价：100 RMB/票",
         "运费 RMB100，优惠 RMB10",
     ],
 )
@@ -1282,6 +1284,35 @@ def test_document_fee_parser_rejects_rates_and_multi_amount_fee_lines(line) -> N
     assert build_document_fee_proposals(
         source, document, transport_mode="AIR"
     ) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "shipping insurance USD 100",
+        "运费说明：发票金额 RMB 1000",
+    ],
+)
+def test_document_fee_parser_requires_fee_term_to_bind_to_money(line) -> None:
+    source = {"source_id": "COMMENT", "source_label": "物流评论"}
+    document = _fee_document("DOC-1", line)
+
+    assert _looks_like_quote_amount_line(line) is False
+    assert build_document_fee_proposals(
+        source, document, transport_mode="AIR"
+    ) == []
+
+
+def test_forwarder_name_does_not_reclassify_explicit_air_freight_as_port_charge() -> None:
+    source = {"source_id": "COMMENT", "source_label": "物流评论"}
+    document = _fee_document("DOC-1", "某货代报价：空运费 RMB 100")
+
+    proposals = build_document_fee_proposals(
+        source, document, transport_mode="AIR"
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0]["payload"]["logical_fee_key"] == "international_air_freight"
 
 
 def test_document_fee_parser_keeps_normal_two_decimal_money_total() -> None:

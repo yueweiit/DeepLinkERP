@@ -2592,7 +2592,11 @@ def build_document_fee_proposals(
         ]
         payload = proposal.get("payload") or {}
         evidence_line = lines[line_index][0] if 0 <= line_index < len(lines) else ""
-        if re.search(r"(?:港杂|货代|port\s+charge|forwarder)", evidence_line, re.IGNORECASE):
+        if re.search(
+            r"(?:港杂(?:费)?|货代(?:附加)?费|port\s+(?:fee|charge)|forwarder\s+(?:fee|charge))",
+            evidence_line,
+            re.IGNORECASE,
+        ):
             payload.update(
                 logical_fee_key="port_and_forwarder_charges",
                 expense_category="港杂与货代费",

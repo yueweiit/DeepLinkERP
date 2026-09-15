@@ -2350,15 +2350,46 @@ def _looks_like_quote_amount_line(line: str) -> bool:
         re.IGNORECASE,
     ):
         return len(money_matches) == 1
-    if re.search(
-        r"(?:运费|物流费|空运费|海运费|快递费|港杂|货代|附加费|freight|shipping(?:\s+fee)?)",
-        text,
-        re.IGNORECASE,
-    ):
+    if _fee_term_binds_money(text, money_matches):
         return len(money_matches) == 1
     if "=" not in text:
         return False
     return len(money_matches) == 1
+
+
+_EXPLICIT_FEE_TERM_PATTERN = re.compile(
+    r"(?:国际)?(?:空运|海运|快递|物流)?运费|"
+    r"物流费|快递费|港杂(?:费)?|货代(?:附加)?费|附加费|"
+    r"(?:(?:air|sea|ocean|international|express)\s+)?freight(?:\s+(?:fee|charge|cost))?|"
+    r"(?:logistics|shipping|port|forwarder)\s+(?:fee|charge|cost)|"
+    r"express\s+surcharge",
+    re.IGNORECASE,
+)
+_FEE_MONEY_CONNECTORS = frozenset(
+    {
+        "", "金额", "为", "共", "计", "合计", "合计金额", "总计", "总额",
+        "应付", "实付", "约", "预计", "预估", "amount", "total", "totalamount",
+    }
+)
+
+
+def _fee_term_binds_money(
+    text: str, money_matches: list[tuple[str, tuple[int, int]]]
+) -> bool:
+    """Require one explicit fee term to bind directly to the money span."""
+
+    if len(money_matches) != 1:
+        return False
+    money_start = money_matches[0][1][0]
+    for match in _EXPLICIT_FEE_TERM_PATTERN.finditer(text):
+        if match.end() > money_start:
+            continue
+        connector = re.sub(
+            r"[\s:：,，;；()（）\-—]", "", text[match.end():money_start]
+        ).lower()
+        if connector in _FEE_MONEY_CONNECTORS:
+            return True
+    return False
 
 
 def _parse_direct_quote_line(line: str) -> dict | None:
@@ -2375,9 +2406,15 @@ def _parse_direct_quote_line(line: str) -> dict | None:
     if not match:
         return None
     tail = _clean(match.group("tail"))
-    if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", tail, re.IGNORECASE):
+    if re.search(
+        r"/(?:方|立方|箱|票|件|公斤|cbm|m3|kg|kgs?|pcs?|packages?|shipments?)",
+        tail,
+        re.IGNORECASE,
+    ):
         # The amount immediately after the colon is a rate.  If the line also
         # contains an equals sign, the total-line parser will take its RHS.
+        return None
+    if len(_quote_money_amount_matches(text)) != 1:
         return None
     carrier = _clean(match.group("carrier")).strip("：:")
     if not carrier or len(carrier) > 40:
