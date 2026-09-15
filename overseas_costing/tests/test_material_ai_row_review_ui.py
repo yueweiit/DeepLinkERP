@@ -63,13 +63,13 @@ delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
 assert.deepEqual([...selection.fees].sort(),['APPROVED','TOTAL']);
 const html=w.renderMaterialAIReviewDialogContent();
 const main=html.slice(html.indexOf('<h4>费用 '),html.indexOf('资料来源与其他记录'));
-for(const id of ['TOTAL','AMB','APPROVED','PLAIN'])assert(main.includes(`data-mf-ai-fee-select="${id}"`),id);
-for(const id of ['AIR','PORT','ALT'])assert(!main.includes(`data-mf-ai-fee-select="${id}"`),id);
+for(const id of ['TOTAL','APPROVED','PLAIN'])assert(main.includes(`data-mf-ai-fee-select="${id}"`),id);
+for(const id of ['AIR','PORT','ALT','AMB'])assert(!main.includes(`data-mf-ai-fee-select="${id}"`),id);
 assert(main.includes('data-mf-ai-fee-select="TOTAL"') && main.includes('checked'));
 for(const text of ['国际空运费','9367.46','费用明细','空运分项','港杂与货代费','分项合计 10346.99，差额 0.01 RMB'])assert(main.includes(text),text);
 assert(!html.includes('data-mf-ai-fee-select="AIR"'));assert(!html.includes('data-mf-ai-fee-select="PORT"'));
 const advanced=html.slice(html.indexOf('资料来源与其他记录'));
-for(const text of ['其他空运报价','613.90','历史报价','不可采用'])assert(advanced.includes(text),text);
+for(const text of ['其他空运报价','613.90','历史报价','待核对运费','不可采用'])assert(advanced.includes(text),text);
 assert(!advanced.includes('国际空运费'));
 """)
 
@@ -85,6 +85,25 @@ let html=w.renderMaterialAIReviewDialogContent();
 for(const id of ['A','B'])assert(html.includes(`type="radio" data-mf-ai-fee-select="${id}"`),id);
 w.changeMaterialAIRowSelection('fees','A',true);assert.deepEqual([...selection.fees],['A']);
 w.changeMaterialAIRowSelection('fees','B',true);assert.deepEqual([...selection.fees],['B']);
+""")
+
+
+def test_resolved_fee_total_excludes_ambiguous_and_unknown_roles_from_all_selection_paths():
+    run_ui(r"""
+const fill=ready();fill.row_review.fees=[
+ {proposal_id:'TOTAL',selection_role:'primary_total',payload:{expense_category:'已裁决总额',amount:'200',currency:'RMB'},can_apply:true,default_selected:true},
+ {proposal_id:'AMB',selection_role:'ambiguous',payload:{expense_category:'歧义运费',amount:'199',currency:'RMB'},can_apply:true,default_selected:true,blocked_reason:'已有裁决总额'},
+ {proposal_id:'FUTURE',selection_role:'future_role',payload:{expense_category:'未知角色费用',amount:'88',currency:'RMB'},can_apply:true,default_selected:true},
+];
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
+assert.deepEqual([...selection.fees],['TOTAL']);
+const html=w.renderMaterialAIReviewDialogContent();
+const main=html.slice(html.indexOf('<h4>费用 '),html.indexOf('资料来源与其他记录'));
+assert(main.includes('data-mf-ai-fee-select="TOTAL"'));
+for(const id of ['AMB','FUTURE'])assert(!main.includes(`data-mf-ai-fee-select="${id}"`),id);
+for(const text of ['歧义运费','未知角色费用'])assert(!main.includes(text),text);
+w.changeMaterialAIRowSelection('fees','AMB',true);w.changeMaterialAIRowSelection('fees','FUTURE',true);
+assert.deepEqual([...selection.fees],['TOTAL']);
 """)
 
 

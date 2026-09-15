@@ -11346,13 +11346,28 @@ class OverseasCostWorkbench {
     return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>请核对物料和费用，确认后一次填充到当前批次。</span></div></header><main class="ocw-mf-ai-dialog-body">${physicalSummary}${fill.ai_warning ? `<div class="ocw-mf-ai-progress-warning">${this.escape(fill.ai_warning)}</div>` : ""}<div data-mf-ai-autofill-preview="1">${this.renderMaterialAIAutofillPreview(fill)}</div>${this.renderCurrentSourceReviewControls(fill.source_context || fill.draft?.source_context || {}, fill.draft?.cargo_review, { fees: (fill.proposals || []).some(p => p.proposal_type === "fee_update"), values: fill.edits?._source_review || {} })}<details class="ocw-mf-ai-review-advanced"><summary>高级：来源与其他方案</summary><div>${this.renderMaterialAIReviewSources(fill)}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${fill.applying ? "disabled" : ""}>更换来源并重新生成</button>${this.renderSourceAIReviewProposals(true)}</div></details></main><footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${fill.applying ? "disabled" : ""}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${fill.applying ? "disabled" : ""}>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canApplyMaterialAIFill(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : "确认填充"}</button></div></footer></div>`;
   }
 
+  materialAIReviewFeePolicy(fill) {
+    const fees = fill?.row_review?.fees || [];
+    const hasResolvedTotal = fees.some(fee => ["primary_total", "approved_quote"].includes(String(fee.selection_role || "")));
+    const mainFees = fees.filter(fee => {
+      const role = String(fee.selection_role || "");
+      return ["", "primary_total", "approved_quote"].includes(role) || role === "ambiguous" && !hasResolvedTotal;
+    });
+    const mainIds = new Set(mainFees.map(fee => String(fee.proposal_id)));
+    const selectableIds = new Set(mainFees.filter(fee => fee.can_apply).map(fee => String(fee.proposal_id)));
+    const otherFees = fees.filter(fee => String(fee.selection_role || "") !== "component" && !mainIds.has(String(fee.proposal_id)));
+    return { fees, hasResolvedTotal, mainFees, selectableIds, otherFees };
+  }
+
   ensureMaterialAIRowSelection(fill) {
+    const feePolicy = this.materialAIReviewFeePolicy(fill);
     if (!fill.rowSelection) fill.rowSelection = {
       mode: "update_selected",
       rows: new Set((fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
-      fees: new Set((fill.row_review.fees || []).filter(fee => !["component", "alternative"].includes(String(fee.selection_role || "")) && fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
+      fees: new Set(feePolicy.mainFees.filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
       request: 0, loading: false, preview: null, error: "", timer: null,
     };
+    else fill.rowSelection.fees.forEach(id => { if (!feePolicy.selectableIds.has(String(id))) fill.rowSelection.fees.delete(id); });
     return fill.rowSelection;
   }
 
@@ -11367,6 +11382,7 @@ class OverseasCostWorkbench {
     if (!fill?.row_review || fill.applying || fill.discarding) return;
     const selection = this.ensureMaterialAIRowSelection(fill);
     const rows = fill.row_review.rows || [];
+    const feePolicy = this.materialAIReviewFeePolicy(fill);
     if (kind === "mode") {
       if (!["fill_missing", "update_selected", "add_selected"].includes(id)) return;
       selection.mode = id;
@@ -11377,11 +11393,11 @@ class OverseasCostWorkbench {
       });
       if (id === "add_selected") selection.fees.clear();
     } else {
-      const items = kind === "rows" ? rows : fill.row_review.fees || [];
+      const items = kind === "rows" ? rows : feePolicy.fees;
       for (const item of items) {
         const itemId = String(kind === "rows" ? item.row_id : item.proposal_id);
         const role = String(item.selection_role || "");
-        const allowed = kind === "fees" ? selection.mode !== "add_selected" && item.can_apply && !["component", "alternative"].includes(role)
+        const allowed = kind === "fees" ? selection.mode !== "add_selected" && feePolicy.selectableIds.has(itemId)
           : selection.mode === "update_selected" ? item.can_update : selection.mode === "add_selected" ? item.can_add : item.can_fill;
         if (id !== "all" && itemId !== id) continue;
         if (checked && allowed) {
@@ -11498,10 +11514,11 @@ class OverseasCostWorkbench {
     const groupedTables = sourceTables
       + (otherSourceRows.length ? `<details class="ocw-mf-ai-source-candidate-group"><summary><strong>其他识别结果</strong><span>${otherSourceRows.length} 行</span></summary>${renderCandidateTable(otherSourceRows)}</details>` : "")
       + (currentRows.length ? `<details class="ocw-mf-ai-source-candidate-group is-current"><summary><strong>当前已有</strong><span>${currentRows.length} 行 · 未选行保留</span></summary>${renderCandidateTable(currentRows)}</details>` : "");
-    const fees = catalog.fees || [];
+    const feePolicy = this.materialAIReviewFeePolicy(fill);
+    const fees = feePolicy.fees;
     const feeRole = fee => String(fee.selection_role || "");
-    const mainFees = fees.filter(fee => !["component", "alternative"].includes(feeRole(fee)));
-    const alternativeFees = fees.filter(fee => feeRole(fee) === "alternative");
+    const mainFees = feePolicy.mainFees;
+    const otherFees = feePolicy.otherFees;
     const componentsByParent = new Map();
     fees.filter(fee => feeRole(fee) === "component").forEach(fee => {
       const parentId = String(fee.parent_proposal_id || "");
@@ -11525,9 +11542,10 @@ class OverseasCostWorkbench {
       const ambiguous = feeRole(fee) === "ambiguous";
       return `<tr><td><input type="${ambiguous ? "radio" : "checkbox"}" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${ambiguous ? 'name="mf-ai-ambiguous-fee" ' : ""}${selection.mode === "add_selected" || !fee.can_apply || fill.applying ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${value(fee.previous_amount ?? values.previous_amount)}</td><td>${value(fee.blocked_reason || values.remark || values.source_label || fee.reason || "")}${!fee.can_apply ? "<small>只读 · 不可采用</small>" : selection.mode === "add_selected" ? "<small>新增物料需单独确认</small>" : ""}</td></tr>${renderFeeComponents(fee)}`;
     };
-    const alternativeFeeRecords = alternativeFees.length ? `<section class="ocw-mf-ai-other-fees" data-mf-ai-other-fees="1"><h4>其他费用记录（只读 · 不可采用）</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>金额</th><th>币种</th><th>来源 / 说明</th><th>不可采用原因</th></tr></thead><tbody>${alternativeFees.map(fee => {
+    const otherFeeRecords = otherFees.length ? `<section class="ocw-mf-ai-other-fees" data-mf-ai-other-fees="1"><h4>其他费用记录（只读 · 不可采用）</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>金额</th><th>币种</th><th>来源 / 说明</th><th>不可采用原因</th></tr></thead><tbody>${otherFees.map(fee => {
       const values = fee.payload || fee;
-      return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(fee.blocked_reason || "该记录仅供参考，不可采用。")}</td></tr>`;
+      const reason = fee.blocked_reason || (feeRole(fee) === "ambiguous" && feePolicy.hasResolvedTotal ? "已有裁决总额，该歧义候选不可采用。" : "该记录角色不可采用，仅供参考。");
+      return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(reason)}</td></tr>`;
     }).join("")}</tbody></table></div></section>` : "";
     return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>逐行选择物料，费用单独选择；最终明细由服务器预览。</span></div></header>
       <main class="ocw-mf-ai-dialog-body"><section class="ocw-mf-ai-row-controls"><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="update_selected" ${selection.mode === "update_selected" ? "selected" : ""}>更新所选行（默认）</option><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option>${hasAddCandidates ? `<option value="add_selected" ${selection.mode === "add_selected" ? "selected" : ""}>单独确认新增</option>` : ""}</select></label><p>${selection.mode === "update_selected" ? "只更新所选候选对应的现有物料行；其他行完全保留。未匹配的新物料需单独确认新增。" : selection.mode === "add_selected" ? "仅新增明确勾选的未匹配物料；本次不同时更新现有行或费用，确认前请再次核对行数。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。匹配不唯一的行需核对。"}</p></section>
@@ -11536,7 +11554,7 @@ class OverseasCostWorkbench {
       <section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${mainFees.length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${mainFees.map(renderMainFee).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>
       ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
-      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${alternativeFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
+      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${otherFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
   }
 
