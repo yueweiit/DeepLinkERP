@@ -16,7 +16,7 @@ class Repo(ContextRepository):
         self.create_run({'batch':'B1','version':'V1','status':'READY','proposal_version':1,'clarification_text':'','source_manifest_json':self.sources,
             'input_fingerprint':ai._source_review_fingerprint('B1','V1',self.items,self.sources,'',context=self.context),
             'draft_json':{'material_input_fingerprint':service.material_fingerprint(self.items,self.sources,self.context),
-                          'row_review_policy':'ai-field-review-1'},
+                          'row_review_policy':service.rows.POLICY},
             'candidates_json':[{'proposal_id':'P1','proposal_type':'item_update','target_item_name':'I1','default_selected':True,'payload':{'fields':{'gross_weight_kg':2}}}]})
     def list_sources(self,*args):return deepcopy(self.sources)
     def get_fees(self,*args):return deepcopy(self.fees)
@@ -107,7 +107,7 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
 
     catalog=service.review_catalog(repo,'B1',repo.run)
     source_row=next(row for row in catalog['rows'] if row['origin']=='source')
-    assert catalog['policy']=='ai-field-review-1'
+    assert catalog['policy']=='ai-field-review-2'
     assert source_row['meaningful_field_count']==1
     assert '已默认选择' in source_row['default_selection_reason']
     selected=[row['row_id'] for row in catalog['rows'] if row['default_selected']]
@@ -318,6 +318,39 @@ def test_ready_draft_from_previous_review_policy_requires_reanalysis():
 
     with pytest.raises(ValueError,match='规则已升级'):
         service.review_catalog(repo,'B1',repo.run)
+
+
+def test_review_catalog_merges_run_progress_into_stage_availability_and_warnings():
+    repo=Repo()
+    repo.sources=[
+        {'source_id':'PAY','source_kind':'approval_attachment','approval_role':'logistics_expense',
+         'approval_title':'费用支出','available':True},
+        {'source_id':'LOG','source_kind':'approval_form','approval_role':'international_logistics',
+         'approval_title':'国际物流审批','available':True},
+    ]
+    repo.run['source_manifest_json']=deepcopy(repo.sources)
+    repo.run['source_progress_json']=[
+        {'source_id':'PAY','read_status':'FAILED','status':'FAILED','error':'附件已失效'},
+        {'source_id':'LOG','read_status':'COMPLETED','status':'COMPLETED','error':''},
+    ]
+    repo.run['candidates_json']=[{
+        'proposal_id':'LOG','proposal_type':'item_update','target_item_name':'I1',
+        'confidence':.99,'source_refs':[{'source_id':'LOG'}],
+        'payload':{'fields':{'gross_weight_kg':2}},
+    }]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+
+    catalog=service.review_catalog(repo,'B1',repo.run)
+    payment,logistics,_purchase=catalog['stage_snapshots']
+
+    assert payment['status']=='UNAVAILABLE'
+    assert payment['evidence_summary']['unreadable']==1
+    assert payment['warnings']==['PAY：附件已失效']
+    assert logistics['status']=='AVAILABLE'
+    assert logistics['evidence_summary']['readable']==1
 
 
 @pytest.mark.parametrize('change',['fee','item','source','note'])

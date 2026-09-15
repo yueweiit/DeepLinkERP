@@ -11,11 +11,37 @@ from .logistics_settlement.model import digest
 from .material_value_semantics import is_effectively_missing
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-field-review-1'
+POLICY = 'ai-field-review-2'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
 FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')
 MISSING_LABELS = {'material_code':'SKU','actual_shipped_qty':'数量','shipped_uom':'单位','gross_weight_kg':'毛重','volume_m3':'体积'}
+STAGE_SPECS = (
+    ('payment', 0, '支付申请'),
+    ('international_logistics', 1, '国际物流'),
+    ('purchase', 2, '采购支出'),
+)
+EXPLICIT_CORRECTION_MARKERS = ('更正', '改为', '以此为准', '原值错误')
+CORRECTION_FIELD_MARKERS = {
+    'gross_weight_kg': ('毛重', 'gross weight'),
+    'net_weight_kg': ('净重', 'net weight'),
+    'volume_m3': ('体积', '方数', 'cbm', 'm3'),
+    'volume_weight_kg': ('体积重', 'volume weight'),
+    'chargeable_weight_kg': ('计费重', 'chargeable weight'),
+    'weight_ratio': ('重量占比', '占比'),
+    'package_count': ('箱数', '件数', 'package count'),
+    'packaging_type': ('包装', '箱型', 'packaging'),
+    'actual_shipped_qty': ('实发数量', '发货数量', '数量'),
+    'shipped_uom': ('发货单位', '单位'),
+    'project_collection': ('项目归属', '归属'),
+    'unit_price': ('采购单价', '单价'),
+    'purchase_currency': ('采购币种', '币种'),
+    'purchase_uom': ('采购单位',),
+    'unit_price_uom': ('单价单位',),
+    'shipment_value_rmb': ('本次发货货值', '货值'),
+}
+READABLE_SOURCE_STATUSES = frozenset({'READ', 'PARSED', 'COMPLETED', 'PARTIAL', 'AVAILABLE'})
+UNREADABLE_SOURCE_STATUSES = frozenset({'FAILED', 'SKIPPED', 'UNREADABLE'})
 
 
 def missing(row, field):
@@ -90,6 +116,65 @@ def _apply_valuation_values(values, valuation):
             values['purchase_currency'] = valuation.get('currency')
 
 
+def _stage_snapshot_id(stage):
+    return digest(POLICY, 'stage-snapshot', stage)
+
+
+def _process_instance_id(source):
+    source=source or {}
+    return str(
+        source.get('process_instance_id')
+        or source.get('approval_instance_id')
+        or source.get('source_instance_id')
+        or source.get('parent_source_id')
+        or source.get('logical_source_id')
+        or source.get('source_id')
+        or ''
+    )
+
+
+def _source_status(source):
+    return str((source or {}).get('read_status') or (source or {}).get('status') or '').strip().upper()
+
+
+def _evidence_record(source):
+    source=source or {}
+    return {
+        'evidence_id':str(source.get('source_id') or ''),
+        'evidence_kind':str(source.get('evidence_kind') or 'other'),
+        'source_label':str(source.get('source_label') or source.get('file_name') or source.get('source_id') or ''),
+        'occurred_at':str(source.get('occurred_at') or source.get('source_updated_at') or ''),
+        'read_status':_source_status(source) or 'NO_RESULT',
+    }
+
+
+def _correction_text(source):
+    source=source or {}
+    if str(source.get('evidence_kind') or '') != 'comment':
+        return ''
+    return '\n'.join(str(source.get(key) or '') for key in (
+        'comment_text','remark','text','content','text_excerpt',
+    ))
+
+
+def _is_explicit_correction(source):
+    text=_correction_text(source)
+    return bool(text and any(marker in text for marker in EXPLICIT_CORRECTION_MARKERS))
+
+
+def _correction_uniquely_targets(row, fieldname):
+    text=str(row.get('_review_correction_text') or '').strip().casefold()
+    values=row.get('values') or {}
+    identifiers={
+        str(values.get(key) or '').strip().casefold()
+        for key in ('material_code','product_name','spec_model')
+        if len(str(values.get(key) or '').strip()) >= 2
+    }
+    field_markers=CORRECTION_FIELD_MARKERS.get(fieldname,(fieldname,))
+    return bool(text and identifiers and any(value in text for value in identifiers)
+                and any(str(marker).casefold() in text for marker in field_markers))
+
+
 def _source_groups(catalog_rows, sources):
     from .source_priority_service import rank_material_packing_sources
     ordered=rank_material_packing_sources(sources or [])
@@ -100,6 +185,7 @@ def _source_groups(catalog_rows, sources):
         if not key:continue
         if key not in by_key:
             group={'group_id':digest(POLICY,'source-group',key),'source_id':key,
+                   'process_instance_id':_process_instance_id(source),
                    'source_label':str(source.get('source_label') or source.get('file_name') or key),
                    'source_kind':str(source.get('source_kind') or ''),'source_updated_at':str(source.get('source_updated_at') or source.get('occurred_at') or ''),
                    'priority':int(source.get('priority') or len(groups)+1),
@@ -118,7 +204,9 @@ def _source_groups(catalog_rows, sources):
             by_key[key]=group;groups.append(group)
         group=by_key[key]
         group['source_ids'].append(source_id)
-        for alias in (source_id,source.get('resolver_source_id'),source.get('logical_source_id'),source.get('parent_source_id')):
+        for alias in (source_id,source.get('resolver_source_id'),source.get('logical_source_id'),
+                      source.get('parent_source_id'),source.get('process_instance_id'),
+                      source.get('approval_instance_id'),source.get('source_instance_id')):
             if str(alias or ''):
                 alias=str(alias)
                 aliases[alias]=group
@@ -136,19 +224,39 @@ def _source_groups(catalog_rows, sources):
         if group:
             evidence=min(matched_sources,key=lambda value:(
                 int(value.get('workflow_rank') if value.get('workflow_rank') is not None else 3),
-                int(value.get('evidence_rank') if value.get('evidence_rank') is not None else 4),
                 int(value.get('priority') or 999999),
                 str(value.get('source_id') or ''),
             )) if matched_sources else group
+            evidence_chain=[_evidence_record(value) for value in sorted(matched_sources,key=lambda value:(
+                int(value.get('workflow_rank') if value.get('workflow_rank') is not None else 3),
+                _process_instance_id(value),str(value.get('occurred_at') or value.get('source_updated_at') or ''),
+                str(value.get('source_id') or ''),
+            ))]
+            correction_sources=[value for value in matched_sources if _is_explicit_correction(value)]
+            correction_source=max(correction_sources,key=lambda value:(
+                str(value.get('occurred_at') or value.get('source_updated_at') or ''),
+                str(value.get('source_id') or ''),
+            )) if correction_sources else None
             row.update(source_group_id=group['group_id'],source_priority=group['priority'],source_label=group['source_label'],
                        workflow_stage=evidence['workflow_stage'],workflow_rank=evidence['workflow_rank'],
                        evidence_kind=evidence['evidence_kind'],evidence_rank=evidence['evidence_rank'],
-                       priority_reason=evidence['priority_reason'])
+                       priority_reason=evidence['priority_reason'],
+                       stage_snapshot_id=_stage_snapshot_id(evidence['workflow_stage']),
+                       process_instance_id=_process_instance_id(evidence),
+                       _review_evidence_chain=evidence_chain,
+                       _review_correction_explicit=bool(correction_source),
+                       _review_correction_text=_correction_text(correction_source),
+                       _review_occurred_at=str((correction_source or evidence).get('occurred_at')
+                                               or (correction_source or evidence).get('source_updated_at') or ''),
+                       _review_primary_source_id=str(evidence.get('source_id') or ''))
             group['row_ids'].append(row['row_id'])
         else:
             row.update(source_group_id='',source_priority=len(groups)+1,source_label='其他识别结果',
                        workflow_stage='other',workflow_rank=3,evidence_kind='other',evidence_rank=4,
-                       priority_reason='来源未分类，不作为高优先级默认值。')
+                       priority_reason='来源未分类，不作为高优先级默认值。',
+                       stage_snapshot_id=_stage_snapshot_id('other'),process_instance_id='',
+                       _review_evidence_chain=[],_review_correction_explicit=False,
+                       _review_correction_text='',_review_occurred_at='',_review_primary_source_id='')
         row['conflict_fields']=[]
     targets={str(row.get('target_item_name') or '') for row in catalog_rows if row.get('can_update')}
     for target in targets:
@@ -170,7 +278,7 @@ def _source_groups(catalog_rows, sources):
 
 
 def _field_candidates(catalog_rows):
-    """Resolve defaults per field while leaving every server-validated option selectable."""
+    """Resolve fields inside each process, then fall through business stages."""
 
     result=[]
     rows_by_id={str(row.get('row_id') or ''):row for row in catalog_rows}
@@ -192,9 +300,28 @@ def _field_candidates(catalog_rows):
                 'evidence_kind':row.get('evidence_kind') or 'other','evidence_rank':int(row.get('evidence_rank') or 0),
                 'priority_reason':row.get('priority_reason') or '','confidence':confidence,
                 'default_eligible':fieldname not in set(row.get('existing_value_conflict_fields') or []),
+                'stage_snapshot_id':row.get('stage_snapshot_id') or _stage_snapshot_id(row.get('workflow_stage') or 'other'),
+                'process_instance_id':row.get('process_instance_id') or '',
+                'evidence_chain':deepcopy(row.get('_review_evidence_chain') or []),
+                'correction_kind':('explicit' if row.get('_review_correction_explicit')
+                                   and _correction_uniquely_targets(row,fieldname) else 'none'),
+                'supersedes_candidate_id':'','effective_in_stage':False,
                 'can_apply':can_apply,'default_selected':False,'resolution_reason':(
                     '服务端已校验，可手工改选。' if can_apply else '证据置信度不足，仅供核对。'),
+                '_review_occurred_at':str(row.get('_review_occurred_at') or ''),
+                '_review_primary_source_id':str(row.get('_review_primary_source_id') or ''),
             })
+    correction_counts=Counter(
+        (candidate['process_instance_id'],candidate['item_name'],candidate['fieldname'],
+         candidate['_review_primary_source_id'])
+        for candidate in result if candidate['correction_kind']=='explicit'
+    )
+    for candidate in result:
+        key=(candidate['process_instance_id'],candidate['item_name'],candidate['fieldname'],
+             candidate['_review_primary_source_id'])
+        if candidate['correction_kind']=='explicit' and correction_counts[key]!=1:
+            candidate['correction_kind']='none'
+            candidate['resolution_reason']='更正内容未能唯一定位到一个物料字段，保留为人工候选。'
     grouped={}
     for candidate in result:
         grouped.setdefault((candidate['item_name'],candidate['fieldname']),[]).append(candidate)
@@ -202,22 +329,61 @@ def _field_candidates(catalog_rows):
         eligible=[candidate for candidate in candidates if candidate['can_apply'] and candidate['default_eligible'] and candidate['confidence']>=0.9]
         if not eligible:
             continue
-        best_rank=min((candidate['workflow_rank'],candidate['evidence_rank']) for candidate in eligible)
-        best=[candidate for candidate in eligible if (candidate['workflow_rank'],candidate['evidence_rank'])==best_rank]
-        distinct={_canonical_field_candidate(candidate['fieldname'],candidate['suggested_value']) for candidate in best}
-        if len(distinct)>1:
-            for candidate in best:
-                candidate['resolution_reason']='同级来源存在冲突，服务端不武断选值，请人工选择。'
-            continue
-        winner=min(best,key=lambda candidate:(-candidate['confidence'],candidate['candidate_id']))
-        winner['default_selected']=True
-        winner['resolution_reason']=(
-            f"{winner['priority_reason'] or '按流程和证据优先级'} 本字段已默认选择。"
-        )
-        for candidate in candidates:
-            if candidate is winner or candidate in best:
+        by_process={}
+        for candidate in eligible:
+            process_key=(candidate['workflow_rank'],candidate['workflow_stage'],
+                         candidate['process_instance_id'] or candidate['row_id'])
+            by_process.setdefault(process_key,[]).append(candidate)
+        for process_candidates in by_process.values():
+            stream=sorted(process_candidates,key=lambda candidate:(
+                1 if candidate['evidence_kind']=='comment' else 0,
+                candidate['_review_occurred_at'],candidate['_review_primary_source_id'],candidate['candidate_id'],
+            ))
+            effective=[]
+            for candidate in stream:
+                if candidate['correction_kind']=='explicit':
+                    if effective:
+                        candidate['supersedes_candidate_id']=effective[-1]['candidate_id']
+                    for superseded in effective:
+                        superseded['effective_in_stage']=False
+                        superseded['resolution_reason']='同一流程后续评论已明确更正该字段，原值仅供追溯。'
+                    effective=[candidate]
+                else:
+                    effective.append(candidate)
+                candidate['effective_in_stage']=True
+        winner=None
+        conflicted_rank=None
+        for stage_rank in sorted({candidate['workflow_rank'] for candidate in eligible}):
+            stage=[candidate for candidate in eligible
+                   if candidate['workflow_rank']==stage_rank and candidate['effective_in_stage']]
+            if not stage:
                 continue
-            candidate['resolution_reason']='优先级较低，保留为本字段可改选候选。'
+            distinct={_canonical_field_candidate(candidate['fieldname'],candidate['suggested_value'])
+                      for candidate in stage}
+            if len(distinct)>1:
+                conflicted_rank=stage_rank if conflicted_rank is None else conflicted_rank
+                for candidate in stage:
+                    candidate['resolution_reason']='同级来源存在冲突，服务端不武断选值，继续检查下一优先级。'
+                continue
+            winner=min(stage,key=lambda candidate:(-candidate['confidence'],candidate['candidate_id']))
+            break
+        if winner:
+            winner['default_selected']=True
+            winner['resolution_reason']=(
+                ('高优先级来源冲突或缺少有效值，已按流程顺序回落；' if conflicted_rank is not None else '')
+                + f"{winner['priority_reason'] or '按流程优先级'} 本字段已默认选择。"
+            )
+        for candidate in candidates:
+            if candidate is winner or '明确更正' in candidate['resolution_reason'] or '同级来源存在冲突' in candidate['resolution_reason']:
+                continue
+            if not candidate['can_apply']:
+                continue
+            if not candidate['default_eligible']:
+                candidate['resolution_reason']='当前已有受保护的明确值，本候选仅可人工核对。'
+            elif candidate['confidence']<0.9:
+                candidate['resolution_reason']='证据置信度不足，不作为默认值；仍可人工改选。'
+            else:
+                candidate['resolution_reason']='未作为默认值，保留为本字段可改选候选。'
     defaults={candidate['row_id'] for candidate in result if candidate['default_selected']}
     for row_id,row in rows_by_id.items():
         if row.get('origin')!='source':
@@ -237,6 +403,114 @@ def _canonical_field_candidate(fieldname,value):
         try:return format(Decimal(str(value)).normalize(),'f')
         except (InvalidOperation,TypeError,ValueError):pass
     return str(value or '').strip().casefold()
+
+
+def _stage_snapshots(catalog_rows, field_candidates, sources):
+    """Return the fixed business-stage directory used by the review UI."""
+
+    from .source_priority_service import rank_material_packing_sources
+    ordered=rank_material_packing_sources(sources or [])
+    candidates_by_row={}
+    for candidate in field_candidates:
+        candidates_by_row.setdefault(str(candidate.get('row_id') or ''),[]).append(candidate)
+    snapshots=[]
+    for stage,stage_rank,stage_label in STAGE_SPECS:
+        stage_sources=[source for source in ordered if source.get('workflow_stage')==stage]
+        stage_rows=sorted(
+            (row for row in catalog_rows
+             if row.get('origin')=='source' and row.get('workflow_stage')==stage),
+            key=lambda row:(str(row.get('process_instance_id') or ''),str(row.get('row_id') or '')),
+        )
+        process_map={}
+        for source in stage_sources:
+            process_id=_process_instance_id(source)
+            if not process_id:
+                continue
+            process=process_map.setdefault(process_id,{
+                'process_instance_id':process_id,
+                'label':str(source.get('approval_title') or source.get('process_title')
+                            or source.get('process_name') or source.get('source_label')
+                            or source.get('file_name') or process_id),
+                'approval_no':str(source.get('approval_no') or ''),
+                'source_ids':[],'evidence':[],'row_ids':[],'status':'UNAVAILABLE',
+            })
+            source_id=str(source.get('source_id') or '')
+            if source_id and source_id not in process['source_ids']:
+                process['source_ids'].append(source_id)
+            record=_evidence_record(source)
+            if record not in process['evidence']:
+                process['evidence'].append(record)
+        snapshot_rows=[]
+        for row in stage_rows:
+            process_id=str(row.get('process_instance_id') or '')
+            row_candidates=sorted(candidates_by_row.get(str(row.get('row_id') or ''),[]),
+                                  key=lambda candidate:(candidate['fieldname'],candidate['candidate_id']))
+            field_map={}
+            for candidate in row_candidates:
+                field_map.setdefault(candidate['fieldname'],[]).append(candidate['candidate_id'])
+            values=row.get('values') or {}
+            snapshot_rows.append({
+                'row_id':row.get('row_id'),'process_instance_id':process_id,
+                'item_name':row.get('target_item_name') or '',
+                'material_code':values.get('material_code') or '',
+                'product_name':values.get('product_name') or '',
+                'spec_model':values.get('spec_model') or '',
+                'field_candidates':field_map,
+            })
+            process=process_map.get(process_id)
+            if process and row.get('row_id') not in process['row_ids']:
+                process['row_ids'].append(row.get('row_id'))
+        candidate_source_ids={
+            str(evidence.get('evidence_id') or '')
+            for row in stage_rows
+            for candidate in candidates_by_row.get(str(row.get('row_id') or ''),[])
+            for evidence in candidate.get('evidence_chain') or []
+        }
+        unreadable=[source for source in stage_sources
+                    if _source_status(source) in UNREADABLE_SOURCE_STATUSES]
+        readable=[source for source in stage_sources
+                  if (_source_status(source) in READABLE_SOURCE_STATUSES
+                      or str(source.get('source_id') or '') in candidate_source_ids)]
+        warnings=[]
+        for source in stage_sources:
+            status=_source_status(source)
+            error=str(source.get('error') or source.get('analysis_reason') or '').strip()
+            if status in UNREADABLE_SOURCE_STATUSES or (status=='PARTIAL' and error):
+                label=str(source.get('source_label') or source.get('file_name') or source.get('source_id') or '资料')
+                warnings.append(f"{label}：{error or '未能读取，已跳过。'}")
+        status=('PARTIAL' if stage_rows and unreadable else
+                'AVAILABLE' if stage_rows else 'UNAVAILABLE')
+        for process in process_map.values():
+            process['source_ids'].sort()
+            process['evidence'].sort(key=lambda evidence:(
+                evidence['occurred_at'],evidence['evidence_id'],
+            ))
+            process['row_ids'].sort()
+            process['status']=('PARTIAL' if process['row_ids'] and any(
+                evidence['read_status'] in UNREADABLE_SOURCE_STATUSES for evidence in process['evidence'])
+                else 'AVAILABLE' if process['row_ids'] else 'UNAVAILABLE')
+        by_kind=Counter(str(source.get('evidence_kind') or 'other') for source in stage_sources)
+        fallback_reason=(
+            '部分资料不可读，已跳过并继续使用本阶段可用候选。'
+            if status=='PARTIAL' else
+            '本阶段未找到有效资料，默认值将从下一优先级阶段补充。'
+            if status=='UNAVAILABLE' and stage_rank < STAGE_SPECS[-1][1] else
+            '本阶段未找到有效资料。'
+            if status=='UNAVAILABLE' else ''
+        )
+        snapshots.append({
+            'stage_snapshot_id':_stage_snapshot_id(stage),
+            'stage':stage,'stage_rank':stage_rank,'stage_label':stage_label,'status':status,
+            'processes':sorted(process_map.values(),key=lambda process:process['process_instance_id']),
+            'rows':snapshot_rows,
+            'evidence_summary':{
+                'total':len(stage_sources),'readable':len(readable),'unreadable':len(unreadable),
+                'candidate_count':sum(len(candidates_by_row.get(str(row.get('row_id') or ''),[])) for row in stage_rows),
+                'by_kind':dict(sorted(by_kind.items())),
+            },
+            'fallback_reason':fallback_reason,'warnings':warnings,
+        })
+    return snapshots
 
 
 def catalog(items, proposals, fees, context, *, run_id, sources=None):
@@ -349,10 +623,11 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
         add(deepcopy(item),{'proposal_id':'current:'+item['name']},origin='current',target=item['name'],stable=item['name'],fields=[])
     source_groups=_source_groups(rows,sources)
     field_candidates=_field_candidates(rows)
+    stage_snapshots=_stage_snapshots(rows,field_candidates,sources)
     fee_rows=[p for p in material_ai_fee_policy.decorate(proposals,fees,context) if p.get('proposal_type')=='fee_update']
     return {'policy':POLICY,'rows':rows,'fees':fee_rows,'source_groups':source_groups,
-            'field_candidates':field_candidates,
-            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups,field_candidates)}
+            'field_candidates':field_candidates,'stage_snapshots':stage_snapshots,
+            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups,field_candidates,stage_snapshots)}
 
 
 def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):

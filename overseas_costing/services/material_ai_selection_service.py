@@ -8,6 +8,30 @@ from .logistics_settlement.model import digest
 RECEIPT_POLICY = 'ai-field-preview-receipt-2'
 
 
+def _sources_with_progress(sources, progress):
+    """Reattach browser-safe run outcomes to freshly locked source metadata."""
+
+    by_id={}
+    for row in progress or []:
+        for key in ('source_id','parent_source_id'):
+            source_id=str(row.get(key) or '')
+            if source_id:
+                by_id.setdefault(source_id,row)
+    result=[]
+    for source in sources or []:
+        current=deepcopy(source)
+        status_row=next((by_id.get(str(source.get(key) or '')) for key in (
+            'source_id','logical_source_id','parent_source_id','resolver_source_id',
+        ) if by_id.get(str(source.get(key) or ''))),None)
+        if status_row:
+            current['read_status']=str(status_row.get('read_status') or status_row.get('status') or 'NO_RESULT')
+            current['error']=str(status_row.get('error') or '')
+            current['result_count']=int(status_row.get('result_count')
+                                        or status_row.get('candidate_count') or 0)
+        result.append(current)
+    return result
+
+
 def material_fingerprint(items,sources,context):
     """Fee-only amendments do not consume reusable material recognition results."""
     from . import material_ai_fill_service as ai
@@ -43,6 +67,8 @@ def _inputs(repo, batch, run, *, locked=False):
     if ai._clarification_changed(repo,batch,run,locked=locked):raise ValueError('说明已变化，请按新说明重新分析。')
     items=repo.get_items(batch,context['version'])
     sources=ai._reload_review_manifest(repo,batch,context['version'],run)
+    sources=_sources_with_progress(
+        sources,ai._load_json(ai._record_value(run,'source_progress_json'),[]))
     fingerprint=ai._source_review_fingerprint(batch,context['version'],items,sources,str(ai._record_value(run,'clarification_text') or ''),context=context)
     saved_material=draft.get('material_input_fingerprint')
     if fingerprint!=ai._record_value(run,'input_fingerprint') and (not saved_material or saved_material!=material_fingerprint(items,sources,context)):
