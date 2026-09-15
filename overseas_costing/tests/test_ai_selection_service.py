@@ -21,7 +21,8 @@ class Repo(ContextRepository):
         self.create_run({'batch':'B1','version':'V1','status':'READY','proposal_version':1,'clarification_text':'','source_manifest_json':self.sources,
             'input_fingerprint':ai._source_review_fingerprint('B1','V1',self.items,self.sources,'',context=self.context),
             'draft_json':{'material_input_fingerprint':service.material_fingerprint(self.items,self.sources,self.context),
-                          'row_review_policy':service.rows.POLICY},
+                          'row_review_policy':service.rows.POLICY,
+                          'processing_version':ai.SOURCE_REVIEW_PROCESSING_VERSION},
             'candidates_json':[{
                 'proposal_id':'P1','proposal_type':'item_update','target_item_name':'I1',
                 'default_selected':True,'source_refs':[{'source_id':'DOC'}],
@@ -131,7 +132,7 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
 
     catalog=service.review_catalog(repo,'B1',repo.run)
     source_row=next(row for row in catalog['rows'] if row['origin']=='source')
-    assert catalog['policy']=='ai-field-review-3'
+    assert catalog['policy']=='ai-field-review-4'
     assert source_row['meaningful_field_count']==1
     assert '已默认选择' in source_row['default_selection_reason']
     selected=[row['row_id'] for row in catalog['rows'] if row['default_selected']]
@@ -296,6 +297,25 @@ def test_old_lightweight_receipt_policy_must_be_repreviewed():
 
     with pytest.raises(ValueError,match='规则已升级'):
         confirm(repo,preview)
+
+
+def test_proc3_ready_draft_is_rejected_by_review_prepare_and_confirm():
+    review_repo=Repo()
+    review_repo.run['draft_json']['processing_version']='procurement-source-3'
+    with pytest.raises(ValueError,match='重新分析'):
+        service.review_catalog(review_repo,'B1',review_repo.run)
+
+    prepare_repo=Repo()
+    prepare_repo.run['draft_json']['processing_version']='procurement-source-3'
+    with pytest.raises(ValueError,match='重新分析'):
+        service.prepare(
+            'B1',prepare_repo.run['name'],[],[],'fill_missing','V1',repository=prepare_repo)
+
+    confirm_repo=Repo();preview=prepare(confirm_repo)
+    confirm_repo.run['draft_json']['processing_version']='procurement-source-3'
+    with pytest.raises(ValueError,match='重新分析'):
+        confirm(confirm_repo,preview)
+    assert not confirm_repo.writes
 
 
 def test_public_catalog_and_preview_replace_process_instance_ids_with_stable_opaque_ids():

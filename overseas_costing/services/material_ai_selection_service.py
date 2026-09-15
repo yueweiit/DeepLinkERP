@@ -5,7 +5,7 @@ from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
-RECEIPT_POLICY = 'ai-field-preview-receipt-3'
+RECEIPT_POLICY = 'ai-field-preview-receipt-4'
 
 
 def _sources_with_progress(sources, progress):
@@ -59,6 +59,8 @@ def _inputs(repo, batch, run, *, locked=False):
     from . import material_ai_fill_service as ai
     ai._assert_run_batch(run,batch)
     draft=ai._load_json(ai._record_value(run,'draft_json'),{})
+    if draft.get('processing_version') != ai.SOURCE_REVIEW_PROCESSING_VERSION:
+        raise ValueError('AI 资料处理规则已升级，请重新分析资料。')
     if int(ai._record_value(run,'proposal_version',0) or 0) > 0 and draft.get('row_review_policy') != rows.POLICY:
         raise ValueError('AI 预览规则已升级，请重新分析资料。')
     context=ai._review_context(repo,batch,str(ai._record_value(run,'version')),

@@ -1178,7 +1178,7 @@ def test_single_proposal_referencing_payment_and_purchase_is_a_conflict_in_both_
 
 
 def test_row_review_policy_is_stage_snapshot_version():
-    assert service.POLICY == 'ai-field-review-3'
+    assert service.POLICY == 'ai-field-review-4'
 
 
 def test_fee_stage_snapshots_are_fixed_even_when_no_fee_source_exists():

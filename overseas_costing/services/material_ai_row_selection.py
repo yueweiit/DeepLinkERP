@@ -11,7 +11,7 @@ from .logistics_settlement.model import digest
 from .material_value_semantics import is_effectively_missing
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-field-review-3'
+POLICY = 'ai-field-review-4'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
 FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')

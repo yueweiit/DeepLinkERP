@@ -188,16 +188,29 @@ def _confirm_and_reconstruct_payment_match(store,ledger,run,preview,draft,contex
     from . import material_ai_payment_match, material_ai_selection_service
     from .logistics_settlement import runtime
     enabled=runtime.freight_enabled() if freight_mode is None else bool(freight_mode)
-    material_ai_payment_match.confirm_preview_candidate(
+    relation=material_ai_payment_match.confirm_preview_candidate(
         store,ledger,preview['batch'],reference,actor,freight_mode=enabled)
-    # Confirmation changes settlement authority. Re-read all sources and
-    # rebuild rows/fees before any business record is written, within the same
-    # savepoint that owns the candidate transition.
+    # Re-read all sources and rebuild rows/fees after the locked relation
+    # validation, before any business record is written in the same savepoint.
     if repository is None:
         from .material_ai_fill_service import FrappeMaterialAIFillRepository
         repository=FrappeMaterialAIFillRepository()
-    return material_ai_selection_service.reconstruct_after_payment_match(
+    refreshed,locked_context=material_ai_selection_service.reconstruct_after_payment_match(
         repository,run,preview,draft)
+    return {**refreshed,'_payment_match_relation':relation},locked_context
+
+
+def _write_rows_and_payment_relation(store,ledger,preview,context,actor):
+    version_name=write_rows(store,ledger,preview,context) if (
+        preview['selected_row_ids'] or preview.get('selected_field_choices')
+        or any(candidate.get('default_selected') and candidate.get('can_apply')
+               for candidate in preview.get('packing_group_candidates') or [])
+    ) else preview['version']
+    relation=preview.get('_payment_match_relation')
+    if relation:
+        from .material_ai_payment_match import persist_relation
+        persist_relation(store,ledger,preview['batch'],version_name,relation,actor)
+    return version_name
 
 
 def apply_selection(run,preview,draft,context):
@@ -211,11 +224,8 @@ def apply_selection(run,preview,draft,context):
     with store.atomic():
         preview,context=_confirm_and_reconstruct_payment_match(
             store,ledger,run,preview,draft,context,frappe.session.user)
-        version_name=write_rows(store,ledger,preview,context) if (
-            preview['selected_row_ids'] or preview.get('selected_field_choices')
-            or any(candidate.get('default_selected') and candidate.get('can_apply')
-                   for candidate in preview.get('packing_group_candidates') or [])
-        ) else preview['version']
+        version_name=_write_rows_and_payment_relation(
+            store,ledger,preview,context,frappe.session.user)
         for proposal in preview['fees']:
             existing=fee_service._decorate_historical_rules(fee_service._query_rules(preview['batch'],version_name),context.get('transport_mode'))
             assert_allowed([proposal],existing,context.get('effective_source') or {})

@@ -141,9 +141,10 @@ def test_pending_payment_match_is_confirmed_before_locked_preview_is_recomputed(
     preview={'batch':'B1','payment_match_candidate':{
         'candidate_id':'FC-1','revision':'FR-1','version':'V1'}}
     refreshed={**preview,'recomputed':True}
+    relation={'policy':'material-ai-payment-match-1','candidate_id':'FC-1'}
     monkeypatch.setattr(material_ai_payment_match,'confirm_preview_candidate',
-        lambda store,ledger,batch,reference,actor,freight_mode: events.append(
-            ('confirm',batch,reference,actor,freight_mode)))
+        lambda store,ledger,batch,reference,actor,freight_mode: (
+            events.append(('confirm',batch,reference,actor,freight_mode)) or relation))
     def reconstruct(repository,run,current,draft):
         assert events and events[0][0]=='confirm'
         events.append(('recompute',repository))
@@ -153,10 +154,38 @@ def test_pending_payment_match_is_confirmed_before_locked_preview_is_recomputed(
     result,context=_confirm_and_reconstruct_payment_match(
         object(),object(),{'name':'RUN'},preview,{}, {},'user',repository='repo',freight_mode=True)
 
-    assert result is refreshed and context=={'locked':True}
+    assert result is not refreshed and result['_payment_match_relation'] is relation
+    assert {key:value for key,value in result.items() if key!='_payment_match_relation'}==refreshed
+    assert context=={'locked':True}
     assert events==[
         ('confirm','B1',preview['payment_match_candidate'],'user',True),
         ('recompute','repo'),
+    ]
+
+
+def test_payment_relation_is_saved_only_after_row_metadata(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match
+    from overseas_costing.services import material_ai_selection_writer as writer
+
+    relation={'policy':'material-ai-payment-match-1','candidate_id':'FC-1'}
+    preview={
+        'batch':'B1','version':'V1','selected_row_ids':['ROW-1'],
+        'selected_field_choices':{},'packing_group_candidates':[],
+        '_payment_match_relation':relation,
+    }
+    events=[]
+    monkeypatch.setattr(writer,'write_rows',lambda *_args:(events.append('write_rows') or 'V2'))
+    monkeypatch.setattr(material_ai_payment_match,'persist_relation',
+        lambda store,ledger,batch,version,current,actor: events.append(
+            ('persist_relation',batch,version,current,actor)))
+
+    version=writer._write_rows_and_payment_relation(
+        object(),object(),preview,{},'user')
+
+    assert version=='V2'
+    assert events==[
+        'write_rows',
+        ('persist_relation','B1','V2',relation,'user'),
     ]
 
 

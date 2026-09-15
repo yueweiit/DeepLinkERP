@@ -2340,7 +2340,7 @@ def start_source_ai_review(
             "source_progress_json": _json(build_source_progress(sources)),
             "trigger_mode": str(trigger_mode or "MANUAL")[:40],
             "clarification_text": clarification,
-            "draft_json": _json({"review_input": {
+            "draft_json": _json({"processing_version": SOURCE_REVIEW_PROCESSING_VERSION, "review_input": {
                 "clarification_revision": note["revision"],
                 "cost_version": context["version"],
                 "source_context": deepcopy(context.get("effective_source") or {}),
@@ -4278,6 +4278,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         nonlocal run
         if "draft_json" in updates:
             draft = _load_json(updates["draft_json"], {})
+            draft["processing_version"] = SOURCE_REVIEW_PROCESSING_VERSION
             review_input = _load_json(_record_value(run, "draft_json"), {}).get("review_input")
             if review_input is not None:
                 review_input = deepcopy(review_input)
@@ -4860,6 +4861,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             for proposal in candidates:
                 counts[proposal["proposal_type"]] += 1
             draft = {
+                "processing_version": SOURCE_REVIEW_PROCESSING_VERSION,
                 "proposals": candidates,
                 "summary": counts,
                 "selected_count": sum(1 for row in candidates if row.get("default_selected")),
@@ -4984,6 +4986,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 persist(status='STALE', progress_step='来源未完成归档或已变化', error_message=str(error), completed_at=_now())
                 return {'ok':False, 'run_id':str(run_id), 'status':'STALE'}
         if unified_review:
+            draft['processing_version'] = SOURCE_REVIEW_PROCESSING_VERSION
             draft['material_input_fingerprint'] = material_fingerprint(refreshed_items, sources, refreshed_context)
             draft["review_input"] = deepcopy(_load_json(_record_value(run, "draft_json"), {}).get("review_input") or {})
         selected_progress = [

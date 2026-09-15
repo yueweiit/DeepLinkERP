@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -100,7 +101,7 @@ def test_multiple_strong_payment_matches_are_not_selected_arbitrarily():
     ) is None
 
 
-def test_server_confirmation_is_revision_fenced_and_atomic():
+def test_server_confirmation_revalidates_relation_without_freezing_candidate():
     from overseas_costing.services import material_ai_payment_match as service
 
     store, ledger, batch, version, _logistics, _source, candidate = _strong_context()
@@ -123,11 +124,27 @@ def test_server_confirmation_is_revision_fenced_and_atomic():
         )
     assert store.get("freight_candidate", candidate["id"])["status"] == "pending"
 
-    confirmed = service.confirm_preview_candidate(
+    relation = service.confirm_preview_candidate(
         store, ledger, batch["name"], reference, "user", freight_mode=True
     )
-    assert confirmed == reference
-    assert store.get("freight_candidate", candidate["id"])["status"] == "confirmed"
+    assert relation == {
+        "policy": service.POLICY,
+        "candidate_id": candidate["id"],
+        "candidate_revision": candidate["revision"],
+        "version": version["name"],
+        "logistics_id": candidate["logistics_id"],
+        "expense_id": candidate["expense_id"],
+        "logistics_snapshot": candidate["logistics_snapshot"],
+        "expense_snapshot": candidate["expense_snapshot"],
+        "confirmed_by": "user",
+        "confirmed_at": relation["confirmed_at"],
+    }
+    assert relation["confirmed_at"]
+    assert store.get("freight_candidate", candidate["id"])["status"] == "pending"
+    assert not any(
+        row["action"] == "material_ai_payment_match_confirmed"
+        for row in store.find("audit", binding_id=batch["name"])
+    )
 
 
 def test_confirmation_locks_match_arbitration_before_candidate_context(monkeypatch):
@@ -156,6 +173,105 @@ def test_confirmation_locks_match_arbitration_before_candidate_context(monkeypat
     assert locked_reads.index(("state", "match_lock")) < locked_reads.index(
         ("freight_candidate", candidate["id"])
     )
+
+
+def test_version_relation_is_safe_audited_and_idempotent():
+    from overseas_costing.services import material_ai_payment_match as service
+
+    store, ledger, batch, version, _logistics, _source, candidate = _strong_context()
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    relation = service.confirm_preview_candidate(
+        store, ledger, batch["name"], reference, "user", freight_mode=True
+    )
+
+    first = service.persist_relation(
+        store, ledger, batch["name"], version["name"], relation, "user"
+    )
+    second = service.persist_relation(
+        store, ledger, batch["name"], version["name"], relation, "user"
+    )
+
+    metadata = json.loads(ledger.get("version", version["name"])["extra_json"])
+    assert metadata["material_ai_payment_match"] == first == second
+    assert set(first) == {
+        "policy", "candidate_id", "candidate_revision", "version",
+        "logistics_id", "expense_id", "logistics_snapshot", "expense_snapshot",
+        "confirmed_by", "confirmed_at",
+    }
+    assert "amount" not in json.dumps(first) and "text" not in json.dumps(first)
+    audits = [
+        row for row in store.find("audit", binding_id=batch["name"])
+        if row["action"] == "material_ai_payment_match_confirmed"
+    ]
+    assert len(audits) == 1
+    assert store.get("freight_candidate", candidate["id"])["status"] == "pending"
+
+
+def test_version_relation_and_audit_roll_back_when_later_apply_fails():
+    from overseas_costing.services import material_ai_payment_match as service
+
+    store, ledger, batch, version, _logistics, _source, candidate = _strong_context()
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    relation = service.confirm_preview_candidate(
+        store, ledger, batch["name"], reference, "user", freight_mode=True
+    )
+
+    with pytest.raises(RuntimeError, match="later write failed"):
+        with store.atomic():
+            service.persist_relation(
+                store, ledger, batch["name"], version["name"], relation, "user"
+            )
+            raise RuntimeError("later write failed")
+
+    metadata = json.loads(ledger.get("version", version["name"]).get("extra_json") or "{}")
+    assert "material_ai_payment_match" not in metadata
+    assert not any(
+        row["action"] == "material_ai_payment_match_confirmed"
+        for row in store.find("audit", binding_id=batch["name"])
+    )
+    assert store.get("freight_candidate", candidate["id"])["status"] == "pending"
+
+
+def test_saved_ai_relation_does_not_freeze_candidate_rebuild_or_rejection():
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import freight_matching, freight_runtime
+    from overseas_costing.services.logistics_settlement.model import parse_source
+    from overseas_costing.tests.test_freight_lines import monthly, setup_cost
+
+    store, ledger, batch, version, _item, logistics, expense = setup_cost()
+    candidate = freight_matching.rule_pass(store, logistics["id"])[0]
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    relation = service.confirm_preview_candidate(
+        store, ledger, batch["name"], reference, "user", freight_mode=True
+    )
+    service.persist_relation(
+        store, ledger, batch["name"], version["name"], relation, "user"
+    )
+
+    changed = monthly()
+    changed["raw_payload"]["comments"] = [{"text": "付款资料快照更新"}]
+    changed["updated_at"] = "2026-09-16T10:00:00+00:00"
+    refreshed_source = store.ingest(parse_source(changed, logistics_codes={"logistics"}))
+    rebuilt = freight_matching.rule_pass(store, logistics["id"])[0]
+
+    assert refreshed_source["snapshot"] != expense["snapshot"]
+    assert rebuilt["revision"] != candidate["revision"]
+    assert rebuilt["expense_snapshot"] == refreshed_source["snapshot"]
+    assert rebuilt["status"] == "pending"
+
+    rejected = freight_runtime.decide_payment_candidate(
+        store, ledger, batch["name"], version["name"], rebuilt["id"], rebuilt["revision"],
+        "reject", "新快照需重新核对", "user",
+        lease_check=lambda *_args, **_kwargs: None,
+        edit_token="token", expected_modified="modified",
+    )
+    assert rejected["candidate"]["status"] == "rejected"
 
 
 def test_cross_ticket_candidate_cannot_be_confirmed():

@@ -17,6 +17,11 @@ POLICY = "material-ai-payment-match-1"
 STRONG_METHODS = frozenset({"manual", "explicit", "identifier"})
 AI_CONFIDENCE_MINIMUM = Decimal("0.90")
 REFERENCE_KEYS = frozenset({"candidate_id", "revision", "version"})
+RELATION_KEYS = frozenset({
+    "policy", "candidate_id", "candidate_revision", "version",
+    "logistics_id", "expense_id", "logistics_snapshot", "expense_snapshot",
+    "confirmed_by", "confirmed_at",
+})
 
 
 def _confidence(value) -> Decimal | None:
@@ -108,7 +113,7 @@ def confirm_preview_candidate(
     *,
     freight_mode: bool,
 ):
-    """Confirm an exact current freight candidate inside the caller transaction."""
+    """Revalidate an exact candidate and return a server-owned relation."""
 
     if not freight_mode:
         raise ValueError("当前模式不支持付款明细匹配")
@@ -136,35 +141,75 @@ def confirm_preview_candidate(
     )
     if len(current) != 1 or current[0].get("id") != clean["candidate_id"]:
         raise ValueError("付款匹配候选已变化或存在冲突，请刷新")
-    if str(candidate.get("status") or "").lower() == "confirmed":
-        return clean
-    confirmed = {
-        **candidate,
-        "status": "confirmed",
+    from .logistics_settlement.jobs import utcnow
+    return {
+        "policy": POLICY,
+        "candidate_id": str(candidate["id"]),
+        "candidate_revision": str(candidate["revision"]),
+        "version": version_name,
+        "logistics_id": str(candidate["logistics_id"]),
+        "expense_id": str(candidate["expense_id"]),
+        "logistics_snapshot": str(candidate["logistics_snapshot"]),
+        "expense_snapshot": str(candidate["expense_snapshot"]),
         "confirmed_by": str(actor or ""),
-        "confirmed_for": "material_ai_preview",
+        "confirmed_at": utcnow(),
     }
-    # Keep the matcher revision stable: it authenticates the source pair and
-    # snapshots, while status is rechecked under the same transaction.
-    store.put(
-        "freight_candidate",
-        {
-            "id": confirmed["id"],
-            "logistics_id": confirmed["logistics_id"],
-            "expense_id": confirmed["expense_id"],
-            "status": confirmed["status"],
-            "data": dumps(confirmed),
-        },
+
+
+def _validate_relation(relation: dict, version_name: str, actor: str) -> dict:
+    if not isinstance(relation, dict) or set(relation) != RELATION_KEYS:
+        raise ValueError("付款匹配关系格式不正确")
+    clean = {key: str(relation.get(key) or "") for key in RELATION_KEYS}
+    if (not all(clean.values()) or clean["policy"] != POLICY
+            or clean["version"] != str(version_name)
+            or clean["confirmed_by"] != str(actor or "")):
+        raise ValueError("付款匹配关系已变化，请刷新")
+    return clean
+
+
+def persist_relation(store, ledger, batch_name: str, version_name: str,
+                     relation: dict, actor: str) -> dict:
+    """Persist a version-scoped relation without freezing matcher state."""
+
+    clean = _validate_relation(relation, version_name, actor)
+    store.get("state", "match_lock", lock=True)
+    from .logistics_settlement.payment_adoption import _resolve_context
+    _batch, version, candidate, _source, _logistics, _lines = _resolve_context(
+        store, ledger, batch_name, version_name,
+        clean["candidate_id"], clean["candidate_revision"], lock=True,
     )
+    current = _current_candidates(store, ledger, batch_name, version_name, lock=True)
+    if len(current) != 1 or current[0].get("id") != clean["candidate_id"]:
+        raise ValueError("付款匹配候选已变化或存在冲突，请刷新")
+    expected = {
+        "logistics_id": candidate.get("logistics_id"),
+        "expense_id": candidate.get("expense_id"),
+        "logistics_snapshot": candidate.get("logistics_snapshot"),
+        "expense_snapshot": candidate.get("expense_snapshot"),
+    }
+    if any(clean[key] != str(value or "") for key, value in expected.items()):
+        raise ValueError("付款匹配来源快照已变化，请刷新")
+
+    from .logistics_settlement.application import row_meta
+    metadata = row_meta(version)
+    prior = metadata.get("material_ai_payment_match") or {}
+    identity_keys = RELATION_KEYS - {"confirmed_by", "confirmed_at"}
+    if (isinstance(prior, dict) and set(prior) == RELATION_KEYS
+            and all(str(prior.get(key) or "") == clean[key] for key in identity_keys)):
+        return {key: str(prior.get(key) or "") for key in RELATION_KEYS}
+    metadata["material_ai_payment_match"] = clean
+    ledger.put("version", version_name, {"extra_json": dumps(metadata)})
     store.audit(
         batch_name,
         "material_ai_payment_match_confirmed",
         actor,
         candidate_id=clean["candidate_id"],
-        candidate_revision=clean["revision"],
+        candidate_revision=clean["candidate_revision"],
         version=version_name,
+        logistics_id=clean["logistics_id"],
+        expense_id=clean["expense_id"],
     )
-    return clean
+    return deepcopy(clean)
 
 
 def preview_sources(
