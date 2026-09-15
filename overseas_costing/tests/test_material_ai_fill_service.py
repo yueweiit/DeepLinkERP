@@ -4143,11 +4143,15 @@ def test_public_status_recursively_sanitizes_legacy_nested_failure_details() -> 
     "private_text",
     [
         "<span>500 secret</span>",
+        "<html",
+        '<p class="server-error"',
+        "500 Internal Server Error",
         "/srv/app/config.py contains secret",
         "/private/files/secret.pdf",
         "Traceback (most recent call last): secret",
         "file:///opt/app/secret.txt",
         r"C:\\server\\private\\secret.txt",
+        r"\\server\share\secret.txt",
     ],
 )
 def test_public_payload_sanitizes_unsafe_text_at_any_dict_or_list_depth(private_text) -> None:
@@ -4195,6 +4199,8 @@ def test_public_payload_extra_json_is_parsed_allowlisted_and_never_falls_back_to
         "packing-list.xlsx",
         "TF33304775/TF33304774",
         "物料 P-100 待核对",
+        "物料编码 <P-100> 不匹配",
+        "5 < 10 > 3",
         "https://example.com/help",
     ],
 )

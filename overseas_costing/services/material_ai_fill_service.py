@@ -2296,9 +2296,30 @@ _PUBLIC_AI_HIDDEN_KEYS = frozenset({
     "settlement_original_values", "ai_fill_original_values", "_shipment_valuation",
 })
 _PUBLIC_PROCESS_ID_PATTERN = re.compile(r"proc_[0-9a-f]{64}")
-_UNSAFE_PUBLIC_DETAIL_PATTERN = re.compile(
-    r"(?:<[^<>]+>|\btraceback\b|file://|"
-    r"(?<![:/\w.])/(?:[^/\s<>]+/)+[^/\s<>]+|[a-z]:\\)",
+_HTML_PAIRED_TAG_PATTERN = re.compile(
+    r"<\s*([a-z][\w:-]*)\b[^<>]*>.*?</\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_MARKUP_PATTERN = re.compile(
+    r"(?:<!doctype\b|<!--|<\?xml\b|"
+    r"<\s*/?\s*(?:html|head|body|title|meta|link|script|style|pre|code|"
+    r"div|span|table|thead|tbody|tfoot|tr|th|td|form|input|button|select|"
+    r"option|textarea|label|iframe|object|embed|img|svg|canvas|p|br|hr|"
+    r"ul|ol|li|dl|dt|dd|section|article|header|footer|main|nav)"
+    r"(?![-\w:]))",
+    re.IGNORECASE,
+)
+_HTML_ATTRIBUTE_TAG_PATTERN = re.compile(
+    r"<\s*/?\s*[a-z][\w:-]*\s+[a-z_:][\w:.-]*\s*=", re.IGNORECASE
+)
+_ERROR_PAGE_PATTERN = re.compile(
+    r"(?:\btraceback\b|\binternal\s+server\s+error\b|\bbad\s+gateway\b|"
+    r"\bservice\s+unavailable\b)",
+    re.IGNORECASE,
+)
+_SERVER_PATH_PATTERN = re.compile(
+    r"(?:file://|(?<![:/\w.])/(?:[^/\s<>]+/)+[^/\s<>]+|"
+    r"(?<![a-z0-9])[a-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+)",
     re.IGNORECASE,
 )
 
@@ -2357,7 +2378,17 @@ def _safe_public_text(value: str) -> str:
     """Keep business copy, but never return markup, stack traces, or server paths."""
 
     text = str(value or "")
-    return SERVER_PREVIEW_FAILURE_MESSAGE if _UNSAFE_PUBLIC_DETAIL_PATTERN.search(text) else text
+    unsafe = any(
+        pattern.search(text)
+        for pattern in (
+            _HTML_PAIRED_TAG_PATTERN,
+            _HTML_MARKUP_PATTERN,
+            _HTML_ATTRIBUTE_TAG_PATTERN,
+            _ERROR_PAGE_PATTERN,
+            _SERVER_PATH_PATTERN,
+        )
+    )
+    return SERVER_PREVIEW_FAILURE_MESSAGE if unsafe else text
 
 
 def _public_extra_json(value: Any, replacements: dict[str, str]) -> dict:
