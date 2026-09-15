@@ -83,6 +83,27 @@ def test_existing_physical_cells_use_reasoned_correction_while_blank_cells_stay_
     assert "!this.materialValueIsPlaceholder(column.field, originalValue, item)" in renderer
 
 
+def test_cost_trial_entry_uses_ai_review_and_exposes_user_recovery_actions() -> None:
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    trial_block = source.split("async refreshMaterialFeeCostPreview", 1)[1].split(
+        "acceptSavedComprehensiveCost", 1
+    )[0]
+
+    assert "start_cost_trial_ai_review" in trial_block
+    assert "calculate_comprehensive_cost" not in trial_block
+    for endpoint in (
+        "get_cost_trial_ai_review_status",
+        "preview_cost_trial",
+        "confirm_cost_trial",
+        "discard_cost_trial_ai_review",
+    ):
+        assert endpoint in source
+    for label in ("重试 AI", "返回补资料", "放弃试算", "确认并试算", "凭证优先"):
+        assert label in source
+    assert "AI 只建议分摊口径" in source
+    assert "未采用的 AI 结果不计入" not in source
+
+
 FEE_INPUT_FIXTURE = r"""
 function makeFeeInput({amount, currency, originalAmount, originalCurrency, forceActual=false, feeKey='international_sea_freight'}) {
   const classes = new Set();
@@ -1405,12 +1426,15 @@ def test_trial_saves_current_version_and_updates_other_tabs():
 workspace.detailState.editToken='TOKEN';workspace.detailState.expectedModified='M1';
 workspace.ensureEditSession=async()=>true;
 workspace.batches=[{name:'B-1',estimated_total_cost_rmb:100}];
+state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[]},selections:[],preview:{preview_token:'P'}};
+state.costTrialDialog={hide(){}};workspace.renderCostTrialAIReviewDialog=()=>{};
 let endpoint,args;workspace.call=async(e,a)=>{endpoint=e;args=a;return {ok:true,saved:true,batch_modified:'M2',summary:{total_cost_rmb:'64800.00'},summary_snapshot:{total_cost_rmb:'64800.00',calculation_schema:2}}};
-await workspace.refreshMaterialFeeCostPreview();
+await workspace.confirmCostTrialAI();
 console.log(JSON.stringify({endpoint,args,modified:workspace.detailState.expectedModified,batch:workspace.batches[0]}));
 """)
-    assert result["endpoint"].endswith(".calculate_comprehensive_cost")
+    assert result["endpoint"].endswith(".confirm_cost_trial")
     assert result["args"]["edit_token"] == "TOKEN" and result["args"]["expected_modified"] == "M1"
+    assert result["args"]["preview_token"] == "P"
     assert result["modified"] == "M2"
     assert float(result["batch"]["estimated_total_cost_rmb"]) == 64800
     assert result["batch"]["status"] == "Calculated"
@@ -1459,16 +1483,18 @@ console.log(JSON.stringify({hasDingtalk:html.includes('钉钉秘密附件'),hasL
 
 def test_trial_waits_for_pending_writes_and_ignores_duplicate_clicks():
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
+workspace.openCostTrialAIReviewDialog=()=>{workspace.opened=true};
+workspace.call=async(endpoint)=>{workspace.calls++;if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'READY'};return {ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[]}}};
 let release;const writing=workspace.trackMaterialFeeWrite(()=>new Promise(resolve=>{release=resolve}));
 const first=workspace.refreshMaterialFeeCostPreview();
 await new Promise(resolve=>setImmediate(resolve));
 const before={calls:workspace.calls,disabled:button.disabled,label:button.label};
 await workspace.refreshMaterialFeeCostPreview();release();await writing;await first;
-console.log(JSON.stringify({before,calls:workspace.calls,preview:state.preview,disabled:button.disabled,running:state.previewRunning}));
+console.log(JSON.stringify({before,calls:workspace.calls,opened:workspace.opened,disabled:button.disabled,running:state.previewRunning}));
 """)
     assert result["before"] == {"calls": 0, "disabled": True, "label": "计算中…"}
-    assert result["calls"] == 1
-    assert result["preview"]["summary"]["total_cost_rmb"] == "200.00"
+    assert result["calls"] == 2
+    assert result["opened"] is True
     assert result["disabled"] is False and result["running"] is False
 
 
@@ -1484,7 +1510,7 @@ const running=workspace.refreshMaterialFeeCostPreview();await new Promise(resolv
         "reload": "state.requestId++;",
         "input": "state.inputRevision++;",
     }[change] + r"""
-release({ok:true,summary:{total_cost_rmb:'200.00'}});await running;
+    release({ok:true,run_id:'RUN',status:'QUEUED'});await running;
 console.log(JSON.stringify({preview:workspace.materialFeeState.preview,renders:workspace.renders}));
 """)
     assert result["preview"]["summary"]["total_cost_rmb"] == ("999.00" if change == "batch" else "100.00")
@@ -1525,10 +1551,11 @@ def test_trial_flushes_dirty_fee_before_reading_preview():
 state.fees={fees:[{logical_fee_key:'fee'}]};state.feeDrafts={fee:{amount:'20',currency:'RMB'}};
 const input={attr(){return 'fee'}};global.$=value=>value;const originalFind=workspace.$root.find;
 workspace.$root.find=selector=>selector==='[data-mf-fee-amount]'?{each(callback){callback(0,input)}}:originalFind(selector);
-const order=[];workspace.saveMaterialFeeInlineAmount=async()=>{order.push('save');delete state.feeDrafts.fee};workspace.call=async()=>{order.push('preview');return {ok:true,summary:{total_cost_rmb:'120.00'}}};
-await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({order,total:state.preview.summary.total_cost_rmb}));
+workspace.openCostTrialAIReviewDialog=()=>{};
+const order=[];workspace.saveMaterialFeeInlineAmount=async()=>{order.push('save');delete state.feeDrafts.fee};workspace.call=async(endpoint)=>{order.push(endpoint.endsWith('start_cost_trial_ai_review')?'start':'status');return endpoint.endsWith('start_cost_trial_ai_review')?{ok:true,run_id:'RUN',status:'READY'}:{ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[]}}};
+await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({order,status:state.costTrialAI.status}));
 """)
-    assert result == {"order": ["save", "preview"], "total": "120.00"}
+    assert result == {"order": ["save", "start", "status"], "status": "READY"}
 
 
 MATERIAL_SAVE_FIXTURE = r"""
@@ -1603,10 +1630,11 @@ def test_trial_saves_material_draft_before_reading_cost():
 state.materialDrafts={'A:volume_m3':{itemName:'A',fieldname:'volume_m3',value:'2'}};
 const input={attr(name){return {'data-item-name':'A','data-fieldname':'volume_m3'}[name]}};global.$=value=>value;const originalFind=workspace.$root.find;
 workspace.$root.find=selector=>selector==='[data-mf-cell-input]'?{each(callback){callback(0,input)}}:originalFind(selector);
-const order=[];workspace.saveMaterialFeeCell=async()=>{order.push('save');delete state.materialDrafts['A:volume_m3']};workspace.call=async()=>{order.push('preview');return {ok:true,summary:{}}};
+workspace.openCostTrialAIReviewDialog=()=>{};
+const order=[];workspace.saveMaterialFeeCell=async()=>{order.push('save');delete state.materialDrafts['A:volume_m3']};workspace.call=async(endpoint)=>{order.push(endpoint.endsWith('start_cost_trial_ai_review')?'start':'status');return endpoint.endsWith('start_cost_trial_ai_review')?{ok:true,run_id:'RUN',status:'READY'}:{ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[]}}};
 await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({order}));
 """)
-    assert result["order"] == ["save", "preview"]
+    assert result["order"] == ["save", "start", "status"]
 
 
 def test_trial_stops_if_another_material_is_edited_while_flushing():

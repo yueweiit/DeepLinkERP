@@ -2655,6 +2655,9 @@ def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback
         missing.append("当前批次没有 SKU 明细。")
     if _current_cost_total(batch) <= 0:
         missing.append("当前批次没有有效综合成本结果。")
+    formal_confirmation_blocked = bool(snapshot.get("formal_confirmation_blocked"))
+    if formal_confirmation_blocked:
+        missing.append("当前结果使用暂行分摊口径，可预览和导出，但不能确认正式成本或推送 ERP。")
     for reason in result.get("incomplete_reasons") or []:
         label = next((r.get("expense_category") for r in result.get("excluded_fees", []) if r.get("fee_key") == reason.get("fee_key")), "")
         message = (label + "：" if label else "") + (reason.get("message") or "计算资料不完整。")
@@ -2671,6 +2674,7 @@ def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback
               "has_subsidiary_code": bool(_resolve_batch_subsidiary_code(batch)), "has_dirty_data": dirty,
               "has_invalid_business_approval": bool(invalid.get("invalid")), "has_items": bool(items),
               "has_total_cost": _current_cost_total(batch) > 0,
+              "has_formal_confirmation_block": formal_confirmation_blocked,
               "has_international_freight": any(str(k).startswith("international_") for k in known),
               "has_clearance_fee": "customs_clearance_fee" in known, "has_tariff": "import_tax" in known,
               "is_confirmed": batch.get("confirm_status") == "Confirmed", **quality["checks"]}

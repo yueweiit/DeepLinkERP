@@ -512,7 +512,7 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
         chunk = batches[offset:offset + chunk_size]
         names = [row["name"] for row in chunk]
         versions = [row["current_version"] for row in chunk if row.get("current_version")]
-        version_rows, item_rows, rule_rows, evidence_rows, audit_rows = [], [], [], [], []
+        version_rows, item_rows, rule_rows, evidence_rows, component_rows, audit_rows = [], [], [], [], [], []
         if frappe is not None and versions:
             filters = {"batch": ["in", names], "version": ["in", versions]}
             version_rows = frappe.get_all("Overseas Cost Version",
@@ -526,6 +526,18 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
                 fields=fee_service._rule_fields(), order_by="priority_no asc, modified asc", limit_page_length=0)
             evidence_rows = frappe.get_all("Overseas Cost Fee Evidence", filters=filters,
                 fields=["batch", "version", "fee_rule", "evidence_role", "validation_status"], limit_page_length=0)
+            component_rows = frappe.get_all(
+                "Overseas Cost Fee SKU Component",
+                filters={**filters, "status": "CONFIRMED", "is_active": 1},
+                fields=[
+                    "name", "batch", "version", "fee_rule", "logical_fee_key", "evidence", "attachment",
+                    "item", "stable_line_key", "component_type", "tax_code", "hs_code", "currency",
+                    "original_amount", "amount_rmb", "exchange_rate", "allocation_basis",
+                    "source_evidence_json", "accounting_role", "cost_effect", "reverses_component",
+                    "status", "is_active",
+                ],
+                limit_page_length=0,
+            )
             confirmed_names = [row["name"] for row in chunk if str(row.get("confirm_status") or "").lower() == "confirmed"]
             if confirmed_names:
                 audit_rows = frappe.get_all("Overseas Cost Audit Log",
@@ -535,7 +547,7 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
                     order_by="creation desc", limit_page_length=0)
         by_version = {(row["batch"], row["name"]): dict(row) for row in version_rows}
         groups = []
-        for rows in (item_rows, rule_rows, evidence_rows):
+        for rows in (item_rows, rule_rows, evidence_rows, component_rows):
             grouped = {}
             for row in rows:
                 grouped.setdefault((row.get("batch"), row.get("version")), []).append(row)
@@ -552,7 +564,8 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
             context = batch_source_context(batch['name'], batch.get('current_version'))
             result[batch["name"]] = cost_review_service.evaluate_review_readiness(
                 batch=batch, version=version, items=groups[0].get(key, []),
-                fees=groups[1].get(key, []), evidence=groups[2].get(key, []), source_context=context)
+                fees=groups[1].get(key, []), evidence=groups[2].get(key, []),
+                fee_components=groups[3].get(key, []), source_context=context)
     return result
 
 

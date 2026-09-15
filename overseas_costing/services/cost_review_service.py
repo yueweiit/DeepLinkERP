@@ -40,6 +40,7 @@ MESSAGES = {
     "CURRENCY_UNSUPPORTED": "费用币种暂不支持，请核对费用。",
     "ESTIMATED_AMOUNT": "含暂估费用，可先审核，最终确认前仍需补充实际金额。",
     "EVIDENCE_MISSING": "费用凭证缺失或尚未通过校验，可先审核。",
+    "TEMPORARY_ALLOCATION_BASIS": "当前结果采用暂行分摊口径，补齐资料后需按 AI 建议重新试算。",
 }
 
 
@@ -122,7 +123,9 @@ def _saved_result_matches(snapshot: dict, expected: dict, items: list[dict]) -> 
 
 
 def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], fees: list[dict],
-                              evidence: list[dict] | None = None, source_context: dict | None = None) -> dict:
+                              evidence: list[dict] | None = None,
+                              fee_components: list[dict] | None = None,
+                              source_context: dict | None = None) -> dict:
     """Evaluate one authorized batch; fee rows must use the saved query's order.
 
     Project exactly the fields used by FrappeCostRepository, including nulls.
@@ -158,13 +161,32 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     composed = fee_service.compose_fee_worklist_rows(raw_fees, mode,source_context=source_context_from_items(inputs))
     canonical_fees = fee_service._decorate_historical_rules(composed, mode)
     fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
-    current_hash = cost_preview_service.cost_input_hash(inputs, canonical_fees, fx, mode)
+    components = list(fee_components or [])
+    snapshot = _dict(version.get("summary_snapshot_json"))
+    trial_review = _dict(snapshot.get("ai_cost_trial"))
+    calculation_fees = composed
+    if trial_review.get("is_temporary"):
+        from overseas_costing.services.cost_trial_ai_service import project_fees_for_trial
+        temporary_choices = {
+            str(row.get("fee_key") or ""): row
+            for row in (trial_review.get("fee_choices") or [])
+            if row.get("fee_key") and row.get("temporary")
+        }
+        calculation_fees = project_fees_for_trial(composed, temporary_choices, for_save=True)
+    current_hash = cost_preview_service.cost_input_hash(inputs, canonical_fees, fx, mode, components)
     if any(fee.get("duplicate_rule_names") for fee in canonical_fees):
         # The saver rejects duplicates. The preview retains them as blockers so
         # the read-only workbench can still explain how to repair the batch.
-        expected = cost_preview_service.preview_comprehensive_cost_data(inputs, canonical_fees, fx)
+        expected = cost_preview_service.preview_comprehensive_cost_data(
+            inputs, canonical_fees, fx, fee_components=components
+        )
     else:
-        expected = cost_preview_service.build_saved_cost_data(inputs, composed, fx, mode)
+        expected = cost_preview_service.build_saved_cost_data(
+            inputs, calculation_fees, fx, mode, fee_components=components
+        )
+        if trial_review:
+            from overseas_costing.services.cost_trial_ai_service import annotate_saved_trial_result
+            annotate_saved_trial_result(expected, trial_review)
 
     if not mode:
         block("TRANSPORT_MODE_REQUIRED")
@@ -196,7 +218,6 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
         if status["evidence_state"] in {"MISSING", "INVALID", "PENDING"}:
             warn("EVIDENCE_MISSING")
 
-    snapshot = _dict(version.get("summary_snapshot_json"))
     result_current = 'SOURCE_ADOPTION_PENDING' not in blockers
     if not snapshot:
         block("RESULT_NOT_SAVED")

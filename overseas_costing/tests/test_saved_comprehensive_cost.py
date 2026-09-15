@@ -42,6 +42,17 @@ def test_saved_projection_conserves_preview_cost_and_uses_shipped_quantity():
     assert result["items"][0]["shipping_quantity_difference"] == "-10"
 
 
+def test_cost_input_hash_ignores_private_trial_projection_fields():
+    items, fees, fx = inputs()
+    projected = deepcopy(fees)
+    projected[0]["trial_allocation_basis"] = "gross_weight"
+    projected[0]["trial_suggestion_id"] = "private-suggestion"
+
+    assert service.cost_input_hash(items, projected, fx, "AIR") == service.cost_input_hash(
+        items, fees, fx, "AIR"
+    )
+
+
 def test_sku_presentation_uses_saved_units_and_batch_transport():
     from overseas_costing.services import workbench_service
     items, fees, fx = inputs()
@@ -151,6 +162,14 @@ def test_confirmation_uses_saved_snapshot_zero_fees_and_keeps_real_entity_gap():
     batch.update(status="Dirty", subsidiary_code="MX01")
     result = batch_service._build_calculation_confirmation_readiness(batch, items, fees, "V")
     assert not result["ready"] and result["checks"]["has_dirty_data"]
+
+    batch.update(status="Calculated")
+    batch["summary_snapshot"]["formal_confirmation_blocked"] = True
+    batch["summary_snapshot"]["formal_confirmation_block_reason"] = "TEMPORARY_ALLOCATION_BASIS"
+    result = batch_service._build_calculation_confirmation_readiness(batch, items, fees, "V")
+    assert not result["ready"]
+    assert result["checks"]["has_formal_confirmation_block"]
+    assert "暂行分摊口径" in "".join(result["blocking_reasons"])
 
 
 def test_saved_consumers_ignore_replaced_raw_tax_and_use_effective_shipping():

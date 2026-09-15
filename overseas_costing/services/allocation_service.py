@@ -68,7 +68,6 @@ def suggest_allocation_rules_with_ai(
         content = _call_chat_completions(config, messages)
         parsed = _extract_json_object(content)
         rules = _normalize_ai_rules(parsed, normalized_candidates)
-        rules = _apply_confirmed_business_bases(rules, items)
         rules = _append_basis_coverage_warnings(rules, items)
     except Exception as exc:  # pragma: no cover - 网络异常路径本地通常不走
         return {
@@ -164,6 +163,12 @@ def _conf_value(key: str):
 
 
 def _build_ai_prompt_payload(*, items: list[dict], candidate_rules: list[dict], context: dict) -> dict:
+    from overseas_costing.services.shipment_cost_service import shipment_value
+
+    effective_goods_values = [
+        _to_float(shipment_value(row).get("amount_rmb"))
+        for row in (items or [])
+    ]
     item_rows = [
         {
             "row_no": row.get("row_no"),
@@ -171,23 +176,23 @@ def _build_ai_prompt_payload(*, items: list[dict], candidate_rules: list[dict], 
             "product_name": row.get("product_name"),
             "category": row.get("category"),
             "transport_mode": row.get("transport_mode"),
-            "goods_value": _to_float(row.get("goods_value")),
+            "goods_value": effective_goods_values[index],
             "quantity": _to_float(row.get("quantity")),
             "gross_weight_kg": _to_float(row.get("gross_weight_kg")),
             "volume_m3": _to_float(row.get("volume_m3")),
             "volume_weight_kg": _to_float(row.get("volume_weight_kg")),
             "chargeable_weight_kg": _to_float(row.get("chargeable_weight_kg")),
         }
-        for row in (items or [])[:MAX_AI_ITEMS]
+        for index, row in enumerate((items or [])[:MAX_AI_ITEMS])
     ]
     totals = {
         "item_count": len(items or []),
         "sample_item_count": len(item_rows),
-        "total_goods_value": sum(_to_float(row.get("goods_value")) for row in items or []),
+        "total_goods_value": sum(effective_goods_values),
         "total_gross_weight_kg": sum(_to_float(row.get("gross_weight_kg")) for row in items or []),
         "total_volume_m3": sum(_to_float(row.get("volume_m3")) for row in items or []),
         "total_chargeable_weight_kg": sum(_chargeable_weight(row) for row in items or []),
-        "missing_goods_value_count": sum(1 for row in items or [] if not _to_float(row.get("goods_value"))),
+        "missing_goods_value_count": sum(1 for value in effective_goods_values if not value),
         "missing_gross_weight_count": sum(1 for row in items or [] if not _to_float(row.get("gross_weight_kg"))),
         "missing_volume_count": sum(1 for row in items or [] if not _to_float(row.get("volume_m3"))),
         "missing_chargeable_weight_count": sum(1 for row in items or [] if not _chargeable_weight(row)),
@@ -197,8 +202,12 @@ def _build_ai_prompt_payload(*, items: list[dict], candidate_rules: list[dict], 
             "batch_name": context.get("batch_name") or "",
             "version_name": context.get("version_name") or "",
             "transport_mode": context.get("transport_mode") or _first_value(items, "transport_mode"),
+            "project": context.get("project") or context.get("project_collection") or _first_value(items, "project_collection"),
+            "supplier": context.get("supplier") or context.get("vendor") or _first_value(items, "supplier"),
             "fx_rmb_to_mxn": context.get("fx_rmb_to_mxn"),
             "fx_usd_to_rmb": context.get("fx_usd_to_rmb"),
+            "retrieval_context": context.get("retrieval_context") or [],
+            "retrieval_version": context.get("retrieval_version") or "",
         },
         "totals": totals,
         "candidate_rules": candidate_rules,
@@ -209,13 +218,14 @@ def _build_ai_prompt_payload(*, items: list[dict], candidate_rules: list[dict], 
 def _build_ai_messages(payload: dict) -> list[dict]:
     system_prompt = (
         "你是海外采购综合成本核算的分摊顾问。"
-        "你的任务是基于给定费用池和物料结构，选择基础分摊口径；系统会按该口径填入每行基础分摊金额。"
+        "你的任务是基于给定费用池和物料结构，只选择基础分摊口径；逐 SKU 金额由服务端规则引擎计算。"
         "你必须遵守：1. 不得新增费用池；2. 不得修改金额和币种；"
         "3. allocation_basis 只能是 goods_value、gross_weight、volume、chargeable_weight；"
-        "4. 输出必须是 JSON 对象；5. 如果证据不足，选择最保守、最容易解释的分摊依据。"
+        "4. 不得输出或推算逐 SKU 分摊金额；5. 输出必须是 JSON 对象；"
+        "6. 如果证据不足，选择最保守、最容易解释的分摊依据。"
     )
     user_prompt = {
-        "task": "请为 candidate_rules 中每个费用池选择基础分摊依据，并给出中文理由。系统会按该依据直接计算并写入每行分摊金额。",
+        "task": "请为 candidate_rules 中每个费用池选择基础分摊依据，并给出中文理由。不要输出逐 SKU 金额。",
         "output_schema": {
             "summary": "一句中文总结",
             "rules": [
@@ -230,9 +240,9 @@ def _build_ai_messages(payload: dict) -> list[dict]:
         "business_hint": (
             "所有可追溯的物流费、清关费、税费、仓储费、滞留罚款、杂费原则上都进入综合成本；"
             "关税、增值税最终以完税凭证为准，已有物料税费金额不得作为整票费用池重复分摊；"
-            "当前默认口径先按毛重分摊，便于财务复核；"
-            "只有明确属于抛货、体积重明显更合理，或毛重缺失但体积/计费重可用时，才建议 volume 或 chargeable_weight；"
-            "体积小重量大仍按重量，后续允许人工调整分摊依据后重新试算。"
+            "运输费需根据运输方式、物料重量与体积特征，在毛重、体积或计费重中选择最可解释的口径；"
+            "与价值、保险、税负或商品责任相关的费用可建议按货值。"
+            "每个费用项独立判断，不得用单一全局默认覆盖所有费用。"
             "必须检查 totals 中的缺失数量，不得把存在缺失的数据描述为完整；"
             "缺少分摊依据时应在理由中明确提示补数据，不得为了得到结果而建议平均分摊。"
         ),
@@ -357,57 +367,6 @@ def _normalize_ai_rules(parsed: dict, candidate_rules: list[dict]) -> list[dict]
             fallback["remark"] = f"AI未返回该费用池，沿用系统基础分摊：{fallback.get('remark') or ''}".strip()
             normalized.append(fallback)
     return normalized
-
-
-def _apply_confirmed_business_bases(rules: list[dict], items: list[dict]) -> list[dict]:
-    if not sum(_to_float(row.get("gross_weight_kg")) for row in items or []):
-        return rules
-
-    normalized = []
-    for rule in rules or []:
-        current = dict(rule)
-        if _is_transport_fee_rule(current):
-            basis = str(current.get("allocation_basis") or current.get("basis_field") or "").strip()
-            if basis in {"volume", "chargeable_weight", "chargeable_weight_kg"}:
-                current["allocation_basis"] = "gross_weight"
-                current["basis_field"] = "gross_weight"
-                remark = str(current.get("remark") or "").rstrip("；。")
-                current["remark"] = (
-                    f"{remark}；按已确认业务口径，系统默认先按毛重分摊；如确认属于抛货，可人工改为体积/计费重后重算。"
-                    if remark
-                    else "按已确认业务口径，系统默认先按毛重分摊；如确认属于抛货，可人工改为体积/计费重后重算。"
-                )
-            elif basis == "gross_weight":
-                remark = str(current.get("remark") or "").rstrip("；。")
-                policy = "按已确认业务口径，系统默认先按毛重分摊；如确认属于抛货，可人工改为体积/计费重后重算。"
-                if policy not in remark:
-                    current["remark"] = f"{remark}；{policy}" if remark else policy
-        normalized.append(current)
-    return normalized
-
-
-def _is_transport_fee_rule(rule: dict) -> bool:
-    text = " ".join(
-        str(rule.get(fieldname) or "")
-        for fieldname in ("rule_code", "expense_category", "remark")
-    ).lower()
-    return any(
-        keyword in text
-        for keyword in (
-            "freight",
-            "ocean",
-            "shipping",
-            "logistics",
-            "air",
-            "express",
-            "海运",
-            "空运",
-            "快递",
-            "运费",
-            "运输",
-            "物流",
-        )
-    )
 
 
 def _append_basis_coverage_warnings(rules: list[dict], items: list[dict]) -> list[dict]:

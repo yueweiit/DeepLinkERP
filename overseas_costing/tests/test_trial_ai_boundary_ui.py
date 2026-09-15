@@ -25,33 +25,48 @@ def test_trial_uses_saved_facts_and_retains_unadopted_ai(status):
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + AI_FIXTURE +
         f"fill.status={json.dumps(status)};" + r"""
 const before=JSON.stringify({materials:state.materials,fees:state.fees});
-const requests=[];workspace.call=async(endpoint,args)=>{requests.push({endpoint,args});return {ok:true,saved:true,
- batch_modified:'M2',version_name:'V-1',summary:{total_cost_rmb:'2602.820000'},summary_snapshot:{item_count:1}}};
+const requests=[];workspace.openCostTrialAIReviewDialog=()=>{workspace.opened=true};
+workspace.call=async(endpoint,args)=>{requests.push({endpoint,args});
+ if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'TRIAL',status:'READY',progress_revision:0};
+ if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'TRIAL',status:'READY',draft:{fee_suggestions:[]}};
+ throw new Error('unexpected '+endpoint)};
 const ok=await workspace.refreshMaterialFeeCostPreview();
 console.log(JSON.stringify({ok,requests,retained:state.aiFill===fill,selected:[...selection.rows],
  unchanged:before===JSON.stringify({materials:state.materials,fees:state.fees}),total:state.preview.summary.total_cost_rmb,
- notice:workspace.renderMaterialFeeCostTable().includes('本次按已保存资料试算，未采用的 AI 结果不计入。')}));
+ opened:workspace.opened===true}));
 """)
-    assert result["ok"] and result["retained"] and result["unchanged"] and result["notice"]
+    assert result["ok"] and result["retained"] and result["unchanged"] and result["opened"]
     assert result["selected"] == ["unadopted"]
-    assert result["total"] == "2602.820000"
-    assert len(result["requests"]) == 1
-    assert result["requests"][0]["endpoint"].endswith("calculate_comprehensive_cost")
-    assert set(result["requests"][0]["args"]) == {"batch_name", "version_name"}
+    assert result["total"] == "100.00"
+    assert [row["endpoint"].split(".")[-1] for row in result["requests"]] == [
+        "start_cost_trial_ai_review",
+        "get_cost_trial_ai_review_status",
+    ]
+    assert set(result["requests"][0]["args"]) == {"batch_name", "version_name", "force"}
+    assert "ai_fill" not in result["requests"][0]["args"]
 
 
 def test_trial_waits_only_for_actual_saves_and_blocks_ai_confirm_until_done():
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + AI_FIXTURE + r"""
+const endpoints=[];workspace.openCostTrialAIReviewDialog=()=>{};
+workspace.call=async(endpoint)=>{endpoints.push(endpoint.split('.').pop());
+ if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'TRIAL',status:'READY'};
+ return {ok:true,run_id:'TRIAL',status:'READY',draft:{fee_suggestions:[]}}};
 let release;const writing=workspace.trackMaterialFeeWrite(()=>new Promise(resolve=>release=resolve));
 const running=workspace.refreshMaterialFeeCostPreview();
 await new Promise(resolve=>setImmediate(resolve));
-const before={calls:workspace.calls,canApply:workspace.canConfirmMaterialAIRowSelection(fill)};
+const before={calls:endpoints.length,canApply:workspace.canConfirmMaterialAIRowSelection(fill)};
 await workspace.applyMaterialAIFill();
 await workspace.refreshMaterialFeeCostPreview();
 release();await writing;await running;
-console.log(JSON.stringify({before,calls:workspace.calls,canApply:workspace.canConfirmMaterialAIRowSelection(fill),retained:state.aiFill===fill}));
+console.log(JSON.stringify({before,endpoints,canApply:workspace.canConfirmMaterialAIRowSelection(fill),retained:state.aiFill===fill}));
 """)
-    assert result == {"before": {"calls": 0, "canApply": False}, "calls": 1, "canApply": True, "retained": True}
+    assert result == {
+        "before": {"calls": 0, "canApply": False},
+        "endpoints": ["start_cost_trial_ai_review", "get_cost_trial_ai_review_status"],
+        "canApply": True,
+        "retained": True,
+    }
 
 
 def test_trial_rejects_actual_ai_write_with_specific_message():

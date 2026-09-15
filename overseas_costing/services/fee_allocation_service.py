@@ -107,6 +107,9 @@ def basis_decimal(item: dict, basis: str) -> Decimal | None:
 
 
 def preferred_allocation_basis(fee: dict) -> str:
+    trial_basis = str(fee.get("trial_allocation_basis") or "").strip()
+    if trial_basis in {"goods_value", "gross_weight", "volume", "chargeable_weight"}:
+        return trial_basis
     from overseas_costing.services.project_freight_service import policy_from_fee
     if policy_from_fee(fee):
         return 'gross_weight'

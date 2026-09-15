@@ -37,6 +37,9 @@ class ReadOnlyRows:
             "Overseas Cost Item": [row for context in contexts for row in context["items"]],
             "Overseas Cost Allocation Rule": [row for context in contexts for row in context["fees"]],
             "Overseas Cost Fee Evidence": [],
+            "Overseas Cost Fee SKU Component": [
+                row for context in contexts for row in context.get("fee_components", [])
+            ],
             "Overseas Cost Audit Log": [
                 {"batch": context["batch"]["name"], "version": context["version"]["name"],
                  "action_type": "BATCH_EDIT", "field_name": "confirm_status", "creation": "2026-09-08 11:00:00",
@@ -109,7 +112,8 @@ def test_readiness_queries_are_bounded_by_chunks_and_only_authorized_batch_ids(m
     assert "SECRET" not in json.dumps(result)
     assert len(database.calls) <= 5 * ceil(batch_count / 200)
     queried = {doctype for doctype, _args in database.calls}
-    assert {"Overseas Cost Version", "Overseas Cost Item", "Overseas Cost Allocation Rule", "Overseas Cost Fee Evidence"} <= queried
+    assert {"Overseas Cost Version", "Overseas Cost Item", "Overseas Cost Allocation Rule",
+            "Overseas Cost Fee Evidence", "Overseas Cost Fee SKU Component"} <= queried
     for _doctype, kwargs in database.calls:
         selected_ids = kwargs["filters"]["batch"][1]
         assert set(selected_ids) <= set(allowed)

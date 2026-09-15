@@ -197,6 +197,31 @@ def test_preview_excludes_fee_when_both_physical_and_goods_values_are_incomplete
     assert result["excluded_fees"][0]["reason_code"] == "ALLOCATION_BASIS_INCOMPLETE"
 
 
+def test_complete_confirmed_customs_components_do_not_require_generic_basis():
+    items = _items()
+    for row in items:
+        row.update(goods_value=0, gross_weight_kg=0, volume_m3=0, chargeable_weight_kg=0)
+    fee = {
+        "name": "TAX-RULE",
+        "logical_fee_key": "import_tax",
+        "expense_category": "进口税费",
+        "amount_status": "ACTUAL",
+        "amount": "100",
+        "currency": "RMB",
+        "allocation_basis": "volume",
+    }
+    components = [
+        {"fee_rule": "TAX-RULE", "stable_line_key": "A", "amount_rmb": "30", "status": "CONFIRMED", "is_active": 1, "cost_effect": "COST"},
+        {"fee_rule": "TAX-RULE", "stable_line_key": "B", "amount_rmb": "70", "status": "CONFIRMED", "is_active": 1, "cost_effect": "COST"},
+    ]
+
+    result = preview_comprehensive_cost_data(items, [fee], {}, fee_components=components)
+
+    assert result["excluded_fees"] == []
+    assert result["included_fees"][0]["allocations"] == {"A": "30.00", "B": "70.00"}
+    assert result["included_fees"][0]["component_source"] == "EVIDENCE_SKU_COMPONENT"
+
+
 def test_preview_does_not_mutate_input_or_block_on_missing_project() -> None:
     items = _items()
     for row in items:

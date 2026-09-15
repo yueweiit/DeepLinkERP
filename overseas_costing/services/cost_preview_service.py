@@ -193,10 +193,11 @@ def _allocation_with_components(
             "code": "EVIDENCE_COMPONENT_FX_MISSING",
             "allocations": {},
         }
-    full = allocate_fee_in_rmb(fee, items, fx_context)
-    if full.get("status") != "ALLOCATED":
-        return full
+    full = None
     if not components:
+        full = allocate_fee_in_rmb(fee, items, fx_context)
+        if full.get("status") != "ALLOCATED":
+            return full
         components = _legacy_fee_component_rows(fee, items, fx_context)
         component_source = "LEGACY_ITEM_FIELDS" if components else ""
     if not components:
@@ -234,7 +235,14 @@ def _allocation_with_components(
             "allocations": {},
         }
 
-    fee_total = Decimal(str(full["amount"]))
+    converted = convert_fee_amount_to_rmb(fee, fx_context)
+    if not converted.get("ok"):
+        return {
+            "status": "BLOCKED",
+            "code": converted.get("reason_code") or "FEE_AMOUNT_INVALID",
+            "allocations": {},
+        }
+    fee_total = Decimal(str(converted["amount_rmb"]))
     component_total = sum(component_allocations.values(), Decimal("0"))
     residual = fee_total - component_total
     if residual < Decimal("-0.005"):
@@ -250,14 +258,24 @@ def _allocation_with_components(
             for key, value in (residual_result.get("allocations") or {}).items()
         }
     else:
-        residual_result = full
+        residual_result = {
+            "status": "ALLOCATED",
+            "amount": format(fee_total, "f"),
+            "allocated_total": _money(fee_total),
+            "basis": "evidence_component",
+            "preferred_basis": str(fee.get("allocation_basis") or ""),
+            "fallback_reason": "",
+        }
         residual_allocations = {key: Decimal("0") for key in valid_keys}
+    full = full or residual_result
     allocations = {
         key: _money(component_allocations.get(key, Decimal("0")) + residual_allocations.get(key, Decimal("0")))
         for key in valid_keys
     }
     return {
         **full,
+        "amount": format(fee_total, "f"),
+        "allocated_total": _money(fee_total),
         "allocations": allocations,
         "component_allocations": {key: _money(value) for key, value in component_allocations.items()},
         "residual_amount_rmb": _money(residual),
@@ -606,6 +624,18 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
 
 
+def _without_private_trial_fields(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_private_trial_fields(item)
+            for key, item in value.items()
+            if not str(key).startswith("trial_")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_private_trial_fields(item) for item in value]
+    return value
+
+
 def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None) -> str:
     components = sorted(
         (dict(row or {}) for row in (fee_components or [])),
@@ -618,7 +648,7 @@ def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None
         ),
     )
     return hashlib.sha256(
-        _json([items, fees, fx_context, transport_mode, components]).encode()
+        _json(_without_private_trial_fields([items, fees, fx_context, transport_mode, components])).encode()
     ).hexdigest()
 
 
@@ -825,7 +855,7 @@ COST_INPUT_FIELDS = [
     "unit_price_uom", "quantity", "actual_shipped_qty", "actual_shipped_qty_mode",
     "actual_shipped_qty_source_revision", "shipped_uom", "goods_value", "net_weight_kg",
     "gross_weight_kg", "volume_m3",
-    "volume_weight_kg", "chargeable_weight_kg", "project_collection", "dingtalk_instance_id", "source_type",
+    "volume_weight_kg", "chargeable_weight_kg", "project_collection", "supplier", "dingtalk_instance_id", "source_type",
     "igi_amount", "iva_amount", "dta", "prv_duty", "prv_iva", "import_tax_total",
     *LEGACY_CUSTOMS_SERVICE_FIELDS,
 ]

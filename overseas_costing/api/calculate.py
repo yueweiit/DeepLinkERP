@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import frappe
 
-from overseas_costing.services import calculate_service, cost_preview_service
+from overseas_costing.services import calculate_service, cost_preview_service, cost_trial_ai_service
 from overseas_costing.services.access_control import require_batch_permission, require_doctype_permission
 
 
@@ -230,3 +230,48 @@ def calculate_comprehensive_cost(batch_name: str, version_name: str | None = Non
         batch_name=batch_name, version_name=str(version_name or "") or None,
         edit_token=edit_token, expected_modified=expected_modified,
     )
+
+
+@frappe.whitelist()
+def start_cost_trial_ai_review(batch_name: str, version_name: str | None = None,
+                               edit_token: str | None = None, expected_modified: str | None = None,
+                               force: str | int | bool = False) -> dict:
+    batch_name = require_batch_permission(batch_name, "write")
+    return cost_trial_ai_service.start_cost_trial_ai_review(
+        batch_name=batch_name, version_name=str(version_name or "") or None,
+        edit_token=str(edit_token or ""), expected_modified=str(expected_modified or ""),
+        force=str(force).strip().lower() in {"1", "true", "yes"},
+    )
+
+
+@frappe.whitelist()
+def get_cost_trial_ai_review_status(batch_name: str, run_id: str, after_revision: str | int | None = None) -> dict:
+    batch_name = require_batch_permission(batch_name, "read")
+    return cost_trial_ai_service.get_cost_trial_ai_review_status(
+        batch_name=batch_name, run_id=str(run_id or ""),
+        after_revision=int(after_revision) if after_revision not in (None, "") else None,
+    )
+
+
+@frappe.whitelist()
+def preview_cost_trial(batch_name: str, run_id: str, selections: str = "[]") -> dict:
+    batch_name = require_batch_permission(batch_name, "read")
+    return cost_trial_ai_service.preview_cost_trial(
+        batch_name=batch_name, run_id=str(run_id or ""), selections=selections,
+    )
+
+
+@frappe.whitelist()
+def confirm_cost_trial(batch_name: str, run_id: str, preview_token: str, selections: str = "[]",
+                       edit_token: str | None = None, expected_modified: str | None = None) -> dict:
+    batch_name = require_batch_permission(batch_name, "write")
+    return cost_trial_ai_service.confirm_cost_trial(
+        batch_name=batch_name, run_id=str(run_id or ""), preview_token=str(preview_token or ""),
+        selections=selections, edit_token=str(edit_token or ""), expected_modified=str(expected_modified or ""),
+    )
+
+
+@frappe.whitelist()
+def discard_cost_trial_ai_review(batch_name: str, run_id: str) -> dict:
+    batch_name = require_batch_permission(batch_name, "write")
+    return cost_trial_ai_service.discard_cost_trial_ai_review(batch_name=batch_name, run_id=str(run_id or ""))

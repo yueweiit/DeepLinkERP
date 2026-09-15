@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from overseas_costing.services import cost_preview_service, fee_service
+from overseas_costing.services import cost_preview_service, cost_trial_ai_service, fee_service
 
 
 def saved_context():
@@ -37,7 +37,13 @@ def save_result(context):
     inputs = [{field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS} for row in context["items"]]
     fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
     fees = fee_service.compose_fee_worklist_rows(context["fees"], context["batch"]["transport_mode"])
-    saved = cost_preview_service.build_saved_cost_data(inputs, fees, fx, context["batch"]["transport_mode"])
+    saved = cost_preview_service.build_saved_cost_data(
+        inputs,
+        fees,
+        fx,
+        context["batch"]["transport_mode"],
+        fee_components=context.get("fee_components") or [],
+    )
     version["calculated_at"] = "2026-09-08 10:00:00"
     saved["summary_snapshot"]["calculated_at"] = version["calculated_at"]
     version["summary_snapshot_json"] = json.dumps(saved["summary_snapshot"])
@@ -214,6 +220,89 @@ def test_changed_inputs_report_staleness_without_claiming_saved_result_is_corrup
     context = saved_context()
     context["items"][0]["goods_value"] = 110.0
     assert codes(evaluate(context)) == {"RESULT_STALE"}
+
+
+def test_confirmed_sku_component_is_part_of_saved_result_fingerprint():
+    context = saved_context()
+    tax = next(row for row in context["fees"] if row.get("logical_fee_key") == "import_tax")
+    tax.update(amount_status="ACTUAL", amount=100, currency="RMB")
+    context["fee_components"] = [{
+        "name": "COMP-1",
+        "fee_rule": tax["name"],
+        "logical_fee_key": "import_tax",
+        "stable_line_key": "line-1",
+        "amount_rmb": "100",
+        "status": "CONFIRMED",
+        "is_active": 1,
+        "cost_effect": "COST",
+    }]
+    save_result(context)
+
+    assert evaluate(context)["result_is_current"] is True
+    context["fee_components"][0]["amount_rmb"] = "99"
+    result = evaluate(context)
+    assert result["result_is_current"] is False
+    assert codes(result) == {"RESULT_STALE"}
+
+
+def test_saved_temporary_ai_basis_remains_verifiable_but_not_formally_reviewable():
+    context = saved_context()
+    first = context["items"][0]
+    first.update(goods_value=100, gross_weight_kg=30, volume_m3=1)
+    second = {**first, "name": "I-2", "row_no": 2, "stable_line_key": "line-2",
+              "material_code": "SKU-2", "goods_value": 300, "gross_weight_kg": 10, "volume_m3": 3}
+    context["items"].append(second)
+    fee = context["fees"][0]
+    fee.update(allocation_basis="goods_value", basis_field="goods_value", amount_revision="manual:1")
+    version = context["version"]
+    inputs = [{field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS} for row in context["items"]]
+    fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
+    composed = fee_service.compose_fee_worklist_rows(context["fees"], context["batch"]["transport_mode"])
+    trial_review = {
+        "run_id": "RUN-TEMP",
+        "is_temporary": True,
+        "fee_choices": [{
+            "suggestion_id": "S-1", "fee_key": fee["logical_fee_key"],
+            "basis": "gross_weight", "temporary": True,
+        }],
+    }
+    projected = cost_trial_ai_service.project_fees_for_trial(
+        composed,
+        {fee["logical_fee_key"]: trial_review["fee_choices"][0]},
+        for_save=True,
+    )
+    saved = cost_preview_service.build_saved_cost_data(inputs, projected, fx, "SEA")
+    cost_trial_ai_service.annotate_saved_trial_result(saved, trial_review)
+    version["calculated_at"] = "2026-09-08 12:00:00"
+    saved["summary_snapshot"]["calculated_at"] = version["calculated_at"]
+    version["summary_snapshot_json"] = json.dumps(saved["summary_snapshot"])
+    updates = {row["name"]: row for row in saved["item_updates"]}
+    for item in context["items"]:
+        item.update(updates[item["name"]])
+    context["batch"]["estimated_total_cost_rmb"] = saved["summary"]["total_cost_rmb"]
+
+    result = evaluate(context)
+
+    assert result["result_is_current"] is True
+    assert "SAVED_RESULT_INVALID" not in codes(result)
+    assert "TEMPORARY_ALLOCATION_BASIS" in codes(result)
+    assert result["review_state"] == "processing"
+
+
+def test_saved_formal_ai_review_metadata_does_not_make_result_invalid():
+    context = saved_context()
+    snapshot = json.loads(context["version"]["summary_snapshot_json"])
+    trial_review = {"run_id": "RUN-FORMAL", "is_temporary": False, "fee_choices": []}
+    snapshot["ai_cost_trial"] = trial_review
+    snapshot["is_temporary"] = False
+    snapshot["comprehensive_cost"]["trial_review"] = trial_review
+    snapshot["comprehensive_cost"]["summary"]["is_temporary"] = False
+    context["version"]["summary_snapshot_json"] = json.dumps(snapshot)
+
+    result = evaluate(context)
+
+    assert result["result_is_current"] is True
+    assert "SAVED_RESULT_INVALID" not in codes(result)
 
 
 @pytest.mark.parametrize("missing_context", ["purchase_quantity", "material_code", "subsidiary"])

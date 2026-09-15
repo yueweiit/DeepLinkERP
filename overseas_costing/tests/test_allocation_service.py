@@ -6,7 +6,7 @@ from unittest.mock import mock_open
 from overseas_costing.services import allocation_service
 
 
-def test_ai_allocation_suggestion_keeps_candidate_amount_and_enforces_transport_basis(monkeypatch) -> None:
+def test_ai_allocation_suggestion_keeps_candidate_amount_and_transport_recommendation(monkeypatch) -> None:
     monkeypatch.setattr(
         allocation_service,
         "_ai_config",
@@ -58,10 +58,10 @@ def test_ai_allocation_suggestion_keeps_candidate_amount_and_enforces_transport_
     assert result["source"] == "ai"
     assert result["rules"][0]["amount"] == 500
     assert result["rules"][0]["currency"] == "USD"
-    assert result["rules"][0]["allocation_basis"] == "gross_weight"
+    assert result["rules"][0]["allocation_basis"] == "volume"
     assert result["rules"][0]["is_ai_suggestion"] == 1
     assert "AI基础分摊填入" in result["rules"][0]["remark"]
-    assert "默认先按毛重" in result["rules"][0]["remark"]
+    assert "空间占用" in result["rules"][0]["remark"]
 
 
 def test_ai_allocation_suggestion_skips_without_api_key(monkeypatch) -> None:
@@ -142,6 +142,39 @@ def test_ai_payload_and_rule_remark_expose_missing_basis_data(monkeypatch) -> No
     assert "毛重数据完整" not in result["rules"][0]["remark"]
 
 
+def test_ai_payload_uses_effective_shipment_value_instead_of_stale_goods_mirror():
+    item = {
+        "row_no": 1,
+        "goods_value": 0,
+        "actual_shipped_qty": 1,
+        "shipped_uom": "个",
+        "project_collection": "项目-A",
+        "supplier": "供应商-A",
+        "extra_json": json.dumps({
+            "shipment_valuation": {
+                "amount_rmb": "500",
+                "currency": "RMB",
+                "quantity": "1",
+                "uom": "个",
+                "status": "automatic",
+                "error": "",
+            }
+        }),
+    }
+
+    payload = allocation_service._build_ai_prompt_payload(
+        items=[item],
+        candidate_rules=[{"rule_code": "insurance", "amount": 10, "currency": "RMB"}],
+        context={},
+    )
+
+    assert payload["items"][0]["goods_value"] == 500
+    assert payload["totals"]["total_goods_value"] == 500
+    assert payload["totals"]["missing_goods_value_count"] == 0
+    assert payload["context"]["project"] == "项目-A"
+    assert payload["context"]["supplier"] == "供应商-A"
+
+
 def test_ai_allocation_supports_chargeable_weight_when_gross_weight_missing(monkeypatch) -> None:
     monkeypatch.setattr(
         allocation_service,
@@ -185,7 +218,7 @@ def test_ai_allocation_supports_chargeable_weight_when_gross_weight_missing(monk
     assert "缺少计费重" not in result["rules"][0]["remark"]
 
 
-def test_ai_transport_basis_is_enforced_to_confirmed_gross_weight_first(monkeypatch) -> None:
+def test_ai_transport_basis_is_not_overridden_by_a_hardcoded_default(monkeypatch) -> None:
     monkeypatch.setattr(
         allocation_service,
         "_ai_config",
@@ -224,7 +257,7 @@ def test_ai_transport_basis_is_enforced_to_confirmed_gross_weight_first(monkeypa
     )
 
     assert result["rules"][0]["allocation_basis"] == "gross_weight"
-    assert "默认先按毛重" in result["rules"][0]["remark"]
+    assert "默认先按毛重" not in result["rules"][0]["remark"]
 
 
 def test_conf_value_reads_site_config_when_frappe_conf_is_stale(monkeypatch) -> None:

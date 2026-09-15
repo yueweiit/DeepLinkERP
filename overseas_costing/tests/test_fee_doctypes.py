@@ -49,6 +49,7 @@ def test_fee_doctype_mirrors_are_identical() -> None:
         "overseas_cost_fee_evidence",
         "overseas_cost_fee_evidence_ai_run",
         "overseas_cost_fee_sku_component",
+        "overseas_cost_trial_ai_run",
     ):
         for filename in ("__init__.py", f"{name}.json", f"{name}.py"):
             assert (ROOT / "doctype" / name / filename).read_bytes() == (
@@ -108,3 +109,15 @@ def test_fee_evidence_ai_run_persists_requested_evidence_role() -> None:
 
     assert fields["evidence_role"]["fieldtype"] == "Data"
     assert fields["evidence_role"]["reqd"] == 1
+
+
+def test_cost_trial_ai_run_persists_fingerprint_prompt_and_confirmation_audit() -> None:
+    fields = _fields(
+        _doctype("doctype/overseas_cost_trial_ai_run/overseas_cost_trial_ai_run.json")
+    )
+
+    assert fields["input_fingerprint"]["reqd"] == 1
+    assert fields["prompt_version"]["reqd"] == 1
+    assert fields["draft_json"]["read_only"] == 1
+    assert fields["selection_json"]["read_only"] == 1
+    assert "CONFIRMED" in fields["status"]["options"].splitlines()

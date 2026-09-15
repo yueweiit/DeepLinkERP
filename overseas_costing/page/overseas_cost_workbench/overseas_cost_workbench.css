@@ -7828,6 +7828,47 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-freight-editor > .ocw-mf-row-actions button { min-height: 36px; padding: 7px 12px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; font-size: 12px; }
 .ocw-mf-freight-editor > .ocw-mf-row-actions .ocw-primary-btn { border-color: #076fbe; background: #076fbe; color: #fff; }
 
+.ocw-cost-trial-dialog .modal-dialog { max-width: min(1120px, calc(100vw - 32px)); }
+.ocw-cost-trial-dialog .modal-body { padding: 0; background: #f7f9fc; }
+.ocw-cost-trial-review { display: grid; max-height: min(760px, calc(100vh - 170px)); color: #1d2939; }
+.ocw-cost-trial-review > header,
+.ocw-cost-trial-review > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; background: #fff; }
+.ocw-cost-trial-review > header { border-bottom: 1px solid #dce6f2; }
+.ocw-cost-trial-review > header > div { display: grid; gap: 3px; }
+.ocw-cost-trial-review > header strong { font-size: 16px; }
+.ocw-cost-trial-review > header span { color: #667085; font-size: 12px; }
+.ocw-cost-trial-review > main { display: grid; gap: 12px; padding: 16px 20px; overflow: auto; }
+.ocw-cost-trial-running { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 92px; padding: 18px; border: 1px solid #c8ddf0; border-radius: 9px; background: #eef7ff; color: #076fbe; }
+.ocw-cost-trial-running span { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ocw-cost-trial-review > footer { position: sticky; bottom: 0; border-top: 1px solid #dce6f2; box-shadow: 0 -6px 18px rgba(16, 24, 40, 0.05); }
+.ocw-cost-trial-review > footer > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.ocw-cost-trial-fee { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.65fr); gap: 10px 18px; padding: 16px; border: 1px solid #dce6f2; border-radius: 9px; background: #fff; }
+.ocw-cost-trial-fee > header { grid-column: 1 / -1; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.ocw-cost-trial-fee > header > div { display: flex; align-items: baseline; gap: 10px; }
+.ocw-cost-trial-fee > header span { color: #475467; font-variant-numeric: tabular-nums; }
+.ocw-cost-trial-fee > header em { padding: 3px 8px; border-radius: 999px; background: #eaf5ff; color: #076fbe; font-size: 11px; font-style: normal; }
+.ocw-cost-trial-fee > p { margin: 0; color: #667085; font-size: 12px; line-height: 1.65; }
+.ocw-cost-trial-fee > p.is-warning { padding: 8px 10px; border-radius: 6px; background: #fff7e6; color: #8a5700; }
+.ocw-cost-trial-fee label { display: grid; gap: 5px; color: #475467; font-size: 11px; }
+.ocw-cost-trial-fee select,
+.ocw-cost-trial-fee input { width: 100%; min-height: 36px; padding: 7px 10px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; color: #1d2939; }
+.ocw-cost-trial-alternatives { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 9px 11px; border-radius: 7px; background: #f5f8fc; color: #52647a; font-size: 11px; }
+.ocw-cost-trial-alternatives strong { flex-basis: 100%; color: #344054; }
+.ocw-cost-trial-alternatives span { font-variant-numeric: tabular-nums; }
+.ocw-cost-trial-evidence { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid #a9dfc0; border-radius: 7px; background: #effbf3; color: #067647; }
+.ocw-cost-trial-evidence span { color: #16834d; font-size: 12px; }
+.ocw-cost-trial-preview { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 18px; padding: 14px 16px; border: 1px solid #98c8ef; border-radius: 8px; background: #eef7ff; color: #076fbe; }
+.ocw-cost-trial-preview small { flex-basis: 100%; color: #52647a; }
+.ocw-cost-trial-preview.is-temporary { border-color: #efd29a; background: #fff8e8; color: #8a5700; }
+.ocw-cost-trial-warning { margin: 12px 20px 0; padding: 10px 12px; border: 1px solid #efd29a; border-radius: 7px; background: #fff8e8; color: #8a5700; }
+
+@media (max-width: 720px) {
+  .ocw-cost-trial-fee { grid-template-columns: 1fr; }
+  .ocw-cost-trial-fee > header { align-items: stretch; flex-direction: column; }
+  .ocw-cost-trial-review > footer { align-items: stretch; flex-direction: column; }
+  .ocw-cost-trial-review > footer > button { width: 100%; }
+}
+
 /* Dialogs are mounted under body, outside .ocw-page: do not inherit page tokens. */
 .pg-dialog { --pg-line: #dce4ef; --pg-ink: #25364b; --pg-blue: #087ef5; color: var(--pg-ink); }
 .pg-dialog .modal-dialog { width: min(96vw, 1880px) !important; max-width: none !important; margin: 2vh auto !important; }
