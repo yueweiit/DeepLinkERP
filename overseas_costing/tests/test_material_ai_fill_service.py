@@ -1273,6 +1273,7 @@ def test_document_fee_parser_does_not_promote_purchase_unit_price() -> None:
         "物流费 USD25/票",
         "DHL报价：100 RMB/箱",
         "DHL物流报价：100 RMB/票",
+        "DHL报价：100 RMB，优惠 RMB10",
         "运费 RMB100，优惠 RMB10",
     ],
 )

@@ -2414,7 +2414,7 @@ def _parse_direct_quote_line(line: str) -> dict | None:
         # The amount immediately after the colon is a rate.  If the line also
         # contains an equals sign, the total-line parser will take its RHS.
         return None
-    if len(_quote_money_amount_matches(text)) != 1:
+    if _quote_money_amount_matches(tail):
         return None
     carrier = _clean(match.group("carrier")).strip("：:")
     if not carrier or len(carrier) > 40:
