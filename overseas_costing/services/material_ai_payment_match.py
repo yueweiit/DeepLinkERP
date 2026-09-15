@@ -15,6 +15,7 @@ from .logistics_settlement.model import digest, dumps
 
 POLICY = "material-ai-payment-match-1"
 STRONG_METHODS = frozenset({"manual", "explicit", "identifier"})
+DISPLAY_METHODS = frozenset({"manual", "explicit", "identifier", "reopened"})
 AI_CONFIDENCE_MINIMUM = Decimal("0.90")
 REFERENCE_KEYS = frozenset({"candidate_id", "revision", "version"})
 RELATION_KEYS = frozenset({
@@ -102,6 +103,106 @@ def _validate_reference(reference: dict, version_name: str) -> dict:
     if not all(clean.values()) or clean["version"] != str(version_name):
         raise ValueError("付款匹配凭证已变化，请刷新")
     return clean
+
+
+def _metadata_only_process_source(source: dict, *, reason: str, reference: dict | None = None) -> dict:
+    """Expose payment-process provenance without exposing unscoped business values."""
+
+    identity = {
+        "source_id": str(source.get("id") or ""),
+        "source_snapshot": str(source.get("snapshot") or ""),
+        "process_instance_id": str(source.get("instance") or ""),
+        "approval_no": str(source.get("approval_no") or ""),
+        "title": str(source.get("title") or ""),
+    }
+    evidence_id = digest(POLICY, identity, reference or {}, "matched_process_without_safe_line")
+    result = {
+        "source_id": evidence_id,
+        "logical_source_id": evidence_id,
+        "source_kind": "approval_form",
+        "source_label": str(source.get("title") or "实际付款流程"),
+        "file_name": "",
+        "sheet_name": "",
+        "approval_no": str(source.get("approval_no") or ""),
+        "process_instance_id": str(source.get("instance") or ""),
+        "approval_role": "payment",
+        "approval_title": str(source.get("title") or "实际付款流程"),
+        "source_updated_at": str(source.get("source_updated_at") or ""),
+        "available": True,
+        "excluded": False,
+        "selected": True,
+        "workflow_stage": "payment",
+        "workflow_rank": 0,
+        "selected_source": {
+            "id": evidence_id,
+            "source_id": str(source.get("id") or ""),
+            "source_kind": "approval_form",
+            "source_label": str(source.get("title") or "实际付款流程"),
+            "approval_no": str(source.get("approval_no") or ""),
+            "source_snapshot": str(source.get("snapshot") or ""),
+            "process_instance_id": str(source.get("instance") or ""),
+            "occurred_at": str(source.get("source_updated_at") or ""),
+            "revision": evidence_id,
+        },
+        "scoped_packing": True,
+        "scoped_goods": [],
+        "scoped_text": "",
+        "form_fields": {},
+        "approval_decisions": [],
+        "can_download": False,
+        "read_status": "PARTIAL",
+        "analysis_reason": reason,
+        "error": reason,
+        "ai_eligible": False,
+        "metadata_only_process": True,
+        "source_hash": evidence_id,
+        "content_hash": evidence_id,
+    }
+    if reference:
+        result.update(
+            payment_match_candidate=True,
+            payment_match_candidate_id=reference["candidate_id"],
+            payment_match_candidate_revision=reference["revision"],
+            payment_match_version=reference["version"],
+        )
+    return result
+
+
+def preview_process_sources(store, ledger, batch_name: str, version_name: str, *, freight_mode: bool):
+    """Keep locally matched payment processes visible when none is safe to adopt.
+
+    Conflict and multi-match candidates are provenance only.  They intentionally
+    carry neither a confirmation reference nor any amount/document contents.
+    """
+
+    if not freight_mode:
+        return []
+    logistics = _current_logistics(store, ledger, batch_name, version_name)
+    if not logistics:
+        return []
+    from .logistics_settlement.freight_matching import candidates
+
+    rows = []
+    for candidate in candidates(store, logistics["id"]):
+        status = str(candidate.get("status") or "").lower()
+        method = str(candidate.get("method") or "").lower()
+        confidence = _confidence(candidate.get("confidence"))
+        displayable = method in DISPLAY_METHODS or (
+            method == "deepseek" and (confidence or Decimal("-1")) >= AI_CONFIDENCE_MINIMUM
+        )
+        if status not in {"pending", "confirmed", "conflict"} or not displayable:
+            continue
+        source = store.get("source", candidate.get("expense_id")) or {}
+        if not source:
+            continue
+        issues = [str(value) for value in candidate.get("issues") or [] if str(value).strip()]
+        reason = (
+            "已匹配支付流程，但候选存在冲突，未自动采用；已继续使用下一优先级阶段。"
+            if status == "conflict" or issues
+            else "已匹配支付流程，但存在多个同级候选，未自动采用；已继续使用下一优先级阶段。"
+        )
+        rows.append(_metadata_only_process_source(source, reason=reason))
+    return rows
 
 
 def confirm_preview_candidate(
@@ -415,53 +516,6 @@ def preview_sources(
         # the matched payment process visible, but publish no amount, document
         # contents, or AI input; downstream stage arbitration will safely fall
         # through to the logistics stage for every missing field.
-        evidence_id = digest(POLICY, clean, "matched_process_without_safe_line")
         reason = "已匹配支付流程，但未识别出属于本票的可采用明细；已继续使用下一优先级阶段。"
-        result.append(
-            {
-                "source_id": evidence_id,
-                "logical_source_id": evidence_id,
-                "source_kind": "approval_form",
-                "source_label": str(source.get("title") or "实际付款流程"),
-                "file_name": "",
-                "sheet_name": "",
-                "approval_no": str(source.get("approval_no") or ""),
-                "process_instance_id": str(source.get("instance") or ""),
-                "approval_role": "payment",
-                "approval_title": str(source.get("title") or "实际付款流程"),
-                "source_updated_at": str(source.get("source_updated_at") or ""),
-                "available": True,
-                "excluded": False,
-                "selected": True,
-                "workflow_stage": "payment",
-                "workflow_rank": 0,
-                "payment_match_candidate": True,
-                "payment_match_candidate_id": clean["candidate_id"],
-                "payment_match_candidate_revision": clean["revision"],
-                "payment_match_version": clean["version"],
-                "selected_source": {
-                    "id": evidence_id,
-                    "source_id": str(source.get("id") or ""),
-                    "source_kind": "approval_form",
-                    "source_label": str(source.get("title") or "实际付款流程"),
-                    "approval_no": str(source.get("approval_no") or ""),
-                    "source_snapshot": str(source.get("snapshot") or ""),
-                    "process_instance_id": str(source.get("instance") or ""),
-                    "occurred_at": str(source.get("source_updated_at") or ""),
-                    "revision": evidence_id,
-                },
-                "scoped_packing": True,
-                "scoped_goods": [],
-                "scoped_text": "",
-                "form_fields": {},
-                "approval_decisions": [],
-                "can_download": False,
-                "read_status": "PARTIAL",
-                "analysis_reason": reason,
-                "error": reason,
-                "ai_eligible": False,
-                "source_hash": evidence_id,
-                "content_hash": evidence_id,
-            }
-        )
+        result.append(_metadata_only_process_source(source, reason=reason, reference=clean))
     return result

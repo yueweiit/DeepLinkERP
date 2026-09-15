@@ -3554,6 +3554,8 @@ def _read_source(
             "structured_rows": rows,
             "text": str(source.get("scoped_text") or "")[:MAX_AI_DOCUMENT_CHARS],
             "ai_eligible": source.get("ai_eligible") is not False,
+            "metadata_only_process": bool(source.get("metadata_only_process")),
+            "metadata_notice": str(source.get("analysis_reason") or "")[:1000],
         }
 
     kind = str(source.get("source_kind") or "")
@@ -4629,6 +4631,25 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                             for ref in proposal.get("source_refs") or []:
                                 ref["document_id"] = document["document_id"]
                             deterministic_proposals.append(proposal)
+                elif document.get("metadata_only_process"):
+                    notice = str(
+                        document.get("metadata_notice")
+                        or "已匹配支付流程，但未识别出属于本票的可采用明细。"
+                    )[:1000]
+                    completed_sources.append(source)
+                    _update_source_progress(
+                        source_progress,
+                        source_index,
+                        status="PARTIAL",
+                        detail="已匹配流程，未识别出可采用明细，已继续使用下一阶段",
+                        error=notice,
+                    )
+                    source_warnings.append(
+                        {
+                            "source": source.get("source_label") or source.get("source_id"),
+                            "message": notice,
+                        }
+                    )
                 else:
                     skip_evidence(
                         source_index,

@@ -940,7 +940,11 @@ def _combine_actual_packing_with_fallbacks(actual_sources, fallback_sources, con
 def list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
                              original_scope: bool = False) -> list[dict[str, Any]]:
     from .material_ai_source_dependencies import annotate_source_eligibility
-    from .material_ai_payment_match import select_preview_candidate, preview_sources
+    from .material_ai_payment_match import (
+        preview_process_sources,
+        preview_sources,
+        select_preview_candidate,
+    )
     from .source_priority_service import rank_material_packing_sources
     from .logistics_settlement import runtime
     from .logistics_settlement.store import Store
@@ -963,6 +967,19 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
             try:
                 sources=rank_material_packing_sources([
                     *preview_sources(store,ledger,batch_name,selected_version,reference,freight_mode=True),
+                    *sources,
+                ])
+            except (KeyError, TypeError, ValueError):
+                pass
+        else:
+            # Conflicting or multiple matcher results are still valuable stage
+            # provenance.  Publish process identity only: no amounts, source
+            # text, or confirmation credential can cross this fallback.
+            try:
+                sources=rank_material_packing_sources([
+                    *preview_process_sources(
+                        store,ledger,batch_name,selected_version,freight_mode=True
+                    ),
                     *sources,
                 ])
             except (KeyError, TypeError, ValueError):

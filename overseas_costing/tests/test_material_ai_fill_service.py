@@ -402,6 +402,31 @@ def test_excel_sheet_reader_does_not_turn_database_failure_into_parse_error(monk
         )
 
 
+def test_metadata_only_payment_process_is_not_sent_to_ai_or_treated_as_file_failure() -> None:
+    candidates, document = material_ai_fill_service._read_source(
+        [],
+        {
+            "source_kind": "approval_form",
+            "source_id": "PAY-PROCESS",
+            "source_label": "月结付款",
+            "process_instance_id": "PAY-1",
+            "scoped_packing": True,
+            "scoped_goods": [],
+            "scoped_text": "",
+            "ai_eligible": False,
+            "metadata_only_process": True,
+            "analysis_reason": "已匹配支付流程，但未识别出属于本票的可采用明细。",
+        },
+    )
+
+    assert candidates == []
+    assert document["metadata_only_process"] is True
+    assert document["ai_eligible"] is False
+    assert document["structured_rows"] == []
+    assert document["text"] == ""
+    assert "未识别出属于本票" in document["metadata_notice"]
+
+
 def test_evidence_attempt_identity_deduplicates_a_file_but_not_distinct_workbook_sheets() -> None:
     service = material_ai_fill_service
     base = {"logical_source_id": "oa:PROC:FILE", "source_kind": "approval_attachment"}

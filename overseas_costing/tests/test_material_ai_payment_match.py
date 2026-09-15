@@ -99,6 +99,14 @@ def test_multiple_strong_payment_matches_are_not_selected_arbitrarily():
     assert service.select_preview_candidate(
         store, ledger, batch["name"], version["name"], freight_mode=True
     ) is None
+    visible = service.preview_process_sources(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    assert {row["process_instance_id"] for row in visible} == {
+        source["instance"], second_source["instance"]
+    }
+    assert all("payment_match_candidate" not in row for row in visible)
+    assert all(row["metadata_only_process"] is True for row in visible)
 
 
 def test_server_confirmation_revalidates_relation_without_freezing_candidate():
@@ -418,6 +426,43 @@ def test_payment_preview_keeps_matched_process_when_no_shipment_line_is_safe(mon
     assert preview["scoped_text"] == ""
     assert "未识别出属于本票的可采用明细" in preview["analysis_reason"]
     assert preview["error"] == preview["analysis_reason"]
+    assert "44075.13" not in json.dumps(preview, ensure_ascii=False)
+
+
+def test_conflicting_rule_match_remains_visible_as_metadata_only_payment_process():
+    from overseas_costing.services import material_ai_payment_match as service
+
+    store, ledger, batch, version, _logistics, source, candidate = _strong_context()
+    store.put(
+        "freight_candidate",
+        _candidate_values(
+            candidate,
+            status="conflict",
+            method="explicit",
+            issues=["本笔费用已用于其他票"],
+            line_ids=[],
+            amount_pending=True,
+        ),
+    )
+
+    assert service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    ) is None
+
+    sources = service.preview_process_sources(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+
+    assert len(sources) == 1
+    preview = sources[0]
+    assert preview["workflow_stage"] == "payment"
+    assert preview["process_instance_id"] == source["instance"]
+    assert preview["metadata_only_process"] is True
+    assert preview["ai_eligible"] is False
+    assert preview["scoped_goods"] == []
+    assert preview["scoped_text"] == ""
+    assert "payment_match_candidate" not in preview
+    assert "存在冲突" in preview["analysis_reason"]
     assert "44075.13" not in json.dumps(preview, ensure_ascii=False)
 
 
