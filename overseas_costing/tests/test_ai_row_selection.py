@@ -791,6 +791,44 @@ def test_comment_correction_prefers_longest_matching_chinese_material_name():
     assert by_proposal['LONG']['correction_kind'] == 'explicit'
 
 
+@pytest.mark.parametrize('comment_text', [
+    'SKU-1 毛重从8更正为9kg',
+    'SKU-1 毛重原值8，现更正为9kg',
+    '更正：SKU-1 毛重8→9kg',
+    'SKU-1 毛重由8改为9kg',
+])
+def test_comment_correction_only_promotes_the_directional_new_value(comment_text):
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'FORM', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
+        {'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+         'occurred_at': '2026-09-01T09:00:00', 'comment_text': comment_text},
+    ]
+    proposals = [
+        {'proposal_id': proposal_id, 'proposal_type': 'item_update',
+         'target_item_name': 'I1', 'confidence': .99,
+         'source_refs': [{'source_id': source_id}],
+         'payload': {'fields': {'gross_weight_kg': value}}}
+        for proposal_id,source_id,value in (
+            ('FORM', 'FORM', 7), ('OLD', 'COMMENT', 8), ('NEW', 'COMMENT', 9),
+        )
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert by_proposal['OLD']['correction_kind'] == 'none'
+    assert by_proposal['OLD']['default_selected'] is False
+    assert by_proposal['NEW']['correction_kind'] == 'explicit'
+    assert by_proposal['NEW']['default_selected'] is True
+
+
 def test_multi_ref_comment_corrections_use_comment_evidence_time_and_last_value():
     items = [item('I1', 'SKU-1', gross_weight_kg=None)]
     sources = [

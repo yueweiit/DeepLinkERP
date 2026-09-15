@@ -163,7 +163,7 @@ def _is_explicit_correction(source):
     return bool(text and any(marker in text for marker in EXPLICIT_CORRECTION_MARKERS))
 
 
-def _explicit_correction_clauses(text):
+def _explicit_correction_clauses(text, identifiers=()):
     parts=[
         value.strip().casefold()
         for value in re.split(
@@ -177,9 +177,19 @@ def _explicit_correction_clauses(text):
             continue
         marker_end=max(part.rfind(marker)+len(marker) for marker in markers)
         suffix=part[marker_end:].strip().lstrip(':：').strip()
-        clause=(f'{part} {parts[index+1]}'
-                if not suffix and index+1<len(parts) else part)
-        clauses.append(clause)
+        has_field=any(
+            str(field_marker).casefold() in part
+            for field_markers in CORRECTION_FIELD_MARKERS.values()
+            for field_marker in field_markers
+        )
+        has_identifier=any(_identifier_spans(identifier,part) for identifier in identifiers)
+        clause_parts=[]
+        if not has_field and not has_identifier and index>0:
+            clause_parts.append(parts[index-1])
+        clause_parts.append(part)
+        if (not has_field or not suffix) and index+1<len(parts):
+            clause_parts.append(parts[index+1])
+        clauses.append(' '.join(clause_parts))
     return clauses
 
 
@@ -215,21 +225,34 @@ def _correction_value_in_clause(clause, fieldname, value):
         position=clause.find(marker)
         if position < 0:
             continue
-        tail=clause[position+len(marker):]
+        field_tail=clause[position+len(marker):]
+        direction=re.search(
+            r'(?:更正为|改为|改成|调整为|变更为|以此为准)\s*[:：]?|(?:→|->|=>)',
+            field_tail,
+        )
+        if direction:
+            value_text=field_tail[direction.end():]
+        elif any(correction_marker in clause[:position]
+                 for correction_marker in ('更正','以此为准')):
+            value_text=field_tail
+        else:
+            continue
         try:
             expected=Decimal(str(value).replace(',','')).normalize()
         except (InvalidOperation,TypeError,ValueError):
             expected=None
         if expected is not None:
-            for token in re.findall(r'(?<![\d.])[-+]?\d[\d,]*(?:\.\d+)?(?![\d.])',tail):
-                try:
-                    if Decimal(token.replace(',','')).normalize()==expected:
-                        return True
-                except InvalidOperation:
-                    continue
+            tokens=re.findall(r'(?<![\d.])[-+]?\d[\d,]*(?:\.\d+)?(?![\d.])',value_text)
+            if not tokens:
+                continue
+            try:
+                if Decimal(tokens[0].replace(',','')).normalize()==expected:
+                    return True
+            except InvalidOperation:
+                continue
         else:
             normalized=str(value or '').strip().casefold()
-            if normalized and normalized in tail:
+            if normalized and normalized in value_text:
                 return True
     return False
 
@@ -258,7 +281,8 @@ def _matching_correction_evidence(row, fieldname, value, identifier_counts):
     }
     matches=[]
     for evidence in row.get('_review_correction_evidence') or []:
-        for clause in _explicit_correction_clauses(evidence.get('text')):
+        for clause in _explicit_correction_clauses(
+                evidence.get('text'),identifier_counts.keys()):
             longest_matches=_longest_identifier_matches(
                 clause,identifier_counts.keys())
             unique_target=any(
