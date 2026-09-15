@@ -858,7 +858,7 @@
         <span>${isReview ? "暂估与待补凭证仅作提示；最终确认仍须通过校验" : "点击批次号查看详情，按下一步处理阻断项"}</span>
       </div>
       <div class="ocw-batch-grid ocw-batch-grid-head" aria-hidden="true">
-        <span></span><span>批次 / 物流单号</span><span>业务类型 / SKU</span><span>${isReview ? "核对状态" : "当前问题"}</span><span>采购货值</span><span>综合成本</span><span>${isHistory ? "确认时间" : "更新时间"}</span><span>下一步</span>
+        <span></span><span>批次 / 物流单号</span><span>业务类型 / SKU</span><span>${isReview ? "核对状态" : "当前问题"}</span><span>采购货值</span><span>综合成本</span><span>流程发起时间</span><span>下一步</span>
       </div>
       <div class="ocw-batch-grid-body">
         ${rows || `<div class="ocw-state-panel"><strong>当前条件下没有${title}</strong><span>${isReview && !isHistory ? "请先在待处理中补齐计算所需资料并完成试算；旧结果不会进入待核对。" : "可调整日期、清空筛选或切换任务视图。"}</span></div>`}
@@ -896,7 +896,7 @@
           <div><strong class="ocw-issue is-${this.escape(batch.primary_issue)}">${this.escape(rowStatus)}</strong><span>${this.escape(reviewMessages.join("；") || (batch.issue_codes || []).map((code) => this.issueLabel(code)).join("、") || "分摊结果可用")}</span></div>
           <div><strong>${this.escape(this.formatMoney(batch.total_goods_value || 0))}</strong><span>RMB</span></div>
           <div><strong>${this.escape(this.formatMoney(totalCost || 0))}</strong><span>RMB${batch.result_is_current === false && hasSavedResult ? " · 上次结果，待更新" : ""}</span></div>
-          <div><strong>${this.escape(this.formatDateTimeMinute(batch.review_state === "confirmed" ? batch.reviewed_at : batch.modified) || "-")}</strong><span>${this.escape(batch.review_state === "confirmed" ? `确认版本 ${batch.reviewed_version || batch.current_version || "—"}` : batch.result_is_current === false ? "待重新试算" : batch.status || "")}</span></div>
+          <div><strong>${this.escape(this.formatDateTimeMinute(batch.source_created_at) || "—")}</strong><span>${this.escape(batch.review_state === "confirmed" ? `确认版本 ${batch.reviewed_version || batch.current_version || "—"}` : batch.result_is_current === false ? "待重新试算" : batch.status || "")}</span></div>
           <div class="ocw-row-actions">
             <button class="ocw-primary-btn" type="button" data-action="workbench-primary" data-primary-action="${action.action}" data-batch-name="${this.escape(batch.name)}">${action.label}</button>
             <button class="ocw-outline-btn" type="button" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
