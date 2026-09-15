@@ -1,6 +1,7 @@
 """AI 试算口径审核服务。"""
 
 from decimal import Decimal
+import hashlib
 
 import pytest
 
@@ -41,6 +42,72 @@ def _fee(key="international_air_freight", amount=100):
         "scope_type": "ALL_ITEMS",
         "allocation_basis": "goods_value",
     }
+
+
+@pytest.mark.parametrize("amount", [0, "0", "0.00", "-0"])
+def test_zero_amount_fee_does_not_require_ai_allocation(amount):
+    assert cost_trial_ai_service.requires_ai_allocation(_fee("destination_delivery", amount)) is False
+
+
+@pytest.mark.parametrize("amount", [1, "0.01", "-1"])
+def test_nonzero_counted_fee_requires_ai_allocation(amount):
+    assert cost_trial_ai_service.requires_ai_allocation(_fee(amount=amount)) is True
+
+
+@pytest.mark.parametrize(
+    "fee",
+    [
+        {**_fee(amount=""), "amount_status": "ACTUAL"},
+        {**_fee(amount=None), "amount_status": "ACTUAL"},
+        {**_fee(amount="100"), "amount_status": "MISSING"},
+    ],
+)
+def test_missing_or_non_counted_fee_does_not_require_ai_allocation(fee):
+    assert cost_trial_ai_service.requires_ai_allocation(fee) is False
+
+
+def test_review_omits_zero_fee_but_preserves_nonzero_fee_suggestion():
+    result = cost_trial_ai_service.build_cost_trial_review_draft(
+        items=ITEMS,
+        fees=[_fee("destination_delivery", "0.00"), _fee("international_air_freight", "100")],
+        fx_context={},
+        context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR"},
+        ai_result={
+            "ok": True,
+            "model": "deepseek-test",
+            "rules": [
+                {**_fee("destination_delivery", "0.00"), "allocation_basis": "gross_weight"},
+                {**_fee("international_air_freight", "100"), "allocation_basis": "goods_value"},
+            ],
+        },
+    )
+
+    assert [row["fee_key"] for row in result["fee_suggestions"]] == ["international_air_freight"]
+
+
+def test_zero_fee_needs_no_choice_and_remains_in_cost_snapshot():
+    fee = _fee("destination_delivery", "0")
+    draft = cost_trial_ai_service.build_cost_trial_review_draft(
+        items=ITEMS,
+        fees=[fee],
+        fx_context={},
+        context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR"},
+        ai_result={"ok": True, "model": "deepseek-test", "rules": []},
+    )
+
+    result = cost_trial_ai_service.preview_selected_cost_trial(
+        items=ITEMS,
+        fees=[fee],
+        fx_context={},
+        fee_components=[],
+        draft=draft,
+        selections=[],
+    )
+
+    assert draft["fee_suggestions"] == []
+    assert result["trial_review"]["fee_choices"] == []
+    assert result["included_fees"][0]["fee_key"] == "destination_delivery"
+    assert result["included_fees"][0]["amount_rmb"] == "0.00"
 
 
 def test_build_review_exposes_complete_alternatives_when_ai_basis_is_missing():
@@ -421,6 +488,75 @@ def test_lifecycle_reuses_same_ready_input_unless_force_is_requested():
     assert reused["run_id"] == "RUN-1" and reused["reused"] is True
     assert forced["run_id"] == "RUN-2" and forced["reused"] is False
     assert queued == ["RUN-1", "RUN-2"]
+
+
+def test_execute_does_not_send_zero_amount_fee_to_deepseek():
+    repo = TrialRepository()
+    repo.fees = [_fee("destination_delivery", "0"), _fee("international_air_freight", "100")]
+    received = []
+
+    def capture_suggester(*, items, candidate_rules, context):
+        received.extend(candidate_rules)
+        return {
+            "ok": True,
+            "action": "suggested",
+            "model": "deepseek-test",
+            "rules": [{**candidate_rules[0], "allocation_basis": "goods_value"}],
+        }
+
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=lambda _run: None
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=capture_suggester
+    )
+
+    assert [_fee_row["logical_fee_key"] for _fee_row in received] == ["international_air_freight"]
+
+
+def test_v1_ready_run_is_not_reused_after_zero_fee_policy_change():
+    repo = TrialRepository()
+    legacy_payload = {
+        "schema": 1,
+        "context": repo.context,
+        "items": repo.items,
+        "fees": repo.fees,
+        "fx_context": repo.fx,
+        "fee_components": repo.components,
+    }
+    legacy_fingerprint = hashlib.sha256(
+        cost_trial_ai_service._json(legacy_payload).encode("utf-8")
+    ).hexdigest()
+    repo.runs["RUN-V1"] = {
+        "name": "RUN-V1",
+        "batch": "B1",
+        "version": "V1",
+        "status": "READY",
+        "input_fingerprint": legacy_fingerprint,
+        "progress_revision": 3,
+    }
+
+    result = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=lambda _run: None
+    )
+
+    assert result["run_id"] != "RUN-V1"
+    assert result["reused"] is False
+
+
+def test_zero_to_nonzero_change_invalidates_ready_preview():
+    repo = TrialRepository()
+    repo.fees = [_fee("destination_delivery", "0")]
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=lambda _run: None
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=lambda **_kwargs: {"ok": True, "rules": []}
+    )
+    repo.fees[0]["amount"] = "25"
+
+    with pytest.raises(ValueError, match="输入已变化"):
+        cost_trial_ai_service.preview_cost_trial("B1", started["run_id"], [], repository=repo)
 
 
 def test_feature_switch_can_disable_new_ai_trial_entry(monkeypatch):

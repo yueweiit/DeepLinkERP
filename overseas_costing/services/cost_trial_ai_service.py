@@ -31,6 +31,8 @@ BASIS_FIELDS = {
     "chargeable_weight": "chargeable_weight_kg",
 }
 EVIDENCE_PRIORITY_FEES = frozenset({"import_tax", "customs_clearance_fee"})
+INPUT_SCHEMA_VERSION = 2
+PROMPT_VERSION = "cost-trial-v2"
 
 
 def cost_trial_ai_enabled() -> bool:
@@ -86,6 +88,13 @@ def _decimal(value: Any) -> Decimal | None:
 
 def _fee_key(fee: dict) -> str:
     return str(fee.get("logical_fee_key") or fee.get("rule_code") or fee.get("name") or "")
+
+
+def requires_ai_allocation(fee: dict) -> bool:
+    """Return whether a fee needs an AI-selected allocation basis."""
+
+    amount = _decimal(fee.get("amount"))
+    return fee_allocation_service.is_counted_fee(fee) and amount is not None and amount != 0
 
 
 def _item_key(item: dict) -> str:
@@ -170,7 +179,7 @@ def _suggestion_id(fingerprint: str, fee_key: str) -> str:
 def build_input_fingerprint(*, context: dict, items: list[dict], fees: list[dict], fx_context: dict,
                             fee_components: list[dict] | None = None) -> str:
     payload = {
-        "schema": 1,
+        "schema": INPUT_SCHEMA_VERSION,
         "context": context,
         "items": items,
         "fees": fees,
@@ -199,7 +208,7 @@ def build_cost_trial_review_draft(
         fx_context=fx_context,
         fee_components=components,
     )
-    counted = [fee for fee in fees or [] if fee_allocation_service.is_counted_fee(fee)]
+    counted = [fee for fee in fees or [] if requires_ai_allocation(fee)]
     ai = ai_result if ai_result is not None else allocation_service.suggest_allocation_rules_with_ai(
         items=items,
         candidate_rules=counted,
@@ -525,7 +534,7 @@ def start_cost_trial_ai_review(
                 "progress_step": "等待 AI 分析",
                 "progress_percent": 0,
                 "model": "",
-                "prompt_version": "cost-trial-v1",
+                "prompt_version": PROMPT_VERSION,
                 "draft_json": {},
                 "error_message": "",
             }
@@ -561,7 +570,7 @@ def execute_cost_trial_ai_review(
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
         # Do not keep cost rows locked while waiting for the external model.
         repo.commit()
-        candidate_fees = [fee for fee in inputs["fees"] if fee_allocation_service.is_counted_fee(fee)]
+        candidate_fees = [fee for fee in inputs["fees"] if requires_ai_allocation(fee)]
         suggester = ai_suggester or allocation_service.suggest_allocation_rules_with_ai
         ai = suggester(
             items=inputs["items"],
