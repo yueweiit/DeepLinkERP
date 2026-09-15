@@ -55,6 +55,9 @@ console.log(JSON.stringify({{message:workspace.materialAIErrorMessage({expressio
     "({status:500,responseText:'<!DOCTYPE html><html><head><title>Internal Server Error</title></head><body><h1>Server Error</h1><p>secret traceback</p></body></html>'})",
     "('<html><body><h1>Bad Gateway</h1><p>proxy details</p></body></html>')",
     "('<p class=\"server-error\">proxy details</p>')",
+    "('<html><body><h1>Bad Gateway')",
+    "('<p class=\"server-error\">proxy details')",
+    "('<html/>')",
 ])
 def test_html_and_http_500_errors_are_never_shown_verbatim(expression):
     result = _fee_workspace_result(FIXTURE + f"""
