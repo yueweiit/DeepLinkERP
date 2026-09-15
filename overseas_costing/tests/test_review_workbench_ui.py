@@ -97,14 +97,54 @@ console.log(JSON.stringify({page:v.viewState.page,filters:v.filters}));
     assert result['filters']['review_warning']==''
 
 
-def test_cost_history_headers_and_empty_state_are_explicit():
-    html=run_js("""
-global.window={requestAnimationFrame:()=>{}};
-const v=makeView();v.batches=[];v.workbenchTotal=0;v.filters.review_status='confirmed';
+@pytest.mark.parametrize(
+    ('task', 'review_status'),
+    [('pending', 'pending'), ('cost', 'pending'), ('cost', 'confirmed'), ('erp', 'pending')],
+)
+def test_all_workbench_lists_use_logistics_process_start_time_header(task, review_status):
+    html=run_js(f"""
+global.window={{requestAnimationFrame:()=>{{}}}};
+const v=makeView({json.dumps(task)});v.batches=[];v.workbenchTotal=0;
+v.filters.review_status={json.dumps(review_status)};
 v.renderWorkbenchBatchList();console.log(JSON.stringify(v.html));
 """)
     text=''.join(html.values())
-    assert '已核对批次' in text and '核对状态' in text and '确认时间' in text
+    assert '流程发起时间' in text
+    assert '更新时间' not in text
+    assert '确认时间' not in text
+
+
+def test_workbench_row_uses_only_source_created_at_and_preserves_status_detail():
+    result=run_js("""
+const v=makeView();
+const base={name:'B',batch_no:'B',primary_issue:'calculation',primary_action:'recalculate',
+ review_blockers:[],review_warnings:[],estimated_total_cost_rmb:100};
+const active=v.renderWorkbenchBatchRow({...base,review_state:'processing',result_is_current:false,
+ source_created_at:'2026-09-01 08:15:00',modified:'2026-09-15 12:30:00',status:'Dirty'});
+const confirmed=v.renderWorkbenchBatchRow({...base,review_state:'confirmed',result_is_current:true,
+ source_created_at:'2026-09-02 09:20:00',reviewed_at:'2026-09-16 10:45:00',reviewed_version:'V3'});
+const missing=v.renderWorkbenchBatchRow({...base,review_state:'processing',result_is_current:true,
+ source_created_at:'',modified:'2026-09-17 11:00:00',status:'Draft'});
+console.log(JSON.stringify({active,confirmed,missing}));
+""")
+    assert '2026-09-01 08:15:00' in result['active']
+    assert '2026-09-15 12:30:00' not in result['active']
+    assert '待重新试算' in result['active']
+    assert '2026-09-02 09:20:00' in result['confirmed']
+    assert '2026-09-16 10:45:00' not in result['confirmed']
+    assert '确认版本 V3' in result['confirmed']
+    assert '<strong>—</strong>' in result['missing']
+    assert '2026-09-17 11:00:00' not in result['missing']
+    assert '<span>Draft</span>' in result['missing']
+
+
+def test_batch_action_column_is_right_aligned_on_desktop_and_left_aligned_on_mobile():
+    css = (PARTS / '25-workbench-redesign.css').read_text(encoding='utf-8')
+    assert '.ocw-batch-grid-head > :last-child {' in css
+    assert 'justify-self: end;' in css
+    assert 'text-align: right;' in css
+    mobile = css.split('@media (max-width: 980px) {', 1)[1]
+    assert '.ocw-row-actions { justify-self: start; justify-content: flex-start; }' in mobile
 
 
 def test_detail_navigation_invalidates_pending_list_without_reopening_detail():

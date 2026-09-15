@@ -257,6 +257,11 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
   font-weight: 700;
 }
 
+.ocw-batch-grid-head > :last-child {
+  justify-self: end;
+  text-align: right;
+}
+
 .ocw-workbench-row {
   min-height: 76px;
   padding: 10px 14px;
@@ -344,6 +349,7 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-issue.is-ready { color: #067647; }
 
 .ocw-row-actions {
+  justify-self: end;
   justify-content: flex-end;
 }
 
@@ -794,7 +800,7 @@ input[type="range"].ocw-result-scrollbar:disabled {
   .ocw-batch-grid { grid-template-columns: 36px repeat(2, minmax(0, 1fr)); }
   .ocw-result-preview-toggle { grid-row: 1 / span 3; align-self: start; }
   .ocw-result-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .ocw-row-actions { justify-content: flex-start; }
+  .ocw-row-actions { justify-self: start; justify-content: flex-start; }
 }
 
 @media (prefers-reduced-motion: reduce) {
