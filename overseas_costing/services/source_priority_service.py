@@ -162,8 +162,12 @@ def classify_workflow_stage(source: dict) -> str:
     # authority here.  A pending recommendation cannot be adopted atomically by
     # the AI preview confirmation path, so it remains outside the stage until
     # the existing "actual payment / packing change" workflow confirms it.
-    if source.get("actual_packing_source") and str(source.get("actual_packing_match_status") or "").lower() == "matched":
-        return "payment"
+    if source.get("actual_packing_source"):
+        return (
+            "payment"
+            if str(source.get("actual_packing_match_status") or "").lower() == "matched"
+            else "other"
+        )
     if role in {"logistics_expense", "payment", "expense", "settlement"}:
         return "payment"
     if any(_packing_field_name(marker) in identity_text for marker in _PAYMENT_TITLE_MARKERS):

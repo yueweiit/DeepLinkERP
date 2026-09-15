@@ -876,6 +876,8 @@ def test_actual_packing_match_precedes_workflow_packing_attachment_and_exposes_r
             'source_kind': 'approval_attachment',
             'actual_packing_source': True,
             'actual_packing_match_status': 'matched',
+            'approval_role': 'payment',
+            'approval_title': '月结付款',
         },
     ])
 
@@ -883,10 +885,11 @@ def test_actual_packing_match_precedes_workflow_packing_attachment_and_exposes_r
     assert ranked[0]['priority'] == 1
     assert ranked[0]['priority_reason'] == '实际运费／装箱变更已匹配当前单据'
     assert ranked[0]['actual_packing_match_status'] == 'matched'
+    assert ranked[0]['workflow_stage'] == 'payment'
     assert ranked[1]['dedicated_packing_attachment'] is True
 
 
-@pytest.mark.parametrize('status', ['pending', 'rejected', 'ambiguous'])
+@pytest.mark.parametrize('status', ['pending', 'rejected', 'ambiguous', 'stale'])
 def test_unconfirmed_actual_payment_match_is_not_promoted_to_payment_source(status):
     from overseas_costing.services.source_priority_service import rank_material_packing_sources
 
@@ -895,6 +898,8 @@ def test_unconfirmed_actual_payment_match_is_not_promoted_to_payment_source(stat
         'source_kind': 'approval_attachment',
         'actual_packing_source': True,
         'actual_packing_match_status': status,
+        'approval_role': 'payment',
+        'approval_title': '月结付款',
     }])
 
     assert ranked[0]['workflow_stage'] == 'other'

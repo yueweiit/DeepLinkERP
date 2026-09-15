@@ -1309,21 +1309,34 @@ def _arbitrate_review_freight_totals(
     if not freight:
         return
     approved = [proposal for proposal in freight if proposal.get("approved_carrier")]
+    approved_stages = {
+        str(proposal.get("workflow_stage") or "other")
+        for proposal in approved
+    }
+    total_candidates = []
     for proposal in freight:
         if proposal in approved:
             proposal["selection_role"] = "approved_quote"
             continue
-        proposal["selection_role"] = "alternative" if approved else "ambiguous"
+        same_stage_approved = (
+            str(proposal.get("workflow_stage") or "other") in approved_stages
+        )
+        proposal["selection_role"] = (
+            "alternative" if same_stage_approved else "ambiguous"
+        )
         proposal["default_selected"] = False
-        if approved:
+        if same_stage_approved:
             proposal["recommended"] = False
             proposal["resolution_reason"] = (
-                "已有服务端确认的承运商报价，其他 freight 范围记录仅供参考，不能单独采用。"
+                "本阶段已有服务端确认的承运商报价，同阶段其他 freight "
+                "范围记录仅供参考，不能单独采用。"
             )
-    if approved:
+        else:
+            total_candidates.append(proposal)
+    if approved and not total_candidates:
         return
     declared_totals = [
-        proposal for proposal in freight
+        proposal for proposal in total_candidates
         if str((proposal.get("payload") or {}).get("logical_fee_key") or "")
         in _PRIMARY_REVIEW_FREIGHT_KEYS
         and _has_declared_money_total(proposal, evidence)
@@ -1334,7 +1347,7 @@ def _arbitrate_review_freight_totals(
     document_id = _review_fee_document_id(total)
     currency = str((total.get("payload") or {}).get("currency") or "")
     same_document_candidates = [
-        proposal for proposal in freight
+        proposal for proposal in total_candidates
         if proposal is not total
         and _review_fee_document_id(proposal) == document_id
     ]
@@ -1359,7 +1372,7 @@ def _arbitrate_review_freight_totals(
     minimum_unit = Decimal("0.01")
     if difference > minimum_unit:
         return
-    for proposal in freight:
+    for proposal in total_candidates:
         proposal.update(selection_role="alternative", default_selected=False, recommended=False)
     for component in components:
         component.update(
