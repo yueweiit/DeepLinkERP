@@ -661,6 +661,108 @@ def test_name_only_comment_correction_does_not_supersede_duplicate_named_materia
     assert not any(row['default_selected'] for row in candidates)
 
 
+def test_comment_correction_is_local_to_the_target_material_and_field_clause():
+    items = [
+        item('I1', 'SKU-1', gross_weight_kg=None),
+        item('I2', 'SKU-2', gross_weight_kg=None),
+    ]
+    sources = [
+        {'source_id': 'FORM', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_form',
+         'approval_role': 'international_logistics', 'occurred_at': '2026-09-01T08:00:00'},
+        {'source_id': 'COMMENT', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_comment',
+         'approval_role': 'international_logistics', 'occurred_at': '2026-09-01T09:00:00',
+         'comment_text': 'SKU-1 毛重8；更正 SKU-2 毛重改为9'},
+    ]
+    proposals = [
+        {'proposal_id': proposal_id, 'proposal_type': 'item_update',
+         'target_item_name': target, 'confidence': .99,
+         'source_refs': [{'source_id': source_id}],
+         'payload': {'fields': {'gross_weight_kg': value}}}
+        for proposal_id,target,source_id,value in (
+            ('FORM-I1', 'I1', 'FORM', 7), ('COMMENT-I1', 'I1', 'COMMENT', 8),
+            ('FORM-I2', 'I2', 'FORM', 7), ('COMMENT-I2', 'I2', 'COMMENT', 9),
+        )
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates_by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert candidates_by_proposal['COMMENT-I1']['correction_kind'] == 'none'
+    assert candidates_by_proposal['COMMENT-I2']['correction_kind'] == 'explicit'
+    assert candidates_by_proposal['COMMENT-I2']['default_selected'] is True
+    assert not any(
+        candidate['default_selected'] for proposal_id,candidate in candidates_by_proposal.items()
+        if proposal_id in {'FORM-I1', 'COMMENT-I1'}
+    )
+
+
+def test_comment_correction_uses_boundary_safe_sku_matching():
+    items = [
+        item('I1', 'SKU-1', gross_weight_kg=None),
+        item('I10', 'SKU-10', gross_weight_kg=None),
+    ]
+    sources = [{
+        'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+        'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+        'comment_text': '更正 SKU-10 毛重改为9',
+    }]
+    proposals = [{
+        'proposal_id': 'WRONG-TARGET', 'proposal_type': 'item_update',
+        'target_item_name': 'I1', 'confidence': .99,
+        'source_refs': [{'source_id': 'COMMENT'}],
+        'payload': {'fields': {'gross_weight_kg': 9}},
+    }]
+
+    review = catalog(items, proposals, sources)
+    candidate = next(row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg')
+
+    assert candidate['correction_kind'] == 'none'
+
+
+def test_multi_ref_comment_corrections_use_comment_evidence_time_and_last_value():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'FORM', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_form',
+         'approval_role': 'international_logistics', 'occurred_at': '2026-09-01T12:00:00'},
+        {'source_id': 'FIX-1', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_comment',
+         'approval_role': 'international_logistics', 'occurred_at': '2026-09-01T09:00:00',
+         'comment_text': '更正 SKU-1 毛重改为8kg'},
+        {'source_id': 'FIX-2', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_comment',
+         'approval_role': 'international_logistics', 'occurred_at': '2026-09-01T10:00:00',
+         'comment_text': '原值错误，以此为准：SKU-1 毛重9kg'},
+    ]
+    proposals = [
+        {'proposal_id': 'FORM', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'source_refs': [{'source_id': 'FORM'}],
+         'payload': {'fields': {'gross_weight_kg': 7}}},
+        {'proposal_id': 'FIX-1', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'source_refs': [{'source_id': 'FORM'}, {'source_id': 'FIX-1'}],
+         'payload': {'fields': {'gross_weight_kg': 8}}},
+        {'proposal_id': 'FIX-2', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'source_refs': [{'source_id': 'FORM'}, {'source_id': 'FIX-2'}],
+         'payload': {'fields': {'gross_weight_kg': 9}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert by_proposal['FIX-1']['evidence_kind'] == 'comment'
+    assert by_proposal['FIX-1']['value_evidence_id'] == 'FIX-1'
+    assert by_proposal['FIX-2']['evidence_kind'] == 'comment'
+    assert by_proposal['FIX-2']['value_evidence_id'] == 'FIX-2'
+    assert by_proposal['FIX-2']['supersedes_candidate_id'] == by_proposal['FIX-1']['candidate_id']
+    assert by_proposal['FIX-2']['default_selected'] is True
+    assert by_proposal['FORM']['effective_in_stage'] is False
+
+
 def test_other_stage_candidate_is_audit_only_and_never_default_selected():
     items = [item('I1', 'SKU-1', gross_weight_kg=None)]
     proposal = {
@@ -743,6 +845,38 @@ def test_multiple_purchase_processes_with_same_sku_keep_distinct_stage_rows():
     assert len({row['row_id'] for row in purchase['rows']}) == 2
     assert {row['process_instance_id'] for row in purchase['rows']} == {'PUR-1', 'PUR-2'}
     assert {row['material_code'] for row in purchase['rows']} == {'SKU-1'}
+
+
+def test_single_proposal_referencing_two_purchase_processes_is_visible_in_both_without_default():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'PUR-1-FORM', 'process_instance_id': 'PUR-1',
+         'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '商品采购支出 1'},
+        {'source_id': 'PUR-2-FORM', 'process_instance_id': 'PUR-2',
+         'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '商品采购支出 2'},
+    ]
+    proposals = [{
+        'proposal_id': 'MULTI-PURCHASE', 'proposal_type': 'item_update',
+        'target_item_name': 'I1', 'confidence': .99,
+        'source_refs': [{'source_id': 'PUR-1-FORM'}, {'source_id': 'PUR-2-FORM'}],
+        'payload': {'fields': {'gross_weight_kg': 7}},
+    }]
+
+    review = catalog(items, proposals, sources)
+    purchase = review['stage_snapshots'][2]
+    candidate = next(row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg')
+
+    assert [process['process_instance_id'] for process in purchase['processes']] == ['PUR-1', 'PUR-2']
+    assert {row['process_instance_id'] for row in purchase['rows']} == {'PUR-1', 'PUR-2'}
+    assert all(process['has_conflicts'] for process in purchase['processes'])
+    assert all(process['warnings'] for process in purchase['processes'])
+    assert candidate['process_instance_id'] == ''
+    assert candidate['process_instance_ids'] == ['PUR-1', 'PUR-2']
+    assert candidate['process_conflict'] is True
+    assert candidate['can_apply'] is True
+    assert candidate['default_selected'] is False
 
 
 def test_row_review_policy_is_stage_snapshot_version():
