@@ -62,7 +62,10 @@ def test_explicit_source_zero_quantity_counts_and_projects_as_meaningful(proposa
 def test_placeholder_quantity_does_not_block_other_meaningful_fields():
     rows=[item(actual_shipped_qty=3,gross_weight_kg=None)]
 
-    review=catalog(rows,[reconcile([source(actual_shipped_qty='/',gross_weight_kg=7)])])
+    review=catalog(
+        rows,[reconcile([source(actual_shipped_qty='/',gross_weight_kg=7)])],
+        [{'source_id':'L','source_kind':'approval_form','approval_role':'international_logistics'}],
+    )
     selected=next(row for row in review['rows'] if row['origin']=='source')
     projected=service.project(rows,review,[selected['row_id']],[],'update_selected')
 
@@ -82,9 +85,12 @@ def test_explicit_missing_zero_is_fillable():
 def test_catalog_keeps_a_safe_default_for_whole_table_replacement():
     items=[item(gross_weight_kg='1')]
     proposal={'proposal_id':'P','proposal_type':'item_update','target_item_name':'I1',
-              'default_selected':True,'payload':{'fields':{'gross_weight_kg':'2'}}}
+              'default_selected':True,'source_refs':[{'source_id':'LOG'}],
+              'payload':{'fields':{'gross_weight_kg':'2'}}}
 
-    selected=next(row for row in catalog(items,[proposal])['rows'] if row['origin']=='source')
+    selected=next(row for row in catalog(items,[proposal],[{
+        'source_id':'LOG','source_kind':'approval_form','approval_role':'international_logistics',
+    }])['rows'] if row['origin']=='source')
 
     assert not selected['default_selected']
     assert selected['default_replace_selected']
@@ -100,7 +106,10 @@ def test_update_selected_changes_one_of_eight_without_removing_other_rows():
         'source_refs': [{'source_id': 'PACKING-LIST', 'field': '毛重'}],
         'payload': {'fields': {'gross_weight_kg': '99'}},
     }
-    review = catalog(items, [proposal])
+    review = catalog(items, [proposal], [{
+        'source_id':'PACKING-LIST','source_kind':'approval_attachment',
+        'approval_role':'international_logistics',
+    }])
     selected = next(row for row in review['rows'] if row['origin'] == 'source')
 
     assert selected['action'] == 'update'
@@ -501,13 +510,21 @@ def test_catalog_exposes_fixed_stage_snapshots_and_aggregates_process_evidence()
     assert payment['evidence_summary']['total'] == 2
     assert payment['evidence_summary']['by_kind'] == {'approval_form': 1, 'comment': 1}
     assert {row['process_instance_id'] for row in payment['rows']} == {'PAY-1'}
+    assert len(payment['rows']) == 1
+    payment_row = payment['rows'][0]
+    assert set(payment_row['field_candidates']) == {'gross_weight_kg', 'volume_m3'}
+    assert [evidence['evidence_id'] for evidence in payment_row['evidence_chain']] == [
+        'PAY-COMMENT', 'PAY-FORM',
+    ]
     assert logistics['status'] == purchase['status'] == 'UNAVAILABLE'
     assert logistics['rows'] == purchase['rows'] == []
     for stage in first['stage_snapshots']:
         assert set(stage) >= {
-            'stage', 'stage_rank', 'status', 'processes', 'rows',
+            'stage', 'stage_rank', 'rank', 'status', 'processes', 'rows',
             'evidence_summary', 'fallback_reason', 'warnings',
         }
+        assert stage['rank'] == stage['stage_rank']
+    assert logistics['stage_label'] == '国际物流'
     assert first['stage_snapshots'] == second['stage_snapshots']
     assert first['fingerprint'] == second['fingerprint']
     json.dumps(first['stage_snapshots'], ensure_ascii=False)
@@ -614,6 +631,91 @@ def test_correction_words_without_unique_material_and_field_do_not_supersede():
 
     assert all(row['correction_kind'] == 'none' for row in candidates)
     assert not any(row['default_selected'] for row in candidates)
+
+
+def test_name_only_comment_correction_does_not_supersede_duplicate_named_materials():
+    items = [
+        item('I1', 'SKU-1', product_name='同名物料', gross_weight_kg=None),
+        item('I2', 'SKU-2', product_name='同名物料', gross_weight_kg=None),
+    ]
+    sources = [
+        {'source_id': 'FORM', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_form',
+         'approval_role': 'international_logistics', 'occurred_at': '2026-09-01T08:00:00'},
+        {'source_id': 'COMMENT', 'process_instance_id': 'LOG-1', 'source_kind': 'approval_comment',
+         'approval_role': 'international_logistics', 'occurred_at': '2026-09-01T09:00:00',
+         'comment_text': '更正：同名物料毛重改为 8kg'},
+    ]
+    proposals = [
+        {'proposal_id': 'FORM', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'source_refs': [{'source_id': 'FORM'}],
+         'payload': {'fields': {'gross_weight_kg': 7}}},
+        {'proposal_id': 'COMMENT', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'source_refs': [{'source_id': 'COMMENT'}],
+         'payload': {'fields': {'gross_weight_kg': 8}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates = [row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg']
+
+    assert all(row['correction_kind'] == 'none' for row in candidates)
+    assert not any(row['default_selected'] for row in candidates)
+
+
+def test_other_stage_candidate_is_audit_only_and_never_default_selected():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    proposal = {
+        'proposal_id': 'UNKNOWN', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+        'confidence': .99, 'source_refs': [{'source_id': 'UNKNOWN'}],
+        'payload': {'fields': {'gross_weight_kg': 9}},
+    }
+
+    review = catalog(items, [proposal], [{
+        'source_id': 'UNKNOWN', 'source_kind': 'other', 'source_label': '未分类资料',
+    }])
+    candidate = next(row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg')
+
+    assert candidate['workflow_stage'] == 'other'
+    assert candidate['stage_snapshot_id'] == ''
+    assert candidate['can_apply'] is True
+    assert candidate['effective_in_stage'] is False
+    assert candidate['default_selected'] is False
+    source_row = next(row for row in review['rows'] if row['origin'] == 'source')
+    assert source_row['default_selected'] is False
+    assert source_row['default_update_selected'] is False
+    assert source_row['default_replace_selected'] is False
+
+
+def test_partial_and_failed_evidence_propagate_stage_and_process_status():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'PAY-FAILED', 'process_instance_id': 'PAY-1',
+         'source_kind': 'approval_attachment', 'approval_role': 'logistics_expense',
+         'read_status': 'FAILED', 'error': '下载失败'},
+        {'source_id': 'LOG-FORM', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics',
+         'read_status': 'COMPLETED'},
+        {'source_id': 'LOG-PARTIAL', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+         'read_status': 'PARTIAL', 'error': '附件已跳过'},
+        {'source_id': 'LOG-FAILED', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_attachment', 'approval_role': 'international_logistics',
+         'read_status': 'UNREADABLE', 'error': '文件损坏'},
+    ]
+    proposals = [{
+        'proposal_id': 'LOG', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+        'confidence': .99, 'source_refs': [{'source_id': 'LOG-FORM'}],
+        'payload': {'fields': {'gross_weight_kg': 7}},
+    }]
+
+    review = catalog(items, proposals, sources)
+    payment, logistics, _purchase = review['stage_snapshots']
+
+    assert payment['status'] == 'UNAVAILABLE'
+    assert payment['processes'][0]['status'] == 'UNAVAILABLE'
+    assert logistics['status'] == 'PARTIAL'
+    assert logistics['processes'][0]['status'] == 'PARTIAL'
+    assert logistics['evidence_summary']['readable'] == 2
+    assert logistics['evidence_summary']['unreadable'] == 1
 
 
 def test_multiple_purchase_processes_with_same_sku_keep_distinct_stage_rows():

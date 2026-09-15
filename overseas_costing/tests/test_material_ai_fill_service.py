@@ -328,6 +328,48 @@ def test_unified_review_marks_different_source_values_as_conflicting() -> None:
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_identical_item_values_from_distinct_purchase_processes_remain_distinct() -> None:
+    items = _items()
+    documents = [
+        {
+            "document_id": document_id,
+            "source_ref": {
+                "source": "approval_form",
+                "source_id": source_id,
+                "process_instance_id": process_id,
+                "workflow_stage": "purchase",
+            },
+            "form_fields": {"毛重": "7"},
+        }
+        for document_id, source_id, process_id in (
+            ("DOC-1", "PUR-1-FORM", "PUR-1"),
+            ("DOC-2", "PUR-2-FORM", "PUR-2"),
+        )
+    ]
+    proposals = [
+        {
+            "proposal_id": proposal_id,
+            "proposal_type": "item_update",
+            "target_item_name": "ITEM-1",
+            "confidence": 0.96,
+            "source_refs": [{"document_id": document_id, "field": "毛重"}],
+            "payload": {"fields": {"gross_weight_kg": "7"}},
+        }
+        for proposal_id, document_id in (
+            ("PUR-1", "DOC-1"),
+            ("PUR-1-DUPLICATE", "DOC-1"),
+            ("PUR-2", "DOC-2"),
+        )
+    ]
+
+    normalized = normalize_source_review_proposals(proposals, items, documents)
+
+    assert [row["proposal_id"] for row in normalized] == ["PUR-1", "PUR-2"]
+    assert [row["source_refs"][0]["process_instance_id"] for row in normalized] == [
+        "PUR-1", "PUR-2",
+    ]
+
+
 def test_freight_alternatives_share_conflict_group_and_recommend_volume_without_defaulting() -> None:
     source = {
         "source_id": "approval:LOG-1:form",

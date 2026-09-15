@@ -337,6 +337,7 @@ def _source_ref(value: Any) -> dict:
     }
     for fieldname, limit in (
         ("source_id", 500),
+        ("process_instance_id", 500),
         ("approval_no", 200),
         ("actor_name", 200),
         ("occurred_at", 100),
@@ -1069,6 +1070,16 @@ def _fee_ref_identity(ref: dict, evidence: dict[str, dict]) -> tuple[str, ...]:
     )
 
 
+def _item_ref_identity(ref: dict, evidence: dict[str, dict]) -> tuple[str, ...]:
+    """Keep equal item facts from separate workflow/evidence instances distinct."""
+
+    return (
+        str(ref.get("process_instance_id") or ""),
+        str(ref.get("source_id") or ""),
+        *_fee_ref_identity(ref, evidence),
+    )
+
+
 def _arbitrate_review_freight_totals(
     proposals: list[dict], evidence: dict[str, dict]
 ) -> None:
@@ -1390,7 +1401,12 @@ def normalize_source_review_proposals(
                 )),
             )
             if proposal_type == "fee_update"
-            else (proposal_type, target, _json(payload))
+            else (
+                proposal_type,
+                target,
+                _json(payload),
+                tuple(sorted({_item_ref_identity(ref, evidence) for ref in refs})),
+            )
         )
         if identity in seen_payloads:
             continue
@@ -2510,7 +2526,7 @@ def _source_reference(source: dict, *, row: Any = None, cell: str = "", page: An
         "cell": cell,
     }
     for fieldname in (
-        "source_id", "approval_no", "actor_name", "occurred_at", "workflow_stage",
+        "source_id", "process_instance_id", "approval_no", "actor_name", "occurred_at", "workflow_stage",
         "workflow_rank", "evidence_kind", "evidence_rank", "priority_reason",
     ):
         if str(source.get(fieldname) or "").strip():

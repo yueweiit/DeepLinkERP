@@ -11,13 +11,20 @@ class Repo(ContextRepository):
         super().__init__()
         self.context['effective_source']={'root_kind':'logistics','fingerprint':'SOURCE','packing':{'root_kind':'logistics','source_snapshot':'S1','available':True},'freight':{'revision':'F1'}}
         self.items[0].update(gross_weight_kg=None,quantity=1,actual_shipped_qty=1,unit='件',shipped_uom='件')
-        self.fees=[];self.sources=[{'source_id':'DOC','source_kind':'approval_form','source_hash':'HASH'}]
+        self.fees=[];self.sources=[{
+            'source_id':'DOC','source_kind':'approval_form','source_hash':'HASH',
+            'approval_role':'international_logistics','approval_title':'国际物流审批',
+        }]
         self.rolled_back=False
         self.create_run({'batch':'B1','version':'V1','status':'READY','proposal_version':1,'clarification_text':'','source_manifest_json':self.sources,
             'input_fingerprint':ai._source_review_fingerprint('B1','V1',self.items,self.sources,'',context=self.context),
             'draft_json':{'material_input_fingerprint':service.material_fingerprint(self.items,self.sources,self.context),
                           'row_review_policy':service.rows.POLICY},
-            'candidates_json':[{'proposal_id':'P1','proposal_type':'item_update','target_item_name':'I1','default_selected':True,'payload':{'fields':{'gross_weight_kg':2}}}]})
+            'candidates_json':[{
+                'proposal_id':'P1','proposal_type':'item_update','target_item_name':'I1',
+                'default_selected':True,'source_refs':[{'source_id':'DOC'}],
+                'payload':{'fields':{'gross_weight_kg':2}},
+            }]})
     def list_sources(self,*args):return deepcopy(self.sources)
     def get_fees(self,*args):return deepcopy(self.fees)
     def lock_review_scope(self,*args):pass
@@ -180,6 +187,7 @@ def test_large_private_projection_adds_only_a_bounded_receipt_and_can_confirm():
     repo.run['draft_json']['large_analysis']=large_private
     repo.run['candidates_json']=[{
         'proposal_id':'P-LARGE','proposal_type':'logistics_reconcile','default_selected':True,
+        'source_refs':[{'source_id':'DOC'}],
         'payload':{'rows':[{
             'name':'draft-large','material_code':'SKU1','product_name':'Large',
             'gross_weight_kg':2,'actual_shipped_qty':1,'unit':'件','_review_origin':'source',
@@ -418,6 +426,14 @@ def test_unrelated_unverified_merged_amount_group_does_not_block_physical_fill()
 
 def test_unverified_group_for_same_item_but_other_source_does_not_block_value_fill():
     repo = Repo()
+    repo.sources.append({
+        'source_id':'CURRENT-SHEET','source_kind':'approval_attachment',
+        'approval_role':'international_logistics','source_label':'本次清单',
+    })
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
     repo.run['candidates_json'] = [{
         'proposal_id': 'VALUE',
         'proposal_type': 'item_update',
@@ -441,6 +457,10 @@ def test_unverified_group_for_same_item_but_other_source_does_not_block_value_fi
 
 def test_relevant_unverified_merged_amount_group_blocks_confirmation_without_writing():
     repo = Repo()
+    repo.sources.append({
+        'source_id':'PACKING-SHEET','source_kind':'approval_attachment',
+        'approval_role':'international_logistics','source_label':'装箱单',
+    })
     repo.items=[
         {**repo.items[0],'stable_line_key':'LINE-1','row_no':1},
         {'name':'I2','material_code':'SKU2','stable_line_key':'LINE-2','row_no':2,
