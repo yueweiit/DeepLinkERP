@@ -5,6 +5,9 @@ from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
+RECEIPT_POLICY = 'ai-row-preview-receipt-1'
+
+
 def material_fingerprint(items,sources,context):
     """Fee-only amendments do not consume reusable material recognition results."""
     from . import material_ai_fill_service as ai
@@ -97,6 +100,50 @@ def _blocking_merged_amount_groups(groups, changes):
     ]
 
 
+def _attach_control_metadata(projection, merged_amount_groups, packing_group_candidates):
+    merged_amount_groups=deepcopy(merged_amount_groups or [])
+    packing_group_candidates=deepcopy(packing_group_candidates or [])
+    blocking=_blocking_merged_amount_groups(
+        merged_amount_groups,projection.get('changes') or [])
+    projection['merged_amount_groups']=merged_amount_groups
+    projection['blocking_merged_amount_groups']=blocking
+    projection['packing_group_candidates']=packing_group_candidates
+    projection['merged_amount_blocking']=bool(blocking)
+    if blocking:
+        projection['can_apply']=False
+        projection.setdefault('unresolved',[]).append({
+            'code':'MERGED_AMOUNT_ALLOCATION_REQUIRED',
+            'message':'合并金额组缺少独立单价或合计不一致，请完成人工分摊后重新预览。',
+        })
+    return projection
+
+
+def _preview_revision(context,items,sources,current_fees,catalog,selection,dependencies):
+    return digest(
+        rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],
+        selection['selected_row_ids'],selection['selected_fee_ids'],selection['mode'],dependencies,
+        selection.get('merged_amount_groups') or [],selection.get('packing_group_candidates') or [],
+    )
+
+
+def _preview_receipt(preview):
+    """Persist only the inputs needed to authenticate and reconstruct a preview."""
+    keys=(
+        'id','revision','run_id','batch','version','mode','selected_row_ids','selected_fee_ids',
+        'dependencies','input_fingerprint','fee_fingerprint','catalog_fingerprint',
+        'merged_amount_groups','packing_group_candidates',
+    )
+    return {'receipt_policy':RECEIPT_POLICY,
+            **{key:deepcopy(preview.get(key)) for key in keys}}
+
+
+def _clean_preview_draft(draft):
+    cleaned=deepcopy(draft)
+    cleaned.pop('row_previews',None)
+    cleaned.pop('current_row_preview',None)
+    return cleaned
+
+
 def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository=None):
     from . import material_ai_fill_service as ai
     if mode == 'replace_all':
@@ -117,33 +164,18 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
     # Re-read under the newly held evidence locks before saving any preview.
     if dependencies:
         context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
-    projection=rows.project(items,catalog,row_ids,fee_ids,mode)
-    merged_amount_groups=deepcopy(draft.get('merged_amount_groups') or [])
-    blocking_merged_amount_groups=_blocking_merged_amount_groups(
-        merged_amount_groups, projection.get('changes') or [])
-    allocation_required=bool(blocking_merged_amount_groups)
-    projection['merged_amount_groups']=merged_amount_groups
-    projection['blocking_merged_amount_groups']=blocking_merged_amount_groups
-    projection['packing_group_candidates']=deepcopy(draft.get('packing_group_candidates') or [])
-    projection['merged_amount_blocking']=allocation_required
-    if allocation_required:
-        projection['can_apply']=False
-        projection.setdefault('unresolved',[]).append({
-            'code':'MERGED_AMOUNT_ALLOCATION_REQUIRED',
-            'message':'合并金额组缺少独立单价或合计不一致，请完成人工分摊后重新预览。',
-        })
-    revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],row_ids,fee_ids,mode,dependencies,
-                    merged_amount_groups,projection['packing_group_candidates'])
+    projection=_attach_control_metadata(
+        rows.project(items,catalog,row_ids,fee_ids,mode),
+        draft.get('merged_amount_groups') or [],draft.get('packing_group_candidates') or [])
+    revision=_preview_revision(context,items,sources,current_fees,catalog,projection,dependencies)
     preview={**projection,'id':digest(run_id,revision),'revision':revision,'run_id':run_id,'batch':batch_name,
              'version':context['version'],'source_context':context.get('effective_source') or {},
              'original_source_reanalysis':ai._run_uses_original_sources(run),
              'input_fingerprint':ai._record_value(run,'input_fingerprint'),
              'fee_fingerprint':digest(current_fees),'sources':deepcopy(sources),'dependencies':dependencies}
-    previews=draft.setdefault('row_previews',{})
-    # Keep only bounded recent previews; the latest one is required for confirmation.
-    previews[preview['id']]=preview
-    if len(previews)>12:
-        draft['row_previews']=dict(list(previews.items())[-12:])
+    # A receipt authenticates the selection while the material projection is
+    # reconstructed under confirmation locks. Superseded previews are useless.
+    draft['row_previews']={preview['id']:_preview_receipt(preview)}
     draft['current_row_preview']=preview['id']
     repo.save_row_review_draft(run,draft)
     return {'ok':True,'preview':public_preview(preview),'row_review':public_catalog(catalog)}
@@ -168,40 +200,54 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
     run=repo.lock_run(run_id)
     ai._assert_run_batch(run,batch_name)
     draft=ai._load_json(ai._record_value(run,'draft_json'),{})
-    preview=(draft.get('row_previews') or {}).get(preview_id)
-    if not preview or preview.get('revision')!=preview_revision:raise ValueError('所选预览已变化，请刷新预览后确认。')
-    if preview.get('mode') == 'replace_all':
-        raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
     applied=draft.get('row_application') or {}
     if ai._record_value(run,'status')=='APPLIED':
         if applied.get('preview_id')!=preview_id:raise ValueError('此分析已按其他选择采用，不能重复确认。')
         return {**applied,'ok':True,'idempotent':True}
+    receipt=(draft.get('row_previews') or {}).get(preview_id)
+    if not receipt or receipt.get('revision')!=preview_revision:
+        raise ValueError('所选预览已变化，请刷新预览并使用最新预览后确认。')
+    if receipt.get('mode') == 'replace_all':
+        raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
     if ai._record_value(run,'status')!='READY' or draft.get('current_row_preview')!=preview_id:
         raise ValueError('草稿或选择已变化，请使用最新预览。')
-    if preview.get('merged_amount_blocking'):
-        raise ValueError('合并金额组尚未完成人工分摊或合计校验，本次未保存。')
+    if (receipt.get('id')!=preview_id or receipt.get('run_id')!=run_id
+            or receipt.get('batch')!=batch_name):
+        raise ValueError('所选预览与当前分析不一致，请刷新预览后确认。')
     repo.assert_write(batch_name,edit_token,expected_modified)
-    repo.lock_review_inputs(batch_name,preview['version'])
+    repo.lock_review_inputs(batch_name,receipt['version'])
+    dependencies=deepcopy(receipt.get('dependencies') or [])
     if callable(getattr(repo,'assert_row_dependencies',None)):
-        repo.assert_row_dependencies(batch_name,preview.get('dependencies') or [],lock=True)
-    selected_fee_ids=preview.get('selected_fee_ids') or []
-    selected_fees=preview.get('fees') or []
+        repo.assert_row_dependencies(batch_name,dependencies,lock=True)
+    context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
+    current=_attach_control_metadata(
+        rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode']),
+        receipt.get('merged_amount_groups') or [],receipt.get('packing_group_candidates') or [])
+    revision=_preview_revision(context,items,sources,current_fees,catalog,current,dependencies)
+    if revision!=preview_revision:
+        raise ValueError('来源、费用或物料已变化，请刷新预览；本次未保存。')
+    if current.get('merged_amount_blocking'):
+        raise ValueError('合并金额组尚未完成人工分摊或合计校验，本次未保存。')
+    selected_fee_ids=current.get('selected_fee_ids') or []
+    selected_fees=current.get('fees') or []
     estimate_only=bool(selected_fee_ids) and len(selected_fees)==len(selected_fee_ids) and all(
         str((fee.get('payload') or {}).get('amount_status') or '').upper()=='ESTIMATED'
         for fee in selected_fees)
     if selected_fee_ids and not estimate_only and callable(getattr(repo,'assert_adoption_dependencies',None)):
-        repo.assert_adoption_dependencies(batch_name,preview.get('dependencies') or [],lock=True)
+        repo.assert_adoption_dependencies(batch_name,dependencies,lock=True)
     elif callable(getattr(repo,'assert_row_dependencies',None)):
-        repo.assert_row_dependencies(batch_name,preview.get('dependencies') or [],lock=True,purpose='estimate')
-    context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
-    current=rows.project(items,catalog,preview['selected_row_ids'],preview['selected_fee_ids'],preview['mode'])
-    revision=digest(rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],preview['selected_row_ids'],preview['selected_fee_ids'],preview['mode'],preview.get('dependencies') or [],
-                    preview.get('merged_amount_groups') or [], preview.get('packing_group_candidates') or [])
-    if revision!=preview_revision:raise ValueError('来源、费用或物料已变化，请刷新预览；本次未保存。')
+        repo.assert_row_dependencies(batch_name,dependencies,lock=True,purpose='estimate')
     if not current['can_apply']:raise ValueError('请选择需要填充的物料或费用。')
     fees.assert_allowed(current['fees'],current_fees,context.get('effective_source') or {})
+    verified={**current,'id':preview_id,'revision':revision,'run_id':run_id,'batch':batch_name,
+              'version':context['version'],'source_context':context.get('effective_source') or {},
+              'original_source_reanalysis':ai._run_uses_original_sources(run),
+              'input_fingerprint':ai._record_value(run,'input_fingerprint'),
+              'fee_fingerprint':digest(current_fees),'sources':deepcopy(sources),
+              'dependencies':dependencies}
+    cleaned_draft=_clean_preview_draft(draft)
     try:
-        return repo.apply_row_selection(run,preview,draft,context)
+        return repo.apply_row_selection(run,verified,cleaned_draft,context)
     except Exception:
         repo.rollback()
         raise

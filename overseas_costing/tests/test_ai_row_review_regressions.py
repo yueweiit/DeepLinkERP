@@ -464,8 +464,9 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
         assert "_price_metadata" not in str(prepared)
         assert "_verified_prior_item" not in str(prepared)
         if run_id == "RUN-2":
-            server_preview = run["draft_json"]["row_previews"][prepared["id"]]
-            assert float(server_preview["rows"][0]["unit_price"]) == 12
+            receipt = run["draft_json"]["row_previews"][prepared["id"]]
+            assert "rows" not in receipt
+            assert "purchase_fact" not in json.dumps(receipt, ensure_ascii=False)
         return selection.confirm(batch["name"], run_id, prepared["id"], prepared["revision"],
                                  "TOKEN", "M", repository=repo)
 

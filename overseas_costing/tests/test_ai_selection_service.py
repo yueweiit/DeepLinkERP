@@ -63,14 +63,16 @@ def test_pending_adopted_material_scope_can_reenter_review_prepare_and_confirm()
     assert len(repo.writes)==1
 
 
-def test_only_server_preview_is_written_and_same_confirmation_reuses_result():
+def test_confirmation_recomputes_preview_cleans_receipt_and_reuses_result():
     repo=Repo();preview=prepare(repo)
     public=deepcopy(preview);public['rows'][0]['gross_weight_kg']=999
     confirm(repo,public);confirm(repo,public)
     assert len(repo.writes)==1 and repo.writes[0]['rows'][0]['gross_weight_kg']==2
+    assert 'row_previews' not in repo.run['draft_json']
+    assert 'current_row_preview' not in repo.run['draft_json']
 
 
-def test_public_catalog_and_prepare_deeply_hide_purchase_evidence_but_server_preview_keeps_it():
+def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
     repo=Repo()
     repo.items[0]['extra_json']=json.dumps({
         'logistics_row':{'identity':'LINE','purchase_fact':{'unit_price':12},
@@ -96,14 +98,56 @@ def test_public_catalog_and_prepare_deeply_hide_purchase_evidence_but_server_pre
         assert 'settlement_original_values' not in serialized
         assert 'ai_fill_original_values' not in serialized
         assert 'OLD-ITEM' not in serialized and 'OLDER-ITEM' not in serialized
-    internal=json.dumps(repo.run['draft_json']['row_previews'],ensure_ascii=False)
-    assert 'purchase_fact' in internal
+    receipt=repo.run['draft_json']['row_previews'][response['preview']['id']]
+    internal=json.dumps(receipt,ensure_ascii=False)
+    assert 'purchase_fact' not in internal
+    assert not ({'rows','changes','actual_sources','fees','sources'} & receipt.keys())
+    assert receipt['selected_row_ids']==selected
+    assert receipt['revision']==response['preview']['revision']
 
 
 def test_new_selection_supersedes_older_preview():
     repo=Repo();old=prepare(repo);prepare(repo,ids=[])
+    assert old['id'] not in repo.run['draft_json']['row_previews']
+    assert len(repo.run['draft_json']['row_previews'])==1
     with pytest.raises(ValueError,match='最新预览'):confirm(repo,old)
     assert not repo.writes
+
+
+def test_legacy_full_preview_receipt_is_accepted_but_its_rows_are_not_trusted():
+    repo=Repo();preview=prepare(repo)
+    receipt=repo.run['draft_json']['row_previews'][preview['id']]
+    receipt['rows']=deepcopy(preview['rows'])
+    receipt['rows'][0]['gross_weight_kg']=999
+    receipt['changes']=deepcopy(preview['changes'])
+    receipt['actual_sources']=deepcopy(preview['actual_sources'])
+
+    assert confirm(repo,preview)['ok']
+    assert repo.writes[0]['rows'][0]['gross_weight_kg']==2
+
+
+def test_large_private_projection_adds_only_a_bounded_receipt_and_can_confirm():
+    repo=Repo()
+    large_private='x'*(11*1024*1024)
+    repo.run['draft_json']['large_analysis']=large_private
+    repo.run['candidates_json']=[{
+        'proposal_id':'P-LARGE','proposal_type':'logistics_reconcile','default_selected':True,
+        'payload':{'rows':[{
+            'name':'draft-large','material_code':'SKU1','product_name':'Large',
+            'gross_weight_kg':2,'actual_shipped_qty':1,'unit':'件','_review_origin':'source',
+            '_review_price_metadata':{'logistics_row':{'purchase_fact':large_private}},
+        }]},
+    }]
+    before_size=len(json.dumps(repo.run['draft_json'],ensure_ascii=False))
+
+    preview=prepare(repo,mode='update_selected')
+
+    after_size=len(json.dumps(repo.run['draft_json'],ensure_ascii=False))
+    receipt=repo.run['draft_json']['row_previews'][preview['id']]
+    assert after_size-before_size < 128*1024
+    assert not ({'rows','changes','actual_sources','fees','sources'} & receipt.keys())
+    assert large_private not in json.dumps(receipt,ensure_ascii=False)
+    assert confirm(repo,preview)['ok']
 
 
 @pytest.mark.parametrize('change',['fee','item','source','note'])
