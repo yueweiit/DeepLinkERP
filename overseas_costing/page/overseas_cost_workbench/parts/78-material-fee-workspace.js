@@ -527,22 +527,35 @@
     return ["READY", "READY_WITH_WARNINGS"].includes(String(status || ""));
   }
 
-  materialAIReadyTitle(fillOrStatus) {
+  materialAIReadyCopy(fillOrStatus) {
     const fill = typeof fillOrStatus === "object" && fillOrStatus !== null
       ? fillOrStatus
       : { status: fillOrStatus };
-    if (String(fill.status || "") !== "READY_WITH_WARNINGS") return "AI 资料草稿已生成";
+    const incomplete = ["PARTIAL", "UNAVAILABLE"].includes(String(fill.source_completeness || "").toUpperCase());
+    if (String(fill.status || "") !== "READY_WITH_WARNINGS" && !incomplete) {
+      return { title: "AI 资料草稿已生成", step: String(fill.progress_step || "草稿已生成") };
+    }
     const skipped = (Array.isArray(fill.source_progress) ? fill.source_progress : []).some(source => {
       const status = String(source?.status || "").toUpperCase();
       const readStatus = String(source?.read_status || "").toUpperCase();
       return ["SKIPPED", "FAILED"].includes(status) || ["SKIPPED", "UNREADABLE", "FAILED"].includes(readStatus);
     });
     if (skipped && String(fill.source_completeness || "") === "UNAVAILABLE") {
-      return "草稿已生成（未找到有效资料，部分资料已跳过）";
+      return { title: "草稿已生成（未找到有效资料，部分资料已跳过）", step: "未找到有效资料；部分资料已跳过" };
     }
-    if (skipped) return "草稿已生成（部分资料已跳过）";
-    if (String(fill.source_completeness || "") === "UNAVAILABLE") return "草稿已生成（未找到可采用内容）";
-    return "草稿已生成（部分资料待核对）";
+    if (skipped) return { title: "草稿已生成（部分资料已跳过）", step: "部分资料已跳过" };
+    if (String(fill.source_completeness || "") === "UNAVAILABLE") {
+      return { title: "草稿已生成（未找到可采用内容）", step: "未找到可采用内容" };
+    }
+    return { title: "草稿已生成（部分资料待核对）", step: "部分资料待核对" };
+  }
+
+  materialAIReadyTitle(fillOrStatus) {
+    return this.materialAIReadyCopy(fillOrStatus).title;
+  }
+
+  materialAIReadyStep(fill) {
+    return this.materialAIReadyCopy(fill).step;
   }
 
   materialAIReadyChipLabel(fill) {
@@ -1525,8 +1538,10 @@
     const steps = ["读取资料", "解析/OCR", "DeepSeek 识别", "合并候选"];
     const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
     const warning = fill.ai_warning || fill.error_message || "";
-    const title = this.isMaterialAIReadyStatus(fill.status) ? this.materialAIReadyTitle(fill) : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : "正在分析当前批次资料";
-    return `<div class="ocw-mf-ai-banner is-${this.escape(String(fill.status || "running").toLowerCase())}"><div><strong>${title}</strong><span>${this.escape(fill.progress_step || "读取资料")}</span></div><div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i style="width:${progress}%"></i></div><div class="ocw-mf-ai-steps">${steps.map((step) => `<span class="${step === fill.progress_step ? "active" : ""}">${step}</span>`).join("")}</div>${warning ? `<p>${this.escape(warning)}</p>` : ""}</div>`;
+    const ready = this.isMaterialAIReadyStatus(fill.status);
+    const title = ready ? this.materialAIReadyTitle(fill) : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : "正在分析当前批次资料";
+    const progressStep = ready ? this.materialAIReadyStep(fill) : (fill.progress_step || "读取资料");
+    return `<div class="ocw-mf-ai-banner is-${this.escape(String(fill.status || "running").toLowerCase())}"><div><strong>${title}</strong><span>${this.escape(progressStep)}</span></div><div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i style="width:${progress}%"></i></div><div class="ocw-mf-ai-steps">${steps.map((step) => `<span class="${step === progressStep ? "active" : ""}">${step}</span>`).join("")}</div>${warning ? `<p>${this.escape(warning)}</p>` : ""}</div>`;
   }
 
   materialAIProgressStatus(value) {
@@ -1678,7 +1693,7 @@
     const canRetry = failed || Boolean(fill.stalled || fill.is_stalled || fill.connection_error || fill.polling_paused);
     const title = ready ? this.materialAIReadyTitle(fill) : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
     return `<div class="ocw-mf-ai-progress-dialog" data-mf-ai-progress-host="1">
-      <header><div><strong data-mf-ai-progress-title>${this.escape(title)}</strong><span data-mf-ai-progress-step>${this.escape(fill.progress_step || "等待读取资料")}</span></div><b data-mf-ai-progress-percent>${progress}%</b></header>
+      <header><div><strong data-mf-ai-progress-title>${this.escape(title)}</strong><span data-mf-ai-progress-step>${this.escape(ready ? this.materialAIReadyStep(fill) : (fill.progress_step || "等待读取资料"))}</span></div><b data-mf-ai-progress-percent>${progress}%</b></header>
       <main class="ocw-mf-ai-dialog-body">
       <div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i data-mf-ai-progress-bar style="width:${progress}%"></i></div>
       <div class="ocw-mf-ai-progress-summary">
@@ -1889,7 +1904,7 @@
       const summary = fill.completion_summary || {};
       const warning = this.materialAIProgressWarning(fill);
       $host.find("[data-mf-ai-progress-title]").text(title);
-      $host.find("[data-mf-ai-progress-step]").text(fill.progress_step || "等待读取资料");
+      $host.find("[data-mf-ai-progress-step]").text(ready ? this.materialAIReadyStep(fill) : (fill.progress_step || "等待读取资料"));
       $host.find("[data-mf-ai-progress-percent]").text(`${progress}%`);
       $host.find("[data-mf-ai-progress-bar]").css("width", `${progress}%`);
       const labels = {

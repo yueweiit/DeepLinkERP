@@ -164,6 +164,28 @@ assert.equal(w.materialAIReadyTitle(legacy),'草稿已生成（部分资料待�
 """)
 
 
+def test_warning_banner_dialog_and_status_step_ignore_contradictory_legacy_progress_copy():
+    run_ui(r"""
+const cases=[
+ {fill:{status:'READY_WITH_WARNINGS',source_completeness:'UNAVAILABLE',source_progress:[{status:'SKIPPED',read_status:'SKIPPED'}],progress_step:'草稿已生成（部分资料已跳过）'},title:'草稿已生成（未找到有效资料，部分资料已跳过）',step:'未找到有效资料；部分资料已跳过'},
+ {fill:{status:'READY',source_completeness:'UNAVAILABLE',source_progress:[{status:'COMPLETED',read_status:'READ'}],progress_step:'草稿已生成（部分资料已跳过）'},title:'草稿已生成（未找到可采用内容）',step:'未找到可采用内容'},
+ {fill:{status:'READY_WITH_WARNINGS',progress_step:'草稿已生成（部分资料已跳过）'},title:'草稿已生成（部分资料待核对）',step:'部分资料待核对'},
+];
+for(const row of cases){
+ state.aiFill=row.fill;
+ const banner=w.renderMaterialAIFillBanner();
+ const dialog=w.renderMaterialAIProgressDialogContent();
+ const chip=w.renderMaterialAIProgressChip();
+ for(const html of [banner,dialog]){assert(html.includes(row.title),html);assert(html.includes(row.step),html);}
+ assert(chip.includes(row.title.replace(/^草稿已生成/,'AI 草稿待查看')));
+ if(row.step!=='部分资料已跳过'){
+   assert(!banner.includes('<span>草稿已生成（部分资料已跳过）</span>'));
+   assert(!dialog.includes('data-mf-ai-progress-step>草稿已生成（部分资料已跳过）</span>'));
+ }
+}
+""")
+
+
 def test_real_catalog_renders_safe_skip_causes_and_legacy_generic_fallback():
     from copy import deepcopy
     from overseas_costing.services import material_ai_fill_service as ai
