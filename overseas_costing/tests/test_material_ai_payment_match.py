@@ -386,6 +386,41 @@ def test_payment_preview_uses_only_matched_line_when_catalog_row_is_unreadable(m
     assert "44075.13" not in preview["scoped_text"]
 
 
+def test_payment_preview_keeps_matched_process_when_no_shipment_line_is_safe(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import packing_selection
+
+    store, ledger, batch, version, logistics, source, candidate = payment_setup(
+        structured=True,
+        scope="freight",
+        amount="44075.13",
+        mode="EXPRESS",
+    )
+    candidate.update(method="explicit", issues=[], line_ids=[], amount_pending=True)
+    store.put("freight_candidate", _candidate_values(candidate))
+    monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, []))
+
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    sources = service.preview_sources(
+        store, ledger, batch["name"], version["name"], reference, freight_mode=True
+    )
+
+    assert len(sources) == 1
+    preview = sources[0]
+    assert preview["workflow_stage"] == "payment"
+    assert preview["process_instance_id"] == source["instance"]
+    assert preview["source_kind"] == "approval_form"
+    assert preview["read_status"] == "PARTIAL"
+    assert preview["ai_eligible"] is False
+    assert preview["scoped_goods"] == []
+    assert preview["scoped_text"] == ""
+    assert "未识别出属于本票的可采用明细" in preview["analysis_reason"]
+    assert preview["error"] == preview["analysis_reason"]
+    assert "44075.13" not in json.dumps(preview, ensure_ascii=False)
+
+
 def test_payment_preview_merges_matched_fee_line_into_same_document_snapshot(monkeypatch):
     from overseas_costing.services import material_ai_payment_match as service
     from overseas_costing.services.logistics_settlement import packing_selection

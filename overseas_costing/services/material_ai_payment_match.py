@@ -409,4 +409,59 @@ def preview_sources(
                 "content_hash": evidence_id,
             }
         )
+    if not result:
+        # A strong process-level relation is still useful provenance even when
+        # a monthly statement cannot be narrowed to one shipment line.  Keep
+        # the matched payment process visible, but publish no amount, document
+        # contents, or AI input; downstream stage arbitration will safely fall
+        # through to the logistics stage for every missing field.
+        evidence_id = digest(POLICY, clean, "matched_process_without_safe_line")
+        reason = "已匹配支付流程，但未识别出属于本票的可采用明细；已继续使用下一优先级阶段。"
+        result.append(
+            {
+                "source_id": evidence_id,
+                "logical_source_id": evidence_id,
+                "source_kind": "approval_form",
+                "source_label": str(source.get("title") or "实际付款流程"),
+                "file_name": "",
+                "sheet_name": "",
+                "approval_no": str(source.get("approval_no") or ""),
+                "process_instance_id": str(source.get("instance") or ""),
+                "approval_role": "payment",
+                "approval_title": str(source.get("title") or "实际付款流程"),
+                "source_updated_at": str(source.get("source_updated_at") or ""),
+                "available": True,
+                "excluded": False,
+                "selected": True,
+                "workflow_stage": "payment",
+                "workflow_rank": 0,
+                "payment_match_candidate": True,
+                "payment_match_candidate_id": clean["candidate_id"],
+                "payment_match_candidate_revision": clean["revision"],
+                "payment_match_version": clean["version"],
+                "selected_source": {
+                    "id": evidence_id,
+                    "source_id": str(source.get("id") or ""),
+                    "source_kind": "approval_form",
+                    "source_label": str(source.get("title") or "实际付款流程"),
+                    "approval_no": str(source.get("approval_no") or ""),
+                    "source_snapshot": str(source.get("snapshot") or ""),
+                    "process_instance_id": str(source.get("instance") or ""),
+                    "occurred_at": str(source.get("source_updated_at") or ""),
+                    "revision": evidence_id,
+                },
+                "scoped_packing": True,
+                "scoped_goods": [],
+                "scoped_text": "",
+                "form_fields": {},
+                "approval_decisions": [],
+                "can_download": False,
+                "read_status": "PARTIAL",
+                "analysis_reason": reason,
+                "error": reason,
+                "ai_eligible": False,
+                "source_hash": evidence_id,
+                "content_hash": evidence_id,
+            }
+        )
     return result

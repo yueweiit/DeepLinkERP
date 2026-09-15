@@ -3553,7 +3553,7 @@ def _read_source(
             "source_ref": _source_reference(source),
             "structured_rows": rows,
             "text": str(source.get("scoped_text") or "")[:MAX_AI_DOCUMENT_CHARS],
-            "ai_eligible": True,
+            "ai_eligible": source.get("ai_eligible") is not False,
         }
 
     kind = str(source.get("source_kind") or "")

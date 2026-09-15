@@ -129,6 +129,24 @@ const apply=html.match(/data-action="mf-ai-apply"([^>]*)>/);assert(apply&&!apply
 """)
 
 
+def test_matched_process_without_safe_fields_explains_stage_fallback():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[],
+ stage_snapshots:[
+  {stage:'payment',stage_rank:0,stage_label:'支付申请',status:'PARTIAL',rows:[],warnings:['已匹配支付流程，但未识别出属于本票的可采用明细。'],fallback_reason:'已继续使用下一优先级阶段。',processes:[{process_instance_id:'PAY',label:'月结付款',status:'PARTIAL',evidence:[]}]},
+  {stage:'international_logistics',stage_rank:1,stage_label:'国际物流',status:'UNAVAILABLE',rows:[],processes:[],warnings:[],fallback_reason:''},
+  {stage:'purchase',stage_rank:2,stage_label:'采购支出',status:'UNAVAILABLE',rows:[],processes:[],warnings:[],fallback_reason:''},
+ ],fee_stage_snapshots:[
+  {stage:'payment',stage_rank:0,stage_label:'支付申请',status:'PARTIAL',fees:[],warnings:[],fallback_reason:'已继续使用下一优先级阶段。',processes:[{process_instance_id:'PAY',label:'月结付款',status:'PARTIAL',evidence:[]}]},
+  {stage:'international_logistics',stage_rank:1,stage_label:'国际物流',status:'UNAVAILABLE',fees:[],processes:[],warnings:[],fallback_reason:''},
+ ]};
+delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+assert(html.includes('已找到流程，但未识别出可采用字段；已按优先级继续向下补充'));
+assert(html.includes('已找到流程，但未识别出可采用费用；已按优先级继续向下补充'));
+""")
+
+
 def test_ready_with_warnings_uses_server_can_apply_for_confirm_and_safe_status_copy():
     run_ui(r"""
 const fill=w.initializeMaterialAIDraft({status:'READY_WITH_WARNINGS',run_id:'run-warning',source_completeness:'PARTIAL',row_review:catalog});

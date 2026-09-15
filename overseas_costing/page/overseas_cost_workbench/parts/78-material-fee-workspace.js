@@ -2284,7 +2284,10 @@
         }).join("");
         return `<tr><td class="ocw-mf-ai-stage-process">${this.escape(processLabel)}</td><th scope="row">${value(material)}</th>${fieldCells}</tr>`;
       }).join("");
-      const empty = `<tr><td colspan="${stageColumns.length + 2}" class="is-empty">未找到有效资料</td></tr>`;
+      const emptyMessage = (stage.processes || []).length
+        ? "已找到流程，但未识别出可采用字段；已按优先级继续向下补充"
+        : "未找到有效资料";
+      const empty = `<tr><td colspan="${stageColumns.length + 2}" class="is-empty">${this.escape(emptyMessage)}</td></tr>`;
       const status = String(stage.status || "UNAVAILABLE").toUpperCase();
       return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-packing-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)} · 优先级 ${Number(stage.stage_rank || 0) + 1}</strong><span><b>${this.escape(this.materialAIStageStatusLabel(status))}</b>已采用 ${selectedCount} 个字段</span></summary>${stage.fallback_reason ? `<p class="ocw-mf-ai-stage-fallback">${this.escape(stage.fallback_reason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-stage-matrix"><thead><tr><th>所属流程</th><th>物料</th>${stageColumns.map(([, label]) => `<th>${this.escape(label)}</th>`).join("")}</tr></thead><tbody>${matrixRows || empty}</tbody></table></div>${this.renderMaterialAIStageEvidence(stage)}</details>`;
     }).join("");
@@ -2366,7 +2369,10 @@
       const other = otherFees.length ? `<details class="ocw-mf-ai-stage-other-fees"><summary>其他记录 <span>${otherFees.length} 条（只读）</span></summary><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>金额</th><th>币种</th><th>来源 / 说明</th><th>不可采用原因</th></tr></thead><tbody>${otherFees.map(fee => { const values = fee.payload || fee; return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(fee.blocked_reason || fee.resolution_reason || "该记录角色不可采用，仅供参考。")}<small>只读 · 不可采用</small></td></tr>`; }).join("")}</tbody></table></div></details>` : "";
       const status = String(stage.status || "UNAVAILABLE").toUpperCase();
       const selectedCount = mainFees.filter(fee => selection.fees.has(String(fee.proposal_id))).length;
-      const empty = '<tr><td colspan="5">未找到有效费用资料</td></tr>';
+      const emptyMessage = (stage.processes || []).length
+        ? "已找到流程，但未识别出可采用费用；已按优先级继续向下补充"
+        : "未找到有效费用资料";
+      const empty = `<tr><td colspan="5">${this.escape(emptyMessage)}</td></tr>`;
       return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-fee-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)} · 优先级 ${Number(stage.stage_rank || 0) + 1}</strong><span><b>${this.escape(this.materialAIStageStatusLabel(status))}</b>已选 ${selectedCount} 项</span></summary>${stage.fallback_reason ? `<p class="ocw-mf-ai-stage-fallback">${this.escape(stage.fallback_reason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${mainFees.map(renderMain).join("") || empty}</tbody></table></div>${other}${this.renderMaterialAIStageEvidence(stage)}</details>`;
     }).join("");
     const assignedIds = new Set(stages.flatMap(stage => (stage.fees || []).map(fee => String(fee?.proposal_id || fee || "")).filter(Boolean)));
