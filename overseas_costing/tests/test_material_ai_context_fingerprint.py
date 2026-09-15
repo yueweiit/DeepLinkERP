@@ -194,16 +194,16 @@ def test_apply_rejects_updated_material_specification():
     assert repo.writes == []
 
 
-def test_unchanged_context_can_still_generate_and_confirm(monkeypatch):
+def test_raw_source_apply_cannot_confirm_warning_draft_without_selection_receipt(monkeypatch):
     repo = ContextRepository()
     start(repo)
     monkeypatch.setattr(service, "_call_source_review_ai", lambda *_args, **_kwargs: {"ok": True, "proposals": []})
     ready = service.execute_material_ai_fill(repo.run["name"], repository=repo)
     assert ready["status"] == "READY_WITH_WARNINGS", repo.run.get("error_message")
 
-    applied = service.apply_source_ai_review(
-        "B1", repo.run["name"], [], {}, "TOKEN", "M1", repository=repo,
-    )
+    with pytest.raises(ValueError, match="逐项选择"):
+        service.apply_source_ai_review(
+            "B1", repo.run["name"], [], {}, "TOKEN", "M1", repository=repo,
+        )
 
-    assert applied["status"] == "APPLIED"
-    assert len(repo.writes) == 1
+    assert repo.writes == []

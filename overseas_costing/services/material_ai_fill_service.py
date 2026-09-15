@@ -106,6 +106,22 @@ def is_material_ai_preview_ready(status: Any) -> bool:
     return str(status or "") in PREVIEW_READY_STATES
 
 
+def _assert_legacy_raw_apply_allowed(
+    run: Any, *, not_ready_message: str = "AI 草稿尚未准备完成或已经处理。"
+) -> None:
+    status = str(_record_value(run, "status") or "")
+    source_completeness = str(
+        _record_value(run, "source_completeness") or ""
+    ).upper()
+    if status == "READY_WITH_WARNINGS" or source_completeness in {
+        "PARTIAL",
+        "UNAVAILABLE",
+    }:
+        raise ValueError("当前草稿需通过逐项选择预览确认，不能直接提交字段值。")
+    if status != "READY":
+        raise ValueError(not_ready_message)
+
+
 REVIEW_REPLACEMENT_FIELDS = REVIEW_ITEM_FIELDS
 REVIEW_ITEM_UPDATE_FIELDS = frozenset(
     {
@@ -2782,13 +2798,7 @@ def apply_material_ai_fill(
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     run = repo.lock_run(str(run_id or ""))
     _assert_run_batch(run, batch_name)
-    run_status = str(_record_value(run, "status") or "")
-    if not is_material_ai_preview_ready(run_status):
-        raise ValueError("AI 草稿尚未准备完成或已经处理。")
-    if str(_record_value(run, "source_completeness") or "") == "UNAVAILABLE":
-        raise ValueError("当前 AI 草稿没有可采用内容，请补充资料后重新分析。")
-    if run_status == "READY_WITH_WARNINGS":
-        raise ValueError("部分资料已跳过，请通过逐项选择预览确认。")
+    _assert_legacy_raw_apply_allowed(run)
     items = repo.get_items(context["batch"], context["version"])
     sources = repo.list_sources(context["batch"], context["version"])
     current_fingerprint = build_input_fingerprint(context["batch"], context["version"], items, sources, context=context)
@@ -2899,8 +2909,9 @@ def apply_source_ai_review(
         repo.save_run(run, status="STALE", progress_step="说明已变化",
                       error_message="保存的说明已变化，请按新说明重新分析。", completed_at=_now())
         return {"ok": False, "stale": True, "run_id": str(run_id), "status": "STALE"}
-    if not is_material_ai_preview_ready(_record_value(run, "status")):
-        raise ValueError("AI 资料审核草稿尚未准备完成或已经处理。")
+    _assert_legacy_raw_apply_allowed(
+        run, not_ready_message="AI 资料审核草稿尚未准备完成或已经处理。"
+    )
     repo.assert_write(context["batch"], str(edit_token or ""), str(expected_modified or ""))
     if hasattr(repo, "lock_review_inputs"):
         repo.lock_review_inputs(context["batch"], context["version"])
@@ -4868,12 +4879,6 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             source_progress_json=source_progress,
         )
         warning_parts = [str(ai_result.get("warning") or "")]
-        if not sources:
-            warning_parts.append("当前未找到可识别资料，已保留当前物料预览。")
-        if source_errors:
-            warning_parts.append("部分资料已跳过。")
-        if source_warnings:
-            warning_parts.append("部分资料待核对。")
         if unified_review:
             from .material_ai_fee_policy import decorate
             from .material_ai_selection_service import material_fingerprint
@@ -5016,6 +5021,22 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             for index, source in enumerate(sources)
             if source.get("selected") is not False and index < len(source_progress)
         ]
+        has_skipped_evidence = any(
+            str(row.get("status") or "").upper() in {"SKIPPED", "FAILED"}
+            or str(row.get("read_status") or "").upper()
+            in {"SKIPPED", "UNREADABLE", "FAILED"}
+            for row in selected_progress
+        )
+        if has_skipped_evidence:
+            warning_parts.append("部分资料已跳过。")
+        if source_warnings or (source_errors and not has_skipped_evidence):
+            warning_parts.append("部分资料待核对。")
+        if not candidates and not any(str(part or "").strip() for part in warning_parts):
+            warning_parts.append(
+                "未找到有效资料。"
+                if has_skipped_evidence
+                else "未找到可采用内容。"
+            )
         source_completeness = (
             "UNAVAILABLE"
             if not candidates
@@ -5035,12 +5056,19 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             if source_completeness in {"PARTIAL", "UNAVAILABLE"}
             else "READY"
         )
+        ready_progress_step = (
+            "草稿已生成"
+            if ready_status == "READY"
+            else "草稿已生成（部分资料已跳过）"
+            if has_skipped_evidence and source_completeness == "PARTIAL"
+            else "草稿已生成（未找到有效资料，部分资料已跳过）"
+            if has_skipped_evidence
+            else "草稿已生成（未找到可采用内容）"
+            if source_completeness == "UNAVAILABLE"
+            else "草稿已生成（部分资料待核对）"
+        )
         persist(status=ready_status,
-            progress_step=(
-                "草稿已生成（部分资料已跳过）"
-                if ready_status == "READY_WITH_WARNINGS"
-                else "草稿已生成"
-            ),
+            progress_step=ready_progress_step,
             progress_percent=100,
             model=ai_result.get("model") or "",
             vision_model=ai_result.get("vision_model") or "",
@@ -5618,6 +5646,7 @@ class FrappeMaterialAIFillRepository:
         frappe.db.set_value('Overseas Cost Item', item_name, values, update_modified=False)
 
     def apply_run(self, run: Any, updates: list[dict], audit: dict) -> dict:
+        _assert_legacy_raw_apply_allowed(run)
         from overseas_costing.services import calculate_service, usage_service
 
         bundle=effective_source.current_source_bundle(audit['batch'],audit['version'],lock=True)
@@ -5634,8 +5663,6 @@ class FrappeMaterialAIFillRepository:
                 "SELECT name FROM `tabOverseas Cost Item` WHERE batch=%s AND version=%s ORDER BY name FOR UPDATE",
                 (audit["batch"], audit["version"]),
             )
-        if not is_material_ai_preview_ready(_record_value(run, "status")):
-            raise ValueError("AI 草稿尚未准备完成或已经处理。")
         changed = 0
         try:
             for update in updates:
@@ -5687,6 +5714,9 @@ class FrappeMaterialAIFillRepository:
     ) -> dict:
         """Apply selected purchase, packing and fee proposals in one database transaction."""
 
+        _assert_legacy_raw_apply_allowed(
+            run, not_ready_message="AI 资料审核草稿尚未准备完成或已经处理。"
+        )
         from overseas_costing.services import calculate_service, fee_service, usage_service
 
         bundle = effective_source.current_source_bundle(audit['batch'],audit['version'],lock=True)

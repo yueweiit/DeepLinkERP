@@ -142,7 +142,7 @@ let review=w.renderMaterialAIReviewDialogContent();
 let apply=review.match(/data-action="mf-ai-apply"([^>]*)>/);
 assert(apply&&!apply[1].includes('disabled'));
 let html=w.renderMaterialAIProgressDialogContent();
-assert(html.includes('草稿已生成（部分资料已跳过）'));
+assert(html.includes('草稿已生成（部分资料待核对）'));
 selection.preview={id:'P2',revision:'R2',can_apply:false,rows:[]};
 selection.previewKey=w.materialAIRowSelectionKey(fill);
 assert.equal(w.canConfirmMaterialAIRowSelection(fill),false);
@@ -150,6 +150,17 @@ assert.equal(w.canApplyMaterialAIFill(fill),false);
 review=w.renderMaterialAIReviewDialogContent();
 apply=review.match(/data-action="mf-ai-apply"([^>]*)>/);
 assert(apply&&apply[1].includes('disabled'));
+""")
+
+
+def test_ready_warning_copy_distinguishes_skipped_sources_from_no_candidates_and_legacy():
+    run_ui(r"""
+const skipped={status:'READY_WITH_WARNINGS',source_completeness:'UNAVAILABLE',source_progress:[{status:'SKIPPED',read_status:'SKIPPED'}]};
+const empty={status:'READY_WITH_WARNINGS',source_completeness:'UNAVAILABLE',source_progress:[{status:'COMPLETED',read_status:'READ'}]};
+const legacy={status:'READY_WITH_WARNINGS'};
+assert.equal(w.materialAIReadyTitle(skipped),'草稿已生成（未找到有效资料，部分资料已跳过）');
+assert.equal(w.materialAIReadyTitle(empty),'草稿已生成（未找到可采用内容）');
+assert.equal(w.materialAIReadyTitle(legacy),'草稿已生成（部分资料待核对）');
 """)
 
 

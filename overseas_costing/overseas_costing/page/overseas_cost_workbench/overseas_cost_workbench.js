@@ -9893,10 +9893,29 @@ class OverseasCostWorkbench {
     return ["READY", "READY_WITH_WARNINGS"].includes(String(status || ""));
   }
 
-  materialAIReadyTitle(status) {
-    return String(status || "") === "READY_WITH_WARNINGS"
-      ? "草稿已生成（部分资料已跳过）"
-      : "AI 资料草稿已生成";
+  materialAIReadyTitle(fillOrStatus) {
+    const fill = typeof fillOrStatus === "object" && fillOrStatus !== null
+      ? fillOrStatus
+      : { status: fillOrStatus };
+    if (String(fill.status || "") !== "READY_WITH_WARNINGS") return "AI 资料草稿已生成";
+    const skipped = (Array.isArray(fill.source_progress) ? fill.source_progress : []).some(source => {
+      const status = String(source?.status || "").toUpperCase();
+      const readStatus = String(source?.read_status || "").toUpperCase();
+      return ["SKIPPED", "FAILED"].includes(status) || ["SKIPPED", "UNREADABLE", "FAILED"].includes(readStatus);
+    });
+    if (skipped && String(fill.source_completeness || "") === "UNAVAILABLE") {
+      return "草稿已生成（未找到有效资料，部分资料已跳过）";
+    }
+    if (skipped) return "草稿已生成（部分资料已跳过）";
+    if (String(fill.source_completeness || "") === "UNAVAILABLE") return "草稿已生成（未找到可采用内容）";
+    return "草稿已生成（部分资料待核对）";
+  }
+
+  materialAIReadyChipLabel(fill) {
+    const title = this.materialAIReadyTitle(fill);
+    return title === "AI 资料草稿已生成"
+      ? "AI 草稿待查看"
+      : title.replace(/^草稿已生成/, "AI 草稿待查看");
   }
 
   materialFeeCurrencyOptions() {
@@ -10872,7 +10891,7 @@ class OverseasCostWorkbench {
     const steps = ["读取资料", "解析/OCR", "DeepSeek 识别", "合并候选"];
     const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
     const warning = fill.ai_warning || fill.error_message || "";
-    const title = this.isMaterialAIReadyStatus(fill.status) ? this.materialAIReadyTitle(fill.status) : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : "正在分析当前批次资料";
+    const title = this.isMaterialAIReadyStatus(fill.status) ? this.materialAIReadyTitle(fill) : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : "正在分析当前批次资料";
     return `<div class="ocw-mf-ai-banner is-${this.escape(String(fill.status || "running").toLowerCase())}"><div><strong>${title}</strong><span>${this.escape(fill.progress_step || "读取资料")}</span></div><div class="ocw-mf-ai-progress" aria-label="AI 分析进度"><i style="width:${progress}%"></i></div><div class="ocw-mf-ai-steps">${steps.map((step) => `<span class="${step === fill.progress_step ? "active" : ""}">${step}</span>`).join("")}</div>${warning ? `<p>${this.escape(warning)}</p>` : ""}</div>`;
   }
 
@@ -11003,7 +11022,7 @@ class OverseasCostWorkbench {
     const active = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill?.status || ""));
     const minimized = Boolean(this.ensureMaterialFeeState().aiProgressMinimized);
     const label = this.isMaterialAIReadyStatus(fill?.status)
-      ? (fill?.status === "READY_WITH_WARNINGS" ? "AI 草稿待查看 · 部分资料已跳过" : "AI 草稿待查看")
+      ? this.materialAIReadyChipLabel(fill)
       : fill?.status === "FAILED"
         ? "AI 分析失败"
         : fill?.status === "STALE"
@@ -11023,7 +11042,7 @@ class OverseasCostWorkbench {
     const ready = this.isMaterialAIReadyStatus(fill.status);
     const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
     const canRetry = failed || Boolean(fill.stalled || fill.is_stalled || fill.connection_error || fill.polling_paused);
-    const title = ready ? this.materialAIReadyTitle(fill.status) : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+    const title = ready ? this.materialAIReadyTitle(fill) : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
     return `<div class="ocw-mf-ai-progress-dialog" data-mf-ai-progress-host="1">
       <header><div><strong data-mf-ai-progress-title>${this.escape(title)}</strong><span data-mf-ai-progress-step>${this.escape(fill.progress_step || "等待读取资料")}</span></div><b data-mf-ai-progress-percent>${progress}%</b></header>
       <main class="ocw-mf-ai-dialog-body">
@@ -11212,7 +11231,7 @@ class OverseasCostWorkbench {
     const $chip = this.$root?.find?.("[data-mf-ai-progress-chip]");
     const fill = state.aiFill || {};
     const active = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill.status || ""));
-    const chipLabel = this.isMaterialAIReadyStatus(fill.status) ? (fill.status === "READY_WITH_WARNINGS" ? "AI 草稿待查看 · 部分资料已跳过" : "AI 草稿待查看") : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : `AI ${Math.max(0, Math.min(100, Number(fill.progress_percent || 0)))}%`;
+    const chipLabel = this.isMaterialAIReadyStatus(fill.status) ? this.materialAIReadyChipLabel(fill) : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : `AI ${Math.max(0, Math.min(100, Number(fill.progress_percent || 0)))}%`;
     if ($chip?.length) {
       $chip.prop("hidden", !(active && state.aiProgressMinimized));
       $chip.find("span").text(chipLabel);
@@ -11229,7 +11248,7 @@ class OverseasCostWorkbench {
       const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
       const ready = this.isMaterialAIReadyStatus(fill.status);
       const failed = ["FAILED", "STALE"].includes(String(fill.status || ""));
-      const title = ready ? this.materialAIReadyTitle(fill.status) : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
+      const title = ready ? this.materialAIReadyTitle(fill) : fill.polling_paused ? "AI 状态读取已暂停" : failed ? "AI 分析未完成" : "AI 正在分析当前批次资料";
       const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
       const sourceGroups = this.materialAISourceGroups(sources);
       const sourceSummary = this.materialAISourceGroupSummary(sourceGroups);

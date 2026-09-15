@@ -2973,11 +2973,11 @@ def test_legacy_material_apply_rejects_ready_with_warnings_that_require_server_s
     assert repository.applied == []
 
 
-def test_legacy_material_apply_rejects_unavailable_warning_draft_even_with_client_updates() -> None:
-    repository = _LifecycleRepository(status="READY_WITH_WARNINGS")
-    repository.run.update(source_completeness="UNAVAILABLE", candidates_json=[])
+def test_legacy_material_apply_rejects_deployed_ready_partial_draft() -> None:
+    repository = _LifecycleRepository(status="READY")
+    repository.run.update(source_completeness="PARTIAL")
 
-    with pytest.raises(ValueError, match="没有可采用内容"):
+    with pytest.raises(ValueError, match="逐项选择"):
         apply_material_ai_fill(
             "B1",
             "RUN-1",
@@ -2988,6 +2988,54 @@ def test_legacy_material_apply_rejects_unavailable_warning_draft_even_with_clien
         )
 
     assert repository.applied == []
+
+
+def test_legacy_material_apply_rejects_unavailable_warning_draft_even_with_client_updates() -> None:
+    repository = _LifecycleRepository(status="READY_WITH_WARNINGS")
+    repository.run.update(source_completeness="UNAVAILABLE", candidates_json=[])
+
+    with pytest.raises(ValueError, match="逐项选择"):
+        apply_material_ai_fill(
+            "B1",
+            "RUN-1",
+            [{"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 12}],
+            "TOKEN",
+            "M1",
+            repository=repository,
+        )
+
+    assert repository.applied == []
+
+
+@pytest.mark.parametrize(
+    ("status", "source_completeness"),
+    [("READY_WITH_WARNINGS", "PARTIAL"), ("READY", "PARTIAL")],
+)
+def test_legacy_source_review_apply_rejects_partial_draft_without_row_selection(
+    status: str, source_completeness: str
+) -> None:
+    repository = _LifecycleRepository(status=status)
+    repository.run.update(source_completeness=source_completeness)
+    repository.source_applied = []
+    repository.apply_source_review = lambda *args, **kwargs: repository.source_applied.append(
+        (args, kwargs)
+    ) or {"changed_count": 1, "batch_modified": "M2"}
+
+    with pytest.raises(ValueError, match="逐项选择"):
+        apply_source_ai_review(
+            "B1",
+            "RUN-1",
+            [],
+            {},
+            "TOKEN",
+            "M1",
+            manual_updates=[
+                {"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": 12}
+            ],
+            repository=repository,
+        )
+
+    assert repository.source_applied == []
 
 
 def test_unified_apply_marks_removed_selected_source_stale() -> None:
@@ -4288,6 +4336,8 @@ def test_unified_worker_falls_back_after_higher_priority_required_source_fails(m
     assert progress["LOGISTICS-PACKING"]["status"] in {"PARSED", "PARTIAL", "COMPLETED"}
     assert repository.run["candidates_json"]
     assert repository.run["source_completeness"] == "PARTIAL"
+    assert repository.run["progress_step"] == "草稿已生成（部分资料已跳过）"
+    assert "部分资料已跳过" in repository.run["ai_warning"]
 
 
 def test_unified_worker_is_ready_unavailable_when_all_selected_optional_sources_are_unusable(monkeypatch) -> None:
@@ -4791,6 +4841,21 @@ def test_readable_evidence_without_final_candidates_is_ready_unavailable(monkeyp
     assert repository.run["candidates_json"] == []
     assert repository.run["source_completeness"] == "UNAVAILABLE"
     assert repository.run["source_progress_json"][0]["read_status"] == "READ"
+    assert repository.run["progress_step"] == "草稿已生成（未找到可采用内容）"
+    assert "未找到可采用内容" in repository.run["ai_warning"]
+    assert "跳过" not in repository.run["progress_step"]
+    assert "跳过" not in repository.run["ai_warning"]
+
+
+def test_repository_raw_writers_reject_warning_before_business_mutation() -> None:
+    repository = material_ai_fill_service.FrappeMaterialAIFillRepository()
+    run = {"status": "READY_WITH_WARNINGS", "source_completeness": "PARTIAL"}
+    audit = {"batch": "B1", "version": "V1"}
+
+    with pytest.raises(ValueError, match="逐项选择"):
+        repository.apply_run(run, [], audit)
+    with pytest.raises(ValueError, match="逐项选择"):
+        repository.apply_source_review(run, [], [], audit)
 
 
 @pytest.mark.parametrize('initial_status',['QUEUED','RUNNING','READY','READY_WITH_WARNINGS'])
