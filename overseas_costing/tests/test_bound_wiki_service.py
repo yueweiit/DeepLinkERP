@@ -27,17 +27,91 @@ def clients(sha='a',quantity=4,download=None):
 
 
 def test_refresh_cas_does_not_allow_delayed_old_worker_to_overwrite_new_cache(setup):
-    from overseas_costing.services.packing_source_service import refresh_bound_wiki_snapshot,load_bound_wiki_snapshot
+    from overseas_costing.services import packing_source_service as packing
     s,l,b,v,*_=setup
     ctx=wiki_fixture(setup)['context']
     newer=clients('b',6)
     def delayed_old(_manifest):
-        refresh_bound_wiki_snapshot(b['name'],'W:S',store=s,ledger=l,clients=newer)
+        packing.refresh_bound_wiki_snapshot(b['name'],'W:S',store=s,ledger=l,clients=newer)
         return clients('a',4).archive.download({})
-    with pytest.raises(ValueError,match='刷新'):
-        refresh_bound_wiki_snapshot(b['name'],'W:S',store=s,ledger=l,clients=clients('a',download=delayed_old))
-    cached=load_bound_wiki_snapshot(ctx,'W:S',store=s)
+    with pytest.raises(packing.PackingSourceIntegrityError,match='刷新'):
+        packing.refresh_bound_wiki_snapshot(b['name'],'W:S',store=s,ledger=l,clients=clients('a',download=delayed_old))
+    cached=packing.load_bound_wiki_snapshot(ctx,'W:S',store=s)
     assert cached['source_hash']=='b'*64 and cached['preview']['material_rows'][0]['quantity']=='6'
+
+
+def test_refresh_rejects_archive_without_verifiable_hash_or_matching_sheet(setup):
+    from overseas_costing.services import packing_source_service as packing
+
+    s, l, batch, _version, *_ = setup
+    wiki_fixture(setup)
+    missing_hash = clients()
+    missing_hash.catalog.get_latest_snapshot = lambda *_args: {
+        "id": "SN-missing",
+        "corp_id": "C",
+        "content_sha256": "",
+    }
+    wrong_sheet = clients()
+    wrong_sheet.archive.download = lambda _manifest: {
+        "schemaVersion": 1,
+        "workbookId": "OTHER",
+        "sheetId": "S",
+        "values": [],
+    }
+
+    with pytest.raises(packing.PackingSourceIntegrityError, match="可验证归档"):
+        packing.refresh_bound_wiki_snapshot(
+            batch["name"], "W:S", store=s, ledger=l, clients=missing_hash
+        )
+    with pytest.raises(packing.PackingSourceIntegrityError, match="不属于所选工作表"):
+        packing.refresh_bound_wiki_snapshot(
+            batch["name"], "W:S", store=s, ledger=l, clients=wrong_sheet
+        )
+
+
+def test_refresh_rejects_purchase_link_change_with_integrity_error(setup):
+    from overseas_costing.services import packing_source_service as packing
+
+    s, l, batch, _version, *_ = setup
+    bundle = wiki_fixture(setup)
+
+    def unlink_during_download(_manifest):
+        source = s.get("source", bundle["source"]["id"])
+        source["raw"]["wiki"] = []
+        s.put("source", {"id": source["id"], "data": dumps(source)})
+        return clients().archive.download({})
+
+    with pytest.raises(packing.PackingSourceIntegrityError, match="采购支出关联已变化"):
+        packing.refresh_bound_wiki_snapshot(
+            batch["name"],
+            "W:S",
+            store=s,
+            ledger=l,
+            clients=clients(download=unlink_during_download),
+        )
+
+
+def test_direct_wiki_read_rejects_snapshot_sheet_mismatch_with_integrity_error(monkeypatch):
+    from overseas_costing.services import packing_source_service as packing
+    from overseas_costing.integrations import dingtalk_packing_source
+
+    monkeypatch.setattr(packing.effective_source, "validate_packing_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(packing.effective_source, "current_source_bundle", lambda *_args, **_kwargs: None)
+    mismatch = clients()
+    mismatch.archive.download = lambda _manifest: {
+        "schemaVersion": 1,
+        "workbookId": "W",
+        "sheetId": "OTHER",
+        "values": [],
+    }
+    monkeypatch.setattr(dingtalk_packing_source, "get_packing_runtime_clients", lambda: mismatch)
+
+    with pytest.raises(packing.PackingSourceIntegrityError, match="快照与所选 Sheet 不一致"):
+        packing._resolve_trusted_packing_source(
+            batch_name="B1",
+            source_kind="wiki_sheet",
+            source_id="W:S",
+        )
 
 
 def test_changed_cache_invalidates_context_but_identical_refresh_is_noop(setup):

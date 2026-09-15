@@ -31,6 +31,7 @@ from overseas_costing.services.source_review_manifest_service import (
     stable_source_identity,
     source_progress_manifest,
 )
+from overseas_costing.services.source_read_errors import SourceIntegrityError
 
 try:
     import frappe
@@ -79,6 +80,8 @@ EVIDENCE_DOWNLOAD_TIMEOUT_SECONDS = 10.0
 EVIDENCE_PARSE_TIMEOUT_SECONDS = 15.0
 AI_SEMANTIC_TIMEOUT_SECONDS = 60.0
 EVIDENCE_SKIP_DETAIL = "已跳过，继续读取下一资料。"
+AI_SAFE_FAILURE_WARNING = "AI 语义分析未完成，已保留服务器规则解析结果。"
+VISION_SAFE_FAILURE_WARNING = "视觉识别未完成，已继续使用文字资料。"
 REVIEW_PROPOSAL_TYPES = frozenset({"material_replace", "item_update", "fee_update", "logistics_reconcile"})
 REVIEW_ITEM_FIELDS = frozenset(
     {
@@ -149,7 +152,7 @@ class EvidenceReadSkipped(ValueError):
         super().__init__(self.safe_text)
 
 
-class EvidenceIntegrityError(RuntimeError):
+class EvidenceIntegrityError(SourceIntegrityError):
     """A stale or inconsistent server-owned source must fail the whole run."""
 
 
@@ -158,6 +161,38 @@ class _EvidenceSystemFailure(BaseException):
 
     def __init__(self, error: Exception):
         self.error = error
+
+
+def _is_fatal_system_exception(error: Exception) -> bool:
+    """Identify infrastructure and integrity failures by type, never message text."""
+
+    module = type(error).__module__.casefold()
+    name = type(error).__name__.casefold()
+    return (
+        isinstance(error, (SourceIntegrityError, PermissionError))
+        or module.startswith("frappe")
+        or module.startswith(
+            (
+                "mariadb",
+                "mysql",
+                "mysqldb",
+                "psycopg",
+                "pymysql",
+                "sqlalchemy",
+                "sqlite3",
+            )
+        )
+        or any(
+            marker in name
+            for marker in (
+                "databaseerror",
+                "operationalerror",
+                "transaction",
+                "deadlock",
+                "locktimeout",
+            )
+        )
+    )
 
 
 def _evidence_attempt_key(source: dict) -> tuple[str, str]:
@@ -179,39 +214,12 @@ def _classify_evidence_exception(error: Exception, phase: str) -> EvidenceReadSk
 
     if isinstance(error, EvidenceReadSkipped):
         return error
-    if isinstance(error, EvidenceIntegrityError):
-        return None
     module = type(error).__module__.casefold()
-    name = type(error).__name__.casefold()
+    if isinstance(error, PermissionError) and not module.startswith("frappe"):
+        return EvidenceReadSkipped("SOURCE_PERMISSION_DENIED", "资料文件无读取权限。")
+    if _is_fatal_system_exception(error):
+        return None
     message = str(error or "").casefold()
-    if phase == "download" and module.startswith("frappe"):
-        if name == "permissionerror":
-            return EvidenceReadSkipped(
-                "SOURCE_PERMISSION_DENIED", "资料文件无读取权限。"
-            )
-        if name == "doesnotexisterror":
-            return EvidenceReadSkipped("FILE_NOT_FOUND", "资料文件不存在。")
-    if module.startswith("frappe") or any(
-        marker in name
-        for marker in ("databaseerror", "operationalerror", "transaction", "deadlock", "locktimeout")
-    ):
-        return None
-    if any(
-        marker in message
-        for marker in (
-            "来源已变化",
-            "来源内容已变化",
-            "指纹已变化",
-            "版本已变化",
-            "不属于当前批次",
-            "不属于当前采购支出",
-            "缺少审批实例或文件标识",
-            "来源依赖",
-            "execution claim",
-            "run claim",
-        )
-    ):
-        return None
     if isinstance(error, FileNotFoundError) or "404" in message or "not found" in message or "不存在" in message:
         return EvidenceReadSkipped("FILE_NOT_FOUND", "资料文件不存在。")
     if isinstance(error, PermissionError) or any(
@@ -263,6 +271,10 @@ def _run_evidence_step(callback: Callable[[], Any], *, phase: str) -> Any:
         try:
             return {"step_ok": True, "result": callback()}
         except Exception as error:
+            if isinstance(error, SourceIntegrityError) and not isinstance(
+                error, EvidenceIntegrityError
+            ):
+                error = EvidenceIntegrityError(str(error))
             skipped = _classify_evidence_exception(error, phase)
             if skipped is not None:
                 return {"step_ok": False, "skipped": skipped}
@@ -279,6 +291,36 @@ def _run_evidence_step(callback: Callable[[], Any], *, phase: str) -> Any:
     if not bounded.get("step_ok"):
         raise bounded["skipped"]
     return bounded.get("result")
+
+
+def _run_ai_semantic(callback: Callable[[], dict], *, fallback: dict) -> dict:
+    """Run semantic AI independently while allowing fatal server errors to escape."""
+
+    from overseas_costing.services.logistics_autofill_service import run_supplement
+
+    def invoke() -> dict:
+        try:
+            return {"semantic_completed": True, "result": callback()}
+        except Exception as error:
+            if _is_fatal_system_exception(error):
+                raise _EvidenceSystemFailure(error)
+            return {
+                "semantic_completed": True,
+                "result": {**fallback, "ok": False, "warning": AI_SAFE_FAILURE_WARNING},
+            }
+
+    try:
+        bounded = run_supplement(invoke, seconds=AI_SEMANTIC_TIMEOUT_SECONDS)
+    except _EvidenceSystemFailure as fatal:
+        raise fatal.error
+    if not bounded.get("semantic_completed"):
+        return {**fallback, "ok": False, "warning": AI_SAFE_FAILURE_WARNING}
+    result = bounded.get("result")
+    return result if isinstance(result, dict) else {
+        **fallback,
+        "ok": False,
+        "warning": AI_SAFE_FAILURE_WARNING,
+    }
 
 
 def _json(value: Any) -> str:
@@ -2990,7 +3032,7 @@ def _ensure_local_attachment(source: dict) -> dict:
     if bound:
         effective_source.require_readable(bundle['context'])
         if (source.get('source_context') or {}).get('fingerprint') != bundle['context']['fingerprint']:
-            raise ValueError('当前采购支出来源已变化，请重新分析。')
+            raise EvidenceIntegrityError('当前采购支出来源已变化，请重新分析。')
         if source.get('download_required'):
             raise ValueError('当前采购支出附件尚未完成本地归档，请等待同步。')
     if source.get("download_required"):
@@ -2998,7 +3040,7 @@ def _ensure_local_attachment(source: dict) -> dict:
         file_id = str(source.get("file_id") or "")
         if source_id.startswith("oa:"):
             if not process_id or not file_id:
-                raise ValueError("钉钉附件缺少审批实例或文件标识，请先刷新资料来源。")
+                raise EvidenceIntegrityError("钉钉附件缺少审批实例或文件标识，请先刷新资料来源。")
             materialized = dingtalk_approval_service.materialize_batch_dingtalk_attachment(
                 str(source.get("batch") or ""), process_id, file_id
             )
@@ -3016,9 +3058,9 @@ def _ensure_local_attachment(source: dict) -> dict:
         as_dict=True,
     ) or {}
     if str(row.get("batch") or "") != str(source.get("batch") or ""):
-        raise ValueError("附件已不属于当前批次，请重新分析。")
+        raise EvidenceIntegrityError("附件已不属于当前批次，请重新分析。")
     if bound and not effective_source.attachment_allowed(row, bundle, for_analysis=True):
-        raise ValueError('附件不属于当前采购支出及成本版本。')
+        raise EvidenceIntegrityError('附件不属于当前采购支出及成本版本。')
     if not row.get("file_url"):
         raise ValueError("附件尚未保存到系统，暂时无法读取。")
     path = attachment_parse_service._resolve_source_file_path(file_url=str(row.get("file_url") or ""))
@@ -3794,7 +3836,14 @@ def _call_vision_style_descriptions(documents: list[dict]) -> dict:
             )
         return {"ok": True, "model": config.get("model") or "", "observations": observations, "warning": ""}
     except Exception as exc:  # pragma: no cover - production integration path
-        return {"ok": False, "model": config.get("model") or "", "observations": [], "warning": f"视觉识别未完成，已继续使用文字资料：{exc}"}
+        if _is_fatal_system_exception(exc):
+            raise
+        return {
+            "ok": False,
+            "model": config.get("model") or "",
+            "observations": [],
+            "warning": VISION_SAFE_FAILURE_WARNING,
+        }
 
 
 def _call_material_ai(items: list[dict], documents: list[dict]) -> dict:
@@ -3863,11 +3912,13 @@ def _call_material_ai(items: list[dict], documents: list[dict]) -> dict:
             "warning": "",
         }
     except Exception as exc:  # pragma: no cover - 网络异常路径由集成环境覆盖
+        if _is_fatal_system_exception(exc):
+            raise
         return {
             "ok": False,
             "model": config.get("model") or "",
             "candidates": [],
-            "warning": f"DeepSeek 识别失败，已保留可靠的规则解析结果：{exc}",
+            "warning": AI_SAFE_FAILURE_WARNING,
         }
 
 
@@ -3967,11 +4018,17 @@ def _call_source_review_ai(
             "evidence_documents": documents,
         }
     except Exception as exc:  # pragma: no cover - network failures are integration-tested
+        if _is_fatal_system_exception(exc):
+            raise
         return {
             "ok": False,
             "model": config.get("model") or "",
             "proposals": [],
-            "warning": "；".join(part for part in (f"DeepSeek 分析失败，已保留规则解析候选：{exc}", vision_result.get("warning")) if part),
+            "warning": "；".join(
+                part
+                for part in (AI_SAFE_FAILURE_WARNING, vision_result.get("warning"))
+                if part
+            ),
             "vision_model": vision_result.get("model") or "",
             "evidence_documents": documents,
         }
@@ -4134,7 +4191,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             }
 
         persist(progress_step="读取主审批与装箱附件", progress_percent=10)
-        from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation, autofill_preview, extra, run_supplement
+        from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation, autofill_preview, extra
         reconciliation = None
         read_items = items
         original_bundle_reader = getattr(repo, 'get_original_source_bundle', None)
@@ -4433,7 +4490,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             if _source_review_context(latest_context) != _source_review_context(context):
                 persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
                 return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
-            ai_result = run_supplement(
+            ai_result = _run_ai_semantic(
                 lambda: _call_source_review_ai(
                     read_items,
                     documents,
@@ -4445,7 +4502,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         REVIEW_FEE_KEYS,
                     ),
                 ),
-                seconds=AI_SEMANTIC_TIMEOUT_SECONDS,
+                fallback={
+                    "model": "",
+                    "vision_model": "",
+                    "proposals": [],
+                    "evidence_documents": documents,
+                },
             )
             enhanced_by_id = {
                 str(document.get("document_id") or ""): document
@@ -4545,9 +4607,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
                 return {'ok': False, 'run_id': str(run_id), 'status': 'STALE'}
             ai_result = (
-                run_supplement(
+                _run_ai_semantic(
                     lambda: _call_material_ai(read_items, documents),
-                    seconds=AI_SEMANTIC_TIMEOUT_SECONDS,
+                    fallback={"model": "", "candidates": []},
                 )
                 if documents or deterministic
                 else {"ok": False, "candidates": [], "warning": ""}
@@ -4733,7 +4795,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         ]
         source_completeness = (
             "UNAVAILABLE"
-            if not completed_sources
+            if not candidates
             else "PARTIAL"
             if source_errors or source_warnings or any(
                 str(row.get("status") or "") in {"SKIPPED", "FAILED", "PARTIAL", "NO_RESULT"}

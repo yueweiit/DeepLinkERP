@@ -3,7 +3,9 @@
 import copy
 import json
 import re
+import sqlite3
 import time
+from pathlib import Path
 
 import pytest
 
@@ -48,6 +50,27 @@ def test_material_ai_timestamps_are_mariadb_datetime_compatible(monkeypatch) -> 
     value = material_ai_fill_service._now()
 
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value)
+
+
+def test_material_ai_run_schema_accepts_unavailable_source_completeness() -> None:
+    root = Path(__file__).resolve().parents[1]
+    metadata = json.loads(
+        (
+            root
+            / "overseas_costing"
+            / "doctype"
+            / "overseas_cost_material_ai_run"
+            / "overseas_cost_material_ai_run.json"
+        ).read_text(encoding="utf-8")
+    )
+    fields = {field["fieldname"]: field for field in metadata["fields"]}
+
+    assert fields["source_completeness"]["options"].splitlines() == [
+        "PENDING",
+        "UNAVAILABLE",
+        "PARTIAL",
+        "COMPLETE",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -280,15 +303,34 @@ def test_database_and_source_integrity_failures_are_not_downgraded_to_evidence_s
             lambda: (_ for _ in ()).throw(service.EvidenceIntegrityError("来源指纹已变化")),
             phase="download",
         )
-    with pytest.raises(ValueError) as missing_identity:
+    with pytest.raises(service.EvidenceIntegrityError):
         service._run_evidence_step(
-            lambda: (_ for _ in ()).throw(ValueError("钉钉附件缺少审批实例或文件标识")),
+            lambda: (_ for _ in ()).throw(service.EvidenceIntegrityError("附件服务器标识不完整")),
             phase="download",
         )
-    assert not isinstance(missing_identity.value, service.EvidenceReadSkipped)
 
 
-def test_frappe_file_download_errors_are_skipped_but_frappe_system_permissions_remain_fatal() -> None:
+def test_attachment_materialization_raises_typed_integrity_error_for_missing_server_identity(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    service = material_ai_fill_service
+    monkeypatch.setattr(service, "frappe", SimpleNamespace())
+    monkeypatch.setattr(service.effective_source, "current_source_bundle", lambda *_args: None)
+
+    with pytest.raises(service.EvidenceIntegrityError, match="文件标识"):
+        service._ensure_local_attachment(
+            {
+                "source_id": "oa:PROC-1:FILE-1",
+                "resolver_source_id": "oa:PROC-1:FILE-1",
+                "batch": "B1",
+                "download_required": True,
+                "process_instance_id": "",
+                "file_id": "",
+            }
+        )
+
+
+def test_frappe_errors_remain_fatal_even_inside_download_budget() -> None:
     service = material_ai_fill_service
 
     FrappePermissionError = type("PermissionError", (RuntimeError,), {"__module__": "frappe.exceptions"})
@@ -296,12 +338,12 @@ def test_frappe_file_download_errors_are_skipped_but_frappe_system_permissions_r
         "DoesNotExistError", (RuntimeError,), {"__module__": "frappe.exceptions"}
     )
 
-    with pytest.raises(service.EvidenceReadSkipped) as denied:
+    with pytest.raises(FrappePermissionError):
         service._run_evidence_step(
             lambda: (_ for _ in ()).throw(FrappePermissionError("Not permitted")),
             phase="download",
         )
-    with pytest.raises(service.EvidenceReadSkipped) as missing:
+    with pytest.raises(FrappeDoesNotExistError):
         service._run_evidence_step(
             lambda: (_ for _ in ()).throw(FrappeDoesNotExistError("File does not exist")),
             phase="download",
@@ -311,9 +353,6 @@ def test_frappe_file_download_errors_are_skipped_but_frappe_system_permissions_r
             lambda: (_ for _ in ()).throw(FrappePermissionError("System permission denied")),
             phase="parse",
         )
-
-    assert denied.value.code == "SOURCE_PERMISSION_DENIED"
-    assert missing.value.code == "FILE_NOT_FOUND"
 
 
 def test_excel_sheet_reader_does_not_turn_database_failure_into_parse_error(monkeypatch, tmp_path) -> None:
@@ -1837,6 +1876,58 @@ def test_empty_document_is_removed_before_deepseek_call(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert "没有可供 AI 识别" in result["warning"]
+
+
+def test_material_ai_internal_database_error_is_not_converted_to_model_warning(monkeypatch) -> None:
+    from overseas_costing.services import allocation_service
+
+    class DatabaseError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        allocation_service,
+        "_ai_config",
+        lambda: {"api_key": "test-key", "model": "test-model"},
+    )
+    monkeypatch.setattr(
+        allocation_service,
+        "_call_chat_completions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DatabaseError("database transaction failed")
+        ),
+    )
+
+    with pytest.raises(DatabaseError):
+        _call_material_ai(
+            _items(),
+            [{"source_ref": {"source_id": "A"}, "text": "可读资料"}],
+        )
+
+
+def test_material_ai_internal_model_error_returns_fixed_safe_warning(monkeypatch) -> None:
+    from overseas_costing.services import allocation_service
+
+    monkeypatch.setattr(
+        allocation_service,
+        "_ai_config",
+        lambda: {"api_key": "test-key", "model": "test-model"},
+    )
+    monkeypatch.setattr(
+        allocation_service,
+        "_call_chat_completions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("<html>Internal Server Error /private/files/secret.xlsx</html>")
+        ),
+    )
+
+    result = _call_material_ai(
+        _items(),
+        [{"source_ref": {"source_id": "A"}, "text": "可读资料"}],
+    )
+
+    assert result["warning"] == material_ai_fill_service.AI_SAFE_FAILURE_WARNING
+    assert "html" not in result["warning"].lower()
+    assert "/private/" not in result["warning"]
 
 
 def test_image_payload_is_kept_as_source_review_evidence() -> None:
@@ -3865,7 +3956,7 @@ def test_worker_reads_each_evidence_once_continues_and_gives_ai_an_independent_b
     assert budgets == [15.0, 15.0, 60.0]
     assert len(ai_documents) == 1
     assert ai_documents[0]["source_ref"]["source_id"] == "COMMENT-LOGISTICS"
-    assert repository.run["source_completeness"] == "PARTIAL"
+    assert repository.run["source_completeness"] == "UNAVAILABLE"
 
 
 def test_worker_skips_duplicate_logical_evidence_but_keeps_distinct_sources(monkeypatch) -> None:
@@ -3911,6 +4002,138 @@ def test_worker_does_not_downgrade_database_failure_to_skipped_source(monkeypatc
     assert result["status"] == "FAILED"
     assert repository.run["status"] == "FAILED"
     assert repository.run["source_progress_json"][0]["status"] != "SKIPPED"
+
+
+def test_worker_marks_explicit_packing_source_integrity_failure_stale(monkeypatch) -> None:
+    from overseas_costing.services import packing_source_service
+
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            packing_source_service.PackingSourceIntegrityError(
+                "装箱计划表快照与所选 Sheet 不一致。"
+            )
+        ),
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "STALE"
+    assert repository.run["status"] == "STALE"
+    assert repository.run["source_progress_json"][0]["status"] != "SKIPPED"
+
+
+def test_ai_semantic_database_failure_fails_the_run(monkeypatch) -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+
+    class DatabaseError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda *_args, **_kwargs: (
+            [],
+            {
+                "source_ref": {"source_id": "A"},
+                "text": "可读装箱资料",
+                "ai_eligible": True,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_call_material_ai",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DatabaseError("database transaction failed")
+        ),
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "FAILED"
+    assert repository.run["status"] == "FAILED"
+
+
+def test_ai_semantic_runner_rethrows_real_dbapi_integrity_errors() -> None:
+    service = material_ai_fill_service
+
+    with pytest.raises(sqlite3.IntegrityError):
+        service._run_ai_semantic(
+            lambda: (_ for _ in ()).throw(
+                sqlite3.IntegrityError("unique constraint failed")
+            ),
+            fallback={"candidates": []},
+        )
+
+
+def test_ai_semantic_model_failure_keeps_ready_with_fixed_safe_warning(monkeypatch) -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda *_args, **_kwargs: (
+            [],
+            {
+                "source_ref": {"source_id": "A"},
+                "text": "可读装箱资料",
+                "ai_eligible": True,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_call_material_ai",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("<html>Internal Server Error /private/files/secret.xlsx</html>")
+        ),
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY"
+    assert repository.run["ai_warning"] == service.AI_SAFE_FAILURE_WARNING
+    assert "html" not in repository.run["ai_warning"].lower()
+    assert "/private/" not in repository.run["ai_warning"]
+
+
+def test_readable_evidence_without_final_candidates_is_ready_unavailable(monkeypatch) -> None:
+    service = material_ai_fill_service
+    repository = _LifecycleRepository(status="QUEUED")
+    monkeypatch.setattr(
+        service,
+        "_read_source",
+        lambda *_args, **_kwargs: (
+            [],
+            {
+                "source_ref": {"source_id": "A"},
+                "text": "可读但没有可采用的数据",
+                "ai_eligible": True,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_call_material_ai",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "model": "test-model",
+            "candidates": [],
+            "warning": "",
+        },
+    )
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY"
+    assert repository.run["candidates_json"] == []
+    assert repository.run["source_completeness"] == "UNAVAILABLE"
+    assert repository.run["source_progress_json"][0]["read_status"] == "READ"
 
 
 @pytest.mark.parametrize('initial_status',['QUEUED','RUNNING'])

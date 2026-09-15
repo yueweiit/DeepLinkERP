@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
 from overseas_costing.services import dingtalk_approval_service, import_service
 from overseas_costing.services.packing_comment_service import parse_packing_comment
 from overseas_costing.services import effective_logistics_source as effective_source
+from overseas_costing.services.source_read_errors import SourceIntegrityError
 
 
 SOURCE_KIND_ALIASES = {
@@ -25,6 +26,10 @@ SOURCE_KIND_ALIASES = {
     "approval_comment": "approval_comment",
     "wiki_sheet": "wiki_sheet",
 }
+
+
+class PackingSourceIntegrityError(SourceIntegrityError, ValueError):
+    """The selected server snapshot changed or failed identity verification."""
 
 
 def normalize_packing_source_kind(value: str) -> str:
@@ -331,7 +336,7 @@ def resolve_trusted_packing_source(
         source_id=source_id, sheet_name=sheet_name, strict_material_xlsx=strict_material_xlsx)
     latest = effective_source.current_source_bundle(batch_name)
     if context != ((latest or {}).get('context') or {}):
-        raise ValueError('当前关联来源已变化，请重新预览。')
+        raise PackingSourceIntegrityError('当前关联来源已变化，请重新预览。')
     if context:
         trusted['source_context'] = context
         trusted['source_hash'] = hashlib.sha256(f"{trusted['source_hash']}|{context['fingerprint']}".encode()).hexdigest()
@@ -436,10 +441,10 @@ def refresh_bound_wiki_snapshot(batch_name, source_id, *, store=None, ledger=Non
     clients=clients or get_packing_runtime_clients()
     manifest=clients.catalog.get_latest_snapshot(workbook,sheet) or {}
     if not manifest.get('content_sha256') or str(manifest.get('corp_id') or '')!=context['corp_id']:
-        raise ValueError('当前工作表缺少本企业可验证归档，请先完成归档刷新。')
+        raise PackingSourceIntegrityError('当前工作表缺少本企业可验证归档，请先完成归档刷新。')
     payload=clients.archive.download(manifest)
     if str(payload.get('workbookId') or '')!=workbook or str(payload.get('sheetId') or '')!=sheet:
-        raise ValueError('归档内容不属于所选工作表。')
+        raise PackingSourceIntegrityError('归档内容不属于所选工作表。')
     grid=build_grid_from_dingtalk_snapshot(payload)
     trusted={'source_hash':str(manifest['content_sha256']), 'grid':grid,'preview':parse_packing_grid(grid),
              'source':{'source_kind':'wiki_sheet','source_id':source_id,'workbook_id':workbook,'sheet_id':sheet,
@@ -449,9 +454,9 @@ def refresh_bound_wiki_snapshot(batch_name, source_id, *, store=None, ledger=Non
         current=effective_source.load_source_bundle(batch_name,store=store,ledger=ledger,lock=True)
         cache=store.get('state',cache_key,lock=True) or {}
         if int(cache.get('refresh_generation') or 0)!=observed_generation:
-            raise ValueError('已有更新的工作表刷新结果，请重新读取本地资料。')
+            raise PackingSourceIntegrityError('已有更新的工作表刷新结果，请重新读取本地资料。')
         if current['context']!=context or source_id not in effective_source.explicit_wiki_sources(current['source']):
-            raise ValueError('获取期间采购支出关联已变化，请重新获取。')
+            raise PackingSourceIntegrityError('获取期间采购支出关联已变化，请重新获取。')
         old_sha=(cache.get('trusted') or {}).get('source_hash')
         changed=bool(old_sha and old_sha!=trusted['source_hash'])
         store.put('state',{'id':cache_key,'updated_at':utcnow(),
@@ -580,13 +585,11 @@ def _resolve_trusted_packing_source(
         raise ValueError("装箱计划表 Sheet 尚无可用缓存，请先刷新资料。")
     payload = clients.archive.download(manifest)
     if str(payload.get("workbookId") or "") != workbook_id or str(payload.get("sheetId") or "") != sheet_id:
-        raise ValueError("装箱计划表快照与所选 Sheet 不一致。")
+        raise PackingSourceIntegrityError("装箱计划表快照与所选 Sheet 不一致。")
     grid = build_grid_from_dingtalk_snapshot(payload)
     source_hash = str(manifest.get("content_sha256") or "").strip().lower()
     if not source_hash:
-        source_hash = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        raise PackingSourceIntegrityError("装箱计划表缺少可验证归档哈希。")
     return {
         "source_hash": source_hash,
         "source": {
