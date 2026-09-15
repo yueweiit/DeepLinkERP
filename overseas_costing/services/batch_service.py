@@ -256,6 +256,7 @@ EXCEL_COLUMNS = [
     {"excel_col": "BE", "fieldname": "transport_mode", "label": "运输方式"},
 ]
 EXCEL_FIELDNAMES = [column["fieldname"] for column in EXCEL_COLUMNS]
+VIRTUAL_ITEM_FIELDNAMES = frozenset({"package_count", "packaging_type"})
 EXTRA_ITEM_FIELDS = [
     "name",
     "row_no",
@@ -290,6 +291,17 @@ EXTRA_ITEM_FIELDS = [
     "profit_margin",
     "profit_status",
 ]
+
+
+def _persistent_item_fieldnames(fieldnames) -> list[str]:
+    """Return fields physically stored on Overseas Cost Item."""
+    return [
+        fieldname
+        for fieldname in fieldnames or []
+        if fieldname not in VIRTUAL_ITEM_FIELDNAMES
+    ]
+
+
 ITEM_FILTER_FIELDS = (
     "customs_no",
     "waybill_no",
@@ -1645,7 +1657,9 @@ def get_batch_items(
     if not resolved_version_name:
         return {"ok": False, "batch_name": batch_doc_name, "message": "当前批次没有版本。"}
 
-    fields = list(dict.fromkeys(EXTRA_ITEM_FIELDS + EXCEL_FIELDNAMES + ["extra_json"]))
+    fields = list(dict.fromkeys(
+        EXTRA_ITEM_FIELDS + _persistent_item_fieldnames(EXCEL_FIELDNAMES) + ["extra_json"]
+    ))
     db_filters, or_filters = _build_item_query_args(
         batch_doc_name,
         resolved_version_name,

@@ -5,6 +5,7 @@ import json
 
 from openpyxl import load_workbook
 
+from overseas_costing.services import batch_service
 from overseas_costing.services.batch_service import (
     EXCEL_COLUMNS,
     EXTRA_ITEM_FIELDS,
@@ -164,6 +165,14 @@ def test_get_batch_items_dry_run_keeps_filters() -> None:
     assert result["filters"]["keyword"] == "YL000098"
     assert result["columns"][0]["fieldname"] == "material_code"
     assert "derived_json" in EXTRA_ITEM_FIELDS
+
+
+def test_persistent_item_fieldnames_exclude_metadata_only_packing_values() -> None:
+    fields = batch_service._persistent_item_fieldnames(batch_service.EXCEL_FIELDNAMES)
+
+    assert "package_count" not in fields
+    assert "packaging_type" not in fields
+    assert "gross_weight_kg" in fields
 
 
 def test_excel_columns_include_spec_model_after_product_name() -> None:

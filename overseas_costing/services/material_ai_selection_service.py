@@ -53,6 +53,50 @@ def review_catalog(repo,batch,run):
     return public_catalog(_inputs(repo,batch,run)[-1])
 
 
+def _source_ref_sheet(ref):
+    return str(
+        ref.get('sheet_name') or ref.get('sheet') or ref.get('worksheet') or ''
+    ).strip().casefold()
+
+
+def _merged_amount_group_matches_change(group, change):
+    """Return whether an unverified amount control governs an adopted value."""
+    if change.get('fieldname') != 'shipment_value_rmb':
+        return False
+    item_name = str(change.get('item_name') or '').strip()
+    members = {
+        str(value or '').strip()
+        for value in group.get('member_item_names') or []
+        if str(value or '').strip()
+    }
+    if members and item_name not in members:
+        return False
+
+    group_source = str(group.get('source_id') or '').strip()
+    group_sheet = str(group.get('sheet_name') or group.get('sheet') or '').strip().casefold()
+    refs = [ref for ref in change.get('source_refs') or [] if isinstance(ref, dict)]
+    if group_source or group_sheet:
+        for ref in refs:
+            if group_source and str(ref.get('source_id') or '').strip() != group_source:
+                continue
+            if group_sheet and _source_ref_sheet(ref) != group_sheet:
+                continue
+            return True
+        # Older proposals may lack source refs. Preserve the safety fence only
+        # when the group can still be tied to the adopted material explicitly.
+        return not refs and bool(members and item_name in members)
+    return bool(members and item_name in members)
+
+
+def _blocking_merged_amount_groups(groups, changes):
+    return [
+        deepcopy(group)
+        for group in groups or []
+        if group.get('status') != 'verified'
+        and any(_merged_amount_group_matches_change(group, change) for change in changes or [])
+    ]
+
+
 def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository=None):
     from . import material_ai_fill_service as ai
     if mode == 'replace_all':
@@ -75,8 +119,11 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
         context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     projection=rows.project(items,catalog,row_ids,fee_ids,mode)
     merged_amount_groups=deepcopy(draft.get('merged_amount_groups') or [])
-    allocation_required=any(group.get('status')!='verified' for group in merged_amount_groups)
+    blocking_merged_amount_groups=_blocking_merged_amount_groups(
+        merged_amount_groups, projection.get('changes') or [])
+    allocation_required=bool(blocking_merged_amount_groups)
     projection['merged_amount_groups']=merged_amount_groups
+    projection['blocking_merged_amount_groups']=blocking_merged_amount_groups
     projection['packing_group_candidates']=deepcopy(draft.get('packing_group_candidates') or [])
     projection['merged_amount_blocking']=allocation_required
     if allocation_required:

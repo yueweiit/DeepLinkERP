@@ -211,6 +211,50 @@ def test_item_page_queries_only_requested_slice(monkeypatch) -> None:
     assert calls[1][1]["limit_page_length"] == 50
 
 
+def test_item_page_projects_virtual_packing_fields_without_selecting_mysql_columns(monkeypatch) -> None:
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            if kwargs["fields"] == [{"COUNT": "name", "as": "total"}]:
+                return [{"total": 1}]
+            return [{
+                "name": "ITEM-1",
+                "row_no": 1,
+                "material_code": "SKU-1",
+                "extra_json": json.dumps({
+                    "ai_row_packing_values": {
+                        "package_count": "7",
+                        "packaging_type": "纸箱",
+                    }
+                }),
+            }]
+
+    monkeypatch.setattr(workbench_service, "frappe", FakeFrappe())
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda value: "BATCH-DOC")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda batch, version: "VER-1")
+    monkeypatch.setattr(
+        batch_service,
+        "_build_item_query_args",
+        lambda *args, **kwargs: (["batch-filter"], ["keyword-filter"]),
+    )
+
+    result = workbench_service.get_batch_items_page("BATCH-001", field_group="all")
+
+    selected_fields = calls[1][1]["fields"]
+    assert "package_count" not in selected_fields
+    assert "packaging_type" not in selected_fields
+    assert "extra_json" in selected_fields
+    assert result["items"][0]["package_count"] == "7"
+    assert result["items"][0]["packaging_type"] == "纸箱"
+    assert {column["fieldname"] for column in result["columns"]} >= {
+        "package_count",
+        "packaging_type",
+    }
+
+
 @pytest.mark.parametrize(
     ("frappe_version", "expected_count_fields"),
     [
@@ -334,6 +378,8 @@ def test_locate_batch_item_uses_unfiltered_server_order(monkeypatch) -> None:
     assert result["page"] == 2
     assert result["item"]["material_code"] == "SKU-076"
     assert calls[0][1]["limit_page_length"] == 0
+    assert "package_count" not in calls[0][1]["fields"]
+    assert "packaging_type" not in calls[0][1]["fields"]
 
 
 def test_result_preview_item_keeps_other_cost_out_of_clearance() -> None:

@@ -144,10 +144,68 @@ def test_ordinary_ai_selection_rejects_whole_table_replacement():
         service.prepare('B1', repo.run['name'], selected, [], 'replace_all', 'V1', repository=repo)
 
 
-def test_unverified_merged_amount_group_blocks_confirmation_without_writing():
+def test_unrelated_unverified_merged_amount_group_does_not_block_physical_fill():
     repo = Repo()
     repo.run['draft_json']['merged_amount_groups'] = [{
+        'source_id': 'OLD-WORKBOOK-SHEET',
+        'sheet_name': '历史装箱单',
+        'member_item_names': ['OTHER-ITEM'],
+        'unit_price_range': 'Z2:Z7',
+        'total_amount_range': 'AA2:AA7',
+        'control_total': 60400,
+        'computed_total': 59800,
+        'status': 'needs_allocation',
+    }]
+
+    preview = prepare(repo)
+
+    assert preview['merged_amount_blocking'] is False
+    assert preview['can_apply'] is True
+    assert not any(
+        isinstance(reason, dict) and reason.get('code') == 'MERGED_AMOUNT_ALLOCATION_REQUIRED'
+        for reason in preview['unresolved']
+    )
+    assert confirm(repo, preview)['ok'] is True
+    assert len(repo.writes) == 1
+
+
+def test_unverified_group_for_same_item_but_other_source_does_not_block_value_fill():
+    repo = Repo()
+    repo.run['candidates_json'] = [{
+        'proposal_id': 'VALUE',
+        'proposal_type': 'item_update',
+        'target_item_name': 'I1',
+        'default_selected': True,
+        'source_refs': [{'source_id': 'CURRENT-SHEET', 'sheet_name': '本次清单'}],
+        'payload': {'fields': {'shipment_value_rmb': '100'}},
+    }]
+    repo.run['draft_json']['merged_amount_groups'] = [{
+        'source_id': 'OLD-SHEET',
+        'sheet_name': '历史清单',
+        'member_item_names': ['I1'],
+        'status': 'needs_allocation',
+    }]
+
+    preview = prepare(repo)
+
+    assert preview['merged_amount_blocking'] is False
+    assert preview['can_apply'] is True
+
+
+def test_relevant_unverified_merged_amount_group_blocks_confirmation_without_writing():
+    repo = Repo()
+    repo.run['candidates_json'] = [{
+        'proposal_id': 'VALUE',
+        'proposal_type': 'item_update',
+        'target_item_name': 'I1',
+        'default_selected': True,
+        'source_refs': [{'source_id': 'PACKING-SHEET', 'sheet_name': '装箱单'}],
+        'payload': {'fields': {'shipment_value_rmb': '100'}},
+    }]
+    repo.run['draft_json']['merged_amount_groups'] = [{
+        'source_id': 'PACKING-SHEET',
         'sheet_name': '装箱单',
+        'member_item_names': ['I1'],
         'unit_price_range': 'Z2:Z7',
         'total_amount_range': 'AA2:AA7',
         'control_total': 60400,
@@ -159,6 +217,7 @@ def test_unverified_merged_amount_group_blocks_confirmation_without_writing():
 
     assert preview['merged_amount_blocking'] is True
     assert preview['can_apply'] is False
+    assert preview['blocking_merged_amount_groups'][0]['source_id'] == 'PACKING-SHEET'
     assert preview['unresolved'][0]['code'] == 'MERGED_AMOUNT_ALLOCATION_REQUIRED'
     with pytest.raises(ValueError, match='人工分摊'):
         confirm(repo, preview)

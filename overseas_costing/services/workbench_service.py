@@ -694,10 +694,11 @@ def get_batch_items_page(
         resolved_version,
         keyword=keyword,
     )
+    display_fieldnames = [column["fieldname"] for column in columns]
     fieldnames = list(
         dict.fromkeys(
             ["name", "row_no", "excel_row_no", "modified", "derived_json", "extra_json", "source_doc_no", "dingtalk_instance_id"]
-            + [column["fieldname"] for column in columns]
+            + batch_service._persistent_item_fieldnames(display_fieldnames)
         )
     )
     count_rows = frappe.get_all(
@@ -778,7 +779,10 @@ def locate_batch_item(
     if not resolved_version:
         return {"ok": False, "message": "当前批次没有版本。"}
 
-    fields = list(dict.fromkeys(["name", "row_no", "excel_row_no"] + batch_service.EXCEL_FIELDNAMES))
+    fields = list(dict.fromkeys(
+        ["name", "row_no", "excel_row_no"]
+        + batch_service._persistent_item_fieldnames(batch_service.EXCEL_FIELDNAMES)
+    ))
     items = frappe.get_all(
         "Overseas Cost Item",
         filters={"batch": batch_doc_name, "version": resolved_version, "is_excluded": 0},
