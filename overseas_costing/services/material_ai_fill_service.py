@@ -473,6 +473,9 @@ def _reconcile_source_progress(
                 status=status,
                 detail=str(old.get("detail") or ""),
                 error=str(old.get("error") or ""),
+                skip_reason_code=str(old.get("skip_reason_code") or ""),
+                skip_reason_text=str(old.get("skip_reason_text") or ""),
+                elapsed_ms=old.get("elapsed_ms") or 0,
             )
             progress[index]["sheet_options"] = deepcopy(old.get("sheet_options") or [])
             continue

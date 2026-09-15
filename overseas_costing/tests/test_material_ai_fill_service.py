@@ -3842,6 +3842,86 @@ def test_downloaded_excel_parent_expands_to_stable_sheet_sources() -> None:
     assert len({source["source_id"] for source in expanded}) == 2
 
 
+def test_reconcile_keeps_other_skipped_metadata_when_one_source_materializes() -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+
+    sources = [
+        {
+            "source_id": "MATERIALIZED:SHEET-A",
+            "parent_source_id": "ATTACHMENT-A",
+            "source_kind": "manual_attachment",
+            "evidence_kind": "sheet",
+            "source_label": "multi.xlsx",
+            "sheet_name": "Sheet A",
+            "selected": True,
+            "read_status": "NO_RESULT",
+        },
+        {
+            "source_id": "ATTACHMENT-B",
+            "source_kind": "manual_attachment",
+            "evidence_kind": "attachment",
+            "source_label": "broken.xlsx",
+            "selected": True,
+            "read_status": "NO_RESULT",
+        },
+    ]
+    previous = [
+        {"source_id": "ATTACHMENT-A", "read_status": "READ", "status": "COMPLETED"},
+        {
+            "source_id": "ATTACHMENT-B",
+            "read_status": "SKIPPED",
+            "status": "SKIPPED",
+            "detail": "资料文件已损坏。已跳过，继续读取下一资料。",
+            "skip_reason_code": "CORRUPT_DOCUMENT",
+            "skip_reason_text": "资料文件已损坏。",
+            "elapsed_ms": 15321,
+        },
+    ]
+    candidates = [{
+        "source_refs": [{"source_id": "MATERIALIZED:SHEET-A"}],
+    }]
+
+    progress = service._reconcile_source_progress(sources, previous, candidates)
+    by_id = {row["source_id"]: row for row in progress}
+
+    assert by_id["MATERIALIZED:SHEET-A"]["status"] == "COMPLETED"
+    assert by_id["ATTACHMENT-B"]["skip_reason_code"] == "CORRUPT_DOCUMENT"
+    assert by_id["ATTACHMENT-B"]["skip_reason_text"] == "资料文件已损坏。"
+    assert by_id["ATTACHMENT-B"]["elapsed_ms"] == 15321
+
+
+def test_reconcile_copies_skipped_parent_metadata_to_materialized_child() -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+
+    sources = [{
+        "source_id": "MATERIALIZED:SHEET-A",
+        "parent_source_id": "ATTACHMENT-A",
+        "source_kind": "manual_attachment",
+        "evidence_kind": "sheet",
+        "source_label": "broken.xlsx",
+        "sheet_name": "Sheet A",
+        "selected": True,
+        "read_status": "NO_RESULT",
+    }]
+    previous = [{
+        "source_id": "ATTACHMENT-A",
+        "read_status": "SKIPPED",
+        "status": "SKIPPED",
+        "detail": "资料文件已损坏。已跳过，继续读取下一资料。",
+        "skip_reason_code": "CORRUPT_DOCUMENT",
+        "skip_reason_text": "资料文件已损坏。",
+        "elapsed_ms": 15321,
+    }]
+
+    progress = service._reconcile_source_progress(sources, previous, [])
+
+    assert progress[0]["source_id"] == "MATERIALIZED:SHEET-A"
+    assert progress[0]["read_status"] == "SKIPPED"
+    assert progress[0]["skip_reason_code"] == "CORRUPT_DOCUMENT"
+    assert progress[0]["skip_reason_text"] == "资料文件已损坏。"
+    assert progress[0]["elapsed_ms"] == 15321
+
+
 def test_unmaterialized_excel_candidates_are_bound_to_sheet_source_ids() -> None:
     from overseas_costing.services import material_ai_fill_service as service
 
