@@ -1175,6 +1175,70 @@ def test_document_fee_parser_keeps_explicit_payable_money_total() -> None:
     assert [row["payload"]["amount"] for row in proposals] == ["10347"]
 
 
+def test_dhl_formula_comment_only_emits_the_payable_formula_result() -> None:
+    source = {"source_id": "COMMENT", "source_label": "DHL 报价评论"}
+    document = _fee_document(
+        "DOC-DHL",
+        "DHL报价：",
+        "运费=4075*(1+燃油附加费)*重量+155*(1+燃油附加费)*超过25kg的箱数",
+        "+附加费*重量*附加费25折+超过25kg搬运费*超重箱数",
+        "50.22*1.3975*42.05KG+155*1.3975*1+155*1=3322.784523元",
+        "每kg单价：79.01984596元（含超重费用1箱）",
+    )
+
+    proposals = build_document_fee_proposals(source, document, transport_mode="AIR")
+
+    assert [(row["payload"]["amount"], row["payload"]["currency"]) for row in proposals] == [
+        ("3322.784523", "RMB")
+    ]
+
+
+def test_fee_default_uses_workflow_priority_but_keeps_lower_freight_selectable() -> None:
+    payment = _fee_document("DOC-PAY", "应付运费 RMB 120")
+    payment["source_ref"].update(
+        workflow_stage="payment", workflow_rank=0,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    logistics = _fee_document("DOC-LOG", "国际运费 RMB 100")
+    logistics["source_ref"].update(
+        workflow_stage="international_logistics", workflow_rank=1,
+        evidence_kind="dedicated_attachment", evidence_rank=0,
+    )
+    proposals = [
+        _review_fee("PAY", "120", "international_air_freight", "DOC-PAY", 1),
+        _review_fee("LOG", "100", "international_air_freight", "DOC-LOG", 1),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [payment, logistics], transport_mode="AIR"
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert by_id["PAY"]["default_selected"] is True
+    assert by_id["PAY"]["workflow_stage"] == "payment"
+    assert by_id["LOG"]["default_selected"] is False
+    assert by_id["LOG"]["selection_role"] == "ambiguous"
+    decorated = {row["proposal_id"]: row for row in material_ai_fill_service.material_ai_fee_policy.decorate(normalized, [], {})}
+    assert decorated["PAY"]["can_apply"] is True
+    assert decorated["LOG"]["can_apply"] is True
+
+
+def test_product_purchase_cannot_default_other_fee() -> None:
+    document = _fee_document("DOC-PURCHASE", "清关费 RMB 100")
+    document["source_ref"].update(
+        workflow_stage="purchase", workflow_rank=2,
+        evidence_kind="approval_form", evidence_rank=1,
+    )
+    proposal = _review_fee("CUSTOMS", "100", "customs_clearance_fee", "DOC-PURCHASE", 1)
+
+    normalized = normalize_source_review_proposals([proposal], _items(), [document])
+    decorated = material_ai_fill_service.material_ai_fee_policy.decorate(normalized, [], {})
+
+    assert decorated[0]["default_selected"] is False
+    assert decorated[0]["can_apply"] is False
+    assert "商品采购" in decorated[0]["blocked_reason"]
+
+
 def test_document_fee_parser_extracts_explicit_freight_components_and_total() -> None:
     source = {"source_id": "COMMENT", "source_label": "评论 · 李仲华"}
     document = _fee_document(

@@ -805,6 +805,45 @@ def test_international_logistics_packing_attachment_precedes_approval_body():
     assert [source['source_id'] for source in sorted(sources, key=material_packing_source_priority)] == ['PACK', 'OA']
 
 
+def test_workflow_and_evidence_priority_are_server_classified():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([
+        {'source_id': 'PURCHASE', 'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '商品采购支出'},
+        {'source_id': 'LOGISTICS-ATTACHMENT', 'source_kind': 'approval_attachment',
+         'approval_role': 'international_logistics', 'source_field': '装箱单附件（Excel）'},
+        {'source_id': 'PAYMENT-COMMENT', 'source_kind': 'approval_comment',
+         'approval_role': 'logistics_expense', 'approval_title': '运营支出'},
+        {'source_id': 'PAYMENT-FORM', 'source_kind': 'approval_form',
+         'approval_role': 'logistics_expense', 'approval_title': '运营支出'},
+    ])
+
+    assert [row['source_id'] for row in ranked] == [
+        'PAYMENT-FORM', 'PAYMENT-COMMENT', 'LOGISTICS-ATTACHMENT', 'PURCHASE'
+    ]
+    assert [(row['workflow_stage'], row['workflow_rank']) for row in ranked] == [
+        ('payment', 0), ('payment', 0), ('international_logistics', 1), ('purchase', 2)
+    ]
+    assert ranked[0]['evidence_kind'] == 'approval_form'
+    assert ranked[1]['evidence_kind'] == 'comment'
+
+
+def test_transport_purchase_expense_is_payment_but_product_purchase_is_purchase():
+    from overseas_costing.services.source_priority_service import rank_material_packing_sources
+
+    ranked = rank_material_packing_sources([
+        {'source_id': 'PRODUCT', 'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '采购支出', 'form_fields': {'采购用途': '购买物流袋'}},
+        {'source_id': 'TRANSPORT', 'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '采购支出', 'form_fields': {'费用类型': '运输费'}},
+    ])
+
+    assert ranked[0]['source_id'] == 'TRANSPORT'
+    assert ranked[0]['workflow_stage'] == 'payment'
+    assert ranked[1]['workflow_stage'] == 'purchase'
+
+
 def test_actual_packing_match_precedes_workflow_packing_attachment_and_exposes_reason():
     from overseas_costing.services.source_priority_service import rank_material_packing_sources
 

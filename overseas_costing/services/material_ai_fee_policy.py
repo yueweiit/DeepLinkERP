@@ -25,13 +25,14 @@ def decorate(proposals, fees, context):
         if proposal.get('proposal_type') != 'fee_update':
             continue
         role = str(proposal.get('selection_role') or '')
-        reason = (
+        role_reason = (
             '该费用是已裁决运费总额的分项，仅供只读核对，不能单独应用。'
             if role == 'component'
             else '该费用是已裁决运费总额之外的备选报价，仅供只读参考。'
             if role == 'alternative'
             else blocked_reason(proposal.get('payload') or {}, fees, context)
         )
+        reason = str(proposal.get('source_policy_blocked') or '') or role_reason
         proposal.update(can_apply=not bool(reason), blocked_reason=reason)
         if reason:
             proposal['default_selected'] = False
@@ -42,11 +43,12 @@ def assert_allowed(proposals, fees, context):
     for proposal in proposals:
         if proposal.get('proposal_type') == 'fee_update':
             role = str(proposal.get('selection_role') or '')
-            reason = (
+            role_reason = (
                 '该费用仅供只读核对，不能单独应用。'
                 if role in {'component', 'alternative'}
                 else blocked_reason(proposal.get('payload') or {}, fees, context)
             )
+            reason = str(proposal.get('source_policy_blocked') or '') or role_reason
             if reason:
                 raise ValueError(reason)
 

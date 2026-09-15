@@ -34,6 +34,10 @@ def test_comment_source_preview_rechecks_hash_and_delegates_to_existing_preview(
         "remark": "MBA101283 1PCS，重量2.5kg",
     }
     monkeypatch.setattr(service, "_find_comment_source", lambda _batch, _source: comment)
+    monkeypatch.setattr(service, "_source_context", lambda _batch, _version=None: {
+        "valid": True, "version_name": "", "batch_modified": "", "version_modified": "",
+    })
+    monkeypatch.setattr(service, "_comment_resolutions", lambda _batch, _source: [])
     captured = {}
 
     def fake_preview(**kwargs):
@@ -49,7 +53,9 @@ def test_comment_source_preview_rechecks_hash_and_delegates_to_existing_preview(
     assert result["source_revision"]
     rows = json.loads(captured["sheet_rows_json"])
     assert rows[0]["material_code"] == "MBA101283"
-    assert rows[0]["gross_weight_kg"] == 2.5
+    assert "gross_weight_kg" not in rows[0]
+    assert result["comment_preview"]["gross_weight_kg"] == 2.5
+    assert result["comment_preview"]["weight_scope"] == "packing_group"
     assert captured["attachment_name"] is None
     assert rows[0]["source_attachment_id"] == f"DINGTALK-COMMENT:{'a' * 64}"
     assert rows[0]["source_file_name"] == "钉钉审批评论"

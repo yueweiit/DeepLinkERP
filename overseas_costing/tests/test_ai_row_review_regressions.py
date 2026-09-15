@@ -455,7 +455,9 @@ def test_forced_second_source_review_uses_latest_version_and_refreshed_purchase_
             enriched_fact = json.loads(enriched["items"][0]["extra_json"])["logistics_row"]["purchase_fact"]
             assert float(enriched_fact["unit_price"]) == 12
             assert float(proposal["payload"]["rows"][0]["_review_purchase_values"]["unit_price"]) == 12
-        run.update(status="READY", candidates_json=[proposal])
+        ready_draft=ai._load_json(run.get("draft_json"),{})
+        ready_draft["row_review_policy"]=selection.rows.POLICY
+        run.update(status="READY", candidates_json=[proposal], draft_json=ready_draft)
         catalog = selection.review_catalog(repo, batch["name"], run)
         selected_ids = [row["row_id"] for row in catalog["rows"] if row["origin"] == "source"]
         prepared = selection.prepare(batch["name"], run_id, selected_ids, [], "update_selected",

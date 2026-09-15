@@ -17,16 +17,34 @@ def test_comment_source_id_is_stable_and_sensitive_to_text() -> None:
 
 
 def test_parses_mould_shipping_comment_into_reviewable_packing_candidate() -> None:
-    result = parse_packing_comment("规格33*20*23，重量：42.05kg，1套模具+3个手机壳")
+    result = parse_packing_comment("规格33*20*23,重量：42.05kg\n1套模具+3个手机壳")
 
     assert result["is_candidate"] is True
     assert result["gross_weight_kg"] == 42.05
     assert result["dimensions_cm"] == [33.0, 20.0, 23.0]
     assert result["volume_m3"] == 0.01518
     assert result["rows"] == [
-        {"product_name": "模具", "actual_shipped_qty": 1.0, "unit": "套", "gross_weight_kg": 42.05, "volume_m3": 0.01518},
+        {"product_name": "模具", "actual_shipped_qty": 1.0, "unit": "套"},
         {"product_name": "手机壳", "actual_shipped_qty": 3.0, "unit": "个"},
     ]
+    assert result["weight_scope"] == "packing_group"
+    assert result["weight_basis"] == "inferred_unqualified_weight_as_gross"
+    assert result["package_count"] is None
+
+
+def test_full_dhl_comment_keeps_dimensions_and_weight_at_group_scope() -> None:
+    result = parse_packing_comment(
+        "DHL 单号1841361513\nETA 2026.7.27已到工厂\n发货明细：\n"
+        '"薇武士   MWV101144    IP17PRO  -TPU\n'
+        "规格33*20*23,重量：42.05kg\n1套模具+3个手机壳"
+    )
+
+    assert result["dimensions_cm"] == [33.0, 20.0, 23.0]
+    assert result["volume_m3"] == 0.01518
+    assert result["gross_weight_kg"] == 42.05
+    assert "MWV101144" in result["material_code_hints"]
+    assert result["package_count"] is None
+    assert all("gross_weight_kg" not in row and "volume_m3" not in row for row in result["rows"])
 
 
 def test_parses_material_quantity_and_aggregate_bag_comment() -> None:

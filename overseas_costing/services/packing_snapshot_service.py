@@ -847,6 +847,8 @@ def _list_approval_body_ai_sources(batch_name: str, *, detail: dict | None = Non
             "source_label": f"{title}正文",
             "process_instance_id": instance_id,
             "approval_role": role,
+            "approval_title": title,
+            "process_code": str(approval.get("process_code") or approval.get("process_code_name") or ""),
             "excluded": bool(approval.get("excluded")),
             "exclude_reason": str(
                 approval.get("exclusion_reason")
@@ -1004,6 +1006,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             "process_instance_id": str(source.get("process_instance_id") or ""),
             "file_id": str(source.get("file_id") or ""),
             "approval_role": str(source.get("approval_role") or ""),
+            "approval_title": str(source.get("approval_title") or source.get("process_title") or ""),
+            "process_code": str(source.get("process_code") or ""),
             "approval_no": str(source.get("approval_no") or source.get("business_id") or ""),
             "actor_name": str(
                 source.get("actor_name")
@@ -1105,6 +1109,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
         owning = approval_body_by_instance.get(str(source.get("process_instance_id") or "")) or {}
         packing_fields = {key: value for key, value in (owning.get("form_fields") or {}).items() if "装箱单附件" in key}
         source = {**source, "approval_role": owning.get("approval_role") or source.get("approval_role"),
+                  "approval_title": owning.get("approval_title") or source.get("approval_title"),
+                  "process_code": owning.get("process_code") or source.get("process_code"),
                   "dedicated_packing": bool(packing_fields and str(source.get("file_name") or source.get("source_label") or "--") in _json(packing_fields))}
         # The approval/file identity remains an original source even when its
         # local cache was created under an older batch version.  Append it from
@@ -1175,6 +1181,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             ),
             "source_id": row.get("name"),
             "approval_role": owning_approval.get("approval_role") or "",
+            "approval_title": owning_approval.get("approval_title") or "",
+            "process_code": owning_approval.get("process_code") or "",
             "dedicated_packing": bool(packing_fields and file_name in _json(packing_fields)),
             "source_label": file_name or row.get("name"),
             "file_name": file_name,

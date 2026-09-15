@@ -104,6 +104,34 @@ def test_comment_reads_server_manifest_without_reloading_approval(monkeypatch):
     _, document = service._read_source([], {"source_kind": "approval_comment", "comment_text": "走大墨仓"})
     assert document["text"] == "走大墨仓"
 
+
+def test_read_packing_comment_exposes_group_candidate_without_row_weight():
+    from overseas_costing.services import material_ai_fill_service as service
+    items = [
+        {"name": "I1", "stable_line_key": "L1", "material_code": "MWV101144", "product_name": "薇武士", "unit": "件"},
+        {"name": "I2", "stable_line_key": "L2", "material_code": "MOLD-1", "product_name": "模具", "unit": "套"},
+        {"name": "I3", "stable_line_key": "L3", "material_code": "CASE-1", "product_name": "手机壳", "unit": "个"},
+    ]
+    comment = (
+        "DHL 单号1841361513\nETA 2026.7.27已到工厂\n发货明细：\n"
+        "薇武士 MWV101144 IP17PRO -TPU\n规格33*20*23,重量：42.05kg\n"
+        "1套模具+3个手机壳"
+    )
+
+    candidates, document = service._read_source(
+        items,
+        {"source_kind": "approval_comment", "source_id": "COMMENT", "source_hash": "HASH", "comment_text": comment},
+    )
+
+    assert candidates == []
+    group = document["packing_group_candidates"][0]
+    assert group["gross_weight_kg"] == "42.05"
+    assert group["volume_m3"] == "0.01518"
+    assert group["package_count"] is None
+    assert group["member_keys"] == ["L1", "L2", "L3"]
+    assert group["default_selected"] is True
+    assert group["weight_basis"] == "inferred_unqualified_weight_as_gross"
+
 def test_worker_previews_eight_rows_and_final_freight_without_business_write(monkeypatch):
     from overseas_costing.services import material_ai_fill_service as service
     from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepository

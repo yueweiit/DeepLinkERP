@@ -11153,9 +11153,11 @@ class OverseasCostWorkbench {
       });
       dialog.$wrapper
         .off("change.ocwAIReview input.ocwAIReview")
-        .on("change.ocwAIReview", "[data-mf-ai-row-select],[data-mf-ai-fee-select],[data-mf-ai-row-mode]", (event) => {
+        .on("change.ocwAIReview", "[data-mf-ai-row-select],[data-mf-ai-fee-select],[data-mf-ai-field-select],[data-mf-ai-packing-group-select],[data-mf-ai-row-mode]", (event) => {
           const $input = $(event.currentTarget);
           if ($input.attr("data-mf-ai-row-mode") !== undefined) this.changeMaterialAIRowSelection("mode", $input.val());
+          else if ($input.attr("data-mf-ai-field-select") !== undefined) this.changeMaterialAIRowSelection("fields", $input.attr("data-mf-ai-field-select"), $input.val());
+          else if ($input.attr("data-mf-ai-packing-group-select") !== undefined) this.changeMaterialAIRowSelection("packingGroups", $input.attr("data-mf-ai-packing-group-select"), $input.prop("checked"));
           else this.changeMaterialAIRowSelection($input.attr("data-mf-ai-row-select") !== undefined ? "rows" : "fees", $input.attr("data-mf-ai-row-select") ?? $input.attr("data-mf-ai-fee-select"), $input.prop("checked"));
         })
         .on("change.ocwAIReview", "[data-mf-ai-proposal-select]", (event) => {
@@ -11361,20 +11363,37 @@ class OverseasCostWorkbench {
 
   ensureMaterialAIRowSelection(fill) {
     const feePolicy = this.materialAIReviewFeePolicy(fill);
+    const fieldCandidates = Array.isArray(fill.row_review.field_candidates) ? fill.row_review.field_candidates : [];
+    const packingCandidates = Array.isArray(fill.draft?.packing_group_candidates) ? fill.draft.packing_group_candidates : [];
+    const packingAllowed = candidate => candidate.can_apply || (candidate.evidence || []).some(row => String(row.kind || "") === "xlsx_merge");
     if (!fill.rowSelection) fill.rowSelection = {
       mode: "update_selected",
-      rows: new Set((fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
+      rows: new Set(fieldCandidates.length ? [] : (fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
+      fields: new Map(fieldCandidates.filter(candidate => candidate.can_apply && candidate.default_selected)
+        .map(candidate => [`${candidate.item_name}:${candidate.fieldname}`, String(candidate.candidate_id)])),
+      packingGroups: new Set(packingCandidates.filter(candidate => packingAllowed(candidate)
+        && (candidate.default_selected || (candidate.evidence || []).some(row => String(row.kind || "") === "xlsx_merge")))
+        .map(candidate => String(candidate.candidate_id))),
       fees: new Set(feePolicy.mainFees.filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
       request: 0, loading: false, preview: null, error: "", timer: null,
     };
-    else fill.rowSelection.fees.forEach(id => { if (!feePolicy.selectableIds.has(String(id))) fill.rowSelection.fees.delete(id); });
+    else {
+      if (!(fill.rowSelection.fields instanceof Map)) fill.rowSelection.fields = new Map();
+      if (!(fill.rowSelection.packingGroups instanceof Set)) fill.rowSelection.packingGroups = new Set();
+      fill.rowSelection.fees.forEach(id => { if (!feePolicy.selectableIds.has(String(id))) fill.rowSelection.fees.delete(id); });
+      const validFieldIds = new Set(fieldCandidates.filter(candidate => candidate.can_apply).map(candidate => String(candidate.candidate_id)));
+      fill.rowSelection.fields.forEach((candidateId, key) => { if (!validFieldIds.has(String(candidateId))) fill.rowSelection.fields.delete(key); });
+      const validPackingIds = new Set(packingCandidates.filter(packingAllowed).map(candidate => String(candidate.candidate_id)));
+      fill.rowSelection.packingGroups.forEach(id => { if (!validPackingIds.has(String(id))) fill.rowSelection.packingGroups.delete(id); });
+    }
     return fill.rowSelection;
   }
 
   materialAIRowSelectionKey(fill) {
     const selection = this.ensureMaterialAIRowSelection(fill);
     return JSON.stringify([this.detailState.batchName, this.detailState.versionName, fill.runId || fill.run_id,
-      fill.row_review.fingerprint, selection.mode, [...selection.rows].sort(), [...selection.fees].sort()]);
+      fill.row_review.fingerprint, selection.mode, [...selection.rows].sort(), [...selection.fields.entries()].sort(),
+      [...selection.packingGroups].sort(), [...selection.fees].sort()]);
   }
 
   changeMaterialAIRowSelection(kind, id, checked) {
@@ -11391,7 +11410,28 @@ class OverseasCostWorkbench {
         const allowed = id === "update_selected" ? row?.can_update : id === "add_selected" ? row?.can_add : row?.can_fill;
         if (!row || !allowed) selection.rows.delete(rowId);
       });
-      if (id === "add_selected") selection.fees.clear();
+      if (id === "add_selected") { selection.fees.clear(); selection.fields.clear(); selection.packingGroups.clear(); }
+      else if (!(selection.fields.size) && (fill.row_review.field_candidates || []).length) {
+        (fill.row_review.field_candidates || []).filter(candidate => candidate.can_apply && candidate.default_selected)
+          .forEach(candidate => selection.fields.set(`${candidate.item_name}:${candidate.fieldname}`, String(candidate.candidate_id)));
+      }
+      if (id !== "add_selected" && !selection.packingGroups.size) {
+        (fill.draft?.packing_group_candidates || []).filter(candidate =>
+          (candidate.can_apply && candidate.default_selected)
+          || (candidate.evidence || []).some(row => String(row.kind || "") === "xlsx_merge"))
+          .forEach(candidate => selection.packingGroups.add(String(candidate.candidate_id)));
+      }
+    } else if (kind === "fields") {
+      const candidate = (fill.row_review.field_candidates || []).find(row => String(row.candidate_id) === String(checked));
+      if (!checked) selection.fields.delete(String(id));
+      else if (candidate?.can_apply && `${candidate.item_name}:${candidate.fieldname}` === String(id)) {
+        selection.fields.set(String(id), String(candidate.candidate_id));
+      }
+    } else if (kind === "packingGroups") {
+      const candidate = (fill.draft?.packing_group_candidates || []).find(row => String(row.candidate_id) === String(id));
+      const allowed = candidate?.can_apply || (candidate?.evidence || []).some(row => String(row.kind || "") === "xlsx_merge");
+      if (checked && allowed && selection.mode !== "add_selected") selection.packingGroups.add(String(id));
+      else selection.packingGroups.delete(String(id));
     } else {
       const items = kind === "rows" ? rows : feePolicy.fees;
       for (const item of items) {
@@ -11450,6 +11490,8 @@ class OverseasCostWorkbench {
       const result = await this.call("overseas_costing.api.materials.preview_source_ai_selection", {
         batch_name: state.batchName, run_id: fill.runId || fill.run_id,
         row_ids_json: JSON.stringify([...selection.rows]), fee_ids_json: JSON.stringify([...selection.fees]),
+        ...((fill.row_review.field_candidates || []).length ? { field_choices_json: JSON.stringify(Object.fromEntries(selection.fields)) } : {}),
+        ...((fill.draft?.packing_group_candidates || []).length ? { packing_group_ids_json: JSON.stringify([...selection.packingGroups]) } : {}),
         mode: selection.mode, expected_version: this.detailState.versionName || null,
       }, false);
       if (!current()) return;
@@ -11489,9 +11531,28 @@ class OverseasCostWorkbench {
     const notices = [...(preview?.unresolved || []), ...(Array.isArray(missing) ? missing : [])];
     const mergedAmountGroups = preview?.merged_amount_groups || fill.draft?.merged_amount_groups || [];
     const mergedAmountSummary = mergedAmountGroups.length ? `<section class="ocw-mf-ai-preview-section"><h4>合并金额校验</h4><ul>${mergedAmountGroups.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · 第 ${this.escape(group.source_range?.start_row ?? group.source_row ?? "--")}-${this.escape(group.source_range?.end_row ?? group.source_row ?? "--")} 行 · 组总额 ${this.escape(group.control_total_rmb ?? "--")} · 独立行合计 ${this.escape(group.computed_total_rmb ?? "--")} · ${group.status === "verified" ? "已校验" : "待人工分摊"}</li>`).join("")}</ul></section>` : "";
-    const packingGroupCandidates = preview?.packing_group_candidates || fill.draft?.packing_group_candidates || [];
-    const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>仅 Excel 真实合并范围会随本次资料确认建立；已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · ${Number(group.member_keys?.length || 0)} 行 · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³</li>`).join("")}</ul></section>` : "";
+    const packingGroupCandidates = fill.draft?.packing_group_candidates || preview?.packing_group_candidates || [];
+    const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>默认仅采用 Excel 真实合并范围或服务端唯一匹配的评论组；可在确认前单独取消。已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => { const allowed = group.can_apply || (group.evidence || []).some(row => String(row.kind || "") === "xlsx_merge"); return `<li><label><input type="checkbox" data-mf-ai-packing-group-select="${this.escape(group.candidate_id)}" ${selection.packingGroups.has(String(group.candidate_id)) ? "checked" : ""} ${!allowed || busy ? "disabled" : ""}> ${this.escape(group.source_label || group.sheet_name || group.source_id || "装箱单")}</label> · ${Number(group.member_keys?.length || 0)} 行 · 成员 ${this.escape((group.member_labels || group.member_keys || []).join("、") || "待选择")} · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³${group.weight_basis === "inferred_unqualified_weight_as_gross" ? " · 未注明口径，按组毛重候选" : ""}<small>${this.escape(group.resolution_reason || "")}</small></li>`; }).join("")}</ul></section>` : "";
     const fieldLabels = Object.fromEntries(columns);
+    const workflowLabels = { payment: "支付申请", international_logistics: "国际物流审批", purchase: "商品采购支出", other: "其他来源" };
+    const evidenceLabels = { dedicated_attachment: "专用附件", approval_form: "审批正文", attachment: "其他相关附件", comment: "评论", other: "其他证据" };
+    const fieldCandidates = Array.isArray(catalog.field_candidates) ? catalog.field_candidates : [];
+    const fieldGroups = new Map();
+    fieldCandidates.forEach(candidate => {
+      const key = `${candidate.item_name}:${candidate.fieldname}`;
+      if (!fieldGroups.has(key)) fieldGroups.set(key, []);
+      fieldGroups.get(key).push(candidate);
+    });
+    const fieldChoiceRows = [...fieldGroups.entries()].map(([key, candidates]) => {
+      const selectedId = selection.fields.get(key) || "";
+      const selected = candidates.find(candidate => String(candidate.candidate_id) === String(selectedId));
+      const options = [`<option value="">不采用 / 待选择</option>`, ...candidates.filter(candidate => candidate.can_apply).map(candidate =>
+        `<option value="${this.escape(candidate.candidate_id)}" ${String(candidate.candidate_id) === String(selectedId) ? "selected" : ""}>${value(candidate.suggested_value)} · ${this.escape(candidate.source_label || "未命名来源")}</option>`)].join("");
+      const item = (catalog.rows || []).find(row => row.origin === "current" && String(row.target_item_name || row.values?.name || "") === String(candidates[0]?.item_name || ""));
+      const source = selected ? `${workflowLabels[selected.workflow_stage] || selected.workflow_stage || "其他来源"} · ${evidenceLabels[selected.evidence_kind] || selected.evidence_kind || "其他证据"} · ${selected.source_label || ""}` : "同级冲突，请选择";
+      return `<tr><td>${value(item?.values?.material_code || item?.values?.product_name || candidates[0]?.item_name)}</td><td>${value(fieldLabels[candidates[0]?.fieldname] || candidates[0]?.fieldname)}</td><td><select data-mf-ai-field-select="${this.escape(key)}" ${busy}>${options}</select></td><td>${this.escape(source)}<small>${this.escape(selected?.resolution_reason || candidates[0]?.resolution_reason || "")}</small></td><td>${candidates.length} 个候选</td></tr>`;
+    }).join("");
+    const fieldChoiceSection = fieldCandidates.length ? `<section class="ocw-mf-ai-preview-section" data-mf-ai-field-candidates><h4>逐字段默认值 <span>已选 ${selection.fields.size} / ${fieldGroups.size}</span></h4><p>优先级只决定默认值；每个字段都可单独改选低优先级的合法候选。</p><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>物料</th><th>字段</th><th>采用值</th><th>流程来源 / 证据</th><th>候选数</th></tr></thead><tbody>${fieldChoiceRows}</tbody></table></div></section>` : "";
     const renderCandidateRows = rows => rows.map(row => {
       const allowed = selection.mode === "update_selected" ? row.can_update : selection.mode === "add_selected" ? row.can_add : row.can_fill;
       const origin = row.origin === "current" ? "当前已有" : row.action === "add_candidate" ? "待新增" : "本次识别";
@@ -11551,14 +11612,13 @@ class OverseasCostWorkbench {
       const reason = fee.blocked_reason || (feeRole(fee) === "ambiguous" && feePolicy.hasResolvedTotal ? "已有裁决总额，该歧义候选不可采用。" : "该记录角色不可采用，仅供参考。");
       return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(reason)}</td></tr>`;
     }).join("")}</tbody></table></div></section>` : "";
-    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>逐行选择物料，费用单独选择；最终明细由服务器预览。</span></div></header>
+    return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>物料逐字段选择，费用单独选择；最终明细由服务器预览。</span></div></header>
       <main class="ocw-mf-ai-dialog-body"><section class="ocw-mf-ai-row-controls"><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="update_selected" ${selection.mode === "update_selected" ? "selected" : ""}>更新所选行（默认）</option><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option>${hasAddCandidates ? `<option value="add_selected" ${selection.mode === "add_selected" ? "selected" : ""}>单独确认新增</option>` : ""}</select></label><p>${selection.mode === "update_selected" ? "只更新所选候选对应的现有物料行；其他行完全保留。未匹配的新物料需单独确认新增。" : selection.mode === "add_selected" ? "仅新增明确勾选的未匹配物料；本次不同时更新现有行或费用，确认前请再次核对行数。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。匹配不唯一的行需核对。"}</p></section>
-      <section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>
-      ${groupedTables || renderCandidateTable([])}</section>
+      ${fieldChoiceSection}${fieldCandidates.length && selection.mode !== "add_selected" ? "" : `<section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>${groupedTables || renderCandidateTable([])}</section>`}
       <section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${mainFees.length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${mainFees.map(renderMainFee).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>
       ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
-      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${otherFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
+      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${fieldCandidates.length ? groupedTables : ""}${otherFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
   }
 

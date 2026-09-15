@@ -202,7 +202,8 @@ def project_packing_groups(items, groups, *, strict=True):
             # A group-level carton count is counted once. Weight and volume are
             # allocated for downstream per-row cost splits, while the UI/export
             # still renders the authoritative group totals once via rowspan.
-            target['package_count'] = _text(_decimal(group.get('package_count')) or Decimal('0')) if position == 0 else '0'
+            if group.get('package_count') not in (None, ''):
+                target['package_count'] = _text(_decimal(group.get('package_count')) or Decimal('0')) if position == 0 else '0'
             target['packaging_type'] = str(group.get('packaging_type') or '')
             target['packing_group_id'] = group['group_id']
             target['packing_group_position'] = position
@@ -435,7 +436,7 @@ def mark_member_changed(frappe, version_name, stable_line_key, action):
 
 
 def adopt_xlsx_group_candidates(items, existing_groups, candidates, preview_id, *, actor='', confirmed_member_keys=None):
-    """Adopt only complete real-merge candidates; never overwrite a saved group."""
+    """Adopt server-proven Excel merges or uniquely matched comment groups."""
     groups = [deepcopy(group) for group in existing_groups or []]
     # A removed group is an explicit user decision and acts as a tombstone for
     # automatic source re-adoption. Users can still create a new manual group.
@@ -445,18 +446,27 @@ def adopt_xlsx_group_candidates(items, existing_groups, candidates, preview_id, 
     for candidate in candidates or []:
         members = [str(key) for key in candidate.get('member_keys') or []]
         evidence = candidate.get('evidence') or []
+        xlsx_merge = any(str(row.get('kind') or '') == 'xlsx_merge' for row in evidence)
+        trusted_comment = (
+            candidate.get('creation_method') == 'trusted_comment_text'
+            and candidate.get('can_apply') and candidate.get('default_selected')
+            and any(str(row.get('kind') or '') == 'trusted_comment_text' for row in evidence)
+        )
         if (len(members) < 2 or occupied.intersection(members)
                 or (confirmed is not None and not set(members).issubset(confirmed))
-                or not any(str(row.get('kind') or '') == 'xlsx_merge' for row in evidence)):
+                or not (xlsx_merge or trusted_comment)):
             continue
         values = {field:candidate.get(field) for field in (*GROUP_FIELDS, 'packaging_type')}
         try:
             prepared = build_group_preview(items, groups, members, action='create',
                 version='', values=values, source_fingerprint=candidate.get('source_fingerprint') or '',
-                creation_method='xlsx_merge', reason='采用 Excel 真实合并范围')
+                creation_method='trusted_comment_text' if trusted_comment else 'xlsx_merge',
+                reason='采用评论中唯一匹配的整票装箱组' if trusted_comment else '采用 Excel 真实合并范围')
         except ValueError:
             continue
         group = prepared['group']
+        if trusted_comment and candidate.get('package_count') in (None, ''):
+            group['package_count'] = None
         group.update(group_id=str(candidate.get('candidate_id') or group['group_id']), status='confirmed',
                      confirmed_by=str(actor or 'source-confirmation'), confirmed_at=datetime.now().isoformat(timespec='seconds'),
                      last_preview_id=preview_id, source_id=candidate.get('source_id'),

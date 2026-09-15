@@ -351,12 +351,21 @@ def apply_source_ai_review(
 
 
 @frappe.whitelist(methods=['POST'])
-def preview_source_ai_selection(batch_name,run_id,row_ids_json,fee_ids_json,mode,expected_version):
+def preview_source_ai_selection(batch_name,run_id,row_ids_json,fee_ids_json,mode,expected_version,
+                                field_choices_json=None,packing_group_ids_json=None):
     batch_name=require_batch_permission(batch_name,'write')
     from overseas_costing.services.material_ai_selection_service import prepare
     try:
-        return prepare(batch_name,str(run_id),_ai_review_payload(row_ids_json,list,'物料选择'),
+        args=(batch_name,str(run_id),_ai_review_payload(row_ids_json,list,'物料选择'),
             _ai_review_payload(fee_ids_json,list,'费用选择'),str(mode),str(expected_version))
+        if field_choices_json is None and packing_group_ids_json is None:
+            return prepare(*args)
+        kwargs={}
+        if field_choices_json is not None:
+            kwargs['field_choices']=_ai_review_payload(field_choices_json,dict,'逐字段选择')
+        if packing_group_ids_json is not None:
+            kwargs['packing_group_ids']=_ai_review_payload(packing_group_ids_json,list,'装箱组选择')
+        return prepare(*args,**kwargs)
     except ValueError as error:
         frappe.db.rollback()
         return {'ok':False,'code':'REVIEW_REQUIRED','message':str(error)}

@@ -11,7 +11,7 @@ from .logistics_settlement.model import digest
 from .material_value_semantics import is_effectively_missing
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-row-review-4'
+POLICY = 'ai-field-review-1'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
 FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')
@@ -91,8 +91,8 @@ def _apply_valuation_values(values, valuation):
 
 
 def _source_groups(catalog_rows, sources):
-    from .source_priority_service import material_packing_source_priority
-    ordered=sorted((deepcopy(source) for source in sources or []),key=material_packing_source_priority)
+    from .source_priority_service import rank_material_packing_sources
+    ordered=rank_material_packing_sources(sources or [])
     groups=[];by_key={};aliases={}
     for source in ordered:
         source_id=str(source.get('source_id') or '')
@@ -104,6 +104,10 @@ def _source_groups(catalog_rows, sources):
                    'source_kind':str(source.get('source_kind') or ''),'source_updated_at':str(source.get('source_updated_at') or source.get('occurred_at') or ''),
                    'priority':int(source.get('priority') or len(groups)+1),
                    'priority_reason':str(source.get('priority_reason') or ''),
+                   'workflow_stage':str(source.get('workflow_stage') or 'other'),
+                   'workflow_rank':int(source.get('workflow_rank') if source.get('workflow_rank') is not None else 3),
+                   'evidence_kind':str(source.get('evidence_kind') or 'other'),
+                   'evidence_rank':int(source.get('evidence_rank') if source.get('evidence_rank') is not None else 4),
                    'actual_packing_match_status':str(source.get('actual_packing_match_status') or 'none'),
                    'actual_packing_match_id':str(source.get('actual_packing_match_id') or ''),
                    'actual_packing_match_revision':str(source.get('actual_packing_match_revision') or ''),
@@ -124,54 +128,103 @@ def _source_groups(catalog_rows, sources):
             if group and group not in matched:matched.append(group)
         group=min(matched,key=lambda value:value['priority']) if matched else None
         if group:
-            row.update(source_group_id=group['group_id'],source_priority=group['priority'],source_label=group['source_label'])
+            row.update(source_group_id=group['group_id'],source_priority=group['priority'],source_label=group['source_label'],
+                       workflow_stage=group['workflow_stage'],workflow_rank=group['workflow_rank'],
+                       evidence_kind=group['evidence_kind'],evidence_rank=group['evidence_rank'],
+                       priority_reason=group['priority_reason'])
             group['row_ids'].append(row['row_id'])
         else:
-            row.update(source_group_id='',source_priority=len(groups)+1,source_label='其他识别结果')
+            row.update(source_group_id='',source_priority=len(groups)+1,source_label='其他识别结果',
+                       workflow_stage='other',workflow_rank=3,evidence_kind='other',evidence_rank=4,
+                       priority_reason='来源未分类，不作为高优先级默认值。')
         row['conflict_fields']=[]
     targets={str(row.get('target_item_name') or '') for row in catalog_rows if row.get('can_update')}
     for target in targets:
-        seen=set();highest=None
+        seen=set()
         candidates=sorted((row for row in catalog_rows if row.get('can_update') and str(row.get('target_item_name') or '')==target),
                           key=lambda row:(int(row.get('source_priority') or 999999),str(row.get('row_id') or '')))
-        eligible=[]
         for row in candidates:
             present={field for field in row.get('fields') or [] if not missing(row.get('values') or {},field)}
             overlap=sorted(present & seen)
             row['meaningful_field_count']=len(present)
             row['conflict_fields']=overlap
-            row['lower_priority']=highest is not None and int(row.get('source_priority') or 999999)>highest
+            row['lower_priority']=bool(seen) and bool(overlap)
             if overlap:
                 group=next((value for value in groups if value['group_id']==row.get('source_group_id')),None)
                 if group:group['has_conflicts']=True
-            if row.get('default_update_selected'):
-                if present:eligible.append(row)
-                seen.update(present)
-                if highest is None:highest=int(row.get('source_priority') or 999999)
+            seen.update(present)
             row['default_update_selected']=False
-        if not eligible:continue
-        winner=min(eligible,key=lambda row:(-int(row['meaningful_field_count']),
-            int(row.get('source_priority') or 999999),str(row.get('row_id') or '')))
-        winner['default_update_selected']=True
-        count=int(winner['meaningful_field_count'])
-        equally_complete=[row for row in eligible if int(row['meaningful_field_count'])==count]
-        same_priority=[row for row in equally_complete
-                       if int(row.get('source_priority') or 999999)==int(winner.get('source_priority') or 999999)]
-        if len(same_priority)>1:
-            winner['default_selection_reason']=f'有效字段 {count} 项；完整度和来源优先级并列，按稳定行标识默认选择。'
-        elif len(equally_complete)>1:
-            winner['default_selection_reason']=f'有效字段 {count} 项；完整度并列，按来源优先级默认选择。'
-        else:
-            winner['default_selection_reason']=f'有效字段 {count} 项，为同物料候选中最完整，已默认选择。'
-        for row in eligible:
-            if row is winner:continue
-            if int(row['meaningful_field_count'])<count:
-                row['default_selection_reason']='同物料存在更完整的候选，未默认选择。'
-            elif int(row.get('source_priority') or 999999)>int(winner.get('source_priority') or 999999):
-                row['default_selection_reason']='完整度并列，来源优先级较低，未默认选择。'
-            else:
-                row['default_selection_reason']='完整度和来源优先级并列，按稳定行标识未默认选择。'
     return groups
+
+
+def _field_candidates(catalog_rows):
+    """Resolve defaults per field while leaving every server-validated option selectable."""
+
+    result=[]
+    rows_by_id={str(row.get('row_id') or ''):row for row in catalog_rows}
+    for row in catalog_rows:
+        if row.get('origin')!='source' or not row.get('can_update'):
+            continue
+        confidence=float(row.get('confidence') or 0)
+        for fieldname in row.get('fields') or []:
+            value=(row.get('values') or {}).get(fieldname)
+            if missing(row.get('values') or {},fieldname):
+                continue
+            candidate_id=digest(POLICY,'field-candidate',row.get('row_id'),row.get('target_item_name'),fieldname)
+            can_apply=bool(row.get('candidate_can_apply'))
+            result.append({
+                'candidate_id':candidate_id,'item_name':row.get('target_item_name'),'fieldname':fieldname,
+                'suggested_value':deepcopy(value),'row_id':row.get('row_id'),'source_group_id':row.get('source_group_id'),
+                'source_label':row.get('source_label'),'source_refs':deepcopy(row.get('source_refs') or []),
+                'workflow_stage':row.get('workflow_stage') or 'other','workflow_rank':int(row.get('workflow_rank') or 0),
+                'evidence_kind':row.get('evidence_kind') or 'other','evidence_rank':int(row.get('evidence_rank') or 0),
+                'priority_reason':row.get('priority_reason') or '','confidence':confidence,
+                'default_eligible':fieldname not in set(row.get('existing_value_conflict_fields') or []),
+                'can_apply':can_apply,'default_selected':False,'resolution_reason':(
+                    '服务端已校验，可手工改选。' if can_apply else '证据置信度不足，仅供核对。'),
+            })
+    grouped={}
+    for candidate in result:
+        grouped.setdefault((candidate['item_name'],candidate['fieldname']),[]).append(candidate)
+    for candidates in grouped.values():
+        eligible=[candidate for candidate in candidates if candidate['can_apply'] and candidate['default_eligible'] and candidate['confidence']>=0.9]
+        if not eligible:
+            continue
+        best_rank=min((candidate['workflow_rank'],candidate['evidence_rank']) for candidate in eligible)
+        best=[candidate for candidate in eligible if (candidate['workflow_rank'],candidate['evidence_rank'])==best_rank]
+        distinct={_canonical_field_candidate(candidate['fieldname'],candidate['suggested_value']) for candidate in best}
+        if len(distinct)>1:
+            for candidate in best:
+                candidate['resolution_reason']='同级来源存在冲突，服务端不武断选值，请人工选择。'
+            continue
+        winner=min(best,key=lambda candidate:(-candidate['confidence'],candidate['candidate_id']))
+        winner['default_selected']=True
+        winner['resolution_reason']=(
+            f"{winner['priority_reason'] or '按流程和证据优先级'} 本字段已默认选择。"
+        )
+        for candidate in candidates:
+            if candidate is winner or candidate in best:
+                continue
+            candidate['resolution_reason']='优先级较低，保留为本字段可改选候选。'
+    defaults={candidate['row_id'] for candidate in result if candidate['default_selected']}
+    for row_id,row in rows_by_id.items():
+        if row.get('origin')!='source':
+            continue
+        count=sum(1 for candidate in result if candidate['row_id']==row_id and candidate['default_selected'])
+        row['default_update_selected']=row_id in defaults
+        row['default_selected']=bool(row.get('can_fill') and row_id in defaults)
+        row['default_selection_reason']=(
+            f'逐字段裁决后，本来源提供 {count} 个已默认选择字段。'
+            if count else '本来源未提供默认字段，但合法候选仍可逐字段改选。'
+        )
+    return result
+
+
+def _canonical_field_candidate(fieldname,value):
+    if fieldname in PHYSICAL or fieldname in {'actual_shipped_qty','unit_price','shipment_value_rmb'}:
+        try:return format(Decimal(str(value)).normalize(),'f')
+        except (InvalidOperation,TypeError,ValueError):pass
+    return str(value or '').strip().casefold()
 
 
 def catalog(items, proposals, fees, context, *, run_id, sources=None):
@@ -228,6 +281,9 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                      'meaningful_field_count':sum(not missing(values,field) for field in fill_fields),
                      'default_selection_reason':'',
                      'blocked_reason':reason,'source_refs':deepcopy(proposal.get('source_refs') or []),
+                     'confidence':float(proposal.get('confidence') if proposal.get('confidence') is not None else (1 if proposal.get('default_selected') else 0)),
+                     'existing_value_conflict_fields':deepcopy(proposal.get('existing_value_conflict_fields') or []),
+                     'candidate_can_apply':bool(valid and len(matches)==1 and target and not proposal.get('blocked')),
                      'proposal_id':proposal.get('proposal_id'),'proposal_type':proposal.get('proposal_type'),'fields':fill_fields})
         if price_metadata is not None:
             rows[-1]['_price_metadata']=deepcopy(price_metadata)
@@ -280,12 +336,14 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
     for item in items:
         add(deepcopy(item),{'proposal_id':'current:'+item['name']},origin='current',target=item['name'],stable=item['name'],fields=[])
     source_groups=_source_groups(rows,sources)
+    field_candidates=_field_candidates(rows)
     fee_rows=[p for p in material_ai_fee_policy.decorate(proposals,fees,context) if p.get('proposal_type')=='fee_update']
     return {'policy':POLICY,'rows':rows,'fees':fee_rows,'source_groups':source_groups,
-            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups)}
+            'field_candidates':field_candidates,
+            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups,field_candidates)}
 
 
-def project(items, catalog, row_ids, fee_ids, mode):
+def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
     if mode not in ('fill_missing','update_selected','add_selected','replace_all'):raise ValueError('请选择补充空缺、更新所选行、单独新增或替换整票。')
     if not isinstance(row_ids,list) or not isinstance(fee_ids,list):raise ValueError('请选择有效的物料行和费用。')
     if any(not isinstance(i,str) for i in row_ids+fee_ids) or len(row_ids)!=len(set(row_ids)) or len(fee_ids)!=len(set(fee_ids)):
@@ -298,6 +356,21 @@ def project(items, catalog, row_ids, fee_ids, mode):
     if mode=='update_selected':
         chosen.sort(key=lambda row:(int(row.get('source_priority') or 999999),str(row.get('row_id') or '')))
     selected_fees=[r for r in catalog['fees'] if r['proposal_id'] in fee_ids]
+    selected_field_candidates=[]
+    if field_choices is not None:
+        if not isinstance(field_choices,dict) or any(not isinstance(key,str) or not isinstance(value,str) for key,value in field_choices.items()):
+            raise ValueError('逐字段选择格式不正确。')
+        fields_by_id={candidate['candidate_id']:candidate for candidate in catalog.get('field_candidates') or []}
+        if set(field_choices.values())-fields_by_id.keys():
+            raise ValueError('所选字段候选不属于当前草稿，请刷新预览。')
+        for expected_key,candidate_id in field_choices.items():
+            candidate=fields_by_id[candidate_id]
+            actual_key=f"{candidate['item_name']}:{candidate['fieldname']}"
+            if expected_key!=actual_key:
+                raise ValueError('逐字段选择与物料不匹配。')
+            if not candidate.get('can_apply'):
+                raise ValueError(candidate.get('resolution_reason') or '本字段候选不可采用。')
+            selected_field_candidates.append(candidate)
     for row in chosen:
         allowed_key=('can_fill' if mode=='fill_missing' else 'can_update' if mode=='update_selected'
                      else 'can_add' if mode=='add_selected' else 'can_replace')
@@ -320,6 +393,35 @@ def project(items, catalog, row_ids, fee_ids, mode):
     items=[deepcopy(effective.get(i['name'],i)) for i in items]
     result=[{**deepcopy(i),'_row_action':'retain'} for i in items] if mode in ('fill_missing','update_selected','add_selected') else []
     original={i['name']:i for i in items};used=set();used_choices={};changes=[];added=0
+    if field_choices is not None and mode in ('fill_missing','update_selected'):
+        for candidate in sorted(selected_field_candidates,key=lambda value:(value['item_name'],value['fieldname'],value['candidate_id'])):
+            row=next((value for value in result if value.get('name')==candidate['item_name']),None)
+            if row is None:raise ValueError('逐字段候选的目标物料已变化，请刷新。')
+            field=candidate['fieldname']
+            if mode=='fill_missing' and not missing(row,field):
+                continue
+            before=row.get(field);row[field]=deepcopy(candidate['suggested_value'])
+            meta=json_dict(row.get('extra_json'));field_refs=meta.setdefault('ai_row_fields',{})
+            field_refs[field]={'candidate_id':candidate['candidate_id'],'row_id':candidate['row_id'],
+                               'source_refs':deepcopy(candidate.get('source_refs') or [])}
+            mask=set(meta.get('settlement_packing_missing') or []);mask.discard(field)
+            if field=='actual_shipped_qty':mask.discard('quantity')
+            meta['settlement_packing_missing']=sorted(mask);row['extra_json']=meta;row['_row_action']='source'
+            changes.append({'candidate_id':candidate['candidate_id'],'row_id':candidate['row_id'],
+                'item_name':candidate['item_name'],'fieldname':field,'previous_value':before,'value':row[field],
+                'source_refs':deepcopy(candidate.get('source_refs') or []),'source_group_id':candidate.get('source_group_id'),
+                'source_priority':candidate.get('workflow_rank'),'workflow_stage':candidate.get('workflow_stage'),
+                'evidence_kind':candidate.get('evidence_kind'),'conflict_override':not candidate.get('default_selected')})
+        for index,row in enumerate(result,1):row['row_no']=index
+        actual_by_field={(change['item_name'],change['fieldname']):{
+            key:deepcopy(change.get(key)) for key in ('item_name','fieldname','candidate_id','row_id','source_refs','source_group_id','source_priority','workflow_stage','evidence_kind','conflict_override')
+        } for change in changes}
+        missing_fields=sorted({label for row in result for field,label in MISSING_LABELS.items() if missing(row,field)})
+        return {'policy':POLICY,'mode':mode,'rows':result,'fees':selected_fees,'changes':changes,
+                'selected_row_ids':row_ids,'selected_fee_ids':fee_ids,'selected_field_choices':deepcopy(field_choices),
+                'added_count':0,'removed_count':0,'updated_count':len({change['item_name'] for change in changes}),
+                'actual_sources':list(actual_by_field.values()),'missing_fields':missing_fields,'unresolved':[],
+                'can_apply':bool(changes or selected_fees),'catalog_fingerprint':catalog['fingerprint']}
     for choice in chosen:
         incoming=choice['values'];target=choice['target_item_name'];refs=choice['source_refs']
         duplicate_target=False

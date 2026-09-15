@@ -340,9 +340,18 @@ def _source_ref(value: Any) -> dict:
         ("approval_no", 200),
         ("actor_name", 200),
         ("occurred_at", 100),
+        ("workflow_stage", 60),
+        ("evidence_kind", 60),
+        ("priority_reason", 500),
     ):
         if str(row.get(fieldname) or "").strip():
             result[fieldname] = str(row.get(fieldname) or "").strip()[:limit]
+    for fieldname in ("workflow_rank", "evidence_rank"):
+        if row.get(fieldname) is not None:
+            try:
+                result[fieldname] = int(row.get(fieldname))
+            except (TypeError, ValueError):
+                pass
     return result
 
 
@@ -1146,6 +1155,90 @@ def _arbitrate_review_freight_totals(
     )
 
 
+def _proposal_source_authority(proposal: dict) -> tuple[int, int]:
+    refs = [ref for ref in proposal.get("source_refs") or [] if isinstance(ref, dict)]
+    ranks = []
+    for ref in refs:
+        try:
+            workflow_rank = int(ref.get("workflow_rank"))
+        except (TypeError, ValueError):
+            workflow_rank = 3
+        try:
+            evidence_rank = int(ref.get("evidence_rank"))
+        except (TypeError, ValueError):
+            evidence_rank = 4
+        ranks.append((workflow_rank, evidence_rank))
+    return min(ranks) if ranks else (3, 4)
+
+
+def _arbitrate_review_fee_sources(proposals: list[dict]) -> None:
+    """Choose fee defaults by server source authority, never by model ordering."""
+
+    from .logistics_settlement.fee_policy import row_scopes
+
+    fee_proposals = [row for row in proposals if row.get("proposal_type") == "fee_update"]
+    grouped: dict[tuple[str, ...], list[dict]] = {}
+    for proposal in fee_proposals:
+        workflow_rank, evidence_rank = _proposal_source_authority(proposal)
+        ref = next((row for row in proposal.get("source_refs") or [] if isinstance(row, dict)), {})
+        proposal.update(
+            workflow_stage=str(ref.get("workflow_stage") or "other"),
+            workflow_rank=workflow_rank,
+            evidence_kind=str(ref.get("evidence_kind") or "other"),
+            evidence_rank=evidence_rank,
+            priority_reason=str(ref.get("priority_reason") or ""),
+            source_priority_classified=(
+                ref.get("workflow_rank") is not None
+                and str(ref.get("workflow_stage") or "") in {"payment", "international_logistics", "purchase", "other"}
+            ),
+        )
+        scopes = tuple(sorted(row_scopes(proposal.get("payload") or {})))
+        grouped.setdefault(scopes or (str((proposal.get("payload") or {}).get("logical_fee_key") or ""),), []).append(proposal)
+
+    for candidates in grouped.values():
+        if any(str(row.get("selection_role") or "") in {"primary_total", "approved_quote", "component"} for row in candidates):
+            continue
+        for proposal in candidates:
+            scopes = row_scopes(proposal.get("payload") or {})
+            if proposal.get("workflow_stage") == "purchase" and "freight" not in scopes:
+                proposal.update(
+                    selection_role="alternative",
+                    default_selected=False,
+                    recommended=False,
+                    source_policy_blocked="清关费、税费等其他费用不从商品采购支出默认采用；请使用支付申请或国际物流审批来源。",
+                    resolution_reason="商品采购支出不是该类费用的可采用来源。",
+                )
+        eligible = [
+            row for row in candidates
+            if not row.get("source_policy_blocked") and row.get("source_priority_classified")
+            and float(row.get("confidence") or 0) >= 0.9
+        ]
+        if not eligible:
+            continue
+        best_rank = min((row["workflow_rank"], row["evidence_rank"]) for row in eligible)
+        best = [row for row in eligible if (row["workflow_rank"], row["evidence_rank"]) == best_rank]
+        values = {
+            (_canonical_value("amount", (row.get("payload") or {}).get("amount")),
+             str((row.get("payload") or {}).get("currency") or ""))
+            for row in best
+        }
+        for row in candidates:
+            if not row.get("source_policy_blocked"):
+                row.update(selection_role=str(row.get("selection_role") or "ambiguous"), default_selected=False)
+        if len(values) != 1:
+            for row in best:
+                row["resolution_reason"] = "同级来源的费用金额冲突，请人工选择。"
+            continue
+        winner = min(best, key=lambda row: (-float(row.get("confidence") or 0), str(row.get("proposal_id") or "")))
+        winner.update(default_selected=True, recommended=True)
+        winner["resolution_reason"] = (
+            f"{winner.get('priority_reason') or '按流程与证据优先级'} 已设为本费用范围默认值。"
+        )
+        for row in candidates:
+            if row is not winner and not row.get("source_policy_blocked"):
+                row["resolution_reason"] = "优先级较低，保留为可手工改选的费用候选。"
+
+
 def normalize_source_review_proposals(
     proposals: list[dict],
     items: list[dict],
@@ -1242,9 +1335,13 @@ def normalize_source_review_proposals(
             continue
         confidence = float(_confidence(raw.get("confidence")))
         conflict = bool(raw.get("conflict"))
+        existing_value_conflict_fields = []
         if proposal_type == "item_update":
             target_item = items_by_name.get(target) or {}
-            conflict = conflict or any(
+            existing_value_conflict_fields = [
+                fieldname
+                for fieldname, value in payload.get("fields", {}).items()
+                if (
                 not (
                     fieldname == "shipped_uom"
                     and str(target_item.get("actual_shipped_qty_mode") or "")
@@ -1253,8 +1350,9 @@ def normalize_source_review_proposals(
                 and not _is_effectively_missing(fieldname, target_item.get(fieldname), target_item)
                 and _canonical_value(fieldname, target_item.get(fieldname))
                 != _canonical_value(fieldname, value)
-                for fieldname, value in payload.get("fields", {}).items()
-            )
+                )
+            ]
+            conflict = conflict or bool(existing_value_conflict_fields)
         elif proposal_type == "fee_update":
             fee_key = str(payload.get("logical_fee_key") or "")
             existing_fee = next(
@@ -1307,6 +1405,7 @@ def normalize_source_review_proposals(
                 "reason": str(raw.get("reason") or "资料字段匹配")[:1000],
                 "source_refs": refs,
                 "conflict": conflict,
+                "existing_value_conflict_fields": existing_value_conflict_fields,
                 "result_origin": "SYSTEM" if system_origin else "AI",
                 "conflict_group": str(raw.get("conflict_group") or "")[:200],
                 "recommended": bool(raw.get("recommended")),
@@ -1362,6 +1461,7 @@ def normalize_source_review_proposals(
                 f"item:{proposal.get('target_item_name') or ''}:{','.join(fields)}"
             )
     _arbitrate_review_freight_totals(normalized, evidence)
+    _arbitrate_review_fee_sources(normalized)
     return normalized
 
 
@@ -2409,7 +2509,10 @@ def _source_reference(source: dict, *, row: Any = None, cell: str = "", page: An
         "row": row,
         "cell": cell,
     }
-    for fieldname in ("source_id", "approval_no", "actor_name", "occurred_at"):
+    for fieldname in (
+        "source_id", "approval_no", "actor_name", "occurred_at", "workflow_stage",
+        "workflow_rank", "evidence_kind", "evidence_rank", "priority_reason",
+    ):
         if str(source.get(fieldname) or "").strip():
             result[fieldname] = str(source.get(fieldname) or "").strip()
     if isinstance(source.get("selected_source"), dict):
@@ -2907,11 +3010,15 @@ def _read_source(items: list[dict], source: dict, *, attachment_ready=None) -> t
             str(source.get("resolver_source_id") or source.get("source_id") or ""),
         )
         text = str(comment.get("remark") or "").strip()
+        from .packing_comment_service import parse_packing_comment
+        parsed = parse_packing_comment(text)
+        packing_groups = _comment_packing_group_candidates(items, source, parsed)
         return [], {
             "source_ref": _source_reference(source),
             "text": text[:MAX_AI_DOCUMENT_CHARS],
             "actor_name": source.get("actor_name") or comment.get("user_name") or comment.get("user_id") or "",
             "occurred_at": source.get("occurred_at") or comment.get("create_time") or "",
+            "packing_group_candidates": packing_groups,
             "ai_eligible": True,
         }
     if kind == "wiki_sheet":
@@ -3031,6 +3138,61 @@ def _read_source(items: list[dict], source: dict, *, attachment_ready=None) -> t
                 }
             ]
     return [], document
+
+
+def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: dict) -> list[dict]:
+    """Bind group-level comment facts to stable rows without assigning them to row one."""
+
+    from .logistics_settlement.model import digest
+
+    if not parsed.get("is_candidate") or (
+        parsed.get("gross_weight_kg") is None and parsed.get("volume_m3") is None
+    ):
+        return []
+    members=[];labels=[];ambiguous=[]
+    def add_matches(matches, hint):
+        if len(matches) == 1:
+            key=str(matches[0].get("stable_line_key") or "").strip()
+            if key and key not in members:
+                members.append(key)
+                labels.append(str(matches[0].get("material_code") or matches[0].get("product_name") or key))
+        elif len(matches) > 1:
+            ambiguous.append(hint)
+    for code in parsed.get("material_code_hints") or []:
+        matches=[item for item in items or [] if str(item.get("material_code") or "").strip().casefold()==str(code).strip().casefold()]
+        add_matches(matches,code)
+    for hint in parsed.get("rows") or []:
+        code=str(hint.get("material_code") or "").strip().casefold()
+        name=str(hint.get("product_name") or "").strip().casefold()
+        if code:
+            matches=[item for item in items or [] if str(item.get("material_code") or "").strip().casefold()==code]
+        else:
+            matches=[item for item in items or [] if name and str(item.get("product_name") or "").strip().casefold()==name]
+        add_matches(matches, hint.get("material_code") or hint.get("product_name"))
+    can_apply=len(members)>=2 and not ambiguous
+    source_id=str(source.get("source_id") or "")
+    return [{
+        "candidate_id":digest("comment-packing-group-1",source.get("source_hash"),source_id,members,
+                              parsed.get("gross_weight_kg"),parsed.get("volume_m3")),
+        "member_keys":members,"member_labels":labels,
+        "member_hints":deepcopy(parsed.get("rows") or []),
+        "package_count":None,
+        "net_weight_kg":None,
+        "gross_weight_kg":str(parsed.get("gross_weight_kg")) if parsed.get("gross_weight_kg") is not None else None,
+        "volume_m3":str(parsed.get("volume_m3")) if parsed.get("volume_m3") is not None else None,
+        "dimensions_cm":deepcopy(parsed.get("dimensions_cm")),
+        "weight_basis":parsed.get("weight_basis"),
+        "source_fingerprint":source.get("source_hash") or source.get("content_hash"),
+        "creation_method":"trusted_comment_text","source_id":source_id,
+        "source_label":source.get("source_label") or "审批评论",
+        "evidence":[{"kind":"trusted_comment_text","confidence":parsed.get("confidence")}],
+        "can_apply":can_apply,"default_selected":can_apply,
+        "needs_member_confirmation":not can_apply,
+        "resolution_reason":(
+            "评论中整票重量和尺寸已唯一匹配到连续物料；最终确认前请核对成员范围。"
+            if can_apply else "评论中整票重量和尺寸已识别，但物料成员匹配不唯一，仅供对照。"
+        ),
+    }]
 
 
 def _excel_review_entries(
@@ -4105,6 +4267,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
         if unified_review:
             from .material_ai_fee_policy import decorate
             from .material_ai_selection_service import material_fingerprint
+            from .material_ai_row_selection import POLICY as row_review_policy
             candidates = decorate(candidates, existing_fees, context.get("effective_source") or {})
             counts = {proposal_type: 0 for proposal_type in REVIEW_PROPOSAL_TYPES}
             for proposal in candidates:
@@ -4117,6 +4280,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 "autofill_preview": autofill_preview(read_items, candidates, existing_fees, fx_rates=context.get('fx_rates')),
                 "fee_fingerprint": hashlib.sha256(_json(existing_fees).encode()).hexdigest(),
                 "material_input_fingerprint": material_fingerprint(items,sources,context),
+                "row_review_policy": row_review_policy,
             }
             merged_amount_groups = [
                 {"source_id": fill.get("source_id"), "sheet_name": fill.get("sheet_name"), **group}
@@ -4132,6 +4296,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 for fill in document.get('shipment_fills') or []
                 for candidate in fill.get('packing_group_candidates') or []
             ]
+            packing_group_candidates.extend(
+                deepcopy(candidate)
+                for document in documents
+                for candidate in document.get('packing_group_candidates') or []
+            )
             draft['packing_group_candidates'] = packing_group_candidates
             draft['autofill_preview']['packing_group_candidates'] = deepcopy(packing_group_candidates)
             cargo_reviews = [review for document in documents for review in document.get('cargo_reviews') or []]

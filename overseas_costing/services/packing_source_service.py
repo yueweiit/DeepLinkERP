@@ -625,7 +625,7 @@ def _comment_snapshot_preview(parsed: dict) -> dict:
         "net_weight_kg": {"value": None, "count_once": True},
         "gross_weight_kg": {"value": str(gross) if gross is not None else None, "count_once": True},
         "volume_m3": {"value": str(volume) if volume is not None else None, "count_once": True},
-        "package_count": {"value": "1", "count_once": True},
+        "package_count": {"value": None, "count_once": True},
         "evidence": [{"kind": "trusted_comment_text", "confidence": parsed.get("confidence")}],
         "needs_confirmation": True,
     }
@@ -635,7 +635,7 @@ def _comment_snapshot_preview(parsed: dict) -> dict:
         "source": {"source_kind": "approval_comment"},
         "material_row_count": len(rows),
         "package_group_count": 1,
-        "package_count": 1,
+        "package_count": None,
         "material_rows": rows,
         "groups": [group],
         "totals": {

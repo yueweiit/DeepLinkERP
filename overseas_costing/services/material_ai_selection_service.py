@@ -5,7 +5,7 @@ from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
-RECEIPT_POLICY = 'ai-row-preview-receipt-1'
+RECEIPT_POLICY = 'ai-field-preview-receipt-2'
 
 
 def material_fingerprint(items,sources,context):
@@ -34,6 +34,9 @@ def material_fingerprint(items,sources,context):
 def _inputs(repo, batch, run, *, locked=False):
     from . import material_ai_fill_service as ai
     ai._assert_run_batch(run,batch)
+    draft=ai._load_json(ai._record_value(run,'draft_json'),{})
+    if int(ai._record_value(run,'proposal_version',0) or 0) > 0 and draft.get('row_review_policy') != rows.POLICY:
+        raise ValueError('AI 预览规则已升级，请重新分析资料。')
     context=ai._review_context(repo,batch,str(ai._record_value(run,'version')),
         original_sources=ai._run_uses_original_sources(run))
     ai.effective_source.require_readable(context.get('effective_source') or {})
@@ -41,10 +44,10 @@ def _inputs(repo, batch, run, *, locked=False):
     items=repo.get_items(batch,context['version'])
     sources=ai._reload_review_manifest(repo,batch,context['version'],run)
     fingerprint=ai._source_review_fingerprint(batch,context['version'],items,sources,str(ai._record_value(run,'clarification_text') or ''),context=context)
-    saved_material=ai._load_json(ai._record_value(run,'draft_json'),{}).get('material_input_fingerprint')
+    saved_material=draft.get('material_input_fingerprint')
     if fingerprint!=ai._record_value(run,'input_fingerprint') and (not saved_material or saved_material!=material_fingerprint(items,sources,context)):
         raise ValueError('来源、物料或版本已变化，请重新分析资料。')
-    baseline=(ai._load_json(ai._record_value(run,'draft_json'),{}).get('review_input') or {}).get('source_dependencies')
+    baseline=(draft.get('review_input') or {}).get('source_dependencies')
     if baseline is not None and callable(getattr(repo,'assert_row_dependencies',None)):
         repo.assert_row_dependencies(batch,baseline,lock=locked)
     current_fees=repo.get_fees(batch,context['version'])
@@ -117,14 +120,17 @@ def _attach_control_metadata(projection, merged_amount_groups, packing_group_can
             'code':'MERGED_AMOUNT_ALLOCATION_REQUIRED',
             'message':'合并金额组缺少独立单价或合计不一致，请完成人工分摊后重新预览。',
         })
+    if not blocking and any(candidate.get('default_selected') and candidate.get('can_apply')
+                            for candidate in packing_group_candidates):
+        projection['can_apply']=True
     return projection
 
 
 def _preview_revision(context,items,sources,current_fees,catalog,selection,dependencies):
     return digest(
         rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],
-        selection['selected_row_ids'],selection['selected_fee_ids'],selection['mode'],dependencies,
-        selection.get('merged_amount_groups') or [],selection.get('packing_group_candidates') or [],
+        selection['selected_row_ids'],selection['selected_fee_ids'],selection.get('selected_field_choices'),selection['mode'],dependencies,
+        selection.get('merged_amount_groups') or [],selection.get('selected_packing_group_ids') or [],
     )
 
 
@@ -132,8 +138,9 @@ def _preview_receipt(preview):
     """Persist only the inputs needed to authenticate and reconstruct a preview."""
     keys=(
         'id','revision','run_id','batch','version','mode','selected_row_ids','selected_fee_ids',
+        'selected_field_choices',
         'dependencies','input_fingerprint','fee_fingerprint','catalog_fingerprint',
-        'merged_amount_groups','packing_group_candidates',
+        'selected_packing_group_ids',
     )
     return {'receipt_policy':RECEIPT_POLICY,
             **{key:deepcopy(preview.get(key)) for key in keys}}
@@ -146,7 +153,48 @@ def _clean_preview_draft(draft):
     return cleaned
 
 
-def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository=None):
+def _selected_packing_groups(items, candidates, selected_ids):
+    candidates=deepcopy(candidates or [])
+    by_id={str(candidate.get('candidate_id') or ''):candidate for candidate in candidates}
+    if any(not candidate_id for candidate_id in by_id) or len(by_id)!=len(candidates):
+        raise ValueError('装箱组候选标识无效，请重新分析。')
+    if selected_ids is None:
+        selected_ids=[candidate_id for candidate_id,candidate in by_id.items() if (
+            candidate.get('default_selected') and candidate.get('can_apply')
+            or any(str(evidence.get('kind') or '') == 'xlsx_merge'
+                   for evidence in candidate.get('evidence') or [])
+        )]
+    if (not isinstance(selected_ids,list) or any(not isinstance(value,str) for value in selected_ids)
+            or len(selected_ids)!=len(set(selected_ids))):
+        raise ValueError('装箱组选择格式不正确。')
+    if set(selected_ids)-by_id.keys():
+        raise ValueError('所选装箱组不属于当前草稿，请刷新预览。')
+    ordered_items=sorted(
+        [item for item in items or [] if not int(item.get('is_excluded') or 0)],
+        key=lambda item:(int(item.get('row_no') or 0),str(item.get('name') or '')),
+    )
+    stable_keys=[str(item.get('stable_line_key') or '') for item in ordered_items]
+    if selected_ids and (any(not key for key in stable_keys) or len(stable_keys)!=len(set(stable_keys))):
+        raise ValueError('装箱组物料身份不稳定，请刷新后重新分析。')
+    occupied=set();selected=[]
+    for candidate_id in selected_ids:
+        candidate=by_id[candidate_id]
+        xlsx_merge=any(str(evidence.get('kind') or '') == 'xlsx_merge'
+                       for evidence in candidate.get('evidence') or [])
+        if not xlsx_merge and not candidate.get('can_apply'):
+            raise ValueError(candidate.get('resolution_reason') or '该装箱组成员尚未确认，不能采用。')
+        members=[str(value or '') for value in candidate.get('member_keys') or []]
+        if len(members)<2 or len(members)!=len(set(members)) or any(member not in stable_keys for member in members):
+            raise ValueError('装箱组物料已变化，请刷新后重新选择。')
+        positions=sorted(stable_keys.index(member) for member in members)
+        if positions!=list(range(min(positions),max(positions)+1)) or occupied.intersection(members):
+            raise ValueError('装箱组只能覆盖连续且互不重复的物料行。')
+        occupied.update(members);selected.append(candidate)
+    return selected,sorted(selected_ids)
+
+
+def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choices=None,
+            packing_group_ids=None,repository=None):
     from . import material_ai_fill_service as ai
     if mode == 'replace_all':
         raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
@@ -166,9 +214,12 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,repository
     # Re-read under the newly held evidence locks before saving any preview.
     if dependencies:
         context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
+    selected_packing_groups,selected_packing_group_ids=_selected_packing_groups(
+        items,draft.get('packing_group_candidates') or [],packing_group_ids)
     projection=_attach_control_metadata(
-        rows.project(items,catalog,row_ids,fee_ids,mode),
-        draft.get('merged_amount_groups') or [],draft.get('packing_group_candidates') or [])
+        rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices),
+        draft.get('merged_amount_groups') or [],selected_packing_groups)
+    projection['selected_packing_group_ids']=selected_packing_group_ids
     revision=_preview_revision(context,items,sources,current_fees,catalog,projection,dependencies)
     preview={**projection,'id':digest(run_id,revision),'revision':revision,'run_id':run_id,'batch':batch_name,
              'version':context['version'],'source_context':context.get('effective_source') or {},
@@ -222,9 +273,16 @@ def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_mo
     if callable(getattr(repo,'assert_row_dependencies',None)):
         repo.assert_row_dependencies(batch_name,dependencies,lock=True)
     context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
+    selected_group_ids=set(receipt.get('selected_packing_group_ids') or [])
+    if not selected_group_ids and receipt.get('packing_group_candidates'):
+        selected_group_ids={str(candidate.get('candidate_id') or '') for candidate in receipt.get('packing_group_candidates') or []}
+    selected_packing_groups,validated_group_ids=_selected_packing_groups(
+        items,draft.get('packing_group_candidates') or [],sorted(selected_group_ids))
     current=_attach_control_metadata(
-        rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode']),
-        receipt.get('merged_amount_groups') or [],receipt.get('packing_group_candidates') or [])
+        rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode'],
+                     field_choices=receipt.get('selected_field_choices')),
+        draft.get('merged_amount_groups') or receipt.get('merged_amount_groups') or [],selected_packing_groups)
+    current['selected_packing_group_ids']=validated_group_ids
     revision=_preview_revision(context,items,sources,current_fees,catalog,current,dependencies)
     if revision!=preview_revision:
         raise ValueError('来源、费用或物料已变化，请刷新预览；本次未保存。')

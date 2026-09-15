@@ -125,6 +125,29 @@ def test_only_real_xlsx_merge_candidates_are_adopted_without_overwriting_manual_
     assert partial == [], 'A source group must not be created when only part of its rows was confirmed'
 
 
+def test_uniquely_matched_comment_group_is_adopted_only_after_members_are_in_confirmed_preview():
+    candidate = {
+        'candidate_id':'COMMENT-1','member_keys':['L1','L2'],
+        'gross_weight_kg':'42.05','volume_m3':'0.01518','package_count':None,
+        'source_fingerprint':'COMMENT-HASH','creation_method':'trusted_comment_text',
+        'default_selected':True,'can_apply':True,
+        'evidence':[{'kind':'trusted_comment_text','confidence':1}],
+    }
+
+    groups = adopt_xlsx_group_candidates(
+        rows(), [], [candidate], 'PREVIEW', actor='source-confirmation',
+        confirmed_member_keys={'L1','L2'},
+    )
+
+    assert len(groups) == 1
+    assert groups[0]['group_id'] == 'COMMENT-1'
+    assert groups[0]['creation_method'] == 'trusted_comment_text'
+    assert groups[0]['package_count'] is None
+    assert adopt_xlsx_group_candidates(
+        rows(), [], [candidate], 'PREVIEW', confirmed_member_keys={'L1'}
+    ) == []
+
+
 class Repo:
     def __init__(self):
         self.state = {'batch':'B1','batch_modified':'BM1','version':'V1','version_modified':'VM1',

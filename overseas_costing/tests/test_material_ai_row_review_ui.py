@@ -48,6 +48,25 @@ assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('da
 """)
 
 
+def test_per_field_defaults_show_source_metadata_and_submit_only_candidate_ids():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-1',field_candidates:[
+ {candidate_id:'PAY-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'9',source_label:'费用支出正文',workflow_stage:'payment',evidence_kind:'approval_form',can_apply:true,default_selected:true,resolution_reason:'支付申请默认'},
+ {candidate_id:'LOG-W',item_name:'I1',fieldname:'gross_weight_kg',suggested_value:'8',source_label:'国际物流附件',workflow_stage:'international_logistics',evidence_kind:'dedicated_attachment',can_apply:true,default_selected:false,resolution_reason:'低优先级可改选'},
+ {candidate_id:'LOG-V',item_name:'I1',fieldname:'volume_m3',suggested_value:'2',source_label:'国际物流附件',workflow_stage:'international_logistics',evidence_kind:'dedicated_attachment',can_apply:true,default_selected:true,resolution_reason:'高层缺失时补值'},
+]};delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+assert.deepEqual([...selection.fields.entries()].sort(),[['I1:gross_weight_kg','PAY-W'],['I1:volume_m3','LOG-V']]);
+let html=w.renderMaterialAIReviewDialogContent();
+for(const text of ['逐字段默认值','费用支出正文','支付申请','审批正文','2 个候选'])assert(html.includes(text),text);
+w.scheduleMaterialAIRowPreview=()=>{};w.changeMaterialAIRowSelection('fields','I1:gross_weight_kg','LOG-W');
+assert.equal(selection.fields.get('I1:gross_weight_kg'),'LOG-W');
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,preview:{id:'P',revision:'R',can_apply:true,rows:[]}}};
+await w.previewMaterialAIRowSelection();
+assert.deepEqual(JSON.parse(calls[0].args.field_choices_json),{ 'I1:gross_weight_kg':'LOG-W','I1:volume_m3':'LOG-V' });
+assert.equal(calls[0].args.row_ids_json,'[]');
+""")
+
+
 def test_fee_roles_render_totals_components_and_alternatives_in_their_review_levels():
     run_ui(r"""
 const fill=ready();fill.row_review.fees=[
@@ -273,13 +292,14 @@ for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','1056
 
 def test_row_review_displays_server_packing_group_candidates_and_autofill_price_columns():
     run_ui(r"""
-const fill=ready();fill.rowSelection.preview={id:'P',revision:'R',can_apply:true,rows:[],
-  packing_group_candidates:[{candidate_id:'G1',member_keys:['L1','L2','L3'],package_count:'21',
-    net_weight_kg:'389',gross_weight_kg:'397.7',volume_m3:'0.40884',sheet_name:'Packing'}]};
+const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G1',member_keys:['L1','L2','L3'],package_count:'21',
+    net_weight_kg:'389',gross_weight_kg:'397.7',volume_m3:'0.40884',sheet_name:'Packing',default_selected:true,can_apply:true}]};
+fill.rowSelection=null;w.ensureMaterialAIRowSelection(fill);fill.rowSelection.preview={id:'P',revision:'R',can_apply:true,rows:[],packing_group_candidates:fill.draft.packing_group_candidates};
 fill.rowSelection.previewKey=w.materialAIRowSelectionKey(fill);
 let html=w.renderMaterialAIReviewDialogContent();
 for(const text of ['装箱组候选','3 行','21','389','397.7','0.40884'])assert(html.includes(text),text);
-fill.draft={autofill_preview:{items:[{unit_price:'4.40',purchase_currency:'RMB',shipment_value_rmb:'10560'}],fees:[],notes:[],project_summary:[],unresolved:[]}};
+assert(html.includes('data-mf-ai-packing-group-select="G1"'));assert(html.includes('checked'));
+fill.draft.autofill_preview={items:[{unit_price:'4.40',purchase_currency:'RMB',shipment_value_rmb:'10560'}],fees:[],notes:[],project_summary:[],unresolved:[]};
 html=w.renderMaterialAIAutofillPreview(fill);
 for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','10560'])assert(html.includes(text),text);
 """)

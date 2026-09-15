@@ -68,6 +68,39 @@ def get_field_source_label(field_group: str) -> str:
 
 
 ACTUAL_PACKING_MATCH_STATUSES = frozenset({"matched", "none", "ambiguous", "stale", "invalid"})
+WORKFLOW_RANKS = {
+    "payment": 0,
+    "international_logistics": 1,
+    "purchase": 2,
+    "other": 3,
+}
+EVIDENCE_RANKS = {
+    "dedicated_attachment": 0,
+    "approval_form": 1,
+    "attachment": 2,
+    "comment": 3,
+    "other": 4,
+}
+WORKFLOW_LABELS = {
+    "payment": "支付申请",
+    "international_logistics": "国际物流审批",
+    "purchase": "商品采购支出",
+    "other": "其他来源",
+}
+EVIDENCE_LABELS = {
+    "dedicated_attachment": "专用附件",
+    "approval_form": "审批正文",
+    "attachment": "其他相关附件",
+    "comment": "评论",
+    "other": "其他证据",
+}
+
+_PAYMENT_TITLE_MARKERS = (
+    "运营支出", "月结付款", "月结", "费用支出", "付款申请", "支付申请", "报销",
+)
+_TRANSPORT_PAYMENT_MARKERS = (
+    "运输", "物流", "运费", "海运", "空运", "快递", "dhl", "fedex", "ups", "清关", "关税", "完税",
+)
 
 
 def _packing_field_name(value: object) -> str:
@@ -86,6 +119,78 @@ def is_workflow_packing_attachment(source: dict) -> bool:
         or source.get("flow_field_name")
     )
     return "装箱单附件" in field and ("excel" in field or field == "装箱单附件")
+
+
+def _source_business_text(source: dict) -> str:
+    fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
+    parts = [
+        source.get("approval_title"), source.get("process_title"), source.get("process_name"),
+        source.get("source_label"), source.get("expense_type"), source.get("approval_role"),
+        *(f"{key}:{value}" for key, value in fields.items()),
+    ]
+    return _packing_field_name(" ".join(str(value or "") for value in parts))
+
+
+def _purchase_expense_type_text(source: dict) -> str:
+    fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
+    typed_values = [
+        value for key, value in fields.items()
+        if any(marker in _packing_field_name(key) for marker in ("类型", "类别", "科目", "支出分类"))
+    ]
+    return _packing_field_name(" ".join(str(value or "") for value in (
+        source.get("approval_title"), source.get("process_title"), source.get("process_name"),
+        source.get("source_label"), source.get("expense_type"), *typed_values,
+    )))
+
+
+def classify_workflow_stage(source: dict) -> str:
+    """Classify business authority; a transport-flavoured purchase is a payment."""
+
+    source = source or {}
+    role = str(source.get("approval_role") or "").strip().casefold()
+    text = _source_business_text(source)
+    if source.get("actual_packing_source") and str(source.get("actual_packing_match_status") or "").lower() == "matched":
+        return "payment"
+    if role in {"logistics_expense", "payment", "expense", "settlement"}:
+        return "payment"
+    if any(_packing_field_name(marker) in text for marker in _PAYMENT_TITLE_MARKERS):
+        return "payment"
+    if role == "purchase" or "采购支出" in text:
+        typed_text = _purchase_expense_type_text(source)
+        return "payment" if any(_packing_field_name(marker) in typed_text for marker in _TRANSPORT_PAYMENT_MARKERS) else "purchase"
+    if role == "international_logistics" or "国际物流" in text or is_workflow_packing_attachment(source):
+        return "international_logistics"
+    return "other"
+
+
+def classify_evidence_kind(source: dict) -> str:
+    source = source or {}
+    kind = str(source.get("source_kind") or "").strip().casefold()
+    if (
+        source.get("actual_packing_source")
+        and str(source.get("actual_packing_match_status") or "").lower() == "matched"
+    ) or is_workflow_packing_attachment(source):
+        return "dedicated_attachment"
+    if kind == "approval_form":
+        return "approval_form"
+    if kind == "approval_comment":
+        return "comment"
+    if kind in {"approval_attachment", "manual_attachment", "wiki_sheet", "attachment"}:
+        return "attachment"
+    return "other"
+
+
+def annotate_source_priority(source: dict) -> dict:
+    row = deepcopy(source or {})
+    workflow_stage = classify_workflow_stage(row)
+    evidence_kind = classify_evidence_kind(row)
+    row.update(
+        workflow_stage=workflow_stage,
+        workflow_rank=WORKFLOW_RANKS[workflow_stage],
+        evidence_kind=evidence_kind,
+        evidence_rank=EVIDENCE_RANKS[evidence_kind],
+    )
+    return row
 
 
 def _actual_match_identity(source: dict) -> str:
@@ -125,7 +230,7 @@ def _global_actual_match_status(sources: list[dict]) -> tuple[str, str]:
 def rank_material_packing_sources(sources: list[dict]) -> list[dict]:
     """Apply one server-owned, explainable priority order to material sources."""
 
-    rows = [deepcopy(source or {}) for source in sources or []]
+    rows = [annotate_source_priority(source or {}) for source in sources or []]
     status, matched_identity = _global_actual_match_status(rows)
     for row in rows:
         workflow_attachment = is_workflow_packing_attachment(row)
@@ -151,28 +256,28 @@ def rank_material_packing_sources(sources: list[dict]) -> list[dict]:
                 analysis_reason="多个实际装箱候选匹配当前单据，请先完成唯一匹配后重新预览。",
                 adoption_allowed=False,
                 adoption_restriction="实际装箱来源尚未唯一确认。",
+                workflow_stage="other",
+                workflow_rank=WORKFLOW_RANKS["other"],
+                evidence_kind="other",
+                evidence_rank=EVIDENCE_RANKS["other"],
             )
         if is_matched:
-            rank = 0
             reason = "实际运费／装箱变更已匹配当前单据"
         elif workflow_attachment:
-            rank = 1 if status == "matched" else 0
             reason = (
                 "实际装箱匹配未提供的字段由流程装箱单附件补充"
                 if status == "matched"
                 else "当前无有效实际装箱匹配，采用流程装箱单附件"
             )
         else:
-            kind = str(row.get("source_kind") or "")
-            role = str(row.get("approval_role") or "")
-            if role == "international_logistics" and kind == "approval_form":
-                rank = 2
-            elif kind == "approval_form":
-                rank = 3
+            if row["workflow_stage"] == "other":
+                reason = "按服务端资料源顺序补充高优先级缺失字段"
             else:
-                rank = 4
-            reason = "按服务端资料源顺序补充高优先级缺失字段"
-        row["source_priority_rank"] = rank
+                reason = (
+                    f"{WORKFLOW_LABELS[row['workflow_stage']]} · {EVIDENCE_LABELS[row['evidence_kind']]}；"
+                    "优先级仅决定逐字段默认值，低优先级合法值仍可改选。"
+                )
+        row["source_priority_rank"] = row["workflow_rank"] * 10 + row["evidence_rank"]
         row["priority_reason"] = reason
 
     ordered = sorted(rows, key=material_packing_source_priority)
@@ -185,29 +290,16 @@ def rank_material_packing_sources(sources: list[dict]) -> list[dict]:
     return ordered
 
 
-def material_packing_source_priority(source: dict) -> tuple[int, str, str, str]:
+def material_packing_source_priority(source: dict) -> tuple[int, int, str, str]:
     """Deterministic material/packing evidence order shared by listing and review."""
 
     source = source or {}
-    kind = str(source.get("source_kind") or "")
-    role = str(source.get("approval_role") or "")
-    if source.get("source_priority_rank") is not None:
-        rank = int(source.get("source_priority_rank"))
-    elif source.get("actual_packing_source") and str(source.get("actual_packing_match_status") or "").lower() == "matched":
-        rank = 0
-    elif is_workflow_packing_attachment(source):
-        rank = 0
-    elif role == "international_logistics" and kind == "approval_form":
-        rank = 1
-    elif source.get("dedicated_packing"):
-        rank = 2
-    elif kind == "approval_form":
-        rank = 3
-    else:
-        rank = 4
+    annotated = annotate_source_priority(source)
+    workflow_rank = int(source.get("workflow_rank") if source.get("workflow_rank") is not None else annotated["workflow_rank"])
+    evidence_rank = int(source.get("evidence_rank") if source.get("evidence_rank") is not None else annotated["evidence_rank"])
     return (
-        rank,
-        kind,
+        workflow_rank,
+        evidence_rank,
         str(source.get("source_id") or ""),
         str(source.get("sheet_name") or ""),
     )

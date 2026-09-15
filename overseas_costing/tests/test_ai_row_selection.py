@@ -206,23 +206,25 @@ def test_catalog_groups_sources_by_priority_and_marks_lower_priority_conflicts()
 
     assert [group['source_id'] for group in review['source_groups'][:2]] == ['PACKING-LIST', 'LOGISTICS-OA']
     assert source_rows['HIGH']['source_priority'] < source_rows['LOW']['source_priority']
-    assert not source_rows['HIGH']['default_update_selected']
+    assert source_rows['HIGH']['default_update_selected']
     assert source_rows['LOW']['default_update_selected']
     assert source_rows['HIGH']['meaningful_field_count'] == 1
     assert source_rows['LOW']['meaningful_field_count'] == 2
-    assert '最完整' in source_rows['LOW']['default_selection_reason']
+    assert '逐字段' in source_rows['LOW']['default_selection_reason']
     assert source_rows['LOW']['conflict_fields'] == ['gross_weight_kg']
 
-    projected = service.project(items, review,
-        [source_rows['HIGH']['row_id'], source_rows['LOW']['row_id']], [], 'update_selected')
-    assert projected['rows'][0]['gross_weight_kg'] == 8
+    choices = {
+        f"I1:{candidate['fieldname']}": candidate['candidate_id']
+        for candidate in review['field_candidates'] if candidate['default_selected']
+    }
+    projected = service.project(items, review, [], [], 'update_selected', field_choices=choices)
+    assert projected['rows'][0]['gross_weight_kg'] == 9
     assert projected['rows'][0]['volume_m3'] == 2
     adopted = {(row['item_name'], row['fieldname']): row for row in projected['actual_sources']}
-    assert adopted[('I1', 'gross_weight_kg')]['row_id'] == source_rows['LOW']['row_id']
-    assert adopted[('I1', 'gross_weight_kg')]['conflict_override']
+    assert adopted[('I1', 'gross_weight_kg')]['row_id'] == source_rows['HIGH']['row_id']
 
 
-def test_equal_completeness_uses_source_priority_instead_of_combining_rows():
+def test_distinct_fields_are_combined_from_each_best_available_source():
     items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
     sources = [
         {'source_id': 'PACK', 'source_kind': 'approval_attachment',
@@ -242,14 +244,19 @@ def test_equal_completeness_uses_source_priority_instead_of_combining_rows():
     candidates = {row['proposal_id']: row for row in review['rows'] if row['origin'] == 'source'}
 
     assert candidates['PACK']['default_update_selected']
-    assert not candidates['OA']['default_update_selected']
+    assert candidates['OA']['default_update_selected']
     assert candidates['PACK']['meaningful_field_count'] == 1
     assert candidates['OA']['meaningful_field_count'] == 1
-    assert '完整度并列' in candidates['PACK']['default_selection_reason']
+    defaults = {
+        candidate['fieldname']: candidate
+        for candidate in review['field_candidates'] if candidate['default_selected']
+    }
+    assert defaults['gross_weight_kg']['row_id'] == candidates['PACK']['row_id']
+    assert defaults['volume_m3']['row_id'] == candidates['OA']['row_id']
     assert not candidates['OA']['conflict_fields']
 
 
-def test_more_complete_lower_priority_row_wins_when_higher_row_has_placeholders():
+def test_lower_priority_fills_missing_fields_without_overriding_higher_priority_values():
     items = [item('I1', 'FL004107', gross_weight_kg=None, volume_m3=None)]
     sources = [
         {'source_id': 'PACK', 'source_kind': 'approval_attachment',
@@ -275,11 +282,15 @@ def test_more_complete_lower_priority_row_wins_when_higher_row_has_placeholders(
 
     assert candidates['PACK']['meaningful_field_count'] == 2
     assert candidates['OA']['meaningful_field_count'] == 7
-    assert not candidates['PACK']['default_update_selected']
+    assert candidates['PACK']['default_update_selected']
     assert candidates['OA']['default_update_selected']
 
-    projected = service.project(items, review, [candidates['OA']['row_id']], [], 'update_selected')
-    assert projected['rows'][0]['actual_shipped_qty'] == 500
+    choices = {
+        f"I1:{candidate['fieldname']}": candidate['candidate_id']
+        for candidate in review['field_candidates'] if candidate['default_selected']
+    }
+    projected = service.project(items, review, [], [], 'update_selected', field_choices=choices)
+    assert projected['rows'][0]['actual_shipped_qty'] == 200
     assert projected['rows'][0]['package_count'] == 1
     assert projected['rows'][0]['gross_weight_kg'] == 13.4
 
@@ -291,7 +302,85 @@ def test_more_complete_lower_priority_row_wins_when_higher_row_has_placeholders(
     assert placeholder_projection['rows'][0].get('volume_m3') is None
 
 
-def test_completeness_tie_uses_stable_row_id_within_one_source():
+def test_payment_logistics_purchase_priority_is_applied_per_field_and_lower_value_can_be_chosen():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
+    sources = [
+        {'source_id': 'PURCHASE', 'source_kind': 'approval_form', 'approval_role': 'purchase',
+         'approval_title': '商品采购支出'},
+        {'source_id': 'LOGISTICS', 'source_kind': 'approval_form',
+         'approval_role': 'international_logistics', 'approval_title': '国际物流审批'},
+        {'source_id': 'PAYMENT', 'source_kind': 'approval_form',
+         'approval_role': 'logistics_expense', 'approval_title': '费用支出'},
+    ]
+    proposals = [
+        {'proposal_id': 'PURCHASE', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'default_selected': True, 'source_refs': [{'source_id': 'PURCHASE'}],
+         'payload': {'fields': {'gross_weight_kg': 7, 'volume_m3': 1}}},
+        {'proposal_id': 'LOGISTICS', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'default_selected': True, 'source_refs': [{'source_id': 'LOGISTICS'}],
+         'payload': {'fields': {'gross_weight_kg': 8, 'volume_m3': 2}}},
+        {'proposal_id': 'PAYMENT', 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'default_selected': True, 'source_refs': [{'source_id': 'PAYMENT'}],
+         'payload': {'fields': {'gross_weight_kg': 9}}},
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_field = {}
+    for candidate in review['field_candidates']:
+        by_field.setdefault(candidate['fieldname'], []).append(candidate)
+    assert next(row for row in by_field['gross_weight_kg'] if row['default_selected'])['workflow_stage'] == 'payment'
+    assert next(row for row in by_field['volume_m3'] if row['default_selected'])['workflow_stage'] == 'international_logistics'
+
+    selected = {
+        'I1:gross_weight_kg': next(row for row in by_field['gross_weight_kg'] if row['workflow_stage'] == 'international_logistics')['candidate_id'],
+        'I1:volume_m3': next(row for row in by_field['volume_m3'] if row['default_selected'])['candidate_id'],
+    }
+    projected = service.project(items, review, [], [], 'update_selected', field_choices=selected)
+    assert projected['rows'][0]['gross_weight_kg'] == 8
+    assert projected['rows'][0]['volume_m3'] == 2
+
+
+def test_same_rank_conflicting_values_require_manual_field_choice():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': source_id, 'source_kind': 'approval_form',
+         'approval_role': 'logistics_expense', 'approval_title': '费用支出'}
+        for source_id in ('PAY-A', 'PAY-B')
+    ]
+    proposals = [
+        {'proposal_id': source_id, 'proposal_type': 'item_update', 'target_item_name': 'I1',
+         'confidence': .99, 'default_selected': False, 'conflict': True,
+         'source_refs': [{'source_id': source_id}], 'payload': {'fields': {'gross_weight_kg': value}}}
+        for source_id, value in (('PAY-A', 8), ('PAY-B', 9))
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates = [row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg']
+
+    assert len(candidates) == 2
+    assert not any(row['default_selected'] for row in candidates)
+    assert all(row['can_apply'] for row in candidates)
+    assert all('同级' in row['resolution_reason'] for row in candidates)
+
+
+def test_existing_confirmed_value_is_not_replaced_by_a_default_field_choice():
+    items = [item('I1', 'SKU-1', gross_weight_kg=5, manual_override_flag=1)]
+    proposal = {
+        'proposal_id':'P','proposal_type':'item_update','target_item_name':'I1',
+        'confidence':.99,'default_selected':False,'conflict':True,
+        'existing_value_conflict_fields':['gross_weight_kg'],
+        'source_refs':[{'source_id':'PAY'}],'payload':{'fields':{'gross_weight_kg':9}},
+    }
+    review = catalog(items, [proposal], [{
+        'source_id':'PAY','source_kind':'approval_form','approval_role':'logistics_expense',
+    }])
+
+    candidate = next(row for row in review['field_candidates'] if row['fieldname']=='gross_weight_kg')
+    assert candidate['can_apply'] is True
+    assert candidate['default_selected'] is False
+
+
+def test_same_source_conflicting_field_values_do_not_use_stable_id_as_business_decision():
     items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
     sources = [{'source_id': 'PACK', 'source_kind': 'approval_attachment',
                 'source_field': '装箱单附件（Excel）'}]
@@ -305,8 +394,10 @@ def test_completeness_tie_uses_stable_row_id_within_one_source():
     review = catalog(items, proposals, sources)
     candidates = [row for row in review['rows'] if row['origin'] == 'source']
 
-    expected = min(candidates, key=lambda row: row['row_id'])
-    assert [row['row_id'] for row in candidates if row['default_update_selected']] == [expected['row_id']]
+    assert not [row for row in candidates if row['default_update_selected']]
+    field_candidates = [row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg']
+    assert len(field_candidates) == 2
+    assert not any(row['default_selected'] for row in field_candidates)
 
 
 def test_more_complete_unsafe_candidate_is_not_promoted():

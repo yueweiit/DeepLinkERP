@@ -224,6 +224,25 @@ def test_selected_row_preview_and_confirm_use_ids_write_permission_and_inline_co
     assert not result['ok'] and result['code']=='REVIEW_REQUIRED' and rollbacks
 
 
+def test_selected_row_preview_passes_optional_field_and_packing_group_choices(monkeypatch):
+    from overseas_costing.services import material_ai_selection_service as selection
+    api=_load_api(monkeypatch);captured={}
+    monkeypatch.setattr(api,'require_batch_permission',lambda batch,_permission:batch)
+    monkeypatch.setattr(selection,'prepare',lambda *args,**kwargs:captured.update(args=args,kwargs=kwargs) or {'ok':True})
+
+    result=api.preview_source_ai_selection(
+        'B','RUN','[]','[]','update_selected','V',
+        field_choices_json='{"I1:gross_weight_kg":"FIELD-1"}',
+        packing_group_ids_json='["GROUP-1"]',
+    )
+
+    assert result['ok']
+    assert captured['kwargs']=={
+        'field_choices':{'I1:gross_weight_kg':'FIELD-1'},
+        'packing_group_ids':['GROUP-1'],
+    }
+
+
 def test_source_reanalysis_flag_is_server_boolean(monkeypatch):
     api = _load_api(monkeypatch)
     captured = {}

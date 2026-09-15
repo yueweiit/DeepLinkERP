@@ -136,6 +136,11 @@ def write_rows(store,ledger,preview,context):
             str(row.get('stable_line_key') or '') for row in preview.get('rows') or []
             if row.get('_row_action') == 'source' and row.get('stable_line_key')
         }
+        confirmed_member_keys.update(
+            str(key) for candidate in preview.get('packing_group_candidates') or []
+            if candidate.get('default_selected') and candidate.get('can_apply')
+            for key in candidate.get('member_keys') or []
+        )
         metadata[META_KEY]=adopt_xlsx_group_candidates(
             adopted, groups_from_version({'extra_json':metadata}), preview.get('packing_group_candidates') or [],
             preview['id'], confirmed_member_keys=confirmed_member_keys)
@@ -156,7 +161,7 @@ def write_rows(store,ledger,preview,context):
     elif metadata.get('ai_row_adoption'):
         metadata['ai_row_adoption'].update(revision=preview['revision'],goods=scoped_goods(adopted))
     metadata.setdefault('ai_row_applications',[]).append({'preview_id':preview['id'],'run_id':preview['run_id'],'mode':preview['mode'],
-        'selected_row_ids':preview['selected_row_ids'],'changes':preview['changes'],
+        'selected_row_ids':preview['selected_row_ids'],'selected_field_choices':preview.get('selected_field_choices') or {},'changes':preview['changes'],
         'actual_sources':preview.get('actual_sources') or []})
     ledger.put('version',version['name'],{'extra_json':dumps(metadata),'calculated_at':None,'summary_snapshot_json':'{}','rule_snapshot_json':'[]'})
     ledger.put('batch',batch_name,{'current_version':version['name'],'status':'Dirty','confirm_status':'Pending','writeback_status':'Not Started',
@@ -185,7 +190,11 @@ def apply_selection(run,preview,draft,context):
     from .logistics_settlement.freight_adoption import refresh_item_contexts
     store=Store.frappe();ledger=FrappeLedger()
     with store.atomic():
-        version_name=write_rows(store,ledger,preview,context) if preview['selected_row_ids'] else preview['version']
+        version_name=write_rows(store,ledger,preview,context) if (
+            preview['selected_row_ids'] or preview.get('selected_field_choices')
+            or any(candidate.get('default_selected') and candidate.get('can_apply')
+                   for candidate in preview.get('packing_group_candidates') or [])
+        ) else preview['version']
         for proposal in preview['fees']:
             existing=fee_service._decorate_historical_rules(fee_service._query_rules(preview['batch'],version_name),context.get('transport_mode'))
             assert_allowed([proposal],existing,context.get('effective_source') or {})

@@ -595,6 +595,8 @@
 .ocw-mf-ai-preview-table tbody tr:last-child td { border-bottom: 0; }
 .ocw-mf-ai-preview-table tbody tr:nth-child(even) { background: #fbfcfe; }
 .ocw-mf-ai-preview-table td:nth-child(3) { min-width: 150px; max-width: 280px; white-space: normal; overflow-wrap: anywhere; }
+.ocw-mf-ai-preview-table [data-mf-ai-field-select] { width: 100%; min-width: 210px; min-height: 34px; padding: 5px 8px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; color: #1f344f; }
+.ocw-mf-ai-preview-section [data-mf-ai-packing-group-select] { margin-right: 5px; accent-color: #1673cc; }
 .ocw-mf-ai-preview-empty { margin: 0; color: #667085; font-size: 12px; }
 .ocw-mf-ai-preview-unresolved { padding: 12px; border: 1px solid #efcf84; border-radius: 8px; background: #fff8e7; color: #8a5700; font-size: 12px; }
 .ocw-mf-ai-preview-unresolved ul { padding-left: 18px; margin: 0; }

@@ -13,9 +13,10 @@ class Repo(ContextRepository):
         self.items[0].update(gross_weight_kg=None,quantity=1,actual_shipped_qty=1,unit='件',shipped_uom='件')
         self.fees=[];self.sources=[{'source_id':'DOC','source_kind':'approval_form','source_hash':'HASH'}]
         self.rolled_back=False
-        self.create_run({'batch':'B1','version':'V1','status':'READY','clarification_text':'','source_manifest_json':self.sources,
+        self.create_run({'batch':'B1','version':'V1','status':'READY','proposal_version':1,'clarification_text':'','source_manifest_json':self.sources,
             'input_fingerprint':ai._source_review_fingerprint('B1','V1',self.items,self.sources,'',context=self.context),
-            'draft_json':{'material_input_fingerprint':service.material_fingerprint(self.items,self.sources,self.context)},
+            'draft_json':{'material_input_fingerprint':service.material_fingerprint(self.items,self.sources,self.context),
+                          'row_review_policy':'ai-field-review-1'},
             'candidates_json':[{'proposal_id':'P1','proposal_type':'item_update','target_item_name':'I1','default_selected':True,'payload':{'fields':{'gross_weight_kg':2}}}]})
     def list_sources(self,*args):return deepcopy(self.sources)
     def get_fees(self,*args):return deepcopy(self.fees)
@@ -30,10 +31,11 @@ class Repo(ContextRepository):
         return result
 
 
-def prepare(repo,ids=None,fees=None,mode='fill_missing'):
+def prepare(repo,ids=None,fees=None,mode='fill_missing',packing_group_ids=None):
     catalog=service.review_catalog(repo,'B1',repo.run)
     ids=ids if ids is not None else [r['row_id'] for r in catalog['rows'] if r['default_selected']]
-    return service.prepare('B1',repo.run['name'],ids,fees or [],mode,'V1',repository=repo)['preview']
+    return service.prepare('B1',repo.run['name'],ids,fees or [],mode,'V1',
+                           packing_group_ids=packing_group_ids,repository=repo)['preview']
 
 
 def confirm(repo,preview):
@@ -105,7 +107,7 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
 
     catalog=service.review_catalog(repo,'B1',repo.run)
     source_row=next(row for row in catalog['rows'] if row['origin']=='source')
-    assert catalog['policy']=='ai-row-review-4'
+    assert catalog['policy']=='ai-field-review-1'
     assert source_row['meaningful_field_count']==1
     assert '已默认选择' in source_row['default_selection_reason']
     selected=[row['row_id'] for row in catalog['rows'] if row['default_selected']]
@@ -124,8 +126,32 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
     internal=json.dumps(receipt,ensure_ascii=False)
     assert 'purchase_fact' not in internal
     assert not ({'rows','changes','actual_sources','fees','sources'} & receipt.keys())
+    assert 'packing_group_candidates' not in receipt
+    assert 'merged_amount_groups' not in receipt
     assert receipt['selected_row_ids']==selected
     assert receipt['revision']==response['preview']['revision']
+
+
+def test_field_choices_are_authenticated_without_persisting_business_values():
+    repo = Repo()
+    catalog = service.review_catalog(repo, 'B1', repo.run)
+    candidate = next(row for row in catalog['field_candidates'] if row['default_selected'])
+    choices = {f"{candidate['item_name']}:{candidate['fieldname']}": candidate['candidate_id']}
+
+    response = service.prepare(
+        'B1', repo.run['name'], [], [], 'update_selected', 'V1',
+        field_choices=choices, repository=repo,
+    )
+    preview = response['preview']
+    receipt = repo.run['draft_json']['row_previews'][preview['id']]
+
+    assert preview['rows'][0]['gross_weight_kg'] == 2
+    assert receipt['selected_field_choices'] == choices
+    serialized = json.dumps(receipt, ensure_ascii=False)
+    assert 'suggested_value' not in serialized
+    assert len(serialized) < 32_000
+    assert confirm(repo, preview)['ok']
+    assert repo.writes[0]['rows'][0]['gross_weight_kg'] == 2
 
 
 def test_new_selection_supersedes_older_preview():
@@ -172,6 +198,34 @@ def test_large_private_projection_adds_only_a_bounded_receipt_and_can_confirm():
     assert confirm(repo,preview)['ok']
 
 
+def test_packing_group_default_can_be_deselected_before_confirmation():
+    repo=Repo()
+    repo.items=[
+        {**repo.items[0],'stable_line_key':'LINE-1','row_no':1},
+        {'name':'I2','material_code':'SKU2','stable_line_key':'LINE-2','row_no':2,
+         'quantity':1,'actual_shipped_qty':1,'unit':'件','shipped_uom':'件'},
+    ]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'GROUP-1','member_keys':['LINE-1','LINE-2'],
+        'gross_weight_kg':'42.05','package_count':None,
+        'default_selected':True,'can_apply':True,
+        'evidence':[{'kind':'trusted_comment_text'}],
+    }]
+
+    selected=prepare(repo,ids=[],mode='update_selected')
+    assert selected['selected_packing_group_ids']==['GROUP-1']
+    assert selected['can_apply'] is True
+
+    deselected=prepare(repo,ids=[],mode='update_selected',packing_group_ids=[])
+    assert deselected['selected_packing_group_ids']==[]
+    assert deselected['packing_group_candidates']==[]
+    assert deselected['can_apply'] is False
+
+
 def test_preview_cleanup_shallow_copies_top_level_without_copying_large_nested_draft():
     payload='x'*1024
     large_analysis=[
@@ -197,14 +251,21 @@ def test_preview_cleanup_shallow_copies_top_level_without_copying_large_nested_d
 
 def test_policy_upgrade_rejects_preview_created_by_previous_row_policy(monkeypatch):
     repo=Repo()
-    monkeypatch.setattr(service.rows,'POLICY','ai-row-review-3')
     preview=prepare(repo)
     monkeypatch.setattr(service.rows,'POLICY','ai-row-review-4')
 
-    with pytest.raises(ValueError,match='(?:不属于|刷新预览)'):
+    with pytest.raises(ValueError,match='(?:不属于|刷新预览|规则已升级)'):
         confirm(repo,preview)
 
     assert not repo.writes
+
+
+def test_ready_draft_from_previous_review_policy_requires_reanalysis():
+    repo=Repo()
+    repo.run['draft_json']['row_review_policy']='ai-row-review-previous'
+
+    with pytest.raises(ValueError,match='规则已升级'):
+        service.review_catalog(repo,'B1',repo.run)
 
 
 @pytest.mark.parametrize('change',['fee','item','source','note'])
@@ -295,6 +356,15 @@ def test_unverified_group_for_same_item_but_other_source_does_not_block_value_fi
 
 def test_relevant_unverified_merged_amount_group_blocks_confirmation_without_writing():
     repo = Repo()
+    repo.items=[
+        {**repo.items[0],'stable_line_key':'LINE-1','row_no':1},
+        {'name':'I2','material_code':'SKU2','stable_line_key':'LINE-2','row_no':2,
+         'quantity':1,'actual_shipped_qty':1,'unit':'件','shipped_uom':'件'},
+    ]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
     repo.run['candidates_json'] = [{
         'proposal_id': 'VALUE',
         'proposal_type': 'item_update',
@@ -312,6 +382,13 @@ def test_relevant_unverified_merged_amount_group_blocks_confirmation_without_wri
         'control_total': 60400,
         'computed_total': 59800,
         'status': 'needs_allocation',
+    }]
+    repo.run['draft_json']['packing_group_candidates'] = [{
+        'candidate_id': 'PACKING-GROUP',
+        'member_keys': ['LINE-1', 'LINE-2'],
+        'default_selected': True,
+        'can_apply': True,
+        'evidence': [{'kind': 'trusted_comment_text'}],
     }]
 
     preview = prepare(repo)

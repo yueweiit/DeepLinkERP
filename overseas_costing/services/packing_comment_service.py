@@ -8,7 +8,10 @@ import re
 
 PACKING_KEYWORDS = ("装箱", "装柜", "发货", "发出", "寄出", "重量", "毛重", "规格", "尺寸", "dhl", "packing")
 QUANTITY_UNITS = r"PCS|pcs|Pcs|件|个|套|箱|包|袋|支|台|卷|托"
-NUMBER = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d,.])"
+# A comma after a complete number is often punctuation in OA comments.  Keep
+# comma protection only on the left so malformed thousands such as 1,2,3 are
+# still rejected by the stricter quantity patterns below.
+NUMBER = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.])"
 
 
 def build_comment_source_id(instance_id: str, operation_time: str, user_id: str, remark: str) -> str:
@@ -41,6 +44,10 @@ def parse_packing_comment(remark: str) -> dict:
     text = str(remark or "").strip()
     rows: list[dict] = []
     seen: set[tuple[str, str, float]] = set()
+    material_code_hints = list(dict.fromkeys(
+        match.group(0).upper()
+        for match in re.finditer(r"\b[A-Z][A-Z0-9_-]*\d[A-Z0-9_-]*\b", text, re.I)
+    ))
 
     weight_match = re.search(rf"(?:重量|毛重|重)\s*[：:=]?\s*({NUMBER})\s*(?:kg|公斤|千克)\b", text, re.I)
     gross_weight = _number(weight_match.group(1)) if weight_match else None
@@ -115,12 +122,6 @@ def parse_packing_comment(remark: str) -> dict:
         seen.add(key)
         rows.append({"product_name": product_name, "actual_shipped_qty": quantity, "unit": unit})
 
-    if rows:
-        if gross_weight is not None:
-            rows[0]["gross_weight_kg"] = gross_weight
-        if volume_m3 is not None:
-            rows[0]["volume_m3"] = volume_m3
-
     normalized = text.lower()
     keyword_hits = [keyword for keyword in PACKING_KEYWORDS if keyword in normalized]
     is_candidate = bool(rows or ((gross_weight is not None or dimensions) and keyword_hits))
@@ -131,6 +132,13 @@ def parse_packing_comment(remark: str) -> dict:
         "gross_weight_kg": gross_weight,
         "dimensions_cm": dimensions,
         "volume_m3": volume_m3,
+        "weight_scope": "packing_group" if gross_weight is not None else None,
+        "weight_basis": (
+            "explicit_gross_weight" if weight_match and re.search(r"毛重", weight_match.group(0))
+            else "inferred_unqualified_weight_as_gross" if gross_weight is not None else None
+        ),
+        "package_count": None,
+        "material_code_hints": material_code_hints,
         "rows": rows,
         "keyword_hits": keyword_hits,
         "source_text": text,
