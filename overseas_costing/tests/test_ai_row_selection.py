@@ -292,10 +292,10 @@ def test_different_fee_keys_covering_same_scope_cannot_both_be_adopted():
     fees = [
         {'proposal_id': 'AIR', 'proposal_type': 'fee_update',
          'payload': {'logical_fee_key': 'international_air_freight', 'amount': '100', 'currency': 'RMB'}},
-        {'proposal_id': 'SURCHARGE', 'proposal_type': 'fee_update',
-         'payload': {'logical_fee_key': 'express_surcharge', 'amount': '20', 'currency': 'RMB'}},
+        {'proposal_id': 'PORT', 'proposal_type': 'fee_update',
+         'payload': {'logical_fee_key': 'port_and_forwarder_charges', 'amount': '20', 'currency': 'RMB'}},
     ]
     review = service.catalog([], fees, [], {}, run_id='R')
 
     with pytest.raises(ValueError, match='只选择一份'):
-        service.project([], review, [], ['AIR', 'SURCHARGE'], 'fill_missing')
+        service.project([], review, [], ['AIR', 'PORT'], 'fill_missing')

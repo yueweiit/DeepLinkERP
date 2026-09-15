@@ -944,6 +944,9 @@ def _review_ref_matches_locator(ref: dict, locator: dict) -> bool:
     for fieldname in ("row", "page"):
         expected = _positive_location(ref.get(fieldname))
         actual = _positive_location(locator.get(fieldname))
+        if fieldname == "page" and expected == 1 and actual is None:
+            # Unpaginated extracted PDF text is canonically its first page.
+            continue
         if expected and expected != actual:
             return False
     return True
@@ -955,7 +958,7 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
     document_id = _review_fee_document_id(proposal)
     document = evidence.get(document_id) or {}
     amount_key = _fee_amount_key((proposal.get("payload") or {}).get("amount"))
-    currency = str((proposal.get("payload") or {}).get("currency") or "RMB")
+    currency = str((proposal.get("payload") or {}).get("currency") or "")
     currency_pattern = _CURRENCY_LINE_PATTERNS.get(currency)
     if not document_id or not amount_key or currency_pattern is None:
         return False
@@ -963,10 +966,15 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
         ref for ref in proposal.get("source_refs") or []
         if str(ref.get("document_id") or "") == document_id
     ]
+    from overseas_costing.scripts.import_oa_logistics import (
+        _looks_like_quote_amount_line,
+    )
     for line, locator in _document_fee_lines(document):
         if refs and not any(_review_ref_matches_locator(ref, locator) for ref in refs):
             continue
-        if not _DECLARED_TOTAL_PATTERN.search(line) or not currency_pattern.search(line):
+        if (not _DECLARED_TOTAL_PATTERN.search(line)
+                or not _looks_like_quote_amount_line(line)
+                or not currency_pattern.search(line)):
             continue
         line_amounts = {
             _fee_amount_key(match)
@@ -990,9 +998,15 @@ def _arbitrate_review_freight_totals(
     ]
     if not freight:
         return
+    approved = [proposal for proposal in freight if proposal.get("approved_carrier")]
     for proposal in freight:
+        if proposal in approved:
+            proposal["selection_role"] = "approved_quote"
+            continue
         proposal["selection_role"] = "ambiguous"
         proposal["default_selected"] = False
+    if approved:
+        return
     declared_totals = [
         proposal for proposal in freight
         if str((proposal.get("payload") or {}).get("logical_fee_key") or "")
@@ -1004,14 +1018,17 @@ def _arbitrate_review_freight_totals(
     total = declared_totals[0]
     document_id = _review_fee_document_id(total)
     currency = str((total.get("payload") or {}).get("currency") or "")
-    components = [
+    same_document_candidates = [
         proposal for proposal in freight
         if proposal is not total
         and _review_fee_document_id(proposal) == document_id
-        and str((proposal.get("payload") or {}).get("currency") or "") == currency
     ]
-    if len(components) < 2:
+    if (currency not in REVIEW_CURRENCIES
+            or len(same_document_candidates) < 2
+            or any(str((proposal.get("payload") or {}).get("currency") or "") != currency
+                   for proposal in same_document_candidates)):
         return
+    components = same_document_candidates
     total_amount = _decimal((total.get("payload") or {}).get("amount"))
     component_amounts = [
         _decimal((proposal.get("payload") or {}).get("amount"))
@@ -1157,7 +1174,17 @@ def normalize_source_review_proposals(
             )
             conflict = (conflict or bool(existing_fee)) and not approved
         identity = (
-            (proposal_type, payload.get("logical_fee_key"), payload.get("amount"), payload.get("currency"))
+            (
+                proposal_type,
+                payload.get("logical_fee_key"),
+                payload.get("amount"),
+                payload.get("currency"),
+                tuple(sorted(
+                    tuple(str(ref.get(fieldname) or "") for fieldname in
+                          ("document_id", "field", "sheet", "page", "row", "cell"))
+                    for ref in refs
+                )),
+            )
             if proposal_type == "fee_update"
             else (proposal_type, target, _json(payload))
         )
@@ -1184,6 +1211,7 @@ def normalize_source_review_proposals(
                 "conflict_group": str(raw.get("conflict_group") or "")[:200],
                 "recommended": bool(raw.get("recommended")),
                 "carrier": str(raw.get("carrier") or "")[:100],
+                "approved_carrier": bool(raw.get("approved_carrier")) and system_origin,
                 "alternatives": raw.get("alternatives") or [],
                 "default_selected": bool(raw.get("default_selected", confidence >= 0.9)) and confidence >= 0.9 and not conflict,
                 "payload": payload,

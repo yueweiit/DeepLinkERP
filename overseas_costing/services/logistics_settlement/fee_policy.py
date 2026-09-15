@@ -24,7 +24,9 @@ def row_scopes(rule):
         return {'customs'}
     if 'tax' in keys:
         return {'tax'}
-    if any(token in keys for token in ('freight', 'ocean', 'international_express_fee', 'express_surcharge', 'forwarder_surcharge')):
+    if any(token in keys for token in (
+            'freight', 'ocean', 'international_express_fee', 'express_surcharge',
+            'forwarder_surcharge', 'port_and_forwarder_charges')):
         return {'freight'}
     return set()
 

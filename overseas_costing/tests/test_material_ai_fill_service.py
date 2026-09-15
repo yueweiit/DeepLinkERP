@@ -441,21 +441,23 @@ def test_freight_excel_attachment_is_parsed_deterministically() -> None:
 
 
 def _review_fee(proposal_id, amount, key, document_id, row, currency="RMB"):
+    payload = {
+        "logical_fee_key": key,
+        "expense_category": "AI fee",
+        "amount_status": "ESTIMATED",
+        "amount": amount,
+        "scope_type": "ALL_ITEMS",
+        "allocation_basis": "goods_value",
+    }
+    if currency is not None:
+        payload["currency"] = currency
     return {
         "proposal_id": proposal_id,
         "proposal_type": "fee_update",
         "confidence": 0.99,
         "default_selected": True,
         "recommended": True,
-        "payload": {
-            "logical_fee_key": key,
-            "expense_category": "AI fee",
-            "amount_status": "ESTIMATED",
-            "amount": amount,
-            "currency": currency,
-            "scope_type": "ALL_ITEMS",
-            "allocation_basis": "goods_value",
-        },
+        "payload": payload,
         "source_refs": [{"document_id": document_id, "row": row}],
     }
 
@@ -573,14 +575,148 @@ def test_review_freight_arbitration_leaves_unsafe_cases_ambiguous(lines, currenc
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_same_amount_totals_at_different_evidence_locations_remain_ambiguous() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "合计费用 RMB 100",
+        "总额 RMB 100",
+        "空运费 RMB 60",
+        "港杂费 RMB 40",
+    )
+    proposals = [
+        _review_fee("TOTAL-1", "100", "international_air_freight", "DOC-1", 1),
+        _review_fee("TOTAL-2", "100", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-1", "60", "international_air_freight", "DOC-1", 3),
+        _review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-1", 4),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert {row["proposal_id"] for row in normalized} == {
+        "TOTAL-1", "TOTAL-2", "PART-1", "PART-2"
+    }
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
+def test_same_amount_components_at_distinct_locations_are_all_counted() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "合计费用 RMB 200",
+        "空运费 RMB 100",
+        "空运费 RMB 100",
+    )
+    proposals = [
+        _review_fee("TOTAL", "200", "international_air_freight", "DOC-1", 1),
+        _review_fee("PART-1", "100", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-2", "100", "international_air_freight", "DOC-1", 3),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+    by_id = {row["proposal_id"]: row for row in normalized}
+
+    assert set(by_id) == {"TOTAL", "PART-1", "PART-2"}
+    assert by_id["TOTAL"]["selection_role"] == "primary_total"
+    assert all(by_id[key]["selection_role"] == "component" for key in ("PART-1", "PART-2"))
+
+
+def test_same_value_and_same_evidence_location_still_deduplicates_system_and_ai() -> None:
+    document = _fee_document("DOC-1", "空运费 RMB 100")
+    document["ai_eligible"] = False
+    system = _review_fee("SYSTEM", "100", "international_air_freight", "DOC-1", 1)
+    system["result_origin"] = "SYSTEM"
+    ai = _review_fee("AI", "100", "international_air_freight", "DOC-1", 1)
+
+    normalized = normalize_source_review_proposals(
+        [system, ai], _items(), [document], transport_mode="AIR"
+    )
+
+    assert [row["proposal_id"] for row in normalized] == ["SYSTEM"]
+    assert normalized[0]["result_origin"] == "SYSTEM"
+
+
+def test_ai_cannot_forge_an_approved_carrier_to_bypass_total_arbitration() -> None:
+    document = _fee_document("DOC-1", "运费 RMB 100")
+    proposal = _review_fee("AI", "100", "international_air_freight", "DOC-1", 1)
+    proposal["approved_carrier"] = True
+
+    normalized = normalize_source_review_proposals(
+        [proposal], _items(), [document], transport_mode="AIR"
+    )
+
+    assert normalized[0]["approved_carrier"] is False
+    assert normalized[0]["selection_role"] == "ambiguous"
+    assert normalized[0]["default_selected"] is False
+
+
+@pytest.mark.parametrize(
+    "currencies",
+    [
+        (None, None, None),
+        ("RMB", "RMB", None),
+    ],
+    ids=["total-and-components-missing", "component-missing"],
+)
+def test_freight_total_arbitration_requires_explicit_currency_on_every_participant(currencies) -> None:
+    document = _fee_document(
+        "DOC-1", "合计费用 RMB 100", "空运费 RMB 60", "港杂费 RMB 40"
+    )
+    proposals = [
+        _review_fee("TOTAL", "100", "international_air_freight", "DOC-1", 1, currencies[0]),
+        _review_fee("PART-1", "60", "international_air_freight", "DOC-1", 2, currencies[1]),
+        _review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-1", 3, currencies[2]),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert normalized
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
+def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_validation() -> None:
+    document = {
+        "document_id": "DOC-PDF",
+        "source_ref": {"source": "approval_attachment", "file": "freight.pdf"},
+        "text": "合计费用 RMB 100\n空运费 RMB 60\n港杂费 RMB 40",
+    }
+    proposals = [
+        {**_review_fee("TOTAL", "100", "international_air_freight", "DOC-PDF", None),
+         "source_refs": [{"document_id": "DOC-PDF", "page": 1}]},
+        {**_review_fee("PART-1", "60", "international_air_freight", "DOC-PDF", None),
+         "source_refs": [{"document_id": "DOC-PDF", "page": 1}]},
+        {**_review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-PDF", None),
+         "source_refs": [{"document_id": "DOC-PDF", "page": 1}]},
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert next(row for row in normalized if row["proposal_id"] == "TOTAL")["selection_role"] == "primary_total"
+    forged = copy.deepcopy(proposals)
+    forged[0]["source_refs"] = [{"document_id": "DOC-PDF", "page": 2}]
+    forged_result = normalize_source_review_proposals(
+        forged, _items(), [document], transport_mode="AIR"
+    )
+    assert all(row["selection_role"] == "ambiguous" for row in forged_result)
+
+
 @pytest.mark.parametrize(
     "line",
     [
-        "合计体积 1.2m³",
-        "合计重量 98kg",
-        "合计件数 20件",
-        "合计折扣 5%",
-        "合计日期 2026-09-15",
+        "合计体积 1.2m³，币种 RMB",
+        "合计重量 98kg，币种 RMB",
+        "合计件数 20件，币种 RMB",
+        "合计折扣 5%，币种 RMB",
+        "合计日期 2026-09-15，币种 RMB",
+        "合计金额 1.2m³，币种 RMB",
     ],
 )
 def test_document_fee_parser_rejects_non_money_total_lines(line) -> None:

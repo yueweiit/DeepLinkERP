@@ -2214,9 +2214,18 @@ def _looks_like_quote_amount_line(line: str) -> bool:
         return False
     if re.search(r"/(?:方|立方|cbm|m3|kg|kgs?)", text, re.IGNORECASE) and "=" not in text:
         return False
-    money = bool(
+    currency_token = r"(?:元|rmb|cny|¥|￥|usd|us\$|美金|美元|mxn|peso|比索)"
+    number_token = r"[-+]?\d[\d,]*(?:\.\d+)?"
+    money_amount = bool(
         re.search(
-            r"(?:元|rmb|cny|¥|￥|usd|us\$|美金|美元|mxn|peso|比索)",
+            rf"(?:{currency_token}\s*[:：]?\s*{number_token}|{number_token}\s*{currency_token})",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    financial = bool(
+        re.search(
+            r"(?:应付|运费|费用|货款|金额|价款|价格|总额|总价|freight|shipping|amount|payable|price)",
             text,
             re.IGNORECASE,
         )
@@ -2226,12 +2235,17 @@ def _looks_like_quote_amount_line(line: str) -> bool:
         text,
         re.IGNORECASE,
     ):
-        return money and bool(re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", text))
+        return financial and money_amount
     if "=" not in text:
         return False
-    if not re.search(r"(?:元|rmb|cny|¥|￥|usd|美金|美元|mxn|peso|比索)", text, re.IGNORECASE):
+    after_equals = text.rsplit("=", 1)[1]
+    if not re.search(
+        rf"(?:{currency_token}\s*[:：]?\s*{number_token}|{number_token}\s*{currency_token})",
+        after_equals,
+        re.IGNORECASE,
+    ):
         return False
-    return bool(re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", text.rsplit("=", 1)[1]))
+    return bool(re.search(number_token, after_equals))
 
 
 def _parse_direct_quote_line(line: str) -> dict | None:
