@@ -3,4 +3,3 @@
 
 class SourceIntegrityError(RuntimeError):
     """A server-owned source identity, snapshot, or relationship changed."""
-
