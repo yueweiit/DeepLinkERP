@@ -24,6 +24,8 @@ def material_fingerprint(items,sources,context):
         row['extra_json']=meta;clean_items.append(row)
     clean_sources=[]
     for source in sources:
+        if not bool(source.get('selected',True)):
+            continue
         row=ai._fingerprint_source(source);row['source_context']=packing(row.get('source_context'));clean_sources.append(row)
     return digest('ai-material-input-1',clean_items,clean_sources,packing(context.get('effective_source')),
         context.get('fx_rates'),context.get('clarification_revision'))

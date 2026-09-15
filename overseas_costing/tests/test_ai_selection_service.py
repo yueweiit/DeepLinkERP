@@ -52,6 +52,24 @@ def pending_adopted_scope(repo):
         repo.items,repo.sources,repo.context)
 
 
+def test_unselected_source_materialization_does_not_invalidate_review_fingerprints():
+    context = {'batch': 'B1', 'version': 'V1', 'transport_mode': 'AIR'}
+    items = [{'name': 'I1', 'material_code': 'SKU1'}]
+    before = [
+        {'source_id': 'SELECTED', 'source_kind': 'approval_form', 'source_hash': 'S1', 'selected': True},
+        {'source_id': 'IGNORED', 'source_kind': 'approval_attachment', 'source_hash': 'OLD', 'selected': False},
+    ]
+    after = deepcopy(before)
+    after[1]['source_hash'] = 'MATERIALIZED'
+
+    assert ai._source_review_fingerprint('B1', 'V1', items, before, '', context=context) == (
+        ai._source_review_fingerprint('B1', 'V1', items, after, '', context=context)
+    )
+    assert service.material_fingerprint(items, before, context) == (
+        service.material_fingerprint(items, after, context)
+    )
+
+
 def test_pending_adopted_material_scope_can_reenter_review_prepare_and_confirm():
     repo=Repo();pending_adopted_scope(repo)
 

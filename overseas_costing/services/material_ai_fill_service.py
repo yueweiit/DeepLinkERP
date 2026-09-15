@@ -594,7 +594,11 @@ def build_input_fingerprint(batch_name: str, version_name: str, items: list[dict
         "version": str(version_name or ""),
         "items": sorted((_fingerprint_item(row) for row in items or []), key=lambda row: str(row.get("name") or "")),
         "sources": sorted(
-            (_fingerprint_source(row) for row in sources or []),
+            (
+                _fingerprint_source(row)
+                for row in sources or []
+                if bool(row.get("selected", True))
+            ),
             key=lambda row: (str(row.get("source_kind") or ""), str(row.get("logical_source_id") or ""), str(row.get("sheet_name") or "")),
         ),
     }
