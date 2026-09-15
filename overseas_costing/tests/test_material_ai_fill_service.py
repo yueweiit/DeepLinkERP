@@ -3475,6 +3475,67 @@ def test_unified_worker_blocks_when_required_source_has_no_usable_content(monkey
     assert "未发现可识别内容" in repository.run["error_message"]
 
 
+def test_unified_worker_falls_back_after_higher_priority_required_source_fails(monkeypatch) -> None:
+    from overseas_costing.services import material_ai_fill_service as service
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = [
+        {
+            "source_kind": "approval_form",
+            "source_id": "approval:PAYMENT:form",
+            "logical_source_id": "approval:PAYMENT:form",
+            "source_hash": "payment-hash",
+            "source_label": "费用支出正文",
+            "approval_role": "logistics_expense",
+            "analysis_required": True,
+            "form_fields": {},
+        },
+        {
+            "source_kind": "manual_attachment",
+            "source_id": "LOGISTICS-PACKING",
+            "logical_source_id": "LOGISTICS-PACKING",
+            "source_hash": "packing-hash",
+            "source_label": "国际物流装箱单.xlsx",
+            "file_name": "国际物流装箱单.xlsx",
+            "approval_role": "international_logistics",
+        },
+    ]
+    manifest = prepare_source_manifest(repository.sources)
+    repository.run.update({
+        "proposal_version": 1,
+        "source_manifest_json": manifest,
+        "input_fingerprint": service._source_review_fingerprint(
+            "B1", "V1", _items(), manifest, ""
+        ),
+    })
+
+    def read_source(_items_arg, source):
+        if source["source_id"] == "approval:PAYMENT:form":
+            raise ValueError("无权读取高优先级来源")
+        return (
+            [_candidate("ITEM-1", "gross_weight_kg", "12.5", source="国际物流装箱单.xlsx")],
+            {
+                "source_ref": {"source": "manual_attachment", "file": "国际物流装箱单.xlsx", "sheet": "Sheet1"},
+                "structured_rows": [{"source_row": 8, "gross_weight_kg": "12.5"}],
+                "ai_eligible": False,
+            },
+        )
+
+    monkeypatch.setattr(service, "_read_source", read_source)
+    monkeypatch.setattr(service, "_call_source_review_ai", lambda *_args, **_kwargs: {
+        "ok": False, "proposals": [], "warning": "",
+    })
+
+    result = execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] == "READY", repository.run.get("error_message")
+    progress = {row["source_id"]: row for row in repository.run["source_progress_json"]}
+    assert progress["approval:PAYMENT:form"]["status"] == "FAILED"
+    assert progress["LOGISTICS-PACKING"]["status"] in {"PARSED", "PARTIAL", "COMPLETED"}
+    assert repository.run["candidates_json"]
+
+
 def test_unified_worker_blocks_when_all_selected_optional_sources_are_unusable(monkeypatch) -> None:
     from overseas_costing.services import material_ai_fill_service as service
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest

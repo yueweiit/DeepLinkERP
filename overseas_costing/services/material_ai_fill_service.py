@@ -2889,7 +2889,20 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
         original_preview['shipment_fill'] = shipment_fill
         shipment_fill['attempted_item_names'] = [item['name'] for item in matched_items] if has_values else []
         sheet_name = str((preview.get('source') or {}).get('sheet_name') or source.get('sheet_name') or '')
-        row_keys = {int(row.get('source_row')):row.get('_target_stable_line_key')
+        def persisted_member_key(target_key):
+            target = next(
+                (item for item in items if item.get('stable_line_key') == target_key),
+                {},
+            )
+            existing_name = str(target.get('_existing_name') or '').strip()
+            if existing_name and '_existing_stable_line_key' in target:
+                return (
+                    str(target.get('_existing_stable_line_key') or '').strip()
+                    or f'legacy:{existing_name}'
+                )
+            return str(target_key or '').strip()
+
+        row_keys = {int(row.get('source_row')):persisted_member_key(row.get('_target_stable_line_key'))
                     for row in preview.get('material_rows') or [] if row.get('source_row')}
         shipment_fill['packing_group_candidates'] = [
             {'candidate_id':digest('xlsx-packing-group', source.get('source_hash'), sheet_name,
@@ -4006,8 +4019,6 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                                 ref["document_id"] = document["document_id"]
                             deterministic_proposals.append(proposal)
                 else:
-                    if source.get("analysis_required"):
-                        raise ValueError("必需资料未发现可识别内容。")
                     _update_source_progress(
                         source_progress,
                         source_index,
@@ -4029,8 +4040,6 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         "message": str(exc),
                     }
                 )
-                if source.get("analysis_required"):
-                    raise
 
             partial = ([reconciliation] if reconciliation else []) + deterministic_proposals
             persist(source_progress_json=source_progress,

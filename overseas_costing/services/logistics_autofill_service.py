@@ -189,7 +189,12 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
                     "shipped_uom": goods_row.get("unit") or "",
                     "source_doc_no": old.get("source_doc_no") or source.get("approval_no"),
                     "source_type": "OA_LOGISTICS_ROW",
-                    "_existing_name": retained_name})
+                    "_existing_name": retained_name,
+                    "_existing_stable_line_key": (
+                        old.get("_existing_stable_line_key")
+                        if "_existing_stable_line_key" in old
+                        else old.get("stable_line_key")
+                    )})
         if retained_name and str(old.get("actual_shipped_qty_mode") or "") == "MANUAL_CONFIRMED":
             row["actual_shipped_qty"] = old.get("actual_shipped_qty")
             row["actual_shipped_qty_mode"] = "MANUAL_CONFIRMED"
@@ -211,6 +216,11 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
     for original in unmatched:
         row = deepcopy(original)
         row["_existing_name"] = row["name"]
+        row["_existing_stable_line_key"] = (
+            row.get("_existing_stable_line_key")
+            if "_existing_stable_line_key" in row
+            else row.get("stable_line_key")
+        )
         row["_review_origin"] = "current"
         row["stable_line_key"] = row.get("stable_line_key") or "retained:" + hashlib.sha256(row["name"].encode()).hexdigest()[:32]
         row["row_no"] = len(rows) + 1

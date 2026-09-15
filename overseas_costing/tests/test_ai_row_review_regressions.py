@@ -682,3 +682,34 @@ def test_real_xlsx_physical_merge_becomes_a_stable_packing_group_candidate():
     assert len(candidates) == 1
     assert candidates[0]['member_keys'] == ['L1','L2']
     assert candidates[0]['sheet_name'] == 'Packing'
+
+
+def test_xlsx_group_uses_persisted_legacy_keys_for_reconciled_existing_rows():
+    items = [
+        {'name':'I1','stable_line_key':'logistics:one','_existing_name':'I1',
+         '_existing_stable_line_key':'','row_no':1,'material_code':'A','actual_shipped_qty':2,
+         'unit':'件','shipped_uom':'件','extra_json':json.dumps({'logistics_row':{'identity':'logistics:one'}})},
+        {'name':'I2','stable_line_key':'logistics:two','_existing_name':'I2',
+         '_existing_stable_line_key':'','row_no':2,'material_code':'B','actual_shipped_qty':3,
+         'unit':'件','shipped_uom':'件','extra_json':json.dumps({'logistics_row':{'identity':'logistics:two'}})},
+    ]
+    preview = {
+        'ok':True,'source':{'sheet_name':'Packing','merge_ranges_available':True},
+        'validation':{'blocking':[]},
+        'material_rows':[
+            {'source_row':2,'material_code':'A','quantity':'2','unit':'件','gross_weight_kg':'5',
+             'field_ranges':{'gross_weight_kg':{'start_row':2,'end_row':3,'start_column':8,'end_column':8}}},
+            {'source_row':3,'material_code':'B','quantity':'3','unit':'件','gross_weight_kg':'5',
+             'field_ranges':{'gross_weight_kg':{'start_row':2,'end_row':3,'start_column':8,'end_column':8}}},
+        ],
+        'groups':[{'group_id':'package-legacy','row_numbers':[2,3],
+                   'package_count':{'value':'1'},'net_weight_kg':{'value':'4'},
+                   'gross_weight_kg':{'value':'5'},'volume_m3':{'value':'0.1'},
+                   'needs_confirmation':False,
+                   'evidence':[{'kind':'xlsx_merge','field':'gross_weight_kg','start_row':2,'end_row':3}]}],
+    }
+
+    _projection_candidates(items, {'source_id':'ATTACHMENT','source_hash':'HASH'}, preview)
+
+    candidate = preview['shipment_fill']['packing_group_candidates'][0]
+    assert candidate['member_keys'] == ['legacy:I1','legacy:I2']
