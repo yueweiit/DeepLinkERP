@@ -1984,7 +1984,7 @@
     if (!fill.rowSelection) fill.rowSelection = {
       mode: "update_selected",
       rows: new Set((fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
-      fees: new Set((fill.row_review.fees || []).filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
+      fees: new Set((fill.row_review.fees || []).filter(fee => !["component", "alternative"].includes(String(fee.selection_role || "")) && fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
       request: 0, loading: false, preview: null, error: "", timer: null,
     };
     return fill.rowSelection;
@@ -2014,10 +2014,16 @@
       const items = kind === "rows" ? rows : fill.row_review.fees || [];
       for (const item of items) {
         const itemId = String(kind === "rows" ? item.row_id : item.proposal_id);
-        const allowed = kind === "fees" ? selection.mode !== "add_selected" && item.can_apply
+        const role = String(item.selection_role || "");
+        const allowed = kind === "fees" ? selection.mode !== "add_selected" && item.can_apply && !["component", "alternative"].includes(role)
           : selection.mode === "update_selected" ? item.can_update : selection.mode === "add_selected" ? item.can_add : item.can_fill;
         if (id !== "all" && itemId !== id) continue;
-        if (checked && allowed) selection[kind].add(itemId);
+        if (checked && allowed) {
+          if (kind === "fees" && role === "ambiguous") {
+            items.filter(candidate => candidate.selection_role === "ambiguous").forEach(candidate => selection.fees.delete(String(candidate.proposal_id)));
+          }
+          selection[kind].add(itemId);
+        }
         else selection[kind].delete(itemId);
       }
     }
@@ -2071,7 +2077,7 @@
       selection.preview = result.preview;
       selection.previewKey = this.materialAIRowSelectionKey(fill);
     } catch (error) {
-      if (current()) selection.error = this.materialAIErrorMessage(error, "预览失败，请重试。");
+      if (current()) selection.error = this.materialAIErrorMessage(error, "服务器预览失败，本次未保存，请稍后重试。");
     } finally {
       release();
       if (selection.inFlight === inFlight) selection.inFlight = null;
@@ -2126,17 +2132,45 @@
     const groupedTables = sourceTables
       + (otherSourceRows.length ? `<details class="ocw-mf-ai-source-candidate-group"><summary><strong>其他识别结果</strong><span>${otherSourceRows.length} 行</span></summary>${renderCandidateTable(otherSourceRows)}</details>` : "")
       + (currentRows.length ? `<details class="ocw-mf-ai-source-candidate-group is-current"><summary><strong>当前已有</strong><span>${currentRows.length} 行 · 未选行保留</span></summary>${renderCandidateTable(currentRows)}</details>` : "");
+    const fees = catalog.fees || [];
+    const feeRole = fee => String(fee.selection_role || "");
+    const mainFees = fees.filter(fee => !["component", "alternative"].includes(feeRole(fee)));
+    const alternativeFees = fees.filter(fee => feeRole(fee) === "alternative");
+    const componentsByParent = new Map();
+    fees.filter(fee => feeRole(fee) === "component").forEach(fee => {
+      const parentId = String(fee.parent_proposal_id || "");
+      if (!componentsByParent.has(parentId)) componentsByParent.set(parentId, []);
+      componentsByParent.get(parentId).push(fee);
+    });
+    const feeDescription = fee => {
+      const values = fee.payload || fee;
+      return [values.source_label, values.remark, fee.reason].filter(Boolean).join(" · ") || fee.blocked_reason || "";
+    };
+    const renderFeeComponents = fee => {
+      const rows = componentsByParent.get(String(fee.proposal_id)) || [];
+      if (!rows.length) return "";
+      return `<tr class="ocw-mf-ai-fee-components" data-mf-ai-fee-components-for="${this.escape(fee.proposal_id)}"><td></td><td colspan="4"><div><strong>总额分项（只读）</strong>${fee.resolution_reason ? `<p>${this.escape(fee.resolution_reason)}</p>` : ""}<table><thead><tr><th>分项</th><th>金额</th><th>币种</th><th>来源 / 说明</th></tr></thead><tbody>${rows.map(component => {
+        const values = component.payload || component;
+        return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(component))}</td></tr>`;
+      }).join("")}</tbody></table></div></td></tr>`;
+    };
+    const renderMainFee = fee => {
+      const values = fee.payload || fee;
+      const ambiguous = feeRole(fee) === "ambiguous";
+      return `<tr><td><input type="${ambiguous ? "radio" : "checkbox"}" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${ambiguous ? 'name="mf-ai-ambiguous-fee" ' : ""}${selection.mode === "add_selected" || !fee.can_apply || fill.applying ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${value(fee.previous_amount ?? values.previous_amount)}</td><td>${value(fee.blocked_reason || values.remark || values.source_label || fee.reason || "")}${!fee.can_apply ? "<small>只读 · 不可采用</small>" : selection.mode === "add_selected" ? "<small>新增物料需单独确认</small>" : ""}</td></tr>${renderFeeComponents(fee)}`;
+    };
+    const alternativeFeeRecords = alternativeFees.length ? `<section class="ocw-mf-ai-other-fees" data-mf-ai-other-fees="1"><h4>其他费用记录（只读 · 不可采用）</h4><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>费用项目</th><th>金额</th><th>币种</th><th>来源 / 说明</th><th>不可采用原因</th></tr></thead><tbody>${alternativeFees.map(fee => {
+      const values = fee.payload || fee;
+      return `<tr><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)}</td><td>${value(values.currency)}</td><td>${value(feeDescription(fee))}</td><td>${value(fee.blocked_reason || "该记录仅供参考，不可采用。")}</td></tr>`;
+    }).join("")}</tbody></table></div></section>` : "";
     return `<div class="ocw-mf-ai-review-dialog" data-mf-ai-review-host="1"><header><div><strong>填充预览</strong><span>逐行选择物料，费用单独选择；最终明细由服务器预览。</span></div></header>
       <main class="ocw-mf-ai-dialog-body"><section class="ocw-mf-ai-row-controls"><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="update_selected" ${selection.mode === "update_selected" ? "selected" : ""}>更新所选行（默认）</option><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option>${hasAddCandidates ? `<option value="add_selected" ${selection.mode === "add_selected" ? "selected" : ""}>单独确认新增</option>` : ""}</select></label><p>${selection.mode === "update_selected" ? "只更新所选候选对应的现有物料行；其他行完全保留。未匹配的新物料需单独确认新增。" : selection.mode === "add_selected" ? "仅新增明确勾选的未匹配物料；本次不同时更新现有行或费用，确认前请再次核对行数。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。匹配不唯一的行需核对。"}</p></section>
       <section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>
       ${groupedTables || renderCandidateTable([])}</section>
-      <section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${(catalog.fees || []).length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${(catalog.fees || []).map(fee => {
-        const values = fee.payload || fee;
-        return `<tr><td><input type="checkbox" data-mf-ai-fee-select="${this.escape(fee.proposal_id)}" ${selection.mode === "add_selected" || !fee.can_apply || fill.applying ? "disabled" : ""} ${selection.fees.has(String(fee.proposal_id)) ? "checked" : ""} aria-label="选择费用 ${this.escape(values.expense_category || values.logical_fee_key || "")}"></td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${value(fee.previous_amount ?? values.previous_amount)}</td><td>${value(fee.blocked_reason || values.remark || values.source_label || fee.reason || "")}${!fee.can_apply ? "<small>只读 · 不可采用</small>" : selection.mode === "add_selected" ? "<small>新增物料需单独确认</small>" : ""}</td></tr>`;
-      }).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>
+      <section class="ocw-mf-ai-preview-section"><h4>费用 <span>已选 ${selection.fees.size} / ${mainFees.length}</span></h4><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-fee-catalog"><thead><tr><th>选择</th><th>费用项目</th><th>采用金额</th><th>原金额</th><th>来源与说明</th></tr></thead><tbody>${mainFees.map(renderMainFee).join("") || '<tr><td colspan="5">本次没有费用候选</td></tr>'}</tbody></table></div></section>
       ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
-      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与报价记录</summary>${this.renderMaterialAIReviewSources(fill)}${(catalog.fees || []).map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
+      <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${alternativeFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
   }
 
@@ -2567,9 +2601,11 @@
 
   materialAIErrorMessage(error, fallback = "AI 分析暂时不可用，请稍后重试。") {
     const payload = this.materialAIErrorPayload(error);
+    const status = Number(error?.status ?? error?.xhr?.status);
+    if (status === 500) return fallback === "AI 分析暂时不可用，请稍后重试。"
+      ? "服务器处理失败，请稍后重试。" : fallback;
     if (!payload?.error?.reason && payload?.ok !== false) {
-      const status = error?.status ?? error?.xhr?.status;
-      if (status !== undefined) {
+      if (Number.isFinite(status)) {
         const transportMessage = {
           0: "网络连接已中断，请检查连接后重试。",
           401: "登录已失效，请重新登录后重试。",
@@ -2578,7 +2614,7 @@
           502: "服务暂时不可用，请稍后重试。",
           503: "服务暂时不可用，请稍后重试。",
           504: "服务响应超时，请稍后重试。",
-        }[Number(status)];
+        }[status];
         if (transportMessage) return transportMessage;
       }
     }
@@ -2589,6 +2625,7 @@
     if (/QueryDeadlockError|changed since last read|\(1020\)/i.test(message)) {
       return "任务状态正在同步，请稍后重试。";
     }
+    if (/<\s*!doctype\b|<\s*\/?\s*(?:html|body|title|h1|p)\b/i.test(message)) return fallback;
     if (!message || message === "操作失败" || /^\s*[\[{]/.test(message) || /\[object Object\]|Traceback|frappe\.exceptions/i.test(message)) return fallback;
     return message.slice(0, 500);
   }

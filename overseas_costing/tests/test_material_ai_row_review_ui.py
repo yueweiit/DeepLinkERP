@@ -48,6 +48,46 @@ assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('da
 """)
 
 
+def test_fee_roles_render_totals_components_and_alternatives_in_their_review_levels():
+    run_ui(r"""
+const fill=ready();fill.row_review.fees=[
+ {proposal_id:'TOTAL',selection_role:'primary_total',payload:{expense_category:'应付总额',amount:'10347.00',currency:'RMB',source_label:'采购支出审批'},can_apply:true,default_selected:true,resolution_reason:'分项合计 10346.99，差额 0.01 RMB'},
+ {proposal_id:'AIR',selection_role:'component',parent_proposal_id:'TOTAL',payload:{expense_category:'国际空运费',amount:'9367.46',currency:'RMB',source_label:'费用明细',remark:'空运分项'},can_apply:false,default_selected:false,blocked_reason:'已裁决总额的分项'},
+ {proposal_id:'PORT',selection_role:'component',parent_proposal_id:'TOTAL',payload:{expense_category:'港杂与货代费',amount:'979.53',currency:'RMB',remark:'港杂分项'},can_apply:false,default_selected:false},
+ {proposal_id:'ALT',selection_role:'alternative',payload:{expense_category:'其他空运报价',amount:'613.90',currency:'RMB',source_label:'历史报价'},can_apply:false,default_selected:false,blocked_reason:'已有明确总额，该报价不可采用'},
+ {proposal_id:'AMB',selection_role:'ambiguous',payload:{expense_category:'待核对运费',amount:'700',currency:'RMB'},can_apply:true,default_selected:false},
+ {proposal_id:'APPROVED',selection_role:'approved_quote',payload:{expense_category:'审批采用报价',amount:'800',currency:'RMB'},can_apply:true,default_selected:true},
+ {proposal_id:'PLAIN',payload:{expense_category:'普通候选',amount:'12',currency:'RMB'},can_apply:true,default_selected:false},
+];
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+assert.deepEqual([...selection.fees].sort(),['APPROVED','TOTAL']);
+const html=w.renderMaterialAIReviewDialogContent();
+const main=html.slice(html.indexOf('<h4>费用 '),html.indexOf('资料来源与其他记录'));
+for(const id of ['TOTAL','AMB','APPROVED','PLAIN'])assert(main.includes(`data-mf-ai-fee-select="${id}"`),id);
+for(const id of ['AIR','PORT','ALT'])assert(!main.includes(`data-mf-ai-fee-select="${id}"`),id);
+assert(main.includes('data-mf-ai-fee-select="TOTAL"') && main.includes('checked'));
+for(const text of ['国际空运费','9367.46','费用明细','空运分项','港杂与货代费','分项合计 10346.99，差额 0.01 RMB'])assert(main.includes(text),text);
+assert(!html.includes('data-mf-ai-fee-select="AIR"'));assert(!html.includes('data-mf-ai-fee-select="PORT"'));
+const advanced=html.slice(html.indexOf('资料来源与其他记录'));
+for(const text of ['其他空运报价','613.90','历史报价','不可采用'])assert(advanced.includes(text),text);
+assert(!advanced.includes('国际空运费'));
+""")
+
+
+def test_ambiguous_fees_remain_visible_and_are_single_choice_without_resolved_total():
+    run_ui(r"""
+const fill=ready();fill.row_review.fees=[
+ {proposal_id:'A',selection_role:'ambiguous',payload:{expense_category:'运费候选 A',amount:'100',currency:'RMB'},can_apply:true,default_selected:false},
+ {proposal_id:'B',selection_role:'ambiguous',payload:{expense_category:'运费候选 B',amount:'120',currency:'RMB'},can_apply:true,default_selected:false},
+];
+delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
+let html=w.renderMaterialAIReviewDialogContent();
+for(const id of ['A','B'])assert(html.includes(`type="radio" data-mf-ai-fee-select="${id}"`),id);
+w.changeMaterialAIRowSelection('fees','A',true);assert.deepEqual([...selection.fees],['A']);
+w.changeMaterialAIRowSelection('fees','B',true);assert.deepEqual([...selection.fees],['B']);
+""")
+
+
 def test_only_latest_server_preview_is_displayed_and_can_be_confirmed():
     run_ui(r"""
 const fill=ready();fill.rowSelection.mode='fill_missing';const pending=[];w.call=(method,args)=>{calls.push({method,args});return new Promise(resolve=>pending.push(resolve))};

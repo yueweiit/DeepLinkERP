@@ -51,6 +51,35 @@ console.log(JSON.stringify({{message:workspace.materialAIErrorMessage({expressio
     assert not result['message'].startswith('{')
 
 
+@pytest.mark.parametrize('expression', [
+    "({status:500,responseText:'<!DOCTYPE html><html><head><title>Internal Server Error</title></head><body><h1>Server Error</h1><p>secret traceback</p></body></html>'})",
+    "('<html><body><h1>Bad Gateway</h1><p>proxy details</p></body></html>')",
+])
+def test_html_and_http_500_errors_are_never_shown_verbatim(expression):
+    result = _fee_workspace_result(FIXTURE + f"""
+console.log(JSON.stringify({{message:workspace.materialAIErrorMessage({expression},'可读的默认提示')}}));
+""")
+    assert result['message'] in ('服务器处理失败，请稍后重试。', '可读的默认提示')
+    for leaked in ('html', 'doctype', 'Internal Server Error', 'Server Error', 'secret traceback', 'Bad Gateway', 'proxy details'):
+        assert leaked.lower() not in result['message'].lower()
+
+
+def test_plain_business_error_remains_readable_while_preview_uses_safe_server_failure_copy():
+    result = _fee_workspace_result(FIXTURE + r"""
+const business=workspace.materialAIErrorMessage(new Error('资料与当前批次不一致'),'默认提示');
+state.aiFill={status:'READY',run_id:'R1',row_review:{policy:'p',fingerprint:'f',rows:[],fees:[]}};
+workspace.ensureMaterialAIRowSelection(state.aiFill);
+workspace.renderMaterialAIReviewDialog=()=>{};
+workspace.call=async()=>{throw {status:500,responseText:'<html><body><h1>Internal Server Error</h1></body></html>'}};
+await workspace.previewMaterialAIRowSelection();
+console.log(JSON.stringify({business,preview:state.aiFill.rowSelection.error}));
+""")
+    assert result == {
+        'business': '资料与当前批次不一致',
+        'preview': '服务器预览失败，本次未保存，请稍后重试。',
+    }
+
+
 @pytest.mark.parametrize('rejected', [False, True])
 def test_business_start_failure_stops_once_and_preserves_source_choice_and_clarification(rejected):
     result = _fee_workspace_result(FIXTURE + f"const failure={json.dumps(ERROR, ensure_ascii=False)};" + f"const rejected={str(rejected).lower()};" + r"""

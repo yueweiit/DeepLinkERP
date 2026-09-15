@@ -765,8 +765,17 @@
 .ocw-mf-ai-fee-catalog td:last-child,
 .ocw-mf-ai-final-table td:nth-child(2) { min-width: 180px; max-width: 320px; white-space: normal; overflow-wrap: anywhere; }
 .ocw-mf-ai-preview-table input[type="checkbox"] { width: 17px; height: 17px; accent-color: #1673cc; cursor: pointer; }
-.ocw-mf-ai-preview-table input[type="checkbox"]:disabled { cursor: not-allowed; }
+.ocw-mf-ai-preview-table input[type="radio"] { width: 17px; height: 17px; accent-color: #1673cc; cursor: pointer; }
+.ocw-mf-ai-preview-table :is(input[type="checkbox"], input[type="radio"]):disabled { cursor: not-allowed; }
 .ocw-mf-ai-preview-table tr.is-review { background: #fffaf0; }
+.ocw-mf-ai-fee-components > td { background: #f7faff; white-space: normal; }
+.ocw-mf-ai-fee-components > td > div { display: grid; gap: 7px; padding: 3px 0 6px; }
+.ocw-mf-ai-fee-components p { margin: 0; color: #52647a; font-size: 11px; }
+.ocw-mf-ai-fee-components table { border: 1px solid #dce6f2; border-radius: 6px; background: #fff; }
+.ocw-mf-ai-fee-components table th,
+.ocw-mf-ai-fee-components table td { padding: 7px 9px; white-space: normal; }
+.ocw-mf-ai-other-fees { margin-top: 12px; }
+.ocw-mf-ai-other-fees h4 { margin: 0 0 8px; color: #475467; font-size: 12px; }
 .ocw-mf-ai-review-error { margin: 12px 0; padding: 10px 12px; border: 1px solid #f0b5b5; border-radius: 6px; background: #fff3f2; color: #a92727; white-space: normal; overflow-wrap: anywhere; }
 .ocw-mf-fee-table > tbody > .ocw-mf-freight-editor-row > td { padding: 0; background: #f5f9ff; white-space: normal; }
 .ocw-mf-freight-editor { padding: 18px; border-left: 3px solid #297fc7; }
