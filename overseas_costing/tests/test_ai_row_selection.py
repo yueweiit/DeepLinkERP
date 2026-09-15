@@ -829,6 +829,60 @@ def test_comment_correction_only_promotes_the_directional_new_value(comment_text
     assert by_proposal['NEW']['default_selected'] is True
 
 
+def test_bare_old_to_new_arrow_is_a_directional_correction_for_one_material_field():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [
+        {'source_id': 'FORM', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_form', 'approval_role': 'international_logistics'},
+        {'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+         'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+         'occurred_at': '2026-09-01T09:00:00',
+         'comment_text': 'SKU-1 毛重8→9kg'},
+    ]
+    proposals = [
+        {'proposal_id': proposal_id, 'proposal_type': 'item_update',
+         'target_item_name': 'I1', 'confidence': .99,
+         'source_refs': [{'source_id': source_id}],
+         'payload': {'fields': {'gross_weight_kg': value}}}
+        for proposal_id,source_id,value in (
+            ('FORM', 'FORM', 7), ('OLD', 'COMMENT', 8), ('NEW', 'COMMENT', 9),
+        )
+    ]
+
+    review = catalog(items, proposals, sources)
+    by_proposal = {
+        row['proposal_id']: candidate
+        for row in review['rows'] if row.get('proposal_id')
+        for candidate in review['field_candidates'] if candidate['row_id'] == row['row_id']
+    }
+
+    assert by_proposal['OLD']['correction_kind'] == 'none'
+    assert by_proposal['OLD']['default_selected'] is False
+    assert by_proposal['NEW']['correction_kind'] == 'explicit'
+    assert by_proposal['NEW']['default_selected'] is True
+
+
+@pytest.mark.parametrize('comment_text', ['毛重8→9kg', 'SKU-1 8→9kg'])
+def test_bare_arrow_without_unique_material_and_field_is_not_a_correction(comment_text):
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [{
+        'source_id': 'COMMENT', 'process_instance_id': 'LOG-1',
+        'source_kind': 'approval_comment', 'approval_role': 'international_logistics',
+        'comment_text': comment_text,
+    }]
+    proposals = [{
+        'proposal_id': 'ARROW', 'proposal_type': 'item_update',
+        'target_item_name': 'I1', 'confidence': .99,
+        'source_refs': [{'source_id': 'COMMENT'}],
+        'payload': {'fields': {'gross_weight_kg': 9}},
+    }]
+
+    review = catalog(items, proposals, sources)
+    candidate = next(row for row in review['field_candidates'] if row['fieldname'] == 'gross_weight_kg')
+
+    assert candidate['correction_kind'] == 'none'
+
+
 def test_multi_ref_comment_corrections_use_comment_evidence_time_and_last_value():
     items = [item('I1', 'SKU-1', gross_weight_kg=None)]
     sources = [

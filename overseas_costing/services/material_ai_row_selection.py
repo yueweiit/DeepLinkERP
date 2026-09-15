@@ -41,6 +41,9 @@ CORRECTION_FIELD_MARKERS = {
     'unit_price_uom': ('单价单位',),
     'shipment_value_rmb': ('本次发货货值', '货值'),
 }
+DIRECTIONAL_ARROW_PATTERN = re.compile(
+    r'(?<![\d.])[-+]?\d[\d,]*(?:\.\d+)?\s*(?:→|->|=>)\s*[-+]?\d[\d,]*(?:\.\d+)?'
+)
 READABLE_SOURCE_STATUSES = frozenset({'READ', 'PARSED', 'COMPLETED', 'PARTIAL', 'AVAILABLE'})
 UNREADABLE_SOURCE_STATUSES = frozenset({'FAILED', 'SKIPPED', 'UNREADABLE'})
 
@@ -160,7 +163,22 @@ def _correction_text(source):
 
 def _is_explicit_correction(source):
     text=_correction_text(source)
-    return bool(text and any(marker in text for marker in EXPLICIT_CORRECTION_MARKERS))
+    return bool(text and (
+        any(marker in text for marker in EXPLICIT_CORRECTION_MARKERS)
+        or _has_directional_arrow_correction(text)
+    ))
+
+
+def _has_directional_arrow_correction(text):
+    text=str(text or '').casefold()
+    return bool(
+        DIRECTIONAL_ARROW_PATTERN.search(text)
+        and any(
+            str(field_marker).casefold() in text
+            for field_markers in CORRECTION_FIELD_MARKERS.values()
+            for field_marker in field_markers
+        )
+    )
 
 
 def _explicit_correction_clauses(text, identifiers=()):
@@ -173,10 +191,13 @@ def _explicit_correction_clauses(text, identifiers=()):
     clauses=[]
     for index,part in enumerate(parts):
         markers=[marker for marker in EXPLICIT_CORRECTION_MARKERS if marker in part]
-        if not markers:
+        directional_arrow=_has_directional_arrow_correction(part)
+        if not markers and not directional_arrow:
             continue
-        marker_end=max(part.rfind(marker)+len(marker) for marker in markers)
-        suffix=part[marker_end:].strip().lstrip(':：').strip()
+        marker_end=(max(part.rfind(marker)+len(marker) for marker in markers)
+                    if markers else 0)
+        suffix=(part[marker_end:].strip().lstrip(':：').strip()
+                if markers else part)
         has_field=any(
             str(field_marker).casefold() in part
             for field_markers in CORRECTION_FIELD_MARKERS.values()
