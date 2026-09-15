@@ -920,7 +920,7 @@ _DECLARED_TOTAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CURRENCY_LINE_PATTERNS = {
-    "RMB": re.compile(r"(?:rmb|cny|¥|￥|元)", re.IGNORECASE),
+    "RMB": re.compile(r"(?:rmb|cny|¥|￥|(?<!美)元)", re.IGNORECASE),
     "USD": re.compile(r"(?:usd|us\$|美金|美元)", re.IGNORECASE),
     "MXN": re.compile(r"(?:mxn|peso|比索)", re.IGNORECASE),
 }
@@ -966,19 +966,16 @@ def _has_declared_money_total(proposal: dict, evidence: dict[str, dict]) -> bool
         ref for ref in proposal.get("source_refs") or []
         if str(ref.get("document_id") or "") == document_id
     ]
-    from overseas_costing.scripts.import_oa_logistics import (
-        _looks_like_quote_amount_line,
-    )
+    from overseas_costing.scripts.import_oa_logistics import _quote_money_amount_matches
     for line, locator in _document_fee_lines(document):
         if refs and not any(_review_ref_matches_locator(ref, locator) for ref in refs):
             continue
-        if (not _DECLARED_TOTAL_PATTERN.search(line)
-                or not _looks_like_quote_amount_line(line)
-                or not currency_pattern.search(line)):
+        if not _DECLARED_TOTAL_PATTERN.search(line):
             continue
         line_amounts = {
-            _fee_amount_key(match)
-            for match in re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?", line)
+            _fee_amount_key(matched_amount)
+            for matched_amount, span in _quote_money_amount_matches(line)
+            if currency_pattern.search(line[span[0]:span[1]])
         }
         if amount_key in line_amounts:
             return True

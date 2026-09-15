@@ -2228,10 +2228,11 @@ def _quote_money_amount_matches(text: str) -> list[tuple[str, tuple[int, int]]]:
     for pattern, number_before_currency in patterns:
         for match in pattern.finditer(text):
             if number_before_currency:
-                before_number = text[:match.start("number")].rstrip()
-                if before_number:
-                    previous = before_number[-1]
-                    if previous.isalnum() or previous in "._,/-/%％":
+                number_start = match.start("number")
+                if number_start:
+                    previous = text[number_start - 1]
+                    if (not previous.isspace()
+                            and (previous.isalnum() or previous in "._,/-/%％")):
                         continue
             # Inspect after the complete greedy number match in Python rather
             # than a regex lookahead that may backtrack 2026 to 202, etc.

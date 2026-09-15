@@ -680,6 +680,44 @@ def test_freight_total_arbitration_requires_explicit_currency_on_every_participa
     assert all(row["default_selected"] is False for row in normalized)
 
 
+def test_freight_arbitration_does_not_treat_a_date_fragment_as_declared_total() -> None:
+    document = _fee_document(
+        "DOC-1",
+        "合计费用 RMB 100 日期 2026年09月15日",
+        "空运费 RMB 10",
+        "港杂费 RMB 5",
+    )
+    proposals = [
+        _review_fee("FALSE-TOTAL", "15", "international_air_freight", "DOC-1", 1),
+        _review_fee("PART-1", "10", "international_air_freight", "DOC-1", 2),
+        _review_fee("PART-2", "5", "port_and_forwarder_charges", "DOC-1", 3),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+    assert all(row["default_selected"] is False for row in normalized)
+
+
+def test_freight_arbitration_validates_currency_inside_the_money_span() -> None:
+    document = _fee_document(
+        "DOC-1", "合计费用：100美元", "空运费 RMB 60", "港杂费 RMB 40"
+    )
+    proposals = [
+        _review_fee("TOTAL", "100", "international_air_freight", "DOC-1", 1, "RMB"),
+        _review_fee("PART-1", "60", "international_air_freight", "DOC-1", 2, "RMB"),
+        _review_fee("PART-2", "40", "port_and_forwarder_charges", "DOC-1", 3, "RMB"),
+    ]
+
+    normalized = normalize_source_review_proposals(
+        proposals, _items(), [document], transport_mode="AIR"
+    )
+
+    assert all(row["selection_role"] == "ambiguous" for row in normalized)
+
+
 def test_unpaginated_pdf_page_one_refs_can_resolve_total_without_relaxing_page_validation() -> None:
     document = {
         "document_id": "DOC-PDF",
@@ -744,7 +782,7 @@ def test_document_fee_parser_keeps_explicit_payable_money_total() -> None:
 
 @pytest.mark.parametrize(
     "line",
-    ["合计 RMB 100", "总计 USD 100", "grand total USD 100"],
+    ["合计 RMB 100", "总计 USD 100", "grand total USD 100", "合计金额 100 RMB"],
 )
 def test_quote_amount_line_accepts_bare_total_marker_with_adjacent_money(line) -> None:
     assert _looks_like_quote_amount_line(line) is True
