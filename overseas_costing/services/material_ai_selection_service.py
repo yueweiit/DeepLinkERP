@@ -138,7 +138,7 @@ def _preview_receipt(preview):
 
 
 def _clean_preview_draft(draft):
-    cleaned=deepcopy(draft)
+    cleaned=dict(draft)
     cleaned.pop('row_previews',None)
     cleaned.pop('current_row_preview',None)
     return cleaned

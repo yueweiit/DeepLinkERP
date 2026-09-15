@@ -150,6 +150,29 @@ def test_large_private_projection_adds_only_a_bounded_receipt_and_can_confirm():
     assert confirm(repo,preview)['ok']
 
 
+def test_preview_cleanup_shallow_copies_top_level_without_copying_large_nested_draft():
+    payload='x'*1024
+    large_analysis=[
+        {'documents':[{'rows':[{'evidence':payload} for _ in range(32)]}]}
+        for _ in range(352)
+    ]
+    assert len(json.dumps(large_analysis)) > 11*1024*1024
+    draft={
+        'large_analysis':large_analysis,
+        'row_previews':{'P1':{'id':'P1'}},
+        'current_row_preview':'P1',
+    }
+
+    cleaned=service._clean_preview_draft(draft)
+
+    assert cleaned is not draft
+    assert cleaned['large_analysis'] is large_analysis
+    assert cleaned['large_analysis'][0]['documents'] is large_analysis[0]['documents']
+    assert 'row_previews' not in cleaned and 'current_row_preview' not in cleaned
+    cleaned['row_application']={'preview_id':'P1'}
+    assert 'row_application' not in draft
+
+
 @pytest.mark.parametrize('change',['fee','item','source','note'])
 def test_changes_after_preview_block_all_writes(change):
     repo=Repo();preview=prepare(repo)
