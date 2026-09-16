@@ -48,14 +48,35 @@ assert.deepEqual(w.detailState.paymentSourceSelection,{batchName:'B',versionName
 ''')
 
 
-def test_open_is_cached_readonly_and_never_starts_matching_or_ai():
+def test_open_initializes_missing_payment_candidates_once_without_ai_or_batch_matching():
     run_js(BATCH_CONTROLLER + r'''
-w.settlementApi=async(method,args)=>{calls.push({method,args});return {ok:true,freight_mode:true,viewed_version:'V',payment_source_scope:{status:'UNAVAILABLE',version:'V',candidates:[],selected_refs:[]}}};
+let reads=0;
+w.settlementApi=async(method,args)=>{
+ calls.push({method,args});
+ if(method==='run_payment_rule_matching')return {ok:true,matching:{status:'completed'}};
+ reads++;
+ return {ok:true,freight_mode:true,viewed_version:'V',matching:{status:reads===1?'not_started':'completed'},payment_source_scope:{status:reads===1?'UNAVAILABLE':'AUTO_MATCHED',version:'V',candidates:reads===1?[]:[{candidate_id:'payment-candidate',revision:'r',selected:true}],selected_refs:reads===1?[]:[{candidate_id:'payment-candidate',revision:'r',version:'V'}]}};
+};
 w.bindFreightInputs=()=>{};w.captureFreightDraft=()=>{};
 await w.openBatchSettlementDialog('B','V');
-assert.deepEqual(calls.map(row=>row.method),['get_batch_settlement']);
-assert(!calls.some(row=>['start_payment_ai_matching','run_payment_rule_matching','start_batch_matching'].includes(row.method)));
+assert.deepEqual(calls.map(row=>row.method),['get_batch_settlement','run_payment_rule_matching','get_batch_settlement']);
+assert.deepEqual(calls[1].args,{batch_name:'B',version_name:'V'});
+await active.handler('refresh');
+assert.equal(calls.filter(row=>row.method==='run_payment_rule_matching').length,1);
+assert(!calls.some(row=>['start_payment_ai_matching','start_batch_matching'].includes(row.method)));
 w.stopSettlementDialog(active);
+''')
+
+
+def test_historical_or_final_payment_source_preview_never_initializes_candidates():
+    run_js(BATCH_CONTROLLER + r'''
+let mode='historical';
+w.settlementApi=async(method,args)=>{calls.push({method,args});return {ok:true,freight_mode:true,viewed_version:'V',historical:mode==='historical',confirm_status:mode==='final'?'Confirmed':'',matching:{status:'not_started'},payment_source_scope:{status:'UNAVAILABLE',version:'V',candidates:[],selected_refs:[]}}};
+w.bindFreightInputs=()=>{};w.captureFreightDraft=()=>{};
+await w.openBatchSettlementDialog('B','V');w.stopSettlementDialog(active);
+mode='final';await w.openBatchSettlementDialog('B','V');w.stopSettlementDialog(active);
+assert.equal(calls.filter(row=>row.method==='run_payment_rule_matching').length,0);
+assert(!calls.some(row=>row.method==='start_payment_ai_matching'));
 ''')
 
 

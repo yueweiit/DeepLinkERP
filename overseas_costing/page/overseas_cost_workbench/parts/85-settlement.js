@@ -382,6 +382,8 @@
     state.detailContext = this.detailState?.batchName === batchName ? this.settlementDetailContext() : null;
     state.autoMatchChecked = false;
     state.autoMatchStarted = false;
+    state.paymentRuleMatchChecked = false;
+    state.paymentRuleMatchStarted = false;
     const load = () => this.loadBatchSettlementDialog(state);
     const afterWrite = (result = {}) => {
       // Adoption may create a new current adjustment version. Only a completed
@@ -436,6 +438,14 @@
       if (!data?.ok) throw new Error(data?.message || "读取本票匹配失败");
       state.data = data;
       this.renderBatchSettlementDialog(state, data);
+      const initializePaymentRules = !state.paymentRuleMatchChecked;
+      state.paymentRuleMatchChecked = true;
+      if (data.freight_mode && initializePaymentRules && !data.historical && !this.paymentReadOnly(data)
+          && data.payment_source_scope?.status === "UNAVAILABLE"
+          && !(data.payment_source_scope?.candidates || []).length
+          && ["not_started", "stale"].includes(data.matching?.status)) {
+        return this.startPaymentRuleMatching(state);
+      }
       const autoMatch = !state.autoMatchChecked;
       state.autoMatchChecked = true;
       if (!data.freight_mode && autoMatch && !data.binding && !data.historical && ["not_started", "stale"].includes(data.matching?.status)) {
@@ -449,6 +459,29 @@
       if (!this.isBatchSettlementCurrent(state, request)) return;
       this.settlementBody(state, '<button class="ocw-outline-btn" data-settlement-action="refresh">重新读取</button>');
       this.settlementNotice(state, error.message || "读取失败", true);
+    }
+  }
+
+  async startPaymentRuleMatching(state) {
+    const data = state.data || {};
+    if (!this.isBatchSettlementCurrent(state) || state.busy || state.paymentRuleMatchStarted
+        || data.historical || this.paymentReadOnly(data)) return;
+    state.paymentRuleMatchStarted = true;
+    let request;
+    try {
+      const result = await this.settlementWrite(state, () => {
+        request = state.request;
+        return this.settlementApi("run_payment_rule_matching", {
+          batch_name: state.batchName,
+          version_name: data.viewed_version || state.versionName || null,
+        });
+      });
+      if (!this.isBatchSettlementCurrent(state, request)) return;
+      if (!result?.ok) throw new Error(result?.message || "支付来源规则匹配失败");
+      await this.loadBatchSettlementDialog(state);
+    } catch (error) {
+      if (!this.isBatchSettlementCurrent(state, request)) return;
+      this.settlementNotice(state, `${error.message || "支付来源规则匹配失败"}；已保留当前预览。`, true);
     }
   }
 
