@@ -58,7 +58,8 @@ def currency(value):
     if isinstance(value, list):
         value = value[0] if len(value) == 1 else ''
     key = norm(value)
-    if key in ('rmb', 'cny', '人民币', '人民币rmb', '人民币cny', 'rmb人民币', 'cny人民币'):
+    if key in ('rmb', 'cny', '人民币', '人民币rmb', '人民币cny', 'rmb人民币', 'cny人民币',
+               '元', '人民币元') or str(value or '').strip() in {'¥', '￥'}:
         return 'RMB'
     if key in ('usd', '美元', '美金', 'dolar', 'dolares', '美元dolar', '美元usd', 'usd美元'):
         return 'USD'

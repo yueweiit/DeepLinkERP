@@ -137,6 +137,66 @@ def test_code_precedes_unique_name_and_unknown_or_ambiguous_rows_are_not_eligibl
     assert by_waybill["WB-FOREIGN"]["default_eligible"] is False
 
 
+def test_weak_ip17_hint_does_not_block_unique_full_product_name_fallback():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(6, "WB-NAME-HINT", "")
+    line["cargo_text"] = ""
+    line["packing"]["material_code_hints"] = ["IP17"]
+    line["goods"] = [{"material_code": "", "product_name": "薇 武 士 ip17 pro max"}]
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+    physical = next(fact for fact in facts if fact["fact_kind"] == "payment_physical")
+
+    assert physical["scope_status"] == "in_scope"
+    assert physical["match_method"] == "unique_name"
+    assert physical["material_targets"][0]["material_key"] == "LINE-145"
+
+
+@pytest.mark.parametrize("code_location", ["line", "goods"])
+def test_explicit_foreign_structured_code_blocks_matching_name_fallback(code_location):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(6, "WB-FOREIGN-NAME", "")
+    line["cargo_text"] = ""
+    line["material_code"] = "FOREIGN999" if code_location == "line" else ""
+    line["packing"]["material_code_hints"] = ["IP17"]
+    line["goods"] = [{
+        "material_code": "FOREIGN999" if code_location == "goods" else "",
+        "product_name": "薇武士 IP17 PRO MAX",
+    }]
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+    physical = next(fact for fact in facts if fact["fact_kind"] == "payment_physical")
+
+    assert physical["scope_status"] == "out_of_scope"
+    assert physical["match_method"] == "foreign_code"
+    assert physical["material_targets"] == []
+
+
+def test_true_current_exact_code_precedes_conflicting_unique_name():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(6, "WB-EXACT", "")
+    line["cargo_text"] = ""
+    line["material_code"] = "MWV101144"
+    line["packing"]["material_code_hints"] = ["IP17"]
+    line["goods"] = [{"material_code": "", "product_name": "薇武士 IP17 PRO MAX"}]
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+    physical = next(fact for fact in facts if fact["fact_kind"] == "payment_physical")
+
+    assert physical["scope_status"] == "in_scope"
+    assert physical["match_method"] == "exact_code"
+    assert physical["material_targets"][0]["material_key"] == "LINE-144"
+
+
 def test_duplicate_row_identity_is_coalesced_but_distinct_rows_for_one_sku_stay_manual():
     from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
 
@@ -273,6 +333,89 @@ def test_common_rmb_goods_currency_labels_normalize_to_rmb(currency):
 
     assert goods["monetary"] == {"amount": "1200", "currency": "RMB"}
     assert [action["value"] for action in goods["allowed_actions"]] == ["1200", "RMB"]
+
+
+@pytest.mark.parametrize("label", ["¥", "￥", "元", "人民币元"])
+def test_canonical_currency_normalizer_owns_common_rmb_symbols(label):
+    from overseas_costing.services.logistics_settlement.model import currency
+
+    assert currency(label) == "RMB"
+
+
+@pytest.mark.parametrize(
+    ("currency", "expected"),
+    [("美元 USD", "USD"), ("美金", "USD"), ("墨西哥比索MXN", "MXN"), ("pesos", "MXN")],
+)
+def test_goods_currency_uses_canonical_usd_and_mxn_aliases(currency, expected):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(10, "WB-GOODS", "MWV101144")
+    line.update(goods_value="1200", goods_currency=currency)
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+    goods = next(fact for fact in facts if fact["fact_kind"] == "payment_goods_value")
+
+    assert goods["monetary"] == {"amount": "1200", "currency": expected}
+    assert goods["read_only"] is True
+    assert goods["allowed_actions"] == []
+
+
+def test_cny_and_rmb_freight_components_coalesce_into_one_rmb_total():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    cny = _line(13, "WB-CNY", "MWV101144")
+    cny["currency"] = "CNY"
+    rmb = _line(14, "WB-RMB", "MWV101145")
+    rmb["currency"] = "人民币RMB"
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [cny, rmb]
+    )
+    components = [fact for fact in facts if fact["fact_kind"] == "payment_freight_component"]
+    totals = [fact for fact in facts if fact["fact_kind"] == "payment_freight_total"]
+
+    assert {fact["monetary"]["currency"] for fact in components} == {"RMB"}
+    assert len(totals) == 1
+    assert totals[0]["monetary"] == {"amount": "6828.38", "currency": "RMB"}
+
+
+def test_freight_source_currency_uses_canonical_alias():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(15, "WB-SOURCE-CURRENCY", "MWV101144")
+    line["currency"] = ""
+    source = {
+        "id": "PAYMENT",
+        "instance": "PROCESS",
+        "approval_no": "PAY",
+        "currency": "比索peso",
+    }
+    facts = build_payment_facts(_items(), source, [line])
+    component = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_component")
+    total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
+
+    assert component["monetary"]["currency"] == "MXN"
+    assert total["monetary"]["currency"] == "MXN"
+    assert component["allowed_actions"] == []
+    assert total["allowed_actions"] == []
+
+
+def test_unknown_freight_currency_remains_fact_only_and_non_applying():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(16, "WB-UNKNOWN-CURRENCY", "MWV101144")
+    line["currency"] = "unknown-token"
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+    component = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_component")
+    total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
+
+    assert component["monetary"]["currency"] == "UNKNOWN-TOKEN"
+    assert component["allowed_actions"] == []
+    assert total["allowed_actions"] == []
 
 
 @pytest.mark.parametrize("currency", ["USD", "MXN"])

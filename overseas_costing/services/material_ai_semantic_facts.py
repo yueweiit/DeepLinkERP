@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 import json
 import unicodedata
 
+from .logistics_settlement.model import currency as normalize_currency
 from .logistics_settlement.model import digest
 
 
@@ -132,30 +133,42 @@ def _match_targets(items: list[dict], line: dict) -> tuple[list[dict], str, str]
 
     packing = packing_for_line(line)
     goods = _line_goods(line)
-    raw_codes = [
-        *(packing.get("material_code_hints") or []),
-        line.get("material_code"),
-        *(row.get("material_code") for row in goods),
+    structured_goods = [
+        row for row in line.get("goods") or [] if isinstance(row, dict)
     ]
+    explicit_codes = [
+        line.get("material_code"),
+        *(row.get("material_code") for row in structured_goods),
+    ]
+    heuristic_codes = list(packing.get("material_code_hints") or [])
     code_index: dict[str, list[dict]] = {}
     for item in items:
         code = _identity(item.get("material_code"))
         if code:
             code_index.setdefault(code, []).append(item)
-    matched_by_code = []
-    seen_keys = set()
-    for raw_code in raw_codes:
-        for item in code_index.get(_identity(raw_code), []):
-            key = _material_key(item)
-            if key and key not in seen_keys:
-                matched_by_code.append(item)
-                seen_keys.add(key)
-    if matched_by_code:
-        if len(matched_by_code) == 1:
-            return matched_by_code, "exact_code", "精确物料编码命中当前批次基线。"
-        return matched_by_code, "exact_code", "同一证据行命中多个当前物料编码，需要核对共享包装。"
-    if any(_identity(value) for value in raw_codes):
+    def code_matches(raw_codes: list[object]) -> list[dict]:
+        matched = []
+        seen_keys = set()
+        for raw_code in raw_codes:
+            for item in code_index.get(_identity(raw_code), []):
+                key = _material_key(item)
+                if key and key not in seen_keys:
+                    matched.append(item)
+                    seen_keys.add(key)
+        return matched
+
+    explicit_matches = code_matches(explicit_codes)
+    if explicit_matches:
+        if len(explicit_matches) == 1:
+            return explicit_matches, "exact_code", "精确物料编码命中当前批次基线。"
+        return explicit_matches, "exact_code", "同一证据行命中多个当前物料编码，需要核对共享包装。"
+    if any(_identity(value) for value in explicit_codes):
         return [], "foreign_code", "证据行已提供物料编码，但未命中当前批次基线；不使用名称降级放宽。"
+    heuristic_matches = code_matches(heuristic_codes)
+    if heuristic_matches:
+        if len(heuristic_matches) == 1:
+            return heuristic_matches, "exact_code", "解析提示中的物料编码精确命中当前批次基线。"
+        return heuristic_matches, "exact_code", "同一证据行的解析提示命中多个当前物料编码，需要核对。"
 
     name_index: dict[str, list[dict]] = {}
     for item in items:
@@ -257,19 +270,7 @@ def _explicit_goods_value(line: dict) -> tuple[str, str]:
             if str(fields.get(key) or "").strip():
                 raw_currency = fields[key]
                 break
-    currency = unicodedata.normalize("NFKC", str(raw_currency or "")).strip().upper()
-    compact_currency = "".join(currency.split())
-    if compact_currency in {
-        "RMB",
-        "CNY",
-        "人民币",
-        "人民币RMB",
-        "人民币CNY",
-        "¥",
-        "元",
-    }:
-        currency = "RMB"
-    return _decimal_text(raw_amount), currency
+    return _decimal_text(raw_amount), normalize_currency(raw_currency)
 
 
 def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> list[dict]:
@@ -466,7 +467,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             )
 
         amount = _decimal_text(line.get("amount"))
-        currency = str(line.get("currency") or source.get("currency") or "").strip().upper()
+        currency = normalize_currency(line.get("currency") or source.get("currency"))
         if amount and currency and material_targets and scope_status != "out_of_scope":
             component_facts.append(
                 {
