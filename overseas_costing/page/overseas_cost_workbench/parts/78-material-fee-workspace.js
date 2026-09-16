@@ -3104,13 +3104,22 @@
     state.aiStartPromise = null;
     state.aiPollRetryPromise = null;
     const options = { ...(state.aiStartOptions || {}) };
+    const sourceScopeStale = fill?.status === "STALE"
+      || /不属于当前批次|资料来源.*已失效|资料来源选择已变化/.test(
+        this.materialAIProgressWarning(fill || {}));
     // A failed start may have reached the server. Keep its key until a run is known.
-    if (fill?.runId) {
+    if (fill?.runId || sourceScopeStale) {
       options.force = true;
       options.restart = true;
       delete options.request_id;
       delete options.requestPayload;
-      if (options.reanalyzeOriginalSources) {
+      if (sourceScopeStale) {
+        // A policy/source refresh must rebuild both scopes from current server
+        // evidence. Replaying IDs from the obsolete draft can only fail again.
+        delete options.selectedSourceIds;
+        delete options.paymentPreflightComplete;
+        delete options.paymentCandidateRefs;
+      } else if (options.reanalyzeOriginalSources) {
         // An explicit original-source reread must rebuild its selection from the
         // latest trusted manifest.  Attachment materialization can replace a
         // pending public id with sheet ids while the first run is active; reusing

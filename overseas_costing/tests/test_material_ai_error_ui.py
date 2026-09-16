@@ -400,6 +400,25 @@ console.log(JSON.stringify({selected}));
     assert result['selected'] == ['oa:PROC-1:FILE-9:sheet:0123456789abcdef0123']
 
 
+@pytest.mark.parametrize('status,with_run', [('STALE', True), ('FAILED', False)])
+def test_stale_source_scope_retry_rebuilds_current_source_and_payment_ranges(status, with_run):
+    result = _fee_workspace_result(FIXTURE + f"const staleStatus={json.dumps(status)};const withRun={str(with_run).lower()};" + r"""
+state.aiStartOptions={force:false,request_id:'OLD-REQUEST',requestPayload:{request_id:'OLD-REQUEST'},
+ selectedSourceIds:['oa:obsolete'],paymentPreflightComplete:true,
+ paymentCandidateRefs:[{candidate_id:'OLD',revision:'R1',version:'V1'}]};
+state.aiFill={status:staleStatus,...(withRun?{runId:'OLD-RUN'}:{}),
+ error_message:staleStatus==='FAILED'?'资料来源 oa:obsolete 不属于当前批次或已失效。':'规则已升级',
+ source_progress:[{source_id:'oa:obsolete',selected:true}]};
+let options;workspace.startMaterialAIFill=async(value)=>{options=value};
+await workspace.retryMaterialAIProgress();
+console.log(JSON.stringify(options));
+""")
+    assert result['force'] is True and result['restart'] is True
+    for key in ('request_id', 'requestPayload', 'selectedSourceIds',
+                'paymentPreflightComplete', 'paymentCandidateRefs'):
+        assert key not in result
+
+
 def test_progress_refresh_preserves_expanded_logical_source_groups():
     source = (PARTS / '78-material-fee-workspace.js').read_text(encoding='utf-8')
     update = source.split('  updateMaterialAIProgressSources(', 1)[1].split(
