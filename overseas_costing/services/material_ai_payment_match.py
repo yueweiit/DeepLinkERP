@@ -319,6 +319,53 @@ def preview_process_sources(store, ledger, batch_name: str, version_name: str, *
     return rows
 
 
+def coalesce_fact_sources(sources: list[dict]) -> list[dict]:
+    """Prefer scoped facts over the same process/document/Sheet raw path."""
+
+    fact_locations = set()
+    for source in sources or []:
+        process_id = str(source.get("process_instance_id") or "")
+        for fact in source.get("semantic_facts") or []:
+            provenance = fact.get("provenance") if isinstance(fact, dict) else {}
+            document_id = str((provenance or {}).get("document_id") or "")
+            file_name = str((provenance or {}).get("file_name") or "")
+            sheet = str((provenance or {}).get("sheet") or source.get("sheet_name") or "")
+            for identity in (document_id, file_name.casefold()):
+                if process_id and identity:
+                    fact_locations.add((process_id, identity, sheet.casefold()))
+
+    result = []
+    for source in sources or []:
+        if source.get("semantic_facts"):
+            result.append(source)
+            continue
+        process_id = str(source.get("process_instance_id") or "")
+        selected = source.get("selected_source") or {}
+        evidence = selected.get("evidence") or {}
+        document_id = str(
+            source.get("document_id")
+            or selected.get("document_id")
+            or evidence.get("document_id")
+            or ""
+        )
+        logical_id = str(source.get("logical_source_id") or "")
+        logical_prefix = f"oa:{process_id}:" if process_id else ""
+        if not document_id and logical_prefix and logical_id.startswith(logical_prefix):
+            document_id = logical_id[len(logical_prefix):]
+        sheet = str(source.get("sheet_name") or selected.get("sheet") or evidence.get("sheet") or "")
+        identities = {
+            document_id,
+            str(source.get("file_name") or source.get("source_label") or "").casefold(),
+        } - {""}
+        if process_id and any(
+            (process_id, identity, sheet.casefold()) in fact_locations
+            for identity in identities
+        ):
+            continue
+        result.append(source)
+    return result
+
+
 def confirm_preview_candidate(
     store,
     ledger,
@@ -482,6 +529,16 @@ def preview_sources(
     source = store.get("source", candidate.get("expense_id")) or {}
     if not source:
         return []
+    from .material_ai_semantic_facts import build_payment_facts, eligible_physical_facts
+
+    baseline_items = ledger.rows("item", batch=batch_name, version=version_name)
+    payment_lines = [
+        line
+        for line in store.find("freight_line", source_id=source.get("id"))
+        if line.get("snapshot") == source.get("snapshot")
+    ]
+    semantic_facts = build_payment_facts(baseline_items, source, payment_lines)
+    eligible_facts = eligible_physical_facts(semantic_facts)
     from .logistics_settlement.packing_selection import _catalog
     from .logistics_settlement.freight_packing import text_goods
 
@@ -684,6 +741,147 @@ def preview_sources(
                 "content_hash": evidence_id,
             }
         )
+    # The freight matcher remains shipment-scoped and unchanged.  Once the
+    # user/server has selected one payment process, material AI may additionally
+    # read exact baseline SKU rows from that same monthly workbook even when a
+    # row's DingTalk approval column names a sibling logistics approval.  Facts
+    # are the boundary: unknown, duplicate and ambiguous rows never enter this
+    # preview path.
+    def fact_location(fact):
+        provenance = fact.get("provenance") or {}
+        return (
+            str(provenance.get("document_id") or ""),
+            str(provenance.get("sheet") or ""),
+            provenance.get("row"),
+            str(fact.get("waybill") or ""),
+        )
+
+    def source_location(preview):
+        selected = preview.get("selected_source") or {}
+        evidence = selected.get("evidence") or {}
+        text = str(preview.get("scoped_text") or "")
+        waybill_match = re.search(r"(?:运单号|DHL\s*单号)\s*[:：]?\s*([^\s]+)", text, re.I)
+        return (
+            str(selected.get("document_id") or evidence.get("document_id") or ""),
+            str(selected.get("sheet") or evidence.get("sheet") or preview.get("sheet_name") or ""),
+            evidence.get("row"),
+            waybill_match.group(1) if waybill_match else "",
+        )
+
+    components_by_package = {
+        str(fact.get("package_identity") or ""): fact
+        for fact in semantic_facts
+        if fact.get("fact_kind") == "payment_freight_component"
+    }
+    total_facts = [
+        fact for fact in semantic_facts if fact.get("fact_kind") == "payment_freight_total"
+    ]
+    total_attached = False
+    existing_by_location = {source_location(preview): preview for preview in result}
+    for fact in eligible_facts:
+        target = fact["material_targets"][0]
+        physical = fact.get("physical") or {}
+        provenance = fact.get("provenance") or {}
+        evidence = {
+            key: deepcopy(provenance.get(key))
+            for key in ("document_id", "file_name", "sheet", "row")
+            if provenance.get(key) not in (None, "")
+        }
+        scoped_good = {
+            "material_code": target.get("material_code") or "",
+            "product_name": target.get("product_name") or "",
+            "spec_model": "",
+            "quantity": None,
+            "unit": "",
+            **{key: value for key, value in physical.items() if key != "dimensions_cm"},
+            "dimensions_cm": deepcopy(physical.get("dimensions_cm") or []),
+            "physical": {
+                key: value for key, value in physical.items() if key != "dimensions_cm"
+            },
+            "evidence": evidence,
+            "waybill": fact.get("waybill") or "",
+            "package_identity": fact.get("package_identity") or "",
+            "_fact_id": fact["fact_id"],
+            "_material_key": target.get("material_key") or "",
+        }
+        location = fact_location(fact)
+        preview = existing_by_location.get(location)
+        if preview is None:
+            evidence_id = digest(POLICY, clean, "semantic_fact", fact["fact_id"])
+            source_kind = "approval_attachment" if evidence.get("document_id") else "approval_form"
+            source_label = str(evidence.get("file_name") or source.get("title") or "实际付款流程")
+            if evidence.get("sheet"):
+                source_label += f" · {evidence['sheet']}"
+            selected_source = {
+                "id": evidence_id,
+                "source_id": str(source.get("id") or ""),
+                "source_kind": source_kind,
+                "source_label": source_label,
+                "approval_no": str(source.get("approval_no") or ""),
+                "source_snapshot": str(source.get("snapshot") or ""),
+                "process_instance_id": str(source.get("instance") or ""),
+                "occurred_at": str(source.get("source_updated_at") or ""),
+                "evidence": evidence,
+                "revision": evidence_id,
+            }
+            if evidence.get("document_id"):
+                selected_source["document_id"] = evidence["document_id"]
+            if evidence.get("sheet"):
+                selected_source["sheet"] = evidence["sheet"]
+            preview = {
+                "source_id": evidence_id,
+                "logical_source_id": evidence_id,
+                "source_kind": source_kind,
+                "source_label": source_label,
+                "file_name": str(evidence.get("file_name") or ""),
+                "sheet_name": str(evidence.get("sheet") or ""),
+                "approval_no": str(source.get("approval_no") or ""),
+                "process_instance_id": str(source.get("instance") or ""),
+                "approval_role": "payment",
+                "approval_title": str(source.get("title") or "实际付款流程"),
+                "source_updated_at": str(source.get("source_updated_at") or ""),
+                "available": True,
+                "excluded": False,
+                "selected": True,
+                "workflow_stage": "payment",
+                "workflow_rank": 0,
+                "payment_match_candidate": True,
+                "payment_match_candidate_id": clean["candidate_id"],
+                "payment_match_candidate_revision": clean["revision"],
+                "payment_match_version": clean["version"],
+                "payment_match_user_selected": bool(user_selected),
+                "selected_source": selected_source,
+                "scoped_packing": True,
+                "scoped_goods": [scoped_good],
+                "scoped_text": "\n".join(
+                    filter(
+                        None,
+                        (
+                            f"运单号: {fact.get('waybill')}" if fact.get("waybill") else "",
+                            f"物料编码: {target.get('material_code')}" if target.get("material_code") else "",
+                        ),
+                    )
+                ),
+                "form_fields": {},
+                "approval_decisions": [],
+                "can_download": False,
+                "source_hash": evidence_id,
+                "content_hash": evidence_id,
+                "packing_group_candidates": [],
+            }
+            result.append(preview)
+            existing_by_location[location] = preview
+        else:
+            preview["scoped_goods"] = [scoped_good]
+        fact_bundle = [fact]
+        component = components_by_package.get(str(fact.get("package_identity") or ""))
+        if component:
+            fact_bundle.append(component)
+        if not total_attached and total_facts:
+            fact_bundle.extend(total_facts)
+            total_attached = True
+        preview["semantic_facts"] = fact_bundle
+        preview["semantic_fact_ids"] = [row["fact_id"] for row in fact_bundle]
     if not result:
         # A strong process-level relation is still useful provenance even when
         # a monthly statement cannot be narrowed to one shipment line.  Keep

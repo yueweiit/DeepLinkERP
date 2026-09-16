@@ -1005,6 +1005,7 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
                              payment_references: list[dict] | None = None) -> list[dict[str, Any]]:
     from .material_ai_source_dependencies import annotate_source_eligibility
     from .material_ai_payment_match import (
+        coalesce_fact_sources,
         preview_process_sources,
         preview_sources,
         select_preview_candidate,
@@ -1055,7 +1056,9 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
                 ])
             except (KeyError, TypeError, ValueError):
                 pass
-    return annotate_source_eligibility(sources,store=store,ledger=ledger,batch_name=batch_name)
+    return annotate_source_eligibility(
+        coalesce_fact_sources(sources), store=store, ledger=ledger, batch_name=batch_name
+    )
 
 
 def _list_material_ai_sources(batch_name: str, version_name: str | None = None, *,

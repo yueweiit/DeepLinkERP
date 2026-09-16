@@ -105,7 +105,7 @@ def test_comment_reads_server_manifest_without_reloading_approval(monkeypatch):
     assert document["text"] == "走大墨仓"
 
 
-def test_read_packing_comment_exposes_group_candidate_without_row_weight():
+def test_read_packing_comment_with_one_exact_sku_defaults_only_that_sku():
     from overseas_costing.services import material_ai_fill_service as service
     items = [
         {"name": "I1", "stable_line_key": "L1", "material_code": "MWV101144", "product_name": "薇武士", "unit": "件"},
@@ -128,22 +128,21 @@ def test_read_packing_comment_exposes_group_candidate_without_row_weight():
     assert group["gross_weight_kg"] == "42.05"
     assert group["volume_m3"] == "0.01518"
     assert group["package_count"] is None
-    assert group["member_keys"] == ["L1", "L2", "L3"]
+    assert group["member_keys"] == ["L1"]
     assert group["default_selected"] is True
     assert group["weight_basis"] == "inferred_unqualified_weight_as_gross"
     assert group["assignment_options"] == [{
         "assignment_id": group["assignment_options"][0]["assignment_id"],
-        "mode": "one_box_group",
-        "member_keys": ["L1", "L2", "L3"],
-        "label": "MWV101144、MOLD-1、CASE-1 共同装为 1 箱",
-        "package_count_override": "1",
+        "mode": "single_item",
+        "member_keys": ["L1"],
+        "label": "仅归属 MWV101144",
         "default_selected": True,
         "can_apply": True,
-        "resolution_reason": "评论已唯一匹配全部装箱成员。",
+        "resolution_reason": "将评论中的整组装箱事实仅用于该物料。",
     }]
 
 
-def test_ambiguous_comment_packing_facts_offer_mutually_exclusive_assignments():
+def test_plus_sign_in_cargo_description_never_offers_a_group_assignment():
     from overseas_costing.services import material_ai_fill_service as service
     items = [
         {"name": "I1", "stable_line_key": "L1", "material_code": "MWV101144", "product_name": "薇武士IP17 PRO"},
@@ -164,14 +163,12 @@ def test_ambiguous_comment_packing_facts_offer_mutually_exclusive_assignments():
     options = group["assignment_options"]
     assert [(option["mode"], option["member_keys"]) for option in options] == [
         ("single_item", ["L1"]),
-        ("single_item", ["L2"]),
-        ("one_box_group", ["L1", "L2"]),
     ]
     assert sum(bool(option["default_selected"]) for option in options) == 1
-    assert next(option for option in options if option["default_selected"])["mode"] == "one_box_group"
-    assert next(option for option in options if option["mode"] == "one_box_group")["package_count_override"] == "1"
+    assert next(option for option in options if option["default_selected"])["mode"] == "single_item"
+    assert all(option["mode"] != "one_box_group" for option in options)
     assert group["can_apply"] is True
-    assert group["needs_member_confirmation"] is True
+    assert group["needs_member_confirmation"] is False
 
 def test_worker_previews_eight_rows_and_final_freight_without_business_write(monkeypatch):
     from overseas_costing.services import material_ai_fill_service as service

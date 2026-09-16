@@ -808,3 +808,167 @@ def test_payment_preview_never_widens_missing_row_evidence_to_whole_monthly_shee
     assert "SECRET999" not in payload
     assert "其他票私密明细" not in payload
     assert "MWV101144 本票货物" in payload
+
+
+def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other_approval_ids(monkeypatch):
+    from overseas_costing.services import material_ai_fill_service as ai_fill
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import packing_selection
+
+    store, ledger, batch, version, logistics, source, candidate = payment_setup(
+        structured=True, scope="freight", amount="3414.19", mode="EXPRESS"
+    )
+    source.update(
+        title="月结付款",
+        instance="202608260009000284583",
+        approval_no="202608260009000284583",
+    )
+    store.put("source", {"id": source["id"], "instance": source["instance"], "data": dumps(source)})
+    items = [
+        ledger.create(
+            "item",
+            {
+                "batch": batch["name"], "version": version["name"],
+                "stable_line_key": "LINE-144", "material_code": "MWV101144",
+                "product_name": "薇武士 IP17 PRO", "gross_weight_kg": 0, "volume_m3": 0,
+            },
+        ),
+        ledger.create(
+            "item",
+            {
+                "batch": batch["name"], "version": version["name"],
+                "stable_line_key": "LINE-145", "material_code": "MWV101145",
+                "product_name": "薇武士 IP17 PRO MAX", "gross_weight_kg": 0, "volume_m3": 0,
+            },
+        ),
+    ]
+
+    first = store.get("freight_line", "payment-line-1")
+    first.update(
+        waybill="1841361513", approval_no="202607211417000078258",
+        amount="3414.19", currency="RMB",
+        cargo_text="MWV101144 IP17PRO TPU\n规格33*20*23,重量：42.05kg\n1套模具+3个手机壳",
+        packing={
+            "material_code_hints": ["MWV101144", "IP17PRO"],
+            "chargeable_weight_kg": "46", "gross_weight_kg": "42.05",
+            "package_count": "1", "dimensions_cm": ["33", "20", "23"],
+            "volume_m3": "0.01518",
+        },
+        evidence={
+            "document_id": "dhl-doc", "file_name": "DHL(6.29-7.24)快递明细.xlsx",
+            "sheet": "DHL快递", "row": 14,
+        },
+    )
+    store.put(
+        "freight_line",
+        {
+            "id": first["id"], "source_id": first["source_id"], "snapshot": first["snapshot"],
+            "line_key": first["line_key"], "waybill": first["waybill"],
+            "approval_no": first["approval_no"], "charge_key": first["charge_key"],
+            "data": dumps(first),
+        },
+    )
+    second = deepcopy(first)
+    second.update(
+        id="payment-line-2", line_key="payment-line-key-2", waybill="1841364722",
+        approval_no="202607211416000291269",
+        cargo_text="MWV101145 IP17 PRO MAX TPU\n规格33*20*23,重量：42.05kg",
+        packing={**first["packing"], "material_code_hints": ["MWV101145"]},
+        evidence={**first["evidence"], "row": 13},
+    )
+    store.insert(
+        "freight_line",
+        {
+            "id": second["id"], "source_id": second["source_id"], "snapshot": second["snapshot"],
+            "line_key": second["line_key"], "waybill": second["waybill"],
+            "approval_no": second["approval_no"], "charge_key": second["charge_key"],
+            "data": dumps(second),
+        },
+    )
+    candidate.update(method="explicit", issues=[], line_ids=[first["id"]])
+    store.put("freight_candidate", _candidate_values(candidate))
+    monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, []))
+
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    sources = service.preview_sources(
+        store, ledger, batch["name"], version["name"], reference, freight_mode=True
+    )
+
+    physical_facts = [
+        fact
+        for preview in sources
+        for fact in preview.get("semantic_facts") or []
+        if fact["fact_kind"] == "payment_physical"
+    ]
+    assert {(fact["waybill"], fact["material_targets"][0]["material_code"]) for fact in physical_facts} == {
+        ("1841361513", "MWV101144"),
+        ("1841364722", "MWV101145"),
+    }
+    assert len({fact["package_identity"] for fact in physical_facts}) == 2
+    assert not any(preview.get("packing_group_candidates") for preview in sources)
+    total_facts = [
+        fact
+        for preview in sources
+        for fact in preview.get("semantic_facts") or []
+        if fact["fact_kind"] == "payment_freight_total"
+    ]
+    assert len({fact["fact_id"] for fact in total_facts}) == 1
+    assert total_facts[0]["monetary"] == {"amount": "6828.38", "currency": "RMB"}
+
+    candidates = []
+    for preview in sources:
+        rows, _document = ai_fill._read_source(items, preview)
+        candidates.extend(rows)
+    assert {
+        (row["item_name"], row["fieldname"], row["suggested_value"])
+        for row in candidates
+    } == {
+        (items[0]["name"], "gross_weight_kg", "42.05"),
+        (items[0]["name"], "chargeable_weight_kg", "46"),
+        (items[0]["name"], "package_count", "1"),
+        (items[0]["name"], "volume_m3", "0.01518"),
+        (items[1]["name"], "gross_weight_kg", "42.05"),
+        (items[1]["name"], "chargeable_weight_kg", "46"),
+        (items[1]["name"], "package_count", "1"),
+        (items[1]["name"], "volume_m3", "0.01518"),
+    }
+    assert len({row["fact_ids"][0] for row in candidates}) == 2
+
+
+def test_payment_fact_source_coalesces_the_same_general_attachment_sheet_before_catalog():
+    from overseas_costing.services.material_ai_payment_match import coalesce_fact_sources
+
+    fact_source = {
+        "source_id": "FACT-SOURCE",
+        "process_instance_id": "PROCESS-1",
+        "sheet_name": "DHL快递",
+        "semantic_facts": [
+            {
+                "fact_id": "FACT-1",
+                "provenance": {
+                    "document_id": "dhl-doc", "file_name": "DHL.xlsx",
+                    "sheet": "DHL快递", "row": 14,
+                },
+            }
+        ],
+    }
+    general_duplicate = {
+        "source_id": "ATTACHMENT-1",
+        "logical_source_id": "oa:PROCESS-1:dhl-file",
+        "process_instance_id": "PROCESS-1",
+        "file_name": "DHL.xlsx",
+        "sheet_name": "DHL快递",
+    }
+    unrelated = {
+        "source_id": "ATTACHMENT-2",
+        "logical_source_id": "oa:PROCESS-1:other-doc",
+        "process_instance_id": "PROCESS-1",
+        "sheet_name": "Sheet1",
+    }
+
+    assert coalesce_fact_sources([fact_source, general_duplicate, unrelated]) == [
+        fact_source,
+        unrelated,
+    ]

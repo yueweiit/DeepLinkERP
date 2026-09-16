@@ -236,6 +236,7 @@ def projection_candidates_to_review_proposals(candidates: list[dict], source: di
                 "result_origin": "SYSTEM",
                 "reason": str(candidate.get("reason") or "Excel 确定性解析。"),
                 "source_refs": list(candidate.get("source_refs") or []),
+                **({"fact_ids": list(candidate.get("fact_ids") or [])} if candidate.get("fact_ids") else {}),
                 "payload": {"item_name": item_name, "fields": {fieldname: candidate.get("suggested_value")}},
             }
         )

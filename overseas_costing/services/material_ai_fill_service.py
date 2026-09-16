@@ -986,6 +986,8 @@ def build_source_review_messages(
         "fee_update 只能补充系统给出的逻辑费用。所有数值必须引用真实 document_id 以及字段、Sheet 行或页码；"
         "图片转录可作为证据；只有文字和数值清晰可见时才可返回候选，模糊、遮挡或无法唯一匹配时不得猜测。"
         "已有值、低置信、匹配歧义或来源冲突必须 default_selected=false。"
+        "如果输入提供 semantic_fact_allowlist，提案必须填写 fact_ids，且只能逐字采用对应事实的"
+        "allowed_actions；不得引用未知事实、越界物料或改写服务器事实数值。"
     )
     safe_items = [
         {
@@ -1003,10 +1005,103 @@ def build_source_review_messages(
             "fee_eligibility": fee_policy or {},
             "fx_rates_to_rmb": fx_rates or {},
             "manual_clarification_untrusted": str(clarification_text or "")[:4000],
+            "semantic_fact_allowlist": [
+                {
+                    key: deepcopy(fact.get(key))
+                    for key in (
+                        "fact_id",
+                        "fact_kind",
+                        "scope_status",
+                        "material_targets",
+                        "allowed_actions",
+                    )
+                }
+                for document in documents or []
+                for fact in document.get("semantic_facts") or []
+                if isinstance(fact, dict) and fact.get("fact_id")
+            ],
             "untrusted_documents": documents or [],
         }
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _fact_bound_proposal_ids(
+    raw: dict,
+    proposal_type: str,
+    target: str,
+    payload: dict,
+    evidence: dict[str, dict],
+) -> list[str] | None:
+    """Validate model actions against facts issued for the referenced documents.
+
+    ``None`` means the proposal attempted to use structured facts but crossed
+    the allowlist boundary.  An empty list means ordinary, non-fact evidence.
+    """
+
+    claimed = raw.get("fact_ids")
+    if claimed is not None and not isinstance(claimed, list):
+        return None
+    claimed_ids = [str(value or "") for value in claimed or []]
+    if any(not value for value in claimed_ids) or len(claimed_ids) != len(set(claimed_ids)):
+        return None
+    referenced_document_ids = {
+        str(ref.get("document_id") or "")
+        for ref in raw.get("source_refs") or []
+        if isinstance(ref, dict) and ref.get("document_id")
+    }
+    facts = {
+        str(fact.get("fact_id") or ""): fact
+        for document_id in referenced_document_ids
+        for fact in (evidence.get(document_id) or {}).get("semantic_facts") or []
+        if isinstance(fact, dict) and fact.get("fact_id")
+    }
+    references_fact_document = any(
+        (evidence.get(document_id) or {}).get("semantic_facts")
+        for document_id in referenced_document_ids
+    )
+    if not claimed_ids:
+        return None if references_fact_document else []
+    if any(fact_id not in facts for fact_id in claimed_ids):
+        return None
+    selected_facts = [facts[fact_id] for fact_id in claimed_ids]
+    if any(
+        fact.get("scope_status") != "in_scope" or not fact.get("default_eligible")
+        for fact in selected_facts
+    ):
+        return None
+    actions = [
+        action
+        for fact in selected_facts
+        for action in fact.get("allowed_actions") or []
+        if isinstance(action, dict)
+    ]
+    if proposal_type == "item_update":
+        fields = payload.get("fields") or {}
+        for fieldname, value in fields.items():
+            if not any(
+                action.get("action") == "item_update"
+                and str(action.get("target_item_name") or "") == target
+                and str(action.get("fieldname") or "") == fieldname
+                and _canonical_value(fieldname, action.get("value"))
+                == _canonical_value(fieldname, value)
+                for action in actions
+            ):
+                return None
+    elif proposal_type == "fee_update":
+        if not any(
+            action.get("action") == "fee_update"
+            and str(action.get("logical_fee_key") or "")
+            == str(payload.get("logical_fee_key") or "")
+            and _canonical_value("amount", action.get("amount"))
+            == _canonical_value("amount", payload.get("amount"))
+            and str(action.get("currency") or "") == str(payload.get("currency") or "")
+            for action in actions
+        ):
+            return None
+    else:
+        return None
+    return claimed_ids
 
 
 def _canonical_review_ref(
@@ -1704,6 +1799,13 @@ def normalize_source_review_proposals(
                     continue
         except ValueError:
             continue
+        fact_ids = _fact_bound_proposal_ids(
+            raw, proposal_type, target, payload, evidence
+        )
+        if fact_ids is None:
+            if proposal_id not in trusted_system_ids:
+                continue
+            fact_ids = []
         confidence = float(_confidence(raw.get("confidence")))
         conflict = bool(raw.get("conflict"))
         existing_value_conflict_fields = []
@@ -1780,6 +1882,7 @@ def normalize_source_review_proposals(
                 "confidence": confidence,
                 "reason": str(raw.get("reason") or "资料字段匹配")[:1000],
                 "source_refs": refs,
+                **({"fact_ids": fact_ids} if fact_ids else {}),
                 "conflict": conflict,
                 "existing_value_conflict_fields": existing_value_conflict_fields,
                 "result_origin": "SYSTEM" if system_origin else "AI",
@@ -3487,6 +3590,7 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
                     "confidence": 0.99,
                     "reason": "支付附件已按本票审批号或运单号精确匹配。",
                     "source_refs": [_source_reference(ref_source, row=source_row)],
+                    **({"fact_ids": [str(row.get("_fact_id"))]} if row.get("_fact_id") else {}),
                 })
         return candidates
     if logistics_rows:
@@ -3724,6 +3828,7 @@ def _read_source(
         return _projection_candidates(items, source, {"material_rows": rows}), {
             "source_ref": _source_reference(source),
             "structured_rows": rows,
+            "semantic_facts": deepcopy(source.get("semantic_facts") or []),
             "text": str(source.get("scoped_text") or "")[:MAX_AI_DOCUMENT_CHARS],
             "ai_eligible": source.get("ai_eligible") is not False,
             "metadata_only_process": bool(source.get("metadata_only_process")),
@@ -3894,6 +3999,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
     ):
         return []
     members=[];labels=[];ambiguous=[]
+    code_members=[]
     def add_matches(matches, hint):
         if len(matches) == 1:
             key=str(matches[0].get("stable_line_key") or "").strip()
@@ -3905,25 +4011,49 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
     for code in parsed.get("material_code_hints") or []:
         matches=[item for item in items or [] if str(item.get("material_code") or "").strip().casefold()==str(code).strip().casefold()]
         add_matches(matches,code)
+        if len(matches) == 1:
+            key=str(matches[0].get("stable_line_key") or "").strip()
+            if key and key not in code_members:
+                code_members.append(key)
     for hint in parsed.get("rows") or []:
         code=str(hint.get("material_code") or "").strip().casefold()
         name=str(hint.get("product_name") or "").strip().casefold()
         if code:
             matches=[item for item in items or [] if str(item.get("material_code") or "").strip().casefold()==code]
+            if len(matches) == 1:
+                key=str(matches[0].get("stable_line_key") or "").strip()
+                if key and key not in code_members:
+                    code_members.append(key)
         else:
             matches=[item for item in items or [] if name and str(item.get("product_name") or "").strip().casefold()==name]
         add_matches(matches, hint.get("material_code") or hint.get("product_name"))
+    source_text=str(parsed.get('source_text') or '')
+    explicit_joint=bool(re.search(
+        r'(?:共同|一起|合箱|同箱|共用|共享)[^\n]{0,12}(?:装|包装|箱)|(?:共同装箱|一起装箱|合并装箱)',
+        source_text,
+        re.I,
+    ))
+    # A cargo expression such as ``1套模具+3个手机壳`` describes
+    # contents, not a relationship between every current material row.  When
+    # only one exact SKU is present, keep the candidate bound to that SKU.
+    if len(code_members) == 1 and not explicit_joint:
+        only=code_members[0]
+        narrowed=[(member,label) for member,label in zip(members,labels) if member==only]
+        members=[member for member,_label in narrowed]
+        labels=[label for _member,label in narrowed]
     ordered_items=[item for item in items or [] if not int(item.get('is_excluded') or 0)]
     selectable_items=[]
     for item in ordered_items:
         key=str(item.get('stable_line_key') or (f"legacy:{item.get('name')}" if item.get('name') else '')).strip()
         if not key:
             continue
+        if members and not explicit_joint and key not in members:
+            continue
         selectable_items.append({
             'key':key,
             'label':str(item.get('material_code') or item.get('product_name') or item.get('name') or key),
         })
-    exact_members=len(members)>=2 and not ambiguous
+    exact_members=(len(code_members)>=2 or (explicit_joint and len(members)>=2)) and not ambiguous
     source_id=str(source.get("source_id") or "")
     candidate_id=digest("comment-packing-group-1",source.get("source_hash"),source_id,members,
                         parsed.get("gross_weight_kg"),parsed.get("volume_m3"))
@@ -3945,16 +4075,15 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             'default_selected':False,'can_apply':True,
             'resolution_reason':'将评论中的整组装箱事实仅用于该物料。',
         } for item in selectable_items]
-        if len(selectable_items)>=2:
+        if len(selectable_items)>=2 and explicit_joint:
             all_keys=[item['key'] for item in selectable_items]
             all_labels=[item['label'] for item in selectable_items]
-            explicit_group=bool(re.search(r'[+＋]|(?:共同|一起|合箱|一箱)',str(parsed.get('source_text') or ''),re.I))
             assignment_options.append({
                 'assignment_id':digest('packing-assignment',candidate_id,'one_box_group',all_keys),
                 'mode':'one_box_group','member_keys':all_keys,
                 'label':f"{'、'.join(all_labels)} 共同装为 1 箱",
                 'package_count_override':'1',
-                'default_selected':explicit_group,'can_apply':True,
+                'default_selected':True,'can_apply':True,
                 'resolution_reason':'将候选物料作为一个装箱组，共用本条重量、体积和箱数。',
             })
         if not any(option['default_selected'] for option in assignment_options) and len(assignment_options)==1:
