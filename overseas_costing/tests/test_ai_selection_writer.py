@@ -1,10 +1,12 @@
 from copy import deepcopy
+from decimal import Decimal
 import json
 from overseas_costing.tests.test_freight_lines import setup_cost
 from overseas_costing.services import material_ai_row_selection as rows
 from overseas_costing.services.material_ai_selection_writer import write_rows, _confirm_and_reconstruct_payment_match
 from overseas_costing.services.effective_logistics_source import load_source_bundle
 from overseas_costing.services.logistics_settlement.model import dumps
+from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
 
 
 def valuation_selection(items, ctx, version, batch):
@@ -90,6 +92,51 @@ def test_update_selected_persists_one_row_and_keeps_all_other_rows():
     for name,row in before.items():
         if name!=i['name']:
             assert after[name]==row
+
+
+def test_confirmed_ai_shared_box_is_merged_in_material_packing_data_and_counted_once():
+    store,ledger,batch,version,first,*_=setup_cost()
+    ledger.put('item',first['name'],{
+        'stable_line_key':'L1','row_no':1,'actual_shipped_qty':1,
+        'goods_value':12000,'package_count':0,'gross_weight_kg':0,'volume_m3':0,
+    })
+    ledger.create('item',{
+        'batch':batch['name'],'version':version['name'],'row_no':2,
+        'stable_line_key':'L2','material_code':'MWV101145','product_name':'薇武士IP17 PRO MAX',
+        'unit':'套','quantity':1,'actual_shipped_qty':1,'goods_value':12000,
+        'package_count':0,'gross_weight_kg':0,'volume_m3':0,
+    })
+    current=ledger.rows('item',version=version['name'])
+    context=load_source_bundle(batch['name'],version['name'],store=store,ledger=ledger)['context']
+    preview={
+        'id':'AI-SHARED-BOX','revision':'AI-SHARED-BOX-R1','run_id':'RUN',
+        'batch':batch['name'],'version':version['name'],'mode':'update_selected',
+        'rows':deepcopy(current),'changes':[],'selected_row_ids':[],
+        'selected_field_choices':{},'sources':[],'source_context':context,
+        'packing_group_candidates':[{
+            'candidate_id':'COMMENT-ONE-BOX','member_keys':['L1','L2'],
+            'gross_weight_kg':'42.05','volume_m3':'0.01518','package_count':'1',
+            'source_fingerprint':'COMMENT-HASH','creation_method':'trusted_comment_text',
+            'default_selected':True,'can_apply':True,
+            'evidence':[{'kind':'trusted_comment_text','confidence':1}],
+        }],
+    }
+
+    written_version=write_rows(store,ledger,preview,context)
+    saved_version=ledger.get('version',written_version)
+    saved_items=ledger.rows('item',version=written_version)
+    groups=groups_from_version(saved_version)
+    material_packing=project_packing_groups(saved_items,groups)
+
+    assert written_version==version['name']
+    assert len(groups)==1
+    assert groups[0]['member_keys']==['L1','L2']
+    assert groups[0]['package_count']=='1'
+    assert [row['packing_group_id'] for row in material_packing['items']]==[
+        'COMMENT-ONE-BOX','COMMENT-ONE-BOX']
+    assert [row['package_count'] for row in material_packing['items']]==['1','0']
+    assert sum(Decimal(str(row['gross_weight_kg'])) for row in material_packing['items'])==Decimal('42.05')
+    assert sum(Decimal(str(row['volume_m3'])) for row in material_packing['items'])==Decimal('0.01518')
 
 
 def test_original_source_reanalysis_clears_legacy_selected_row_scope_after_update():

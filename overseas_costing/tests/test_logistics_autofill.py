@@ -136,6 +136,7 @@ def test_read_packing_comment_exposes_group_candidate_without_row_weight():
         "mode": "one_box_group",
         "member_keys": ["L1", "L2", "L3"],
         "label": "MWV101144、MOLD-1、CASE-1 共同装为 1 箱",
+        "package_count_override": "1",
         "default_selected": True,
         "can_apply": True,
         "resolution_reason": "评论已唯一匹配全部装箱成员。",
@@ -168,6 +169,7 @@ def test_ambiguous_comment_packing_facts_offer_mutually_exclusive_assignments():
     ]
     assert sum(bool(option["default_selected"]) for option in options) == 1
     assert next(option for option in options if option["default_selected"])["mode"] == "one_box_group"
+    assert next(option for option in options if option["mode"] == "one_box_group")["package_count_override"] == "1"
     assert group["can_apply"] is True
     assert group["needs_member_confirmation"] is True
 

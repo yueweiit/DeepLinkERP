@@ -3855,6 +3855,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             'assignment_id':digest('packing-assignment',candidate_id,'one_box_group',members),
             'mode':'one_box_group','member_keys':list(members),
             'label':f"{'、'.join(labels)} 共同装为 1 箱",
+            'package_count_override':'1',
             'default_selected':True,'can_apply':True,
             'resolution_reason':'评论已唯一匹配全部装箱成员。',
         }]
@@ -3874,6 +3875,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
                 'assignment_id':digest('packing-assignment',candidate_id,'one_box_group',all_keys),
                 'mode':'one_box_group','member_keys':all_keys,
                 'label':f"{'、'.join(all_labels)} 共同装为 1 箱",
+                'package_count_override':'1',
                 'default_selected':explicit_group,'can_apply':True,
                 'resolution_reason':'将候选物料作为一个装箱组，共用本条重量、体积和箱数。',
             })

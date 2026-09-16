@@ -148,6 +148,27 @@ def test_uniquely_matched_comment_group_is_adopted_only_after_members_are_in_con
     ) == []
 
 
+def test_confirmed_one_box_comment_group_persists_and_counts_carton_once():
+    candidate = {
+        'candidate_id':'COMMENT-ONE-BOX','member_keys':['L1','L2'],
+        'gross_weight_kg':'42.05','volume_m3':'0.01518','package_count':'1',
+        'source_fingerprint':'COMMENT-HASH','creation_method':'trusted_comment_text',
+        'default_selected':True,'can_apply':True,
+        'evidence':[{'kind':'trusted_comment_text','confidence':1}],
+    }
+
+    groups = adopt_xlsx_group_candidates(
+        rows(), [], [candidate], 'PREVIEW', actor='source-confirmation',
+        confirmed_member_keys={'L1','L2'},
+    )
+    projected = project_packing_groups(rows()[:2], groups)
+
+    assert groups[0]['package_count'] == '1'
+    assert [row['package_count'] for row in projected['items']] == ['1','0']
+    assert sum(Decimal(row['gross_weight_kg']) for row in projected['items']) == Decimal('42.05')
+    assert sum(Decimal(row['volume_m3']) for row in projected['items']) == Decimal('0.01518')
+
+
 class Repo:
     def __init__(self):
         self.state = {'batch':'B1','batch_modified':'BM1','version':'V1','version_modified':'VM1',

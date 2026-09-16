@@ -679,10 +679,10 @@ assert.deepEqual([...fill.rowSelection.packingAssignments.entries()],[['G-NEW','
 def test_shared_box_is_rendered_once_in_final_preview_instead_of_repeating_group_totals():
     run_ui(r"""
 const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G-NEW',member_keys:['L1'],
-    package_count:'1',gross_weight_kg:'42.05',volume_m3:'0.01518',sheet_name:'评论',default_selected:true,can_apply:true,
+    package_count:null,gross_weight_kg:'42.05',volume_m3:'0.01518',sheet_name:'评论',default_selected:true,can_apply:true,
     assignment_options:[
       {assignment_id:'G-NEW:L1',mode:'single_item',member_keys:['L1'],label:'仅归属 MWV101144',default_selected:false,can_apply:true},
-      {assignment_id:'G-NEW:ALL',mode:'one_box_group',member_keys:['L1','L2'],label:'MWV101144、MWV101145 共同装为 1 箱',default_selected:true,can_apply:true},
+      {assignment_id:'G-NEW:ALL',mode:'one_box_group',member_keys:['L1','L2'],package_count_override:'1',label:'MWV101144、MWV101145 共同装为 1 箱',default_selected:true,can_apply:true},
     ],evidence:[{kind:'trusted_comment_text'}]}]};
 fill.rowSelection=null;w.ensureMaterialAIRowSelection(fill);
 fill.rowSelection.preview={id:'P',revision:'R',can_apply:true,rows:[

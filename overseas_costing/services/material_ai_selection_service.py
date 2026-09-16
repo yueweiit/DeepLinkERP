@@ -477,6 +477,11 @@ def _selected_packing_assignments(items,candidates,selected_assignments):
             for key in members],
             'selected_assignment_id':assignment_id,'assignment_mode':mode,
             'default_selected':True,'can_apply':True}
+        package_count_override=option.get('package_count_override')
+        if package_count_override not in (None,''):
+            if mode!='one_box_group' or str(package_count_override).strip()!='1':
+                raise ValueError('装箱归属的箱数确认值无效，请刷新预览。')
+            selected['package_count']='1'
         if mode=='single_item':
             singles.append(selected)
         elif mode=='one_box_group':

@@ -2457,7 +2457,7 @@
       const option = (group.assignment_options || []).find(row => String(row.assignment_id || "") === selectedAssignment);
       if (!option?.can_apply || option.mode !== "one_box_group" || (option.member_keys || []).length < 2) return;
       option.member_keys.forEach((memberKey, position) => sharedPackingByMember.set(String(memberKey), {
-        group, position, size: option.member_keys.length,
+        group, option, position, size: option.member_keys.length,
       }));
     });
     const finalCells = row => {
@@ -2466,7 +2466,9 @@
       return columns.map(([field]) => {
         if (!shared || !sharedPackingFields.has(field)) return `<td>${value(row[field])}</td>`;
         if (shared.position > 0) return "";
-        const total = shared.group[field];
+        const total = field === "package_count"
+          ? (shared.option.package_count_override ?? shared.group[field])
+          : shared.group[field];
         return `<td class="is-packing-group" rowspan="${Number(shared.size)}">${value(total)}<small>共享 1 箱总计 · ${Number(shared.size)} 个物料</small></td>`;
       }).join("");
     };

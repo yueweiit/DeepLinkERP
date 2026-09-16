@@ -589,13 +589,13 @@ def test_packing_assignment_group_is_the_only_adopted_relation():
         repo.items,repo.sources,repo.context)
     repo.run['draft_json']['packing_group_candidates']=[{
         'candidate_id':'PACK-1','member_keys':['LINE-1'],
-        'gross_weight_kg':'42.05','volume_m3':'0.01518','package_count':1,
+        'gross_weight_kg':'42.05','volume_m3':'0.01518','package_count':None,
         'can_apply':True,'default_selected':True,
         'assignment_options':[
             {'assignment_id':'PACK-1:LINE-1','mode':'single_item','member_keys':['LINE-1'],
              'default_selected':False,'can_apply':True},
             {'assignment_id':'PACK-1:GROUP','mode':'one_box_group','member_keys':['LINE-1','LINE-2'],
-             'default_selected':True,'can_apply':True},
+             'package_count_override':'1','default_selected':True,'can_apply':True},
         ],
     }]
 
@@ -603,6 +603,7 @@ def test_packing_assignment_group_is_the_only_adopted_relation():
 
     assert preview['selected_packing_assignments']=={'PACK-1':'PACK-1:GROUP'}
     assert [candidate['member_keys'] for candidate in preview['packing_group_candidates']]==[['LINE-1','LINE-2']]
+    assert preview['packing_group_candidates'][0]['package_count']=='1'
     assert not any(change['fieldname'] in {'gross_weight_kg','volume_m3','package_count'}
                    for change in preview['changes'])
 
