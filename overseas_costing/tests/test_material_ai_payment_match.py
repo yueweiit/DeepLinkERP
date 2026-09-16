@@ -514,7 +514,10 @@ def test_payment_preview_uses_only_matched_line_when_catalog_row_is_unreadable(m
     assert "44075.13" not in preview["scoped_text"]
 
 
-def test_exact_monthly_payment_row_becomes_complete_payment_stage_field_candidates(monkeypatch):
+@pytest.mark.parametrize("legacy_archive_row", [False, True])
+def test_exact_monthly_payment_row_becomes_complete_payment_stage_field_candidates(
+    monkeypatch, legacy_archive_row
+):
     from overseas_costing.services import material_ai_fill_service as ai_fill
     from overseas_costing.services import material_ai_payment_match as service
     from overseas_costing.services.logistics_settlement import packing_selection
@@ -546,6 +549,13 @@ def test_exact_monthly_payment_row_becomes_complete_payment_stage_field_candidat
             "row": 14,
         },
     )
+    if legacy_archive_row:
+        # Production contains statement rows archived before ``packing`` was
+        # persisted.  The unified AI preview must derive the same exact-row
+        # physical facts as the payment-source summary instead of dropping
+        # every packing field while still accepting the freight amount.
+        line.pop("packing", None)
+        line["fields"] = {"件数": 1, "重量": 46}
     store.put(
         "freight_line",
         {

@@ -29,7 +29,13 @@ RELATION_KEYS = frozenset({
 def _line_scoped_goods(line: dict, evidence: dict) -> list[dict]:
     """Project row-scoped packing facts only when one material code is explicit."""
 
-    packing = line.get("packing") if isinstance(line.get("packing"), dict) else {}
+    # Older archived monthly-statement rows predate the persisted ``packing``
+    # projection.  Use the same normalizer as the payment-source summary so a
+    # successfully matched legacy row cannot expose its freight amount while
+    # silently losing its weight, carton count and dimensions in AI fill.
+    from .logistics_settlement.freight_lines import packing_for_line
+
+    packing = packing_for_line(line)
     material_codes = list(dict.fromkeys(
         str(value or "").strip().upper()
         for value in packing.get("material_code_hints") or []
