@@ -80,6 +80,8 @@ LEGACY_AI_FLOW_DISABLED_MESSAGE = (
 AUTO_ADOPT_CONFIDENCE = Decimal("0.90")
 MAX_UPDATES = 5000
 MAX_AI_DOCUMENT_CHARS = 200_000
+MAX_AI_PROMPT_OVERHEAD_CHARS = 50_000
+MAX_SEMANTIC_FACT_ALLOWLIST_CHARS = 30_000
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 MAX_VISION_IMAGES = 20
 MAX_VISION_IMAGE_BYTES = 5 * 1024 * 1024
@@ -958,6 +960,86 @@ def build_ai_messages(items: list[dict], documents: list[dict]) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def _compact_semantic_fact_allowlist(documents: list[dict]) -> list[dict]:
+    """Keep model authority small and independent from untrusted document text."""
+
+    result = []
+    seen = set()
+    for document in documents or []:
+        document_id = str(document.get("document_id") or "")
+        for fact in document.get("semantic_facts") or []:
+            if not isinstance(fact, dict) or not fact.get("fact_id"):
+                continue
+            fact_id = str(fact["fact_id"])
+            dedupe_key = (document_id, fact_id)
+            if dedupe_key in seen:
+                continue
+            provenance = fact.get("provenance") if isinstance(fact.get("provenance"), dict) else {}
+            compact = {
+                "document_id": document_id,
+                **{
+                    key: deepcopy(fact.get(key))
+                    for key in (
+                        "fact_id",
+                        "fact_kind",
+                        "scope_status",
+                        "default_eligible",
+                        "material_targets",
+                        "allowed_actions",
+                    )
+                },
+                "provenance": {
+                    key: deepcopy(provenance.get(key))
+                    for key in ("sheet", "row", "cell")
+                    if provenance.get(key) not in (None, "")
+                },
+            }
+            if len(_json([*result, compact])) > MAX_SEMANTIC_FACT_ALLOWLIST_CHARS:
+                continue
+            result.append(compact)
+            seen.add(dedupe_key)
+    return result
+
+
+def _fit_source_review_prompt_payload(payload: dict) -> dict:
+    """Bound untrusted evidence while preserving the compact authority list."""
+
+    bounded = deepcopy(payload)
+    limit = MAX_AI_DOCUMENT_CHARS + MAX_AI_PROMPT_OVERHEAD_CHARS
+    documents = bounded.get("untrusted_documents") or []
+    while len(_json(bounded)) > limit and documents:
+        excess = len(_json(bounded)) - limit
+        changed = False
+        for document in reversed(documents):
+            text = str(document.get("text") or "")
+            if text:
+                document["text"] = text[: max(0, len(text) - excess - 500)]
+                changed = True
+                break
+            for key in ("structured_rows", "semantic_rows", "vision_observations"):
+                rows = document.get(key)
+                if isinstance(rows, list) and rows:
+                    document[key] = rows[:-1]
+                    changed = True
+                    break
+            if changed:
+                break
+        if not changed:
+            documents.pop()
+    items = bounded.get("items") or []
+    original_item_count = len(items)
+    while len(_json(bounded)) > limit and items:
+        encoded_size = len(_json(bounded))
+        excess_ratio = max(0.01, (encoded_size - limit) / max(1, encoded_size))
+        remove_count = max(1, int(len(items) * excess_ratio) + 1)
+        del items[-remove_count:]
+    if len(items) != original_item_count:
+        bounded["items_truncated"] = True
+        while len(_json(bounded)) > limit and items:
+            items.pop()
+    return bounded
+
+
 def build_source_review_messages(
     items: list[dict],
     documents: list[dict],
@@ -965,6 +1047,7 @@ def build_source_review_messages(
     clarification_text: str = "",
     fx_rates: dict | None = None,
     fee_policy: dict | None = None,
+    semantic_fact_allowlist: list[dict] | None = None,
 ) -> list[dict]:
     """Build the unified review prompt while treating every source as untrusted evidence."""
 
@@ -998,31 +1081,27 @@ def build_source_review_messages(
         }
         for row in items or []
     ]
-    user = _json(
+    compact_allowlist = (
+        deepcopy(semantic_fact_allowlist)
+        if semantic_fact_allowlist is not None
+        else _compact_semantic_fact_allowlist(documents)
+    )
+    prompt_documents = [
+        {key: deepcopy(value) for key, value in document.items() if key != "semantic_facts"}
+        for document in documents or []
+    ]
+    payload = _fit_source_review_prompt_payload(
         {
             "items": safe_items,
             "allowed_logical_fee_keys": sorted(key for key in REVIEW_FEE_KEYS if fee_policy is None or fee_policy.get(key, {}).get("can_apply")),
             "fee_eligibility": fee_policy or {},
             "fx_rates_to_rmb": fx_rates or {},
             "manual_clarification_untrusted": str(clarification_text or "")[:4000],
-            "semantic_fact_allowlist": [
-                {
-                    key: deepcopy(fact.get(key))
-                    for key in (
-                        "fact_id",
-                        "fact_kind",
-                        "scope_status",
-                        "material_targets",
-                        "allowed_actions",
-                    )
-                }
-                for document in documents or []
-                for fact in document.get("semantic_facts") or []
-                if isinstance(fact, dict) and fact.get("fact_id")
-            ],
-            "untrusted_documents": documents or [],
+            "semantic_fact_allowlist": compact_allowlist,
+            "untrusted_documents": prompt_documents,
         }
     )
+    user = _json(payload)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -1032,6 +1111,7 @@ def _fact_bound_proposal_ids(
     target: str,
     target_material_key: str,
     payload: dict,
+    canonical_refs: list[dict],
     evidence: dict[str, dict],
 ) -> list[str] | None:
     """Validate model actions against facts issued for the referenced documents.
@@ -1048,24 +1128,45 @@ def _fact_bound_proposal_ids(
         return None
     referenced_document_ids = {
         str(ref.get("document_id") or "")
-        for ref in raw.get("source_refs") or []
+        for ref in canonical_refs or []
         if isinstance(ref, dict) and ref.get("document_id")
     }
-    facts = {
-        str(fact.get("fact_id") or ""): fact
-        for document_id in referenced_document_ids
-        for fact in (evidence.get(document_id) or {}).get("semantic_facts") or []
-        if isinstance(fact, dict) and fact.get("fact_id")
-    }
+    fact_entries = {}
+    for document_id in referenced_document_ids:
+        for fact in (evidence.get(document_id) or {}).get("semantic_facts") or []:
+            if not isinstance(fact, dict) or not fact.get("fact_id"):
+                continue
+            fact_entries.setdefault(str(fact["fact_id"]), []).append((document_id, fact))
     references_fact_document = any(
         (evidence.get(document_id) or {}).get("semantic_facts")
         for document_id in referenced_document_ids
     )
     if not claimed_ids:
         return None if references_fact_document else []
-    if any(fact_id not in facts for fact_id in claimed_ids):
-        return None
-    selected_facts = [facts[fact_id] for fact_id in claimed_ids]
+    selected_facts = []
+    for fact_id in claimed_ids:
+        matching_facts = []
+        for document_id, fact in fact_entries.get(fact_id) or []:
+            provenance = fact.get("provenance") if isinstance(fact.get("provenance"), dict) else {}
+            fact_row = _positive_location(provenance.get("row"))
+            fact_sheet = str(provenance.get("sheet") or "").strip()
+            fact_cell = str(provenance.get("cell") or "").strip().upper()
+            matching_refs = [
+                ref for ref in canonical_refs or []
+                if str(ref.get("document_id") or "") == document_id
+                and (not fact_row or _positive_location(ref.get("row")) == fact_row)
+                and (
+                    not fact_sheet
+                    or not str(ref.get("sheet") or "").strip()
+                    or str(ref.get("sheet") or "").strip() == fact_sheet
+                )
+                and (not fact_cell or str(ref.get("cell") or "").strip().upper() == fact_cell)
+            ]
+            if matching_refs:
+                matching_facts.append(fact)
+        if len(matching_facts) != 1:
+            return None
+        selected_facts.append(matching_facts[0])
     if any(
         fact.get("scope_status") != "in_scope" or not fact.get("default_eligible")
         for fact in selected_facts
@@ -1810,6 +1911,7 @@ def normalize_source_review_proposals(
                 or (f"legacy:{target}" if target else "")
             ).strip(),
             payload,
+            refs,
             evidence,
         )
         if fact_ids is None:
@@ -4089,11 +4191,17 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             matches=[item for item in items or [] if name and str(item.get("product_name") or "").strip().casefold()==name]
         add_matches(matches, hint.get("material_code") or hint.get("product_name"))
     source_text=str(parsed.get('source_text') or '')
-    explicit_joint=bool(re.search(
-        r'(?:共同|一起|合箱|同箱|共用|共享)[^\n]{0,12}(?:装|包装|箱)|(?:共同装箱|一起装箱|合并装箱)',
+    affirmative_joint=bool(re.search(
+        r'(?:共同|一起|同箱|共用|共享)[^\n]{0,12}(?:装|包装|箱)|(?:合箱|合并装箱)',
         source_text,
         re.I,
     ))
+    negated_joint=bool(re.search(
+        r'(?:不|未|不要|并非|不是|无需)\s*(?:一起|共同|合箱|合并装箱)',
+        source_text,
+        re.I,
+    ))
+    explicit_joint=affirmative_joint and not negated_joint
     package_pattern=re.compile(
         r'(?:DHL\s*(?:单号|运单|tracking)?|快递单号|运单号|提单号|包裹号|包装号|箱号|'
         r'waybill|tracking(?:\s*(?:no|number))?|awb)'
@@ -4666,6 +4774,11 @@ def _call_source_review_ai(
         }
         for document in documents
     ]
+    semantic_fact_allowlist = _compact_semantic_fact_allowlist(documents)
+    prompt_documents = [
+        {key: deepcopy(value) for key, value in document.items() if key != "semantic_facts"}
+        for document in documents
+    ]
     config = allocation_service._ai_config()
     if not config.get("api_key"):
         return {
@@ -4677,7 +4790,7 @@ def _call_source_review_ai(
         }
     bounded = []
     remaining = MAX_AI_DOCUMENT_CHARS
-    for document in documents:
+    for document in prompt_documents:
         if remaining <= 0:
             break
         encoded = _json(document)
@@ -4713,6 +4826,7 @@ def _call_source_review_ai(
                 clarification_text=clarification_text,
                 fx_rates=fx_rates,
                 fee_policy=fee_policy,
+                semantic_fact_allowlist=semantic_fact_allowlist,
             ),
         )
         parsed = allocation_service._extract_json_object(content)

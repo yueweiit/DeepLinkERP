@@ -3,6 +3,8 @@ from copy import deepcopy
 from decimal import Decimal
 import json
 
+import pytest
+
 from overseas_costing.scripts.import_oa_logistics import extract_logistics_quote_candidates_from_approval
 
 QUOTES = """计费重量预估875.7kg/350=2.502立方
@@ -256,6 +258,30 @@ def test_joint_language_groups_only_two_exact_identified_members():
     )
 
     assert candidate["member_keys"] == ["L1", "L2"]
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("one_box_group", ["L1", "L2"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "wording",
+    ["不一起装箱", "不共同装箱", "未合箱", "不要合箱"],
+)
+def test_negated_joint_language_never_forms_one_box_group(wording):
+    candidate = _group_candidate_for_comment(
+        f"MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
+
+@pytest.mark.parametrize("wording", ["一起装箱", "共同装箱", "合箱", "合并装箱"])
+def test_affirmative_joint_language_groups_exact_members(wording):
+    candidate = _group_candidate_for_comment(
+        f"MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
+    )
+
     assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
         ("one_box_group", ["L1", "L2"]),
     ]

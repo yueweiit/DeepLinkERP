@@ -468,7 +468,14 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
 
         amount = _decimal_text(line.get("amount"))
         currency = normalize_currency(line.get("currency") or source.get("currency"))
-        if amount and currency and material_targets and scope_status != "out_of_scope":
+        line_scope = str(line.get("scope") or "").strip().casefold()
+        if (
+            amount
+            and currency
+            and line_scope == "freight"
+            and material_targets
+            and scope_status != "out_of_scope"
+        ):
             component_facts.append(
                 {
                     **base,

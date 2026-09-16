@@ -2412,6 +2412,103 @@ def test_source_review_ai_returns_vision_transcription_for_server_validation(mon
     )
 
 
+def test_source_review_prompt_compacts_facts_once_and_preserves_them_across_text_truncation(monkeypatch) -> None:
+    from overseas_costing.services import allocation_service
+
+    captured = {}
+    monkeypatch.setattr(
+        material_ai_fill_service,
+        "_call_vision_style_descriptions",
+        lambda _documents: {"ok": True, "model": "", "observations": [], "warning": ""},
+    )
+    monkeypatch.setattr(
+        allocation_service,
+        "_ai_config",
+        lambda: {"api_key": "test", "model": "deepseek-test"},
+    )
+
+    def fake_chat(_config, messages, **_kwargs):
+        captured["messages"] = messages
+        return '{"proposals":[]}'
+
+    monkeypatch.setattr(allocation_service, "_call_chat_completions", fake_chat)
+    fact_a = {
+        "fact_id": "FACT-A",
+        "fact_kind": "payment_physical",
+        "scope_status": "in_scope",
+        "material_targets": [{"item_name": "ITEM-1", "material_key": "LINE-1"}],
+        "allowed_actions": [],
+        "provenance": {"sheet": "S", "row": 1},
+        "evidence_chain": [{"large": "A" * 10_000}],
+    }
+    fact_b = {
+        **fact_a,
+        "fact_id": "FACT-B",
+        "provenance": {"sheet": "S", "row": 2},
+        "evidence_chain": [{"large": "B" * 10_000}],
+    }
+    documents = [
+        {
+            "document_id": "DOC-A",
+            "source_ref": {"source": "approval_attachment", "file": "A.xlsx"},
+            "text": "small",
+            "semantic_facts": [fact_a],
+            "ai_eligible": True,
+        },
+        {
+            "document_id": "DOC-B",
+            "source_ref": {"source": "approval_attachment", "file": "B.xlsx"},
+            "text": "X" * (material_ai_fill_service.MAX_AI_DOCUMENT_CHARS + 10_000),
+            "semantic_facts": [fact_b],
+            "ai_eligible": True,
+        },
+    ]
+
+    result = material_ai_fill_service._call_source_review_ai(_items(), documents)
+    user_content = captured["messages"][1]["content"]
+    payload = json.loads(user_content)
+
+    assert {fact["fact_id"] for fact in payload["semantic_fact_allowlist"]} == {
+        "FACT-A",
+        "FACT-B",
+    }
+    assert all("semantic_facts" not in document for document in payload["untrusted_documents"])
+    assert "evidence_chain" not in user_content
+    assert len(user_content) <= material_ai_fill_service.MAX_AI_DOCUMENT_CHARS + 50_000
+    assert result["evidence_documents"][0]["semantic_facts"] == [fact_a]
+    assert result["evidence_documents"][1]["semantic_facts"] == [fact_b]
+
+
+def test_source_review_prompt_fixed_envelope_keeps_fact_allowlist_when_items_are_oversized() -> None:
+    fact = {
+        "fact_id": "FACT-KEEP",
+        "fact_kind": "payment_physical",
+        "scope_status": "in_scope",
+        "default_eligible": True,
+        "material_targets": [{"item_name": "ITEM-0", "material_key": "LINE-0"}],
+        "allowed_actions": [],
+        "provenance": {"row": 1},
+    }
+    oversized_items = [
+        {"name": f"ITEM-{index}-" + ("X" * 5_000), "stable_line_key": f"LINE-{index}"}
+        for index in range(100)
+    ]
+    messages = build_source_review_messages(
+        oversized_items,
+        [{
+            "document_id": "DOC-KEEP",
+            "source_ref": {"source": "approval_attachment", "file": "A.xlsx"},
+            "text": "evidence",
+            "semantic_facts": [fact],
+        }],
+    )
+    user_content = messages[1]["content"]
+    payload = json.loads(user_content)
+
+    assert len(user_content) <= material_ai_fill_service.MAX_AI_DOCUMENT_CHARS + 50_000
+    assert [row["fact_id"] for row in payload["semantic_fact_allowlist"]] == ["FACT-KEEP"]
+
+
 def test_existing_values_and_source_conflicts_are_never_overwritten() -> None:
     result = build_material_ai_draft(
         _items(),

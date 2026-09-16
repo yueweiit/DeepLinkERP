@@ -418,6 +418,28 @@ def test_unknown_freight_currency_remains_fact_only_and_non_applying():
     assert total["allowed_actions"] == []
 
 
+@pytest.mark.parametrize("excluded_scope", ["customs", "tax", "service"])
+def test_only_freight_scope_contributes_components_and_total(excluded_scope):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    freight = _line(17, "WB-FREIGHT", "MWV101144")
+    freight.update(scope=" FREIGHT ", amount="100")
+    non_freight = _line(18, "WB-NON-FREIGHT", "MWV101145")
+    non_freight.update(scope=excluded_scope, amount="900")
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"},
+        [freight, non_freight],
+    )
+    components = [fact for fact in facts if fact["fact_kind"] == "payment_freight_component"]
+    totals = [fact for fact in facts if fact["fact_kind"] == "payment_freight_total"]
+
+    assert [(fact["waybill"], fact["monetary"]["amount"]) for fact in components] == [
+        ("WB-FREIGHT", "100"),
+    ]
+    assert [fact["monetary"]["amount"] for fact in totals] == ["100"]
+
+
 @pytest.mark.parametrize("currency", ["USD", "MXN"])
 def test_non_rmb_goods_value_stays_authoritative_read_only(currency):
     from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
@@ -599,3 +621,68 @@ def test_model_fact_reference_must_be_known_in_scope_and_use_allowlisted_value()
     assert stale_key == []
     assert trusted_stale_key == []
     assert trusted_empty_fact_ids == []
+
+
+def test_fact_claim_requires_a_surviving_canonical_ref_at_its_provenance_row():
+    fact = {
+        "fact_id": "FACT-ROW-14",
+        "fact_kind": "payment_physical",
+        "scope_status": "in_scope",
+        "default_eligible": True,
+        "provenance": {"document_id": "SOURCE-DOC", "sheet": "DHL", "row": 14},
+        "material_targets": [{"item_name": "ITEM-144", "material_key": "LINE-144"}],
+        "allowed_actions": [{
+            "action": "item_update",
+            "target_item_name": "ITEM-144",
+            "material_key": "LINE-144",
+            "fieldname": "gross_weight_kg",
+            "value": "42.05",
+        }],
+    }
+    fact_document = {
+        "document_id": "DOC-FACT",
+        "source_ref": {"source": "approval_attachment", "file": "DHL.xlsx"},
+        "structured_rows": [{"source_row": 14}, {"source_row": 15}],
+        "semantic_facts": [fact],
+    }
+    other_document = {
+        "document_id": "DOC-OTHER",
+        "source_ref": {"source": "approval_form", "file": "Other"},
+        "structured_rows": [{"source_row": 1}],
+    }
+    base = {
+        "proposal_id": "MODEL-ROW",
+        "proposal_type": "item_update",
+        "target_item_name": "ITEM-144",
+        "confidence": 1,
+        "reason": "structured fact",
+        "fact_ids": ["FACT-ROW-14"],
+        "payload": {"item_name": "ITEM-144", "fields": {"gross_weight_kg": "42.05"}},
+    }
+    items = [{"name": "ITEM-144", "stable_line_key": "LINE-144", "gross_weight_kg": "0"}]
+
+    valid = fill.normalize_source_review_proposals(
+        [{**base, "source_refs": [{"document_id": "DOC-FACT", "row": 14}]}],
+        items,
+        [fact_document, other_document],
+    )
+    wrong_fact_row = fill.normalize_source_review_proposals(
+        [{**base, "source_refs": [{"document_id": "DOC-FACT", "row": 15}]}],
+        items,
+        [fact_document, other_document],
+    )
+    invalid_fact_ref_plus_unrelated_valid_ref = fill.normalize_source_review_proposals(
+        [{
+            **base,
+            "source_refs": [
+                {"document_id": "DOC-FACT", "row": 999},
+                {"document_id": "DOC-OTHER", "row": 1},
+            ],
+        }],
+        items,
+        [fact_document, other_document],
+    )
+
+    assert len(valid) == 1
+    assert wrong_fact_row == []
+    assert invalid_fact_ref_plus_unrelated_valid_ref == []

@@ -984,3 +984,40 @@ def test_payment_fact_source_coalesces_the_same_general_attachment_sheet_before_
         fact_source,
         unrelated,
     ]
+
+
+def test_payment_fact_source_never_coalesces_a_different_stable_document_with_same_filename():
+    from overseas_costing.services.material_ai_payment_match import coalesce_fact_sources
+
+    fact_source = {
+        "source_id": "FACT-SOURCE",
+        "process_instance_id": "PROCESS-1",
+        "semantic_facts": [{
+            "fact_id": "FACT-A",
+            "provenance": {
+                "document_id": "DOC-A",
+                "file_name": "DHL.xlsx",
+                "sheet": "DHL快递",
+                "row": 14,
+            },
+        }],
+    }
+    same_document = {
+        "source_id": "RAW-A",
+        "process_instance_id": "PROCESS-1",
+        "document_id": "DOC-A",
+        "file_name": "DHL.xlsx",
+        "sheet_name": "DHL快递",
+    }
+    different_document = {
+        "source_id": "RAW-B",
+        "process_instance_id": "PROCESS-1",
+        "document_id": "DOC-B",
+        "file_name": "DHL.xlsx",
+        "sheet_name": "DHL快递",
+    }
+
+    assert coalesce_fact_sources([fact_source, same_document, different_document]) == [
+        fact_source,
+        different_document,
+    ]

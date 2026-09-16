@@ -322,17 +322,23 @@ def preview_process_sources(store, ledger, batch_name: str, version_name: str, *
 def coalesce_fact_sources(sources: list[dict]) -> list[dict]:
     """Prefer scoped facts over the same process/document/Sheet raw path."""
 
-    fact_locations = set()
+    fact_locations = []
     for source in sources or []:
         process_id = str(source.get("process_instance_id") or "")
         for fact in source.get("semantic_facts") or []:
             provenance = fact.get("provenance") if isinstance(fact, dict) else {}
             document_id = str((provenance or {}).get("document_id") or "")
-            file_name = str((provenance or {}).get("file_name") or "")
+            file_name = str((provenance or {}).get("file_name") or "").casefold()
             sheet = str((provenance or {}).get("sheet") or source.get("sheet_name") or "")
-            for identity in (document_id, file_name.casefold()):
-                if process_id and identity:
-                    fact_locations.add((process_id, identity, sheet.casefold()))
+            if process_id and (document_id or file_name):
+                fact_locations.append(
+                    {
+                        "process_id": process_id,
+                        "document_id": document_id,
+                        "file_name": file_name,
+                        "sheet": sheet.casefold(),
+                    }
+                )
 
     result = []
     for source in sources or []:
@@ -342,25 +348,26 @@ def coalesce_fact_sources(sources: list[dict]) -> list[dict]:
         process_id = str(source.get("process_instance_id") or "")
         selected = source.get("selected_source") or {}
         evidence = selected.get("evidence") or {}
-        document_id = str(
+        stable_document_id = str(
             source.get("document_id")
             or selected.get("document_id")
             or evidence.get("document_id")
             or ""
         )
-        logical_id = str(source.get("logical_source_id") or "")
-        logical_prefix = f"oa:{process_id}:" if process_id else ""
-        if not document_id and logical_prefix and logical_id.startswith(logical_prefix):
-            document_id = logical_id[len(logical_prefix):]
         sheet = str(source.get("sheet_name") or selected.get("sheet") or evidence.get("sheet") or "")
-        identities = {
-            document_id,
-            str(source.get("file_name") or source.get("source_label") or "").casefold(),
-        } - {""}
-        if process_id and any(
-            (process_id, identity, sheet.casefold()) in fact_locations
-            for identity in identities
-        ):
+        file_name = str(source.get("file_name") or source.get("source_label") or "").casefold()
+
+        def same_location(location):
+            if (
+                location["process_id"] != process_id
+                or location["sheet"] != sheet.casefold()
+            ):
+                return False
+            if stable_document_id and location["document_id"]:
+                return stable_document_id == location["document_id"]
+            return bool(file_name and location["file_name"] == file_name)
+
+        if process_id and any(same_location(location) for location in fact_locations):
             continue
         result.append(source)
     return result
