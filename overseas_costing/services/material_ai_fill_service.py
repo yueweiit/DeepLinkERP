@@ -1323,6 +1323,165 @@ def _fact_bound_proposal_ids(
     return claimed_ids
 
 
+def _trusted_semantic_fee_relation(
+    raw: dict,
+    payload: dict,
+    canonical_refs: list[dict],
+    evidence: dict[str, dict],
+    transport_mode: str,
+) -> dict | None:
+    """Validate server-issued payment fee hierarchy against exact fact provenance."""
+
+    role = str(raw.get("selection_role") or "")
+    if role not in {"primary_total", "component"}:
+        return None
+    claimed_ids = raw.get("fact_ids")
+    if not isinstance(claimed_ids, list) or len(claimed_ids) != 1:
+        return None
+    fact_id = str(claimed_ids[0] or "")
+    document_ids = {
+        str(ref.get("document_id") or "")
+        for ref in canonical_refs
+        if str(ref.get("document_id") or "")
+    }
+    if len(document_ids) != 1:
+        return None
+    document_id = next(iter(document_ids))
+    facts = {
+        str(fact.get("fact_id") or ""): fact
+        for fact in (evidence.get(document_id) or {}).get("semantic_facts") or []
+        if isinstance(fact, dict) and str(fact.get("fact_id") or "")
+    }
+    fact = facts.get(fact_id)
+    expected_kind = (
+        "payment_freight_total" if role == "primary_total"
+        else "payment_freight_component"
+    )
+    if (
+        not fact
+        or fact.get("fact_kind") != expected_kind
+        or fact.get("scope_status") != "in_scope"
+        or (role == "primary_total" and not fact.get("default_eligible"))
+    ):
+        return None
+    monetary = fact.get("monetary") if isinstance(fact.get("monetary"), dict) else {}
+    if (
+        _canonical_value("amount", monetary.get("amount"))
+        != _canonical_value("amount", payload.get("amount"))
+        or str(monetary.get("currency") or "") != str(payload.get("currency") or "")
+    ):
+        return None
+
+    provenance_facts = (
+        [facts.get(str(component_id or "")) for component_id in fact.get("component_fact_ids") or []]
+        if role == "primary_total"
+        else [fact]
+    )
+    if not provenance_facts or any(
+        not component or component.get("fact_kind") != "payment_freight_component"
+        for component in provenance_facts
+    ):
+        return None
+
+    def locator(row: dict) -> tuple[str, str, str, str]:
+        return (
+            str(row.get("document_id") or ""),
+            str(row.get("sheet") or ""),
+            str(_positive_location(row.get("row")) or ""),
+            str(row.get("cell") or "").strip().upper(),
+        )
+
+    expected_refs = {
+        locator({**(
+            component.get("provenance")
+            if isinstance(component.get("provenance"), dict)
+            else {}
+        ), "document_id": document_id})
+        for component in provenance_facts
+    }
+    actual_refs = {locator(ref) for ref in canonical_refs}
+    if actual_refs != expected_refs:
+        return None
+    if role == "component" and fact.get("allowed_actions"):
+        return None
+    from .logistics_settlement.model import digest
+
+    if role == "primary_total":
+        parent_id = ""
+        expected_proposal_id = f"semantic-payment-fee:{digest(fact_id, transport_mode)}"[:120]
+    else:
+        parents = [
+            total for total in facts.values()
+            if total.get("fact_kind") == "payment_freight_total"
+            and fact_id in (total.get("component_fact_ids") or [])
+            and total.get("scope_status") == "in_scope"
+            and total.get("default_eligible")
+        ]
+        if len(parents) != 1:
+            return None
+        parent_id = (
+            f"semantic-payment-fee:{digest(str(parents[0].get('fact_id') or ''), transport_mode)}"[:120]
+        )
+        expected_proposal_id = (
+            f"semantic-payment-component:{digest(fact_id, parent_id)}"[:120]
+        )
+    if (
+        str(raw.get("proposal_id") or "") != expected_proposal_id
+        or str(raw.get("parent_proposal_id") or "") != parent_id
+    ):
+        return None
+    if role == "primary_total":
+        actions = [
+            action for action in fact.get("allowed_actions") or []
+            if isinstance(action, dict) and action.get("action") == "fee_update"
+        ]
+        raw_payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        if len(actions) != 1:
+            return None
+        action = actions[0]
+        if (
+            str(raw_payload.get("logical_fee_key") or "")
+            != str(action.get("logical_fee_key") or "")
+            or _canonical_value("amount", raw_payload.get("amount"))
+            != _canonical_value("amount", action.get("amount"))
+            or str(raw_payload.get("currency") or "")
+            != str(action.get("currency") or "")
+        ):
+            return None
+    return {
+        "fact_ids": [fact_id],
+        "selection_role": role,
+        "parent_proposal_id": parent_id,
+    }
+
+
+def _claims_payment_freight_total(
+    raw: dict,
+    canonical_refs: list[dict],
+    evidence: dict[str, dict],
+) -> bool:
+    """Return whether an untrusted proposal claims a server-owned freight total."""
+
+    claimed_ids = raw.get("fact_ids")
+    if not isinstance(claimed_ids, list):
+        return False
+    claimed = {str(fact_id or "") for fact_id in claimed_ids if str(fact_id or "")}
+    if not claimed:
+        return False
+    document_ids = {
+        str(ref.get("document_id") or "")
+        for ref in canonical_refs
+        if str(ref.get("document_id") or "")
+    }
+    return any(
+        str(fact.get("fact_id") or "") in claimed
+        and fact.get("fact_kind") == "payment_freight_total"
+        for document_id in document_ids
+        for fact in (evidence.get(document_id) or {}).get("semantic_facts") or []
+        if isinstance(fact, dict)
+    )
+
+
 def _canonical_review_ref(
     claimed: dict,
     documents: dict[str, dict],
@@ -1380,7 +1539,12 @@ def _canonical_review_ref(
     elif structured_rows:
         if row not in structured_rows:
             return None
-        ref.update({"row": row, "page": None, "cell": str(claimed.get("cell") or "")[:100]})
+        ref.update({
+            "sheet": str(claimed.get("sheet") or ref.get("sheet") or "")[:200],
+            "row": row,
+            "page": None,
+            "cell": str(claimed.get("cell") or "")[:100],
+        })
     elif document.get("form_fields"):
         field = str(claimed.get("field") or "")
         if field not in document.get("form_fields", {}):
@@ -1651,6 +1815,7 @@ def _arbitrate_review_freight_totals(
     freight = [
         proposal for proposal in proposals
         if proposal.get("proposal_type") == "fee_update"
+        and not proposal.get("_semantic_payment_fee")
         and str((proposal.get("payload") or {}).get("logical_fee_key") or "")
         in _REVIEW_FREIGHT_CANDIDATE_KEYS
     ]
@@ -1849,6 +2014,22 @@ def _arbitrate_review_fee_sources(proposals: list[dict]) -> None:
                     and str(row.get("selection_role") or "") != "component"):
                 row["default_selected"] = False
 
+        semantic_existing_conflict = next(
+            (
+                row for row in candidates
+                if row.get("_semantic_payment_fee")
+                and row.get("_existing_fee_conflict")
+                and str(row.get("selection_role") or "") == "primary_total"
+            ),
+            None,
+        )
+        if semantic_existing_conflict:
+            semantic_existing_conflict["recommended"] = False
+            semantic_existing_conflict["resolution_reason"] = (
+                "已有可编辑的同类费用值，付款总额仅作冲突候选，不默认覆盖。"
+            )
+            continue
+
         winner = None
         fallback = False
         for stage in ("payment", "international_logistics"):
@@ -1857,6 +2038,10 @@ def _arbitrate_review_fee_sources(proposals: list[dict]) -> None:
                 if row.get("workflow_stage") == stage
                 and not row.get("source_policy_blocked")
                 and not row.get("source_stage_conflict")
+                and not (
+                    row.get("_semantic_payment_fee")
+                    and row.get("_existing_fee_conflict")
+                )
                 and str(row.get("selection_role") or "") != "component"
                 and str(row.get("selection_role") or "") != "alternative"
                 and (
@@ -1940,6 +2125,29 @@ def normalize_source_review_proposals(
     trusted_system_ids = {
         str(proposal_id) for proposal_id in trusted_system_proposal_ids or set()
     }
+    from .logistics_settlement.model import digest
+
+    expected_semantic_ids = set()
+    for document in evidence.values():
+        facts = {
+            str(fact.get("fact_id") or ""): fact
+            for fact in document.get("semantic_facts") or []
+            if isinstance(fact, dict) and str(fact.get("fact_id") or "")
+        }
+        for total_id, total in facts.items():
+            if (
+                total.get("fact_kind") != "payment_freight_total"
+                or total.get("scope_status") != "in_scope"
+                or not total.get("default_eligible")
+            ):
+                continue
+            primary_id = f"semantic-payment-fee:{digest(total_id, transport_mode)}"[:120]
+            expected_semantic_ids.add(primary_id)
+            expected_semantic_ids.update(
+                f"semantic-payment-component:{digest(str(component_id), primary_id)}"[:120]
+                for component_id in total.get("component_fact_ids") or []
+                if str(component_id or "") in facts
+            )
     normalized = []
     seen = set()
     seen_payloads = set()
@@ -1947,6 +2155,13 @@ def normalize_source_review_proposals(
         if not isinstance(raw, dict):
             continue
         proposal_type = str(raw.get("proposal_type") or "")
+        raw_proposal_id = str(raw.get("proposal_id") or "")[:120]
+        trusted_semantic_id = (
+            raw_proposal_id in trusted_system_ids
+            and raw_proposal_id in expected_semantic_ids
+        )
+        if trusted_semantic_id and proposal_type != "fee_update":
+            continue
         if proposal_type == "logistics_reconcile":
             continue  # Never accept row creation/reconciliation from model output.
         if proposal_type not in REVIEW_PROPOSAL_TYPES:
@@ -1970,6 +2185,7 @@ def normalize_source_review_proposals(
         if proposal_id in seen:
             continue
         seen.add(proposal_id)
+        system_origin = proposal_id in trusted_system_ids
         target = str(raw.get("target_item_name") or (raw.get("payload") or {}).get("item_name") or "")
         try:
             if proposal_type == "material_replace":
@@ -2018,17 +2234,45 @@ def normalize_source_review_proposals(
                     continue
         except ValueError:
             continue
-        fact_ids = _fact_bound_proposal_ids(
-            raw,
-            proposal_type,
-            target,
-            str(
-                (items_by_name.get(target) or {}).get("stable_line_key")
-                or (f"legacy:{target}" if target else "")
-            ).strip(),
-            payload,
-            refs,
-            evidence,
+        claims_payment_total = (
+            proposal_type == "fee_update"
+            and _claims_payment_freight_total(raw, refs, evidence)
+        )
+        semantic_relation = (
+            _trusted_semantic_fee_relation(
+                raw, payload, refs, evidence, transport_mode
+            )
+            if system_origin and proposal_type == "fee_update"
+            else None
+        )
+        if trusted_semantic_id and semantic_relation is None:
+            continue
+        if claims_payment_total and semantic_relation is None:
+            # Authoritative payment totals are projected by the server before
+            # the model runs.  Proposal-ID trust is insufficient: every claim
+            # must retain the exact role, action, and component provenance.
+            continue
+        if (
+            system_origin
+            and str(raw.get("selection_role") or "") in {"primary_total", "component"}
+            and semantic_relation is None
+        ):
+            continue
+        fact_ids = (
+            semantic_relation["fact_ids"]
+            if semantic_relation and semantic_relation["selection_role"] == "component"
+            else _fact_bound_proposal_ids(
+                raw,
+                proposal_type,
+                target,
+                str(
+                    (items_by_name.get(target) or {}).get("stable_line_key")
+                    or (f"legacy:{target}" if target else "")
+                ).strip(),
+                payload,
+                refs,
+                evidence,
+            )
         )
         if fact_ids is None:
             if "fact_ids" in raw or proposal_id not in trusted_system_ids:
@@ -2037,6 +2281,7 @@ def normalize_source_review_proposals(
         confidence = float(_confidence(raw.get("confidence")))
         conflict = bool(raw.get("conflict"))
         existing_value_conflict_fields = []
+        existing_fee_conflict = False
         if proposal_type == "item_update":
             target_item = items_by_name.get(target) or {}
             existing_value_conflict_fields = [
@@ -2071,6 +2316,7 @@ def normalize_source_review_proposals(
                 {"amount": str(payload.get("amount")), "currency": payload.get("currency")}
                 for ref in refs
             )
+            existing_fee_conflict = bool(existing_fee) and not approved
             conflict = (conflict or bool(existing_fee)) and not approved
         identity = (
             (
@@ -2101,7 +2347,6 @@ def normalize_source_review_proposals(
         if identity in seen_payloads:
             continue
         seen_payloads.add(identity)
-        system_origin = proposal_id in trusted_system_ids
         normalized.append(
             {
                 "proposal_id": proposal_id,
@@ -2113,6 +2358,7 @@ def normalize_source_review_proposals(
                 **({"fact_ids": fact_ids} if fact_ids else {}),
                 "conflict": conflict,
                 "existing_value_conflict_fields": existing_value_conflict_fields,
+                "_existing_fee_conflict": existing_fee_conflict,
                 "result_origin": "SYSTEM" if system_origin else "AI",
                 "conflict_group": str(raw.get("conflict_group") or "")[:200],
                 # A model cannot self-elect a fee. Deterministic proposal IDs
@@ -2127,6 +2373,16 @@ def normalize_source_review_proposals(
                 "alternatives": raw.get("alternatives") or [],
                 "default_selected": bool(raw.get("default_selected", confidence >= 0.9)) and confidence >= 0.9 and not conflict,
                 "payload": payload,
+                **(
+                    {
+                        "selection_role": semantic_relation["selection_role"],
+                        "parent_proposal_id": semantic_relation["parent_proposal_id"],
+                        "_semantic_payment_fee": True,
+                        "resolution_reason": str(raw.get("resolution_reason") or "")[:1000],
+                    }
+                    if semantic_relation
+                    else {}
+                ),
             }
         )
     conflict_members: set[int] = set()
@@ -2143,6 +2399,8 @@ def normalize_source_review_proposals(
                 item_values.setdefault(key, {}).setdefault(canonical, set()).add(index)
         elif proposal_type == "fee_update":
             payload = proposal.get("payload") or {}
+            if str(proposal.get("selection_role") or "") == "component":
+                continue
             fee_key = str(payload.get("logical_fee_key") or "")
             canonical = _json(
                 {
@@ -2823,6 +3081,7 @@ def _load_json(value: Any, default: Any) -> Any:
 _PUBLIC_AI_HIDDEN_KEYS = frozenset({
     "_price_metadata", "_verified_prior_item", "purchase_fact", "purchase_fact_history",
     "settlement_original_values", "ai_fill_original_values", "_shipment_valuation",
+    "_semantic_payment_fee", "_semantic_read_only_unsupported", "_existing_fee_conflict",
 })
 _PUBLIC_PROCESS_ID_PATTERN = re.compile(r"proc_[0-9a-f]{64}")
 _HTML_PAIRED_TAG_PATTERN = re.compile(
@@ -3696,6 +3955,166 @@ def build_document_fee_proposals(
                 expense_category="快递附加费",
             )
         payload["remark"] = "来自服务器读取的物流报价附件，待确认。"
+    return proposals
+
+
+def build_semantic_payment_fee_proposals(
+    document: dict,
+    *,
+    transport_mode: str = "",
+) -> list[dict]:
+    """Build server-owned fee records from authoritative payment facts."""
+
+    from .logistics_settlement.model import digest
+    from .transport_fee_service import primary_freight_definition
+
+    document_id = str(document.get("document_id") or "")
+    facts_by_id = {
+        str(fact.get("fact_id") or ""): fact
+        for fact in document.get("semantic_facts") or []
+        if isinstance(fact, dict) and str(fact.get("fact_id") or "")
+    }
+    totals = sorted(
+        (
+            fact for fact in facts_by_id.values()
+            if fact.get("fact_kind") == "payment_freight_total"
+            and fact.get("scope_status") == "in_scope"
+            and fact.get("default_eligible")
+        ),
+        key=lambda fact: str(fact.get("fact_id") or ""),
+    )
+    try:
+        definition = primary_freight_definition(transport_mode)
+    except ValueError:
+        definition = None
+
+    def source_ref(fact: dict) -> dict:
+        provenance = fact.get("provenance") if isinstance(fact.get("provenance"), dict) else {}
+        return {
+            "document_id": document_id,
+            "sheet": str(provenance.get("sheet") or ""),
+            "row": provenance.get("row"),
+            "cell": str(provenance.get("cell") or ""),
+        }
+
+    proposals = []
+    emitted = set()
+    for total in totals:
+        total_id = str(total["fact_id"])
+        components = [
+            facts_by_id[component_id]
+            for component_id in total.get("component_fact_ids") or []
+            if component_id in facts_by_id
+            and facts_by_id[component_id].get("fact_kind") == "payment_freight_component"
+        ]
+        if not components or len(components) != len(total.get("component_fact_ids") or []):
+            continue
+        amount = str((total.get("monetary") or {}).get("amount") or "")
+        currency = str((total.get("monetary") or {}).get("currency") or "")
+        primary_id = f"semantic-payment-fee:{digest(total_id, transport_mode)}"[:120]
+        refs = [source_ref(component) for component in components]
+        if definition is None:
+            total["allowed_actions"] = []
+            proposals.append(
+                {
+                    "proposal_id": primary_id,
+                    "proposal_type": "fee_update",
+                    "confidence": 1.0,
+                    "conflict": False,
+                    "default_selected": False,
+                    "recommended": False,
+                    "selection_role": "alternative",
+                    "can_apply": False,
+                    "blocked_reason": "运输方式未明确或不受支持，付款运费总额仅供只读核对。",
+                    "source_policy_blocked": "运输方式未明确或不受支持，付款运费总额仅供只读核对。",
+                    "result_origin": "SYSTEM",
+                    "reason": str(total.get("reason") or ""),
+                    "resolution_reason": "需先确认运输方式，才能确定系统逻辑费用。",
+                    "source_refs": refs,
+                    "fact_ids": [total_id],
+                    "_semantic_read_only_unsupported": True,
+                    "payload": {
+                        "expense_category": "付款运费总额（运输方式待确认）",
+                        "amount_status": "ACTUAL",
+                        "amount": amount,
+                        "currency": currency,
+                        "scope_type": "ALL_ITEMS",
+                        "remark": str(total.get("reason") or ""),
+                    },
+                }
+            )
+            continue
+
+        action = {
+            "action": "fee_update",
+            "logical_fee_key": definition["logical_fee_key"],
+            "amount": amount,
+            "currency": currency,
+        }
+        total["allowed_actions"] = [action]
+        primary_payload = {
+            **definition,
+            "amount_status": "ACTUAL",
+            "amount": amount,
+            "currency": currency,
+            "scope_type": "ALL_ITEMS",
+            "remark": str(total.get("reason") or ""),
+        }
+        if primary_id not in emitted:
+            emitted.add(primary_id)
+            proposals.append(
+                {
+                    "proposal_id": primary_id,
+                    "proposal_type": "fee_update",
+                    "confidence": 1.0,
+                    "conflict": False,
+                    "default_selected": True,
+                    "recommended": True,
+                    "selection_role": "primary_total",
+                    "result_origin": "SYSTEM",
+                    "reason": str(total.get("reason") or ""),
+                    "resolution_reason": "支付明细运费组件按同币种汇总，只采用一次权威总额。",
+                    "source_refs": refs,
+                    "fact_ids": [total_id],
+                    "_semantic_payment_fee": True,
+                    "conflict_group": f"fee:{definition['logical_fee_key']}",
+                    "payload": primary_payload,
+                }
+            )
+        for component in components:
+            component_id = str(component["fact_id"])
+            proposal_id = f"semantic-payment-component:{digest(component_id, primary_id)}"[:120]
+            if proposal_id in emitted:
+                continue
+            emitted.add(proposal_id)
+            monetary = component.get("monetary") or {}
+            proposals.append(
+                {
+                    "proposal_id": proposal_id,
+                    "proposal_type": "fee_update",
+                    "confidence": 1.0,
+                    "conflict": False,
+                    "default_selected": False,
+                    "recommended": False,
+                    "selection_role": "component",
+                    "parent_proposal_id": primary_id,
+                    "result_origin": "SYSTEM",
+                    "reason": str(component.get("reason") or ""),
+                    "resolution_reason": "该行是权威付款运费总额的组件，仅供只读核对。",
+                    "source_refs": [source_ref(component)],
+                    "fact_ids": [component_id],
+                    "_semantic_payment_fee": True,
+                    "conflict_group": f"fee:{definition['logical_fee_key']}",
+                    "payload": {
+                        **definition,
+                        "amount_status": "ACTUAL",
+                        "amount": str(monetary.get("amount") or ""),
+                        "currency": str(monetary.get("currency") or ""),
+                        "scope_type": "ALL_ITEMS",
+                        "remark": str(component.get("reason") or ""),
+                    },
+                }
+            )
     return proposals
 
 
@@ -5196,6 +5615,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                                 row[field] = None
         deterministic: list[dict] = []
         deterministic_proposals: list[dict] = []
+        semantic_read_only_fee_records: list[dict] = []
         excel_proposals_by_parent: dict[str, list[tuple[int, dict, list[dict]]]] = {}
         selected_excel_sheets = set()
         documents: list[dict] = []
@@ -5305,6 +5725,19 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 if has_document_evidence:
                     document = {**document, "document_id": f"DOC-{len(documents) + 1}"}
                     documents.append(document)
+                    if unified_review:
+                        semantic_fee_records = build_semantic_payment_fee_proposals(
+                            document,
+                            transport_mode=str(context.get("transport_mode") or ""),
+                        )
+                        semantic_read_only_fee_records.extend(
+                            record for record in semantic_fee_records
+                            if record.get("_semantic_read_only_unsupported")
+                        )
+                        deterministic_proposals.extend(
+                            record for record in semantic_fee_records
+                            if not record.get("_semantic_read_only_unsupported")
+                        )
                     if unified_review and source.get("source_kind") != "approval_form":
                         deterministic_proposals.extend(
                             build_document_fee_proposals(
@@ -5420,7 +5853,11 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     (time.monotonic() - evidence_started) * 1000,
                 )
 
-            partial = ([reconciliation] if reconciliation else []) + deterministic_proposals
+            partial = (
+                ([reconciliation] if reconciliation else [])
+                + deterministic_proposals
+                + semantic_read_only_fee_records
+            )
             persist(source_progress_json=source_progress,
                 progress_percent=10 + int(50 * (source_index + 1) / max(1, len(sources))),
                 candidates_json=partial if unified_review else deterministic,
@@ -5549,6 +5986,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                         payload["fields"] = {field: value for field, value in payload.get("fields", {}).items() if field not in {"actual_shipped_qty", "shipped_uom"} and (target, field) not in system_fields}
             review_input = [p for p in deterministic_proposals + supplemental_proposals
                 if p.get("proposal_type") != "fee_update" or p.get("payload", {}).get("logical_fee_key") not in approved
+                or p.get("_semantic_payment_fee")
                 or p is approved[p["payload"]["logical_fee_key"]]]
             candidates = normalize_source_review_proposals(
                 review_input,
@@ -5560,6 +5998,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 trusted_system_proposal_ids=trusted_system_proposal_ids,
                 trusted_approved_proposal_ids=trusted_approved_proposal_ids,
             )
+            candidates.extend(deepcopy(semantic_read_only_fee_records))
             # Bind policy only from deterministic server proposals, never model output.
             server_policies = {p['proposal_id']:p['_project_policy'] for p in deterministic_proposals if p.get('_project_policy')}
             for candidate in candidates:

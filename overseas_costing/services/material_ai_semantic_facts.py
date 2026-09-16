@@ -64,6 +64,7 @@ def _provenance(source: dict, line: dict) -> dict:
         "file_name": str(evidence.get("file_name") or ""),
         "sheet": str(evidence.get("sheet") or ""),
         "row": evidence.get("row"),
+        "cell": str(evidence.get("cell") or ""),
         "line_id": str(line.get("id") or ""),
         "line_key": str(line.get("line_key") or ""),
     }
