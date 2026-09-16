@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 import uuid
 
 from .freight_lines import logical_fee_key as inferred_fee_key, matching_lines
+from .freight_matching import CANDIDATE_SCOPE_POLICY
 from .jobs import utcnow
 from .model import digest, dumps
 
@@ -124,6 +125,8 @@ def _resolve_context(store, ledger, batch_name, version_name, candidate_id, cand
     candidate = store.get("freight_candidate", candidate_id, lock=lock)
     if not candidate or candidate.get("revision") != candidate_revision or candidate.get("status") == "rejected":
         raise ValueError("付款候选已变化或被否决，请刷新")
+    if candidate.get("line_scope_policy") != CANDIDATE_SCOPE_POLICY:
+        raise ValueError("付款候选范围策略已更新，请重新匹配")
     if not store.find("batch_map", batch=batch_name, source_id=candidate["logistics_id"]):
         raise ValueError("付款候选不属于当前批次")
     source = store.get("source", candidate["expense_id"], lock=lock) or {}
@@ -328,6 +331,8 @@ def _validate_preview(store, ledger, preview, now):
     candidate = store.get("freight_candidate", preview["candidate_id"], lock=True) or {}
     if candidate.get("revision") != preview["dependencies"]["candidate_revision"] or candidate.get("status") == "rejected":
         raise ValueError("付款候选已变化，请重新预览")
+    if candidate.get("line_scope_policy") != CANDIDATE_SCOPE_POLICY:
+        raise ValueError("付款候选范围策略已更新，请重新匹配")
     source = store.get("source", preview["source_id"], lock=True) or {}
     logistics = store.get("source", preview["logistics_id"], lock=True) or {}
     if source.get("snapshot") != preview["dependencies"]["source_snapshot"] or logistics.get("snapshot") != preview["dependencies"]["logistics_snapshot"]:

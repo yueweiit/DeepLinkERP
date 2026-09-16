@@ -128,6 +128,69 @@ def test_preview_is_private_read_only_and_confirm_writes_only_selected_fee():
     assert ledger.get("rule", unrelated["name"])["is_enabled"] == 1
 
 
+def test_legacy_scope_candidate_with_unrelated_identifierless_line_is_hidden_and_not_previewable():
+    from overseas_costing.services.logistics_settlement.freight_runtime import batch_status
+    from overseas_costing.services.logistics_settlement.payment_adoption import preview_payment_adoption
+
+    ctx = payment_setup(structured=True, scope="freight", amount="3414.19", mode="EXPRESS")
+    store, ledger, batch, version, _logistics, _source, candidate = ctx
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        waybill="",
+        approval_no="",
+        cargo_text="ABC999 其他票物料",
+        packing={"material_code_hints": ["ABC999"]},
+    )
+    store.put("freight_line", {
+        "id": line["id"], "waybill": "", "approval_no": "", "data": dumps(line),
+    })
+    candidate.pop("line_scope_policy")
+    store.put("freight_candidate", {
+        "id": candidate["id"], "data": dumps(candidate),
+    })
+
+    public = batch_status(store, ledger, batch["name"], version["name"])
+    assert public["payment_candidates"] == []
+    with pytest.raises(ValueError, match="策略已更新"):
+        preview_payment_adoption(
+            store, ledger, batch["name"], version["name"],
+            candidate["id"], candidate["revision"],
+            [selection("3414.19", key="international_express_fee",
+                       source_line_id="payment-line-1")], "user",
+            now=NOW,
+        )
+    assert not store.find("payment_preview")
+
+
+def test_confirmation_rejects_preview_when_candidate_scope_policy_becomes_legacy():
+    ctx = payment_setup(structured=True, scope="freight", amount="3414.19", mode="EXPRESS")
+    store, _ledger, _batch, _version, _logistics, _source, candidate = ctx
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        waybill="",
+        approval_no="",
+        cargo_text="ABC999 其他票物料",
+        packing={"material_code_hints": ["ABC999"]},
+    )
+    store.put("freight_line", {
+        "id": line["id"], "waybill": "", "approval_no": "", "data": dumps(line),
+    })
+    preview = make_preview(
+        ctx,
+        [selection("3414.19", key="international_express_fee",
+                   source_line_id="payment-line-1")],
+    )
+    candidate.pop("line_scope_policy")
+    store.put("freight_candidate", {
+        "id": candidate["id"], "data": dumps(candidate),
+    })
+
+    with pytest.raises(ValueError, match="策略已更新"):
+        confirm_preview(ctx, preview)
+    assert not store.find("payment_claim")
+    assert store.get("payment_preview", preview["preview_id"])["status"] == "pending"
+
+
 @pytest.mark.parametrize("mode,key,scope,basis", [
     ("SEA", "international_sea_freight", "freight", "volume"),
     ("AIR", "international_air_freight", "freight", "chargeable_weight"),

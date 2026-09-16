@@ -233,7 +233,10 @@ def batch_status(store,ledger,batch_name,version_name=None):
     base.update(public_payment_context(store,ledger,batch_name,vname))
     if not maps:return base
     logistics=store.get('source',maps[0]['source_id'])
-    current_candidates=matching.candidates(store,logistics['id']) if not historical else []
+    current_candidates=[
+        candidate for candidate in matching.candidates(store,logistics['id'])
+        if candidate.get('line_scope_policy')==matching.CANDIDATE_SCOPE_POLICY
+    ] if not historical else []
     candidates=[candidate_view(store,c,batch.get('transport_mode'),ledger) for c in current_candidates if c['status']!='rejected']
     rejected=[candidate_view(store,c,batch.get('transport_mode'),ledger) for c in current_candidates if c['status']=='rejected']
     from . import payment_ai_matching
