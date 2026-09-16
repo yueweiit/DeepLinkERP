@@ -435,7 +435,24 @@ def _stable_item_index(items):
     return index
 
 
-def _selected_packing_assignments(items,candidates,selected_assignments):
+def _packing_key_aliases(items,catalog,projection):
+    projected_by_name={str(row.get('name') or ''):row for row in projection.get('rows') or []}
+    aliases={}
+    for item in items or []:
+        target=projected_by_name.get(str(item.get('name') or ''))
+        if target:
+            old=str(item.get('stable_line_key') or '').strip()
+            current=str(target.get('stable_line_key') or '').strip()
+            if old and current:aliases[old]=current
+    for candidate in (catalog or {}).get('rows') or []:
+        target=projected_by_name.get(str(candidate.get('target_item_name') or ''))
+        source_key=str((candidate.get('values') or {}).get('stable_line_key') or '').strip()
+        current=str((target or {}).get('stable_line_key') or '').strip()
+        if source_key and current:aliases[source_key]=current
+    return aliases
+
+
+def _selected_packing_assignments(items,candidates,selected_assignments,*,key_aliases=None):
     candidates=deepcopy(candidates or [])
     by_id={str(candidate.get('candidate_id') or ''):candidate for candidate in candidates}
     if any(not candidate_id for candidate_id in by_id) or len(by_id)!=len(candidates):
@@ -464,7 +481,9 @@ def _selected_packing_assignments(items,candidates,selected_assignments):
             raise ValueError('所选装箱归属已变化，请刷新预览。')
         if not option.get('can_apply'):
             raise ValueError(option.get('resolution_reason') or '该装箱归属不可采用。')
-        members=[str(value or '') for value in option.get('member_keys') or []]
+        aliases=key_aliases or {}
+        members=[aliases.get(str(value or ''),str(value or ''))
+                 for value in option.get('member_keys') or []]
         mode=str(option.get('mode') or '')
         expected_count=1 if mode=='single_item' else 2
         if len(members)<expected_count or len(members)!=len(set(members)) or any(member not in item_index for member in members):
@@ -550,15 +569,19 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choi
     if dependencies:
         context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     candidates=draft.get('packing_group_candidates') or []
+    projection=rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices)
+    projected_items=projection.get('rows') or []
     if packing_assignments is not None or any(candidate.get('assignment_options') for candidate in candidates):
         selected_packing_groups,single_assignments,validated_assignments=(
-            _selected_packing_assignments(items,candidates,packing_assignments))
+            _selected_packing_assignments(
+                projected_items,candidates,packing_assignments,
+                key_aliases=_packing_key_aliases(items,catalog,projection),
+            ))
         selected_packing_group_ids=[str(candidate.get('candidate_id')) for candidate in selected_packing_groups]
     else:
         selected_packing_groups,selected_packing_group_ids=_selected_packing_groups(
-            items,candidates,packing_group_ids)
+            projected_items,candidates,packing_group_ids)
         single_assignments=[];validated_assignments={}
-    projection=rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices)
     _apply_single_packing_assignments(projection,single_assignments)
     projection=_attach_control_metadata(
         projection,draft.get('merged_amount_groups') or [],selected_packing_groups)
@@ -600,19 +623,23 @@ def _reconstruct_locked_preview(repo,batch_name,run,receipt,draft):
         repo.assert_row_dependencies(batch_name,dependencies,lock=True)
     context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
     candidates=draft.get('packing_group_candidates') or []
+    current=rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode'],
+                         field_choices=receipt.get('selected_field_choices'))
+    projected_items=current.get('rows') or []
     if any(candidate.get('assignment_options') for candidate in candidates):
         selected_packing_groups,single_assignments,validated_assignments=(
-            _selected_packing_assignments(items,candidates,receipt.get('selected_packing_assignments') or {}))
+            _selected_packing_assignments(
+                projected_items,candidates,receipt.get('selected_packing_assignments') or {},
+                key_aliases=_packing_key_aliases(items,catalog,current),
+            ))
         validated_group_ids=[str(candidate.get('candidate_id')) for candidate in selected_packing_groups]
     else:
         selected_group_ids=set(receipt.get('selected_packing_group_ids') or [])
         if not selected_group_ids and receipt.get('packing_group_candidates'):
             selected_group_ids={str(candidate.get('candidate_id') or '') for candidate in receipt.get('packing_group_candidates') or []}
         selected_packing_groups,validated_group_ids=_selected_packing_groups(
-            items,candidates,sorted(selected_group_ids))
+            projected_items,candidates,sorted(selected_group_ids))
         single_assignments=[];validated_assignments={}
-    current=rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode'],
-                         field_choices=receipt.get('selected_field_choices'))
     _apply_single_packing_assignments(current,single_assignments)
     current=_attach_control_metadata(
         current,draft.get('merged_amount_groups') or receipt.get('merged_amount_groups') or [],selected_packing_groups)

@@ -694,6 +694,40 @@ def test_packing_assignment_can_apply_group_facts_to_exactly_one_material():
     assert preview['packing_group_candidates']==[]
 
 
+def test_packing_assignment_is_validated_against_authoritative_projected_rows():
+    repo=Repo()
+    repo.items=[{**repo.items[0],'stable_line_key':'OLD-LINE','row_no':1}]
+    repo.run['candidates_json']=[{
+        'proposal_id':'LOGISTICS-SCOPE','proposal_type':'logistics_reconcile',
+        'default_selected':True,'result_origin':'SYSTEM','source_refs':[{'source_id':'DOC'}],
+        'payload':{'scope_status':'AUTHORITATIVE','original_item_names':['I1'],
+                   'excluded_item_names':[],'unresolved':[],'rows':[
+                       {**repo.items[0],'name':'I1','_existing_name':'I1','_review_origin':'source',
+                        'stable_line_key':'NEW-LINE','row_no':1,
+                        '_review_source_values':{'material_code':'SKU1','product_name':'SKU1',
+                                                 'actual_shipped_qty':1,'stable_line_key':'NEW-LINE'}}]},
+    }]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'PACK-NEW','member_keys':['NEW-LINE'],
+        'gross_weight_kg':'42.05','can_apply':True,'default_selected':True,
+        'assignment_options':[
+            {'assignment_id':'PACK-NEW:NEW-LINE','mode':'single_item','member_keys':['NEW-LINE'],
+             'default_selected':True,'can_apply':True},
+        ],
+    }]
+
+    preview=prepare(repo,mode='update_selected',packing_assignments={
+        'PACK-NEW':'PACK-NEW:NEW-LINE',
+    })
+
+    assert preview['rows'][0]['stable_line_key']=='OLD-LINE'
+    assert preview['rows'][0]['gross_weight_kg']=='42.05'
+
+
 def test_packing_assignment_group_is_the_only_adopted_relation():
     repo=Repo()
     repo.items=[
