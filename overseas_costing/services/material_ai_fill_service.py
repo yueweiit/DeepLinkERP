@@ -4307,40 +4307,60 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             matches=[item for item in items or [] if name and str(item.get("product_name") or "").strip().casefold()==name]
         add_matches(matches, hint.get("material_code") or hint.get("product_name"))
     source_text=str(parsed.get('source_text') or '')
-    affirmative_joint=bool(re.search(
-        r'(?:共同|一起|同箱|共用|共享)[^\n]{0,12}(?:装|包装|箱)|(?:合箱|合并装箱)',
-        source_text,
-        re.I,
-    ))
-    negated_joint=bool(re.search(
-        r'(?:(?:并非|[不未没无勿禁])[^\n，。；;!！?？]{0,6}'
-        r'(?:一起|共同|合箱|合并装箱|同箱|一箱|共用|共享))'
-        r'|(?:(?:分开|分别|单独|拆分)\s*(?:装|包装|装箱|箱))',
-        source_text,
-        re.I,
-    ))
-    explicit_joint=affirmative_joint and not negated_joint
     package_pattern=re.compile(
         r'(?:DHL\s*(?:单号|运单|tracking)?|快递单号|运单号|提单号|包裹号|包装号|箱号|'
         r'waybill|tracking(?:\s*(?:no|number))?|awb)'
         r'\s*[:：#-]?\s*([A-Z0-9][A-Z0-9-]{4,})',
         re.I,
     )
+    joint_pattern=re.compile(
+        r'(?:共同|一起|共用|共享)[^\n，。；;!！?？]{0,12}'
+        r'(?:装|包装|箱)|(?:合箱|合并装箱|同箱|一箱)',
+        re.I,
+    )
+    negated_joint_pattern=re.compile(
+        r'(?:(?:并非|不(?!影响|妨碍)|[未没无勿禁])'
+        r'[^\n，。；;!！?？]{0,6}(?:一起|共同|合箱|合并装箱|同箱|一箱|共用|共享))'
+        r'|(?:(?:分开|分别|单独|拆分)\s*(?:装|包装|装箱|箱))',
+        re.I,
+    )
+
+    # Keep semantic relationships within a sentence-sized evidence window. A
+    # long delimiter-free comment is chunked defensively rather than allowing
+    # a distant negation or material code to bind the whole source.
+    clauses=[]
+    for raw_clause in re.split(r'[\n\r。！？!?；;，,]+|(?<!\d)\.(?!\d)', source_text):
+        raw_clause=raw_clause.strip()
+        clauses.extend(
+            raw_clause[offset:offset + 500]
+            for offset in range(0,len(raw_clause),500)
+            if raw_clause[offset:offset + 500]
+        )
+
+    clause_evidence=[]
     package_ids_by_member={key:set() for key in code_members}
     all_package_ids=set()
-    for source_line in source_text.splitlines():
-        line_package_ids={
+    for clause in clauses:
+        clause_package_ids={
             re.sub(r'[^A-Z0-9]', '', match.group(1).upper())
-            for match in package_pattern.finditer(source_line)
+            for match in package_pattern.finditer(clause)
         }
-        all_package_ids.update(line_package_ids)
+        all_package_ids.update(clause_package_ids)
+        clause_members=[]
         for key, material_code in material_codes_by_key.items():
             if re.search(
                 rf'(?<![A-Z0-9]){re.escape(material_code)}(?![A-Z0-9])',
-                source_line,
+                clause,
                 re.I,
             ):
-                package_ids_by_member[key].update(line_package_ids)
+                clause_members.append(key)
+                package_ids_by_member[key].update(clause_package_ids)
+        clause_evidence.append({
+            'member_keys':clause_members,
+            'package_ids':clause_package_ids,
+            'affirmative_joint':bool(joint_pattern.search(clause)),
+            'negated_joint':bool(negated_joint_pattern.search(clause)),
+        })
     if len(all_package_ids)==1:
         for key in code_members:
             if not package_ids_by_member[key]:
@@ -4360,12 +4380,52 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         or any(len(package_ids_by_member[key])>1 for key in code_members)
         or len(associated_package_ids)>1
     )
+    shared_package_id=(
+        next(iter(associated_package_ids))
+        if shared_package_identity else ''
+    )
+
+    def relationship_is_negated(member_keys, package_id=''):
+        member_keys=set(member_keys)
+        return any(
+            evidence['negated_joint']
+            and (
+                bool(member_keys.intersection(evidence['member_keys']))
+                or bool(package_id and package_id in evidence['package_ids'])
+            )
+            for evidence in clause_evidence
+        )
+
+    group_member_keys=[]
+    if not ambiguous and not conflicting_package_identities:
+        for evidence in clause_evidence:
+            clause_member_keys=[
+                key for key in code_members if key in evidence['member_keys']
+            ]
+            if (
+                evidence['affirmative_joint']
+                and not evidence['negated_joint']
+                and len(clause_member_keys)>=2
+                and not relationship_is_negated(clause_member_keys)
+            ):
+                group_member_keys=clause_member_keys
+                break
+        if (
+            not group_member_keys
+            and shared_package_identity
+            and not relationship_is_negated(code_members,shared_package_id)
+        ):
+            group_member_keys=list(code_members)
     # A cargo expression such as ``1套模具+3个手机壳`` describes
     # contents, not a relationship between every current material row.  When
     # only one exact SKU is present, keep the candidate bound to that SKU.
     exact_member_pairs=[
         (member,label) for member,label in zip(members,labels) if member in code_members
     ]
+    if group_member_keys:
+        exact_member_pairs=[
+            (member,label) for member,label in exact_member_pairs if member in group_member_keys
+        ]
     members=[member for member,_label in exact_member_pairs]
     labels=[label for _member,label in exact_member_pairs]
     ordered_items=[item for item in items or [] if not int(item.get('is_excluded') or 0)]
@@ -4380,14 +4440,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             'key':key,
             'label':str(item.get('material_code') or item.get('product_name') or item.get('name') or key),
         })
-    exact_members=(
-        (
-            len(code_members)>=2
-            and not conflicting_package_identities
-            and not negated_joint
-            and (shared_package_identity or explicit_joint)
-        )
-    ) and not ambiguous
+    exact_members=bool(group_member_keys)
     source_id=str(source.get("source_id") or "")
     candidate_id=digest("comment-packing-group-1",source.get("source_hash"),source_id,members,
                         parsed.get("gross_weight_kg"),parsed.get("volume_m3"))

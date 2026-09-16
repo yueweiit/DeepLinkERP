@@ -322,7 +322,59 @@ def test_unrelated_negation_in_an_earlier_clause_does_not_veto_affirmative_joint
     ]
 
 
-@pytest.mark.parametrize("wording", ["一起装箱", "共同装箱", "合箱", "合并装箱"])
+@pytest.mark.parametrize("wording", ["不影响一起装箱", "不妨碍共同装箱"])
+def test_non_negating_construction_keeps_exact_member_joint_packing_affirmative(wording):
+    candidate = _group_candidate_for_comment(
+        f"MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
+    )
+
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("one_box_group", ["L1", "L2"]),
+    ]
+
+
+def test_unrelated_cargo_negative_clause_does_not_veto_later_exact_member_affirmative_clause():
+    candidate = _group_candidate_for_comment(
+        "其他货物不需要一起装箱；MWV101144 MWV101145 一起装箱\n"
+        "规格33*20*23,重量42.05kg"
+    )
+
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("one_box_group", ["L1", "L2"]),
+    ]
+
+
+def test_joint_language_without_two_exact_members_in_same_clause_is_not_actionable():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 MWV101145\n其他货物一起装箱\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
+
+def test_unrelated_negative_clause_does_not_veto_shared_waybill_inference():
+    candidate = _group_candidate_for_comment(
+        "其他货物不需要一起装箱；DHL 单号1841361513 MWV101144 MWV101145\n"
+        "规格33*20*23,重量42.05kg"
+    )
+
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("one_box_group", ["L1", "L2"]),
+    ]
+
+
+def test_exact_member_negative_clause_vetoes_shared_waybill_inference():
+    candidate = _group_candidate_for_comment(
+        "DHL 单号1841361513 MWV101144 MWV101145 不需要一起装箱\n"
+        "规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
+
+@pytest.mark.parametrize("wording", ["一起装箱", "共同装箱", "合箱", "合并装箱", "同箱", "一箱"])
 def test_affirmative_joint_language_groups_exact_members(wording):
     candidate = _group_candidate_for_comment(
         f"MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
