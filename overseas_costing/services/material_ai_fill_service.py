@@ -4356,11 +4356,15 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             ):
                 clause_members.append(key)
                 package_ids_by_member[key].update(clause_package_ids)
+        affirmative_joint=bool(joint_pattern.search(clause))
         clause_evidence.append({
             'member_keys':clause_members,
             'package_ids':clause_package_ids,
-            'affirmative_joint':bool(joint_pattern.search(clause)),
-            'negated_joint':bool(negated_joint_pattern.search(clause)),
+            'affirmative_joint':affirmative_joint,
+            'negated_joint':bool(
+                negated_joint_pattern.search(clause)
+                or ('一箱' in clause and not affirmative_joint)
+            ),
         })
     if len(all_package_ids)==1:
         for key in code_members:
@@ -4388,17 +4392,17 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
 
     def relationship_is_negated(member_keys, package_id=''):
         member_keys=set(member_keys)
-        return any(
-            evidence['negated_joint']
-            and (
+        for evidence in clause_evidence:
+            negative_member_keys=set(evidence['member_keys'])
+            if evidence['negated_joint'] and (
                 (
-                    bool(member_keys)
-                    and member_keys.issubset(set(evidence['member_keys']))
+                    bool(negative_member_keys)
+                    and negative_member_keys.issubset(member_keys)
                 )
                 or bool(package_id and package_id in evidence['package_ids'])
-            )
-            for evidence in clause_evidence
-        )
+            ):
+                return True
+        return False
 
     group_member_keys=[]
     if not ambiguous and not conflicting_package_identities:
