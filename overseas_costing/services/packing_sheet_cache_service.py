@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from time import sleep as _sleep
 from typing import Any
 import uuid
 
@@ -608,17 +609,79 @@ def scheduled_refresh_catalog_cache() -> dict:
     return refresh_catalog_cache()
 
 
-def prewarm_catalog_cache() -> dict:
-    """发布门禁：只有远端增量同步和所有启用 Sheet 本地物化都成功才返回。"""
+def prewarm_catalog_cache(
+    *,
+    store=None,
+    clients=None,
+    sleep=None,
+    poll_seconds: float = 5.0,
+    max_polls: int = 120,
+) -> dict:
+    """发布门禁：首次为无快照 Sheet 排队，随后要求所有启用 Sheet 完成物化。"""
 
-    result = refresh_catalog_cache()
+    from overseas_costing.integrations.dingtalk_packing_source import build_refresh_request_key
+
+    store = store or _default_store()
+    clients = clients or _default_clients()
+    sleeper = sleep or _sleep
+    rows = clients.catalog.list_catalog_snapshot()
+    missing = [
+        row
+        for row in rows
+        if row.get("sheet_id")
+        and _active(row)
+        and (
+            str(row.get("snapshot_status") or "") != "ready"
+            or len(str(row.get("content_sha256") or "").strip()) != 64
+        )
+    ]
+    pending: dict[str, str] = {}
+    for row in missing:
+        workbook_id = str(row.get("workbook_id") or "")
+        sheet_id = str(row.get("sheet_id") or "")
+        request_key = build_refresh_request_key(
+            "sheet",
+            workbook_id,
+            sheet_id,
+            uuid.uuid4().hex,
+        )
+        clients.submitter.request_sheet_refresh(
+            workbook_id,
+            sheet_id,
+            request_key,
+            "deployment-prewarm",
+        )
+        pending[request_key] = f"{workbook_id}:{sheet_id}"
+
+    for poll_index in range(max(1, int(max_polls))):
+        failures: list[str] = []
+        for request_key, source_id in list(pending.items()):
+            status = clients.catalog.get_refresh_status(request_key) or {}
+            state = str(status.get("status") or "not_found")
+            if state == "success":
+                pending.pop(request_key, None)
+            elif state == "failed":
+                message = str(status.get("error_message") or "远端刷新失败。")
+                failures.append(f"{source_id}: {message}")
+        if failures:
+            raise PackingSheetCacheError("装箱 Sheet 首次刷新失败：" + "; ".join(failures)[:1000])
+        if not pending:
+            break
+        if poll_index + 1 < max(1, int(max_polls)):
+            sleeper(max(0.0, float(poll_seconds)))
+    if pending:
+        raise PackingSheetCacheError(
+            f"仍有 {len(pending)} 个装箱 Sheet 首次刷新未完成，请稍后重试部署。"
+        )
+
+    result = refresh_catalog_cache(store=store, clients=clients)
     if result.get("skipped"):
         raise PackingSheetCacheError("装箱 Sheet 缓存正在由另一个任务同步，本次预热未完成。")
     if result.get("error") or result.get("failed"):
         raise PackingSheetCacheError(
             f"装箱 Sheet 缓存预热失败：{result.get('error') or str(result.get('failed')) + ' 个 Sheet 未就绪。'}"
         )
-    catalog = get_cached_catalog()
+    catalog = get_cached_catalog(store=store)
     sheets = [
         sheet
         for workbook in catalog.get("wiki_workbooks") or []
@@ -636,4 +699,9 @@ def prewarm_catalog_cache() -> dict:
         raise PackingSheetCacheError(
             f"仍有 {len(pending)} 个启用 Sheet 未完成本地物化。"
         )
-    return {**result, "ready": len(sheets), "catalog_status": catalog.get("catalog_status")}
+    return {
+        **result,
+        "requested": len(missing),
+        "ready": len(sheets),
+        "catalog_status": catalog.get("catalog_status"),
+    }

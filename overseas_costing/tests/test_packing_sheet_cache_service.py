@@ -271,24 +271,26 @@ def test_scheduler_runs_twice_daily_at_eight_and_eighteen() -> None:
 def test_deployment_prewarm_requires_every_active_sheet_to_be_ready(monkeypatch) -> None:
     from overseas_costing.services import packing_sheet_cache_service as service
 
+    store = _store()
+    clients = _clients()
     monkeypatch.setattr(
         service,
         "refresh_catalog_cache",
-        lambda: {"checked": 2, "updated": 1, "unchanged": 0, "failed": 1},
+        lambda **_kwargs: {"checked": 2, "updated": 1, "unchanged": 0, "failed": 1},
     )
 
     with pytest.raises(service.PackingSheetCacheError, match="预热失败"):
-        service.prewarm_catalog_cache()
+        service.prewarm_catalog_cache(store=store, clients=clients)
 
     monkeypatch.setattr(
         service,
         "refresh_catalog_cache",
-        lambda: {"checked": 1, "updated": 1, "unchanged": 0, "failed": 0},
+        lambda **_kwargs: {"checked": 1, "updated": 1, "unchanged": 0, "failed": 0},
     )
     monkeypatch.setattr(
         service,
         "get_cached_catalog",
-        lambda: {
+        lambda **_kwargs: {
             "catalog_status": "ready",
             "wiki_workbooks": [{"sheets": [{
                 "source_id": "WB:S",
@@ -299,10 +301,70 @@ def test_deployment_prewarm_requires_every_active_sheet_to_be_ready(monkeypatch)
         },
     )
 
-    result = service.prewarm_catalog_cache()
+    result = service.prewarm_catalog_cache(store=store, clients=clients)
 
     assert result["ready"] == 1
     assert result["catalog_status"] == "ready"
+
+
+def test_deployment_prewarm_requests_missing_snapshots_before_materializing() -> None:
+    from overseas_costing.services import packing_sheet_cache_service as service
+
+    store = _store()
+    missing = {
+        **_row(),
+        "snapshot_id": None,
+        "snapshot_status": None,
+        "snapshot_created_at": None,
+        "capture_finished_at": None,
+        "content_sha256": None,
+        "object_key": None,
+    }
+
+    class PrewarmCatalog(FakeCatalog):
+        def __init__(self):
+            super().__init__([missing])
+            self.status_checks = 0
+
+        def get_refresh_status(self, _request_key):
+            self.status_checks += 1
+            if self.status_checks == 1:
+                return {"status": "running"}
+            self.rows = [_row()]
+            return {"status": "success"}
+
+    class Submitter:
+        def __init__(self):
+            self.requests = []
+
+        def request_sheet_refresh(self, workbook_id, sheet_id, request_key, requested_by):
+            self.requests.append((workbook_id, sheet_id, request_key, requested_by))
+            return 77
+
+    catalog = PrewarmCatalog()
+    submitter = Submitter()
+    clients = SimpleNamespace(
+        catalog=catalog,
+        submitter=submitter,
+        archive=FakeArchive(_payload()),
+    )
+    sleeps = []
+
+    result = service.prewarm_catalog_cache(
+        store=store,
+        clients=clients,
+        sleep=lambda seconds: sleeps.append(seconds),
+        poll_seconds=0.01,
+        max_polls=3,
+    )
+
+    assert result["ready"] == 1
+    assert result["requested"] == 1
+    assert submitter.requests[0][0:2] == ("WB-2026", "S-1")
+    assert len(submitter.requests[0][2]) == 64
+    assert submitter.requests[0][3] == "deployment-prewarm"
+    assert sleeps == [0.01]
+    assert clients.archive.downloads == 1
 
 
 def test_batch_catalog_recommendation_reads_only_local_cache(monkeypatch) -> None:
