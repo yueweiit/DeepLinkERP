@@ -268,6 +268,43 @@ def test_scheduler_runs_twice_daily_at_eight_and_eighteen() -> None:
     )
 
 
+def test_deployment_prewarm_requires_every_active_sheet_to_be_ready(monkeypatch) -> None:
+    from overseas_costing.services import packing_sheet_cache_service as service
+
+    monkeypatch.setattr(
+        service,
+        "refresh_catalog_cache",
+        lambda: {"checked": 2, "updated": 1, "unchanged": 0, "failed": 1},
+    )
+
+    with pytest.raises(service.PackingSheetCacheError, match="预热失败"):
+        service.prewarm_catalog_cache()
+
+    monkeypatch.setattr(
+        service,
+        "refresh_catalog_cache",
+        lambda: {"checked": 1, "updated": 1, "unchanged": 0, "failed": 0},
+    )
+    monkeypatch.setattr(
+        service,
+        "get_cached_catalog",
+        lambda: {
+            "catalog_status": "ready",
+            "wiki_workbooks": [{"sheets": [{
+                "source_id": "WB:S",
+                "active": True,
+                "cache_status": "ready",
+                "content_hash": "a" * 64,
+            }]}],
+        },
+    )
+
+    result = service.prewarm_catalog_cache()
+
+    assert result["ready"] == 1
+    assert result["catalog_status"] == "ready"
+
+
 def test_batch_catalog_recommendation_reads_only_local_cache(monkeypatch) -> None:
     from overseas_costing.services import packing_sheet_cache_service as cache
     from overseas_costing.services import packing_snapshot_service as service

@@ -178,6 +178,15 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash '$remote_runtime_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '$remote_runtime_dockerfile' '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' install; script_exit_code=\$?; rm -f '$remote_runtime_script' '$remote_runtime_dockerfile'; exit \$script_exit_code"
 
+      - name: Prewarm packing sheet local cache
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.packing_sheet_cache_service.prewarm_catalog_cache'
+
       - name: Configure and verify material AI
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}

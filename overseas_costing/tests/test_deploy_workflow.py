@@ -29,6 +29,16 @@ def test_deploy_job_checks_out_repository_before_running_asset_script():
     assert deploy_block.index(checkout) < deploy_block.index(asset_script)
 
 
+def test_deploy_prewarms_packing_cache_before_switching_frontend_assets() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+
+    prewarm = "overseas_costing.services.packing_sheet_cache_service.prewarm_catalog_cache"
+    assets = "Synchronize and verify frontend assets"
+    assert prewarm in deploy
+    assert deploy.index("Upgrade and migrate ERP") < deploy.index(prewarm) < deploy.index(assets)
+
+
 def test_production_deploy_requires_deepseek_and_installs_document_runtime() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]

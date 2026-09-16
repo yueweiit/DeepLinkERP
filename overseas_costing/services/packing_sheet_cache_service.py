@@ -606,3 +606,34 @@ def complete_manual_refresh(request_key: str, *, store=None, clients=None) -> di
 
 def scheduled_refresh_catalog_cache() -> dict:
     return refresh_catalog_cache()
+
+
+def prewarm_catalog_cache() -> dict:
+    """发布门禁：只有远端增量同步和所有启用 Sheet 本地物化都成功才返回。"""
+
+    result = refresh_catalog_cache()
+    if result.get("skipped"):
+        raise PackingSheetCacheError("装箱 Sheet 缓存正在由另一个任务同步，本次预热未完成。")
+    if result.get("error") or result.get("failed"):
+        raise PackingSheetCacheError(
+            f"装箱 Sheet 缓存预热失败：{result.get('error') or str(result.get('failed')) + ' 个 Sheet 未就绪。'}"
+        )
+    catalog = get_cached_catalog()
+    sheets = [
+        sheet
+        for workbook in catalog.get("wiki_workbooks") or []
+        for sheet in workbook.get("sheets") or []
+        if sheet.get("active") is not False
+    ]
+    pending = [
+        str(sheet.get("source_id") or "")
+        for sheet in sheets
+        if sheet.get("cache_status") != "ready" or not sheet.get("content_hash")
+    ]
+    if not sheets:
+        raise PackingSheetCacheError("装箱 Sheet 目录为空，不允许切换新前端。")
+    if pending:
+        raise PackingSheetCacheError(
+            f"仍有 {len(pending)} 个启用 Sheet 未完成本地物化。"
+        )
+    return {**result, "ready": len(sheets), "catalog_status": catalog.get("catalog_status")}
