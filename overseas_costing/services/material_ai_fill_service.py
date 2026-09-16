@@ -1030,6 +1030,7 @@ def _fact_bound_proposal_ids(
     raw: dict,
     proposal_type: str,
     target: str,
+    target_material_key: str,
     payload: dict,
     evidence: dict[str, dict],
 ) -> list[str] | None:
@@ -1082,6 +1083,7 @@ def _fact_bound_proposal_ids(
             if not any(
                 action.get("action") == "item_update"
                 and str(action.get("target_item_name") or "") == target
+                and str(action.get("material_key") or "") == target_material_key
                 and str(action.get("fieldname") or "") == fieldname
                 and _canonical_value(fieldname, action.get("value"))
                 == _canonical_value(fieldname, value)
@@ -1800,10 +1802,18 @@ def normalize_source_review_proposals(
         except ValueError:
             continue
         fact_ids = _fact_bound_proposal_ids(
-            raw, proposal_type, target, payload, evidence
+            raw,
+            proposal_type,
+            target,
+            str(
+                (items_by_name.get(target) or {}).get("stable_line_key")
+                or (f"legacy:{target}" if target else "")
+            ).strip(),
+            payload,
+            evidence,
         )
         if fact_ids is None:
-            if proposal_id not in trusted_system_ids:
+            if "fact_ids" in raw or proposal_id not in trusted_system_ids:
                 continue
             fact_ids = []
         confidence = float(_confidence(raw.get("confidence")))
@@ -4048,6 +4058,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         return []
     members=[];labels=[];ambiguous=[]
     code_members=[]
+    material_codes_by_key={}
     def add_matches(matches, hint):
         if len(matches) == 1:
             key=str(matches[0].get("stable_line_key") or "").strip()
@@ -4063,6 +4074,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             key=str(matches[0].get("stable_line_key") or "").strip()
             if key and key not in code_members:
                 code_members.append(key)
+                material_codes_by_key[key]=str(matches[0].get("material_code") or code).strip()
     for hint in parsed.get("rows") or []:
         code=str(hint.get("material_code") or "").strip().casefold()
         name=str(hint.get("product_name") or "").strip().casefold()
@@ -4072,6 +4084,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
                 key=str(matches[0].get("stable_line_key") or "").strip()
                 if key and key not in code_members:
                     code_members.append(key)
+                    material_codes_by_key[key]=str(matches[0].get("material_code") or code).strip()
         else:
             matches=[item for item in items or [] if name and str(item.get("product_name") or "").strip().casefold()==name]
         add_matches(matches, hint.get("material_code") or hint.get("product_name"))
@@ -4081,27 +4094,61 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         source_text,
         re.I,
     ))
-    shared_package_identity=bool(re.search(
-        r'(?:DHL\s*(?:单号|运单|tracking)?|快递单号|运单号|提单号|waybill|tracking(?:\s*(?:no|number))?|awb)'
-        r'\s*[:：#-]?\s*[A-Z0-9][A-Z0-9-]{4,}',
-        source_text,
+    package_pattern=re.compile(
+        r'(?:DHL\s*(?:单号|运单|tracking)?|快递单号|运单号|提单号|包裹号|包装号|箱号|'
+        r'waybill|tracking(?:\s*(?:no|number))?|awb)'
+        r'\s*[:：#-]?\s*([A-Z0-9][A-Z0-9-]{4,})',
         re.I,
-    ))
+    )
+    package_ids_by_member={key:set() for key in code_members}
+    all_package_ids=set()
+    for source_line in source_text.splitlines():
+        line_package_ids={
+            re.sub(r'[^A-Z0-9]', '', match.group(1).upper())
+            for match in package_pattern.finditer(source_line)
+        }
+        all_package_ids.update(line_package_ids)
+        for key, material_code in material_codes_by_key.items():
+            if re.search(
+                rf'(?<![A-Z0-9]){re.escape(material_code)}(?![A-Z0-9])',
+                source_line,
+                re.I,
+            ):
+                package_ids_by_member[key].update(line_package_ids)
+    if len(all_package_ids)==1:
+        for key in code_members:
+            if not package_ids_by_member[key]:
+                package_ids_by_member[key].update(all_package_ids)
+    associated_package_ids={
+        next(iter(identities))
+        for identities in package_ids_by_member.values()
+        if len(identities)==1
+    }
+    shared_package_identity=(
+        len(code_members)>=2
+        and len(associated_package_ids)==1
+        and all(len(package_ids_by_member[key])==1 for key in code_members)
+    )
+    conflicting_package_identities=(
+        len(all_package_ids)>1
+        or any(len(package_ids_by_member[key])>1 for key in code_members)
+        or len(associated_package_ids)>1
+    )
     # A cargo expression such as ``1套模具+3个手机壳`` describes
     # contents, not a relationship between every current material row.  When
     # only one exact SKU is present, keep the candidate bound to that SKU.
-    if len(code_members) == 1 and not explicit_joint:
-        only=code_members[0]
-        narrowed=[(member,label) for member,label in zip(members,labels) if member==only]
-        members=[member for member,_label in narrowed]
-        labels=[label for _member,label in narrowed]
+    exact_member_pairs=[
+        (member,label) for member,label in zip(members,labels) if member in code_members
+    ]
+    members=[member for member,_label in exact_member_pairs]
+    labels=[label for _member,label in exact_member_pairs]
     ordered_items=[item for item in items or [] if not int(item.get('is_excluded') or 0)]
     selectable_items=[]
     for item in ordered_items:
         key=str(item.get('stable_line_key') or (f"legacy:{item.get('name')}" if item.get('name') else '')).strip()
         if not key:
             continue
-        if members and not explicit_joint and key not in members:
+        if key not in code_members:
             continue
         selectable_items.append({
             'key':key,
@@ -4109,9 +4156,9 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         })
     exact_members=(
         (
-            len(code_members)>=2 and (shared_package_identity or explicit_joint)
-        ) or (
-            explicit_joint and len(members)>=2
+            len(code_members)>=2
+            and not conflicting_package_identities
+            and (shared_package_identity or explicit_joint)
         )
     ) and not ambiguous
     source_id=str(source.get("source_id") or "")
@@ -4135,17 +4182,6 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             'default_selected':False,'can_apply':True,
             'resolution_reason':'将评论中的整组装箱事实仅用于该物料。',
         } for item in selectable_items]
-        if len(selectable_items)>=2 and explicit_joint:
-            all_keys=[item['key'] for item in selectable_items]
-            all_labels=[item['label'] for item in selectable_items]
-            assignment_options.append({
-                'assignment_id':digest('packing-assignment',candidate_id,'one_box_group',all_keys),
-                'mode':'one_box_group','member_keys':all_keys,
-                'label':f"{'、'.join(all_labels)} 共同装为 1 箱",
-                'package_count_override':'1',
-                'default_selected':True,'can_apply':True,
-                'resolution_reason':'将候选物料作为一个装箱组，共用本条重量、体积和箱数。',
-            })
         if not any(option['default_selected'] for option in assignment_options) and len(assignment_options)==1:
             assignment_options[0]['default_selected']=True
     can_apply=bool(assignment_options)

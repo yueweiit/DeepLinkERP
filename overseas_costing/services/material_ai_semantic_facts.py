@@ -257,7 +257,19 @@ def _explicit_goods_value(line: dict) -> tuple[str, str]:
             if str(fields.get(key) or "").strip():
                 raw_currency = fields[key]
                 break
-    return _decimal_text(raw_amount), str(raw_currency or "").strip().upper()
+    currency = unicodedata.normalize("NFKC", str(raw_currency or "")).strip().upper()
+    compact_currency = "".join(currency.split())
+    if compact_currency in {
+        "RMB",
+        "CNY",
+        "人民币",
+        "人民币RMB",
+        "人民币CNY",
+        "¥",
+        "元",
+    }:
+        currency = "RMB"
+    return _decimal_text(raw_amount), currency
 
 
 def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> list[dict]:
@@ -409,7 +421,11 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
         goods_amount, goods_currency = _explicit_goods_value(line)
         if goods_amount and goods_currency and material_targets:
             allowed_actions = []
-            if scope_status == "in_scope" and len(material_targets) == 1:
+            if (
+                scope_status == "in_scope"
+                and len(material_targets) == 1
+                and goods_currency == "RMB"
+            ):
                 target = material_targets[0]
                 allowed_actions = [
                     {
@@ -441,7 +457,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
                     ),
                     "fact_kind": "payment_goods_value",
                     "default_eligible": scope_status == "in_scope",
-                    "read_only": scope_status != "in_scope",
+                    "read_only": scope_status != "in_scope" or goods_currency != "RMB",
                     "physical": {},
                     "monetary": {"amount": goods_amount, "currency": goods_currency},
                     "reason": "已选付款工作簿行显式标注的货值与币种。",

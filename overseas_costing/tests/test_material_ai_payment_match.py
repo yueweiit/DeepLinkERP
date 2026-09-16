@@ -926,6 +926,8 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
     ]
     assert len(goods_facts) == 1
     assert goods_facts[0]["monetary"] == {"amount": "1200", "currency": "USD"}
+    assert goods_facts[0]["read_only"] is True
+    assert goods_facts[0]["allowed_actions"] == []
 
     candidates = []
     for preview in sources:
@@ -943,10 +945,8 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
         (items[1]["name"], "chargeable_weight_kg", "46"),
         (items[1]["name"], "package_count", "1"),
         (items[1]["name"], "volume_m3", "0.01518"),
-        (items[0]["name"], "goods_value", "1200"),
-        (items[0]["name"], "purchase_currency", "USD"),
     }
-    assert len({row["fact_ids"][0] for row in candidates}) == 3
+    assert len({row["fact_ids"][0] for row in candidates}) == 2
 
 
 def test_payment_fact_source_coalesces_the_same_general_attachment_sheet_before_catalog():

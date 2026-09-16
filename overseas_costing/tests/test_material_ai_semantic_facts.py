@@ -227,11 +227,11 @@ def test_matched_freight_without_physical_values_still_yields_component_and_tota
     assert total["allowed_actions"] == []
 
 
-def test_explicit_goods_value_is_distinct_from_freight_amount_and_allowlisted():
+def test_explicit_rmb_goods_value_is_distinct_from_freight_amount_and_allowlisted():
     from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
 
     line = _line(10, "WB-GOODS", "MWV101144")
-    line.update(amount="88.50", currency="RMB", goods_value="1200", goods_currency="USD")
+    line.update(amount="88.50", currency="RMB", goods_value="1200", goods_currency="人民币RMB")
 
     facts = build_payment_facts(
         _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
@@ -239,7 +239,7 @@ def test_explicit_goods_value_is_distinct_from_freight_amount_and_allowlisted():
 
     goods = next(fact for fact in facts if fact["fact_kind"] == "payment_goods_value")
     freight = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_component")
-    assert goods["monetary"] == {"amount": "1200", "currency": "USD"}
+    assert goods["monetary"] == {"amount": "1200", "currency": "RMB"}
     assert freight["monetary"] == {"amount": "88.5", "currency": "RMB"}
     assert goods["allowed_actions"] == [
         {
@@ -254,9 +254,44 @@ def test_explicit_goods_value_is_distinct_from_freight_amount_and_allowlisted():
             "target_item_name": "ITEM-144",
             "material_key": "LINE-144",
             "fieldname": "purchase_currency",
-            "value": "USD",
+            "value": "RMB",
         },
     ]
+
+
+@pytest.mark.parametrize("currency", ["CNY", "¥", "元"])
+def test_common_rmb_goods_currency_labels_normalize_to_rmb(currency):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(10, "WB-GOODS", "MWV101144")
+    line.update(goods_value="1200", goods_currency=currency)
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+    goods = next(fact for fact in facts if fact["fact_kind"] == "payment_goods_value")
+
+    assert goods["monetary"] == {"amount": "1200", "currency": "RMB"}
+    assert [action["value"] for action in goods["allowed_actions"]] == ["1200", "RMB"]
+
+
+@pytest.mark.parametrize("currency", ["USD", "MXN"])
+def test_non_rmb_goods_value_stays_authoritative_read_only(currency):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(10, "WB-GOODS", "MWV101144")
+    line.update(goods_value="1200", goods_currency=currency)
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+    goods = next(fact for fact in facts if fact["fact_kind"] == "payment_goods_value")
+
+    assert goods["monetary"] == {"amount": "1200", "currency": currency}
+    assert goods["scope_status"] == "in_scope"
+    assert goods["default_eligible"] is True
+    assert goods["read_only"] is True
+    assert goods["allowed_actions"] == []
 
 
 def test_ambiguous_scope_keeps_goods_value_read_only_and_excludes_freight_total():
@@ -352,6 +387,7 @@ def test_model_fact_reference_must_be_known_in_scope_and_use_allowlisted_value()
             {
                 "action": "item_update",
                 "target_item_name": "ITEM-144",
+                "material_key": "LINE-144",
                 "fieldname": "gross_weight_kg",
                 "value": "42.05",
             }
@@ -390,9 +426,33 @@ def test_model_fact_reference_must_be_known_in_scope_and_use_allowlisted_value()
         items,
         [{**document, "semantic_facts": [{**fact, "scope_status": "out_of_scope", "default_eligible": False}]}],
     )
+    stale_key_fact = {
+        **fact,
+        "allowed_actions": [{**fact["allowed_actions"][0], "material_key": "STALE-LINE"}],
+    }
+    stale_key = fill.normalize_source_review_proposals(
+        [{**base, "fact_ids": ["FACT-1"]}],
+        items,
+        [{**document, "semantic_facts": [stale_key_fact]}],
+    )
+    trusted_stale_key = fill.normalize_source_review_proposals(
+        [{**base, "fact_ids": ["FACT-1"]}],
+        items,
+        [{**document, "semantic_facts": [stale_key_fact]}],
+        trusted_system_proposal_ids={"MODEL-1"},
+    )
+    trusted_empty_fact_ids = fill.normalize_source_review_proposals(
+        [{**base, "fact_ids": []}],
+        items,
+        [document],
+        trusted_system_proposal_ids={"MODEL-1"},
+    )
 
     assert len(valid) == 1
     assert valid[0]["fact_ids"] == ["FACT-1"]
     assert unknown == []
     assert invented == []
     assert out_of_scope == []
+    assert stale_key == []
+    assert trusted_stale_key == []
+    assert trusted_empty_fact_ids == []

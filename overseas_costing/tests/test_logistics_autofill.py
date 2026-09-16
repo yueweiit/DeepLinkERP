@@ -190,6 +190,76 @@ def test_two_exact_codes_without_waybill_or_joint_language_do_not_form_one_box_g
     assert candidate["needs_member_confirmation"] is True
     assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
 
+
+def _group_candidate_for_comment(comment):
+    from overseas_costing.services import material_ai_fill_service as service
+
+    items = [
+        {"name": "I1", "stable_line_key": "L1", "material_code": "MWV101144", "product_name": "IP17 PRO"},
+        {"name": "I2", "stable_line_key": "L2", "material_code": "MWV101145", "product_name": "IP17 PRO MAX"},
+        {"name": "I3", "stable_line_key": "L3", "material_code": "MOLD-1", "product_name": "模具"},
+    ]
+    _candidates, document = service._read_source(
+        items,
+        {"source_kind": "approval_comment", "source_id": "COMMENT", "source_hash": comment, "comment_text": comment},
+    )
+    return document["packing_group_candidates"][0]
+
+
+def test_two_exact_skus_with_distinct_waybills_never_form_one_box_group():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 运单号 WB11111\nMWV101145 运单号 WB22222\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+    assert {tuple(option["member_keys"]) for option in candidate["assignment_options"]} == {
+        ("L1",),
+        ("L2",),
+    }
+
+
+def test_carrier_name_without_labeled_waybill_is_not_a_package_identity():
+    candidate = _group_candidate_for_comment(
+        "DHL\nMWV101144 MWV101145\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
+
+def test_joint_language_without_exact_material_identifiers_is_not_actionable():
+    candidate = _group_candidate_for_comment(
+        "与其他货物一起共同装箱\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["member_keys"] == []
+    assert candidate["assignment_options"] == []
+    assert candidate["can_apply"] is False
+    assert candidate["default_selected"] is False
+
+
+def test_joint_language_with_one_exact_sku_never_broadens_to_baseline():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 与其他货物一起共同装箱\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["member_keys"] == ["L1"]
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("single_item", ["L1"]),
+    ]
+
+
+def test_joint_language_groups_only_two_exact_identified_members():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 与 MWV101145 共同装箱\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["member_keys"] == ["L1", "L2"]
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("one_box_group", ["L1", "L2"]),
+    ]
+
 def test_worker_previews_eight_rows_and_final_freight_without_business_write(monkeypatch):
     from overseas_costing.services import material_ai_fill_service as service
     from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepository
