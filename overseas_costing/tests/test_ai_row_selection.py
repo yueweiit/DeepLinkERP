@@ -384,6 +384,37 @@ def test_unreadable_higher_priority_source_does_not_block_lower_priority_default
     assert candidates[0]['default_selected'] is True
 
 
+def test_same_source_same_value_is_one_field_candidate_not_a_false_conflict():
+    items = [item('I1', 'SKU-1', gross_weight_kg=None)]
+    sources = [{
+        'source_id': 'PAYMENT-ROW-14', 'process_instance_id': 'PAYMENT-1',
+        'source_kind': 'approval_attachment', 'approval_role': 'logistics_expense',
+        'source_label': 'DHL月结明细.xlsx · 第14行',
+    }]
+    proposals = [
+        {
+            'proposal_id': proposal_id, 'proposal_type': 'item_update',
+            'target_item_name': 'I1', 'confidence': .99,
+            'source_refs': [{'source_id': 'PAYMENT-ROW-14'}],
+            'payload': {'fields': {'gross_weight_kg': value}},
+        }
+        for proposal_id, value in (
+            ('SERVER-EXACT-ROW', '42.05'),
+            ('AI-SAME-EVIDENCE', 42.050),
+        )
+    ]
+
+    review = catalog(items, proposals, sources)
+    candidates = [
+        row for row in review['field_candidates']
+        if row['fieldname'] == 'gross_weight_kg'
+    ]
+
+    assert len(candidates) == 1
+    assert candidates[0]['default_selected'] is True
+    assert candidates[0]['suggested_value'] == '42.05'
+
+
 def test_plain_comment_conflict_does_not_override_attachment_in_same_process():
     items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
     sources = [

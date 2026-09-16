@@ -616,6 +616,43 @@ def _field_candidates(catalog_rows):
                     (correction_evidence or {}).get('source_id')
                     or row.get('_review_primary_source_id') or ''),
             })
+    # A trusted parser result and the semantic pass may independently report
+    # the same field from the same exact evidence row.  That is corroboration,
+    # not a user-facing choice or conflict.  Keep one server candidate while
+    # retaining every evidence reference for audit.  Values from different
+    # evidence units or processes remain separate choices.
+    coalesced=[]
+    equivalent={}
+    for candidate in result:
+        evidence_id=str(candidate.get('_review_primary_source_id') or '')
+        if not evidence_id or candidate.get('process_conflict'):
+            coalesced.append(candidate)
+            continue
+        key=(
+            candidate.get('item_name'),candidate.get('fieldname'),
+            _canonical_field_candidate(
+                candidate.get('fieldname'),candidate.get('suggested_value')),
+            candidate.get('workflow_stage'),candidate.get('process_instance_id'),
+            evidence_id,candidate.get('correction_kind'),
+            candidate.get('_review_occurred_at'),
+        )
+        existing=equivalent.get(key)
+        if not existing:
+            equivalent[key]=candidate
+            coalesced.append(candidate)
+            continue
+        for list_field in ('source_refs','evidence_chain','process_instance_ids'):
+            for value in candidate.get(list_field) or []:
+                if value not in existing[list_field]:
+                    existing[list_field].append(deepcopy(value))
+        existing['confidence']=max(existing['confidence'],candidate['confidence'])
+        existing['can_apply']=bool(existing['can_apply'] or candidate['can_apply'])
+        existing['default_eligible']=bool(
+            existing['default_eligible'] or candidate['default_eligible'])
+        existing['source_priority']=min(
+            existing['source_priority'],candidate['source_priority'])
+        existing['evidence_rank']=min(existing['evidence_rank'],candidate['evidence_rank'])
+    result=coalesced
     correction_counts=Counter(
         (candidate['process_instance_id'],candidate['item_name'],candidate['fieldname'],
          candidate['_review_primary_source_id'])
