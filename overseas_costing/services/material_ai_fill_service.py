@@ -1323,6 +1323,35 @@ def _fact_bound_proposal_ids(
     return claimed_ids
 
 
+def _semantic_fact_graph(documents: dict[str, dict] | list[dict]) -> tuple[dict, dict]:
+    """Coalesce identical server facts while retaining one canonical evidence document."""
+
+    rows = documents.values() if isinstance(documents, dict) else documents
+    entries: dict[str, list[tuple[str, dict]]] = {}
+    for document in rows or []:
+        if not isinstance(document, dict):
+            continue
+        document_id = str(document.get("document_id") or "")
+        for fact in document.get("semantic_facts") or []:
+            if not isinstance(fact, dict) or not str(fact.get("fact_id") or ""):
+                continue
+            entries.setdefault(str(fact["fact_id"]), []).append((document_id, fact))
+
+    facts = {}
+    fact_documents = {}
+    for fact_id, occurrences in entries.items():
+        signatures = {_json(fact) for _document_id, fact in occurrences}
+        if len(signatures) != 1:
+            continue
+        document_id, fact = min(
+            occurrences,
+            key=lambda occurrence: (occurrence[0], _json(occurrence[1])),
+        )
+        facts[fact_id] = fact
+        fact_documents[fact_id] = document_id
+    return facts, fact_documents
+
+
 def _trusted_semantic_fee_relation(
     raw: dict,
     payload: dict,
@@ -1339,19 +1368,7 @@ def _trusted_semantic_fee_relation(
     if not isinstance(claimed_ids, list) or len(claimed_ids) != 1:
         return None
     fact_id = str(claimed_ids[0] or "")
-    document_ids = {
-        str(ref.get("document_id") or "")
-        for ref in canonical_refs
-        if str(ref.get("document_id") or "")
-    }
-    if len(document_ids) != 1:
-        return None
-    document_id = next(iter(document_ids))
-    facts = {
-        str(fact.get("fact_id") or ""): fact
-        for fact in (evidence.get(document_id) or {}).get("semantic_facts") or []
-        if isinstance(fact, dict) and str(fact.get("fact_id") or "")
-    }
+    facts, fact_documents = _semantic_fact_graph(evidence)
     fact = facts.get(fact_id)
     expected_kind = (
         "payment_freight_total" if role == "primary_total"
@@ -1391,14 +1408,21 @@ def _trusted_semantic_fee_relation(
             str(row.get("cell") or "").strip().upper(),
         )
 
-    expected_refs = {
-        locator({**(
-            component.get("provenance")
-            if isinstance(component.get("provenance"), dict)
-            else {}
-        ), "document_id": document_id})
-        for component in provenance_facts
-    }
+    expected_refs = set()
+    for component in provenance_facts:
+        component_id = str(component.get("fact_id") or "")
+        expected_refs.add(
+            locator(
+                {
+                    **(
+                        component.get("provenance")
+                        if isinstance(component.get("provenance"), dict)
+                        else {}
+                    ),
+                    "document_id": fact_documents.get(component_id),
+                }
+            )
+        )
     actual_refs = {locator(ref) for ref in canonical_refs}
     if actual_refs != expected_refs:
         return None
@@ -2128,26 +2152,21 @@ def normalize_source_review_proposals(
     from .logistics_settlement.model import digest
 
     expected_semantic_ids = set()
-    for document in evidence.values():
-        facts = {
-            str(fact.get("fact_id") or ""): fact
-            for fact in document.get("semantic_facts") or []
-            if isinstance(fact, dict) and str(fact.get("fact_id") or "")
-        }
-        for total_id, total in facts.items():
-            if (
-                total.get("fact_kind") != "payment_freight_total"
-                or total.get("scope_status") != "in_scope"
-                or not total.get("default_eligible")
-            ):
-                continue
-            primary_id = f"semantic-payment-fee:{digest(total_id, transport_mode)}"[:120]
-            expected_semantic_ids.add(primary_id)
-            expected_semantic_ids.update(
-                f"semantic-payment-component:{digest(str(component_id), primary_id)}"[:120]
-                for component_id in total.get("component_fact_ids") or []
-                if str(component_id or "") in facts
-            )
+    semantic_facts, _semantic_fact_documents = _semantic_fact_graph(evidence)
+    for total_id, total in semantic_facts.items():
+        if (
+            total.get("fact_kind") != "payment_freight_total"
+            or total.get("scope_status") != "in_scope"
+            or not total.get("default_eligible")
+        ):
+            continue
+        primary_id = f"semantic-payment-fee:{digest(total_id, transport_mode)}"[:120]
+        expected_semantic_ids.add(primary_id)
+        expected_semantic_ids.update(
+            f"semantic-payment-component:{digest(str(component_id), primary_id)}"[:120]
+            for component_id in total.get("component_fact_ids") or []
+            if str(component_id or "") in semantic_facts
+        )
     normalized = []
     seen = set()
     seen_payloads = set()
@@ -3959,7 +3978,7 @@ def build_document_fee_proposals(
 
 
 def build_semantic_payment_fee_proposals(
-    document: dict,
+    document: dict | list[dict],
     *,
     transport_mode: str = "",
 ) -> list[dict]:
@@ -3968,12 +3987,8 @@ def build_semantic_payment_fee_proposals(
     from .logistics_settlement.model import digest
     from .transport_fee_service import primary_freight_definition
 
-    document_id = str(document.get("document_id") or "")
-    facts_by_id = {
-        str(fact.get("fact_id") or ""): fact
-        for fact in document.get("semantic_facts") or []
-        if isinstance(fact, dict) and str(fact.get("fact_id") or "")
-    }
+    documents = document if isinstance(document, list) else [document]
+    facts_by_id, fact_documents = _semantic_fact_graph(documents)
     totals = sorted(
         (
             fact for fact in facts_by_id.values()
@@ -3991,7 +4006,7 @@ def build_semantic_payment_fee_proposals(
     def source_ref(fact: dict) -> dict:
         provenance = fact.get("provenance") if isinstance(fact.get("provenance"), dict) else {}
         return {
-            "document_id": document_id,
+            "document_id": fact_documents.get(str(fact.get("fact_id") or ""), ""),
             "sheet": str(provenance.get("sheet") or ""),
             "row": provenance.get("row"),
             "cell": str(provenance.get("cell") or ""),
@@ -4014,7 +4029,10 @@ def build_semantic_payment_fee_proposals(
         primary_id = f"semantic-payment-fee:{digest(total_id, transport_mode)}"[:120]
         refs = [source_ref(component) for component in components]
         if definition is None:
-            total["allowed_actions"] = []
+            for source_document in documents:
+                for source_fact in source_document.get("semantic_facts") or []:
+                    if str(source_fact.get("fact_id") or "") == total_id:
+                        source_fact["allowed_actions"] = []
             proposals.append(
                 {
                     "proposal_id": primary_id,
@@ -4051,7 +4069,10 @@ def build_semantic_payment_fee_proposals(
             "amount": amount,
             "currency": currency,
         }
-        total["allowed_actions"] = [action]
+        for source_document in documents:
+            for source_fact in source_document.get("semantic_facts") or []:
+                if str(source_fact.get("fact_id") or "") == total_id:
+                    source_fact["allowed_actions"] = [deepcopy(action)]
         primary_payload = {
             **definition,
             "amount_status": "ACTUAL",
@@ -5725,19 +5746,6 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 if has_document_evidence:
                     document = {**document, "document_id": f"DOC-{len(documents) + 1}"}
                     documents.append(document)
-                    if unified_review:
-                        semantic_fee_records = build_semantic_payment_fee_proposals(
-                            document,
-                            transport_mode=str(context.get("transport_mode") or ""),
-                        )
-                        semantic_read_only_fee_records.extend(
-                            record for record in semantic_fee_records
-                            if record.get("_semantic_read_only_unsupported")
-                        )
-                        deterministic_proposals.extend(
-                            record for record in semantic_fee_records
-                            if not record.get("_semantic_read_only_unsupported")
-                        )
                     if unified_review and source.get("source_kind") != "approval_form":
                         deterministic_proposals.extend(
                             build_document_fee_proposals(
@@ -5921,6 +5929,44 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                     status="NEEDS_SELECTION",
                     detail="多个 Sheet 都可能匹配，请选择后重新分析",
                 )
+
+        if unified_review:
+            semantic_fee_records = build_semantic_payment_fee_proposals(
+                documents,
+                transport_mode=str(context.get("transport_mode") or ""),
+            )
+            semantic_fee_keys = {
+                str((record.get("payload") or {}).get("logical_fee_key") or "")
+                for record in semantic_fee_records
+                if record.get("selection_role") == "primary_total"
+            }
+            semantic_component_documents = {
+                str(ref.get("document_id") or "")
+                for record in semantic_fee_records
+                if record.get("selection_role") == "component"
+                for ref in record.get("source_refs") or []
+                if str(ref.get("document_id") or "")
+            }
+            deterministic_proposals = [
+                proposal for proposal in deterministic_proposals
+                if not (
+                    proposal.get("proposal_type") == "fee_update"
+                    and str((proposal.get("payload") or {}).get("logical_fee_key") or "")
+                    in semantic_fee_keys
+                    and any(
+                        str(ref.get("document_id") or "") in semantic_component_documents
+                        for ref in proposal.get("source_refs") or []
+                    )
+                )
+            ]
+            semantic_read_only_fee_records.extend(
+                record for record in semantic_fee_records
+                if record.get("_semantic_read_only_unsupported")
+            )
+            deterministic_proposals.extend(
+                record for record in semantic_fee_records
+                if not record.get("_semantic_read_only_unsupported")
+            )
 
         for index, entry in enumerate(source_progress):
             if entry.get("status") == "PARSED" and entry.get("parse_method") in {"AI_TEXT", "AI_VISION"}:

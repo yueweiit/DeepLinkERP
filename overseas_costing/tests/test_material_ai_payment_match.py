@@ -948,6 +948,79 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
     }
     assert len({row["fact_ids"][0] for row in candidates}) == 2
 
+    from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+    from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepository
+
+    repository = _LifecycleRepository(status="QUEUED")
+    repository.sources = deepcopy(sources)
+    repository.get_items = lambda _batch, _version: deepcopy(items)
+    repository.get_context = lambda _batch, _version: {
+        "batch": batch["name"],
+        "version": version["name"],
+        "batch_modified": "M1",
+        "transport_mode": "EXPRESS",
+        "effective_source": {},
+    }
+    manifest = prepare_source_manifest(repository.sources)
+    context = repository.get_context(batch["name"], version["name"])
+    repository.run.update(
+        batch=batch["name"],
+        version=version["name"],
+        proposal_version=1,
+        source_manifest_json=manifest,
+        input_fingerprint=ai_fill._source_review_fingerprint(
+            batch["name"], version["name"], items, manifest, "", context=context
+        ),
+    )
+    monkeypatch.setattr(
+        ai_fill,
+        "_call_source_review_ai",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "proposals": [],
+            "evidence_documents": [],
+            "warning": "",
+        },
+    )
+
+    result = ai_fill.execute_material_ai_fill("RUN-1", repository=repository)
+
+    assert result["status"] in {"READY", "READY_WITH_WARNINGS"}, repository.run.get("error_message")
+    fees = [
+        row for row in repository.run["candidates_json"]
+        if row.get("proposal_type") == "fee_update"
+    ]
+    assert len(fees) == 3
+    assert [
+        row["payload"]["amount"] for row in fees if row.get("default_selected")
+    ] == ["6828.38"]
+    assert sum(row.get("selection_role") == "primary_total" for row in fees) == 1
+    components = [row for row in fees if row.get("selection_role") == "component"]
+    assert [row["payload"]["amount"] for row in components] == ["3414.19", "3414.19"]
+    assert all(row["can_apply"] is False for row in components)
+    component_locations = {
+        (
+            row["source_refs"][0]["document_id"],
+            row["source_refs"][0]["sheet"],
+            row["source_refs"][0]["row"],
+        )
+        for row in components
+    }
+    assert {location[1:] for location in component_locations} == {
+        ("DHL快递", 13),
+        ("DHL快递", 14),
+    }
+    assert len({location[0] for location in component_locations}) == 2
+    primary = next(row for row in fees if row.get("selection_role") == "primary_total")
+    assert {
+        (ref["document_id"], ref["sheet"], ref["row"])
+        for ref in primary["source_refs"]
+    } == component_locations
+    assert not any(
+        row["payload"]["amount"] == "3414.19" and row.get("default_selected")
+        for row in fees
+    )
+
 
 def test_payment_fact_source_coalesces_the_same_general_attachment_sheet_before_catalog():
     from overseas_costing.services.material_ai_payment_match import coalesce_fact_sources

@@ -196,6 +196,33 @@ def test_existing_editable_fee_conflicts_and_final_or_disabled_fee_blocks_applic
         assert blocked_primary["recommended"] is False
 
 
+def test_actual_scope_blocking_ignores_only_inactive_different_key_nonfinal_fees() -> None:
+    _document_value, _raw, normalized = _normalized("AIR")
+
+    inactive_other = {
+        "logical_fee_key": "international_express_fee",
+        "amount": "6000",
+        "currency": "RMB",
+        "amount_status": "ACTUAL",
+        "is_enabled": 0,
+        "is_active": 0,
+    }
+    allowed = material_ai_fee_policy.decorate(normalized, [inactive_other], {})
+    allowed_primary = next(row for row in allowed if row["selection_role"] == "primary_total")
+    assert allowed_primary["can_apply"] is True
+    assert allowed_primary["default_selected"] is True
+
+    for blocking in (
+        {**inactive_other, "is_enabled": 1, "is_active": 1},
+        {**inactive_other, "is_final": 1},
+        {**inactive_other, "logical_fee_key": "international_air_freight"},
+    ):
+        decorated = material_ai_fee_policy.decorate(normalized, [blocking], {})
+        primary = next(row for row in decorated if row["selection_role"] == "primary_total")
+        assert primary["can_apply"] is False
+        assert primary["default_selected"] is False
+
+
 def test_authoritative_payment_total_outranks_lower_logistics_quote() -> None:
     from overseas_costing.tests.test_material_ai_fill_service import _fee_document, _review_fee
 

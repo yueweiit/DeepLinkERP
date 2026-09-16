@@ -14,6 +14,7 @@ def _semantic_actual_reason(proposal, fees):
     for fee in fees or []:
         if (
             str(fee.get('amount_status') or '').strip().upper() == 'ACTUAL'
+            and (is_final(fee) or fee_is_active(fee))
             and (scopes & row_scopes(fee) or key == fee.get('logical_fee_key'))
         ):
             return '已有实际运费或最终费用，本报价不参与填充；请通过费用更正调整。'
