@@ -6,6 +6,7 @@ import pytest
 
 from overseas_costing.services import material_ai_fee_policy
 from overseas_costing.services.material_ai_fill_service import (
+    build_payment_material_extension_proposals,
     build_semantic_payment_fee_proposals,
     normalize_source_review_proposals,
 )
@@ -84,6 +85,83 @@ def _document() -> dict:
         "semantic_facts": facts,
         "ai_eligible": False,
     }
+
+
+def test_same_shipment_payment_fact_becomes_server_owned_material_extension():
+    facts = build_payment_facts(
+        [_items()[0]],
+        {'id':'PAYMENT','instance':'PAY-1','approval_no':'PAY-1','title':'月结付款'},
+        [{
+            **_line(13, '1841364722', 'MWV101145'),
+            'material_code':'MWV101145',
+            'packing': {
+                'material_code_hints':['MWV101145'],
+                'package_count':'1','gross_weight_kg':'42.05',
+                'volume_m3':'0.01518','chargeable_weight_kg':'46',
+            },
+            'product_name':'薇武士 IP17 PRO MAX',
+        }],
+        shipment_identifiers={'1841364722'},
+    )
+    document={
+        'document_id':'DOC-EXT',
+        'source_ref':{'source_id':'PAYMENT'},
+        'semantic_facts':facts,
+    }
+
+    proposals=build_payment_material_extension_proposals([document])
+
+    assert len(proposals)==1
+    proposal=proposals[0]
+    assert proposal['proposal_type']=='payment_material_extension'
+    assert proposal['result_origin']=='SYSTEM'
+    assert proposal['default_selected'] is False
+    assert proposal['fact_ids']==[next(
+        fact['fact_id'] for fact in facts if fact['fact_kind']=='payment_physical'
+    )]
+    assert proposal['payload']['rows']==[{
+        'material_code':'MWV101145',
+        'product_name':'薇武士 IP17 PRO MAX',
+        'spec_model':'',
+        'stable_line_key':proposal['payload']['rows'][0]['stable_line_key'],
+        'source_doc_no':'1841364722',
+        'package_identity':'waybill:1841364722',
+        'package_count':'1',
+        'gross_weight_kg':'42.05',
+        'volume_m3':'0.01518',
+        'chargeable_weight_kg':'46',
+    }]
+    normalized=normalize_source_review_proposals(
+        proposals,[_items()[0]],[document],
+        transport_mode='AIR',
+        trusted_system_proposal_ids={proposal['proposal_id']},
+    )
+    assert len(normalized)==1
+    assert normalized[0]['proposal_type']=='payment_material_extension'
+    assert normalized[0]['payload']['rows'][0]['material_code']=='MWV101145'
+
+
+def test_same_shipment_payment_material_can_extend_scope_without_physical_fields():
+    line={
+        **_line(13,'1841364722','MWV101145'),
+        'material_code':'MWV101145','product_name':'薇武士 IP17 PRO MAX',
+        'packing':{'material_code_hints':['MWV101145']},
+    }
+    facts=build_payment_facts(
+        [_items()[0]],{'id':'PAYMENT','instance':'PAY-1','approval_no':'PAY-1'},
+        [line],shipment_identifiers={'1841364722'},
+    )
+    document={'document_id':'DOC-EXT','source_ref':{'source_id':'PAYMENT'},
+              'semantic_facts':facts}
+
+    proposals=build_payment_material_extension_proposals([document])
+
+    assert len(proposals)==1
+    assert proposals[0]['payload']['rows'][0]['material_code']=='MWV101145'
+    assert not any(
+        field in proposals[0]['payload']['rows'][0]
+        for field in ('gross_weight_kg','volume_m3','package_count')
+    )
 
 
 def _normalized(mode: str = "AIR", *, existing_fees: list[dict] | None = None):

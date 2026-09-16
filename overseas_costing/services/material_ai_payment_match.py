@@ -570,11 +570,17 @@ def preview_sources(
         if line.get("snapshot") == source.get("snapshot")
         and str(line.get("id") or "") in authorized_line_ids
     ]
-    semantic_facts = build_payment_facts(baseline_items, source, payment_lines)
     from .logistics_settlement.packing_selection import _catalog
     from .logistics_settlement.freight_packing import text_goods
 
     _logistics, catalog = _catalog(store, ledger, batch_name, version_name)
+    from .shipment_material_scope import shipment_identifiers
+    semantic_facts = build_payment_facts(
+        baseline_items,
+        source,
+        payment_lines,
+        shipment_identifiers=shipment_identifiers(_logistics or {}),
+    )
     line_evidence = []
     for line_id in candidate.get("line_ids") or []:
         line = store.get("freight_line", line_id) or {}
@@ -840,6 +846,8 @@ def preview_sources(
             "package_identity": fact.get("package_identity") or "",
             "_fact_id": fact["fact_id"],
             "_material_key": target.get("material_key") or "",
+            "_proposed_new_item": bool(fact.get("proposed_new_item")),
+            "_scope_status": str(fact.get("scope_status") or ""),
         }
         location = fact_location(fact)
         preview = existing_by_location.get(location)

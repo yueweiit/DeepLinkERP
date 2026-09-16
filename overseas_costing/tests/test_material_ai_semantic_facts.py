@@ -175,6 +175,81 @@ def test_explicit_foreign_structured_code_blocks_matching_name_fallback(code_loc
     assert physical["material_targets"] == []
 
 
+def test_foreign_payment_material_becomes_extension_only_for_same_shipment_identifier():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    same_shipment = _line(20, "1841361513", "EXTRA-001", approval_no="LOG-78258")
+    same_shipment["goods"] = [{"material_code": "EXTRA-001", "product_name": "同票补充模具"}]
+    other_shipment = _line(21, "1841364722", "EXTRA-002", approval_no="LOG-91269")
+    other_shipment["goods"] = [{"material_code": "EXTRA-002", "product_name": "其他物流物料"}]
+
+    facts = build_payment_facts(
+        _items(),
+        {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"},
+        [same_shipment, other_shipment],
+        shipment_identifiers={"1841361513", "LOG-78258"},
+    )
+    physical = {
+        fact["waybill"]: fact for fact in facts if fact["fact_kind"] == "payment_physical"
+    }
+
+    extension = physical["1841361513"]
+    assert extension["scope_status"] == "same_shipment_extension"
+    assert extension["default_eligible"] is True
+    assert extension["material_targets"] == [{
+        "item_name": "",
+        "material_key": extension["material_targets"][0]["material_key"],
+        "material_code": "EXTRA-001",
+        "product_name": "同票补充模具",
+    }]
+    assert extension["proposed_new_item"] is True
+    assert physical["1841364722"]["scope_status"] == "out_of_scope"
+    assert physical["1841364722"]["default_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    'shipment_id,baseline_code,expected_waybill',
+    [
+        ('1841361513','MWV101144','1841361513'),
+        ('1841364722','MWV101145','1841364722'),
+    ],
+)
+def test_monthly_payment_rows_stay_isolated_between_two_logistics_orders(
+        shipment_id,baseline_code,expected_waybill):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    baseline=[next(item for item in _items() if item['material_code']==baseline_code)]
+    facts=build_payment_facts(
+        baseline,{'id':'PAYMENT','instance':'MONTHLY','approval_no':'PAY'},
+        [_line(13,'1841364722','MWV101145'),
+         _line(14,'1841361513','MWV101144')],
+        shipment_identifiers={shipment_id},
+    )
+
+    components=[fact for fact in facts
+                if fact['fact_kind']=='payment_freight_component'
+                and fact['scope_status'] in {'in_scope','same_shipment_extension'}]
+    totals=[fact for fact in facts if fact['fact_kind']=='payment_freight_total']
+    assert [fact['waybill'] for fact in components]==[expected_waybill]
+    assert len(totals)==1
+    assert totals[0]['monetary']=={'amount':'3414.19','currency':'RMB'}
+
+
+@pytest.mark.parametrize("label", ["运单号", "快递单号", "装箱单号", "AWB", "Tracking Number"])
+def test_shipment_identifier_aliases_share_one_exact_namespace(label):
+    from overseas_costing.services.shipment_material_scope import shipment_identifiers
+
+    assert shipment_identifiers({label: " ab-123 456 "}) == {"AB123456"}
+
+
+def test_shipment_identifier_text_does_not_swallow_following_eta_or_weight():
+    from overseas_costing.services.shipment_material_scope import shipment_identifiers
+
+    assert shipment_identifiers({
+        'text':'DHL 运单号1841361513 ETA 2026.7.27 已到工厂，重量 42.05kg'
+    }) == {'1841361513'}
+
+
 def test_true_current_exact_code_precedes_conflicting_unique_name():
     from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
 

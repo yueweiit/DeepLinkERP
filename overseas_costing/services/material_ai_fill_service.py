@@ -94,7 +94,10 @@ AI_SAFE_FAILURE_WARNING = "AI 语义分析未完成，已保留服务器规则�
 VISION_SAFE_FAILURE_WARNING = "视觉识别未完成，已继续使用文字资料。"
 SERVER_PREVIEW_FAILURE_MESSAGE = "服务器预览失败，本次未保存，请稍后重试。"
 SOURCE_STALE_MESSAGE = "资料来源已变化，请重新分析。"
-REVIEW_PROPOSAL_TYPES = frozenset({"material_replace", "item_update", "fee_update", "logistics_reconcile"})
+REVIEW_PROPOSAL_TYPES = frozenset({
+    "material_replace", "item_update", "fee_update", "logistics_reconcile",
+    "payment_material_extension",
+})
 REVIEW_ITEM_FIELDS = frozenset(
     {
         "product_name",
@@ -1283,8 +1286,13 @@ def _fact_bound_proposal_ids(
         if len(matching_facts) != 1:
             return None
         selected_facts.append(matching_facts[0])
+    allowed_scope = (
+        {'same_shipment_extension'}
+        if proposal_type == 'payment_material_extension'
+        else {'in_scope'}
+    )
     if any(
-        fact.get("scope_status") != "in_scope" or not fact.get("default_eligible")
+        fact.get("scope_status") not in allowed_scope or not fact.get("default_eligible")
         for fact in selected_facts
     ):
         return None
@@ -1318,6 +1326,29 @@ def _fact_bound_proposal_ids(
             for action in actions
         ):
             return None
+    elif proposal_type == 'payment_material_extension':
+        rows = payload.get('rows') or []
+        if len(rows) != len(selected_facts):
+            return None
+        for row,fact in zip(rows,selected_facts):
+            targets=fact.get('material_targets') or []
+            physical=fact.get('physical') or {}
+            if (
+                fact.get('fact_kind') not in {
+                    'payment_physical','payment_material_extension'
+                }
+                or not fact.get('proposed_new_item')
+                or len(targets) != 1
+                or str(row.get('material_code') or '').strip()
+                   != str(targets[0].get('material_code') or '').strip()
+                or any(
+                    field in row
+                    and _canonical_value(field,row.get(field))
+                        != _canonical_value(field,physical.get(field))
+                    for field in physical if field in ALLOWED_FIELDS
+                )
+            ):
+                return None
     else:
         return None
     return claimed_ids
@@ -2220,6 +2251,32 @@ def normalize_source_review_proposals(
                         _normalize_review_item_values(row, fx_rates=fx_rates) for row in rows
                     ]
                 }
+            elif proposal_type == "payment_material_extension":
+                if not system_origin:
+                    continue
+                rows = (raw.get('payload') or {}).get('rows') or []
+                if not isinstance(rows,list) or not 1 <= len(rows) <= 100:
+                    continue
+                normalized_rows=[]
+                for row in rows:
+                    if not isinstance(row,dict) or not str(row.get('material_code') or '').strip():
+                        continue
+                    business = {
+                        key:value for key,value in row.items()
+                        if key in REVIEW_REPLACEMENT_FIELDS
+                    }
+                    normalized_row=_normalize_review_item_values(
+                        business,partial=True,fx_rates=fx_rates)
+                    normalized_row.update({
+                        'material_code':str(row.get('material_code') or '')[:500],
+                        'stable_line_key':str(row.get('stable_line_key') or '')[:500],
+                        'source_doc_no':str(row.get('source_doc_no') or '')[:500],
+                        'package_identity':str(row.get('package_identity') or '')[:500],
+                    })
+                    normalized_rows.append(normalized_row)
+                if not normalized_rows:
+                    continue
+                payload={'rows':normalized_rows}
             elif proposal_type == "item_update":
                 if target not in item_names:
                     continue
@@ -3974,6 +4031,71 @@ def build_document_fee_proposals(
                 expense_category="快递附加费",
             )
         payload["remark"] = "来自服务器读取的物流报价附件，待确认。"
+    return proposals
+
+
+def build_payment_material_extension_proposals(documents: list[dict]) -> list[dict]:
+    """Project only server-verified same-shipment payment facts as add candidates."""
+
+    from .logistics_settlement.model import digest
+
+    proposals = []
+    emitted = set()
+    for document in documents or []:
+        document_id = str(document.get('document_id') or '')
+        for fact in document.get('semantic_facts') or []:
+            if (
+                not isinstance(fact, dict)
+                or fact.get('fact_kind') not in {
+                    'payment_physical','payment_material_extension'
+                }
+                or fact.get('scope_status') != 'same_shipment_extension'
+                or not fact.get('proposed_new_item')
+                or not fact.get('default_eligible')
+            ):
+                continue
+            targets = fact.get('material_targets') or []
+            if len(targets) != 1:
+                continue
+            target = targets[0]
+            material_code = str(target.get('material_code') or '').strip()
+            if not material_code:
+                continue
+            fact_id = str(fact.get('fact_id') or '')
+            if not fact_id or fact_id in emitted:
+                continue
+            emitted.add(fact_id)
+            provenance = fact.get('provenance') if isinstance(fact.get('provenance'),dict) else {}
+            physical = fact.get('physical') if isinstance(fact.get('physical'),dict) else {}
+            stable_line_key = str(target.get('material_key') or '').strip()
+            row = {
+                'material_code':material_code,
+                'product_name':str(target.get('product_name') or '').strip(),
+                'spec_model':'',
+                'stable_line_key':stable_line_key,
+                'source_doc_no':str(fact.get('waybill') or '').strip(),
+                'package_identity':str(fact.get('package_identity') or '').strip(),
+                **{field:deepcopy(value) for field,value in physical.items()
+                   if field in ALLOWED_FIELDS},
+            }
+            proposals.append({
+                'proposal_id':f"payment-material-extension:{digest(fact_id)}"[:120],
+                'proposal_type':'payment_material_extension',
+                'confidence':0.99,
+                'conflict':False,
+                'default_selected':False,
+                'result_origin':'SYSTEM',
+                'reason':str(fact.get('reason') or '付款明细与当前国际物流共享精确运单标识。'),
+                'resolution_reason':'同运单付款明细中的额外物料，保留为待确认新增行。',
+                'source_refs':[{
+                    'document_id':document_id or str(provenance.get('document_id') or ''),
+                    'sheet':str(provenance.get('sheet') or ''),
+                    'row':provenance.get('row'),
+                    'cell':str(provenance.get('cell') or ''),
+                }],
+                'fact_ids':[fact_id],
+                'payload':{'rows':[row]},
+            })
     return proposals
 
 
@@ -5966,6 +6088,9 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
             deterministic_proposals.extend(
                 record for record in semantic_fee_records
                 if not record.get("_semantic_read_only_unsupported")
+            )
+            deterministic_proposals.extend(
+                build_payment_material_extension_proposals(documents)
             )
 
         for index, entry in enumerate(source_progress):

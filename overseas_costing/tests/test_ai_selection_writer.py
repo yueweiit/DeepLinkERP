@@ -173,6 +173,33 @@ def test_separate_add_selected_mode_is_the_only_nonreplace_path_that_adds_a_row(
     assert {row['material_code'] for row in saved}=={i['material_code'],'SKU-NEW'}
 
 
+def test_update_soft_excludes_rows_outside_authoritative_logistics_scope():
+    store,ledger,b,v,i,*_=setup_cost()
+    outside=ledger.create('item',{
+        'batch':b['name'],'version':v['name'],'row_no':2,
+        'material_code':'PURCHASE-ONLY','product_name':'Purchase only',
+        'unit':'件','quantity':1,'actual_shipped_qty':1,'is_excluded':0,
+    })
+    context=load_source_bundle(b['name'],v['name'],store=store,ledger=ledger)['context']
+    preview={
+        'id':'SCOPE','revision':'SCOPE-R','run_id':'RUN',
+        'batch':b['name'],'version':v['name'],'mode':'update_selected',
+        'rows':[{**deepcopy(ledger.get('item',i['name'])),'_row_action':'retain'}],
+        'changes':[],'selected_row_ids':['LOGISTICS-BASELINE'],
+        'selected_field_choices':{},'sources':[],'source_context':context,
+        'scope_excluded_item_names':[outside['name']],
+    }
+
+    written=write_rows(store,ledger,preview,context)
+
+    assert written==v['name']
+    excluded=ledger.get('item',outside['name'])
+    assert excluded['is_excluded']==1
+    assert excluded['excluded_by']=='system'
+    assert '国际物流' in excluded['exclusion_reason']
+    assert ledger.get('batch',b['name'])['item_count']==1
+
+
 def test_frozen_version_write_is_rejected():
     import pytest
     store,ledger,b,v,i,ls,e=setup_cost();ctx=load_source_bundle(b['name'],v['name'],store=store,ledger=ledger)['context']

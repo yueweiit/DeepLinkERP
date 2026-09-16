@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -47,6 +48,7 @@ from overseas_costing.utils.field_mapper import map_oa_row_to_item
 PURCHASE_FIELDS = ("quantity", "goods_value", "unit_price", "purchase_currency", "purchase_uom",
                    "unit_price_uom", "source_doc_no", "source_type")
 PHYSICAL_FIELDS = ("net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg")
+AUTO_SCOPE_EXCLUSION_REASON = "系统按国际物流物料范围自动排除"
 
 
 def extra(item: dict) -> dict:
@@ -76,6 +78,21 @@ def _purchase_decimal(value) -> Decimal | None:
     except (InvalidOperation, TypeError, ValueError):
         return None
     return number if number.is_finite() else None
+
+
+def _manual_scope_protected(item: dict) -> bool:
+    """A human-confirmed row survives automatic logistics scope contraction."""
+
+    if str(item.get("manual_override_flag") or "0").strip().casefold() not in {
+        "", "0", "false", "no", "none",
+    }:
+        return True
+    metadata = extra(item)
+    return bool(
+        metadata.get("manual_scope_include")
+        or metadata.get("manual_scope_restored")
+        or (metadata.get("shipment_material_scope") or {}).get("manual_include")
+    )
 
 
 def _reconcile_purchase_allocations(rows: list[dict], items: list[dict], facts: dict, used: set) -> None:
@@ -135,7 +152,7 @@ def _reconcile_purchase_allocations(rows: list[dict], items: list[dict], facts: 
 
 
 def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | None:
-    """Build a row-preserving draft; never mutate inputs, DB or purchase facts."""
+    """Build an authoritative logistics-scope draft without mutating inputs."""
     if source.get("approval_role") != "international_logistics":
         return None
     goods = [map_oa_row_to_item(row) for row in _approval_goods_rows(source)]
@@ -211,9 +228,15 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         row['_review_source_values'] = {key: row.get(key) for key in ('material_code','product_name','spec_model','actual_shipped_qty','shipped_uom','unit','stable_line_key')}
         # Physical fields copied/apportioned above are historical context, not evidence from this approval.
         rows.append(row)
-    # Never silently remove unrelated or manually added rows.
+    # International logistics defines this shipment.  Preserve only explicit
+    # human inclusions; unrelated purchase rows remain recoverable by soft
+    # exclusion when the reviewed projection is confirmed.
     unmatched = [row for row in items if str(row.get("name")) not in used]
+    excluded_item_names = []
     for original in unmatched:
+        if not _manual_scope_protected(original):
+            excluded_item_names.append(str(original.get("name") or ""))
+            continue
         row = deepcopy(original)
         row["_existing_name"] = row["name"]
         row["_existing_stable_line_key"] = (
@@ -225,7 +248,7 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         row["stable_line_key"] = row.get("stable_line_key") or "retained:" + hashlib.sha256(row["name"].encode()).hexdigest()[:32]
         row["row_no"] = len(rows) + 1
         rows.append(row)
-        unresolved.append({"message": f"保留审批之外的现有物料 {row.get('material_code') or row['name']}。"})
+        unresolved.append({"message": f"保留人工确认纳入的物料 {row.get('material_code') or row['name']}。"})
     _reconcile_purchase_allocations(rows, items, facts, used)
     for purchase_key in facts:
         group = [row for row in rows if extra(row).get("logistics_row", {}).get("purchase_key") == purchase_key]
@@ -241,7 +264,10 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
             "default_selected": True, "conflict": False, "reason": "按物流审批逐行填充，保留采购事实。",
             "source_refs": [{"source": "approval_form", "source_id": source["source_id"],
                              "file": source.get("source_label"), "approval_no": source.get("approval_no"), "field": "货物信息"}],
-            "payload": {"rows": rows, "unresolved": unresolved, "original_item_names": [row["name"] for row in items]}}
+            "payload": {"rows": rows, "unresolved": unresolved,
+                        "original_item_names": [row["name"] for row in items],
+                        "excluded_item_names": sorted(name for name in excluded_item_names if name),
+                        "scope_status": "AUTHORITATIVE"}}
 
 
 def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, current: list[dict], run_id: str) -> list[str]:
@@ -255,8 +281,10 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
         raise ValueError("物流行已变化，请重新分析。")
     rows = payload.get("rows") or []
     retained = [row["_existing_name"] for row in rows if row.get("_existing_name")]
-    if set(retained) != existing or len(retained) != len(existing):
-        raise ValueError("物流行重整必须保留每条原记录，不能删除或重复采购事实。")
+    excluded = [str(name or "") for name in payload.get("excluded_item_names") or []]
+    if (set(retained).intersection(excluded) or set(retained).union(excluded) != existing
+            or len(retained) != len(set(retained)) or len(excluded) != len(set(excluded))):
+        raise ValueError("物流物料范围已变化，请重新分析。")
     keys = [row.get("stable_line_key") for row in rows]
     if not all(keys) or len(set(keys)) != len(keys):
         raise ValueError("物流行身份重复或缺失。")
@@ -271,9 +299,23 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
                 raise ValueError('结算货物身份由采购支出确定，装箱资料只能补充物理信息。')
     allowed = (set(GRID_FIELDS) | {"extra_json", "manual_override_flag", "manual_override_reason"}) - {"name", "modified"}
     created = []
+    excluded_at = datetime.now().isoformat(timespec="seconds")
+    for item_name in excluded:
+        frappe.db.set_value(
+            "Overseas Cost Item",
+            item_name,
+            {
+                "is_excluded": 1,
+                "excluded_at": excluded_at,
+                "excluded_by": "system",
+                "exclusion_reason": AUTO_SCOPE_EXCLUSION_REASON,
+            },
+            update_modified=True,
+        )
     for row in rows:
         values = {key: value for key, value in row.items() if key in allowed}
         values.update(batch=batch, version=version, actual_shipped_qty_source_revision=run_id,
+                      is_excluded=0, excluded_at=None, excluded_by="", exclusion_reason="",
                       cost_output_uom=row.get("shipped_uom") or "")
         metadata = extra(row)
         metadata["autofill_review"] = {"run_id": run_id, "proposal_id": proposal["proposal_id"], "source_refs": proposal.get("source_refs") or []}
@@ -284,6 +326,128 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
             created.append(frappe.get_doc({"doctype": "Overseas Cost Item", **values}).insert(ignore_permissions=True).name)
     frappe.db.set_value("Overseas Cost Batch", batch, "item_count", len(rows), update_modified=False)
     return created
+
+
+def plan_authoritative_scope_membership(items: list[dict], proposal: dict) -> dict:
+    """Return idempotent soft-exclusion changes for an existing current version."""
+
+    payload = proposal.get('payload') or {}
+    eligible = {
+        str(item.get('name') or ''): item
+        for item in items or []
+        if str(item.get('name') or '')
+        and (
+            not int(item.get('is_excluded') or 0)
+            or str(item.get('exclusion_reason') or '') == AUTO_SCOPE_EXCLUSION_REASON
+        )
+    }
+    expected = {str(name or '') for name in payload.get('original_item_names') or []}
+    if expected != set(eligible):
+        raise ValueError('历史版本物料范围已变化，请重新生成修复计划。')
+    retained = {
+        str(row.get('_existing_name') or '')
+        for row in payload.get('rows') or []
+        if str(row.get('_existing_name') or '')
+    }
+    excluded = {str(name or '') for name in payload.get('excluded_item_names') or []}
+    if retained & excluded or retained | excluded != set(eligible):
+        raise ValueError('国际物流物料范围不完整，不执行历史修复。')
+    exclude = sorted(
+        name for name in excluded if not int(eligible[name].get('is_excluded') or 0)
+    )
+    restore = sorted(
+        name for name in retained
+        if int(eligible[name].get('is_excluded') or 0)
+        and str(eligible[name].get('exclusion_reason') or '') == AUTO_SCOPE_EXCLUSION_REASON
+    )
+    active = sorted(
+        name for name in retained
+        if name not in excluded
+    )
+    return {'exclude':exclude,'restore':restore,'active_item_names':active}
+
+
+def backfill_current_material_scopes(batch_names=None, *, dry_run=True, limit=500):
+    """Repair current-version material scopes from locally archived logistics forms.
+
+    The default is deliberately a dry run.  This command never creates rows;
+    payment-only additions remain an explicit AI-preview decision.
+    """
+
+    import frappe
+    from .material_input_service import GRID_FIELDS
+    from .packing_snapshot_service import list_material_ai_sources
+
+    if batch_names is None:
+        filters={'current_version':['!=','']}
+        batches=frappe.get_all(
+            'Overseas Cost Batch',filters=filters,
+            fields=['name','current_version'],order_by='name asc',
+            limit_page_length=max(1,int(limit or 100000)),
+        )
+    else:
+        if isinstance(batch_names,str):
+            batch_names=[batch_names]
+        requested=[str(value or '').strip() for value in batch_names if str(value or '').strip()]
+        batches=frappe.get_all(
+            'Overseas Cost Batch',filters={'name':['in',requested]},
+            fields=['name','current_version'],order_by='name asc',
+            limit_page_length=max(1,len(requested)),
+        )
+    summary={'dry_run':bool(dry_run),'checked':0,'changed':0,'excluded':0,'restored':0,
+             'batches':[],'skipped':[]}
+    for batch in batches:
+        batch_name=str(batch.get('name') or '')
+        version=str(batch.get('current_version') or '')
+        summary['checked']+=1
+        try:
+            sources=list_material_ai_sources(batch_name,version_name=version,original_scope=True)
+            logistics=next((source for source in sources
+                if source.get('approval_role')=='international_logistics'
+                and source.get('source_kind')=='approval_form'
+                and source.get('available',True) and not source.get('excluded')),None)
+            if not logistics:
+                summary['skipped'].append({'batch':batch_name,'reason':'未找到可用的国际物流正文。'})
+                continue
+            all_items=frappe.get_all(
+                'Overseas Cost Item',filters={'batch':batch_name,'version':version},
+                fields=list(dict.fromkeys([*GRID_FIELDS,'extra_json','manual_override_flag',
+                    'manual_override_reason','is_excluded','exclusion_reason'])),
+                order_by='row_no asc,name asc',limit_page_length=10000,
+            )
+            eligible=[item for item in all_items if
+                not int(item.get('is_excluded') or 0)
+                or str(item.get('exclusion_reason') or '')==AUTO_SCOPE_EXCLUSION_REASON]
+            proposal=build_logistics_reconciliation(eligible,logistics)
+            if not proposal or proposal.get('blocked') or not (proposal.get('payload') or {}).get('rows'):
+                summary['skipped'].append({'batch':batch_name,'reason':'国际物流物料表无法唯一确定。'})
+                continue
+            plan=plan_authoritative_scope_membership(all_items,proposal)
+            if not plan['exclude'] and not plan['restore']:
+                continue
+            summary['changed']+=1
+            summary['excluded']+=len(plan['exclude'])
+            summary['restored']+=len(plan['restore'])
+            summary['batches'].append({'batch':batch_name,'version':version,**plan})
+            if dry_run:
+                continue
+            timestamp=datetime.now().isoformat(timespec='seconds')
+            for name in plan['exclude']:
+                frappe.db.set_value('Overseas Cost Item',name,{
+                    'is_excluded':1,'excluded_at':timestamp,'excluded_by':'system',
+                    'exclusion_reason':AUTO_SCOPE_EXCLUSION_REASON,
+                },update_modified=True)
+            for name in plan['restore']:
+                frappe.db.set_value('Overseas Cost Item',name,{
+                    'is_excluded':0,'excluded_at':None,'excluded_by':'','exclusion_reason':'',
+                },update_modified=True)
+            frappe.db.set_value('Overseas Cost Batch',batch_name,{
+                'item_count':len(plan['active_item_names']),
+                'status':'Dirty','confirm_status':'Pending','writeback_status':'Not Started',
+            },update_modified=True)
+        except Exception as error:
+            summary['skipped'].append({'batch':batch_name,'reason':str(error)[:500]})
+    return summary
 
 
 def selected_carrier(candidates: list[dict], decisions: list[dict]) -> str:

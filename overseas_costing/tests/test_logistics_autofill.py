@@ -65,6 +65,85 @@ def test_reconcile_again_does_not_split_or_multiply_purchase_facts():
     assert [(r["stable_line_key"], r["quantity"], r["goods_value"]) for r in second] == [
         (r["stable_line_key"], r["quantity"], r["goods_value"]) for r in first]
 
+
+def test_authoritative_logistics_rows_soft_exclude_unmatched_purchase_materials():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "I-144", "material_code": "MWV101144", "quantity": 1,
+         "actual_shipped_qty": 1, "source_type": "PURCHASE_EXPENSE_OA", "extra_json": "{}"},
+        {"name": "I-145", "material_code": "MWV101145", "quantity": 1,
+         "actual_shipped_qty": 1, "source_type": "PURCHASE_EXPENSE_OA", "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-1:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-1",
+        "source_label": "国际物流正文",
+        "form_fields": {"货物信息": [{"物料编码": "MWV101145", "物料名称": "IP17 PRO MAX", "数量": 1, "单位": "套"}]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source)
+
+    assert [row["material_code"] for row in proposal["payload"]["rows"]] == ["MWV101145"]
+    assert proposal["payload"]["excluded_item_names"] == ["I-144"]
+    assert proposal["payload"]["scope_status"] == "AUTHORITATIVE"
+
+
+def test_manual_material_outside_logistics_scope_is_retained_and_not_auto_excluded():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "I-144", "material_code": "MWV101144", "quantity": 1,
+         "actual_shipped_qty": 1, "manual_override_flag": 1,
+         "manual_override_reason": "人工确认本次一起发货", "extra_json": "{}"},
+        {"name": "I-145", "material_code": "MWV101145", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-1:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-1",
+        "source_label": "国际物流正文",
+        "form_fields": {"货物信息": [{"物料编码": "MWV101145", "物料名称": "IP17 PRO MAX", "数量": 1, "单位": "套"}]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source)
+
+    assert {row["material_code"] for row in proposal["payload"]["rows"]} == {"MWV101144", "MWV101145"}
+    assert proposal["payload"]["excluded_item_names"] == []
+    retained = next(row for row in proposal["payload"]["rows"] if row["material_code"] == "MWV101144")
+    assert retained["_review_origin"] == "current"
+
+
+def test_authoritative_scope_backfill_plan_restores_only_previous_system_exclusions():
+    from overseas_costing.services import logistics_autofill_service as service
+
+    proposal = {
+        'payload': {
+            'original_item_names':['I-KEEP','I-REMOVE','I-RESTORE'],
+            'excluded_item_names':['I-REMOVE'],
+            'rows':[
+                {'_existing_name':'I-KEEP'},
+                {'_existing_name':'I-RESTORE'},
+            ],
+        },
+    }
+    items = [
+        {'name':'I-KEEP','is_excluded':0},
+        {'name':'I-REMOVE','is_excluded':0},
+        {'name':'I-RESTORE','is_excluded':1,
+         'exclusion_reason':service.AUTO_SCOPE_EXCLUSION_REASON},
+        {'name':'I-MANUAL-EXCLUDED','is_excluded':1,
+         'exclusion_reason':'人工排除'},
+    ]
+
+    plan=service.plan_authoritative_scope_membership(items,proposal)
+
+    assert plan=={
+        'exclude':['I-REMOVE'],
+        'restore':['I-RESTORE'],
+        'active_item_names':['I-KEEP','I-RESTORE'],
+    }
+
 def test_carrier_decision_selects_final_freight_without_choosing_cheapest():
     from overseas_costing.services.material_ai_fill_service import build_approval_fee_proposals
     rows = build_approval_fee_proposals(approval(), transport_mode="SEA", existing_fees=[
