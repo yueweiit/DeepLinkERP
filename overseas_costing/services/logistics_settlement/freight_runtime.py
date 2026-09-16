@@ -74,7 +74,9 @@ def _payment_template(source):
 
 
 def _payment_line_summary(line):
+    from .freight_lines import packing_for_line
     evidence=line.get('evidence') or {}
+    packing=packing_for_line(line)
     return {
         'line_id':str(line.get('id') or ''),
         'approval_no':str(line.get('approval_no') or ''),
@@ -84,7 +86,7 @@ def _payment_line_summary(line):
             'currency':str(line.get('currency') or ''),
         } if line.get('amount') not in (None,'') else None,
         'packing':{
-            key:value for key,value in (line.get('packing') or {}).items()
+            key:value for key,value in packing.items()
             if key in {'material_code_hints','chargeable_weight_kg','gross_weight_kg',
                        'package_count','dimensions_cm','volume_m3'}
         },

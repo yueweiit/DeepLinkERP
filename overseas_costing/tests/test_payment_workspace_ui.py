@@ -16,6 +16,8 @@ def test_entry_is_single_simple_payment_source_workspace_without_legacy_editors(
 const strip=w.renderFreightStrip(data);const html=w.renderFreightContent(data,state);
 assert(strip.includes('实际支付流程/装箱资料来源'));
 for(const label of ['自动匹配','DHL 月结付款','AI 解析摘要','物料字段结果','更换支付来源'])assert(html.includes(label),label);
+w.renderFreightWorkspace(state);
+assert(state.actions.includes('确认此支付来源并查看 AI 填充预览'));
 for(const removed of ['实际支付流程</button>','装箱变更</button>','操作记录</button>','DeepSeek','本轮最多候选','费用分类','附件对应费用项','整体替换','确认认领费用'])assert(!html.includes(removed),removed);
 ''')
 
@@ -45,6 +47,17 @@ assert.deepEqual(JSON.parse(calls[0].args.selections_json),state.freightDraft.pa
 const payload=JSON.stringify(calls[0].args);for(const forbidden of ['3414.19','42.05','DHL(6.29-7.24)','source_snapshot'])assert(!payload.includes(forbidden),forbidden);
 assert.deepEqual(w.detailState.paymentSourceRefs,state.freightDraft.payment_source_refs);
 assert.deepEqual(w.detailState.paymentSourceSelection,{batchName:'B',versionName:'V',refs:state.freightDraft.payment_source_refs});
+''')
+
+
+def test_confirmed_payment_scope_continues_to_ai_preview_without_writing_business_data():
+    run_js(HARNESS + PAYMENT_SCOPE + r'''
+state.data=data;state.dialog.hide=()=>{state.hidden=true;state.open=false};let started=0;
+w.startMaterialAIFill=()=>{started++;return Promise.resolve()};
+await w.handleFreightAction(state,'payment-source-preview',button({}),noop);
+assert.equal(state.hidden,true);assert.equal(started,1);
+assert.deepEqual(w.detailState.paymentSourceSelection,{batchName:'B',versionName:'V',refs:data.payment_source_scope.selected_refs});
+assert.equal(calls.length,0);
 ''')
 
 

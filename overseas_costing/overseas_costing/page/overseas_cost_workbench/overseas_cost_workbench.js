@@ -16776,12 +16776,12 @@ class OverseasCostWorkbench {
       ...(choices.coverage?.length ? { coverage: choices.coverage } : {}), negative_confirmed: choices.negative_confirmed === true };
   }
 
-  settlementDialog(title, extraFields = [], fieldsFirst = false) {
+  settlementDialog(title, extraFields = [], fieldsFirst = false, closeLabel = "关闭") {
     const body = { fieldtype: "HTML", fieldname: "settlement_body", options: "正在读取本地资料…" };
     const dialog = new frappe.ui.Dialog({ title, size: "extra-large", fields: [
       ...(fieldsFirst ? [...extraFields, body] : [body, ...extraFields]),
       { fieldtype: "HTML", fieldname: "settlement_actions", options: "" },
-    ], primary_action_label: "关闭", primary_action: () => dialog.hide() });
+    ], primary_action_label: closeLabel, primary_action: () => dialog.hide() });
     const state = { dialog, open: true, request: 0, timer: null, busy: false };
     dialog.onhide = () => this.stopSettlementDialog(state);
     dialog.$wrapper.on("hide.bs.modal.ocwSettlement", (event) => {
@@ -17108,7 +17108,7 @@ class OverseasCostWorkbench {
 
   async openBatchSettlementDialog(batchName, viewedVersion = null, initialTab = 'freight') {
     if (this.batchSettlementState?.open) this.stopSettlementDialog(this.batchSettlementState);
-    const state = this.settlementDialog("支付来源与装箱资料");
+    const state = this.settlementDialog("支付来源与装箱资料", [], false, "取消");
     this.batchSettlementState = state;
     state.batchName = batchName;
     state.freightTab = ['freight', 'packing', 'audit'].includes(initialTab) ? initialTab : 'freight';
@@ -18354,7 +18354,9 @@ class OverseasCostWorkbench {
     const paymentWritable = !this.paymentReadOnly(state.data || {});
     let actions = '';
     if (paymentScope && (paymentScope.status === 'NEEDS_SELECTION' || state.paymentSourceEditing)) {
-      actions += this.freightActionButton('payment-source-apply', '使用所选支付来源', '', true, disabled);
+      actions += this.freightActionButton('payment-source-apply', '确认所选支付来源', '', true, disabled);
+    } else if (paymentScope && (paymentScope.selected_refs || []).length) {
+      actions += this.freightActionButton('payment-source-preview', '确认此支付来源并查看 AI 填充预览', '', true, disabled);
     }
     if (!paymentScope && view) actions += this.freightActionButton('freight-back', view.kind === 'evidence' ? '返回核对' : view.kind === 'payment-preview' ? '返回修改附件／费用' : '返回列表', '', false, disabled);
     if (view?.kind === 'evidence' && state.freightEvidenceRow?.source?.open_url) actions += this.freightActionButton('freight-evidence-source', '打开支付原单');
@@ -18482,6 +18484,19 @@ class OverseasCostWorkbench {
       state.paymentSourceEditing = true;
       state.freightDraft = { ...(state.freightDraft || {}), payment_source_refs: [...(data.payment_source_scope?.selected_refs || [])] };
       return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-source-preview') {
+      const refs = data.payment_source_scope?.selected_refs || [];
+      if (!refs.length) throw new Error('请先选择需要 AI 解析的支付来源');
+      this.detailState ||= {};
+      this.detailState.paymentSourceRefs = [...refs];
+      this.detailState.paymentSourceSelection = {
+        batchName: state.batchName,
+        versionName: state.versionName,
+        refs: [...refs],
+      };
+      state.dialog.hide();
+      return this.startMaterialAIFill();
     }
     if (action === 'payment-source-apply') {
       const selections = state.freightDraft?.payment_source_refs || [];

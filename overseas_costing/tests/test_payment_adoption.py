@@ -380,6 +380,51 @@ def test_payment_source_scope_auto_selects_unique_monthly_match_and_exposes_only
     assert "source_snapshot" not in dumps(scope)
 
 
+def test_payment_source_scope_derives_packing_from_legacy_monthly_line_payload():
+    """Previously archived statement rows may predate the packing projection."""
+
+    from overseas_costing.services.logistics_settlement.freight_runtime import batch_status
+
+    ctx = payment_setup(structured=True, scope="freight", amount="3414.19", mode="EXPRESS")
+    store, ledger, batch, version, _logistics, source, candidate = ctx
+    source.update(title="月结付款", approval_no="202608260009000284583")
+    store.put("source", {"id": source["id"], "data": dumps(source)})
+    ledger.create("item", {
+        "batch": batch["name"], "version": version["name"],
+        "material_code": "MWV101144", "product_name": "薇武士IP17 PRO",
+        "gross_weight_kg": 0, "chargeable_weight_kg": 0, "volume_m3": 0,
+    })
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        waybill="1841361513", approval_no="202607211417000078258",
+        billing_weight="46",
+        cargo_text='"\u8587\u6b66\u58eb   MWV101144    IP17PRO  -TPU\n\u89c4\u683c33*20*23,\u91cd\u91cf\uff1a42.05kg\n1\u5957\u6a21\u5177+3\u4e2a\u624b\u673a\u58f3"',
+        fields={"件数": 1, "重量": 46},
+        evidence={"file_name": "DHL(6.29-7.24)快递明细.xlsx", "sheet": "DHL快递", "row": 14},
+    )
+    line.pop("packing", None)
+    store.put("freight_line", {"id": line["id"], "waybill": line["waybill"],
+        "approval_no": line["approval_no"], "data": dumps(line)})
+    candidate.update(method="identifier", issues=[])
+    store.put("freight_candidate", _candidate_values_for_runtime(candidate))
+
+    scope = batch_status(store, ledger, batch["name"], version["name"])["payment_source_scope"]
+
+    packing = scope["candidates"][0]["parsed_summary"]["packing"]
+    assert packing == {
+        "material_code_hints": ["MWV101144", "IP17PRO"],
+        "chargeable_weight_kg": "46", "gross_weight_kg": "42.05",
+        "package_count": "1", "dimensions_cm": ["33", "20", "23"],
+        "volume_m3": "0.01518",
+    }
+    material = next(row for row in scope["material_rows"] if row["material_code"] == "MWV101144")
+    assert material["values"] == {
+        "gross_weight_kg": "42.05", "chargeable_weight_kg": "46",
+        "package_count": "1", "volume_m3": "0.01518",
+    }
+    assert material["fallback_fields"] == []
+
+
 def _candidate_values_for_runtime(candidate):
     return {
         "id": candidate["id"], "logistics_id": candidate["logistics_id"],

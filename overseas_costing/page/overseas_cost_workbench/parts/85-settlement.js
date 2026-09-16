@@ -30,12 +30,12 @@
       ...(choices.coverage?.length ? { coverage: choices.coverage } : {}), negative_confirmed: choices.negative_confirmed === true };
   }
 
-  settlementDialog(title, extraFields = [], fieldsFirst = false) {
+  settlementDialog(title, extraFields = [], fieldsFirst = false, closeLabel = "关闭") {
     const body = { fieldtype: "HTML", fieldname: "settlement_body", options: "正在读取本地资料…" };
     const dialog = new frappe.ui.Dialog({ title, size: "extra-large", fields: [
       ...(fieldsFirst ? [...extraFields, body] : [body, ...extraFields]),
       { fieldtype: "HTML", fieldname: "settlement_actions", options: "" },
-    ], primary_action_label: "关闭", primary_action: () => dialog.hide() });
+    ], primary_action_label: closeLabel, primary_action: () => dialog.hide() });
     const state = { dialog, open: true, request: 0, timer: null, busy: false };
     dialog.onhide = () => this.stopSettlementDialog(state);
     dialog.$wrapper.on("hide.bs.modal.ocwSettlement", (event) => {
@@ -362,7 +362,7 @@
 
   async openBatchSettlementDialog(batchName, viewedVersion = null, initialTab = 'freight') {
     if (this.batchSettlementState?.open) this.stopSettlementDialog(this.batchSettlementState);
-    const state = this.settlementDialog("支付来源与装箱资料");
+    const state = this.settlementDialog("支付来源与装箱资料", [], false, "取消");
     this.batchSettlementState = state;
     state.batchName = batchName;
     state.freightTab = ['freight', 'packing', 'audit'].includes(initialTab) ? initialTab : 'freight';
