@@ -93,18 +93,15 @@ def test_refresh_rejects_purchase_link_change_with_integrity_error(setup):
 
 def test_direct_wiki_read_rejects_snapshot_sheet_mismatch_with_integrity_error(monkeypatch):
     from overseas_costing.services import packing_source_service as packing
-    from overseas_costing.integrations import dingtalk_packing_source
+    from overseas_costing.services import packing_sheet_cache_service as cache
 
     monkeypatch.setattr(packing.effective_source, "validate_packing_source", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(packing.effective_source, "current_source_bundle", lambda *_args, **_kwargs: None)
-    mismatch = clients()
-    mismatch.archive.download = lambda _manifest: {
-        "schemaVersion": 1,
-        "workbookId": "W",
-        "sheetId": "OTHER",
-        "values": [],
-    }
-    monkeypatch.setattr(dingtalk_packing_source, "get_packing_runtime_clients", lambda: mismatch)
+    monkeypatch.setattr(
+        cache,
+        "get_cached_sheet",
+        lambda _source_id: (_ for _ in ()).throw(cache.PackingSheetCacheError("快照与所选 Sheet 不一致")),
+    )
 
     with pytest.raises(packing.PackingSourceIntegrityError, match="快照与所选 Sheet 不一致"):
         packing._resolve_trusted_packing_source(
@@ -112,6 +109,60 @@ def test_direct_wiki_read_rejects_snapshot_sheet_mismatch_with_integrity_error(m
             source_kind="wiki_sheet",
             source_id="W:S",
         )
+
+
+def test_direct_wiki_preview_reads_local_cache_without_remote_calls(monkeypatch):
+    from overseas_costing.services import packing_source_service as packing
+    from overseas_costing.services import packing_sheet_cache_service as cache
+    from overseas_costing.integrations import dingtalk_packing_source
+
+    monkeypatch.setattr(packing.effective_source, "validate_packing_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(packing.effective_source, "current_source_bundle", lambda *_args, **_kwargs: None)
+    trusted = {
+        "source_hash": "a" * 64,
+        "source": {"source_kind": "wiki_sheet", "source_id": "W:S"},
+        "preview": {"material_rows": []},
+    }
+    monkeypatch.setattr(cache, "get_cached_sheet", lambda source_id: trusted if source_id == "W:S" else None)
+    monkeypatch.setattr(
+        dingtalk_packing_source,
+        "get_packing_runtime_clients",
+        lambda: (_ for _ in ()).throw(AssertionError("preview must stay local")),
+    )
+
+    result = packing._resolve_trusted_packing_source(
+        batch_name="B1", source_kind="wiki_sheet", source_id="W:S"
+    )
+
+    assert result == trusted
+
+
+def test_current_wiki_verification_compares_remote_manifest_without_downloading(monkeypatch):
+    from overseas_costing.services import packing_source_service as packing
+    from overseas_costing.services import packing_sheet_cache_service as cache
+    from overseas_costing.integrations import dingtalk_packing_source
+
+    monkeypatch.setattr(packing.effective_source, "validate_packing_source", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(packing.effective_source, "current_source_bundle", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cache,
+        "get_cached_sheet",
+        lambda _source_id: {
+            "source_hash": "a" * 64,
+            "source": {"source_kind": "wiki_sheet", "source_id": "W:S"},
+        },
+    )
+    remote = clients("a")
+    remote.archive.download = lambda _manifest: (_ for _ in ()).throw(
+        AssertionError("verification must not download")
+    )
+    monkeypatch.setattr(dingtalk_packing_source, "get_packing_runtime_clients", lambda: remote)
+
+    assert packing.verify_current_wiki_source("B1", "W:S") == "a" * 64
+
+    remote.catalog.get_latest_snapshot = lambda *_args: {"content_sha256": "b" * 64, "status": "ready"}
+    with pytest.raises(packing.PackingSourceChangedError):
+        packing.verify_current_wiki_source("B1", "W:S")
 
 
 def test_changed_cache_invalidates_context_but_identical_refresh_is_noop(setup):
@@ -244,11 +295,14 @@ def test_failed_wiki_refresh_is_visible_in_local_catalogue_without_changing_cont
     packing.refresh_bound_wiki_snapshot(b['name'],'W:S',store=s,ledger=l,clients=clients())
     first=next(row for row in catalog._bound_material_sources(b['name'],bundle) if row['source_kind']=='wiki_sheet')
     assert first['cache_refreshed_at'] and first['refresh_last_success_at']
+    assert first['cache_status']=='ready' and first['content_hash']
+    assert first['cache_updated_at']==first['cache_refreshed_at']
     assert first['approval_no']==bundle['source']['approval_no']
     def failed(*a,**k): raise RuntimeError('archive temporarily unavailable')
     refresh_bound_wiki_round(s,l,refresh=failed)
     failed_row=next(row for row in catalog._bound_material_sources(b['name'],bundle) if row['source_kind']=='wiki_sheet')
     assert failed_row['refresh_error']=='archive temporarily unavailable'
+    assert failed_row['cache_status']=='stale' and failed_row['sync_error']==failed_row['refresh_error']
     assert failed_row['refresh_last_success_at']==first['refresh_last_success_at']
     assert failed_row['available'] and failed_row['source_hash']==first['source_hash']
     assert failed_row['refresh_last_checked_at']

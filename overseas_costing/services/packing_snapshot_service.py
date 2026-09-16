@@ -712,7 +712,13 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
             )
 
     if not include_wiki:
-        return {"approval_sources": [*approval, *comments], "manual_sources": manual, "wiki_workbooks": []}
+        return {
+            "approval_sources": [*approval, *comments],
+            "manual_sources": manual,
+            "manual_attachments": manual,
+            "wiki_workbooks": [],
+            "source_context": (bundle or {}).get("context") or {},
+        }
     wiki = []
     wiki_error = ""
     try:
@@ -790,6 +796,63 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
         "approval_sources": [*approval, *comments],
         "wiki_workbooks": wiki,
         "wiki_error": wiki_error,
+    }
+
+
+def list_cached_packing_sheet_catalog(batch_name: str) -> dict[str, Any]:
+    """为装箱计划表首屏返回纯本地目录和推荐。"""
+
+    if frappe is None:
+        raise RuntimeError("当前环境未连接 Frappe。")
+    from overseas_costing.services import packing_sheet_cache_service
+
+    cached = packing_sheet_cache_service.get_cached_catalog()
+    bundle = effective_source.current_source_bundle(batch_name)
+    context = (bundle or {}).get("context") or {}
+    if bundle and (
+        context.get("root_kind") == "expense"
+        or (context.get("packing") or {}).get("selected_source")
+    ):
+        scoped = list_packing_sources(batch_name)
+        return {
+            **cached,
+            **scoped,
+            "catalog_status": cached.get("catalog_status") or "ready",
+            "source_context": context,
+        }
+
+    batch_context = _packing_batch_context(str(batch_name), {})
+    all_sheets = [
+        dict(sheet)
+        for workbook in cached.get("wiki_workbooks") or []
+        for sheet in workbook.get("sheets") or []
+    ]
+    summaries = {
+        str(sheet.get("source_id") or ""): dict(sheet.get("summary") or {})
+        for sheet in all_sheets
+        if sheet.get("summary")
+    }
+    recommended = recommend_packing_sheets(
+        all_sheets,
+        batch_context=batch_context,
+        snapshot_summaries=summaries,
+    )
+    recommended_by_id = {
+        str(sheet.get("source_id") or ""): sheet for sheet in recommended
+    }
+    workbooks = []
+    for workbook in cached.get("wiki_workbooks") or []:
+        sheets = [
+            recommended_by_id[str(sheet.get("source_id") or "")]
+            for sheet in workbook.get("sheets") or []
+            if str(sheet.get("source_id") or "") in recommended_by_id
+        ]
+        if sheets:
+            workbooks.append({**workbook, "sheets": sheets})
+    return {
+        **cached,
+        "wiki_workbooks": _pin_recommended_workbook(workbooks),
+        "source_context": context,
     }
 
 
@@ -1326,8 +1389,21 @@ def _bound_material_sources(batch_name, bundle):
             'approval_role': 'logistics_expense', 'content_hash': document.get('fingerprint') or document['id']})
     for source_id in sorted(effective_source.explicit_wiki_sources(bundle.get('source'))):
         cached=packing_source_service.load_bound_wiki_snapshot(context,source_id)
+        refresh=packing_source_service.wiki_refresh_status(context,source_id)
+        refresh_error=str(refresh.get('refresh_error') or '')
+        cache_status=(
+            'unavailable' if approval['excluded']
+            else 'stale' if cached and refresh_error
+            else 'ready' if cached
+            else 'error' if refresh_error
+            else 'missing'
+        )
         result.append({'source_kind': 'wiki_sheet', 'source_id': source_id, 'source_label': '采购支出链接的装箱计划表',
-                       **packing_source_service.wiki_refresh_status(context,source_id),
+                       **refresh, 'cache_status':cache_status,
+                       'cache_updated_at':refresh.get('cache_refreshed_at') or '',
+                       'last_checked_at':refresh.get('refresh_last_checked_at') or '',
+                       'last_success_at':refresh.get('refresh_last_success_at') or '',
+                       'sync_error':refresh_error, 'active':not approval['excluded'],
                        'process_instance_id': context['instance_id'], 'available': bool(cached) and not approval['excluded'],
                        'content_hash':(cached or {}).get('source_hash'), 'source_updated_at':((cached or {}).get('source') or {}).get('source_updated_at'),
                        'excluded':approval['excluded'] or not cached,
@@ -1338,7 +1414,8 @@ def _bound_material_sources(batch_name, bundle):
         row['source_context'] = context
         row['analysis_only'] = bool(not context['approved'] or context['invalid'])
         content = {key:value for key,value in row.items() if key not in {
-            'cache_refreshed_at','refresh_last_checked_at','refresh_last_success_at','refresh_error'}}
+            'cache_refreshed_at','refresh_last_checked_at','refresh_last_success_at','refresh_error',
+            'cache_status','cache_updated_at','last_checked_at','last_success_at','sync_error'}}
         row['source_hash'] = hashlib.sha256(_json({'context': context, 'source': content}).encode()).hexdigest()
     return result
 

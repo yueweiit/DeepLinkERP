@@ -14,6 +14,7 @@
 | `version_service.py` | 版本服务 | 版本摘要、版本复制辅助逻辑 |
 | `audit_service.py` | 审计服务 | 写修改日志、重算日志、版本日志 |
 | `attachment_parse_service.py` | 附件解析服务 | 装箱单解析任务、完税凭证 PDF 预览解析、解析快照保存、后续 OCR/AI 解析入口 |
+| `packing_sheet_cache_service.py` | 装箱 Sheet 缓存服务 | 远程目录增量同步、本地物化预览、单 Sheet 手动刷新和过期状态 |
 
 ## 当前约定
 

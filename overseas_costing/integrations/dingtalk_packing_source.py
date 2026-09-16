@@ -104,6 +104,37 @@ class PackingSheetCatalog:
             """
         )
 
+    def list_catalog_snapshot(self) -> list[dict[str, Any]]:
+        """一次取得工作簿、Sheet 和最新快照 manifest，供本地增量缓存使用。"""
+
+        return self._read(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (corp_id, workbook_id, sheet_id) *
+                  FROM costing_read.packing_sheet_snapshots_v1
+                 WHERE is_latest = TRUE
+                 ORDER BY corp_id, workbook_id, sheet_id, created_at DESC, id DESC
+            )
+            SELECT w.corp_id, w.workbook_id, w.year,
+                   w.label AS workbook_label, w.updated_at AS workbook_updated_at,
+                   s.sheet_id, s.sheet_name, s.visibility,
+                   s.source_updated_at, s.indexed_at,
+                   p.id AS snapshot_id, p.status AS snapshot_status,
+                   p.created_at AS snapshot_created_at, p.capture_finished_at,
+                   p.content_sha256, p.bucket, p.object_key, p.actual_size,
+                   p.error_code, p.error_message
+              FROM costing_read.packing_workbooks_v1 w
+              LEFT JOIN costing_read.packing_sheet_index_v1 s
+                ON s.corp_id = w.corp_id AND s.workbook_id = w.workbook_id
+              LEFT JOIN latest p
+                ON p.corp_id = s.corp_id
+               AND p.workbook_id = s.workbook_id
+               AND p.sheet_id = s.sheet_id
+             ORDER BY w.year DESC, w.label, w.workbook_id,
+                      s.source_updated_at DESC NULLS LAST, s.sheet_name, s.sheet_id
+            """
+        )
+
     def list_sheets(self, workbook_id: str, *, search: str = "", limit: int = 200) -> list[dict[str, Any]]:
         workbook_id = _validate_id(workbook_id, "工作簿 ID")
         search = str(search or "").strip()[:100]

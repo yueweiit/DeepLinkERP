@@ -1498,12 +1498,41 @@ def apply_material_import(
     *,
     repository=None,
     resolver: Optional[Callable[..., dict]] = None,
+    verifier: Optional[Callable[[str, str], str]] = None,
     signing_key: Optional[bytes] = None,
 ) -> dict:
     repo = repository or FrappeMaterialImportRepository()
     claims = decode_material_preview_revision(preview_revision, signing_key=signing_key)
     if not claims or str(claims.get("batch") or "") != str(batch_name):
         return {"ok": False, "source_changed": True, "code": "INVALID_PREVIEW_REVISION"}
+    if str(claims.get("kind") or "") == "wiki_sheet":
+        verify = verifier or (
+            packing_source_service.verify_current_wiki_source if resolver is None else None
+        )
+        if verify is not None:
+            try:
+                verified_hash = verify(str(batch_name), str(claims.get("id") or ""))
+            except packing_source_service.PackingSourceChangedError:
+                return {
+                    "ok": False,
+                    "source_changed": True,
+                    "code": "SOURCE_CHANGED",
+                    "message": "装箱计划表已更新，请刷新所选 Sheet 后重新预览。",
+                }
+            except Exception as error:
+                return {
+                    "ok": False,
+                    "source_changed": False,
+                    "code": "SOURCE_VERIFICATION_FAILED",
+                    "message": f"暂时无法校验装箱计划表最新版本：{str(error)[:500]}",
+                }
+            if str(verified_hash or "") != str(claims.get("source_hash") or ""):
+                return {
+                    "ok": False,
+                    "source_changed": True,
+                    "code": "SOURCE_CHANGED",
+                    "message": "装箱计划表已更新，请刷新所选 Sheet 后重新预览。",
+                }
     choices = _choices(choices_json)
     repo.assert_write(str(batch_name), str(edit_token or ""), str(expected_modified or ""))
     repo.lock(str(batch_name), str(claims.get("version") or ""))

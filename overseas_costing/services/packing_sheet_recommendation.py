@@ -107,6 +107,11 @@ def recommend_packing_sheets(
         item = dict(original)
         source_id = str(item.get("source_id") or "")
         summary = snapshot_summaries.get(source_id) or {}
+        cache_status = str(item.get("cache_status") or "")
+        recommendation_eligible = (
+            item.get("active") is not False
+            and cache_status not in {"unavailable", "error", "missing"}
+        )
         summary_codes = {_normalize_code(value) for value in summary.get("item_codes") or []}
         summary_codes.discard("")
         summary_references = {_normalize_reference(value) for value in summary.get("references") or []}
@@ -163,7 +168,9 @@ def recommend_packing_sheets(
                 "display_source_name": "装箱计划表",
                 "business_date": business_date.isoformat() if business_date else None,
                 "snapshot_status": (
-                    "ready" if has_snapshot else str(item.get("snapshot_status") or "not_cached")
+                    "ready"
+                    if has_snapshot and recommendation_eligible
+                    else str(item.get("snapshot_status") or cache_status or "not_cached")
                 ),
                 "recommendation_score": max(0, min(100, score)),
                 "recommendation_confidence": confidence,
@@ -175,11 +182,16 @@ def recommend_packing_sheets(
                 "auto_select_recommended": False,
                 "_reference_match_count": len(reference_matches),
                 "_coverage": coverage,
+                "_recommendation_eligible": recommendation_eligible,
             }
         )
         scored.append(item)
 
-    eligible = [item for item in scored if item["recommendation_score"] > 0]
+    eligible = [
+        item
+        for item in scored
+        if item["_recommendation_eligible"] and item["recommendation_score"] > 0
+    ]
     if eligible:
         winner = max(
             eligible,
@@ -200,6 +212,7 @@ def recommend_packing_sheets(
     for item in scored:
         item.pop("_reference_match_count", None)
         item.pop("_coverage", None)
+        item.pop("_recommendation_eligible", None)
     return sort_packing_sheets(scored)
 
 

@@ -5226,7 +5226,7 @@
     dialog.materialVersionName = this.detailState.versionName;
     dialog.materialSourceTab = options.sourceTab || "wiki";
     dialog.materialAttachmentSources = [];
-    dialog.wikiMaterialRefreshedSources = new Set();
+    dialog.materialAttachmentsLoaded = false;
     dialog.wikiMaterialWorkbooks = [];
     dialog.wikiMaterialBusy = "";
     dialog.wikiMaterialProgress = "";
@@ -5244,6 +5244,10 @@
         if (dialog.wikiMaterialBusy) return;
         dialog.materialSourceTab = $(event.currentTarget).attr("data-mf-source-tab");
         this.renderWikiMaterialSources(dialog);
+        if (dialog.materialSourceTab !== "wiki" && !dialog.materialAttachmentsLoaded) {
+          this.loadMaterialAttachmentSources(dialog)
+            .catch((error) => this.showWikiMaterialSourceError(dialog, error));
+        }
       })
       .on("click.ocwMfWiki", "[data-mf-attachment-source]", (event) => {
         const $button = $(event.currentTarget);
@@ -5254,7 +5258,8 @@
         dialog.hide(); this.openMaterialXlsxUploader();
       })
       .on("click.ocwMfWiki", "[data-action='mf-source-reload']", () => {
-        this.loadWikiMaterialSources(dialog).catch((error) => this.showWikiMaterialSourceError(dialog, error));
+        this.loadMaterialAttachmentSources(dialog, { force: true })
+          .catch((error) => this.showWikiMaterialSourceError(dialog, error));
       })
       .on("click.ocwMfWiki", "[data-mf-wiki-source]", (event) => {
         dialog.wikiMaterialSelectedSource = $(event.currentTarget).attr("data-source-id") || "";
@@ -5266,29 +5271,35 @@
           $(node).toggle(!keyword || String($(node).attr("data-search") || "").includes(keyword));
         });
       })
-      .on("click.ocwMfWiki", "[data-action='mf-wiki-refresh-all']", () => {
-        this.refreshWikiMaterialCatalogs(dialog)
+      .on("click.ocwMfWiki", "[data-action='mf-wiki-refresh-selected']", () => {
+        this.refreshSelectedWikiMaterialSource(dialog)
           .catch((error) => this.showWikiMaterialSourceError(dialog, error));
       })
       .on("click.ocwMfWiki", "[data-action='mf-wiki-preview-card']", (event) => {
         const $button = $(event.currentTarget);
-        this.previewFreshWikiMaterialImport(
-          dialog,
-          $button.attr("data-workbook-id"),
-          $button.attr("data-sheet-id"),
-          $button.attr("data-source-id"),
-        ).catch((error) => this.showWikiMaterialSourceError(dialog, error));
+        const sourceId = String($button.attr("data-source-id") || "");
+        if (!sourceId || dialog.wikiMaterialBusy) return;
+        dialog.wikiMaterialSelectedSource = sourceId;
+        dialog.wikiMaterialBusy = `preview:${sourceId}`;
+        this.renderWikiMaterialSources(dialog);
+        this.previewWikiMaterialImport(dialog, sourceId)
+          .catch((error) => this.showWikiMaterialSourceError(dialog, error))
+          .finally(() => {
+            dialog.wikiMaterialBusy = "";
+            if (!dialog.wikiMaterialClosed && !dialog.wikiMaterialOpeningPreview) this.renderWikiMaterialSources(dialog);
+          });
       })
       .on("click.ocwMfWiki", "[data-action='mf-wiki-cancel']", () => {
         dialog.wikiMaterialClosed = true;
         dialog.hide();
       });
     await this.loadWikiMaterialSources(dialog);
+    if (dialog.materialSourceTab !== "wiki") await this.loadMaterialAttachmentSources(dialog);
     return dialog;
   }
 
   async loadWikiMaterialSources(dialog, { preserveOnError = false } = {}) {
-    const result = await this.call("overseas_costing.api.packing_api.list_packing_sources", {
+    const result = await this.call("overseas_costing.api.packing_api.list_packing_sheet_catalog", {
       batch_name: this.detailState.batchName,
     }, true);
     const nextWorkbooks = result?.wiki_workbooks || [];
@@ -5301,17 +5312,14 @@
       dialog.wikiMaterialWorkbooks = [];
       dialog.wikiMaterialPreview = null;
     }
-    dialog.materialAttachmentSources = dialog.sourceContext.root_kind === "expense"
-      ? [...(result?.approval_sources || [])].filter((row) => row.source_kind === "approval_attachment")
-      : [...(result?.manual_attachments || [])];
     if (
       preserveOnError
       && sameSource
-      && result?.wiki_error
+      && result?.sync_error
       && !nextWorkbooks.length
       && (dialog.wikiMaterialSources || []).length
     ) {
-      dialog.wikiMaterialError = result.wiki_error;
+      dialog.wikiMaterialError = result.sync_error;
       if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
       return false;
     }
@@ -5325,11 +5333,32 @@
       return rightDate.localeCompare(leftDate) || String(left.source_label || "").localeCompare(String(right.source_label || ""));
     });
     dialog.wikiMaterialSources = sheets;
-    dialog.wikiMaterialError = result?.wiki_error || "";
+    dialog.wikiMaterialError = result?.sync_error || "";
     if (!sheets.some((sheet) => String(sheet.source_id) === String(dialog.wikiMaterialSelectedSource))) {
       const recommended = sheets.find((sheet) => sheet.auto_select_recommended) || sheets.find((sheet) => sheet.is_recommended) || sheets[0];
       dialog.wikiMaterialSelectedSource = recommended?.source_id || "";
     }
+    if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
+    return true;
+  }
+
+  async loadMaterialAttachmentSources(dialog, { force = false } = {}) {
+    if (dialog.materialAttachmentsLoaded && !force) return true;
+    const result = await this.call("overseas_costing.api.packing_api.list_packing_attachment_sources", {
+      batch_name: this.detailState.batchName,
+    }, true);
+    const nextContext = result?.source_context || {};
+    if (
+      dialog.sourceContext?.fingerprint
+      && nextContext.fingerprint
+      && dialog.sourceContext.fingerprint !== nextContext.fingerprint
+    ) throw new Error("当前资料来源已变化，请关闭后重新获取资料。");
+    dialog.sourceContext = nextContext;
+    dialog.materialAttachmentSources = dialog.sourceContext.root_kind === "expense"
+      ? [...(result?.approval_sources || [])].filter((row) => row.source_kind === "approval_attachment")
+      : [...(result?.manual_attachments || [])];
+    dialog.materialAttachmentsLoaded = true;
+    dialog.wikiMaterialOperationError = "";
     if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
     return true;
   }
@@ -5347,10 +5376,14 @@
       const selected = String(sheet.source_id || "") === selectedId;
       const sheetId = String(sheet.source_id || "").split(":").slice(1).join(":");
       const confidence = { high: "高置信度", medium: "中置信度", low: "低置信度" }[sheet.recommendation_confidence] || "待确认";
-      const updatedAt = sheet.snapshot_updated_at || sheet.source_updated_at;
-      const status = sheet.snapshot_status === "ready"
-        ? `已刷新 ${this.formatDateTimeMinute(updatedAt) || updatedAt || ""}`
-        : sheet.snapshot_status === "unreadable" ? "缓存不可读取" : "待刷新";
+      const updatedAt = sheet.last_success_at || sheet.cache_updated_at || sheet.snapshot_updated_at;
+      const cacheStatus = String(sheet.cache_status || "missing");
+      const status = cacheStatus === "ready"
+        ? `已同步 ${this.formatDateTimeMinute(updatedAt) || updatedAt || ""}`
+        : cacheStatus === "stale" ? `缓存已过期 · 同步于 ${this.formatDateTimeMinute(updatedAt) || updatedAt || "未知"}`
+        : cacheStatus === "error" ? `同步失败${sheet.sync_error ? `：${sheet.sync_error}` : ""}`
+        : cacheStatus === "unavailable" ? "Sheet 已停用" : "尚未缓存";
+      const previewDisabled = busy || !sheet.content_hash || ["error", "missing", "unavailable"].includes(cacheStatus);
       return `<article class="ocw-mf-wiki-card ${selected ? "selected" : ""} ${sheet.is_recommended ? "recommended" : ""}" data-mf-wiki-card="1" data-search="${this.escape(String(sheet.source_label || "").toLowerCase())}">
         <button type="button" data-mf-wiki-source="1" data-source-id="${this.escape(sheet.source_id || "")}">
           <span>${sheet.is_recommended ? "系统推荐" : "SHEET"}</span>
@@ -5358,14 +5391,14 @@
           <small>${this.escape(sheet.workbook_label || "装箱计划表")} · 装箱日期 ${this.escape(sheet.business_date || "未识别")}</small>
         </button>
         ${sheet.is_recommended ? `<div class="ocw-mf-wiki-reasons"><b>系统推荐 · ${this.escape(confidence)}</b>${(sheet.recommendation_reasons || []).slice(0, 3).map((reason) => `<span>${this.escape(reason)}</span>`).join("")}</div>` : ""}
-        <div class="ocw-mf-wiki-card-meta"><span>${this.escape(status)}</span><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-wiki-preview-card" data-source-id="${this.escape(sheet.source_id || "")}" data-workbook-id="${this.escape(sheet.workbook_id || "")}" data-sheet-id="${this.escape(sheetId)}" ${busy ? "disabled" : ""}>${busy === `sheet:${sheet.source_id}` ? "正在刷新…" : "预览"}</button></div>
+        <div class="ocw-mf-wiki-card-meta"><span>${this.escape(status)}</span><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-wiki-preview-card" data-source-id="${this.escape(sheet.source_id || "")}" data-workbook-id="${this.escape(sheet.workbook_id || "")}" data-sheet-id="${this.escape(sheetId)}" ${previewDisabled ? "disabled" : ""}>${busy === `preview:${sheet.source_id}` ? "正在打开…" : "预览"}</button></div>
       </article>`;
     }).join("");
     $target.html(`
       ${this.renderMaterialSourceTabs(dialog)}
       <div class="ocw-mf-wiki-toolbar">
         <label class="ocw-mf-wiki-search"><span>查找 Sheet</span><input type="search" data-action="mf-wiki-filter" placeholder="输入装箱单、日期或品类"></label>
-        <button class="ocw-outline-btn" type="button" data-action="mf-wiki-refresh-all" ${busy ? "disabled" : ""}>${busy === "global" ? this.escape(dialog.wikiMaterialProgress || "正在刷新…") : "刷新最新数据"}</button>
+        <button class="ocw-outline-btn" type="button" data-action="mf-wiki-refresh-selected" ${busy || !selectedId ? "disabled" : ""}>${busy === `sheet:${selectedId}` ? "正在刷新…" : "刷新所选 Sheet"}</button>
       </div>
       ${dialog.wikiMaterialError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialError)}</div>` : ""}
       ${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}
@@ -5440,45 +5473,6 @@
     if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
   }
 
-  async refreshWikiMaterialCatalogs(dialog) {
-    if (dialog.wikiMaterialBusy) return;
-    const workbooks = (dialog.wikiMaterialWorkbooks || []).filter((workbook) => workbook.workbook_id);
-    if (!workbooks.length) throw new Error("没有可刷新的装箱计划年度表。");
-    dialog.wikiMaterialBusy = "global";
-    dialog.wikiMaterialOperationError = "";
-    const failures = [];
-    let succeeded = 0;
-    try {
-      for (let index = 0; index < workbooks.length; index += 1) {
-        const workbook = workbooks[index];
-        dialog.wikiMaterialProgress = `正在刷新 ${index + 1}/${workbooks.length}`;
-        this.renderWikiMaterialSources(dialog);
-        const requestId = this.packingFlowRequestId();
-        try {
-          await this.call("overseas_costing.api.packing_api.request_packing_workbook_refresh", {
-            batch_name: this.detailState.batchName,
-            workbook_id: workbook.workbook_id,
-            request_id: requestId,
-          }, false);
-          await this.waitPackingRefresh(this.getDetailBatch(), requestId);
-          succeeded += 1;
-        } catch (error) {
-          failures.push(`${workbook.label || workbook.workbook_id}：${this.normalizeErrorMessage(error)}`);
-        }
-      }
-      const loaded = await this.loadWikiMaterialSources(dialog, { preserveOnError: true });
-      if (!loaded) throw new Error(dialog.wikiMaterialError || "刷新后的装箱计划目录读取失败。");
-      dialog.wikiMaterialOperationError = failures.length
-        ? `部分装箱计划表刷新失败（${failures.length}/${workbooks.length}）：${failures.join("；")}`
-        : "";
-      if (succeeded) frappe.show_alert({ message: `已刷新 ${succeeded} 个装箱计划年度表`, indicator: "green" });
-    } finally {
-      dialog.wikiMaterialBusy = "";
-      dialog.wikiMaterialProgress = "";
-      if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
-    }
-  }
-
   async refreshWikiMaterialSource(dialog, workbookId, sheetId, sourceId) {
     if (!workbookId || !sheetId) throw new Error("无法识别需要刷新的装箱计划 Sheet。");
     const requestId = this.packingFlowRequestId();
@@ -5489,25 +5483,23 @@
       request_id: requestId,
     }, false);
     await this.waitPackingRefresh(this.getDetailBatch(), requestId);
-    dialog.wikiMaterialRefreshedSources.add(String(sourceId || `${workbookId}:${sheetId}`));
     const loaded = await this.loadWikiMaterialSources(dialog, { preserveOnError: true });
     if (!loaded) throw new Error(dialog.wikiMaterialError || "刷新后的 Sheet 目录读取失败。");
   }
 
-  async previewFreshWikiMaterialImport(dialog, workbookId, sheetId, sourceId) {
+  async refreshSelectedWikiMaterialSource(dialog) {
     if (dialog.wikiMaterialBusy) return;
-    const normalizedSourceId = String(sourceId || "");
-    if (!normalizedSourceId) throw new Error("无法识别需要预览的装箱计划 Sheet。");
-    dialog.wikiMaterialSelectedSource = normalizedSourceId;
-    dialog.wikiMaterialBusy = `sheet:${normalizedSourceId}`;
+    const sourceId = String(dialog.wikiMaterialSelectedSource || "");
+    const selected = (dialog.wikiMaterialSources || []).find((sheet) => String(sheet.source_id || "") === sourceId);
+    if (!selected) throw new Error("请先选择需要刷新的装箱计划 Sheet。");
+    const sheetId = String(selected.sheet_id || sourceId.split(":").slice(1).join(":"));
+    dialog.wikiMaterialBusy = `sheet:${sourceId}`;
     dialog.wikiMaterialOperationError = "";
     this.renderWikiMaterialSources(dialog);
     try {
-      if (!dialog.wikiMaterialRefreshedSources.has(normalizedSourceId)) {
-        await this.refreshWikiMaterialSource(dialog, workbookId, sheetId, normalizedSourceId);
-      }
+      await this.refreshWikiMaterialSource(dialog, selected.workbook_id, sheetId, sourceId);
       if (dialog.wikiMaterialClosed) return;
-      await this.previewWikiMaterialImport(dialog, normalizedSourceId);
+      await this.previewWikiMaterialImport(dialog, sourceId);
     } finally {
       dialog.wikiMaterialBusy = "";
       if (!dialog.wikiMaterialClosed && !dialog.wikiMaterialOpeningPreview) {

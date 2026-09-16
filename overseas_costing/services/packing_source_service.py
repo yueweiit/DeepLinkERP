@@ -32,6 +32,10 @@ class PackingSourceIntegrityError(SourceIntegrityError, ValueError):
     """The selected server snapshot changed or failed identity verification."""
 
 
+class PackingSourceChangedError(PackingSourceIntegrityError):
+    """The remote manifest no longer matches the locally previewed snapshot."""
+
+
 def normalize_packing_source_kind(value: str) -> str:
     kind = str(value or "").strip().lower()
     if kind not in SOURCE_KIND_ALIASES:
@@ -577,33 +581,47 @@ def _resolve_trusted_packing_source(
     workbook_id, separator, sheet_id = resolved_source_id.partition(":")
     if not separator or not workbook_id or not sheet_id:
         raise ValueError("装箱计划表 Sheet 来源 ID 不合法。")
+    from overseas_costing.services.packing_sheet_cache_service import (
+        PackingSheetCacheError,
+        get_cached_sheet,
+    )
+
+    try:
+        return get_cached_sheet(resolved_source_id)
+    except PackingSheetCacheError as error:
+        raise PackingSourceIntegrityError(str(error)) from error
+
+
+def verify_current_wiki_source(batch_name: str, source_id: str) -> str:
+    """写入前只查询远端 manifest 哈希，不下载归档内容。"""
+
+    resolved_source_id = str(source_id or "").strip()
+    effective_source.validate_packing_source(batch_name, "wiki_sheet", resolved_source_id)
+    bundle = effective_source.current_source_bundle(batch_name)
+    context = (bundle or {}).get("context") or {}
+    if bundle and context.get("root_kind") == "expense":
+        cached = load_bound_wiki_snapshot(context, resolved_source_id)
+    else:
+        from overseas_costing.services.packing_sheet_cache_service import get_cached_sheet
+
+        cached = get_cached_sheet(resolved_source_id)
+    if not cached:
+        raise PackingSourceIntegrityError("该装箱计划 Sheet 尚无可用的本地缓存。")
+    workbook_id, separator, sheet_id = resolved_source_id.partition(":")
+    if not separator or not workbook_id or not sheet_id:
+        raise ValueError("装箱计划表 Sheet 来源 ID 不合法。")
     from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
 
-    clients = get_packing_runtime_clients()
-    manifest = clients.catalog.get_latest_snapshot(workbook_id, sheet_id)
-    if not manifest:
-        raise ValueError("装箱计划表 Sheet 尚无可用缓存，请先刷新资料。")
-    payload = clients.archive.download(manifest)
-    if str(payload.get("workbookId") or "") != workbook_id or str(payload.get("sheetId") or "") != sheet_id:
-        raise PackingSourceIntegrityError("装箱计划表快照与所选 Sheet 不一致。")
-    grid = build_grid_from_dingtalk_snapshot(payload)
-    source_hash = str(manifest.get("content_sha256") or "").strip().lower()
-    if not source_hash:
-        raise PackingSourceIntegrityError("装箱计划表缺少可验证归档哈希。")
-    return {
-        "source_hash": source_hash,
-        "source": {
-            "source_kind": kind,
-            "source_id": resolved_source_id,
-            "source_label": str(payload.get("sheetName") or sheet_id),
-            "workbook_id": workbook_id,
-            "sheet_id": sheet_id,
-            "sheet_name": payload.get("sheetName") or "",
-            "source_updated_at": payload.get("captureFinishedAt") or manifest.get("capture_finished_at"),
-        },
-        "grid": grid,
-        "preview": parse_packing_grid(grid),
-    }
+    manifest = get_packing_runtime_clients().catalog.get_latest_snapshot(workbook_id, sheet_id)
+    if not manifest or str(manifest.get("status") or "ready") != "ready":
+        raise PackingSourceIntegrityError("无法校验装箱计划 Sheet 的最新版本。")
+    remote_hash = str(manifest.get("content_sha256") or "").strip().lower()
+    cached_hash = str(cached.get("source_hash") or "").strip().lower()
+    if not remote_hash or remote_hash != cached_hash:
+        raise PackingSourceChangedError("装箱计划表已更新，请刷新所选 Sheet 后重新预览。")
+    if context:
+        return hashlib.sha256(f"{cached_hash}|{context['fingerprint']}".encode()).hexdigest()
+    return cached_hash
 
 
 def _comment_snapshot_preview(parsed: dict) -> dict:

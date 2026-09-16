@@ -129,6 +129,36 @@ def test_latest_snapshot_query_rejects_arbitrary_workbook_url() -> None:
         catalog.list_latest_snapshots("https://alidocs.dingtalk.com/i/nodes/secret")
 
 
+def test_reader_lists_complete_catalog_with_one_query() -> None:
+    cursor = FakeCursor(
+        rows=[
+            {
+                "workbook_id": "WB-2026",
+                "sheet_id": "st-ring",
+                "snapshot_id": 4,
+                "content_sha256": "a" * 64,
+            }
+        ]
+    )
+    connect_calls = []
+    catalog = PackingSheetCatalog(
+        _config(),
+        connect=lambda **kwargs: connect_calls.append(kwargs) or FakeConnection(cursor),
+    )
+
+    rows = catalog.list_catalog_snapshot()
+
+    assert rows[0]["sheet_id"] == "st-ring"
+    assert len(connect_calls) == 1
+    assert len(cursor.calls) == 1
+    sql, params = cursor.calls[0]
+    assert "packing_workbooks_v1" in sql
+    assert "packing_sheet_index_v1" in sql
+    assert "packing_sheet_snapshots_v1" in sql
+    assert "DISTINCT ON" in sql
+    assert params == ()
+
+
 def test_refresh_submitter_uses_separate_non_reader_connection_and_only_named_function() -> None:
     cursor = FakeCursor(one={"request_id": 77})
     calls = []

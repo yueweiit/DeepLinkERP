@@ -36,6 +36,9 @@ scheduler_events = {
     "cron": {
         "*/10 * * * *": ["overseas_costing.services.logistics_settlement.runtime.resume_pending"],
         "0 3 * * 0": ["overseas_costing.services.logistics_settlement.runtime.weekly_reconcile"],
+        "0 8,18 * * *": [
+            "overseas_costing.services.packing_sheet_cache_service.scheduled_refresh_catalog_cache",
+        ],
         "0 */6 * * *": [
             "overseas_costing.services.approval_repair_service.scheduled_audit_and_repair_dingtalk_approvals",
             "overseas_costing.services.logistics_settlement.runtime.scheduled_sync",

@@ -176,3 +176,29 @@ def test_unreadable_snapshot_is_never_auto_selected() -> None:
 
     assert result[0]["is_recommended"] is True
     assert result[0]["auto_select_recommended"] is False
+
+
+def test_unavailable_cached_sheet_is_never_recommended_from_retained_summary() -> None:
+    result = recommend_packing_sheets(
+        [
+            {
+                "source_id": "WB:removed",
+                "source_label": "指环扣-packing list2026.9.05",
+                "workbook_year": 2026,
+                "active": False,
+                "cache_status": "unavailable",
+                "content_hash": "a" * 64,
+            }
+        ],
+        batch_context={
+            "item_codes": ["SKU-1"],
+            "references": [],
+            "keywords": ["指环扣"],
+            "reference_date": "2026-09-03",
+        },
+        snapshot_summaries={"WB:removed": {"item_codes": ["SKU-1"], "references": []}},
+    )
+
+    assert result[0]["snapshot_status"] == "unavailable"
+    assert result[0]["is_recommended"] is False
+    assert result[0]["auto_select_recommended"] is False

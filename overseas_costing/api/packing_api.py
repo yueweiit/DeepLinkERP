@@ -8,7 +8,12 @@ import re
 import frappe
 
 from overseas_costing.integrations.dingtalk_packing_source import get_packing_runtime_clients
-from overseas_costing.services import freight_comparison_service, packing_snapshot_service
+from overseas_costing.services import (
+    effective_logistics_source as effective_source,
+    freight_comparison_service,
+    packing_sheet_cache_service,
+    packing_snapshot_service,
+)
 from overseas_costing.services.access_control import require_packing_workflow_permission
 
 
@@ -45,6 +50,22 @@ def _request_key(value: str) -> str:
 def list_packing_sources(batch_name):
     batch_name = require_packing_workflow_permission(batch_name, "read")
     return packing_snapshot_service.list_packing_sources(batch_name)
+
+
+@frappe.whitelist()
+def list_packing_sheet_catalog(batch_name):
+    """只读取本地物化缓存；打开弹窗不触发远端目录或归档读取。"""
+
+    batch_name = require_packing_workflow_permission(batch_name, "read")
+    return packing_snapshot_service.list_cached_packing_sheet_catalog(batch_name)
+
+
+@frappe.whitelist()
+def list_packing_attachment_sources(batch_name):
+    """懒加载附件来源，且不查询或解析远程装箱 Sheet。"""
+
+    batch_name = require_packing_workflow_permission(batch_name, "read")
+    return packing_snapshot_service.list_packing_sources(batch_name, include_wiki=False)
 
 
 @frappe.whitelist()
@@ -98,6 +119,12 @@ def request_packing_sheet_refresh(batch_name, workbook_id, sheet_id, request_id)
     current = _refresh_selected_wiki(batch_name, str(workbook_id), str(sheet_id), request_key)
     if current is not None:
         return current
+    packing_sheet_cache_service.register_manual_refresh(
+        batch_name=batch_name,
+        workbook_id=str(workbook_id),
+        sheet_id=str(sheet_id),
+        request_key=request_key,
+    )
     request_number = get_packing_runtime_clients().submitter.request_sheet_refresh(
         str(workbook_id), str(sheet_id), request_key, str(frappe.session.user)
     )
@@ -107,8 +134,7 @@ def request_packing_sheet_refresh(batch_name, workbook_id, sheet_id, request_id)
 @frappe.whitelist()
 def get_packing_refresh_status(batch_name, request_id):
     batch_name = require_packing_workflow_permission(batch_name, "read")
-    from overseas_costing.services.effective_logistics_source import current_source_bundle
-    bundle = current_source_bundle(batch_name)
+    bundle = effective_source.current_source_bundle(batch_name)
     if bundle and bundle['context']['root_kind'] == 'expense':
         from overseas_costing.services.logistics_settlement.store import Store
         from overseas_costing.services.logistics_settlement.model import digest
@@ -116,9 +142,23 @@ def get_packing_refresh_status(batch_name, request_id):
         if state and state.get('source_context') != bundle['context']:
             return {'status':'failed','error_message':'刷新期间采购支出来源已变化，请重新获取资料。'}
         return {key:state.get(key) for key in ('status','error_message','source_ids','source_context')} if state else {'status':'not_found'}
-    return get_packing_runtime_clients().catalog.get_refresh_status(_request_key(request_id)) or {
+    request_key = _request_key(request_id)
+    status = get_packing_runtime_clients().catalog.get_refresh_status(request_key) or {
         "status": "not_found"
     }
+    if str(status.get("status") or "") == "success":
+        try:
+            completed = packing_sheet_cache_service.complete_manual_refresh(request_key)
+        except Exception as error:
+            return {"status": "failed", "error_message": str(error)[:1000]}
+        if completed and completed.get("pending") is True:
+            return {"status": "running"}
+        if not completed or completed.get("ok") is not True:
+            return {
+                "status": "failed",
+                "error_message": "远端刷新已完成，但缺少可验证的本地物化请求。请重新刷新所选 Sheet。",
+            }
+    return status
 
 
 def _refresh_selected_wiki(batch_name, workbook_id, sheet_id, request_key):

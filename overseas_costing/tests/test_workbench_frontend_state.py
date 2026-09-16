@@ -310,11 +310,10 @@ def test_packing_flow_static_ui_contract() -> None:
     source_service = (ROOT / "services" / "packing_source_service.py").read_text(encoding="utf-8")
 
     for label in (
-        "本地上传",
-        "钉钉审批附件/评论",
-        "装箱计划表",
-        "刷新列表",
-        "刷新资料",
+            "本地上传",
+            "钉钉审批附件/评论",
+            "装箱计划表",
+            "刷新所选 Sheet",
         "系统推荐",
         "预览这张装箱计划",
         "共享箱级数据",
@@ -451,7 +450,8 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
         "overseas_costing.api.materials.set_shipping_quantity",
         "overseas_costing.api.materials.preview_material_import",
         "overseas_costing.api.materials.apply_material_import",
-        "overseas_costing.api.packing_api.list_packing_sources",
+        "overseas_costing.api.packing_api.list_packing_sheet_catalog",
+        "overseas_costing.api.packing_api.list_packing_attachment_sources",
         "overseas_costing.api.packing_api.request_packing_sheet_refresh",
         "overseas_costing.api.calculate.update_item_field",
         "overseas_costing.api.calculate.batch_update_items",
@@ -1332,16 +1332,22 @@ def test_fee_workspace_exclusion_is_in_trial_result_without_an_allocation_column
     assert result == {"basis": False, "rawCode": False, "excluded": True, "chinese": True}
 
 
-def test_wiki_material_source_dialog_refreshes_globally_and_previews_each_sheet() -> None:
+def test_wiki_material_source_dialog_uses_local_catalog_and_refreshes_only_selected_sheet() -> None:
     workspace = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     workspace += (PARTS / "79-material-import-grid.js").read_text(encoding="utf-8")
 
-    assert "request_packing_workbook_refresh" in workspace
-    assert 'data-action="mf-wiki-refresh-all"' in workspace
+    assert "overseas_costing.api.packing_api.list_packing_sheet_catalog" in workspace
+    assert "overseas_costing.api.packing_api.list_packing_attachment_sources" in workspace
+    assert 'data-action="mf-wiki-refresh-selected"' in workspace
     assert 'data-action="mf-wiki-preview-card"' in workspace
-    assert "wikiMaterialRefreshedSources = new Set()" in workspace
-    assert "refreshWikiMaterialCatalogs" in workspace
-    assert "previewFreshWikiMaterialImport" in workspace
+    assert "loadMaterialAttachmentSources" in workspace
+    assert "refreshSelectedWikiMaterialSource" in workspace
+    assert 'data-action="mf-wiki-refresh-all"' not in workspace
+    assert "request_packing_workbook_refresh" not in workspace
+    assert "previewFreshWikiMaterialImport" not in workspace
+    assert "wikiMaterialRefreshedSources" not in workspace
+    assert '缓存已过期' in workspace
+    assert '刷新所选 Sheet' in workspace
     assert "wikiMaterialClosed" in workspace
     assert "hide.bs.modal.ocwMfWiki" in workspace
     assert "preserveOnError" in workspace
@@ -1349,6 +1355,21 @@ def test_wiki_material_source_dialog_refreshes_globally_and_previews_each_sheet(
     assert "系统只读取服务器已授权的钉钉装箱计划表" not in workspace
     assert "预览所选 Sheet" not in workspace
     assert "确认写入物料表" in workspace
+
+
+def test_packing_freight_flow_uses_local_catalog_and_selected_sheet_refresh() -> None:
+    packing_flow = (PARTS / "86-packing-flow.js").read_text(encoding="utf-8")
+
+    assert "overseas_costing.api.packing_api.list_packing_sheet_catalog" in packing_flow
+    assert "overseas_costing.api.packing_api.list_packing_attachment_sources" in packing_flow
+    assert "request_packing_workbook_refresh" not in packing_flow
+    assert "refreshPackingWorkbook" not in packing_flow
+    assert 'data-action="packing-refresh-list"' not in packing_flow
+    assert 'data-action="packing-refresh-selected"' in packing_flow
+    assert "刷新所选 Sheet" in packing_flow
+    assert "wikiPreviewReady" in packing_flow
+    assert '["ready", "stale"].includes' in packing_flow
+    assert "selectedSource?.content_hash" in packing_flow
 
 
 def test_recalculate_ui_blocks_invalid_approval_batches() -> None:

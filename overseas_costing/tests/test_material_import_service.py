@@ -1221,6 +1221,74 @@ def test_apply_rejects_changed_source_before_writing() -> None:
     assert repository.rollbacks == 1
 
 
+def test_apply_verifies_wiki_manifest_before_taking_write_lock() -> None:
+    from overseas_costing.services.packing_source_service import PackingSourceChangedError
+
+    repository = FakeRepository()
+    preview = preview_material_import(
+        "B1",
+        "wiki_sheet",
+        "WB-1:ST-1",
+        repository=repository,
+        resolver=_wiki_resolver(),
+        signing_key=b"secret",
+    )
+
+    def changed(_batch_name, _source_id):
+        raise PackingSourceChangedError("已更新")
+
+    result = apply_material_import(
+        "B1",
+        preview["preview_revision"],
+        {},
+        "EDIT-1",
+        "BM1",
+        repository=repository,
+        resolver=_wiki_resolver(),
+        verifier=changed,
+        signing_key=b"secret",
+    )
+
+    assert result == {
+        "ok": False,
+        "source_changed": True,
+        "code": "SOURCE_CHANGED",
+        "message": "装箱计划表已更新，请刷新所选 Sheet 后重新预览。",
+    }
+    assert repository.write_checks == []
+    assert repository.writes == []
+
+
+def test_apply_fails_closed_when_wiki_manifest_cannot_be_verified() -> None:
+    repository = FakeRepository()
+    preview = preview_material_import(
+        "B1",
+        "wiki_sheet",
+        "WB-1:ST-1",
+        repository=repository,
+        resolver=_wiki_resolver(),
+        signing_key=b"secret",
+    )
+
+    result = apply_material_import(
+        "B1",
+        preview["preview_revision"],
+        {},
+        "EDIT-1",
+        "BM1",
+        repository=repository,
+        resolver=_wiki_resolver(),
+        verifier=lambda *_args: (_ for _ in ()).throw(RuntimeError("remote unavailable")),
+        signing_key=b"secret",
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "SOURCE_VERIFICATION_FAILED"
+    assert "remote unavailable" in result["message"]
+    assert repository.write_checks == []
+    assert repository.writes == []
+
+
 def test_apply_rejects_batch_changed_after_preview_before_writing() -> None:
     repository = FakeRepository()
     preview = preview_material_import(
