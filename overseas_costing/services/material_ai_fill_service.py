@@ -2832,7 +2832,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-8'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-9'
 
 
 def _source_review_fingerprint(
@@ -2853,6 +2853,28 @@ def _source_review_fingerprint(
             "context": _source_review_context(context),
         }).encode("utf-8")
     ).hexdigest()
+
+
+def _use_logistics_reconciliation(proposal: dict | None, items: list[dict]) -> bool:
+    """Use every complete logistics goods table as the shipment authority.
+
+    Previously the first review only activated reconciliation when it expanded
+    the saved rows.  A logistics approval containing one material therefore
+    could not contract a purchase-derived two-row table until a later run had
+    already stamped logistics metadata.
+    """
+    if not proposal:
+        return False
+    if proposal.get("blocked"):
+        return True
+    payload = proposal.get("payload") or {}
+    if payload.get("scope_status") == "AUTHORITATIVE" and payload.get("rows"):
+        return True
+    from overseas_costing.services.logistics_autofill_service import extra
+    return (
+        len(payload.get("rows") or []) > len(items or [])
+        or any(extra(row).get("logistics_row") for row in items or [])
+    )
 
 
 def _selected_ids_from_run_manifest(value: Any) -> list[str] | None:
@@ -5748,7 +5770,7 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 from overseas_costing.services.logistics_purchase_facts_service import enrich_logistics_purchase_facts
                 enriched = enrich_logistics_purchase_facts(items, sources, fx_rates=context.get("fx_rates") or {})
                 proposed = build_logistics_reconciliation(enriched["items"], main_source)
-                if proposed and (proposed.get("blocked") or len(proposed["payload"]["rows"]) > len(items) or any(extra(row).get("logistics_row") for row in enriched["items"])):
+                if _use_logistics_reconciliation(proposed, enriched["items"]):
                     reconciliation = proposed
                     reconciliation["payload"]["unresolved"].extend(enriched["unresolved"])
                     read_items = deepcopy(proposed["payload"]["rows"])
@@ -5928,7 +5950,12 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                             build_system_approval_proposals,
                         )
 
-                        approval_proposals = [] if reconciliation else build_system_approval_proposals(
+                        # Keep deterministic physical facts from the logistics
+                        # form even when its goods table also defines the row
+                        # scope.  The merge below rejects quantity overrides
+                        # but safely folds weight/volume/project fields into
+                        # the authoritative logistics rows.
+                        approval_proposals = build_system_approval_proposals(
                             read_items,
                             source,
                             transport_mode=str(context.get("transport_mode") or ""),

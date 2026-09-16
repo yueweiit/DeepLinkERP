@@ -89,6 +89,25 @@ def test_authoritative_logistics_rows_soft_exclude_unmatched_purchase_materials(
     assert proposal["payload"]["scope_status"] == "AUTHORITATIVE"
 
 
+def test_ai_review_uses_authoritative_logistics_scope_when_it_contracts_existing_rows():
+    from overseas_costing.services.material_ai_fill_service import _use_logistics_reconciliation
+
+    proposal = {
+        "proposal_type": "logistics_reconcile",
+        "blocked": False,
+        "payload": {
+            "scope_status": "AUTHORITATIVE",
+            "rows": [{"name": "I-145", "material_code": "MWV101145"}],
+            "excluded_item_names": ["I-144"],
+        },
+    }
+
+    assert _use_logistics_reconciliation(proposal, [
+        {"name": "I-144", "material_code": "MWV101144", "extra_json": "{}"},
+        {"name": "I-145", "material_code": "MWV101145", "extra_json": "{}"},
+    ]) is True
+
+
 def test_manual_material_outside_logistics_scope_is_retained_and_not_auto_excluded():
     from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
 
