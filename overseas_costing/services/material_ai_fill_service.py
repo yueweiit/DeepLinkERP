@@ -47,6 +47,7 @@ ALLOWED_FIELDS = (
     "gross_weight_kg",
     "volume_m3",
     "chargeable_weight_kg",
+    "package_count",
     "project_collection",
 )
 SOURCE_FIELD_BY_AI_FIELD = {
@@ -56,6 +57,7 @@ SOURCE_FIELD_BY_AI_FIELD = {
     "gross_weight_kg": "gross_weight_kg",
     "volume_m3": "volume_m3",
     "chargeable_weight_kg": "chargeable_weight_kg",
+    "package_count": "package_count",
     "project_collection": "project_collection",
 }
 NUMERIC_FIELDS = frozenset(
@@ -65,6 +67,7 @@ NUMERIC_FIELDS = frozenset(
         "gross_weight_kg",
         "volume_m3",
         "chargeable_weight_kg",
+        "package_count",
     }
 )
 PREVIEW_READY_STATES = ("READY", "READY_WITH_WARNINGS")
@@ -2164,7 +2167,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-6'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-7'
 
 
 def _source_review_fingerprint(
@@ -3375,6 +3378,39 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
     if preview.get("ok") is False and not blockers:
         preview.setdefault("autofill_warnings", []).append("装箱解析未通过校验，未自动填充。")
         return []
+    if source.get("scoped_packing"):
+        # Payment-source rows have already been narrowed to an authenticated
+        # shipment line by approval/waybill identity.  Re-running them through
+        # the generic workbook completeness policy incorrectly drops valid
+        # row-level physical facts (for example gross weight and volume when a
+        # monthly statement has no net-weight column).  Project each explicit
+        # field directly, but only after one existing material matches.
+        candidates = []
+        for row in preview.get("material_rows") or []:
+            targets = material_import_service._match_wiki_candidates(items, row)
+            if len(targets) != 1:
+                continue
+            item_name = str(targets[0].get("name") or "")
+            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+            source_row = evidence.get("row") or row.get("source_row")
+            ref_source = {
+                **source,
+                **({"sheet_name": evidence.get("sheet")} if evidence.get("sheet") else {}),
+            }
+            for fieldname in ALLOWED_FIELDS:
+                source_field = SOURCE_FIELD_BY_AI_FIELD.get(fieldname, fieldname)
+                value = row.get(source_field)
+                if fieldname in blocked_fields or _is_blank(value):
+                    continue
+                candidates.append({
+                    "item_name": item_name,
+                    "fieldname": fieldname,
+                    "suggested_value": value,
+                    "confidence": 0.99,
+                    "reason": "支付附件已按本票审批号或运单号精确匹配。",
+                    "source_refs": [_source_reference(ref_source, row=source_row)],
+                })
+        return candidates
     if logistics_rows:
         original_preview = preview
         preview = deepcopy(preview)
@@ -4711,6 +4747,17 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                             source_index, source, source_candidates, document
                         )
                     )
+                elif unified_review and source_candidates:
+                    # Server-scoped payment rows and other deterministic
+                    # non-workbook sources used to stop at the legacy
+                    # candidate list.  The unified review consumes proposals,
+                    # so publish those exact fields into the same server-owned
+                    # path used by Excel without asking the model to rediscover
+                    # them from text.
+                    for _index, _source, proposals in _excel_review_entries(
+                        source_index, source, source_candidates, document
+                    ):
+                        deterministic_proposals.extend(proposals)
                 if has_document_evidence or source_candidates:
                     field_count, page_count = _source_document_counts(document)
                     detail = "已解析"

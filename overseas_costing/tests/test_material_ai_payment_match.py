@@ -514,6 +514,132 @@ def test_payment_preview_uses_only_matched_line_when_catalog_row_is_unreadable(m
     assert "44075.13" not in preview["scoped_text"]
 
 
+def test_exact_monthly_payment_row_becomes_complete_payment_stage_field_candidates(monkeypatch):
+    from overseas_costing.services import material_ai_fill_service as ai_fill
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import packing_selection
+
+    store, ledger, batch, version, logistics, source, candidate = payment_setup(
+        structured=True,
+        scope="freight",
+        amount="3414.19",
+        mode="EXPRESS",
+    )
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        amount="3414.19",
+        currency="RMB",
+        billing_weight="46",
+        cargo_text="MWV101144 IP17PRO TPU\n规格33*20*23,重量：42.05kg\n1套模具+3个手机壳",
+        packing={
+            "material_code_hints": ["MWV101144", "IP17PRO"],
+            "chargeable_weight_kg": "46",
+            "gross_weight_kg": "42.05",
+            "package_count": "1",
+            "dimensions_cm": ["33", "20", "23"],
+            "volume_m3": "0.01518",
+        },
+        evidence={
+            "document_id": "payment-document-1",
+            "file_name": "DHL(6.29-7.24)快递明细.xlsx",
+            "sheet": "DHL快递",
+            "row": 14,
+        },
+    )
+    store.put(
+        "freight_line",
+        {
+            "id": line["id"],
+            "source_id": line["source_id"],
+            "snapshot": line["snapshot"],
+            "line_key": line["line_key"],
+            "waybill": line["waybill"],
+            "approval_no": line["approval_no"],
+            "charge_key": line["charge_key"],
+            "data": dumps(line),
+        },
+    )
+    candidate.update(method="explicit", issues=[])
+    store.put("freight_candidate", _candidate_values(candidate))
+    monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, []))
+
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    payment_source = service.preview_sources(
+        store, ledger, batch["name"], version["name"], reference, freight_mode=True
+    )[0]
+    items = [
+        {
+            "name": "ITEM-144",
+            "stable_line_key": "ITEM-144",
+            "material_code": "MWV101144",
+            "product_name": "薇武士IP17 PRO",
+            "actual_shipped_qty": "1",
+            "quantity": "1",
+            "gross_weight_kg": "0",
+            "volume_m3": "0",
+            "extra_json": "{}",
+        },
+        {
+            "name": "ITEM-145",
+            "stable_line_key": "ITEM-145",
+            "material_code": "MWV101145",
+            "product_name": "薇武士IP17 PRO MAX",
+            "actual_shipped_qty": "1",
+            "quantity": "1",
+            "gross_weight_kg": "0",
+            "volume_m3": "0",
+            "extra_json": "{}",
+        },
+    ]
+
+    candidates, document = ai_fill._read_source(items, payment_source)
+
+    assert {
+        (row["item_name"], row["fieldname"], row["suggested_value"])
+        for row in candidates
+    } == {
+        ("ITEM-144", "gross_weight_kg", "42.05"),
+        ("ITEM-144", "chargeable_weight_kg", "46"),
+        ("ITEM-144", "package_count", "1"),
+        ("ITEM-144", "volume_m3", "0.01518"),
+    }
+    assert all(row["source_refs"][0]["row"] == 14 for row in candidates)
+    assert all(row["source_refs"][0]["sheet"] == "DHL快递" for row in candidates)
+
+    document["document_id"] = "DOC-1"
+    proposals = ai_fill._excel_review_entries(
+        0, payment_source, candidates, document
+    )[0][2]
+    normalized = ai_fill.normalize_source_review_proposals(
+        proposals,
+        items,
+        [document],
+        trusted_system_proposal_ids={row["proposal_id"] for row in proposals},
+    )
+    from overseas_costing.services import material_ai_row_selection
+
+    catalog = material_ai_row_selection.catalog(
+        items, normalized, [], {}, run_id="RUN-PAYMENT", sources=[payment_source]
+    )
+    payment_stage = catalog["stage_snapshots"][0]
+    payment_item = next(row for row in payment_stage["rows"] if row["item_name"] == "ITEM-144")
+    assert set(payment_item["field_candidates"]) == {
+        "gross_weight_kg", "chargeable_weight_kg", "package_count", "volume_m3",
+    }
+    assert {
+        row["fieldname"]: row["suggested_value"]
+        for row in catalog["field_candidates"]
+        if row["default_selected"]
+    } == {
+        "gross_weight_kg": "42.05",
+        "chargeable_weight_kg": "46",
+        "package_count": "1",
+        "volume_m3": "0.01518",
+    }
+
+
 def test_payment_preview_keeps_matched_process_when_no_shipment_line_is_safe(monkeypatch):
     from overseas_costing.services import material_ai_payment_match as service
     from overseas_costing.services.logistics_settlement import packing_selection

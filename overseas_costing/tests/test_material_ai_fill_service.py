@@ -2454,6 +2454,7 @@ def test_apply_validation_rejects_purchase_facts_foreign_rows_and_negative_numbe
         "gross_weight_kg",
         "volume_m3",
         "chargeable_weight_kg",
+        "package_count",
         "project_collection",
     }
     with pytest.raises(ValueError, match="不允许 AI 修改"):
@@ -2469,6 +2470,11 @@ def test_apply_validation_rejects_purchase_facts_foreign_rows_and_negative_numbe
     with pytest.raises(ValueError, match="不能为负数"):
         validate_apply_updates(
             [{"item_name": "ITEM-1", "fieldname": "gross_weight_kg", "value": -1}],
+            _items(),
+        )
+    with pytest.raises(ValueError, match="不能为负数"):
+        validate_apply_updates(
+            [{"item_name": "ITEM-1", "fieldname": "package_count", "value": -1}],
             _items(),
         )
 
