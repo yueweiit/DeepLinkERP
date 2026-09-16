@@ -435,7 +435,7 @@ def _stable_item_index(items):
     return index
 
 
-def _packing_key_aliases(items,catalog,projection):
+def _packing_key_aliases(items,catalog,projection,candidates=None):
     projected_by_name={str(row.get('name') or ''):row for row in projection.get('rows') or []}
     aliases={}
     for item in items or []:
@@ -449,6 +449,33 @@ def _packing_key_aliases(items,catalog,projection):
         source_key=str((candidate.get('values') or {}).get('stable_line_key') or '').strip()
         current=str((target or {}).get('stable_line_key') or '').strip()
         if source_key and current:aliases[source_key]=current
+    # Packing candidates are generated before the authoritative logistics
+    # scope is projected.  A source row can therefore carry a different line
+    # identity from the persisted material that survives the projection.  The
+    # candidate's server-generated material label is a safe final bridge when
+    # it uniquely matches a projected material code/name; never guess on an
+    # ambiguous label.
+    projected_by_label={}
+    for row in projection.get('rows') or []:
+        current=str(row.get('stable_line_key') or (
+            f"legacy:{row.get('name')}" if row.get('name') else '')).strip()
+        if not current:
+            continue
+        for value in (row.get('material_code'),row.get('product_name')):
+            label=str(value or '').strip().casefold()
+            if label:
+                projected_by_label.setdefault(label,[]).append(current)
+    for candidate in candidates or []:
+        member_keys=list(candidate.get('member_keys') or [])
+        member_labels=list(candidate.get('member_labels') or [])
+        if len(member_keys)!=len(member_labels):
+            continue
+        for source_key,label_value in zip(member_keys,member_labels):
+            source_key=str(source_key or '').strip()
+            matches=list(dict.fromkeys(
+                projected_by_label.get(str(label_value or '').strip().casefold(),[])))
+            if source_key and len(matches)==1:
+                aliases[source_key]=matches[0]
     return aliases
 
 
@@ -575,7 +602,7 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choi
         selected_packing_groups,single_assignments,validated_assignments=(
             _selected_packing_assignments(
                 projected_items,candidates,packing_assignments,
-                key_aliases=_packing_key_aliases(items,catalog,projection),
+                key_aliases=_packing_key_aliases(items,catalog,projection,candidates),
             ))
         selected_packing_group_ids=[str(candidate.get('candidate_id')) for candidate in selected_packing_groups]
     else:
@@ -630,7 +657,7 @@ def _reconstruct_locked_preview(repo,batch_name,run,receipt,draft):
         selected_packing_groups,single_assignments,validated_assignments=(
             _selected_packing_assignments(
                 projected_items,candidates,receipt.get('selected_packing_assignments') or {},
-                key_aliases=_packing_key_aliases(items,catalog,current),
+                key_aliases=_packing_key_aliases(items,catalog,current,candidates),
             ))
         validated_group_ids=[str(candidate.get('candidate_id')) for candidate in selected_packing_groups]
     else:
