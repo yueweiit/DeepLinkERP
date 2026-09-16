@@ -4315,12 +4315,14 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
     )
     joint_pattern=re.compile(
         r'(?:共同|一起|共用|共享)[^\n，。；;!！?？]{0,12}'
-        r'(?:装|包装|箱)|(?:合箱|合并装箱|同箱)',
+        r'(?:装|包装|箱)|(?:合箱|合并装箱|同箱)'
+        r'|(?:合为|合成)一箱|(?:装在|装入|放在)同一箱',
         re.I,
     )
     negated_joint_pattern=re.compile(
         r'(?:(?:并非|不(?!影响|妨碍)|[未没无勿禁])'
-        r'[^\n，。；;!！?？]{0,6}(?:一起|共同|合箱|合并装箱|同箱|一箱|共用|共享))'
+        r'[^\n，。；;!！?？]{0,6}(?:一起|共同|合箱|合并装箱|同箱|一箱|共用|共享'
+        r'|(?:合为|合成)一箱|(?:装在|装入|放在)同一箱))'
         r'|(?:(?:分开|分别|单独|拆分)\s*(?:装|包装|装箱|箱))'
         r'|(?:(?:各自|各装|每(?:款|种))[^\n，。；;!！?？]{0,3}一箱|一箱一(?:个|款|种))',
         re.I,
@@ -4356,14 +4358,15 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             ):
                 clause_members.append(key)
                 package_ids_by_member[key].update(clause_package_ids)
-        affirmative_joint=bool(joint_pattern.search(clause))
+        semantic_clause=re.sub(r'[\s:：/\\_+\-—–·•()（）\[\]【】、]+','',clause)
+        affirmative_joint=bool(joint_pattern.search(semantic_clause))
         clause_evidence.append({
             'member_keys':clause_members,
             'package_ids':clause_package_ids,
             'affirmative_joint':affirmative_joint,
             'negated_joint':bool(
-                negated_joint_pattern.search(clause)
-                or ('一箱' in clause and not affirmative_joint)
+                negated_joint_pattern.search(semantic_clause)
+                or ('一箱' in semantic_clause and not affirmative_joint)
             ),
         })
     if len(all_package_ids)==1:

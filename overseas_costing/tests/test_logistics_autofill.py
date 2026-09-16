@@ -399,7 +399,21 @@ def test_ambiguous_or_separate_one_box_wording_vetoes_shared_waybill_inference(w
 
 @pytest.mark.parametrize(
     "wording",
-    ["一起装箱", "共同装箱", "共同装成一箱", "合箱", "合并装箱", "同箱"],
+    [
+        "一起装箱",
+        "共同装箱",
+        "共同装成一箱",
+        "合箱",
+        "合并装箱",
+        "同箱",
+        "合为一箱",
+        "合成一箱",
+        "装在同一箱",
+        "装入同一箱",
+        "放在同一箱",
+        "合 为 一箱",
+        "装-在-同-一-箱",
+    ],
 )
 def test_affirmative_joint_language_groups_exact_members(wording):
     candidate = _group_candidate_for_comment(
@@ -409,6 +423,19 @@ def test_affirmative_joint_language_groups_exact_members(wording):
     assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
         ("one_box_group", ["L1", "L2"]),
     ]
+
+
+@pytest.mark.parametrize(
+    "wording",
+    ["不合为一箱", "不要装在同一箱", "不 要 装-入-同-一-箱"],
+)
+def test_negated_shared_one_box_construction_vetoes_shared_waybill(wording):
+    candidate = _group_candidate_for_comment(
+        f"DHL 单号1841361513 MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
 
 
 def test_negative_clause_for_different_member_pair_does_not_veto_candidate_pair():
