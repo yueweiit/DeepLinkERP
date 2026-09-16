@@ -374,7 +374,30 @@ def test_exact_member_negative_clause_vetoes_shared_waybill_inference():
     assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
 
 
-@pytest.mark.parametrize("wording", ["一起装箱", "共同装箱", "合箱", "合并装箱", "同箱", "一箱"])
+@pytest.mark.parametrize("wording", ["各装一箱", "每款一箱", "各自一箱", "一箱一个产品", "一箱"])
+def test_bare_or_separate_one_box_wording_never_authorizes_joint_group(wording):
+    candidate = _group_candidate_for_comment(
+        f"MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
+
+@pytest.mark.parametrize("wording", ["各装一箱", "每款一箱", "各自一箱", "一箱一个产品"])
+def test_separate_one_box_wording_vetoes_shared_waybill_inference(wording):
+    candidate = _group_candidate_for_comment(
+        f"DHL 单号1841361513 MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
+
+@pytest.mark.parametrize(
+    "wording",
+    ["一起装箱", "共同装箱", "共同装成一箱", "合箱", "合并装箱", "同箱"],
+)
 def test_affirmative_joint_language_groups_exact_members(wording):
     candidate = _group_candidate_for_comment(
         f"MWV101144 MWV101145 {wording}\n规格33*20*23,重量42.05kg"
@@ -383,6 +406,48 @@ def test_affirmative_joint_language_groups_exact_members(wording):
     assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
         ("one_box_group", ["L1", "L2"]),
     ]
+
+
+def test_negative_clause_for_different_member_pair_does_not_veto_candidate_pair():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 MOLD-1 不一起装箱；MWV101144 MWV101145 一起装箱\n"
+        "规格33*20*23,重量42.05kg"
+    )
+
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("one_box_group", ["L1", "L2"]),
+    ]
+
+
+def test_negative_clause_for_same_member_pair_vetoes_candidate_pair():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 MWV101145 不一起装箱；MWV101144 MWV101145 一起装箱\n"
+        "规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
+
+def test_three_member_candidate_is_not_vetoed_by_negative_subset_relationship():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 MOLD-1 不一起装箱；"
+        "MWV101144 MWV101145 MOLD-1 一起装箱\n规格33*20*23,重量42.05kg"
+    )
+
+    assert len(candidate["assignment_options"]) == 1
+    assert candidate["assignment_options"][0]["mode"] == "one_box_group"
+    assert set(candidate["assignment_options"][0]["member_keys"]) == {"L1", "L2", "L3"}
+
+
+def test_negative_superset_relationship_vetoes_two_member_candidate():
+    candidate = _group_candidate_for_comment(
+        "MWV101144 MWV101145 MOLD-1 不一起装箱；"
+        "MWV101144 MWV101145 一起装箱\n规格33*20*23,重量42.05kg"
+    )
+
+    assert candidate["default_selected"] is False
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
 
 def test_worker_previews_eight_rows_and_final_freight_without_business_write(monkeypatch):
     from overseas_costing.services import material_ai_fill_service as service

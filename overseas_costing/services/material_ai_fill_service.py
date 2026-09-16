@@ -4315,13 +4315,14 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
     )
     joint_pattern=re.compile(
         r'(?:共同|一起|共用|共享)[^\n，。；;!！?？]{0,12}'
-        r'(?:装|包装|箱)|(?:合箱|合并装箱|同箱|一箱)',
+        r'(?:装|包装|箱)|(?:合箱|合并装箱|同箱)',
         re.I,
     )
     negated_joint_pattern=re.compile(
         r'(?:(?:并非|不(?!影响|妨碍)|[未没无勿禁])'
         r'[^\n，。；;!！?？]{0,6}(?:一起|共同|合箱|合并装箱|同箱|一箱|共用|共享))'
-        r'|(?:(?:分开|分别|单独|拆分)\s*(?:装|包装|装箱|箱))',
+        r'|(?:(?:分开|分别|单独|拆分)\s*(?:装|包装|装箱|箱))'
+        r'|(?:(?:各自|各装|每(?:款|种))[^\n，。；;!！?？]{0,3}一箱|一箱一(?:个|款|种))',
         re.I,
     )
 
@@ -4390,7 +4391,10 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         return any(
             evidence['negated_joint']
             and (
-                bool(member_keys.intersection(evidence['member_keys']))
+                (
+                    bool(member_keys)
+                    and member_keys.issubset(set(evidence['member_keys']))
+                )
                 or bool(package_id and package_id in evidence['package_ids'])
             )
             for evidence in clause_evidence
