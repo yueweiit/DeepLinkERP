@@ -454,6 +454,56 @@ def test_material_scope_does_not_change_payment_first_field_defaults():
     }
 
 
+def test_ambiguous_logistics_row_falls_back_to_purchase_without_emptying_catalog():
+    items = [
+        item('I1', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
+        item('I2', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
+    ]
+    sources = [
+        _stage_source('international_logistics', 'LOG'),
+        _stage_source('purchase', 'PUR'),
+    ]
+    ambiguous = reconcile([source('SAME', gross_weight_kg=7, actual_shipped_qty='1')])
+    ambiguous['proposal_id'] = 'LOG-AMBIGUOUS'
+    ambiguous['source_refs'] = [{'source_id': 'LOG'}]
+    purchase = _stage_update('PUR-P', 'I1', 'PUR', gross_weight_kg=5)
+
+    review = catalog(items, [ambiguous, purchase], sources)
+
+    assert review['material_scope_source'] == 'purchase'
+    assert review['material_scope_fallback'] is True
+    assert 'fallback' in review['material_scope_reason'].lower() or '回落' in review['material_scope_reason']
+    assert {
+        row['target_item_name'] for row in review['rows'] if row['origin'] == 'current'
+    } == {'I1'}
+    assert any(
+        candidate['workflow_stage'] == 'purchase'
+        and candidate['item_name'] == 'I1'
+        for candidate in review['field_candidates']
+    )
+
+
+def test_ambiguous_logistics_without_lower_scope_keeps_current_purchase_baseline():
+    items = [
+        item('I1', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
+        item('I2', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
+    ]
+    sources = [_stage_source('international_logistics', 'LOG')]
+    ambiguous = reconcile([source('SAME', gross_weight_kg=7, actual_shipped_qty='1')])
+    ambiguous['proposal_id'] = 'LOG-AMBIGUOUS'
+    ambiguous['source_refs'] = [{'source_id': 'LOG'}]
+
+    review = catalog(items, [ambiguous], sources)
+
+    assert review['material_scope_source'] == 'purchase'
+    assert review['material_scope_constrained'] is False
+    assert review['material_scope_fallback'] is True
+    assert {
+        row['target_item_name'] for row in review['rows'] if row['origin'] == 'current'
+    } == {'I1', 'I2'}
+    assert review['material_scope_reason']
+
+
 def test_unmatched_valid_logistics_material_defines_scope_before_matched_payment():
     items = [item('I1', 'PURCHASE-SKU', gross_weight_kg=None)]
     sources = [
@@ -1359,7 +1409,7 @@ def test_single_proposal_referencing_payment_and_purchase_is_a_conflict_in_both_
 
 
 def test_row_review_policy_is_stage_snapshot_version():
-    assert service.POLICY == 'ai-field-review-5'
+    assert service.POLICY == 'ai-field-review-6'
 
 
 def test_fee_stage_snapshots_are_fixed_even_when_no_fee_source_exists():

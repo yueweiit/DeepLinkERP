@@ -177,6 +177,8 @@ def run(store,job_id,call_model,model='',current_version=None):
                             job['no_match']+=1;continue
                         line_ids=proposal.get('line_ids') or []
                         if not isinstance(line_ids,list) or len(line_ids)>50 or len(set(line_ids))!=len(line_ids):raise ValueError('AI 明细选择无效')
+                        if not line_ids:
+                            job['no_match']+=1;continue
                         input_allowed={line['id'] for line in source_summary['lines']}
                         if set(line_ids)-input_allowed:raise ValueError('AI 选择了未授权明细')
                         source=store.get('source',proposal['expense_id'],lock=True);logistics=store.get('source',job['logistics_id'],lock=True)

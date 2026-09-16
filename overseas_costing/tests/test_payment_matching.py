@@ -325,6 +325,22 @@ def test_identifierless_payment_rows_require_unique_current_logistics_material_m
     }
     assert _shipment_material_lines(logistics, [foreign_code_same_name]) == []
 
+    short_name_logistics = {
+        'goods': [{'material_code': '', 'product_name': 'PRO'}],
+        'identifiers': [],
+    }
+    sibling_variant = {
+        'id': 'PRO-MAX', 'waybill': '', 'approval_no': '',
+        'cargo_text': 'IP17 PRO MAX 手机壳', 'packing': {'material_code_hints': []},
+    }
+    assert _shipment_material_lines(short_name_logistics, [sibling_variant]) == []
+
+    full_name_logistics = {
+        'goods': [{'material_code': '', 'product_name': '薇武士 IP17 PRO'}],
+        'identifiers': [],
+    }
+    assert _shipment_material_lines(full_name_logistics, [name_only]) == [name_only]
+
 
 def test_stale_freight_line_snapshot_is_not_an_exact_source_or_payment_score():
     from overseas_costing.services.logistics_settlement import freight_matching
@@ -459,6 +475,30 @@ def test_payment_ai_can_save_the_unique_authorized_identifierless_material_line(
     saved = store.find("freight_candidate", expense_id=source["id"])[0]
     assert result["status"] == "completed" and result["recommended"] == 1
     assert saved["line_ids"] == ["payment-line-1"]
+
+
+def test_payment_ai_high_confidence_empty_line_selection_is_not_recommended():
+    from overseas_costing.services.logistics_settlement import payment_ai_matching
+
+    store, _ledger, batch, version, logistics, source, _candidate = (
+        _payment_ai_material_scope_context()
+    )
+    job = payment_ai_matching.start(
+        store, logistics["id"], batch["name"], version["name"], "user"
+    )
+
+    result = payment_ai_matching.run(
+        store,
+        job["id"],
+        lambda _messages: {"matches": [{
+            "expense_id": source["id"], "confidence": 1,
+            "reason": "只判断流程相关但未选明细", "line_ids": [],
+        }]},
+        current_version=lambda _batch: version["name"],
+    )
+
+    assert result["recommended"] == 0
+    assert not store.find("freight_candidate", expense_id=source["id"])
 
 
 def test_payment_ai_has_no_work_when_source_has_no_shipment_scoped_lines():

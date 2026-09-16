@@ -1,7 +1,7 @@
 """Durable, per-shipment matching; monthly statements are not globally occupied."""
 import re
 from datetime import datetime, timedelta, timezone
-from .model import digest, dumps, norm
+from .model import digest, dumps, identity, norm
 from .freight_lines import POLICY, lines_for_source, matching_lines
 from .ai_matching import save, safe_text
 from .jobs import utcnow
@@ -10,6 +10,25 @@ RULE_POLICY = 'shipment-payment-rules-4'
 CANDIDATE_SCOPE_POLICY = 'shipment-payment-line-scope-2'
 HINT_LIMITS = {'waybill':160, 'supplier':200, 'project':200, 'date':80, 'description':500}
 CANDIDATE_PRIORITY = {'manual':400, 'explicit':300, 'identifier':200, 'deepseek':100, 'reopened':0}
+
+
+def _product_name_tokens(value):
+    return re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]+',identity(value))
+
+
+def _complete_product_name_match(product_name,cargo_text):
+    """Match a complete name identity, not a fragment of a sibling model."""
+
+    expected=_product_name_tokens(product_name);actual=_product_name_tokens(cargo_text)
+    if not expected or len(expected)>len(actual):return False
+    for start in range(len(actual)-len(expected)+1):
+        if actual[start:start+len(expected)]!=expected:continue
+        before=actual[start-1] if start else ''
+        after=actual[start+len(expected)] if start+len(expected)<len(actual) else ''
+        if before.isascii() and before.isalnum() and expected[0].isascii():continue
+        if after.isascii() and after.isalnum() and expected[-1].isascii():continue
+        return True
+    return False
 
 
 def _shipment_material_lines(logistics, lines):
@@ -48,13 +67,13 @@ def _shipment_material_lines(logistics, lines):
         return code_matches if len(code_matches) == 1 else []
 
     logistics_names = {
-        norm(goods.get('product_name'))
+        str(goods.get('product_name') or '').strip()
         for goods in logistics.get('goods') or []
-        if norm(goods.get('product_name'))
+        if str(goods.get('product_name') or '').strip()
     }
     name_matches = [
         row for row in rows_without_codes
-        if any(name in norm(row.get('cargo_text')) for name in logistics_names)
+        if any(_complete_product_name_match(name,row.get('cargo_text')) for name in logistics_names)
     ]
     return name_matches if len(name_matches) == 1 else []
 
