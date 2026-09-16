@@ -279,10 +279,8 @@ def manual_candidate(store,ledger,batch_name,expense_id,reason,expected_revision
         logistics=store.get('source',maps[0]['source_id'],lock=True);expense=store.get('source',expense_id,lock=True)
         if not expense or expense['corp']!=logistics['corp'] or expense['invalid'] or not expense.get('approved') or expense['kind']!='expense':
             raise ValueError('来源企业、类型或状态不符')
-        from .freight_lines import matching_lines
-        lines=matching.current_lines(store,expense);own=matching_lines(logistics,lines)
-        # Manual relation still cannot expose an explicitly different shipment as an adoptable line.
-        own += [r for r in lines if not r.get('waybill') and not r.get('approval_no')]
+        lines=matching.current_lines(store,expense)
+        own=matching.shipment_candidate_lines(logistics,lines)
         candidate=matching.save_candidate(store,logistics,expense,own,'manual',reason,expected_revision=expected_revision)
     return candidate_view(store,candidate)
 

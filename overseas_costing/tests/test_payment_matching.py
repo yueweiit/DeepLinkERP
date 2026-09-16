@@ -471,6 +471,91 @@ def test_existing_identifier_candidate_requires_revision_before_manual_upgrade()
     assert manual['method']=='manual'
 
 
+def test_manual_candidate_only_admits_unique_current_material_identifierless_line():
+    from overseas_costing.services.logistics_settlement import freight_runtime
+    from overseas_costing.tests.test_payment_adoption import payment_setup
+
+    store, ledger, batch, _version, logistics, source, _candidate = payment_setup(
+        structured=True, scope="freight", amount="3414.19", mode="EXPRESS"
+    )
+    logistics.update(
+        identifiers=[("material", "MWV101144")],
+        goods=[{"material_code": "MWV101144", "product_name": "薇武士 IP17 PRO"}],
+    )
+    store.put("source", {"id": logistics["id"], "data": dumps(logistics)})
+    own = store.get("freight_line", "payment-line-1")
+    own.update(
+        waybill="", approval_no="", cargo_text="MWV101144 薇武士 IP17 PRO",
+        packing={"material_code_hints": ["MWV101144"]},
+    )
+    store.put("freight_line", {
+        "id": own["id"], "waybill": "", "approval_no": "", "data": dumps(own),
+    })
+    unrelated = {
+        **own,
+        "id": "payment-line-2",
+        "line_key": "line-key-2",
+        "charge_key": "economic-charge-2",
+        "cargo_text": "ABC999 薇武士 IP17 PRO",
+        "packing": {"material_code_hints": ["ABC999"]},
+    }
+    store.insert("freight_line", {
+        "id": unrelated["id"], "source_id": source["id"], "snapshot": source["snapshot"],
+        "line_key": unrelated["line_key"], "waybill": "", "approval_no": "",
+        "charge_key": unrelated["charge_key"], "data": dumps(unrelated),
+    })
+    store.sql("DELETE FROM oc_ls_freight_candidate WHERE logistics_id=%s", (logistics["id"],))
+
+    freight_runtime.manual_candidate(
+        store, ledger, batch["name"], source["id"], "人工选择付款流程", expected_revision=""
+    )
+
+    saved = store.find("freight_candidate", logistics_id=logistics["id"])[0]
+    assert saved["line_scope_policy"] == freight_runtime.matching.CANDIDATE_SCOPE_POLICY
+    assert saved["line_ids"] == ["payment-line-1"]
+
+
+def test_manual_candidate_does_not_guess_between_multiple_current_material_lines():
+    from overseas_costing.services.logistics_settlement import freight_runtime
+    from overseas_costing.tests.test_payment_adoption import payment_setup
+
+    store, ledger, batch, _version, logistics, source, _candidate = payment_setup(
+        structured=True, scope="freight", amount="3414.19", mode="EXPRESS"
+    )
+    logistics.update(
+        identifiers=[("material", "MWV101144")],
+        goods=[{"material_code": "MWV101144", "product_name": "薇武士 IP17 PRO"}],
+    )
+    store.put("source", {"id": logistics["id"], "data": dumps(logistics)})
+    first = store.get("freight_line", "payment-line-1")
+    first.update(
+        waybill="", approval_no="", cargo_text="MWV101144 薇武士 IP17 PRO",
+        packing={"material_code_hints": ["MWV101144"]},
+    )
+    store.put("freight_line", {
+        "id": first["id"], "waybill": "", "approval_no": "", "data": dumps(first),
+    })
+    second = {
+        **first,
+        "id": "payment-line-2",
+        "line_key": "line-key-2",
+        "charge_key": "economic-charge-2",
+    }
+    store.insert("freight_line", {
+        "id": second["id"], "source_id": source["id"], "snapshot": source["snapshot"],
+        "line_key": second["line_key"], "waybill": "", "approval_no": "",
+        "charge_key": second["charge_key"], "data": dumps(second),
+    })
+    store.sql("DELETE FROM oc_ls_freight_candidate WHERE logistics_id=%s", (logistics["id"],))
+
+    freight_runtime.manual_candidate(
+        store, ledger, batch["name"], source["id"], "人工选择付款流程", expected_revision=""
+    )
+
+    saved = store.find("freight_candidate", logistics_id=logistics["id"])[0]
+    assert saved["line_ids"] == []
+
+
 def test_equal_manual_candidate_update_requires_revision_cas():
     from overseas_costing.services.logistics_settlement import freight_matching
     store, _ledger, _batch, _version, _item, logistics, expense = setup_cost()

@@ -59,6 +59,13 @@ def _shipment_material_lines(logistics, lines):
     return name_matches if len(name_matches) == 1 else []
 
 
+def shipment_candidate_lines(logistics, lines):
+    """Authorize exact identifiers plus one uniquely matched identifierless material row."""
+
+    selected = matching_lines(logistics, lines) + _shipment_material_lines(logistics, lines)
+    return list({row['id']: row for row in selected}.values())
+
+
 def index_source(store, source):
     for line in lines_for_source(source):
         line={**line,'id':digest(source['snapshot'],line['id']),'snapshot':source['snapshot']}
@@ -169,11 +176,9 @@ def rule_pass(store,logistics_id):
     for eid in sorted(source_ids):
         source=store.get('source',eid)
         if not source or source['kind']!='expense' or source['invalid'] or not source['approved'] or source['corp']!=logistics['corp']: continue
-        all_lines=current_lines(store,source); lines=matching_lines(logistics,all_lines)
+        all_lines=current_lines(store,source); lines=shipment_candidate_lines(logistics,all_lines)
         explicit=logistics['instance'] in source['related']
         shared=set(map(tuple,logistics['identifiers'])) & set(map(tuple,source['identifiers']))
-        if not lines and (explicit or shared) and len(source['related'])<=1:
-            lines=_shipment_material_lines(logistics,all_lines)
         if lines or explicit or shared:
             save_candidate(store,logistics,source,lines,'explicit' if explicit else 'identifier',
                            '原单明确关联本票' if explicit else '本票运单／审批号与明细一致')
@@ -352,11 +357,7 @@ def run(store,job_id,call_model,model=''):
             try:
                 lines=current_lines(store,source)
                 # Strongly identified lines for another shipment are not sent to AI.
-                exact_ids={r['id'] for r in matching_lines(logistics,lines)}
-                material_lines={
-                    row['id'] for row in _shipment_material_lines(logistics,lines)
-                }
-                eligible=[r for r in lines if r['id'] in exact_ids or r['id'] in material_lines]
+                eligible=shipment_candidate_lines(logistics,lines)
                 if lines and not eligible:
                     outcome='no_match'
                 else:
