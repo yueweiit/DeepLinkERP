@@ -579,23 +579,21 @@ def test_selected_payment_scope_is_forwarded_as_id_only_ai_input():
     run_ui(r"""
 ready();w.openMaterialAIProgressDialog=()=>{};w.pollMaterialAIFill=async()=>{};
 const refs=[{candidate_id:'C1',revision:'R1',version:w.detailState.versionName}];
-w.detailState.paymentSourceRefs=refs;
-w.detailState.paymentSourceSelection={batchName:w.detailState.batchName,versionName:w.detailState.versionName,refs};
 w.call=async(method,args)=>{calls.push({method,args});return {ok:true,status:'QUEUED',run_id:'fresh',progress_revision:0}};
-await w.startMaterialAIFill({force:true,restart:true});
+await w.startMaterialAIFill({force:true,restart:true,paymentPreflightComplete:true,paymentCandidateRefs:refs});
 const args=calls[0].args;assert.equal(calls[0].method,'overseas_costing.api.materials.start_source_ai_review');
 assert.deepEqual(JSON.parse(args.payment_candidate_refs_json),refs);
 for(const forbidden of ['amount','gross_weight_kg','source_snapshot'])assert(!args.payment_candidate_refs_json.includes(forbidden));
 """)
 
 
-def test_stale_payment_scope_is_not_forwarded_to_another_batch_or_version():
+def test_unscoped_start_leaves_payment_preflight_to_the_unified_endpoint():
     run_ui(r"""
 ready();w.openMaterialAIProgressDialog=()=>{};w.pollMaterialAIFill=async()=>{};
-w.detailState.paymentSourceSelection={batchName:'OTHER',versionName:'OLD',refs:[{candidate_id:'C1',revision:'R1',version:'OLD'}]};
 w.call=async(method,args)=>{calls.push({method,args});return {ok:true,status:'QUEUED',run_id:'fresh',progress_revision:0}};
 await w.startMaterialAIFill({force:true,restart:true});
-assert(!('payment_candidate_refs_json' in calls[0].args));
+assert(calls[0].method.endsWith('start_source_ai_review'));
+assert.equal(calls.length,1);assert(!('payment_candidate_refs_json' in calls[0].args));
 """)
 
 
@@ -642,30 +640,38 @@ for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','1056
 def test_row_review_displays_server_packing_group_candidates_and_autofill_price_columns():
     run_ui(r"""
 const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G1',member_keys:['L1','L2','L3'],package_count:'21',
-    net_weight_kg:'389',gross_weight_kg:'397.7',volume_m3:'0.40884',sheet_name:'Packing',default_selected:true,can_apply:true}]};
+    net_weight_kg:'389',gross_weight_kg:'397.7',volume_m3:'0.40884',sheet_name:'Packing',default_selected:true,can_apply:true,
+    assignment_options:[{assignment_id:'G1:ALL',mode:'one_box_group',member_keys:['L1','L2','L3'],label:'3 个物料共同装为 1 箱',default_selected:true,can_apply:true}]}]};
 fill.rowSelection=null;w.ensureMaterialAIRowSelection(fill);fill.rowSelection.preview={id:'P',revision:'R',can_apply:true,rows:[],packing_group_candidates:fill.draft.packing_group_candidates};
 fill.rowSelection.previewKey=w.materialAIRowSelectionKey(fill);
 let html=w.renderMaterialAIReviewDialogContent();
 for(const text of ['装箱组候选','3 行','21','389','397.7','0.40884'])assert(html.includes(text),text);
-assert(html.includes('data-mf-ai-packing-group-select="G1"'));assert(html.includes('checked'));
+assert(html.includes('type="radio"'));assert(html.includes('data-mf-ai-packing-assignment="G1"'));
+assert(html.includes('value="G1:ALL"'));assert(html.includes('checked'));
+assert.deepEqual([...fill.rowSelection.packingAssignments.entries()],[['G1','G1:ALL']]);
 fill.draft.autofill_preview={items:[{unit_price:'4.40',purchase_currency:'RMB',shipment_value_rmb:'10560'}],fees:[],notes:[],project_summary:[],unresolved:[]};
 html=w.renderMaterialAIAutofillPreview(fill);
 for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','10560'])assert(html.includes(text),text);
 """)
 
 
-def test_unmatched_xlsx_group_is_read_only_and_not_default_selected():
+def test_ambiguous_packing_assignment_is_selectable_and_mutually_exclusive():
     run_ui(r"""
-const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G-NEW',member_keys:['L1','logistics:new'],
-    gross_weight_kg:'42.05',sheet_name:'Packing',default_selected:false,can_apply:false,
-    needs_member_confirmation:true,resolution_reason:'装箱组包含尚未确认新增的物料，成员未全部匹配现有物料。',
-    evidence:[{kind:'xlsx_merge'}]}]};
+const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G-NEW',member_keys:['L1'],
+    gross_weight_kg:'42.05',sheet_name:'评论',default_selected:true,can_apply:true,needs_member_confirmation:true,
+    assignment_options:[
+      {assignment_id:'G-NEW:L1',mode:'single_item',member_keys:['L1'],label:'仅归属 MWV101144',default_selected:false,can_apply:true},
+      {assignment_id:'G-NEW:L2',mode:'single_item',member_keys:['L2'],label:'仅归属 MWV101145',default_selected:false,can_apply:true},
+      {assignment_id:'G-NEW:ALL',mode:'one_box_group',member_keys:['L1','L2'],label:'两个物料共同装为 1 箱',default_selected:true,can_apply:true},
+    ],evidence:[{kind:'trusted_comment_text'}]}]};
 fill.rowSelection=null;w.ensureMaterialAIRowSelection(fill);
-const html=w.renderMaterialAIReviewDialogContent();
-assert(!fill.rowSelection.packingGroups.has('G-NEW'));
-assert(html.includes('data-mf-ai-packing-group-select="G-NEW"'));
-assert(html.includes('disabled'));
-assert(html.includes('成员未全部匹配现有物料'));
+let html=w.renderMaterialAIReviewDialogContent();
+assert.equal((html.match(/name="packing-assignment-G-NEW"/g)||[]).length,3);
+assert.equal((html.match(/name="packing-assignment-G-NEW"[^>]*checked/g)||[]).length,1);
+assert(!html.includes('data-mf-ai-packing-group-select'));
+w.scheduleMaterialAIRowPreview=()=>{};
+w.changeMaterialAIRowSelection('packingAssignments','G-NEW','G-NEW:L1');
+assert.deepEqual([...fill.rowSelection.packingAssignments.entries()],[['G-NEW','G-NEW:L1']]);
 """)
 
 

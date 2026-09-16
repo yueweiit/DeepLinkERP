@@ -277,7 +277,7 @@ def test_selected_row_preview_and_confirm_use_ids_write_permission_and_inline_co
     assert not result['ok'] and result['code']=='REVIEW_REQUIRED' and rollbacks
 
 
-def test_selected_row_preview_passes_optional_field_and_packing_group_choices(monkeypatch):
+def test_selected_row_preview_passes_optional_field_and_packing_assignment_choices(monkeypatch):
     from overseas_costing.services import material_ai_selection_service as selection
     api=_load_api(monkeypatch);captured={}
     monkeypatch.setattr(api,'require_batch_permission',lambda batch,_permission:batch)
@@ -286,13 +286,13 @@ def test_selected_row_preview_passes_optional_field_and_packing_group_choices(mo
     result=api.preview_source_ai_selection(
         'B','RUN','[]','[]','update_selected','V',
         field_choices_json='{"I1:gross_weight_kg":"FIELD-1"}',
-        packing_group_ids_json='["GROUP-1"]',
+        packing_assignments_json='{"GROUP-1":"GROUP-1:ALL"}',
     )
 
     assert result['ok']
     assert captured['kwargs']=={
         'field_choices':{'I1:gross_weight_kg':'FIELD-1'},
-        'packing_group_ids':['GROUP-1'],
+        'packing_assignments':{'GROUP-1':'GROUP-1:ALL'},
     }
 
 
@@ -306,6 +306,24 @@ def test_source_reanalysis_flag_is_server_boolean(monkeypatch):
     api.start_source_ai_review('B', 'V', reanalyze_original_sources='true')
 
     assert captured['reanalyze_original_sources'] is True
+
+
+def test_payment_selection_is_returned_by_the_unified_start_endpoint(monkeypatch):
+    api = _load_api(monkeypatch)
+    calls = []
+    monkeypatch.setattr(api, 'require_batch_permission',
+                        lambda batch, permission: calls.append((batch, permission)) or 'B1')
+    monkeypatch.setattr(api.material_ai_fill_service, 'start_source_ai_review',
+                        lambda *args, **kwargs: calls.append((args, kwargs)) or {
+                            'ok': True, 'status': 'PAYMENT_SELECTION',
+                            'payment_preflight': {'status': 'NEEDS_SELECTION', 'candidates': []},
+                        })
+
+    result = api.start_source_ai_review('B', 'V')
+
+    assert result['status'] == 'PAYMENT_SELECTION'
+    assert calls[0] == ('B', 'write')
+    assert calls[1][0][:2] == ('B1', 'V')
 
 
 def test_material_row_recovery_api_keeps_preview_and_confirm_separate(monkeypatch):

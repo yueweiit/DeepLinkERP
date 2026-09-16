@@ -156,7 +156,7 @@
     });
     this.$root.on("click", "[data-action='mf-ai-fill']", () => {
       const fill = this.ensureMaterialFeeState().aiFill;
-      if (["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
+      if (["STARTING", "PAYMENT_SELECTION", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill?.status || ""))) {
         this.openMaterialAIProgressDialog();
         return;
       }
@@ -311,7 +311,7 @@
   invalidateMaterialAIClarification(note) {
     const state = this.ensureMaterialFeeState();
     if (Number(note.revision || 0) > Number(state.aiFill?.clarification_revision ?? state.aiClarificationRevision ?? 0) && state.aiFill
-        && ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(state.aiFill.status)) {
+        && ["STARTING", "PAYMENT_SELECTION", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(state.aiFill.status)) {
       state.aiRunGeneration = Number(state.aiRunGeneration || 0) + 1;
       state.aiFill = { ...state.aiFill, status: "STALE", draftVisible: false, stale: true };
       state.aiPendingReady = null;
@@ -615,7 +615,7 @@
     const blockingPackingGroups = (materialSummary.packing_groups || []).filter(group => group.blocking || group.status === "needs_reconfirmation");
     const feeSummary = state.fees.summary || {};
     const evidencePending = Number(feeSummary.missing_evidence_fee_count || 0);
-    const aiActive = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(String(state.aiFill?.status || ""));
+    const aiActive = ["STARTING", "PAYMENT_SELECTION", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(String(state.aiFill?.status || ""));
     const $content = this.$root.find("[data-area='detail-content']");
     $content.html(`
       <div class="ocw-mf-workspace">
@@ -1668,7 +1668,7 @@
 
   renderMaterialAIProgressChip() {
     const fill = this.ensureMaterialFeeState().aiFill;
-    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill?.status || ""));
+    const active = ["STARTING", "PAYMENT_SELECTION", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill?.status || ""));
     const minimized = Boolean(this.ensureMaterialFeeState().aiProgressMinimized);
     const label = this.isMaterialAIReadyStatus(fill?.status)
       ? this.materialAIReadyChipLabel(fill)
@@ -1682,6 +1682,7 @@
 
   renderMaterialAIProgressDialogContent() {
     const fill = this.ensureMaterialFeeState().aiFill || {};
+    if (fill.status === "PAYMENT_SELECTION") return this.renderMaterialAIPaymentSelection(fill);
     const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
     const sources = Array.isArray(fill.source_progress) ? fill.source_progress : [];
     const sourceGroups = this.materialAISourceGroups(sources);
@@ -1712,6 +1713,16 @@
         <div><button class="ocw-outline-btn" type="button" data-action="mf-ai-progress-retry" ${canRetry ? "" : "hidden"}>重试</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel">取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard">放弃任务</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" disabled>确认填充</button></div>
       </footer>
     </div>`;
+  }
+
+  renderMaterialAIPaymentSelection(fill) {
+    const scope = fill.paymentPreflight || {};
+    const selected = fill.paymentSelection instanceof Set ? fill.paymentSelection : new Set();
+    const choices = (scope.candidates || []).map((candidate) => {
+      const id = String(candidate.candidate_id || "");
+      return `<label class="ocw-mf-ai-payment-choice"><input type="checkbox" data-mf-ai-payment-candidate="${this.escape(id)}" ${selected.has(id) ? "checked" : ""}><span><strong>${this.escape(candidate.title || candidate.workflow_template || "支付流程")}</strong><small>${this.escape(candidate.approval_no || "审批号待核对")} · ${candidate.match_strength === "STRONG" ? "强匹配" : "弱匹配"}</small><small>${this.escape(candidate.match_reason || "请核对是否属于本票")}</small></span></label>`;
+    }).join("");
+    return `<div class="ocw-mf-ai-progress-dialog is-payment-selection" data-mf-ai-progress-host="1"><header><div><strong>选择本次需要解析的支付流程</strong><span>仅选择资料范围；确认填充前不会修改业务数据。</span></div></header><main class="ocw-mf-ai-dialog-body"><p>规则已找到以下支付申请。可多选；如果都不属于本票，可跳过支付申请并继续读取国际物流和采购支出。</p><div class="ocw-mf-ai-payment-choices">${choices || "<p>未找到可用支付流程。</p>"}</div></main><footer class="ocw-mf-ai-dialog-footer"><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel">取消</button><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-payment-skip">跳过支付申请</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-payment-continue" ${selected.size ? "" : "disabled"}>使用所选来源并继续</button></div></footer></div>`;
   }
 
   materialAIProgressSourceKey(source, index) {
@@ -1827,15 +1838,19 @@
           this.restartMaterialAIFromOriginalSources();
         } else if (action === "mf-ai-progress-retry") {
           this.retryMaterialAIProgress();
+        } else if (action === "mf-ai-payment-continue") {
+          this.continueMaterialAIPaymentSelection(false).catch((error) => this.showError(error));
+        } else if (action === "mf-ai-payment-skip") {
+          this.continueMaterialAIPaymentSelection(true).catch((error) => this.showError(error));
         }
       });
       dialog.$wrapper
         .off("change.ocwAIReview input.ocwAIReview")
-        .on("change.ocwAIReview", "[data-mf-ai-row-select],[data-mf-ai-fee-select],[data-mf-ai-field-select],[data-mf-ai-packing-group-select],[data-mf-ai-row-mode]", (event) => {
+        .on("change.ocwAIReview", "[data-mf-ai-row-select],[data-mf-ai-fee-select],[data-mf-ai-field-select],[data-mf-ai-packing-assignment],[data-mf-ai-row-mode]", (event) => {
           const $input = $(event.currentTarget);
           if ($input.attr("data-mf-ai-row-mode") !== undefined) this.changeMaterialAIRowSelection("mode", $input.val());
           else if ($input.attr("data-mf-ai-field-select") !== undefined) this.changeMaterialAIRowSelection("fields", $input.attr("data-mf-ai-field-select"), $input.val());
-          else if ($input.attr("data-mf-ai-packing-group-select") !== undefined) this.changeMaterialAIRowSelection("packingGroups", $input.attr("data-mf-ai-packing-group-select"), $input.prop("checked"));
+          else if ($input.attr("data-mf-ai-packing-assignment") !== undefined) this.changeMaterialAIRowSelection("packingAssignments", $input.attr("data-mf-ai-packing-assignment"), $input.val());
           else this.changeMaterialAIRowSelection($input.attr("data-mf-ai-row-select") !== undefined ? "rows" : "fees", $input.attr("data-mf-ai-row-select") ?? $input.attr("data-mf-ai-fee-select"), $input.prop("checked"));
         })
         .on("change.ocwAIReview", "[data-mf-ai-proposal-select]", (event) => {
@@ -1861,12 +1876,24 @@
             source.selected = Boolean($(event.currentTarget).prop("checked"));
           }
         })
+        .on("change.ocwAIReview", "[data-mf-ai-payment-candidate]", (event) => {
+          const fill = state.aiFill;
+          if (fill?.status !== "PAYMENT_SELECTION") return;
+          if (!(fill.paymentSelection instanceof Set)) fill.paymentSelection = new Set();
+          const id = String($(event.currentTarget).attr("data-mf-ai-payment-candidate") || "");
+          if ($(event.currentTarget).prop("checked")) fill.paymentSelection.add(id);
+          else fill.paymentSelection.delete(id);
+          state.aiProgressDialog.fields_dict.progress_html.$wrapper.html(this.renderMaterialAIProgressDialogContent());
+        })
         .on("input.ocwAIReview", "[data-mf-ai-edit]", (event) => {
           this.updateSourceAIReviewEdit($(event.currentTarget));
         });
     } else {
       state.aiProgressDialog.show();
-      if (!this.isMaterialAIReadyStatus(state.aiFill?.status) && !state.aiProgressDialog.$wrapper.find("[data-mf-ai-progress-host]").length) {
+      const paymentSelectionChanged = state.aiFill?.status === "PAYMENT_SELECTION"
+        && !state.aiProgressDialog.$wrapper.find(".is-payment-selection").length;
+      if (paymentSelectionChanged || (!this.isMaterialAIReadyStatus(state.aiFill?.status)
+          && !state.aiProgressDialog.$wrapper.find("[data-mf-ai-progress-host]").length)) {
         state.aiProgressDialog.$wrapper.removeClass("is-review");
         state.aiProgressDialog.fields_dict.progress_html.$wrapper.html(this.renderMaterialAIProgressDialogContent());
       }
@@ -1879,7 +1906,7 @@
     const state = this.ensureMaterialFeeState();
     const $chip = this.$root?.find?.("[data-mf-ai-progress-chip]");
     const fill = state.aiFill || {};
-    const active = ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill.status || ""));
+    const active = ["STARTING", "PAYMENT_SELECTION", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS", "FAILED", "STALE"].includes(String(fill.status || ""));
     const chipLabel = this.isMaterialAIReadyStatus(fill.status) ? this.materialAIReadyChipLabel(fill) : fill.status === "FAILED" ? "AI 分析失败" : fill.status === "STALE" ? "AI 草稿已过期" : `AI ${Math.max(0, Math.min(100, Number(fill.progress_percent || 0)))}%`;
     if ($chip?.length) {
       $chip.prop("hidden", !(active && state.aiProgressMinimized));
@@ -1888,10 +1915,16 @@
     const $button = this.$root?.find?.("[data-action='mf-ai-fill']");
     if ($button?.length) {
       const status = String(state.aiFill?.status || "");
-      $button.text(this.isMaterialAIReadyStatus(status) ? "查看填充预览" : ["STARTING", "QUEUED", "RUNNING"].includes(status) ? "查看填充进度" : "AI填充资料");
+      $button.text(this.isMaterialAIReadyStatus(status) ? "查看填充预览" : ["STARTING", "PAYMENT_SELECTION", "QUEUED", "RUNNING"].includes(status) ? "查看填充进度" : "AI填充资料");
     }
     const dialog = state.aiProgressDialog;
     if (dialog?.$wrapper?.length) {
+      if (fill.status === "PAYMENT_SELECTION") {
+        if (!dialog.$wrapper.find(".is-payment-selection").length) {
+          dialog.fields_dict.progress_html.$wrapper.html(this.renderMaterialAIProgressDialogContent());
+        }
+        return;
+      }
       const $host = dialog.$wrapper.find("[data-mf-ai-progress-host]");
       if (!$host.length) return;
       const progress = Math.max(0, Math.min(100, Number(fill.progress_percent || 0)));
@@ -2050,26 +2083,35 @@
     const feePolicy = this.materialAIReviewFeePolicy(fill);
     const fieldCandidates = Array.isArray(fill.row_review.field_candidates) ? fill.row_review.field_candidates : [];
     const packingCandidates = Array.isArray(fill.draft?.packing_group_candidates) ? fill.draft.packing_group_candidates : [];
-    const packingAllowed = candidate => Boolean(candidate.can_apply);
+    const packingDefaults = new Map();
+    packingCandidates.forEach((candidate) => {
+      const defaults = (candidate.assignment_options || []).filter((option) => option.can_apply && option.default_selected);
+      if (defaults.length === 1) packingDefaults.set(String(candidate.candidate_id), String(defaults[0].assignment_id));
+    });
     if (!fill.rowSelection) fill.rowSelection = {
       mode: "update_selected",
       rows: new Set(fieldCandidates.length ? [] : (fill.row_review.rows || []).filter(row => row.can_update && (row.default_update_selected ?? row.default_selected)).map(row => String(row.row_id))),
       fields: new Map(fieldCandidates.filter(candidate => candidate.can_apply && candidate.default_selected)
         .map(candidate => [`${candidate.item_name}:${candidate.fieldname}`, String(candidate.candidate_id)])),
-      packingGroups: new Set(packingCandidates.filter(candidate => packingAllowed(candidate)
-        && (candidate.default_selected || (candidate.evidence || []).some(row => String(row.kind || "") === "xlsx_merge")))
-        .map(candidate => String(candidate.candidate_id))),
+      packingAssignments: packingDefaults,
       fees: new Set(feePolicy.mainFees.filter(fee => fee.can_apply && fee.default_selected).map(fee => String(fee.proposal_id))),
       request: 0, loading: false, preview: null, error: "", timer: null,
     };
     else {
       if (!(fill.rowSelection.fields instanceof Map)) fill.rowSelection.fields = new Map();
-      if (!(fill.rowSelection.packingGroups instanceof Set)) fill.rowSelection.packingGroups = new Set();
+      if (!(fill.rowSelection.packingAssignments instanceof Map)) fill.rowSelection.packingAssignments = new Map(packingDefaults);
       fill.rowSelection.fees.forEach(id => { if (!feePolicy.selectableIds.has(String(id))) fill.rowSelection.fees.delete(id); });
       const validFieldIds = new Set(fieldCandidates.filter(candidate => candidate.can_apply).map(candidate => String(candidate.candidate_id)));
       fill.rowSelection.fields.forEach((candidateId, key) => { if (!validFieldIds.has(String(candidateId))) fill.rowSelection.fields.delete(key); });
-      const validPackingIds = new Set(packingCandidates.filter(packingAllowed).map(candidate => String(candidate.candidate_id)));
-      fill.rowSelection.packingGroups.forEach(id => { if (!validPackingIds.has(String(id))) fill.rowSelection.packingGroups.delete(id); });
+      const validPackingAssignments = new Map(packingCandidates.map((candidate) => [
+        String(candidate.candidate_id),
+        new Set((candidate.assignment_options || []).filter((option) => option.can_apply).map((option) => String(option.assignment_id))),
+      ]));
+      fill.rowSelection.packingAssignments.forEach((assignmentId, candidateId) => {
+        if (!validPackingAssignments.get(String(candidateId))?.has(String(assignmentId))) {
+          fill.rowSelection.packingAssignments.delete(candidateId);
+        }
+      });
     }
     return fill.rowSelection;
   }
@@ -2078,7 +2120,7 @@
     const selection = this.ensureMaterialAIRowSelection(fill);
     return JSON.stringify([this.detailState.batchName, this.detailState.versionName, fill.runId || fill.run_id,
       fill.row_review.fingerprint, selection.mode, [...selection.rows].sort(), [...selection.fields.entries()].sort(),
-      [...selection.packingGroups].sort(), [...selection.fees].sort()]);
+      [...selection.packingAssignments.entries()].sort(), [...selection.fees].sort()]);
   }
 
   changeMaterialAIRowSelection(kind, id, checked) {
@@ -2095,15 +2137,16 @@
         const allowed = id === "update_selected" ? row?.can_update : id === "add_selected" ? row?.can_add : row?.can_fill;
         if (!row || !allowed) selection.rows.delete(rowId);
       });
-      if (id === "add_selected") { selection.fees.clear(); selection.fields.clear(); selection.packingGroups.clear(); }
+      if (id === "add_selected") { selection.fees.clear(); selection.fields.clear(); selection.packingAssignments.clear(); }
       else if (!(selection.fields.size) && (fill.row_review.field_candidates || []).length) {
         (fill.row_review.field_candidates || []).filter(candidate => candidate.can_apply && candidate.default_selected)
           .forEach(candidate => selection.fields.set(`${candidate.item_name}:${candidate.fieldname}`, String(candidate.candidate_id)));
       }
-      if (id !== "add_selected" && !selection.packingGroups.size) {
-        (fill.draft?.packing_group_candidates || []).filter(candidate =>
-          candidate.can_apply && candidate.default_selected)
-          .forEach(candidate => selection.packingGroups.add(String(candidate.candidate_id)));
+      if (id !== "add_selected" && !selection.packingAssignments.size) {
+        (fill.draft?.packing_group_candidates || []).forEach((candidate) => {
+          const defaults = (candidate.assignment_options || []).filter((option) => option.can_apply && option.default_selected);
+          if (defaults.length === 1) selection.packingAssignments.set(String(candidate.candidate_id), String(defaults[0].assignment_id));
+        });
       }
     } else if (kind === "fields") {
       const candidate = (fill.row_review.field_candidates || []).find(row => String(row.candidate_id) === String(checked));
@@ -2111,11 +2154,11 @@
       else if (candidate?.can_apply && `${candidate.item_name}:${candidate.fieldname}` === String(id)) {
         selection.fields.set(String(id), String(candidate.candidate_id));
       }
-    } else if (kind === "packingGroups") {
+    } else if (kind === "packingAssignments") {
       const candidate = (fill.draft?.packing_group_candidates || []).find(row => String(row.candidate_id) === String(id));
-      const allowed = Boolean(candidate?.can_apply);
-      if (checked && allowed && selection.mode !== "add_selected") selection.packingGroups.add(String(id));
-      else selection.packingGroups.delete(String(id));
+      const option = (candidate?.assignment_options || []).find(row => String(row.assignment_id) === String(checked));
+      if (option?.can_apply && selection.mode !== "add_selected") selection.packingAssignments.set(String(id), String(option.assignment_id));
+      else selection.packingAssignments.delete(String(id));
     } else {
       const items = kind === "rows" ? rows : feePolicy.fees;
       for (const item of items) {
@@ -2180,7 +2223,7 @@
         batch_name: state.batchName, run_id: fill.runId || fill.run_id,
         row_ids_json: JSON.stringify([...selection.rows]), fee_ids_json: JSON.stringify([...selection.fees]),
         ...((fill.row_review.field_candidates || []).length ? { field_choices_json: JSON.stringify(Object.fromEntries(selection.fields)) } : {}),
-        ...((fill.draft?.packing_group_candidates || []).length ? { packing_group_ids_json: JSON.stringify([...selection.packingGroups]) } : {}),
+        ...((fill.draft?.packing_group_candidates || []).length ? { packing_assignments_json: JSON.stringify(Object.fromEntries(selection.packingAssignments)) } : {}),
         mode: selection.mode, expected_version: this.detailState.versionName || null,
       }, false);
       if (!current()) return;
@@ -2405,7 +2448,7 @@
     const mergedAmountGroups = preview?.merged_amount_groups || fill.draft?.merged_amount_groups || [];
     const mergedAmountSummary = mergedAmountGroups.length ? `<section class="ocw-mf-ai-preview-section"><h4>合并金额校验</h4><ul>${mergedAmountGroups.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · 第 ${this.escape(group.source_range?.start_row ?? group.source_row ?? "--")}-${this.escape(group.source_range?.end_row ?? group.source_row ?? "--")} 行 · 组总额 ${this.escape(group.control_total_rmb ?? "--")} · 独立行合计 ${this.escape(group.computed_total_rmb ?? "--")} · ${group.status === "verified" ? "已校验" : "待人工分摊"}</li>`).join("")}</ul></section>` : "";
     const packingGroupCandidates = fill.draft?.packing_group_candidates || preview?.packing_group_candidates || [];
-    const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>默认仅采用已完整匹配现有物料的 Excel 合并范围或评论组；成员未确认的组只读展示。已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => { const allowed = Boolean(group.can_apply); return `<li><label><input type="checkbox" data-mf-ai-packing-group-select="${this.escape(group.candidate_id)}" ${selection.packingGroups.has(String(group.candidate_id)) ? "checked" : ""} ${!allowed || busy ? "disabled" : ""}> ${this.escape(group.source_label || group.sheet_name || group.source_id || "装箱单")}</label> · ${Number(group.member_keys?.length || 0)} 行 · 成员 ${this.escape((group.member_labels || group.member_keys || []).join("、") || "待选择")} · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³${group.weight_basis === "inferred_unqualified_weight_as_gross" ? " · 未注明口径，按组毛重候选" : ""}<small>${this.escape(group.resolution_reason || "")}</small></li>`; }).join("")}</ul></section>` : "";
+    const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>每条装箱事实只能选择一种归属：仅归属某个物料，或候选物料共同装为 1 箱。已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => { const candidateId = String(group.candidate_id || ""); const selectedAssignment = selection.packingAssignments.get(candidateId); return `<li><strong>${this.escape(group.source_label || group.sheet_name || group.source_id || "装箱单")}</strong> · ${Number(group.member_keys?.length || 0)} 行 · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³${group.weight_basis === "inferred_unqualified_weight_as_gross" ? " · 未注明口径，按组毛重候选" : ""}<div class="ocw-mf-ai-packing-assignments">${(group.assignment_options || []).map((option) => `<label><input type="radio" name="packing-assignment-${this.escape(candidateId)}" data-mf-ai-packing-assignment="${this.escape(candidateId)}" value="${this.escape(option.assignment_id)}" ${selectedAssignment === String(option.assignment_id) ? "checked" : ""} ${!option.can_apply || busy ? "disabled" : ""}><span>${this.escape(option.label || "装箱归属")}</span></label>`).join("") || `<small>${this.escape(group.resolution_reason || "暂无可用归属选项")}</small>`}</div><small>${this.escape(group.resolution_reason || "")}</small></li>`; }).join("")}</ul></section>` : "";
     const fieldLabels = Object.fromEntries(columns);
     const workflowLabels = { payment: "支付申请", international_logistics: "国际物流审批", purchase: "商品采购支出", other: "其他来源" };
     const evidenceLabels = { dedicated_attachment: "专用附件", approval_form: "审批正文", attachment: "其他相关附件", comment: "评论", other: "其他证据" };
@@ -3085,6 +3128,28 @@
     return Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
+  continueMaterialAIPaymentSelection(skip = false) {
+    const state = this.ensureMaterialFeeState();
+    const fill = state.aiFill || {};
+    if (fill.status !== "PAYMENT_SELECTION") return Promise.resolve();
+    const selected = skip ? new Set() : (fill.paymentSelection instanceof Set ? fill.paymentSelection : new Set());
+    if (!skip && !selected.size) return Promise.reject(new Error("请选择支付流程，或跳过支付申请。"));
+    const refs = (fill.paymentPreflight?.candidates || [])
+      .filter((candidate) => selected.has(String(candidate.candidate_id || "")))
+      .map((candidate) => ({
+        candidate_id: String(candidate.candidate_id || ""),
+        revision: String(candidate.revision || ""),
+        version: String(fill.paymentPreflight?.version || this.detailState.versionName || ""),
+      }));
+    state.aiStartPromise = null;
+    state.aiFill = null;
+    return this.startMaterialAIFill({
+      ...(state.aiStartOptions || {}), restart: true,
+      request_id: this.materialAINewRequestId(), requestPayload: null,
+      paymentPreflightComplete: true, paymentCandidateRefs: refs,
+    });
+  }
+
   startMaterialAIFill(options = {}) {
     const state = this.ensureMaterialFeeState();
     if (state.aiStartPromise) {
@@ -3092,7 +3157,7 @@
       return state.aiStartPromise;
     }
     const currentStatus = String(state.aiFill?.status || "");
-    if (!options.restart && ["STARTING", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(currentStatus)) {
+    if (!options.restart && ["STARTING", "PAYMENT_SELECTION", "QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(currentStatus)) {
       this.openMaterialAIProgressDialog();
       return Promise.resolve();
     }
@@ -3153,12 +3218,8 @@
         force: options.force === true ? 1 : 0,
         ...(options.reanalyzeOriginalSources ? { reanalyze_original_sources: 1 } : {}),
       };
-      const paymentSelection = this.detailState.paymentSourceSelection;
-      if (!options.reanalyzeOriginalSources
-          && paymentSelection?.batchName === batchName
-          && paymentSelection?.versionName === versionName
-          && Array.isArray(paymentSelection.refs)) {
-        payload.payment_candidate_refs_json = JSON.stringify(paymentSelection.refs.map((row) => ({
+      if (!options.reanalyzeOriginalSources && options.paymentPreflightComplete) {
+        payload.payment_candidate_refs_json = JSON.stringify((options.paymentCandidateRefs || []).map((row) => ({
           candidate_id: String(row.candidate_id || ''),
           revision: String(row.revision || ''),
           version: String(row.version || ''),
@@ -3197,6 +3258,20 @@
     if (!isCurrent()) return;
     if (!started && lastError) throw lastError;
     if (!started?.ok) throw started || new Error("AI 分析任务启动失败。");
+    if (started.status === "PAYMENT_SELECTION") {
+      const scope = started.payment_preflight || {};
+      const selectedRefs = Array.isArray(scope.selected_refs) ? scope.selected_refs : [];
+      state.aiStartOptions = { ...options, paymentPreflightComplete: false };
+      state.aiFill = {
+        status: "PAYMENT_SELECTION", progress_step: "等待选择支付来源", progress_percent: 0,
+        paymentPreflight: scope,
+        paymentSelection: new Set(selectedRefs.map((row) => String(row.candidate_id || ""))),
+      };
+      state.aiPendingReady = null;
+      this.openMaterialAIProgressDialog();
+      this.updateMaterialAIProgressSurface();
+      return;
+    }
     state.aiFill = { ...started, runId: started.run_id, status: started.status, progress_step: "读取资料", progress_percent: 5, progress_revision: Number(started.progress_revision || 0), source_progress: started.source_progress || [], reused: Boolean(started.reused), reuse_reason: started.reuse_reason || "" };
     state.aiPendingReady = null;
     this.openMaterialAIProgressDialog();

@@ -131,6 +131,45 @@ def test_read_packing_comment_exposes_group_candidate_without_row_weight():
     assert group["member_keys"] == ["L1", "L2", "L3"]
     assert group["default_selected"] is True
     assert group["weight_basis"] == "inferred_unqualified_weight_as_gross"
+    assert group["assignment_options"] == [{
+        "assignment_id": group["assignment_options"][0]["assignment_id"],
+        "mode": "one_box_group",
+        "member_keys": ["L1", "L2", "L3"],
+        "label": "MWV101144、MOLD-1、CASE-1 共同装为 1 箱",
+        "default_selected": True,
+        "can_apply": True,
+        "resolution_reason": "评论已唯一匹配全部装箱成员。",
+    }]
+
+
+def test_ambiguous_comment_packing_facts_offer_mutually_exclusive_assignments():
+    from overseas_costing.services import material_ai_fill_service as service
+    items = [
+        {"name": "I1", "stable_line_key": "L1", "material_code": "MWV101144", "product_name": "薇武士IP17 PRO"},
+        {"name": "I2", "stable_line_key": "L2", "material_code": "MWV101145", "product_name": "薇武士IP17 PRO MAX"},
+    ]
+    comment = (
+        "DHL 单号1841361513\n发货明细：\n"
+        "薇武士 MWV101144 IP17PRO -TPU\n规格33*20*23,重量：42.05kg\n"
+        "1套模具+3个手机壳"
+    )
+
+    _candidates, document = service._read_source(
+        items,
+        {"source_kind": "approval_comment", "source_id": "COMMENT", "source_hash": "HASH", "comment_text": comment},
+    )
+
+    group = document["packing_group_candidates"][0]
+    options = group["assignment_options"]
+    assert [(option["mode"], option["member_keys"]) for option in options] == [
+        ("single_item", ["L1"]),
+        ("single_item", ["L2"]),
+        ("one_box_group", ["L1", "L2"]),
+    ]
+    assert sum(bool(option["default_selected"]) for option in options) == 1
+    assert next(option for option in options if option["default_selected"])["mode"] == "one_box_group"
+    assert group["can_apply"] is True
+    assert group["needs_member_confirmation"] is True
 
 def test_worker_previews_eight_rows_and_final_freight_without_business_write(monkeypatch):
     from overseas_costing.services import material_ai_fill_service as service

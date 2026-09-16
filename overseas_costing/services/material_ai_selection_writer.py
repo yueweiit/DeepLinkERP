@@ -214,6 +214,7 @@ def _confirm_and_reconstruct_payment_match(store,ledger,run,preview,draft,contex
 def _write_rows_and_payment_relation(store,ledger,preview,context,actor):
     version_name=write_rows(store,ledger,preview,context) if (
         preview['selected_row_ids'] or preview.get('selected_field_choices')
+        or preview.get('selected_packing_assignments')
         or any(candidate.get('default_selected') and candidate.get('can_apply')
                for candidate in preview.get('packing_group_candidates') or [])
     ) else preview['version']

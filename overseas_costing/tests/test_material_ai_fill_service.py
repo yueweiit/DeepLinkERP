@@ -52,6 +52,31 @@ def test_material_ai_timestamps_are_mariadb_datetime_compatible(monkeypatch) -> 
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value)
 
 
+def test_manual_source_review_returns_ambiguous_payment_scope_before_creating_run(monkeypatch) -> None:
+    scope = {
+        "status": "NEEDS_SELECTION",
+        "version": "V1",
+        "selected_refs": [],
+        "candidates": [{"candidate_id": "C1", "revision": "R1"}],
+    }
+    monkeypatch.setattr(
+        material_ai_fill_service,
+        "payment_source_preflight",
+        lambda batch, version: {
+            "ok": True,
+            "payment_preflight": scope,
+        },
+    )
+
+    result = start_source_ai_review("B1", "V1")
+
+    assert result == {
+        "ok": True,
+        "status": "PAYMENT_SELECTION",
+        "payment_preflight": scope,
+    }
+
+
 def test_material_ai_run_schema_accepts_unavailable_source_completeness() -> None:
     root = Path(__file__).resolve().parents[1]
     metadata = json.loads(

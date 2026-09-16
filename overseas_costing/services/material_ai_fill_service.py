@@ -2164,7 +2164,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-5'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-6'
 
 
 def _source_review_fingerprint(
@@ -2274,6 +2274,27 @@ def start_source_ai_review(
     reanalyze_original_sources: bool = False,
 ) -> dict:
     """Start a non-blocking review task. Applying the draft still requires an edit token."""
+
+    # The user-facing AI-fill entry owns payment-source preflight.  Keep it in
+    # the same request as task creation so connection retries stay idempotent
+    # and the browser never has to coordinate two startup endpoints.  Injected
+    # repositories are test/worker seams and already provide an explicit source
+    # scope, so they intentionally bypass this production preflight.
+    if (
+        repository is None
+        and trigger_mode == "MANUAL"
+        and payment_candidate_refs is None
+        and not reanalyze_original_sources
+    ):
+        payment_preflight = payment_source_preflight(batch_name, version_name)
+        scope = payment_preflight.get("payment_preflight") or {}
+        if scope.get("status") == "NEEDS_SELECTION":
+            return {
+                "ok": True,
+                "status": "PAYMENT_SELECTION",
+                "payment_preflight": scope,
+            }
+        payment_candidate_refs = list(scope.get("selected_refs") or [])
 
     repo = repository or FrappeMaterialAIFillRepository()
     if reanalyze_original_sources:
@@ -3475,11 +3496,14 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
                 continue
             members = [row_members[number] for number in row_numbers]
             can_apply = all(member['persisted'] for member in members)
+            candidate_id=digest('xlsx-packing-group', source.get('source_hash'), sheet_name,
+                                group.get('group_id'), row_numbers)
+            member_keys=[member['key'] for member in members]
+            member_labels=[member['label'] for member in members]
             packing_group_candidates.append({
-                'candidate_id':digest('xlsx-packing-group', source.get('source_hash'), sheet_name,
-                                      group.get('group_id'), row_numbers),
-                'member_keys':[member['key'] for member in members],
-                'member_labels':[member['label'] for member in members],
+                'candidate_id':candidate_id,
+                'member_keys':member_keys,
+                'member_labels':member_labels,
                 'package_count':(group.get('package_count') or {}).get('value'),
                 'net_weight_kg':(group.get('net_weight_kg') or {}).get('value'),
                 'gross_weight_kg':(group.get('gross_weight_kg') or {}).get('value'),
@@ -3489,6 +3513,13 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
                 'sheet_name':sheet_name,'evidence':deepcopy(group.get('evidence') or []),
                 'can_apply':can_apply,'default_selected':can_apply,
                 'needs_member_confirmation':not can_apply,
+                'assignment_options':([{
+                    'assignment_id':digest('packing-assignment',candidate_id,'one_box_group',member_keys),
+                    'mode':'one_box_group','member_keys':member_keys,
+                    'label':f"{'、'.join(member_labels)} 共同装为 1 箱",
+                    'default_selected':True,'can_apply':True,
+                    'resolution_reason':'Excel 合并范围已唯一匹配全部装箱成员。',
+                }] if can_apply else []),
                 'resolution_reason':(
                     'Excel 合并范围已匹配到现有物料，可作为装箱组采用。'
                     if can_apply else
@@ -3768,11 +3799,53 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         else:
             matches=[item for item in items or [] if name and str(item.get("product_name") or "").strip().casefold()==name]
         add_matches(matches, hint.get("material_code") or hint.get("product_name"))
-    can_apply=len(members)>=2 and not ambiguous
+    ordered_items=[item for item in items or [] if not int(item.get('is_excluded') or 0)]
+    selectable_items=[]
+    for item in ordered_items:
+        key=str(item.get('stable_line_key') or (f"legacy:{item.get('name')}" if item.get('name') else '')).strip()
+        if not key:
+            continue
+        selectable_items.append({
+            'key':key,
+            'label':str(item.get('material_code') or item.get('product_name') or item.get('name') or key),
+        })
+    exact_members=len(members)>=2 and not ambiguous
     source_id=str(source.get("source_id") or "")
+    candidate_id=digest("comment-packing-group-1",source.get("source_hash"),source_id,members,
+                        parsed.get("gross_weight_kg"),parsed.get("volume_m3"))
+    assignment_options=[]
+    if exact_members:
+        assignment_options=[{
+            'assignment_id':digest('packing-assignment',candidate_id,'one_box_group',members),
+            'mode':'one_box_group','member_keys':list(members),
+            'label':f"{'、'.join(labels)} 共同装为 1 箱",
+            'default_selected':True,'can_apply':True,
+            'resolution_reason':'评论已唯一匹配全部装箱成员。',
+        }]
+    elif 1 <= len(selectable_items) <= 8:
+        assignment_options=[{
+            'assignment_id':digest('packing-assignment',candidate_id,'single_item',[item['key']]),
+            'mode':'single_item','member_keys':[item['key']],
+            'label':f"仅归属 {item['label']}",
+            'default_selected':False,'can_apply':True,
+            'resolution_reason':'将评论中的整组装箱事实仅用于该物料。',
+        } for item in selectable_items]
+        if len(selectable_items)>=2:
+            all_keys=[item['key'] for item in selectable_items]
+            all_labels=[item['label'] for item in selectable_items]
+            explicit_group=bool(re.search(r'[+＋]|(?:共同|一起|合箱|一箱)',str(parsed.get('source_text') or ''),re.I))
+            assignment_options.append({
+                'assignment_id':digest('packing-assignment',candidate_id,'one_box_group',all_keys),
+                'mode':'one_box_group','member_keys':all_keys,
+                'label':f"{'、'.join(all_labels)} 共同装为 1 箱",
+                'default_selected':explicit_group,'can_apply':True,
+                'resolution_reason':'将候选物料作为一个装箱组，共用本条重量、体积和箱数。',
+            })
+        if not any(option['default_selected'] for option in assignment_options) and len(assignment_options)==1:
+            assignment_options[0]['default_selected']=True
+    can_apply=bool(assignment_options)
     return [{
-        "candidate_id":digest("comment-packing-group-1",source.get("source_hash"),source_id,members,
-                              parsed.get("gross_weight_kg"),parsed.get("volume_m3")),
+        "candidate_id":candidate_id,
         "member_keys":members,"member_labels":labels,
         "member_hints":deepcopy(parsed.get("rows") or []),
         "package_count":None,
@@ -3785,13 +3858,43 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         "creation_method":"trusted_comment_text","source_id":source_id,
         "source_label":source.get("source_label") or "审批评论",
         "evidence":[{"kind":"trusted_comment_text","confidence":parsed.get("confidence")}],
-        "can_apply":can_apply,"default_selected":can_apply,
-        "needs_member_confirmation":not can_apply,
+        "can_apply":can_apply,"default_selected":bool(
+            can_apply and any(option.get('default_selected') for option in assignment_options)),
+        "needs_member_confirmation":len(assignment_options)>1,
+        "assignment_options":assignment_options,
         "resolution_reason":(
             "评论中整票重量和尺寸已唯一匹配到连续物料；最终确认前请核对成员范围。"
-            if can_apply else "评论中整票重量和尺寸已识别，但物料成员匹配不唯一，仅供对照。"
+            if exact_members else "评论中整票重量和尺寸已识别，请在单物料归属或共同装箱中选择一项。"
         ),
     }]
+
+
+def payment_source_preflight(batch_name: str, version_name: str) -> dict:
+    """Resolve the ID-only payment range before one unified AI-fill run.
+
+    Deterministic matching is refreshed at most once when no candidates have
+    been built yet.  This endpoint never persists a payment relation or any
+    material/fee projection; that remains part of final AI confirmation.
+    """
+
+    from .logistics_settlement import runtime
+
+    status=runtime.batch_status(str(batch_name),str(version_name))
+    if not status.get('freight_mode'):
+        return {'ok':True,'payment_preflight':{
+            'policy':'payment-source-scope-1','version':str(version_name),
+            'status':'UNAVAILABLE','selected_refs':[],'candidates':[],
+            'message':'当前模式无需匹配支付来源，已继续读取其他资料。',
+        }}
+    scope=status.get('payment_source_scope') or {}
+    matching=status.get('matching') or {}
+    if (scope.get('status')=='UNAVAILABLE' and not scope.get('candidates')
+            and str(matching.get('status') or '') in {'not_started','stale'}
+            and not status.get('historical')):
+        runtime.run_payment_rule_matching(str(batch_name),str(version_name))
+        status=runtime.batch_status(str(batch_name),str(version_name))
+        scope=status.get('payment_source_scope') or {}
+    return {'ok':True,'payment_preflight':deepcopy(scope)}
 
 
 def _excel_review_entries(

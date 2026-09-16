@@ -41,11 +41,12 @@ class Repo(ContextRepository):
         return result
 
 
-def prepare(repo,ids=None,fees=None,mode='fill_missing',packing_group_ids=None):
+def prepare(repo,ids=None,fees=None,mode='fill_missing',packing_group_ids=None,packing_assignments=None):
     catalog=service.review_catalog(repo,'B1',repo.run)
     ids=ids if ids is not None else [r['row_id'] for r in catalog['rows'] if r['default_selected']]
     return service.prepare('B1',repo.run['name'],ids,fees or [],mode,'V1',
-                           packing_group_ids=packing_group_ids,repository=repo)['preview']
+                           packing_group_ids=packing_group_ids,
+                           packing_assignments=packing_assignments,repository=repo)['preview']
 
 
 def confirm(repo,preview):
@@ -538,6 +539,72 @@ def test_packing_group_default_can_be_deselected_before_confirmation():
     assert deselected['selected_packing_group_ids']==[]
     assert deselected['packing_group_candidates']==[]
     assert deselected['can_apply'] is False
+
+
+def test_packing_assignment_can_apply_group_facts_to_exactly_one_material():
+    repo=Repo()
+    repo.items=[
+        {**repo.items[0],'stable_line_key':'LINE-1','row_no':1},
+        {'name':'I2','material_code':'SKU2','stable_line_key':'LINE-2','row_no':2,
+         'quantity':1,'actual_shipped_qty':1,'unit':'件','shipped_uom':'件'},
+    ]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'PACK-1','member_keys':['LINE-1'],
+        'gross_weight_kg':'42.05','volume_m3':'0.01518','package_count':None,
+        'can_apply':True,'default_selected':True,
+        'assignment_options':[
+            {'assignment_id':'PACK-1:LINE-1','mode':'single_item','member_keys':['LINE-1'],
+             'default_selected':False,'can_apply':True},
+            {'assignment_id':'PACK-1:LINE-2','mode':'single_item','member_keys':['LINE-2'],
+             'default_selected':True,'can_apply':True},
+            {'assignment_id':'PACK-1:GROUP','mode':'one_box_group','member_keys':['LINE-1','LINE-2'],
+             'default_selected':False,'can_apply':True},
+        ],
+    }]
+
+    preview=prepare(repo,ids=[],mode='update_selected',packing_assignments={'PACK-1':'PACK-1:LINE-2'})
+
+    rows={row['name']:row for row in preview['rows']}
+    assert rows['I1'].get('gross_weight_kg') is None
+    assert rows['I2']['gross_weight_kg']=='42.05'
+    assert rows['I2']['volume_m3']=='0.01518'
+    assert preview['selected_packing_assignments']=={'PACK-1':'PACK-1:LINE-2'}
+    assert preview['packing_group_candidates']==[]
+
+
+def test_packing_assignment_group_is_the_only_adopted_relation():
+    repo=Repo()
+    repo.items=[
+        {**repo.items[0],'stable_line_key':'LINE-1','row_no':1},
+        {'name':'I2','material_code':'SKU2','stable_line_key':'LINE-2','row_no':2,
+         'quantity':1,'actual_shipped_qty':1,'unit':'件','shipped_uom':'件'},
+    ]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'PACK-1','member_keys':['LINE-1'],
+        'gross_weight_kg':'42.05','volume_m3':'0.01518','package_count':1,
+        'can_apply':True,'default_selected':True,
+        'assignment_options':[
+            {'assignment_id':'PACK-1:LINE-1','mode':'single_item','member_keys':['LINE-1'],
+             'default_selected':False,'can_apply':True},
+            {'assignment_id':'PACK-1:GROUP','mode':'one_box_group','member_keys':['LINE-1','LINE-2'],
+             'default_selected':True,'can_apply':True},
+        ],
+    }]
+
+    preview=prepare(repo,ids=[],mode='update_selected',packing_assignments={'PACK-1':'PACK-1:GROUP'})
+
+    assert preview['selected_packing_assignments']=={'PACK-1':'PACK-1:GROUP'}
+    assert [candidate['member_keys'] for candidate in preview['packing_group_candidates']]==[['LINE-1','LINE-2']]
+    assert not any(change['fieldname'] in {'gross_weight_kg','volume_m3','package_count'}
+                   for change in preview['changes'])
 
 
 def test_packing_group_selection_tolerates_unrelated_legacy_rows_without_stored_keys():

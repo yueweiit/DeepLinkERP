@@ -6,7 +6,7 @@ from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
-RECEIPT_POLICY = 'ai-field-preview-receipt-5'
+RECEIPT_POLICY = 'ai-field-preview-receipt-6'
 
 _SKIPPED_PROGRESS_STATUSES = frozenset({
     'FAILED', 'SKIPPED', 'UNREADABLE', 'TIMEOUT', 'FORBIDDEN', 'MISSING',
@@ -330,6 +330,7 @@ def _preview_revision(context,items,sources,current_fees,catalog,selection,depen
         rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],
         selection['selected_row_ids'],selection['selected_fee_ids'],selection.get('selected_field_choices'),selection['mode'],dependencies,
         selection.get('merged_amount_groups') or [],selection.get('selected_packing_group_ids') or [],
+        selection.get('selected_packing_assignments') or {},
         selection.get('payment_match_candidates') or selection.get('payment_match_candidate'),
     )
 
@@ -367,7 +368,7 @@ def _preview_receipt(preview):
         'id','revision','run_id','batch','version','mode','selected_row_ids','selected_fee_ids',
         'selected_field_choices',
         'dependencies','input_fingerprint','fee_fingerprint','catalog_fingerprint',
-        'selected_packing_group_ids','payment_match_candidate',
+        'selected_packing_group_ids','selected_packing_assignments','payment_match_candidate',
         'payment_match_candidates',
     )
     return {'receipt_policy':RECEIPT_POLICY,
@@ -421,8 +422,108 @@ def _selected_packing_groups(items, candidates, selected_ids):
     return selected,sorted(selected_ids)
 
 
+def _stable_item_index(items):
+    index={}
+    for item in sorted(
+            [value for value in items or [] if not int(value.get('is_excluded') or 0)],
+            key=lambda value:(int(value.get('row_no') or 0),str(value.get('name') or ''))):
+        key=str(item.get('stable_line_key') or (
+            f"legacy:{item.get('name')}" if item.get('name') else '')).strip()
+        if not key or key in index:
+            raise ValueError('装箱候选的物料身份不稳定，请刷新后重新分析。')
+        index[key]=item
+    return index
+
+
+def _selected_packing_assignments(items,candidates,selected_assignments):
+    candidates=deepcopy(candidates or [])
+    by_id={str(candidate.get('candidate_id') or ''):candidate for candidate in candidates}
+    if any(not candidate_id for candidate_id in by_id) or len(by_id)!=len(candidates):
+        raise ValueError('装箱候选标识无效，请重新分析。')
+    if selected_assignments is None:
+        selected_assignments={}
+        for candidate_id,candidate in by_id.items():
+            defaults=[option for option in candidate.get('assignment_options') or []
+                      if option.get('default_selected') and option.get('can_apply')]
+            if len(defaults)==1:
+                selected_assignments[candidate_id]=str(defaults[0].get('assignment_id') or '')
+    if (not isinstance(selected_assignments,dict)
+            or any(not isinstance(key,str) or not isinstance(value,str)
+                   for key,value in selected_assignments.items())):
+        raise ValueError('装箱归属选择格式不正确。')
+    if set(selected_assignments)-by_id.keys():
+        raise ValueError('所选装箱候选不属于当前草稿，请刷新预览。')
+    item_index=_stable_item_index(items)
+    occupied=set();groups=[];singles=[];validated={}
+    for candidate_id,assignment_id in sorted(selected_assignments.items()):
+        candidate=by_id[candidate_id]
+        options={str(option.get('assignment_id') or ''):option
+                 for option in candidate.get('assignment_options') or []}
+        option=options.get(assignment_id)
+        if not option:
+            raise ValueError('所选装箱归属已变化，请刷新预览。')
+        if not option.get('can_apply'):
+            raise ValueError(option.get('resolution_reason') or '该装箱归属不可采用。')
+        members=[str(value or '') for value in option.get('member_keys') or []]
+        mode=str(option.get('mode') or '')
+        expected_count=1 if mode=='single_item' else 2
+        if len(members)<expected_count or len(members)!=len(set(members)) or any(member not in item_index for member in members):
+            raise ValueError('装箱候选的物料已变化，请刷新后重新选择。')
+        if occupied.intersection(members):
+            raise ValueError('同一物料不能同时采用两组装箱事实。')
+        occupied.update(members);validated[candidate_id]=assignment_id
+        selected={**candidate,'member_keys':members,'member_labels':[
+            str(item_index[key].get('material_code') or item_index[key].get('product_name') or key)
+            for key in members],
+            'selected_assignment_id':assignment_id,'assignment_mode':mode,
+            'default_selected':True,'can_apply':True}
+        if mode=='single_item':
+            singles.append(selected)
+        elif mode=='one_box_group':
+            positions=sorted(list(item_index).index(member) for member in members)
+            if positions!=list(range(min(positions),max(positions)+1)):
+                raise ValueError('共同装箱只能覆盖连续物料行。')
+            groups.append(selected)
+        else:
+            raise ValueError('装箱归属类型无效，请重新分析。')
+    return groups,singles,validated
+
+
+def _apply_single_packing_assignments(projection,singles):
+    rows_by_key={str(row.get('stable_line_key') or (
+        f"legacy:{row.get('name')}" if row.get('name') else '')):row
+        for row in projection.get('rows') or []}
+    changes=projection.setdefault('changes',[])
+    for candidate in singles or []:
+        key=candidate['member_keys'][0];row=rows_by_key.get(key)
+        if row is None:
+            raise ValueError('装箱归属的目标物料已变化，请刷新。')
+        for field in ('package_count','net_weight_kg','gross_weight_kg','volume_m3'):
+            value=candidate.get(field)
+            if value is None:
+                continue
+            before=row.get(field);row[field]=deepcopy(value);row['_row_action']='source'
+            changes.append({'candidate_id':candidate.get('candidate_id'),
+                'assignment_id':candidate.get('selected_assignment_id'),
+                'item_name':row.get('name'),'fieldname':field,
+                'previous_value':before,'value':deepcopy(value),
+                'source_refs':[{'source_id':candidate.get('source_id'),
+                                'sheet':candidate.get('sheet_name')}],
+                'workflow_stage':'payment' if candidate.get('workflow_stage')=='payment' else candidate.get('workflow_stage')})
+        meta=rows.json_dict(row.get('extra_json'))
+        mask=set(meta.get('settlement_packing_missing') or [])
+        for field in ('package_count','net_weight_kg','gross_weight_kg','volume_m3'):
+            if candidate.get(field) is not None:
+                mask.discard(field)
+        meta['settlement_packing_missing']=sorted(mask);row['extra_json']=meta
+    if singles:
+        projection['updated_count']=len({candidate['member_keys'][0] for candidate in singles})
+        projection['can_apply']=True
+    return projection
+
+
 def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choices=None,
-            packing_group_ids=None,repository=None):
+            packing_group_ids=None,packing_assignments=None,repository=None):
     from . import material_ai_fill_service as ai
     if mode == 'replace_all':
         raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
@@ -443,12 +544,21 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choi
     # Re-read under the newly held evidence locks before saving any preview.
     if dependencies:
         context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
-    selected_packing_groups,selected_packing_group_ids=_selected_packing_groups(
-        items,draft.get('packing_group_candidates') or [],packing_group_ids)
+    candidates=draft.get('packing_group_candidates') or []
+    if packing_assignments is not None or any(candidate.get('assignment_options') for candidate in candidates):
+        selected_packing_groups,single_assignments,validated_assignments=(
+            _selected_packing_assignments(items,candidates,packing_assignments))
+        selected_packing_group_ids=[str(candidate.get('candidate_id')) for candidate in selected_packing_groups]
+    else:
+        selected_packing_groups,selected_packing_group_ids=_selected_packing_groups(
+            items,candidates,packing_group_ids)
+        single_assignments=[];validated_assignments={}
+    projection=rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices)
+    _apply_single_packing_assignments(projection,single_assignments)
     projection=_attach_control_metadata(
-        rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices),
-        draft.get('merged_amount_groups') or [],selected_packing_groups)
+        projection,draft.get('merged_amount_groups') or [],selected_packing_groups)
     projection['selected_packing_group_ids']=selected_packing_group_ids
+    projection['selected_packing_assignments']=validated_assignments
     projection['payment_match_candidates']=_payment_match_references(sources,context['version'])
     projection['payment_match_candidate']=_payment_match_reference(sources,context['version'])
     revision=_preview_revision(context,items,sources,current_fees,catalog,projection,dependencies)
@@ -484,16 +594,25 @@ def _reconstruct_locked_preview(repo,batch_name,run,receipt,draft):
     if callable(getattr(repo,'assert_row_dependencies',None)):
         repo.assert_row_dependencies(batch_name,dependencies,lock=True)
     context,items,sources,current_fees,catalog=_inputs(repo,batch_name,run,locked=True)
-    selected_group_ids=set(receipt.get('selected_packing_group_ids') or [])
-    if not selected_group_ids and receipt.get('packing_group_candidates'):
-        selected_group_ids={str(candidate.get('candidate_id') or '') for candidate in receipt.get('packing_group_candidates') or []}
-    selected_packing_groups,validated_group_ids=_selected_packing_groups(
-        items,draft.get('packing_group_candidates') or [],sorted(selected_group_ids))
+    candidates=draft.get('packing_group_candidates') or []
+    if any(candidate.get('assignment_options') for candidate in candidates):
+        selected_packing_groups,single_assignments,validated_assignments=(
+            _selected_packing_assignments(items,candidates,receipt.get('selected_packing_assignments') or {}))
+        validated_group_ids=[str(candidate.get('candidate_id')) for candidate in selected_packing_groups]
+    else:
+        selected_group_ids=set(receipt.get('selected_packing_group_ids') or [])
+        if not selected_group_ids and receipt.get('packing_group_candidates'):
+            selected_group_ids={str(candidate.get('candidate_id') or '') for candidate in receipt.get('packing_group_candidates') or []}
+        selected_packing_groups,validated_group_ids=_selected_packing_groups(
+            items,candidates,sorted(selected_group_ids))
+        single_assignments=[];validated_assignments={}
+    current=rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode'],
+                         field_choices=receipt.get('selected_field_choices'))
+    _apply_single_packing_assignments(current,single_assignments)
     current=_attach_control_metadata(
-        rows.project(items,catalog,receipt['selected_row_ids'],receipt['selected_fee_ids'],receipt['mode'],
-                     field_choices=receipt.get('selected_field_choices')),
-        draft.get('merged_amount_groups') or receipt.get('merged_amount_groups') or [],selected_packing_groups)
+        current,draft.get('merged_amount_groups') or receipt.get('merged_amount_groups') or [],selected_packing_groups)
     current['selected_packing_group_ids']=validated_group_ids
+    current['selected_packing_assignments']=validated_assignments
     current['payment_match_candidates']=_payment_match_references(sources,context['version'])
     current['payment_match_candidate']=_payment_match_reference(sources,context['version'])
     if current.get('payment_match_candidates') != receipt.get('payment_match_candidates'):
