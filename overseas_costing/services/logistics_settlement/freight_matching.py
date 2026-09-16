@@ -6,7 +6,8 @@ from .freight_lines import POLICY, lines_for_source, matching_lines
 from .ai_matching import save, safe_text
 from .jobs import utcnow
 
-RULE_POLICY = 'shipment-payment-rules-3'
+RULE_POLICY = 'shipment-payment-rules-4'
+CANDIDATE_SCOPE_POLICY = 'shipment-payment-line-scope-2'
 HINT_LIMITS = {'waybill':160, 'supplier':200, 'project':200, 'date':80, 'description':500}
 CANDIDATE_PRIORITY = {'manual':400, 'explicit':300, 'identifier':200, 'deepseek':100, 'reopened':0}
 
@@ -27,25 +28,19 @@ def _shipment_material_lines(logistics, lines):
         for goods in logistics.get('goods') or []
         if str(goods.get('material_code') or '').strip()
     )
-    code_prefixes = {
-        match.group(0)
-        for code in logistics_codes
-        if (match := re.match(r'[A-Z]+', code))
-    }
     code_matches = []
     rows_without_codes = []
     for row in blank:
+        packing = row.get('packing') if isinstance(row.get('packing'), dict) else None
+        raw_hints = packing.get('material_code_hints') if packing is not None else None
         hints = {
             str(value or '').strip().upper()
-            for value in packing_for_line(row).get('material_code_hints') or []
+            for value in (raw_hints if raw_hints is not None else
+                          packing_for_line(row).get('material_code_hints') or [])
             if str(value or '').strip()
         }
-        authoritative_hints = {
-            hint for hint in hints
-            if any(hint.startswith(prefix) for prefix in code_prefixes)
-        }
-        if authoritative_hints:
-            if authoritative_hints & logistics_codes:
+        if hints:
+            if hints & logistics_codes:
                 code_matches.append(row)
         else:
             rows_without_codes.append(row)
@@ -107,27 +102,38 @@ def candidates(store,logistics_id):
 
 def save_candidate(store,logistics,expense,lines,method,reason,*,model='',confidence=None,expected_revision=None):
     cid=digest(POLICY,logistics['id'],expense['id'])
-    revision=digest(POLICY,logistics['snapshot'],expense['snapshot'],[r['id'] for r in lines],method,model,str(confidence),reason)
+    revision=digest(POLICY,CANDIDATE_SCOPE_POLICY,logistics['snapshot'],expense['snapshot'],[r['id'] for r in lines],method,model,str(confidence),reason)
     with store.atomic():
         store.get('state','match_lock',lock=True)
         prior=store.get('freight_candidate',cid,lock=True)
+        legacy_scope=prior if prior and prior.get('line_scope_policy')!=CANDIDATE_SCOPE_POLICY else None
         if expected_revision=='' and prior:
             raise ValueError('候选已存在，请刷新后重试')
         if expected_revision not in (None,'') and (prior or {}).get('revision')!=expected_revision:
             raise ValueError('候选已变化，请刷新后重试')
-        if prior and method=='manual' and expected_revision is None:
+        if prior and not legacy_scope and method=='manual' and expected_revision is None:
             raise ValueError('候选已存在，请提供匹配的候选版本后重试')
         # Rejection permanently protects a pair until the explicit reopen path.
-        if prior and prior.get('status') in ('rejected','confirmed'):return prior
-        if prior and CANDIDATE_PRIORITY.get(method,0)<CANDIDATE_PRIORITY.get(prior.get('method'),0):return prior
+        if prior and not legacy_scope and prior.get('status') in ('rejected','confirmed'):return prior
+        if prior and not legacy_scope and CANDIDATE_PRIORITY.get(method,0)<CANDIDATE_PRIORITY.get(prior.get('method'),0):return prior
         issues=[]
         for line in lines:
             if line.get('ambiguous'): issues.append('重复凭证或明细行身份不唯一，待核对')
             if line.get('identifier_conflict'):issues.append('运单与审批编号指向不同票，请核对')
             claims=store.find('freight_claim',charge_key=line['charge_key'])
             if any(c['logistics_id']!=logistics['id'] for c in claims): issues.append('本笔费用已用于其他票')
-        c={'id':cid,'logistics_id':logistics['id'],'expense_id':expense['id'],'status':'conflict' if issues else 'pending',
+        migrated_status=(legacy_scope or {}).get('status')
+        status='conflict' if issues else migrated_status if migrated_status in ('confirmed','rejected') else 'pending'
+        migrations=list((legacy_scope or {}).get('scope_migrations') or [])
+        if legacy_scope:
+            migrations.append({'policy':str(legacy_scope.get('line_scope_policy') or ''),
+                               'revision':str(legacy_scope.get('revision') or ''),
+                               'status':str(legacy_scope.get('status') or ''),
+                               'line_ids':list(legacy_scope.get('line_ids') or [])})
+        c={'id':cid,'logistics_id':logistics['id'],'expense_id':expense['id'],'status':status,
            'revision':revision,'expense_snapshot':expense['snapshot'],'logistics_snapshot':logistics['snapshot'],
+           'line_scope_policy':CANDIDATE_SCOPE_POLICY,
+           'scope_migrations':migrations,
            'line_ids':[r['id'] for r in lines],'method':method,'reason':reason,'issues':sorted(set(issues)),
            'model':str(model or ''),'confidence':None if confidence is None else str(confidence),
            'source_revision':expense['snapshot'],'amount_pending':not bool(lines)}
@@ -204,7 +210,7 @@ def payment_candidate_state(store,logistics_id,expense_ids):
     rows=[store.unpack(row) for row in store.sql(
         f'SELECT * FROM oc_ls_freight_candidate WHERE logistics_id=%s AND expense_id IN ({marks}) ORDER BY id',
         [logistics_id,*expense_ids])]
-    return sorted((c['id'],c.get('revision'),c.get('status'),c.get('method')) for c in rows)
+    return sorted((c['id'],c.get('revision'),c.get('status'),c.get('method'),c.get('line_scope_policy')) for c in rows)
 
 
 def payment_pool(store,logistics_id,hints=None,offset=0,limit=30):

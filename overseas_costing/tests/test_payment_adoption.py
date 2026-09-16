@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from overseas_costing.services.logistics_settlement.model import digest, dumps
+from overseas_costing.services.logistics_settlement.freight_matching import CANDIDATE_SCOPE_POLICY
 from overseas_costing.services.logistics_settlement.store import Store
 from overseas_costing.tests.test_settlement_writer import Ledger
 
@@ -55,6 +56,7 @@ def payment_setup(*, structured=False, scope="review", amount="100", currency="R
         "id": "candidate-1", "logistics_id": logistics["id"], "expense_id": source["id"], "status": "pending",
         "revision": "candidate-revision", "expense_snapshot": source["snapshot"],
         "logistics_snapshot": logistics["snapshot"], "line_ids": line_ids,
+        "line_scope_policy": CANDIDATE_SCOPE_POLICY,
     }
     store.insert("freight_candidate", {"id": candidate["id"], "logistics_id": logistics["id"],
         "expense_id": source["id"], "status": "pending", "data": dumps(candidate)})

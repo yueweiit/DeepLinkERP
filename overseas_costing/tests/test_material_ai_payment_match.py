@@ -41,6 +41,68 @@ def test_unique_strong_current_freight_candidate_is_selected_by_server():
     }
 
 
+def test_legacy_line_scope_candidate_is_ignored_without_deleting_confirmed_audit():
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import freight_matching
+
+    store, ledger, batch, version, logistics, source, legacy = payment_setup(
+        structured=True, scope="freight", amount="3414.19", mode="EXPRESS"
+    )
+    legacy = deepcopy(legacy)
+    legacy.update(
+        id=freight_matching.digest(
+            freight_matching.POLICY, logistics["id"], source["id"]
+        ),
+        revision="legacy-line-scope-revision",
+        status="confirmed",
+        line_ids=["legacy-cross-ticket-line"],
+    )
+    legacy.pop("line_scope_policy", None)
+    store.sql("DELETE FROM oc_ls_freight_candidate WHERE logistics_id=%s", (logistics["id"],))
+    store.insert("freight_candidate", _candidate_values(legacy))
+    legacy_reference = {
+        "candidate_id": legacy["id"],
+        "revision": legacy["revision"],
+        "version": version["name"],
+    }
+    assert service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    ) is None
+    with pytest.raises(ValueError, match="已变化"):
+        service.validate_preview_references(
+            store, ledger, batch["name"], version["name"], [legacy_reference]
+        )
+
+    line = store.get("freight_line", "payment-line-1")
+    current = freight_matching.save_candidate(
+        store, logistics, source, [line], "identifier", "当前票物流明细重新裁决"
+    )
+    assert current["line_scope_policy"] == freight_matching.CANDIDATE_SCOPE_POLICY
+    assert current["id"] == legacy["id"]
+    assert current["status"] == "confirmed"
+    assert current["line_ids"] == ["payment-line-1"]
+    assert current["scope_migrations"][-1] == {
+        "line_ids": ["legacy-cross-ticket-line"],
+        "policy": "",
+        "revision": "legacy-line-scope-revision",
+        "status": "confirmed",
+    }
+
+    selected = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+
+    assert selected == {
+        "candidate_id": current["id"],
+        "revision": current["revision"],
+        "version": version["name"],
+    }
+    saved = store.get("freight_candidate", legacy["id"])
+    assert saved["status"] == "confirmed"
+    assert saved["line_ids"] == ["payment-line-1"]
+    assert saved["scope_migrations"][-1]["line_ids"] == ["legacy-cross-ticket-line"]
+
+
 @pytest.mark.parametrize(
     "changes",
     [

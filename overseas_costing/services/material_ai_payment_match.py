@@ -122,12 +122,14 @@ def _current_candidates(store, ledger, batch_name: str, version_name: str, *, lo
     logistics = _current_logistics(store, ledger, batch_name, version_name, lock=lock)
     if not logistics:
         return []
-    from .logistics_settlement.freight_matching import candidates
+    from .logistics_settlement.freight_matching import CANDIDATE_SCOPE_POLICY, candidates
 
     rows = []
     for raw in candidates(store, logistics["id"]):
         candidate = store.get("freight_candidate", raw["id"], lock=lock) if lock else raw
-        if candidate and _strong(candidate):
+        if (candidate
+                and candidate.get("line_scope_policy") == CANDIDATE_SCOPE_POLICY
+                and _strong(candidate)):
             rows.append(candidate)
     return rows
 
@@ -209,12 +211,13 @@ def validate_preview_references(store, ledger, batch_name: str, version_name: st
     logistics = _current_logistics(store, ledger, batch_name, version_name, lock=lock)
     if not logistics:
         raise ValueError("本票国际物流来源已变化，请刷新")
-    from .logistics_settlement.freight_matching import candidates
+    from .logistics_settlement.freight_matching import CANDIDATE_SCOPE_POLICY, candidates
     available = {}
     for row in candidates(store, logistics["id"]):
         candidate = store.get("freight_candidate", row.get("id"), lock=lock) if lock else row
         source = store.get("source", (candidate or {}).get("expense_id"), lock=lock) if candidate else None
         if (not candidate
+                or candidate.get("line_scope_policy") != CANDIDATE_SCOPE_POLICY
                 or str(candidate.get("status") or "").lower() not in {"pending", "confirmed"}
                 or candidate.get("issues")
                 or not source or not _payment_source_allowed(source)):
@@ -310,10 +313,12 @@ def preview_process_sources(store, ledger, batch_name: str, version_name: str, *
     logistics = _current_logistics(store, ledger, batch_name, version_name)
     if not logistics:
         return []
-    from .logistics_settlement.freight_matching import candidates
+    from .logistics_settlement.freight_matching import CANDIDATE_SCOPE_POLICY, candidates
 
     rows = []
     for candidate in candidates(store, logistics["id"]):
+        if candidate.get("line_scope_policy") != CANDIDATE_SCOPE_POLICY:
+            continue
         status = str(candidate.get("status") or "").lower()
         method = str(candidate.get("method") or "").lower()
         confidence = _confidence(candidate.get("confidence"))

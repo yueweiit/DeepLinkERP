@@ -280,6 +280,13 @@ def test_identifierless_payment_rows_require_unique_current_logistics_material_m
     }
     assert _shipment_material_lines(logistics, [name_only, sibling]) == [name_only]
 
+    foreign_code_same_name = {
+        'id': 'FOREIGN-CODE', 'waybill': '', 'approval_no': '',
+        'cargo_text': 'ABC999 薇武士 IP17 PRO 手机壳',
+        'packing': {'material_code_hints': ['ABC999']},
+    }
+    assert _shipment_material_lines(logistics, [foreign_code_same_name]) == []
+
 
 def test_stale_freight_line_snapshot_is_not_an_exact_source_or_payment_score():
     from overseas_costing.services.logistics_settlement import freight_matching
