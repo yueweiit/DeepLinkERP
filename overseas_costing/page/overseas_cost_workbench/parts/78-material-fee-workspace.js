@@ -1835,7 +1835,7 @@
         } else if (action === "mf-ai-row-all" || action === "mf-ai-row-none") {
           this.changeMaterialAIRowSelection("rows", "all", action === "mf-ai-row-all");
         } else if (action === "mf-ai-row-preview") {
-          this.restartMaterialAIFromOriginalSources();
+          this.restartMaterialAIFromCurrentSources();
         } else if (action === "mf-ai-progress-retry") {
           this.retryMaterialAIProgress();
         } else if (action === "mf-ai-payment-continue") {
@@ -2449,6 +2449,27 @@
     const mergedAmountSummary = mergedAmountGroups.length ? `<section class="ocw-mf-ai-preview-section"><h4>合并金额校验</h4><ul>${mergedAmountGroups.map((group) => `<li>${this.escape(group.sheet_name || group.source_id || "装箱单")} · 第 ${this.escape(group.source_range?.start_row ?? group.source_row ?? "--")}-${this.escape(group.source_range?.end_row ?? group.source_row ?? "--")} 行 · 组总额 ${this.escape(group.control_total_rmb ?? "--")} · 独立行合计 ${this.escape(group.computed_total_rmb ?? "--")} · ${group.status === "verified" ? "已校验" : "待人工分摊"}</li>`).join("")}</ul></section>` : "";
     const packingGroupCandidates = fill.draft?.packing_group_candidates || preview?.packing_group_candidates || [];
     const packingGroupSummary = packingGroupCandidates.length ? `<section class="ocw-mf-ai-preview-section"><h4>装箱组候选</h4><p>每条装箱事实只能选择一种归属：仅归属某个物料，或候选物料共同装为 1 箱。已保存的人工分组不会被覆盖。</p><ul>${packingGroupCandidates.map((group) => { const candidateId = String(group.candidate_id || ""); const selectedAssignment = selection.packingAssignments.get(candidateId); return `<li><strong>${this.escape(group.source_label || group.sheet_name || group.source_id || "装箱单")}</strong> · ${Number(group.member_keys?.length || 0)} 行 · 箱数 ${this.escape(group.package_count ?? "--")} · 净重 ${this.escape(group.net_weight_kg ?? "--")} kg · 毛重 ${this.escape(group.gross_weight_kg ?? "--")} kg · 体积 ${this.escape(group.volume_m3 ?? "--")} m³${group.weight_basis === "inferred_unqualified_weight_as_gross" ? " · 未注明口径，按组毛重候选" : ""}<div class="ocw-mf-ai-packing-assignments">${(group.assignment_options || []).map((option) => `<label><input type="radio" name="packing-assignment-${this.escape(candidateId)}" data-mf-ai-packing-assignment="${this.escape(candidateId)}" value="${this.escape(option.assignment_id)}" ${selectedAssignment === String(option.assignment_id) ? "checked" : ""} ${!option.can_apply || busy ? "disabled" : ""}><span>${this.escape(option.label || "装箱归属")}</span></label>`).join("") || `<small>${this.escape(group.resolution_reason || "暂无可用归属选项")}</small>`}</div><small>${this.escape(group.resolution_reason || "")}</small></li>`; }).join("")}</ul></section>` : "";
+    const sharedPackingFields = new Set(["package_count", "net_weight_kg", "gross_weight_kg", "volume_m3"]);
+    const sharedPackingByMember = new Map();
+    packingGroupCandidates.forEach(group => {
+      const candidateId = String(group.candidate_id || "");
+      const selectedAssignment = String(selection.packingAssignments.get(candidateId) || "");
+      const option = (group.assignment_options || []).find(row => String(row.assignment_id || "") === selectedAssignment);
+      if (!option?.can_apply || option.mode !== "one_box_group" || (option.member_keys || []).length < 2) return;
+      option.member_keys.forEach((memberKey, position) => sharedPackingByMember.set(String(memberKey), {
+        group, position, size: option.member_keys.length,
+      }));
+    });
+    const finalCells = row => {
+      const rowKey = String(row.stable_line_key || (row.name ? `legacy:${row.name}` : ""));
+      const shared = sharedPackingByMember.get(rowKey);
+      return columns.map(([field]) => {
+        if (!shared || !sharedPackingFields.has(field)) return `<td>${value(row[field])}</td>`;
+        if (shared.position > 0) return "";
+        const total = shared.group[field];
+        return `<td class="is-packing-group" rowspan="${Number(shared.size)}">${value(total)}<small>共享 1 箱总计 · ${Number(shared.size)} 个物料</small></td>`;
+      }).join("");
+    };
     const fieldLabels = Object.fromEntries(columns);
     const workflowLabels = { payment: "支付申请", international_logistics: "国际物流审批", purchase: "商品采购支出", other: "其他来源" };
     const evidenceLabels = { dedicated_attachment: "专用附件", approval_form: "审批正文", attachment: "其他相关附件", comment: "评论", other: "其他证据" };
@@ -2573,7 +2594,7 @@
       <main class="ocw-mf-ai-dialog-body"><section class="ocw-mf-ai-row-controls"><label>填充方式 <select data-mf-ai-row-mode ${busy}><option value="update_selected" ${selection.mode === "update_selected" ? "selected" : ""}>更新所选行（默认）</option><option value="fill_missing" ${selection.mode === "fill_missing" ? "selected" : ""}>只补缺失</option>${hasAddCandidates ? `<option value="add_selected" ${selection.mode === "add_selected" ? "selected" : ""}>单独确认新增</option>` : ""}</select></label><p>${selection.mode === "update_selected" ? "只更新所选候选对应的现有物料行；其他行完全保留。未匹配的新物料需单独确认新增。" : selection.mode === "add_selected" ? "仅新增明确勾选的未匹配物料；本次不同时更新现有行或费用，确认前请再次核对行数。" : "只补真正缺失的字段；已填金额、数量和 0 值保留。匹配不唯一的行需核对。"}</p></section>
       ${fieldChoiceSection}${selection.mode !== "add_selected" && (hasPackingStages || fieldCandidates.length) ? "" : `<section class="ocw-mf-ai-preview-section"><h4>物料行 <span>已选 ${selection.rows.size} / ${(catalog.rows || []).length}</span></h4><div class="ocw-mf-ai-row-toolbar"><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-all" ${busy}>全选可用行</button><button type="button" class="ocw-outline-btn" data-action="mf-ai-row-none" ${busy}>全不选</button></div>${groupedTables || renderCandidateTable([])}</section>`}
       ${feeSection}
-      ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
+      ${mergedAmountSummary}${packingGroupSummary}<section class="ocw-mf-ai-preview-section" data-mf-ai-final-preview><h4>确认后物料清单</h4>${selection.loading ? '<p role="status">正在更新服务器预览…</p>' : preview ? `<p>最终 ${preview.rows?.length || 0} 行 · 新增 ${Number(preview.added_count || 0)} · 移除 ${Number(preview.removed_count || 0)} · 补充 ${Number(preview.updated_count || 0)} · 缺项 ${missingCount}</p><div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-final-table"><thead><tr>${columns.map(([, label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${(preview.rows || []).map(row => `<tr>${finalCells(row)}</tr>`).join("")}</tbody></table></div>` : '<p>等待服务器预览。</p>'}${notices.length ? `<ul>${notices.map(row => `<li>${this.escape(typeof row === "string" ? row : row.message || row.reason || row.fieldname || "待核对")}</li>`).join("")}</ul>` : ""}</section>
       ${selection.error ? `<p class="ocw-mf-ai-review-error" role="alert">${this.escape(selection.error)}</p>` : ""}
       <details class="ocw-mf-ai-review-advanced"><summary>资料来源与其他记录</summary>${this.renderMaterialAIReviewSources(fill)}${hasFeeStages ? "" : otherFeeRecords}${mainFees.map(fee => this.renderSourceAIReviewAlternativeQuotes({...fee, proposal_type: "fee_update"})).join("")}<button class="ocw-outline-btn" type="button" data-action="mf-ai-change-sources" ${busy}>更换来源并重新生成</button></details></main>
       <footer class="ocw-mf-ai-dialog-footer"><span>确认前不会修改已保存数据</span><div><button class="ocw-outline-btn" type="button" data-action="mf-ai-review-cancel" ${busy}>取消</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-discard" ${busy}>放弃草稿</button><button class="ocw-outline-btn" type="button" data-action="mf-ai-row-preview" ${selection.loading || fill.applying ? "disabled" : ""}>重新读取资料源</button><button class="ocw-primary-btn" type="button" data-action="mf-ai-apply" ${this.canConfirmMaterialAIRowSelection(fill) ? "" : "disabled"}>${fill.applying ? "正在填充…" : selection.mode === "add_selected" ? "确认新增" : "确认填充"}</button></div></footer></div>`;
@@ -2732,11 +2753,11 @@
     await this.startMaterialAIFill({ force: true, restart: true, selectedSourceIds });
   }
 
-  restartMaterialAIFromOriginalSources() {
+  restartMaterialAIFromCurrentSources() {
     const state = this.ensureMaterialFeeState();
     state.aiPendingReady = null;
     if (state.aiProgressDialog?.$wrapper?.length) state.aiProgressDialog.$wrapper.removeClass("is-review");
-    return this.startMaterialAIFill({ force: true, restart: true, reanalyzeOriginalSources: true });
+    return this.startMaterialAIFill({ force: true, restart: true });
   }
 
   async previewMaterialRowRecovery() {
@@ -3119,12 +3140,6 @@
         delete options.selectedSourceIds;
         delete options.paymentPreflightComplete;
         delete options.paymentCandidateRefs;
-      } else if (options.reanalyzeOriginalSources) {
-        // An explicit original-source reread must rebuild its selection from the
-        // latest trusted manifest.  Attachment materialization can replace a
-        // pending public id with sheet ids while the first run is active; reusing
-        // that stale id would make the safety validator reject the retry.
-        delete options.selectedSourceIds;
       } else if (fill?.source_progress?.length) {
         options.selectedSourceIds = this.materialAISelectedSourceIds(fill.source_progress);
       }
@@ -3225,9 +3240,8 @@
           ? { expected_clarification_revision: state.aiClarificationRevision }
           : { clarification_text: state.aiClarification || "" }),
         force: options.force === true ? 1 : 0,
-        ...(options.reanalyzeOriginalSources ? { reanalyze_original_sources: 1 } : {}),
       };
-      if (!options.reanalyzeOriginalSources && options.paymentPreflightComplete) {
+      if (options.paymentPreflightComplete) {
         payload.payment_candidate_refs_json = JSON.stringify((options.paymentCandidateRefs || []).map((row) => ({
           candidate_id: String(row.candidate_id || ''),
           revision: String(row.revision || ''),

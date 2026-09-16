@@ -564,13 +564,14 @@ assert(!html.includes('data-mf-ai-autofill-preview'));assert(!html.includes('OLD
 """)
 
 
-def test_explicit_reread_starts_a_fresh_original_source_analysis():
+def test_explicit_reread_starts_a_fresh_unified_three_stage_analysis():
     run_ui(r"""
 ready();w.openMaterialAIProgressDialog=()=>{};w.pollMaterialAIFill=async()=>{};
 w.call=async(method,args)=>{calls.push({method,args});return {ok:true,status:'QUEUED',run_id:'fresh',progress_revision:0}};
-await w.restartMaterialAIFromOriginalSources();
+await w.restartMaterialAIFromCurrentSources();
 assert.equal(calls[0].method,'overseas_costing.api.materials.start_source_ai_review');
-assert.equal(calls[0].args.force,1);assert.equal(calls[0].args.reanalyze_original_sources,1);
+assert.equal(calls[0].args.force,1);assert(!('reanalyze_original_sources' in calls[0].args));
+assert(!('payment_candidate_refs_json' in calls[0].args));
 assert(!('selected_source_ids_json' in calls[0].args));
 """)
 
@@ -672,6 +673,31 @@ assert(!html.includes('data-mf-ai-packing-group-select'));
 w.scheduleMaterialAIRowPreview=()=>{};
 w.changeMaterialAIRowSelection('packingAssignments','G-NEW','G-NEW:L1');
 assert.deepEqual([...fill.rowSelection.packingAssignments.entries()],[['G-NEW','G-NEW:L1']]);
+""")
+
+
+def test_shared_box_is_rendered_once_in_final_preview_instead_of_repeating_group_totals():
+    run_ui(r"""
+const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G-NEW',member_keys:['L1'],
+    package_count:'1',gross_weight_kg:'42.05',volume_m3:'0.01518',sheet_name:'评论',default_selected:true,can_apply:true,
+    assignment_options:[
+      {assignment_id:'G-NEW:L1',mode:'single_item',member_keys:['L1'],label:'仅归属 MWV101144',default_selected:false,can_apply:true},
+      {assignment_id:'G-NEW:ALL',mode:'one_box_group',member_keys:['L1','L2'],label:'MWV101144、MWV101145 共同装为 1 箱',default_selected:true,can_apply:true},
+    ],evidence:[{kind:'trusted_comment_text'}]}]};
+fill.rowSelection=null;w.ensureMaterialAIRowSelection(fill);
+fill.rowSelection.preview={id:'P',revision:'R',can_apply:true,rows:[
+  {name:'I1',stable_line_key:'L1',material_code:'MWV101144',product_name:'薇武士IP17 PRO',actual_shipped_qty:1,package_count:1,gross_weight_kg:'42.05',volume_m3:'0.01518'},
+  {name:'I2',stable_line_key:'L2',material_code:'MWV101145',product_name:'薇武士IP17 PRO MAX',actual_shipped_qty:1,package_count:1,gross_weight_kg:'42.05',volume_m3:'0.01518'},
+],packing_group_candidates:fill.draft.packing_group_candidates};
+fill.rowSelection.previewKey=w.materialAIRowSelectionKey(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+const finalTable=html.slice(html.indexOf('class="ocw-mf-ai-final-table"'));
+assert(finalTable.includes('rowspan="2"'));
+assert(finalTable.includes('共享 1 箱总计'));
+assert.equal((finalTable.match(/>42\.05</g)||[]).length,1);
+assert.equal((finalTable.match(/>0\.01518</g)||[]).length,1);
+assert.equal((finalTable.match(/>1<\/td>/g)||[]).length,2); // 两条实发数量
+assert.equal((finalTable.match(/rowspan="2">1<small>共享 1 箱总计/g)||[]).length,1);
 """)
 
 
