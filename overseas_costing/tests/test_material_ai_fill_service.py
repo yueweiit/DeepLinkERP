@@ -2509,6 +2509,67 @@ def test_source_review_prompt_fixed_envelope_keeps_fact_allowlist_when_items_are
     assert [row["fact_id"] for row in payload["semantic_fact_allowlist"]] == ["FACT-KEEP"]
 
 
+def test_source_review_prompt_bounds_large_structured_payload_in_batched_passes(monkeypatch) -> None:
+    fact = {
+        "fact_id": "FACT-BULK",
+        "fact_kind": "payment_physical",
+        "scope_status": "in_scope",
+        "default_eligible": True,
+        "material_targets": [{"item_name": "ITEM-0", "material_key": "LINE-0"}],
+        "allowed_actions": [],
+        "provenance": {"sheet": "Monthly", "row": 1},
+    }
+    items = [
+        {
+            "name": f"ITEM-{index}",
+            "stable_line_key": f"LINE-{index}",
+            "material_code": f"MWV{index:06d}",
+            "product_name": "product-" + ("I" * 300),
+        }
+        for index in range(1_500)
+    ]
+    documents = [{
+        "document_id": "DOC-BULK",
+        "source_ref": {"source": "approval_attachment", "file": "bulk.xlsx"},
+        "text": "monthly payment evidence\n" + ("T" * 20_000),
+        "structured_rows": [
+            {
+                "source_row": index + 1,
+                "material_code": f"MWV{index:06d}",
+                "description": "row-" + ("R" * 300),
+            }
+            for index in range(1_500)
+        ],
+        "semantic_facts": [fact],
+    }]
+    original_documents = copy.deepcopy(documents)
+    original_json = material_ai_fill_service._json
+    serialization_calls = 0
+
+    def counted_json(value):
+        nonlocal serialization_calls
+        serialization_calls += 1
+        return original_json(value)
+
+    monkeypatch.setattr(material_ai_fill_service, "_json", counted_json)
+
+    messages = build_source_review_messages(items, documents)
+    user_content = messages[1]["content"]
+    payload = json.loads(user_content)
+
+    assert serialization_calls <= 20
+    assert len(user_content) <= (
+        material_ai_fill_service.MAX_AI_DOCUMENT_CHARS
+        + material_ai_fill_service.MAX_AI_PROMPT_OVERHEAD_CHARS
+    )
+    assert [row["fact_id"] for row in payload["semantic_fact_allowlist"]] == ["FACT-BULK"]
+    assert payload["untrusted_documents"][0]["document_id"] == "DOC-BULK"
+    assert payload["untrusted_documents"][0]["text"].startswith("monthly payment evidence")
+    assert 0 < len(payload["untrusted_documents"][0]["structured_rows"]) < 1_500
+    assert 0 < len(payload["items"]) < 1_500
+    assert documents == original_documents
+
+
 def test_existing_values_and_source_conflicts_are_never_overwritten() -> None:
     result = build_material_ai_draft(
         _items(),

@@ -965,6 +965,7 @@ def _compact_semantic_fact_allowlist(documents: list[dict]) -> list[dict]:
 
     result = []
     seen = set()
+    encoded_chars = 2  # JSON list brackets; each entry is encoded exactly once.
     for document in documents or []:
         document_id = str(document.get("document_id") or "")
         for fact in document.get("semantic_facts") or []:
@@ -994,50 +995,165 @@ def _compact_semantic_fact_allowlist(documents: list[dict]) -> list[dict]:
                     if provenance.get(key) not in (None, "")
                 },
             }
-            if len(_json([*result, compact])) > MAX_SEMANTIC_FACT_ALLOWLIST_CHARS:
+            compact_chars = len(json.dumps(
+                compact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ))
+            separator_chars = 1 if result else 0
+            if encoded_chars + separator_chars + compact_chars > MAX_SEMANTIC_FACT_ALLOWLIST_CHARS:
                 continue
             result.append(compact)
             seen.add(dedupe_key)
+            encoded_chars += separator_chars + compact_chars
     return result
 
 
 def _fit_source_review_prompt_payload(payload: dict) -> dict:
-    """Bound untrusted evidence while preserving the compact authority list."""
+    """Bound prompt evidence in linear passes while preserving model authority.
+
+    The previous implementation serialized the complete payload after removing
+    every individual structured row. Large workbooks therefore had quadratic
+    prompt preparation cost and could lose every document before item trimming
+    began. This allocator measures each row/item once and reserves capacity for
+    both collections.
+    """
 
     bounded = deepcopy(payload)
     limit = MAX_AI_DOCUMENT_CHARS + MAX_AI_PROMPT_OVERHEAD_CHARS
-    documents = bounded.get("untrusted_documents") or []
-    while len(_json(bounded)) > limit and documents:
-        excess = len(_json(bounded)) - limit
-        changed = False
-        for document in reversed(documents):
-            text = str(document.get("text") or "")
-            if text:
-                document["text"] = text[: max(0, len(text) - excess - 500)]
-                changed = True
+    if len(_json(bounded)) <= limit:
+        return bounded
+
+    def encoded_chars(value: Any) -> int:
+        return len(json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ))
+
+    original_items = bounded.get("items") or []
+    original_documents = bounded.get("untrusted_documents") or []
+    result = {
+        key: deepcopy(value)
+        for key, value in bounded.items()
+        if key not in {"items", "untrusted_documents", "items_truncated"}
+    }
+    result["items"] = []
+    result["untrusted_documents"] = []
+
+    bulk_document_keys = {"text", "structured_rows", "semantic_rows", "vision_observations"}
+    selected_documents: list[tuple[dict, dict]] = []
+    # Keep document shells in one forward pass and reserve most of the envelope
+    # for evidence rows/items.  This also bounds a pathological many-document
+    # payload without repeatedly serializing and popping one shell at a time.
+    reserve = 4_096
+    empty_payload_chars = encoded_chars(result)
+    shell_budget = min(40_000, max(0, (limit - empty_payload_chars - reserve) // 5))
+    shell_chars = 0
+    for document in original_documents:
+        shell = {
+            key: deepcopy(value)
+            for key, value in document.items()
+            if key not in bulk_document_keys and key != "semantic_facts"
+        }
+        if encoded_chars(shell) > 8_000:
+            shell = {
+                key: deepcopy(document.get(key))
+                for key in ("document_id", "source_ref", "ai_eligible")
+                if document.get(key) not in (None, "")
+            }
+        if any(document.get(key) for key in bulk_document_keys):
+            shell["truncated"] = True
+        cost = encoded_chars(shell) + 1
+        if cost > shell_budget - shell_chars:
+            break
+        result["untrusted_documents"].append(shell)
+        selected_documents.append((document, shell))
+        shell_chars += cost
+
+    base_chars = encoded_chars(result)
+    available = max(0, limit - base_chars - reserve)
+
+    def take_prefix(values: list, budget: int, *, start: int = 0) -> tuple[list, int, int]:
+        kept = []
+        used = 0
+        index = start
+        while index < len(values):
+            value = values[index]
+            cost = encoded_chars(value) + 1
+            if cost > budget - used:
                 break
-            for key in ("structured_rows", "semantic_rows", "vision_observations"):
-                rows = document.get(key)
-                if isinstance(rows, list) and rows:
-                    document[key] = rows[:-1]
-                    changed = True
-                    break
-            if changed:
-                break
-        if not changed:
-            documents.pop()
-    items = bounded.get("items") or []
-    original_item_count = len(items)
-    while len(_json(bounded)) > limit and items:
-        encoded_size = len(_json(bounded))
-        excess_ratio = max(0.01, (encoded_size - limit) / max(1, encoded_size))
-        remove_count = max(1, int(len(items) * excess_ratio) + 1)
-        del items[-remove_count:]
-    if len(items) != original_item_count:
-        bounded["items_truncated"] = True
-        while len(_json(bounded)) > limit and items:
-            items.pop()
-    return bounded
+            kept.append(deepcopy(value))
+            used += cost
+            index += 1
+        return kept, used, index
+
+    has_document_evidence = any(
+        document.get("text")
+        or any(document.get(key) for key in ("structured_rows", "semantic_rows", "vision_observations"))
+        for document, _shell in selected_documents
+    )
+    initial_item_budget = available // 2 if original_items and has_document_evidence else available
+    kept_items, item_chars, next_item = take_prefix(original_items, initial_item_budget)
+    result["items"] = kept_items
+    document_budget = max(0, available - item_chars)
+    document_chars = 0
+
+    # Keep readable context without allowing text to starve structured evidence.
+    for document, shell in selected_documents:
+        text = str(document.get("text") or "")
+        if text and document_chars < document_budget:
+            text_budget = min(2_000, document_budget - document_chars)
+            prefix = text[:text_budget]
+            if prefix:
+                shell["text"] = prefix
+                document_chars += encoded_chars(prefix) + len('"text":,')
+        for key in ("structured_rows", "semantic_rows", "vision_observations"):
+            rows = document.get(key)
+            if not isinstance(rows, list) or not rows:
+                continue
+            kept_rows, used, _next_row = take_prefix(
+                rows,
+                max(0, document_budget - document_chars),
+            )
+            if kept_rows:
+                shell[key] = kept_rows
+                document_chars += used + len(key) + 4
+
+    # Spend unused document capacity on more items in one forward scan.
+    remaining = max(0, document_budget - document_chars)
+    extra_items, _extra_chars, next_item = take_prefix(
+        original_items,
+        remaining,
+        start=next_item,
+    )
+    result["items"].extend(extra_items)
+    if next_item < len(original_items):
+        result["items_truncated"] = True
+
+    encoded = _json(result)
+    if len(encoded) <= limit:
+        return result
+
+    # Defensive suffix correction; the main path above already reserves space.
+    excess = len(encoded) - limit + 256
+    removed = 0
+    while result["items"] and removed < excess:
+        removed += encoded_chars(result["items"].pop()) + 1
+        result["items_truncated"] = True
+    encoded = _json(result)
+    if len(encoded) <= limit:
+        return result
+    for _document, shell in reversed(selected_documents):
+        text = str(shell.get("text") or "")
+        if text:
+            shell["text"] = text[: max(0, len(text) - (len(encoded) - limit) - 256)]
+            break
+    return result
 
 
 def build_source_review_messages(
@@ -4197,7 +4313,9 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         re.I,
     ))
     negated_joint=bool(re.search(
-        r'(?:不|未|不要|并非|不是|无需)\s*(?:一起|共同|合箱|合并装箱)',
+        r'(?:(?:不能|不可以|不允许|不得|禁止|严禁|请勿|没有|不再|不要|并非|不是|无需|未|不)'
+        r'\s*(?:一起|共同|同箱|合箱|合并装箱))'
+        r'|(?:(?:分开|分别|单独|拆分)\s*(?:装|包装|装箱|箱))',
         source_text,
         re.I,
     ))
@@ -4266,6 +4384,7 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         (
             len(code_members)>=2
             and not conflicting_package_identities
+            and not negated_joint
             and (shared_package_identity or explicit_joint)
         )
     ) and not ambiguous
@@ -4788,35 +4907,9 @@ def _call_source_review_ai(
             "warning": "；".join(part for part in ("未配置 DeepSeek 密钥，已保留规则解析候选；AI 分析未完成。", vision_result.get("warning")) if part),
             "evidence_documents": documents,
         }
-    bounded = []
-    remaining = MAX_AI_DOCUMENT_CHARS
-    for document in prompt_documents:
-        if remaining <= 0:
-            break
-        encoded = _json(document)
-        if len(encoded) <= remaining:
-            bounded.append(document)
-            remaining -= len(encoded)
-            continue
-        truncated = {
-            "document_id": document.get("document_id"),
-            "source_ref": document.get("source_ref") or {},
-            "form_fields": document.get("form_fields") or {},
-            "semantic_rows": [],
-            "structured_rows": [],
-            "image_anchors": (document.get("image_anchors") or [])[:100],
-            "truncated": True,
-        }
-        for key in ("structured_rows", "semantic_rows"):
-            for row in document.get(key) or []:
-                candidate = {**truncated, key: [*truncated[key], row]}
-                if len(_json(candidate)) > remaining:
-                    break
-                truncated = candidate
-        if document.get("text"):
-            truncated["text"] = str(document.get("text") or "")[: max(0, remaining - len(_json(truncated)) - 500)]
-        bounded.append(truncated)
-        remaining = 0
+    # Prompt sizing is centralized in ``build_source_review_messages`` so rows,
+    # items, provenance, and the semantic allowlist share one linear budget.
+    bounded = prompt_documents
     try:
         content = allocation_service._call_chat_completions(
             config,
