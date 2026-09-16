@@ -2650,6 +2650,84 @@ def _assert_run_batch(run: Any, batch_name: str) -> None:
         raise ValueError("AI 草稿任务不属于当前批次。")
 
 
+def get_source_ai_process_open_target(
+    batch_name: str,
+    run_id: str,
+    source_open_ref: str,
+    *,
+    repository: Any | None = None,
+) -> dict:
+    """Resolve one opaque review-process reference to a trusted DingTalk target."""
+
+    from . import material_ai_row_selection as row_selection
+    from overseas_costing.utils.dingtalk import build_dingtalk_order_payload
+
+    generic_error = "原单链接已失效，请重新读取资料源。"
+    process_ref = str(source_open_ref or "").strip()
+    if not _PUBLIC_PROCESS_ID_PATTERN.fullmatch(process_ref):
+        raise ValueError(generic_error)
+    repo = repository or FrappeMaterialAIFillRepository()
+    run = repo.get_run(str(run_id or ""))
+    _assert_run_batch(run, batch_name)
+    sources = _load_json(_record_value(run, "source_manifest_json"), [])
+    matched = [
+        source for source in sources
+        if isinstance(source, dict)
+        and _opaque_public_process_id(row_selection._process_instance_id(source)) == process_ref
+        and row_selection._source_can_open(source)
+    ]
+    if not matched:
+        raise ValueError(generic_error)
+    process_ids = {
+        row_selection._process_instance_id(source)
+        for source in matched
+        if row_selection._process_instance_id(source)
+    }
+    if len(process_ids) != 1:
+        raise ValueError(generic_error)
+    instance_id = next((
+        row_selection._dingtalk_instance_id(source)
+        for source in matched
+        if row_selection._dingtalk_instance_id(source)
+    ), "")
+    official_url = next((
+        row_selection._source_official_url(source)
+        for source in matched
+        if row_selection._source_official_url(source)
+    ), "")
+    approval_no = next((
+        str(source.get("approval_no") or "") for source in matched
+        if str(source.get("approval_no") or "").strip()
+    ), "")
+    label = next((
+        str(source.get("approval_title") or source.get("process_title")
+            or source.get("process_name") or source.get("source_label") or "")
+        for source in matched
+        if str(source.get("approval_title") or source.get("process_title")
+            or source.get("process_name") or source.get("source_label") or "").strip()
+    ), approval_no or "钉钉审批")
+    target = build_dingtalk_order_payload(
+        batch_name=batch_name,
+        approval_no=approval_no,
+        instance_id=instance_id,
+        official_url=official_url,
+    )
+    open_url = str(target.get("open_url") or "")
+    if not (
+        open_url.lower().startswith("dingtalk://dingtalkclient/")
+        or re.match(r"^https://([a-z0-9-]+\.)*dingtalk\.com/", open_url, re.IGNORECASE)
+    ):
+        raise ValueError(generic_error)
+    return {
+        "ok": True,
+        "source_open_ref": process_ref,
+        "label": label[:500],
+        "approval_no": approval_no[:200],
+        "open_url": open_url,
+        "open_mode": str(target.get("open_mode") or "unavailable"),
+    }
+
+
 def get_material_ai_fill_status(
     batch_name: str,
     run_id: str,

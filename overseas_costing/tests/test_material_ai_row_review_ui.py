@@ -84,13 +84,13 @@ const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4
 ]};
 fill.row_review.stage_snapshots=[
  {stage_snapshot_id:'SP',stage:'payment',stage_rank:0,stage_label:'支付申请',status:'AVAILABLE',fallback_reason:'',warnings:[],
-  processes:[{process_instance_id:'PP',label:'月结付款 2026-07',approval_no:'PAY-1',status:'AVAILABLE',evidence:[{evidence_id:'EF',evidence_kind:'approval_form',source_label:'月结正文',read_status:'COMPLETED'}]}],
+  processes:[{process_instance_id:'PP',source_open_ref:'PP',can_open:true,label:'月结付款 2026-07',approval_no:'PAY-1',status:'AVAILABLE',evidence:[{evidence_id:'EF',evidence_kind:'approval_form',source_label:'月结正文',read_status:'COMPLETED'}]}],
   rows:[{row_id:'SRP',process_instance_id:'PP',item_name:'I1',material_code:'SKU-1',product_name:'物料1',field_candidates:{gross_weight_kg:['PAY-W']}}]},
  {stage_snapshot_id:'SL',stage:'international_logistics',stage_rank:1,stage_label:'国际物流',status:'PARTIAL',fallback_reason:'部分资料不可读，已跳过并继续使用本阶段可用候选。',warnings:[],
-  processes:[{process_instance_id:'PL',label:'国际物流审批',approval_no:'LOG-1',status:'PARTIAL',evidence:[{evidence_id:'EA',evidence_kind:'attachment',source_label:'装箱单.xlsx',read_status:'SKIPPED',skip_reason_text:'文件已损坏'}]}],
+  processes:[{process_instance_id:'PL',source_open_ref:'PL',can_open:true,label:'国际物流审批',approval_no:'LOG-1',status:'PARTIAL',evidence:[{evidence_id:'EA',evidence_kind:'attachment',source_label:'装箱单.xlsx',read_status:'SKIPPED',skip_reason_text:'文件已损坏'}]}],
   rows:[{row_id:'SRL',process_instance_id:'PL',item_name:'I1',material_code:'SKU-1',product_name:'物料1',field_candidates:{gross_weight_kg:['LOG-W'],volume_m3:['LOG-V']}}]},
  {stage_snapshot_id:'SU',stage:'purchase',stage_rank:2,stage_label:'采购支出',status:'AVAILABLE',fallback_reason:'',warnings:[],
-  processes:[{process_instance_id:'PU1',label:'采购支出 1',approval_no:'PUR-1',status:'AVAILABLE',evidence:[]},{process_instance_id:'PU2',label:'采购支出 2',approval_no:'PUR-2',status:'AVAILABLE',evidence:[]}],
+  processes:[{process_instance_id:'PU1',source_open_ref:'PU1',can_open:true,label:'采购支出 1',approval_no:'PUR-1',status:'AVAILABLE',evidence:[]},{process_instance_id:'PU2',source_open_ref:'PU2',can_open:true,label:'采购支出 2',approval_no:'PUR-2',status:'AVAILABLE',evidence:[]}],
   rows:[{row_id:'SRU',process_instance_id:'PU2',item_name:'I2',material_code:'SKU-2',product_name:'物料2',field_candidates:{actual_shipped_qty:['PUR-Q']}}]},
 ];
 delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
@@ -101,12 +101,37 @@ for(const pair of [['payment','支付申请 · 优先级 1'],['international_log
 }
 assert.equal((html.match(/class="ocw-mf-ai-stage-matrix"/g)||[]).length,3);
 assert(html.includes('月结付款 2026-07'));assert(html.includes('采购支出 1'));assert(html.includes('采购支出 2'));
+assert.equal((html.match(/data-mf-ai-source-open-ref=/g)||[]).length,4);
+for(const label of ['打开支付申请原单','打开国际物流原单','打开采购支出原单'])assert(html.includes(label),label);
+assert.equal((html.match(/data-mf-ai-source-open-ref="PU1"/g)||[]).length,1);
+assert.equal((html.match(/data-mf-ai-source-open-ref="PU2"/g)||[]).length,1);
 assert(html.includes('未采用此阶段'));assert(html.includes('value="LOG-W"'));
 assert(!html.includes('来源 1 · 月结正文'));assert(!html.includes('来源 2 · 装箱单.xlsx'));
 const before=[...selection.fields.entries()].sort();
 w.changeMaterialAIRowSelection('fields','I1:gross_weight_kg','LOG-W');
 assert.deepEqual([...selection.fields.entries()].sort(),[['I1:gross_weight_kg','LOG-W'],['I1:volume_m3','LOG-V'],['I2:actual_shipped_qty','PUR-Q']]);
 assert.notDeepEqual([...selection.fields.entries()].sort(),before);
+""")
+
+
+def test_opening_stage_source_uses_read_only_resolver_and_keeps_preview_selection_on_failure():
+    run_ui(r"""
+const fill=ready();fill.runId='RUN-1';
+const selection=w.ensureMaterialAIRowSelection(fill);selection.fields.set('I1:gross_weight_kg','CANDIDATE');
+let opened=null;let alertMessage='';
+w.openSettlementSource=source=>{opened=source};
+frappe.show_alert=payload=>{alertMessage=payload.message};
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,open_url:'dingtalk://dingtalkclient/page/link?safe=1',open_mode:'desktop_protocol',label:'月结付款'};};
+await w.openMaterialAISourceProcess('proc_safe');
+assert(calls[0].method.endsWith('get_source_ai_process_open_target'));
+assert.deepEqual(calls[0].args,{batch_name:'B',run_id:'RUN-1',source_open_ref:'proc_safe'});
+assert.equal(opened.label,'月结付款');
+assert.equal(selection.fields.get('I1:gross_weight_kg'),'CANDIDATE');
+w.call=async()=>({ok:false,message:'server detail'});opened=null;
+await w.openMaterialAISourceProcess('proc_stale');
+assert.equal(opened,null);
+assert.equal(alertMessage,'原单链接已失效，请重新读取资料源');
+assert.equal(selection.fields.get('I1:gross_weight_kg'),'CANDIDATE');
 """)
 
 

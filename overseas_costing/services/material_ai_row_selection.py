@@ -149,6 +149,39 @@ def _process_instance_id(source):
     )
 
 
+def _dingtalk_instance_id(source):
+    source=source or {}
+    return str(
+        source.get('process_instance_id')
+        or source.get('approval_instance_id')
+        or source.get('source_instance_id')
+        or source.get('dingtalk_instance_id')
+        or ''
+    )
+
+
+def _source_official_url(source):
+    source=source or {}
+    return str(
+        source.get('official_url')
+        or source.get('dingtalk_official_url')
+        or source.get('source_dingtalk_url')
+        or ''
+    )
+
+
+def _source_can_open(source):
+    from overseas_costing.utils.dingtalk import build_dingtalk_order_payload
+    open_url=str(build_dingtalk_order_payload(
+        instance_id=_dingtalk_instance_id(source),
+        official_url=_source_official_url(source),
+    ).get('open_url') or '')
+    return bool(
+        open_url.lower().startswith('dingtalk://dingtalkclient/')
+        or re.match(r'^https://([a-z0-9-]+\.)*dingtalk\.com/', open_url, re.IGNORECASE)
+    )
+
+
 def _source_status(source):
     return str((source or {}).get('read_status') or (source or {}).get('status') or '').strip().upper()
 
@@ -834,7 +867,11 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                 'approval_no':str(source.get('approval_no') or ''),
                 'source_ids':[],'evidence':[],'row_ids':[],'status':'UNAVAILABLE',
                 'has_conflicts':False,'warnings':[],
+                'can_open':False,'source_open_ref':'',
             })
+            if _source_can_open(source):
+                process['can_open']=True
+                process['source_open_ref']=process_id
             source_id=str(source.get('source_id') or '')
             if source_id and source_id not in process['source_ids']:
                 process['source_ids'].append(source_id)
@@ -900,6 +937,7 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                     'process_instance_id':process_id,'label':process_id,'approval_no':'',
                     'source_ids':[],'evidence':[],'row_ids':[],'status':'UNAVAILABLE',
                     'has_conflicts':False,'warnings':[],
+                    'can_open':False,'source_open_ref':'',
                 })
                 if warning:
                     process['has_conflicts']=True
@@ -924,6 +962,7 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                 'process_instance_id':process_id,'label':process_id,'approval_no':'',
                 'source_ids':[],'evidence':[],'row_ids':[],'status':'UNAVAILABLE',
                 'has_conflicts':False,'warnings':[],
+                'can_open':False,'source_open_ref':'',
             })
             if snapshot_row['row_id'] not in process['row_ids']:
                 process['row_ids'].append(snapshot_row['row_id'])

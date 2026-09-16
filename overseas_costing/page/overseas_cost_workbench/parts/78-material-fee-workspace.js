@@ -1842,6 +1842,8 @@
           this.continueMaterialAIPaymentSelection(false).catch((error) => this.showError(error));
         } else if (action === "mf-ai-payment-skip") {
           this.continueMaterialAIPaymentSelection(true).catch((error) => this.showError(error));
+        } else if (action === "mf-ai-open-source") {
+          this.openMaterialAISourceProcess($(event.currentTarget).attr("data-mf-ai-source-open-ref"));
         }
       });
       dialog.$wrapper
@@ -2257,6 +2259,40 @@
     return "未找到有效资料";
   }
 
+  materialAIStageSourceActions(stage) {
+    const buttonLabels = {
+      payment: "打开支付申请原单",
+      international_logistics: "打开国际物流原单",
+      purchase: "打开采购支出原单",
+    };
+    const seen = new Set();
+    const processes = (Array.isArray(stage?.processes) ? stage.processes : []).filter((process) => {
+      const ref = String(process?.source_open_ref || "");
+      if (!process?.can_open || !ref || seen.has(ref)) return false;
+      seen.add(ref);
+      return true;
+    });
+    if (!processes.length) return "";
+    const buttonLabel = buttonLabels[String(stage.stage || "")] || "打开原单";
+    return `<div class="ocw-mf-ai-stage-sources"><strong>相关原单</strong><div>${processes.map((process) => `<span><b>${this.escape(process.label || process.approval_no || "钉钉审批")}</b>${process.approval_no ? `<small>${this.escape(process.approval_no)}</small>` : ""}<button type="button" class="ocw-outline-btn ocw-mini-btn" data-action="mf-ai-open-source" data-mf-ai-source-open-ref="${this.escape(process.source_open_ref)}">${this.escape(buttonLabel)}</button></span>`).join("")}</div></div>`;
+  }
+
+  async openMaterialAISourceProcess(sourceOpenRef) {
+    const state = this.ensureMaterialFeeState();
+    const fill = state.aiFill;
+    try {
+      const result = await this.call("overseas_costing.api.materials.get_source_ai_process_open_target", {
+        batch_name: this.detailState.batchName,
+        run_id: fill?.runId || fill?.run_id || "",
+        source_open_ref: String(sourceOpenRef || ""),
+      }, false);
+      if (!result?.ok || !result.open_url) throw new Error("source_unavailable");
+      this.openSettlementSource(result);
+    } catch (_error) {
+      frappe.show_alert({ message: "原单链接已失效，请重新读取资料源", indicator: "orange" });
+    }
+  }
+
   renderMaterialAIStageEvidence(stage) {
     const processes = Array.isArray(stage?.processes) ? stage.processes : [];
     const evidenceLabels = {
@@ -2332,7 +2368,7 @@
         : "未找到有效资料";
       const empty = `<tr><td colspan="${stageColumns.length + 2}" class="is-empty">${this.escape(emptyMessage)}</td></tr>`;
       const status = String(stage.status || "UNAVAILABLE").toUpperCase();
-      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-packing-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)} · 优先级 ${Number(stage.stage_rank || 0) + 1}</strong><span><b>${this.escape(this.materialAIStageStatusLabel(status))}</b>已采用 ${selectedCount} 个字段</span></summary>${stage.fallback_reason ? `<p class="ocw-mf-ai-stage-fallback">${this.escape(stage.fallback_reason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-stage-matrix"><thead><tr><th>所属流程</th><th>物料</th>${stageColumns.map(([, label]) => `<th>${this.escape(label)}</th>`).join("")}</tr></thead><tbody>${matrixRows || empty}</tbody></table></div>${this.renderMaterialAIStageEvidence(stage)}</details>`;
+      return `<details class="ocw-mf-ai-stage-panel is-${this.escape(status.toLowerCase())}" data-mf-ai-packing-stage="${this.escape(stage.stage)}" ${index === openIndex ? "open" : ""}><summary><strong>${this.escape(stage.stage_label)} · 优先级 ${Number(stage.stage_rank || 0) + 1}</strong><span><b>${this.escape(this.materialAIStageStatusLabel(status))}</b>已采用 ${selectedCount} 个字段</span></summary>${this.materialAIStageSourceActions(stage)}${stage.fallback_reason ? `<p class="ocw-mf-ai-stage-fallback">${this.escape(stage.fallback_reason)}</p>` : ""}<div class="ocw-mf-ai-preview-table"><table class="ocw-mf-ai-stage-matrix"><thead><tr><th>所属流程</th><th>物料</th>${stageColumns.map(([, label]) => `<th>${this.escape(label)}</th>`).join("")}</tr></thead><tbody>${matrixRows || empty}</tbody></table></div>${this.renderMaterialAIStageEvidence(stage)}</details>`;
     }).join("");
     const assignedIds = new Set(stages.flatMap(stage => (stage.rows || []).flatMap(row => Object.values(row.field_candidates || {}).flat().map(String))));
     const unclassified = (catalog.field_candidates || []).filter(candidate => !assignedIds.has(String(candidate.candidate_id)));

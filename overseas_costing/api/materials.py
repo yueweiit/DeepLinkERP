@@ -324,6 +324,16 @@ def get_source_ai_review_status(batch_name, run_id=None, version_name=None, afte
 
 
 @frappe.whitelist()
+def get_source_ai_process_open_target(batch_name, run_id, source_open_ref):
+    batch_name = require_batch_permission(batch_name, "read")
+    return material_ai_fill_service.get_source_ai_process_open_target(
+        batch_name,
+        str(run_id or "")[:200],
+        str(source_open_ref or "")[:80],
+    )
+
+
+@frappe.whitelist()
 def apply_source_ai_review(
     batch_name,
     run_id,

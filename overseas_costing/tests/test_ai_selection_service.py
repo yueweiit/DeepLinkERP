@@ -411,6 +411,124 @@ def test_public_catalog_and_preview_replace_process_instance_ids_with_stable_opa
     assert first_process_id == second_process_id == candidate_process_id
 
 
+def test_public_catalog_exposes_one_safe_open_reference_for_every_real_stage_process():
+    repo = Repo()
+    raw_process_ids = {
+        'payment': 'PAYMENT-PROCESS-001',
+        'logistics': 'LOGISTICS-PROCESS-001',
+        'purchase_1': 'PURCHASE-PROCESS-001',
+        'purchase_2': 'PURCHASE-PROCESS-002',
+    }
+    repo.sources = [
+        {
+            'source_id': 'PAY-FORM', 'source_kind': 'approval_form',
+            'source_hash': 'PAY-FORM-HASH', 'approval_role': 'payment',
+            'approval_title': '月结付款', 'approval_no': 'PAY-001',
+            'process_instance_id': raw_process_ids['payment'],
+        },
+        {
+            'source_id': 'PAY-ATTACHMENT', 'source_kind': 'approval_attachment',
+            'source_hash': 'PAY-ATTACHMENT-HASH', 'approval_role': 'payment',
+            'approval_title': '月结付款', 'approval_no': 'PAY-001',
+            'process_instance_id': raw_process_ids['payment'],
+        },
+        {
+            'source_id': 'LOG-FORM', 'source_kind': 'approval_form',
+            'source_hash': 'LOG-HASH', 'approval_role': 'international_logistics',
+            'approval_title': '国际物流审批', 'approval_no': 'LOG-001',
+            'process_instance_id': raw_process_ids['logistics'],
+        },
+        {
+            'source_id': 'PUR-1', 'source_kind': 'approval_form',
+            'source_hash': 'PUR-1-HASH', 'approval_role': 'purchase',
+            'approval_title': '采购支出 1', 'approval_no': 'PUR-001',
+            'process_instance_id': raw_process_ids['purchase_1'],
+        },
+        {
+            'source_id': 'PUR-2', 'source_kind': 'approval_form',
+            'source_hash': 'PUR-2-HASH', 'approval_role': 'purchase',
+            'approval_title': '采购支出 2', 'approval_no': 'PUR-002',
+            'process_instance_id': raw_process_ids['purchase_2'],
+        },
+    ]
+    repo.run['source_manifest_json'] = deepcopy(repo.sources)
+    repo.run['input_fingerprint'] = ai._source_review_fingerprint(
+        'B1', 'V1', repo.items, repo.sources, '', context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint'] = service.material_fingerprint(
+        repo.items, repo.sources, repo.context)
+
+    catalog = service.review_catalog(repo, 'B1', repo.run)
+    processes = [
+        process
+        for stage in catalog['stage_snapshots']
+        for process in stage['processes']
+    ]
+
+    assert len(processes) == 4
+    assert all(process['can_open'] is True for process in processes)
+    assert all(process['source_open_ref'] == process['process_instance_id'] for process in processes)
+    assert all(re.fullmatch(r'proc_[0-9a-f]{64}', process['source_open_ref']) for process in processes)
+    serialized = json.dumps(catalog, ensure_ascii=False)
+    assert all(raw_process_id not in serialized for raw_process_id in raw_process_ids.values())
+
+
+def test_public_catalog_does_not_offer_internal_attachment_parent_as_dingtalk_process():
+    repo = Repo()
+    repo.sources = [{
+        'source_id': 'oa:PROC-1:FILE-9:sheet:abc',
+        'parent_source_id': 'oa:PROC-1:FILE-9',
+        'logical_source_id': 'oa:PROC-1:FILE-9',
+        'official_url': 'https://example.com/not-a-dingtalk-order',
+        'source_kind': 'approval_attachment',
+        'source_hash': 'ATTACHMENT-HASH',
+        'approval_role': 'payment',
+        'approval_title': '月结付款附件',
+        'approval_no': 'PAY-001',
+    }]
+    repo.run['source_manifest_json'] = deepcopy(repo.sources)
+    repo.run['input_fingerprint'] = ai._source_review_fingerprint(
+        'B1', 'V1', repo.items, repo.sources, '', context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint'] = service.material_fingerprint(
+        repo.items, repo.sources, repo.context)
+
+    catalog = service.review_catalog(repo, 'B1', repo.run)
+    process = catalog['stage_snapshots'][0]['processes'][0]
+
+    assert process['can_open'] is False
+    assert process['source_open_ref'] == ''
+
+
+def test_source_open_target_resolves_monthly_payment_and_rejects_forged_or_cross_batch_refs():
+    repo = Repo()
+    raw_process_id = 'PAYMENT-MONTHLY-PROCESS-001'
+    repo.sources = [{
+        'source_id': 'PAYMENT-FORM', 'source_kind': 'approval_form',
+        'source_hash': 'PAYMENT-HASH', 'approval_role': 'payment',
+        'approval_title': '李仲华提交的月结付款', 'approval_no': '202607211417000078258',
+        'process_instance_id': raw_process_id,
+    }]
+    repo.run['source_manifest_json'] = deepcopy(repo.sources)
+    source_open_ref = ai._opaque_public_process_id(raw_process_id)
+
+    target = ai.get_source_ai_process_open_target(
+        'B1', repo.run['name'], source_open_ref, repository=repo)
+
+    assert target['ok'] is True
+    assert target['source_open_ref'] == source_open_ref
+    assert target['label'] == '李仲华提交的月结付款'
+    assert target['approval_no'] == '202607211417000078258'
+    assert target['open_mode'] == 'desktop_protocol'
+    assert target['open_url'].startswith('dingtalk://dingtalkclient/')
+    assert raw_process_id in target['open_url']
+
+    with pytest.raises(ValueError, match='原单链接已失效'):
+        ai.get_source_ai_process_open_target(
+            'B1', repo.run['name'], 'proc_' + ('f' * 64), repository=repo)
+    with pytest.raises(ValueError, match='不属于当前批次'):
+        ai.get_source_ai_process_open_target(
+            'B2', repo.run['name'], source_open_ref, repository=repo)
+
+
 def test_public_process_id_prefix_cannot_bypass_opaque_digest_validation():
     repo = Repo()
     raw_process_id = 'proc_external-dingtalk-instance-secret'

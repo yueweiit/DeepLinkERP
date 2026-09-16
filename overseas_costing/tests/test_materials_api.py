@@ -149,6 +149,28 @@ def test_ai_fill_api_uses_read_for_status_and_write_for_mutations(monkeypatch) -
     ]
 
 
+def test_source_ai_process_open_target_is_read_only_and_uses_safe_reference(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    checks = []
+    captured = {}
+    monkeypatch.setattr(
+        api,
+        "require_batch_permission",
+        lambda batch, ptype: checks.append((batch, ptype)) or "BATCH-DOC",
+    )
+    monkeypatch.setattr(
+        api.material_ai_fill_service,
+        "get_source_ai_process_open_target",
+        lambda *args: captured.update(args=args) or {"ok": True, "open_url": "dingtalk://safe"},
+    )
+
+    result = api.get_source_ai_process_open_target("B", "RUN", "proc_" + ("a" * 64))
+
+    assert result == {"ok": True, "open_url": "dingtalk://safe"}
+    assert checks == [("B", "read")]
+    assert captured["args"] == ("BATCH-DOC", "RUN", "proc_" + ("a" * 64))
+
+
 def test_ai_apply_rejects_oversized_or_non_array_updates_before_service(monkeypatch) -> None:
     api = _load_api(monkeypatch)
     monkeypatch.setattr(api, "require_batch_permission", lambda batch, _ptype: batch)
