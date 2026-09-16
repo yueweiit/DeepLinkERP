@@ -6,7 +6,7 @@ from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
-RECEIPT_POLICY = 'ai-field-preview-receipt-4'
+RECEIPT_POLICY = 'ai-field-preview-receipt-5'
 
 _SKIPPED_PROGRESS_STATUSES = frozenset({
     'FAILED', 'SKIPPED', 'UNREADABLE', 'TIMEOUT', 'FORBIDDEN', 'MISSING',
@@ -330,27 +330,35 @@ def _preview_revision(context,items,sources,current_fees,catalog,selection,depen
         rows.POLICY,context,items,sources,current_fees,catalog['fingerprint'],
         selection['selected_row_ids'],selection['selected_fee_ids'],selection.get('selected_field_choices'),selection['mode'],dependencies,
         selection.get('merged_amount_groups') or [],selection.get('selected_packing_group_ids') or [],
-        selection.get('payment_match_candidate'),
+        selection.get('payment_match_candidates') or selection.get('payment_match_candidate'),
     )
 
 
-def _payment_match_reference(sources, version):
-    references={
-        (
+def _payment_match_references(sources, version):
+    references = {}
+    for source in sources or []:
+        if not source.get('payment_match_candidate'):
+            continue
+        key = (
             str(source.get('payment_match_candidate_id') or ''),
             str(source.get('payment_match_candidate_revision') or ''),
             str(source.get('payment_match_version') or ''),
         )
-        for source in sources or []
-        if source.get('payment_match_candidate')
-    }
-    references.discard(('', '', ''))
-    if len(references)!=1:
+        if not all(key) or key[2] != str(version or ''):
+            continue
+        references[key] = references.get(key, False) or bool(source.get('payment_match_user_selected'))
+    return [
+        {'candidate_id': candidate_id, 'revision': revision, 'version': candidate_version,
+         'user_selected': bool(references[(candidate_id, revision, candidate_version)])}
+        for candidate_id, revision, candidate_version in sorted(references)
+    ]
+
+
+def _payment_match_reference(sources, version):
+    references = _payment_match_references(sources, version)
+    if len(references) != 1:
         return None
-    candidate_id,revision,candidate_version=next(iter(references))
-    if not candidate_id or not revision or candidate_version!=str(version or ''):
-        return None
-    return {'candidate_id':candidate_id,'revision':revision,'version':candidate_version}
+    return {key: references[0][key] for key in ('candidate_id', 'revision', 'version')}
 
 
 def _preview_receipt(preview):
@@ -360,6 +368,7 @@ def _preview_receipt(preview):
         'selected_field_choices',
         'dependencies','input_fingerprint','fee_fingerprint','catalog_fingerprint',
         'selected_packing_group_ids','payment_match_candidate',
+        'payment_match_candidates',
     )
     return {'receipt_policy':RECEIPT_POLICY,
             **{key:deepcopy(preview.get(key)) for key in keys}}
@@ -440,6 +449,7 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choi
         rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices),
         draft.get('merged_amount_groups') or [],selected_packing_groups)
     projection['selected_packing_group_ids']=selected_packing_group_ids
+    projection['payment_match_candidates']=_payment_match_references(sources,context['version'])
     projection['payment_match_candidate']=_payment_match_reference(sources,context['version'])
     revision=_preview_revision(context,items,sources,current_fees,catalog,projection,dependencies)
     preview={**projection,'id':digest(run_id,revision),'revision':revision,'run_id':run_id,'batch':batch_name,
@@ -484,7 +494,10 @@ def _reconstruct_locked_preview(repo,batch_name,run,receipt,draft):
                      field_choices=receipt.get('selected_field_choices')),
         draft.get('merged_amount_groups') or receipt.get('merged_amount_groups') or [],selected_packing_groups)
     current['selected_packing_group_ids']=validated_group_ids
+    current['payment_match_candidates']=_payment_match_references(sources,context['version'])
     current['payment_match_candidate']=_payment_match_reference(sources,context['version'])
+    if current.get('payment_match_candidates') != receipt.get('payment_match_candidates'):
+        raise ValueError('实际付款流程匹配已变化，请刷新预览；本次未保存。')
     if current.get('payment_match_candidate') != receipt.get('payment_match_candidate'):
         raise ValueError('实际付款流程匹配已变化，请刷新预览；本次未保存。')
     revision=_preview_revision(context,items,sources,current_fees,catalog,current,dependencies)
@@ -536,7 +549,7 @@ def _confirm_locked(batch_name,run_id,preview_id,preview_revision,edit_token,exp
         raise ValueError('所选预览已变化，请刷新预览并使用最新预览后确认。')
     if receipt.get('receipt_policy')!=RECEIPT_POLICY:
         raise ValueError('AI 预览规则已升级，请重新分析资料。')
-    if receipt.get('payment_match_candidate') and not payment_match_lock_held:
+    if (receipt.get('payment_match_candidates') or receipt.get('payment_match_candidate')) and not payment_match_lock_held:
         raise ValueError('实际付款流程匹配已变化，请刷新预览；本次未保存。')
     if receipt.get('mode') == 'replace_all':
         raise ValueError('整表替换仅能在独立的整源采纳流程中执行。')
@@ -564,7 +577,8 @@ def _payment_match_receipt_hint(run,preview_id):
     from . import material_ai_fill_service as ai
     draft=ai._load_json(ai._record_value(run,'draft_json'),{})
     receipt=(draft.get('row_previews') or {}).get(preview_id)
-    return bool(isinstance(receipt,dict) and receipt.get('payment_match_candidate'))
+    return bool(isinstance(receipt,dict) and (
+        receipt.get('payment_match_candidates') or receipt.get('payment_match_candidate')))
 
 
 def confirm(batch_name,run_id,preview_id,preview_revision,edit_token,expected_modified,*,repository=None):

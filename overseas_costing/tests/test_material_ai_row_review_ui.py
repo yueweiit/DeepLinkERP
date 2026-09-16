@@ -575,6 +575,30 @@ assert(!('selected_source_ids_json' in calls[0].args));
 """)
 
 
+def test_selected_payment_scope_is_forwarded_as_id_only_ai_input():
+    run_ui(r"""
+ready();w.openMaterialAIProgressDialog=()=>{};w.pollMaterialAIFill=async()=>{};
+const refs=[{candidate_id:'C1',revision:'R1',version:w.detailState.versionName}];
+w.detailState.paymentSourceRefs=refs;
+w.detailState.paymentSourceSelection={batchName:w.detailState.batchName,versionName:w.detailState.versionName,refs};
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,status:'QUEUED',run_id:'fresh',progress_revision:0}};
+await w.startMaterialAIFill({force:true,restart:true});
+const args=calls[0].args;assert.equal(calls[0].method,'overseas_costing.api.materials.start_source_ai_review');
+assert.deepEqual(JSON.parse(args.payment_candidate_refs_json),refs);
+for(const forbidden of ['amount','gross_weight_kg','source_snapshot'])assert(!args.payment_candidate_refs_json.includes(forbidden));
+""")
+
+
+def test_stale_payment_scope_is_not_forwarded_to_another_batch_or_version():
+    run_ui(r"""
+ready();w.openMaterialAIProgressDialog=()=>{};w.pollMaterialAIFill=async()=>{};
+w.detailState.paymentSourceSelection={batchName:'OTHER',versionName:'OLD',refs:[{candidate_id:'C1',revision:'R1',version:'OLD'}]};
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,status:'QUEUED',run_id:'fresh',progress_revision:0}};
+await w.startMaterialAIFill({force:true,restart:true});
+assert(!('payment_candidate_refs_json' in calls[0].args));
+""")
+
+
 def test_material_candidates_render_as_expandable_priority_source_tables():
     run_ui(r"""
 const fill=ready();

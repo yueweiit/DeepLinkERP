@@ -3,6 +3,7 @@ from copy import deepcopy
 from io import BytesIO, StringIO
 from pathlib import Path
 import csv
+import re
 import tempfile
 
 from .model import PARSER_VERSION, digest, dumps, norm, number, pick
@@ -12,6 +13,21 @@ COMPLETE_FEES = {'完整费用明细', '费用结算明细', 'desglosetotaldegas
 PACKING_LABELS = ('装箱', 'packing', 'empaque')
 
 
+def _xlsx_display_value(cell):
+    """Honor an explicit spreadsheet decimal display without rounding free text/AI values."""
+    value = cell.value
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or cell.is_date:
+        return value
+    number_format = str(cell.number_format or '')
+    if '%' in number_format or 'E+' in number_format.upper():
+        return value
+    section = number_format.split(';', 1)[0]
+    match = re.search(r'[0#]+\.([0#]+)', section)
+    if not match:
+        return value
+    return round(float(value), len(match.group(1)))
+
+
 def parse_document(content, file_name):
     suffix = Path(file_name).suffix.lower()
     sheets = []
@@ -19,7 +35,10 @@ def parse_document(content, file_name):
         from openpyxl import load_workbook
         book = load_workbook(BytesIO(content), read_only=True, data_only=True)
         try:
-            sheets = [(sheet.title, list(sheet.values)) for sheet in book.worksheets]
+            sheets = [
+                (sheet.title, [tuple(_xlsx_display_value(cell) for cell in row) for row in sheet.iter_rows()])
+                for sheet in book.worksheets
+            ]
         finally:
             book.close()
     elif suffix == '.xls':

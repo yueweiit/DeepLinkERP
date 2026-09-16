@@ -282,6 +282,7 @@ def start_source_ai_review(
     clarification_text=None,
     force=False,
     selected_source_ids_json=None,
+    payment_candidate_refs_json=None,
     expected_clarification_revision=None,
     request_id=None,
     reanalyze_original_sources=False,
@@ -298,6 +299,11 @@ def start_source_ai_review(
         selected_source_ids=(
             _ai_review_payload(selected_source_ids_json, list, "资料来源选择")
             if selected_source_ids_json is not None
+            else None
+        ),
+        payment_candidate_refs=(
+            _ai_review_payload(payment_candidate_refs_json, list, "支付来源选择")
+            if payment_candidate_refs_json is not None
             else None
         ),
         **({"reanalyze_original_sources": True}

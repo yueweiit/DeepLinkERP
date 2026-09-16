@@ -53,6 +53,14 @@ def get_batch_settlement(batch_name, version_name=None):
 
 
 @frappe.whitelist(methods=['POST'])
+@_review_validation
+def preview_payment_source_selection(batch_name, version_name, selections_json):
+    batch_name=require_batch_permission(batch_name,'read')
+    return runtime.preview_payment_source_selection(
+        batch_name,str(version_name or ''),_decode(selections_json,list))
+
+
+@frappe.whitelist(methods=['POST'])
 def start_batch_matching(batch_name, version_name=None):
     return runtime.run_payment_rule_matching(require_batch_permission(batch_name, 'write'), version_name) if runtime.freight_enabled() else runtime.start_batch_matching(require_batch_permission(batch_name, 'write'), version_name)
 

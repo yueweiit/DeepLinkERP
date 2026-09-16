@@ -1,4 +1,6 @@
 """Local RPC projections and background integration for shipment freight."""
+import re
+
 from . import freight_adoption as adoption, freight_matching as matching, freight_packing as packing
 from .model import digest,dumps
 from .application import row_meta
@@ -64,6 +66,151 @@ def candidate_view(store,candidate,transport_mode='',ledger=None):
             'packing_available':any(l.get('cargo_text') for l in lines) or bool(source.get('goods')) or any(d.get('tables') for d in source.get('documents') or [])}
 
 
+def _payment_template(source):
+    """Classify only the approved payment workflow families used by this product."""
+
+    from overseas_costing.services.material_ai_payment_match import payment_workflow_template
+    return payment_workflow_template(source)
+
+
+def _payment_line_summary(line):
+    evidence=line.get('evidence') or {}
+    return {
+        'line_id':str(line.get('id') or ''),
+        'approval_no':str(line.get('approval_no') or ''),
+        'waybill':str(line.get('waybill') or ''),
+        'freight':{
+            'amount':line.get('amount'),
+            'currency':str(line.get('currency') or ''),
+        } if line.get('amount') not in (None,'') else None,
+        'packing':{
+            key:value for key,value in (line.get('packing') or {}).items()
+            if key in {'material_code_hints','chargeable_weight_kg','gross_weight_kg',
+                       'package_count','dimensions_cm','volume_m3'}
+        },
+        'evidence':{
+            key:evidence.get(key) for key in ('file_name','sheet','row')
+            if evidence.get(key) not in (None,'')
+        },
+    }
+
+
+def payment_source_scope(store,candidates,version_name,items=None,requested_refs=None):
+    """Small browser projection for choosing payment processes, never fee adoption."""
+
+    from overseas_costing.services import material_ai_payment_match
+    rows=[]
+    for candidate in candidates:
+        if (str(candidate.get('status') or '').lower() not in {'pending','confirmed'}
+                or candidate.get('issues')):
+            continue
+        source=store.get('source',candidate.get('expense_id')) or {}
+        template=_payment_template(source)
+        if not template or not source.get('approved') or source.get('invalid'):
+            continue
+        summaries=[]
+        for line_id in candidate.get('line_ids') or []:
+            line=store.get('freight_line',line_id) or {}
+            if line.get('source_id')==source.get('id') and line.get('snapshot')==source.get('snapshot'):
+                summaries.append(_payment_line_summary(line))
+        strength='STRONG' if material_ai_payment_match._strong(candidate) else 'WEAK'
+        parsed_summary=(summaries[0] if len(summaries)==1 else {'lines':summaries})
+        rows.append({
+            'candidate_id':str(candidate.get('id') or ''),
+            'revision':str(candidate.get('revision') or ''),
+            'workflow_template':template,
+            'title':str(source.get('title') or template),
+            'approval_no':str(source.get('approval_no') or source.get('instance') or ''),
+            'match_strength':strength,
+            'match_reason':str(candidate.get('reason') or ('审批号或运单号精确匹配' if strength=='STRONG' else '需要人工确认范围')),
+            'parsed_summary':parsed_summary,
+        })
+    rows.sort(key=lambda row:(0 if row['match_strength']=='STRONG' else 1,row['approval_no'],row['candidate_id']))
+    strong=[row for row in rows if row['match_strength']=='STRONG']
+    if requested_refs is not None:
+        if not isinstance(requested_refs,list):raise ValueError('支付来源选择格式不正确')
+        available={(row['candidate_id'],row['revision'],str(version_name or '')):row for row in rows}
+        keys=[]
+        for reference in requested_refs:
+            if not isinstance(reference,dict) or set(reference)!={'candidate_id','revision','version'}:
+                raise ValueError('支付来源选择格式不正确')
+            key=tuple(str(reference.get(name) or '') for name in ('candidate_id','revision','version'))
+            if key not in available:raise ValueError('支付来源候选已变化，请刷新')
+            keys.append(key)
+        if len(keys)!=len(set(keys)):raise ValueError('支付来源选择重复')
+        selected=[available[key] for key in keys]
+        status='SELECTED' if selected else 'NEEDS_SELECTION' if rows else 'UNAVAILABLE'
+    else:
+        selected=strong if len(strong)==1 else []
+        status='AUTO_MATCHED' if len(strong)==1 else 'NEEDS_SELECTION' if rows else 'UNAVAILABLE'
+    for row in rows:
+        row['selected']=row in selected
+    material_rows=[]
+    selected_lines=[summary for row in selected for summary in (
+        row['parsed_summary'].get('lines') or [row['parsed_summary']]
+        if isinstance(row.get('parsed_summary'),dict) else [])]
+    overlay_fields=('gross_weight_kg','chargeable_weight_kg','package_count','volume_m3')
+    for item in items or []:
+        code=str(item.get('material_code') or '').strip().upper()
+        values={field:item.get(field) for field in overlay_fields if item.get(field) not in (None,'')}
+        evidence=[];overlaid=set()
+        for summary in selected_lines:
+            packing=summary.get('packing') or {}
+            codes=[str(value or '').strip().upper() for value in packing.get('material_code_hints') or []
+                   if re.fullmatch(r'[A-Z]{2,8}\d{3,}',str(value or '').strip(),re.I)]
+            if len(set(codes))!=1 or code not in codes:continue
+            for field in overlay_fields:
+                if packing.get(field) not in (None,''):
+                    values[field]=packing[field];overlaid.add(field)
+            if summary.get('evidence'):evidence.append(summary['evidence'])
+        material_rows.append({
+            'item_name':str(item.get('name') or ''),'material_code':code,
+            'product_name':str(item.get('product_name') or ''),'values':values,
+            'fallback_fields':[field for field in overlay_fields if field not in overlaid],
+            'evidence':evidence,
+        })
+    return {
+        'policy':'payment-source-scope-1','version':str(version_name or ''),'status':status,
+        'selected_refs':[{'candidate_id':row['candidate_id'],'revision':row['revision'],
+                          'version':str(version_name or '')} for row in selected],
+        'candidates':rows,
+        'material_rows':material_rows,
+        'message':(
+            '已按审批号或运单号自动匹配唯一支付流程。'
+            if status=='AUTO_MATCHED' else
+            '已选择支付流程范围，AI 只会解析这些流程的本票明细。'
+            if status=='SELECTED' else
+            '找到多个或弱匹配支付流程，请只选择需要 AI 解析的范围。'
+            if status=='NEEDS_SELECTION' else
+            '未找到可用支付流程，将继续使用国际物流和采购支出资料。'
+        ),
+    }
+
+
+def payment_source_history(store, version):
+    """Safe, version-scoped summary of payment relations confirmed by AI fill."""
+
+    metadata=row_meta(version or {})
+    relations=metadata.get('material_ai_payment_matches') or []
+    if not relations and isinstance(metadata.get('material_ai_payment_match'),dict):
+        relations=[metadata['material_ai_payment_match']]
+    result=[];seen=set()
+    for relation in relations:
+        if not isinstance(relation,dict):continue
+        identity=(str(relation.get('candidate_id') or ''),str(relation.get('expense_id') or ''))
+        if not all(identity) or identity in seen:continue
+        seen.add(identity)
+        source=store.get('source',identity[1]) or {}
+        result.append({
+            'title':str(source.get('title') or '支付流程'),
+            'approval_no':str(source.get('approval_no') or source.get('instance') or ''),
+            'workflow_template':_payment_template(source),
+            'confirmed_by':str(relation.get('confirmed_by') or ''),
+            'confirmed_at':str(relation.get('confirmed_at') or ''),
+        })
+    return result
+
+
 def batch_status(store,ledger,batch_name,version_name=None):
     from .runtime import source_summary
     from overseas_costing.services.effective_logistics_source import resolve_source_context
@@ -78,7 +225,8 @@ def batch_status(store,ledger,batch_name,version_name=None):
           'binding':None,'candidates':[],
           'payment_candidates':[],'payment_rejected_candidates':[],
           'matching':{'status':'not_started'},'payment_matching':{'status':'not_started'},
-          'sync':store.get('state','sync') or {},'health':store.get('state','health') or {}}
+          'sync':store.get('state','sync') or {},'health':store.get('state','health') or {},
+          'payment_source_scope':payment_source_scope(store,[],vname,[])}
     from .payment_adoption import public_payment_context
     base.update(public_payment_context(store,ledger,batch_name,vname))
     if not maps:return base
@@ -91,13 +239,24 @@ def batch_status(store,ledger,batch_name,version_name=None):
         payment_matching=payment_ai_matching.status(store,logistics['id'],current_version=lambda _batch:batch.get('current_version')) if not historical else {'status':'historical'},
         candidates=candidates,payment_candidates=candidates,payment_rejected_candidates=rejected,
         freight=adoption.context(store,ledger,batch_name,vname),source_context=resolve_source_context(batch_name,vname,store=store,ledger=ledger))
+    base['payment_source_scope']=payment_source_scope(
+        store,current_candidates if not historical else [],vname,
+        ledger.rows('item',batch=batch_name,version=vname),
+    )
     ctx=base['source_context'];review=store.get('packing_review',base['freight'].get('packing_review_id') or '')
     base['packing']={'status':'adopted' if review else 'unverified','message':'已独立采用装箱变更；原始资料保留在操作记录' if review else '装箱沿用当前资料；尚未确认是否有变更',
         'review_id':(review or {}).get('id'),'source_context':ctx.get('packing') or ctx}
     base['packing_checks']=[{**{k:i.get(k) for k in ('name','material_code','product_name','quantity','unit','gross_weight_kg','volume_m3')},'revision':packing.item_fingerprint([i])} for i in ledger.rows('item',batch=batch_name,version=vname) if row_meta(i).get('settlement_packing_review')]
     base['blocking_reasons']=adoption.blockers(store,ledger,batch_name,vname)
     if review and not ctx.get('available'):base['blocking_reasons'].append('已采用装箱来源更新或失效，请重新核对')
-    base['audit']=store.find('audit',binding_id=batch_name,limit=50)
+    base['payment_source_history']=payment_source_history(store,version)
+    audit_rows=store.find('audit',binding_id=batch_name,limit=50)
+    for audit_row in audit_rows:
+        if audit_row.get('action')!='material_ai_payment_match_confirmed':continue
+        source=store.get('source',audit_row.get('expense_id')) or {}
+        audit_row['source_approval_no']=str(source.get('approval_no') or source.get('instance') or '')
+        audit_row['source_title']=str(source.get('title') or '支付流程')
+    base['audit']=audit_rows
     legacy=store.find('binding',logistics_id=logistics['id'])
     if legacy and not row_meta(version).get('freight_settlement'):
         base['legacy_binding']={**legacy[0],'expense':financial_summary(store.get('source',legacy[0]['expense_id']))}

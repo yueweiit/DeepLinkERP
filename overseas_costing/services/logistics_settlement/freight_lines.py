@@ -14,6 +14,11 @@ TAX_LABELS = ('关税', '税费', '进口税', 'impuesto', 'arancel')
 MEXICO_INLAND_LABELS = ('末端', '派送', '当地配送', '内陆', 'last mile', 'flete local', 'inland')
 
 
+def compact_number(value):
+    text=number(value)
+    return text[:-2] if text and text.endswith('.0') else text
+
+
 def identifiers_in(value):
     text = dumps(value) if not isinstance(value,str) else value
     tokens = {('waybill',v.upper()) for v in re.findall(r'(?<![A-Z0-9])MXT\d{4,}(?![A-Z0-9])',text.upper())}
@@ -104,9 +109,20 @@ def row_line(source, fields, *, document_id='', document_hash='', file_id='', fi
     if any(t in norm(str(project)) for t in ('小计','合计','总计','subtotal','total')):return None
     key=digest(file_id or 'form',sheet,native_id or [waybill,approval,label,project])
     cargo=pick(fields,'发货明细','货物明细','物料明细','装箱明细','Cargo','Mercancía') or ''
+    from overseas_costing.services.packing_comment_service import parse_packing_comment
+    packing_fact=parse_packing_comment(str(cargo))
+    packing={
+        'material_code_hints':packing_fact.get('material_code_hints') or [],
+        'chargeable_weight_kg':number(pick(fields,'重量','计费重量','Peso')),
+        'gross_weight_kg':number(packing_fact.get('gross_weight_kg')),
+        'package_count':number(pick(fields,'件数','箱数','Packages','Bultos')),
+        'dimensions_cm':[compact_number(value) for value in (packing_fact.get('dimensions_cm') or [])],
+        'volume_m3':number(packing_fact.get('volume_m3')),
+    }
     return {'id':digest(source['id'],key),'line_key':key,'source_id':source['id'],'source_snapshot':source.get('snapshot') or '',
         'waybill':waybill.upper(),'approval_no':approval,'amount':amount,'currency':cur,'label':label,'scope':fee_scope(label),
         'project':str(project),'cargo_text':str(cargo),'billing_weight':number(pick(fields,'重量','计费重量','Peso')),
+        'packing':packing,
         'evidence':{'document_hash':document_hash,'document_id':document_id,'file_id':file_id,'file_name':file_name,'sheet':sheet,'row':position,'amount_field':amount_label},
         'charge_key':digest('economic-charge',source.get('corp'),waybill,approval,norm(label),str(project),amount,cur,norm(cargo)),
         'revision':digest(source.get('snapshot') or source.get('fingerprint'),key,fields),'fields':fields}

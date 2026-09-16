@@ -109,6 +109,30 @@ def test_multiple_strong_payment_matches_are_not_selected_arbitrarily():
     assert all(row["metadata_only_process"] is True for row in visible)
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"status": "conflict", "method": "explicit", "issues": []},
+        {"status": "pending", "method": "explicit", "issues": ["跨票冲突"]},
+    ],
+)
+def test_manual_payment_range_cannot_promote_unsafe_candidates(changes):
+    from overseas_costing.services import material_ai_payment_match as service
+
+    store, ledger, batch, version, _logistics, _source, candidate = _strong_context()
+    store.put("freight_candidate", _candidate_values(candidate, **changes))
+    reference = {
+        "candidate_id": candidate["id"],
+        "revision": candidate["revision"],
+        "version": version["name"],
+    }
+
+    with pytest.raises(ValueError, match="变化"):
+        service.validate_preview_references(
+            store, ledger, batch["name"], version["name"], [reference]
+        )
+
+
 def test_server_confirmation_revalidates_relation_without_freezing_candidate():
     from overseas_costing.services import material_ai_payment_match as service
 
@@ -214,7 +238,45 @@ def test_version_relation_is_safe_audited_and_idempotent():
         if row["action"] == "material_ai_payment_match_confirmed"
     ]
     assert len(audits) == 1
+    assert audits[0]["user_selected"] is False
     assert store.get("freight_candidate", candidate["id"])["status"] == "pending"
+
+
+def test_historical_version_exposes_safe_payment_source_relation_summary():
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement.freight_runtime import batch_status
+
+    store, ledger, batch, version, _logistics, source, candidate = _strong_context()
+    source.update(title="月结付款")
+    store.put("source", {"id": source["id"], "data": dumps(source)})
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    relation = service.confirm_preview_candidate(
+        store, ledger, batch["name"], reference, "user", freight_mode=True
+    )
+    service.persist_relation(
+        store, ledger, batch["name"], version["name"], relation, "user", user_selected=True
+    )
+    next_version = ledger.create(
+        "version", {"batch": batch["name"], "status": "Active", "is_current": 1}
+    )
+    ledger.put("batch", batch["name"], {"current_version": next_version["name"]})
+
+    public = batch_status(store, ledger, batch["name"], version["name"])
+
+    assert public["historical"] is True
+    assert public["payment_source_history"] == [{
+        "title": "月结付款",
+        "approval_no": "APP-1",
+        "workflow_template": "月结付款",
+        "confirmed_by": "user",
+        "confirmed_at": relation["confirmed_at"],
+    }]
+    audit = next(row for row in public["audit"]
+                 if row["action"] == "material_ai_payment_match_confirmed")
+    assert audit["source_approval_no"] == "APP-1"
+    assert audit["user_selected"] is True
 
 
 def test_version_relation_and_audit_roll_back_when_later_apply_fails():
@@ -332,6 +394,34 @@ def test_payment_match_sources_are_server_scoped_and_contain_stable_reference_on
     assert all("amount" not in row and "currency" not in row for row in sources)
 
 
+def test_material_source_listing_honors_explicit_payment_range_without_persisting(monkeypatch):
+    from overseas_costing.services import packing_snapshot_service as packing
+    from overseas_costing.services.logistics_settlement import freight_matching, ledger as ledger_module, runtime
+    from overseas_costing.services.logistics_settlement.store import Store
+    from overseas_costing.tests.test_freight_lines import setup_cost
+
+    store, ledger, batch, version, _item, logistics, _source = setup_cost()
+    candidate = freight_matching.rule_pass(store, logistics["id"])[0]
+    reference = {
+        "candidate_id": candidate["id"],
+        "revision": candidate["revision"],
+        "version": version["name"],
+    }
+    monkeypatch.setattr(Store, "frappe", classmethod(lambda _cls: store))
+    monkeypatch.setattr(ledger_module, "FrappeLedger", lambda: ledger)
+    monkeypatch.setattr(runtime, "freight_enabled", lambda: True)
+    monkeypatch.setattr(packing, "_list_material_ai_sources", lambda *_args, **_kwargs: [])
+
+    sources = packing.list_material_ai_sources(
+        batch["name"], version["name"], payment_references=[reference]
+    )
+
+    assert sources
+    assert {row["payment_match_candidate_id"] for row in sources} == {candidate["id"]}
+    assert {row["payment_match_user_selected"] for row in sources} == {True}
+    assert store.find("audit", binding_id=batch["name"]) == []
+
+
 def test_payment_preview_uses_only_matched_line_when_catalog_row_is_unreadable(monkeypatch):
     from overseas_costing.services import material_ai_payment_match as service
     from overseas_costing.services.logistics_settlement import packing_selection
@@ -347,8 +437,16 @@ def test_payment_preview_uses_only_matched_line_when_catalog_row_is_unreadable(m
         amount="3322.784523",
         currency="RMB",
         label="DHL 快递运费",
-        billing_weight="42.05",
-        cargo_text="MWV101144 IP17PRO TPU 1pcs",
+        billing_weight="46",
+        cargo_text="MWV101144 IP17PRO TPU\n规格33*20*23,重量：42.05kg\n1套模具+3个手机壳",
+        packing={
+            "material_code_hints": ["MWV101144", "IP17PRO"],
+            "chargeable_weight_kg": "46",
+            "gross_weight_kg": "42.05",
+            "package_count": "1",
+            "dimensions_cm": ["33", "20", "23"],
+            "volume_m3": "0.01518",
+        },
         evidence={
             "document_id": "payment-document-1",
             "file_name": "DHL(6.29-7.24)快递明细.xlsx",
@@ -386,11 +484,33 @@ def test_payment_preview_uses_only_matched_line_when_catalog_row_is_unreadable(m
     assert preview["process_instance_id"] == source["instance"]
     assert preview["source_kind"] == "approval_attachment"
     assert preview["selected_source"]["document_id"] == "payment-document-1"
-    assert preview["scoped_goods"][0]["material_code"] == "MWV101144"
-    assert preview["scoped_goods"][0]["quantity"] == "1"
+    assert preview["scoped_goods"] == [{
+        "material_code": "MWV101144",
+        "product_name": "",
+        "spec_model": "",
+        "quantity": None,
+        "unit": "",
+        "gross_weight_kg": "42.05",
+        "chargeable_weight_kg": "46",
+        "package_count": "1",
+        "volume_m3": "0.01518",
+        "dimensions_cm": ["33", "20", "23"],
+        "physical": {
+            "gross_weight_kg": "42.05",
+            "chargeable_weight_kg": "46",
+            "package_count": "1",
+            "volume_m3": "0.01518",
+        },
+        "evidence": {
+            "document_id": "payment-document-1",
+            "file_name": "DHL(6.29-7.24)快递明细.xlsx",
+            "sheet": "DHL",
+            "row": 8,
+        },
+    }]
     assert "运费金额: 3322.784523 RMB" in preview["scoped_text"]
-    assert "计费重量: 42.05 kg" in preview["scoped_text"]
-    assert "MWV101144 IP17PRO TPU 1pcs" in preview["scoped_text"]
+    assert "计费重量: 46 kg" in preview["scoped_text"]
+    assert "MWV101144 IP17PRO TPU" in preview["scoped_text"]
     assert "44075.13" not in preview["scoped_text"]
 
 
@@ -493,7 +613,7 @@ def test_payment_preview_merges_matched_fee_line_into_same_document_snapshot(mon
         "id": "catalog-row", "source_id": source["id"], "source_kind": "approval_attachment",
         "source_label": "DHL.xlsx · DHL", "approval_no": source["approval_no"],
         "source_snapshot": source["snapshot"], "process_instance_id": source["instance"],
-        "evidence": {"document_id": "doc", "file_name": "DHL.xlsx", "sheet": "DHL"},
+        "evidence": {"document_id": "doc", "file_name": "DHL.xlsx", "sheet": "DHL", "row": 8},
         "document_id": "doc", "sheet": "DHL", "revision": "catalog-revision",
         "goods": [{"material_code": "MWV101144", "quantity": "1"}],
         "text": "装箱资料",
@@ -512,3 +632,43 @@ def test_payment_preview_merges_matched_fee_line_into_same_document_snapshot(mon
     assert sources[0]["scoped_text"].splitlines() == [
         "装箱资料", "费用项目: DHL 快递运费", "运费金额: 3322.784523 RMB", "运单号: WB-1",
     ]
+
+
+def test_payment_preview_never_widens_missing_row_evidence_to_whole_monthly_sheet(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import packing_selection
+
+    store, ledger, batch, version, logistics, source, candidate = payment_setup(
+        structured=True, scope="freight", amount="3414.19", mode="EXPRESS"
+    )
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        cargo_text="MWV101144 本票货物",
+        evidence={"document_id": "monthly-doc", "file_name": "DHL.xlsx", "sheet": "DHL"},
+    )
+    store.put("freight_line", {"id": line["id"], "data": dumps(line)})
+    candidate.update(method="explicit", issues=[])
+    store.put("freight_candidate", _candidate_values(candidate))
+    sibling = {
+        "id": "other-ticket-row", "source_id": source["id"],
+        "source_kind": "approval_attachment", "source_label": "DHL.xlsx · DHL",
+        "approval_no": source["approval_no"], "source_snapshot": source["snapshot"],
+        "process_instance_id": source["instance"], "document_id": "monthly-doc", "sheet": "DHL",
+        "evidence": {"document_id": "monthly-doc", "file_name": "DHL.xlsx", "sheet": "DHL", "row": 99},
+        "revision": "other-ticket-revision",
+        "goods": [{"material_code": "SECRET999", "quantity": "999"}],
+        "text": "其他票私密明细",
+    }
+    monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, [sibling]))
+
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    sources = service.preview_sources(
+        store, ledger, batch["name"], version["name"], reference, freight_mode=True
+    )
+
+    payload = json.dumps(sources, ensure_ascii=False)
+    assert "SECRET999" not in payload
+    assert "其他票私密明细" not in payload
+    assert "MWV101144 本票货物" in payload

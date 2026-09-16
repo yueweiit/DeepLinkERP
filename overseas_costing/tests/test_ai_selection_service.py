@@ -213,6 +213,40 @@ def test_payment_match_receipt_contains_only_server_candidate_reference():
     assert '120' not in serialized and 'SECRET-SKU' not in serialized
 
 
+def test_multiple_user_selected_payment_matches_are_kept_as_id_only_receipt():
+    repo = Repo()
+    repo.sources = [
+        {
+            **repo.sources[0],
+            'source_id': f'DOC-{index}',
+            'source_hash': f'HASH-{index}',
+            'payment_match_candidate': True,
+            'payment_match_candidate_id': f'FC-{index}',
+            'payment_match_candidate_revision': f'FR-{index}',
+            'payment_match_version': 'V1',
+            'payment_match_user_selected': True,
+            'scoped_text': f'private-{index}',
+        }
+        for index in (1, 2)
+    ]
+    repo.run['source_manifest_json'] = deepcopy(repo.sources)
+    repo.run['input_fingerprint'] = ai._source_review_fingerprint(
+        'B1', 'V1', repo.items, repo.sources, '', context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint'] = service.material_fingerprint(
+        repo.items, repo.sources, repo.context)
+
+    response = service.prepare('B1', repo.run['name'], [], [], 'fill_missing', 'V1', repository=repo)
+    receipt = repo.run['draft_json']['row_previews'][response['preview']['id']]
+
+    assert response['preview']['payment_match_candidate'] is None
+    assert response['preview']['payment_match_candidates'] == [
+        {'candidate_id': 'FC-1', 'revision': 'FR-1', 'version': 'V1', 'user_selected': True},
+        {'candidate_id': 'FC-2', 'revision': 'FR-2', 'version': 'V1', 'user_selected': True},
+    ]
+    assert receipt['payment_match_candidates'] == response['preview']['payment_match_candidates']
+    assert 'private-' not in json.dumps(receipt, ensure_ascii=False)
+
+
 def test_payment_match_confirmation_locks_arbitration_before_review_scope():
     repo=Repo();preview=payment_match_preview(repo);events=[]
     original_get_run=repo.get_run

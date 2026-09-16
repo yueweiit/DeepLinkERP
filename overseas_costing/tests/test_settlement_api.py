@@ -104,6 +104,25 @@ def test_per_batch_payment_apis_separate_rules_from_explicit_ai(batch_api, monke
     assert permissions == ["write", "write", "write"]
 
 
+def test_payment_source_selection_preview_is_readonly_and_forwards_id_only_refs(batch_api, monkeypatch):
+    calls = []
+    refs = [{"candidate_id": "C1", "revision": "R1", "version": "V"}]
+    monkeypatch.setattr(
+        batch_api, "require_batch_permission",
+        lambda batch, permission="read": calls.append(("permission", permission)) or batch,
+    )
+    monkeypatch.setattr(
+        batch_api.runtime, "preview_payment_source_selection",
+        lambda batch, version, selections: calls.append((batch, version, selections))
+        or {"ok": True, "payment_source_scope": {"selected_refs": selections}},
+    )
+
+    result = batch_api.preview_payment_source_selection("B", "V", __import__("json").dumps(refs))
+
+    assert result["payment_source_scope"]["selected_refs"] == refs
+    assert calls == [("permission", "read"), ("B", "V", refs)]
+
+
 def test_manual_payment_candidate_forwards_expected_revision(batch_api, monkeypatch):
     monkeypatch.setattr(batch_api.runtime,'freight_enabled',lambda:True)
     from overseas_costing.services.logistics_settlement import freight_runtime

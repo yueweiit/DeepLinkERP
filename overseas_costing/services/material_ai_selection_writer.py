@@ -182,14 +182,22 @@ def scoped_goods(items):
 
 
 def _confirm_and_reconstruct_payment_match(store,ledger,run,preview,draft,context,actor,*,repository=None,freight_mode=None):
-    reference=preview.get('payment_match_candidate')
-    if not reference:
+    references=preview.get('payment_match_candidates') or ([preview['payment_match_candidate']]
+        if preview.get('payment_match_candidate') else [])
+    if not references:
         return preview,context
     from . import material_ai_payment_match, material_ai_selection_service
     from .logistics_settlement import runtime
     enabled=runtime.freight_enabled() if freight_mode is None else bool(freight_mode)
-    relation=material_ai_payment_match.confirm_preview_candidate(
-        store,ledger,preview['batch'],reference,actor,freight_mode=enabled)
+    relations=[]
+    for reference in references:
+        clean={key:reference.get(key) for key in ('candidate_id','revision','version')}
+        kwargs={'freight_mode':enabled}
+        if reference.get('user_selected'):
+            kwargs['user_selected']=True
+        relation=material_ai_payment_match.confirm_preview_candidate(
+            store,ledger,preview['batch'],clean,actor,**kwargs)
+        relations.append({'relation':relation,'user_selected':bool(reference.get('user_selected'))})
     # Re-read all sources and rebuild rows/fees after the locked relation
     # validation, before any business record is written in the same savepoint.
     if repository is None:
@@ -197,7 +205,10 @@ def _confirm_and_reconstruct_payment_match(store,ledger,run,preview,draft,contex
         repository=FrappeMaterialAIFillRepository()
     refreshed,locked_context=material_ai_selection_service.reconstruct_after_payment_match(
         repository,run,preview,draft)
-    return {**refreshed,'_payment_match_relation':relation},locked_context
+    result={**refreshed,'_payment_match_relations':relations}
+    if len(relations)==1:
+        result['_payment_match_relation']=relations[0]['relation']
+    return result,locked_context
 
 
 def _write_rows_and_payment_relation(store,ledger,preview,context,actor):
@@ -206,10 +217,13 @@ def _write_rows_and_payment_relation(store,ledger,preview,context,actor):
         or any(candidate.get('default_selected') and candidate.get('can_apply')
                for candidate in preview.get('packing_group_candidates') or [])
     ) else preview['version']
-    relation=preview.get('_payment_match_relation')
-    if relation:
+    relations=preview.get('_payment_match_relations') or ([{
+        'relation':preview['_payment_match_relation'],'user_selected':False
+    }] if preview.get('_payment_match_relation') else [])
+    for entry in relations:
         from .material_ai_payment_match import persist_relation
-        persist_relation(store,ledger,preview['batch'],version_name,relation,actor)
+        kwargs={'user_selected':True} if entry.get('user_selected') else {}
+        persist_relation(store,ledger,preview['batch'],version_name,entry['relation'],actor,**kwargs)
     return version_name
 
 

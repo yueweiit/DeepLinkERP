@@ -31,6 +31,30 @@ def monthly():
     return row
 
 
+def dhl_monthly_same_amount_rows():
+    """The production shape: adjacent rows may share money but belong to different tickets."""
+    row = source('dhl-monthly', text='DHL 6.29-7.24 月结', amount='44075.13')
+    row['title'] = '月结付款'
+    wb = Workbook(); sh = wb.active; sh.title = 'DHL快递'
+    sh.append(['发件日期', '运单号', '重量', '件数', '运费金额（RMB）', '单价/KG', '发货明细', '所属项目', '钉钉流程'])
+    for _ in range(11):
+        sh.append([])
+    sh.append(['2026/7/20', '1841364722', 46, 1, 3414.18994140625, 74.22,
+               '薇武士 MWV101145 IP17 PRO MAX -TPU\n规格33*20*23,重量：42.05kg',
+               '薇武士项目', '202607211416000291269'])
+    sh.append(['2026/7/20', '1841361513', 46, 1, 3414.18994140625, 74.22,
+               '薇武士 MWV101144 IP17PRO -TPU\n规格33*20*23,重量：42.05kg\n1套模具+3个手机壳',
+               '薇武士项目', '202607211417000078258'])
+    for cell in (sh['E13'], sh['E14']):
+        cell.number_format = '¥0.00'
+    out = BytesIO(); wb.save(out)
+    doc = {'id':'dhl-doc', 'file_name':'DHL(6.29-7.24)快递明细.xlsx', 'file_id':'dhl-file',
+           'manifest':{'archive_quality':'original','sha256':'dhl-hash'},
+           **parse_document(out.getvalue(), 'DHL(6.29-7.24)快递明细.xlsx')}
+    row['settlement_documents'] = [doc]
+    return row
+
+
 def test_monthly_and_wrong_category_financial_sources_are_discovered():
     parsed=parse_source(monthly(),logistics_codes={'logistics'})
     assert parsed['kind']=='expense'
@@ -61,6 +85,34 @@ def test_monthly_extracts_own_row_and_never_total_project_or_other_goods():
     assert 'Oppo' in selected[0]['cargo_text'] and 'HONOR' not in selected[0]['cargo_text']
     assert selected[0]['billing_weight']=='33.5'
     assert 'gross_weight_kg' not in selected[0]
+
+
+def test_dhl_monthly_exact_approval_selects_only_row_14_and_extracts_packing_facts():
+    from overseas_costing.services.logistics_settlement.freight_lines import lines_for_source, matching_lines
+
+    payment = parse_source(dhl_monthly_same_amount_rows(), logistics_codes={'logistics'})
+    lines = lines_for_source(payment)
+    logistics = parse_source(
+        source('202607211417000078258', 'logistics', text='DHL 单号 1841361513'),
+        logistics_codes={'logistics'},
+    )
+    selected = matching_lines(logistics, lines)
+
+    assert len(lines) == 2
+    assert len(selected) == 1
+    line = selected[0]
+    assert line['approval_no'] == '202607211417000078258'
+    assert line['waybill'] == '1841361513'
+    assert line['amount'] == '3414.19'
+    assert line['evidence']['row'] == 14
+    assert line['packing'] == {
+        'material_code_hints': ['MWV101144', 'IP17PRO'],
+        'chargeable_weight_kg': '46',
+        'gross_weight_kg': '42.05',
+        'package_count': '1',
+        'dimensions_cm': ['33', '20', '23'],
+        'volume_m3': '0.01518',
+    }
 
 
 def test_reordered_rows_keep_identity_zero_and_credits_are_not_discarded():

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
+import re
 
-from .logistics_settlement.model import digest, dumps
+from .logistics_settlement.model import digest, dumps, norm
 
 
 POLICY = "material-ai-payment-match-1"
@@ -23,6 +24,37 @@ RELATION_KEYS = frozenset({
     "logistics_id", "expense_id", "logistics_snapshot", "expense_snapshot",
     "confirmed_by", "confirmed_at",
 })
+
+
+def _line_scoped_goods(line: dict, evidence: dict) -> list[dict]:
+    """Project row-scoped packing facts only when one material code is explicit."""
+
+    packing = line.get("packing") if isinstance(line.get("packing"), dict) else {}
+    material_codes = list(dict.fromkeys(
+        str(value or "").strip().upper()
+        for value in packing.get("material_code_hints") or []
+        if re.fullmatch(r"[A-Z]{2,8}\d{3,}", str(value or "").strip(), re.I)
+    ))
+    if len(material_codes) != 1:
+        return []
+    physical = {
+        field: str(packing[field])
+        for field in ("gross_weight_kg", "chargeable_weight_kg", "package_count", "volume_m3")
+        if packing.get(field) not in (None, "")
+    }
+    if not physical:
+        return []
+    return [{
+        "material_code": material_codes[0],
+        "product_name": "",
+        "spec_model": "",
+        "quantity": None,
+        "unit": "",
+        **physical,
+        "dimensions_cm": deepcopy(packing.get("dimensions_cm") or []),
+        "physical": deepcopy(physical),
+        "evidence": deepcopy(evidence),
+    }]
 
 
 def _confidence(value) -> Decimal | None:
@@ -102,6 +134,82 @@ def _validate_reference(reference: dict, version_name: str) -> dict:
     clean = {key: str(reference.get(key) or "") for key in REFERENCE_KEYS}
     if not all(clean.values()) or clean["version"] != str(version_name):
         raise ValueError("付款匹配凭证已变化，请刷新")
+    return clean
+
+
+def payment_workflow_template(source: dict) -> str:
+    """Classify only registered payment workflows, not ordinary product purchase."""
+
+    if source.get("kind") != "expense":
+        return ""
+    identities = [norm(source.get(key)) for key in ("title", "process_code", "template_name")
+                  if norm(source.get(key))]
+    title = " ".join(identities)
+    fields = source.get("fields") if isinstance(source.get("fields"), dict) else {}
+    typed = [title]
+    for key, value in fields.items():
+        label = norm(key)
+        if any(marker in label for marker in ("类型", "类别", "科目", "支出分类")):
+            typed.append(norm(value))
+    business_type = " ".join(typed)
+    transport_markers = (
+        "运输", "物流", "运费", "海运", "空运", "快递", "dhl", "fedex", "ups", "清关", "关税", "完税",
+    )
+    product_markers = ("采购商品", "商品采购", "物料采购", "product purchase", "product-purchase")
+    # An explicit product-purchase identity is authoritative.  Words such as
+    # DHL or 物流 may occur in a free-form title and must not promote an
+    # ordinary merchandise purchase into a payment workflow.
+    if any(marker in business_type for marker in product_markers):
+        return ""
+    if "月结付款" in title:
+        return "月结付款"
+    if "运营支出" in title:
+        return "运营支出"
+    if "费用支出" in title:
+        return "费用支出"
+    if "采购支出" not in title:
+        return ""
+    if any(marker in business_type for marker in transport_markers):
+        return "运输类采购支出"
+    return ""
+
+
+def _payment_source_allowed(source: dict) -> bool:
+    return bool(payment_workflow_template(source) and source.get("approved") and not source.get("invalid"))
+
+
+def validate_preview_references(store, ledger, batch_name: str, version_name: str,
+                                references: list[dict], *, lock: bool = False) -> list[dict]:
+    """Validate ID-only user choices against the current shipment matcher."""
+
+    if not isinstance(references, list):
+        raise ValueError("支付来源选择格式不正确")
+    logistics = _current_logistics(store, ledger, batch_name, version_name, lock=lock)
+    if not logistics:
+        raise ValueError("本票国际物流来源已变化，请刷新")
+    from .logistics_settlement.freight_matching import candidates
+    available = {}
+    for row in candidates(store, logistics["id"]):
+        candidate = store.get("freight_candidate", row.get("id"), lock=lock) if lock else row
+        source = store.get("source", (candidate or {}).get("expense_id"), lock=lock) if candidate else None
+        if (not candidate
+                or str(candidate.get("status") or "").lower() not in {"pending", "confirmed"}
+                or candidate.get("issues")
+                or not source or not _payment_source_allowed(source)):
+            continue
+        available[str(candidate.get("id") or "")] = candidate
+    clean = []
+    seen = set()
+    for reference in references:
+        current = _validate_reference(reference, version_name)
+        candidate = available.get(current["candidate_id"])
+        if not candidate or str(candidate.get("revision") or "") != current["revision"]:
+            raise ValueError("支付来源候选已变化，请刷新")
+        key = tuple(current[name] for name in ("candidate_id", "revision", "version"))
+        if key in seen:
+            raise ValueError("支付来源选择重复")
+        seen.add(key)
+        clean.append(current)
     return clean
 
 
@@ -213,6 +321,7 @@ def confirm_preview_candidate(
     actor: str,
     *,
     freight_mode: bool,
+    user_selected: bool = False,
 ):
     """Revalidate an exact candidate and return a server-owned relation."""
 
@@ -237,11 +346,16 @@ def confirm_preview_candidate(
     )
     # Re-run the unique/strong arbitration under locks.  The user cannot turn
     # a candidate ID into authority, and a newly appeared peer blocks adoption.
-    current = _current_candidates(
-        store, ledger, batch_name, version_name, lock=True
-    )
-    if len(current) != 1 or current[0].get("id") != clean["candidate_id"]:
-        raise ValueError("付款匹配候选已变化或存在冲突，请刷新")
+    if user_selected:
+        validate_preview_references(
+            store, ledger, batch_name, version_name, [clean], lock=True
+        )
+    else:
+        current = _current_candidates(
+            store, ledger, batch_name, version_name, lock=True
+        )
+        if len(current) != 1 or current[0].get("id") != clean["candidate_id"]:
+            raise ValueError("付款匹配候选已变化或存在冲突，请刷新")
     from .logistics_settlement.jobs import utcnow
     return {
         "policy": POLICY,
@@ -269,7 +383,7 @@ def _validate_relation(relation: dict, version_name: str, actor: str) -> dict:
 
 
 def persist_relation(store, ledger, batch_name: str, version_name: str,
-                     relation: dict, actor: str) -> dict:
+                     relation: dict, actor: str, *, user_selected: bool = False) -> dict:
     """Persist a version-scoped relation without freezing matcher state."""
 
     clean = _validate_relation(relation, version_name, actor)
@@ -279,9 +393,19 @@ def persist_relation(store, ledger, batch_name: str, version_name: str,
         store, ledger, batch_name, version_name,
         clean["candidate_id"], clean["candidate_revision"], lock=True,
     )
-    current = _current_candidates(store, ledger, batch_name, version_name, lock=True)
-    if len(current) != 1 or current[0].get("id") != clean["candidate_id"]:
-        raise ValueError("付款匹配候选已变化或存在冲突，请刷新")
+    reference = {
+        "candidate_id": clean["candidate_id"],
+        "revision": clean["candidate_revision"],
+        "version": clean["version"],
+    }
+    if user_selected:
+        validate_preview_references(
+            store, ledger, batch_name, version_name, [reference], lock=True
+        )
+    else:
+        current = _current_candidates(store, ledger, batch_name, version_name, lock=True)
+        if len(current) != 1 or current[0].get("id") != clean["candidate_id"]:
+            raise ValueError("付款匹配候选已变化或存在冲突，请刷新")
     expected = {
         "logistics_id": candidate.get("logistics_id"),
         "expense_id": candidate.get("expense_id"),
@@ -294,11 +418,22 @@ def persist_relation(store, ledger, batch_name: str, version_name: str,
     from .logistics_settlement.application import row_meta
     metadata = row_meta(version)
     prior = metadata.get("material_ai_payment_match") or {}
+    prior_many = metadata.get("material_ai_payment_matches") or []
     identity_keys = RELATION_KEYS - {"confirmed_by", "confirmed_at"}
+    existing = next((row for row in prior_many if isinstance(row, dict)
+        and set(row) == RELATION_KEYS
+        and all(str(row.get(key) or "") == clean[key] for key in identity_keys)), None)
+    if existing:
+        return {key: str(existing.get(key) or "") for key in RELATION_KEYS}
     if (isinstance(prior, dict) and set(prior) == RELATION_KEYS
             and all(str(prior.get(key) or "") == clean[key] for key in identity_keys)):
-        return {key: str(prior.get(key) or "") for key in RELATION_KEYS}
-    metadata["material_ai_payment_match"] = clean
+        existing = {key: str(prior.get(key) or "") for key in RELATION_KEYS}
+        if not prior_many:
+            metadata["material_ai_payment_matches"] = [existing]
+            ledger.put("version", version_name, {"extra_json": dumps(metadata)})
+        return existing
+    metadata.setdefault("material_ai_payment_matches", []).append(clean)
+    metadata.setdefault("material_ai_payment_match", clean)
     ledger.put("version", version_name, {"extra_json": dumps(metadata)})
     store.audit(
         batch_name,
@@ -309,6 +444,7 @@ def persist_relation(store, ledger, batch_name: str, version_name: str,
         version=version_name,
         logistics_id=clean["logistics_id"],
         expense_id=clean["expense_id"],
+        user_selected=bool(user_selected),
     )
     return deepcopy(clean)
 
@@ -321,17 +457,21 @@ def preview_sources(
     reference: dict | None,
     *,
     freight_mode: bool,
+    user_selected: bool = False,
 ):
     """Build shipment-scoped payment evidence without copying the matcher."""
 
     if not reference or not freight_mode:
         return []
     clean = _validate_reference(reference, version_name)
-    selected = select_preview_candidate(
-        store, ledger, batch_name, version_name, freight_mode=freight_mode
-    )
-    if selected != clean:
-        return []
+    if user_selected:
+        validate_preview_references(store, ledger, batch_name, version_name, [clean])
+    else:
+        selected = select_preview_candidate(
+            store, ledger, batch_name, version_name, freight_mode=freight_mode
+        )
+        if selected != clean:
+            return []
     candidate = store.get("freight_candidate", clean["candidate_id"]) or {}
     source = store.get("source", candidate.get("expense_id")) or {}
     if not source:
@@ -340,7 +480,26 @@ def preview_sources(
     from .logistics_settlement.freight_packing import text_goods
 
     _logistics, catalog = _catalog(store, ledger, batch_name, version_name)
-    rows = [row for row in catalog if row.get("source_id") == source.get("id")]
+    line_evidence = []
+    for line_id in candidate.get("line_ids") or []:
+        line = store.get("freight_line", line_id) or {}
+        if line.get("source_id") == source.get("id") and line.get("snapshot") == source.get("snapshot"):
+            line_evidence.append(line.get("evidence") or {})
+
+    def row_matches_line(row):
+        evidence = row.get("evidence") or {}
+        document_id = str(row.get("document_id") or evidence.get("document_id") or "")
+        sheet = str(row.get("sheet") or evidence.get("sheet") or "")
+        row_number = row.get("row") if row.get("row") is not None else evidence.get("row")
+        for allowed in line_evidence:
+            if (document_id and document_id == str(allowed.get("document_id") or "")
+                    and sheet == str(allowed.get("sheet") or "")
+                    and allowed.get("row") not in (None, "")
+                    and row_number == allowed.get("row")):
+                return True
+        return False
+
+    rows = [row for row in catalog if row.get("source_id") == source.get("id") and row_matches_line(row)]
     result = []
     covered_documents = {}
     for row in rows:
@@ -392,6 +551,7 @@ def preview_sources(
                 "payment_match_candidate_id": clean["candidate_id"],
                 "payment_match_candidate_revision": clean["revision"],
                 "payment_match_version": clean["version"],
+                "payment_match_user_selected": bool(user_selected),
                 "selected_source": selected_source,
                 "scoped_packing": True,
                 "scoped_goods": deepcopy(row.get("goods") or []),
@@ -421,6 +581,7 @@ def preview_sources(
         cargo_text = str(line.get("cargo_text") or "").strip()
         amount = line.get("amount")
         billing_weight = line.get("billing_weight")
+        line_goods = _line_scoped_goods(line, evidence)
         text_lines = []
         if line.get("label"):
             text_lines.append(f"费用项目: {line['label']}")
@@ -446,6 +607,12 @@ def preview_sources(
             existing["scoped_text"] = "\n".join(filter(None, (existing_text, matched_text)))
             existing["content_hash"] = digest(
                 existing.get("content_hash"), line_id, line.get("line_key"), matched_text
+            )
+            existing_codes = {str(row.get("material_code") or "").strip().casefold()
+                              for row in existing.get("scoped_goods") or []}
+            existing.setdefault("scoped_goods", []).extend(
+                row for row in line_goods
+                if str(row.get("material_code") or "").strip().casefold() not in existing_codes
             )
             continue
         source_kind = (
@@ -476,7 +643,7 @@ def preview_sources(
         if sheet:
             selected_source["sheet"] = sheet
         scoped_text = "\n".join(text_lines)
-        scoped_goods = text_goods(cargo_text, evidence) if cargo_text else []
+        scoped_goods = line_goods or (text_goods(cargo_text, evidence) if cargo_text else [])
         result.append(
             {
                 "source_id": evidence_id,
@@ -499,6 +666,7 @@ def preview_sources(
                 "payment_match_candidate_id": clean["candidate_id"],
                 "payment_match_candidate_revision": clean["revision"],
                 "payment_match_version": clean["version"],
+                "payment_match_user_selected": bool(user_selected),
                 "selected_source": selected_source,
                 "scoped_packing": True,
                 "scoped_goods": scoped_goods,
@@ -517,5 +685,7 @@ def preview_sources(
         # contents, or AI input; downstream stage arbitration will safely fall
         # through to the logistics stage for every missing field.
         reason = "已匹配支付流程，但未识别出属于本票的可采用明细；已继续使用下一优先级阶段。"
-        result.append(_metadata_only_process_source(source, reason=reason, reference=clean))
+        fallback = _metadata_only_process_source(source, reason=reason, reference=clean)
+        fallback["payment_match_user_selected"] = bool(user_selected)
+        result.append(fallback)
     return result

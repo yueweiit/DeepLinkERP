@@ -3153,6 +3153,17 @@
         force: options.force === true ? 1 : 0,
         ...(options.reanalyzeOriginalSources ? { reanalyze_original_sources: 1 } : {}),
       };
+      const paymentSelection = this.detailState.paymentSourceSelection;
+      if (!options.reanalyzeOriginalSources
+          && paymentSelection?.batchName === batchName
+          && paymentSelection?.versionName === versionName
+          && Array.isArray(paymentSelection.refs)) {
+        payload.payment_candidate_refs_json = JSON.stringify(paymentSelection.refs.map((row) => ({
+          candidate_id: String(row.candidate_id || ''),
+          revision: String(row.revision || ''),
+          version: String(row.version || ''),
+        })));
+      }
       if (Array.isArray(options.selectedSourceIds)) {
         const currentSources = options.sourceProgress || state.aiFill?.source_progress || [];
         const sources = new Map(currentSources.map((source) => [String(source.source_id || ""), source]));

@@ -339,6 +339,92 @@ def test_public_projection_is_safe_additive_and_marks_stale_claims():
     assert stale["payment_blocking_reasons"]
 
 
+def test_payment_source_scope_auto_selects_unique_monthly_match_and_exposes_only_exact_line_summary():
+    from overseas_costing.services.logistics_settlement.freight_runtime import batch_status
+
+    ctx = payment_setup(structured=True, scope="freight", amount="3414.19", mode="EXPRESS")
+    store, ledger, batch, version, _logistics, source, candidate = ctx
+    source.update(title="月结付款", approval_no="202608260009000284583")
+    store.put("source", {"id": source["id"], "data": dumps(source)})
+    line = store.get("freight_line", "payment-line-1")
+    line.update(
+        waybill="1841361513", approval_no="202607211417000078258",
+        billing_weight="46", cargo_text="MWV101144 IP17PRO -TPU",
+        packing={
+            "material_code_hints": ["MWV101144", "IP17PRO"],
+            "chargeable_weight_kg": "46", "gross_weight_kg": "42.05",
+            "package_count": "1", "dimensions_cm": ["33", "20", "23"],
+            "volume_m3": "0.01518",
+        },
+        evidence={"file_name": "DHL(6.29-7.24)快递明细.xlsx", "sheet": "DHL快递", "row": 14},
+    )
+    store.put("freight_line", {"id": line["id"], "waybill": line["waybill"],
+        "approval_no": line["approval_no"], "data": dumps(line)})
+    candidate.update(method="identifier", issues=[])
+    store.put("freight_candidate", _candidate_values_for_runtime(candidate))
+
+    scope = batch_status(store, ledger, batch["name"], version["name"])["payment_source_scope"]
+
+    assert scope["status"] == "AUTO_MATCHED"
+    assert scope["version"] == version["name"]
+    assert scope["selected_refs"] == [{"candidate_id": candidate["id"],
+                                        "revision": candidate["revision"],
+                                        "version": version["name"]}]
+    assert len(scope["candidates"]) == 1
+    summary = scope["candidates"][0]["parsed_summary"]
+    assert summary["approval_no"] == "202607211417000078258"
+    assert summary["waybill"] == "1841361513"
+    assert summary["freight"] == {"amount": "3414.19", "currency": "RMB"}
+    assert summary["packing"]["gross_weight_kg"] == "42.05"
+    assert summary["evidence"]["row"] == 14
+    assert "source_snapshot" not in dumps(scope)
+
+
+def _candidate_values_for_runtime(candidate):
+    return {
+        "id": candidate["id"], "logistics_id": candidate["logistics_id"],
+        "expense_id": candidate["expense_id"], "status": candidate["status"],
+        "data": dumps(candidate),
+    }
+
+
+def test_payment_source_template_excludes_product_purchase_but_accepts_transport_typed_purchase():
+    from overseas_costing.services.logistics_settlement.freight_runtime import _payment_template
+
+    product = {"title": "采购支出", "kind": "expense", "fields": {"支出类型": "采购商品"}}
+    product_monthly = {"title": "商品采购月结", "kind": "expense", "fields": {"支出类型": "采购商品"}}
+    product_monthly_payment = {
+        "title": "DHL 商品采购月结付款", "process_code": "PRODUCT-PURCHASE", "kind": "expense",
+        "fields": {"支出类型": "采购商品"},
+    }
+    transport = {"title": "采购支出", "kind": "expense", "fields": {"支出类型": "运输及物流服务"}}
+
+    assert _payment_template(product) == ""
+    assert _payment_template(product_monthly) == ""
+    assert _payment_template(product_monthly_payment) == ""
+    assert _payment_template(transport) == "运输类采购支出"
+
+
+def test_payment_source_scope_hides_conflicted_or_issue_candidates():
+    from overseas_costing.services.logistics_settlement.freight_runtime import batch_status
+
+    for changes in (
+        {"status": "conflict", "method": "explicit", "issues": []},
+        {"status": "pending", "method": "explicit", "issues": ["本笔费用已用于其他票"]},
+    ):
+        ctx = payment_setup(structured=True, scope="freight")
+        store, ledger, batch, version, _logistics, source, candidate = ctx
+        source.update(title="月结付款")
+        store.put("source", {"id": source["id"], "data": dumps(source)})
+        candidate.update(**changes)
+        store.put("freight_candidate", _candidate_values_for_runtime(candidate))
+
+        scope = batch_status(store, ledger, batch["name"], version["name"])["payment_source_scope"]
+
+        assert scope["status"] == "UNAVAILABLE"
+        assert scope["candidates"] == []
+
+
 @pytest.mark.parametrize("batch_updates", [
     {"confirm_status": "Confirmed"},
     {"writeback_status": "Success"},

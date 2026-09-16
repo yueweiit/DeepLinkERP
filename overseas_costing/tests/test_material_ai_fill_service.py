@@ -2943,6 +2943,36 @@ def test_unified_start_persists_server_validated_source_selection() -> None:
     assert json.loads(repository.created[0]["source_progress_json"])[1]["read_status"] == "EXCLUDED"
 
 
+def test_unified_start_uses_server_validated_payment_source_refs_and_persists_them_in_receipt() -> None:
+    repository = _StartRepository()
+    references = [{"candidate_id": "C1", "revision": "R1", "version": "V1"}]
+    calls = []
+
+    def selected_sources(batch_name, version_name, payment_candidate_refs):
+        calls.append((batch_name, version_name, payment_candidate_refs))
+        return [{
+            "source_kind": "approval_attachment",
+            "source_id": "PAYMENT-ROW-14",
+            "source_hash": "row-14",
+            "payment_match_candidate": True,
+            "payment_match_candidate_id": "C1",
+            "payment_match_candidate_revision": "R1",
+            "payment_match_version": "V1",
+            "payment_match_user_selected": True,
+        }]
+
+    repository.list_sources_with_payment_references = selected_sources
+    start_source_ai_review(
+        "B1", "V1", payment_candidate_refs=references,
+        repository=repository, enqueue=lambda _run: None,
+    )
+
+    assert calls == [("B1", "V1", references)]
+    draft = json.loads(repository.created[0]["draft_json"])
+    assert draft["review_input"]["payment_candidate_refs"] == references
+    assert json.loads(repository.created[0]["source_manifest_json"])[0]["source_id"] == "PAYMENT-ROW-14"
+
+
 def test_unified_start_rejects_source_id_not_signed_for_current_batch() -> None:
     repository = _StartRepository()
 

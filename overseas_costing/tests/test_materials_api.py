@@ -206,7 +206,10 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
     monkeypatch.setattr(api.material_ai_fill_service, "apply_source_ai_review", lambda *args: calls.append(("apply", args)) or {"ok": True})
     monkeypatch.setattr(api.material_ai_fill_service, "discard_source_ai_review", lambda *args: calls.append(("discard", args)) or {"ok": True})
 
-    api.start_source_ai_review("B", "V", "两款是一套", 1, '["SOURCE-1"]')
+    api.start_source_ai_review(
+        "B", "V", "两款是一套", 1, '["SOURCE-1"]',
+        payment_candidate_refs_json='[{"candidate_id":"C1","revision":"R1","version":"V"}]',
+    )
     api.get_source_ai_review_status("B", "R", None, "9")
     with pytest.raises(ValueError, match="重新分析"):
         api.apply_source_ai_review(
@@ -222,10 +225,20 @@ def test_unified_source_review_api_uses_write_role_and_requires_edit_token_only_
 
     start_call = next(row for row in calls if row[0] == "start")
     assert start_call[2]["selected_source_ids"] == ["SOURCE-1"]
+    assert start_call[2]["payment_candidate_refs"] == [
+        {"candidate_id": "C1", "revision": "R1", "version": "V"}
+    ]
 
     assert checks == ["write", "read", "write", "write"]
     assert calls[0][1] == ("B", "V", "两款是一套")
-    assert calls[0][2] == {"force": True, "selected_source_ids": ["SOURCE-1"], "request_id": None}
+    assert calls[0][2] == {
+        "force": True,
+        "selected_source_ids": ["SOURCE-1"],
+        "payment_candidate_refs": [
+            {"candidate_id": "C1", "revision": "R1", "version": "V"}
+        ],
+        "request_id": None,
+    }
     assert calls[1][2]["after_revision"] == 9
     assert not any(row[0] == "apply" for row in calls)
 

@@ -325,6 +325,24 @@ def run_payment_rule_matching(batch_name,version_name=None):
     return {'ok':True,'matching':job,'payment_candidates':rows,'candidates':rows}
 
 
+def preview_payment_source_selection(batch_name,version_name,selections):
+    """Validate a browser's ID-only payment range without persisting a relation."""
+    if not freight_enabled():raise ValueError('当前模式不支持付款来源选择')
+    from . import freight_matching
+    from .freight_runtime import payment_source_scope
+    db=store();ledger=FrappeLedger();batch=ledger.get('batch',batch_name) or {}
+    current=str(batch.get('current_version') or '')
+    if str(version_name or '')!=current:raise ValueError('当前成本版本已变化，请刷新')
+    mappings=db.find('batch_map',batch=batch_name)
+    if len(mappings)!=1:raise ValueError('本票国际物流来源不唯一，请刷新')
+    logistics=db.get('source',mappings[0]['source_id']) or {}
+    candidates=freight_matching.candidates(db,logistics.get('id'))
+    return {'ok':True,'payment_source_scope':payment_source_scope(
+        db,candidates,current,ledger.rows('item',batch=batch_name,version=current),
+        requested_refs=selections,
+    )}
+
+
 def start_payment_ai_matching(batch_name,version_name=None,hints=None,offset=0,limit=30):
     if not freight_enabled():raise ValueError('当前模式不支持付款明细 AI 匹配')
     from . import payment_ai_matching

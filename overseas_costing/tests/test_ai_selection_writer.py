@@ -155,7 +155,8 @@ def test_pending_payment_match_is_confirmed_before_locked_preview_is_recomputed(
         object(),object(),{'name':'RUN'},preview,{}, {},'user',repository='repo',freight_mode=True)
 
     assert result is not refreshed and result['_payment_match_relation'] is relation
-    assert {key:value for key,value in result.items() if key!='_payment_match_relation'}==refreshed
+    assert {key:value for key,value in result.items()
+            if key not in {'_payment_match_relation','_payment_match_relations'}}==refreshed
     assert context=={'locked':True}
     assert events==[
         ('confirm','B1',preview['payment_match_candidate'],'user',True),
@@ -187,6 +188,31 @@ def test_payment_relation_is_saved_only_after_row_metadata(monkeypatch):
         'write_rows',
         ('persist_relation','B1','V2',relation,'user'),
     ]
+
+
+def test_multiple_selected_payment_relations_are_confirmed_and_persisted_atomically(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match, material_ai_selection_service
+    from overseas_costing.services import material_ai_selection_writer as writer
+
+    references = [
+        {'candidate_id': 'FC-1', 'revision': 'FR-1', 'version': 'V1', 'user_selected': True},
+        {'candidate_id': 'FC-2', 'revision': 'FR-2', 'version': 'V1', 'user_selected': True},
+    ]
+    preview = {'batch': 'B1', 'version': 'V1', 'payment_match_candidate': None,
+               'payment_match_candidates': references}
+    events = []
+    monkeypatch.setattr(material_ai_payment_match, 'confirm_preview_candidate',
+        lambda store, ledger, batch, reference, actor, freight_mode, user_selected=False: (
+            events.append(('confirm', reference['candidate_id'], user_selected))
+            or {'candidate_id': reference['candidate_id']}))
+    monkeypatch.setattr(material_ai_selection_service, 'reconstruct_after_payment_match',
+        lambda repository, run, current, draft: ({**current, 'recomputed': True}, {'locked': True}))
+
+    rebuilt, _context = writer._confirm_and_reconstruct_payment_match(
+        object(), object(), {}, preview, {}, {}, 'user', repository='repo', freight_mode=True)
+
+    assert events == [('confirm', 'FC-1', True), ('confirm', 'FC-2', True)]
+    assert [row['relation']['candidate_id'] for row in rebuilt['_payment_match_relations']] == ['FC-1', 'FC-2']
 
 
 def test_structured_attachment_valuation_survives_row_review_and_is_persisted_without_purchase_link():

@@ -938,12 +938,14 @@ def _combine_actual_packing_with_fallbacks(actual_sources, fallback_sources, con
 
 
 def list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
-                             original_scope: bool = False) -> list[dict[str, Any]]:
+                             original_scope: bool = False,
+                             payment_references: list[dict] | None = None) -> list[dict[str, Any]]:
     from .material_ai_source_dependencies import annotate_source_eligibility
     from .material_ai_payment_match import (
         preview_process_sources,
         preview_sources,
         select_preview_candidate,
+        validate_preview_references,
     )
     from .source_priority_service import rank_material_packing_sources
     from .logistics_settlement import runtime
@@ -959,19 +961,25 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
     )
     if not original_scope and not has_confirmed_actual and runtime.freight_enabled():
         selected_version=str(version_name or (ledger.get('batch',batch_name) or {}).get('current_version') or '')
-        reference=select_preview_candidate(store,ledger,batch_name,selected_version,freight_mode=True)
-        if reference:
+        references = (validate_preview_references(
+            store, ledger, batch_name, selected_version, payment_references
+        ) if payment_references is not None else None)
+        reference=select_preview_candidate(store,ledger,batch_name,selected_version,freight_mode=True) if references is None else None
+        selected_references = references if references is not None else ([reference] if reference else [])
+        if selected_references:
             # The settlement catalog has already scoped monthly statements to
             # this shipment.  A malformed/unreadable evidence row is omitted;
             # it never blocks the remaining workflow sources.
             try:
                 sources=rank_material_packing_sources([
-                    *preview_sources(store,ledger,batch_name,selected_version,reference,freight_mode=True),
+                    *(source for selected_reference in selected_references for source in preview_sources(
+                        store,ledger,batch_name,selected_version,selected_reference,freight_mode=True,
+                        user_selected=references is not None)),
                     *sources,
                 ])
             except (KeyError, TypeError, ValueError):
                 pass
-        else:
+        elif payment_references is None:
             # Conflicting or multiple matcher results are still valuable stage
             # provenance.  Publish process identity only: no amounts, source
             # text, or confirmation credential can cross this fallback.

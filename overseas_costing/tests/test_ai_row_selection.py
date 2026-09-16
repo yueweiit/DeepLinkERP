@@ -517,7 +517,9 @@ def test_catalog_exposes_fixed_stage_snapshots_and_aggregates_process_evidence()
         'PAY-COMMENT', 'PAY-FORM',
     ]
     assert logistics['status'] == purchase['status'] == 'UNAVAILABLE'
-    assert logistics['rows'] == purchase['rows'] == []
+    assert len(logistics['rows']) == len(purchase['rows']) == 1
+    assert logistics['rows'][0]['baseline_only'] is True
+    assert purchase['rows'][0]['baseline_values']['material_code'] == 'SKU-1'
     for stage in first['stage_snapshots']:
         assert set(stage) >= {
             'stage', 'stage_rank', 'rank', 'status', 'processes', 'rows',
@@ -528,6 +530,42 @@ def test_catalog_exposes_fixed_stage_snapshots_and_aggregates_process_evidence()
     assert first['stage_snapshots'] == second['stage_snapshots']
     assert first['fingerprint'] == second['fingerprint']
     json.dumps(first['stage_snapshots'], ensure_ascii=False)
+
+
+def test_every_packing_stage_starts_with_all_current_materials_and_overlays_only_matched_row():
+    items = [
+        item('I1', 'MWV101144', gross_weight_kg=0, volume_m3=0),
+        item('I2', 'MWV101145', gross_weight_kg=5, volume_m3=1),
+    ]
+    sources = [{
+        'source_id': 'PAY-LINE', 'process_instance_id': 'PAY-1',
+        'source_kind': 'approval_attachment', 'approval_role': 'logistics_expense',
+        'approval_title': '月结付款', 'read_status': 'COMPLETED',
+    }]
+    proposals = [{
+        'proposal_id': 'PAY-LINE', 'proposal_type': 'item_update',
+        'target_item_name': 'I1', 'confidence': .99,
+        'source_refs': [{'source_id': 'PAY-LINE'}],
+        'payload': {'fields': {
+            'gross_weight_kg': '42.05', 'volume_m3': '0.01518',
+            'chargeable_weight_kg': '46', 'package_count': '1',
+        }},
+    }]
+
+    review = catalog(items, proposals, sources)
+
+    for stage in review['stage_snapshots']:
+        assert {row['item_name'] for row in stage['rows']} == {'I1', 'I2'}
+        assert all(row['baseline_values']['material_code'].startswith('MWV') for row in stage['rows'])
+    payment = review['stage_snapshots'][0]
+    first = next(row for row in payment['rows'] if row['item_name'] == 'I1')
+    second = next(row for row in payment['rows'] if row['item_name'] == 'I2')
+    assert set(first['field_candidates']) == {
+        'gross_weight_kg', 'volume_m3', 'chargeable_weight_kg', 'package_count',
+    }
+    assert first['baseline_only'] is False
+    assert second['baseline_only'] is True
+    assert second['field_candidates'] == {}
 
 
 def test_stage_priority_falls_through_conflict_and_missing_fields_without_disabling_lower_candidates():

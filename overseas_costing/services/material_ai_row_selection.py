@@ -757,6 +757,18 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
 
     from .source_priority_service import rank_material_packing_sources
     ordered=rank_material_packing_sources(sources or [])
+    current_rows=sorted(
+        (row for row in catalog_rows if row.get('origin')=='current'),
+        key=lambda row:(int((row.get('values') or {}).get('row_no') or 0),str(row.get('target_item_name') or '')),
+    )
+    baseline_fields=(*IDENTITY,'actual_shipped_qty','shipped_uom','unit',*PHYSICAL,
+                     'project_collection','unit_price','purchase_currency','purchase_uom',
+                     'unit_price_uom','shipment_value_rmb')
+    def baseline_values(row):
+        values=row.get('values') or {}
+        return {field:deepcopy(values.get(field)) for field in baseline_fields}
+    current_by_key={_stage_row_material_key(row):row for row in current_rows}
+    current_by_name={str(row.get('target_item_name') or ''):row for row in current_rows}
     candidates_by_row={}
     for candidate in field_candidates:
         candidates_by_row.setdefault(str(candidate.get('row_id') or ''),[]).append(candidate)
@@ -819,6 +831,8 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                 process_conflict_warnings.append(warning)
             for process_id in process_ids:
                 aggregate_key=(process_id,material_key)
+                baseline=(current_by_key.get(material_key)
+                          or current_by_name.get(str(row.get('target_item_name') or '')))
                 snapshot_row=aggregated_rows.setdefault(aggregate_key,{
                     'row_id':digest(POLICY,'stage-row',stage,process_id,material_key),
                     'process_instance_id':process_id,'material_stable_key':material_key,
@@ -826,6 +840,8 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                     'material_code':values.get('material_code') or '',
                     'product_name':values.get('product_name') or '',
                     'spec_model':values.get('spec_model') or '',
+                    'baseline_values':baseline_values(baseline) if baseline else {},
+                    'baseline_only':False,
                     'process_instance_ids':all_process_ids,'process_conflict':process_conflict,
                     'source_row_ids':[],'field_candidates':{},'evidence_chain':[],
                 })
@@ -853,6 +869,7 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                     if warning not in process['warnings']:
                         process['warnings'].append(warning)
         snapshot_rows=[]
+        covered_items=set()
         for aggregate_key,snapshot_row in sorted(aggregated_rows.items()):
             snapshot_row['source_row_ids'].sort()
             snapshot_row['field_candidates']={
@@ -863,6 +880,8 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
                 evidence.get('occurred_at') or '',evidence.get('evidence_id') or '',
             ))
             snapshot_rows.append(snapshot_row)
+            if snapshot_row.get('item_name'):
+                covered_items.add(str(snapshot_row['item_name']))
             process_id=aggregate_key[0]
             process=process_map.setdefault(process_id,{
                 'process_instance_id':process_id,'label':process_id,'approval_no':'',
@@ -871,6 +890,27 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
             })
             if snapshot_row['row_id'] not in process['row_ids']:
                 process['row_ids'].append(snapshot_row['row_id'])
+        for current in current_rows:
+            item_name=str(current.get('target_item_name') or '')
+            if item_name in covered_items:
+                continue
+            values=current.get('values') or {}
+            material_key=_stage_row_material_key(current)
+            snapshot_rows.append({
+                'row_id':digest(POLICY,'stage-baseline-row',stage,material_key),
+                'process_instance_id':'','material_stable_key':material_key,
+                'item_name':item_name,'material_code':values.get('material_code') or '',
+                'product_name':values.get('product_name') or '',
+                'spec_model':values.get('spec_model') or '',
+                'baseline_values':baseline_values(current),'baseline_only':True,
+                'process_instance_ids':[],'process_conflict':False,
+                'source_row_ids':[],'field_candidates':{},'evidence_chain':[],
+            })
+        snapshot_rows.sort(key=lambda row:(
+            int((row.get('baseline_values') or {}).get('row_no') or 0),
+            str(row.get('item_name') or ''),str(row.get('process_instance_id') or ''),
+            str(row.get('row_id') or ''),
+        ))
         candidate_source_ids={
             str(evidence.get('evidence_id') or '')
             for row in stage_rows
@@ -897,7 +937,7 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
             (_evidence_record(source) for source in stage_sources),
             key=lambda evidence:(evidence.get('occurred_at') or '',evidence.get('evidence_id') or ''),
         )
-        status=_availability_status(stage_evidence,has_rows=bool(snapshot_rows))
+        status=_availability_status(stage_evidence,has_rows=bool(aggregated_rows))
         for process in process_map.values():
             process['source_ids'].sort()
             process['evidence'].sort(key=lambda evidence:(

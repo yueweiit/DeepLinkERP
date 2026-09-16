@@ -12519,6 +12519,17 @@ class OverseasCostWorkbench {
         force: options.force === true ? 1 : 0,
         ...(options.reanalyzeOriginalSources ? { reanalyze_original_sources: 1 } : {}),
       };
+      const paymentSelection = this.detailState.paymentSourceSelection;
+      if (!options.reanalyzeOriginalSources
+          && paymentSelection?.batchName === batchName
+          && paymentSelection?.versionName === versionName
+          && Array.isArray(paymentSelection.refs)) {
+        payload.payment_candidate_refs_json = JSON.stringify(paymentSelection.refs.map((row) => ({
+          candidate_id: String(row.candidate_id || ''),
+          revision: String(row.revision || ''),
+          version: String(row.version || ''),
+        })));
+      }
       if (Array.isArray(options.selectedSourceIds)) {
         const currentSources = options.sourceProgress || state.aiFill?.source_progress || [];
         const sources = new Map(currentSources.map((source) => [String(source.source_id || ""), source]));
@@ -17097,11 +17108,23 @@ class OverseasCostWorkbench {
 
   async openBatchSettlementDialog(batchName, viewedVersion = null, initialTab = 'freight') {
     if (this.batchSettlementState?.open) this.stopSettlementDialog(this.batchSettlementState);
-    const state = this.settlementDialog("实际支付流程/装箱变更");
+    const state = this.settlementDialog("支付来源与装箱资料");
     this.batchSettlementState = state;
     state.batchName = batchName;
     state.freightTab = ['freight', 'packing', 'audit'].includes(initialTab) ? initialTab : 'freight';
     state.versionName = viewedVersion || (this.detailState?.batchName === batchName ? this.detailState.versionName : null);
+    const savedPaymentSelection = this.detailState?.paymentSourceSelection;
+    if (savedPaymentSelection
+        && (savedPaymentSelection.batchName !== batchName
+          || savedPaymentSelection.versionName !== state.versionName)) {
+      delete this.detailState.paymentSourceSelection;
+      delete this.detailState.paymentSourceRefs;
+    } else if (savedPaymentSelection && Array.isArray(savedPaymentSelection.refs)) {
+      state.freightDraft = {
+        ...(state.freightDraft || {}),
+        payment_source_refs: [...savedPaymentSelection.refs],
+      };
+    }
     state.detailContext = this.detailState?.batchName === batchName ? this.settlementDetailContext() : null;
     state.autoMatchChecked = false;
     state.autoMatchStarted = false;
@@ -17874,7 +17897,7 @@ class OverseasCostWorkbench {
     return `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "历史版本" : "本票"}当前采用${unified ? '实际费用' : '运费'}：${this.escape(amount)}</strong>
       <small>装箱：${this.escape(data.packing?.message || "保留当前资料，变更单独核对")}</small>
       ${(data.payment_blocking_reasons || data.freight?.issues || []).map(v => `<small class="ocw-settlement-notice">${this.escape(v)}</small>`).join("")}</div>
-      <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${readOnly ? "查看历史支付流程/装箱变更" : "实际支付流程/装箱变更"}</button>
+      <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${unified ? "实际支付流程/装箱资料来源" : readOnly ? "查看历史支付流程/装箱变更" : "实际支付流程/装箱变更"}</button>
       ${data.logistics?.open_url ? '<button class="ocw-outline-btn" data-settlement-strip-action="source">打开国际物流原单</button>' : ""}</div></div>`;
   }
 
@@ -17917,6 +17940,9 @@ class OverseasCostWorkbench {
   }
 
   renderFreightContent(data, state = {}) {
+    if (data.payment_source_scope && !data.historical && !this.paymentReadOnly(data)) {
+      return this.renderPaymentSourceWorkspace(data, state);
+    }
     const tab = state.freightTab || 'freight';
     const unified = Array.isArray(data.payment_claims) || Array.isArray(data.payment_candidates) || !!data.payment_matching;
     const tabs = unified ? [['freight', '实际支付流程'], ['packing', '装箱变更'], ['audit', '操作记录']]
@@ -17937,6 +17963,63 @@ class OverseasCostWorkbench {
       ${state.freightMessage ? `<p class="ocw-settlement-notice" role="status">${this.escape(state.freightMessage)}</p>` : ''}
       ${state.freightError ? `<p class="ocw-settlement-notice is-error" role="alert">${this.escape(state.freightError)}</p>` : ''}
       <div class="ocw-freight-panel" role="tabpanel">${body}</div></div>`;
+  }
+
+  paymentSourceLines(candidate = {}) {
+    const summary = candidate.parsed_summary || {};
+    return Array.isArray(summary.lines) ? summary.lines : Object.keys(summary).length ? [summary] : [];
+  }
+
+  renderPaymentSourceSummary(candidate = {}) {
+    const lines = this.paymentSourceLines(candidate);
+    if (!lines.length) return '<p class="ocw-settlement-hint">该流程尚未识别出本票明细；确认范围后 AI 会继续解析可读资料。</p>';
+    return lines.map(line => {
+      const packing = line.packing || {};
+      const freight = line.freight || {};
+      const dimensions = Array.isArray(packing.dimensions_cm) ? packing.dimensions_cm.join('×') : '';
+      const facts = [
+        line.approval_no ? `本票审批号 ${this.escape(line.approval_no)}` : '',
+        line.waybill ? `运单号 ${this.escape(line.waybill)}` : '',
+        freight.amount != null ? `运费 ${this.escape(freight.amount)} ${this.escape(freight.currency || '')}` : '',
+        packing.chargeable_weight_kg != null ? `计费重 ${this.escape(packing.chargeable_weight_kg)} kg` : '',
+        packing.gross_weight_kg != null ? `毛重 ${this.escape(packing.gross_weight_kg)} kg` : '',
+        packing.package_count != null ? `${this.escape(packing.package_count)} 箱` : '',
+        dimensions ? `${this.escape(dimensions)} cm` : '',
+        packing.volume_m3 != null ? `${this.escape(packing.volume_m3)} m³` : '',
+      ].filter(Boolean);
+      return `<article class="ocw-payment-source-summary"><div class="ocw-payment-source-facts">${facts.map(value => `<span>${value}</span>`).join('')}</div><small>${this.escape(this.freightEvidence(line.evidence || {}))}</small></article>`;
+    }).join('');
+  }
+
+  renderPaymentSourceWorkspace(data, state = {}) {
+    const scope = data.payment_source_scope || {};
+    const candidates = scope.candidates || [];
+    const selectedIds = new Set((state.freightDraft?.payment_source_refs || scope.selected_refs || []).map(row => String(row.candidate_id || '')));
+    const selected = candidates.filter(row => selectedIds.has(String(row.candidate_id || '')) || (row.selected && !selectedIds.size));
+    const choose = scope.status === 'NEEDS_SELECTION' || state.paymentSourceEditing === true;
+    const status = scope.status === 'AUTO_MATCHED' ? '自动匹配' : scope.status === 'SELECTED' ? '已选择' : scope.status === 'NEEDS_SELECTION' ? '待选择' : '未找到可用来源';
+    const candidateChoices = candidates.map(candidate => {
+      const id = String(candidate.candidate_id || '');
+      const checked = selectedIds.has(id) || (!selectedIds.size && candidate.selected);
+      return `<label class="ocw-payment-source-choice"><input type="checkbox" data-payment-source-candidate="${this.escape(id)}" data-payment-source-revision="${this.escape(candidate.revision || '')}" ${checked ? 'checked' : ''}><span><strong>${this.escape(candidate.title || candidate.workflow_template || '支付流程')}</strong><small>${this.escape(candidate.approval_no || '审批号待核对')} · ${candidate.match_strength === 'STRONG' ? '强匹配' : '弱匹配'}</small><small>${this.escape(candidate.match_reason || '请核对是否属于本票')}</small></span></label>`;
+    }).join('');
+    const summaries = (selected.length ? selected : candidates.filter(row => row.selected)).map(candidate => `<section class="ocw-payment-source-card"><div class="ocw-freight-heading"><div><strong>${this.escape(candidate.title || candidate.workflow_template || '支付流程')}</strong><small>${this.escape(candidate.approval_no || '')}</small></div><span class="ocw-freight-status">${candidate.match_strength === 'STRONG' ? '精确明细' : '待核对'}</span></div>${this.renderPaymentSourceSummary(candidate)}</section>`).join('');
+    const fields = [
+      ['gross_weight_kg', '毛重 kg'], ['chargeable_weight_kg', '计费重 kg'],
+      ['package_count', '箱数'], ['volume_m3', '体积 m³'],
+    ];
+    const materialRows = (scope.material_rows || []).map(row => `<tr><td><strong>${this.escape(row.material_code || '—')}</strong><small>${this.escape(row.product_name || '')}</small></td>${fields.map(([key]) => {
+      const value = row.values?.[key];
+      const fallback = (row.fallback_fields || []).includes(key);
+      return `<td>${value != null && value !== '' ? this.escape(value) : '—'}${fallback ? '<small class="ocw-payment-source-fallback">向下补充</small>' : ''}</td>`;
+    }).join('')}</tr>`).join('');
+    return `<div class="ocw-freight-workspace ocw-payment-source-workspace"><div class="ocw-freight-heading"><div><small>实际支付流程/装箱资料来源</small><strong>${this.escape(data.logistics?.approval_no || state.batchName || '当前批次')}</strong></div>${this.freightActionButton('refresh', '刷新', '', false, !!state.freightWriting)}</div>
+      ${state.freightMessage ? `<p class="ocw-settlement-notice" role="status">${this.escape(state.freightMessage)}</p>` : ''}${state.freightError ? `<p class="ocw-settlement-notice is-error" role="alert">${this.escape(state.freightError)}</p>` : ''}
+      <section class="ocw-payment-source-status"><div><small>匹配状态</small><strong>${status}</strong><p>${this.escape(scope.message || '支付来源不可用时会自动继续读取国际物流和采购支出。')}</p></div>${!choose && candidates.length ? this.freightActionButton('payment-source-change', '更换支付来源') : ''}</section>
+      ${choose ? `<section><div class="ocw-freight-heading"><div><strong>选择 AI 解析范围</strong><small>仅从固定支付流程模板中选择；可以多选，预览阶段不会写入业务数据。</small></div></div><div class="ocw-payment-source-choices">${candidateChoices || '<p>没有可选择的支付流程，将继续使用下一阶段资料。</p>'}</div></section>` : ''}
+      <section><h4 class="ocw-freight-section-title">AI 解析摘要</h4>${summaries || '<p class="ocw-settlement-hint">支付阶段未取得有效明细，将自动向国际物流和采购支出补充。</p>'}</section>
+      <section><h4 class="ocw-freight-section-title">物料字段结果</h4><div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table ocw-payment-source-materials"><thead><tr><th>物料</th>${fields.map(([, label]) => `<th>${label}</th>`).join('')}</tr></thead><tbody>${materialRows || '<tr><td colspan="5">当前版本没有物料行，请刷新批次资料。</td></tr>'}</tbody></table></div><p class="ocw-settlement-hint">未由支付附件覆盖的字段保留现值，并在 AI 填充预览中按国际物流、采购支出顺序向下补充。</p></section>
+      <details class="ocw-payment-source-evidence"><summary>匹配依据和原始附件行</summary>${summaries || '<p>暂无可读附件行。</p>'}</details></div>`;
   }
 
   renderFreightFees(data) {
@@ -18034,7 +18117,8 @@ class OverseasCostWorkbench {
     const candidates = data.payment_candidates || data.candidates || [];
     const rejected = data.payment_rejected_candidates || [];
     const readOnly = this.paymentReadOnly(data);
-    return `${this.renderPaymentClaims(data)}${readOnly ? '' : this.renderPaymentMatching(data, state)}
+    const sourceHistory = (data.payment_source_history || []).map(row => `<article class="ocw-settlement-source"><strong>${this.escape(row.title || row.workflow_template || '支付流程')}</strong><p>${this.escape(row.approval_no || '审批号待核对')}</p><small>${this.escape(row.workflow_template || '已确认支付来源')} · ${this.escape(row.confirmed_at || '')}</small></article>`).join('');
+    return `${sourceHistory ? `<section><h4 class="ocw-freight-section-title">已确认支付来源</h4>${sourceHistory}</section>` : ''}${this.renderPaymentClaims(data)}${readOnly ? '' : this.renderPaymentMatching(data, state)}
       <section><div class="ocw-settlement-toolbar"><h4 class="ocw-freight-section-title">待确认支付候选</h4></div>${candidates.map(row => this.renderPaymentCandidate(row, data, state)).join('') || '<p class="ocw-settlement-hint">尚未找到可靠候选。可先运行规则匹配，再按需使用 AI。</p>'}</section>
       ${rejected.length ? `<details class="ocw-payment-rejected"><summary>已否决候选 ${rejected.length}</summary>${rejected.map(row => `<p>${this.escape(row.expense?.approval_no || row.expense?.title || '支付流程')} · ${this.escape(row.rejection_reason || '已否决')} ${readOnly ? '' : this.freightActionButton('payment-reopen', '重新纳入', `data-id="${this.escape(row.id)}"`)}</p>`).join('')}</details>` : ''}
       ${(data.payment_blocking_reasons || []).map(message => `<p class="ocw-settlement-notice is-error">${this.escape(message)}</p>`).join('')}`;
@@ -18207,9 +18291,11 @@ class OverseasCostWorkbench {
   }
 
   renderFreightAudit(data) {
-    const labels = { freight_amount:'更正费用金额', freight_replace:'更换费用来源', freight_revoke:'撤销费用采用', freight_lines_adopted:'采用运费', packing_source_replaced:'替换装箱来源', packing_changes_adopted:'采用装箱资料', freight_packing_verified:'核对装箱资料', freight_source_pending:'来源已更新，等待核对', freight_application_recovered:'恢复费用采用', freight_amount_corrected:'更正费用金额', amount:'更正费用金额', freight_claim_amount:'更正费用金额', freight_claim_replaced:'更换费用来源', replace:'更换费用来源', freight_claim_revoked:'撤销费用采用', revoke:'撤销费用采用', freight_confirmed:'采用运费', confirm:'采用运费', freight_rejected:'标记不是本票', rejected:'标记不是本票', packing_source_confirmed:'替换装箱来源', packing_adopted:'采用装箱资料', freight_packing_confirmed:'采用装箱资料', packing_checks_resolved:'核对装箱资料', amount_corrected:'更正费用金额', source_replaced:'更换费用来源', claim_revoked:'撤销费用采用' };
+    const labels = { material_ai_payment_match_confirmed:'AI 填充确认支付来源', freight_amount:'更正费用金额', freight_replace:'更换费用来源', freight_revoke:'撤销费用采用', freight_lines_adopted:'采用运费', packing_source_replaced:'替换装箱来源', packing_changes_adopted:'采用装箱资料', freight_packing_verified:'核对装箱资料', freight_source_pending:'来源已更新，等待核对', freight_application_recovered:'恢复费用采用', freight_amount_corrected:'更正费用金额', amount:'更正费用金额', freight_claim_amount:'更正费用金额', freight_claim_replaced:'更换费用来源', replace:'更换费用来源', freight_claim_revoked:'撤销费用采用', revoke:'撤销费用采用', freight_confirmed:'采用运费', confirm:'采用运费', freight_rejected:'标记不是本票', rejected:'标记不是本票', packing_source_confirmed:'替换装箱来源', packing_adopted:'采用装箱资料', freight_packing_confirmed:'采用装箱资料', packing_checks_resolved:'核对装箱资料', amount_corrected:'更正费用金额', source_replaced:'更换费用来源', claim_revoked:'撤销费用采用' };
     const values = claims => (Array.isArray(claims) ? claims : []).map(c => `${c.applied_amount ?? c.amount ?? '待核对'} ${c.currency || ''} · ${c.approval_no || ''}`).join('；') || '无采用费用';
-    const changes = row => row.action === 'packing_source_replaced'
+    const changes = row => row.action === 'material_ai_payment_match_confirmed'
+      ? `支付来源：${row.source_approval_no || row.source_title || '已确认'}`
+      : row.action === 'packing_source_replaced'
       ? `来源：${row.source || '资料'}；${row.old_version || ''} → ${row.version || ''}`
       : (row.before || row.after) ? `${values(row.before)} → ${values(row.after)}` : '';
     return `<h4 class="ocw-freight-section-title">操作记录</h4><div class="ocw-settlement-table-wrap"><table class="ocw-settlement-table"><thead><tr><th>时间</th><th>操作</th><th>操作人</th><th>变更前后／来源</th><th>依据</th></tr></thead><tbody>${(data.audit || []).map(row => `<tr><td>${this.escape(row.created_at || '')}</td><td>${this.escape(labels[row.action] || '来源与采用记录更新')}</td><td>${this.escape(row.actor || '')}</td><td>${this.escape(changes(row))}</td><td>${this.escape(row.reason || '—')}</td></tr>`).join('') || '<tr><td colspan="5">暂无操作记录</td></tr>'}</tbody></table></div>`;
@@ -18228,11 +18314,16 @@ class OverseasCostWorkbench {
     $wrapper?.addClass?.('ocw-freight-modal');
     if (state.packingVersion && state.packingVersion !== state.versionName) { state.packingSources = null; state.packingPreview = null; state.packingSelected = null; }
     this.settlementBody(state, this.renderFreightContent(state.data || {}, state));
+    const paymentScope = !state.data?.historical && !this.paymentReadOnly(state.data || {})
+      ? state.data?.payment_source_scope : null;
     const view = state.freightView;
     const disabled = !!(state.freightWriting || state.freightLoading);
     const paymentWritable = !this.paymentReadOnly(state.data || {});
     let actions = '';
-    if (view) actions += this.freightActionButton('freight-back', view.kind === 'evidence' ? '返回核对' : view.kind === 'payment-preview' ? '返回修改附件／费用' : '返回列表', '', false, disabled);
+    if (paymentScope && (paymentScope.status === 'NEEDS_SELECTION' || state.paymentSourceEditing)) {
+      actions += this.freightActionButton('payment-source-apply', '使用所选支付来源', '', true, disabled);
+    }
+    if (!paymentScope && view) actions += this.freightActionButton('freight-back', view.kind === 'evidence' ? '返回核对' : view.kind === 'payment-preview' ? '返回修改附件／费用' : '返回列表', '', false, disabled);
     if (view?.kind === 'evidence' && state.freightEvidenceRow?.source?.open_url) actions += this.freightActionButton('freight-evidence-source', '打开支付原单');
     if (paymentWritable && view?.kind === 'payment-adopt') actions += this.freightActionButton('payment-preview', '生成费用差异预览', '', true, disabled);
     if (paymentWritable && view?.kind === 'payment-preview') actions += this.freightActionButton('payment-confirm', '确认认领费用', '', true, disabled || !!(state.paymentPreview?.payment_blocking_reasons || []).length);
@@ -18240,13 +18331,22 @@ class OverseasCostWorkbench {
     if (paymentWritable && view?.kind === 'payment-decision') actions += this.freightActionButton('payment-decision-save', '保存核对记录', '', true, disabled);
     if (!state.data?.historical && view && ['amount','replace','revoke','adopt','reject','checks'].includes(view.kind)) actions += this.freightActionButton('freight-save', ({amount:'保存金额更正',replace:'确认更换来源',revoke:'确认撤销采用',adopt:'确认采用所选费用',reject:'保存否决记录',checks:'确认所选装箱资料适用'})[view.kind], '', true, disabled);
     if (state.freightTab === 'packing' && !view && this.canAdoptFreightPacking(state)) actions += this.freightActionButton('packing-source-confirm', '采用此来源并替换本票装箱资料', '', true, disabled);
-    this.settlementActions(state, `<div class="ocw-freight-footer"><span>${state.freightWriting ? '正在保存，请稍候…' : state.data?.historical ? '历史版本 · 只读' : '费用与装箱资料分别核对、分别采用'}</span><div class="ocw-freight-row-actions">${actions}</div></div>`);
+    const footer = paymentScope ? '这里只选择 AI 解析范围；最终确认填充前不会修改业务数据。'
+      : state.data?.historical ? '历史版本 · 只读' : '费用与装箱资料分别核对、分别采用';
+    this.settlementActions(state, `<div class="ocw-freight-footer"><span>${state.freightWriting ? '正在处理，请稍候…' : footer}</span><div class="ocw-freight-row-actions">${actions}</div></div>`);
     this.bindFreightInputs(state);
   }
 
   captureFreightDraft(state) {
     const $wrapper = state.dialog.$wrapper;
     const draft = state.freightDraft ||= {};
+    if ($wrapper.find('[data-payment-source-candidate]').length) {
+      draft.payment_source_refs = $wrapper.find('[data-payment-source-candidate]:checked').map((_, element) => ({
+        candidate_id: String(element.getAttribute('data-payment-source-candidate') || ''),
+        revision: String(element.getAttribute('data-payment-source-revision') || ''),
+        version: String(state.versionName || ''),
+      })).get();
+    }
     $wrapper.find('[data-freight-field]').each((_, element) => { const key = element.getAttribute('data-freight-field'); draft[key] = element.type === 'checkbox' ? element.checked : element.value; });
     $wrapper.find('[data-payment-row-field]').each((_, element) => { const index = Number(element.getAttribute('data-payment-row-index')); const key = element.getAttribute('data-payment-row-field'); if (draft.payment_rows?.[index]) draft.payment_rows[index][key] = element.value; });
     if ($wrapper.find('[data-payment-replace-claim]').length) {
@@ -18285,7 +18385,7 @@ class OverseasCostWorkbench {
 
   bindFreightInputs(state) {
     const $wrapper = state.dialog.$wrapper;
-    $wrapper.off('input.ocwFreight change.ocwFreight').on('input.ocwFreight change.ocwFreight', '[data-freight-field],[data-freight-line],[data-freight-check],[data-payment-row-field],[data-payment-attachment],[data-payment-attachment-keys],[data-payment-replace-claim]', event => {
+    $wrapper.off('input.ocwFreight change.ocwFreight').on('input.ocwFreight change.ocwFreight', '[data-freight-field],[data-freight-line],[data-freight-check],[data-payment-row-field],[data-payment-attachment],[data-payment-attachment-keys],[data-payment-replace-claim],[data-payment-source-candidate]', event => {
       if (state.busy || state.freightWriting) return;
       this.captureFreightDraft(state);
       const key = event.currentTarget.getAttribute('data-freight-field');
@@ -18345,6 +18445,41 @@ class OverseasCostWorkbench {
     if (!state.open || state.busy || state.freightWriting) return;
     const data = state.data;
     this.captureFreightDraft(state);
+    if (action === 'payment-source-change') {
+      state.paymentSourceEditing = true;
+      state.freightDraft = { ...(state.freightDraft || {}), payment_source_refs: [...(data.payment_source_scope?.selected_refs || [])] };
+      return this.renderFreightWorkspace(state);
+    }
+    if (action === 'payment-source-apply') {
+      const selections = state.freightDraft?.payment_source_refs || [];
+      state.freightLoading = true; state.freightError = ''; this.renderFreightWorkspace(state);
+      try {
+        const result = await this.settlementApi('preview_payment_source_selection', {
+          batch_name: state.batchName,
+          version_name: state.versionName,
+          selections_json: JSON.stringify(selections),
+        });
+        if (!result?.ok) throw new Error(result?.message || '支付来源选择未生效');
+        state.data = { ...state.data, payment_source_scope: result.payment_source_scope };
+        state.freightDraft = { ...(state.freightDraft || {}), payment_source_refs: [...(result.payment_source_scope?.selected_refs || [])] };
+        this.detailState ||= {};
+        this.detailState.paymentSourceRefs = [...state.freightDraft.payment_source_refs];
+        this.detailState.paymentSourceSelection = {
+          batchName: state.batchName,
+          versionName: state.versionName,
+          refs: [...state.freightDraft.payment_source_refs],
+        };
+        state.paymentSourceEditing = false;
+        state.freightMessage = result.payment_source_scope?.message || '已更新支付来源范围。';
+      } catch (error) {
+        state.freightError = error.message || '支付来源选择失败';
+        throw error;
+      } finally {
+        state.freightLoading = false;
+        if (state.open) this.renderFreightWorkspace(state);
+      }
+      return;
+    }
     if (action === 'freight-tab' || action === 'packing-review') {
       state.freightRequest = (state.freightRequest || 0) + 1; state.freightLoading = false;
       state.freightTab = action === 'packing-review' ? 'packing' : $button.attr('data-freight-tab');

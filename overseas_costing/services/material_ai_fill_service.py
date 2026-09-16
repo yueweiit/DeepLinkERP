@@ -2164,7 +2164,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-4'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-5'
 
 
 def _source_review_fingerprint(
@@ -2212,17 +2212,26 @@ def _review_context(repo: Any, batch_name: str, version_name: str | None, *, ori
     return reader(batch_name, version_name) if callable(reader) else repo.get_context(batch_name, version_name)
 
 
-def _review_sources(repo: Any, batch_name: str, version_name: str, *, original_sources: bool = False) -> list[dict]:
+def _review_sources(repo: Any, batch_name: str, version_name: str, *, original_sources: bool = False,
+                    payment_candidate_refs: list[dict] | None = None) -> list[dict]:
+    if payment_candidate_refs is not None and not original_sources:
+        reader = getattr(repo, "list_sources_with_payment_references", None)
+        if not callable(reader):
+            raise ValueError("当前资料存储不支持支付来源选择，请刷新后重试。")
+        return reader(batch_name, version_name, deepcopy(payment_candidate_refs))
     reader = getattr(repo, "list_original_sources", None) if original_sources else None
     return reader(batch_name, version_name) if callable(reader) else repo.list_sources(batch_name, version_name)
 
 
 def _reload_review_manifest(repo: Any, batch_name: str, version_name: str, run: Any) -> list[dict]:
+    draft = _load_json(_record_value(run, "draft_json"), {})
+    payment_candidate_refs = (draft.get("review_input") or {}).get("payment_candidate_refs")
     selected_ids = _selected_ids_from_run_manifest(
         _record_value(run, "source_manifest_json")
     )
     raw_sources = _review_sources(
-        repo, batch_name, version_name, original_sources=_run_uses_original_sources(run)
+        repo, batch_name, version_name, original_sources=_run_uses_original_sources(run),
+        payment_candidate_refs=payment_candidate_refs,
     )
     if selected_ids is None:
         # Runs created before selectable manifests were introduced remain readable.
@@ -2258,6 +2267,7 @@ def start_source_ai_review(
     request_id: str | None = None,
     expected_clarification_revision: int | None = None,
     selected_source_ids: list[str] | None = None,
+    payment_candidate_refs: list[dict] | None = None,
     repository: Any | None = None,
     enqueue: Callable[[str], None] | None = None,
     trigger_mode: str = "MANUAL",
@@ -2279,8 +2289,22 @@ def start_source_ai_review(
     if request_key and not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', request_key):
         raise ValueError('分析请求标识不合法，请重新打开分析。')
     from .logistics_settlement.model import digest
+    if payment_candidate_refs is not None:
+        if (not isinstance(payment_candidate_refs, list)
+                or any(not isinstance(row, dict)
+                       or set(row) != {"candidate_id", "revision", "version"}
+                       or not all(str(row.get(key) or "") for key in ("candidate_id", "revision", "version"))
+                       or str(row.get("version")) != str(context["version"])
+                       for row in payment_candidate_refs)):
+            raise ValueError("支付来源选择已变化，请重新打开预览。")
+        payment_candidate_refs = [
+            {key: str(row[key]) for key in ("candidate_id", "revision", "version")}
+            for row in payment_candidate_refs
+        ]
+        if len({tuple(row.values()) for row in payment_candidate_refs}) != len(payment_candidate_refs):
+            raise ValueError("支付来源选择重复，请重新打开预览。")
     request_fingerprint = digest(context["version"], clarification_text, expected_clarification_revision,
-                                 selected_source_ids, force, trigger_mode)
+                                 selected_source_ids, payment_candidate_refs, force, trigger_mode)
     if request_key and callable(getattr(repo, 'find_start_request', None)):
         requested = repo.find_start_request(context['batch'], context['version'], request_key, request_fingerprint)
         if requested:
@@ -2311,7 +2335,8 @@ def start_source_ai_review(
     items = repo.get_items(context["batch"], context["version"])
     sources = prepare_source_manifest(
         _review_sources(repo, context["batch"], context["version"],
-                        original_sources=reanalyze_original_sources),
+                        original_sources=reanalyze_original_sources,
+                        payment_candidate_refs=payment_candidate_refs),
         selected_source_ids=selected_source_ids,
     )
     source_dependencies = repo.capture_row_dependencies(sources,context,allow_pending=True) if callable(getattr(repo,'capture_row_dependencies',None)) else None
@@ -2375,6 +2400,8 @@ def start_source_ai_review(
                 "clarification_revision": note["revision"],
                 "cost_version": context["version"],
                 "source_context": deepcopy(context.get("effective_source") or {}),
+                **({"payment_candidate_refs": payment_candidate_refs}
+                   if payment_candidate_refs is not None else {}),
                 **({"source_dependencies":source_dependencies} if source_dependencies is not None else {}),
             }}),
             "proposal_version": 1,
@@ -5412,6 +5439,15 @@ class FrappeMaterialAIFillRepository:
         from overseas_costing.services.packing_snapshot_service import list_material_ai_sources
 
         return list_material_ai_sources(batch_name, version_name=version_name)
+
+    def list_sources_with_payment_references(self, batch_name: str, version_name: str,
+                                             payment_candidate_refs: list[dict]) -> list[dict]:
+        from overseas_costing.services.packing_snapshot_service import list_material_ai_sources
+
+        return list_material_ai_sources(
+            batch_name, version_name=version_name,
+            payment_references=payment_candidate_refs,
+        )
 
     def list_original_sources(self, batch_name: str, version_name: str) -> list[dict]:
         from overseas_costing.services.packing_snapshot_service import list_material_ai_sources
