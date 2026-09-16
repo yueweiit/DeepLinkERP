@@ -529,7 +529,7 @@ def preview_sources(
     source = store.get("source", candidate.get("expense_id")) or {}
     if not source:
         return []
-    from .material_ai_semantic_facts import build_payment_facts, eligible_physical_facts
+    from .material_ai_semantic_facts import build_payment_facts, eligible_evidence_facts
 
     baseline_items = ledger.rows("item", batch=batch_name, version=version_name)
     payment_lines = [
@@ -538,7 +538,6 @@ def preview_sources(
         if line.get("snapshot") == source.get("snapshot")
     ]
     semantic_facts = build_payment_facts(baseline_items, source, payment_lines)
-    eligible_facts = eligible_physical_facts(semantic_facts)
     from .logistics_settlement.packing_selection import _catalog
     from .logistics_settlement.freight_packing import text_goods
 
@@ -768,11 +767,12 @@ def preview_sources(
             waybill_match.group(1) if waybill_match else "",
         )
 
-    components_by_package = {
-        str(fact.get("package_identity") or ""): fact
-        for fact in semantic_facts
-        if fact.get("fact_kind") == "payment_freight_component"
-    }
+    eligible_facts = eligible_evidence_facts(semantic_facts)
+    facts_by_location = {}
+    for semantic_fact in semantic_facts:
+        if semantic_fact.get("fact_kind") == "payment_freight_total":
+            continue
+        facts_by_location.setdefault(fact_location(semantic_fact), []).append(semantic_fact)
     total_facts = [
         fact for fact in semantic_facts if fact.get("fact_kind") == "payment_freight_total"
     ]
@@ -873,10 +873,7 @@ def preview_sources(
             existing_by_location[location] = preview
         else:
             preview["scoped_goods"] = [scoped_good]
-        fact_bundle = [fact]
-        component = components_by_package.get(str(fact.get("package_identity") or ""))
-        if component:
-            fact_bundle.append(component)
+        fact_bundle = list(facts_by_location.get(location) or [fact])
         if not total_attached and total_facts:
             fact_bundle.extend(total_facts)
             total_attached = True

@@ -847,6 +847,7 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
     first.update(
         waybill="1841361513", approval_no="202607211417000078258",
         amount="3414.19", currency="RMB",
+        goods_value="1200", goods_currency="USD",
         cargo_text="MWV101144 IP17PRO TPU\n规格33*20*23,重量：42.05kg\n1套模具+3个手机壳",
         packing={
             "material_code_hints": ["MWV101144", "IP17PRO"],
@@ -872,6 +873,7 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
     second.update(
         id="payment-line-2", line_key="payment-line-key-2", waybill="1841364722",
         approval_no="202607211416000291269",
+        goods_value=None, goods_currency=None,
         cargo_text="MWV101145 IP17 PRO MAX TPU\n规格33*20*23,重量：42.05kg",
         packing={**first["packing"], "material_code_hints": ["MWV101145"]},
         evidence={**first["evidence"], "row": 13},
@@ -916,6 +918,14 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
     ]
     assert len({fact["fact_id"] for fact in total_facts}) == 1
     assert total_facts[0]["monetary"] == {"amount": "6828.38", "currency": "RMB"}
+    goods_facts = [
+        fact
+        for preview in sources
+        for fact in preview.get("semantic_facts") or []
+        if fact["fact_kind"] == "payment_goods_value"
+    ]
+    assert len(goods_facts) == 1
+    assert goods_facts[0]["monetary"] == {"amount": "1200", "currency": "USD"}
 
     candidates = []
     for preview in sources:
@@ -933,8 +943,10 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
         (items[1]["name"], "chargeable_weight_kg", "46"),
         (items[1]["name"], "package_count", "1"),
         (items[1]["name"], "volume_m3", "0.01518"),
+        (items[0]["name"], "goods_value", "1200"),
+        (items[0]["name"], "purchase_currency", "USD"),
     }
-    assert len({row["fact_ids"][0] for row in candidates}) == 2
+    assert len({row["fact_ids"][0] for row in candidates}) == 3
 
 
 def test_payment_fact_source_coalesces_the_same_general_attachment_sheet_before_catalog():

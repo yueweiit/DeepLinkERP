@@ -110,6 +110,8 @@ def _stable_row_identity(source: dict, line: dict, provenance: dict) -> dict:
             or ""
         ),
     }
+
+
 def _line_goods(line: dict) -> list[dict]:
     goods = [deepcopy(row) for row in line.get("goods") or [] if isinstance(row, dict)]
     if goods:
@@ -193,23 +195,69 @@ def _physical(line: dict) -> dict:
     return values
 
 
-def _resolved_by_item_identifier(item: dict, facts: list[dict]) -> bool:
+def _item_identifiers(item: dict) -> set[str]:
     identifiers = {
         _identity(item.get(field))
         for field in ("waybill", "tracking_no", "tracking_number", "awb")
         if _identity(item.get(field))
     }
-    if not identifiers:
-        try:
-            metadata = json.loads(str(item.get("extra_json") or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            metadata = {}
-        identifiers = {
+    try:
+        metadata = json.loads(str(item.get("extra_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        metadata = {}
+    if isinstance(metadata, dict):
+        identifiers.update(
             _identity(metadata.get(field))
             for field in ("waybill", "tracking_no", "tracking_number", "awb")
             if _identity(metadata.get(field))
-        }
-    return bool(identifiers) and sum(_identity(fact.get("waybill")) in identifiers for fact in facts) == 1
+        )
+    return identifiers
+
+
+def _resolved_row_identifier(item: dict, rows: list[dict]) -> str:
+    """Return the one normalized row identifier explicitly stored on the item."""
+
+    identifiers = _item_identifiers(item)
+    matches = [
+        _identity(row.get("waybill"))
+        for row in rows
+        if _identity(row.get("waybill")) in identifiers
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _explicit_goods_value(line: dict) -> tuple[str, str]:
+    """Read goods value only from dedicated fields, never from freight amount."""
+
+    fields = line.get("fields") if isinstance(line.get("fields"), dict) else {}
+    raw_amount = line.get("goods_value")
+    if raw_amount in (None, ""):
+        for key in (
+            "goods_value",
+            "总货值",
+            "货值",
+            "商品金额",
+            "货物金额",
+            "申报价值",
+            "Goods Value",
+            "Declared Value",
+        ):
+            if fields.get(key) not in (None, ""):
+                raw_amount = fields[key]
+                break
+    raw_currency = line.get("goods_currency") or line.get("purchase_currency")
+    if not str(raw_currency or "").strip():
+        for key in (
+            "goods_currency",
+            "货值币种",
+            "商品币种",
+            "申报币种",
+            "Goods Currency",
+        ):
+            if str(fields.get(key) or "").strip():
+                raw_currency = fields[key]
+                break
+    return _decimal_text(raw_amount), str(raw_currency or "").strip().upper()
 
 
 def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> list[dict]:
@@ -230,8 +278,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             str(line.get("waybill") or ""),
         ),
     )
-    physical_facts = []
-    component_facts = []
+    row_records = []
     for line in ordered_lines:
         targets, match_method, reason = _match_targets(baseline, line)
         if len(targets) == 1:
@@ -261,17 +308,70 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             {"kind": "selected_payment_process", **process},
             {"kind": "structured_workbook_row", **provenance},
         ]
+        row_records.append(
+            {
+                "line": line,
+                "process": process,
+                "provenance": provenance,
+                "stable_row_identity": stable_row_identity,
+                "waybill": waybill,
+                "package_identity": package_identity,
+                "material_targets": material_targets,
+                "scope_status": scope_status,
+                "match_method": match_method,
+                "reason": reason,
+                "evidence_chain": evidence_chain,
+            }
+        )
+
+    # Archive copies were coalesced by document/sheet/row/business identity.
+    # Multiple remaining rows are therefore genuine competing evidence, even
+    # if a carrier reused the same waybill/package value.
+    by_target: dict[str, list[dict]] = {}
+    items_by_key = {_material_key(item): item for item in baseline}
+    for record in row_records:
+        if record["scope_status"] != "in_scope" or len(record["material_targets"]) != 1:
+            continue
+        target_key = record["material_targets"][0]["material_key"]
+        by_target.setdefault(target_key, []).append(record)
+    for target_key, target_rows in by_target.items():
+        if len(target_rows) <= 1:
+            continue
+        resolved_identifier = _resolved_row_identifier(items_by_key.get(target_key) or {}, target_rows)
+        if resolved_identifier:
+            for record in target_rows:
+                if _identity(record.get("waybill")) != resolved_identifier:
+                    record.update(
+                        scope_status="out_of_scope",
+                        reason="当前物料已存储的运单标识指向同一证据中的另一行。",
+                    )
+            continue
+        for record in target_rows:
+            record.update(
+                scope_status="ambiguous",
+                reason="同一当前物料匹配到多个真实证据行，需要人工确认。",
+            )
+
+    physical_facts = []
+    goods_value_facts = []
+    component_facts = []
+    for record in row_records:
+        line = record["line"]
+        scope_status = record["scope_status"]
+        material_targets = record["material_targets"]
+        base = {
+            "workflow_stage": "payment",
+            "process": deepcopy(record["process"]),
+            "provenance": deepcopy(record["provenance"]),
+            "waybill": record["waybill"],
+            "package_identity": record["package_identity"],
+            "material_targets": deepcopy(material_targets),
+            "scope_status": scope_status,
+            "match_method": record["match_method"],
+            "evidence_chain": deepcopy(record["evidence_chain"]),
+        }
         physical = _physical(line)
         if physical:
-            fact_id = digest(
-                POLICY,
-                "payment_physical",
-                process,
-                stable_row_identity,
-                package_identity,
-                material_targets,
-                physical,
-            )
             allowed_actions = []
             if scope_status == "in_scope" and len(material_targets) == 1:
                 allowed_actions = [
@@ -287,96 +387,106 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
                 ]
             physical_facts.append(
                 {
-                    "fact_id": fact_id,
+                    **base,
+                    "fact_id": digest(
+                        POLICY,
+                        "payment_physical",
+                        record["process"],
+                        record["stable_row_identity"],
+                        record["package_identity"],
+                        material_targets,
+                        physical,
+                    ),
                     "fact_kind": "payment_physical",
-                    "workflow_stage": "payment",
-                    "process": process,
-                    "provenance": provenance,
-                    "waybill": waybill,
-                    "package_identity": package_identity,
-                    "material_targets": material_targets,
-                    "scope_status": scope_status,
                     "default_eligible": scope_status == "in_scope",
-                    "match_method": match_method,
                     "physical": physical,
                     "monetary": {},
-                    "evidence_chain": evidence_chain,
-                    "reason": reason,
+                    "reason": record["reason"],
                     "allowed_actions": allowed_actions,
                 }
             )
+
+        goods_amount, goods_currency = _explicit_goods_value(line)
+        if goods_amount and goods_currency and material_targets:
+            allowed_actions = []
+            if scope_status == "in_scope" and len(material_targets) == 1:
+                target = material_targets[0]
+                allowed_actions = [
+                    {
+                        "action": "item_update",
+                        "target_item_name": target["item_name"],
+                        "material_key": target["material_key"],
+                        "fieldname": "goods_value",
+                        "value": goods_amount,
+                    },
+                    {
+                        "action": "item_update",
+                        "target_item_name": target["item_name"],
+                        "material_key": target["material_key"],
+                        "fieldname": "purchase_currency",
+                        "value": goods_currency,
+                    },
+                ]
+            goods_value_facts.append(
+                {
+                    **base,
+                    "fact_id": digest(
+                        POLICY,
+                        "payment_goods_value",
+                        record["process"],
+                        record["stable_row_identity"],
+                        material_targets,
+                        goods_amount,
+                        goods_currency,
+                    ),
+                    "fact_kind": "payment_goods_value",
+                    "default_eligible": scope_status == "in_scope",
+                    "read_only": scope_status != "in_scope",
+                    "physical": {},
+                    "monetary": {"amount": goods_amount, "currency": goods_currency},
+                    "reason": "已选付款工作簿行显式标注的货值与币种。",
+                    "allowed_actions": allowed_actions,
+                }
+            )
+
         amount = _decimal_text(line.get("amount"))
         currency = str(line.get("currency") or source.get("currency") or "").strip().upper()
-        if amount and currency and scope_status == "in_scope":
-            component_id = digest(
-                POLICY, "payment_freight_component", process, stable_row_identity,
-                package_identity, amount, currency
-            )
+        if amount and currency and material_targets and scope_status != "out_of_scope":
             component_facts.append(
                 {
-                    "fact_id": component_id,
+                    **base,
+                    "fact_id": digest(
+                        POLICY,
+                        "payment_freight_component",
+                        record["process"],
+                        record["stable_row_identity"],
+                        record["package_identity"],
+                        amount,
+                        currency,
+                    ),
                     "fact_kind": "payment_freight_component",
-                    "workflow_stage": "payment",
-                    "process": process,
-                    "provenance": provenance,
-                    "waybill": waybill,
-                    "package_identity": package_identity,
-                    "material_targets": material_targets,
-                    "scope_status": "in_scope",
                     "default_eligible": False,
                     "read_only": True,
                     "selection_role": "component",
-                    "match_method": match_method,
                     "physical": {},
                     "monetary": {"amount": amount, "currency": currency},
-                    "evidence_chain": evidence_chain,
                     "reason": "已选付款工作簿的单行运费组件，仅用于合计。",
                     "allowed_actions": [],
                 }
             )
 
-    by_target: dict[str, list[dict]] = {}
-    items_by_name = {str(item.get("name") or ""): item for item in baseline}
-    for fact in physical_facts:
-        if fact["scope_status"] != "in_scope" or len(fact["material_targets"]) != 1:
-            continue
-        by_target.setdefault(fact["material_targets"][0]["item_name"], []).append(fact)
-    for item_name, target_facts in by_target.items():
-        if len({fact["package_identity"] for fact in target_facts}) <= 1:
-            continue
-        if _resolved_by_item_identifier(items_by_name.get(item_name) or {}, target_facts):
-            for fact in target_facts:
-                if _identity(fact.get("waybill")) != _identity(
-                    (items_by_name.get(item_name) or {}).get("waybill")
-                ):
-                    fact.update(scope_status="out_of_scope", default_eligible=False, allowed_actions=[])
-            continue
-        for fact in target_facts:
-            fact.update(
-                scope_status="ambiguous",
-                default_eligible=False,
-                allowed_actions=[],
-                reason="同一当前物料匹配到多个不同运单/包装行，需要人工确认。",
-            )
-
-    # If ambiguity invalidated a target, its monetary rows cannot contribute
-    # to a default total either.
-    eligible_packages = {
-        fact["package_identity"]
-        for fact in physical_facts
-        if fact["scope_status"] == "in_scope" and fact["default_eligible"]
-    }
-    component_facts = [
-        fact for fact in component_facts if fact["package_identity"] in eligible_packages
-    ]
     totals = []
     components_by_currency: dict[str, list[dict]] = {}
     for fact in component_facts:
+        if fact["scope_status"] != "in_scope":
+            continue
         components_by_currency.setdefault(fact["monetary"]["currency"], []).append(fact)
     for currency, components in sorted(components_by_currency.items()):
         amount = sum((Decimal(fact["monetary"]["amount"]) for fact in components), Decimal("0"))
         component_ids = [fact["fact_id"] for fact in components]
-        total_id = digest(POLICY, "payment_freight_total", process, currency, component_ids, amount)
+        total_id = digest(
+            POLICY, "payment_freight_total", components[0]["process"], currency, component_ids, amount
+        )
         totals.append(
             {
                 "fact_id": total_id,
@@ -419,7 +529,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
                 "allowed_actions": [],
             }
         )
-    return [*physical_facts, *component_facts, *totals]
+    return [*physical_facts, *goods_value_facts, *component_facts, *totals]
 
 
 def eligible_physical_facts(facts: list[dict]) -> list[dict]:
@@ -431,3 +541,32 @@ def eligible_physical_facts(facts: list[dict]) -> list[dict]:
         and fact.get("default_eligible")
         and len(fact.get("material_targets") or []) == 1
     ]
+
+
+def eligible_evidence_facts(facts: list[dict]) -> list[dict]:
+    """Choose one in-scope preview anchor per structured payment row."""
+
+    priority = {
+        "payment_physical": 0,
+        "payment_goods_value": 1,
+        "payment_freight_component": 2,
+    }
+    anchors: dict[tuple, dict] = {}
+    for fact in facts or []:
+        if (
+            fact.get("fact_kind") not in priority
+            or fact.get("scope_status") != "in_scope"
+            or len(fact.get("material_targets") or []) != 1
+        ):
+            continue
+        provenance = fact.get("provenance") or {}
+        location = (
+            str(provenance.get("document_id") or ""),
+            str(provenance.get("sheet") or ""),
+            provenance.get("row"),
+            str(fact.get("waybill") or ""),
+        )
+        current = anchors.get(location)
+        if current is None or priority[fact["fact_kind"]] < priority[current["fact_kind"]]:
+            anchors[location] = fact
+    return list(anchors.values())

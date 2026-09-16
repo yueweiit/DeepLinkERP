@@ -170,6 +170,26 @@ def test_plus_sign_in_cargo_description_never_offers_a_group_assignment():
     assert group["can_apply"] is True
     assert group["needs_member_confirmation"] is False
 
+
+def test_two_exact_codes_without_waybill_or_joint_language_do_not_form_one_box_group():
+    from overseas_costing.services import material_ai_fill_service as service
+
+    items = [
+        {"name": "I1", "stable_line_key": "L1", "material_code": "MWV101144", "product_name": "IP17 PRO"},
+        {"name": "I2", "stable_line_key": "L2", "material_code": "MWV101145", "product_name": "IP17 PRO MAX"},
+    ]
+    comment = "MWV101144 MWV101145\n规格33*20*23,重量42.05kg"
+
+    _candidates, document = service._read_source(
+        items,
+        {"source_kind": "approval_comment", "source_id": "COMMENT", "source_hash": "HASH", "comment_text": comment},
+    )
+
+    candidate = document["packing_group_candidates"][0]
+    assert candidate["default_selected"] is False
+    assert candidate["needs_member_confirmation"] is True
+    assert all(option["mode"] != "one_box_group" for option in candidate["assignment_options"])
+
 def test_worker_previews_eight_rows_and_final_freight_without_business_write(monkeypatch):
     from overseas_costing.services import material_ai_fill_service as service
     from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepository

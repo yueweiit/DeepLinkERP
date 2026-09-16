@@ -3592,6 +3592,54 @@ def _projection_candidates(items: list[dict], source: dict, preview: dict) -> li
                     "source_refs": [_source_reference(ref_source, row=source_row)],
                     **({"fact_ids": [str(row.get("_fact_id"))]} if row.get("_fact_id") else {}),
                 })
+        items_by_key = {
+            str(
+                item.get("stable_line_key")
+                or (f"legacy:{item.get('name')}" if item.get("name") else "")
+            ).strip(): item
+            for item in items or []
+        }
+        seen_fact_candidates = set()
+        for fact in source.get("semantic_facts") or []:
+            if (
+                not isinstance(fact, dict)
+                or fact.get("scope_status") != "in_scope"
+                or not fact.get("default_eligible")
+            ):
+                continue
+            fact_id = str(fact.get("fact_id") or "")
+            if not fact_id:
+                continue
+            for action in fact.get("allowed_actions") or []:
+                if not isinstance(action, dict) or action.get("action") != "item_update":
+                    continue
+                fieldname = str(action.get("fieldname") or "")
+                if fieldname not in {"goods_value", "purchase_currency"}:
+                    continue
+                material_key = str(action.get("material_key") or "").strip()
+                target_item = items_by_key.get(material_key)
+                if (
+                    not target_item
+                    or str(target_item.get("name") or "")
+                    != str(action.get("target_item_name") or "")
+                    or _is_blank(action.get("value"))
+                ):
+                    continue
+                dedupe_key = (fact_id, material_key, fieldname, str(action.get("value")))
+                if dedupe_key in seen_fact_candidates:
+                    continue
+                seen_fact_candidates.add(dedupe_key)
+                candidates.append(
+                    {
+                        "item_name": str(target_item.get("name") or ""),
+                        "fieldname": fieldname,
+                        "suggested_value": action["value"],
+                        "confidence": 0.99,
+                        "reason": "已选付款附件行显式标注的物料货值事实。",
+                        "source_refs": [_source_reference(source)],
+                        "fact_ids": [fact_id],
+                    }
+                )
         return candidates
     if logistics_rows:
         original_preview = preview
@@ -4033,6 +4081,12 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         source_text,
         re.I,
     ))
+    shared_package_identity=bool(re.search(
+        r'(?:DHL\s*(?:单号|运单|tracking)?|快递单号|运单号|提单号|waybill|tracking(?:\s*(?:no|number))?|awb)'
+        r'\s*[:：#-]?\s*[A-Z0-9][A-Z0-9-]{4,}',
+        source_text,
+        re.I,
+    ))
     # A cargo expression such as ``1套模具+3个手机壳`` describes
     # contents, not a relationship between every current material row.  When
     # only one exact SKU is present, keep the candidate bound to that SKU.
@@ -4053,7 +4107,13 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
             'key':key,
             'label':str(item.get('material_code') or item.get('product_name') or item.get('name') or key),
         })
-    exact_members=(len(code_members)>=2 or (explicit_joint and len(members)>=2)) and not ambiguous
+    exact_members=(
+        (
+            len(code_members)>=2 and (shared_package_identity or explicit_joint)
+        ) or (
+            explicit_joint and len(members)>=2
+        )
+    ) and not ambiguous
     source_id=str(source.get("source_id") or "")
     candidate_id=digest("comment-packing-group-1",source.get("source_hash"),source_id,members,
                         parsed.get("gross_weight_kg"),parsed.get("volume_m3"))

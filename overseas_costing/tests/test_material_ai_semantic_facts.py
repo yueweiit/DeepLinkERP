@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from overseas_costing.services import material_ai_fill_service as fill
 
 
@@ -154,6 +158,187 @@ def test_duplicate_row_identity_is_coalesced_but_distinct_rows_for_one_sku_stay_
     assert len(ambiguous_physical) == 2
     assert {fact["scope_status"] for fact in ambiguous_physical} == {"ambiguous"}
     assert all(fact["default_eligible"] is False for fact in ambiguous_physical)
+
+
+def test_same_sku_genuine_rows_with_same_waybill_are_ambiguous_and_not_totalled_twice():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    source = {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}
+    first = _line(7, "WB-SHARED", "MWV101144")
+    second = _line(8, "WB-SHARED", "MWV101144")
+
+    facts = build_payment_facts(_items(), source, [first, second])
+    physical = [fact for fact in facts if fact["fact_kind"] == "payment_physical"]
+
+    assert len(physical) == 2
+    assert {fact["scope_status"] for fact in physical} == {"ambiguous"}
+    assert all(fact["allowed_actions"] == [] for fact in physical)
+    assert not any(fact["fact_kind"] == "payment_freight_total" for fact in facts)
+
+
+@pytest.mark.parametrize(
+    "item_updates",
+    [
+        {"tracking_no": "WB-ONE"},
+        {"extra_json": json.dumps({"tracking_number": "WB-ONE"})},
+    ],
+)
+def test_item_tracking_identifier_resolves_one_same_sku_shipment(item_updates):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    items = _items()
+    items[0].update(item_updates)
+    source = {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}
+    facts = build_payment_facts(
+        items,
+        source,
+        [_line(7, "WB-ONE", "MWV101144"), _line(8, "WB-TWO", "MWV101144")],
+    )
+    physical = {
+        fact["waybill"]: fact
+        for fact in facts
+        if fact["fact_kind"] == "payment_physical"
+    }
+
+    assert physical["WB-ONE"]["scope_status"] == "in_scope"
+    assert physical["WB-ONE"]["default_eligible"] is True
+    assert physical["WB-TWO"]["scope_status"] == "out_of_scope"
+    assert physical["WB-TWO"]["default_eligible"] is False
+    total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
+    assert total["monetary"] == {"amount": "3414.19", "currency": "RMB"}
+
+
+def test_matched_freight_without_physical_values_still_yields_component_and_total():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(9, "WB-NO-PHYSICAL", "MWV101144")
+    line["packing"] = {"material_code_hints": ["MWV101144"]}
+    line["cargo_text"] = "MWV101144"
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+
+    component = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_component")
+    total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
+    assert component["monetary"] == {"amount": "3414.19", "currency": "RMB"}
+    assert component["scope_status"] == "in_scope"
+    assert total["monetary"] == {"amount": "3414.19", "currency": "RMB"}
+    assert total["allowed_actions"] == []
+
+
+def test_explicit_goods_value_is_distinct_from_freight_amount_and_allowlisted():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(10, "WB-GOODS", "MWV101144")
+    line.update(amount="88.50", currency="RMB", goods_value="1200", goods_currency="USD")
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+
+    goods = next(fact for fact in facts if fact["fact_kind"] == "payment_goods_value")
+    freight = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_component")
+    assert goods["monetary"] == {"amount": "1200", "currency": "USD"}
+    assert freight["monetary"] == {"amount": "88.5", "currency": "RMB"}
+    assert goods["allowed_actions"] == [
+        {
+            "action": "item_update",
+            "target_item_name": "ITEM-144",
+            "material_key": "LINE-144",
+            "fieldname": "goods_value",
+            "value": "1200",
+        },
+        {
+            "action": "item_update",
+            "target_item_name": "ITEM-144",
+            "material_key": "LINE-144",
+            "fieldname": "purchase_currency",
+            "value": "USD",
+        },
+    ]
+
+
+def test_ambiguous_scope_keeps_goods_value_read_only_and_excludes_freight_total():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    first = _line(11, "WB-A", "MWV101144")
+    second = _line(12, "WB-B", "MWV101144")
+    for line in (first, second):
+        line.update(goods_value="600", goods_currency="USD")
+        line["packing"] = {"material_code_hints": ["MWV101144"]}
+        line["cargo_text"] = "MWV101144"
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [first, second]
+    )
+    goods = [fact for fact in facts if fact["fact_kind"] == "payment_goods_value"]
+
+    assert len(goods) == 2
+    assert {fact["scope_status"] for fact in goods} == {"ambiguous"}
+    assert all(fact["default_eligible"] is False and fact["allowed_actions"] == [] for fact in goods)
+    assert not any(fact["fact_kind"] == "payment_freight_total" for fact in facts)
+
+
+def test_monetary_only_row_is_an_eligible_preview_evidence_anchor():
+    from overseas_costing.services.material_ai_semantic_facts import (
+        build_payment_facts,
+        eligible_evidence_facts,
+    )
+
+    line = _line(15, "WB-MONEY-ONLY", "MWV101144")
+    line["packing"] = {"material_code_hints": ["MWV101144"]}
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+
+    anchors = eligible_evidence_facts(facts)
+    assert [fact["fact_kind"] for fact in anchors] == ["payment_freight_component"]
+    assert anchors[0]["waybill"] == "WB-MONEY-ONLY"
+
+
+def test_scoped_goods_fact_actions_become_deterministic_candidates():
+    fact = {
+        "fact_id": "GOODS-FACT",
+        "fact_kind": "payment_goods_value",
+        "scope_status": "in_scope",
+        "default_eligible": True,
+        "material_targets": [{"item_name": "ITEM-144", "material_key": "LINE-144"}],
+        "allowed_actions": [
+            {
+                "action": "item_update",
+                "target_item_name": "ITEM-144",
+                "material_key": "LINE-144",
+                "fieldname": "goods_value",
+                "value": "1200",
+            },
+            {
+                "action": "item_update",
+                "target_item_name": "ITEM-144",
+                "material_key": "LINE-144",
+                "fieldname": "purchase_currency",
+                "value": "USD",
+            },
+        ],
+    }
+    source = {
+        "source_id": "PAYMENT-FACT",
+        "source_kind": "approval_attachment",
+        "scoped_packing": True,
+        "scoped_goods": [{"material_code": "MWV101144", "_material_key": "LINE-144"}],
+        "semantic_facts": [fact],
+    }
+
+    candidates, document = fill._read_source(_items(), source)
+
+    assert {
+        (row["item_name"], row["fieldname"], row["suggested_value"], tuple(row["fact_ids"]))
+        for row in candidates
+    } == {
+        ("ITEM-144", "goods_value", "1200", ("GOODS-FACT",)),
+        ("ITEM-144", "purchase_currency", "USD", ("GOODS-FACT",)),
+    }
+    assert document["semantic_facts"] == [fact]
 
 
 def test_model_fact_reference_must_be_known_in_scope_and_use_allowlisted_value():
