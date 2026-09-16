@@ -163,7 +163,7 @@ def test_public_catalog_and_compact_receipt_deeply_hide_purchase_evidence():
 
     catalog=service.review_catalog(repo,'B1',repo.run)
     source_row=next(row for row in catalog['rows'] if row['origin']=='source')
-    assert catalog['policy']=='ai-field-review-4'
+    assert catalog['policy']=='ai-field-review-5'
     assert source_row['meaningful_field_count']==1
     assert '已默认选择' in source_row['default_selection_reason']
     selected=[row['row_id'] for row in catalog['rows'] if row['default_selected']]

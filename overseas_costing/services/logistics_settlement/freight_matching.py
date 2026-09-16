@@ -11,6 +11,59 @@ HINT_LIMITS = {'waybill':160, 'supplier':200, 'project':200, 'date':80, 'descrip
 CANDIDATE_PRIORITY = {'manual':400, 'explicit':300, 'identifier':200, 'deepseek':100, 'reopened':0}
 
 
+def _shipment_material_lines(logistics, lines):
+    """Narrow identifierless rows to one unique current-shipment material."""
+
+    from .freight_lines import packing_for_line
+
+    blank = [row for row in lines if not row.get('waybill') and not row.get('approval_no')]
+    logistics_codes = {
+        str(code or '').strip().upper()
+        for kind, code in logistics.get('identifiers') or []
+        if kind == 'material' and str(code or '').strip()
+    }
+    logistics_codes.update(
+        str(goods.get('material_code') or '').strip().upper()
+        for goods in logistics.get('goods') or []
+        if str(goods.get('material_code') or '').strip()
+    )
+    code_prefixes = {
+        match.group(0)
+        for code in logistics_codes
+        if (match := re.match(r'[A-Z]+', code))
+    }
+    code_matches = []
+    rows_without_codes = []
+    for row in blank:
+        hints = {
+            str(value or '').strip().upper()
+            for value in packing_for_line(row).get('material_code_hints') or []
+            if str(value or '').strip()
+        }
+        authoritative_hints = {
+            hint for hint in hints
+            if any(hint.startswith(prefix) for prefix in code_prefixes)
+        }
+        if authoritative_hints:
+            if authoritative_hints & logistics_codes:
+                code_matches.append(row)
+        else:
+            rows_without_codes.append(row)
+    if code_matches:
+        return code_matches if len(code_matches) == 1 else []
+
+    logistics_names = {
+        norm(goods.get('product_name'))
+        for goods in logistics.get('goods') or []
+        if norm(goods.get('product_name'))
+    }
+    name_matches = [
+        row for row in rows_without_codes
+        if any(name in norm(row.get('cargo_text')) for name in logistics_names)
+    ]
+    return name_matches if len(name_matches) == 1 else []
+
+
 def index_source(store, source):
     for line in lines_for_source(source):
         line={**line,'id':digest(source['snapshot'],line['id']),'snapshot':source['snapshot']}
@@ -114,7 +167,7 @@ def rule_pass(store,logistics_id):
         explicit=logistics['instance'] in source['related']
         shared=set(map(tuple,logistics['identifiers'])) & set(map(tuple,source['identifiers']))
         if not lines and (explicit or shared) and len(source['related'])<=1:
-            lines=[r for r in all_lines if not r.get('waybill') and not r.get('approval_no')]
+            lines=_shipment_material_lines(logistics,all_lines)
         if lines or explicit or shared:
             save_candidate(store,logistics,source,lines,'explicit' if explicit else 'identifier',
                            '原单明确关联本票' if explicit else '本票运单／审批号与明细一致')
@@ -294,7 +347,10 @@ def run(store,job_id,call_model,model=''):
                 lines=current_lines(store,source)
                 # Strongly identified lines for another shipment are not sent to AI.
                 exact_ids={r['id'] for r in matching_lines(logistics,lines)}
-                eligible=[r for r in lines if r['id'] in exact_ids or not r.get('waybill') and not r.get('approval_no')]
+                material_lines={
+                    row['id'] for row in _shipment_material_lines(logistics,lines)
+                }
+                eligible=[r for r in lines if r['id'] in exact_ids or r['id'] in material_lines]
                 if lines and not eligible:
                     outcome='no_match'
                 else:

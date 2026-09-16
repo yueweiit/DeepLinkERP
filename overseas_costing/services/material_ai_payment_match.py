@@ -14,7 +14,7 @@ import re
 from .logistics_settlement.model import digest, dumps, norm
 
 
-POLICY = "material-ai-payment-match-1"
+POLICY = "material-ai-payment-match-2"
 STRONG_METHODS = frozenset({"manual", "explicit", "identifier"})
 DISPLAY_METHODS = frozenset({"manual", "explicit", "identifier", "reopened"})
 AI_CONFIDENCE_MINIMUM = Decimal("0.90")
@@ -556,10 +556,14 @@ def preview_sources(
     from .material_ai_semantic_facts import build_payment_facts, eligible_evidence_facts
 
     baseline_items = ledger.rows("item", batch=batch_name, version=version_name)
+    authorized_line_ids = {
+        str(line_id) for line_id in candidate.get("line_ids") or [] if str(line_id)
+    }
     payment_lines = [
         line
         for line in store.find("freight_line", source_id=source.get("id"))
         if line.get("snapshot") == source.get("snapshot")
+        and str(line.get("id") or "") in authorized_line_ids
     ]
     semantic_facts = build_payment_facts(baseline_items, source, payment_lines)
     from .logistics_settlement.packing_selection import _catalog
@@ -770,12 +774,9 @@ def preview_sources(
                 "content_hash": evidence_id,
             }
         )
-    # The freight matcher remains shipment-scoped and unchanged.  Once the
-    # user/server has selected one payment process, material AI may additionally
-    # read exact baseline SKU rows from that same monthly workbook even when a
-    # row's DingTalk approval column names a sibling logistics approval.  Facts
-    # are the boundary: unknown, duplicate and ambiguous rows never enter this
-    # preview path.
+    # Semantic facts are derived only from the exact matcher-authorized line
+    # IDs above.  This attachment step must never scan or widen to sibling rows
+    # in the same monthly workbook.
     def fact_location(fact):
         provenance = fact.get("provenance") or {}
         return (

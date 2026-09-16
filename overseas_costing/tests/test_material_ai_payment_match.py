@@ -923,7 +923,16 @@ def test_preview_sources_skips_non_mapping_matched_evidence_and_keeps_valid_sibl
     assert "SKU456 Other 1 pcs" not in json.dumps(sources, ensure_ascii=False)
 
 
-def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other_approval_ids(monkeypatch):
+@pytest.mark.parametrize(
+    'selected_line, expected_waybill, expected_code, expected_item_index, expected_row, has_goods_value',
+    [
+        ('first', '1841361513', 'MWV101144', 0, 14, True),
+        ('second', '1841364722', 'MWV101145', 1, 13, False),
+    ],
+)
+def test_selected_monthly_payment_never_expands_to_sibling_logistics_approval(
+        monkeypatch, selected_line, expected_waybill, expected_code,
+        expected_item_index, expected_row, has_goods_value):
     from overseas_costing.services import material_ai_fill_service as ai_fill
     from overseas_costing.services import material_ai_payment_match as service
     from overseas_costing.services.logistics_settlement import packing_selection
@@ -1000,7 +1009,8 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
             "data": dumps(second),
         },
     )
-    candidate.update(method="explicit", issues=[], line_ids=[first["id"]])
+    selected = first if selected_line == 'first' else second
+    candidate.update(method="explicit", issues=[], line_ids=[selected["id"]])
     store.put("freight_candidate", _candidate_values(candidate))
     monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, []))
 
@@ -1018,10 +1028,9 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
         if fact["fact_kind"] == "payment_physical"
     ]
     assert {(fact["waybill"], fact["material_targets"][0]["material_code"]) for fact in physical_facts} == {
-        ("1841361513", "MWV101144"),
-        ("1841364722", "MWV101145"),
+        (expected_waybill, expected_code),
     }
-    assert len({fact["package_identity"] for fact in physical_facts}) == 2
+    assert len({fact["package_identity"] for fact in physical_facts}) == 1
     assert not any(preview.get("packing_group_candidates") for preview in sources)
     total_facts = [
         fact
@@ -1030,17 +1039,18 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
         if fact["fact_kind"] == "payment_freight_total"
     ]
     assert len({fact["fact_id"] for fact in total_facts}) == 1
-    assert total_facts[0]["monetary"] == {"amount": "6828.38", "currency": "RMB"}
+    assert total_facts[0]["monetary"] == {"amount": "3414.19", "currency": "RMB"}
     goods_facts = [
         fact
         for preview in sources
         for fact in preview.get("semantic_facts") or []
         if fact["fact_kind"] == "payment_goods_value"
     ]
-    assert len(goods_facts) == 1
-    assert goods_facts[0]["monetary"] == {"amount": "1200", "currency": "USD"}
-    assert goods_facts[0]["read_only"] is True
-    assert goods_facts[0]["allowed_actions"] == []
+    assert len(goods_facts) == int(has_goods_value)
+    if has_goods_value:
+        assert goods_facts[0]["monetary"] == {"amount": "1200", "currency": "USD"}
+        assert goods_facts[0]["read_only"] is True
+        assert goods_facts[0]["allowed_actions"] == []
 
     candidates = []
     for preview in sources:
@@ -1050,16 +1060,12 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
         (row["item_name"], row["fieldname"], row["suggested_value"])
         for row in candidates
     } == {
-        (items[0]["name"], "gross_weight_kg", "42.05"),
-        (items[0]["name"], "chargeable_weight_kg", "46"),
-        (items[0]["name"], "package_count", "1"),
-        (items[0]["name"], "volume_m3", "0.01518"),
-        (items[1]["name"], "gross_weight_kg", "42.05"),
-        (items[1]["name"], "chargeable_weight_kg", "46"),
-        (items[1]["name"], "package_count", "1"),
-        (items[1]["name"], "volume_m3", "0.01518"),
+        (items[expected_item_index]["name"], "gross_weight_kg", "42.05"),
+        (items[expected_item_index]["name"], "chargeable_weight_kg", "46"),
+        (items[expected_item_index]["name"], "package_count", "1"),
+        (items[expected_item_index]["name"], "volume_m3", "0.01518"),
     }
-    assert len({row["fact_ids"][0] for row in candidates}) == 2
+    assert len({row["fact_ids"][0] for row in candidates}) == 1
 
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
     from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepository
@@ -1103,36 +1109,22 @@ def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other
         row for row in repository.run["candidates_json"]
         if row.get("proposal_type") == "fee_update"
     ]
-    assert len(fees) == 3
+    assert len(fees) == 1
     assert [
         row["payload"]["amount"] for row in fees if row.get("default_selected")
-    ] == ["6828.38"]
+    ] == ["3414.19"]
     assert sum(row.get("selection_role") == "primary_total" for row in fees) == 1
     components = [row for row in fees if row.get("selection_role") == "component"]
-    assert [row["payload"]["amount"] for row in components] == ["3414.19", "3414.19"]
-    assert all(row["can_apply"] is False for row in components)
-    component_locations = {
-        (
-            row["source_refs"][0]["document_id"],
-            row["source_refs"][0]["sheet"],
-            row["source_refs"][0]["row"],
-        )
-        for row in components
-    }
-    assert {location[1:] for location in component_locations} == {
-        ("DHL快递", 13),
-        ("DHL快递", 14),
-    }
-    assert len({location[0] for location in component_locations}) == 2
+    assert components == []
     primary = next(row for row in fees if row.get("selection_role") == "primary_total")
     assert {
-        (ref["document_id"], ref["sheet"], ref["row"])
+        (ref["sheet"], ref["row"])
         for ref in primary["source_refs"]
-    } == component_locations
-    assert not any(
-        row["payload"]["amount"] == "3414.19" and row.get("default_selected")
+    } == {("DHL快递", expected_row)}
+    assert sum(
+        row["payload"]["amount"] == "3414.19" and bool(row.get("default_selected"))
         for row in fees
-    )
+    ) == 1
 
 
 def test_payment_fact_source_coalesces_the_same_general_attachment_sheet_before_catalog():

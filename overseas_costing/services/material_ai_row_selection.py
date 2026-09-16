@@ -11,7 +11,7 @@ from .logistics_settlement.model import digest
 from .material_value_semantics import is_effectively_missing
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-field-review-4'
+POLICY = 'ai-field-review-5'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
 FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')
@@ -23,6 +23,7 @@ STAGE_SPECS = (
 )
 FEE_STAGE_SPECS = STAGE_SPECS[:2]
 DEFAULT_WORKFLOW_STAGES = frozenset(stage for stage,_rank,_label in STAGE_SPECS)
+MATERIAL_SCOPE_STAGES = ('international_logistics', 'payment', 'purchase')
 EXPLICIT_CORRECTION_MARKERS = ('更正', '改为', '以此为准', '原值错误')
 CORRECTION_FIELD_MARKERS = {
     'gross_weight_kg': ('毛重', 'gross weight'),
@@ -1189,6 +1190,60 @@ def _fee_stage_snapshots(fees, sources):
     return snapshots
 
 
+def _material_scope(catalog_rows):
+    """Choose row identity separately from per-field source precedence."""
+
+    current_names = {
+        str(row.get('target_item_name') or '')
+        for row in catalog_rows if row.get('origin') == 'current'
+    }
+    for stage in MATERIAL_SCOPE_STAGES:
+        stage_rows = [
+            row for row in catalog_rows
+            if row.get('origin') == 'source'
+            and row.get('workflow_stage') == stage
+            and row.get('can_replace')
+            and bool((row.get('values') or {}).get('material_code')
+                     or (row.get('values') or {}).get('product_name'))
+        ]
+        names = {
+            str(row.get('target_item_name') or '')
+            for row in stage_rows
+            if str(row.get('target_item_name') or '') in current_names
+        }
+        names.discard('')
+        if stage_rows:
+            label = dict((name, label) for name, _rank, label in STAGE_SPECS)[stage]
+            return {
+                'source': stage,
+                'item_names': names,
+                'source_row_ids':sorted({
+                    str(row.get('row_id') or '') for row in stage_rows
+                }),
+                'constrained': True,
+                'fallback': stage != 'international_logistics',
+                'reason': f'主表物料范围由{label}中有效识别的物料行确定。',
+            }
+    return {
+        'source': 'purchase',
+        'item_names': current_names,
+        'source_row_ids':[],
+        'constrained': False,
+        'fallback': True,
+        'reason': '国际物流与支付未识别出有效物料行，主表范围回落到商品采购物料。',
+    }
+
+
+def _rows_in_material_scope(catalog_rows, item_names, source_row_ids, *, constrained):
+    if not constrained:
+        return list(catalog_rows)
+    return [
+        row for row in catalog_rows
+        if str(row.get('target_item_name') or '') in item_names
+        or str(row.get('row_id') or '') in source_row_ids
+    ]
+
+
 def catalog(items, proposals, fees, context, *, run_id, sources=None):
     """Do not expose inherited purchase values as newly recognized packing evidence."""
     from .effective_source_values import project_source_values
@@ -1298,15 +1353,36 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
     for item in items:
         add(deepcopy(item),{'proposal_id':'current:'+item['name']},origin='current',target=item['name'],stable=item['name'],fields=[])
     source_groups=_source_groups(rows,sources)
-    field_candidates=_field_candidates(rows)
-    stage_snapshots=_stage_snapshots(rows,field_candidates,sources)
+    scope=_material_scope(rows)
+    scoped_rows=_rows_in_material_scope(
+        rows,scope['item_names'],scope['source_row_ids'],constrained=scope['constrained'])
+    all_field_candidates=_field_candidates(rows)
+    scoped_row_ids={str(row.get('row_id') or '') for row in scoped_rows}
+    field_candidates=[
+        candidate for candidate in all_field_candidates
+        if str(candidate.get('row_id') or '') in scoped_row_ids
+    ]
+    # Stage snapshots remain a source-by-source diagnostic directory.  The
+    # main catalog below is independently constrained by the chosen row scope.
+    stage_snapshots=_stage_snapshots(rows,all_field_candidates,sources)
+    if scope['constrained']:
+        source_groups=[{
+            **group,
+            'row_ids':[row_id for row_id in group.get('row_ids') or [] if row_id in scoped_row_ids],
+        } for group in source_groups if any(
+            row_id in scoped_row_ids for row_id in group.get('row_ids') or [])]
     fee_rows=[p for p in material_ai_fee_policy.decorate(proposals,fees,context) if p.get('proposal_type')=='fee_update']
     fee_stage_snapshots=_fee_stage_snapshots(fee_rows,sources or [])
-    return {'policy':POLICY,'rows':rows,'fees':fee_rows,'source_groups':source_groups,
+    return {'policy':POLICY,'rows':scoped_rows,'fees':fee_rows,'source_groups':source_groups,
             'field_candidates':field_candidates,'stage_snapshots':stage_snapshots,
             'fee_stage_snapshots':fee_stage_snapshots,
-            'fingerprint':digest(POLICY,run_id,rows,fee_rows,source_groups,field_candidates,
-                                 stage_snapshots,fee_stage_snapshots)}
+            'material_scope_source':scope['source'],
+            'material_scope_reason':scope['reason'],
+            'material_scope_fallback':scope['fallback'],
+            'material_scope_constrained':scope['constrained'],
+            'material_scope_item_names':sorted(scope['item_names']),
+            'fingerprint':digest(POLICY,run_id,scoped_rows,fee_rows,source_groups,field_candidates,
+                                 stage_snapshots,fee_stage_snapshots,scope)}
 
 
 def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):

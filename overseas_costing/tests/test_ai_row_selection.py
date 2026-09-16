@@ -360,6 +360,118 @@ def test_payment_logistics_purchase_priority_is_applied_per_field_and_lower_valu
     assert projected['rows'][0]['volume_m3'] == 2
 
 
+def _stage_source(stage, source_id):
+    role = 'logistics_expense' if stage == 'payment' else stage
+    return {
+        'source_id': source_id, 'process_instance_id': source_id,
+        'source_kind': 'approval_form', 'approval_role': role,
+        'approval_title': source_id, 'read_status': 'COMPLETED',
+    }
+
+
+def _stage_update(proposal_id, target, source_id, **fields):
+    return {
+        'proposal_id': proposal_id, 'proposal_type': 'item_update',
+        'target_item_name': target, 'confidence': .99,
+        'source_refs': [{'source_id': source_id}],
+        'payload': {'fields': fields},
+    }
+
+
+@pytest.mark.parametrize(
+    'present_stages, expected_source, expected_item, expected_fallback',
+    [
+        (('international_logistics', 'payment', 'purchase'), 'international_logistics', 'I2', False),
+        (('payment', 'purchase'), 'payment', 'I1', True),
+        (('purchase',), 'purchase', 'I2', True),
+    ],
+)
+def test_material_row_scope_uses_logistics_then_payment_then_purchase(
+        present_stages, expected_source, expected_item, expected_fallback):
+    items = [
+        item('I1', 'MWV101144', gross_weight_kg=None),
+        item('I2', 'MWV101145', gross_weight_kg=None),
+    ]
+    target_by_stage = {
+        'international_logistics': 'I2', 'payment': 'I1', 'purchase': 'I2',
+    }
+    sources = [_stage_source(stage, f'{stage}-SOURCE') for stage in present_stages]
+    proposals = [
+        _stage_update(
+            f'{stage}-PROPOSAL', target_by_stage[stage], f'{stage}-SOURCE',
+            gross_weight_kg={'international_logistics': 7, 'payment': 9, 'purchase': 5}[stage],
+        )
+        for stage in present_stages
+    ]
+
+    review = catalog(items, proposals, sources)
+
+    assert review['material_scope_source'] == expected_source
+    assert review['material_scope_fallback'] is expected_fallback
+    assert review['material_scope_reason']
+    assert {
+        row['target_item_name'] for row in review['rows']
+        if row['origin'] == 'current'
+    } == {expected_item}
+    assert all(
+        row.get('target_item_name') in {'', expected_item}
+        for row in review['rows']
+    )
+
+
+def test_material_scope_does_not_change_payment_first_field_defaults():
+    items = [item(
+        'I1', 'MWV101144', gross_weight_kg=None, actual_shipped_qty='3',
+        unit_price='10', purchase_currency='USD', purchase_uom='件',
+    )]
+    sources = [
+        _stage_source('international_logistics', 'LOG'),
+        _stage_source('payment', 'PAY'),
+        _stage_source('purchase', 'PUR'),
+    ]
+    proposals = [
+        _stage_update('LOG-P', 'I1', 'LOG', gross_weight_kg=7),
+        _stage_update('PAY-P', 'I1', 'PAY', gross_weight_kg=9),
+        _stage_update('PUR-P', 'I1', 'PUR', gross_weight_kg=5),
+    ]
+
+    review = catalog(items, proposals, sources)
+    default = next(
+        candidate for candidate in review['field_candidates']
+        if candidate['fieldname'] == 'gross_weight_kg' and candidate['default_selected']
+    )
+
+    assert review['material_scope_source'] == 'international_logistics'
+    assert default['workflow_stage'] == 'payment'
+    assert default['suggested_value'] == 9
+    current = next(row for row in review['rows'] if row['origin'] == 'current')['values']
+    assert {
+        key: current[key]
+        for key in ('actual_shipped_qty', 'unit_price', 'purchase_currency', 'purchase_uom')
+    } == {
+        'actual_shipped_qty': '3', 'unit_price': '10',
+        'purchase_currency': 'USD', 'purchase_uom': '件',
+    }
+
+
+def test_unmatched_valid_logistics_material_defines_scope_before_matched_payment():
+    items = [item('I1', 'PURCHASE-SKU', gross_weight_kg=None)]
+    sources = [
+        _stage_source('international_logistics', 'LOG'),
+        _stage_source('payment', 'PAY'),
+    ]
+    logistics = reconcile([source('LOGISTICS-ONLY', gross_weight_kg=7)])
+    logistics['proposal_id'] = 'LOG-P'
+    logistics['source_refs'] = [{'source_id': 'LOG'}]
+    payment = _stage_update('PAY-P', 'I1', 'PAY', gross_weight_kg=9)
+
+    review = catalog(items, [logistics, payment], sources)
+
+    assert review['material_scope_source'] == 'international_logistics'
+    assert [row['values']['material_code'] for row in review['rows']] == ['LOGISTICS-ONLY']
+    assert review['rows'][0]['can_add'] is True
+
+
 def test_unreadable_higher_priority_source_does_not_block_lower_priority_default():
     items = [item('I1', 'SKU-1', gross_weight_kg=None)]
     sources = [
@@ -1247,7 +1359,7 @@ def test_single_proposal_referencing_payment_and_purchase_is_a_conflict_in_both_
 
 
 def test_row_review_policy_is_stage_snapshot_version():
-    assert service.POLICY == 'ai-field-review-4'
+    assert service.POLICY == 'ai-field-review-5'
 
 
 def test_fee_stage_snapshots_are_fixed_even_when_no_fee_source_exists():

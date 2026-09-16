@@ -251,6 +251,36 @@ def test_explicit_reference_ranks_above_ordinary_shared_identifier_with_matching
     assert [row['local_match_score'] for row in page['sources']]==[3000,1000]
 
 
+def test_identifierless_payment_rows_require_unique_current_logistics_material_match():
+    from overseas_costing.services.logistics_settlement.freight_matching import _shipment_material_lines
+
+    logistics = {
+        'goods': [{'material_code': 'MWV101144', 'product_name': '薇武士 IP17 PRO'}],
+        'identifiers': [('material', 'MWV101144')],
+    }
+    own = {
+        'id': 'OWN', 'waybill': '', 'approval_no': '',
+        'cargo_text': 'MWV101144 IP17PRO TPU',
+        'packing': {'material_code_hints': ['MWV101144']},
+    }
+    sibling = {
+        'id': 'SIBLING', 'waybill': '', 'approval_no': '',
+        'cargo_text': 'MWV101145 IP17 PRO MAX TPU',
+        'packing': {'material_code_hints': ['MWV101145']},
+    }
+
+    assert [row['id'] for row in _shipment_material_lines(logistics, [own, sibling])] == ['OWN']
+
+    ambiguous = {**own, 'id': 'OWN-2'}
+    assert _shipment_material_lines(logistics, [own, ambiguous]) == []
+
+    name_only = {
+        'id': 'NAME', 'waybill': '', 'approval_no': '',
+        'cargo_text': '薇武士 IP17 PRO 手机壳', 'packing': {'material_code_hints': []},
+    }
+    assert _shipment_material_lines(logistics, [name_only, sibling]) == [name_only]
+
+
 def test_stale_freight_line_snapshot_is_not_an_exact_source_or_payment_score():
     from overseas_costing.services.logistics_settlement import freight_matching
     from overseas_costing.tests.test_freight_lines import monthly

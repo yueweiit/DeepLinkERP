@@ -48,6 +48,20 @@ assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('da
 """)
 
 
+def test_review_explains_server_selected_main_material_scope_safely():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,
+ material_scope_source:'international_logistics',material_scope_fallback:false,
+ material_scope_reason:'主表由国际物流 <unsafe> 定行。'};
+delete fill.rowSelection;w.ensureMaterialAIRowSelection(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+assert(html.includes('data-mf-ai-material-scope'));
+assert(html.includes('主表物料范围'));
+assert(html.includes('主表由国际物流 &lt;unsafe> 定行。'));
+assert(!html.includes('已按安全顺序回落'));
+""")
+
+
 def test_per_field_defaults_show_source_metadata_and_submit_only_candidate_ids():
     run_ui(r"""
 const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-1',field_candidates:[

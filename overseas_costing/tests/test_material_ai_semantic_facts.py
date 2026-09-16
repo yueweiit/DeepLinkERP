@@ -52,7 +52,7 @@ def _line(row: int, waybill: str, code: str, *, approval_no: str = "OTHER") -> d
     }
 
 
-def test_selected_monthly_rows_become_independent_physical_facts_and_one_freight_total():
+def test_selected_monthly_row_becomes_one_physical_fact_and_one_ticket_total():
     from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
 
     source = {
@@ -64,19 +64,15 @@ def test_selected_monthly_rows_become_independent_physical_facts_and_one_freight
     facts = build_payment_facts(
         _items(),
         source,
-        [
-            _line(14, "1841361513", "MWV101144", approval_no="202607211417000078258"),
-            _line(13, "1841364722", "MWV101145", approval_no="202607211416000291269"),
-        ],
+        [_line(14, "1841361513", "MWV101144", approval_no="202607211417000078258")],
     )
 
     physical = [fact for fact in facts if fact["fact_kind"] == "payment_physical"]
     assert [(fact["waybill"], fact["material_targets"][0]["item_name"]) for fact in physical] == [
-        ("1841364722", "ITEM-145"),
         ("1841361513", "ITEM-144"),
     ]
-    assert len({fact["fact_id"] for fact in physical}) == 2
-    assert len({fact["package_identity"] for fact in physical}) == 2
+    assert len({fact["fact_id"] for fact in physical}) == 1
+    assert len({fact["package_identity"] for fact in physical}) == 1
     assert all(fact["scope_status"] == "in_scope" for fact in physical)
     assert all(
         fact["physical"]
@@ -92,10 +88,10 @@ def test_selected_monthly_rows_become_independent_physical_facts_and_one_freight
 
     components = [fact for fact in facts if fact["fact_kind"] == "payment_freight_component"]
     total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
-    assert len(components) == 2
+    assert len(components) == 1
     assert all(fact["read_only"] is True for fact in components)
     assert {fact["selection_role"] for fact in components} == {"component"}
-    assert total["monetary"] == {"amount": "6828.38", "currency": "RMB"}
+    assert total["monetary"] == {"amount": "3414.19", "currency": "RMB"}
     assert total["selection_role"] == "primary_total"
     assert total["allowed_actions"] == []
     assert total["component_fact_ids"] == [fact["fact_id"] for fact in components]
