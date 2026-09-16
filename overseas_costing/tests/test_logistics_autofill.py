@@ -285,6 +285,11 @@ def test_joint_language_groups_only_two_exact_identified_members():
         "分开装箱",
         "分别装箱",
         "单独装箱",
+        "不需要一起装箱",
+        "不可一起装箱",
+        "无法一起装箱",
+        "没一起装箱",
+        "不能够一起装箱",
     ],
 )
 @pytest.mark.parametrize("waybill", ["", "DHL 单号1841361513\n"])
@@ -300,6 +305,16 @@ def test_negated_joint_language_vetoes_one_box_group_even_with_shared_waybill(wo
 def test_shared_waybill_still_groups_two_exact_members_without_negative_language():
     candidate = _group_candidate_for_comment(
         "DHL 单号1841361513\nMWV101144 MWV101145\n规格33*20*23,重量42.05kg"
+    )
+
+    assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [
+        ("one_box_group", ["L1", "L2"]),
+    ]
+
+
+def test_unrelated_negation_in_an_earlier_clause_does_not_veto_affirmative_joint_packing():
+    candidate = _group_candidate_for_comment(
+        "不接受破损包装；MWV101144 MWV101145 一起装箱\n规格33*20*23,重量42.05kg"
     )
 
     assert [(option["mode"], option["member_keys"]) for option in candidate["assignment_options"]] == [

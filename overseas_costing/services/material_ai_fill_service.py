@@ -4313,8 +4313,8 @@ def _comment_packing_group_candidates(items: list[dict], source: dict, parsed: d
         re.I,
     ))
     negated_joint=bool(re.search(
-        r'(?:(?:不能|不可以|不允许|不得|禁止|严禁|请勿|没有|不再|不要|并非|不是|无需|未|不)'
-        r'\s*(?:一起|共同|同箱|合箱|合并装箱))'
+        r'(?:(?:并非|[不未没无勿禁])[^\n，。；;!！?？]{0,6}'
+        r'(?:一起|共同|合箱|合并装箱|同箱|一箱|共用|共享))'
         r'|(?:(?:分开|分别|单独|拆分)\s*(?:装|包装|装箱|箱))',
         source_text,
         re.I,
