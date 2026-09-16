@@ -302,6 +302,27 @@ def test_malformed_locator_is_fail_closed_without_aborting_other_rows(malformed_
     assert all(fact["allowed_actions"] == [] for fact in malformed_facts)
 
 
+def test_non_mapping_evidence_is_sanitized_before_text_goods_and_keeps_valid_sibling():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    source = {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}
+    valid = _line(10, "WB-VALID", "MWV101144")
+    malformed = _line(11, "WB-MALFORMED-TEXT", "")
+    malformed["cargo_text"] = "SKU456 Other 1 pcs"
+    malformed["packing"]["material_code_hints"] = []
+    malformed["evidence"] = "not-a-mapping"
+
+    facts = build_payment_facts(_items(), source, [malformed, valid])
+
+    total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
+    assert total["monetary"] == {"amount": "3414.19", "currency": "RMB"}
+    malformed_facts = [
+        fact for fact in facts if fact.get("waybill") == "WB-MALFORMED-TEXT"
+    ]
+    assert all(fact["scope_status"] != "in_scope" for fact in malformed_facts)
+    assert all(fact["allowed_actions"] == [] for fact in malformed_facts)
+
+
 def test_same_sku_genuine_rows_with_same_waybill_are_ambiguous_and_not_totalled_twice():
     from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
 

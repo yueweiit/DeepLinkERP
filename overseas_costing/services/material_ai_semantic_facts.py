@@ -128,7 +128,7 @@ def _dedupe_key(source: dict, line: dict) -> tuple[str, str, str]:
         malformed_identity = digest(
             POLICY,
             "malformed-locator",
-            _canonical_json(evidence if isinstance(line.get("evidence"), dict) else line.get("evidence")),
+            str(line.get("_semantic_raw_evidence_signature") or _canonical_json(evidence)),
             _business_signature(line),
         )
         return ("", "", malformed_identity)
@@ -167,7 +167,7 @@ def _line_goods(line: dict) -> list[dict]:
     try:
         from .logistics_settlement.freight_packing import text_goods
 
-        return text_goods(cargo_text, deepcopy(line.get("evidence") or {}))
+        return text_goods(cargo_text, deepcopy(_evidence(line)))
     except (TypeError, ValueError):
         return []
 
@@ -333,9 +333,14 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
 
     baseline = [row for row in items or [] if not int(row.get("is_excluded") or 0)]
     grouped_lines: dict[tuple[str, str, str], dict[str, list[dict]]] = {}
-    for line in lines or []:
-        if not isinstance(line, dict):
+    for raw_line in lines or []:
+        if not isinstance(raw_line, dict):
             continue
+        line = deepcopy(raw_line)
+        line["_semantic_raw_evidence_signature"] = _canonical_json(
+            raw_line.get("evidence")
+        )
+        line["evidence"] = deepcopy(_evidence(raw_line))
         grouped_lines.setdefault(_dedupe_key(source, line), {}).setdefault(
             _business_signature(line), []
         ).append(line)
