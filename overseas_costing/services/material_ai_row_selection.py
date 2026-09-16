@@ -1190,7 +1190,7 @@ def _fee_stage_snapshots(fees, sources):
     return snapshots
 
 
-def _material_scope(catalog_rows):
+def _material_scope(catalog_rows, sources=None):
     """Choose row identity separately from per-field source precedence."""
 
     current_names = {
@@ -1230,6 +1230,28 @@ def _material_scope(catalog_rows):
                     + f'主表物料范围由{label}中有效识别的物料行确定。'
                 ),
             }
+        if stage == 'international_logistics':
+            from .source_priority_service import rank_material_packing_sources
+            has_readable_logistics_process = any(
+                source.get('workflow_stage') == 'international_logistics'
+                and str(source.get('source_kind') or '') == 'approval_form'
+                and _source_status(source) not in UNREADABLE_SOURCE_STATUSES
+                and not source.get('excluded')
+                and bool(source.get('available', True))
+                for source in rank_material_packing_sources(sources or [])
+            )
+            if has_readable_logistics_process and current_names:
+                return {
+                    'source': 'international_logistics',
+                    'item_names': current_names,
+                    'source_row_ids': [],
+                    'constrained': False,
+                    'fallback': False,
+                    'reason': (
+                        '主表物料范围沿用当前国际物流单的物料底表；'
+                        '支付申请只覆盖已精确匹配的字段。'
+                    ),
+                }
     return {
         'source': 'purchase',
         'item_names': current_names,
@@ -1359,7 +1381,7 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
     for item in items:
         add(deepcopy(item),{'proposal_id':'current:'+item['name']},origin='current',target=item['name'],stable=item['name'],fields=[])
     source_groups=_source_groups(rows,sources)
-    scope=_material_scope(rows)
+    scope=_material_scope(rows,sources)
     scoped_rows=_rows_in_material_scope(
         rows,scope['item_names'],scope['source_row_ids'],constrained=scope['constrained'])
     all_field_candidates=_field_candidates(rows)

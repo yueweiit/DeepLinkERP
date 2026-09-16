@@ -454,7 +454,30 @@ def test_material_scope_does_not_change_payment_first_field_defaults():
     }
 
 
-def test_ambiguous_logistics_row_falls_back_to_purchase_without_emptying_catalog():
+def test_readable_logistics_process_keeps_current_material_table_as_scope_before_payment_rows():
+    items = [
+        item('I1', 'MWV101144', gross_weight_kg=None),
+        item('I2', 'MWV101145', gross_weight_kg=None),
+    ]
+    sources = [
+        _stage_source('international_logistics', 'LOG'),
+        _stage_source('payment', 'PAY'),
+    ]
+    proposals = [_stage_update('PAY-P', 'I2', 'PAY', gross_weight_kg=42.05)]
+
+    review = catalog(items, proposals, sources)
+
+    assert review['material_scope_source'] == 'international_logistics'
+    assert review['material_scope_fallback'] is False
+    assert review['material_scope_constrained'] is False
+    assert {
+        row['target_item_name'] for row in review['rows'] if row['origin'] == 'current'
+    } == {'I1', 'I2'}
+    assert '国际物流' in review['material_scope_reason']
+    assert '精确匹配' in review['material_scope_reason']
+
+
+def test_ambiguous_logistics_row_keeps_logistics_baseline_without_emptying_catalog():
     items = [
         item('I1', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
         item('I2', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
@@ -470,12 +493,12 @@ def test_ambiguous_logistics_row_falls_back_to_purchase_without_emptying_catalog
 
     review = catalog(items, [ambiguous, purchase], sources)
 
-    assert review['material_scope_source'] == 'purchase'
-    assert review['material_scope_fallback'] is True
-    assert 'fallback' in review['material_scope_reason'].lower() or '回落' in review['material_scope_reason']
+    assert review['material_scope_source'] == 'international_logistics'
+    assert review['material_scope_fallback'] is False
+    assert '国际物流' in review['material_scope_reason']
     assert {
         row['target_item_name'] for row in review['rows'] if row['origin'] == 'current'
-    } == {'I1'}
+    } == {'I1', 'I2'}
     assert any(
         candidate['workflow_stage'] == 'purchase'
         and candidate['item_name'] == 'I1'
@@ -483,7 +506,7 @@ def test_ambiguous_logistics_row_falls_back_to_purchase_without_emptying_catalog
     )
 
 
-def test_ambiguous_logistics_without_lower_scope_keeps_current_purchase_baseline():
+def test_ambiguous_logistics_without_lower_scope_keeps_current_logistics_baseline():
     items = [
         item('I1', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
         item('I2', 'SAME', gross_weight_kg=None, actual_shipped_qty='1'),
@@ -495,9 +518,9 @@ def test_ambiguous_logistics_without_lower_scope_keeps_current_purchase_baseline
 
     review = catalog(items, [ambiguous], sources)
 
-    assert review['material_scope_source'] == 'purchase'
+    assert review['material_scope_source'] == 'international_logistics'
     assert review['material_scope_constrained'] is False
-    assert review['material_scope_fallback'] is True
+    assert review['material_scope_fallback'] is False
     assert {
         row['target_item_name'] for row in review['rows'] if row['origin'] == 'current'
     } == {'I1', 'I2'}

@@ -695,6 +695,18 @@ for(const text of ['采购单价','币种','本次发货货值 RMB','4.40','1056
 """)
 
 
+def test_non_actionable_packing_group_hint_is_not_rendered_as_a_candidate_section():
+    run_ui(r"""
+const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G-NONE',member_keys:[],
+    gross_weight_kg:'42.05',volume_m3:'0.01518',source_label:'评论',default_selected:false,can_apply:false,
+    assignment_options:[],resolution_reason:'评论中整票重量和尺寸已识别，但物料成员匹配不唯一。'}]};
+fill.rowSelection=null;w.ensureMaterialAIRowSelection(fill);
+const html=w.renderMaterialAIReviewDialogContent();
+assert(!html.includes('装箱组候选'));
+assert(!html.includes('G-NONE'));
+""")
+
+
 def test_ambiguous_packing_assignment_is_selectable_and_mutually_exclusive():
     run_ui(r"""
 const fill=ready();fill.draft={packing_group_candidates:[{candidate_id:'G-NEW',member_keys:['L1'],
