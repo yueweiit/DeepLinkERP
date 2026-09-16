@@ -810,6 +810,119 @@ def test_payment_preview_never_widens_missing_row_evidence_to_whole_monthly_shee
     assert "MWV101144 本票货物" in payload
 
 
+def test_preview_sources_skips_non_mapping_matched_evidence_and_keeps_valid_sibling(monkeypatch):
+    from overseas_costing.services import material_ai_payment_match as service
+    from overseas_costing.services.logistics_settlement import packing_selection
+
+    store, ledger, batch, version, logistics, source, candidate = payment_setup(
+        structured=True, scope="freight", amount="3414.19", mode="EXPRESS"
+    )
+    ledger.create(
+        "item",
+        {
+            "batch": batch["name"],
+            "version": version["name"],
+            "stable_line_key": "LINE-144",
+            "material_code": "MWV101144",
+            "product_name": "薇武士 IP17 PRO",
+        },
+    )
+    malformed = store.get("freight_line", "payment-line-1")
+    malformed.update(
+        waybill="WB-MALFORMED",
+        cargo_text="SKU456 Other 1 pcs",
+        packing={"material_code_hints": []},
+        evidence="malformed",
+    )
+    store.put(
+        "freight_line",
+        {
+            "id": malformed["id"],
+            "source_id": malformed["source_id"],
+            "snapshot": malformed["snapshot"],
+            "line_key": malformed["line_key"],
+            "waybill": malformed["waybill"],
+            "approval_no": malformed["approval_no"],
+            "charge_key": malformed["charge_key"],
+            "data": dumps(malformed),
+        },
+    )
+    valid = deepcopy(malformed)
+    valid.update(
+        id="payment-line-valid",
+        line_key="payment-line-key-valid",
+        waybill="WB-VALID",
+        cargo_text="MWV101144 薇武士 IP17 PRO",
+        packing={
+            "material_code_hints": ["MWV101144"],
+            "gross_weight_kg": "42.05",
+        },
+        evidence={
+            "document_id": "monthly-doc",
+            "file_name": "DHL.xlsx",
+            "sheet": "DHL",
+            "row": 13,
+        },
+    )
+    store.insert(
+        "freight_line",
+        {
+            "id": valid["id"],
+            "source_id": valid["source_id"],
+            "snapshot": valid["snapshot"],
+            "line_key": valid["line_key"],
+            "waybill": valid["waybill"],
+            "approval_no": valid["approval_no"],
+            "charge_key": valid["charge_key"],
+            "data": dumps(valid),
+        },
+    )
+    candidate.update(
+        method="explicit",
+        issues=[],
+        line_ids=[malformed["id"], valid["id"]],
+    )
+    store.put("freight_candidate", _candidate_values(candidate))
+    catalog_row = {
+        "id": "catalog-valid",
+        "source_id": source["id"],
+        "source_kind": "approval_attachment",
+        "source_label": "DHL.xlsx · DHL",
+        "approval_no": source["approval_no"],
+        "source_snapshot": source["snapshot"],
+        "process_instance_id": source["instance"],
+        "document_id": "monthly-doc",
+        "sheet": "DHL",
+        "evidence": deepcopy(valid["evidence"]),
+        "revision": "catalog-valid-revision",
+        "goods": [{"material_code": "MWV101144", "gross_weight_kg": "42.05"}],
+        "text": "MWV101144 薇武士 IP17 PRO",
+    }
+    monkeypatch.setattr(packing_selection, "_catalog", lambda *_args: (logistics, [catalog_row]))
+
+    reference = service.select_preview_candidate(
+        store, ledger, batch["name"], version["name"], freight_mode=True
+    )
+    sources = service.preview_sources(
+        store, ledger, batch["name"], version["name"], reference, freight_mode=True
+    )
+
+    facts = [fact for preview in sources for fact in preview.get("semantic_facts") or []]
+    total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
+    assert total["monetary"] == {"amount": "3414.19", "currency": "RMB"}
+    assert any(
+        fact["fact_kind"] == "payment_physical"
+        and fact["waybill"] == "WB-VALID"
+        and fact["scope_status"] == "in_scope"
+        for fact in facts
+    )
+    assert not any(
+        fact.get("waybill") == "WB-MALFORMED" and fact.get("scope_status") == "in_scope"
+        for fact in facts
+    )
+    assert "SKU456 Other 1 pcs" not in json.dumps(sources, ensure_ascii=False)
+
+
 def test_selected_monthly_payment_expands_only_exact_baseline_rows_despite_other_approval_ids(monkeypatch):
     from overseas_costing.services import material_ai_fill_service as ai_fill
     from overseas_costing.services import material_ai_payment_match as service

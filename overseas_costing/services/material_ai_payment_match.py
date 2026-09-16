@@ -26,6 +26,22 @@ RELATION_KEYS = frozenset({
 })
 
 
+def _evidence(row: dict) -> dict:
+    if not isinstance(row, dict):
+        return {}
+    value = row.get("evidence")
+    return value if isinstance(value, dict) else {}
+
+
+def _has_malformed_evidence(row: dict) -> bool:
+    return bool(
+        isinstance(row, dict)
+        and "evidence" in row
+        and row.get("evidence") is not None
+        and not isinstance(row.get("evidence"), dict)
+    )
+
+
 def _line_scoped_goods(line: dict, evidence: dict) -> list[dict]:
     """Project row-scoped packing facts only when one material code is explicit."""
 
@@ -346,8 +362,9 @@ def coalesce_fact_sources(sources: list[dict]) -> list[dict]:
             result.append(source)
             continue
         process_id = str(source.get("process_instance_id") or "")
-        selected = source.get("selected_source") or {}
-        evidence = selected.get("evidence") or {}
+        selected = source.get("selected_source")
+        selected = selected if isinstance(selected, dict) else {}
+        evidence = _evidence(selected)
         stable_document_id = str(
             source.get("document_id")
             or selected.get("document_id")
@@ -553,10 +570,12 @@ def preview_sources(
     for line_id in candidate.get("line_ids") or []:
         line = store.get("freight_line", line_id) or {}
         if line.get("source_id") == source.get("id") and line.get("snapshot") == source.get("snapshot"):
-            line_evidence.append(line.get("evidence") or {})
+            line_evidence.append(_evidence(line))
 
     def row_matches_line(row):
-        evidence = row.get("evidence") or {}
+        if _has_malformed_evidence(row):
+            return False
+        evidence = _evidence(row)
         document_id = str(row.get("document_id") or evidence.get("document_id") or "")
         sheet = str(row.get("sheet") or evidence.get("sheet") or "")
         row_number = row.get("row") if row.get("row") is not None else evidence.get("row")
@@ -574,7 +593,7 @@ def preview_sources(
     for row in rows:
         if not (row.get("goods") or str(row.get("text") or "").strip()):
             continue
-        row_evidence = row.get("evidence") or {}
+        row_evidence = _evidence(row)
         document_id = str(row.get("document_id") or row_evidence.get("document_id") or "")
         document_key = (document_id, str(row.get("sheet") or row_evidence.get("sheet") or ""))
         evidence_id = digest(POLICY, clean, row.get("id"), row.get("revision"))
@@ -597,13 +616,15 @@ def preview_sources(
             )
             if row.get(key) not in (None, "")
         }
+        if "evidence" in selected_source:
+            selected_source["evidence"] = deepcopy(row_evidence)
         result.append(
             {
                 "source_id": evidence_id,
                 "logical_source_id": evidence_id,
                 "source_kind": str(row.get("source_kind") or "approval_form"),
                 "source_label": str(row.get("source_label") or source.get("title") or "实际付款流程"),
-                "file_name": str((row.get("evidence") or {}).get("file_name") or ""),
+                "file_name": str(row_evidence.get("file_name") or ""),
                 "sheet_name": str(row.get("sheet") or ""),
                 "approval_no": str(source.get("approval_no") or ""),
                 "process_instance_id": str(source.get("instance") or ""),
@@ -644,7 +665,9 @@ def preview_sources(
         if (line.get("source_id") != source.get("id")
                 or line.get("snapshot") != source.get("snapshot")):
             continue
-        evidence = deepcopy(line.get("evidence") or {})
+        if _has_malformed_evidence(line):
+            continue
+        evidence = deepcopy(_evidence(line))
         document_id = str(evidence.get("document_id") or "")
         sheet = str(evidence.get("sheet") or "")
         cargo_text = str(line.get("cargo_text") or "").strip()
@@ -763,8 +786,9 @@ def preview_sources(
         )
 
     def source_location(preview):
-        selected = preview.get("selected_source") or {}
-        evidence = selected.get("evidence") or {}
+        selected = preview.get("selected_source")
+        selected = selected if isinstance(selected, dict) else {}
+        evidence = _evidence(selected)
         text = str(preview.get("scoped_text") or "")
         waybill_match = re.search(r"(?:运单号|DHL\s*单号)\s*[:：]?\s*([^\s]+)", text, re.I)
         return (
