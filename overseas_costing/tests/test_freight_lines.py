@@ -96,6 +96,14 @@ def test_dhl_monthly_exact_approval_selects_only_row_14_and_extracts_packing_fac
         source('202607211417000078258', 'logistics', text='DHL 单号 1841361513'),
         logistics_codes={'logistics'},
     )
+    logistics['approval_no'] = '202607211417000078258'
+    # A logistics approval can mention a sibling shipment in comments or links.
+    # Its own approval number remains the strongest exact key and must prevent
+    # the adjacent same-amount row from entering the candidate.
+    logistics['identifiers'].extend([
+        ('approval', '202607211416000291269'),
+        ('waybill', '1841364722'),
+    ])
     selected = matching_lines(logistics, lines)
 
     assert len(lines) == 2

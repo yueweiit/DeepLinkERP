@@ -6,7 +6,7 @@ from .freight_lines import POLICY, lines_for_source, matching_lines
 from .ai_matching import save, safe_text
 from .jobs import utcnow
 
-RULE_POLICY = 'shipment-payment-rules-2'
+RULE_POLICY = 'shipment-payment-rules-3'
 HINT_LIMITS = {'waybill':160, 'supplier':200, 'project':200, 'date':80, 'description':500}
 CANDIDATE_PRIORITY = {'manual':400, 'explicit':300, 'identifier':200, 'deepseek':100, 'reopened':0}
 

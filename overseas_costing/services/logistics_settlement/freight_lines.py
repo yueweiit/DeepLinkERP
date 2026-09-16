@@ -178,8 +178,10 @@ def lines_for_source(source):
 
 def matching_lines(logistics, lines):
     tokens={str(t[1]).upper() for t in logistics.get('identifiers') or [] if t[0] in ('waybill','approval')}
+    primary_approval=str(logistics.get('approval_no') or '').strip().upper()
+    primary_rows=[row for row in lines if primary_approval and str(row.get('approval_no') or '').strip().upper()==primary_approval]
     result=[]
-    for row in lines:
+    for row in primary_rows or lines:
         if not any(row.get(k) in tokens for k in ('waybill','approval_no')):continue
         conflict=any(row.get(k) and row[k] not in tokens and any(t[0]==kind for t in logistics.get('identifiers') or []) for k,kind in [('waybill','waybill'),('approval_no','approval')])
         result.append({**row,'identifier_conflict':conflict})
