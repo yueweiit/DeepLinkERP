@@ -56,22 +56,62 @@ def _target(item: dict) -> dict:
     }
 
 
+def _evidence(line: dict) -> dict:
+    value = line.get("evidence")
+    return value if isinstance(value, dict) else {}
+
+
+def _row_number(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not parsed.is_finite() or parsed != parsed.to_integral_value():
+        return None
+    number = int(parsed)
+    return number if number > 0 else None
+
+
+def _locator_is_valid(line: dict) -> bool:
+    return isinstance(line.get("evidence"), dict) and _row_number(_evidence(line).get("row")) is not None
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _business_signature(line: dict) -> str:
+    """Compare row meaning while ignoring archive/copy bookkeeping."""
+
+    ignored = {
+        "id", "source_id", "snapshot", "revision", "created_at", "modified_at",
+        "creation", "modified", "evidence",
+    }
+    return _canonical_json({
+        key: value
+        for key, value in line.items()
+        if key not in ignored and not str(key).startswith("_semantic_")
+    })
+
+
 def _provenance(source: dict, line: dict) -> dict:
-    evidence = line.get("evidence") if isinstance(line.get("evidence"), dict) else {}
+    evidence = _evidence(line)
     return {
         "source_id": str(source.get("id") or source.get("source_id") or ""),
         "document_id": str(evidence.get("document_id") or ""),
         "file_name": str(evidence.get("file_name") or ""),
         "sheet": str(evidence.get("sheet") or ""),
-        "row": evidence.get("row"),
+        "row": _row_number(evidence.get("row")),
         "cell": str(evidence.get("cell") or ""),
         "line_id": str(line.get("id") or ""),
         "line_key": str(line.get("line_key") or ""),
     }
 
 
-def _dedupe_key(source: dict, line: dict) -> tuple[str, str, str, str]:
-    evidence = line.get("evidence") if isinstance(line.get("evidence"), dict) else {}
+def _dedupe_key(source: dict, line: dict) -> tuple[str, str, str]:
+    evidence = _evidence(line)
     document_identity = str(
         evidence.get("document_id")
         or evidence.get("file_id")
@@ -81,18 +121,21 @@ def _dedupe_key(source: dict, line: dict) -> tuple[str, str, str, str]:
         or source.get("id")
         or ""
     )
-    business_identifier = str(
-        line.get("waybill")
-        or line.get("line_key")
-        or line.get("approval_no")
-        or line.get("charge_key")
-        or ""
-    )
+    row_number = _row_number(evidence.get("row"))
+    if row_number is None:
+        # Missing/malformed locations cannot prove equivalence.  Keep each
+        # business row isolated so malformed evidence never merges values.
+        malformed_identity = digest(
+            POLICY,
+            "malformed-locator",
+            _canonical_json(evidence if isinstance(line.get("evidence"), dict) else line.get("evidence")),
+            _business_signature(line),
+        )
+        return ("", "", malformed_identity)
     return (
         _identity(document_identity),
         _identity(evidence.get("sheet")),
-        str(evidence.get("row") or ""),
-        _identity(business_identifier),
+        str(row_number),
     )
 
 
@@ -158,13 +201,24 @@ def _match_targets(items: list[dict], line: dict) -> tuple[list[dict], str, str]
                     seen_keys.add(key)
         return matched
 
-    explicit_matches = code_matches(explicit_codes)
-    if explicit_matches:
+    normalized_explicit_codes = [
+        _identity(value) for value in explicit_codes if _identity(value)
+    ]
+    if normalized_explicit_codes:
+        explicit_candidates = [code_index.get(code) or [] for code in normalized_explicit_codes]
+        if any(not candidates for candidates in explicit_candidates):
+            return [], "foreign_code", "证据行的显式物料编码未全部命中当前批次基线；整行不降级放宽。"
+        explicit_matches = []
+        seen_keys = set()
+        for candidates in explicit_candidates:
+            for item in candidates:
+                key = _material_key(item)
+                if key and key not in seen_keys:
+                    explicit_matches.append(item)
+                    seen_keys.add(key)
         if len(explicit_matches) == 1:
-            return explicit_matches, "exact_code", "精确物料编码命中当前批次基线。"
-        return explicit_matches, "exact_code", "同一证据行命中多个当前物料编码，需要核对共享包装。"
-    if any(_identity(value) for value in explicit_codes):
-        return [], "foreign_code", "证据行已提供物料编码，但未命中当前批次基线；不使用名称降级放宽。"
+            return explicit_matches, "exact_code", "所有显式物料编码一致精确命中当前批次基线。"
+        return explicit_matches, "ambiguous_code", "同一证据行的显式物料编码指向不同当前物料，不自动归属。"
     heuristic_matches = code_matches(heuristic_codes)
     if heuristic_matches:
         if len(heuristic_matches) == 1:
@@ -278,24 +332,56 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
     """Normalize selected payment rows against the current material baseline."""
 
     baseline = [row for row in items or [] if not int(row.get("is_excluded") or 0)]
-    unique_lines = {}
+    grouped_lines: dict[tuple[str, str, str], dict[str, list[dict]]] = {}
     for line in lines or []:
         if not isinstance(line, dict):
             continue
-        unique_lines.setdefault(_dedupe_key(source, line), line)
-    ordered_lines = sorted(
-        unique_lines.values(),
-        key=lambda line: (
-            str((line.get("evidence") or {}).get("document_id") or ""),
-            str((line.get("evidence") or {}).get("sheet") or ""),
-            int((line.get("evidence") or {}).get("row") or 0),
+        grouped_lines.setdefault(_dedupe_key(source, line), {}).setdefault(
+            _business_signature(line), []
+        ).append(line)
+    unique_lines = []
+    for locator in sorted(grouped_lines):
+        variants = grouped_lines[locator]
+        locator_conflict = len(variants) > 1
+        for signature in sorted(variants):
+            canonical = deepcopy(min(variants[signature], key=_canonical_json))
+            if locator_conflict:
+                canonical["_semantic_locator_conflict"] = True
+                canonical["_semantic_conflict_signature"] = digest(
+                    POLICY, "locator-conflict", locator, signature
+                )
+            unique_lines.append(canonical)
+
+    def order_key(line: dict) -> tuple:
+        evidence = _evidence(line)
+        row_number = _row_number(evidence.get("row"))
+        return (
+            str(evidence.get("document_id") or ""),
+            str(evidence.get("sheet") or ""),
+            0 if row_number is not None else 1,
+            row_number or 0,
+            str(evidence.get("row") or ""),
             str(line.get("waybill") or ""),
-        ),
+            _business_signature(line),
+        )
+
+    ordered_lines = sorted(
+        unique_lines,
+        key=order_key,
     )
     row_records = []
     for line in ordered_lines:
         targets, match_method, reason = _match_targets(baseline, line)
-        if len(targets) == 1:
+        locator_valid = _locator_is_valid(line)
+        if line.get("_semantic_locator_conflict"):
+            scope_status = "ambiguous"
+            match_method = "locator_conflict"
+            reason = "同一证据位置存在不同业务内容，仅供只读核对。"
+        elif not locator_valid:
+            scope_status = "ambiguous" if targets else "out_of_scope"
+            match_method = "malformed_locator"
+            reason = "证据位置缺失或行号无效，不能作为可采用事实。"
+        elif len(targets) == 1:
             scope_status = "in_scope"
         elif len(targets) > 1:
             scope_status = "ambiguous"
@@ -305,6 +391,10 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             scope_status = "out_of_scope"
         provenance = _provenance(source, line)
         stable_row_identity = _stable_row_identity(source, line, provenance)
+        if line.get("_semantic_conflict_signature"):
+            stable_row_identity["conflict_variant"] = str(
+                line["_semantic_conflict_signature"]
+            )
         material_targets = [_target(item) for item in targets]
         waybill = str(line.get("waybill") or "").strip()
         package_identity = (

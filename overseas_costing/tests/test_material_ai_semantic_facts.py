@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 import json
 
 import pytest
@@ -218,6 +219,87 @@ def test_duplicate_row_identity_is_coalesced_but_distinct_rows_for_one_sku_stay_
     assert len(ambiguous_physical) == 2
     assert {fact["scope_status"] for fact in ambiguous_physical} == {"ambiguous"}
     assert all(fact["default_eligible"] is False for fact in ambiguous_physical)
+
+
+def test_same_locator_conflicting_business_rows_are_order_independent_and_read_only():
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    source = {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}
+    first = _line(7, "WB-CONFLICT", "MWV101144")
+    first["amount"] = "100"
+    conflicting = {**first, "id": "CONFLICT-COPY", "amount": "200"}
+
+    facts = build_payment_facts(_items(), source, [first, conflicting])
+    reversed_facts = build_payment_facts(_items(), source, [conflicting, first])
+
+    assert facts == reversed_facts
+    physical = [fact for fact in facts if fact["fact_kind"] == "payment_physical"]
+    components = [
+        fact for fact in facts if fact["fact_kind"] == "payment_freight_component"
+    ]
+    assert len(physical) == 2
+    assert len(components) == 2
+    assert {fact["scope_status"] for fact in [*physical, *components]} == {"ambiguous"}
+    assert all(fact["allowed_actions"] == [] for fact in [*physical, *components])
+    assert {fact["monetary"]["amount"] for fact in components} == {"100", "200"}
+    assert not any(fact["fact_kind"] == "payment_freight_total" for fact in facts)
+
+
+@pytest.mark.parametrize(
+    ("codes", "expected_scope"),
+    [
+        (("MWV101144", "FOREIGN999"), "out_of_scope"),
+        (("MWV101144", "MWV101145"), "ambiguous"),
+    ],
+)
+def test_every_explicit_structured_code_must_resolve_to_the_same_target(codes, expected_scope):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    line = _line(9, "WB-MULTI-CODE", "")
+    line["cargo_text"] = ""
+    line["packing"]["material_code_hints"] = []
+    line["material_code"] = codes[0]
+    line["goods"] = [{"material_code": codes[1], "product_name": "薇武士 IP17 PRO"}]
+
+    facts = build_payment_facts(
+        _items(), {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}, [line]
+    )
+
+    physical = next(fact for fact in facts if fact["fact_kind"] == "payment_physical")
+    assert physical["scope_status"] == expected_scope
+    assert physical["default_eligible"] is False
+    assert physical["allowed_actions"] == []
+    assert not any(fact["fact_kind"] == "payment_freight_total" for fact in facts)
+    assert all(fact.get("allowed_actions") == [] for fact in facts)
+
+
+@pytest.mark.parametrize(
+    "malformed_evidence",
+    [
+        "not-a-mapping",
+        {"document_id": "DHL-MONTHLY", "sheet": "DHL快递", "row": "bad"},
+        {"document_id": "DHL-MONTHLY", "sheet": "DHL快递", "row": 11.9},
+        {"document_id": "DHL-MONTHLY", "sheet": "DHL快递", "row": Decimal("11.9")},
+    ],
+)
+def test_malformed_locator_is_fail_closed_without_aborting_other_rows(malformed_evidence):
+    from overseas_costing.services.material_ai_semantic_facts import build_payment_facts
+
+    source = {"id": "PAYMENT", "instance": "PROCESS", "approval_no": "PAY"}
+    valid = _line(10, "WB-VALID", "MWV101144")
+    malformed = _line(11, "WB-MALFORMED", "MWV101145")
+    malformed["evidence"] = malformed_evidence
+
+    facts = build_payment_facts(_items(), source, [malformed, valid])
+
+    valid_total = next(fact for fact in facts if fact["fact_kind"] == "payment_freight_total")
+    assert valid_total["monetary"] == {"amount": "3414.19", "currency": "RMB"}
+    malformed_facts = [
+        fact for fact in facts if fact.get("waybill") == "WB-MALFORMED"
+    ]
+    assert malformed_facts
+    assert all(fact["scope_status"] != "in_scope" for fact in malformed_facts)
+    assert all(fact["allowed_actions"] == [] for fact in malformed_facts)
 
 
 def test_same_sku_genuine_rows_with_same_waybill_are_ambiguous_and_not_totalled_twice():
