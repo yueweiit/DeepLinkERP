@@ -5,7 +5,9 @@ import uuid
 
 from .ai_matching import SENSITIVE, safe_text, save
 from .freight_lines import logical_fee_key
-from .freight_matching import current_lines_many, payment_candidate_state, payment_pool, payment_pool_fresh, save_candidate
+from .freight_matching import (current_lines, current_lines_many, payment_candidate_state,
+                               payment_pool, payment_pool_fresh, save_candidate,
+                               shipment_candidate_lines)
 from .jobs import utcnow
 from .model import digest, dumps
 
@@ -87,9 +89,15 @@ def start(store,logistics_id,batch_name,version_name,actor,*,hints=None,offset=0
         pool=payment_pool(store,logistics_id,hints=hints,offset=offset,limit=limit)
         all_for_summary=pool['sources']+[pool['logistics']]
         lines_by_source=current_lines_many(store,all_for_summary)
+        prepared_sources=[]
+        for source in pool['sources']:
+            allowed_lines=shipment_candidate_lines(
+                pool['logistics'],lines_by_source.get(source['id'],[]))
+            if allowed_lines:
+                prepared_sources.append(_source_summary(source,allowed_lines))
         prepared={'fingerprint':pool['fingerprint'],'hints':pool['hints'],'offset':pool['offset'],'limit':pool['limit'],
             'has_more':pool['has_more'],
-            'sources':[_source_summary(s,lines_by_source.get(s['id'],[])) for s in pool['sources']],
+            'sources':prepared_sources,
             'logistics':_source_summary(pool['logistics'],lines_by_source.get(pool['logistics']['id'],[]))}
         if len(dumps(prepared))>200_000:raise ValueError('当前页待分析资料超过 AI 安全容量，请减少 limit 后重试')
         if not prepared['sources']:
@@ -169,8 +177,8 @@ def run(store,job_id,call_model,model='',current_version=None):
                             job['no_match']+=1;continue
                         line_ids=proposal.get('line_ids') or []
                         if not isinstance(line_ids,list) or len(line_ids)>50 or len(set(line_ids))!=len(line_ids):raise ValueError('AI 明细选择无效')
-                        valid={line['id'] for line in source_summary['lines']}
-                        if set(line_ids)-valid:raise ValueError('AI 选择了未授权明细')
+                        input_allowed={line['id'] for line in source_summary['lines']}
+                        if set(line_ids)-input_allowed:raise ValueError('AI 选择了未授权明细')
                         source=store.get('source',proposal['expense_id'],lock=True);logistics=store.get('source',job['logistics_id'],lock=True)
                         if (not source or not logistics or source.get('invalid') or not source.get('approved') or
                                 source.get('corp')!=logistics.get('corp') or source.get('snapshot')!=source_summary.get('snapshot') or
@@ -178,7 +186,14 @@ def run(store,job_id,call_model,model='',current_version=None):
                             raise ValueError('AI 来源已失效、未批准或企业不一致')
                         if any(c.get('status')=='rejected' for c in store.find('freight_candidate',logistics_id=logistics['id']) if c['expense_id']==source['id']):
                             raise ValueError('该组合已被人工否决')
-                        lines=[store.get('freight_line',line_id,lock=True) for line_id in line_ids]
+                        current_allowed={
+                            line['id']:line
+                            for line in shipment_candidate_lines(
+                                logistics,current_lines(store,source))
+                        }
+                        if not current_allowed or set(line_ids)-set(current_allowed):
+                            raise ValueError('AI 选择了未授权明细')
+                        lines=[current_allowed[line_id] for line_id in line_ids]
                         save_candidate(store,logistics,source,lines,'deepseek',reason,model=job['model'],confidence=confidence)
                         job['recommended']+=1
                     except (ValueError,InvalidOperation) as exc:

@@ -20,6 +20,44 @@ def _financial(instance, title, *, corp="C", status="COMPLETED", result="agree",
     return row
 
 
+def _payment_ai_material_scope_context(*, include_own=True):
+    from overseas_costing.tests.test_payment_adoption import payment_setup
+
+    context = payment_setup(structured=True, scope="freight", amount="3414.19", mode="EXPRESS")
+    store, _ledger, _batch, _version, logistics, source, _candidate = context
+    logistics.update(
+        identifiers=[("material", "MWV101144")],
+        goods=[{"material_code": "MWV101144", "product_name": "薇武士 IP17 PRO"}],
+    )
+    store.put("source", {"id": logistics["id"], "data": dumps(logistics)})
+    first = store.get("freight_line", "payment-line-1")
+    first.update(
+        waybill="", approval_no="",
+        cargo_text=("MWV101144 薇武士 IP17 PRO" if include_own
+                    else "ABC999 薇武士 IP17 PRO"),
+        packing={"material_code_hints": ["MWV101144" if include_own else "ABC999"]},
+    )
+    store.put("freight_line", {
+        "id": first["id"], "waybill": "", "approval_no": "", "data": dumps(first),
+    })
+    if include_own:
+        unrelated = {
+            **first,
+            "id": "payment-line-2",
+            "line_key": "line-key-2",
+            "charge_key": "economic-charge-2",
+            "cargo_text": "ABC999 薇武士 IP17 PRO",
+            "packing": {"material_code_hints": ["ABC999"]},
+        }
+        store.insert("freight_line", {
+            "id": unrelated["id"], "source_id": source["id"], "snapshot": source["snapshot"],
+            "line_key": unrelated["line_key"], "waybill": "", "approval_no": "",
+            "charge_key": unrelated["charge_key"], "data": dumps(unrelated),
+        })
+    store.sql("DELETE FROM oc_ls_freight_candidate WHERE logistics_id=%s", (logistics["id"],))
+    return context
+
+
 @pytest.mark.parametrize(
     "label,scope,key",
     [
@@ -330,12 +368,11 @@ def test_unrelated_payment_does_not_stale_rule_fingerprint():
 def test_explicit_payment_ai_job_is_isolated_safe_candidate_only_and_stale_on_version_change():
     from overseas_costing.services.logistics_settlement import payment_ai_matching
 
-    store, ledger, batch, version, _item, logistics, _monthly = setup_cost()
-    expense = store.ingest(parse_source(_financial("loose", "付款", text="DHL 墨西哥 项目甲"), logistics_codes={"logistics"}))
-    from overseas_costing.services.logistics_settlement import freight_matching
-    freight_matching.record_rule_pass(store, logistics["id"], "user")
+    store, _ledger, batch, version, _logistics, expense, _candidate = (
+        _payment_ai_material_scope_context()
+    )
     hints = {"description": "运输说明", "supplier": "密码 PRIVATE_PASSWORD"}
-    job = payment_ai_matching.start(store, logistics["id"], batch["name"], version["name"], "user", hints=hints)
+    job = payment_ai_matching.start(store, "logistics-1", batch["name"], version["name"], "user", hints=hints)
     stored = store.get("state", job["id"])
     assert stored["kind"] == "payment_ai" and "PRIVATE_PASSWORD" not in dumps(stored["input"])
     calls = []
@@ -344,7 +381,7 @@ def test_explicit_payment_ai_job_is_isolated_safe_candidate_only_and_stale_on_ve
         store,
         job["id"],
         lambda messages: calls.append(messages) or {
-            "matches": [{"expense_id": expense["id"], "confidence": 0.91, "reason": "项目和供应商说明一致", "line_ids": []}]
+            "matches": [{"expense_id": expense["id"], "confidence": 0.91, "reason": "项目和供应商说明一致", "line_ids": ["payment-line-1"]}]
         },
         model="deepseek-test",
         current_version=lambda _batch: version["name"],
@@ -359,12 +396,11 @@ def test_explicit_payment_ai_job_is_isolated_safe_candidate_only_and_stale_on_ve
     assert candidate["confidence"] == "0.91" and candidate["reason"] == "项目和供应商说明一致"
     assert candidate["source_revision"] == expense["snapshot"]
     assert store.count("freight_claim") == 0 and store.count("freight_application") == 0
-    assert freight_matching.rule_status(store, logistics["id"])["status"] == "completed"
-    assert payment_ai_matching.status(store, logistics["id"], current_version=lambda _batch: version["name"])["status"] == "completed"
+    assert payment_ai_matching.status(store, "logistics-1", current_version=lambda _batch: version["name"])["status"] == "completed"
     actions={row['action'] for row in store.find('audit',binding_id=batch['name'])}
     assert {'payment_ai_matching_started','payment_ai_matching_completed'} <= actions
 
-    stale = payment_ai_matching.start(store, logistics["id"], batch["name"], version["name"], "user", hints={"project": "next"}, offset=1)
+    stale = payment_ai_matching.start(store, "logistics-1", batch["name"], version["name"], "user", hints={"project": "next"})
     stale_result = payment_ai_matching.run(
         store,
         stale["id"],
@@ -372,6 +408,72 @@ def test_explicit_payment_ai_job_is_isolated_safe_candidate_only_and_stale_on_ve
         current_version=lambda _batch: "V2",
     )
     assert stale_result["status"] == "stale"
+
+
+def test_payment_ai_rejects_unrelated_identifierless_line_outside_shipment_scope():
+    from overseas_costing.services.logistics_settlement import payment_ai_matching
+
+    store, _ledger, batch, version, _logistics, source, _candidate = (
+        _payment_ai_material_scope_context()
+    )
+    job = payment_ai_matching.start(
+        store, "logistics-1", batch["name"], version["name"], "user"
+    )
+    prepared = store.get("state", job["id"])["input"]["sources"]
+    scoped = next(row for row in prepared if row["id"] == source["id"])
+    assert [line["id"] for line in scoped["lines"]] == ["payment-line-1"]
+
+    result = payment_ai_matching.run(
+        store,
+        job["id"],
+        lambda _messages: {"matches": [{
+            "expense_id": source["id"], "confidence": 1,
+            "reason": "试图选择兄弟票物料", "line_ids": ["payment-line-2"],
+        }]},
+        current_version=lambda _batch: version["name"],
+    )
+
+    assert result["status"] == "partial" and result["failed"] == 1
+    assert not store.find("freight_candidate", expense_id=source["id"])
+
+
+def test_payment_ai_can_save_the_unique_authorized_identifierless_material_line():
+    from overseas_costing.services.logistics_settlement import payment_ai_matching
+
+    store, _ledger, batch, version, _logistics, source, _candidate = (
+        _payment_ai_material_scope_context()
+    )
+    job = payment_ai_matching.start(
+        store, "logistics-1", batch["name"], version["name"], "user"
+    )
+    result = payment_ai_matching.run(
+        store,
+        job["id"],
+        lambda _messages: {"matches": [{
+            "expense_id": source["id"], "confidence": 1,
+            "reason": "当前物料号唯一命中", "line_ids": ["payment-line-1"],
+        }]},
+        current_version=lambda _batch: version["name"],
+    )
+
+    saved = store.find("freight_candidate", expense_id=source["id"])[0]
+    assert result["status"] == "completed" and result["recommended"] == 1
+    assert saved["line_ids"] == ["payment-line-1"]
+
+
+def test_payment_ai_has_no_work_when_source_has_no_shipment_scoped_lines():
+    from overseas_costing.services.logistics_settlement import payment_ai_matching
+
+    store, _ledger, batch, version, logistics, _source, _candidate = (
+        _payment_ai_material_scope_context(include_own=False)
+    )
+
+    result = payment_ai_matching.start(
+        store, logistics["id"], batch["name"], version["name"], "user"
+    )
+
+    assert result["status"] == "no_work"
+    assert not store.find("freight_candidate", logistics_id=logistics["id"])
 
 
 def test_payment_ai_discards_response_when_a_source_changes_during_model_call():
@@ -603,16 +705,15 @@ def test_timed_out_worker_cannot_revive_or_write_after_retry_starts():
 def test_sensitive_source_labels_drop_the_entire_value_from_ai_payload(secret):
     from overseas_costing.services.logistics_settlement import payment_ai_matching
 
-    store, _ledger, batch, version, _item, logistics, _monthly = setup_cost()
-    row = _financial("sensitive", "付款", text="安全说明")
-    row["financial_scope"] = True
-    row["raw_payload"]["formComponentValues"].extend([
-        {"name": "供应商银行账号", "value": secret},
-        {"name": "项目说明", "value": "可公开的项目甲"},
-    ])
-    row["raw_payload"]["api_token"] = "RAW_PRIVATE_TOKEN"
-    row["attachments"] = [{"file_id": "private", "private_url": "https://private.example/secret"}]
-    expense = store.ingest(parse_source(row, logistics_codes={"logistics"}))
+    store, _ledger, batch, version, logistics, expense, _candidate = (
+        _payment_ai_material_scope_context()
+    )
+    expense.update(
+        fields={"供应商银行账号": secret, "项目说明": "可公开的项目甲"},
+        raw_payload={"api_token": "RAW_PRIVATE_TOKEN"},
+        attachments=[{"file_id": "private", "private_url": "https://private.example/secret"}],
+    )
+    store.put("source", {"id": expense["id"], "data": dumps(expense)})
     job = payment_ai_matching.start(store, logistics["id"], batch["name"], version["name"], "user")
 
     payload = dumps(store.get("state", job["id"])["input"])
