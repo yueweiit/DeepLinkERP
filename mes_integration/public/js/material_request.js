@@ -98,8 +98,8 @@ function refresh_mes_material_request_ui(frm) {
 	if (!is_mes_integration_enabled(frm)) {
 		frm.remove_custom_button(__("提交并发料"));
 		frm.remove_custom_button(__("发料并推送至DLM"));
+		frm.remove_custom_button(__("生成物料移动"));
 		frm.remove_custom_button(__("发料"), __("Create"));
-		return;
 	}
 
 	toggle_injection_molding_weight_fields(frm);
@@ -319,12 +319,10 @@ function mes_format_detail_qty(value) {
 }
 
 function add_custom_issue_stock_entry_button(frm) {
-
-	if (!is_mes_integration_enabled(frm)) {
-		return;
-	}
 	frm.remove_custom_button(__("提交并发料"));
 	frm.remove_custom_button(__("发料并推送至DLM"));
+	frm.remove_custom_button(__("生成物料移动"));
+	frm.remove_custom_button(__("发料"), __("Create"));
 
 	if (can_submit_and_issue_material_request(frm)) {
 		frm.add_custom_button(__("提交并发料"), function() {
@@ -343,14 +341,14 @@ function add_custom_issue_stock_entry_button(frm) {
 		return;
 	}
 
-	if (!can_create_issue_stock_entry(frm)) {
+	if (!can_create_material_movement(frm)) {
 		return;
 	}
 
-	frm.add_custom_button(__("发料"), function() {
+	frm.add_custom_button(__("生成物料移动"), function() {
 		open_issue_stock_entry(frm);
-	}, __("Create"));
-	frm.page.set_inner_btn_group_as_primary(__("Create"));
+	});
+	style_material_movement_button(frm);
 }
 
 function can_submit_and_issue_material_request(frm) {
@@ -363,6 +361,7 @@ function can_submit_and_issue_material_request(frm) {
 		frm.doc &&
 		frm.doc.docstatus === 0 &&
 		!frm.is_new() &&
+		is_mes_material_request(frm) &&
 		SUBMIT_AND_ISSUE_MATERIAL_REQUEST_TYPES.includes(frm.doc.material_request_type)
 	);
 }
@@ -388,6 +387,15 @@ function submit_and_issue_material_request(frm) {
 
 function can_submit_issue_and_push_to_dlm(frm) {
 	return can_create_issue_stock_entry(frm);
+}
+
+function is_mes_material_request(frm) {
+	const source = cstr(frm && frm.doc && frm.doc.custom_request_source).trim();
+	if (source) {
+		return source === "MES";
+	}
+
+	return cstr(frm && frm.doc && frm.doc.name).startsWith("MAT-MR-MES-");
 }
 
 function submit_issue_and_push_to_dlm(frm) {
@@ -931,10 +939,14 @@ function show_issue_stock_entry_prompt(frm) {
 }
 
 function can_create_issue_stock_entry(frm) {
-
-	if (!is_mes_integration_enabled(frm)) {
+	if (!is_mes_integration_enabled(frm) || !is_mes_material_request(frm)) {
 		return false;
 	}
+
+	return can_create_material_movement(frm);
+}
+
+function can_create_material_movement(frm) {
 	if (
 		frm.doc.docstatus !== 1 ||
 		frm.doc.status === "Stopped" ||
@@ -945,6 +957,15 @@ function can_create_issue_stock_entry(frm) {
 
 	const precision = frappe.defaults.get_default("float_precision");
 	return flt(frm.doc.per_ordered, precision) < 100;
+}
+
+function style_material_movement_button(frm) {
+	requestAnimationFrame(function() {
+		$(frm.page.wrapper)
+			.find('.page-actions button[data-label="%E7%94%9F%E6%88%90%E7%89%A9%E6%96%99%E7%A7%BB%E5%8A%A8"]')
+			.removeClass("btn-default btn-secondary btn-xs")
+			.addClass("btn-primary btn-sm");
+	});
 }
 
 function open_issue_stock_entry(frm) {

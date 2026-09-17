@@ -25,9 +25,9 @@ frappe.ui.form.on("Stock Entry", {
 		}
 		clear_manual_mes_receipt_stock_entry_no(frm);
 		sync_mes_stock_entry_fields(frm);
-		add_stock_entry_save_and_submit_button(frm);
-		add_push_to_mes_button(frm);
-		schedule_mes_status_display(frm);
+		load_mes_stock_entry_source(frm).then(function() {
+			refresh_mes_stock_entry_actions(frm);
+		});
 	},
 
 	validate: function(frm) {
@@ -39,6 +39,9 @@ frappe.ui.form.on("Stock Entry", {
 	items_add: function(frm, cdt, cdn) {
 		if (is_mes_integration_enabled(frm)) {
 			set_manufacturing_warehouse(frm, cdt, cdn);
+			load_mes_stock_entry_source(frm).then(function() {
+				refresh_mes_stock_entry_actions(frm);
+			});
 		}
 	},
 
@@ -103,6 +106,14 @@ function refresh_mes_stock_entry_ui(frm) {
 	remember_mes_receipt_stock_entry_no(frm);
 	show_mes_receipt_stock_entry_no(frm);
 	sync_mes_stock_entry_fields(frm);
+	frm.remove_custom_button(__("推送至DLM"));
+	remove_mes_status_badge(frm);
+	load_mes_stock_entry_source(frm).then(function() {
+		refresh_mes_stock_entry_actions(frm);
+	});
+}
+
+function refresh_mes_stock_entry_actions(frm) {
 	add_stock_entry_save_and_submit_button(frm);
 	add_push_to_mes_button(frm);
 	schedule_mes_status_display(frm);
@@ -126,9 +137,74 @@ function is_dlm_issue_stock_entry(frm) {
 	return frm && frm.doc && MES_DLM_STOCK_ENTRY_TYPES.includes(frm.doc.stock_entry_type);
 }
 
+function get_stock_entry_material_request_names(frm) {
+	return [...new Set((frm && frm.doc && frm.doc.items || [])
+		.map(function(row) {
+			return row && row.material_request;
+		})
+		.filter(Boolean))];
+}
+
+function load_mes_stock_entry_source(frm) {
+	const materialRequestNames = get_stock_entry_material_request_names(frm);
+	const cacheKey = materialRequestNames.join("\u0001");
+
+	if (
+		frm &&
+		frm._mes_stock_entry_source_cache_key === cacheKey &&
+		frm._mes_stock_entry_source_loaded
+	) {
+		return Promise.resolve(Boolean(frm._mes_source_stock_entry));
+	}
+
+	if (!frm) {
+		return Promise.resolve(false);
+	}
+
+	frm._mes_stock_entry_source_cache_key = cacheKey;
+	frm._mes_stock_entry_source_loaded = false;
+	frm._mes_source_stock_entry = false;
+
+	if (!materialRequestNames.length) {
+		frm._mes_stock_entry_source_loaded = true;
+		return Promise.resolve(false);
+	}
+
+	return frappe.db.get_list("Material Request", {
+		filters: {
+			name: ["in", materialRequestNames]
+		},
+		fields: ["name", "custom_request_source"],
+		limit_page_length: materialRequestNames.length
+	}).then(function(rows) {
+		const materialRequests = {};
+		(rows || []).forEach(function(row) {
+			materialRequests[row.name] = row;
+		});
+
+		frm._mes_source_stock_entry = materialRequestNames.some(function(name) {
+			const source = materialRequests[name] && materialRequests[name].custom_request_source;
+			return source ? source === "MES" : String(name).startsWith("MAT-MR-MES-");
+		});
+		frm._mes_stock_entry_source_loaded = true;
+		return frm._mes_source_stock_entry;
+	}).catch(function() {
+		frm._mes_source_stock_entry = false;
+		frm._mes_stock_entry_source_loaded = true;
+		return false;
+	});
+}
+
+function is_mes_source_stock_entry(frm) {
+	return Boolean(frm && frm._mes_stock_entry_source_loaded && frm._mes_source_stock_entry);
+}
+
 function can_push_stock_entry_to_dlm(frm) {
 
 	if (!is_mes_integration_enabled(frm)) {
+		return false;
+	}
+	if (!is_mes_source_stock_entry(frm)) {
 		return false;
 	}
 	return (
@@ -197,6 +273,9 @@ function save_and_submit_stock_entry(frm) {
 function can_save_submit_and_push_stock_entry_to_dlm(frm) {
 
 	if (!is_mes_integration_enabled(frm)) {
+		return false;
+	}
+	if (!is_mes_source_stock_entry(frm)) {
 		return false;
 	}
 	return (
@@ -349,11 +428,17 @@ frappe.ui.form.on("Stock Entry Detail", {
 	material_request: function(frm, cdt, cdn) {
 		set_manufacturing_warehouse(frm, cdt, cdn);
 		sync_mes_stock_entry_fields(frm);
+		load_mes_stock_entry_source(frm).then(function() {
+			refresh_mes_stock_entry_actions(frm);
+		});
 	},
 
 	material_request_item: function(frm, cdt, cdn) {
 		set_manufacturing_warehouse(frm, cdt, cdn);
 		sync_mes_stock_entry_fields(frm);
+		load_mes_stock_entry_source(frm).then(function() {
+			refresh_mes_stock_entry_actions(frm);
+		});
 	},
 
 	custom_material_request_no: function(frm) {
@@ -493,6 +578,11 @@ function display_mes_status(frm, attempt) {
 	}
 
 	if (!is_dlm_issue_stock_entry(frm)) {
+		remove_mes_status_badge(frm);
+		return;
+	}
+
+	if (!is_mes_source_stock_entry(frm)) {
 		remove_mes_status_badge(frm);
 		return;
 	}

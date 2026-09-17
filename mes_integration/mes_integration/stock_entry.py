@@ -31,6 +31,9 @@ def push_to_mes(stock_entry_name):
     if not is_dlm_issue_stock_entry(stock_entry):
         frappe.throw(frappe._("只有其他出库、工单发料、注塑发料可以推送至 DLM"))
 
+    if not is_mes_source_stock_entry(stock_entry):
+        frappe.throw(frappe._("只有 MES 来源的物料移动可以推送至 DLM"))
+
     if stock_entry.get("custom_mes_status") == "Pushed":
         message = frappe._("此库存移动单已推送至 MES，无需重复推送")
         create_mes_log(
@@ -157,6 +160,21 @@ def get_issue_material_request(stock_entry):
 def validate_stock_entry_for_issue_confirm(stock_entry):
     if not get_issue_material_request(stock_entry):
         frappe.throw(frappe._("请先关联原生 Material Request，再推送至 DLM"))
+
+    if not is_mes_source_stock_entry(stock_entry):
+        frappe.throw(frappe._("只有 MES 来源的物料移动可以推送至 DLM"))
+
+
+def is_mes_source_stock_entry(stock_entry):
+    """Return whether an issue Stock Entry came from a MES Material Request."""
+    material_request_name = get_issue_material_request(stock_entry)
+    if not material_request_name:
+        return False
+
+    material_request = frappe.get_cached_doc("Material Request", material_request_name)
+    from mes_integration.mes_integration.material_request import is_mes_material_request
+
+    return is_mes_material_request(material_request)
 
 
 def post_issue_confirm(payload, url=None):
@@ -319,6 +337,12 @@ def reset_mes_status(stock_entry_name):
         throw_mes_integration_disabled(stock_entry.get("company"))
 
     if stock_entry.get("custom_mes_status") == "Pushed":
+        if not is_mes_source_stock_entry(stock_entry):
+            return {
+                "status": "skipped",
+                "message": "手动物料移动无需重置 DLM 状态",
+            }
+
         stock_entry.check_permission("write")
         stock_entry.db_set("custom_mes_status", "Unpushed")
         frappe.logger().info(f"库存转移单 {stock_entry_name} 已修改，MES 状态重置为 Unpushed")

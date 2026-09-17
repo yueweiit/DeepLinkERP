@@ -136,7 +136,17 @@ function configure_batch_issue_dialog_fields(fields, is_transfer) {
 
 function can_batch_issue_material_request(doc) {
 	return doc.docstatus === 1 && doc.status !== "Stopped" && doc.status !== "Cancelled" &&
+		is_mes_material_request_list_doc(doc) &&
 		mes_issue_material_request_types.includes(doc.material_request_type) && flt(doc.per_ordered) < 100;
+}
+
+function is_mes_material_request_list_doc(doc) {
+	const source = String(doc.custom_request_source || "").trim();
+	if (source) {
+		return source === "MES";
+	}
+
+	return String(doc.name || "").startsWith("MAT-MR-MES-");
 }
 
 function get_batch_issue_rows(doc) {
