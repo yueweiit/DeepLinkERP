@@ -74,10 +74,10 @@ jobs:
           test -n "$DEPLOY_HOST"
           test -n "$DEPLOY_USER"
           if [ "$RESET_OPERATION" = "audit" ]; then
-            kwargs='{"dry_run": true, "include_all_versions": true}'
+            kwargs='{"dry_run": True, "include_all_versions": True}'
           else
             effective_run_id="${RESET_RUN_ID:-material-scope-reset-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
-            kwargs="{\"dry_run\": false, \"include_all_versions\": true, \"expected_plan_hash\": \"$RESET_PLAN_HASH\", \"run_id\": \"$effective_run_id\", \"raise_on_incomplete\": true}"
+            kwargs="{\"dry_run\": False, \"include_all_versions\": True, \"expected_plan_hash\": \"$RESET_PLAN_HASH\", \"run_id\": \"$effective_run_id\", \"raise_on_incomplete\": True}"
           fi
           ssh -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
