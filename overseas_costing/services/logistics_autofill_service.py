@@ -10,6 +10,7 @@ import re
 import signal
 import threading
 import time
+import unicodedata
 
 
 class SupplementBudgetExceeded(BaseException):
@@ -151,29 +152,98 @@ def _reconcile_purchase_allocations(rows: list[dict], items: list[dict], facts: 
             row["extra_json"] = json.dumps(row_metadata, ensure_ascii=False, default=str)
 
 
-def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | None:
+def _normalized_material_name(value: object) -> str:
+    return re.sub(
+        r"\s+", "", unicodedata.normalize("NFKC", str(value or ""))
+    ).casefold()
+
+
+def _display_material_code(value: object) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or ""))).strip()
+
+
+def _normalized_material_code(value: object) -> str:
+    return _display_material_code(value).casefold()
+
+
+def _scope_source_fingerprint(source: dict, goods: list[dict]) -> str:
+    payload = {
+        "source_id": str(source.get("source_id") or ""),
+        "source_hash": str(source.get("source_hash") or source.get("content_hash") or ""),
+        "approval_no": str(source.get("approval_no") or ""),
+        "goods": [
+            {
+                "material_code": _normalized_material_code(row.get("material_code")),
+                "product_name": _normalized_material_name(row.get("product_name")),
+                "quantity": str(row.get("quantity") or ""),
+                "unit": str(row.get("unit") or ""),
+            }
+            for row in goods
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def build_logistics_reconciliation(
+    items: list[dict], source: dict, *, reset_manual_scope: bool = False
+) -> dict | None:
     """Build an authoritative logistics-scope draft without mutating inputs."""
     if source.get("approval_role") != "international_logistics":
         return None
     goods = [map_oa_row_to_item(row) for row in _approval_goods_rows(source)]
+    by_name: dict[str, list[dict]] = {}
+    for item in items:
+        normalized_name = _normalized_material_name(item.get("product_name"))
+        if normalized_name:
+            by_name.setdefault(normalized_name, []).append(item)
+    for row in goods:
+        if row.get("material_code"):
+            row["material_code"] = _display_material_code(row.get("material_code"))
+            continue
+        matches = by_name.get(_normalized_material_name(row.get("product_name")), [])
+        codes = {str(item.get("material_code") or "").strip() for item in matches
+                 if str(item.get("material_code") or "").strip()}
+        if len(matches) != 1 or len(codes) != 1:
+            return None
+        row["material_code"] = next(iter(codes))
+        row["product_name"] = matches[0].get("product_name") or row.get("product_name")
     if not goods or any(not row.get("material_code") or Decimal(str(row.get("quantity") or 0)) <= 0 for row in goods):
         return None
     for item in items:
-        if not extra(item).get("logistics_row", {}).get("identity") and item.get("actual_shipped_qty_mode") == "MANUAL_CONFIRMED" and sum(str(g.get("material_code") or "").casefold() == str(item.get("material_code") or "").casefold() for g in goods) > 1:
+        if (not reset_manual_scope
+                and not extra(item).get("logistics_row", {}).get("identity")
+                and item.get("actual_shipped_qty_mode") == "MANUAL_CONFIRMED"
+                and sum(_normalized_material_code(g.get("material_code"))
+                        == _normalized_material_code(item.get("material_code"))
+                        for g in goods) > 1):
             message = f"{item.get('material_code')} 的现有人工实发数量属于聚合行，无法直接拆分；已保留现有物料，请先核对这项人工差异。"
             return {"proposal_id": "logistics-manual-conflict", "proposal_type": "logistics_reconcile", "result_origin": "SYSTEM", "default_selected": False,
                     "conflict": True, "blocked": True, "reason": message, "source_refs": [],
                     "payload": {"rows": deepcopy(items), "unresolved": [{"message": message}], "original_item_names": [row["name"] for row in items]}}
     by_code: dict[str, list[dict]] = {}
     for item in items:
-        by_code.setdefault(str(item.get("material_code") or "").casefold(), []).append(item)
-    rows, used, unresolved = [], set(), []
+        by_code.setdefault(_normalized_material_code(item.get("material_code")), []).append(item)
+    rows, used, unresolved, name_mismatches = [], set(), [], []
     facts: dict[str, dict] = {}
     for index, goods_row in enumerate(goods, 1):
-        code = str(goods_row["material_code"])
-        identity = f"{source['source_id']}:{index}:{code}"
+        source_code = _display_material_code(goods_row["material_code"])
+        code_key = _normalized_material_code(source_code)
+        matches = by_code.get(code_key, [])
+        code = _display_material_code(
+            (matches[0] if matches else {}).get("material_code") or source_code)
+        identity = f"{source['source_id']}:{index}:{code_key}"
         key = "logistics:" + hashlib.sha256(identity.encode()).hexdigest()[:32]
-        matches = by_code.get(code.casefold(), [])
+        canonical_by_name: dict[str, str] = {}
+        for match in matches:
+            display_name = str(match.get("product_name") or "").strip()
+            if display_name:
+                canonical_by_name.setdefault(_normalized_material_name(display_name), display_name)
+        shared_canonical_name = (
+            next(iter(canonical_by_name.values())) if len(canonical_by_name) == 1 else ""
+        )
+        canonical_item_name = str((matches[0] if matches else {}).get("name") or "")
         old = next((row for row in matches if row.get("stable_line_key") == key or extra(row).get("logistics_row", {}).get("identity") == key), None)
         if old is None:
             # Distinct purchases must not be silently resolved by SKU alone.
@@ -184,6 +254,8 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
             remaining = [row for row in matches if row.get("name") not in used]
             exact = [row for row in remaining if Decimal(str(row.get("actual_shipped_qty") or row.get("quantity") or 0)) == Decimal(str(goods_row["quantity"]))]
             old = (exact or remaining or matches or [{}])[0]
+        if len(canonical_by_name) > 1 and not old:
+            return None
         metadata = extra(old)
         prior = metadata.get("logistics_row") or {}
         fact = prior.get("purchase_fact") or {field: old.get(field) for field in PURCHASE_FIELDS}
@@ -196,10 +268,21 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
             used.add(retained_name)
         row = {field: old.get(field) for field in (*PURCHASE_FIELDS, *PHYSICAL_FIELDS,
                 "project_collection", "manual_override_flag", "manual_override_reason", "spec_model")}
+        source_name = str(goods_row.get("product_name") or "").strip()
+        canonical_name = str(old.get("product_name") or shared_canonical_name or "").strip()
+        if (source_name and canonical_name
+                and _normalized_material_name(source_name)
+                != _normalized_material_name(canonical_name)):
+            name_mismatches.append({
+                "material_code": code,
+                "source_name": source_name,
+                "canonical_name": canonical_name,
+                "item_name": retained_name or canonical_item_name,
+            })
         row.update({"name": retained_name or f"draft-{key[10:]}", "stable_line_key": (old.get("stable_line_key") if retained_name else None) or key,
                     "unit": old.get('unit') or goods_row.get('unit') or '',
                     "row_no": index, "material_code": code, "_review_origin": "source",
-                    "product_name": goods_row.get("product_name") or old.get("product_name") or code,
+                    "product_name": canonical_name or source_name or code,
                     "spec_model": goods_row.get("spec_model") or old.get("spec_model"),
                     "actual_shipped_qty": str(goods_row["quantity"]),
                     "actual_shipped_qty_mode": "EXPLICIT_SOURCE",
@@ -212,7 +295,8 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
                         if "_existing_stable_line_key" in old
                         else old.get("stable_line_key")
                     )})
-        if retained_name and str(old.get("actual_shipped_qty_mode") or "") == "MANUAL_CONFIRMED":
+        if (not reset_manual_scope and retained_name
+                and str(old.get("actual_shipped_qty_mode") or "") == "MANUAL_CONFIRMED"):
             row["actual_shipped_qty"] = old.get("actual_shipped_qty")
             row["actual_shipped_qty_mode"] = "MANUAL_CONFIRMED"
             row["shipped_uom"] = old.get("shipped_uom")
@@ -234,7 +318,7 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
     unmatched = [row for row in items if str(row.get("name")) not in used]
     excluded_item_names = []
     for original in unmatched:
-        if not _manual_scope_protected(original):
+        if reset_manual_scope or not _manual_scope_protected(original):
             excluded_item_names.append(str(original.get("name") or ""))
             continue
         row = deepcopy(original)
@@ -267,10 +351,26 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
             "payload": {"rows": rows, "unresolved": unresolved,
                         "original_item_names": [row["name"] for row in items],
                         "excluded_item_names": sorted(name for name in excluded_item_names if name),
-                        "scope_status": "AUTHORITATIVE"}}
+                        "scope_status": "AUTHORITATIVE",
+                        "scope_origin": "international_logistics",
+                        "active_item_names": sorted(
+                            str(row.get("_existing_name") or "") for row in rows
+                            if str(row.get("_existing_name") or "")
+                        ),
+                        "restored_item_names": [],
+                        "name_mismatches": name_mismatches,
+                        "source_fact_ids": [
+                            f"{source.get('source_id')}:{index}"
+                            for index, _row in enumerate(goods, 1)
+                        ],
+                        "source_fingerprint": _scope_source_fingerprint(source, goods)}}
 
 
-def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, current: list[dict], run_id: str) -> list[str]:
+def apply_reconciliation(
+    frappe, proposal: dict, *, batch: str, version: str,
+    current: list[dict], run_id: str, update_batch_count: bool = True,
+    initialization_reset: bool = False,
+) -> list[str]:
     """Called only inside the review transaction with locked, fingerprinted rows."""
     from overseas_costing.services.material_input_service import GRID_FIELDS
     payload = proposal["payload"]
@@ -289,7 +389,7 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
     if not all(keys) or len(set(keys)) != len(keys):
         raise ValueError("物流行身份重复或缺失。")
     settled = {row['name']:row for row in current if extra(row).get('settlement_cargo')}
-    if settled:
+    if settled and not initialization_reset:
         if len(rows) != len(current) or any(not row.get('_existing_name') for row in rows):
             raise ValueError('已采用物流结算货物清单，不能从装箱来源拆分或新增结算物料行；请核对采购支出关联。')
         for row in rows:
@@ -324,19 +424,23 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
             frappe.db.set_value("Overseas Cost Item", row["_existing_name"], values, update_modified=True)
         else:
             created.append(frappe.get_doc({"doctype": "Overseas Cost Item", **values}).insert(ignore_permissions=True).name)
-    frappe.db.set_value("Overseas Cost Batch", batch, "item_count", len(rows), update_modified=False)
+    if update_batch_count:
+        frappe.db.set_value("Overseas Cost Batch", batch, "item_count", len(rows), update_modified=False)
     return created
 
 
-def plan_authoritative_scope_membership(items: list[dict], proposal: dict) -> dict:
+def plan_authoritative_scope_membership(
+    items: list[dict], proposal: dict, *, reset_all_existing: bool = False
+) -> dict:
     """Return idempotent soft-exclusion changes for an existing current version."""
 
     payload = proposal.get('payload') or {}
     eligible = {
         str(item.get('name') or ''): item
         for item in items or []
-        if str(item.get('name') or '')
-        and (
+        if str(item.get('name') or '') and (
+            reset_all_existing
+            or
             not int(item.get('is_excluded') or 0)
             or str(item.get('exclusion_reason') or '') == AUTO_SCOPE_EXCLUSION_REASON
         )
@@ -355,99 +459,52 @@ def plan_authoritative_scope_membership(items: list[dict], proposal: dict) -> di
     exclude = sorted(
         name for name in excluded if not int(eligible[name].get('is_excluded') or 0)
     )
-    restore = sorted(
-        name for name in retained
+    restore = sorted(name for name in retained
         if int(eligible[name].get('is_excluded') or 0)
-        and str(eligible[name].get('exclusion_reason') or '') == AUTO_SCOPE_EXCLUSION_REASON
-    )
+        and (reset_all_existing
+             or str(eligible[name].get('exclusion_reason') or '') == AUTO_SCOPE_EXCLUSION_REASON))
     active = sorted(
         name for name in retained
         if name not in excluded
     )
-    return {'exclude':exclude,'restore':restore,'active_item_names':active}
+    create_rows = [deepcopy(row) for row in payload.get('rows') or []
+                   if not str(row.get('_existing_name') or '')]
+    plan = {
+        'exclude':exclude,
+        'restore':restore,
+        'active_item_names':active,
+        'create_rows':create_rows,
+        'name_mismatches':deepcopy(payload.get('name_mismatches') or []),
+        'scope_status':str(payload.get('scope_status') or 'AUTHORITATIVE'),
+        'scope_origin':str(payload.get('scope_origin') or 'international_logistics'),
+        'source_fact_ids':deepcopy(payload.get('source_fact_ids') or []),
+        'source_fingerprint':str(payload.get('source_fingerprint') or ''),
+    }
+    plan['plan_hash'] = hashlib.sha256(json.dumps(
+        plan, ensure_ascii=False, sort_keys=True, default=str
+    ).encode()).hexdigest()
+    return plan
 
 
 def backfill_current_material_scopes(batch_names=None, *, dry_run=True, limit=500):
-    """Repair current-version material scopes from locally archived logistics forms.
+    """Compatibility wrapper for the safer current-version reset audit."""
 
-    The default is deliberately a dry run.  This command never creates rows;
-    payment-only additions remain an explicit AI-preview decision.
-    """
-
-    import frappe
-    from .material_input_service import GRID_FIELDS
-    from .packing_snapshot_service import list_material_ai_sources
-
-    if batch_names is None:
-        filters={'current_version':['!=','']}
-        batches=frappe.get_all(
-            'Overseas Cost Batch',filters=filters,
-            fields=['name','current_version'],order_by='name asc',
-            limit_page_length=max(1,int(limit or 100000)),
-        )
-    else:
-        if isinstance(batch_names,str):
-            batch_names=[batch_names]
-        requested=[str(value or '').strip() for value in batch_names if str(value or '').strip()]
-        batches=frappe.get_all(
-            'Overseas Cost Batch',filters={'name':['in',requested]},
-            fields=['name','current_version'],order_by='name asc',
-            limit_page_length=max(1,len(requested)),
-        )
-    summary={'dry_run':bool(dry_run),'checked':0,'changed':0,'excluded':0,'restored':0,
-             'batches':[],'skipped':[]}
-    for batch in batches:
-        batch_name=str(batch.get('name') or '')
-        version=str(batch.get('current_version') or '')
-        summary['checked']+=1
-        try:
-            sources=list_material_ai_sources(batch_name,version_name=version,original_scope=True)
-            logistics=next((source for source in sources
-                if source.get('approval_role')=='international_logistics'
-                and source.get('source_kind')=='approval_form'
-                and source.get('available',True) and not source.get('excluded')),None)
-            if not logistics:
-                summary['skipped'].append({'batch':batch_name,'reason':'未找到可用的国际物流正文。'})
-                continue
-            all_items=frappe.get_all(
-                'Overseas Cost Item',filters={'batch':batch_name,'version':version},
-                fields=list(dict.fromkeys([*GRID_FIELDS,'extra_json','manual_override_flag',
-                    'manual_override_reason','is_excluded','exclusion_reason'])),
-                order_by='row_no asc,name asc',limit_page_length=10000,
-            )
-            eligible=[item for item in all_items if
-                not int(item.get('is_excluded') or 0)
-                or str(item.get('exclusion_reason') or '')==AUTO_SCOPE_EXCLUSION_REASON]
-            proposal=build_logistics_reconciliation(eligible,logistics)
-            if not proposal or proposal.get('blocked') or not (proposal.get('payload') or {}).get('rows'):
-                summary['skipped'].append({'batch':batch_name,'reason':'国际物流物料表无法唯一确定。'})
-                continue
-            plan=plan_authoritative_scope_membership(all_items,proposal)
-            if not plan['exclude'] and not plan['restore']:
-                continue
-            summary['changed']+=1
-            summary['excluded']+=len(plan['exclude'])
-            summary['restored']+=len(plan['restore'])
-            summary['batches'].append({'batch':batch_name,'version':version,**plan})
-            if dry_run:
-                continue
-            timestamp=datetime.now().isoformat(timespec='seconds')
-            for name in plan['exclude']:
-                frappe.db.set_value('Overseas Cost Item',name,{
-                    'is_excluded':1,'excluded_at':timestamp,'excluded_by':'system',
-                    'exclusion_reason':AUTO_SCOPE_EXCLUSION_REASON,
-                },update_modified=True)
-            for name in plan['restore']:
-                frappe.db.set_value('Overseas Cost Item',name,{
-                    'is_excluded':0,'excluded_at':None,'excluded_by':'','exclusion_reason':'',
-                },update_modified=True)
-            frappe.db.set_value('Overseas Cost Batch',batch_name,{
-                'item_count':len(plan['active_item_names']),
-                'status':'Dirty','confirm_status':'Pending','writeback_status':'Not Started',
-            },update_modified=True)
-        except Exception as error:
-            summary['skipped'].append({'batch':batch_name,'reason':str(error)[:500]})
-    return summary
+    from .material_scope_reset_service import reset_all_material_scopes
+    if not dry_run:
+        raise ValueError('正式执行需先调用 reset_all_material_scopes 生成只读计划哈希。')
+    result = reset_all_material_scopes(
+        batch_names=batch_names, dry_run=True,
+        include_all_versions=False, limit=limit)
+    return {
+        'dry_run':True,
+        'checked':result.get('checked_versions',0),
+        'changed':result.get('changed_versions',0),
+        'excluded':result.get('excluded',0),
+        'restored':result.get('restored',0),
+        'batches':result.get('entries') or [],
+        'skipped':result.get('skipped') or [],
+        'plan_hash':result.get('plan_hash'),
+    }
 
 
 def selected_carrier(candidates: list[dict], decisions: list[dict]) -> str:

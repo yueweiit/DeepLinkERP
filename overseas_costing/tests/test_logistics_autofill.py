@@ -2,6 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,6 +90,246 @@ def test_authoritative_logistics_rows_soft_exclude_unmatched_purchase_materials(
     assert proposal["payload"]["scope_status"] == "AUTHORITATIVE"
 
 
+def test_authoritative_logistics_code_wins_without_overwriting_canonical_name():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "I-144", "material_code": "MWV101144",
+         "product_name": "薇武士 IP17 PRO", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+        {"name": "I-145", "material_code": "MWV101145",
+         "product_name": "薇武士 IP17 PRO MAX", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-78258:form",
+        "source_hash": "source-hash-78258",
+        "approval_role": "international_logistics",
+        "approval_no": "202607211417000078258",
+        "source_label": "国际物流正文",
+        "form_fields": {"货物信息": [{
+            "物料编码": "MWV101144", "物料名称": "MHA超队模具",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source)
+
+    assert [row["material_code"] for row in proposal["payload"]["rows"]] == ["MWV101144"]
+    assert proposal["payload"]["rows"][0]["product_name"] == "薇武士 IP17 PRO"
+    assert proposal["payload"]["excluded_item_names"] == ["I-145"]
+    assert proposal["payload"]["name_mismatches"] == [{
+        "material_code": "MWV101144",
+        "source_name": "MHA超队模具",
+        "canonical_name": "薇武士 IP17 PRO",
+        "item_name": "I-144",
+    }]
+    assert proposal["payload"]["scope_origin"] == "international_logistics"
+    assert proposal["payload"]["source_fingerprint"]
+
+
+def test_code_uses_shared_purchase_name_even_when_purchase_rows_are_ambiguous():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "P-1", "material_code": "SKU-1", "product_name": "规范名称",
+         "quantity": 1, "actual_shipped_qty": 1, "extra_json": "{}"},
+        {"name": "P-2", "material_code": "SKU-1", "product_name": "规范名称",
+         "quantity": 2, "actual_shipped_qty": 2, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-NAME:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-NAME",
+        "form_fields": {"货物信息": [{
+            "物料编码": "SKU-1", "物料名称": "错误名称", "数量": 3, "单位": "个",
+        }]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source, reset_manual_scope=True)
+
+    assert proposal["payload"]["rows"][0]["product_name"] == "规范名称"
+    assert proposal["payload"]["name_mismatches"][0]["source_name"] == "错误名称"
+
+
+def test_material_code_matching_normalizes_width_case_and_whitespace():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [{
+        "name": "I-144", "material_code": "MWV101144",
+        "product_name": "规范名称", "quantity": 1,
+        "actual_shipped_qty": 1, "extra_json": "{}",
+    }]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-CODE:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-CODE",
+        "form_fields": {"货物信息": [{
+            "物料编码": " ｍｗｖ１０１１４４ ", "物料名称": "错误名称",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source, reset_manual_scope=True)
+
+    assert proposal["payload"]["rows"][0]["material_code"] == "MWV101144"
+    assert proposal["payload"]["rows"][0]["product_name"] == "规范名称"
+
+
+def test_conflicting_existing_names_for_one_code_are_not_replaced_by_source_name():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "P-1", "material_code": "SKU-1", "product_name": "规范名称 A",
+         "quantity": 1, "actual_shipped_qty": 1, "extra_json": "{}"},
+        {"name": "P-2", "material_code": "SKU-1", "product_name": "规范名称 B",
+         "quantity": 1, "actual_shipped_qty": 1, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-CONFLICT:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-CONFLICT",
+        "form_fields": {"货物信息": [{
+            "物料编码": "SKU-1", "物料名称": "错误名称", "数量": 2, "单位": "个",
+        }]},
+    }
+
+    assert build_logistics_reconciliation(
+        items, source, reset_manual_scope=True) is None
+
+
+def test_initialization_reset_does_not_protect_old_manual_rows():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "I-144", "material_code": "MWV101144", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+        {"name": "I-MANUAL", "material_code": "MWV101145", "quantity": 1,
+         "actual_shipped_qty": 1, "manual_override_flag": 1,
+         "manual_override_reason": "测试期人工加入", "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-1:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-1",
+        "source_label": "国际物流正文",
+        "form_fields": {"货物信息": [{
+            "物料编码": "MWV101144", "物料名称": "IP17 PRO",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source, reset_manual_scope=True)
+
+    assert proposal["payload"]["excluded_item_names"] == ["I-MANUAL"]
+    assert [row["material_code"] for row in proposal["payload"]["rows"]] == ["MWV101144"]
+
+
+def test_initialization_reset_replaces_old_manual_quantity_with_logistics_quantity():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [{
+        "name": "I-144", "material_code": "MWV101144", "quantity": 9,
+        "actual_shipped_qty": 9, "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "箱", "extra_json": "{}",
+    }]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-QTY:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-QTY",
+        "form_fields": {"货物信息": [{
+            "物料编码": "MWV101144", "物料名称": "IP17 PRO",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source, reset_manual_scope=True)
+    row = proposal["payload"]["rows"][0]
+
+    assert row["actual_shipped_qty"] == "1"
+    assert row["actual_shipped_qty_mode"] == "EXPLICIT_SOURCE"
+    assert row["shipped_uom"] == "套"
+
+
+def test_logistics_row_without_code_uses_only_unique_exact_normalized_name():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "I-144", "material_code": "MWV101144",
+         "product_name": "薇 武士 IP17 PRO", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+        {"name": "I-145", "material_code": "MWV101145",
+         "product_name": "薇武士 IP17 PRO MAX", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-NAME:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-NAME",
+        "form_fields": {"货物信息": [{
+            "物料名称": " 薇武士  ip17 pro ", "数量": 1, "单位": "套",
+        }]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source, reset_manual_scope=True)
+
+    assert proposal["payload"]["scope_status"] == "AUTHORITATIVE"
+    assert proposal["payload"]["rows"][0]["material_code"] == "MWV101144"
+    assert proposal["payload"]["rows"][0]["product_name"] == "薇 武士 IP17 PRO"
+    assert proposal["payload"]["excluded_item_names"] == ["I-145"]
+
+
+def test_logistics_row_without_code_and_ambiguous_name_is_not_authoritative():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "I-1", "material_code": "SKU-1", "product_name": "同名物料",
+         "quantity": 1, "actual_shipped_qty": 1, "extra_json": "{}"},
+        {"name": "I-2", "material_code": "SKU-2", "product_name": "同 名 物料",
+         "quantity": 1, "actual_shipped_qty": 1, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-DUP:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-DUP",
+        "form_fields": {"货物信息": [{"物料名称": "同名物料", "数量": 1, "单位": "个"}]},
+    }
+
+    assert build_logistics_reconciliation(items, source, reset_manual_scope=True) is None
+
+
+def test_initialization_apply_can_reset_test_settlement_rows():
+    from overseas_costing.services.logistics_autofill_service import (
+        apply_reconciliation, build_logistics_reconciliation,
+    )
+
+    items = [
+        {"name": "I-144", "material_code": "MWV101144", "product_name": "IP17 PRO",
+         "quantity": 1, "actual_shipped_qty": 1,
+         "extra_json": json.dumps({"settlement_cargo": {"source": "test"}})},
+        {"name": "I-145", "material_code": "MWV101145", "product_name": "IP17 PRO MAX",
+         "quantity": 1, "actual_shipped_qty": 1, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-RESET:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-RESET",
+        "form_fields": {"货物信息": [{
+            "物料编码": "MWV101144", "物料名称": "IP17 PRO",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+    proposal = build_logistics_reconciliation(items, source, reset_manual_scope=True)
+    writes = []
+
+    class DB:
+        @staticmethod
+        def set_value(doctype, name, values, **_kwargs):
+            writes.append((doctype, name, values))
+
+    apply_reconciliation(
+        SimpleNamespace(db=DB()), proposal, batch="B-1", version="V-1",
+        current=items, run_id="RESET-1", update_batch_count=False,
+        initialization_reset=True,
+    )
+
+    excluded = next(values for doctype, name, values in writes
+                    if doctype == "Overseas Cost Item" and name == "I-145")
+    assert excluded["is_excluded"] == 1
+
+
 def test_ai_review_uses_authoritative_logistics_scope_when_it_contracts_existing_rows():
     from overseas_costing.services.material_ai_fill_service import _use_logistics_reconciliation
 
@@ -161,7 +402,51 @@ def test_authoritative_scope_backfill_plan_restores_only_previous_system_exclusi
         'exclude':['I-REMOVE'],
         'restore':['I-RESTORE'],
         'active_item_names':['I-KEEP','I-RESTORE'],
+        'create_rows':[],
+        'name_mismatches':[],
+        'scope_status':'AUTHORITATIVE',
+        'scope_origin':'international_logistics',
+        'source_fact_ids':[],
+        'source_fingerprint':'',
+        'plan_hash':plan['plan_hash'],
     }
+
+
+def test_scope_reset_plan_includes_manually_excluded_rows_and_missing_logistics_rows():
+    from overseas_costing.services import logistics_autofill_service as service
+
+    items = [
+        {'name':'I-KEEP','material_code':'SKU-KEEP','is_excluded':0},
+        {'name':'I-OLD-MANUAL','material_code':'SKU-OLD','is_excluded':1,
+         'exclusion_reason':'人工排除'},
+    ]
+    proposal = {
+        'payload': {
+            'scope_status':'AUTHORITATIVE',
+            'scope_origin':'international_logistics',
+            'source_fact_ids':['LOG:1','LOG:2'],
+            'source_fingerprint':'SOURCE-FP',
+            'name_mismatches':[],
+            'original_item_names':['I-KEEP','I-OLD-MANUAL'],
+            'excluded_item_names':['I-OLD-MANUAL'],
+            'rows':[
+                {'_existing_name':'I-KEEP','material_code':'SKU-KEEP'},
+                {'_existing_name':'','name':'draft-new','material_code':'SKU-NEW'},
+            ],
+        },
+    }
+
+    plan = service.plan_authoritative_scope_membership(
+        items, proposal, reset_all_existing=True)
+
+    assert plan['exclude'] == []
+    assert plan['restore'] == []
+    assert [row['material_code'] for row in plan['create_rows']] == ['SKU-NEW']
+    assert plan['active_item_names'] == ['I-KEEP']
+    assert plan['scope_status'] == 'AUTHORITATIVE'
+    assert plan['source_fact_ids'] == ['LOG:1','LOG:2']
+    assert plan['source_fingerprint'] == 'SOURCE-FP'
+    assert plan['plan_hash']
 
 def test_carrier_decision_selects_final_freight_without_choosing_cheapest():
     from overseas_costing.services.material_ai_fill_service import build_approval_fee_proposals
