@@ -19,6 +19,10 @@ on:
         description: Optional stable run id for resuming an apply run
         required: false
         type: string
+      batch_name:
+        description: Optional single batch name for a focused audit or apply
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -34,6 +38,7 @@ jobs:
           RESET_OPERATION: ${{ inputs.operation }}
           RESET_PLAN_HASH: ${{ inputs.plan_hash }}
           RESET_RUN_ID: ${{ inputs.run_id }}
+          RESET_BATCH_NAME: ${{ inputs.batch_name }}
         run: |
           set -euo pipefail
           if [ "$RESET_OPERATION" = "apply" ]; then
@@ -45,6 +50,12 @@ jobs:
           if [ -n "$RESET_RUN_ID" ]; then
             [[ "$RESET_RUN_ID" =~ ^[A-Za-z0-9._:-]{1,100}$ ]] || {
               echo "run_id contains unsupported characters" >&2
+              exit 1
+            }
+          fi
+          if [ -n "$RESET_BATCH_NAME" ]; then
+            [[ "$RESET_BATCH_NAME" =~ ^[A-Za-z0-9._-]{1,140}$ ]] || {
+              echo "batch_name contains unsupported characters" >&2
               exit 1
             }
           fi
@@ -69,15 +80,21 @@ jobs:
           RESET_OPERATION: ${{ inputs.operation }}
           RESET_PLAN_HASH: ${{ inputs.plan_hash }}
           RESET_RUN_ID: ${{ inputs.run_id }}
+          RESET_BATCH_NAME: ${{ inputs.batch_name }}
         run: |
           set -euo pipefail
           test -n "$DEPLOY_HOST"
           test -n "$DEPLOY_USER"
+          if [ -n "$RESET_BATCH_NAME" ]; then
+            batch_arg=", \"batch_names\": [\"$RESET_BATCH_NAME\"]"
+          else
+            batch_arg=""
+          fi
           if [ "$RESET_OPERATION" = "audit" ]; then
-            kwargs='{"dry_run": True, "include_all_versions": True}'
+            kwargs="{\"dry_run\": True, \"include_all_versions\": True$batch_arg}"
           else
             effective_run_id="${RESET_RUN_ID:-material-scope-reset-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
-            kwargs="{\"dry_run\": False, \"include_all_versions\": True, \"expected_plan_hash\": \"$RESET_PLAN_HASH\", \"run_id\": \"$effective_run_id\", \"raise_on_incomplete\": True}"
+            kwargs="{\"dry_run\": False, \"include_all_versions\": True, \"expected_plan_hash\": \"$RESET_PLAN_HASH\", \"run_id\": \"$effective_run_id\", \"raise_on_incomplete\": True$batch_arg}"
           fi
           ssh -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \

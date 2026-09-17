@@ -185,12 +185,20 @@ def build_reset_entry(
         "extra_json", "manual_override_flag", "manual_override_reason",
         *PURCHASE_FIELDS, *PHYSICAL_FIELDS,
     }
-    updated = sorted(name for name, row in retained.items()
-                     if name in existing and any(
-                         not _projected_value_matches(
-                             field, existing[name].get(field), row.get(field),
-                         )
-                         for field in update_fields))
+    updated_item_fields = {
+        name: sorted(
+            field for field in update_fields
+            if not _projected_value_matches(
+                field, existing[name].get(field), row.get(field),
+            )
+        )
+        for name, row in retained.items()
+        if name in existing
+    }
+    updated_item_fields = {
+        name: fields for name, fields in updated_item_fields.items() if fields
+    }
+    updated = sorted(updated_item_fields)
     entry = {
         **{key: deepcopy(target.get(key)) for key in (
             "batch", "version", "current_version", "is_current", "version_status")},
@@ -199,6 +207,7 @@ def build_reset_entry(
         "after_material_codes": after_codes,
         "material_fingerprint": _material_fingerprint(items),
         "updated_item_names": updated,
+        "updated_item_fields": updated_item_fields,
         "proposal": proposal,
     }
     entry["changed"] = bool(
@@ -237,6 +246,13 @@ def build_reset_manifest(entries: list[dict], skipped: list[dict]) -> dict:
             created_item_count=len(entry.get("create_rows") or []),
             updated_item_count=len(entry.get("updated_item_names") or []),
         )
+        field_counts: dict[str, int] = {}
+        for fields in (entry.get("updated_item_fields") or {}).values():
+            for field in fields:
+                field_counts[field] = field_counts.get(field, 0) + 1
+        compact["updated_field_counts"] = {
+            field: field_counts[field] for field in sorted(field_counts)
+        }
         compact["name_mismatches"] = [{
             key: deepcopy(row.get(key)) for key in (
                 "material_code", "source_name", "canonical_name",

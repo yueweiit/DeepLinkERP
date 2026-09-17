@@ -237,6 +237,36 @@ def test_fresh_audit_treats_database_decimal_scale_as_the_same_projected_value()
     assert second["changed"] is False
 
 
+def test_reset_entry_reports_only_changed_field_names_for_diagnostics():
+    from overseas_costing.services.material_scope_reset_service import build_reset_entry
+
+    target = {
+        "batch": "B-1", "version": "V-1", "current_version": "V-1",
+        "is_current": True, "version_status": "Active",
+    }
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-1:form",
+        "source_hash": "SOURCE", "approval_role": "international_logistics",
+        "approval_no": "LOG-1", "form_fields": {"货物信息": [{
+            "物料编码": "SKU-1", "物料名称": "物料", "数量": 1, "单位": "个",
+        }]},
+    }
+    item = {
+        "name": "I-1", "material_code": "SKU-1", "product_name": "物料",
+        "quantity": 1, "actual_shipped_qty": 1,
+        "actual_shipped_qty_mode": "LEGACY_UNVERIFIED", "shipped_uom": "个",
+        "unit": "个", "is_excluded": 0, "extra_json": "{}",
+    }
+
+    entry = build_reset_entry(target, [item], source)
+
+    assert entry["updated_item_names"] == ["I-1"]
+    assert entry["updated_item_fields"] == {"I-1": [
+        "actual_shipped_qty_mode", "extra_json", "row_no", "source_doc_no",
+        "source_type", "stable_line_key",
+    ]}
+
+
 def test_manifest_hash_changes_when_material_membership_changes():
     from overseas_costing.services.material_scope_reset_service import build_reset_manifest
 
