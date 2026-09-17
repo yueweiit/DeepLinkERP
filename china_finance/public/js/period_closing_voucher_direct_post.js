@@ -101,6 +101,12 @@ function china_finance_render_period_closing_entries(frm) {
 		const balanced = Math.abs(total_debit - total_credit) <= 0.005;
 		const escape = frappe.utils.escape_html;
 		const format_amount = (value) => format_currency(Number(value || 0), currency);
+		const company_suffix = frm.doc.company ? ` - ${frm.doc.company}` : "";
+		const display_account = (account) => (
+			company_suffix && account.endsWith(company_suffix)
+				? account.slice(0, -company_suffix.length)
+				: account
+		);
 
 		if (!rows.length) {
 			let message = __("提交后将显示实际生成的会计分录");
@@ -114,7 +120,7 @@ function china_finance_render_period_closing_entries(frm) {
 			<tr>
 				<td class="china-period-closing-entries__index">${escape(String(row.idx || ""))}</td>
 				<td>${escape(row.summary || "")}</td>
-				<td class="china-period-closing-entries__account">${escape(row.account || "")}</td>
+				<td class="china-period-closing-entries__account">${escape(display_account(row.account || ""))}</td>
 				<td class="text-right">${format_amount(row.debit)}</td>
 				<td class="text-right">${format_amount(row.credit)}</td>
 			</tr>`).join("");
