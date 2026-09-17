@@ -407,9 +407,7 @@
   }
 
   isCalculationConfirmed(batch = {}) {
-    const confirmStatus = String(batch.confirm_status ?? "").trim();
-    const normalized = (confirmStatus || String(batch.status ?? "").trim()).toLowerCase();
-    return normalized === "confirmed";
+    return String(batch.confirm_status ?? "").trim().toLowerCase() === "confirmed";
   }
 
   erpPushActionState(batch = {}, itemCount = null) {
@@ -446,7 +444,7 @@
       return { label: "推送 ERP", enabled: false, reason: "请先校验计算结果。" };
     }
     if (writebackLower.includes("fail")) {
-      return { label: "重试 ERP", enabled: true, reason: "上次推送失败，可以重试 ERP。" };
+      return { label: "重试 ERP", enabled: true, reason: batch.writeback_message || "上次推送失败，可以重试 ERP。" };
     }
     return { label: "推送 ERP", enabled: true, reason: "已完成试算和人工校验，可以推送 ERP。" };
   }

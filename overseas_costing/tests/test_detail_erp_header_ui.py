@@ -102,6 +102,13 @@ ERP_STATES = [
         "请先校验计算结果",
     ),
     (
+        "status_only_confirmed",
+        {"name": "B-1", "status": "Confirmed", "confirm_status": " ", "current_version": "V-1"},
+        "推送 ERP",
+        False,
+        "请先完成试算",
+    ),
+    (
         "ready",
         {"name": "B-1", "status": "Calculated", "confirm_status": "Confirmed", "current_version": "V-1"},
         "推送 ERP",
@@ -186,7 +193,7 @@ console.log(JSON.stringify({button:button(view.html,'detail-writeback-to-erp'),t
     assert result["button"]["disabled"] is False
 
 
-def test_confirm_status_falls_back_to_batch_status_only_when_empty():
+def test_confirm_status_never_falls_back_to_batch_status():
     result = run_view_js(
         """
 const view=makeView({name:'B-1',status:'Confirmed',confirm_status:' '});
@@ -197,7 +204,7 @@ console.log(JSON.stringify({
 """
     )
 
-    assert result == {"empty": True, "explicitPartial": False}
+    assert result == {"empty": False, "explicitPartial": False}
 
 
 def test_detail_header_handler_delegates_exact_batch_without_direct_backend_call():
@@ -210,18 +217,23 @@ const handlers={{}};
 const view=new Harness();
 view.detailState={{batchName:'DETAIL-BATCH'}};
 view.drawerBatchName='DRAWER-BATCH';
-view.$root={{on:(type,selector,handler)=>{{handlers[selector]=handler;return view.$root;}}}};
+view.$root={{on:(type,selector,handler)=>{{(handlers[selector]??=[]).push(handler);return view.$root;}}}};
 let delegated=[],backendCalls=0;
 view.writebackToErp=batchName=>delegated.push(batchName);
 view.call=()=>{{backendCalls+=1;throw new Error('header must not call backend directly')}};
 global.window={{}};
 global.$=node=>node===window?{{off(){{return this}},on(){{return this}}}}:{{attr:()=>'',hasClass:()=>false,closest:()=>({{length:0}})}};
 view.bindEvents();
-handlers["[data-action='detail-writeback-to-erp']"]({{currentTarget:{{}}}});
-console.log(JSON.stringify({{delegated,backendCalls}}));
+const detailHandlers=handlers["[data-action='detail-writeback-to-erp']"]||[];
+detailHandlers[0]({{currentTarget:{{}}}});
+console.log(JSON.stringify({{delegated,backendCalls,bindingCount:detailHandlers.length}}));
 """
     completed = subprocess.run(["node", "-e", source], check=True, capture_output=True, text=True)
-    assert json.loads(completed.stdout) == {"delegated": ["DETAIL-BATCH"], "backendCalls": 0}
+    assert json.loads(completed.stdout) == {
+        "delegated": ["DETAIL-BATCH"],
+        "backendCalls": 0,
+        "bindingCount": 1,
+    }
 
 
 def test_overview_keeps_confirmation_preview_and_push_safety_gates():
@@ -233,6 +245,7 @@ function render(batch){const view=makeView(batch);const html=view.renderErpFlowP
 console.log(JSON.stringify({
   unconfirmed:render({name:'B-1',status:'Calculated',current_version:'V-1'}),
   partial:render({name:'B-1',status:'Calculated',confirm_status:'Partially Confirmed',current_version:'V-1'}),
+  statusOnly:render({name:'B-1',status:'Confirmed',confirm_status:' ',current_version:'V-1'}),
   ready:render({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'}),
   stale:render({name:'B-1',status:'Dirty',confirm_status:'Confirmed',current_version:'V-1'}),
   invalid:render({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',source_status:{invalid_business:true}}),
@@ -245,6 +258,8 @@ console.log(JSON.stringify({
     assert result["unconfirmed"]["push"]["disabled"] is True
     assert result["partial"]["preview"]["disabled"] is True
     assert result["partial"]["push"]["disabled"] is True
+    assert result["statusOnly"]["preview"]["disabled"] is True
+    assert result["statusOnly"]["push"]["disabled"] is True
     assert result["ready"]["preview"]["disabled"] is False
     assert result["ready"]["push"]["disabled"] is False
     assert result["stale"]["confirm"]["disabled"] is True
@@ -254,14 +269,15 @@ console.log(JSON.stringify({
     assert result["invalid"]["push"]["disabled"] is True
 
 
-def test_erp_queue_rejects_partially_confirmed_batch():
+@pytest.mark.parametrize("confirm_status", ["Partially Confirmed", ""])
+def test_erp_queue_rejects_batch_without_exact_confirm_status(confirm_status):
     result = run_view_js(
-        """
-const batch={name:'B-1',status:'Calculated',confirm_status:'Partially Confirmed',current_version:'V-1',item_count:1};
-const view=makeView(batch);view.batchItems={'B-1':[]};
+        f"""
+const batch={{name:'B-1',status:'Confirmed',confirm_status:{json.dumps(confirm_status)},current_version:'V-1',item_count:1}};
+const view=makeView(batch);view.batchItems={{'B-1':[]}};
 view.batchTotalCostNumber=()=>100;view.businessTypeCompactLabel=()=>'';
 const html=view.renderErpQueueRow(batch);
-console.log(JSON.stringify({preview:button(html,'queue-preview-erp'),push:button(html,'queue-writeback-erp'),html}));
+console.log(JSON.stringify({{preview:button(html,'queue-preview-erp'),push:button(html,'queue-writeback-erp'),html}}));
 """
     )
 
@@ -287,7 +303,7 @@ view.showError=error=>events.push(['error',error.message]);
 view.switchDetailTab=async()=>{};
 await view.queueErpWriteback('B-1');
 const state=view.erpPushActionState(view.getDetailBatch());
-console.log(JSON.stringify({endpoints,events,state,button:button(view.html,'detail-writeback-to-erp'),header:view.detailState.header}));
+console.log(JSON.stringify({endpoints,events,state,button:button(view.html,'detail-writeback-to-erp'),html:view.html,header:view.detailState.header}));
 """
     )
 
@@ -299,5 +315,52 @@ console.log(JSON.stringify({endpoints,events,state,button:button(view.html,'deta
     assert result["header"]["writeback_status"] == "Failed"
     assert result["state"]["label"] == "重试 ERP"
     assert result["state"]["enabled"] is True
+    assert result["state"]["reason"] == "ERP timeout"
     assert result["button"]["label"] == "重试 ERP"
     assert result["button"]["disabled"] is False
+    assert "ERP timeout" in result["button"]["tag"]
+    assert "ERP timeout" in result["html"]
+
+
+def test_failed_writeback_keeps_original_block_after_drawer_refresh_sync():
+    result = run_view_js(
+        """
+const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
+const view=makeView(batch);const endpoints=[],drawerStates=[];
+view.detailState.batchName='';view.drawerBatchName='B-1';view.activeBatchName='B-1';
+view.$root={attr:()=> 'workbench',find:()=>({hasClass:()=>true})};
+view.call=async(endpoint)=>{
+  endpoints.push(endpoint);
+  if(endpoint.endsWith('writeback_to_erp'))return {ok:false,batch_name:'B-1',writeback_status:'Failed',message:'ERP timeout'};
+  if(endpoint.endsWith('check_writeback_ready'))return {ok:true,ready:true};
+  throw new Error(endpoint);
+};
+view.recordUsage=()=>{};view.loadBatchItems=async()=>{};view.loadAuditLogs=async()=>{};view.renderTable=()=>{};
+view.renderBatchDrawer=()=>drawerStates.push(view.erpFlowBlockState?.result?.message||null);
+await view.queueErpWriteback('B-1');
+console.log(JSON.stringify({endpoints,drawerStates,block:view.erpFlowBlockState}));
+"""
+    )
+
+    assert [endpoint.rsplit(".", 1)[-1] for endpoint in result["endpoints"]] == ["writeback_to_erp"]
+    assert result["block"]["result"]["message"] == "ERP timeout"
+    assert result["drawerStates"][-1] == "ERP timeout"
+
+
+def test_refresh_failure_does_not_replace_original_erp_error():
+    result = run_view_js(
+        """
+const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'};
+const view=makeView(batch);let rejected='';
+view.call=async()=>({ok:false,batch_name:'B-1',writeback_status:'Failed',message:'ERP timeout'});
+view.recordUsage=()=>{};view.refreshBatch=async()=>{throw new Error('detail refresh failed')};
+view.switchDetailTab=async()=>{};
+try{await view.queueErpWriteback('B-1')}catch(error){rejected=error.message}
+console.log(JSON.stringify({rejected,block:view.erpFlowBlockState,button:button(view.html,'detail-writeback-to-erp'),html:view.html}));
+"""
+    )
+
+    assert result["rejected"] == ""
+    assert result["block"]["result"]["message"] == "ERP timeout"
+    assert result["button"]["label"] == "重试 ERP"
+    assert "ERP timeout" in result["html"]

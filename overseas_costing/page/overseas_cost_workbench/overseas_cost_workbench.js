@@ -2113,11 +2113,31 @@ class OverseasCostWorkbench {
       true
     );
     if (!result.ok) {
+      const detailRefreshSnapshot = this.detailState?.batchName === batch.name ? this.detailState.detail : null;
+      const detailTab = this.detailState?.tab || "items";
       if (result.writeback_status) batch.writeback_status = result.writeback_status;
       if (result.message) batch.writeback_message = result.message;
       this.recordUsage("PUSH_ERP", { batch, status: "Failed", remark: result.message || "ERP 推送未进入队列" });
-      this.showErpFlowBlock(result, "ERP 推送未进入队列");
-      await this.refreshBatch(batch.name);
+      try {
+        await this.refreshBatch(batch.name);
+      } catch (refreshError) {
+        console.warn("[overseas-cost-workbench] ERP 失败后刷新批次未完成", refreshError);
+      } finally {
+        this.showErpFlowBlock(result, "ERP 推送未进入队列");
+        if (this.detailState?.batchName === batch.name && this.detailState.detail === detailRefreshSnapshot) {
+          this.detailState.header = {
+            ...(this.detailState.header || {}),
+            writeback_status: result.writeback_status || batch.writeback_status || "Failed",
+            writeback_message: result.message || batch.writeback_message || "",
+          };
+          try {
+            this.renderDetailShell();
+            await this.switchDetailTab(detailTab, { updateUrl: false });
+          } catch (renderError) {
+            console.warn("[overseas-cost-workbench] ERP 失败后详情重绘未完成", renderError);
+          }
+        }
+      }
       return;
     }
     batch.writeback_status = result.writeback_status || "Pending";
@@ -15960,9 +15980,7 @@ class OverseasCostWorkbench {
   }
 
   isCalculationConfirmed(batch = {}) {
-    const confirmStatus = String(batch.confirm_status ?? "").trim();
-    const normalized = (confirmStatus || String(batch.status ?? "").trim()).toLowerCase();
-    return normalized === "confirmed";
+    return String(batch.confirm_status ?? "").trim().toLowerCase() === "confirmed";
   }
 
   erpPushActionState(batch = {}, itemCount = null) {
@@ -15999,7 +16017,7 @@ class OverseasCostWorkbench {
       return { label: "推送 ERP", enabled: false, reason: "请先校验计算结果。" };
     }
     if (writebackLower.includes("fail")) {
-      return { label: "重试 ERP", enabled: true, reason: "上次推送失败，可以重试 ERP。" };
+      return { label: "重试 ERP", enabled: true, reason: batch.writeback_message || "上次推送失败，可以重试 ERP。" };
     }
     return { label: "推送 ERP", enabled: true, reason: "已完成试算和人工校验，可以推送 ERP。" };
   }
