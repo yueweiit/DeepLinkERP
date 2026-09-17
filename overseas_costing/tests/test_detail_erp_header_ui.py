@@ -499,3 +499,66 @@ console.log(JSON.stringify({rejected,block:view.erpFlowBlockState,button:button(
     assert result["block"]["result"]["message"] == "ERP timeout"
     assert result["button"]["label"] == "重试 ERP"
     assert "ERP timeout" in result["html"]
+
+
+@pytest.mark.parametrize("tab", ["vouchers", "documents"])
+def test_transport_error_becomes_visible_retry_without_fake_failed_status(tab):
+    result = run_view_js(
+        f"""
+const batch={{name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'}};
+const view=makeView(batch);const errors=[],usage=[];let calls=0;
+view.detailState.tab={json.dumps(tab)};view.renderDetailShell();
+view.call=async()=>{{calls+=1;throw new Error('Network timeout')}};
+view.recordUsage=(action,payload)=>usage.push([action,payload.status,payload.remark]);
+view.showError=error=>errors.push(error.message);
+global.frappe={{confirm:(_message,yes)=>yes(),show_alert:()=>{{}}}};
+view.writebackToErp('B-1');
+await new Promise(resolve=>setImmediate(resolve));
+const state=view.erpPushActionState(view.getDetailBatch());
+console.log(JSON.stringify({{
+  calls,errors,usage,state,pushBlock:view.erpPushBlockState,genericBlock:view.erpFlowBlockState,
+  writebackStatus:view.getDetailBatch().writeback_status,
+  button:button(view.html,'detail-writeback-to-erp'),html:view.html,
+}}));
+"""
+    )
+
+    assert result["calls"] == 1
+    assert result["errors"] == ["Network timeout"]
+    assert result["usage"] == [["PUSH_ERP", "Failed", "Network timeout"]]
+    assert result["pushBlock"] == {
+        "batchName": "B-1",
+        "versionName": "V-1",
+        "message": "Network timeout",
+        "blocking_reasons": [],
+    }
+    assert result["state"]["label"] == "重试 ERP"
+    assert result["state"]["enabled"] is True
+    assert result["state"]["reason"] == "Network timeout"
+    assert result["button"]["label"] == "重试 ERP"
+    assert result["button"]["disabled"] is False
+    assert "Network timeout" in result["html"]
+    assert result["writebackStatus"] == "Not Started"
+    assert "writeback_status" not in result["genericBlock"]["result"]
+
+
+def test_rapid_confirmed_pushes_share_one_inflight_request():
+    result = run_view_js(
+        """
+const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
+const view=makeView(batch);let calls=0,release;
+const gate=new Promise(resolve=>{release=resolve});
+view.call=async()=>{calls+=1;await gate;return {ok:true,writeback_status:'Pending',message:'queued'}};
+view.refreshBatch=async()=>{};view.recordUsage=()=>{};view.showError=()=>{};
+global.frappe={confirm:(_message,yes)=>yes(),show_alert:()=>{}};
+view.writebackToErp('B-1');
+view.writebackToErp('B-1');
+await new Promise(resolve=>setImmediate(resolve));
+const callsWhilePending=calls;
+release();
+await new Promise(resolve=>setImmediate(resolve));
+console.log(JSON.stringify({callsWhilePending,calls}));
+"""
+    )
+
+    assert result == {"callsWhilePending": 1, "calls": 1}
