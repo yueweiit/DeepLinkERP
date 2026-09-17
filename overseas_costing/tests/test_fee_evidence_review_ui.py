@@ -328,6 +328,135 @@ console.log(JSON.stringify({apiFailure:await run('api-failure'),editMissing:awai
     }
 
 
+def test_voucher_start_returns_before_delayed_poll_and_background_failure_does_not_change_result() -> None:
+    result = _voucher_click_result(
+        r"""
+const passive={empty(){return this},removeData(){return this},addClass(){return this},on(){return this},find(){return this}};
+const dialogs=[];
+frappe.ui={Dialog:class{
+  constructor(){
+    this.handlers={};this.hideCalls=0;
+    this.$wrapper={length:1,addClass:()=>this.$wrapper,on:(event,selector,handler)=>{this.handlers[`${event}${selector}`]=handler;return this.$wrapper},find:()=>passive};
+    dialogs.push(this);
+  }
+  show(){}
+  hide(){this.hideCalls++}
+}};
+const button={attrs:{'data-batch-name':'BATCH-5','data-version-name':'VERSION-5','data-attachment-name':'ATTACHMENT-5'},disabled:false,label:'AI 解析并分摊到 SKU'};
+const buttonQuery={attr:(name)=>button.attrs[name]||'',prop(name,value){if(value===undefined)return button[name];button[name]=value;return this},text(value){if(value===undefined)return button.label;button.label=value;return this}};
+dollar=(value)=>value===button?buttonQuery:passive;
+const workspace=Object.create(Harness.prototype);
+workspace.detailState={batchName:'BATCH-5',versionName:'VERSION-5'};
+const state={feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:null};
+workspace.ensureMaterialFeeState=()=>state;
+workspace.ensureMaterialFeeEditSession=async()=>true;
+workspace.getDetailBatch=()=>({current_version:'VERSION-5'});
+workspace.findMaterialFee=()=>({required_evidence_role:'tax_certificate'});
+workspace.renderTaxCertificateRecordDetail=()=>'<div></div>';
+workspace.renderFeeEvidenceReviewProgressShell=()=>'<div></div>';
+workspace.updateFeeEvidenceReviewProgress=()=>{};
+workspace.materialAIErrorMessage=(error,fallback)=>error?.message||fallback;
+workspace.showError=()=>{};
+workspace.call=async(endpoint)=>{
+  if(endpoint.endsWith('get_tax_certificate_parse_record'))return {ok:true,record_summary:{batch:{name:'BATCH-5'},version:'VERSION-5'}};
+  if(endpoint.endsWith('start_fee_evidence_review'))return {ok:true,run_id:'RUN-5',status:'QUEUED'};
+  throw new Error(endpoint);
+};
+let finishPoll;
+workspace.pollFeeEvidenceReview=()=>new Promise((resolve,reject)=>{finishPoll=()=>reject(new Error('后台分析失败'))});
+await workspace.openTaxCertificateRecordDialog('ATTACHMENT-5');
+const detail=dialogs[0];
+let settled=false;let started;
+const click=detail.handlers["click[data-action='ai-review-voucher']"]({preventDefault(){},currentTarget:button}).then(value=>{settled=true;started=value});
+await new Promise(resolve=>setImmediate(resolve));
+const beforePoll={settled,hideCalls:detail.hideCalls,button:{disabled:button.disabled,label:button.label}};
+finishPoll();await click;await new Promise(resolve=>setImmediate(resolve));
+console.log(JSON.stringify({started,beforePoll,afterPoll:{hideCalls:detail.hideCalls,status:state.feeEvidenceReview.status,error:state.feeEvidenceReview.error_message}}));
+"""
+    )
+
+    assert result == {
+        "started": True,
+        "beforePoll": {
+            "settled": True,
+            "hideCalls": 1,
+            "button": {"disabled": False, "label": "AI 解析并分摊到 SKU"},
+        },
+        "afterPoll": {"hideCalls": 1, "status": "FAILED", "error": "后台分析失败"},
+    }
+
+
+def test_different_voucher_request_is_rejected_while_edit_lease_is_pending() -> None:
+    result = _voucher_click_result(
+        r"""
+const passive={empty(){return this},removeData(){return this},addClass(){return this},on(){return this},find(){return this}};
+frappe.ui={Dialog:class{constructor(){this.$wrapper={length:1,addClass(){return this},on(){return this},find(){return passive}}}show(){}}};
+const alerts=[];frappe.show_alert=(value)=>alerts.push(value);
+const workspace=Object.create(Harness.prototype);
+workspace.detailState={batchName:'BATCH-6',versionName:'VERSION-6'};
+const state={feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:null};
+workspace.ensureMaterialFeeState=()=>state;
+let releaseLease;let leaseCalls=0;const leasePromise=new Promise(resolve=>{releaseLease=resolve});
+workspace.ensureMaterialFeeEditSession=()=>{leaseCalls++;return leasePromise};
+workspace.findMaterialFee=()=>({required_evidence_role:'tax_certificate'});
+workspace.renderFeeEvidenceReviewProgressShell=()=>'<div></div>';
+workspace.updateFeeEvidenceReviewProgress=()=>{};
+workspace.pollFeeEvidenceReview=async()=>{};
+let startCalls=0;workspace.call=async()=>{startCalls++;return {ok:true,run_id:`RUN-${startCalls}`,status:'QUEUED'}};
+const first=workspace.openFeeEvidenceReviewDialog('import_tax','ATTACHMENT-A',{batchName:'BATCH-6',versionName:'VERSION-6',evidenceRole:'tax_certificate'});
+let secondSettled=false;let secondValue;
+const second=workspace.openFeeEvidenceReviewDialog('import_tax','ATTACHMENT-B',{batchName:'BATCH-6',versionName:'VERSION-6',evidenceRole:'tax_certificate'}).then(value=>{secondSettled=true;secondValue=value});
+await new Promise(resolve=>setImmediate(resolve));
+const pending={leaseCalls,secondSettled,secondValue,alerts};
+releaseLease(true);const firstValue=await first;await second;
+console.log(JSON.stringify({pending,firstValue,secondValue,leaseCalls,startCalls,attachment:state.feeEvidenceReview?.attachment}));
+"""
+    )
+
+    assert result["pending"]["leaseCalls"] == 1
+    assert result["pending"]["secondSettled"] is True
+    assert result["pending"]["secondValue"] is False
+    assert "已有凭证正在启动/分析" in result["pending"]["alerts"][0]["message"]
+    assert result["firstValue"] is True
+    assert result["leaseCalls"] == 1
+    assert result["startCalls"] == 1
+    assert result["attachment"] == "ATTACHMENT-A"
+
+
+def test_same_voucher_request_reuses_pending_start_without_duplicate_lease_or_api() -> None:
+    result = _voucher_click_result(
+        r"""
+const passive={empty(){return this},removeData(){return this},addClass(){return this},on(){return this},find(){return this}};
+frappe.ui={Dialog:class{constructor(){this.$wrapper={length:1,addClass(){return this},on(){return this},find(){return passive}}}show(){}}};
+const workspace=Object.create(Harness.prototype);
+workspace.detailState={batchName:'BATCH-7',versionName:'VERSION-7'};
+const state={feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:null};
+workspace.ensureMaterialFeeState=()=>state;
+let releaseLease;let leaseCalls=0;const leasePromise=new Promise(resolve=>{releaseLease=resolve});
+workspace.ensureMaterialFeeEditSession=()=>{leaseCalls++;return leasePromise};
+workspace.findMaterialFee=()=>({required_evidence_role:'tax_certificate'});
+workspace.renderFeeEvidenceReviewProgressShell=()=>'<div></div>';
+workspace.updateFeeEvidenceReviewProgress=()=>{};
+workspace.pollFeeEvidenceReview=async()=>{};
+let startCalls=0;workspace.call=async()=>{startCalls++;return {ok:true,run_id:'RUN-7',status:'QUEUED'}};
+const options={batchName:'BATCH-7',versionName:'VERSION-7',evidenceRole:'tax_certificate'};
+const first=workspace.openFeeEvidenceReviewDialog('import_tax','ATTACHMENT-7',options);
+const duplicate=workspace.openFeeEvidenceReviewDialog('import_tax','ATTACHMENT-7',options);
+await new Promise(resolve=>setImmediate(resolve));
+const pending={leaseCalls,startCalls};
+releaseLease(true);const values=await Promise.all([first,duplicate]);
+console.log(JSON.stringify({pending,values,leaseCalls,startCalls}));
+"""
+    )
+
+    assert result == {
+        "pending": {"leaseCalls": 1, "startCalls": 0},
+        "values": [True, True],
+        "leaseCalls": 1,
+        "startCalls": 1,
+    }
+
+
 def test_review_marks_conflicts_and_missing_fx_without_default_selection() -> None:
     source = PART.read_text(encoding="utf-8")
     css = CSS.read_text(encoding="utf-8")

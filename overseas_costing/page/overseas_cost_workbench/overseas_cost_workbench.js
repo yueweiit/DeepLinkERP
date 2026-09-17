@@ -9417,6 +9417,8 @@ class OverseasCostWorkbench {
         feeEvidenceReview: null,
         feeEvidenceReviewDialog: null,
         feeEvidenceReviewStartPromise: null,
+        feeEvidenceReviewMonitorPromise: null,
+        feeEvidenceReviewActiveRequestKey: "",
         costTrialAI: null,
         costTrialDialog: null,
       };
@@ -13927,54 +13929,67 @@ class OverseasCostWorkbench {
 
   async openFeeEvidenceReviewDialog(feeKey, attachment, options = {}) {
     const state = this.ensureMaterialFeeState();
-    if (state.feeEvidenceReviewStartPromise) {
-      state.feeEvidenceReviewDialog?.show();
-      return state.feeEvidenceReviewStartPromise;
-    }
-    if (!(await this.ensureMaterialFeeEditSession())) return false;
-    state.feeEvidenceReview = {
-      status: "STARTING", logicalFeeKey: String(feeKey || ""), attachment: String(attachment || ""),
+    const fee = this.findMaterialFee(feeKey) || {};
+    const request = {
       batchName: String(options.batchName || this.detailState.batchName || ""),
       versionName: String(options.versionName || this.detailState.versionName || ""),
-      progress_percent: 0, progress_step: "正在启动凭证分析", progress_revision: 0,
+      logicalFeeKey: String(feeKey || ""),
+      attachment: String(attachment || ""),
+      evidenceRole: String(options.evidenceRole || fee.required_evidence_role || "expense_invoice"),
     };
-    if (!state.feeEvidenceReviewDialog) {
-      const dialog = new frappe.ui.Dialog({
-        title: "AI 凭证解析与 SKU 分摊审核",
-        fields: [{ fieldtype: "HTML", fieldname: "fee_review", options: this.renderFeeEvidenceReviewProgressShell() }],
-      });
-      state.feeEvidenceReviewDialog = dialog;
-      dialog.$wrapper.addClass("ocw-mf-evidence-review-modal");
-      dialog.$wrapper.on("change", "[data-mf-fee-review-select]", (event) => {
-        const review = state.feeEvidenceReview;
-        const id = String($(event.currentTarget).attr("data-proposal-id") || "");
-        if ($(event.currentTarget).prop("checked")) review.selections.add(id);
-        else review.selections.delete(id);
-      });
-      dialog.$wrapper.on("input change", "[data-mf-fee-review-edit]", (event) => {
-        const $input = $(event.currentTarget);
-        const proposalId = String($input.attr("data-proposal-id") || "");
-        const fieldname = String($input.attr("data-fieldname") || "");
-        const review = state.feeEvidenceReview;
-        review.edits[proposalId] = review.edits[proposalId] || {};
-        review.edits[proposalId][fieldname] = $input.attr("type") === "checkbox" ? ($input.prop("checked") ? 1 : 0) : String($input.val() ?? "");
-        review.selections.add(proposalId);
-        dialog.$wrapper.find(`[data-mf-fee-review-select][data-proposal-id='${proposalId.replace(/'/g, "\\'")}']`).prop("checked", true);
-      });
-      dialog.$wrapper.on("click", "[data-action='mf-fee-review-apply']", () => this.applyFeeEvidenceReview().catch((error) => this.showError(error)));
-      dialog.$wrapper.on("click", "[data-action='mf-fee-review-discard']", () => this.discardFeeEvidenceReview().catch((error) => this.showError(error)));
+    const requestKey = JSON.stringify(request);
+    if (state.feeEvidenceReviewActiveRequestKey) {
+      state.feeEvidenceReviewDialog?.show();
+      if (state.feeEvidenceReviewActiveRequestKey === requestKey) {
+        return state.feeEvidenceReviewStartPromise || true;
+      }
+      frappe.show_alert({ message: "已有凭证正在启动/分析，请稍候完成后再试。", indicator: "orange" });
+      return false;
     }
-    state.feeEvidenceReviewDialog.show();
-    state.feeEvidenceReviewDialog.$wrapper.find("[data-mf-fee-review-draft]").empty().removeData("rendered");
-    this.updateFeeEvidenceReviewProgress();
-    const startPromise = (async () => {
-      const fee = this.findMaterialFee(feeKey) || {};
+    state.feeEvidenceReviewActiveRequestKey = requestKey;
+    let monitorStarted = false;
+    const startPromise = Promise.resolve().then(async () => {
+      if (!(await this.ensureMaterialFeeEditSession())) return false;
+      state.feeEvidenceReview = {
+        status: "STARTING", logicalFeeKey: request.logicalFeeKey, attachment: request.attachment,
+        batchName: request.batchName, versionName: request.versionName, requestKey,
+        progress_percent: 0, progress_step: "正在启动凭证分析", progress_revision: 0,
+      };
+      if (!state.feeEvidenceReviewDialog) {
+        const dialog = new frappe.ui.Dialog({
+          title: "AI 凭证解析与 SKU 分摊审核",
+          fields: [{ fieldtype: "HTML", fieldname: "fee_review", options: this.renderFeeEvidenceReviewProgressShell() }],
+        });
+        state.feeEvidenceReviewDialog = dialog;
+        dialog.$wrapper.addClass("ocw-mf-evidence-review-modal");
+        dialog.$wrapper.on("change", "[data-mf-fee-review-select]", (event) => {
+          const review = state.feeEvidenceReview;
+          const id = String($(event.currentTarget).attr("data-proposal-id") || "");
+          if ($(event.currentTarget).prop("checked")) review.selections.add(id);
+          else review.selections.delete(id);
+        });
+        dialog.$wrapper.on("input change", "[data-mf-fee-review-edit]", (event) => {
+          const $input = $(event.currentTarget);
+          const proposalId = String($input.attr("data-proposal-id") || "");
+          const fieldname = String($input.attr("data-fieldname") || "");
+          const review = state.feeEvidenceReview;
+          review.edits[proposalId] = review.edits[proposalId] || {};
+          review.edits[proposalId][fieldname] = $input.attr("type") === "checkbox" ? ($input.prop("checked") ? 1 : 0) : String($input.val() ?? "");
+          review.selections.add(proposalId);
+          dialog.$wrapper.find(`[data-mf-fee-review-select][data-proposal-id='${proposalId.replace(/'/g, "\\'")}']`).prop("checked", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-review-apply']", () => this.applyFeeEvidenceReview().catch((error) => this.showError(error)));
+        dialog.$wrapper.on("click", "[data-action='mf-fee-review-discard']", () => this.discardFeeEvidenceReview().catch((error) => this.showError(error)));
+      }
+      state.feeEvidenceReviewDialog.show();
+      state.feeEvidenceReviewDialog.$wrapper.find("[data-mf-fee-review-draft]").empty().removeData("rendered");
+      this.updateFeeEvidenceReviewProgress();
       const started = await this.call("overseas_costing.api.fees.start_fee_evidence_review", {
-        batch_name: state.feeEvidenceReview.batchName,
-        version_name: state.feeEvidenceReview.versionName,
-        logical_fee_key: feeKey,
-        attachment,
-        evidence_role: options.evidenceRole || fee.required_evidence_role || "expense_invoice",
+        batch_name: request.batchName,
+        version_name: request.versionName,
+        logical_fee_key: request.logicalFeeKey,
+        attachment: request.attachment,
+        evidence_role: request.evidenceRole,
         force: options.force ? 1 : 0,
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
@@ -13985,14 +14000,31 @@ class OverseasCostWorkbench {
         progress_revision: Number(started.progress_revision || 0), progress_step: "读取凭证", progress_percent: 5,
       };
       this.updateFeeEvidenceReviewProgress();
-      await this.pollFeeEvidenceReview(state, state.feeEvidenceReview.batchName, started.run_id);
+      let monitorPromise;
+      monitorPromise = Promise.resolve()
+        .then(() => this.pollFeeEvidenceReview(state, request.batchName, started.run_id))
+        .catch((error) => {
+          state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
+          this.updateFeeEvidenceReviewProgress();
+        })
+        .finally(() => {
+          if (state.feeEvidenceReviewMonitorPromise === monitorPromise) state.feeEvidenceReviewMonitorPromise = null;
+          if (state.feeEvidenceReviewActiveRequestKey === requestKey) state.feeEvidenceReviewActiveRequestKey = "";
+        });
+      state.feeEvidenceReviewMonitorPromise = monitorPromise;
+      monitorStarted = true;
       return true;
-    })().catch((error) => {
-      state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
-      this.updateFeeEvidenceReviewProgress();
+    }).catch((error) => {
+      if (state.feeEvidenceReview?.requestKey === requestKey && state.feeEvidenceReviewDialog) {
+        state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
+        this.updateFeeEvidenceReviewProgress();
+      } else {
+        this.showError(error);
+      }
       return false;
     }).finally(() => {
       if (state.feeEvidenceReviewStartPromise === startPromise) state.feeEvidenceReviewStartPromise = null;
+      if (!monitorStarted && state.feeEvidenceReviewActiveRequestKey === requestKey) state.feeEvidenceReviewActiveRequestKey = "";
     });
     state.feeEvidenceReviewStartPromise = startPromise;
     return startPromise;
