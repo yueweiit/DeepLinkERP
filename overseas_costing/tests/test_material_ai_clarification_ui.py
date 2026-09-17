@@ -51,16 +51,20 @@ workspace.pollMaterialAIFill=async(_state,_batch,_version,runId)=>{
 let releaseLatest;
 workspace.call=async(method,args)=>{
  if(method.endsWith('get_source_ai_review_status'))return new Promise(resolve=>{releaseLatest=resolve});
+ if(method.endsWith('get_snapshot'))return {ok:true,batch_name:'B1',version_name:'V1',cache:{status:'ready',input_fingerprint:'fp'},data:{
+   detail:{ok:true,batch_name:'B1',version_name:'V1',header:{}},materials:{items:[]},fees:{fees:[],summary:{}},preview:{summary:{}},settlement:{viewed_version:'V1'}}};
+ if(method.endsWith('check_freshness'))return {ok:true,unchanged:true,current_fingerprint:'fp'};
  if(method.endsWith('save_source_ai_clarification'))return {ok:true,unchanged:false,clarification:{text:args.clarification_text,revision:2}};
  if(method.endsWith('start_source_ai_review'))return {ok:true,status:'QUEUED',run_id:'NEW'};
  return {};
 };
 const loading=workspace.loadMaterialFeeWorkspace({quiet:true});
+await loading;
 state.aiClarification='新说明';state.aiClarificationDirty=true;
 await workspace.reanalyzeMaterialAIClarification();
 const generation=state.aiRunGeneration;
 releaseLatest({ok:true,status:'READY',run_id:'OLD',clarification_revision:1,clarification:{text:'旧说明',revision:1}});
-await loading;
+await new Promise(resolve=>setImmediate(resolve));
 console.log(JSON.stringify({runId:state.aiFill.runId,status:state.aiFill.status,revision:state.aiClarificationRevision,text:state.aiClarification,pending:state.aiPendingReady,generationUnchanged:state.aiRunGeneration===generation,polledRuns}));
 """)
     assert result == {

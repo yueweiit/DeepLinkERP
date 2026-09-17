@@ -12,7 +12,7 @@
           dataType: "json",
           headers: { "X-Frappe-CSRF-Token": frappe.csrf_token, Accept: "application/json" },
         })
-      : await frappe.call({ method, args, freeze });
+      : await frappe.call({ method, args, freeze, ...(options.type ? { type: options.type } : {}) });
     return response.message || {};
   }
   async loadBatches() {

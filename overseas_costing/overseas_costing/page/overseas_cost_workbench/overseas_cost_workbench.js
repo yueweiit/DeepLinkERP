@@ -1194,7 +1194,7 @@ class OverseasCostWorkbench {
           dataType: "json",
           headers: { "X-Frappe-CSRF-Token": frappe.csrf_token, Accept: "application/json" },
         })
-      : await frappe.call({ method, args, freeze });
+      : await frappe.call({ method, args, freeze, ...(options.type ? { type: options.type } : {}) });
     return response.message || {};
   }
   async loadBatches() {
@@ -9381,6 +9381,9 @@ class OverseasCostWorkbench {
         materials: null,
         fees: null,
         preview: null,
+        cache: null,
+        cacheDirty: false,
+        cacheChecking: false,
         aiFill: null,
         aiPendingReady: null,
         aiProgressDialog: null,
@@ -9418,7 +9421,7 @@ class OverseasCostWorkbench {
   bindMaterialFeeWorkspaceEvents() {
     this.$root.on("click", "[data-action='mf-reload']", () => {
       this.clearMaterialSelection(false);
-      this.loadMaterialFeeWorkspace();
+      this.loadMaterialFeeWorkspace({ forceRefresh: true });
     });
     this.$root.on("click", "[data-action='mf-view-settlement-source']", () => {
       this.openBatchSettlementDialog(this.detailState.batchName, this.detailState.versionName || null);
@@ -9791,77 +9794,36 @@ class OverseasCostWorkbench {
     const batch = this.getDetailBatch();
     const batchName = String(batch.name || this.detailState.batchName || "");
     const requestedVersion = this.detailState.versionName;
+    const versionName = this.detailState.versionName || batch.current_version || null;
     const requestId = ++state.requestId;
     state.loading = true;
+    state.cacheChecking = false;
     if (!options.quiet) this.renderDetailTabLoading("正在读取费用、凭证和物料表");
     try {
-      const shouldRestoreAI = !state.aiFill;
-      const restoreGeneration = state.aiRunGeneration || 0;
-      const [detail, materials, fees, preview, latestAI, savedClarification] = await Promise.all([
-        this.call("overseas_costing.api.batch.get_batch_detail", {
-          batch_name: batchName,
-          version_name: this.detailState.versionName || batch.current_version || null,
-        }),
-        this.call("overseas_costing.api.materials.get_material_grid", {
-          batch_name: batchName,
-          version_name: this.detailState.versionName || batch.current_version || null,
-          page: state.page,
-          page_length: state.pageLength,
-        }),
-        this.call("overseas_costing.api.fees.get_fee_worklist", {
-          batch_name: batchName,
-          version_name: this.detailState.versionName || batch.current_version || null,
-        }),
-        this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
-          batch_name: batchName,
-          version_name: this.detailState.versionName || batch.current_version || null,
-        }),
-        shouldRestoreAI
-          ? this.call("overseas_costing.api.materials.get_source_ai_review_status", {
-              batch_name: batchName,
-              version_name: this.detailState.versionName || batch.current_version || null,
-              run_id: "",
-            }, false, { inlineErrors: true })
-          : Promise.resolve(null),
-        shouldRestoreAI ? Promise.resolve(null)
-          : this.call("overseas_costing.api.materials.get_source_ai_clarification", { batch_name: batchName }, false),
-      ]);
-      if (
-        requestId !== state.requestId
-        || this.materialFeeState !== state
-        || this.detailState.batchName !== batchName
-        || this.detailState.versionName !== requestedVersion
-        || this.detailState.tab !== "documents"
-      ) return false;
-      this.applyMaterialFeeHeaderSnapshot(detail, batchName);
-      const loadedSelectionVersion = String(materials?.version_name || this.detailState.versionName || batch.current_version || "");
-      if (state.packingGroupSelectionVersion !== undefined
-          && state.packingGroupSelectionVersion !== loadedSelectionVersion) {
-        state.packingGroupSelections.clear();
-      }
-      state.packingGroupSelectionVersion = loadedSelectionVersion;
-      state.materials = materials;
-      state.fees = fees;
-      state.preview = preview;
-      state.settlementData = null;
-      this.acceptMaterialAIClarification(savedClarification?.clarification || latestAI?.clarification);
-      if (!state.aiFill && restoreGeneration === (state.aiRunGeneration || 0) && latestAI?.ok && latestAI.status && latestAI.status !== "NONE") {
-        if (Number(latestAI.clarification_revision || 0) < Number(state.aiClarificationRevision || 0)
-            && ["QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(latestAI.status)) latestAI.status = "STALE";
-        state.aiFill = { ...latestAI, runId: latestAI.run_id, draftVisible: false };
-        state.aiPendingReady = this.isMaterialAIReadyStatus(latestAI.status) ? latestAI : null;
-      }
+      const forceRefresh = Boolean(options.forceRefresh || state.cacheDirty);
+      const endpoint = forceRefresh
+        ? "overseas_costing.api.material_fee_workspace.refresh_snapshot"
+        : "overseas_costing.api.material_fee_workspace.get_snapshot";
+      const snapshot = await this.call(endpoint, {
+        batch_name: batchName,
+        version_name: versionName,
+        page: state.page,
+        page_length: state.pageLength,
+      }, false, forceRefresh ? {} : { type: "GET" });
+      if (!this.isMaterialFeeWorkspaceRequestCurrent(state, batchName, requestedVersion, requestId)) return false;
+      this.applyMaterialFeeWorkspaceSnapshot(snapshot, state, batchName, batch.current_version || "");
       state.loading = false;
       this.renderMaterialFeeWorkspace();
-      if (["QUEUED", "RUNNING"].includes(String(state.aiFill?.status || "")) && !state.aiFill.polling && !state.aiFill.polling_paused) {
-        state.aiFill.polling = true;
-        this.pollMaterialAIFill(
-          state,
-          batchName,
-          this.detailState.versionName || batch.current_version || "",
-          state.aiFill.runId
-        ).catch((error) => this.failMaterialAIProgress(error, "AI 分析状态读取失败，正在等待重试。"));
-      }
+      const activeVersion = this.detailState.versionName;
+      const resolvedVersion = activeVersion || versionName;
+      this.restoreMaterialFeeWorkspaceAI(state, batchName, resolvedVersion, requestId).catch((error) => {
+        if (this.isMaterialFeeWorkspaceRequestCurrent(state, batchName, activeVersion, requestId)) {
+          state.aiStatusError = this.normalizeErrorMessage?.(error) || error?.message || "AI 状态读取失败";
+        }
+      });
+      if (!forceRefresh) this.checkMaterialFeeWorkspaceFreshness(
+        state, batchName, resolvedVersion, activeVersion, requestId
+      );
       return true;
     } catch (error) {
       if (
@@ -9875,6 +9837,124 @@ class OverseasCostWorkbench {
       this.renderDetailTabError("资料与费用", error);
       return false;
     }
+  }
+
+  isMaterialFeeWorkspaceRequestCurrent(state, batchName, requestedVersion, requestId) {
+    return requestId === state.requestId
+      && this.materialFeeState === state
+      && this.detailState.batchName === batchName
+      && this.detailState.versionName === requestedVersion
+      && this.detailState.tab === "documents";
+  }
+
+  applyMaterialFeeWorkspaceSnapshot(snapshot, state, batchName, fallbackVersion = "") {
+    if (!snapshot?.ok || !snapshot.data) throw new Error(snapshot?.message || "资料与费用快照读取失败");
+    const data = snapshot.data;
+    if (!data.detail || !data.materials || !data.fees || !data.preview) {
+      throw new Error("资料与费用快照不完整，请刷新后重试。");
+    }
+    this.applyMaterialFeeHeaderSnapshot(data.detail, batchName);
+    const loadedSelectionVersion = String(
+      data.materials?.version_name || snapshot.version_name || this.detailState.versionName || fallbackVersion || ""
+    );
+    if (state.packingGroupSelectionVersion !== undefined
+        && state.packingGroupSelectionVersion !== loadedSelectionVersion) {
+      state.packingGroupSelections.clear();
+    }
+    state.packingGroupSelectionVersion = loadedSelectionVersion;
+    state.materials = data.materials;
+    state.fees = data.fees;
+    state.preview = data.preview;
+    state.settlementData = data.settlement || null;
+    state.cache = { ...(snapshot.cache || {}) };
+    state.cacheDirty = false;
+    state.cacheChecking = false;
+  }
+
+  async restoreMaterialFeeWorkspaceAI(state, batchName, versionName, requestId) {
+    const requestedVersion = this.detailState.versionName;
+    const shouldRestoreAI = !state.aiFill;
+    const restoreGeneration = state.aiRunGeneration || 0;
+    state.aiStatusLoading = true;
+    try {
+      const result = shouldRestoreAI
+        ? await this.call("overseas_costing.api.materials.get_source_ai_review_status", {
+            batch_name: batchName,
+            version_name: versionName,
+            run_id: "",
+          }, false, { inlineErrors: true })
+        : await this.call("overseas_costing.api.materials.get_source_ai_clarification", {
+            batch_name: batchName,
+          }, false);
+      if (!this.isMaterialFeeWorkspaceRequestCurrent(state, batchName, requestedVersion, requestId)) return false;
+      const latestAI = shouldRestoreAI ? result : null;
+      const savedClarification = shouldRestoreAI ? null : result;
+      this.acceptMaterialAIClarification(savedClarification?.clarification || latestAI?.clarification);
+      if (!state.aiFill && restoreGeneration === (state.aiRunGeneration || 0)
+          && latestAI?.ok && latestAI.status && latestAI.status !== "NONE") {
+        if (Number(latestAI.clarification_revision || 0) < Number(state.aiClarificationRevision || 0)
+            && ["QUEUED", "RUNNING", "READY", "READY_WITH_WARNINGS"].includes(latestAI.status)) latestAI.status = "STALE";
+        state.aiFill = { ...latestAI, runId: latestAI.run_id, draftVisible: false };
+        state.aiPendingReady = this.isMaterialAIReadyStatus(latestAI.status) ? latestAI : null;
+        this.renderMaterialFeeWorkspacePreservingPosition?.();
+      }
+      if (["QUEUED", "RUNNING"].includes(String(state.aiFill?.status || "")) && !state.aiFill.polling && !state.aiFill.polling_paused) {
+        state.aiFill.polling = true;
+        this.pollMaterialAIFill(state, batchName, versionName || "", state.aiFill.runId)
+          .catch((error) => this.failMaterialAIProgress(error, "AI 分析状态读取失败，正在等待重试。"));
+      }
+      return true;
+    } finally {
+      state.aiStatusLoading = false;
+    }
+  }
+
+  checkMaterialFeeWorkspaceFreshness(state, batchName, versionName, requestedVersion, requestId) {
+    const inputRevision = state.inputRevision;
+    state.cacheChecking = true;
+    this.updateMaterialFeeCacheStatus();
+    const isCurrent = () => this.isMaterialFeeWorkspaceRequestCurrent(state, batchName, requestedVersion, requestId)
+      && state.inputRevision === inputRevision;
+    return this.call("overseas_costing.api.material_fee_workspace.check_freshness", {
+      batch_name: batchName,
+      version_name: versionName,
+      snapshot_fingerprint: state.cache?.input_fingerprint || "",
+      page: state.page,
+      page_length: state.pageLength,
+    }, false, { type: "GET" }).then(async (freshness) => {
+      if (!isCurrent()) return false;
+      state.cacheChecking = false;
+      if (freshness?.unchanged) {
+        state.cache = {
+          ...(state.cache || {}), status: "ready", refresh_error: "",
+          last_checked_at: freshness.checked_at || state.cache?.last_checked_at || "",
+          input_fingerprint: freshness.current_fingerprint || state.cache?.input_fingerprint || "",
+        };
+        this.updateMaterialFeeCacheStatus();
+        return true;
+      }
+      state.cache = { ...(state.cache || {}), status: "stale", refresh_error: "" };
+      this.updateMaterialFeeCacheStatus();
+      const refreshed = await this.call("overseas_costing.api.material_fee_workspace.refresh_snapshot", {
+        batch_name: batchName,
+        version_name: versionName,
+        page: state.page,
+        page_length: state.pageLength,
+      }, false);
+      if (!isCurrent()) return false;
+      this.applyMaterialFeeWorkspaceSnapshot(refreshed, state, batchName, versionName || "");
+      this.renderMaterialFeeWorkspacePreservingPosition();
+      return true;
+    }).catch((error) => {
+      if (!isCurrent()) return false;
+      state.cacheChecking = false;
+      state.cache = {
+        ...(state.cache || {}), status: "stale",
+        refresh_error: this.normalizeErrorMessage?.(error) || error?.message || "后台核对失败",
+      };
+      this.updateMaterialFeeCacheStatus();
+      return false;
+    });
   }
 
   materialFeeBasisLabel(value) {
@@ -9986,7 +10066,7 @@ class OverseasCostWorkbench {
     $content.html(`
       <div class="ocw-mf-workspace">
         <div class="ocw-detail-section-head ocw-mf-page-head">
-          <div><span>资料与费用</span><h2>综合成本资料工作区</h2><p>没有装箱计划也可以先用 OA 资料预览；正式推送前再补齐红色缺项和未定费用。</p></div>
+          <div><span>资料与费用</span><h2>综合成本资料工作区</h2><p>没有装箱计划也可以先用 OA 资料预览；正式推送前再补齐红色缺项和未定费用。</p>${this.renderMaterialFeeCacheStatus()}</div>
           <div class="ocw-detail-section-actions">
             <button class="ocw-outline-btn" type="button" data-action="mf-show-sources">查看资料来源</button>
             <button class="ocw-outline-btn" type="button" data-action="mf-reload">刷新</button>
@@ -9995,7 +10075,7 @@ class OverseasCostWorkbench {
         <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
         ${feeSummary.source_pending ? `<p class="ocw-mf-dialog-note">${this.escape(feeSummary.source_message)}</p>` : ""}
         <div class="ocw-mf-alert-strip" aria-label="当前待办摘要">
-          ${this.renderMaterialFeeMetric("计算红格", materialSummary.missing_cell_count || 0, "danger")}
+          ${this.renderMaterialFeeMetric("计算红格", materialSummary.missing_cell_count || 0, "danger", true)}
           ${this.renderMaterialFeeMetric("费用未定", feeSummary.missing_amount_fee_count || 0, "danger")}
           ${this.renderMaterialFeeMetric("凭证待补", evidencePending, evidencePending ? "warn" : "ok")}
           ${this.renderMaterialFeeMetric("暂估待核", feeSummary.estimated_fee_count || 0, Number(feeSummary.estimated_fee_count || 0) ? "warn" : "ok")}
@@ -10041,9 +10121,41 @@ class OverseasCostWorkbench {
     this.restoreMaterialFeeInputFocus();
   }
 
-  renderMaterialFeeMetric(label, value, tone) {
+  renderMaterialFeeMetric(label, value, tone, successOnZero = false) {
     const number = Number(value || 0);
-    return `<div class="ocw-mf-metric is-${this.escape(tone)}"><span>${this.escape(label)}</span><strong>${this.escape(String(number))}</strong><em>${number ? "待处理" : "已清零"}</em></div>`;
+    const cleared = successOnZero && number === 0;
+    const className = cleared ? "is-cleared" : `is-${this.escape(tone)}`;
+    const accessible = cleared ? ` aria-label="0 个${this.escape(label)}，已清零"` : "";
+    const hidden = cleared ? ' aria-hidden="true"' : "";
+    return `<div class="ocw-mf-metric ${className}"${accessible}><span>${this.escape(label)}</span><strong${hidden}>${cleared ? "✓" : this.escape(String(number))}</strong><em>${number ? "待处理" : "已清零"}</em></div>`;
+  }
+
+  materialFeeCacheStatus() {
+    const state = this.ensureMaterialFeeState();
+    const cache = state.cache || {};
+    if (cache.refresh_error) return {
+      status: "error", text: "快照核对失败·正在显示上次可信数据", title: cache.refresh_error,
+    };
+    if (cache.status === "stale") return { status: "stale", text: "本地快照可能较旧·正在后台更新", title: "" };
+    if (state.cacheChecking || cache.status === "refreshing") {
+      return { status: "checking", text: "本地快照已显示·正在后台核对", title: "" };
+    }
+    if (cache.last_checked_at) return { status: "ready", text: "本地快照·已核对", title: cache.last_checked_at };
+    return { status: "ready", text: "本地快照·快速载入", title: cache.generated_at || "" };
+  }
+
+  renderMaterialFeeCacheStatus() {
+    const status = this.materialFeeCacheStatus();
+    return `<small class="ocw-mf-cache-status" data-mf-cache-status="${this.escape(status.status)}" role="status" title="${this.escape(status.title)}">${this.escape(status.text)}</small>`;
+  }
+
+  updateMaterialFeeCacheStatus() {
+    if (!this.$root?.find) return;
+    const status = this.materialFeeCacheStatus();
+    const $status = this.$root.find("[data-mf-cache-status]");
+    $status?.attr?.("data-mf-cache-status", status.status);
+    $status?.attr?.("title", status.title);
+    $status?.text?.(status.text);
   }
 
   async openExcludedMaterialsDialog() {
@@ -12890,6 +13002,7 @@ class OverseasCostWorkbench {
     if (!modified) return;
     this.detailState.expectedModified = modified;
     if (this.detailState.header) this.detailState.header.modified = modified;
+    if (this.materialFeeState?.batchName === this.detailState.batchName) this.materialFeeState.cacheDirty = true;
   }
 
   applyMaterialFeeHeaderSnapshot(detail, batchName) {
@@ -13517,20 +13630,12 @@ class OverseasCostWorkbench {
     const versionName = this.detailState.versionName || null;
     const fullRequestId = state.requestId;
     const requestId = ++state.feeRequestId;
-    const [detail, fees, preview] = await Promise.all([
-      this.call("overseas_costing.api.batch.get_batch_detail", {
-        batch_name: expectedBatchName,
-        version_name: versionName,
-      }),
-      this.call("overseas_costing.api.fees.get_fee_worklist", {
-        batch_name: expectedBatchName,
-        version_name: versionName,
-      }),
-      this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
-        batch_name: expectedBatchName,
-        version_name: versionName,
-      }),
-    ]);
+    const snapshot = await this.call("overseas_costing.api.material_fee_workspace.refresh_snapshot", {
+      batch_name: expectedBatchName,
+      version_name: versionName,
+      page: state.page,
+      page_length: state.pageLength,
+    });
     if (
       this.detailState.batchName !== expectedBatchName
       || this.materialFeeState !== state
@@ -13538,9 +13643,15 @@ class OverseasCostWorkbench {
       || fullRequestId !== state.requestId
       || this.detailState.tab !== "documents"
     ) return false;
-    this.applyMaterialFeeHeaderSnapshot(detail, expectedBatchName);
-    state.fees = fees;
-    state.preview = preview;
+    const data = snapshot?.data || {};
+    if (!snapshot?.ok || !data.detail || !data.fees || !data.preview) {
+      throw new Error(snapshot?.message || "最新资料同步失败");
+    }
+    this.applyMaterialFeeHeaderSnapshot(data.detail, expectedBatchName);
+    state.fees = data.fees;
+    state.preview = data.preview;
+    state.cache = { ...(snapshot.cache || {}) };
+    state.cacheDirty = false;
     return true;
   }
 
@@ -13549,16 +13660,12 @@ class OverseasCostWorkbench {
     const batchName = String(this.detailState.batchName || "");
     const fullRequestId = state.requestId;
     const requestId = ++state.feeRequestId;
-    const [fees, preview] = await Promise.all([
-      this.call("overseas_costing.api.fees.get_fee_worklist", {
-        batch_name: batchName,
-        version_name: this.detailState.versionName || null,
-      }),
-      this.call("overseas_costing.api.calculate.preview_comprehensive_cost", {
-        batch_name: batchName,
-        version_name: this.detailState.versionName || null,
-      }),
-    ]);
+    const snapshot = await this.call("overseas_costing.api.material_fee_workspace.refresh_snapshot", {
+      batch_name: batchName,
+      version_name: this.detailState.versionName || null,
+      page: state.page,
+      page_length: state.pageLength,
+    });
     if (
       this.detailState.batchName !== batchName
       || this.materialFeeState !== state
@@ -13566,8 +13673,12 @@ class OverseasCostWorkbench {
       || fullRequestId !== state.requestId
       || this.detailState.tab !== "documents"
     ) return false;
-    state.fees = fees;
-    state.preview = preview;
+    const data = snapshot?.data || {};
+    if (!snapshot?.ok || !data.fees || !data.preview) throw new Error(snapshot?.message || "费用快照刷新失败");
+    state.fees = data.fees;
+    state.preview = data.preview;
+    state.cache = { ...(snapshot.cache || {}) };
+    state.cacheDirty = false;
     this.renderMaterialFeeWorkspace();
     return true;
   }
@@ -14192,7 +14303,7 @@ class OverseasCostWorkbench {
         const selected = option.basis === selectedBasis ? "selected" : "";
         return `<option value="${this.escape(option.basis)}" ${selected}>${this.escape(option.label)}·可用</option>`;
       }).join("");
-      const basisControl = `<label><span>本次分摊口径</span><select data-cost-trial-basis data-suggestion-id="${this.escape(row.suggestion_id)}"><option value="">请选择</option>${options}</select></label>`;
+      const basisControl = `<label><span>本次分摊口径</span><select data-cost-trial-basis data-suggestion-id="${this.escape(row.suggestion_id)}" data-recommended-basis="${this.escape(row.recommended_basis || "")}"><option value="">请选择</option>${options}</select></label>`;
       const requiresEvidenceRepair = ["SKU_MATCH_INVALID", "AMOUNT_INVALID"].includes(String(row.evidence_issue || ""));
       const evidence = row.evidence_locked
         ? `<div class="ocw-cost-trial-evidence"><strong>凭证优先</strong><span>${Number(row.evidence_component_count || 0)} 条 SKU 分项·RMB ${this.escape(row.evidence_amount_rmb || "0.00")}</span></div>`
@@ -14217,7 +14328,7 @@ class OverseasCostWorkbench {
     return `<div class="ocw-cost-trial-review"><header><div><strong>AI 分摊口径建议</strong><span>${this.escape(draft.model || trial.model || "DeepSeek")}·每项费用单独确认</span></div></header>
       ${draft.ai_warning ? `<div class="ocw-cost-trial-warning">${this.escape(draft.ai_warning)}</div>` : ""}
       <main>${waiting ? `<div class="ocw-cost-trial-running"><strong>${this.escape(trial.progress_step || "DeepSeek 正在分析费用口径")}</strong><span>${Math.max(0, Math.min(100, Number(trial.progress_percent || 0)))}%</span></div>` : rows || `<div class="ocw-detail-empty"><strong>当前没有需要分摊的费用</strong></div>`}${previewHtml}</main>
-      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重试 AI</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div><button type="button" class="ocw-primary-btn" data-action="cost-trial-preview" ${hasBlockedSuggestion ? "disabled" : ""}>${trial.previewing ? "预览中…" : "预览分摊结果"}</button></footer>
+      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重试 AI</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">请先补齐被阻止的费用资料</span>` : ""}</footer>
     </div>`;
   }
 
@@ -14234,7 +14345,10 @@ class OverseasCostWorkbench {
     });
     state.costTrialDialog = dialog;
     dialog.$wrapper?.addClass?.("ocw-cost-trial-dialog");
-    dialog.$wrapper?.on?.("click", "[data-action='cost-trial-preview']", () => this.previewCostTrialAI().catch((error) => this.showError(error)));
+    dialog.$wrapper?.on?.("input change", "[data-cost-trial-basis], [data-cost-trial-reason]", () => {
+      this.invalidateCostTrialAIPreview({ render: false });
+      this.updateCostTrialAIPrimaryAction();
+    });
     dialog.$wrapper?.on?.("click", "[data-action='cost-trial-back']", () => dialog.hide());
     dialog.$wrapper?.on?.("click", "[data-action='cost-trial-discard']", () => this.discardCostTrialAI().catch((error) => this.showError(error)));
     dialog.$wrapper?.on?.("click", "[data-action='cost-trial-retry']", () => this.retryCostTrialAI().catch((error) => this.showError(error)));
@@ -14247,10 +14361,10 @@ class OverseasCostWorkbench {
     const dialog = state.costTrialDialog;
     const host = dialog?.fields_dict?.review_html?.$wrapper;
     host?.html?.(this.renderCostTrialAIReview());
-    dialog?.get_primary_btn?.().prop?.("disabled", !state.costTrialAI?.preview?.preview_token || Boolean(state.costTrialAI?.confirming));
+    this.updateCostTrialAIPrimaryAction();
   }
 
-  collectCostTrialAISelections() {
+  collectCostTrialAISelections({ validate = true } = {}) {
     const state = this.ensureMaterialFeeState();
     const wrapper = state.costTrialDialog?.$wrapper;
     const selections = [];
@@ -14258,12 +14372,52 @@ class OverseasCostWorkbench {
       const $input = $(element);
       const suggestionId = String($input.attr("data-suggestion-id") || "");
       const basis = String($input.val() || "");
-      if (!basis) throw new Error("请为每项费用选择可用的分摊口径。");
+      if (validate && !basis) throw new Error("请为每项费用选择可用的分摊口径。");
       let reason = "";
       wrapper.find(`[data-cost-trial-reason][data-suggestion-id='${suggestionId}']`).each((_i, input) => { reason = String($(input).val() || ""); });
+      const recommendedBasis = String($input.attr("data-recommended-basis") || "");
+      if (validate && basis && recommendedBasis && basis !== recommendedBasis && !reason.trim()) {
+        throw new Error("改用其他分摊口径时，请填写确认说明。");
+      }
       selections.push({ suggestion_id: suggestionId, basis, reason });
     });
     return selections;
+  }
+
+  costTrialAIReadyToConfirm() {
+    const trial = this.ensureMaterialFeeState().costTrialAI;
+    if (!trial || trial.status !== "READY" || trial.confirming || trial.previewing) return false;
+    if ((trial.draft?.fee_suggestions || []).some((row) => Boolean(row.blocked))) return false;
+    try {
+      this.collectCostTrialAISelections();
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  updateCostTrialAIPrimaryAction() {
+    const state = this.ensureMaterialFeeState();
+    const trial = state.costTrialAI || {};
+    const $button = state.costTrialDialog?.get_primary_btn?.();
+    const label = trial.actionStage === "preview"
+      ? "校验分摊…"
+      : trial.actionStage === "confirm" ? "保存试算…" : "确认并试算";
+    $button?.text?.(label);
+    $button?.prop?.("disabled", !this.costTrialAIReadyToConfirm());
+    const busy = Boolean(trial.confirming || trial.previewing);
+    state.costTrialDialog?.$wrapper?.find?.("[data-cost-trial-basis], [data-cost-trial-reason]")?.prop?.("disabled", busy);
+    state.costTrialDialog?.$wrapper?.find?.("[data-action^='cost-trial-']")?.prop?.("disabled", busy);
+  }
+
+  invalidateCostTrialAIPreview({ render = true } = {}) {
+    const state = this.ensureMaterialFeeState();
+    const trial = state.costTrialAI;
+    if (!trial) return;
+    trial.preview = null;
+    trial.selections = this.collectCostTrialAISelections({ validate: false });
+    state.costTrialDialog?.$wrapper?.find?.(".ocw-cost-trial-preview")?.remove?.();
+    if (render) this.renderCostTrialAIReviewDialog();
   }
 
   async previewCostTrialAI() {
@@ -14271,6 +14425,8 @@ class OverseasCostWorkbench {
     const trial = state.costTrialAI;
     if (!trial?.runId || trial.previewing) return false;
     const selections = this.collectCostTrialAISelections();
+    trial.selections = selections;
+    trial.preview = null;
     trial.previewing = true;
     try {
       const preview = await this.call("overseas_costing.api.calculate.preview_cost_trial", {
@@ -14291,13 +14447,9 @@ class OverseasCostWorkbench {
   async confirmCostTrialAI() {
     const state = this.ensureMaterialFeeState();
     const trial = state.costTrialAI;
-    if (!trial?.preview?.preview_token || trial.confirming) throw new Error("请先预览分摊结果。");
+    if (!trial?.runId) throw new Error("本次 AI 试算任务已失效，请重试。");
+    if (trial.confirming) return false;
     const currentSelections = this.collectCostTrialAISelections();
-    if (JSON.stringify(currentSelections) !== JSON.stringify(trial.selections || [])) {
-      trial.preview = null;
-      this.renderCostTrialAIReviewDialog();
-      throw new Error("分摊口径或说明已变化，请重新预览后再确认。");
-    }
     const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName;
     const requestId = state.requestId;
@@ -14311,17 +14463,40 @@ class OverseasCostWorkbench {
       && state.feeRequestId === feeRequestId
       && state.inputRevision === inputRevision;
     trial.confirming = true;
-    this.renderCostTrialAIReviewDialog();
-    const calculationWrite = this.call("overseas_costing.api.calculate.confirm_cost_trial", {
-      batch_name: batchName,
-      run_id: trial.runId,
-      preview_token: trial.preview.preview_token,
-      selections: JSON.stringify(currentSelections),
-      edit_token: this.detailState.editToken,
-      expected_modified: this.detailState.expectedModified,
-    });
-    state.calculationWrite = calculationWrite;
+    const previewMatches = trial.preview?.preview_token
+      && JSON.stringify(currentSelections) === JSON.stringify(trial.selections || []);
+    let calculationWrite = null;
     try {
+      if (!previewMatches) {
+        trial.actionStage = "preview";
+        trial.preview = null;
+        trial.selections = currentSelections;
+        this.updateCostTrialAIPrimaryAction();
+        const preview = await this.call("overseas_costing.api.calculate.preview_cost_trial", {
+          batch_name: batchName,
+          run_id: trial.runId,
+          selections: JSON.stringify(currentSelections),
+        });
+        if (!preview?.ok || !preview.preview_token) throw new Error(preview?.message || "试算预览失败。");
+        const latestSelections = this.collectCostTrialAISelections();
+        if (JSON.stringify(latestSelections) !== JSON.stringify(currentSelections)) {
+          trial.preview = null;
+          trial.selections = latestSelections;
+          throw new Error("分摊口径或说明已变化，未保存旧选择，请再次确认。");
+        }
+        trial.preview = preview;
+      }
+      trial.actionStage = "confirm";
+      this.updateCostTrialAIPrimaryAction();
+      calculationWrite = this.call("overseas_costing.api.calculate.confirm_cost_trial", {
+        batch_name: batchName,
+        run_id: trial.runId,
+        preview_token: trial.preview.preview_token,
+        selections: JSON.stringify(currentSelections),
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+      });
+      state.calculationWrite = calculationWrite;
       const result = await calculationWrite;
       if (!result?.ok || !result?.saved) throw new Error(result?.message || "AI 试算保存失败。");
       this.acceptSavedComprehensiveCost(result, batchName, { versionName, preserveDirty: !isUnchangedView() });
@@ -14339,6 +14514,8 @@ class OverseasCostWorkbench {
     } finally {
       if (state.calculationWrite === calculationWrite) state.calculationWrite = null;
       trial.confirming = false;
+      trial.actionStage = "";
+      this.updateCostTrialAIPrimaryAction();
       this.updateMaterialFeeWriteControls(state);
     }
   }

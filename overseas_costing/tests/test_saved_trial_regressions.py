@@ -215,18 +215,141 @@ console.log(JSON.stringify({calls,hidden:state.costTrialDialog,modified:h.detail
     assert result["preview"]["saved"] is True
 
 
-def test_trial_confirmation_requires_a_new_preview_after_choice_changes():
+def test_trial_confirmation_refreshes_preview_after_choice_changes():
     result = _frontend_result(FRONTEND_SETUP + """
 state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[]},
   selections:[{suggestion_id:'S',basis:'goods_value',reason:''}],preview:{preview_token:'P'}};
 h.collectCostTrialAISelections=()=>[{suggestion_id:'S',basis:'gross_weight',reason:'改按重量'}];
-h.renderCostTrialAIReviewDialog=()=>{};let calls=0;h.call=async()=>{calls+=1;return saved};
-let error='';try{await h.confirmCostTrialAI()}catch(exc){error=exc.message}
-console.log(JSON.stringify({calls,error}));
+h.renderCostTrialAIReviewDialog=()=>{};h.renderDetailShell=()=>{};h.updateEditLeaseStatus=()=>{};
+const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
+  if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'P2',summary:{total_cost_rmb:'130'}};
+  return saved;
+};
+await h.confirmCostTrialAI();
+console.log(JSON.stringify({calls}));
 """)
 
-    assert result["calls"] == 0
-    assert "重新预览" in result["error"]
+    assert [row["endpoint"].split(".")[-1] for row in result["calls"]] == [
+        "preview_cost_trial",
+        "confirm_cost_trial",
+    ]
+    assert result["calls"][1]["args"]["preview_token"] == "P2"
+
+
+def test_trial_confirmation_previews_then_saves_in_one_click():
+    result = _frontend_result(FRONTEND_SETUP + """
+state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[]},selections:[],preview:null};
+h.collectCostTrialAISelections=()=>[{suggestion_id:'S',basis:'goods_value',reason:''}];
+h.renderCostTrialAIReviewDialog=()=>{};h.renderDetailShell=()=>{};h.updateEditLeaseStatus=()=>{};
+const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
+  if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'P',summary:{total_cost_rmb:'130'}};
+  if(endpoint.endsWith('confirm_cost_trial'))return saved;
+  throw new Error('unexpected endpoint '+endpoint);
+};
+state.costTrialDialog={hide(){this.hidden=true}};
+await h.confirmCostTrialAI();
+console.log(JSON.stringify({calls,hidden:state.costTrialDialog.hidden,confirming:state.costTrialAI.confirming}));
+""")
+
+    assert [row["endpoint"].split(".")[-1] for row in result["calls"]] == [
+        "preview_cost_trial",
+        "confirm_cost_trial",
+    ]
+    assert result["calls"][1]["args"]["preview_token"] == "P"
+    assert result["hidden"] is True
+    assert result["confirming"] is False
+
+
+def test_trial_preview_failure_never_calls_save_and_keeps_choices():
+    result = _frontend_result(FRONTEND_SETUP + """
+const choices=[{suggestion_id:'S',basis:'gross_weight',reason:'改按重量'}];
+state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[]},selections:choices,preview:null};
+h.collectCostTrialAISelections=()=>choices;h.renderCostTrialAIReviewDialog=()=>{};
+const calls=[];h.call=async(endpoint)=>{calls.push(endpoint.split('.').pop());throw new Error('预览失败')};
+let error='';try{await h.confirmCostTrialAI()}catch(exc){error=exc.message}
+console.log(JSON.stringify({calls,error,selections:state.costTrialAI.selections,preview:state.costTrialAI.preview,confirming:state.costTrialAI.confirming}));
+""")
+
+    assert result["calls"] == ["preview_cost_trial"]
+    assert result["error"] == "预览失败"
+    assert result["selections"] == [
+        {"suggestion_id": "S", "basis": "gross_weight", "reason": "改按重量"}
+    ]
+    assert result["preview"] is None
+    assert result["confirming"] is False
+
+
+def test_trial_choice_change_while_preview_is_running_never_saves_old_selection():
+    result = _frontend_result(FRONTEND_SETUP + """
+let choices=[{suggestion_id:'S',basis:'goods_value',reason:''}];
+state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[]},selections:[],preview:null};
+h.collectCostTrialAISelections=()=>choices;h.renderCostTrialAIReviewDialog=()=>{};
+const calls=[];h.call=async(endpoint)=>{calls.push(endpoint.split('.').pop());
+  choices=[{suggestion_id:'S',basis:'gross_weight',reason:'改按重量'}];
+  return {ok:true,preview_token:'OLD'};
+};
+let error='';try{await h.confirmCostTrialAI()}catch(exc){error=exc.message}
+console.log(JSON.stringify({calls,error,preview:state.costTrialAI.preview,selections:state.costTrialAI.selections}));
+""")
+
+    assert result["calls"] == ["preview_cost_trial"]
+    assert "变化" in result["error"]
+    assert result["preview"] is None
+    assert result["selections"] == [
+        {"suggestion_id": "S", "basis": "gross_weight", "reason": "改按重量"}
+    ]
+
+
+def test_trial_confirmation_failure_keeps_preview_and_choices_for_retry():
+    result = _frontend_result(FRONTEND_SETUP + """
+const choices=[{suggestion_id:'S',basis:'goods_value',reason:''}];
+state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[]},selections:choices,preview:{preview_token:'P'}};
+h.collectCostTrialAISelections=()=>choices;h.renderCostTrialAIReviewDialog=()=>{};
+h.call=async()=>{throw new Error('保存失败')};
+let error='';try{await h.confirmCostTrialAI()}catch(exc){error=exc.message}
+console.log(JSON.stringify({error,preview:state.costTrialAI.preview,selections:state.costTrialAI.selections,confirming:state.costTrialAI.confirming}));
+""")
+
+    assert result["error"] == "保存失败"
+    assert result["preview"] == {"preview_token": "P"}
+    assert result["selections"] == [
+        {"suggestion_id": "S", "basis": "goods_value", "reason": ""}
+    ]
+    assert result["confirming"] is False
+
+
+def test_trial_choice_change_invalidates_existing_preview_token():
+    result = _frontend_result(FRONTEND_SETUP + """
+state.costTrialAI={runId:'RUN',status:'READY',preview:{preview_token:'OLD'},selections:[{suggestion_id:'S',basis:'goods_value',reason:''}]};
+let dialogRenders=0;h.renderCostTrialAIReviewDialog=()=>{dialogRenders+=1};
+h.invalidateCostTrialAIPreview();
+console.log(JSON.stringify({preview:state.costTrialAI.preview,selections:state.costTrialAI.selections,renders:dialogRenders}));
+""")
+
+    assert result == {"preview": None, "selections": [], "renders": 1}
+
+
+def test_trial_primary_enables_only_after_basis_and_required_reason_are_complete():
+    result = _frontend_result(FRONTEND_SETUP + """
+const basis={value:'',attrs:{'data-suggestion-id':'S','data-recommended-basis':'volume'},val(){return this.value},attr(name){return this.attrs[name]||''}};
+const reason={value:'',val(){return this.value}};global.$=value=>value;
+const collection=element=>({each(callback){callback(0,element)}});
+const wrapper={find(selector){return selector==='[data-cost-trial-basis]'?collection(basis):collection(reason)}};
+const button={disabled:null,label:'',prop(name,value){if(name==='disabled')this.disabled=value;return this},text(value){this.label=value;return this}};
+state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[{suggestion_id:'S',recommended_basis:'volume',blocked:false}]},preview:null,selections:[]};
+state.costTrialDialog={$wrapper:wrapper,get_primary_btn:()=>button};
+h.updateCostTrialAIPrimaryAction();const missingBasis=button.disabled;
+basis.value='gross_weight';h.updateCostTrialAIPrimaryAction();const missingReason=button.disabled;
+reason.value='缺体积，改按重量';h.updateCostTrialAIPrimaryAction();
+console.log(JSON.stringify({missingBasis,missingReason,complete:button.disabled,label:button.label}));
+""")
+
+    assert result == {
+        "missingBasis": True,
+        "missingReason": True,
+        "complete": False,
+        "label": "确认并试算",
+    }
 
 
 def test_tax_evidence_total_mismatch_is_visible_but_keeps_manual_basis_controls():

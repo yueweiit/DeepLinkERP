@@ -480,6 +480,20 @@ console.log(JSON.stringify({calls,a,b}));
     assert result['calls'][0]['freeze'] is True and result['calls'][1]['freeze'] is False
 
 
+def test_read_snapshot_transport_can_explicitly_use_get():
+    result = _fee_workspace_result(FIXTURE + f"""
+const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
+workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
+""" + r"""
+let request;frappe.call=async(options)=>{request=options;return {message:{ok:true}}};
+await workspace.call('overseas_costing.api.material_fee_workspace.get_snapshot',{batch_name:'B1'},false,{type:'GET'});
+console.log(JSON.stringify(request));
+""")
+
+    assert result['method'].endswith('.get_snapshot')
+    assert result['type'] == 'GET'
+
+
 @pytest.mark.parametrize('status, message', [(401, '登录'), (403, '权限'), (0, '网络'), (504, '服务')])
 def test_transport_errors_have_readable_inline_recovery_message(status, message):
     result = _fee_workspace_result(FIXTURE + f"""
@@ -507,8 +521,14 @@ state.aiFill={status:'RUNNING',runId:'R1',polling:false,polling_paused:true};
 workspace.getDetailBatch=()=>({name:'B1',current_version:'V1'});
 workspace.applyMaterialFeeHeaderSnapshot=()=>{};workspace.renderMaterialFeeWorkspace=()=>{};
 workspace.renderDetailTabError=(_label,error)=>{throw error};
-let polls=0;workspace.pollMaterialAIFill=async()=>{polls++};workspace.call=async()=>({});
+let polls=0;workspace.pollMaterialAIFill=async()=>{polls++};workspace.call=async(method)=>{
+ if(method.endsWith('get_snapshot'))return {ok:true,batch_name:'B1',version_name:'V1',cache:{status:'ready',input_fingerprint:'fp'},data:{
+  detail:{ok:true,batch_name:'B1',version_name:'V1',header:{}},materials:{items:[]},fees:{fees:[],summary:{}},preview:{summary:{}},settlement:{viewed_version:'V1'}}};
+ if(method.endsWith('check_freshness'))return {ok:true,unchanged:true,current_fingerprint:'fp'};
+ return {};
+};
 await workspace.loadMaterialFeeWorkspace({quiet:true});
+await new Promise(resolve=>setImmediate(resolve));
 console.log(JSON.stringify({polls,paused:state.aiFill.polling_paused}));
 """)
     assert result == {'polls': 0, 'paused': True}

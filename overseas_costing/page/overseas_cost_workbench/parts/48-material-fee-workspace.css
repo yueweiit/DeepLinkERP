@@ -17,6 +17,20 @@
   font-weight: 400;
 }
 
+.ocw-mf-cache-status {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 7px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #effbf3;
+  color: #067647;
+  font-size: 11px;
+}
+.ocw-mf-cache-status[data-mf-cache-status="checking"] { background: #eef7ff; color: #076fbe; }
+.ocw-mf-cache-status[data-mf-cache-status="stale"] { background: #fff8e8; color: #8a5700; }
+.ocw-mf-cache-status[data-mf-cache-status="error"] { background: #fff3f2; color: #a92727; }
+
 .ocw-mf-alert-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -41,6 +55,8 @@
 .ocw-mf-metric.is-warn { border-color: #f6d59b; background: #fffaf0; }
 .ocw-mf-metric.is-warn strong { color: #b05c00; }
 .ocw-mf-metric.is-ok strong { color: #067647; }
+.ocw-mf-metric.is-cleared { border-color: #a9dfc0; background: #effbf3; }
+.ocw-mf-metric.is-cleared strong { color: #067647; }
 
 .ocw-mf-section {
   overflow: hidden;
@@ -888,8 +904,23 @@
 .ocw-mf-freight-editor > .ocw-mf-row-actions button { min-height: 36px; padding: 7px 12px; border: 1px solid #b8c9df; border-radius: 6px; background: #fff; font-size: 12px; }
 .ocw-mf-freight-editor > .ocw-mf-row-actions .ocw-primary-btn { border-color: #076fbe; background: #076fbe; color: #fff; }
 
+.ocw-cost-trial-dialog {
+  --ocw-brand: #0b8cf0;
+  --ocw-brand-dark: #076fbe;
+  --ocw-brand-soft: #eaf5ff;
+}
 .ocw-cost-trial-dialog .modal-dialog { max-width: min(1120px, calc(100vw - 32px)); }
 .ocw-cost-trial-dialog .modal-body { padding: 0; background: #f7f9fc; }
+.ocw-cost-trial-dialog .ocw-primary-btn,
+.ocw-cost-trial-dialog .btn-primary {
+  border-color: var(--ocw-brand-dark);
+  background: var(--ocw-brand);
+  color: #fff;
+}
+.ocw-cost-trial-dialog .ocw-primary-btn:hover,
+.ocw-cost-trial-dialog .btn-primary:hover { background: var(--ocw-brand-dark); color: #fff; }
+.ocw-cost-trial-dialog .ocw-primary-btn:disabled,
+.ocw-cost-trial-dialog .btn-primary:disabled { border-color: #98a2b3; background: #98a2b3; color: #fff; opacity: 1; }
 .ocw-cost-trial-review { display: grid; max-height: min(760px, calc(100vh - 170px)); color: #1d2939; }
 .ocw-cost-trial-review > header,
 .ocw-cost-trial-review > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; background: #fff; }
@@ -902,6 +933,7 @@
 .ocw-cost-trial-running span { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .ocw-cost-trial-review > footer { position: sticky; bottom: 0; border-top: 1px solid #dce6f2; box-shadow: 0 -6px 18px rgba(16, 24, 40, 0.05); }
 .ocw-cost-trial-review > footer > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.ocw-cost-trial-action-hint { color: #8a5700; font-size: 12px; }
 .ocw-cost-trial-fee { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.65fr); gap: 10px 18px; padding: 16px; border: 1px solid #dce6f2; border-radius: 9px; background: #fff; }
 .ocw-cost-trial-fee > header { grid-column: 1 / -1; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .ocw-cost-trial-fee > header > div { display: flex; align-items: baseline; gap: 10px; }
@@ -923,6 +955,9 @@
 .ocw-cost-trial-warning { margin: 12px 20px 0; padding: 10px 12px; border: 1px solid #efd29a; border-radius: 7px; background: #fff8e8; color: #8a5700; }
 
 @media (max-width: 720px) {
+  .ocw-cost-trial-dialog .modal-dialog { max-width: calc(100vw - 16px); margin: 8px auto; }
+  .ocw-cost-trial-dialog .modal-footer { display: flex; gap: 8px; padding: 12px; }
+  .ocw-cost-trial-dialog .modal-footer .btn { min-height: 40px; }
   .ocw-cost-trial-fee { grid-template-columns: 1fr; }
   .ocw-cost-trial-fee > header { align-items: stretch; flex-direction: column; }
   .ocw-cost-trial-review > footer { align-items: stretch; flex-direction: column; }
