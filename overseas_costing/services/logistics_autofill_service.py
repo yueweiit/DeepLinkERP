@@ -174,7 +174,54 @@ def _is_material_code_placeholder(value: object) -> bool:
     return bool(display) and all(character in "/\\|_-—–" for character in display)
 
 
-def _scope_source_fingerprint(source: dict, goods: list[dict]) -> str:
+def build_material_identity_hints(sources: list[dict]) -> list[dict]:
+    """Return lower-stage identities that may fill, but never add, logistics rows."""
+
+    hints, seen = [], set()
+    role_rank = {"purchase": 0, "payment": 1, "logistics_expense": 1}
+    for source in sources or []:
+        role = str(source.get("approval_role") or "").strip().casefold()
+        if (role not in role_rank or source.get("excluded")
+                or not source.get("available", True)):
+            continue
+        if role in {"payment", "logistics_expense"} and not source.get("scoped_packing"):
+            continue
+        raw_rows = source.get("scoped_goods") or _approval_goods_rows(source)
+        for index, raw in enumerate(raw_rows or [], 1):
+            mapped = map_oa_row_to_item(raw)
+            material_code = _display_material_code(mapped.get("material_code"))
+            product_name = str(mapped.get("product_name") or "").strip()
+            if _is_material_code_placeholder(material_code) or not product_name:
+                continue
+            source_id = f"{str(source.get('source_id') or '')}:{index}".strip(":")
+            identity = (
+                _normalized_material_code(material_code),
+                _normalized_material_name(product_name),
+                source_id,
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            hints.append({
+                "material_code": material_code,
+                "product_name": product_name,
+                "source_id": source_id,
+                "approval_role": role,
+                "_role_rank": role_rank[role],
+            })
+    hints.sort(key=lambda row: (
+        row.get("_role_rank", 9), str(row.get("source_id") or ""),
+        _normalized_material_code(row.get("material_code")),
+        _normalized_material_name(row.get("product_name")),
+    ))
+    for row in hints:
+        row.pop("_role_rank", None)
+    return hints
+
+
+def _scope_source_fingerprint(
+    source: dict, goods: list[dict], identity_hints: list[dict] | None = None,
+) -> str:
     payload = {
         "source_id": str(source.get("source_id") or ""),
         "source_hash": str(source.get("source_hash") or source.get("content_hash") or ""),
@@ -191,6 +238,15 @@ def _scope_source_fingerprint(source: dict, goods: list[dict]) -> str:
             }
             for row in goods
         ],
+        "identity_hints": [
+            {
+                "material_code": _normalized_material_code(row.get("material_code")),
+                "product_name": _normalized_material_name(row.get("product_name")),
+                "source_id": str(row.get("source_id") or ""),
+                "approval_role": str(row.get("approval_role") or ""),
+            }
+            for row in identity_hints or []
+        ],
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
@@ -198,7 +254,8 @@ def _scope_source_fingerprint(source: dict, goods: list[dict]) -> str:
 
 
 def build_logistics_reconciliation(
-    items: list[dict], source: dict, *, reset_manual_scope: bool = False
+    items: list[dict], source: dict, *, reset_manual_scope: bool = False,
+    identity_hints: list[dict] | None = None,
 ) -> dict | None:
     """Build an authoritative logistics-scope draft without mutating inputs."""
     if source.get("approval_role") != "international_logistics":
@@ -209,6 +266,16 @@ def build_logistics_reconciliation(
         normalized_name = _normalized_material_name(item.get("product_name"))
         if normalized_name:
             by_name.setdefault(normalized_name, []).append(item)
+    hint_by_name: dict[str, list[dict]] = {}
+    hint_by_code: dict[str, list[dict]] = {}
+    for hint in identity_hints or []:
+        normalized_name = _normalized_material_name(hint.get("product_name"))
+        code_key = _normalized_material_code(hint.get("material_code"))
+        if (normalized_name and code_key
+                and not _is_material_code_placeholder(hint.get("material_code"))):
+            hint_by_name.setdefault(normalized_name, []).append(hint)
+            hint_by_code.setdefault(code_key, []).append(hint)
+    identity_source_ids = set()
     for row in goods:
         if row.get("material_code") and not _is_material_code_placeholder(
             row.get("material_code")
@@ -216,13 +283,30 @@ def build_logistics_reconciliation(
             row["material_code"] = _display_material_code(row.get("material_code"))
             continue
         row["material_code"] = ""
-        matches = by_name.get(_normalized_material_name(row.get("product_name")), [])
-        codes = {str(item.get("material_code") or "").strip() for item in matches
-                 if not _is_material_code_placeholder(item.get("material_code"))}
-        if len(matches) != 1 or len(codes) != 1:
+        name_key = _normalized_material_name(row.get("product_name"))
+        matches = by_name.get(name_key, [])
+        matching_hints = hint_by_name.get(name_key, [])
+        candidates = [
+            candidate for candidate in [*matches, *matching_hints]
+            if not _is_material_code_placeholder(candidate.get("material_code"))
+        ]
+        code_keys = {
+            _normalized_material_code(candidate.get("material_code"))
+            for candidate in candidates
+        }
+        if len(code_keys) != 1:
             return None
-        row["material_code"] = next(iter(codes))
-        row["product_name"] = matches[0].get("product_name") or row.get("product_name")
+        selected = next(
+            candidate for candidate in candidates
+            if _normalized_material_code(candidate.get("material_code")) in code_keys
+        )
+        row["material_code"] = _display_material_code(selected.get("material_code"))
+        row["product_name"] = selected.get("product_name") or row.get("product_name")
+        identity_source_ids.update(
+            str(hint.get("source_id") or "") for hint in matching_hints
+            if (_normalized_material_code(hint.get("material_code")) in code_keys
+                and str(hint.get("source_id") or ""))
+        )
     if not goods or any(not row.get("material_code") or Decimal(str(row.get("quantity") or 0)) <= 0 for row in goods):
         return None
     for item in items:
@@ -245,6 +329,11 @@ def build_logistics_reconciliation(
         source_code = _display_material_code(goods_row["material_code"])
         code_key = _normalized_material_code(source_code)
         matches = by_code.get(code_key, [])
+        matching_code_hints = hint_by_code.get(code_key, [])
+        identity_source_ids.update(
+            str(hint.get("source_id") or "") for hint in matching_code_hints
+            if str(hint.get("source_id") or "")
+        )
         code = _display_material_code(
             (matches[0] if matches else {}).get("material_code") or source_code)
         identity = f"{source['source_id']}:{index}:{code_key}"
@@ -256,6 +345,21 @@ def build_logistics_reconciliation(
                 canonical_by_name.setdefault(_normalized_material_name(display_name), display_name)
         shared_canonical_name = (
             next(iter(canonical_by_name.values())) if len(canonical_by_name) == 1 else ""
+        )
+        preferred_hints = [
+            hint for hint in matching_code_hints
+            if str(hint.get("approval_role") or "").casefold() == "purchase"
+        ] or matching_code_hints
+        canonical_hint_names: dict[str, str] = {}
+        for hint in preferred_hints:
+            display_name = str(hint.get("product_name") or "").strip()
+            if display_name:
+                canonical_hint_names.setdefault(
+                    _normalized_material_name(display_name), display_name,
+                )
+        hinted_canonical_name = (
+            next(iter(canonical_hint_names.values()))
+            if len(canonical_hint_names) == 1 else ""
         )
         canonical_item_name = str((matches[0] if matches else {}).get("name") or "")
         old = next((row for row in matches if row.get("stable_line_key") == key or extra(row).get("logistics_row", {}).get("identity") == key), None)
@@ -283,7 +387,10 @@ def build_logistics_reconciliation(
         row = {field: old.get(field) for field in (*PURCHASE_FIELDS, *PHYSICAL_FIELDS,
                 "project_collection", "manual_override_flag", "manual_override_reason", "spec_model")}
         source_name = str(goods_row.get("product_name") or "").strip()
-        canonical_name = str(old.get("product_name") or shared_canonical_name or "").strip()
+        canonical_name = str(
+            old.get("product_name") or shared_canonical_name
+            or hinted_canonical_name or ""
+        ).strip()
         if (source_name and canonical_name
                 and _normalized_material_name(source_name)
                 != _normalized_material_name(canonical_name)):
@@ -376,8 +483,10 @@ def build_logistics_reconciliation(
                         "source_fact_ids": [
                             f"{source.get('source_id')}:{index}"
                             for index, _row in enumerate(goods, 1)
-                        ],
-                        "source_fingerprint": _scope_source_fingerprint(source, goods)}}
+                        ] + sorted(identity_source_ids),
+                        "source_fingerprint": _scope_source_fingerprint(
+                            source, goods, identity_hints,
+                        )}}
 
 
 def apply_reconciliation(

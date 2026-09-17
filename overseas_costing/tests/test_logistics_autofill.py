@@ -301,6 +301,115 @@ def test_logistics_placeholder_code_falls_back_to_unique_exact_name(placeholder_
     assert proposal["payload"]["excluded_item_names"] == ["I-145"]
 
 
+@pytest.mark.parametrize("role", ["purchase", "payment"])
+def test_logistics_placeholder_code_uses_lower_stage_identity_without_adding_rows(role):
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-HINT:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-HINT",
+        "form_fields": {"货物信息": [{
+            "物料编码": "/", "物料名称": "薇武士 IP17 PRO",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+    hints = [{
+        "material_code": "MWV101144", "product_name": "薇 武士 ip17 pro",
+        "source_id": f"{role}:IDENTITY:1", "approval_role": role,
+    }]
+
+    proposal = build_logistics_reconciliation(
+        [], source, reset_manual_scope=True, identity_hints=hints,
+    )
+
+    rows = proposal["payload"]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["material_code"] == "MWV101144"
+    assert rows[0]["product_name"] == "薇 武士 ip17 pro"
+    assert rows[0]["_existing_name"] == ""
+    assert proposal["payload"]["source_fact_ids"] == [
+        "approval:LOG-HINT:form:1", f"{role}:IDENTITY:1",
+    ]
+
+
+def test_logistics_placeholder_code_with_conflicting_lower_stage_identities_is_not_authoritative():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-CONFLICT:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-CONFLICT",
+        "form_fields": {"货物信息": [{
+            "物料编码": "无", "物料名称": "同名模具", "数量": 1, "单位": "套",
+        }]},
+    }
+    hints = [
+        {"material_code": "SKU-A", "product_name": "同名模具", "source_id": "PURCHASE:1"},
+        {"material_code": "SKU-B", "product_name": "同 名 模具", "source_id": "PAYMENT:1"},
+    ]
+
+    assert build_logistics_reconciliation(
+        [], source, reset_manual_scope=True, identity_hints=hints,
+    ) is None
+
+
+def test_logistics_valid_code_uses_purchase_canonical_name_when_row_must_be_created():
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-CANONICAL:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-CANONICAL",
+        "form_fields": {"货物信息": [{
+            "物料编码": "MWV101144", "物料名称": "MHA超队模具",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+    hints = [{
+        "material_code": "MWV101144", "product_name": "薇武士 IP17 PRO",
+        "source_id": "purchase:CANONICAL:1", "approval_role": "purchase",
+    }]
+
+    proposal = build_logistics_reconciliation(
+        [], source, reset_manual_scope=True, identity_hints=hints,
+    )
+
+    assert proposal["payload"]["rows"][0]["product_name"] == "薇武士 IP17 PRO"
+    assert proposal["payload"]["name_mismatches"] == [{
+        "material_code": "MWV101144", "source_name": "MHA超队模具",
+        "canonical_name": "薇武士 IP17 PRO", "item_name": "",
+    }]
+    assert "purchase:CANONICAL:1" in proposal["payload"]["source_fact_ids"]
+
+
+def test_identity_hints_only_use_purchase_or_shipment_scoped_payment_goods():
+    from overseas_costing.services.logistics_autofill_service import build_material_identity_hints
+
+    sources = [
+        {
+            "source_id": "PURCHASE", "approval_role": "purchase", "available": True,
+            "form_fields": {"货物信息": [{
+                "物料编码": "SKU-P", "物料名称": "采购物料", "数量": 1,
+            }]},
+        },
+        {
+            "source_id": "PAYMENT-SCOPED", "approval_role": "payment", "available": True,
+            "scoped_packing": True,
+            "scoped_goods": [{"material_code": "SKU-M", "product_name": "付款物料", "quantity": 1}],
+        },
+        {
+            "source_id": "PAYMENT-UNSCOPED", "approval_role": "payment", "available": True,
+            "form_fields": {"货物信息": [{
+                "物料编码": "SKU-X", "物料名称": "其他运单物料", "数量": 1,
+            }]},
+        },
+    ]
+
+    hints = build_material_identity_hints(sources)
+
+    assert [(row["material_code"], row["source_id"]) for row in hints] == [
+        ("SKU-P", "PURCHASE:1"), ("SKU-M", "PAYMENT-SCOPED:1"),
+    ]
+
+
 def test_logistics_row_without_code_and_ambiguous_name_is_not_authoritative():
     from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
 

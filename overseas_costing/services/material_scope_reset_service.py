@@ -17,6 +17,7 @@ from .logistics_autofill_service import (
     PHYSICAL_FIELDS,
     PURCHASE_FIELDS,
     apply_reconciliation,
+    build_material_identity_hints,
     build_logistics_reconciliation,
     plan_authoritative_scope_membership,
 )
@@ -123,9 +124,14 @@ def _authoritative_logistics_source(sources: list[dict]) -> tuple[dict | None, s
     return group[0], "AUTHORITATIVE"
 
 
-def build_reset_entry(target: dict, items: list[dict], source: dict) -> dict:
+def build_reset_entry(
+    target: dict, items: list[dict], source: dict, *,
+    identity_hints: list[dict] | None = None,
+) -> dict:
     proposal = build_logistics_reconciliation(
-        items, source, reset_manual_scope=True)
+        items, source, reset_manual_scope=True,
+        identity_hints=identity_hints,
+    )
     if not proposal or proposal.get("blocked"):
         raise ValueError("国际物流物料表无法唯一确定。")
     payload = proposal.get("payload") or {}
@@ -250,7 +256,14 @@ def _reload_reset_entry(runtime, target: dict) -> dict:
         filters={"batch": target["batch"], "version": target["version"]},
         fields=fields, order_by="row_no asc, name asc", limit_page_length=0,
     )
-    entry = build_reset_entry(target, items, source)
+    identity_sources = [
+        *sources,
+        *_list_material_identity_sources(target["batch"], target["version"]),
+    ]
+    entry = build_reset_entry(
+        target, items, source,
+        identity_hints=build_material_identity_hints(identity_sources),
+    )
     entry["_items"] = items
     return entry
 
@@ -261,6 +274,19 @@ def _list_original_logistics_sources(batch_name: str, version_name: str) -> list
     return _list_material_ai_sources(
         batch_name, version_name,
         original_scope=True, _ignore_effective_context=True)
+
+
+def _list_material_identity_sources(batch_name: str, version_name: str) -> list[dict]:
+    from .packing_snapshot_service import list_material_ai_sources
+
+    try:
+        return list_material_ai_sources(
+            batch_name, version_name, original_scope=False,
+        )
+    except Exception:
+        # Lower-stage identities are optional. Failure to enumerate a payment
+        # source must not hide a valid logistics/purchase-based scope.
+        return []
 
 
 def _build_material_scope_reset_audit(

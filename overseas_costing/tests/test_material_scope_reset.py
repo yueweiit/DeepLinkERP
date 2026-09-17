@@ -70,6 +70,33 @@ def test_reset_entry_reports_codes_creates_and_name_mismatch():
     assert entry["proposal"]["payload"]["rows"][0]["product_name"] == "薇武士 IP17 PRO"
 
 
+def test_reset_entry_keeps_logistics_row_count_when_purchase_resolves_placeholder_code():
+    from overseas_costing.services.material_scope_reset_service import build_reset_entry
+
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-PLACEHOLDER:form",
+        "source_hash": "LOGISTICS", "approval_role": "international_logistics",
+        "approval_no": "LOG-PLACEHOLDER", "form_fields": {"货物信息": [
+            {"物料编码": "/", "物料名称": "新模具", "数量": 1, "单位": "套"},
+        ]},
+    }
+    identity_hints = [{
+        "material_code": "MOLD-001", "product_name": "新模具",
+        "source_id": "purchase:P-1:1", "approval_role": "purchase",
+    }]
+
+    entry = build_reset_entry(
+        {"batch": "B-1", "version": "V-1", "current_version": "V-1",
+         "is_current": True, "version_status": "Active"},
+        [], source, identity_hints=identity_hints,
+    )
+
+    assert entry["scope_status"] == "AUTHORITATIVE"
+    assert entry["after_material_codes"] == ["MOLD-001"]
+    assert len(entry["create_rows"]) == 1
+    assert entry["create_rows"][0]["material_code"] == "MOLD-001"
+
+
 def test_entry_hash_changes_for_concurrent_business_field_change():
     from overseas_costing.services.material_scope_reset_service import build_reset_entry
 
@@ -459,3 +486,22 @@ def test_reset_source_listing_bypasses_bound_payment_root(monkeypatch):
     assert calls == [("B-1", "V-1", {
         "original_scope": True, "_ignore_effective_context": True,
     })]
+
+
+def test_reset_identity_source_listing_includes_server_scoped_payment(monkeypatch):
+    from overseas_costing.services import material_scope_reset_service as service
+    from overseas_costing.services import packing_snapshot_service
+
+    calls = []
+    monkeypatch.setattr(
+        packing_snapshot_service, "list_material_ai_sources",
+        lambda batch, version, **kwargs: calls.append((batch, version, kwargs)) or [
+            {"approval_role": "payment", "scoped_packing": True,
+             "scoped_goods": [{"material_code": "SKU-PAY"}]}
+        ],
+    )
+
+    sources = service._list_material_identity_sources("B-1", "V-1")
+
+    assert sources[0]["approval_role"] == "payment"
+    assert calls == [("B-1", "V-1", {"original_scope": False})]
