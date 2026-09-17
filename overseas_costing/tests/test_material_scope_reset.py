@@ -265,6 +265,7 @@ def test_reset_entry_reports_only_changed_field_names_for_diagnostics():
         "actual_shipped_qty_mode", "extra_json", "row_no", "source_doc_no",
         "source_type", "stable_line_key",
     ]}
+    assert entry["updated_json_paths"] == {"I-1": ["$.logistics_row"]}
 
 
 def test_manifest_hash_changes_when_material_membership_changes():

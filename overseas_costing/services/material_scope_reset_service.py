@@ -75,6 +75,30 @@ def _projected_value_matches(field: str, current: object, projected: object) -> 
     return str(current or "") == str(projected or "")
 
 
+def _json_difference_paths(current: object, projected: object, path: str = "$") -> list[str]:
+    """Return value-free JSON paths for audit diagnostics."""
+
+    if type(current) is not type(projected):
+        return [path]
+    if isinstance(current, dict):
+        differences = []
+        for key in sorted(set(current) | set(projected)):
+            child = f"{path}.{key}"
+            if key not in current or key not in projected:
+                differences.append(child)
+            else:
+                differences.extend(_json_difference_paths(current[key], projected[key], child))
+        return differences
+    if isinstance(current, list):
+        differences = []
+        if len(current) != len(projected):
+            differences.append(f"{path}.length")
+        for index, (left, right) in enumerate(zip(current, projected)):
+            differences.extend(_json_difference_paths(left, right, f"{path}[{index}]"))
+        return differences
+    return [] if current == projected else [path]
+
+
 def list_reset_targets(
     frappe, *, batch_names=None, include_all_versions: bool = True, limit: int = 100000
 ) -> list[dict]:
@@ -199,6 +223,19 @@ def build_reset_entry(
         name: fields for name, fields in updated_item_fields.items() if fields
     }
     updated = sorted(updated_item_fields)
+    updated_json_paths = {}
+    for name, fields in updated_item_fields.items():
+        if "extra_json" not in fields:
+            continue
+        try:
+            current_json = json.loads(existing[name].get("extra_json") or "{}")
+            projected_json = json.loads(retained[name].get("extra_json") or "{}")
+        except (TypeError, ValueError):
+            updated_json_paths[name] = ["$"]
+        else:
+            updated_json_paths[name] = _json_difference_paths(
+                current_json, projected_json,
+            )
     entry = {
         **{key: deepcopy(target.get(key)) for key in (
             "batch", "version", "current_version", "is_current", "version_status")},
@@ -208,6 +245,7 @@ def build_reset_entry(
         "material_fingerprint": _material_fingerprint(items),
         "updated_item_names": updated,
         "updated_item_fields": updated_item_fields,
+        "updated_json_paths": updated_json_paths,
         "proposal": proposal,
     }
     entry["changed"] = bool(
@@ -252,6 +290,13 @@ def build_reset_manifest(entries: list[dict], skipped: list[dict]) -> dict:
                 field_counts[field] = field_counts.get(field, 0) + 1
         compact["updated_field_counts"] = {
             field: field_counts[field] for field in sorted(field_counts)
+        }
+        json_path_counts: dict[str, int] = {}
+        for paths in (entry.get("updated_json_paths") or {}).values():
+            for path in paths:
+                json_path_counts[path] = json_path_counts.get(path, 0) + 1
+        compact["updated_json_path_counts"] = {
+            path: json_path_counts[path] for path in sorted(json_path_counts)
         }
         compact["name_mismatches"] = [{
             key: deepcopy(row.get(key)) for key in (
