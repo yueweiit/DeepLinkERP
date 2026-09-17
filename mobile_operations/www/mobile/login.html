@@ -1,0 +1,70 @@
+{% extends "templates/base.html" %}
+
+{% block title %}{{ _("移动作业登录") }}{% endblock %}
+
+{% block navbar %}{% endblock %}
+{% block footer %}{% endblock %}
+
+{% block head_include %}
+<link rel="stylesheet" href="/assets/frappe/css/fonts/fontawesome/font-awesome.min.css">
+{% endblock %}
+
+{% block content %}
+<div class="mobile-login-page">
+	<div class="mobile-login-brand">
+		<img class="mobile-login-logo" src="{{ logo }}" alt="{{ app_name }}">
+		<h1>{{ _("登录到{0}").format(app_name) }}</h1>
+	</div>
+
+	<div class="mobile-login-card">
+		<p class="mobile-login-tip">{{ _("使用账号密码或企业登录方式继续") }}</p>
+		<form id="mobile-login-form" autocomplete="on">
+			<div class="mobile-login-field mobile-login-user-field">
+				<i class="fa fa-envelope-o"></i>
+				<input id="mobile-login-user" type="text" autocomplete="username" placeholder="{{ login_name_placeholder or _('邮箱 / 用户名') }}" required autofocus>
+			</div>
+			<div class="mobile-login-field mobile-login-password">
+				<i class="fa fa-lock"></i>
+				<input id="mobile-login-password" type="password" autocomplete="current-password" placeholder="••••••" required>
+				<button type="button" data-action="toggle-password" aria-label="{{ _('显示密码') }}">{{ _("显示") }}</button>
+			</div>
+			<div class="mobile-login-links">
+				<button type="button" data-action="show-forgot">{{ _("忘记密码?") }}</button>
+			</div>
+			<button class="mobile-login-submit" type="submit">{{ _("登录") }}</button>
+		</form>
+		<div class="mobile-login-status" data-region="status" role="alert"></div>
+		<div class="mobile-login-forgot-panel" data-region="forgot-panel" hidden>
+			<p>{{ _("请输入账号邮箱，我们会发送重置密码链接") }}</p>
+			<input type="email" data-field="forgot-email" placeholder="{{ _('邮箱') }}" autocomplete="email">
+			<button type="button" data-action="send-forgot">{{ _("发送重置链接") }}</button>
+			<button class="mobile-login-back-button" type="button" data-action="back-login">{{ _("返回登录") }}</button>
+		</div>
+
+		{% if social_login or login_with_email_link %}
+		<div class="mobile-login-divider"><span>{{ _("或") }}</span></div>
+		{% endif %}
+
+		{% if social_login %}
+		<div class="mobile-login-providers">
+			{% for provider in provider_logins %}
+			<a class="mobile-login-provider" href="{{ provider.auth_url }}">
+				{% if provider.icon %}{{ provider.icon }}{% else %}<i class="fa fa-commenting-o"></i>{% endif %}
+				{{ _("通过{0}登录").format(provider.provider_name) }}
+			</a>
+			{% endfor %}
+		</div>
+		{% endif %}
+
+		{% if login_with_email_link %}
+		<button class="mobile-login-email-link" type="button" data-action="show-email-link">{{ _("通过邮箱链接登录") }}</button>
+		<div class="mobile-login-email-panel" data-region="email-panel" hidden>
+			<input type="email" data-field="email-link" placeholder="{{ _('请输入邮箱') }}" autocomplete="email">
+			<button type="button" data-action="send-email-link">{{ _("发送登录链接") }}</button>
+		</div>
+		{% endif %}
+	</div>
+
+	<a class="mobile-login-desktop-link" href="/login?{{ mobile_login_redirect_query }}">{{ _("使用标准登录页") }}</a>
+</div>
+{% endblock %}

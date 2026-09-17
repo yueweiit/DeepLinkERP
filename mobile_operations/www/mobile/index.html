@@ -1,0 +1,16 @@
+{# Use the base template directly so the mobile workspace does not inherit the
+   website page title/breadcrumb/header strip. #}
+{% extends "templates/base.html" %}
+
+{% block title %}{{ _("移动作业") }}{% endblock %}
+
+{% block navbar %}{% endblock %}
+{% block footer %}{% endblock %}
+
+{% block head_include %}
+<link rel="stylesheet" href="/assets/frappe/css/fonts/fontawesome/font-awesome.min.css">
+{% endblock %}
+
+{% block content %}
+<div id="mobile-app" class="mobile-app-root"></div>
+{% endblock %}

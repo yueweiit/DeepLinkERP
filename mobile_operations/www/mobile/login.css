@@ -1,0 +1,271 @@
+html,
+body {
+	margin: 0;
+	background: #fff;
+}
+
+body {
+	color: #383838;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.mobile-login-page {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	min-height: 100vh;
+	padding: 38px 15px 30px;
+	box-sizing: border-box;
+}
+
+.mobile-login-brand {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	width: min(100%, 370px);
+	margin-bottom: 20px;
+}
+
+.mobile-login-logo {
+	width: 42px;
+	height: 42px;
+	margin-bottom: 12px;
+	border-radius: 9px;
+	object-fit: cover;
+}
+
+.mobile-login-brand h1 {
+	margin: 0;
+	color: #333;
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.mobile-login-card {
+	width: min(100%, 370px);
+	box-sizing: border-box;
+	padding: 40px 27px 39px;
+	border: 1px solid #e7e7e7;
+	border-radius: 9px;
+	background: #fff;
+}
+
+.mobile-login-tip {
+	display: none;
+}
+
+.mobile-login-field {
+	position: relative;
+	display: flex;
+	align-items: center;
+	margin-bottom: 14px;
+}
+
+.mobile-login-field > i {
+	position: absolute;
+	left: 10px;
+	z-index: 1;
+	color: #8c8c8c;
+	font-size: 14px;
+}
+
+.mobile-login-card input {
+	width: 100%;
+	box-sizing: border-box;
+	height: 36px;
+	padding: 0 12px 0 35px;
+	border: 0;
+	border-radius: 8px;
+	outline: 0;
+	background: #f1f1f1;
+	color: #383838;
+	font-size: 13px;
+}
+
+.mobile-login-card input:focus {
+	box-shadow: none;
+}
+
+.mobile-login-password {
+	margin-bottom: 0;
+}
+
+.mobile-login-password input {
+	padding-right: 48px;
+}
+
+.mobile-login-password button {
+	position: absolute;
+	top: 0;
+	right: 7px;
+	height: 36px;
+	border: 0;
+	background: transparent;
+	color: #777;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.mobile-login-links {
+	margin: 7px 0 21px;
+	text-align: right;
+}
+
+.mobile-login-links button,
+.mobile-login-desktop-link {
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: #777;
+	font-size: 12px;
+	text-decoration: none;
+	cursor: pointer;
+}
+
+.mobile-login-submit {
+	width: 100%;
+	height: 36px;
+	border: 0;
+	border-radius: 7px;
+	background: #171717;
+	color: #fff;
+	font-size: 13px;
+	cursor: pointer;
+}
+
+.mobile-login-submit:disabled {
+	opacity: 0.62;
+	cursor: wait;
+}
+
+.mobile-login-status {
+	min-height: 18px;
+	margin-top: 7px;
+	color: #d14b4b;
+	font-size: 12px;
+	line-height: 1.5;
+	text-align: center;
+}
+
+.mobile-login-divider {
+	position: relative;
+	margin: 21px 0 18px;
+	color: #777;
+	font-size: 12px;
+	text-align: center;
+}
+
+.mobile-login-divider::before,
+.mobile-login-divider::after {
+	position: absolute;
+	top: 50%;
+	width: calc(50% - 18px);
+	height: 1px;
+	background: #ededed;
+	content: "";
+}
+
+.mobile-login-divider::before { left: 0; }
+.mobile-login-divider::after { right: 0; }
+
+.mobile-login-providers {
+	display: grid;
+	gap: 12px;
+}
+
+.mobile-login-provider,
+.mobile-login-email-link {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	width: 100%;
+	height: 36px;
+	box-sizing: border-box;
+	border: 0;
+	border-radius: 7px;
+	background: #f1f1f1;
+	color: #383838;
+	font-size: 12px;
+	text-decoration: none;
+	cursor: pointer;
+}
+
+.mobile-login-provider:hover,
+.mobile-login-email-link:hover {
+	background: #e7e7e7;
+}
+
+.mobile-login-provider img {
+	max-width: 18px;
+	max-height: 18px;
+}
+
+.mobile-login-email-link {
+	margin-top: 12px;
+}
+
+.mobile-login-email-panel {
+	display: flex;
+	gap: 7px;
+	margin-top: 10px;
+}
+
+.mobile-login-email-panel[hidden] {
+	display: none;
+	}
+
+.mobile-login-email-panel input {
+	min-width: 0;
+	padding-left: 12px;
+}
+
+.mobile-login-email-panel button {
+	flex: 0 0 auto;
+	padding: 0 10px;
+	border: 0;
+	border-radius: 7px;
+	background: #171717;
+	color: #fff;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.mobile-login-forgot-panel[hidden] {
+	display: none;
+}
+
+.mobile-login-forgot-panel p {
+	margin: 0 0 14px;
+	color: #777;
+	font-size: 12px;
+	line-height: 1.5;
+	text-align: center;
+}
+
+.mobile-login-forgot-panel input {
+	padding-left: 12px;
+}
+
+.mobile-login-forgot-panel > button:not(.mobile-login-back-button) {
+	width: 100%;
+	height: 36px;
+	margin-top: 12px;
+	border: 0;
+	border-radius: 7px;
+	background: #171717;
+	color: #fff;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.mobile-login-back-button {
+	display: block;
+	margin: 14px auto 0;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: #777;
+	font-size: 12px;
+	cursor: pointer;
+}
