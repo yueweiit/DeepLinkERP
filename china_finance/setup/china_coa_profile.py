@@ -54,18 +54,53 @@ COMPANY_ACCOUNT_TYPE_OVERRIDES = {
 }
 
 
+def uses_yuewei_company_chart(company):
+	"""Identify the bundled chart by stable account signatures, not company name."""
+	return bool(
+		frappe.db.exists(
+			"Account",
+			{
+				"company": company,
+				"account_number": "660225",
+				"account_name": "管理费用－折旧费",
+			},
+		)
+		and frappe.db.exists(
+			"Account",
+			{
+				"company": company,
+				"account_number": "660203",
+				"account_name": "管理费用－物业管理费",
+			},
+		)
+	)
+
+
 def get_company_default_accounts(company):
+	overrides = COMPANY_DEFAULT_ACCOUNT_OVERRIDES.get(company, {})
+	if uses_yuewei_company_chart(company):
+		overrides = COMPANY_DEFAULT_ACCOUNT_OVERRIDES["悦为智能技术(东莞)有限公司"]
 	return {
 		**COMPANY_DEFAULT_ACCOUNTS,
-		**COMPANY_DEFAULT_ACCOUNT_OVERRIDES.get(company, {}),
+		**overrides,
 	}
 
 
 def get_tax_account_rules(company):
+	overrides = TAX_ACCOUNT_RULE_OVERRIDES.get(company, {})
+	if uses_yuewei_company_chart(company):
+		overrides = TAX_ACCOUNT_RULE_OVERRIDES["悦为智能技术(东莞)有限公司"]
 	return {
 		**TAX_ACCOUNT_RULES,
-		**TAX_ACCOUNT_RULE_OVERRIDES.get(company, {}),
+		**overrides,
 	}
+
+
+def get_company_account_type_overrides(company):
+	overrides = COMPANY_ACCOUNT_TYPE_OVERRIDES.get(company, {})
+	if uses_yuewei_company_chart(company):
+		overrides = COMPANY_ACCOUNT_TYPE_OVERRIDES["悦为智能技术(东莞)有限公司"]
+	return overrides
 
 
 @lru_cache(maxsize=1)
@@ -167,7 +202,7 @@ def validate_profile(company, include_defaults=True):
 		)
 		if row.parent_account
 	}
-	account_type_overrides = COMPANY_ACCOUNT_TYPE_OVERRIDES.get(company, {})
+	account_type_overrides = get_company_account_type_overrides(company)
 	for number, rule in expected.items():
 		account = actual.get(number)
 		if not account:
