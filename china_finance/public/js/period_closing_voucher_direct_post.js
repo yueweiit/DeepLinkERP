@@ -73,6 +73,87 @@ function china_finance_wait_for_period_closing_processing(frm, name) {
 	});
 }
 
+function china_finance_render_period_closing_entries(frm) {
+	const field = frm.fields_dict.custom_china_period_entries;
+	if (!field?.$wrapper) return;
+
+	const wrapper = field.$wrapper;
+	const request_id = (frm.__china_finance_period_entries_request_id || 0) + 1;
+	frm.__china_finance_period_entries_request_id = request_id;
+
+	if (frm.is_new()) {
+		wrapper.html(`<div class="china-period-closing-entries__empty text-muted">${__("保存后，提交结账凭证将生成会计分录")}</div>`);
+		return;
+	}
+
+	wrapper.html(`<div class="china-period-closing-entries__loading text-muted">${__("正在加载会计分录...")}</div>`);
+	frappe.call({
+		method: "china_finance.services.closing.get_period_closing_entries",
+		args: { name: frm.doc.name },
+	}).then((response) => {
+		if (request_id !== frm.__china_finance_period_entries_request_id) return;
+
+		const result = response.message || {};
+		const rows = result.rows || [];
+		const currency = result.currency || "CNY";
+		const total_debit = Number(result.total_debit || 0);
+		const total_credit = Number(result.total_credit || 0);
+		const balanced = Math.abs(total_debit - total_credit) <= 0.005;
+		const escape = frappe.utils.escape_html;
+		const format_amount = (value) => format_currency(Number(value || 0), currency);
+
+		if (!rows.length) {
+			let message = __("提交后将显示实际生成的会计分录");
+			if (result.processing_status === "In Progress") message = __("总账正在后台处理中，请稍后刷新");
+			if (Number(result.docstatus) === 2) message = __("该结账凭证已取消，没有有效会计分录");
+			wrapper.html(`<div class="china-period-closing-entries__empty text-muted">${escape(message)}</div>`);
+			return;
+		}
+
+		const body = rows.map((row) => `
+			<tr>
+				<td class="china-period-closing-entries__index">${escape(String(row.idx || ""))}</td>
+				<td>${escape(row.summary || "")}</td>
+				<td class="china-period-closing-entries__account">${escape(row.account || "")}</td>
+				<td class="text-right">${format_amount(row.debit)}</td>
+				<td class="text-right">${format_amount(row.credit)}</td>
+			</tr>`).join("");
+
+		wrapper.html(`
+			<div class="china-period-closing-entries">
+				<div class="china-period-closing-entries__meta">
+					<span>${__("共 {0} 条分录", [rows.length])}</span>
+					<span class="${balanced ? "text-success" : "text-danger"}">${balanced ? __("借贷平衡") : __("借贷不平")}</span>
+				</div>
+				<div class="table-responsive">
+					<table class="table table-bordered china-period-closing-entries__table">
+						<thead>
+							<tr>
+								<th>${__("编号")}</th>
+								<th>${__("摘要")}</th>
+								<th>${__("科目")}</th>
+								<th class="text-right">${__("借方")}</th>
+								<th class="text-right">${__("贷方")}</th>
+							</tr>
+						</thead>
+						<tbody>${body}</tbody>
+						<tfoot>
+							<tr>
+								<th colspan="3" class="text-right">${__("合计")}</th>
+								<th class="text-right">${format_amount(total_debit)}</th>
+								<th class="text-right">${format_amount(total_credit)}</th>
+							</tr>
+						</tfoot>
+					</table>
+				</div>
+			</div>`);
+	}).catch((error) => {
+		if (request_id !== frm.__china_finance_period_entries_request_id) return;
+		const message = error?.message || __("会计分录加载失败，请刷新页面重试");
+		wrapper.html(`<div class="china-period-closing-entries__empty text-danger">${frappe.utils.escape_html(message)}</div>`);
+	});
+}
+
 function china_finance_save_and_complete_period_closing(frm) {
 	if (!china_finance_can_complete_period_closing(frm) || frm.__china_finance_period_closing_processing) {
 		return;
@@ -110,6 +191,7 @@ function china_finance_save_and_complete_period_closing(frm) {
 
 frappe.ui.form.on("Period Closing Voucher", {
 	refresh(frm) {
+		china_finance_render_period_closing_entries(frm);
 		if (!china_finance_can_complete_period_closing(frm)) return;
 		frm.__china_finance_period_closing_save_button_added = false;
 

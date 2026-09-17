@@ -442,10 +442,24 @@ def sync_china_accounting_voucher_print_format():
 
 
 def sync_sales_settlement_custom_fields():
-	"""Install only additive metadata for ERPNext sales documents."""
+	"""Install additive metadata for ERPNext and China Finance documents."""
 	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
 	create_custom_fields({
+		"Period Closing Voucher": [
+			{
+				"fieldname": "custom_china_period_entries_section",
+				"label": "会计分录",
+				"fieldtype": "Section Break",
+				"insert_after": "error_message",
+			},
+			{
+				"fieldname": "custom_china_period_entries",
+				"label": "",
+				"fieldtype": "HTML",
+				"insert_after": "custom_china_period_entries_section",
+			},
+		],
 		"Journal Entry": [
 			{"fieldname": "custom_china_voucher_number", "label": "凭证字号", "fieldtype": "Data", "read_only": 1, "in_list_view": 1, "insert_before": "name"},
 			{"fieldname": "custom_china_bank_transaction", "label": "银行流水来源", "fieldtype": "Link", "options": "Bank Transaction", "read_only": 1, "insert_after": "cheque_no"},

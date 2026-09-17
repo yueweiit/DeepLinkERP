@@ -324,6 +324,52 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	return checks
 
 
+@frappe.whitelist()
+def get_period_closing_entries(name):
+	"""Return the generated GL entries for a Period Closing Voucher.
+
+	The standard Period Closing Voucher creates its accounting entries in GL
+	Entry, sometimes asynchronously. Reading the active GL rows keeps this
+	view aligned with the accounting ledger and avoids maintaining a second,
+	editable copy of the closing entries on the voucher itself.
+	"""
+	if not name:
+		return {"rows": [], "total_debit": 0, "total_credit": 0, "processing_status": ""}
+
+	voucher = frappe.get_doc("Period Closing Voucher", name)
+	voucher.check_permission("read")
+	currency = frappe.db.get_value("Company", voucher.company, "default_currency")
+	rows = frappe.get_all(
+		"GL Entry",
+		filters={
+			"company": voucher.company,
+			"voucher_type": "Period Closing Voucher",
+			"voucher_no": voucher.name,
+			"is_cancelled": 0,
+		},
+		fields=["name", "account", "debit", "credit", "remarks", "account_currency"],
+		order_by="creation asc, name asc",
+		ignore_permissions=True,
+	)
+
+	total_debit = 0
+	total_credit = 0
+	for index, row in enumerate(rows, 1):
+		row["idx"] = index
+		row["summary"] = row.get("remarks") or voucher.remarks or ""
+		total_debit += flt(row.get("debit"))
+		total_credit += flt(row.get("credit"))
+
+	return {
+		"rows": rows,
+		"total_debit": total_debit,
+		"total_credit": total_credit,
+		"currency": currency,
+		"processing_status": voucher.gle_processing_status or "",
+		"docstatus": voucher.docstatus,
+	}
+
+
 def get_account_mapping_coverage(company, templates):
 	template_types = dict(
 		frappe.get_all(

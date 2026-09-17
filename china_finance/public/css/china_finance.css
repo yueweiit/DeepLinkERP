@@ -155,3 +155,39 @@
 .china-voucher-ledger-report .china-voucher-status-text.orange { color: var(--orange-600); }
 .china-voucher-ledger-report .china-voucher-status-text.red { color: var(--red-600); }
 .china-voucher-ledger-report .china-voucher-status-text.gray { color: var(--text-muted); }
+
+.china-period-closing-entries {
+	margin: 0 0 16px;
+}
+
+.china-period-closing-entries__meta {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 8px;
+	color: var(--text-muted);
+	font-size: var(--text-sm);
+}
+
+.china-period-closing-entries__table {
+	margin-bottom: 0;
+}
+
+.china-period-closing-entries__table th,
+.china-period-closing-entries__table td {
+	vertical-align: middle;
+}
+
+.china-period-closing-entries__index {
+	width: 64px;
+	text-align: center;
+}
+
+.china-period-closing-entries__account {
+	min-width: 240px;
+}
+
+.china-period-closing-entries__empty,
+.china-period-closing-entries__loading {
+	padding: 12px 0;
+}
