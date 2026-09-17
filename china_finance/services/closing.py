@@ -17,7 +17,7 @@ from china_finance.services.voucher import calculate_entries_hash, get_pending_c
 from china_finance.services.purchase_reconciliation import get_blocked_purchase_invoices
 from china_finance.services.tax_reconciliation import get_input_tax_closing_checks, get_output_tax_closing_checks
 from china_finance.services.disclosure import get_disclosure_closing_checks, get_notes_payload
-from china_finance.services.sales_settlement import get_sales_settlement_closing_check
+from china_finance.services.sales_settlement import MODE_SETTLEMENT, get_sales_settlement_closing_check
 from china_finance.services.cash_flow_assignment import get_assignment_coverage
 from china_finance.services.statutory_reporting import get_statutory_report_readiness_data
 from china_finance.services.prior_period_error import get_prior_period_error_readiness
@@ -29,6 +29,35 @@ from china_finance.setup.templates import (
 	classify_company_account, is_strictly_excluded_from_statement,
 	refine_classification_for_template, requires_manual_cash_flow_assignment,
 )
+
+
+def _has_active_rule(doctype, company, from_date, to_date):
+	rows = frappe.get_all(
+		doctype,
+		filters={"company": company, "enabled": 1, "effective_from": ["<=", to_date]},
+		fields=["effective_to"],
+	)
+	return any(not row.effective_to or getdate(row.effective_to) >= getdate(from_date) for row in rows)
+
+
+def _has_period_tax_invoices(company, from_date, to_date, direction=None):
+	filters = {
+		"company": company, "docstatus": 1,
+		"invoice_date": ["between", [from_date, to_date]],
+	}
+	if direction:
+		filters["direction"] = direction
+	return bool(frappe.db.exists("China Tax Invoice", filters))
+
+
+def _has_period_sales_settlement(company, from_date, to_date):
+	return bool(frappe.db.exists(
+		"Delivery Note",
+		{
+			"company": company, "posting_date": ["between", [from_date, to_date]],
+			"docstatus": 1, "is_return": 0, "custom_china_settlement_mode": MODE_SETTLEMENT,
+		},
+	))
 
 
 def run_closing_checks(company, from_date, to_date, period_closing_voucher=None, closing_type="Monthly"):
@@ -137,34 +166,38 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	hash_errors = count_voucher_hash_errors(company, voucher_from_date, to_date)
 	add("VOUCHER_HASH", _("凭证快照与分录哈希一致"), hash_errors == 0, _("异常 {0} 张").format(hash_errors))
 
-	current_templates = [
-		get_template(company, statement_type, to_date).name
-		for statement_type in ("Balance Sheet", "Profit and Loss", "Cash Flow", "Changes in Equity")
-	]
-	unreviewed = frappe.db.count(
-		"China Financial Statement Mapping",
-		{"company": company, "template": ["in", current_templates], "reviewed": 0},
-	)
-	add("MAPPING_REVIEW", _("财务报表科目映射已复核"), unreviewed == 0, _("未复核 {0} 条").format(unreviewed))
+	# Monthly closing is an operational lock.  The statutory report package has
+	# its own readiness gate, so report mapping and disclosure checks belong to
+	# year-end/report preparation instead of every monthly close.
+	if closing_type == "Year End":
+		current_templates = [
+			get_template(company, statement_type, to_date).name
+			for statement_type in ("Balance Sheet", "Profit and Loss", "Cash Flow", "Changes in Equity")
+		]
+		unreviewed = frappe.db.count(
+			"China Financial Statement Mapping",
+			{"company": company, "template": ["in", current_templates], "reviewed": 0},
+		)
+		add("MAPPING_REVIEW", _("财务报表科目映射已复核"), unreviewed == 0, _("未复核 {0} 条").format(unreviewed))
 
-	missing_templates = []
-	for statement_type in ("Balance Sheet", "Profit and Loss", "Cash Flow", "Changes in Equity"):
-		template = get_template(company, statement_type, to_date).name
-		if not template or not frappe.db.exists(
-			"China Financial Statement Mapping", {"company": company, "template": template, "reviewed": 1}
-		):
-			missing_templates.append(statement_type)
-	add(
-		"MAPPING_COVERAGE",
-		_("四类财务报表均已配置并复核科目映射"),
-		not missing_templates,
-		_("缺少：{0}").format(", ".join(missing_templates)) if missing_templates else "",
-	)
-	mapping_coverage = get_account_mapping_coverage(company, current_templates)
-	add(
-		"ACCOUNT_MAPPING_COMPLETENESS", _("适用会计科目均已纳入四类报表映射"),
-		mapping_coverage["passed"], mapping_coverage["details"],
-	)
+		missing_templates = []
+		for statement_type in ("Balance Sheet", "Profit and Loss", "Cash Flow", "Changes in Equity"):
+			template = get_template(company, statement_type, to_date).name
+			if not template or not frappe.db.exists(
+				"China Financial Statement Mapping", {"company": company, "template": template, "reviewed": 1}
+			):
+				missing_templates.append(statement_type)
+		add(
+			"MAPPING_COVERAGE",
+			_("四类财务报表均已配置并复核科目映射"),
+			not missing_templates,
+			_("缺少：{0}").format(", ".join(missing_templates)) if missing_templates else "",
+		)
+		mapping_coverage = get_account_mapping_coverage(company, current_templates)
+		add(
+			"ACCOUNT_MAPPING_COMPLETENESS", _("适用会计科目均已纳入四类报表映射"),
+			mapping_coverage["passed"], mapping_coverage["details"],
+		)
 
 	reconciliation_checks = get_reconciliation_closing_checks(company, from_date, to_date)
 	add(
@@ -175,15 +208,8 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 		"RECONCILIATION_DIFFERENCE", _("强制对账差异均已闭环"),
 		reconciliation_checks["differences"]["passed"], reconciliation_checks["differences"]["details"],
 	)
-	add(
-		"RECONCILIATION_DRAFTS", _("非强制对账草稿已关注"), True,
-		reconciliation_checks["drafts"]["details"], "Warning",
-	)
-	if reconciliation_checks["differences"]["timing_count"]:
-		add(
-			"RECONCILIATION_TIMING", _("已批准时间性差异持续跟踪"), True,
-			reconciliation_checks["differences"]["details"], "Warning",
-		)
+	# Draft and approved-timing rows are informational only.  They remain
+	# available on the reconciliation screens but are not closing checks.
 
 	ledger_check = get_ar_ap_ledger_check(company, to_date)
 	add(
@@ -191,99 +217,99 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 		ledger_check["passed"], ledger_check["details"],
 	)
 
-	statement_checks = validate_statement_links(company, from_date, to_date, settings.reconciliation_tolerance)
-	add(
-		"BALANCE_SHEET_EQUATION", _("资产总计等于负债和所有者权益总计"),
-		statement_checks["balance_sheet"]["passed"], statement_checks["balance_sheet"]["details"],
-	)
-	add(
-		"PROFIT_EQUITY_LINK", _("利润表净利润与所有者权益变动表衔接"),
-		statement_checks["profit_equity"]["passed"], statement_checks["profit_equity"]["details"],
-	)
-	add(
-		"CASH_FLOW_RECONCILIATION", _("现金流量表与现金及现金等价物变动衔接"),
-		statement_checks["cash_flow"]["passed"], statement_checks["cash_flow"]["details"],
-	)
-	cash_assignment = get_assignment_coverage(company, from_date, to_date)
-	add(
-		"CASH_FLOW_ASSIGNMENT", _("启用日后现金流量项目均已确认指定"),
-		cash_assignment["passed"], cash_assignment["details"],
-	)
+	if closing_type == "Year End":
+		statement_checks = validate_statement_links(company, from_date, to_date, settings.reconciliation_tolerance)
+		add(
+			"BALANCE_SHEET_EQUATION", _("资产总计等于负债和所有者权益总计"),
+			statement_checks["balance_sheet"]["passed"], statement_checks["balance_sheet"]["details"],
+		)
+		add(
+			"PROFIT_EQUITY_LINK", _("利润表净利润与所有者权益变动表衔接"),
+			statement_checks["profit_equity"]["passed"], statement_checks["profit_equity"]["details"],
+		)
+		add(
+			"CASH_FLOW_RECONCILIATION", _("现金流量表与现金及现金等价物变动衔接"),
+			statement_checks["cash_flow"]["passed"], statement_checks["cash_flow"]["details"],
+		)
+		cash_assignment = get_assignment_coverage(company, from_date, to_date)
+		add(
+			"CASH_FLOW_ASSIGNMENT", _("启用日后现金流量项目均已确认指定"),
+			cash_assignment["passed"], cash_assignment["details"],
+		)
 
-	disclosure_checks = get_disclosure_closing_checks(company, from_date, to_date, closing_type)
-	add(
-		"ACCOUNTING_POLICY_COVERAGE", _("核心会计政策已完整配置并生效"),
-		disclosure_checks["policy"]["passed"], disclosure_checks["policy"]["details"],
-		"Blocking" if closing_type == "Year End" else "Warning",
-	)
-	add(
-		"FINANCIAL_STATEMENT_NOTES", _("财务报表附注已提交"),
-		disclosure_checks["notes"]["passed"], disclosure_checks["notes"]["details"],
-		disclosure_checks["notes"]["severity"],
-	)
-	statutory_readiness = get_statutory_report_readiness_data(company, from_date, to_date)
-	add(
-		"STATUTORY_REPORT_READINESS", _("中国会计准则四表一注正式输出就绪"),
-		statutory_readiness["passed"],
-		(_("阻断项 {0} 个") if closing_type == "Year End" else _("尚未完成项 {0} 个")).format(
-			statutory_readiness["blocking_count"]
-		),
-		"Blocking" if closing_type == "Year End" else "Warning",
-	)
+		disclosure_checks = get_disclosure_closing_checks(company, from_date, to_date, closing_type)
+		add(
+			"ACCOUNTING_POLICY_COVERAGE", _("核心会计政策已完整配置并生效"),
+			disclosure_checks["policy"]["passed"], disclosure_checks["policy"]["details"], "Blocking",
+		)
+		add(
+			"FINANCIAL_STATEMENT_NOTES", _("财务报表附注已提交"),
+			disclosure_checks["notes"]["passed"], disclosure_checks["notes"]["details"], "Blocking",
+		)
+		statutory_readiness = get_statutory_report_readiness_data(company, from_date, to_date)
+		add(
+			"STATUTORY_REPORT_READINESS", _("中国会计准则四表一注正式输出就绪"),
+			statutory_readiness["passed"],
+			_("未完成项 {0}").format(statutory_readiness["blocking_count"]), "Blocking",
+		)
 
-	blocked_purchases = get_blocked_purchase_invoices(company, from_date, to_date)
-	add(
-		"PURCHASE_RECONCILIATION",
-		_("受控采购已完成齐套校验"),
-		not blocked_purchases,
-		_("未齐套 {0} 张").format(len(blocked_purchases)),
-	)
+	if _has_active_rule("China Purchase Reconciliation Rule", company, from_date, to_date):
+		blocked_purchases = get_blocked_purchase_invoices(company, from_date, to_date)
+		add(
+			"PURCHASE_RECONCILIATION",
+			_("受控采购已完成齐套校验"),
+			not blocked_purchases,
+			_("未齐套 {0} 张").format(len(blocked_purchases)),
+		)
 
-	sales_settlement = get_sales_settlement_closing_check(company, from_date, to_date)
-	add(
-		"SALES_SETTLEMENT_COVERAGE",
-		_("对账结算销售出库已完成正式应收确认"),
-		sales_settlement["passed"],
-		sales_settlement["details"],
-	)
+	if _has_period_sales_settlement(company, from_date, to_date):
+		sales_settlement = get_sales_settlement_closing_check(company, from_date, to_date)
+		add(
+			"SALES_SETTLEMENT_COVERAGE",
+			_("对账结算销售出库已完成正式应收确认"),
+			sales_settlement["passed"],
+			sales_settlement["details"],
+		)
 
-	unallocated_tax = frappe.db.sql(
-		"""
-		SELECT COUNT(*) FROM `tabChina Tax Invoice` ti
-		WHERE ti.company=%s AND ti.invoice_date BETWEEN %s AND %s AND ti.docstatus=1
-		AND NOT EXISTS (SELECT 1 FROM `tabChina Tax Invoice Allocation` a WHERE a.parent=ti.name)
-		""",
-		(company, from_date, to_date),
-	)[0][0]
-	add("TAX_ALLOCATION", _("税务发票已完成业务分摊"), unallocated_tax == 0, _("未分摊 {0} 张").format(unallocated_tax), "Warning")
+	has_output_tax = (
+		_has_period_tax_invoices(company, from_date, to_date, "销项")
+		or _has_active_rule("China Invoice Control Rule", company, from_date, to_date)
+	)
+	has_input_tax = _has_period_tax_invoices(company, from_date, to_date, "进项")
+	if has_output_tax or has_input_tax:
+		unallocated_tax = frappe.db.sql(
+			"""
+			SELECT COUNT(*) FROM `tabChina Tax Invoice` ti
+			WHERE ti.company=%s AND ti.invoice_date BETWEEN %s AND %s AND ti.docstatus=1
+			AND NOT EXISTS (SELECT 1 FROM `tabChina Tax Invoice Allocation` a WHERE a.parent=ti.name)
+			""",
+			(company, from_date, to_date),
+		)[0][0]
+		add("TAX_ALLOCATION", _("税务发票已完成业务分摊"), unallocated_tax == 0, _("未分摊 {0} 张").format(unallocated_tax), "Warning")
 
-	output_tax_checks = get_output_tax_closing_checks(company, from_date, to_date)
-	add(
-		"OUTPUT_INVOICE_COVERAGE",
-		_("必须开票的销售发票已完成票账闭环"),
-		output_tax_checks["coverage"]["passed"],
-		output_tax_checks["coverage"]["details"],
-	)
-	add(
-		"OUTPUT_TAX_GL",
-		_("销项税税票与总账发生额一致"),
-		output_tax_checks["gl"]["passed"],
-		output_tax_checks["gl"]["details"],
-	)
-	input_tax_checks = get_input_tax_closing_checks(company, from_date, to_date)
-	add(
-		"INPUT_TAX_ACCOUNTING",
-		_("进项税票分摊与总账发生额一致"),
-		input_tax_checks["accounting"]["passed"],
-		input_tax_checks["accounting"]["details"],
-	)
-	add(
-		"INPUT_TAX_PENDING",
-		_("已勾选未抵扣进项税票已关注"),
-		True,
-		input_tax_checks["pending"]["details"],
-		"Warning",
-	)
+	if has_output_tax:
+		output_tax_checks = get_output_tax_closing_checks(company, from_date, to_date)
+		add(
+			"OUTPUT_INVOICE_COVERAGE",
+			_("必须开票的销售发票已完成票账闭环"),
+			output_tax_checks["coverage"]["passed"],
+			output_tax_checks["coverage"]["details"],
+		)
+		add(
+			"OUTPUT_TAX_GL",
+			_("销项税税票与总账发生额一致"),
+			output_tax_checks["gl"]["passed"],
+			output_tax_checks["gl"]["details"],
+		)
+
+	if has_input_tax:
+		input_tax_checks = get_input_tax_closing_checks(company, from_date, to_date)
+		add(
+			"INPUT_TAX_ACCOUNTING",
+			_("进项税票分摊与总账发生额一致"),
+			input_tax_checks["accounting"]["passed"],
+			input_tax_checks["accounting"]["details"],
+		)
 
 	pcv_ok = bool(period_closing_voucher and frappe.db.get_value("Period Closing Voucher", period_closing_voucher, "docstatus") == 1)
 	add("PERIOD_CLOSING", _("ERPNext 损益结转凭证已提交"), pcv_ok)
@@ -437,14 +463,31 @@ def create_report_snapshots(closing_run):
 		snapshot_statement(closing_run, statement_type, validation_results, notes_payload)
 		for statement_type in ("Balance Sheet", "Profit and Loss", "Cash Flow", "Changes in Equity")
 	]
+	return snapshots
+
+
+def create_closing_archive(closing_run_name):
+	"""Create the ZIP package after the closing transaction has committed.
+
+	Writing an attached file during the submit request can restart a development
+	server's file watcher before the HTTP response is returned.  Running this as
+	after-commit work also ensures an archive is never created for a rolled-back
+	closing run.
+	"""
+	closing_run = frappe.get_doc("China Closing Run", closing_run_name)
+	if closing_run.docstatus != 1 or closing_run.status != "Closed":
+		frappe.throw(_("期末智能结转 {0} 尚未完成，不能生成归档").format(closing_run.name))
+	if closing_run.archive_package:
+		return closing_run.archive_package
+
 	package = create_archive_package(
 		closing_run.company,
 		"China Closing Run",
 		closing_run.name,
 		closing_run=closing_run.name,
 	)
-	closing_run.db_set("archive_package", package["file_url"])
-	return snapshots
+	closing_run.db_set("archive_package", package["file_url"], update_modified=False)
+	return package["file_url"]
 
 
 @frappe.whitelist()
@@ -575,6 +618,124 @@ def create_period_closing_voucher(company, from_date, to_date, closing_type="Mon
 def preview_closing_checks(company, from_date, to_date, period_closing_voucher=None, closing_type="Monthly"):
 	frappe.only_for(("System Manager", "China Finance Manager"))
 	return run_closing_checks(company, getdate(from_date), getdate(to_date), period_closing_voucher, closing_type)
+
+
+@frappe.whitelist(methods=["POST"])
+def submit_closing_run(name):
+	"""Submit the latest server copy of a closing run through its normal hooks.
+
+	The Desk submit action posts the complete client document, including its
+	``modified`` timestamp.  A closing-check save can otherwise race that request
+	and raise a timestamp mismatch.  Loading the document again under a row lock
+	keeps submission serial while preserving all standard validations, report
+	snapshots, after-commit archive generation, and account-freeze behavior.
+	"""
+	if not name:
+		frappe.throw(_("请选择需要提交的期末智能结转"))
+	if not frappe.db.exists("China Closing Run", name):
+		frappe.throw(_("期末智能结转 {0} 不存在").format(name))
+
+	frappe.db.sql("SELECT name FROM `tabChina Closing Run` WHERE name=%s FOR UPDATE", (name,))
+	doc = frappe.get_doc("China Closing Run", name)
+	doc.check_permission("submit")
+
+	if doc.docstatus == 1:
+		if doc.status != "Closed":
+			frappe.throw(_("期末智能结转 {0} 已提交，但当前状态为 {1}").format(doc.name, doc.status))
+		return {
+			"name": doc.name,
+			"docstatus": int(doc.docstatus),
+			"status": doc.status,
+			"already_submitted": True,
+			"archive_package": doc.archive_package,
+		}
+	if doc.docstatus != 0:
+		frappe.throw(_("只有草稿状态的期末智能结转可以提交"))
+
+	try:
+		doc.submit()
+	except Exception:
+		frappe.log_error(
+			message=frappe.get_traceback(),
+			title=_("期末智能结转提交失败：{0}").format(name),
+		)
+		raise
+	return {
+		"name": doc.name,
+		"docstatus": int(doc.docstatus),
+		"status": doc.status,
+		"already_submitted": False,
+		"archive_package": doc.archive_package,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_and_complete_period_closing_voucher(name):
+	"""Complete the configured approval workflow for a Period Closing Voucher.
+
+	The workflow transitions are deliberately applied one by one instead of
+	assigning ``workflow_state`` or ``docstatus`` directly. This preserves the
+	workflow comments/actions and lets the normal Period Closing Voucher submit
+	hooks create the China Accounting Voucher and GL processing job.
+	"""
+	from frappe.model.workflow import apply_workflow, get_transitions, get_workflow
+
+	if not name:
+		frappe.throw(_("请先保存期末结账凭证"))
+
+	doc = frappe.get_doc("Period Closing Voucher", name)
+	doc.check_permission("write")
+	if doc.docstatus != 0:
+		frappe.throw(_("期末结账凭证 {0} 不是草稿，不能重复完成结账").format(doc.name))
+
+	workflow = get_workflow(doc.doctype)
+	workflow_state_field = workflow.workflow_state_field
+	current_state = doc.get(workflow_state_field)
+	if current_state == "Rejected":
+		frappe.throw(_("凭证已被退回，请先修改后重新提交审核"))
+
+	target_states = ("Pending Review", "Approved", "Posted")
+	if current_state not in ("Draft", *target_states[:-1]):
+		frappe.throw(_("期末结账凭证当前状态为 {0}，不能使用快捷完成结账").format(current_state or _("未设置")))
+
+	save_point = f"china_period_closing_{frappe.generate_hash(length=8)}"
+	frappe.db.savepoint(save_point)
+	try:
+		for target_state in target_states:
+			if doc.docstatus == 1:
+				break
+
+			transitions = [
+				transition
+				for transition in get_transitions(doc, workflow, raise_exception=True)
+				if transition.next_state == target_state
+			]
+			if len(transitions) != 1:
+				frappe.throw(
+					_("当前用户无法将期末结账凭证从 {0} 流转到 {1}，请检查工作流权限").format(
+						current_state or _("未设置"), target_state
+					),
+					title=_("无法完成结账"),
+				)
+
+			doc = apply_workflow(doc, transitions[0].action)
+			current_state = doc.get(workflow_state_field)
+
+		if doc.docstatus != 1 or current_state != "Posted":
+			frappe.throw(
+				_("期末结账凭证未完成记账，当前状态为 {0}").format(current_state or _("未设置")),
+				title=_("无法完成结账"),
+			)
+	except Exception:
+		frappe.db.rollback(save_point=save_point)
+		raise
+
+	return {
+		"name": doc.name,
+		"docstatus": int(doc.docstatus),
+		"workflow_state": current_state,
+		"gle_processing_status": doc.get("gle_processing_status"),
+	}
 
 
 @frappe.whitelist()

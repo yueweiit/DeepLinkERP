@@ -7,6 +7,23 @@ from china_finance.services.closing import create_report_snapshots, run_closing_
 
 
 class ChinaClosingRun(Document):
+	def before_insert(self):
+		if not self.amended_from:
+			return
+		self.status = "Draft"
+		self.archive_package = None
+		self.previous_frozen_date = None
+		self.closed_by = None
+		self.closed_on = None
+		self.reopened_by = None
+		self.reopened_on = None
+		self.reopen_reason = None
+		self.set("checks", [])
+
+	def copy_attachments_from_amended_from(self):
+		"""Keep the cancelled run's immutable archive attached only to that run."""
+		return
+
 	def validate(self):
 		self._remove_empty_check_rows()
 		if self.from_date > self.to_date:
@@ -52,6 +69,12 @@ class ChinaClosingRun(Document):
 
 	def on_submit(self):
 		create_report_snapshots(self)
+		frappe.enqueue(
+			"china_finance.services.closing.create_closing_archive",
+			queue="short",
+			enqueue_after_commit=True,
+			closing_run_name=self.name,
+		)
 		settings = frappe.get_cached_doc("China Finance Settings", self.company)
 		if settings.freeze_on_close:
 			frappe.db.set_value("Company", self.company, "accounts_frozen_till_date", self.to_date)

@@ -7,6 +7,7 @@
   {"fieldname":"to_date","fieldtype":"Date","label":"截止日期","mandatory":1},
   {"fieldname":"accounting_period","fieldtype":"Data","label":"会计期间"},
   {"fieldname":"voucher_word","fieldtype":"Data","label":"凭证字"},
+  {"fieldname":"voucher_status","fieldtype":"Select","label":"状态","options":"\n已记账\n已冲销"},
   {"fieldname":"source_doctype","fieldtype":"Link","label":"来源类型","options":"DocType"},
   {"fieldname":"source_name","fieldtype":"Data","label":"来源单据"},
   {"fieldname":"source_event","fieldtype":"Data","label":"来源事件"},

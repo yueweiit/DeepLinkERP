@@ -1,5 +1,22 @@
 const china_voucher_title_field_doctypes = new Set(["Journal Entry", "Payment Entry"]);
+const china_voucher_status_doctypes = new Set(["Journal Entry", "Payment Entry"]);
 const native_list_setup_columns = frappe.views.ListView.prototype.setup_columns;
+
+// A cancelled document can retain its last workflow state (for audit history).
+// The standard indicator checks workflow state before docstatus, which made a
+// cancelled voucher appear as the green “Posted” state in the source list.
+const native_get_indicator = frappe.get_indicator;
+if (!native_get_indicator.__china_voucher_docstatus_priority) {
+	const get_indicator_with_docstatus_priority = function (doc, doctype, show_workflow_state) {
+		const resolved_doctype = doctype || doc?.doctype;
+		if (china_voucher_status_doctypes.has(resolved_doctype) && Number(doc?.docstatus) === 2) {
+			return [__("已取消"), "red", "docstatus,=,2"];
+		}
+		return native_get_indicator(doc, doctype, show_workflow_state);
+	};
+	get_indicator_with_docstatus_priority.__china_voucher_docstatus_priority = true;
+	frappe.get_indicator = get_indicator_with_docstatus_priority;
+}
 
 if (!frappe.views.ListView.prototype.__china_voucher_title_column_patched) {
 	frappe.views.ListView.prototype.setup_columns = function () {
@@ -21,6 +38,7 @@ function configure_china_voucher_number_list(doctype, fields, original_title_fie
 	frappe.listview_settings[doctype] = {
 		add_fields: [
 			"custom_china_voucher_number",
+			"docstatus",
 			...(doctype === "Journal Entry" ? ["custom_china_bank_transaction"] : []),
 		],
 		fields: JSON.stringify(fields.map((fieldname) => ({ fieldname }))),

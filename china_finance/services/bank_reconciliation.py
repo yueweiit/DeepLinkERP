@@ -4,6 +4,7 @@ import json
 import re
 
 import frappe
+from frappe import _
 from frappe.utils import flt, getdate
 from erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool import (
 	create_journal_entry_bts,
@@ -57,6 +58,8 @@ CONFIRMED_UNLINKED_BANK_REFERENCES = {
 	"C0347HD0005GH0Z",
 	"C0347HK0012R48Z",
 }
+
+BANK_RECONCILIATION_TOLERANCE = 0.005
 
 
 @frappe.whitelist()
@@ -264,6 +267,113 @@ def _restore_interest_offset_debit(journal_entry, account=None):
 			entry.credit_in_account_currency = 0
 			entry.debit = -abs(entry.credit)
 			entry.credit = 0
+
+
+def _get_bank_transactions_for_journal_entry(doc):
+	"""Return every bank transaction that still refers to this Journal Entry."""
+	names = []
+	if frappe.db.exists("DocType", "Bank Transaction Payments"):
+		names.extend(
+			frappe.db.get_all(
+				"Bank Transaction Payments",
+				filters={
+					"payment_document": doc.doctype,
+					"payment_entry": doc.name,
+				},
+				pluck="parent",
+			)
+			or []
+		)
+
+	if doc.meta.has_field("custom_china_bank_transaction") and doc.get("custom_china_bank_transaction"):
+		names.append(doc.custom_china_bank_transaction)
+
+	if frappe.db.has_column("Bank Transaction", "custom_china_journal_entry"):
+		names.extend(
+			frappe.db.get_all(
+				"Bank Transaction",
+				filters={"custom_china_journal_entry": doc.name, "docstatus": ["!=", 2]},
+				pluck="name",
+			)
+			or []
+		)
+
+	return sorted(dict.fromkeys(name for name in names if name))
+
+
+def prepare_journal_entry_bank_cancellation(doc):
+	"""Validate bank state and detach stale pointers before cancelling a Journal Entry.
+
+	ERPNext's unreconcile action removes ``Bank Transaction Payments`` rows, but
+	the China Finance convenience link can still point to the submitted Journal
+	Entry. Frappe then treats that link as a backlink and refuses cancellation.
+	Only detach it after this Journal Entry has no active allocation; allocations
+	belonging to other vouchers on the same bank transaction are left untouched.
+	"""
+	if doc.doctype != "Journal Entry":
+		return []
+
+	has_custom_link = frappe.db.has_column("Bank Transaction", "custom_china_journal_entry")
+	names = _get_bank_transactions_for_journal_entry(doc)
+	if not names:
+		if doc.get("clearance_date"):
+			frappe.throw(_("凭证已完成银行清账，请先撤销银行对账后再取消凭证"))
+		return []
+
+	for name in names:
+		# Serialize source editing/cancellation with reconciliation for this row.
+		if not frappe.db.sql(
+			"SELECT name FROM `tabBank Transaction` WHERE name=%s FOR UPDATE",
+			(name,),
+		):
+			continue
+
+		fields = ["docstatus", "status", "allocated_amount"]
+		if has_custom_link:
+			fields.append("custom_china_journal_entry")
+		bank_transaction = frappe.db.get_value(
+			"Bank Transaction",
+			name,
+			fields,
+			as_dict=True,
+		)
+		if not bank_transaction or bank_transaction.docstatus == 2:
+			continue
+
+		allocated_row = None
+		if frappe.db.exists("DocType", "Bank Transaction Payments"):
+			allocated_row = frappe.db.get_value(
+				"Bank Transaction Payments",
+				{
+					"parent": name,
+					"payment_document": doc.doctype,
+					"payment_entry": doc.name,
+				},
+				"allocated_amount",
+			)
+
+		points_to_voucher = has_custom_link and bank_transaction.get("custom_china_journal_entry") == doc.name
+		is_still_reconciled = (
+			flt(allocated_row) > BANK_RECONCILIATION_TOLERANCE
+			or bool(doc.get("clearance_date"))
+		)
+		if is_still_reconciled:
+			frappe.throw(
+				_("凭证已参与银行对账（银行流水 {0}），请先执行“取消银行交易流水核销”后再取消凭证").format(
+					name
+				)
+			)
+
+		if points_to_voucher:
+			frappe.db.set_value(
+				"Bank Transaction",
+				name,
+				"custom_china_journal_entry",
+				None,
+				update_modified=False,
+			)
+
+	return names
 
 
 def on_journal_entry_submit(doc, method=None):

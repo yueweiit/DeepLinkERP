@@ -12,16 +12,31 @@ from china_finance.services.account_display import (
 def execute(filters=None):
 	filters = frappe._dict(filters or {})
 	display_number_filter = filters.get("voucher_word")
+	effective_posting_date = """CASE
+		WHEN v.source_doctype='Period Closing Voucher' THEN pcv.period_end_date
+		ELSE COALESCE(je.posting_date, pe.posting_date, v.posting_date)
+	END"""
+	effective_accounting_period = """CASE
+		WHEN v.source_doctype='Period Closing Voucher'
+			THEN CONCAT(YEAR(pcv.period_end_date), '-', LPAD(MONTH(pcv.period_end_date), 2, '0'))
+		ELSE v.accounting_period
+	END"""
 	conditions = [
 		"v.company=%(company)s",
-		"v.posting_date BETWEEN %(from_date)s AND %(to_date)s",
+		f"{effective_posting_date} BETWEEN %(from_date)s AND %(to_date)s",
 		"v.docstatus=1",
-		"v.source_doctype IN ('Journal Entry', 'Payment Entry')",
+		"v.status IN ('Posted', 'Reversed')",
+		"v.source_doctype IN ('Journal Entry', 'Payment Entry', 'Period Closing Voucher')",
 		"v.source_event='Posting'",
-		"((v.source_doctype='Journal Entry' AND je.docstatus=1) OR (v.source_doctype='Payment Entry' AND pe.docstatus=1))",
+		"""(
+			(v.source_doctype='Journal Entry' AND je.name IS NOT NULL AND je.docstatus IN (1, 2))
+			OR (v.source_doctype='Payment Entry' AND pe.name IS NOT NULL AND pe.docstatus IN (1, 2))
+			OR (v.source_doctype='Period Closing Voucher' AND pcv.name IS NOT NULL AND pcv.docstatus IN (1, 2))
+		)""",
 	]
 	for fieldname, column in (
-		("accounting_period", "v.accounting_period"),
+		("accounting_period", effective_accounting_period),
+		("voucher_status", "v.status"),
 		("account", "e.account"),
 		("party_type", "e.party_type"),
 		("party", "e.party"),
@@ -31,25 +46,42 @@ def execute(filters=None):
 	):
 		if filters.get(fieldname):
 			conditions.append(f"{column}=%({fieldname})s")
+	status_filter = filters.get("voucher_status")
+	if status_filter:
+		status_value = {
+			"已记账": "Posted",
+			"已提交": "Posted",
+			"Posted": "Posted",
+			"已冲销": "Reversed",
+			"Reversed": "Reversed",
+		}.get(status_filter)
+		if status_value:
+			filters.voucher_status = status_value
 	if display_number_filter and not re.search(r"\d+$", str(display_number_filter)):
 		conditions.append("v.voucher_word=%(voucher_word)s")
 	if filters.get("voucher_number"):
 		conditions.append("v.source_name=%(voucher_number)s")
 	if filters.get("search_text"):
 		filters.search_pattern = f"%{filters.search_text}%"
-		conditions.append("(v.statutory_number LIKE %(search_pattern)s OR v.source_name LIKE %(search_pattern)s OR v.remarks LIKE %(search_pattern)s OR e.account LIKE %(search_pattern)s OR e.remarks LIKE %(search_pattern)s)")
+		conditions.append("(v.statutory_number LIKE %(search_pattern)s OR v.source_name LIKE %(search_pattern)s OR v.remarks LIKE %(search_pattern)s OR pcv.remarks LIKE %(search_pattern)s OR e.account LIKE %(search_pattern)s OR e.remarks LIKE %(search_pattern)s)")
 	entries = frappe.db.sql(
 		f"""
 		SELECT v.name AS voucher_snapshot,
-			COALESCE(je.posting_date, pe.posting_date, v.posting_date) AS posting_date,
-			v.accounting_period, v.statutory_number,
+			{effective_posting_date} AS posting_date,
+			{effective_accounting_period} AS accounting_period,
+			CASE
+				WHEN v.source_doctype='Period Closing Voucher' THEN '期末结账'
+				ELSE v.statutory_number
+			END AS statutory_number,
 			v.voucher_word, v.source_doctype, v.source_name, v.source_event,
+			CASE WHEN v.status='Reversed' THEN 2 ELSE 1 END AS voucher_status,
 			COALESCE(e.debit, 0) + COALESCE(e.credit, 0) AS base_total_amount,
 			e.idx AS entry_idx,
 			e.account AS account,
 			e.party_type, e.party, e.cost_center, e.project,
 			CASE
 				WHEN v.source_doctype='Journal Entry' THEN jea.user_remark
+				WHEN v.source_doctype='Period Closing Voucher' THEN COALESCE(pcv.remarks, v.remarks, e.remarks)
 				ELSE e.remarks
 			END AS remarks,
 			e.debit, e.credit
@@ -62,14 +94,15 @@ def execute(filters=None):
 			AND jea.parenttype='Journal Entry'
 			AND jea.idx=e.idx
 		LEFT JOIN `tabPayment Entry` pe ON v.source_doctype='Payment Entry' AND pe.name=v.source_name
+		LEFT JOIN `tabPeriod Closing Voucher` pcv
+			ON v.source_doctype='Period Closing Voucher' AND pcv.name=v.source_name
 		WHERE {' AND '.join(conditions)}
-		ORDER BY v.accounting_period, v.voucher_word, v.posting_date, v.sequence_number, v.name, e.idx
+		ORDER BY {effective_accounting_period}, v.voucher_word, {effective_posting_date}, v.sequence_number, v.name, e.idx
 		""",
 		filters,
 		as_dict=True,
 	)
 	_format_account_labels(entries, filters.company)
-	entries = _assign_dense_display_numbers(entries)
 	if display_number_filter and re.search(r"\d+$", str(display_number_filter)):
 		entries = [entry for entry in entries if entry.get("statutory_number") == display_number_filter]
 	return get_columns(), build_tree_data(entries)
@@ -109,23 +142,6 @@ def _format_account_labels(entries, company):
 			entry["account"] = get_label(entry.account)
 
 
-def _assign_dense_display_numbers(entries):
-	"""Renumber only the export view; immutable voucher snapshots keep audit numbers."""
-	next_number = {}
-	assigned = {}
-	result = []
-	for entry in entries:
-		row = frappe._dict(dict(entry))
-		period_key = (row.get("accounting_period") or "", row.get("voucher_word") or "记")
-		snapshot = row.get("voucher_snapshot")
-		if snapshot not in assigned:
-			next_number[period_key] = next_number.get(period_key, 0) + 1
-			assigned[snapshot] = f"{period_key[1]}{next_number[period_key]}"
-		row["statutory_number"] = assigned[snapshot]
-		result.append(row)
-	return result
-
-
 def build_tree_data(entries):
 	voucher_rows = {}
 	voucher_order = []
@@ -146,7 +162,7 @@ def build_tree_data(entries):
 			"source_doctype": entry.source_doctype if first_line else None,
 			"source_name": entry.source_name if first_line else None,
 			"source_event": entry.source_event if first_line else None,
-			"voucher_status": None,
+			"voucher_status": entry.voucher_status if first_line else None,
 			"prepared_by": None,
 			"modified_by": None,
 			"row_id": f"{voucher_snapshot}:{entry.entry_idx}",
@@ -192,6 +208,7 @@ def get_auxiliary_accounting(entry):
 def get_columns():
 	return [
 		{"label": _("凭证字号"), "fieldname": "statutory_number", "fieldtype": "Data", "width": 100},
+		{"label": _("状态"), "fieldname": "voucher_status", "fieldtype": "Data", "width": 85},
 		{"label": _("凭证日期"), "fieldname": "posting_date", "fieldtype": "Date", "width": 130},
 		{"label": _("会计期间"), "fieldname": "accounting_period", "fieldtype": "Data", "width": 110},
 		{"label": _("摘要"), "fieldname": "remarks", "fieldtype": "Data", "width": 270},

@@ -59,10 +59,12 @@ doctype_js = {
 	"Journal Entry": [
 		"public/js/gl_source_snapshot.js",
 		"public/js/journal_entry_direct_post.js",
+		"public/js/source_voucher_amendment.js",
 	],
 	"Payment Entry": [
 		"public/js/payment_entry_invoice_selector.js",
 		"public/js/gl_source_snapshot.js",
+		"public/js/source_voucher_amendment.js",
 	],
 	"Purchase Invoice": "public/js/gl_source_snapshot.js",
 	"Purchase Receipt": "public/js/gl_source_snapshot.js",
@@ -71,7 +73,10 @@ doctype_js = {
 	"Asset Capitalization": "public/js/gl_source_snapshot.js",
 	"Asset Depreciation Entry": "public/js/gl_source_snapshot.js",
 	"Payroll Entry": "public/js/gl_source_snapshot.js",
-	"Period Closing Voucher": "public/js/gl_source_snapshot.js",
+	"Period Closing Voucher": [
+		"public/js/gl_source_snapshot.js",
+		"public/js/period_closing_voucher_direct_post.js",
+	],
 	"China Finance Settings": "public/js/china_finance_settings.js",
 	"China Accounting Voucher": "public/js/china_accounting_voucher.js",
 	"China Cash Flow Assignment": "public/js/china_cash_flow_assignment.js",
@@ -81,6 +86,7 @@ doctype_list_js = {
 	"Bank Transaction": "public/js/bank_transaction_list.js",
 	"Journal Entry": "public/js/source_voucher_number_list.js",
 	"Payment Entry": "public/js/source_voucher_number_list.js",
+	"Period Closing Voucher": "public/js/period_closing_voucher_list.js",
 	"China Accounting Voucher": "public/js/china_accounting_voucher_list.js",
 	"China Financial Statement Template": "public/js/china_financial_statement_template_list.js",
 	"China Financial Statement Mapping": "public/js/china_financial_statement_mapping_list.js",

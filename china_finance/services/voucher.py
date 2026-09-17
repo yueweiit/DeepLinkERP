@@ -54,6 +54,12 @@ def get_company_settings(company):
 
 
 def get_posting_date(doc):
+	# A period closing voucher is created on the day the user runs the closing,
+	# but its accounting date belongs to the period being closed.  Use the
+	# period end so the generated China Accounting Voucher is reported in the
+	# correct month and does not inherit the user's current date.
+	if getattr(doc, "doctype", None) == "Period Closing Voucher" and doc.get("period_end_date"):
+		return getdate(doc.period_end_date)
 	for fieldname in ("posting_date", "transaction_date", "purchase_date"):
 		if doc.meta.has_field(fieldname) and doc.get(fieldname):
 			return getdate(doc.get(fieldname))
@@ -162,16 +168,24 @@ def _get_import_batch_transition(doc, workflow, next_state):
 	]
 	if len(transitions) != 1:
 		frappe.throw(
-			_("批量审核并记账无法从 {0} 进入 {1}，请检查 Journal Entry 审批工作流配置").format(
+			_("{0} 无法从 {1} 进入 {2}，请检查审批工作流配置").format(
+				doc.doctype,
 				doc.get(workflow.workflow_state_field), next_state
 			)
 		)
 	return transitions[0]
 
 
-def _complete_import_batch_workflow(doc):
-	"""Run the configured review path before the standard Journal Entry submit."""
+def _complete_voucher_workflow(doc):
+	"""Run the configured review path before submitting a formal voucher."""
 	from frappe.model.workflow import apply_workflow, get_workflow
+
+	workflow_name = frappe.db.get_value(
+		"Workflow", {"document_type": doc.doctype, "is_active": 1}, "name"
+	)
+	if not workflow_name:
+		doc.submit()
+		return doc
 
 	workflow = get_workflow(doc.doctype)
 	workflow_state_field = workflow.workflow_state_field
@@ -191,6 +205,11 @@ def _complete_import_batch_workflow(doc):
 	if doc.docstatus != 1:
 		frappe.throw(_("凭证 {0} 未完成记账，当前状态为 {1}").format(doc.name, current_state))
 	return doc
+
+
+def _complete_import_batch_workflow(doc):
+	"""Backward-compatible wrapper for the imported-voucher batch action."""
+	return _complete_voucher_workflow(doc)
 
 
 def _validate_import_batch_document(doc):
@@ -350,6 +369,10 @@ def on_gl_source_cancel(doc, method=None):
 
 def prepare_source_cancellation(doc, method=None):
 	"""Exclude audit-only backlinks before Frappe validates source cancellation."""
+	if doc.doctype == "Journal Entry":
+		from china_finance.services.bank_reconciliation import prepare_journal_entry_bank_cancellation
+
+		prepare_journal_entry_bank_cancellation(doc)
 	_ignore_snapshot_backlinks(doc)
 
 
@@ -621,8 +644,8 @@ def create_voucher_from_source(doc, source_event="Posting", force=False):
 		voucher.flags.ignore_links = True
 	voucher.insert()
 	voucher.submit()
-	_sync_source_voucher_number(doc.doctype, doc.name, voucher.statutory_number)
 	if source_event == "Posting":
+		_sync_source_voucher_number(doc.doctype, doc.name, voucher.statutory_number)
 		from china_finance.services.cash_flow_assignment import create_assignment_if_required
 
 		create_assignment_if_required(voucher.name)
@@ -824,31 +847,6 @@ def _formal_sequence_key(voucher):
 	return "|".join((voucher.company, voucher.fiscal_year, voucher.accounting_period, voucher.voucher_word, "formal"))
 
 
-def _formal_voucher_order_key(voucher):
-	"""Sort formal vouchers by date, then by stable creation order."""
-	return (
-		getdate(voucher.get("posting_date")),
-		str(voucher.get("creation") or ""),
-		str(voucher.get("name") or ""),
-	)
-
-
-def _build_formal_voucher_numbering(existing, current):
-	"""Return all formal vouchers in the order used for monthly numbering."""
-	rows = [dict(row) for row in existing]
-	rows.append(
-		{
-			"name": current.get("name"),
-			"posting_date": current.get("posting_date"),
-			"creation": current.get("creation") or now_datetime(),
-			"source_doctype": current.get("source_doctype"),
-			"source_name": current.get("source_name"),
-			"source_event": current.get("source_event"),
-		}
-	)
-	return sorted(rows, key=_formal_voucher_order_key)
-
-
 def _get_or_create_formal_sequence(voucher, sequence_key):
 	row = frappe.db.sql(
 		"SELECT name, current_value FROM `tabChina Voucher Sequence` WHERE sequence_key=%s FOR UPDATE",
@@ -883,67 +881,77 @@ def _get_or_create_formal_sequence(voucher, sequence_key):
 	return row[0]
 
 
-def _renumber_formal_vouchers(voucher, sequence_key, sequence_row):
-	"""Assign contiguous numbers in posting-date order within one locked month."""
-	existing = frappe.db.sql(
+def _get_inherited_formal_number(voucher):
+	"""Return the original posting number for an amended formal source document."""
+	if voucher.source_doctype not in FORMAL_VOUCHER_SOURCES:
+		return None
+	if not frappe.db.has_column(voucher.source_doctype, "amended_from"):
+		return None
+	amended_from = frappe.db.get_value(voucher.source_doctype, voucher.source_name, "amended_from")
+	if not amended_from:
+		return None
+	original = frappe.db.get_value(
+		"China Accounting Voucher",
+		{
+			"source_key": f"Posting|{voucher.source_doctype}|{amended_from}",
+			"source_event": "Posting",
+			"docstatus": 1,
+		},
+		[
+			"company",
+			"fiscal_year",
+			"accounting_period",
+			"voucher_word",
+			"sequence_number",
+			"statutory_number",
+		],
+		as_dict=True,
+	)
+	if not original:
+		return None
+	if any(
+		str(original.get(fieldname) or "") != str(voucher.get(fieldname) or "")
+		for fieldname in ("company", "fiscal_year", "accounting_period", "voucher_word")
+	):
+		# Moving an amendment to another fiscal period/凭证字 starts a new sequence.
+		return None
+	return original
+
+
+def _get_formal_high_water_mark(voucher):
+	"""Find the largest existing formal number without renumbering history."""
+	row = frappe.db.sql(
 		"""
-		SELECT name, posting_date, creation, source_doctype, source_name, source_event
+		SELECT COALESCE(MAX(sequence_number), 0) AS max_sequence
 		FROM `tabChina Accounting Voucher`
 		WHERE company=%s AND fiscal_year=%s AND accounting_period=%s
-			AND voucher_word=%s AND source_doctype IN ('Journal Entry', 'Payment Entry')
+			AND voucher_word=%s AND source_event IN ('Posting', 'Manual')
 			AND docstatus=1
-		ORDER BY posting_date ASC, creation ASC, name ASC
-		FOR UPDATE
 		""",
 		(voucher.company, voucher.fiscal_year, voucher.accounting_period, voucher.voucher_word),
 		as_dict=True,
 	)
-	ordered = _build_formal_voucher_numbering(existing, voucher)
+	return cint(row[0].max_sequence) if row else 0
 
-	# voucher_key is unique. Move existing keys aside before applying the new
-	# date-ordered keys so an insertion in the middle cannot collide with an old key.
-	token = frappe.generate_hash(length=16)
-	for row in existing:
-		frappe.db.set_value(
-			"China Accounting Voucher",
-			row.name,
-			"voucher_key",
-			f"renumbering|{token}|{row.name}",
-			update_modified=False,
-		)
 
-	for sequence, row in enumerate(ordered, start=1):
-		statutory_number = f"{voucher.voucher_word}{sequence}"
-		voucher_key = f"{sequence_key}|{sequence:08d}"
-		if row["name"] == voucher.name:
-			voucher.sequence_number = sequence
-			voucher.statutory_number = statutory_number
-			voucher.voucher_key = voucher_key
-			continue
+def _next_formal_sequence(sequence_value, high_water_mark):
+	"""Return the next number while preserving all previously assigned numbers."""
+	return max(cint(sequence_value), cint(high_water_mark)) + 1
 
-		frappe.db.set_value(
-			"China Accounting Voucher",
-			row["name"],
-			{
-				"sequence_number": sequence,
-				"statutory_number": statutory_number,
-				"voucher_key": voucher_key,
-			},
-			update_modified=False,
-		)
-		_sync_source_voucher_number(row["source_doctype"], row["source_name"], statutory_number)
 
-	frappe.db.set_value(
-		"China Voucher Sequence",
-		sequence_row["name"],
-		"current_value",
-		len(ordered),
-		update_modified=False,
-	)
+def _build_amendment_voucher_key(voucher):
+	"""Keep an amended snapshot unique even when it inherits the original字号."""
+	return f"amendment|{voucher.source_key}"
 
 
 def assign_voucher_number(voucher):
 	if voucher.voucher_key:
+		return
+	if voucher.source_event == "Cancellation":
+		# A cancellation is an audit snapshot, not a new formal accounting voucher.
+		voucher.sequence_number = 0
+		voucher.statutory_number = None
+		voucher.voucher_key = f"cancellation|{voucher.source_key}"
 		return
 	if voucher.source_doctype not in FORMAL_VOUCHER_SOURCES:
 		# Business-document snapshots remain available for ledger tracing, but
@@ -957,7 +965,26 @@ def assign_voucher_number(voucher):
 		frappe.throw(_("公司 {0} 未启用中国财务设置").format(voucher.company))
 	sequence_key = _formal_sequence_key(voucher)
 	sequence_row = _get_or_create_formal_sequence(voucher, sequence_key)
-	_renumber_formal_vouchers(voucher, sequence_key, sequence_row)
+	inherited = _get_inherited_formal_number(voucher)
+	if inherited and inherited.statutory_number:
+		voucher.sequence_number = inherited.sequence_number
+		voucher.statutory_number = inherited.statutory_number
+		voucher.voucher_key = _build_amendment_voucher_key(voucher)
+		return
+
+	sequence = _next_formal_sequence(
+		sequence_row.get("current_value"), _get_formal_high_water_mark(voucher)
+	)
+	voucher.sequence_number = sequence
+	voucher.statutory_number = f"{voucher.voucher_word}{sequence}"
+	voucher.voucher_key = f"{sequence_key}|{sequence:08d}"
+	frappe.db.set_value(
+		"China Voucher Sequence",
+		sequence_row["name"],
+		"current_value",
+		sequence,
+		update_modified=False,
+	)
 
 
 def calculate_entries_hash(entries):

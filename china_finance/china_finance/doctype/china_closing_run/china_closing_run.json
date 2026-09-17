@@ -1,8 +1,9 @@
 {
  "actions":[], "autoname":"naming_series:", "creation":"2026-07-17 00:00:00.000000", "doctype":"DocType", "engine":"InnoDB",
- "field_order":["naming_series","company","closing_type","from_date","to_date","period_closing_voucher","status","archive_package","previous_frozen_date","closed_by","closed_on","reopened_by","reopened_on","reopen_reason","checks_section","checks","notes"],
+ "field_order":["naming_series","amended_from","company","closing_type","from_date","to_date","period_closing_voucher","status","archive_package","previous_frozen_date","closed_by","closed_on","reopened_by","reopened_on","reopen_reason","checks_section","checks","notes"],
  "fields":[
   {"default":"CNC-.YYYY.-.#####","fieldname":"naming_series","fieldtype":"Select","label":"编号规则","options":"CNC-.YYYY.-.#####","reqd":1},
+  {"fieldname":"amended_from","fieldtype":"Link","ignore_user_permissions":1,"label":"修订自","no_copy":1,"options":"China Closing Run","print_hide":1,"read_only":1,"search_index":1},
   {"fieldname":"company","fieldtype":"Link","in_list_view":1,"label":"公司","options":"Company","reqd":1},
   {"default":"Monthly","fieldname":"closing_type","fieldtype":"Select","label":"结账类型","options":"Monthly\nYear End","reqd":1},
   {"fieldname":"from_date","fieldtype":"Date","label":"起始日期","reqd":1},

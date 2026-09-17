@@ -1,59 +1,28 @@
-from datetime import date, datetime
-
+import frappe
 from frappe.tests import UnitTestCase
 
-from china_finance.services.voucher import _build_formal_voucher_numbering
+from china_finance.services.voucher import _build_amendment_voucher_key, _next_formal_sequence, get_posting_date
 
 
 class TestVoucherNumbering(UnitTestCase):
-	def test_formal_vouchers_are_numbered_by_posting_date(self):
-		existing = [
-			{
-				"name": "CNV-2026-00001",
-				"posting_date": date(2026, 1, 31),
-				"creation": datetime(2026, 1, 1, 9, 0),
-			},
-			{
-				"name": "CNV-2026-00002",
-				"posting_date": date(2026, 1, 15),
-				"creation": datetime(2026, 1, 2, 9, 0),
-			},
-		]
-		current = {
-			"name": "CNV-2026-00003",
-			"posting_date": date(2026, 1, 1),
-			"creation": datetime(2026, 1, 3, 9, 0),
-		}
+	def test_next_sequence_uses_the_larger_high_water_mark(self):
+		self.assertEqual(_next_formal_sequence(15, 15), 16)
+		self.assertEqual(_next_formal_sequence(15, 17), 18)
 
-		ordered = _build_formal_voucher_numbering(existing, current)
+	def test_next_sequence_does_not_reuse_a_previous_number(self):
+		self.assertEqual(_next_formal_sequence(0, 3), 4)
 
+	def test_amendment_uses_a_distinct_snapshot_key(self):
+		voucher = frappe._dict(source_key="Posting|Journal Entry|ACC-JV-2026-00382-1")
 		self.assertEqual(
-			[row["name"] for row in ordered],
-			["CNV-2026-00003", "CNV-2026-00002", "CNV-2026-00001"],
+			_build_amendment_voucher_key(voucher),
+			"amendment|Posting|Journal Entry|ACC-JV-2026-00382-1",
 		)
 
-	def test_same_posting_date_uses_creation_then_name(self):
-		existing = [
-			{
-				"name": "CNV-2026-00002",
-				"posting_date": date(2026, 1, 1),
-				"creation": datetime(2026, 1, 2, 9, 0),
-			},
-			{
-				"name": "CNV-2026-00001",
-				"posting_date": date(2026, 1, 1),
-				"creation": datetime(2026, 1, 1, 9, 0),
-			},
-		]
-		current = {
-			"name": "CNV-2026-00003",
-			"posting_date": date(2026, 1, 1),
-			"creation": datetime(2026, 1, 3, 9, 0),
-		}
-
-		ordered = _build_formal_voucher_numbering(existing, current)
-
-		self.assertEqual(
-			[row["name"] for row in ordered],
-			["CNV-2026-00001", "CNV-2026-00002", "CNV-2026-00003"],
+	def test_period_closing_uses_period_end_date_for_snapshot(self):
+		doc = frappe._dict(
+			doctype="Period Closing Voucher",
+			period_end_date="2026-05-31",
+			transaction_date="2026-09-17",
 		)
+		self.assertEqual(str(get_posting_date(doc)), "2026-05-31")
