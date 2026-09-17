@@ -17,7 +17,7 @@
 
 - [ ] **Step 1: Write the failing analysis-purpose regression test**
 
-Add a helper that creates an archived approval document and an `Overseas Cost Attachment` carrying `approval_excluded=true` and `cost_source_allowed=false`. Change the linked approval to `RUNNING`/`agree`/`approved=False`, then assert that `capture_dependencies(..., purpose="analysis")` succeeds and returns both `approval` and `attachment` dependencies.
+Add a helper that creates an archived approval document and an `Overseas Cost Attachment` carrying `approval_excluded=true` and `cost_source_allowed=false`. Change the linked approval to `RUNNING`/`agree`/`approved=False`, then call `capture_dependencies` with `purpose="analysis"` and assert that it returns both `approval` and `attachment` dependencies.
 
 ```python
 def restricted_approval_attachment(store, ledger, batch, version):
