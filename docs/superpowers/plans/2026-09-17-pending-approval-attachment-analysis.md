@@ -4,7 +4,7 @@
 
 **Goal:** Allow a readable, still-running approval attachment to participate in material estimate analysis without relaxing final-fee adoption or rewriting historical archive policy.
 
-**Architecture:** Keep archived attachment metadata immutable and make dependency validation purpose-aware. An attachment carrying audit/final-cost restrictions may pass `analysis` or `estimate` only when its `process_instance_id` and optional `corp_id` resolve to exactly one currently readable approval; `adoption`, manual attachments, invalid approvals, and retired documents remain fail-closed.
+**Architecture:** Keep archived attachment metadata immutable and make dependency validation purpose-aware. Server-generated approval attachment dependencies carry an `approval_source_id`; an attachment carrying audit/final-cost restrictions may pass `analysis` or `estimate` only when that source still matches its `process_instance_id` and optional `corp_id` and remains readable. `adoption`, manual attachments, invalid approvals, and retired documents remain fail-closed.
 
 **Tech Stack:** Python 3, Frappe/MariaDB production adapter, SQLite service tests, pytest, GitHub Actions production deployment.
 
@@ -103,7 +103,7 @@ def test_manual_audit_attachment_cannot_borrow_approval_analysis_policy():
 ### Task 2: Make attachment dependency validation purpose-aware
 
 **Files:**
-- Modify: `overseas_costing/services/material_ai_source_dependencies.py:101-119`
+- Modify: `overseas_costing/services/material_ai_source_dependencies.py:101-119,220-240`
 - Test: `overseas_costing/tests/test_ai_download_dependencies.py`
 
 - [ ] **Step 1: Add a current-approval resolver for restricted archived attachments**
@@ -111,17 +111,19 @@ def test_manual_audit_attachment_cannot_borrow_approval_analysis_policy():
 Add a private helper next to `_read_dependency`:
 
 ```python
-def _current_attachment_approval(metadata, store):
+def _current_attachment_approval(dependency, metadata, store):
+    source_id = str(dependency.get("approval_source_id") or "")
+    if not source_id:
+        return None
     instance = str(metadata.get("process_instance_id") or metadata.get("instance_id") or "")
     if not instance:
         return None
-    filters = {"instance": instance}
-    if metadata.get("corp_id"):
-        filters["corp"] = metadata["corp_id"]
-    matches = store.find("source", **filters)
-    if len(matches) != 1:
-        raise ValueError("附件缺少唯一的当前审批归档。")
-    return matches[0]
+    source = store.get("source", source_id) or {}
+    if source.get("instance") != instance:
+        raise ValueError("附件的当前审批身份不一致。")
+    if metadata.get("corp_id") and source.get("corp") != metadata.get("corp_id"):
+        raise ValueError("附件的当前审批企业身份不一致。")
+    return source
 ```
 
 - [ ] **Step 2: Apply the minimal purpose-aware rule**
@@ -135,7 +137,7 @@ policy_restricted = (
     or not _enabled(metadata or {"present": True})
 )
 if policy_restricted:
-    current_approval = _current_attachment_approval(metadata, store)
+    current_approval = _current_attachment_approval(dependency, metadata, store)
     if purpose not in {"analysis", "estimate"} or not current_approval:
         raise ValueError("附件来源已被排除。")
     eligibility = approval_eligibility(current_approval)
@@ -147,6 +149,15 @@ if policy_restricted:
 ```
 
 Do not change `approval_eligibility`, `document_retired`, attachment bytes, or the adoption path.
+
+When `capture_dependencies` builds an attachment descriptor for `approval_attachment` or `approval_comment_attachment`, include the server-resolved approval source identity:
+
+```python
+descriptor = {"kind": "attachment", "attachment_id": source_id}
+if kind in {"approval_attachment", "approval_comment_attachment"} and approval_source:
+    descriptor["approval_source_id"] = approval_source["id"]
+add(descriptor)
+```
 
 - [ ] **Step 3: Run the focused regression tests and verify GREEN**
 
