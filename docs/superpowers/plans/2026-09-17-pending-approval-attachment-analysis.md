@@ -4,7 +4,7 @@
 
 **Goal:** Allow a readable, still-running approval attachment to participate in material estimate analysis without relaxing final-fee adoption or rewriting historical archive policy.
 
-**Architecture:** Keep archived attachment metadata immutable and make dependency validation purpose-aware. Server-generated approval attachment dependencies carry an `approval_source_id`; an attachment carrying audit/final-cost restrictions may pass `analysis` or `estimate` only when that source still matches its `process_instance_id` and optional `corp_id` and remains readable. `adoption`, manual attachments, invalid approvals, and retired documents remain fail-closed.
+**Architecture:** Keep archived attachment metadata immutable and make dependency validation purpose-aware. Server-generated approval attachment dependencies carry an `approval_source_id`; an attachment carrying audit/final-cost restrictions may pass `analysis` or `estimate` only when that source remains readable and its server-owned document, file identity, path, fingerprint, and SHA-256 all match the current attachment record. `adoption`, manual or unrelated attachments, invalid approvals, and retired documents remain fail-closed.
 
 **Tech Stack:** Python 3, Frappe/MariaDB production adapter, SQLite service tests, pytest, GitHub Actions production deployment.
 

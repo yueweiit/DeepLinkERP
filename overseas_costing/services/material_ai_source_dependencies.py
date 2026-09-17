@@ -88,6 +88,58 @@ def _current_attachment_approval(dependency, metadata, store):
     return source
 
 
+def _assert_archived_approval_attachment(attachment, metadata, descriptor, document, approval):
+    """Bind a relaxed analysis read to the server-owned approval archive."""
+    if str(attachment.get('source_type') or '').upper() != 'OA':
+        raise ValueError('附件不是审批归档资料。')
+    source_id = str(approval.get('id') or '')
+    document_id = str(descriptor.get('document_id') or '')
+    if not source_id or not document_id or not document:
+        raise ValueError('附件审批归档身份不完整。')
+    archived = [row for row in approval.get('documents') or []
+                if str(row.get('id') or '') == document_id]
+    if len(archived) != 1:
+        raise ValueError('附件不在当前审批归档中。')
+    archived = archived[0]
+    if (not _enabled(archived) or document_retired(archived)
+            or archived.get('status') in {'pending', 'failed', 'error', 'invalid'}):
+        raise ValueError('附件在当前审批归档中已停用或读取失败。')
+    if any(str(row.get('source_id') or '') != source_id
+           for row in (descriptor, document, archived)):
+        raise ValueError('附件的审批归档来源不一致。')
+
+    manifests = [row.get('manifest') or {} for row in (descriptor, document, archived)]
+    file_ids = [str(metadata.get('file_id') or ''),
+                *(str(manifest.get('file_id') or '') for manifest in manifests)]
+    if not file_ids[0] or len(set(file_ids)) != 1:
+        raise ValueError('附件的审批文件身份不一致。')
+
+    instance = str(approval.get('instance') or '')
+    instances = [str(metadata.get('process_instance_id') or metadata.get('instance_id') or ''),
+                 *(str(manifest.get('process_instance_id') or '') for manifest in manifests)]
+    if not instance or any(value != instance for value in instances):
+        raise ValueError('附件的审批实例身份不一致。')
+
+    corp = str(approval.get('corp') or '')
+    corps = [str(metadata.get('corp_id') or ''),
+             *(str(manifest.get('corp_id') or '') for manifest in manifests)]
+    if corp and any(value != corp for value in corps):
+        raise ValueError('附件的审批企业身份不一致。')
+
+    file_urls = [str(attachment.get('file_url') or ''), str(document.get('file_url') or ''),
+                 str(archived.get('file_url') or '')]
+    file_names = [str(attachment.get('file_name') or ''), str(document.get('file_name') or ''),
+                  str(archived.get('file_name') or '')]
+    fingerprints = [str(descriptor.get('fingerprint') or ''), str(document.get('fingerprint') or ''),
+                    str(archived.get('fingerprint') or '')]
+    hashes = [str(manifest.get('sha256') or '').lower() for manifest in manifests]
+    if (not file_urls[0] or len(set(file_urls)) != 1
+            or not file_names[0] or len(set(file_names)) != 1
+            or not fingerprints[0] or len(set(fingerprints)) != 1
+            or not hashes[0] or len(set(hashes)) != 1):
+        raise ValueError('附件与服务器审批归档不一致。')
+
+
 def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpose="adoption"):
     if purpose not in {"analysis", "estimate", "adoption"}:
         raise ValueError("来源校验阶段不合法。")
@@ -128,8 +180,10 @@ def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpo
         metadata = row_meta({'extra_json': attachment.get('parse_result_json')})
         if not _enabled(metadata or {'present': True}):
             raise ValueError('附件来源已被排除。')
-        if metadata.get('approval_excluded') or metadata.get('cost_source_allowed') is False:
-            current_approval = _current_attachment_approval(dependency, metadata, store)
+        restricted = metadata.get('approval_excluded') or metadata.get('cost_source_allowed') is False
+        current_approval = (_current_attachment_approval(dependency, metadata, store)
+                            if dependency.get('approval_source_id') else None)
+        if restricted:
             if purpose not in {'analysis', 'estimate'} or not current_approval:
                 raise ValueError('附件来源已被排除。')
             eligibility = approval_eligibility(current_approval)
@@ -145,6 +199,10 @@ def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpo
             raise ValueError('附件归档缺失、已停用或读取失败。')
         if document_retired(descriptor) or descriptor.get('status') in {'pending', 'failed', 'error', 'invalid'}:
             raise ValueError('附件归档已停用或读取失败。')
+        if current_approval:
+            _assert_archived_approval_attachment(
+                attachment, metadata, descriptor, document, current_approval,
+            )
         # The archive owns content hashing. Ordinary scope reads only compare
         # persisted hashes/metadata and never reopen or download large files.
         return {'attachment': {key: attachment.get(key) for key in ('name', 'batch', 'version', 'file_url',

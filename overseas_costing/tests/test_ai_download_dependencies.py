@@ -1,9 +1,12 @@
 """Downloading selected OA files preserves both identity and local evidence fences."""
+import json
+
 import pytest
 
 from overseas_costing.services import material_ai_fill_service as ai
 from overseas_costing.services.material_ai_source_dependencies import capture_dependencies, dependency_issues
 from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
+from overseas_costing.services.logistics_settlement.document_writer import attachment_values
 from overseas_costing.services.logistics_settlement.model import dumps
 from overseas_costing.tests.test_material_ai_fill_service import _LifecycleRepository
 from overseas_costing.tests.test_settlement_writer import setup as settlement_fixture
@@ -20,24 +23,24 @@ def pending_source():
 def restricted_approval_attachment(store, ledger, batch, version):
     source = store.find('source', instance='E')[0]
     source.update(status='RUNNING', approval_result='agree', approved=False, invalid=False)
-    document = {'id': 'DOC-1', 'source_id': source['id'], 'status': 'review'}
+    manifest = {
+        'file_id': 'FILE-1', 'process_instance_id': 'E', 'corp_id': source['corp'],
+        'sha256': 'a' * 64,
+    }
+    document = {
+        'id': 'DOC-1', 'source_id': source['id'], 'status': 'review',
+        'file_name': 'fuel.png', 'file_url': '/private/files/fuel.png',
+        'fingerprint': 'DOC-1', 'manifest': manifest,
+    }
     source['documents'] = [document]
     store.put('source', {'id': source['id'], 'data': dumps(source)})
     store.insert('document', {
         'id': document['id'], 'source_id': source['id'], 'fingerprint': 'DOC-1',
         'status': 'review', 'data': dumps(document),
     })
-    attachment = ledger.create('attachment', {
-        'batch': batch['name'], 'version': version['name'], 'source_type': 'OA',
-        'file_name': 'fuel.png', 'file_url': '/private/files/fuel.png',
-        'parse_result_json': dumps({
-            'process_instance_id': 'E', 'corp_id': source['corp'],
-            'approval_excluded': True, 'cost_source_allowed': False,
-            'settlement_document': {
-                'document_id': 'DOC-1', 'status': 'review', 'audit_only': True,
-            },
-        }),
-    })
+    attachment = ledger.create('attachment', attachment_values(
+        source, document, batch, version['name'], [], audit_only=True,
+    ))
     selected = [{
         'source_kind': 'approval_attachment', 'source_id': attachment['name'],
         'resolver_source_id': attachment['name'], 'process_instance_id': 'E',
@@ -94,6 +97,91 @@ def test_manual_audit_attachment_cannot_borrow_approval_analysis_policy():
 
     with pytest.raises(ValueError):
         capture_dependencies(manual, purpose='analysis', **options)
+
+
+def test_unrelated_attachment_bytes_cannot_borrow_approval_analysis_policy():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    original = ledger.get('attachment', selected[0]['source_id'])
+    forged = ledger.create('attachment', {
+        **original,
+        'file_name': 'unrelated.png',
+        'file_url': '/private/files/unrelated.png',
+    })
+    unrelated = [{
+        **selected[0], 'source_id': forged['name'], 'resolver_source_id': forged['name'],
+    }]
+    options = dict(
+        store=store, ledger=ledger, batch_name=batch['name'], source_context={}
+    )
+
+    with pytest.raises(ValueError):
+        capture_dependencies(unrelated, purpose='analysis', **options)
+
+
+def test_unrelated_oa_attachment_cannot_bypass_archive_check_by_clearing_policy_flags():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    original = ledger.get('attachment', selected[0]['source_id'])
+    metadata = json.loads(original['parse_result_json'])
+    metadata.update(approval_excluded=False, cost_source_allowed=True)
+    forged = ledger.create('attachment', {
+        **original,
+        'file_name': 'unrelated.png',
+        'file_url': '/private/files/unrelated.png',
+        'parse_result_json': dumps(metadata),
+    })
+    unrelated = [{
+        **selected[0], 'source_id': forged['name'], 'resolver_source_id': forged['name'],
+    }]
+
+    with pytest.raises(ValueError):
+        capture_dependencies(
+            unrelated, store=store, ledger=ledger, batch_name=batch['name'],
+            source_context={}, purpose='analysis',
+        )
+
+
+def test_non_oa_attachment_cannot_borrow_approval_analysis_policy():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    ledger.put('attachment', selected[0]['source_id'], {'source_type': 'Manual'})
+
+    with pytest.raises(ValueError):
+        capture_dependencies(
+            selected, store=store, ledger=ledger, batch_name=batch['name'],
+            source_context={}, purpose='analysis',
+        )
+
+
+def test_attachment_document_cannot_borrow_another_approval_policy():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    attachment = ledger.get('attachment', selected[0]['source_id'])
+    metadata = json.loads(attachment['parse_result_json'])
+    metadata['settlement_document']['source_id'] = 'OTHER-SOURCE'
+    ledger.put('attachment', attachment['name'], {'parse_result_json': dumps(metadata)})
+
+    with pytest.raises(ValueError):
+        capture_dependencies(
+            selected, store=store, ledger=ledger, batch_name=batch['name'],
+            source_context={}, purpose='analysis',
+        )
+
+
+def test_attachment_file_id_must_match_server_archive():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    attachment = ledger.get('attachment', selected[0]['source_id'])
+    metadata = json.loads(attachment['parse_result_json'])
+    metadata['file_id'] = 'OTHER-FILE'
+    ledger.put('attachment', attachment['name'], {'parse_result_json': dumps(metadata)})
+
+    with pytest.raises(ValueError):
+        capture_dependencies(
+            selected, store=store, ledger=ledger, batch_name=batch['name'],
+            source_context={}, purpose='analysis',
+        )
 
 
 def test_download_identity_can_be_captured_but_is_not_a_final_attachment_dependency():
