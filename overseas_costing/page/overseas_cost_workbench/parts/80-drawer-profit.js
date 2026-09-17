@@ -420,8 +420,9 @@
   }
 
   activeErpPushBlock(batch = {}) {
-    const state = this.erpFlowBlockState;
-    if (!state || state.batchName !== batch.name || state.action !== "PUSH_ERP" || state.kind !== "BLOCKED") return null;
+    const state = this.erpPushBlockState;
+    const versionName = String(batch.current_version || "");
+    if (!state || state.batchName !== batch.name || String(state.versionName || "") !== versionName) return null;
     return state;
   }
 
@@ -436,15 +437,12 @@
     const hasTrial = statusLower.includes("calculated") || confirmed;
 
     if (writebackLower.includes("success")) {
+      if (this.erpPushBlockState?.batchName === batch.name) this.erpPushBlockState = null;
       return {
         label: "ERP 已推送",
         enabled: false,
         reason: batch.writeback_message || "已成功推送到 ERP，无需重复操作。",
       };
-    }
-    const pushBlock = this.activeErpPushBlock(batch);
-    if (pushBlock) {
-      return { label: "推送 ERP", enabled: false, reason: this.erpFlowBlockReason(pushBlock.result || {}) };
     }
     if (sourceStatus.invalid_business) {
       return {
@@ -461,6 +459,10 @@
     }
     if (!confirmed) {
       return { label: "推送 ERP", enabled: false, reason: "请先校验计算结果。" };
+    }
+    const pushBlock = this.activeErpPushBlock(batch);
+    if (pushBlock) {
+      return { label: "重试 ERP", enabled: true, reason: this.erpFlowBlockReason(pushBlock) };
     }
     if (writebackLower.includes("fail")) {
       return { label: "重试 ERP", enabled: true, reason: batch.writeback_message || "上次推送失败，可以重试 ERP。" };

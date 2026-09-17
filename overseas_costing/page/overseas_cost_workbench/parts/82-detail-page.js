@@ -146,7 +146,6 @@
     this.detailState.versionName = merged.current_version;
     this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
     this.renderDetailShell();
-    if (this.activeErpPushBlock?.(merged)) await this.syncErpFlowBlock(batchName);
     if (this.detailState.editToken) this.updateEditLeaseStatus();
     if (options.refreshCurrentTab === false) return;
     await this.switchDetailTab(activeTab, { updateUrl: false });

@@ -328,7 +328,7 @@ console.log(JSON.stringify({endpoints,events,state,button:button(view.html,'deta
     assert "ERP timeout" in result["html"]
 
 
-def test_readiness_block_without_failed_status_disables_detail_action_after_refresh():
+def test_push_block_survives_refresh_and_incomplete_readiness_check():
     result = run_view_js(
         """
 const initial={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
@@ -338,81 +338,122 @@ view.call=async(endpoint,args)=>{
   endpoints.push(endpoint);
   if(endpoint.endsWith('writeback_to_erp'))return {ok:false,batch_name:'B-1',blocking_reasons:['ERP configuration missing','missing URL']};
   if(endpoint.endsWith('get_batch_detail'))return {ok:true,batch_name:'B-1',version_name:'V-1',header:{...initial},summary:{}};
+  if(endpoint.endsWith('check_writeback_ready'))return {ok:true,ready:true};
   throw new Error(endpoint);
 };
 view.recordUsage=()=>{};view.switchDetailTab=async()=>{tabRenders+=1};
 await view.queueErpWriteback('B-1');
+await view.refreshDetailSummary();
+await view.syncErpFlowBlock('B-1');
+await view.refreshDetailSummary();
+await view.syncErpFlowBlock('B-1');
 const state=view.erpPushActionState(view.getDetailBatch());
-console.log(JSON.stringify({endpoints,tabRenders,state,block:view.erpFlowBlockState,button:button(view.html,'detail-writeback-to-erp'),html:view.html}));
+console.log(JSON.stringify({endpoints,tabRenders,state,pushBlock:view.erpPushBlockState,genericBlock:view.erpFlowBlockState,button:button(view.html,'detail-writeback-to-erp'),html:view.html}));
 """
     )
 
-    assert [endpoint.rsplit(".", 1)[-1] for endpoint in result["endpoints"]] == [
-        "writeback_to_erp",
-        "get_batch_detail",
-    ]
-    assert result["tabRenders"] == 1
-    assert result["block"]["action"] == "PUSH_ERP"
-    assert result["block"]["kind"] == "BLOCKED"
-    assert result["state"]["enabled"] is False
-    assert result["button"]["disabled"] is True
+    endpoint_names = [endpoint.rsplit(".", 1)[-1] for endpoint in result["endpoints"]]
+    assert endpoint_names.count("get_batch_detail") == 3
+    assert endpoint_names.count("check_writeback_ready") == 2
+    assert result["tabRenders"] == 3
+    assert result["pushBlock"]["batchName"] == "B-1"
+    assert result["pushBlock"]["versionName"] == "V-1"
+    assert result["state"]["label"] == "重试 ERP"
+    assert result["state"]["enabled"] is True
+    assert result["button"]["disabled"] is False
     assert "ERP configuration missing" in result["state"]["reason"]
     assert "missing URL" in result["html"]
 
 
-def test_non_push_block_does_not_disable_detail_erp_action():
+def test_preview_block_does_not_overwrite_push_failure():
     result = run_view_js(
         """
 const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'};
-const view=makeView(batch);view.erpFlowBlockState={batchName:'B-1',action:'PREVIEW_ERP',kind:'BLOCKED',result:{message:'preview only'}};
-console.log(JSON.stringify(view.erpPushActionState(batch)));
+const view=makeView(batch);
+view.erpPushBlockState={batchName:'B-1',versionName:'V-1',message:'ERP configuration missing',blocking_reasons:['missing URL']};
+view.showErpFlowBlock({batch_name:'B-1',message:'preview only'},'preview failed');
+console.log(JSON.stringify({state:view.erpPushActionState(batch),pushBlock:view.erpPushBlockState,genericBlock:view.erpFlowBlockState}));
 """
     )
 
-    assert result["enabled"] is True
+    assert result["genericBlock"]["result"]["message"] == "preview only"
+    assert result["pushBlock"]["message"] == "ERP configuration missing"
+    assert result["state"]["label"] == "重试 ERP"
+    assert result["state"]["enabled"] is True
+    assert result["state"]["reason"] == "ERP configuration missing"
 
 
 def test_successful_push_clears_prior_push_block():
     result = run_view_js(
         """
 const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
-const view=makeView(batch);view.erpFlowBlockState={batchName:'B-1',action:'PUSH_ERP',kind:'BLOCKED',result:{message:'missing URL'}};
-view.call=async()=>({ok:true,writeback_status:'Pending',message:'queued'});
-view.refreshBatch=async()=>{};view.recordUsage=()=>{};
+const view=makeView(batch);view.erpPushBlockState={batchName:'B-1',versionName:'V-1',message:'missing URL',blocking_reasons:[]};
+view.erpFlowBlockState={batchName:'B-1',action:'PUSH_ERP',result:{message:'missing URL'}};
+view.call=async()=>({ok:true,writeback_status:'Success',message:'pushed'});
+view.refreshBatch=async()=>{batch.writeback_status='Success';batch.writeback_message='pushed'};view.recordUsage=()=>{};
 global.frappe={show_alert:()=>{}};
 await view.queueErpWriteback('B-1');
-console.log(JSON.stringify({block:view.erpFlowBlockState,state:view.erpPushActionState(batch)}));
+console.log(JSON.stringify({pushBlock:view.erpPushBlockState,genericBlock:view.erpFlowBlockState,state:view.erpPushActionState(batch)}));
 """
     )
 
-    assert result["block"] is None
-    assert result["state"]["enabled"] is True
+    assert result["pushBlock"] is None
+    assert result["genericBlock"] is None
+    assert result["state"] == {"label": "ERP 已推送", "enabled": False, "reason": "pushed"}
 
 
-def test_later_detail_refresh_clears_push_block_when_readiness_changes():
+def test_push_block_identity_does_not_affect_other_batch_or_version():
     result = run_view_js(
         """
-const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
-const view=makeView(batch);const endpoints=[];
-view.erpFlowBlockState={batchName:'B-1',action:'PUSH_ERP',kind:'BLOCKED',result:{message:'missing URL'}};
-view.renderDetailShell();view.switchDetailTab=async()=>{};
-view.call=async(endpoint)=>{
-  endpoints.push(endpoint);
-  if(endpoint.endsWith('get_batch_detail'))return {ok:true,batch_name:'B-1',version_name:'V-1',header:{...batch},summary:{}};
-  if(endpoint.endsWith('check_writeback_ready'))return {ok:true,ready:true};
-  throw new Error(endpoint);
-};
-await view.refreshDetailSummary();
-console.log(JSON.stringify({endpoints,block:view.erpFlowBlockState,button:button(view.html,'detail-writeback-to-erp')}));
+const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'};
+const view=makeView(batch);
+view.erpPushBlockState={batchName:'B-1',versionName:'V-1',message:'missing URL',blocking_reasons:[]};
+console.log(JSON.stringify({
+  same:view.erpPushActionState(batch),
+  otherBatch:view.erpPushActionState({...batch,name:'B-2'}),
+  otherVersion:view.erpPushActionState({...batch,current_version:'V-2'}),
+}));
 """
     )
 
-    assert [endpoint.rsplit(".", 1)[-1] for endpoint in result["endpoints"]] == [
-        "get_batch_detail",
-        "check_writeback_ready",
-    ]
-    assert result["block"] is None
-    assert result["button"]["disabled"] is False
+    assert result["same"]["label"] == "重试 ERP"
+    assert result["same"]["enabled"] is True
+    assert result["otherBatch"]["label"] == "推送 ERP"
+    assert result["otherBatch"]["enabled"] is True
+    assert result["otherVersion"]["label"] == "推送 ERP"
+    assert result["otherVersion"]["enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("batch", "reason"),
+    [
+        ({"name": "B-1", "status": "Dirty", "confirm_status": "Confirmed", "current_version": "V-1"}, "请先完成试算"),
+        ({"name": "B-1", "status": "Calculated", "confirm_status": "", "current_version": "V-1"}, "请先校验计算结果"),
+        (
+            {
+                "name": "B-1",
+                "status": "Calculated",
+                "confirm_status": "Confirmed",
+                "current_version": "V-1",
+                "source_status": {"invalid_business": True, "invalid_business_reason": "业务来源失效"},
+            },
+            "业务来源失效",
+        ),
+    ],
+)
+def test_push_retry_never_bypasses_hard_gate(batch, reason):
+    result = run_view_js(
+        f"""
+const batch={json.dumps(batch, ensure_ascii=False)};
+const view=makeView(batch);
+view.erpPushBlockState={{batchName:'B-1',versionName:'V-1',message:'missing URL',blocking_reasons:[]}};
+console.log(JSON.stringify(view.erpPushActionState(batch)));
+"""
+    )
+
+    assert result["label"] != "重试 ERP"
+    assert result["enabled"] is False
+    assert reason in result["reason"]
 
 
 def test_failed_writeback_keeps_original_block_after_drawer_refresh_sync():

@@ -461,18 +461,24 @@
       } catch (refreshError) {
         console.warn("[overseas-cost-workbench] ERP 失败后刷新批次未完成", refreshError);
       } finally {
-        this.showErpFlowBlock(result, "ERP 推送未进入队列", {
-          action: "PUSH_ERP",
-          kind: result.writeback_status ? "FAILED" : "BLOCKED",
-        });
+        this.erpPushBlockState = {
+          batchName: batch.name,
+          versionName: String(result.version_name || batch.current_version || ""),
+          message: String(result.message || "").trim(),
+          blocking_reasons: Array.isArray(result.blocking_reasons) ? [...result.blocking_reasons] : [],
+        };
+        this.showErpFlowBlock(result, "ERP 推送未进入队列", { action: "PUSH_ERP" });
       }
       return;
     }
     batch.writeback_status = result.writeback_status || "Pending";
     batch.writeback_message = result.message || "";
+    if (this.erpPushBlockState?.batchName === batch.name) {
+      this.erpPushBlockState = null;
+      this.updateDetailErpAction?.(batch);
+    }
     if (this.erpFlowBlockState?.batchName === batch.name && this.erpFlowBlockState.action === "PUSH_ERP") {
       this.erpFlowBlockState = null;
-      this.updateDetailErpAction?.(batch);
     }
     await this.refreshBatch(batch.name);
     this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
@@ -486,7 +492,6 @@
       batchName,
       title,
       action: options.action || "",
-      kind: options.kind || "",
       result: {
         ...result,
         batch_name: batchName,
@@ -501,7 +506,6 @@
   async syncErpFlowBlock(batchName = "") {
     const batch = this.findBatch(batchName || this.drawerBatchName || this.activeBatchName);
     if (!batch) return;
-    const previousState = this.erpFlowBlockState?.batchName === batch.name ? this.erpFlowBlockState : null;
     const readiness = await this.call(
       "overseas_costing.api.writeback.check_writeback_ready",
       {
@@ -520,8 +524,6 @@
     this.erpFlowBlockState = {
       batchName: batch.name,
       title: "校验未通过",
-      action: previousState?.action || "",
-      kind: previousState?.action === "PUSH_ERP" ? "BLOCKED" : previousState?.kind || "",
       result: readiness || {},
     };
     if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());

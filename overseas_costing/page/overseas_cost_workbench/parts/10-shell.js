@@ -63,6 +63,7 @@ class OverseasCostWorkbench {
     Object.assign(this.filters, this.getDefaultPullDateRange());
     this.moreFiltersOpen = false;
     this.erpFlowBlockState = null;
+    this.erpPushBlockState = null;
     this.childPriorityFields = this.loadChildPriorityFields();
     this.transportSidebarCollapsed = this.loadTransportSidebarState();
     this.viewState = OverseasCostWorkbenchState.parseWorkbenchState(window.location.href);

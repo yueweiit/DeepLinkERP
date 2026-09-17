@@ -633,6 +633,7 @@ class OverseasCostWorkbench {
     Object.assign(this.filters, this.getDefaultPullDateRange());
     this.moreFiltersOpen = false;
     this.erpFlowBlockState = null;
+    this.erpPushBlockState = null;
     this.childPriorityFields = this.loadChildPriorityFields();
     this.transportSidebarCollapsed = this.loadTransportSidebarState();
     this.viewState = OverseasCostWorkbenchState.parseWorkbenchState(window.location.href);
@@ -2121,18 +2122,24 @@ class OverseasCostWorkbench {
       } catch (refreshError) {
         console.warn("[overseas-cost-workbench] ERP 失败后刷新批次未完成", refreshError);
       } finally {
-        this.showErpFlowBlock(result, "ERP 推送未进入队列", {
-          action: "PUSH_ERP",
-          kind: result.writeback_status ? "FAILED" : "BLOCKED",
-        });
+        this.erpPushBlockState = {
+          batchName: batch.name,
+          versionName: String(result.version_name || batch.current_version || ""),
+          message: String(result.message || "").trim(),
+          blocking_reasons: Array.isArray(result.blocking_reasons) ? [...result.blocking_reasons] : [],
+        };
+        this.showErpFlowBlock(result, "ERP 推送未进入队列", { action: "PUSH_ERP" });
       }
       return;
     }
     batch.writeback_status = result.writeback_status || "Pending";
     batch.writeback_message = result.message || "";
+    if (this.erpPushBlockState?.batchName === batch.name) {
+      this.erpPushBlockState = null;
+      this.updateDetailErpAction?.(batch);
+    }
     if (this.erpFlowBlockState?.batchName === batch.name && this.erpFlowBlockState.action === "PUSH_ERP") {
       this.erpFlowBlockState = null;
-      this.updateDetailErpAction?.(batch);
     }
     await this.refreshBatch(batch.name);
     this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
@@ -2146,7 +2153,6 @@ class OverseasCostWorkbench {
       batchName,
       title,
       action: options.action || "",
-      kind: options.kind || "",
       result: {
         ...result,
         batch_name: batchName,
@@ -2161,7 +2167,6 @@ class OverseasCostWorkbench {
   async syncErpFlowBlock(batchName = "") {
     const batch = this.findBatch(batchName || this.drawerBatchName || this.activeBatchName);
     if (!batch) return;
-    const previousState = this.erpFlowBlockState?.batchName === batch.name ? this.erpFlowBlockState : null;
     const readiness = await this.call(
       "overseas_costing.api.writeback.check_writeback_ready",
       {
@@ -2180,8 +2185,6 @@ class OverseasCostWorkbench {
     this.erpFlowBlockState = {
       batchName: batch.name,
       title: "校验未通过",
-      action: previousState?.action || "",
-      kind: previousState?.action === "PUSH_ERP" ? "BLOCKED" : previousState?.kind || "",
       result: readiness || {},
     };
     if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());
@@ -15993,8 +15996,9 @@ class OverseasCostWorkbench {
   }
 
   activeErpPushBlock(batch = {}) {
-    const state = this.erpFlowBlockState;
-    if (!state || state.batchName !== batch.name || state.action !== "PUSH_ERP" || state.kind !== "BLOCKED") return null;
+    const state = this.erpPushBlockState;
+    const versionName = String(batch.current_version || "");
+    if (!state || state.batchName !== batch.name || String(state.versionName || "") !== versionName) return null;
     return state;
   }
 
@@ -16009,15 +16013,12 @@ class OverseasCostWorkbench {
     const hasTrial = statusLower.includes("calculated") || confirmed;
 
     if (writebackLower.includes("success")) {
+      if (this.erpPushBlockState?.batchName === batch.name) this.erpPushBlockState = null;
       return {
         label: "ERP 已推送",
         enabled: false,
         reason: batch.writeback_message || "已成功推送到 ERP，无需重复操作。",
       };
-    }
-    const pushBlock = this.activeErpPushBlock(batch);
-    if (pushBlock) {
-      return { label: "推送 ERP", enabled: false, reason: this.erpFlowBlockReason(pushBlock.result || {}) };
     }
     if (sourceStatus.invalid_business) {
       return {
@@ -16034,6 +16035,10 @@ class OverseasCostWorkbench {
     }
     if (!confirmed) {
       return { label: "推送 ERP", enabled: false, reason: "请先校验计算结果。" };
+    }
+    const pushBlock = this.activeErpPushBlock(batch);
+    if (pushBlock) {
+      return { label: "重试 ERP", enabled: true, reason: this.erpFlowBlockReason(pushBlock) };
     }
     if (writebackLower.includes("fail")) {
       return { label: "重试 ERP", enabled: true, reason: batch.writeback_message || "上次推送失败，可以重试 ERP。" };
@@ -16315,7 +16320,6 @@ class OverseasCostWorkbench {
     this.detailState.versionName = merged.current_version;
     this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
     this.renderDetailShell();
-    if (this.activeErpPushBlock?.(merged)) await this.syncErpFlowBlock(batchName);
     if (this.detailState.editToken) this.updateEditLeaseStatus();
     if (options.refreshCurrentTab === false) return;
     await this.switchDetailTab(activeTab, { updateUrl: false });
