@@ -273,6 +273,34 @@ def test_logistics_row_without_code_uses_only_unique_exact_normalized_name():
     assert proposal["payload"]["excluded_item_names"] == ["I-145"]
 
 
+@pytest.mark.parametrize("placeholder_code", ["/", "//", "无", "NEW"])
+def test_logistics_placeholder_code_falls_back_to_unique_exact_name(placeholder_code):
+    from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
+
+    items = [
+        {"name": "I-144", "material_code": "MWV101144",
+         "product_name": "薇武士 IP17 PRO", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+        {"name": "I-145", "material_code": "MWV101145",
+         "product_name": "薇武士 IP17 PRO MAX", "quantity": 1,
+         "actual_shipped_qty": 1, "extra_json": "{}"},
+    ]
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-PLACEHOLDER:form",
+        "approval_role": "international_logistics", "approval_no": "LOG-PLACEHOLDER",
+        "form_fields": {"货物信息": [{
+            "物料编码": placeholder_code, "物料名称": " 薇武士  ip17 pro ",
+            "数量": 1, "单位": "套",
+        }]},
+    }
+
+    proposal = build_logistics_reconciliation(items, source, reset_manual_scope=True)
+
+    assert proposal["payload"]["scope_status"] == "AUTHORITATIVE"
+    assert [row["material_code"] for row in proposal["payload"]["rows"]] == ["MWV101144"]
+    assert proposal["payload"]["excluded_item_names"] == ["I-145"]
+
+
 def test_logistics_row_without_code_and_ambiguous_name_is_not_authoritative():
     from overseas_costing.services.logistics_autofill_service import build_logistics_reconciliation
 

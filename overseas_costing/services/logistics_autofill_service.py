@@ -43,6 +43,7 @@ def run_supplement(callback, *, seconds: float = 60) -> dict:
         if old_timer[0]:
             signal.setitimer(signal.ITIMER_REAL, max(0.001, old_timer[0] - (time.monotonic() - started)), old_timer[1])
 
+from overseas_costing.services.material_value_semantics import is_placeholder_token
 from overseas_costing.services.source_review_extract_service import _approval_goods_rows
 from overseas_costing.utils.field_mapper import map_oa_row_to_item
 
@@ -166,6 +167,13 @@ def _normalized_material_code(value: object) -> str:
     return _display_material_code(value).casefold()
 
 
+def _is_material_code_placeholder(value: object) -> bool:
+    display = _display_material_code(value)
+    if is_placeholder_token(display) or display.casefold() in {"0", "new"}:
+        return True
+    return bool(display) and all(character in "/\\|_-—–" for character in display)
+
+
 def _scope_source_fingerprint(source: dict, goods: list[dict]) -> str:
     payload = {
         "source_id": str(source.get("source_id") or ""),
@@ -173,7 +181,10 @@ def _scope_source_fingerprint(source: dict, goods: list[dict]) -> str:
         "approval_no": str(source.get("approval_no") or ""),
         "goods": [
             {
-                "material_code": _normalized_material_code(row.get("material_code")),
+                "material_code": (
+                    "" if _is_material_code_placeholder(row.get("material_code"))
+                    else _normalized_material_code(row.get("material_code"))
+                ),
                 "product_name": _normalized_material_name(row.get("product_name")),
                 "quantity": str(row.get("quantity") or ""),
                 "unit": str(row.get("unit") or ""),
@@ -199,12 +210,15 @@ def build_logistics_reconciliation(
         if normalized_name:
             by_name.setdefault(normalized_name, []).append(item)
     for row in goods:
-        if row.get("material_code"):
+        if row.get("material_code") and not _is_material_code_placeholder(
+            row.get("material_code")
+        ):
             row["material_code"] = _display_material_code(row.get("material_code"))
             continue
+        row["material_code"] = ""
         matches = by_name.get(_normalized_material_name(row.get("product_name")), [])
         codes = {str(item.get("material_code") or "").strip() for item in matches
-                 if str(item.get("material_code") or "").strip()}
+                 if not _is_material_code_placeholder(item.get("material_code"))}
         if len(matches) != 1 or len(codes) != 1:
             return None
         row["material_code"] = next(iter(codes))
