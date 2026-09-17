@@ -18,13 +18,16 @@ global.OverseasCostWorkbenchState={{
   parseWorkbenchState:()=>({{tab:'items'}}),
 }};
 const parts={json.dumps(str(PARTS))};
-const classSource=fs.readFileSync(parts+'/80-drawer-profit.js','utf8')
+const calculation=fs.readFileSync(parts+'/30-calculation-erp.js','utf8').split('  applyRecalculateSummary(')[0];
+const classSource=calculation
+  +fs.readFileSync(parts+'/75-table-and-list.js','utf8')
+  +fs.readFileSync(parts+'/80-drawer-profit.js','utf8')
   +fs.readFileSync(parts+'/82-detail-page.js','utf8');
 const Harness=Function(`return class Harness {{${{classSource}}}}`)();
 function makeView(batch) {{
   const view=new Harness();
   view.batches=[batch];
-  view.detailState={{batchName:batch.name,versionName:batch.current_version||'',tab:'items',header:batch,detail:null}};
+  view.detailState={{batchName:batch.name,versionName:batch.current_version||'',tab:'items',header:batch,detail:null,refreshRequestId:0,editToken:''}};
   view.findBatch=name=>view.batches.find(row=>row.name===name);
   view.escape=value=>String(value??'').replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
   view.hasText=value=>String(value??'').trim().length>0;
@@ -45,7 +48,10 @@ function makeView(batch) {{
   view.cleanupSkuScrollControls=()=>{{}};
   view.cleanupMaterialGridScrollControls=()=>{{}};
   view.html='';
-  view.$root={{find:()=>({{html:value=>{{view.html=value;}}}})}};
+  view.$root={{
+    attr:key=>key==='data-screen'?'detail':'',
+    find:()=>({{html:value=>{{view.html=value;}},hasClass:()=>false}}),
+  }};
   return view;
 }}
 function button(html,action) {{
@@ -55,7 +61,9 @@ function button(html,action) {{
   const label=tag.slice(tag.indexOf('>')+1,tag.lastIndexOf('</button>')).replace(/<[^>]+>/g,'').trim();
   return {{tag,label,disabled:/\\sdisabled(?:[\\s>])/.test(tag)}};
 }}
+(async()=>{{
 {script}
+}})().catch(error=>{{console.error(error);process.exit(1)}});
 """
     completed = subprocess.run(
         ["node", "-e", source],
@@ -77,6 +85,18 @@ ERP_STATES = [
     (
         "unconfirmed",
         {"name": "B-1", "status": "Calculated", "current_version": "V-1"},
+        "推送 ERP",
+        False,
+        "请先校验计算结果",
+    ),
+    (
+        "partially_confirmed",
+        {
+            "name": "B-1",
+            "status": "Calculated",
+            "confirm_status": "Partially Confirmed",
+            "current_version": "V-1",
+        },
         "推送 ERP",
         False,
         "请先校验计算结果",
@@ -166,6 +186,20 @@ console.log(JSON.stringify({button:button(view.html,'detail-writeback-to-erp'),t
     assert result["button"]["disabled"] is False
 
 
+def test_confirm_status_falls_back_to_batch_status_only_when_empty():
+    result = run_view_js(
+        """
+const view=makeView({name:'B-1',status:'Confirmed',confirm_status:' '});
+console.log(JSON.stringify({
+  empty:view.isCalculationConfirmed({status:'Confirmed',confirm_status:' '}),
+  explicitPartial:view.isCalculationConfirmed({status:'Confirmed',confirm_status:'Partially Confirmed'}),
+}));
+"""
+    )
+
+    assert result == {"empty": True, "explicitPartial": False}
+
+
 def test_detail_header_handler_delegates_exact_batch_without_direct_backend_call():
     source = f"""
 const fs=require('fs');
@@ -198,6 +232,7 @@ function render(batch){const view=makeView(batch);const html=view.renderErpFlowP
 };}
 console.log(JSON.stringify({
   unconfirmed:render({name:'B-1',status:'Calculated',current_version:'V-1'}),
+  partial:render({name:'B-1',status:'Calculated',confirm_status:'Partially Confirmed',current_version:'V-1'}),
   ready:render({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'}),
   stale:render({name:'B-1',status:'Dirty',confirm_status:'Confirmed',current_version:'V-1'}),
   invalid:render({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',source_status:{invalid_business:true}}),
@@ -208,6 +243,8 @@ console.log(JSON.stringify({
     assert result["unconfirmed"]["confirm"]["disabled"] is False
     assert result["unconfirmed"]["preview"]["disabled"] is True
     assert result["unconfirmed"]["push"]["disabled"] is True
+    assert result["partial"]["preview"]["disabled"] is True
+    assert result["partial"]["push"]["disabled"] is True
     assert result["ready"]["preview"]["disabled"] is False
     assert result["ready"]["push"]["disabled"] is False
     assert result["stale"]["confirm"]["disabled"] is True
@@ -215,3 +252,52 @@ console.log(JSON.stringify({
     assert result["invalid"]["confirm"]["disabled"] is True
     assert result["invalid"]["preview"]["disabled"] is True
     assert result["invalid"]["push"]["disabled"] is True
+
+
+def test_erp_queue_rejects_partially_confirmed_batch():
+    result = run_view_js(
+        """
+const batch={name:'B-1',status:'Calculated',confirm_status:'Partially Confirmed',current_version:'V-1',item_count:1};
+const view=makeView(batch);view.batchItems={'B-1':[]};
+view.batchTotalCostNumber=()=>100;view.businessTypeCompactLabel=()=>'';
+const html=view.renderErpQueueRow(batch);
+console.log(JSON.stringify({preview:button(html,'queue-preview-erp'),push:button(html,'queue-writeback-erp'),html}));
+"""
+    )
+
+    assert result["preview"] is None
+    assert result["push"]["disabled"] is True
+    assert "等待人工校验" in result["html"]
+
+
+def test_failed_writeback_refreshes_detail_header_from_server_state():
+    result = run_view_js(
+        """
+const initial={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
+const view=makeView(initial);const endpoints=[],events=[];
+view.call=async(endpoint,args)=>{
+  endpoints.push([endpoint,args]);
+  if(endpoint.endsWith('writeback_to_erp'))return {ok:false,batch_name:'B-1',writeback_status:'Failed',message:'ERP timeout'};
+  if(endpoint.endsWith('get_batch_detail'))return {ok:true,batch_name:'B-1',version_name:'V-1',header:{...initial,writeback_status:'Failed',writeback_message:'ERP timeout'},summary:{}};
+  throw new Error(endpoint);
+};
+view.recordUsage=(action,payload)=>events.push(['audit',action,payload.status]);
+view.showErpFlowBlock=(payload,title)=>events.push(['block',payload.writeback_status,title]);
+view.showError=error=>events.push(['error',error.message]);
+view.switchDetailTab=async()=>{};
+await view.queueErpWriteback('B-1');
+const state=view.erpPushActionState(view.getDetailBatch());
+console.log(JSON.stringify({endpoints,events,state,button:button(view.html,'detail-writeback-to-erp'),header:view.detailState.header}));
+"""
+    )
+
+    assert [item[0].rsplit(".", 1)[-1] for item in result["endpoints"]] == [
+        "writeback_to_erp",
+        "get_batch_detail",
+    ]
+    assert [event[0] for event in result["events"]] == ["audit", "block"]
+    assert result["header"]["writeback_status"] == "Failed"
+    assert result["state"]["label"] == "重试 ERP"
+    assert result["state"]["enabled"] is True
+    assert result["button"]["label"] == "重试 ERP"
+    assert result["button"]["disabled"] is False

@@ -453,8 +453,11 @@
       true
     );
     if (!result.ok) {
+      if (result.writeback_status) batch.writeback_status = result.writeback_status;
+      if (result.message) batch.writeback_message = result.message;
       this.recordUsage("PUSH_ERP", { batch, status: "Failed", remark: result.message || "ERP 推送未进入队列" });
       this.showErpFlowBlock(result, "ERP 推送未进入队列");
+      await this.refreshBatch(batch.name);
       return;
     }
     batch.writeback_status = result.writeback_status || "Pending";

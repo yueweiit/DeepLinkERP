@@ -406,12 +406,18 @@
     }
   }
 
+  isCalculationConfirmed(batch = {}) {
+    const confirmStatus = String(batch.confirm_status ?? "").trim();
+    const normalized = (confirmStatus || String(batch.status ?? "").trim()).toLowerCase();
+    return normalized === "confirmed";
+  }
+
   erpPushActionState(batch = {}, itemCount = null) {
     const count = itemCount === null ? Number(batch.item_count || 0) : Number(itemCount || 0);
     const statusInfo = this.batchStatusInfo(batch.status, batch, count);
     const statusLower = String(batch.status || "").toLowerCase();
     const writebackLower = String(batch.writeback_status || "Not Started").toLowerCase();
-    const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
+    const confirmed = this.isCalculationConfirmed(batch);
     const sourceStatus = batch.source_status || {};
     const resultNeedsRecalculate = Boolean(statusInfo.needsRecalculate || batch.calculation_stale);
     const hasTrial = statusLower.includes("calculated") || confirmed;
@@ -453,7 +459,7 @@
       : Number((summary.calculation_schema === 2 ? summary.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb) || 0);
     const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
     const hasVersion = this.hasText(batch.current_version);
-    const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
+    const confirmed = this.isCalculationConfirmed(batch);
     const writebackInfo = this.erpWritebackStatusInfo(batch);
     const invalidBusiness = Boolean((batch.source_status || {}).invalid_business);
     const canConfirm = hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
