@@ -377,7 +377,15 @@ def build_logistics_reconciliation(
         metadata = extra(old)
         prior = metadata.get("logistics_row") or {}
         fact = prior.get("purchase_fact") or {field: old.get(field) for field in PURCHASE_FIELDS}
-        purchase_key = prior.get("purchase_key") or old.get("name") or ""
+        # An auto-created logistics row records an explicit empty purchase key.
+        # Preserve that decision on later audits instead of treating the newly
+        # created item name as a purchase-row link and manufacturing allocation
+        # metadata on the second pass.
+        purchase_key = (
+            prior.get("purchase_key")
+            if "purchase_key" in prior
+            else old.get("name") or ""
+        )
         if purchase_key:
             facts[purchase_key] = fact
         existing_name = str(old.get("name") or "")

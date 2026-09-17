@@ -268,6 +268,33 @@ def test_reset_entry_reports_only_changed_field_names_for_diagnostics():
     assert entry["updated_json_paths"] == {"I-1": ["$.logistics_row"]}
 
 
+def test_fresh_audit_keeps_explicit_empty_purchase_link_for_created_logistics_row():
+    from overseas_costing.services.material_scope_reset_service import build_reset_entry
+
+    target = {
+        "batch": "B-1", "version": "V-1", "current_version": "V-1",
+        "is_current": True, "version_status": "Active",
+    }
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-1:form",
+        "source_hash": "SOURCE", "approval_role": "international_logistics",
+        "approval_no": "LOG-1", "form_fields": {"货物信息": [{
+            "物料编码": "SKU-NEW", "物料名称": "新物料", "数量": 1, "单位": "个",
+        }]},
+    }
+    first = build_reset_entry(target, [], source)
+    created = {
+        key: value for key, value in first["proposal"]["payload"]["rows"][0].items()
+        if not key.startswith("_")
+    }
+    created.update(name="I-NEW", is_excluded=0)
+
+    second = build_reset_entry(target, [created], source)
+
+    assert second["updated_item_names"] == []
+    assert second["changed"] is False
+
+
 def test_manifest_hash_changes_when_material_membership_changes():
     from overseas_costing.services.material_scope_reset_service import build_reset_manifest
 
