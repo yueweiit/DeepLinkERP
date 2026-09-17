@@ -15,6 +15,21 @@ def get_tolerance(company):
 
 def get_active_scopes(company, from_date, to_date):
 	from_date, to_date = getdate(from_date), getdate(to_date)
+	settings = frappe.db.get_value(
+		"China Finance Settings",
+		company,
+		[
+			"require_customer_reconciliation",
+			"require_supplier_reconciliation",
+			"require_bank_reconciliation",
+		],
+		as_dict=True,
+	) or frappe._dict()
+	required_scope_types = {
+		"Customer": bool(settings.get("require_customer_reconciliation")),
+		"Supplier": bool(settings.get("require_supplier_reconciliation")),
+		"Bank": bool(settings.get("require_bank_reconciliation")),
+	}
 	scopes = frappe.get_all(
 		"China Reconciliation Scope",
 		filters={"company": company, "enabled": 1, "effective_from": ["<=", to_date]},
@@ -24,7 +39,11 @@ def get_active_scopes(company, from_date, to_date):
 		],
 		order_by="scope_type, reference_name",
 	)
-	return [scope for scope in scopes if not scope.effective_to or getdate(scope.effective_to) >= from_date]
+	return [
+		scope for scope in scopes
+		if required_scope_types.get(scope.scope_type, False)
+		and (not scope.effective_to or getdate(scope.effective_to) >= from_date)
+	]
 
 
 def get_native_bank_reconciliation_data(bank_account, account, company, to_date):
