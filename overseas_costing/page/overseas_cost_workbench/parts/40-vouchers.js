@@ -382,6 +382,7 @@
         fallbackAttachment: String(recordName || ""),
       }).then((started) => {
         if (started) detailDialog.hide();
+        return started;
       });
     });
   }
@@ -473,12 +474,12 @@
     const batch = this.getDetailBatch() || this.getSelectableBatch(targetBatch, this.getSelectableBatches()) || {};
     const targetVersion = String(versionName || this.detailState.versionName || batch.current_version || "");
     if (!targetVersion) throw new Error("当前批次没有可编辑的成本版本。");
-    await this.openFeeEvidenceReviewDialog("import_tax", attachment, {
+    return Boolean(await this.openFeeEvidenceReviewDialog("import_tax", attachment, {
       batchName: targetBatch,
       versionName: targetVersion,
       evidenceRole: "tax_certificate",
       force: false,
-    });
+    }));
   }
 
   async startVoucherFeeEvidenceReview($button, { fallbackBatchName = "", fallbackAttachment = "" } = {}) {
@@ -491,8 +492,7 @@
     };
     $button.prop("disabled", true).text("正在启动 AI…");
     try {
-      await this.openVoucherFeeEvidenceReview(payload);
-      return true;
+      return (await this.openVoucherFeeEvidenceReview(payload)) === true;
     } catch (error) {
       this.showError(error);
       return false;

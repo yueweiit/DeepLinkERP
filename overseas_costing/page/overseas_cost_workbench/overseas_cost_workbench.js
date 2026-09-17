@@ -2772,6 +2772,7 @@ class OverseasCostWorkbench {
         fallbackAttachment: String(recordName || ""),
       }).then((started) => {
         if (started) detailDialog.hide();
+        return started;
       });
     });
   }
@@ -2863,12 +2864,12 @@ class OverseasCostWorkbench {
     const batch = this.getDetailBatch() || this.getSelectableBatch(targetBatch, this.getSelectableBatches()) || {};
     const targetVersion = String(versionName || this.detailState.versionName || batch.current_version || "");
     if (!targetVersion) throw new Error("当前批次没有可编辑的成本版本。");
-    await this.openFeeEvidenceReviewDialog("import_tax", attachment, {
+    return Boolean(await this.openFeeEvidenceReviewDialog("import_tax", attachment, {
       batchName: targetBatch,
       versionName: targetVersion,
       evidenceRole: "tax_certificate",
       force: false,
-    });
+    }));
   }
 
   async startVoucherFeeEvidenceReview($button, { fallbackBatchName = "", fallbackAttachment = "" } = {}) {
@@ -2881,8 +2882,7 @@ class OverseasCostWorkbench {
     };
     $button.prop("disabled", true).text("正在启动 AI…");
     try {
-      await this.openVoucherFeeEvidenceReview(payload);
-      return true;
+      return (await this.openVoucherFeeEvidenceReview(payload)) === true;
     } catch (error) {
       this.showError(error);
       return false;
@@ -13930,7 +13930,7 @@ class OverseasCostWorkbench {
       state.feeEvidenceReviewDialog?.show();
       return state.feeEvidenceReviewStartPromise;
     }
-    if (!(await this.ensureMaterialFeeEditSession())) return;
+    if (!(await this.ensureMaterialFeeEditSession())) return false;
     state.feeEvidenceReview = {
       status: "STARTING", logicalFeeKey: String(feeKey || ""), attachment: String(attachment || ""),
       batchName: String(options.batchName || this.detailState.batchName || ""),
@@ -13985,9 +13985,11 @@ class OverseasCostWorkbench {
       };
       this.updateFeeEvidenceReviewProgress();
       await this.pollFeeEvidenceReview(state, state.feeEvidenceReview.batchName, started.run_id);
+      return true;
     })().catch((error) => {
       state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
       this.updateFeeEvidenceReviewProgress();
+      return false;
     }).finally(() => {
       if (state.feeEvidenceReviewStartPromise === startPromise) state.feeEvidenceReviewStartPromise = null;
     });

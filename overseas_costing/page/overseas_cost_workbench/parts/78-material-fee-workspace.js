@@ -4541,7 +4541,7 @@
       state.feeEvidenceReviewDialog?.show();
       return state.feeEvidenceReviewStartPromise;
     }
-    if (!(await this.ensureMaterialFeeEditSession())) return;
+    if (!(await this.ensureMaterialFeeEditSession())) return false;
     state.feeEvidenceReview = {
       status: "STARTING", logicalFeeKey: String(feeKey || ""), attachment: String(attachment || ""),
       batchName: String(options.batchName || this.detailState.batchName || ""),
@@ -4596,9 +4596,11 @@
       };
       this.updateFeeEvidenceReviewProgress();
       await this.pollFeeEvidenceReview(state, state.feeEvidenceReview.batchName, started.run_id);
+      return true;
     })().catch((error) => {
       state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
       this.updateFeeEvidenceReviewProgress();
+      return false;
     }).finally(() => {
       if (state.feeEvidenceReviewStartPromise === startPromise) state.feeEvidenceReviewStartPromise = null;
     });

@@ -177,6 +177,157 @@ console.log(JSON.stringify({calls,during,after:{disabled:button.disabled,label:b
     }
 
 
+def test_embedded_voucher_real_start_failure_returns_not_started_and_keeps_visible_error() -> None:
+    result = _voucher_click_result(
+        VOUCHER_CLICK_FIXTURE
+        + r"""
+const node={empty(){return this},removeData(){return this}};
+let dialogShows=0;const progress=[];const errors=[];
+frappe.ui={Dialog:class{
+  constructor(){this.$wrapper={length:1,addClass(){return this},on(){return this},find(){return node}}}
+  show(){dialogShows++}
+}};
+const state={feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:null};
+workspace.ensureMaterialFeeState=()=>state;
+workspace.ensureMaterialFeeEditSession=async()=>true;
+workspace.getDetailBatch=()=>({current_version:'VERSION-1'});
+workspace.findMaterialFee=()=>({required_evidence_role:'tax_certificate'});
+workspace.renderFeeEvidenceReviewProgressShell=()=>'<div></div>';
+workspace.updateFeeEvidenceReviewProgress=()=>progress.push({status:state.feeEvidenceReview?.status,error:state.feeEvidenceReview?.error_message});
+workspace.materialAIErrorMessage=(error,fallback)=>error?.message||fallback;
+workspace.call=async(endpoint)=>{if(endpoint.endsWith('start_fee_evidence_review'))throw new Error('启动接口不可用');throw new Error(endpoint)};
+workspace.showError=(error)=>errors.push(error.message);
+const handler=handlers["click[data-action='ai-review-voucher']"];
+const started=await handler({preventDefault(){},currentTarget:button});
+console.log(JSON.stringify({started,dialogShows,review:state.feeEvidenceReview,progress,errors,button:{disabled:button.disabled,label:button.label}}));
+"""
+    )
+
+    assert result["started"] is False
+    assert result["dialogShows"] == 1
+    assert result["review"]["status"] == "FAILED"
+    assert result["review"]["error_message"] == "启动接口不可用"
+    assert result["errors"] == []
+    assert result["button"] == {"disabled": False, "label": "AI 解析并分摊到 SKU"}
+
+
+def test_voucher_record_dialog_closes_once_only_after_real_review_start() -> None:
+    result = _voucher_click_result(
+        r"""
+const passive={empty(){return this},removeData(){return this},addClass(){return this},on(){return this},find(){return this}};
+const dialogs=[];
+frappe.ui={Dialog:class{
+  constructor(){
+    this.handlers={};this.hideCalls=0;this.showCalls=0;
+    this.$wrapper={length:1,addClass:()=>this.$wrapper,on:(event,selector,handler)=>{this.handlers[`${event}${selector}`]=handler;return this.$wrapper},find:()=>passive};
+    dialogs.push(this);
+  }
+  show(){this.showCalls++}
+  hide(){this.hideCalls++}
+}};
+const button={attrs:{'data-batch-name':'BATCH-3','data-version-name':'VERSION-3','data-attachment-name':'ATTACHMENT-3'},disabled:false,label:'AI 解析并分摊到 SKU'};
+const buttonQuery={
+  attr(name){return button.attrs[name]||''},
+  prop(name,value){if(value===undefined)return button[name];button[name]=value;return this},
+  text(value){if(value===undefined)return button.label;button.label=value;return this},
+};
+dollar=(value)=>value===button?buttonQuery:passive;
+const workspace=Object.create(Harness.prototype);
+workspace.detailState={batchName:'BATCH-3',versionName:'VERSION-3'};
+const state={feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:null};
+workspace.ensureMaterialFeeState=()=>state;
+workspace.ensureMaterialFeeEditSession=async()=>true;
+workspace.getDetailBatch=()=>({current_version:'VERSION-3'});
+workspace.findMaterialFee=()=>({required_evidence_role:'tax_certificate'});
+workspace.renderTaxCertificateRecordDetail=()=>'<div></div>';
+workspace.renderFeeEvidenceReviewProgressShell=()=>'<div></div>';
+workspace.updateFeeEvidenceReviewProgress=()=>{};
+workspace.pollFeeEvidenceReview=async()=>{};
+workspace.showError=()=>{};
+let startCalls=0;
+workspace.call=async(endpoint)=>{
+  if(endpoint.endsWith('get_tax_certificate_parse_record'))return {ok:true,record_summary:{batch:{name:'BATCH-3'},version:'VERSION-3'}};
+  if(endpoint.endsWith('start_fee_evidence_review')){startCalls++;return {ok:true,run_id:'RUN-3',status:'QUEUED'}};
+  throw new Error(endpoint);
+};
+await workspace.openTaxCertificateRecordDialog('ATTACHMENT-3');
+const detail=dialogs[0];
+const handler=detail.handlers["click[data-action='ai-review-voucher']"];
+const event={preventDefault(){},currentTarget:button};
+const first=handler(event);const duplicate=handler(event);
+await Promise.all([first,duplicate]);
+console.log(JSON.stringify({startCalls,hideCalls:detail.hideCalls,reviewDialogs:dialogs.length-1,button:{disabled:button.disabled,label:button.label}}));
+"""
+    )
+
+    assert result == {
+        "startCalls": 1,
+        "hideCalls": 1,
+        "reviewDialogs": 1,
+        "button": {"disabled": False, "label": "AI 解析并分摊到 SKU"},
+    }
+
+
+def test_voucher_record_dialog_stays_open_when_real_start_fails_or_edit_session_is_missing() -> None:
+    result = _voucher_click_result(
+        r"""
+async function run(mode){
+  const passive={empty(){return this},removeData(){return this},addClass(){return this},on(){return this},find(){return this}};
+  const dialogs=[];
+  frappe.ui={Dialog:class{
+    constructor(){
+      this.handlers={};this.hideCalls=0;
+      this.$wrapper={length:1,addClass:()=>this.$wrapper,on:(event,selector,handler)=>{this.handlers[`${event}${selector}`]=handler;return this.$wrapper},find:()=>passive};
+      dialogs.push(this);
+    }
+    show(){}
+    hide(){this.hideCalls++}
+  }};
+  const button={attrs:{'data-batch-name':'BATCH-4','data-version-name':'VERSION-4','data-attachment-name':'ATTACHMENT-4'},disabled:false,label:'AI 解析并分摊到 SKU'};
+  const buttonQuery={attr:(name)=>button.attrs[name]||'',prop(name,value){if(value===undefined)return button[name];button[name]=value;return this},text(value){if(value===undefined)return button.label;button.label=value;return this}};
+  dollar=(value)=>value===button?buttonQuery:passive;
+  const workspace=Object.create(Harness.prototype);
+  workspace.detailState={batchName:'BATCH-4',versionName:'VERSION-4'};
+  const state={feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:null};
+  workspace.ensureMaterialFeeState=()=>state;
+  workspace.ensureMaterialFeeEditSession=async()=>mode!=='edit-missing';
+  workspace.getDetailBatch=()=>({current_version:'VERSION-4'});
+  workspace.findMaterialFee=()=>({required_evidence_role:'tax_certificate'});
+  workspace.renderTaxCertificateRecordDetail=()=>'<div></div>';
+  workspace.renderFeeEvidenceReviewProgressShell=()=>'<div></div>';
+  workspace.updateFeeEvidenceReviewProgress=()=>{};
+  workspace.materialAIErrorMessage=(error,fallback)=>error?.message||fallback;
+  workspace.showError=()=>{};
+  workspace.call=async(endpoint)=>{
+    if(endpoint.endsWith('get_tax_certificate_parse_record'))return {ok:true,record_summary:{batch:{name:'BATCH-4'},version:'VERSION-4'}};
+    if(endpoint.endsWith('start_fee_evidence_review'))throw new Error('启动接口不可用');
+    throw new Error(endpoint);
+  };
+  await workspace.openTaxCertificateRecordDialog('ATTACHMENT-4');
+  const detail=dialogs[0];
+  const started=await detail.handlers["click[data-action='ai-review-voucher']"]({preventDefault(){},currentTarget:button});
+  return {started,hideCalls:detail.hideCalls,dialogCount:dialogs.length,reviewStatus:state.feeEvidenceReview?.status||'',button:{disabled:button.disabled,label:button.label}};
+}
+console.log(JSON.stringify({apiFailure:await run('api-failure'),editMissing:await run('edit-missing')}));
+"""
+    )
+
+    assert result["apiFailure"] == {
+        "started": False,
+        "hideCalls": 0,
+        "dialogCount": 2,
+        "reviewStatus": "FAILED",
+        "button": {"disabled": False, "label": "AI 解析并分摊到 SKU"},
+    }
+    assert result["editMissing"] == {
+        "started": False,
+        "hideCalls": 0,
+        "dialogCount": 1,
+        "reviewStatus": "",
+        "button": {"disabled": False, "label": "AI 解析并分摊到 SKU"},
+    }
+
+
 def test_review_marks_conflicts_and_missing_fx_without_default_selection() -> None:
     source = PART.read_text(encoding="utf-8")
     css = CSS.read_text(encoding="utf-8")
