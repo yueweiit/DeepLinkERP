@@ -1,0 +1,217 @@
+"""批次详情顶栏 ERP 入口的行为回归测试。"""
+
+import json
+from pathlib import Path
+import subprocess
+
+import pytest
+
+
+PARTS = Path(__file__).resolve().parents[1] / "page/overseas_cost_workbench/parts"
+
+
+def run_view_js(script: str):
+    source = f"""
+const fs=require('fs');
+global.OverseasCostWorkbenchState={{
+  primaryActionForIssue:()=>({{action:'review',label:'核对成本'}}),
+  parseWorkbenchState:()=>({{tab:'items'}}),
+}};
+const parts={json.dumps(str(PARTS))};
+const classSource=fs.readFileSync(parts+'/80-drawer-profit.js','utf8')
+  +fs.readFileSync(parts+'/82-detail-page.js','utf8');
+const Harness=Function(`return class Harness {{${{classSource}}}}`)();
+function makeView(batch) {{
+  const view=new Harness();
+  view.batches=[batch];
+  view.detailState={{batchName:batch.name,versionName:batch.current_version||'',tab:'items',header:batch,detail:null}};
+  view.findBatch=name=>view.batches.find(row=>row.name===name);
+  view.escape=value=>String(value??'').replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
+  view.hasText=value=>String(value??'').trim().length>0;
+  view.isPositive=value=>Number(value)>0;
+  view.formatMoney=value=>Number(value||0).toFixed(2);
+  view.formatValue=value=>String(value??'');
+  view.formatDateTimeMinute=value=>String(value??'');
+  view.businessTypeLabel=()=>'';
+  view.transportLabel=()=>'';
+  view.issueLabel=value=>String(value??'');
+  view.sumRowsNumber=(rows,key)=>rows.reduce((total,row)=>total+Number(row[key]||0),0);
+  view.batchStatusInfo=(status)=>({{
+    label:String(status||'').toLowerCase().includes('calculated')?'已试算':'待重算',
+    needsRecalculate:['dirty','draft'].some(value=>String(status||'').toLowerCase().includes(value)),
+  }});
+  view.sourceStatusLabel=()=>'已关联资料';
+  view.renderErpFlowBlockInline=()=>'';
+  view.cleanupSkuScrollControls=()=>{{}};
+  view.cleanupMaterialGridScrollControls=()=>{{}};
+  view.html='';
+  view.$root={{find:()=>({{html:value=>{{view.html=value;}}}})}};
+  return view;
+}}
+function button(html,action) {{
+  const tags=html.match(/<button[^>]*>[\\s\\S]*?<\\/button>/g)||[];
+  const tag=tags.find(value=>value.includes(`data-action="${{action}}"`)||value.includes(`data-action='${{action}}'`));
+  if(!tag)return null;
+  const label=tag.slice(tag.indexOf('>')+1,tag.lastIndexOf('</button>')).replace(/<[^>]+>/g,'').trim();
+  return {{tag,label,disabled:/\\sdisabled(?:[\\s>])/.test(tag)}};
+}}
+{script}
+"""
+    completed = subprocess.run(
+        ["node", "-e", source],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+ERP_STATES = [
+    (
+        "untried",
+        {"name": "B-1", "status": "Draft", "current_version": "V-1"},
+        "推送 ERP",
+        False,
+        "请先完成试算",
+    ),
+    (
+        "unconfirmed",
+        {"name": "B-1", "status": "Calculated", "current_version": "V-1"},
+        "推送 ERP",
+        False,
+        "请先校验计算结果",
+    ),
+    (
+        "ready",
+        {"name": "B-1", "status": "Calculated", "confirm_status": "Confirmed", "current_version": "V-1"},
+        "推送 ERP",
+        True,
+        "可以推送 ERP",
+    ),
+    (
+        "failed",
+        {
+            "name": "B-1",
+            "status": "Calculated",
+            "confirm_status": "Confirmed",
+            "current_version": "V-1",
+            "writeback_status": "Failed",
+        },
+        "重试 ERP",
+        True,
+        "可以重试 ERP",
+    ),
+    (
+        "success",
+        {
+            "name": "B-1",
+            "status": "Calculated",
+            "confirm_status": "Confirmed",
+            "current_version": "V-1",
+            "writeback_status": "Success",
+        },
+        "ERP 已推送",
+        False,
+        "无需重复操作",
+    ),
+    (
+        "invalid_business",
+        {
+            "name": "B-1",
+            "status": "Calculated",
+            "confirm_status": "Confirmed",
+            "current_version": "V-1",
+            "source_status": {"invalid_business": True, "invalid_business_reason": "采购审批已撤销"},
+        },
+        "推送 ERP",
+        False,
+        "采购审批已撤销",
+    ),
+]
+
+
+@pytest.mark.parametrize(("_name", "batch", "label", "enabled", "reason"), ERP_STATES)
+def test_detail_header_renders_all_erp_push_states(_name, batch, label, enabled, reason):
+    result = run_view_js(
+        f"""
+const view=makeView({json.dumps(batch, ensure_ascii=False)});
+const state=typeof view.erpPushActionState==='function'?view.erpPushActionState(view.getDetailBatch()):null;
+view.renderDetailShell();
+const rendered=button(view.html,'detail-writeback-to-erp');
+console.log(JSON.stringify({{state,rendered,html:view.html}}));
+"""
+    )
+
+    assert result["state"] is not None
+    assert result["state"]["label"] == label
+    assert result["state"]["enabled"] is enabled
+    assert reason in result["state"]["reason"]
+    assert result["rendered"]["label"] == label
+    assert result["rendered"]["disabled"] is (not enabled)
+    assert reason in result["rendered"]["tag"] or reason in result["html"]
+
+
+def test_detail_erp_button_stays_in_header_outside_overview_tab():
+    result = run_view_js(
+        """
+const view=makeView({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'});
+view.detailState.tab='vouchers';
+view.renderDetailShell();
+console.log(JSON.stringify({button:button(view.html,'detail-writeback-to-erp'),tabs:view.html.includes('data-area="detail-content"')}));
+"""
+    )
+
+    assert result["tabs"] is True
+    assert result["button"]["label"] == "推送 ERP"
+    assert result["button"]["disabled"] is False
+
+
+def test_detail_header_handler_delegates_exact_batch_without_direct_backend_call():
+    source = f"""
+const fs=require('fs');
+const shell=fs.readFileSync({json.dumps(str(PARTS / '10-shell.js'))},'utf8');
+const bindSource=shell.slice(shell.indexOf('  bindEvents() {{'));
+const Harness=Function(`return class Harness {{${{bindSource}}\n}}`)();
+const handlers={{}};
+const view=new Harness();
+view.detailState={{batchName:'DETAIL-BATCH'}};
+view.drawerBatchName='DRAWER-BATCH';
+view.$root={{on:(type,selector,handler)=>{{handlers[selector]=handler;return view.$root;}}}};
+let delegated=[],backendCalls=0;
+view.writebackToErp=batchName=>delegated.push(batchName);
+view.call=()=>{{backendCalls+=1;throw new Error('header must not call backend directly')}};
+global.window={{}};
+global.$=node=>node===window?{{off(){{return this}},on(){{return this}}}}:{{attr:()=>'',hasClass:()=>false,closest:()=>({{length:0}})}};
+view.bindEvents();
+handlers["[data-action='detail-writeback-to-erp']"]({{currentTarget:{{}}}});
+console.log(JSON.stringify({{delegated,backendCalls}}));
+"""
+    completed = subprocess.run(["node", "-e", source], check=True, capture_output=True, text=True)
+    assert json.loads(completed.stdout) == {"delegated": ["DETAIL-BATCH"], "backendCalls": 0}
+
+
+def test_overview_keeps_confirmation_preview_and_push_safety_gates():
+    result = run_view_js(
+        """
+function render(batch){const view=makeView(batch);const html=view.renderErpFlowPanel(batch,[]);return {
+  confirm:button(html,'confirm-calculation-result'),preview:button(html,'preview-erp-payload'),push:button(html,'writeback-to-erp'),html
+};}
+console.log(JSON.stringify({
+  unconfirmed:render({name:'B-1',status:'Calculated',current_version:'V-1'}),
+  ready:render({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'}),
+  stale:render({name:'B-1',status:'Dirty',confirm_status:'Confirmed',current_version:'V-1'}),
+  invalid:render({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',source_status:{invalid_business:true}}),
+}));
+"""
+    )
+
+    assert result["unconfirmed"]["confirm"]["disabled"] is False
+    assert result["unconfirmed"]["preview"]["disabled"] is True
+    assert result["unconfirmed"]["push"]["disabled"] is True
+    assert result["ready"]["preview"]["disabled"] is False
+    assert result["ready"]["push"]["disabled"] is False
+    assert result["stale"]["confirm"]["disabled"] is True
+    assert result["stale"]["push"]["disabled"] is True
+    assert result["invalid"]["confirm"]["disabled"] is True
+    assert result["invalid"]["preview"]["disabled"] is True
+    assert result["invalid"]["push"]["disabled"] is True

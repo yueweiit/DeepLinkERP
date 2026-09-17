@@ -186,6 +186,8 @@
     const sourceStatus = batch.source_status || {};
     const documentStatus = this.sourceStatusLabel(sourceStatus, batch);
     const erpInfo = this.erpWritebackStatusInfo(batch);
+    const erpAction = this.erpPushActionState(batch, Number(batch.item_count || 0));
+    const erpActionReasonId = "ocw-detail-erp-action-reason";
     const updatedAt = batch.modified || (this.detailState.detail?.version || {}).calculated_at || batch.writeback_time || "--";
     this.$root.find("[data-area='detail-screen']").html(`
       <div class="ocw-detail-page">
@@ -200,6 +202,10 @@
           </div>
           <div class="ocw-detail-header-actions">
             <button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>
+            <span class="ocw-detail-erp-action" title="${this.escape(erpAction.reason)}">
+              <button class="ocw-outline-btn" type="button" data-action="detail-writeback-to-erp" aria-label="${this.escape(`${erpAction.label}：${erpAction.reason}`)}" aria-describedby="${erpActionReasonId}"${erpAction.enabled ? "" : " disabled"}>${this.escape(erpAction.label)}</button>
+              <small id="${erpActionReasonId}">${this.escape(erpAction.reason)}</small>
+            </span>
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
               <div class="ocw-detail-tools" data-area="detail-tools" hidden>

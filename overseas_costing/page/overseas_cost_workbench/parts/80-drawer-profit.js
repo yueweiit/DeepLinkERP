@@ -406,6 +406,45 @@
     }
   }
 
+  erpPushActionState(batch = {}, itemCount = null) {
+    const count = itemCount === null ? Number(batch.item_count || 0) : Number(itemCount || 0);
+    const statusInfo = this.batchStatusInfo(batch.status, batch, count);
+    const statusLower = String(batch.status || "").toLowerCase();
+    const writebackLower = String(batch.writeback_status || "Not Started").toLowerCase();
+    const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
+    const sourceStatus = batch.source_status || {};
+    const resultNeedsRecalculate = Boolean(statusInfo.needsRecalculate || batch.calculation_stale);
+    const hasTrial = statusLower.includes("calculated") || confirmed;
+
+    if (writebackLower.includes("success")) {
+      return {
+        label: "ERP 已推送",
+        enabled: false,
+        reason: batch.writeback_message || "已成功推送到 ERP，无需重复操作。",
+      };
+    }
+    if (sourceStatus.invalid_business) {
+      return {
+        label: "推送 ERP",
+        enabled: false,
+        reason:
+          sourceStatus.invalid_business_reason ||
+          sourceStatus.purchase_approval_sync_message ||
+          "关联采购审批已拒绝、撤销或终止，不允许推送 ERP。",
+      };
+    }
+    if (!this.hasText(batch.current_version) || !hasTrial || resultNeedsRecalculate) {
+      return { label: "推送 ERP", enabled: false, reason: "请先完成试算。" };
+    }
+    if (!confirmed) {
+      return { label: "推送 ERP", enabled: false, reason: "请先校验计算结果。" };
+    }
+    if (writebackLower.includes("fail")) {
+      return { label: "重试 ERP", enabled: true, reason: "上次推送失败，可以重试 ERP。" };
+    }
+    return { label: "推送 ERP", enabled: true, reason: "已完成试算和人工校验，可以推送 ERP。" };
+  }
+
   renderErpFlowPanel(batch, items) {
     const summary = batch.summary_snapshot || {};
     const itemCount = items.length || Number(batch.item_count || 0);
@@ -416,11 +455,10 @@
     const hasVersion = this.hasText(batch.current_version);
     const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
     const writebackInfo = this.erpWritebackStatusInfo(batch);
-    const writebackLower = String(batch.writeback_status || "Not Started").toLowerCase();
     const invalidBusiness = Boolean((batch.source_status || {}).invalid_business);
     const canConfirm = hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
     const canPreview = confirmed && !invalidBusiness;
-    const canPush = confirmed && !writebackLower.includes("success") && !invalidBusiness;
+    const erpAction = this.erpPushActionState(batch, itemCount);
     const note = invalidBusiness
       ? "关联采购审批已拒绝、撤销或终止，当前批次保留用于追溯，但不会进入成本确认或 ERP 推送。"
       : confirmed
@@ -457,7 +495,7 @@
           <div class="ocw-erp-flow-actions">
             <button class="ocw-primary-btn ocw-mini-btn" data-action="confirm-calculation-result"${canConfirm ? "" : " disabled"}>校验计算结果</button>
             <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-erp-payload"${canPreview ? "" : " disabled"}>预览 ERP 报文</button>
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="writeback-to-erp"${canPush ? "" : " disabled"}>推送 ERP</button>
+            <button class="ocw-outline-btn ocw-mini-btn" data-action="writeback-to-erp" aria-label="${this.escape(`${erpAction.label}：${erpAction.reason}`)}" title="${this.escape(erpAction.reason)}"${erpAction.enabled ? "" : " disabled"}>${this.escape(erpAction.label)}</button>
           </div>
           <div class="ocw-erp-flow-note">${this.escape(note)}</div>
         </div>
