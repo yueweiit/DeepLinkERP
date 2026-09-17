@@ -2113,8 +2113,6 @@ class OverseasCostWorkbench {
       true
     );
     if (!result.ok) {
-      const detailRefreshSnapshot = this.detailState?.batchName === batch.name ? this.detailState.detail : null;
-      const detailTab = this.detailState?.tab || "items";
       if (result.writeback_status) batch.writeback_status = result.writeback_status;
       if (result.message) batch.writeback_message = result.message;
       this.recordUsage("PUSH_ERP", { batch, status: "Failed", remark: result.message || "ERP 推送未进入队列" });
@@ -2123,36 +2121,32 @@ class OverseasCostWorkbench {
       } catch (refreshError) {
         console.warn("[overseas-cost-workbench] ERP 失败后刷新批次未完成", refreshError);
       } finally {
-        this.showErpFlowBlock(result, "ERP 推送未进入队列");
-        if (this.detailState?.batchName === batch.name && this.detailState.detail === detailRefreshSnapshot) {
-          this.detailState.header = {
-            ...(this.detailState.header || {}),
-            writeback_status: result.writeback_status || batch.writeback_status || "Failed",
-            writeback_message: result.message || batch.writeback_message || "",
-          };
-          try {
-            this.renderDetailShell();
-            await this.switchDetailTab(detailTab, { updateUrl: false });
-          } catch (renderError) {
-            console.warn("[overseas-cost-workbench] ERP 失败后详情重绘未完成", renderError);
-          }
-        }
+        this.showErpFlowBlock(result, "ERP 推送未进入队列", {
+          action: "PUSH_ERP",
+          kind: result.writeback_status ? "FAILED" : "BLOCKED",
+        });
       }
       return;
     }
     batch.writeback_status = result.writeback_status || "Pending";
     batch.writeback_message = result.message || "";
+    if (this.erpFlowBlockState?.batchName === batch.name && this.erpFlowBlockState.action === "PUSH_ERP") {
+      this.erpFlowBlockState = null;
+      this.updateDetailErpAction?.(batch);
+    }
     await this.refreshBatch(batch.name);
     this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
     const indicator = String(result.writeback_status || "").toLowerCase().includes("success") ? "green" : "orange";
     frappe.show_alert({ message: result.message || "DeepLinkERP 推送已处理", indicator });
   }
 
-  showErpFlowBlock(result = {}, title = "流程阻断") {
+  showErpFlowBlock(result = {}, title = "流程阻断", options = {}) {
     const batchName = result.batch_name || this.drawerBatchName || this.activeBatchName;
     this.erpFlowBlockState = {
       batchName,
       title,
+      action: options.action || "",
+      kind: options.kind || "",
       result: {
         ...result,
         batch_name: batchName,
@@ -2161,11 +2155,13 @@ class OverseasCostWorkbench {
     if (this.drawerBatchName === batchName && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
       this.renderBatchDrawer();
     }
+    if (this.detailState?.batchName === batchName) this.updateDetailErpAction?.(this.getDetailBatch());
   }
 
   async syncErpFlowBlock(batchName = "") {
     const batch = this.findBatch(batchName || this.drawerBatchName || this.activeBatchName);
     if (!batch) return;
+    const previousState = this.erpFlowBlockState?.batchName === batch.name ? this.erpFlowBlockState : null;
     const readiness = await this.call(
       "overseas_costing.api.writeback.check_writeback_ready",
       {
@@ -2178,13 +2174,17 @@ class OverseasCostWorkbench {
       if (this.erpFlowBlockState && this.erpFlowBlockState.batchName === batch.name) {
         this.erpFlowBlockState = null;
       }
+      if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());
       return readiness;
     }
     this.erpFlowBlockState = {
       batchName: batch.name,
       title: "校验未通过",
+      action: previousState?.action || "",
+      kind: previousState?.action === "PUSH_ERP" ? "BLOCKED" : previousState?.kind || "",
       result: readiness || {},
     };
+    if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());
     return readiness;
   }
 
@@ -15983,6 +15983,21 @@ class OverseasCostWorkbench {
     return String(batch.confirm_status ?? "").trim().toLowerCase() === "confirmed";
   }
 
+  erpFlowBlockReason(result = {}) {
+    const message = String(result.message || "").trim();
+    if (message) return message;
+    const blockingReasons = Array.isArray(result.blocking_reasons)
+      ? result.blocking_reasons.map((reason) => String(reason || "").trim()).filter(Boolean)
+      : [];
+    return blockingReasons.join("；") || "ERP 推送条件未满足。";
+  }
+
+  activeErpPushBlock(batch = {}) {
+    const state = this.erpFlowBlockState;
+    if (!state || state.batchName !== batch.name || state.action !== "PUSH_ERP" || state.kind !== "BLOCKED") return null;
+    return state;
+  }
+
   erpPushActionState(batch = {}, itemCount = null) {
     const count = itemCount === null ? Number(batch.item_count || 0) : Number(itemCount || 0);
     const statusInfo = this.batchStatusInfo(batch.status, batch, count);
@@ -15999,6 +16014,10 @@ class OverseasCostWorkbench {
         enabled: false,
         reason: batch.writeback_message || "已成功推送到 ERP，无需重复操作。",
       };
+    }
+    const pushBlock = this.activeErpPushBlock(batch);
+    if (pushBlock) {
+      return { label: "推送 ERP", enabled: false, reason: this.erpFlowBlockReason(pushBlock.result || {}) };
     }
     if (sourceStatus.invalid_business) {
       return {
@@ -16296,6 +16315,7 @@ class OverseasCostWorkbench {
     this.detailState.versionName = merged.current_version;
     this.detailState.expectedModified = merged.modified || this.detailState.expectedModified || "";
     this.renderDetailShell();
+    if (this.activeErpPushBlock?.(merged)) await this.syncErpFlowBlock(batchName);
     if (this.detailState.editToken) this.updateEditLeaseStatus();
     if (options.refreshCurrentTab === false) return;
     await this.switchDetailTab(activeTab, { updateUrl: false });
@@ -16325,6 +16345,23 @@ class OverseasCostWorkbench {
     return `<span class="ocw-detail-status is-${tone}"><small>${this.escape(label)}</small><strong>${this.escape(this.formatValue(value || "--"))}</strong></span>`;
   }
 
+  renderDetailErpAction(batch = {}) {
+    const erpAction = this.erpPushActionState(batch, Number(batch.item_count || 0));
+    const reasonId = "ocw-detail-erp-action-reason";
+    return `
+      <span class="ocw-detail-erp-action" data-area="detail-erp-action" title="${this.escape(erpAction.reason)}">
+        <button class="ocw-outline-btn" type="button" data-action="detail-writeback-to-erp" aria-label="${this.escape(`${erpAction.label}：${erpAction.reason}`)}" aria-describedby="${reasonId}"${erpAction.enabled ? "" : " disabled"}>${this.escape(erpAction.label)}</button>
+        <small id="${reasonId}">${this.escape(erpAction.reason)}</small>
+      </span>
+    `;
+  }
+
+  updateDetailErpAction(batch = null) {
+    const current = batch || this.getDetailBatch();
+    if (!current || this.detailState?.batchName !== current.name) return;
+    this.$root.find("[data-area='detail-erp-action']").replaceWith(this.renderDetailErpAction(current));
+  }
+
   renderDetailShell() {
     this.cleanupSkuScrollControls();
     this.cleanupMaterialGridScrollControls?.();
@@ -16336,8 +16373,6 @@ class OverseasCostWorkbench {
     const sourceStatus = batch.source_status || {};
     const documentStatus = this.sourceStatusLabel(sourceStatus, batch);
     const erpInfo = this.erpWritebackStatusInfo(batch);
-    const erpAction = this.erpPushActionState(batch, Number(batch.item_count || 0));
-    const erpActionReasonId = "ocw-detail-erp-action-reason";
     const updatedAt = batch.modified || (this.detailState.detail?.version || {}).calculated_at || batch.writeback_time || "--";
     this.$root.find("[data-area='detail-screen']").html(`
       <div class="ocw-detail-page">
@@ -16352,10 +16387,7 @@ class OverseasCostWorkbench {
           </div>
           <div class="ocw-detail-header-actions">
             <button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>
-            <span class="ocw-detail-erp-action" title="${this.escape(erpAction.reason)}">
-              <button class="ocw-outline-btn" type="button" data-action="detail-writeback-to-erp" aria-label="${this.escape(`${erpAction.label}：${erpAction.reason}`)}" aria-describedby="${erpActionReasonId}"${erpAction.enabled ? "" : " disabled"}>${this.escape(erpAction.label)}</button>
-              <small id="${erpActionReasonId}">${this.escape(erpAction.reason)}</small>
-            </span>
+            ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
               <div class="ocw-detail-tools" data-area="detail-tools" hidden>

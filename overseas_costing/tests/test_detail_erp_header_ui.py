@@ -50,7 +50,13 @@ function makeView(batch) {{
   view.html='';
   view.$root={{
     attr:key=>key==='data-screen'?'detail':'',
-    find:()=>({{html:value=>{{view.html=value;}},hasClass:()=>false}}),
+    find:selector=>({{
+      html:value=>{{if(selector==="[data-area='detail-screen']")view.html=value;}},
+      hasClass:()=>false,
+      replaceWith:value=>{{
+        view.html=view.html.replace(/<span class="ocw-detail-erp-action"[\\s\\S]*?<\\/span>/,value);
+      }},
+    }}),
   }};
   return view;
 }}
@@ -322,6 +328,93 @@ console.log(JSON.stringify({endpoints,events,state,button:button(view.html,'deta
     assert "ERP timeout" in result["html"]
 
 
+def test_readiness_block_without_failed_status_disables_detail_action_after_refresh():
+    result = run_view_js(
+        """
+const initial={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
+const view=makeView(initial);const endpoints=[];let tabRenders=0;
+view.detailState.tab='vouchers';view.renderDetailShell();
+view.call=async(endpoint,args)=>{
+  endpoints.push(endpoint);
+  if(endpoint.endsWith('writeback_to_erp'))return {ok:false,batch_name:'B-1',blocking_reasons:['ERP configuration missing','missing URL']};
+  if(endpoint.endsWith('get_batch_detail'))return {ok:true,batch_name:'B-1',version_name:'V-1',header:{...initial},summary:{}};
+  throw new Error(endpoint);
+};
+view.recordUsage=()=>{};view.switchDetailTab=async()=>{tabRenders+=1};
+await view.queueErpWriteback('B-1');
+const state=view.erpPushActionState(view.getDetailBatch());
+console.log(JSON.stringify({endpoints,tabRenders,state,block:view.erpFlowBlockState,button:button(view.html,'detail-writeback-to-erp'),html:view.html}));
+"""
+    )
+
+    assert [endpoint.rsplit(".", 1)[-1] for endpoint in result["endpoints"]] == [
+        "writeback_to_erp",
+        "get_batch_detail",
+    ]
+    assert result["tabRenders"] == 1
+    assert result["block"]["action"] == "PUSH_ERP"
+    assert result["block"]["kind"] == "BLOCKED"
+    assert result["state"]["enabled"] is False
+    assert result["button"]["disabled"] is True
+    assert "ERP configuration missing" in result["state"]["reason"]
+    assert "missing URL" in result["html"]
+
+
+def test_non_push_block_does_not_disable_detail_erp_action():
+    result = run_view_js(
+        """
+const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'};
+const view=makeView(batch);view.erpFlowBlockState={batchName:'B-1',action:'PREVIEW_ERP',kind:'BLOCKED',result:{message:'preview only'}};
+console.log(JSON.stringify(view.erpPushActionState(batch)));
+"""
+    )
+
+    assert result["enabled"] is True
+
+
+def test_successful_push_clears_prior_push_block():
+    result = run_view_js(
+        """
+const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
+const view=makeView(batch);view.erpFlowBlockState={batchName:'B-1',action:'PUSH_ERP',kind:'BLOCKED',result:{message:'missing URL'}};
+view.call=async()=>({ok:true,writeback_status:'Pending',message:'queued'});
+view.refreshBatch=async()=>{};view.recordUsage=()=>{};
+global.frappe={show_alert:()=>{}};
+await view.queueErpWriteback('B-1');
+console.log(JSON.stringify({block:view.erpFlowBlockState,state:view.erpPushActionState(batch)}));
+"""
+    )
+
+    assert result["block"] is None
+    assert result["state"]["enabled"] is True
+
+
+def test_later_detail_refresh_clears_push_block_when_readiness_changes():
+    result = run_view_js(
+        """
+const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1',writeback_status:'Not Started'};
+const view=makeView(batch);const endpoints=[];
+view.erpFlowBlockState={batchName:'B-1',action:'PUSH_ERP',kind:'BLOCKED',result:{message:'missing URL'}};
+view.renderDetailShell();view.switchDetailTab=async()=>{};
+view.call=async(endpoint)=>{
+  endpoints.push(endpoint);
+  if(endpoint.endsWith('get_batch_detail'))return {ok:true,batch_name:'B-1',version_name:'V-1',header:{...batch},summary:{}};
+  if(endpoint.endsWith('check_writeback_ready'))return {ok:true,ready:true};
+  throw new Error(endpoint);
+};
+await view.refreshDetailSummary();
+console.log(JSON.stringify({endpoints,block:view.erpFlowBlockState,button:button(view.html,'detail-writeback-to-erp')}));
+"""
+    )
+
+    assert [endpoint.rsplit(".", 1)[-1] for endpoint in result["endpoints"]] == [
+        "get_batch_detail",
+        "check_writeback_ready",
+    ]
+    assert result["block"] is None
+    assert result["button"]["disabled"] is False
+
+
 def test_failed_writeback_keeps_original_block_after_drawer_refresh_sync():
     result = run_view_js(
         """
@@ -352,6 +445,7 @@ def test_refresh_failure_does_not_replace_original_erp_error():
         """
 const batch={name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'};
 const view=makeView(batch);let rejected='';
+view.renderDetailShell();
 view.call=async()=>({ok:false,batch_name:'B-1',writeback_status:'Failed',message:'ERP timeout'});
 view.recordUsage=()=>{};view.refreshBatch=async()=>{throw new Error('detail refresh failed')};
 view.switchDetailTab=async()=>{};

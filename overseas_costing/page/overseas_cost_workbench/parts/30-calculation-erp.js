@@ -453,8 +453,6 @@
       true
     );
     if (!result.ok) {
-      const detailRefreshSnapshot = this.detailState?.batchName === batch.name ? this.detailState.detail : null;
-      const detailTab = this.detailState?.tab || "items";
       if (result.writeback_status) batch.writeback_status = result.writeback_status;
       if (result.message) batch.writeback_message = result.message;
       this.recordUsage("PUSH_ERP", { batch, status: "Failed", remark: result.message || "ERP 推送未进入队列" });
@@ -463,36 +461,32 @@
       } catch (refreshError) {
         console.warn("[overseas-cost-workbench] ERP 失败后刷新批次未完成", refreshError);
       } finally {
-        this.showErpFlowBlock(result, "ERP 推送未进入队列");
-        if (this.detailState?.batchName === batch.name && this.detailState.detail === detailRefreshSnapshot) {
-          this.detailState.header = {
-            ...(this.detailState.header || {}),
-            writeback_status: result.writeback_status || batch.writeback_status || "Failed",
-            writeback_message: result.message || batch.writeback_message || "",
-          };
-          try {
-            this.renderDetailShell();
-            await this.switchDetailTab(detailTab, { updateUrl: false });
-          } catch (renderError) {
-            console.warn("[overseas-cost-workbench] ERP 失败后详情重绘未完成", renderError);
-          }
-        }
+        this.showErpFlowBlock(result, "ERP 推送未进入队列", {
+          action: "PUSH_ERP",
+          kind: result.writeback_status ? "FAILED" : "BLOCKED",
+        });
       }
       return;
     }
     batch.writeback_status = result.writeback_status || "Pending";
     batch.writeback_message = result.message || "";
+    if (this.erpFlowBlockState?.batchName === batch.name && this.erpFlowBlockState.action === "PUSH_ERP") {
+      this.erpFlowBlockState = null;
+      this.updateDetailErpAction?.(batch);
+    }
     await this.refreshBatch(batch.name);
     this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
     const indicator = String(result.writeback_status || "").toLowerCase().includes("success") ? "green" : "orange";
     frappe.show_alert({ message: result.message || "DeepLinkERP 推送已处理", indicator });
   }
 
-  showErpFlowBlock(result = {}, title = "流程阻断") {
+  showErpFlowBlock(result = {}, title = "流程阻断", options = {}) {
     const batchName = result.batch_name || this.drawerBatchName || this.activeBatchName;
     this.erpFlowBlockState = {
       batchName,
       title,
+      action: options.action || "",
+      kind: options.kind || "",
       result: {
         ...result,
         batch_name: batchName,
@@ -501,11 +495,13 @@
     if (this.drawerBatchName === batchName && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
       this.renderBatchDrawer();
     }
+    if (this.detailState?.batchName === batchName) this.updateDetailErpAction?.(this.getDetailBatch());
   }
 
   async syncErpFlowBlock(batchName = "") {
     const batch = this.findBatch(batchName || this.drawerBatchName || this.activeBatchName);
     if (!batch) return;
+    const previousState = this.erpFlowBlockState?.batchName === batch.name ? this.erpFlowBlockState : null;
     const readiness = await this.call(
       "overseas_costing.api.writeback.check_writeback_ready",
       {
@@ -518,13 +514,17 @@
       if (this.erpFlowBlockState && this.erpFlowBlockState.batchName === batch.name) {
         this.erpFlowBlockState = null;
       }
+      if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());
       return readiness;
     }
     this.erpFlowBlockState = {
       batchName: batch.name,
       title: "校验未通过",
+      action: previousState?.action || "",
+      kind: previousState?.action === "PUSH_ERP" ? "BLOCKED" : previousState?.kind || "",
       result: readiness || {},
     };
+    if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());
     return readiness;
   }
 

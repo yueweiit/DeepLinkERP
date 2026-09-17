@@ -410,6 +410,21 @@
     return String(batch.confirm_status ?? "").trim().toLowerCase() === "confirmed";
   }
 
+  erpFlowBlockReason(result = {}) {
+    const message = String(result.message || "").trim();
+    if (message) return message;
+    const blockingReasons = Array.isArray(result.blocking_reasons)
+      ? result.blocking_reasons.map((reason) => String(reason || "").trim()).filter(Boolean)
+      : [];
+    return blockingReasons.join("；") || "ERP 推送条件未满足。";
+  }
+
+  activeErpPushBlock(batch = {}) {
+    const state = this.erpFlowBlockState;
+    if (!state || state.batchName !== batch.name || state.action !== "PUSH_ERP" || state.kind !== "BLOCKED") return null;
+    return state;
+  }
+
   erpPushActionState(batch = {}, itemCount = null) {
     const count = itemCount === null ? Number(batch.item_count || 0) : Number(itemCount || 0);
     const statusInfo = this.batchStatusInfo(batch.status, batch, count);
@@ -426,6 +441,10 @@
         enabled: false,
         reason: batch.writeback_message || "已成功推送到 ERP，无需重复操作。",
       };
+    }
+    const pushBlock = this.activeErpPushBlock(batch);
+    if (pushBlock) {
+      return { label: "推送 ERP", enabled: false, reason: this.erpFlowBlockReason(pushBlock.result || {}) };
     }
     if (sourceStatus.invalid_business) {
       return {
