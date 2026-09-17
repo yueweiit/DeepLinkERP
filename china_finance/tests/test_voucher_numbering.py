@@ -1,6 +1,7 @@
 import frappe
 from frappe.tests import UnitTestCase
 
+from china_finance.services.closing import _get_period_closing_next_states
 from china_finance.services.voucher import _build_amendment_voucher_key, _next_formal_sequence, get_posting_date
 
 
@@ -26,3 +27,12 @@ class TestVoucherNumbering(UnitTestCase):
 			transaction_date="2026-09-17",
 		)
 		self.assertEqual(str(get_posting_date(doc)), "2026-05-31")
+
+	def test_period_closing_shortcut_only_runs_remaining_workflow_states(self):
+		self.assertEqual(
+			_get_period_closing_next_states("Draft"),
+			("Pending Review", "Approved", "Posted"),
+		)
+		self.assertEqual(_get_period_closing_next_states("Pending Review"), ("Approved", "Posted"))
+		self.assertEqual(_get_period_closing_next_states("Approved"), ("Posted",))
+		self.assertEqual(_get_period_closing_next_states("Posted"), ())

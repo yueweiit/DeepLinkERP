@@ -30,6 +30,14 @@ from china_finance.setup.templates import (
 	refine_classification_for_template, requires_manual_cash_flow_assignment,
 )
 
+PERIOD_CLOSING_WORKFLOW_STATES = ("Draft", "Pending Review", "Approved", "Posted")
+
+
+def _get_period_closing_next_states(current_state):
+	if current_state not in PERIOD_CLOSING_WORKFLOW_STATES[:-1]:
+		return ()
+	return PERIOD_CLOSING_WORKFLOW_STATES[PERIOD_CLOSING_WORKFLOW_STATES.index(current_state) + 1 :]
+
 
 def _has_active_rule(doctype, company, from_date, to_date):
 	rows = frappe.get_all(
@@ -694,9 +702,9 @@ def save_and_complete_period_closing_voucher(name):
 	if current_state == "Rejected":
 		frappe.throw(_("凭证已被退回，请先修改后重新提交审核"))
 
-	target_states = ("Pending Review", "Approved", "Posted")
-	if current_state not in ("Draft", *target_states[:-1]):
+	if current_state not in PERIOD_CLOSING_WORKFLOW_STATES[:-1]:
 		frappe.throw(_("期末结账凭证当前状态为 {0}，不能使用快捷完成结账").format(current_state or _("未设置")))
+	target_states = _get_period_closing_next_states(current_state)
 
 	save_point = f"china_period_closing_{frappe.generate_hash(length=8)}"
 	frappe.db.savepoint(save_point)
