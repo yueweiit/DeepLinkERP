@@ -2526,11 +2526,9 @@ class OverseasCostWorkbench {
     dialog.$wrapper.on("click", "[data-action='ai-review-voucher']", (event) => {
       event.preventDefault();
       const $button = $(event.currentTarget);
-      this.openVoucherFeeEvidenceReview({
-        batchName: String($button.attr("data-batch-name") || dialog.$wrapper.data("ocw-voucher-batch-name") || ""),
-        versionName: String($button.attr("data-version-name") || ""),
-        attachment: String($button.attr("data-attachment-name") || ""),
-      }).catch((error) => this.showError(error));
+      return this.startVoucherFeeEvidenceReview($button, {
+        fallbackBatchName: String(dialog.$wrapper.data("ocw-voucher-batch-name") || ""),
+      });
     });
   }
 
@@ -2770,12 +2768,11 @@ class OverseasCostWorkbench {
     detailDialog.$wrapper.on("click", "[data-action='ai-review-voucher']", (event) => {
       event.preventDefault();
       const $button = $(event.currentTarget);
-      detailDialog.hide();
-      this.openVoucherFeeEvidenceReview({
-        batchName: String($button.attr("data-batch-name") || ""),
-        versionName: String($button.attr("data-version-name") || ""),
-        attachment: String($button.attr("data-attachment-name") || recordName || ""),
-      }).catch((error) => this.showError(error));
+      return this.startVoucherFeeEvidenceReview($button, {
+        fallbackAttachment: String(recordName || ""),
+      }).then((started) => {
+        if (started) detailDialog.hide();
+      });
     });
   }
 
@@ -2872,6 +2869,26 @@ class OverseasCostWorkbench {
       evidenceRole: "tax_certificate",
       force: false,
     });
+  }
+
+  async startVoucherFeeEvidenceReview($button, { fallbackBatchName = "", fallbackAttachment = "" } = {}) {
+    if (!$button || $button.prop("disabled")) return false;
+    const originalLabel = String($button.text() || "AI 解析并分摊到 SKU");
+    const payload = {
+      batchName: String($button.attr("data-batch-name") || fallbackBatchName || ""),
+      versionName: String($button.attr("data-version-name") || ""),
+      attachment: String($button.attr("data-attachment-name") || fallbackAttachment || ""),
+    };
+    $button.prop("disabled", true).text("正在启动 AI…");
+    try {
+      await this.openVoucherFeeEvidenceReview(payload);
+      return true;
+    } catch (error) {
+      this.showError(error);
+      return false;
+    } finally {
+      $button.prop("disabled", false).text(originalLabel);
+    }
   }
 
   renderVoucherManualResolution(record, mappedResult = {}) {
@@ -3612,6 +3629,12 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='open-voucher-record']", (event) =>
       this.openTaxCertificateRecordDialog($(event.currentTarget).attr("data-record-name"))
     );
+    this.$root.on("click", "[data-action='ai-review-voucher']", (event) => {
+      event.preventDefault();
+      return this.startVoucherFeeEvidenceReview($(event.currentTarget), {
+        fallbackBatchName: String(this.detailState.batchName || ""),
+      });
+    });
     this.$root.on("click", "[data-action='manual-fill-gap']", (event) => {
       const $button = $(event.currentTarget);
       this.openManualGapFillDialog(this.getDetailBatch(), {
