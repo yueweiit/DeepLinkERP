@@ -1,4 +1,5 @@
 from copy import deepcopy
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -193,6 +194,45 @@ def test_fresh_audit_after_projected_apply_is_idempotent():
     assert second["exclude"] == []
     assert second["restore"] == []
     assert second["create_rows"] == []
+    assert second["updated_item_names"] == []
+    assert second["changed"] is False
+
+
+def test_fresh_audit_treats_database_decimal_scale_as_the_same_projected_value():
+    from overseas_costing.services.material_scope_reset_service import build_reset_entry
+
+    target = {
+        "batch": "B-1", "version": "V-1", "current_version": "V-1",
+        "is_current": True, "version_status": "Active",
+    }
+    source = {
+        "source_kind": "approval_form", "source_id": "approval:LOG-1:form",
+        "source_hash": "SOURCE", "approval_role": "international_logistics",
+        "approval_no": "LOG-1", "form_fields": {"货物信息": [{
+            "物料编码": "SKU-1", "物料名称": "物料", "数量": 1, "单位": "个",
+        }]},
+    }
+    item = {
+        "name": "I-1", "stable_line_key": "logistics:stable",
+        "material_code": "SKU-1", "product_name": "物料",
+        "quantity": Decimal("1.000000"),
+        "actual_shipped_qty": Decimal("1.000000"),
+        "actual_shipped_qty_mode": "EXPLICIT_SOURCE", "shipped_uom": "个",
+        "unit": "个", "is_excluded": 0, "extra_json": "{}",
+    }
+
+    first = build_reset_entry(target, [item], source)
+    projected = {
+        key: value for key, value in first["proposal"]["payload"]["rows"][0].items()
+        if not key.startswith("_")
+    }
+    projected.update(
+        name="I-1", is_excluded=0,
+        actual_shipped_qty=Decimal("1.000000"),
+    )
+
+    second = build_reset_entry(target, [projected], source)
+
     assert second["updated_item_names"] == []
     assert second["changed"] is False
 

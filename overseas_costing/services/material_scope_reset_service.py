@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from uuid import uuid4
@@ -44,6 +45,34 @@ def _material_fingerprint(items: list[dict]) -> str:
         }
         for row in sorted(items or [], key=lambda value: str(value.get("name") or ""))
     ])
+
+
+_NUMERIC_ITEM_FIELDS = {
+    "row_no", "quantity", "goods_value", "unit_price",
+    "actual_shipped_qty", "net_weight_kg", "gross_weight_kg",
+    "volume_m3", "chargeable_weight_kg",
+}
+
+
+def _projected_value_matches(field: str, current: object, projected: object) -> bool:
+    """Compare persisted values using the storage semantics of each field."""
+
+    if field in _NUMERIC_ITEM_FIELDS:
+        if current in (None, "") and projected in (None, ""):
+            return True
+        try:
+            return Decimal(str(current)) == Decimal(str(projected))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+    if field == "extra_json":
+        try:
+            current_json = json.loads(current or "{}")
+            projected_json = json.loads(projected or "{}")
+        except (TypeError, ValueError):
+            pass
+        else:
+            return current_json == projected_json
+    return str(current or "") == str(projected or "")
 
 
 def list_reset_targets(
@@ -158,7 +187,9 @@ def build_reset_entry(
     }
     updated = sorted(name for name, row in retained.items()
                      if name in existing and any(
-                         str(existing[name].get(field) or "") != str(row.get(field) or "")
+                         not _projected_value_matches(
+                             field, existing[name].get(field), row.get(field),
+                         )
                          for field in update_fields))
     entry = {
         **{key: deepcopy(target.get(key)) for key in (
