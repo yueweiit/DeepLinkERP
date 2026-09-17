@@ -80,6 +80,7 @@ jobs:
             kwargs="{\"dry_run\": False, \"include_all_versions\": True, \"expected_plan_hash\": \"$RESET_PLAN_HASH\", \"run_id\": \"$effective_run_id\", \"raise_on_incomplete\": True}"
           fi
           ssh -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.material_scope_reset_service.reset_all_material_scopes --kwargs '$kwargs'" \
             2>&1 | tee material-scope-reset-output.txt
