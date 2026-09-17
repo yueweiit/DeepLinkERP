@@ -137,6 +137,60 @@ class TestStatementMappingConsolePayload(UnitTestCase):
 		item = payload["rows"][0]["mappings"][0]
 		self.assertEqual(item["account_name"], "9999 - Disabled")
 		self.assertIsNone(item["account_number"])
+		self.assertEqual(payload["summary"]["mapped_accounts"], 0)
+		self.assertEqual(payload["summary"]["unmapped_accounts"], 0)
+
+	def test_balance_sheet_summary_excludes_profit_and_loss_accounts(self):
+		template = _template([_row("CASH"), _row("RETAINED_EARNINGS")])
+		accounts = [
+			_account("1001 - Cash", root_type="Asset"),
+			_account("4103 - Current Profit", root_type="Equity"),
+			_account("6001 - Revenue", root_type="Income"),
+			_account("660201 - Expense", root_type="Expense"),
+		]
+		mappings = [
+			_mapping("M1", "1001 - Cash", "CASH"),
+			_mapping("M2", "4103 - Current Profit", "RETAINED_EARNINGS"),
+		]
+
+		payload = build_console_payload(template, mappings, accounts)
+
+		self.assertEqual(payload["summary"]["total_leaf_accounts"], 2)
+		self.assertEqual(payload["summary"]["mapped_accounts"], 2)
+		self.assertEqual(payload["summary"]["unmapped_accounts"], 0)
+		self.assertEqual(payload["unmapped_accounts"], [])
+
+	def test_profit_and_loss_summary_excludes_balance_sheet_and_adjustment_accounts(self):
+		template = _template([_row("OPERATING_REVENUE"), _row("ADMIN_EXPENSES")])
+		template.statement_type = "Profit and Loss"
+		accounts = [
+			_account("1001 - Cash", account_number="1001", root_type="Asset"),
+			_account("6001 - Revenue", account_number="6001", root_type="Income"),
+			_account("660201 - Expense", account_number="660201", root_type="Expense"),
+			_account("6901 - Prior Adjustment", account_number="6901", root_type="Expense"),
+		]
+		mappings = [_mapping("M1", "6001 - Revenue", "OPERATING_REVENUE")]
+
+		payload = build_console_payload(template, mappings, accounts)
+
+		self.assertEqual(payload["summary"]["total_leaf_accounts"], 2)
+		self.assertEqual(payload["summary"]["mapped_accounts"], 1)
+		self.assertEqual(payload["summary"]["unmapped_accounts"], 1)
+		self.assertEqual([account.name for account in payload["unmapped_accounts"]], ["660201 - Expense"])
+
+	def test_changes_in_equity_summary_uses_equity_accounts_only(self):
+		template = _template([_row("NET_PROFIT")])
+		template.statement_type = "Changes in Equity"
+		accounts = [
+			_account("4103 - Current Profit", account_number="4103", root_type="Equity"),
+			_account("6001 - Revenue", account_number="6001", root_type="Income"),
+			_account("660201 - Expense", account_number="660201", root_type="Expense"),
+		]
+		mappings = [_mapping("M1", "4103 - Current Profit", "NET_PROFIT")]
+
+		payload = build_console_payload(template, mappings, accounts)
+
+		self.assertEqual(payload["summary"]["total_leaf_accounts"], 1)
 		self.assertEqual(payload["summary"]["mapped_accounts"], 1)
 		self.assertEqual(payload["summary"]["unmapped_accounts"], 0)
 

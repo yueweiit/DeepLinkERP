@@ -9,7 +9,12 @@ from china_finance.services.account_display import (
 	get_account_display_title,
 	strip_account_company_suffix,
 )
-from china_finance.setup.templates import TEMPLATE_EFFECTIVE_FROM, classify_company_account, refine_classification_for_template
+from china_finance.setup.templates import (
+	TEMPLATE_EFFECTIVE_FROM,
+	classify_company_account,
+	is_strictly_excluded_from_statement,
+	refine_classification_for_template,
+)
 
 READ_ROLES = (
 	"System Manager",
@@ -21,6 +26,11 @@ READ_ROLES = (
 WRITE_ROLES = REVIEW_ROLES
 TEMPLATE_WRITE_ROLES = ("System Manager", "China Finance Manager")
 STATEMENT_TYPES = ("Balance Sheet", "Profit and Loss", "Cash Flow", "Changes in Equity")
+STATEMENT_ROOT_TYPES = {
+	"Balance Sheet": {"Asset", "Liability", "Equity"},
+	"Profit and Loss": {"Income", "Expense"},
+	"Changes in Equity": {"Equity"},
+}
 
 
 def _require_read_access():
@@ -140,6 +150,16 @@ def get_reclassification_rules_for_console(company, template):
 	return rules
 
 
+def is_account_applicable_to_statement(account, statement_type):
+	"""Return whether a leaf account belongs in the selected statement's mapping scope."""
+	if is_strictly_excluded_from_statement(account.account_number, statement_type):
+		return False
+	if statement_type == "Cash Flow":
+		return account.account_type not in {"Cash", "Bank"}
+	root_types = STATEMENT_ROOT_TYPES.get(statement_type)
+	return not root_types or account.root_type in root_types
+
+
 def build_console_payload(template, mappings, leaf_accounts, all_accounts=None, company=None):
 	"""Pure aggregation so tests can run without a database."""
 	account_index = {account.name: account for account in leaf_accounts}
@@ -226,7 +246,16 @@ def build_console_payload(template, mappings, leaf_accounts, all_accounts=None, 
 	root_order = {"Asset": 0, "Liability": 1, "Equity": 2, "Income": 3, "Expense": 4}
 	valid_rows = {row.row_code: row.row_type for row in template.rows}
 	row_labels = {row.row_code: row.label for row in template.rows}
-	unmapped_accounts = [account for account in leaf_accounts if account.name not in mapped_accounts]
+	applicable_accounts = [
+		account
+		for account in leaf_accounts
+		if (
+			account.name in mapped_accounts
+			or is_account_applicable_to_statement(account, template.statement_type)
+		)
+	]
+	applicable_account_names = {account.name for account in applicable_accounts}
+	unmapped_accounts = [account for account in applicable_accounts if account.name not in mapped_accounts]
 	likely_row_by_account = {}
 	for account in unmapped_accounts:
 		classification, _basis = classify_company_account(company, account, template.statement_type) if company else (None, None)
@@ -262,8 +291,8 @@ def build_console_payload(template, mappings, leaf_accounts, all_accounts=None, 
 		"accounts": accounts,
 		"unmapped_accounts": unmapped_accounts,
 		"summary": {
-			"total_leaf_accounts": len(leaf_accounts),
-			"mapped_accounts": len(mapped_accounts),
+			"total_leaf_accounts": len(applicable_accounts),
+			"mapped_accounts": len(mapped_accounts & applicable_account_names),
 			"unmapped_accounts": len(unmapped_accounts),
 			"total_mappings": len(mappings),
 			"pending_review": pending_review,

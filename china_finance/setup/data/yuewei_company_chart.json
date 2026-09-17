@@ -1,0 +1,1832 @@
+{
+  "name": "悦为智能技术(东莞)有限公司（公司科目模板）",
+  "country": "China",
+  "source_company": "悦为智能技术(东莞)有限公司",
+  "account_count": 335,
+  "tree": {
+    "所有者权益": {
+      "account_name": "所有者权益",
+      "account_currency": "CNY",
+      "is_group": 1,
+      "root_type": "Equity",
+      "实收资本": {
+        "account_name": "实收资本",
+        "account_number": "4001",
+        "account_type": "Equity",
+        "account_currency": "CNY"
+      },
+      "资本公积": {
+        "account_name": "资本公积",
+        "account_number": "4002",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "资本公积－资本溢价": {
+          "account_name": "资本公积－资本溢价",
+          "account_number": "400201",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        },
+        "资本公积－股本溢价": {
+          "account_name": "资本公积－股本溢价",
+          "account_number": "400202",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        },
+        "资本公积－其他资本公积": {
+          "account_name": "资本公积－其他资本公积",
+          "account_number": "400203",
+          "account_currency": "CNY"
+        }
+      },
+      "其他综合收益": {
+        "account_name": "其他综合收益",
+        "account_number": "4003",
+        "account_type": "Equity",
+        "account_currency": "CNY"
+      },
+      "盈余公积": {
+        "account_name": "盈余公积",
+        "account_number": "4101",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "盈余公积－法定盈余公积": {
+          "account_name": "盈余公积－法定盈余公积",
+          "account_number": "410101",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        },
+        "盈余公积－任意盈余公积": {
+          "account_name": "盈余公积－任意盈余公积",
+          "account_number": "410102",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        },
+        "盈余公积－法定公益金": {
+          "account_name": "盈余公积－法定公益金",
+          "account_number": "410103",
+          "account_currency": "CNY"
+        },
+        "盈余公积－储备基金": {
+          "account_name": "盈余公积－储备基金",
+          "account_number": "410104",
+          "account_currency": "CNY"
+        },
+        "盈余公积－企业发展基金": {
+          "account_name": "盈余公积－企业发展基金",
+          "account_number": "410105",
+          "account_currency": "CNY"
+        },
+        "盈余公积－利润归还投资": {
+          "account_name": "盈余公积－利润归还投资",
+          "account_number": "410106",
+          "account_currency": "CNY"
+        }
+      },
+      "本年利润": {
+        "account_name": "本年利润",
+        "account_number": "4103",
+        "account_type": "Equity",
+        "account_currency": "CNY"
+      },
+      "利润分配": {
+        "account_name": "利润分配",
+        "account_number": "4104",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "利润分配－提取法定盈余公积": {
+          "account_name": "利润分配－提取法定盈余公积",
+          "account_number": "410401",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        },
+        "利润分配－提取任意盈余公积": {
+          "account_name": "利润分配－提取任意盈余公积",
+          "account_number": "410402",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        },
+        "利润分配－提取法定公益金": {
+          "account_name": "利润分配－提取法定公益金",
+          "account_number": "410403",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        },
+        "利润分配－应付现金股利或利润": {
+          "account_name": "利润分配－应付现金股利或利润",
+          "account_number": "410404",
+          "account_currency": "CNY"
+        },
+        "利润分配－转作股本的利润": {
+          "account_name": "利润分配－转作股本的利润",
+          "account_number": "410405",
+          "account_currency": "CNY"
+        },
+        "利润分配－盈余公积补亏": {
+          "account_name": "利润分配－盈余公积补亏",
+          "account_number": "410406",
+          "account_currency": "CNY"
+        },
+        "利润分配－提取储备基金": {
+          "account_name": "利润分配－提取储备基金",
+          "account_number": "410407",
+          "account_currency": "CNY"
+        },
+        "利润分配－提取企业发展基金": {
+          "account_name": "利润分配－提取企业发展基金",
+          "account_number": "410408",
+          "account_currency": "CNY"
+        },
+        "利润分配－提取职工奖励及福利基金": {
+          "account_name": "利润分配－提取职工奖励及福利基金",
+          "account_number": "410409",
+          "account_currency": "CNY"
+        },
+        "利润分配－利润归还投资": {
+          "account_name": "利润分配－利润归还投资",
+          "account_number": "410410",
+          "account_currency": "CNY"
+        },
+        "利润分配－未分配利润": {
+          "account_name": "利润分配－未分配利润",
+          "account_number": "410411",
+          "account_currency": "CNY"
+        },
+        "利润分配－其他利润分配": {
+          "account_name": "利润分配－其他利润分配",
+          "account_number": "410499",
+          "account_type": "Equity",
+          "account_currency": "CNY"
+        }
+      },
+      "库存股": {
+        "account_name": "库存股",
+        "account_number": "4201",
+        "account_type": "Equity",
+        "account_currency": "CNY"
+      },
+      "临时开账平衡": {
+        "account_name": "临时开账平衡",
+        "account_number": "999901",
+        "account_type": "Temporary",
+        "account_currency": "CNY"
+      }
+    },
+    "收入": {
+      "account_name": "收入",
+      "account_currency": "CNY",
+      "is_group": 1,
+      "root_type": "Income",
+      "其他收益": {
+        "account_name": "其他收益",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "公允价值变动损益": {
+          "account_name": "公允价值变动损益",
+          "account_number": "6101",
+          "account_currency": "CNY"
+        },
+        "投资收益": {
+          "account_name": "投资收益",
+          "account_number": "6111",
+          "account_currency": "CNY"
+        },
+        "资产处置收益": {
+          "account_name": "资产处置收益",
+          "account_number": "6115",
+          "account_currency": "CNY"
+        },
+        "其他收益": {
+          "account_name": "其他收益",
+          "account_number": "6117",
+          "account_currency": "CNY"
+        },
+        "其他收益－政府补助": {
+          "account_name": "其他收益－政府补助",
+          "account_number": "6201",
+          "account_currency": "CNY"
+        },
+        "营业外收入": {
+          "account_name": "营业外收入",
+          "account_number": "6301",
+          "account_currency": "CNY"
+        }
+      },
+      "营业收入": {
+        "account_name": "营业收入",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "主营业务收入": {
+          "account_name": "主营业务收入",
+          "account_number": "6001",
+          "account_type": "Income Account",
+          "account_currency": "CNY"
+        },
+        "其他业务收入": {
+          "account_name": "其他业务收入",
+          "account_number": "6051",
+          "account_type": "Income Account",
+          "account_currency": "CNY"
+        }
+      }
+    },
+    "负债": {
+      "account_name": "负债",
+      "account_currency": "CNY",
+      "is_group": 1,
+      "root_type": "Liability",
+      "流动负债": {
+        "account_name": "流动负债",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "短期借款": {
+          "account_name": "短期借款",
+          "account_number": "2001",
+          "account_currency": "CNY"
+        },
+        "交易性金融负债": {
+          "account_name": "交易性金融负债",
+          "account_number": "2101",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "交易性金融负债－本金": {
+            "account_name": "交易性金融负债－本金",
+            "account_number": "210101",
+            "account_currency": "CNY"
+          },
+          "交易性金融负债－公允价值变动": {
+            "account_name": "交易性金融负债－公允价值变动",
+            "account_number": "210102",
+            "account_currency": "CNY"
+          }
+        },
+        "应付票据": {
+          "account_name": "应付票据",
+          "account_number": "2201",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "应付票据－银行承兑汇票": {
+            "account_name": "应付票据－银行承兑汇票",
+            "account_number": "220101",
+            "account_currency": "CNY"
+          },
+          "应付票据－商业承兑汇票": {
+            "account_name": "应付票据－商业承兑汇票",
+            "account_number": "220102",
+            "account_currency": "CNY"
+          }
+        },
+        "应付账款": {
+          "account_name": "应付账款",
+          "account_number": "2202",
+          "account_type": "Payable",
+          "account_currency": "CNY"
+        },
+        "预收账款": {
+          "account_name": "预收账款",
+          "account_number": "2203",
+          "account_type": "Payable",
+          "account_currency": "CNY"
+        },
+        "合同负债": {
+          "account_name": "合同负债",
+          "account_number": "2204",
+          "account_currency": "CNY"
+        },
+        "暂估应付款": {
+          "account_name": "暂估应付款",
+          "account_number": "2205",
+          "account_type": "Stock Received But Not Billed",
+          "account_currency": "CNY"
+        },
+        "资产采购暂估": {
+          "account_name": "资产采购暂估",
+          "account_number": "2206",
+          "account_type": "Asset Received But Not Billed",
+          "account_currency": "CNY"
+        },
+        "应付职工薪酬": {
+          "account_name": "应付职工薪酬",
+          "account_number": "2211",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "应付职工薪酬－工资": {
+            "account_name": "应付职工薪酬－工资",
+            "account_number": "221101",
+            "account_currency": "CNY"
+          },
+          "应付职工薪酬－职工福利": {
+            "account_name": "应付职工薪酬－职工福利",
+            "account_number": "221102",
+            "account_currency": "CNY"
+          },
+          "应付职工薪酬－社会保险费": {
+            "account_name": "应付职工薪酬－社会保险费",
+            "account_number": "221103",
+            "account_currency": "CNY"
+          },
+          "应付职工薪酬－住房公积金": {
+            "account_name": "应付职工薪酬－住房公积金",
+            "account_number": "221104",
+            "account_currency": "CNY"
+          },
+          "应付职工薪酬－工会经费": {
+            "account_name": "应付职工薪酬－工会经费",
+            "account_number": "221105",
+            "account_currency": "CNY"
+          },
+          "应付职工薪酬－职工教育经费": {
+            "account_name": "应付职工薪酬－职工教育经费",
+            "account_number": "221106",
+            "account_currency": "CNY"
+          },
+          "应付职工薪酬－解除职工劳动关系补偿": {
+            "account_name": "应付职工薪酬－解除职工劳动关系补偿",
+            "account_number": "221107",
+            "account_currency": "CNY"
+          }
+        },
+        "应交税费": {
+          "account_name": "应交税费",
+          "account_number": "2221",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "应交税费－应交增值税": {
+            "account_name": "应交税费－应交增值税",
+            "account_number": "222101",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "应交税费－应交增值税－进项税额": {
+              "account_name": "应交税费－应交增值税－进项税额",
+              "account_number": "22210101",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－销项税额抵减": {
+              "account_name": "应交税费－应交增值税－销项税额抵减",
+              "account_number": "22210102",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－已交税金": {
+              "account_name": "应交税费－应交增值税－已交税金",
+              "account_number": "22210103",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－转出未交增值税": {
+              "account_name": "应交税费－应交增值税－转出未交增值税",
+              "account_number": "22210104",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－减免税款": {
+              "account_name": "应交税费－应交增值税－减免税款",
+              "account_number": "22210105",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－出口抵减内销产品应纳税额": {
+              "account_name": "应交税费－应交增值税－出口抵减内销产品应纳税额",
+              "account_number": "22210106",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－销项税额": {
+              "account_name": "应交税费－应交增值税－销项税额",
+              "account_number": "22210107",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－出口退税": {
+              "account_name": "应交税费－应交增值税－出口退税",
+              "account_number": "22210108",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－进项税额转出": {
+              "account_name": "应交税费－应交增值税－进项税额转出",
+              "account_number": "22210109",
+              "account_type": "Tax",
+              "account_currency": "CNY"
+            },
+            "应交税费－应交增值税－转出多交增值税": {
+              "account_name": "应交税费－应交增值税－转出多交增值税",
+              "account_number": "22210110",
+              "account_currency": "CNY"
+            }
+          },
+          "应交税费－未交增值税": {
+            "account_name": "应交税费－未交增值税",
+            "account_number": "222102",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－预交增值税": {
+            "account_name": "应交税费－预交增值税",
+            "account_number": "222103",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－待抵扣进项税额": {
+            "account_name": "应交税费－待抵扣进项税额",
+            "account_number": "222104",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－待认证进项税额": {
+            "account_name": "应交税费－待认证进项税额",
+            "account_number": "222105",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－待转销项税额": {
+            "account_name": "应交税费－待转销项税额",
+            "account_number": "222106",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－增值税留抵税额": {
+            "account_name": "应交税费－增值税留抵税额",
+            "account_number": "222107",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－简易计税": {
+            "account_name": "应交税费－简易计税",
+            "account_number": "222108",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－转让金融商品应交增值税": {
+            "account_name": "应交税费－转让金融商品应交增值税",
+            "account_number": "222109",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－代扣代交增值税": {
+            "account_name": "应交税费－代扣代交增值税",
+            "account_number": "222110",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交所得税": {
+            "account_name": "应交税费－应交所得税",
+            "account_number": "222111",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交个人所得税": {
+            "account_name": "应交税费－应交个人所得税",
+            "account_number": "222112",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交教育费附加": {
+            "account_name": "应交税费－应交教育费附加",
+            "account_number": "222113",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交城市维护建设税": {
+            "account_name": "应交税费－应交城市维护建设税",
+            "account_number": "222114",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交地方教育费附加": {
+            "account_name": "应交税费－应交地方教育费附加",
+            "account_number": "222115",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交土地增值税": {
+            "account_name": "应交税费－应交土地增值税",
+            "account_number": "222116",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交资源税": {
+            "account_name": "应交税费－应交资源税",
+            "account_number": "222117",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交房产税": {
+            "account_name": "应交税费－应交房产税",
+            "account_number": "222118",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交土地使用税": {
+            "account_name": "应交税费－应交土地使用税",
+            "account_number": "222119",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交车船使用税": {
+            "account_name": "应交税费－应交车船使用税",
+            "account_number": "222120",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交消费税": {
+            "account_name": "应交税费－应交消费税",
+            "account_number": "222121",
+            "account_currency": "CNY"
+          },
+          "应交税费－应交矿产资源补偿费": {
+            "account_name": "应交税费－应交矿产资源补偿费",
+            "account_number": "222122",
+            "account_currency": "CNY"
+          },
+          "应交税费－其他应交税费": {
+            "account_name": "应交税费－其他应交税费",
+            "account_number": "222199",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          }
+        },
+        "应付股利": {
+          "account_name": "应付股利",
+          "account_number": "2231",
+          "account_currency": "CNY"
+        },
+        "应付利息": {
+          "account_name": "应付利息",
+          "account_number": "2232",
+          "account_currency": "CNY"
+        },
+        "其他应付款": {
+          "account_name": "其他应付款",
+          "account_number": "2241",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "其他应付款-社保": {
+            "account_name": "其他应付款-社保",
+            "account_number": "224101",
+            "account_currency": "CNY"
+          },
+          "其他应付款-公积金": {
+            "account_name": "其他应付款-公积金",
+            "account_number": "224102",
+            "account_currency": "CNY"
+          }
+        },
+        "受托代销商品款": {
+          "account_name": "受托代销商品款",
+          "account_number": "2314",
+          "account_currency": "CNY"
+        }
+      },
+      "非流动负债": {
+        "account_name": "非流动负债",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "2301 - 递延收益": {
+          "account_name": "递延收益",
+          "account_number": "2301",
+          "account_currency": "CNY"
+        },
+        "2401 - 递延收益": {
+          "account_name": "递延收益",
+          "account_number": "2401",
+          "account_currency": "CNY"
+        },
+        "长期借款": {
+          "account_name": "长期借款",
+          "account_number": "2501",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "长期借款－本金": {
+            "account_name": "长期借款－本金",
+            "account_number": "250101",
+            "account_currency": "CNY"
+          },
+          "长期借款－利息调整": {
+            "account_name": "长期借款－利息调整",
+            "account_number": "250102",
+            "account_currency": "CNY"
+          }
+        },
+        "应付债券": {
+          "account_name": "应付债券",
+          "account_number": "2502",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "应付债券－债券面值": {
+            "account_name": "应付债券－债券面值",
+            "account_number": "250201",
+            "account_currency": "CNY"
+          },
+          "应付债券－利息调整": {
+            "account_name": "应付债券－利息调整",
+            "account_number": "250202",
+            "account_currency": "CNY"
+          },
+          "应付债券－应计利息": {
+            "account_name": "应付债券－应计利息",
+            "account_number": "250203",
+            "account_currency": "CNY"
+          }
+        },
+        "长期应付款": {
+          "account_name": "长期应付款",
+          "account_number": "2701",
+          "account_type": "Payable",
+          "account_currency": "CNY"
+        },
+        "未确认融资费用": {
+          "account_name": "未确认融资费用",
+          "account_number": "2702",
+          "account_currency": "CNY"
+        },
+        "专项应付款": {
+          "account_name": "专项应付款",
+          "account_number": "2711",
+          "account_currency": "CNY"
+        },
+        "预计负债": {
+          "account_name": "预计负债",
+          "account_number": "2801",
+          "account_currency": "CNY"
+        },
+        "递延所得税负债": {
+          "account_name": "递延所得税负债",
+          "account_number": "2901",
+          "account_currency": "CNY"
+        }
+      }
+    },
+    "费用": {
+      "account_name": "费用",
+      "account_currency": "CNY",
+      "is_group": 1,
+      "root_type": "Expense",
+      "以前年度损益调整": {
+        "account_name": "以前年度损益调整",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "以前年度损益调整": {
+          "account_name": "以前年度损益调整",
+          "account_number": "6901",
+          "account_type": "Expense Account",
+          "account_currency": "CNY"
+        }
+      },
+      "减值损失": {
+        "account_name": "减值损失",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "资产减值损失": {
+          "account_name": "资产减值损失",
+          "account_number": "6701",
+          "account_type": "Expense Account",
+          "account_currency": "CNY"
+        },
+        "信用减值损失": {
+          "account_name": "信用减值损失",
+          "account_number": "6702",
+          "account_type": "Expense Account",
+          "account_currency": "CNY"
+        }
+      },
+      "所得税费用": {
+        "account_name": "所得税费用",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "所得税": {
+          "account_name": "所得税",
+          "account_number": "6801",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "所得税－当期所得税费用": {
+            "account_name": "所得税－当期所得税费用",
+            "account_number": "680101",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "所得税－递延所得税费用": {
+            "account_name": "所得税－递延所得税费用",
+            "account_number": "680102",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          }
+        }
+      },
+      "期间费用": {
+        "account_name": "期间费用",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "税金及附加": {
+          "account_name": "税金及附加",
+          "account_number": "6403",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "税金及附加－城市维护建设税": {
+            "account_name": "税金及附加－城市维护建设税",
+            "account_number": "640301",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "税金及附加－教育费附加": {
+            "account_name": "税金及附加－教育费附加",
+            "account_number": "640302",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "税金及附加－地方教育附加": {
+            "account_name": "税金及附加－地方教育附加",
+            "account_number": "640303",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "税金及附加－印花税": {
+            "account_name": "税金及附加－印花税",
+            "account_number": "640304",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          },
+          "税金及附加－其他税金及附加": {
+            "account_name": "税金及附加－其他税金及附加",
+            "account_number": "640399",
+            "account_type": "Tax",
+            "account_currency": "CNY"
+          }
+        },
+        "销售费用": {
+          "account_name": "销售费用",
+          "account_number": "6601",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "销售费用－办公用品": {
+            "account_name": "销售费用－办公用品",
+            "account_number": "660101",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "销售费用－房租": {
+            "account_name": "销售费用－房租",
+            "account_number": "660102",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "销售费用－物业管理费": {
+            "account_name": "销售费用－物业管理费",
+            "account_number": "660103",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "销售费用－水电费": {
+            "account_name": "销售费用－水电费",
+            "account_number": "660104",
+            "account_currency": "CNY"
+          },
+          "销售费用－交际应酬费": {
+            "account_name": "销售费用－交际应酬费",
+            "account_number": "660105",
+            "account_currency": "CNY"
+          },
+          "销售费用－市内交通费": {
+            "account_name": "销售费用－市内交通费",
+            "account_number": "660106",
+            "account_currency": "CNY"
+          },
+          "销售费用－差旅费": {
+            "account_name": "销售费用－差旅费",
+            "account_number": "660107",
+            "account_currency": "CNY"
+          },
+          "销售费用－补助": {
+            "account_name": "销售费用－补助",
+            "account_number": "660108",
+            "account_currency": "CNY"
+          },
+          "销售费用－通讯费": {
+            "account_name": "销售费用－通讯费",
+            "account_number": "660109",
+            "account_currency": "CNY"
+          },
+          "销售费用－工资": {
+            "account_name": "销售费用－工资",
+            "account_number": "660110",
+            "account_currency": "CNY"
+          },
+          "销售费用－佣金": {
+            "account_name": "销售费用－佣金",
+            "account_number": "660111",
+            "account_currency": "CNY"
+          },
+          "销售费用－保险金": {
+            "account_name": "销售费用－保险金",
+            "account_number": "660112",
+            "account_currency": "CNY"
+          },
+          "销售费用－福利费": {
+            "account_name": "销售费用－福利费",
+            "account_number": "660113",
+            "account_currency": "CNY"
+          },
+          "销售费用－包装费": {
+            "account_name": "销售费用－包装费",
+            "account_number": "660114",
+            "account_currency": "CNY"
+          },
+          "销售费用－展览费和广告费": {
+            "account_name": "销售费用－展览费和广告费",
+            "account_number": "660115",
+            "account_currency": "CNY"
+          },
+          "销售费用－商品维修费": {
+            "account_name": "销售费用－商品维修费",
+            "account_number": "660116",
+            "account_currency": "CNY"
+          },
+          "销售费用－预计产品质量保证损失": {
+            "account_name": "销售费用－预计产品质量保证损失",
+            "account_number": "660117",
+            "account_currency": "CNY"
+          },
+          "销售费用－运输费": {
+            "account_name": "销售费用－运输费",
+            "account_number": "660118",
+            "account_currency": "CNY"
+          },
+          "销售费用－装卸费": {
+            "account_name": "销售费用－装卸费",
+            "account_number": "660119",
+            "account_currency": "CNY"
+          },
+          "销售费用－折旧费": {
+            "account_name": "销售费用－折旧费",
+            "account_number": "660120",
+            "account_currency": "CNY"
+          },
+          "销售费用－计提福利": {
+            "account_name": "销售费用－计提福利",
+            "account_number": "660121",
+            "account_currency": "CNY"
+          },
+          "销售费用－计提职工教育经费": {
+            "account_name": "销售费用－计提职工教育经费",
+            "account_number": "660122",
+            "account_currency": "CNY"
+          },
+          "销售费用－其他": {
+            "account_name": "销售费用－其他",
+            "account_number": "660199",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          }
+        },
+        "管理费用": {
+          "account_name": "管理费用",
+          "account_number": "6602",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "管理费用－办公费": {
+            "account_name": "管理费用－办公费",
+            "account_number": "660201",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－房租": {
+            "account_name": "管理费用－房租",
+            "account_number": "660202",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－物业管理费": {
+            "account_name": "管理费用－物业管理费",
+            "account_number": "660203",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－水电费": {
+            "account_name": "管理费用－水电费",
+            "account_number": "660204",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－交际应酬费": {
+            "account_name": "管理费用－交际应酬费",
+            "account_number": "660205",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－业务招待费": {
+            "account_name": "管理费用－业务招待费",
+            "account_number": "660206",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－差旅费": {
+            "account_name": "管理费用－差旅费",
+            "account_number": "660207",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－社会保险费": {
+            "account_name": "管理费用－社会保险费",
+            "account_number": "660208",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－工资": {
+            "account_name": "管理费用－工资",
+            "account_number": "660209",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－保险金": {
+            "account_name": "管理费用－保险金",
+            "account_number": "660210",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－福利费": {
+            "account_name": "管理费用－福利费",
+            "account_number": "660211",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－油费": {
+            "account_name": "管理费用－油费",
+            "account_number": "660212",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          },
+          "管理费用－住房公积金": {
+            "account_name": "管理费用－住房公积金",
+            "account_number": "660213",
+            "account_currency": "CNY"
+          },
+          "管理费用－聘请中介机构费": {
+            "account_name": "管理费用－聘请中介机构费",
+            "account_number": "660214",
+            "account_currency": "CNY"
+          },
+          "管理费用－咨询费": {
+            "account_name": "管理费用－咨询费",
+            "account_number": "660215",
+            "account_currency": "CNY"
+          },
+          "管理费用－诉讼费": {
+            "account_name": "管理费用－诉讼费",
+            "account_number": "660216",
+            "account_currency": "CNY"
+          },
+          "管理费用－房产税": {
+            "account_name": "管理费用－房产税",
+            "account_number": "660217",
+            "account_currency": "CNY"
+          },
+          "管理费用－车船使用税": {
+            "account_name": "管理费用－车船使用税",
+            "account_number": "660218",
+            "account_currency": "CNY"
+          },
+          "管理费用－土地使用税": {
+            "account_name": "管理费用－土地使用税",
+            "account_number": "660219",
+            "account_currency": "CNY"
+          },
+          "管理费用－印花税": {
+            "account_name": "管理费用－印花税",
+            "account_number": "660220",
+            "account_currency": "CNY"
+          },
+          "管理费用－技术转让费": {
+            "account_name": "管理费用－技术转让费",
+            "account_number": "660221",
+            "account_currency": "CNY"
+          },
+          "管理费用－矿产资源补偿费": {
+            "account_name": "管理费用－矿产资源补偿费",
+            "account_number": "660222",
+            "account_currency": "CNY"
+          },
+          "管理费用－研究费用": {
+            "account_name": "管理费用－研究费用",
+            "account_number": "660223",
+            "account_currency": "CNY"
+          },
+          "管理费用－排污费": {
+            "account_name": "管理费用－排污费",
+            "account_number": "660224",
+            "account_currency": "CNY"
+          },
+          "管理费用－折旧费": {
+            "account_name": "管理费用－折旧费",
+            "account_number": "660225",
+            "account_type": "Depreciation",
+            "account_currency": "CNY"
+          },
+          "管理费用－计提福利": {
+            "account_name": "管理费用－计提福利",
+            "account_number": "660226",
+            "account_currency": "CNY"
+          },
+          "管理费用－计提职工教育经费": {
+            "account_name": "管理费用－计提职工教育经费",
+            "account_number": "660227",
+            "account_currency": "CNY"
+          },
+          "管理费用－存货盘亏或盘盈": {
+            "account_name": "管理费用－存货盘亏或盘盈",
+            "account_number": "660228",
+            "account_currency": "CNY"
+          },
+          "管理费用－公积金": {
+            "account_name": "管理费用－公积金",
+            "account_number": "660229",
+            "account_currency": "CNY"
+          },
+          "管理费用－宽带费": {
+            "account_name": "管理费用－宽带费",
+            "account_number": "660230",
+            "account_currency": "CNY"
+          },
+          "管理费用－交通费": {
+            "account_name": "管理费用－交通费",
+            "account_number": "660231",
+            "account_currency": "CNY"
+          },
+          "管理费用－辞退福利": {
+            "account_name": "管理费用－辞退福利",
+            "account_number": "660232",
+            "account_currency": "CNY"
+          },
+          "管理费用－备用金": {
+            "account_name": "管理费用－备用金",
+            "account_number": "660299",
+            "account_type": "Expense Account",
+            "account_currency": "CNY"
+          }
+        },
+        "财务费用": {
+          "account_name": "财务费用",
+          "account_number": "6603",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "财务费用－汇兑损益": {
+            "account_name": "财务费用－汇兑损益",
+            "account_number": "660301",
+            "account_currency": "CNY"
+          },
+          "财务费用－利息": {
+            "account_name": "财务费用－利息",
+            "account_number": "660302",
+            "account_currency": "CNY"
+          },
+          "财务费用－手续费": {
+            "account_name": "财务费用－手续费",
+            "account_number": "660303",
+            "account_currency": "CNY"
+          },
+          "财务费用－已实现汇兑损益": {
+            "account_name": "财务费用－已实现汇兑损益",
+            "account_number": "660304",
+            "account_currency": "CNY"
+          },
+          "财务费用－未实现汇兑损益": {
+            "account_name": "财务费用－未实现汇兑损益",
+            "account_number": "660305",
+            "account_currency": "CNY"
+          },
+          "财务费用－收付款核销差异": {
+            "account_name": "财务费用－收付款核销差异",
+            "account_number": "660306",
+            "account_currency": "CNY"
+          },
+          "财务费用－四舍五入差异": {
+            "account_name": "财务费用－四舍五入差异",
+            "account_number": "660307",
+            "account_type": "Round Off",
+            "account_currency": "CNY"
+          },
+          "财务费用－付款折扣及核销差异": {
+            "account_name": "财务费用－付款折扣及核销差异",
+            "account_number": "660308",
+            "account_currency": "CNY"
+          },
+          "财务费用－其他": {
+            "account_name": "财务费用－其他",
+            "account_number": "660399",
+            "account_currency": "CNY"
+          }
+        }
+      },
+      "研发费用归集": {
+        "account_name": "研发费用归集",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "研发支出": {
+          "account_name": "研发支出",
+          "account_number": "5301",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "研发支出－费用化支出": {
+            "account_name": "研发支出－费用化支出",
+            "account_number": "530101",
+            "account_currency": "CNY"
+          },
+          "研发支出－资本化支出": {
+            "account_name": "研发支出－资本化支出",
+            "account_number": "530102",
+            "account_currency": "CNY"
+          }
+        }
+      },
+      "营业外收支": {
+        "account_name": "营业外收支",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "营业外支出": {
+          "account_name": "营业外支出",
+          "account_number": "6711",
+          "account_type": "Expense Account",
+          "account_currency": "CNY"
+        }
+      },
+      "营业成本": {
+        "account_name": "营业成本",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "主营业务成本": {
+          "account_name": "主营业务成本",
+          "account_number": "6401",
+          "account_type": "Cost of Goods Sold",
+          "account_currency": "CNY"
+        },
+        "库存调整差异": {
+          "account_name": "库存调整差异",
+          "account_number": "640199",
+          "account_type": "Stock Adjustment",
+          "account_currency": "CNY"
+        },
+        "其他业务成本": {
+          "account_name": "其他业务成本",
+          "account_number": "6402",
+          "account_type": "Cost of Goods Sold",
+          "account_currency": "CNY"
+        }
+      }
+    },
+    "资产": {
+      "account_name": "资产",
+      "account_currency": "CNY",
+      "is_group": 1,
+      "root_type": "Asset",
+      "衍生工具": {
+        "account_name": "衍生工具",
+        "account_number": "3101",
+        "account_currency": "CNY"
+      },
+      "套期工具": {
+        "account_name": "套期工具",
+        "account_number": "3201",
+        "account_currency": "CNY"
+      },
+      "被套期项目": {
+        "account_name": "被套期项目",
+        "account_number": "3202",
+        "account_currency": "CNY"
+      },
+      "其他资产": {
+        "account_name": "其他资产",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "待处理财产损溢": {
+          "account_name": "待处理财产损溢",
+          "account_number": "1901",
+          "account_type": "Temporary",
+          "account_currency": "CNY"
+        }
+      },
+      "流动资产": {
+        "account_name": "流动资产",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "交易性金融资产": {
+          "account_name": "交易性金融资产",
+          "account_number": "1101",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "交易性金融资产－本金": {
+            "account_name": "交易性金融资产－本金",
+            "account_number": "110101",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "交易性金融资产－本金－股票": {
+              "account_name": "交易性金融资产－本金－股票",
+              "account_number": "11010101",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－本金－债券": {
+              "account_name": "交易性金融资产－本金－债券",
+              "account_number": "11010102",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－本金－基金": {
+              "account_name": "交易性金融资产－本金－基金",
+              "account_number": "11010103",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－本金－权证": {
+              "account_name": "交易性金融资产－本金－权证",
+              "account_number": "11010104",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－本金－其他": {
+              "account_name": "交易性金融资产－本金－其他",
+              "account_number": "11010199",
+              "account_currency": "CNY"
+            }
+          },
+          "交易性金融资产－公允价值变动": {
+            "account_name": "交易性金融资产－公允价值变动",
+            "account_number": "110102",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "交易性金融资产－公允价值变动－股票": {
+              "account_name": "交易性金融资产－公允价值变动－股票",
+              "account_number": "11010201",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－公允价值变动－债券": {
+              "account_name": "交易性金融资产－公允价值变动－债券",
+              "account_number": "11010202",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－公允价值变动－基金": {
+              "account_name": "交易性金融资产－公允价值变动－基金",
+              "account_number": "11010203",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－公允价值变动－权证": {
+              "account_name": "交易性金融资产－公允价值变动－权证",
+              "account_number": "11010204",
+              "account_currency": "CNY"
+            },
+            "交易性金融资产－公允价值变动－其他": {
+              "account_name": "交易性金融资产－公允价值变动－其他",
+              "account_number": "11010299",
+              "account_currency": "CNY"
+            }
+          }
+        },
+        "应收票据": {
+          "account_name": "应收票据",
+          "account_number": "1121",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "应收票据－银行承兑汇票": {
+            "account_name": "应收票据－银行承兑汇票",
+            "account_number": "112101",
+            "account_currency": "CNY"
+          },
+          "应收票据－商业承兑汇票": {
+            "account_name": "应收票据－商业承兑汇票",
+            "account_number": "112102",
+            "account_currency": "CNY"
+          }
+        },
+        "应收账款": {
+          "account_name": "应收账款",
+          "account_number": "1122",
+          "account_type": "Receivable",
+          "account_currency": "CNY"
+        },
+        "预付账款": {
+          "account_name": "预付账款",
+          "account_number": "1123",
+          "account_type": "Receivable",
+          "account_currency": "CNY"
+        },
+        "应收股利": {
+          "account_name": "应收股利",
+          "account_number": "1131",
+          "account_currency": "CNY"
+        },
+        "应收利息": {
+          "account_name": "应收利息",
+          "account_number": "1132",
+          "account_currency": "CNY"
+        },
+        "其他应收款": {
+          "account_name": "其他应收款",
+          "account_number": "1221",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "其他应收款-验证款": {
+            "account_name": "其他应收款-验证款",
+            "account_number": "122101",
+            "account_type": "Receivable",
+            "account_currency": "CNY"
+          },
+          "其他应收款-社保": {
+            "account_name": "其他应收款-社保",
+            "account_number": "122102",
+            "account_currency": "CNY"
+          },
+          "其他应收款-公积金": {
+            "account_name": "其他应收款-公积金",
+            "account_number": "122103",
+            "account_currency": "CNY"
+          },
+          "其他应收款-备用金": {
+            "account_name": "其他应收款-备用金",
+            "account_number": "122104",
+            "account_currency": "CNY"
+          }
+        },
+        "坏账准备": {
+          "account_name": "坏账准备",
+          "account_number": "1231",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "坏账准备－应收账款坏账准备": {
+            "account_name": "坏账准备－应收账款坏账准备",
+            "account_number": "123101",
+            "account_currency": "CNY"
+          },
+          "坏账准备－其他应收款坏账准备": {
+            "account_name": "坏账准备－其他应收款坏账准备",
+            "account_number": "123102",
+            "account_currency": "CNY"
+          }
+        },
+        "受托代销商品": {
+          "account_name": "受托代销商品",
+          "account_number": "1321",
+          "account_currency": "CNY"
+        },
+        "存货": {
+          "account_name": "存货",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "材料采购": {
+            "account_name": "材料采购",
+            "account_number": "1401",
+            "account_type": "Stock",
+            "account_currency": "CNY"
+          },
+          "在途物资": {
+            "account_name": "在途物资",
+            "account_number": "1402",
+            "account_type": "Stock",
+            "account_currency": "CNY"
+          },
+          "原材料": {
+            "account_name": "原材料",
+            "account_number": "1403",
+            "account_type": "Stock",
+            "account_currency": "CNY"
+          },
+          "材料成本差异": {
+            "account_name": "材料成本差异",
+            "account_number": "1404",
+            "account_currency": "CNY"
+          },
+          "库存商品": {
+            "account_name": "库存商品",
+            "account_number": "1405",
+            "account_type": "Stock",
+            "account_currency": "CNY"
+          },
+          "发出商品": {
+            "account_name": "发出商品",
+            "account_number": "1406",
+            "account_type": "Stock",
+            "account_currency": "CNY"
+          },
+          "商品进销差价": {
+            "account_name": "商品进销差价",
+            "account_number": "1407",
+            "account_currency": "CNY"
+          },
+          "委托加工物资": {
+            "account_name": "委托加工物资",
+            "account_number": "1408",
+            "account_type": "Stock",
+            "account_currency": "CNY"
+          },
+          "周转材料": {
+            "account_name": "周转材料",
+            "account_number": "1411",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "周转材料－包装物": {
+              "account_name": "周转材料－包装物",
+              "account_number": "141101",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "周转材料－低值易耗品": {
+              "account_name": "周转材料－低值易耗品",
+              "account_number": "141102",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            }
+          },
+          "存货跌价准备": {
+            "account_name": "存货跌价准备",
+            "account_number": "1471",
+            "account_currency": "CNY"
+          },
+          "生产成本": {
+            "account_name": "生产成本",
+            "account_number": "5001",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "生产成本－基本生产成本": {
+              "account_name": "生产成本－基本生产成本",
+              "account_number": "500101",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "生产成本－辅助生产成本": {
+              "account_name": "生产成本－辅助生产成本",
+              "account_number": "500102",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "生产成本－基本生产成本－制造费用": {
+              "account_name": "生产成本－基本生产成本－制造费用",
+              "account_number": "500103",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "生产成本－委托加工成本": {
+              "account_name": "生产成本－委托加工成本",
+              "account_number": "500104",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            }
+          },
+          "制造费用": {
+            "account_name": "制造费用",
+            "account_number": "5101",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "制造费用－职工薪酬": {
+              "account_name": "制造费用－职工薪酬",
+              "account_number": "510101",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "制造费用－折旧费": {
+              "account_name": "制造费用－折旧费",
+              "account_number": "510102",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "制造费用－水电费": {
+              "account_name": "制造费用－水电费",
+              "account_number": "510103",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "制造费用－维修费": {
+              "account_name": "制造费用－维修费",
+              "account_number": "510104",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "制造费用－低值易耗品摊销": {
+              "account_name": "制造费用－低值易耗品摊销",
+              "account_number": "510105",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            },
+            "制造费用－其他": {
+              "account_name": "制造费用－其他",
+              "account_number": "510199",
+              "account_type": "Stock",
+              "account_currency": "CNY"
+            }
+          },
+          "劳务成本": {
+            "account_name": "劳务成本",
+            "account_number": "5201",
+            "account_type": "Stock",
+            "account_currency": "CNY"
+          }
+        },
+        "货币资金": {
+          "account_name": "货币资金",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "库存现金": {
+            "account_name": "库存现金",
+            "account_number": "1001",
+            "account_type": "Cash",
+            "account_currency": "CNY"
+          },
+          "银行存款": {
+            "account_name": "银行存款",
+            "account_number": "1002",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "银行存款－基本存款账户": {
+              "account_name": "银行存款－基本存款账户",
+              "account_number": "100201",
+              "account_type": "Bank",
+              "account_currency": "CNY"
+            }
+          },
+          "其他货币资金": {
+            "account_name": "其他货币资金",
+            "account_number": "1012",
+            "account_currency": "CNY",
+            "is_group": 1,
+            "其他货币资金－外埠存款": {
+              "account_name": "其他货币资金－外埠存款",
+              "account_number": "101201",
+              "account_currency": "CNY"
+            },
+            "其他货币资金－银行本票存款": {
+              "account_name": "其他货币资金－银行本票存款",
+              "account_number": "101202",
+              "account_currency": "CNY"
+            },
+            "其他货币资金－银行汇票存款": {
+              "account_name": "其他货币资金－银行汇票存款",
+              "account_number": "101203",
+              "account_currency": "CNY"
+            },
+            "其他货币资金－信用卡存款": {
+              "account_name": "其他货币资金－信用卡存款",
+              "account_number": "101204",
+              "account_currency": "CNY"
+            },
+            "其他货币资金－信用证保证金存款": {
+              "account_name": "其他货币资金－信用证保证金存款",
+              "account_number": "101205",
+              "account_currency": "CNY"
+            },
+            "其他货币资金－存出投资款": {
+              "account_name": "其他货币资金－存出投资款",
+              "account_number": "101206",
+              "account_currency": "CNY"
+            },
+            "其他货币资金－其他": {
+              "account_name": "其他货币资金－其他",
+              "account_number": "101299",
+              "account_currency": "CNY"
+            }
+          }
+        }
+      },
+      "非流动资产": {
+        "account_name": "非流动资产",
+        "account_currency": "CNY",
+        "is_group": 1,
+        "持有至到期投资": {
+          "account_name": "持有至到期投资",
+          "account_number": "1501",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "持有至到期投资－投资成本": {
+            "account_name": "持有至到期投资－投资成本",
+            "account_number": "150101",
+            "account_currency": "CNY"
+          },
+          "持有至到期投资－溢折价": {
+            "account_name": "持有至到期投资－溢折价",
+            "account_number": "150102",
+            "account_currency": "CNY"
+          },
+          "持有至到期投资－应计利息": {
+            "account_name": "持有至到期投资－应计利息",
+            "account_number": "150103",
+            "account_currency": "CNY"
+          }
+        },
+        "持有至到期投资减值准备": {
+          "account_name": "持有至到期投资减值准备",
+          "account_number": "1502",
+          "account_currency": "CNY"
+        },
+        "可供出售金融资产": {
+          "account_name": "可供出售金融资产",
+          "account_number": "1503",
+          "account_currency": "CNY"
+        },
+        "长期股权投资": {
+          "account_name": "长期股权投资",
+          "account_number": "1511",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "长期股权投资－投资成本": {
+            "account_name": "长期股权投资－投资成本",
+            "account_number": "151101",
+            "account_currency": "CNY"
+          },
+          "长期股权投资－损益调整": {
+            "account_name": "长期股权投资－损益调整",
+            "account_number": "151102",
+            "account_currency": "CNY"
+          },
+          "长期股权投资－所有者权益其他变动": {
+            "account_name": "长期股权投资－所有者权益其他变动",
+            "account_number": "151103",
+            "account_currency": "CNY"
+          }
+        },
+        "长期股权投资减值准备": {
+          "account_name": "长期股权投资减值准备",
+          "account_number": "1512",
+          "account_currency": "CNY"
+        },
+        "投资性房地产": {
+          "account_name": "投资性房地产",
+          "account_number": "1521",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "投资性房地产－成本": {
+            "account_name": "投资性房地产－成本",
+            "account_number": "152101",
+            "account_currency": "CNY"
+          },
+          "投资性房地产－公允价值变动": {
+            "account_name": "投资性房地产－公允价值变动",
+            "account_number": "152102",
+            "account_currency": "CNY"
+          }
+        },
+        "长期应收款": {
+          "account_name": "长期应收款",
+          "account_number": "1531",
+          "account_type": "Receivable",
+          "account_currency": "CNY"
+        },
+        "未实现融资收益": {
+          "account_name": "未实现融资收益",
+          "account_number": "1532",
+          "account_currency": "CNY"
+        },
+        "固定资产": {
+          "account_name": "固定资产",
+          "account_number": "1601",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "固定资产－机器设备": {
+            "account_name": "固定资产－机器设备",
+            "account_number": "160101",
+            "account_type": "Fixed Asset",
+            "account_currency": "CNY"
+          },
+          "固定资产－运输设备": {
+            "account_name": "固定资产－运输设备",
+            "account_number": "160102",
+            "account_type": "Fixed Asset",
+            "account_currency": "CNY"
+          },
+          "固定资产－电子及办公设备": {
+            "account_name": "固定资产－电子及办公设备",
+            "account_number": "160103",
+            "account_type": "Fixed Asset",
+            "account_currency": "CNY"
+          }
+        },
+        "累计折旧": {
+          "account_name": "累计折旧",
+          "account_number": "1602",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "累计折旧－机器设备累计折旧": {
+            "account_name": "累计折旧－机器设备累计折旧",
+            "account_number": "160201",
+            "account_type": "Accumulated Depreciation",
+            "account_currency": "CNY"
+          },
+          "累计折旧－运输设备累计折旧": {
+            "account_name": "累计折旧－运输设备累计折旧",
+            "account_number": "160202",
+            "account_type": "Accumulated Depreciation",
+            "account_currency": "CNY"
+          },
+          "累计折旧－电子及办公设备累计折旧": {
+            "account_name": "累计折旧－电子及办公设备累计折旧",
+            "account_number": "160203",
+            "account_type": "Accumulated Depreciation",
+            "account_currency": "CNY"
+          }
+        },
+        "固定资产减值准备": {
+          "account_name": "固定资产减值准备",
+          "account_number": "1603",
+          "account_currency": "CNY"
+        },
+        "在建工程": {
+          "account_name": "在建工程",
+          "account_number": "1604",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "在建工程－建筑工程": {
+            "account_name": "在建工程－建筑工程",
+            "account_number": "160401",
+            "account_currency": "CNY"
+          },
+          "在建工程－安装工程": {
+            "account_name": "在建工程－安装工程",
+            "account_number": "160402",
+            "account_currency": "CNY"
+          },
+          "在建工程－在安装设备": {
+            "account_name": "在建工程－在安装设备",
+            "account_number": "160403",
+            "account_currency": "CNY"
+          },
+          "在建工程－待摊支出": {
+            "account_name": "在建工程－待摊支出",
+            "account_number": "160404",
+            "account_currency": "CNY"
+          }
+        },
+        "工程物资": {
+          "account_name": "工程物资",
+          "account_number": "1605",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "工程物资－专用材料": {
+            "account_name": "工程物资－专用材料",
+            "account_number": "160501",
+            "account_currency": "CNY"
+          },
+          "工程物资－专用设备": {
+            "account_name": "工程物资－专用设备",
+            "account_number": "160502",
+            "account_currency": "CNY"
+          },
+          "工程物资－预付大型设备款": {
+            "account_name": "工程物资－预付大型设备款",
+            "account_number": "160503",
+            "account_currency": "CNY"
+          },
+          "工程物资－为生产准备的工具及器具": {
+            "account_name": "工程物资－为生产准备的工具及器具",
+            "account_number": "160504",
+            "account_currency": "CNY"
+          }
+        },
+        "固定资产清理": {
+          "account_name": "固定资产清理",
+          "account_number": "1606",
+          "account_currency": "CNY"
+        },
+        "生产性生物资产": {
+          "account_name": "生产性生物资产",
+          "account_number": "1621",
+          "account_currency": "CNY"
+        },
+        "生产性生物资产累计折旧": {
+          "account_name": "生产性生物资产累计折旧",
+          "account_number": "1622",
+          "account_currency": "CNY"
+        },
+        "无形资产": {
+          "account_name": "无形资产",
+          "account_number": "1701",
+          "account_currency": "CNY",
+          "is_group": 1,
+          "无形资产－软件": {
+            "account_name": "无形资产－软件",
+            "account_number": "170101",
+            "account_currency": "CNY"
+          },
+          "无形资产－专利权及非专利技术": {
+            "account_name": "无形资产－专利权及非专利技术",
+            "account_number": "170102",
+            "account_currency": "CNY"
+          }
+        },
+        "累计摊销": {
+          "account_name": "累计摊销",
+          "account_number": "1702",
+          "account_currency": "CNY"
+        },
+        "无形资产减值准备": {
+          "account_name": "无形资产减值准备",
+          "account_number": "1703",
+          "account_currency": "CNY"
+        },
+        "商誉": {
+          "account_name": "商誉",
+          "account_number": "1711",
+          "account_currency": "CNY"
+        },
+        "长期待摊费用": {
+          "account_name": "长期待摊费用",
+          "account_number": "1801",
+          "account_currency": "CNY"
+        },
+        "递延所得税资产": {
+          "account_name": "递延所得税资产",
+          "account_number": "1811",
+          "account_currency": "CNY"
+        },
+        "开发支出": {
+          "account_name": "开发支出",
+          "account_currency": "CNY",
+          "is_group": 1
+        }
+      }
+    }
+  }
+}

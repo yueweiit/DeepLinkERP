@@ -391,13 +391,13 @@ class ChinaStatementMapping {
 	render_summary() {
 		const summary = this.data.summary;
 		const items = [
-			{ label: __("Mapped Accounts"), value: `${summary.mapped_accounts} / ${summary.total_leaf_accounts}`, accent: "accent-blue" },
+			{ label: __("Mapped Applicable Accounts"), value: `${summary.mapped_accounts} / ${summary.total_leaf_accounts}`, accent: "accent-blue" },
 			{
 				label: __("Pending Review"), value: summary.pending_review,
 				css: summary.pending_review ? "warning" : "", accent: "accent-orange", filter: this.pending_only,
 			},
 			{
-				label: __("Unmapped Accounts"), value: summary.unmapped_accounts,
+				label: __("Unmapped Applicable Accounts"), value: summary.unmapped_accounts,
 				css: summary.unmapped_accounts ? "danger" : "", accent: "accent-red", filter: this.unmapped_only,
 			},
 			{ label: __("Template"), value: `${this.data.template.accounting_standard} v${this.data.template.version}`, accent: "" },
