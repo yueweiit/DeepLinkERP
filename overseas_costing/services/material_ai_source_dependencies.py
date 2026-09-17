@@ -73,6 +73,21 @@ def _enabled(record):
         or record.get('retired_at') or record.get('available') is False or record.get('is_active') in (0, '0'))
 
 
+def _current_attachment_approval(dependency, metadata, store):
+    source_id = str(dependency.get('approval_source_id') or '')
+    if not source_id:
+        return None
+    instance = str(metadata.get('process_instance_id') or metadata.get('instance_id') or '')
+    if not instance:
+        return None
+    source = store.get('source', source_id) or {}
+    if str(source.get('instance') or '') != instance:
+        raise ValueError('附件的当前审批身份不一致。')
+    if metadata.get('corp_id') and str(source.get('corp') or '') != str(metadata['corp_id']):
+        raise ValueError('附件的当前审批企业身份不一致。')
+    return source
+
+
 def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpose="adoption"):
     if purpose not in {"analysis", "estimate", "adoption"}:
         raise ValueError("来源校验阶段不合法。")
@@ -111,8 +126,18 @@ def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpo
         if not _enabled(attachment) or attachment.get('batch') != batch_name or not attachment.get('file_url'):
             raise ValueError('附件来源缺失或已停用。')
         metadata = row_meta({'extra_json': attachment.get('parse_result_json')})
-        if metadata.get('approval_excluded') or metadata.get('cost_source_allowed') is False or not _enabled(metadata or {'present': True}):
+        if not _enabled(metadata or {'present': True}):
             raise ValueError('附件来源已被排除。')
+        if metadata.get('approval_excluded') or metadata.get('cost_source_allowed') is False:
+            current_approval = _current_attachment_approval(dependency, metadata, store)
+            if purpose not in {'analysis', 'estimate'} or not current_approval:
+                raise ValueError('附件来源已被排除。')
+            eligibility = approval_eligibility(current_approval)
+            if not eligibility['analysis_allowed']:
+                raise SourceEligibilityError(
+                    eligibility['analysis_reason'], source=current_approval,
+                    code=eligibility['analysis_code'],
+                )
         descriptor = metadata.get('settlement_document') or {}
         document_id = descriptor.get('document_id')
         document = store.get('document', document_id, lock=lock) if document_id else None
@@ -247,9 +272,15 @@ def capture_dependencies(sources, *, store, ledger, batch_name, source_context, 
                     add({'kind': 'document', 'document_id': document_id})
                 mappings = store.find('attachment_map', document_id=document_id, version=context.get('cost_version') or '')
                 for mapping in mappings:
-                    add({'kind': 'attachment', 'attachment_id': mapping['attachment']})
+                    descriptor = {'kind': 'attachment', 'attachment_id': mapping['attachment']}
+                    if kind in {'approval_attachment', 'approval_comment_attachment'} and approval_source:
+                        descriptor['approval_source_id'] = approval_source['id']
+                    add(descriptor)
             else:
-                add({'kind': 'attachment', 'attachment_id': source_id})
+                descriptor = {'kind': 'attachment', 'attachment_id': source_id}
+                if kind in {'approval_attachment', 'approval_comment_attachment'} and approval_source:
+                    descriptor['approval_source_id'] = approval_source['id']
+                add(descriptor)
         elif kind == 'wiki_sheet':
             from .packing_source_service import _bound_wiki_cache_key
             if context.get('root_kind') == 'expense' or store.get('state', _bound_wiki_cache_key(context, source_id)):

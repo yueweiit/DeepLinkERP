@@ -17,6 +17,85 @@ def pending_source():
             'download_required': True}
 
 
+def restricted_approval_attachment(store, ledger, batch, version):
+    source = store.find('source', instance='E')[0]
+    source.update(status='RUNNING', approval_result='agree', approved=False, invalid=False)
+    document = {'id': 'DOC-1', 'source_id': source['id'], 'status': 'review'}
+    source['documents'] = [document]
+    store.put('source', {'id': source['id'], 'data': dumps(source)})
+    store.insert('document', {
+        'id': document['id'], 'source_id': source['id'], 'fingerprint': 'DOC-1',
+        'status': 'review', 'data': dumps(document),
+    })
+    attachment = ledger.create('attachment', {
+        'batch': batch['name'], 'version': version['name'], 'source_type': 'OA',
+        'file_name': 'fuel.png', 'file_url': '/private/files/fuel.png',
+        'parse_result_json': dumps({
+            'process_instance_id': 'E', 'corp_id': source['corp'],
+            'approval_excluded': True, 'cost_source_allowed': False,
+            'settlement_document': {
+                'document_id': 'DOC-1', 'status': 'review', 'audit_only': True,
+            },
+        }),
+    })
+    selected = [{
+        'source_kind': 'approval_attachment', 'source_id': attachment['name'],
+        'resolver_source_id': attachment['name'], 'process_instance_id': 'E',
+        'selected': True, 'available': True, 'download_required': False,
+    }]
+    return source, selected
+
+
+def test_running_approval_audit_attachment_is_readable_for_analysis():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+
+    dependencies = capture_dependencies(
+        selected, store=store, ledger=ledger, batch_name=batch['name'],
+        source_context={}, purpose='analysis',
+    )
+
+    assert {row['kind'] for row in dependencies} == {'approval', 'attachment'}
+
+
+def test_running_approval_audit_attachment_remains_blocked_for_adoption():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    options = dict(
+        store=store, ledger=ledger, batch_name=batch['name'], source_context={}
+    )
+
+    with pytest.raises(ValueError):
+        capture_dependencies(selected, purpose='adoption', **options)
+
+
+def test_rejected_approval_audit_attachment_remains_blocked_for_analysis():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    source.update(status='COMPLETED', approval_result='refuse', approved=False, invalid=True)
+    store.put('source', {'id': source['id'], 'data': dumps(source)})
+    options = dict(
+        store=store, ledger=ledger, batch_name=batch['name'], source_context={}
+    )
+
+    with pytest.raises(ValueError):
+        capture_dependencies(selected, purpose='analysis', **options)
+
+
+def test_manual_audit_attachment_cannot_borrow_approval_analysis_policy():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    manual = [{
+        **selected[0], 'source_kind': 'manual_attachment', 'process_instance_id': '',
+    }]
+    options = dict(
+        store=store, ledger=ledger, batch_name=batch['name'], source_context={}
+    )
+
+    with pytest.raises(ValueError):
+        capture_dependencies(manual, purpose='analysis', **options)
+
+
 def test_download_identity_can_be_captured_but_is_not_a_final_attachment_dependency():
     store, ledger, batch, *_ = settlement_fixture.__wrapped__()
     manifest = prepare_source_manifest([pending_source()])
