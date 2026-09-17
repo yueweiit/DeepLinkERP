@@ -231,7 +231,7 @@ class TestStatementMappingRules(UnitTestCase):
 
 	def test_small_enterprise_research_is_disclosed_without_double_mapping(self):
 		valid_rows = {row[0] for row in SMALL_ENTERPRISE_ROWS["Profit and Loss"]}
-		account = _account("660206 - 管理费用－研究费用", account_number="660206")
+		account = _account("660223 - 管理费用－研究费用", account_number="660223")
 		row_code = refine_classification_for_template(account, "Profit and Loss", valid_rows, "ADMIN_EXPENSES")
 		self.assertEqual(row_code, "ADMIN_EXPENSES")
 		self.assertEqual(get_supplementary_row_code(account, "Profit and Loss", valid_rows, row_code), "RESEARCH_EXPENSES")

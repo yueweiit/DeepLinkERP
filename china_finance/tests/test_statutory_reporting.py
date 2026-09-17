@@ -19,7 +19,7 @@ from china_finance.services.statutory_reporting import _build_excel
 from china_finance.china_finance.report.china_financial_statements.china_financial_statements import (
 	get_profit_and_loss_metrics,
 )
-from china_finance.setup.templates import ENTERPRISE_ROWS, build_seed_rows
+from china_finance.setup.templates import ENTERPRISE_ROWS, SMALL_ENTERPRISE_ROWS, build_seed_rows
 
 
 def row(code, row_type="Mapped Accounts", formula=None, direction="Debit Positive"):
@@ -44,6 +44,17 @@ class TestStatutoryFormulaEngine(UnitTestCase):
 		check = next(item for item in checks if item["code"] == "NEGATIVE_PROFIT_AND_LOSS_AMOUNT")
 		self.assertFalse(check["passed"])
 		self.assertFalse(check["blocking"])
+
+	def test_profit_and_loss_allows_negative_interest_income(self):
+		rows = [{
+			"row_code": "INTEREST_EXPENSES", "label": "利息费用（收入以“-”号填列）",
+			"row_type": "Mapped Accounts", "amount": -0.48,
+		}]
+		check = next(
+			item for item in build_statement_checks("Profit and Loss", rows, [])
+			if item["code"] == "NEGATIVE_PROFIT_AND_LOSS_AMOUNT"
+		)
+		self.assertTrue(check["passed"])
 
 	def test_statement_check_flags_account_mapped_to_multiple_rows(self):
 		rows = [{"row_code": "A", "label": "项目A", "row_type": "Mapped Accounts", "amount": 1}]
@@ -87,6 +98,19 @@ class TestStatutoryFormulaEngine(UnitTestCase):
 		result = {item["row_code"]: item["amount"] for item in render_rows(template, {"A": 1, "B": 2, "C": 3})}
 		self.assertEqual(result["SUBTOTAL"], 3)
 		self.assertEqual(result["TOTAL"], 6)
+
+	def test_small_enterprise_supplementary_detail_is_not_double_counted(self):
+		template = SimpleNamespace(
+			accounting_standard="小企业会计准则",
+			statement_type="Profit and Loss",
+			rows=[SimpleNamespace(**item) for item in build_seed_rows(SMALL_ENTERPRISE_ROWS["Profit and Loss"])],
+		)
+		result = {
+			item["row_code"]: item["amount"]
+			for item in render_rows(template, {"ADMIN_EXPENSES": 100, "RESEARCH_EXPENSES": 10}, {"RESEARCH_EXPENSES"})
+		}
+		self.assertEqual(result["ADMIN_EXPENSES"], 100)
+		self.assertEqual(result["RESEARCH_EXPENSES"], 10)
 
 	def test_formula_cycle_is_rejected(self):
 		rows = [row("A", "Formula", "B + 1"), row("B", "Formula", "A + 1")]

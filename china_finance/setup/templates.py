@@ -2,7 +2,7 @@ import frappe
 from frappe.utils import add_days, getdate
 
 TEMPLATE_VERSION = "3.0"
-MAPPING_RULE_VERSION = "1.6"
+MAPPING_RULE_VERSION = "1.7"
 TEMPLATE_EFFECTIVE_FROM = "2026-01-01"
 
 # Depreciation and amortisation cannot be translated into a direct-method cash
@@ -16,7 +16,7 @@ def requires_manual_cash_flow_assignment(account_number):
 
 
 def is_strictly_excluded_from_statement(account_number, statement_type):
-	return statement_type == "Profit and Loss" and str(account_number or "") == "6901"
+	return statement_type == "Profit and Loss" and str(account_number or "") in {"530102", "6901"}
 
 
 def get_seed_version(accounting_standard):
@@ -503,6 +503,115 @@ def sync_unreviewed_automatic_mappings(company, accounting_standard):
 	return updated
 
 
+def refresh_small_enterprise_automatic_mappings():
+	"""Align existing automatic mappings with the current numbered China chart.
+
+	Only mappings created by the automatic rule engine are refreshed. Manual
+	mappings remain unchanged, and existing review metadata is preserved.
+	"""
+	updated = 0
+	removed = 0
+	for settings in frappe.get_all(
+		"China Finance Settings",
+		filters={"enabled": 1, "accounting_standard": "小企业会计准则"},
+		fields=["company"],
+	):
+		company = settings.company
+		accounts = {
+			row.name: row
+			for row in frappe.get_all(
+				"Account",
+				filters={"company": company, "is_group": 0, "disabled": 0},
+				fields=["name", "account_name", "account_number", "parent_account", "root_type", "account_type"],
+			)
+		}
+		accounts_by_name = _get_company_account_index(company)
+		for statement_type in ("Balance Sheet", "Profit and Loss", "Cash Flow", "Changes in Equity"):
+			template = frappe.db.get_value(
+				"China Financial Statement Template",
+				{
+					"accounting_standard": "小企业会计准则",
+					"statement_type": statement_type,
+					"version": get_seed_version("小企业会计准则"),
+				},
+				"name",
+			)
+			if not template:
+				continue
+			valid_rows = {
+				row.row_code: row.row_type
+				for row in frappe.get_cached_doc("China Financial Statement Template", template).rows
+			}
+			for mapping in frappe.get_all(
+				"China Financial Statement Mapping",
+				filters={
+					"company": company,
+					"template": template,
+					"mapping_source": "Automatic",
+				},
+				fields=[
+					"name", "account", "row_code", "supplementary_row_code", "cash_inflow_row_code",
+					"cash_outflow_row_code", "account_number_snapshot", "mapping_basis", "mapping_rule_version",
+				],
+			):
+				account = accounts.get(mapping.account)
+				if not account:
+					continue
+				if is_strictly_excluded_from_statement(account.account_number, statement_type):
+					frappe.delete_doc("China Financial Statement Mapping", mapping.name, ignore_permissions=True)
+					removed += 1
+					continue
+				classification, basis = classify_company_account(company, account, statement_type, accounts_by_name)
+				classification = refine_classification_for_template(account, statement_type, valid_rows, classification)
+				if not classification:
+					continue
+				if isinstance(classification, tuple):
+					row_code, inflow_code, outflow_code = classification
+				else:
+					row_code, inflow_code, outflow_code = classification, None, None
+				if valid_rows.get(row_code) != "Mapped Accounts":
+					continue
+				values = {
+					"row_code": row_code,
+					"supplementary_row_code": get_supplementary_row_code(account, statement_type, valid_rows, row_code),
+					"account_number_snapshot": account.account_number,
+					"mapping_basis": basis or "Accounting Standard Downgrade",
+					"mapping_rule_version": MAPPING_RULE_VERSION,
+				}
+				if statement_type == "Cash Flow":
+					values.update(cash_inflow_row_code=inflow_code, cash_outflow_row_code=outflow_code)
+				if any(mapping.get(field) != value for field, value in values.items()):
+					frappe.db.set_value("China Financial Statement Mapping", mapping.name, values, update_modified=False)
+					updated += 1
+	return {"updated": updated, "removed": removed}
+
+
+def remove_stale_small_enterprise_automatic_mappings():
+	"""Remove automatic mappings that point to groups or inactive accounts."""
+	removed = 0
+	for settings in frappe.get_all(
+		"China Finance Settings",
+		filters={"enabled": 1, "accounting_standard": "小企业会计准则"},
+		fields=["company"],
+	):
+		company = settings.company
+		leaf_accounts = {
+			row.name
+			for row in frappe.get_all(
+				"Account", filters={"company": company, "is_group": 0, "disabled": 0}, fields=["name"]
+			)
+		}
+		for mapping in frappe.get_all(
+			"China Financial Statement Mapping",
+			filters={"company": company, "template": ["like", "小企业会计准则%"], "mapping_source": "Automatic"},
+			fields=["name", "account"],
+		):
+			if mapping.account not in leaf_accounts:
+				frappe.delete_doc("China Financial Statement Mapping", mapping.name, ignore_permissions=True)
+				removed += 1
+	return removed
+
+
 def sync_statement_row_hierarchy():
 	"""Migrate existing template indentation to the editable parent/child control."""
 	updated = 0
@@ -823,7 +932,7 @@ def refine_classification_for_template(account, statement_type, valid_rows, clas
 				row_code = "LAND_VALUE_ADDED_TAX"
 			elif any(word in name for word in ("土地使用税", "房产税", "车船税", "印花税")):
 				row_code = "LOCAL_PROPERTY_TAXES"
-			elif any(word in name for word in ("教育费附加", "矿产资源补偿", "排污费")):
+			elif any(word in name for word in ("教育费附加", "地方教育附加", "教育附加", "矿产资源补偿", "排污费")):
 				row_code = "EDUCATION_SURCHARGES"
 		if number.startswith("6601"):
 			if "维修" in name:
@@ -831,10 +940,10 @@ def refine_classification_for_template(account, statement_type, valid_rows, clas
 			elif any(word in name for word in ("广告", "业务宣传")):
 				row_code = "ADVERTISING_EXPENSES"
 		if number.startswith("6602") and "开办" in name:
-			row_code = "STARTUP_EXPENSES"
-		if number.startswith("6602") and "招待" in name:
-			row_code = "ENTERTAINMENT_EXPENSES"
-		if number.startswith(("660206", "530101")) or any(word in name for word in ("研发", "研究")):
+			row_code = "ADMIN_EXPENSES"
+		if number.startswith("6602") and any(word in name for word in ("招待", "交际应酬")):
+			row_code = "ADMIN_EXPENSES"
+		if number.startswith(("660206", "660223", "530101")) or any(word in name for word in ("研发", "研究")):
 			row_code = "ADMIN_EXPENSES"
 		if number.startswith("6603") and any(word in name for word in ("利息", "Interest")):
 			row_code = "INTEREST_EXPENSES"
@@ -876,11 +985,18 @@ def get_supplementary_row_code(account, statement_type, valid_rows, row_code):
 	The primary mapping remains ADMIN_EXPENSES and this field is rendered outside
 	the parent formula.
 	"""
-	if statement_type != "Profit and Loss" or "RESEARCH_EXPENSES" not in valid_rows:
+	if statement_type != "Profit and Loss":
 		return None
 	number = str(account.account_number or "")
 	name = account.account_name or account.name or ""
-	if row_code == "ADMIN_EXPENSES" and (number.startswith(("660206", "530101")) or any(word in name for word in ("研发", "研究"))):
+	if row_code == "ADMIN_EXPENSES" and (
+		(number.startswith(("660205", "660206")) or any(word in name for word in ("招待", "交际应酬")))
+		and "ENTERTAINMENT_EXPENSES" in valid_rows
+	):
+		return "ENTERTAINMENT_EXPENSES"
+	if row_code == "ADMIN_EXPENSES" and (
+		number.startswith(("530101", "660223")) or any(word in name for word in ("研发", "研究"))
+	) and "RESEARCH_EXPENSES" in valid_rows:
 		return "RESEARCH_EXPENSES"
 	if row_code == "NONOPERATING_INCOME" and number.startswith("6201") and "GOVERNMENT_GRANTS" in valid_rows:
 		return "GOVERNMENT_GRANTS"
@@ -893,7 +1009,7 @@ def classify_account_number(number, statement_type, account=None):
 	if statement_type == "Balance Sheet":
 		return _classify_balance_sheet_number(number)
 	if statement_type == "Profit and Loss":
-		return _classify_profit_loss_number(number)
+		return _classify_profit_loss_number(number, account)
 	if statement_type == "Changes in Equity":
 		if number == "4001": return "OWNER_CONTRIBUTIONS"
 		if number.startswith("4002"): return "OWNER_CONTRIBUTIONS"
@@ -937,7 +1053,7 @@ def classify_account_number(number, statement_type, account=None):
 			return ("CASH_PAID_LONG_TERM_ASSETS", "CASH_RECEIVED_ASSET_DISPOSAL", "CASH_PAID_LONG_TERM_ASSETS")
 		if number.startswith(("2001", "2501", "2502", "2701")):
 			return ("CASH_RECEIVED_BORROWINGS", "CASH_RECEIVED_BORROWINGS", "CASH_PAID_DEBT_REPAYMENT")
-		if number.startswith(("2231", "2232", "410403", "660301")):
+		if number.startswith(("2231", "2232", "410403", "660302")):
 			return ("CASH_PAID_DIVIDENDS_INTEREST", "OTHER_FINANCING_RECEIPTS", "CASH_PAID_DIVIDENDS_INTEREST")
 		if number.startswith(("6111", "1131", "1132")):
 			return ("CASH_RECEIVED_INVESTMENT_INCOME", "CASH_RECEIVED_INVESTMENT_INCOME", "OTHER_INVESTING_PAYMENTS")
@@ -1001,7 +1117,7 @@ def _classify_balance_sheet_number(number):
 	return None
 
 
-def _classify_profit_loss_number(number):
+def _classify_profit_loss_number(number, account=None):
 	if number.startswith(("6001", "6051")): return "OPERATING_REVENUE"
 	if number.startswith("6101"): return "FAIR_VALUE_CHANGES"
 	if number.startswith("6111"): return "INVESTMENT_INCOME"
@@ -1011,7 +1127,13 @@ def _classify_profit_loss_number(number):
 	if number.startswith(("6401", "6402", "640199")): return "OPERATING_COST"
 	if number.startswith("6403"): return "TAX_SURCHARGES"
 	if number.startswith("6601"): return "SELLING_EXPENSES"
-	if number.startswith("660206") or number.startswith("530101"): return "RD_EXPENSES"
+	# The current numbered chart uses 660206 for business entertainment.  An
+	# older chart used that number for research expense, which caused the small
+	# enterprise mapping to disclose hospitality costs as R&D.  530101 remains
+	# the expense-side R&D account; 530102 is excluded from the P&L above because
+	# it is capitalized development expenditure.
+	if number.startswith("660206"): return "ADMIN_EXPENSES"
+	if number.startswith("530101"): return "RD_EXPENSES"
 	if number.startswith("6602"): return "ADMIN_EXPENSES"
 	if number.startswith("6603"): return "FINANCE_EXPENSES"
 	if number.startswith("6701"): return "ASSET_IMPAIRMENT_LOSSES"

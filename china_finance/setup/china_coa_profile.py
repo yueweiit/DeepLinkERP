@@ -9,7 +9,7 @@ from frappe.utils import add_days, cint, getdate, now_datetime
 
 CHART_TEMPLATE = "中国企业会计准则－一般纳税人制造业（1.0）"
 CHART_VERSION = "1.0"
-MAPPING_RULE_VERSION = "1.6"
+MAPPING_RULE_VERSION = "1.7"
 
 COMPANY_DEFAULT_ACCOUNTS = {
 	"default_cash_account": "1001",

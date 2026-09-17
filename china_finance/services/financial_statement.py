@@ -202,17 +202,20 @@ def build_statement(
 			period_values[row_code] += amount
 			ytd_values[row_code] += amount
 
-	period_rows = render_rows(template, period_values)
+	supplementary_row_codes = {
+		mapping.supplementary_row_code for mapping in mappings if mapping.get("supplementary_row_code")
+	}
+	period_rows = render_rows(template, period_values, supplementary_row_codes)
 	accounts_by_row = defaultdict(list)
 	for mapping in mappings:
 		accounts_by_row[mapping.row_code].append(mapping.account)
 	for result_row in period_rows:
 		result_row["source_accounts"] = sorted(set(accounts_by_row.get(result_row["row_code"], [])))
 	opening_rows = (
-		{row["row_code"]: row["amount"] for row in render_rows(template, opening_values)}
+		{row["row_code"]: row["amount"] for row in render_rows(template, opening_values, supplementary_row_codes)}
 		if opening_values is not None else {}
 	)
-	ytd_rows = {row["row_code"]: row["amount"] for row in render_rows(template, ytd_values)}
+	ytd_rows = {row["row_code"]: row["amount"] for row in render_rows(template, ytd_values, supplementary_row_codes)}
 	for result_row in period_rows:
 		result_row["opening_amount"] = opening_rows.get(result_row["row_code"]) if opening_values is not None else None
 		result_row["year_to_date_amount"] = (
@@ -376,7 +379,11 @@ def build_statement_checks(statement_type, rows, mappings, unmapped_accounts=Non
 	if statement_type == "Profit and Loss":
 		negative_rows = [
 			row["label"] for row in rows
-			if row["row_type"] == "Mapped Accounts" and flt(row["amount"]) < -RECLASSIFICATION_TOLERANCE
+			if (
+				row["row_type"] == "Mapped Accounts"
+				and row["row_code"] != "INTEREST_EXPENSES"
+				and flt(row["amount"]) < -RECLASSIFICATION_TOLERANCE
+			)
 		]
 		checks.append({
 			"code": "NEGATIVE_PROFIT_AND_LOSS_AMOUNT",
@@ -598,9 +605,9 @@ def _get_account_daily_balances(
 	return result
 
 
-def render_rows(template, source_values):
+def render_rows(template, source_values, supplementary_row_codes=None):
 	values = defaultdict(float, source_values or {})
-	_roll_up_small_profit_and_loss_rows(template, values)
+	_roll_up_small_profit_and_loss_rows(template, values, supplementary_row_codes)
 	valid_codes = {row.row_code for row in template.rows}
 	for code in valid_codes:
 		values[code] += 0
@@ -633,7 +640,7 @@ def render_rows(template, source_values):
 	return rows
 
 
-def _roll_up_small_profit_and_loss_rows(template, values):
+def _roll_up_small_profit_and_loss_rows(template, values, supplementary_row_codes=None):
 	"""Show child expense rows in their statutory parent without double counting."""
 	if getattr(template, "accounting_standard", None) != "小企业会计准则" or getattr(template, "statement_type", None) != "Profit and Loss":
 		return
@@ -643,6 +650,7 @@ def _roll_up_small_profit_and_loss_rows(template, values):
 		"NONOPERATING_INCOME", "NONOPERATING_EXPENSE",
 	}
 	rows = template.rows
+	supplementary_row_codes = set(supplementary_row_codes or ())
 	for index, parent in enumerate(rows):
 		if parent.row_code not in parent_codes:
 			continue
@@ -650,7 +658,7 @@ def _roll_up_small_profit_and_loss_rows(template, values):
 		for child in rows[index + 1:]:
 			if child.indent <= parent.indent:
 				break
-			if child.row_type == "Mapped Accounts":
+			if child.row_type == "Mapped Accounts" and child.row_code not in supplementary_row_codes:
 				children.append(child.row_code)
 		if children:
 			values[parent.row_code] += sum(flt(values[code]) for code in children)

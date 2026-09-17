@@ -15,6 +15,7 @@ from china_finance.setup.china_coa_profile import (
 )
 from china_finance.setup.templates import (
 	_classify_known_profile_fallback, classify_account_number, refine_classification_for_template,
+	SMALL_ENTERPRISE_ROWS, get_supplementary_row_code, is_strictly_excluded_from_statement,
 	requires_manual_cash_flow_assignment,
 )
 
@@ -145,7 +146,7 @@ class TestChinaCoaProfile(UnitTestCase):
 		account = SimpleNamespace(account_type="Receivable", root_type="Asset")
 		self.assertEqual(classify_account_number("1122", "Balance Sheet", account), "ACCOUNTS_RECEIVABLE")
 		self.assertEqual(classify_account_number("11220101", "Balance Sheet", account), "ACCOUNTS_RECEIVABLE")
-		self.assertEqual(classify_account_number("660206", "Profit and Loss", account), "RD_EXPENSES")
+		self.assertEqual(classify_account_number("660206", "Profit and Loss", account), "ADMIN_EXPENSES")
 		self.assertEqual(classify_account_number("22210101", "Balance Sheet", account), "TAXES_PAYABLE")
 		self.assertEqual(classify_account_number("2301", "Balance Sheet", account), "DEFERRED_INCOME")
 		self.assertEqual(classify_account_number("2203", "Cash Flow", account)[1], "CASH_RECEIVED_SALES")
@@ -175,4 +176,41 @@ class TestChinaCoaProfile(UnitTestCase):
 				account, "Profit and Loss", {"URBAN_MAINTENANCE_TAX": "Mapped Accounts"}, "TAX_SURCHARGES"
 			),
 			"URBAN_MAINTENANCE_TAX",
+		)
+
+	def test_small_enterprise_rules_follow_current_account_names(self):
+		valid_rows = {row[0]: "Mapped Accounts" for row in SMALL_ENTERPRISE_ROWS["Profit and Loss"]}
+		entertainment = SimpleNamespace(
+			account_number="660206", account_name="管理费用－业务招待费", name="660206 - 管理费用－业务招待费"
+		)
+		research = SimpleNamespace(
+			account_number="660223", account_name="管理费用－研究费用", name="660223 - 管理费用－研究费用"
+		)
+		self.assertEqual(classify_account_number("660206", "Profit and Loss", entertainment), "ADMIN_EXPENSES")
+		self.assertEqual(
+			get_supplementary_row_code(entertainment, "Profit and Loss", valid_rows, "ADMIN_EXPENSES"),
+			"ENTERTAINMENT_EXPENSES",
+		)
+		self.assertEqual(
+			get_supplementary_row_code(research, "Profit and Loss", valid_rows, "ADMIN_EXPENSES"),
+			"RESEARCH_EXPENSES",
+		)
+		self.assertEqual(
+			refine_classification_for_template(
+				SimpleNamespace(account_number="640303", account_name="税金及附加－地方教育附加", name="640303"),
+				"Profit and Loss", valid_rows, "TAX_SURCHARGES",
+			),
+			"EDUCATION_SURCHARGES",
+		)
+		self.assertTrue(is_strictly_excluded_from_statement("530102", "Profit and Loss"))
+		self.assertFalse(is_strictly_excluded_from_statement("530101", "Profit and Loss"))
+
+	def test_current_finance_expense_numbers_have_cash_flow_rules(self):
+		self.assertEqual(
+			classify_account_number("660301", "Cash Flow", SimpleNamespace(account_type="Expense", root_type="Expense"))[2],
+			"OTHER_OPERATING_PAYMENTS",
+		)
+		self.assertEqual(
+			classify_account_number("660302", "Cash Flow", SimpleNamespace(account_type="Expense", root_type="Expense"))[2],
+			"CASH_PAID_DIVIDENDS_INTEREST",
 		)
