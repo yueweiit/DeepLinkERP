@@ -1,10 +1,13 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests import UnitTestCase
 from frappe.utils import nowdate
+from rq.job import JobStatus
 
 from mes_integration.mes_integration.integration_log import (
+	MATERIAL_REQUEST_TASK_EVENT,
+	create_material_request_task_log,
 	log_inbound_material_request,
 	write_material_request_creation_log,
 )
@@ -14,7 +17,10 @@ from mes_integration.mes_integration.material_request import (
 	create_and_submit_material_request_payload,
 	create_and_submit_material_request_from_mes,
 	enqueue_mes_material_request_bin_sync_job,
+	get_mes_idempotency_key,
+	mark_material_request_task_failed,
 	recover_material_request_tasks,
+	reconcile_material_request_task_rq_failure,
 	process_material_request_task,
 	sync_material_request_bins,
 )
@@ -24,6 +30,48 @@ class TestMESMaterialRequest(UnitTestCase):
 	def tearDown(self):
 		frappe.db.rollback()
 		super().tearDown()
+
+	def test_mes_request_number_precedes_conflicting_idempotency_header(self):
+		business_request_number = "MIR-TEST-001"
+		request_uuid = "515a46ed-ba1e-4c67-a137-8cfccb243157"
+		request = frappe._dict(headers={"X-Idempotency-Key": request_uuid})
+
+		with (
+			patch(
+				"mes_integration.mes_integration.material_request.frappe.local.request",
+				request,
+				create=True,
+			),
+			patch("mes_integration.mes_integration.material_request.frappe.logger") as logger,
+		):
+			request_key = get_mes_idempotency_key(
+				{"custom_material_request_no": business_request_number},
+				{
+					"custom_material_request_no": business_request_number,
+					"company": "Test Company",
+				},
+			)
+
+		self.assertEqual(request_key, business_request_number)
+		logger.return_value.warning.assert_called_once()
+
+	def test_mes_idempotency_key_falls_back_to_request_id_then_header(self):
+		request_uuid = "515a46ed-ba1e-4c67-a137-8cfccb243157"
+		request = frappe._dict(headers={"X-Idempotency-Key": request_uuid})
+
+		with patch(
+			"mes_integration.mes_integration.material_request.frappe.local.request",
+			request,
+			create=True,
+		):
+			request_key = get_mes_idempotency_key(
+				{"request_id": "MES-LEGACY-001"},
+				{"company": "Test Company"},
+			)
+			fallback_key = get_mes_idempotency_key({}, {"company": "Test Company"})
+
+		self.assertEqual(request_key, "MES-LEGACY-001")
+		self.assertEqual(fallback_key, request_uuid)
 
 	def test_material_request_creation_log_skips_disabled_company(self):
 		doc = frappe._dict(
@@ -206,16 +254,25 @@ class TestMESMaterialRequest(UnitTestCase):
 			patch(
 				"mes_integration.mes_integration.material_request.schedule_material_request_task"
 			) as schedule_task,
+			patch(
+				"mes_integration.mes_integration.material_request.frappe.local.request",
+				frappe._dict(headers={"X-Idempotency-Key": "ASYNC-REQUEST-UUID"}),
+				create=True,
+			),
+			patch("mes_integration.mes_integration.material_request.frappe.logger"),
 		):
-			create_and_submit_material_request_from_mes(material_request=material_request)
+			first_return = create_and_submit_material_request_from_mes(material_request=material_request)
 			first_response = frappe.response["data"].copy()
-			create_and_submit_material_request_from_mes(material_request=material_request)
+			second_return = create_and_submit_material_request_from_mes(material_request=material_request)
 			second_response = frappe.response["data"].copy()
 
 		self.assertEqual(first_response["status"], "queued")
 		self.assertEqual(first_response["task_status"], "Queued")
 		self.assertTrue(first_response["task_id"])
+		self.assertEqual(first_response["request_id"], request_number)
+		self.assertEqual(first_return, first_response)
 		self.assertEqual(first_response["task_id"], second_response["task_id"])
+		self.assertEqual(second_return, second_response)
 		self.assertTrue(second_response["idempotent_reuse"])
 		self.assertEqual(schedule_task.call_count, 2)
 		schedule_task.assert_any_call(first_response["task_id"])
@@ -228,6 +285,22 @@ class TestMESMaterialRequest(UnitTestCase):
 		task = frappe.get_doc("MES Material Request Task", first_response["task_id"])
 		self.assertEqual(task.detail_count, detail_count)
 		self.assertTrue(task.request_payload)
+		self.assertEqual(task.request_key, request_number)
+		self.assertEqual(
+			frappe.parse_json(task.request_payload)["custom_material_request_no"],
+			request_number,
+		)
+		self.assertEqual(
+			frappe.db.count(
+				"MES Integration Log",
+				{
+					"event": MATERIAL_REQUEST_TASK_EVENT,
+					"reference_name": task.name,
+					"status": "Pending",
+				},
+			),
+			1,
+		)
 
 	def test_material_request_task_worker_updates_success(self):
 		task_name = build_material_request_task_name("Test Company", "MES-TASK-TEST")
@@ -274,6 +347,91 @@ class TestMESMaterialRequest(UnitTestCase):
 			frappe.db.get_value(
 				"MES Material Request Task", task_name, "request_payload"
 			)
+		)
+		self.assertEqual(
+			frappe.db.get_value(
+				"MES Integration Log",
+				{
+					"event": MATERIAL_REQUEST_TASK_EVENT,
+					"reference_name": task_name,
+				},
+				"status",
+				order_by="creation desc",
+			),
+			"Success",
+		)
+
+	def test_material_request_task_failure_updates_visible_log(self):
+		task_name = build_material_request_task_name("Test Company", "MES-TASK-FAILED")
+		task = frappe.get_doc(
+			{
+				"doctype": "MES Material Request Task",
+				"name": task_name,
+				"request_key": "MES-TASK-FAILED",
+				"company": "Test Company",
+				"status": "Queued",
+				"submitted_by": frappe.session.user,
+				"request_payload": "{}",
+			}
+		)
+		task.insert(ignore_permissions=True, ignore_links=True, set_name=task_name)
+		create_material_request_task_log(task, {})
+
+		with patch.object(frappe.db, "commit"):
+			mark_material_request_task_failed(task_name, "warehouse is mandatory")
+
+		self.assertEqual(
+			frappe.db.get_value("MES Material Request Task", task_name, "status"),
+			"Failed",
+		)
+		log = frappe.db.get_value(
+			"MES Integration Log",
+			{
+				"event": MATERIAL_REQUEST_TASK_EVENT,
+				"reference_name": task_name,
+			},
+			["status", "error_message"],
+			as_dict=True,
+			order_by="creation desc",
+		)
+		self.assertEqual(log.status, "Failed")
+		self.assertEqual(log.error_message, "warehouse is mandatory")
+
+	def test_rq_wrapper_failure_is_reconciled_to_failed_task(self):
+		task_name = build_material_request_task_name("Test Company", "MES-RQ-FAILED")
+		task = frappe.get_doc(
+			{
+				"doctype": "MES Material Request Task",
+				"name": task_name,
+				"request_key": "MES-RQ-FAILED",
+				"company": "Test Company",
+				"status": "Queued",
+				"submitted_by": frappe.session.user,
+				"request_payload": "{}",
+			}
+		)
+		task.insert(ignore_permissions=True, ignore_links=True, set_name=task_name)
+		create_material_request_task_log(task, {})
+		job = MagicMock()
+		job.get_status.return_value = JobStatus.FAILED
+		job.exc_info = "ModuleNotFoundError: No module named 'mobile_operations'"
+
+		with (
+			patch("frappe.utils.background_jobs.get_job", return_value=job),
+			patch.object(frappe.db, "commit"),
+		):
+			reconciled = reconcile_material_request_task_rq_failure(task)
+
+		self.assertTrue(reconciled)
+		self.assertEqual(
+			frappe.db.get_value("MES Material Request Task", task_name, "status"),
+			"Failed",
+		)
+		self.assertIn(
+			"mobile_operations",
+			frappe.db.get_value(
+				"MES Material Request Task", task_name, "error_message"
+			),
 		)
 
 	def test_failed_material_request_task_reuses_latest_payload(self):

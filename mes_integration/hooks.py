@@ -27,6 +27,7 @@ app_license = "mit"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/mes_integration/css/mes_integration.css"
 # app_include_js = "/assets/mes_integration/js/mes_integration.js"
+app_include_js = "/assets/mes_integration/js/system_log_sidebar.js"
 
 # include js, css files in header of web template
 # web_include_css = "/assets/mes_integration/css/mes_integration.css"
@@ -54,6 +55,7 @@ doctype_list_js = {
 	"Material Request": "public/js/material_request_list.js",
 	"Stock Entry": "public/js/stock_entry_list.js",
 	"MES Integration Log": "public/js/mes_integration_log_list.js",
+	"MES Material Request Task": "public/js/mes_material_request_task_list.js",
 }
 doctype_css = {"Stock Entry": "public/css/stock_entry.css"}
 
@@ -171,6 +173,7 @@ doc_events = {
 		"on_cancel": "mes_integration.mes_integration.delivery_note.clear_delivery_readiness_status",
 	},
 	"Material Request": {
+		"before_insert": "mes_integration.mes_integration.material_request.set_material_request_source",
 		"validate": "mes_integration.mes_integration.material_request.validate_item_details",
 		"after_insert": "mes_integration.mes_integration.integration_log.log_inbound_material_request",
 	},

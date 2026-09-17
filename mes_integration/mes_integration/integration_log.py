@@ -4,6 +4,9 @@ from mes_integration.mes_integration.settings import is_mes_integration_enabled
 
 
 LOGGED_MATERIAL_REQUEST_TYPES = {"Injection Molding Issuance", "Material Issue"}
+MATERIAL_REQUEST_TASK_DOCTYPE = "MES Material Request Task"
+MATERIAL_REQUEST_TASK_EVENT = "Material Request Processing"
+MATERIAL_REQUEST_TASK_LOG_ITEM_LIMIT = 50
 
 
 def create_mes_log(
@@ -73,6 +76,142 @@ def update_mes_log(log, **values):
 		frappe.db.set_value("MES Integration Log", log.name, updates, update_modified=True)
 	except Exception:
 		frappe.log_error(title="Failed to update MES Integration Log", message=frappe.get_traceback())
+
+
+def create_material_request_task_log(task, request_payload=None):
+	"""Create the visible lifecycle log for one asynchronous MES attempt."""
+	request_payload = get_material_request_task_log_payload(task, request_payload)
+	return create_mes_log(
+		direction="Inbound",
+		event=MATERIAL_REQUEST_TASK_EVENT,
+		status="Pending",
+		reference_doctype=MATERIAL_REQUEST_TASK_DOCTYPE,
+		reference_name=task.name,
+		source=get_request_source(),
+		user=task.get("submitted_by"),
+		request_url=get_request_url(),
+		request_payload=request_payload,
+		response_payload={
+			"task_id": task.name,
+			"request_id": task.get("request_key"),
+			"task_status": task.get("status") or "Queued",
+		},
+		trace_id=task.name,
+		processed=0,
+		http_status_code=202,
+		batch_no=request_payload.get("batch_no") or request_payload.get("custom_stock_entry_no"),
+	)
+
+
+def finish_material_request_task_log(
+	task,
+	status,
+	material_request=None,
+	error_message=None,
+):
+	"""Finish the latest Pending lifecycle log, creating one if it is missing."""
+	if not frappe.db.exists("DocType", "MES Integration Log"):
+		return None
+
+	try:
+		log_name = frappe.db.get_value(
+			"MES Integration Log",
+			{
+				"event": MATERIAL_REQUEST_TASK_EVENT,
+				"reference_doctype": MATERIAL_REQUEST_TASK_DOCTYPE,
+				"reference_name": task.name,
+				"status": "Pending",
+			},
+			"name",
+			order_by="creation desc",
+		)
+		response_payload = {
+			"task_id": task.name,
+			"request_id": task.get("request_key"),
+			"task_status": status,
+			"material_request": material_request,
+		}
+		response_payload = {
+			key: value for key, value in response_payload.items() if value is not None
+		}
+
+		if log_name:
+			log = frappe.get_doc("MES Integration Log", log_name)
+			update_mes_log(
+				log,
+				status=status,
+				response_payload=response_payload,
+				error_message=error_message,
+				processed=1,
+				http_status_code=200 if status == "Success" else 500,
+			)
+			return log
+
+		request_payload = get_material_request_task_log_payload(task)
+		return create_mes_log(
+			direction="Inbound",
+			event=MATERIAL_REQUEST_TASK_EVENT,
+			status=status,
+			reference_doctype=MATERIAL_REQUEST_TASK_DOCTYPE,
+			reference_name=task.name,
+			source="Background",
+			user=task.get("submitted_by"),
+			request_payload=request_payload,
+			response_payload=response_payload,
+			error_message=error_message,
+			trace_id=task.name,
+			processed=1,
+			http_status_code=200 if status == "Success" else 500,
+			batch_no=request_payload.get("batch_no")
+			or request_payload.get("custom_stock_entry_no"),
+		)
+	except Exception:
+		frappe.log_error(
+			title="Failed to finish MES Material Request task log",
+			message=frappe.get_traceback(),
+		)
+		return None
+
+
+def get_material_request_task_log_payload(task, request_payload=None):
+	"""Return a bounded payload summary; the complete request remains on the task."""
+	if request_payload is None:
+		request_payload = task.get("request_payload")
+
+	if isinstance(request_payload, str):
+		try:
+			request_payload = frappe.parse_json(request_payload)
+		except ValueError:
+			request_payload = {}
+
+	request_payload = request_payload if isinstance(request_payload, dict) else {}
+	items = request_payload.get("items") or []
+	item_summary = [
+		{
+			key: row.get(key)
+			for key in ("item_code", "item_name", "qty", "uom", "warehouse")
+			if row.get(key) is not None
+		}
+		for row in items[:MATERIAL_REQUEST_TASK_LOG_ITEM_LIMIT]
+		if isinstance(row, dict)
+	]
+	payload = {
+		"task_id": task.name,
+		"request_id": task.get("request_key")
+		or request_payload.get("custom_material_request_no"),
+		"company": task.get("company") or request_payload.get("company"),
+		"material_request_type": request_payload.get("material_request_type"),
+		"transaction_date": request_payload.get("transaction_date"),
+		"schedule_date": request_payload.get("schedule_date"),
+		"custom_stock_entry_no": request_payload.get("custom_stock_entry_no"),
+		"batch_no": request_payload.get("batch_no"),
+		"item_count": task.get("item_count") or len(items),
+		"detail_count": task.get("detail_count")
+		or len(request_payload.get("custom_item_details") or []),
+		"items": item_summary,
+		"items_truncated": len(items) > MATERIAL_REQUEST_TASK_LOG_ITEM_LIMIT,
+	}
+	return {key: value for key, value in payload.items() if value is not None}
 
 
 def log_inbound_material_request(doc, method=None):
