@@ -4430,92 +4430,112 @@
       state.feeEvidenceReviewDialog?.show();
       return state.feeEvidenceReviewStartPromise;
     }
-    if (!(await this.ensureMaterialFeeEditSession())) return;
+    const previousReview = state.feeEvidenceReview;
+    this._feeEvidenceReviewRequestSequence = Number(this._feeEvidenceReviewRequestSequence || 0) + 1;
+    const requestToken = `fee-evidence-review-${this._feeEvidenceReviewRequestSequence}`;
+    let resolveStartPromise;
+    const startPromise = new Promise((resolve) => { resolveStartPromise = resolve; });
+    state.feeEvidenceReviewStartPromise = startPromise;
+    state.feeEvidenceReviewStartToken = requestToken;
     state.feeEvidenceReview = {
       status: "STARTING", logicalFeeKey: String(feeKey || ""), attachment: String(attachment || ""),
       batchName: String(options.batchName || this.detailState.batchName || ""),
       versionName: String(options.versionName || this.detailState.versionName || ""),
-      progress_percent: 0, progress_step: "正在启动凭证分析", progress_revision: 0,
+      progress_percent: 0, progress_step: "正在启动凭证分析", progress_revision: 0, requestToken,
     };
-    if (!state.feeEvidenceReviewDialog) {
-      const dialog = new frappe.ui.Dialog({
-        title: "AI 凭证解析与 SKU 分摊审核",
-        fields: [{ fieldtype: "HTML", fieldname: "fee_review", options: this.renderFeeEvidenceReviewProgressShell() }],
-      });
-      state.feeEvidenceReviewDialog = dialog;
-      dialog.$wrapper.addClass("ocw-mf-evidence-review-modal");
-      dialog.$wrapper.on("change", "[data-mf-fee-review-select]", (event) => {
-        const review = state.feeEvidenceReview;
-        const id = String($(event.currentTarget).attr("data-proposal-id") || "");
-        if ($(event.currentTarget).prop("checked")) review.selections.add(id);
-        else review.selections.delete(id);
-        this.invalidateFeeEvidenceMatrixTotals(review);
-        const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
-        if (review.draft && $totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
-      });
-      dialog.$wrapper.on("input change", "[data-mf-fee-review-edit]", (event) => {
-        const $input = $(event.currentTarget);
-        const proposalId = String($input.attr("data-proposal-id") || "");
-        const fieldname = String($input.attr("data-fieldname") || "");
-        const review = state.feeEvidenceReview;
-        review.edits[proposalId] = review.edits[proposalId] || {};
-        review.edits[proposalId][fieldname] = $input.attr("type") === "checkbox" ? ($input.prop("checked") ? 1 : 0) : String($input.val() ?? "");
-        review.selections.add(proposalId);
-        this.invalidateFeeEvidenceMatrixTotals(review);
-        dialog.$wrapper.find(`[data-mf-fee-review-select][data-proposal-id='${proposalId.replace(/'/g, "\\'")}']`).prop("checked", true);
-        const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
-        if (review.draft && $totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
-      });
-      dialog.$wrapper.on("input", "[data-mf-fee-matrix-input]", (event) => {
-        const $input = $(event.currentTarget);
-        const review = state.feeEvidenceReview;
-        if (!review?.draft) return;
-        this.setFeeEvidenceMatrixValue(review, review.draft, String($input.attr("data-item") || ""), String($input.attr("data-column-key") || ""), String($input.val() ?? ""));
-        const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
-        if ($totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
-      });
-      dialog.$wrapper.on("change", "[data-mf-fee-review-edit]", () => {
-        const review = state.feeEvidenceReview;
-        if (!review?.draft) return;
-        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
-      });
-      dialog.$wrapper.on("change", "[data-mf-fee-matrix-input]", () => {
-        const review = state.feeEvidenceReview;
-        if (!review?.draft) return;
-        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
-      });
-      dialog.$wrapper.on("click", "[data-action='mf-fee-matrix-prev-page'], [data-action='mf-fee-matrix-next-page']", (event) => {
-        const review = state.feeEvidenceReview;
-        if (!review?.draft) return;
-        const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
-        this.setFeeEvidenceMatrixPage(review, review.draft, Number(review.matrixPage || 0) + direction);
-        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
-      });
-      dialog.$wrapper.on("click", "[data-action='mf-fee-source-prev-page'], [data-action='mf-fee-source-next-page']", (event) => {
-        const review = state.feeEvidenceReview;
-        if (!review?.draft) return;
-        const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
-        this.setFeeEvidenceSourcePage(review, review.draft, Number(review.sourcePage || 0) + direction);
-        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
-      });
-      dialog.$wrapper.on("click", "[data-action='mf-fee-matrix-use-ai']", (event) => {
-        const $button = $(event.currentTarget);
-        const review = state.feeEvidenceReview;
-        if (!review?.draft) return;
-        this.adoptFeeEvidenceMatrixSuggestion(review, review.draft, String($button.attr("data-item") || ""), String($button.attr("data-column-key") || ""));
-        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
-      });
-      dialog.$wrapper.on("click", "[data-mf-fee-voucher-details] > summary", (event) => {
-        const review = state.feeEvidenceReview;
-        if (review) review.matrixDetailsOpen = !Boolean($(event.currentTarget).closest("details").prop("open"));
-      });
-      dialog.$wrapper.on("click", "[data-action='mf-fee-review-apply']", () => this.applyFeeEvidenceReview().catch((error) => this.showError(error)));
-      dialog.$wrapper.on("click", "[data-action='mf-fee-review-discard']", () => this.discardFeeEvidenceReview().catch((error) => this.showError(error)));
-    }
-    state.feeEvidenceReviewDialog.show();
-    state.feeEvidenceReviewDialog.$wrapper.find("[data-mf-fee-review-draft]").empty().removeData("rendered");
-    this.updateFeeEvidenceReviewProgress();
-    const startPromise = (async () => {
+    const isCurrentRequest = () => this.materialFeeState === state &&
+      state.feeEvidenceReviewStartToken === requestToken && state.feeEvidenceReview?.requestToken === requestToken;
+    (async () => {
+      if (!(await this.ensureMaterialFeeEditSession())) {
+        if (isCurrentRequest()) state.feeEvidenceReview = previousReview;
+        return;
+      }
+      if (!isCurrentRequest()) return;
+      if (!state.feeEvidenceReviewDialog) {
+        const dialog = new frappe.ui.Dialog({
+          title: "AI 凭证解析与 SKU 分摊审核",
+          fields: [{ fieldtype: "HTML", fieldname: "fee_review", options: this.renderFeeEvidenceReviewProgressShell() }],
+        });
+        state.feeEvidenceReviewDialog = dialog;
+        dialog.$wrapper.addClass("ocw-mf-evidence-review-modal");
+        dialog.$wrapper.on("change", "[data-mf-fee-review-select]", (event) => {
+          const review = state.feeEvidenceReview;
+          const id = String($(event.currentTarget).attr("data-proposal-id") || "");
+          if ($(event.currentTarget).prop("checked")) review.selections.add(id);
+          else review.selections.delete(id);
+          this.invalidateFeeEvidenceMatrixTotals(review);
+          const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+          if (review.draft && $totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
+        });
+        dialog.$wrapper.on("input change", "[data-mf-fee-review-edit]", (event) => {
+          const $input = $(event.currentTarget);
+          const proposalId = String($input.attr("data-proposal-id") || "");
+          const fieldname = String($input.attr("data-fieldname") || "");
+          const review = state.feeEvidenceReview;
+          review.edits[proposalId] = review.edits[proposalId] || {};
+          review.edits[proposalId][fieldname] = $input.attr("type") === "checkbox" ? ($input.prop("checked") ? 1 : 0) : String($input.val() ?? "");
+          review.selections.add(proposalId);
+          this.invalidateFeeEvidenceMatrixTotals(review);
+          dialog.$wrapper.find(`[data-mf-fee-review-select][data-proposal-id='${proposalId.replace(/'/g, "\\'")}']`).prop("checked", true);
+          const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+          if (review.draft && $totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
+        });
+        dialog.$wrapper.on("input", "[data-mf-fee-matrix-input]", (event) => {
+          const $input = $(event.currentTarget);
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          this.setFeeEvidenceMatrixValue(review, review.draft, String($input.attr("data-item") || ""), String($input.attr("data-column-key") || ""), String($input.val() ?? ""));
+          const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+          if ($totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
+        });
+        dialog.$wrapper.on("change", "[data-mf-fee-review-edit]", () => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("change", "[data-mf-fee-matrix-input]", () => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-matrix-prev-page'], [data-action='mf-fee-matrix-next-page']", (event) => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
+          this.setFeeEvidenceMatrixPage(review, review.draft, Number(review.matrixPage || 0) + direction);
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-source-prev-page'], [data-action='mf-fee-source-next-page']", (event) => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
+          this.setFeeEvidenceSourcePage(review, review.draft, Number(review.sourcePage || 0) + direction);
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-warning-prev-page'], [data-action='mf-fee-warning-next-page']", (event) => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
+          this.setFeeEvidenceWarningPage(review, review.draft, Number(review.warningPage || 0) + direction);
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-matrix-use-ai']", (event) => {
+          const $button = $(event.currentTarget);
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          this.adoptFeeEvidenceMatrixSuggestion(review, review.draft, String($button.attr("data-item") || ""), String($button.attr("data-column-key") || ""));
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-mf-fee-voucher-details] > summary", (event) => {
+          const review = state.feeEvidenceReview;
+          if (review) review.matrixDetailsOpen = !Boolean($(event.currentTarget).closest("details").prop("open"));
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-review-apply']", () => this.applyFeeEvidenceReview().catch((error) => this.showError(error)));
+        dialog.$wrapper.on("click", "[data-action='mf-fee-review-discard']", () => this.discardFeeEvidenceReview().catch((error) => this.showError(error)));
+      }
+      state.feeEvidenceReviewDialog.show();
+      state.feeEvidenceReviewDialog.$wrapper.find("[data-mf-fee-review-draft]").empty().removeData("rendered");
+      this.updateFeeEvidenceReviewProgress();
       const fee = this.findMaterialFee(feeKey) || {};
       const started = await this.call("overseas_costing.api.fees.start_fee_evidence_review", {
         batch_name: state.feeEvidenceReview.batchName,
@@ -4527,27 +4547,36 @@
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
       }, false);
+      if (!isCurrentRequest()) return;
       if (!started?.ok) throw new Error(started?.message || "凭证分析任务启动失败");
       state.feeEvidenceReview = {
         ...state.feeEvidenceReview, runId: started.run_id, status: started.status,
         progress_revision: Number(started.progress_revision || 0), progress_step: "读取凭证", progress_percent: 5,
       };
       this.updateFeeEvidenceReviewProgress();
-      await this.pollFeeEvidenceReview(state, state.feeEvidenceReview.batchName, started.run_id);
+      await this.pollFeeEvidenceReview(state, state.feeEvidenceReview.batchName, started.run_id, requestToken);
     })().catch((error) => {
-      state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
-      this.updateFeeEvidenceReviewProgress();
+      if (isCurrentRequest()) {
+        state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
+        this.updateFeeEvidenceReviewProgress();
+      }
     }).finally(() => {
-      if (state.feeEvidenceReviewStartPromise === startPromise) state.feeEvidenceReviewStartPromise = null;
+      if (state.feeEvidenceReviewStartPromise === startPromise) {
+        state.feeEvidenceReviewStartPromise = null;
+        state.feeEvidenceReviewStartToken = null;
+      }
+      resolveStartPromise();
     });
-    state.feeEvidenceReviewStartPromise = startPromise;
     return startPromise;
   }
 
-  async pollFeeEvidenceReview(state, batchName, runId) {
+  async pollFeeEvidenceReview(state, batchName, runId, requestToken) {
+    const isCurrentRequest = () => this.materialFeeState === state &&
+      String(state.feeEvidenceReview?.runId || "") === String(runId || "") &&
+      String(state.feeEvidenceReview?.requestToken || "") === String(requestToken || "");
     let failures = 0;
     for (let attempt = 0; attempt < 300; attempt += 1) {
-      if (this.materialFeeState !== state) return;
+      if (!isCurrentRequest()) return;
       let result;
       try {
         result = await this.call("overseas_costing.api.fees.get_fee_evidence_review_status", {
@@ -4555,17 +4584,20 @@
           run_id: runId,
           after_revision: Number(state.feeEvidenceReview?.progress_revision || 0),
         }, false);
+        if (!isCurrentRequest()) return;
         failures = 0;
       } catch (error) {
+        if (!isCurrentRequest()) return;
         failures += 1;
         state.feeEvidenceReview.connection_error = this.materialAIErrorMessage(error, "状态连接暂时中断，正在重试。 ");
         this.updateFeeEvidenceReviewProgress();
         await new Promise((resolve) => window.setTimeout(resolve, Math.min(5000, 800 * failures)));
+        if (!isCurrentRequest()) return;
         continue;
       }
       if (!result?.ok) throw new Error(result?.message || "凭证分析状态读取失败");
       if (!result.unchanged) {
-        state.feeEvidenceReview = { ...state.feeEvidenceReview, ...result, runId };
+        state.feeEvidenceReview = { ...state.feeEvidenceReview, ...result, runId, requestToken };
         delete state.feeEvidenceReview.connection_error;
         if (result.status === "READY") {
           const draft = result.draft || {};
@@ -4578,6 +4610,7 @@
       }
       if (["READY", "FAILED", "STALE", "APPLIED", "DISCARDED"].includes(String(result.status || ""))) return;
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      if (!isCurrentRequest()) return;
     }
     throw new Error("凭证分析超时，请稍后重新分析。 ");
   }

@@ -130,6 +130,59 @@ assert.equal(cell.originalAmount,'3');assert.equal(cell.amountRmb,'1.5');assert.
     )
 
 
+def test_legacy_proposal_aggregation_preserves_exact_large_original_amounts() -> None:
+    run_js(
+        r"""
+const draft={evidence:{proposal_id:'e'},fee_splits:[{proposal_id:'fee',logical_fee_key:'import_tax',currency:'MXN',amount:'9007199254740992.01',default_selected:true}],components:[
+ {proposal_id:'p1',item:'I',tax_code:'IGI',currency:'MXN',original_amount:'9007199254740992',amount_rmb:null},
+ {proposal_id:'p2',item:'I',tax_code:'IGI',currency:'MXN',original_amount:'0.01',amount_rmb:null}
+],material_matrix:{saved_components:[],rows:[{item:'I',cells:{IGI:{proposals:[0,1],saved:[]}}}]}};
+const review={selections:new Set(['e','fee']),edits:{},matrixEdits:{}};
+const cell=w.resolveFeeEvidenceMatrixCell(draft,0,'IGI');
+assert.equal(cell.originalAmount,'9007199254740992.01');
+const totals=w.feeEvidenceMatrixTotals(draft,review).import_tax;
+assert.equal(totals.allocatedText,'9007199254740992.01');assert.equal(totals.allocatedOriginal,'9007199254740992.01');
+assert.equal(totals.feeTotal,'9007199254740992.01');assert.equal(totals.remaining,'0');
+assert.equal(w.serializeFeeEvidenceMatrix(draft,review).cells[0].original_amount,'9007199254740992.01');
+const mixed=w.feeEvidenceAggregateComponents([{currency:'MXN',original_amount:'1'},{currency:'USD',original_amount:'2'}]);
+assert.equal(mixed.currency,'MIXED');assert.equal(mixed.originalAmount,'');
+"""
+    )
+
+
+def test_saved_component_aggregation_preserves_exact_large_original_amounts() -> None:
+    run_js(
+        r"""
+const draft={evidence:{proposal_id:'e'},fee_splits:[{proposal_id:'fee',logical_fee_key:'import_tax',currency:'MXN',amount:'9007199254740992.01',default_selected:true}],components:[
+ {proposal_id:'p1',item:'I',tax_code:'IGI',currency:'MXN',original_amount:'1',amount_rmb:null}
+],material_matrix:{saved_components:[
+ {id:'s1',currency:'MXN',original_amount:'9007199254740992',amount_rmb:null},
+ {id:'s2',currency:'MXN',original_amount:'0.01',amount_rmb:null}
+],rows:[{item:'I',cells:{IGI:{proposals:[0],saved:[0,1]}}}]}};
+const review={selections:new Set(['e','fee']),edits:{},matrixEdits:{}};
+const cell=w.resolveFeeEvidenceMatrixCell(draft,0,'IGI');
+assert.equal(cell.origin,'SAVED');assert.equal(cell.originalAmount,'9007199254740992.01');assert.equal(cell.suggestedOriginalAmount,'1');
+assert.equal(w.feeEvidenceMatrixTotals(draft,review).import_tax.allocatedText,'9007199254740992.01');
+assert.equal(w.serializeFeeEvidenceMatrix(draft,review).cells[0].original_amount,'9007199254740992.01');
+"""
+    )
+
+
+def test_indexed_proposal_aggregation_preserves_exact_large_original_amounts() -> None:
+    run_js(
+        r"""
+const draft={evidence:{proposal_id:'e'},fee_splits:[{proposal_id:'fee',logical_fee_key:'import_tax',currency:'MXN',amount:'9007199254740992.01',default_selected:true}],components:[],component_contract:{mode:'INDEXED_COLUMNS_V1'},component_store:{format:'INDEXED_COLUMNS_V1',count:2,columns:{
+ proposal_id:{values:['p1','p2']},item:{constant:'I'},tax_code:{constant:'IGI'},currency:{constant:'MXN'},original_amount:{values:['9007199254740992','0.01']},amount_rmb:{values:[null,null]}
+}},material_matrix:{saved_components:[],rows:[{item:'I',cells:{IGI:{proposals:[0,1],saved:[]}}}]}};
+const review={selections:new Set(['e','fee']),edits:{},matrixEdits:{}};
+const cell=w.resolveFeeEvidenceMatrixCell(draft,0,'IGI');
+assert.equal(cell.originalAmount,'9007199254740992.01');
+assert.equal(w.feeEvidenceMatrixTotals(draft,review).import_tax.allocatedText,'9007199254740992.01');
+assert.equal(w.serializeFeeEvidenceMatrix(draft,review).cells[0].original_amount,'9007199254740992.01');
+"""
+    )
+
+
 def test_indexed_ledger_component_is_resolved_only_from_ledger_unmatched_reference() -> None:
     run_js(
         r"""
@@ -288,12 +341,21 @@ assert(html.includes('unmatched.pdf')&&html.includes('第 4 页')&&html.includes
 def test_large_unmatched_source_collection_uses_bounded_source_pages() -> None:
     run_js(
         r"""
-const unmatched=Array.from({length:10000},(_,index)=>({reason_code:'MATERIAL_MATRIX_ITEM_INVALID',source_refs:[{file_name:`unmatched-${index}.pdf`,page:index+1}]}));
+const unmatched=Array.from({length:10000},(_,index)=>({reason_code:'MATERIAL_MATRIX_ITEM_INVALID',message:`warning-${index}`,source_refs:[{file_name:`unmatched-${index}.pdf`,page:index+1}]}));
+unmatched.push({reason_code:'MATERIAL_MATRIX_ITEM_INVALID',message:'warning-0',source_refs:[{file_name:'unmatched-9999.pdf',page:10000}]});
 const draft={evidence:{proposal_id:'e'},fee_splits:[],components:[],material_matrix:{rows:[],saved_components:[],unmatched_lines:unmatched}};
 const review={selections:new Set(),edits:{},matrixEdits:{}};
 let html=w.renderFeeEvidenceReviewDraft(draft,review);
 assert(html.includes('unmatched-0.pdf')&&!html.includes('unmatched-9999.pdf'));
 assert(html.includes('来源第 1 / 100 页')&&html.length<1000000);
+let warningAside=html.match(/<aside class="ocw-mf-matrix-unmatched">[\s\S]*?<\/aside>/)[0];
+assert.equal((warningAside.match(/<p>/g)||[]).length,100);
+assert(warningAside.includes('warning-0')&&!warningAside.includes('warning-9999'));
+assert(warningAside.includes('异常第 1 / 100 页')&&warningAside.includes('mf-fee-warning-next-page'));
+w.setFeeEvidenceWarningPage(review,draft,99);
+html=w.renderFeeEvidenceReviewDraft(draft,review);
+warningAside=html.match(/<aside class="ocw-mf-matrix-unmatched">[\s\S]*?<\/aside>/)[0];
+assert(warningAside.includes('warning-9999')&&!warningAside.includes('warning-0</p>'));
 w.setFeeEvidenceSourcePage(review,draft,99);
 html=w.renderFeeEvidenceReviewDraft(draft,review);
 assert(html.includes('unmatched-9999.pdf')&&!html.includes('unmatched-0.pdf ·'));
@@ -369,6 +431,8 @@ def test_workspace_binds_matrix_pager_actions() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text()
     assert "[data-action='mf-fee-matrix-prev-page'], [data-action='mf-fee-matrix-next-page']" in source
     assert "setFeeEvidenceMatrixPage" in source
+    assert "[data-action='mf-fee-warning-prev-page'], [data-action='mf-fee-warning-next-page']" in source
+    assert "setFeeEvidenceWarningPage" in source
 
 
 def test_workspace_invalidates_matrix_authority_totals_on_review_selection_or_edit() -> None:
@@ -421,8 +485,28 @@ w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','-1');
 assert.throws(()=>w.serializeFeeEvidenceMatrix(draft,review),/非负有限数/);
 w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','Infinity');
 assert.throws(()=>w.serializeFeeEvidenceMatrix(draft,review),/非负有限数/);
-w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','12.345');
-assert.throws(()=>w.serializeFeeEvidenceMatrix(draft,review),/最多保留两位小数/);
+assert.throws(()=>w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','12.345'),/最多保留两位小数/);
+"""
+    )
+
+
+def test_matrix_amount_bounds_reject_oversized_input_before_cell_resolution() -> None:
+    run_js(
+        DRAFT
+        + r"""
+const review={matrixEdits:{}};
+let resolveCalls=0;
+const resolve=w.resolveFeeEvidenceMatrixCell.bind(w);
+w.resolveFeeEvidenceMatrixCell=(...args)=>{resolveCalls+=1;return resolve(...args)};
+assert.throws(()=>w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','9'.repeat(65)),/文本过长/);
+assert.equal(resolveCalls,0);assert.deepEqual(review.matrixEdits,{});
+assert.throws(()=>w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','9'.repeat(29)),/数字位数过多/);
+assert.equal(resolveCalls,0);assert.deepEqual(review.matrixEdits,{});
+assert.throws(()=>w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','12.345'),/最多保留两位小数/);
+assert.equal(resolveCalls,0);assert.deepEqual(review.matrixEdits,{});
+w.setFeeEvidenceMatrixValue(review,draft,'ITEM-2','IVA','9'.repeat(26)+'.01');
+assert.equal(resolveCalls,1);
+assert.equal(review.matrixEdits['ITEM-2\u001fIVA'].value,'9'.repeat(26)+'.01');
 """
     )
 
@@ -433,12 +517,12 @@ def test_totals_exclude_missing_fx_allow_positive_balance_and_block_overage() ->
         + r"""
 const review={matrixEdits:{},edits:{}};
 let totals=w.feeEvidenceMatrixTotals(draft,review);
-assert.equal(totals.import_tax.allocatedOriginal,18);
-assert.equal(totals.import_tax.feeTotal,100);
-assert.equal(totals.import_tax.remaining,82);
+assert.equal(totals.import_tax.allocatedOriginal,'18');
+assert.equal(totals.import_tax.feeTotal,'100');
+assert.equal(totals.import_tax.remaining,'82');
 assert.equal(totals.import_tax.overage,false);
 assert.equal(totals.import_tax.allocatedRmb,7.2);
-assert.equal(totals.customs_clearance_fee.allocatedOriginal,30);
+assert.equal(totals.customs_clearance_fee.allocatedOriginal,'30');
 assert.equal(totals.customs_clearance_fee.allocatedRmb,0);
 assert.equal(totals.customs_clearance_fee.missingFx,true);
 w.setFeeEvidenceMatrixValue(review,draft,'ITEM-1','IGI','101');
@@ -455,7 +539,7 @@ def test_matrix_requires_one_selected_single_currency_fee_authority_per_nonempty
         + r"""
 const review={selections:new Set(['evidence:classification','fee:customs_clearance_fee']),edits:{},matrixEdits:{}};
 let totals=w.feeEvidenceFeeTotals(draft,review);
-assert.equal(totals.import_tax.feeTotal,0);assert.equal(totals.import_tax.currency,'');
+assert.equal(totals.import_tax.feeTotal,'0');assert.equal(totals.import_tax.currency,'');
 assert.equal(w.feeEvidenceMatrixEffectiveCell(draft,review,0,'IGI').currency,'');
 assert(w.renderFeeEvidenceReviewDraft(draft,review).includes('待选择费用币种'));
 assert.throws(()=>w.validateFeeEvidenceMatrix(draft,review),/请选择.*费用拆分/);
@@ -464,6 +548,13 @@ review.selections.add('fee:import_tax');review.selections.add('fee:import_tax:us
 w.invalidateFeeEvidenceMatrixTotals(review);
 assert.throws(()=>w.validateFeeEvidenceMatrix(draft,review),/币种/);
 review.selections.delete('fee:import_tax:usd');
+w.invalidateFeeEvidenceMatrixTotals(review);
+draft.fee_splits.push({proposal_id:'fee:import_tax:duplicate',logical_fee_key:'import_tax',currency:'MXN',amount:'0',default_selected:false});
+review.selections.add('fee:import_tax:duplicate');
+w.invalidateFeeEvidenceMatrixTotals(review);
+assert.equal(w.feeEvidenceFeeTotals(draft,review).import_tax.selectedCount,2);
+assert.throws(()=>w.validateFeeEvidenceMatrix(draft,review),/只能选择一条/);
+review.selections.delete('fee:import_tax:duplicate');
 w.invalidateFeeEvidenceMatrixTotals(review);
 assert.doesNotThrow(()=>w.validateFeeEvidenceMatrix(draft,review));
 """
@@ -646,13 +737,77 @@ def test_ready_poll_keeps_dirty_matrix_values() -> None:
         DRAFT
         + r"""
 global.window={setTimeout:fn=>fn()};
-const review={status:'RUNNING',runId:'RUN',progress_revision:1,selections:new Set(),edits:{},matrixEdits:{'ITEM-1\u001fIGI':{value:'21',dirty:true,sourceProposalIds:['component:1']}}};
+const review={status:'RUNNING',runId:'RUN',requestToken:'TOKEN',progress_revision:1,selections:new Set(),edits:{},matrixEdits:{'ITEM-1\u001fIGI':{value:'21',dirty:true,sourceProposalIds:['component:1']}}};
 const state={batchName:'B',feeEvidenceReview:review};
 w.materialFeeState=state;
 w.call=async()=>({ok:true,status:'READY',progress_revision:2,draft});
 w.updateFeeEvidenceReviewProgress=()=>{};
-await w.pollFeeEvidenceReview(state,'B','RUN');
+await w.pollFeeEvidenceReview(state,'B','RUN','TOKEN');
 assert.equal(state.feeEvidenceReview.matrixEdits['ITEM-1\u001fIGI'].value,'21');
 assert.equal(state.feeEvidenceReview.edits,review.edits);
+"""
+    )
+
+
+def test_review_start_gate_precedes_edit_session_and_blocks_same_or_different_source_duplicates() -> None:
+    run_integrated_js(
+        r"""
+let releaseSession;
+const sessionGate=new Promise(resolve=>{releaseSession=resolve});
+let sessionCalls=0;let startCalls=[];let pollCalls=[];
+const chain={empty(){return this},removeData(){return this}};
+const state={feeEvidenceReview:null,feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:{show:()=>{},$wrapper:{length:0,find:()=>chain}}};
+w.ensureMaterialFeeState=()=>state;
+w.materialFeeState=state;
+w.detailState={batchName:'B',versionName:'V',editToken:'T',expectedModified:'M'};
+w.ensureMaterialFeeEditSession=async()=>{sessionCalls+=1;return sessionGate};
+w.findMaterialFee=()=>({required_evidence_role:'expense_invoice'});
+w.updateFeeEvidenceReviewProgress=()=>{};
+w.pollFeeEvidenceReview=async(...args)=>{pollCalls.push(args)};
+w.call=async(method,args)=>{assert(method.endsWith('start_fee_evidence_review'));startCalls.push(args);return {ok:true,run_id:'RUN',status:'RUNNING',progress_revision:1}};
+const first=w.openFeeEvidenceReviewDialog('import_tax','a.pdf');
+const same=w.openFeeEvidenceReviewDialog('import_tax','a.pdf');
+const different=w.openFeeEvidenceReviewDialog('import_tax','b.pdf');
+await Promise.resolve();await Promise.resolve();
+assert.equal(sessionCalls,1);assert.equal(startCalls.length,0);
+releaseSession(true);
+await Promise.all([first,same,different]);
+assert.equal(startCalls.length,1);assert.equal(startCalls[0].attachment,'a.pdf');
+assert.equal(pollCalls.length,1);
+assert.equal(pollCalls[0][2],'RUN');assert.equal(pollCalls[0][3],state.feeEvidenceReview.requestToken);
+"""
+    )
+
+
+def test_review_start_aborts_when_material_fee_state_changes_during_session_acquire() -> None:
+    run_integrated_js(
+        r"""
+let releaseSession;const sessionGate=new Promise(resolve=>{releaseSession=resolve});let startCalls=0;
+const chain={empty(){return this},removeData(){return this}};
+const state={feeEvidenceReview:null,feeEvidenceReviewStartPromise:null,feeEvidenceReviewDialog:{show:()=>{},$wrapper:{length:0,find:()=>chain}}};
+w.ensureMaterialFeeState=()=>state;w.materialFeeState=state;
+w.detailState={batchName:'B',versionName:'V',editToken:'T',expectedModified:'M'};
+w.ensureMaterialFeeEditSession=async()=>sessionGate;w.updateFeeEvidenceReviewProgress=()=>{};
+w.call=async()=>{startCalls+=1;return {ok:true,run_id:'STALE',status:'RUNNING'}};
+const pending=w.openFeeEvidenceReviewDialog('import_tax','a.pdf');
+await Promise.resolve();w.materialFeeState={batchName:'OTHER'};releaseSession(true);await pending;
+assert.equal(startCalls,0);assert.equal(state.feeEvidenceReviewStartPromise,null);
+"""
+    )
+
+
+def test_stale_review_poll_token_or_run_never_reads_or_overwrites_current_review() -> None:
+    run_integrated_js(
+        r"""
+let calls=0;
+const current={status:'RUNNING',runId:'NEW',requestToken:'NEW-TOKEN',progress_revision:4};
+const state={batchName:'B',feeEvidenceReview:current};
+w.materialFeeState=state;
+w.call=async()=>{calls+=1;return {ok:true,status:'READY',draft:{marker:'stale'}}};
+w.updateFeeEvidenceReviewProgress=()=>{};
+await w.pollFeeEvidenceReview(state,'B','OLD','OLD-TOKEN');
+assert.equal(calls,0);assert.equal(state.feeEvidenceReview,current);assert.equal(state.feeEvidenceReview.draft,undefined);
+await w.pollFeeEvidenceReview(state,'B','NEW','WRONG-TOKEN');
+assert.equal(calls,0);assert.equal(state.feeEvidenceReview,current);
 """
     )
