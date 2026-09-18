@@ -51,3 +51,5 @@ mes_integration.patches.v1_0.add_material_request_source
 mes_integration.patches.v1_0.add_mes_material_request_monitoring_links
 
 mes_integration.patches.v1_0.move_mes_monitoring_links_to_system_logs
+
+mes_integration.patches.v1_0.reset_stock_projected_qty_prepared_report
