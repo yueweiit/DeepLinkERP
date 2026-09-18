@@ -7826,7 +7826,9 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-import-dialog .modal-body { max-height: calc(100vh - 150px); overflow: auto; }
 .ocw-mf-wiki-source-shell { display: grid; gap: 12px; }
 .ocw-mf-wiki-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; }
-.ocw-mf-wiki-toolbar > button { min-width: 120px; white-space: nowrap; }
+.ocw-mf-wiki-toolbar > :first-child { min-width: 0; }
+.ocw-mf-wiki-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.ocw-mf-wiki-toolbar-actions > button { min-width: 120px; white-space: nowrap; }
 .ocw-mf-wiki-search { display: grid; gap: 5px; color: #475467; font-size: 12px; }
 .ocw-mf-wiki-search input { min-height: 38px; border: 1px solid var(--mf-border, #dce6f2); border-radius: 7px; padding: 7px 10px; outline: none; }
 .ocw-mf-wiki-search input:focus { border-color: var(--mf-blue, #0b8cf0); box-shadow: 0 0 0 2px rgba(11, 140, 240, 0.12); }
@@ -7843,6 +7845,11 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-mf-wiki-reasons b { color: #076fbe; font-size: 11px; }
 .ocw-mf-wiki-card-meta { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid #e9eef5; padding-top: 8px; }
 .ocw-mf-wiki-error { padding: 9px 11px; border-radius: 7px; background: #fff0ee; color: #b42318; }
+
+@media (max-width: 700px) {
+  .ocw-mf-wiki-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+  .ocw-mf-wiki-toolbar-actions { justify-content: flex-end; }
+}
 
 .ocw-mf-wiki-import-preview { display: grid; gap: 12px; }
 .ocw-mf-wiki-import-preview .ocw-mf-import-table { max-height: 42vh; }
