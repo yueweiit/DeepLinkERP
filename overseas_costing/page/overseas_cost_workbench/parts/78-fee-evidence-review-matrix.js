@@ -166,11 +166,14 @@
   feeEvidenceReviewSourceRefs(draft = {}) {
     const cache = this.feeEvidenceDraftMatrixCache(draft);
     if (cache.allSourceRefs) return cache.allSourceRefs;
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const unmatched = matrix.unmatched_lines || draft.unmatched_lines || [];
     cache.allSourceRefs = this.feeEvidenceUniqueSourceRefs([
       ...(draft.evidence?.source_refs || []),
       ...(draft.fee_splits || []).flatMap((row) => row.source_refs || []),
       ...this.feeEvidenceLedgerComponents(draft).flatMap((row) => this.feeEvidenceComponentSourceRefs(row)),
       ...this.feeEvidenceMatrixSourceRefs(draft),
+      ...unmatched.flatMap((row) => this.feeEvidenceComponentSourceRefs(row)),
     ]);
     return cache.allSourceRefs;
   }

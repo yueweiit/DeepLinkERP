@@ -270,6 +270,37 @@ assert(!labels.some(x=>x.includes('must-not-scan.pdf')));
     )
 
 
+def test_unmatched_line_sources_are_visible_even_without_a_matrix_component() -> None:
+    run_js(
+        r"""
+const draft={evidence:{proposal_id:'e'},fee_splits:[],components:[],material_matrix:{rows:[],saved_components:[],unmatched_lines:[{
+ reason_code:'MATERIAL_MATRIX_COMPONENT_CONFLICT',message:'路由冲突',source_refs:[{file_name:'unmatched.pdf',page:4,text_line:8}],source_evidence:{file_name:'unmatched-image.png',image_region:{x:1,y:2}}
+}]}};
+const refs=w.feeEvidenceReviewSourceRefs(draft).map(ref=>w.feeEvidenceSourceLabel(ref));
+assert(refs.some(x=>x.includes('unmatched.pdf')&&x.includes('第 4 页')&&x.includes('文本第 8 行')));
+assert(refs.some(x=>x.includes('unmatched-image.png')&&x.includes('图片区域')));
+const html=w.renderFeeEvidenceReviewDraft(draft,{selections:new Set(),edits:{},matrixEdits:{}});
+assert(html.includes('unmatched.pdf')&&html.includes('第 4 页')&&html.includes('文本第 8 行'));
+"""
+    )
+
+
+def test_large_unmatched_source_collection_uses_bounded_source_pages() -> None:
+    run_js(
+        r"""
+const unmatched=Array.from({length:10000},(_,index)=>({reason_code:'MATERIAL_MATRIX_ITEM_INVALID',source_refs:[{file_name:`unmatched-${index}.pdf`,page:index+1}]}));
+const draft={evidence:{proposal_id:'e'},fee_splits:[],components:[],material_matrix:{rows:[],saved_components:[],unmatched_lines:unmatched}};
+const review={selections:new Set(),edits:{},matrixEdits:{}};
+let html=w.renderFeeEvidenceReviewDraft(draft,review);
+assert(html.includes('unmatched-0.pdf')&&!html.includes('unmatched-9999.pdf'));
+assert(html.includes('来源第 1 / 100 页')&&html.length<1000000);
+w.setFeeEvidenceSourcePage(review,draft,99);
+html=w.renderFeeEvidenceReviewDraft(draft,review);
+assert(html.includes('unmatched-9999.pdf')&&!html.includes('unmatched-0.pdf ·'));
+"""
+    )
+
+
 def test_ten_thousand_rows_are_paged_cached_and_keep_dirty_edits_across_pages() -> None:
     run_js(
         r"""
