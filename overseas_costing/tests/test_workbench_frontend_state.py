@@ -421,6 +421,7 @@ def test_overview_reconciles_purchase_approval_status_from_postgres_detail() -> 
 def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() -> None:
     detail_page = (PARTS / "82-detail-page.js").read_text(encoding="utf-8")
     workspace = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    workspace += (PARTS / "78-fee-evidence-review-matrix.js").read_text(encoding="utf-8")
     workspace += (PARTS / "79-material-import-grid.js").read_text(encoding="utf-8")
     stylesheet = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
     documents_block = detail_page.split("async renderDocumentsDetailTab()", 1)[1].split(

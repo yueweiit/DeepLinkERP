@@ -4413,7 +4413,7 @@
       <div class="ocw-mf-fee-review-source"><i></i><div><strong data-mf-fee-review-source-name>读取凭证资料</strong><span data-mf-fee-review-source-detail>等待后台任务</span></div><em data-mf-fee-review-source-status>等待</em></div>
       <div class="ocw-mf-ai-progress-warning" data-mf-fee-review-warning hidden></div>
       <div data-mf-fee-review-draft></div>
-      <footer><button class="ocw-outline-btn" type="button" data-action="mf-fee-review-discard" hidden>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-fee-review-apply" hidden>确认所选草稿</button></footer>
+      <footer><span>预览、编辑和关闭均不写入业务数据。</span><div><button class="ocw-outline-btn" type="button" data-action="mf-fee-review-discard" hidden>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-fee-review-apply" hidden>确认应用</button></div></footer>
     </div>`;
   }
 
@@ -4459,6 +4459,37 @@
         review.edits[proposalId][fieldname] = $input.attr("type") === "checkbox" ? ($input.prop("checked") ? 1 : 0) : String($input.val() ?? "");
         review.selections.add(proposalId);
         dialog.$wrapper.find(`[data-mf-fee-review-select][data-proposal-id='${proposalId.replace(/'/g, "\\'")}']`).prop("checked", true);
+        const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+        if (review.draft && $totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
+      });
+      dialog.$wrapper.on("input", "[data-mf-fee-matrix-input]", (event) => {
+        const $input = $(event.currentTarget);
+        const review = state.feeEvidenceReview;
+        if (!review?.draft) return;
+        this.setFeeEvidenceMatrixValue(review, review.draft, String($input.attr("data-item") || ""), String($input.attr("data-column-key") || ""), String($input.val() ?? ""));
+        const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+        if ($totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
+      });
+      dialog.$wrapper.on("change", "[data-mf-fee-review-edit]", () => {
+        const review = state.feeEvidenceReview;
+        if (!review?.draft) return;
+        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+      });
+      dialog.$wrapper.on("change", "[data-mf-fee-matrix-input]", () => {
+        const review = state.feeEvidenceReview;
+        if (!review?.draft) return;
+        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+      });
+      dialog.$wrapper.on("click", "[data-action='mf-fee-matrix-use-ai']", (event) => {
+        const $button = $(event.currentTarget);
+        const review = state.feeEvidenceReview;
+        if (!review?.draft) return;
+        this.adoptFeeEvidenceMatrixSuggestion(review, review.draft, String($button.attr("data-item") || ""), String($button.attr("data-column-key") || ""));
+        dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+      });
+      dialog.$wrapper.on("click", "[data-mf-fee-voucher-details] > summary", (event) => {
+        const review = state.feeEvidenceReview;
+        if (review) review.matrixDetailsOpen = !Boolean($(event.currentTarget).closest("details").prop("open"));
       });
       dialog.$wrapper.on("click", "[data-action='mf-fee-review-apply']", () => this.applyFeeEvidenceReview().catch((error) => this.showError(error)));
       dialog.$wrapper.on("click", "[data-action='mf-fee-review-discard']", () => this.discardFeeEvidenceReview().catch((error) => this.showError(error)));
@@ -4520,9 +4551,10 @@
         delete state.feeEvidenceReview.connection_error;
         if (result.status === "READY") {
           const draft = result.draft || {};
-          const proposals = [draft.evidence, ...(draft.fee_splits || []), ...(draft.components || [])].filter(Boolean);
-          state.feeEvidenceReview.selections = new Set(proposals.filter((row) => row.default_selected).map((row) => String(row.proposal_id || "")));
-          state.feeEvidenceReview.edits = {};
+          state.feeEvidenceReview.selections = state.feeEvidenceReview.selections || this.defaultFeeEvidenceReviewSelections(draft);
+          state.feeEvidenceReview.edits = state.feeEvidenceReview.edits || {};
+          state.feeEvidenceReview.draft = draft;
+          this.ensureFeeEvidenceMatrixState(state.feeEvidenceReview, draft);
         }
         this.updateFeeEvidenceReviewProgress();
       }
@@ -4552,53 +4584,10 @@
     const ready = review.status === "READY";
     $host.find("[data-action='mf-fee-review-apply'], [data-action='mf-fee-review-discard']").prop("hidden", !ready);
     if (ready && !$host.find("[data-mf-fee-review-draft]").data("rendered")) {
-      $host.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft || {})).data("rendered", true);
+      review.draft = review.draft || {};
+      this.ensureFeeEvidenceMatrixState(review, review.draft);
+      $host.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
     }
-  }
-
-  feeEvidenceSourceLabel(ref = {}) {
-    const region = ref.region || ref.image_region;
-    return [
-      ref.file_name || ref.attachment || ref.file,
-      ref.sheet,
-      ref.page ? `第 ${ref.page} 页` : "",
-      ref.text_line ? `文本第 ${ref.text_line} 行` : "",
-      ref.row ? `表格第 ${ref.row} 行` : "",
-      ref.cell ? `单元格 ${ref.cell}` : "",
-      region ? `图片区域 ${typeof region === "string" ? region : JSON.stringify(region)}` : "",
-      ref.path,
-    ].filter(Boolean).join(" · ");
-  }
-
-  renderFeeEvidenceReviewWarning(row = {}) {
-    if (!row.has_conflict && !row.needs_review && !row.warning) return "";
-    const message = row.warning || (row.has_conflict ? "AI 与规则结果冲突，请人工核对；默认不勾选。" : "证据或匹配信心不足，请人工核对；默认不勾选。");
-    return `<em class="ocw-mf-review-warning">${this.escape(message)}</em>`;
-  }
-
-  renderFeeEvidenceReviewDraft(draft) {
-    const evidence = draft.evidence || {};
-    const selected = (row) => row?.default_selected ? "checked" : "";
-    const statusOptions = [["ESTIMATED", "暂估"], ["ACTUAL", "实际"]];
-    const feeRows = draft.fee_splits || [];
-    const componentRows = draft.components || [];
-    const itemOptions = draft.item_options || [];
-    const refundParents = draft.refund_parent_options || [];
-    const evidenceId = this.escape(evidence.proposal_id || "evidence:classification");
-    const sourceRefs = [
-      ...(evidence.source_refs || []),
-      ...feeRows.flatMap((row) => row.source_refs || []),
-      ...componentRows.map((row) => row.source_evidence || {}).filter((row) => Object.keys(row).length),
-    ];
-    return `<div class="ocw-mf-fee-review-draft">
-      ${this.renderCurrentSourceReviewControls(draft.source_context || {}, null, { fees: true })}
-      <section class="${evidence.has_conflict || evidence.needs_review ? "is-warning" : ""}"><h4>凭证总额</h4>${this.renderFeeEvidenceReviewWarning(evidence)}<label class="ocw-mf-review-choice"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${evidenceId}" ${selected(evidence)}><span><strong>${this.escape(evidence.currency || "RMB")} ${this.escape(evidence.original_amount || "待人工补录")}</strong><small>${this.escape(evidence.reason || "请核对凭证类型和会计作用")}</small></span></label><div class="ocw-mf-review-fields"><label>凭证类型<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="evidence_type">${[["QUOTE","报价"],["PREPAYMENT","预付款／暂缴"],["FINAL_INVOICE","最终发票／结算单"],["TAX_CERTIFICATE","完税凭证"],["PAYMENT","付款流水"],["REFUND","退款／贷项"],["OTHER","其他"]].map(([value,label]) => `<option value="${value}" ${value === evidence.evidence_type ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>会计作用<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="accounting_role">${[["ESTIMATE","更新暂估"],["FINAL_BILL","最终账单"],["SETTLEMENT","付款／退款流水"],["REFERENCE","仅作参考"]].map(([value,label]) => `<option value="${value}" ${value === evidence.accounting_role ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>金额<input data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="original_amount" value="${this.escape(evidence.original_amount || "")}" inputmode="decimal"></label><label>币种<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="currency">${this.materialFeeCurrencyOptions().map((option) => `<option value="${option.value}" ${option.value === (evidence.currency || "RMB") ? "selected" : ""}>${option.label}</option>`).join("")}</select></label><label>方向<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="direction"><option value="DEBIT" ${evidence.direction !== "CREDIT" ? "selected" : ""}>付款／应付</option><option value="CREDIT" ${evidence.direction === "CREDIT" ? "selected" : ""}>退款／冲回</option></select></label><label>关联原付款<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="related_evidence"><option value="">无／待核对</option>${refundParents.map((row) => `<option value="${this.escape(row.name || "")}" ${String(row.name || "") === String(evidence.related_evidence || "") ? "selected" : ""}>${this.escape([row.currency, row.original_amount, row.attachment || row.name].filter(Boolean).join(" · "))}</option>`).join("")}</select></label><label class="is-checkbox"><input type="checkbox" data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="is_final" ${evidence.is_final ? "checked" : ""}> 已确认是最终凭证</label></div></section>
-      <section><h4>费用拆分</h4>${feeRows.length ? feeRows.map((row) => `<label class="ocw-mf-review-choice ${row.has_conflict || row.needs_review ? "is-warning" : ""}"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}><span><strong>${this.escape(row.label || row.logical_fee_key)} · ${this.escape(row.currency)} <input data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount" value="${this.escape(row.amount || "")}" inputmode="decimal"></strong><small><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount_status">${statusOptions.map(([value,label]) => `<option value="${value}" ${value === (row.amount_status || evidence.suggested_amount_status) ? "selected" : ""}>${label}</option>`).join("")}</select></small>${this.renderFeeEvidenceReviewWarning(row)}</span></label>`).join("") : "<p>未识别出可安全拆分的金额，可保留凭证后人工补录。</p>"}</section>
-      ${draft.missing_fx ? `<div class="ocw-mf-review-warning is-block">缺汇率：可保存原币事实，本次试算不会计入。</div>` : ""}
-      <section><h4>税种 · HS / SKU 匹配与分摊结果</h4><div class="ocw-mf-review-table"><table><thead><tr><th>选择</th><th>税种</th><th>HS</th><th>SKU 匹配</th><th>原币金额</th><th>RMB</th><th>依据</th></tr></thead><tbody>${componentRows.length ? componentRows.map((row) => `<tr class="${row.has_conflict || row.needs_review ? "is-warning" : ""}"><td><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}></td><td>${this.escape(row.tax_code || "--")}</td><td>${this.escape(row.hs_code || "--")}</td><td><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="item" aria-label="选择税费分项对应 SKU">${itemOptions.map((option) => `<option value="${this.escape(option.item || "")}" ${String(option.item || "") === String(row.item || "") ? "selected" : ""}>${this.escape([option.material_code, option.product_name].filter(Boolean).join(" · ") || option.stable_line_key || option.item)}</option>`).join("")}</select></td><td>${this.escape(row.currency || "MXN")} ${this.escape(row.original_amount || "--")}</td><td>${this.escape(row.amount_rmb || "缺汇率")}</td><td>${row.refund_parent ? `<small>原付款 ${this.escape(row.refund_parent)}</small>` : ""}${this.escape(row.allocation_basis || "--")}${this.renderFeeEvidenceReviewWarning(row)}</td></tr>`).join("") : `<tr><td colspan="7">暂无可精确归集的 SKU 税费分项</td></tr>`}</tbody></table></div></section>
-      <section class="is-difference"><h4>待归类差额</h4><strong>${this.escape(draft.unclassified_difference || "0.00")} ${this.escape(evidence.currency || "")}</strong><small>人工确认前不计入成本。</small></section>
-      <section><h4>来源证据</h4><p>${sourceRefs.map((ref) => this.escape(this.feeEvidenceSourceLabel(ref))).filter(Boolean).join("；") || "证据位置未完整提取，请人工核对原附件。"}</p></section>
-    </div>`;
   }
 
   async applyFeeEvidenceReview() {
@@ -4608,11 +4597,13 @@
     if (state.feeEvidenceReviewDialog?.$wrapper?.find("[data-current-source-review]").length) {
       review.edits = { ...(review.edits || {}), _source_review: this.collectCurrentSourceReviewControls(state.feeEvidenceReviewDialog.$wrapper) };
     }
+    const componentMatrix = this.validateFeeEvidenceMatrix(review.draft || {}, review);
     const result = await this.call("overseas_costing.api.fees.apply_fee_evidence_review", {
       batch_name: review.batchName || this.detailState.batchName,
       run_id: review.runId,
       selections_json: JSON.stringify([...review.selections]),
       edits_json: JSON.stringify(review.edits || {}),
+      component_matrix_json: JSON.stringify(componentMatrix),
       edit_token: this.detailState.editToken,
       expected_modified: this.detailState.expectedModified,
     }, false);
