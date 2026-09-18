@@ -57,6 +57,15 @@ def _tax_attachment(*line_items: dict, total: str = "15") -> dict:
     }
 
 
+def _resolved_cell(draft: dict, row_index: int, column_key: str) -> dict:
+    return service.resolve_material_matrix_cell(
+        draft["material_matrix"],
+        draft["components"],
+        row_index=row_index,
+        column_key=column_key,
+    )
+
+
 def test_fee_status_transition_requires_reason_for_unproved_actual_and_actual_rollback() -> None:
     with pytest.raises(ValueError, match="最终凭证|原因"):
         fee_service.validate_fee_status_transition(
@@ -358,7 +367,7 @@ def test_material_matrix_has_fixed_columns_and_every_item_in_repository_order() 
     }
     assert list(matrix["rows"][0]["cells"]) == ["IGI"]
     assert matrix["rows"][1]["cells"] == {}
-    assert matrix["empty_cell"]["origin"] == "EMPTY"
+    assert matrix["empty_cell"] == {"proposals": [], "saved": []}
 
 
 def test_material_matrix_empty_rows_use_sparse_cells_and_compact_shared_default() -> None:
@@ -382,8 +391,7 @@ def test_material_matrix_empty_rows_use_sparse_cells_and_compact_shared_default(
 
     assert len(matrix["rows"]) == 10000
     assert all(row["cells"] == {} for row in matrix["rows"])
-    assert matrix["empty_cell"]["origin"] == "EMPTY"
-    assert matrix["empty_cell"]["amount_rmb"] is None
+    assert matrix["empty_cell"] == {"proposals": [], "saved": []}
     assert len(serialized) < 5 * 1024 * 1024
 
 
@@ -421,12 +429,146 @@ def test_material_matrix_high_proposal_dedup_avoids_pairwise_ref_comparisons(
 
     matrix = service.build_material_matrix(items=_items(), components=components)
 
-    cell = matrix["rows"][0]["cells"]["IGI"]
-    assert cell["original_amount"] == "300.00"
-    assert cell["suggested_amount_rmb"] == "150"
-    assert len(cell["source_proposal_ids"]) == 300
-    assert len(cell["source_refs"]) == 300
+    assert matrix["rows"][0]["cells"]["IGI"] == {
+        "proposals": list(range(300)),
+        "saved": [],
+    }
+    resolved = service.resolve_material_matrix_cell(
+        matrix,
+        components,
+        row_index=0,
+        column_key="IGI",
+    )
+    assert resolved["original_amount"] == "300.00"
+    assert resolved["suggested_amount_rmb"] == "150"
+    assert len(resolved["source_proposal_ids"]) == 300
+    assert len(resolved["source_refs"]) == 300
     assert CountingRef.comparisons < 2000
+
+
+def test_material_matrix_cells_store_only_compact_component_references() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "10"},
+            },
+            {
+                "row_no": 9,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "5"},
+            },
+            total="15",
+        ),
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+        ai_review={
+            "line_item_matches": {
+                "8": ["ITEM-GLASSES"],
+                "9": ["ITEM-GLASSES"],
+            }
+        },
+    )
+
+    matrix = draft["material_matrix"]
+    assert matrix["rows"][0]["cells"]["IGI"] == {
+        "proposals": [0, 1],
+        "saved": [],
+    }
+    assert matrix["empty_cell"] == {"proposals": [], "saved": []}
+    assert matrix["saved_components"] == []
+    resolved = service.resolve_material_matrix_cell(
+        matrix,
+        draft["components"],
+        row_index=0,
+        column_key="IGI",
+    )
+    assert resolved["original_amount"] == "15.00"
+    assert resolved["suggested_amount_rmb"] == "7.5"
+    assert resolved["source_proposal_ids"] == ["component:1", "component:2"]
+    assert len(resolved["source_refs"]) == 2
+    assert resolved["has_warning"] is True
+
+
+def test_material_matrix_computes_component_routing_once_per_collected_row(
+    monkeypatch,
+) -> None:
+    component = {
+        "proposal_id": "component:1",
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "component_type": "IMPORT_TAX",
+        "fee_logical_key": "import_tax",
+        "tax_code": "IGI",
+        "currency": "MXN",
+        "original_amount": "10",
+        "amount_rmb": "5",
+    }
+    calls = 0
+    original = service._matrix_component_route
+
+    def counted_route(row):
+        nonlocal calls
+        calls += 1
+        return original(row)
+
+    monkeypatch.setattr(service, "_matrix_component_route", counted_route)
+
+    service.build_material_matrix(items=_items(), components=[component])
+
+    assert calls == 1
+
+
+def test_populated_ten_thousand_row_matrix_stays_under_eight_mib() -> None:
+    items = [
+        {
+            "name": f"ITEM-{index:05d}",
+            "stable_line_key": f"LINE-{index:05d}",
+            "material_code": f"M-{index:05d}",
+            "product_name": "测试物料",
+            "quantity": "1",
+            "unit": "PCS",
+            "hs_code": "90041000",
+        }
+        for index in range(10000)
+    ]
+    components = []
+    for item in items:
+        for column in ("IGI", "IVA", "DTA", "PRV", "PRV_IVA"):
+            components.append(
+                {
+                    "item": item["name"],
+                    "stable_line_key": item["stable_line_key"],
+                    "component_type": "IMPORT_TAX",
+                    "fee_logical_key": "import_tax",
+                    "tax_code": column,
+                    "currency": "MXN",
+                    "original_amount": "1",
+                    "amount_rmb": "0.5",
+                }
+            )
+        components.append(
+            {
+                "item": item["name"],
+                "stable_line_key": item["stable_line_key"],
+                "component_type": "CUSTOMS_SERVICE",
+                "fee_logical_key": "customs_clearance_fee",
+                "tax_code": "",
+                "currency": "MXN",
+                "original_amount": "1",
+                "amount_rmb": "0.5",
+            }
+        )
+
+    matrix = service.build_material_matrix(items=items, components=components)
+    serialized = json.dumps(
+        matrix, ensure_ascii=False, separators=(",", ":"), default=str
+    ).encode("utf-8")
+
+    assert all(len(row["cells"]) == 6 for row in matrix["rows"])
+    assert len(serialized) < 8 * 1024 * 1024
 
 
 def test_material_matrix_uses_complete_raw_items_without_expanding_ai_scope() -> None:
@@ -510,7 +652,7 @@ def test_material_matrix_aggregates_soft_anomaly_component_suggestions() -> None
     ]
     assert proposals and all(component["default_selected"] is False for component in proposals)
     assert all(component["needs_review"] is True for component in proposals)
-    cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
+    cell = _resolved_cell(draft, 0, "IGI")
     assert cell["original_amount"] == "15.00"
     assert cell["amount_rmb"] == "7.5"
     assert cell["suggested_amount_rmb"] == "7.5"
@@ -556,7 +698,16 @@ def test_material_matrix_saved_value_precedes_new_suggestion() -> None:
         ],
     )
 
-    cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
+    matrix = draft["material_matrix"]
+    assert matrix["rows"][0]["cells"]["IGI"] == {
+        "proposals": [0],
+        "saved": [0],
+    }
+    assert matrix["saved_components"][0]["id"] == "COMP-SAVED"
+    assert matrix["saved_components"][0]["source_refs"] == [
+        {"attachment": "ATT-OLD", "row": 2}
+    ]
+    cell = _resolved_cell(draft, 0, "IGI")
     assert cell["origin"] == "SAVED"
     assert cell["status"] == "CONFIRMED"
     assert cell["original_amount"] == "198.00"
@@ -590,8 +741,12 @@ def test_material_matrix_keeps_current_hs_and_exposes_voucher_hs_difference() ->
     row = draft["material_matrix"]["rows"][0]
     assert row["hs_code"] == "90041000"
     assert row["hs_suggestions"] == ["99999999"]
-    assert row["cells"]["IGI"]["has_warning"] is True
-    assert "99999999" in row["cells"]["IGI"]["warning"]
+    assert row["hs_suggestion_details"] == [
+        {"hs_code": "99999999", "proposals": [0], "saved": []}
+    ]
+    cell = _resolved_cell(draft, 0, "IGI")
+    assert cell["has_warning"] is True
+    assert "99999999" in cell["warning"]
 
 
 def test_material_matrix_keeps_unmatched_lines_outside_material_rows() -> None:
@@ -639,7 +794,7 @@ def test_material_matrix_missing_fx_keeps_rmb_blank() -> None:
         ai_review={"line_item_matches": {"8": ["ITEM-GLASSES"]}},
     )
 
-    cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
+    cell = _resolved_cell(draft, 0, "IGI")
     assert cell["original_amount"] == "10.00"
     assert cell["amount_rmb"] is None
     assert cell["suggested_amount_rmb"] is None
@@ -1100,7 +1255,7 @@ def test_invalid_service_row_does_not_discard_valid_sibling_from_matrix() -> Non
         if row["fee_logical_key"] == "customs_clearance_fee"
     ]
     assert [row["item"] for row in clearance] == ["ITEM-GLASSES"]
-    cell = draft["material_matrix"]["rows"][0]["cells"]["CUSTOMS_SERVICE"]
+    cell = _resolved_cell(draft, 0, "CUSTOMS_SERVICE")
     assert cell["original_amount"] == "30.00"
     assert cell["amount_rmb"] == "15"
     assert draft["unmatched_lines"] == [
