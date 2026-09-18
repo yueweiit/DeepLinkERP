@@ -123,6 +123,7 @@ def enqueue_crm_production_progress_event(payload, delivery_note):
             trigger_event="production_progress_reported",
             delivery_note_name=delivery_note.name,
             items=items,
+            production_batch_no=get_crm_production_batch_no(payload, delivery_note),
             remark=get_crm_production_progress_remark(delivery_note.name, items),
         )
     except Exception:
@@ -130,6 +131,30 @@ def enqueue_crm_production_progress_event(payload, delivery_note):
             title="Failed to enqueue CRM production progress event",
             message=frappe.get_traceback(),
         )
+
+
+def get_crm_production_batch_no(payload, delivery_note):
+    """Return the batch identity used to keep production retries idempotent."""
+    for key in ("production_batch_no", "productionBatchNo", "batch_no", "batchNo"):
+        batch_no = str(payload.get(key) or "").strip()
+        if batch_no:
+            return batch_no
+
+    batch_numbers = {
+        str(row.get(key) or "").strip()
+        for row in payload.get("items") or []
+        if isinstance(row, dict)
+        for key in ("production_batch_no", "productionBatchNo", "batch_no", "batchNo")
+        if str(row.get(key) or "").strip()
+    }
+    if len(batch_numbers) == 1:
+        return batch_numbers.pop()
+    if len(batch_numbers) > 1:
+        return ",".join(sorted(batch_numbers))
+
+    # Older MES payloads did not carry a batch number. The ERP draft created for
+    # this one report is still a stable, unique event identity for retries.
+    return delivery_note.name
 
 
 def get_crm_production_progress_items(mes_items):
