@@ -9,12 +9,57 @@
     ];
   }
 
+  feeEvidenceMatrixPageSize() {
+    return 100;
+  }
+
+  feeEvidenceMatrixPageWindow(draft = {}, review = {}) {
+    const rows = this.feeEvidenceMaterialMatrix(draft).rows || [];
+    const pageSize = this.feeEvidenceMatrixPageSize();
+    const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+    const page = Math.max(0, Math.min(pageCount - 1, Number.isInteger(review.matrixPage) ? review.matrixPage : 0));
+    const start = page * pageSize;
+    return { page, pageCount, pageSize, start, end: Math.min(rows.length, start + pageSize), total: rows.length };
+  }
+
+  setFeeEvidenceMatrixPage(review = {}, draft = {}, page = 0) {
+    const window = this.feeEvidenceMatrixPageWindow(draft, { ...review, matrixPage: Number(page) });
+    review.matrixPage = window.page;
+    return window;
+  }
+
+  feeEvidenceSourcePageWindow(draft = {}, review = {}) {
+    const refs = this.feeEvidenceReviewSourceRefs(draft);
+    const pageSize = 100;
+    const pageCount = Math.max(1, Math.ceil(refs.length / pageSize));
+    const page = Math.max(0, Math.min(pageCount - 1, Number.isInteger(review.sourcePage) ? review.sourcePage : 0));
+    const start = page * pageSize;
+    return { refs, page, pageCount, start, end: Math.min(refs.length, start + pageSize), total: refs.length };
+  }
+
+  setFeeEvidenceSourcePage(review = {}, draft = {}, page = 0) {
+    const window = this.feeEvidenceSourcePageWindow(draft, { ...review, sourcePage: Number(page) });
+    review.sourcePage = window.page;
+    return window;
+  }
+
   feeEvidenceMatrixColumnKey(component = {}) {
     const type = String(component.component_type || "").toUpperCase();
     const taxCode = String(component.tax_code || "").toUpperCase();
     const feeKey = String(component.fee_logical_key || component.logical_fee_key || "");
     if (type === "CUSTOMS_SERVICE" || taxCode === "CUSTOMS_SERVICE" || feeKey === "customs_clearance_fee") return "CUSTOMS_SERVICE";
     return this.feeEvidenceMatrixColumns().some((column) => column.key === taxCode && column.feeLogicalKey === "import_tax") ? taxCode : "";
+  }
+
+  feeEvidenceDraftMatrixCache(draft = {}) {
+    this._feeEvidenceDraftMatrixCaches = this._feeEvidenceDraftMatrixCaches || new WeakMap();
+    let cache = this._feeEvidenceDraftMatrixCaches.get(draft);
+    const matrix = draft.material_matrix || null;
+    if (!cache || cache.matrix !== matrix) {
+      cache = { matrix, cells: new Map(), rowIndexes: null, populatedCoordinates: null, sourceRefs: null, allSourceRefs: null };
+      this._feeEvidenceDraftMatrixCaches.set(draft, cache);
+    }
+    return cache;
   }
 
   feeEvidenceMaterialMatrix(draft = {}) {
@@ -63,12 +108,20 @@
     return "仅记台账";
   }
 
+  feeEvidenceStableKey(value) {
+    if (Array.isArray(value)) return `[${value.map((item) => this.feeEvidenceStableKey(item)).join(",")}]`;
+    if (value && typeof value === "object") {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${this.feeEvidenceStableKey(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+
   feeEvidenceComponentSourceRefs(component = {}) {
     const refs = [];
     const seen = new Set();
     const append = (ref) => {
       if (!ref || typeof ref !== "object" || Array.isArray(ref)) return;
-      const key = JSON.stringify(ref);
+      const key = this.feeEvidenceStableKey(ref);
       if (seen.has(key)) return;
       seen.add(key);
       refs.push(ref);
@@ -76,6 +129,50 @@
     (component.source_refs || []).forEach(append);
     append(component.source_evidence);
     return refs;
+  }
+
+  feeEvidenceUniqueSourceRefs(rows = []) {
+    const refs = [];
+    const seen = new Set();
+    rows.forEach((ref) => {
+      if (!ref || typeof ref !== "object" || Array.isArray(ref)) return;
+      const key = this.feeEvidenceStableKey(ref);
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push(ref);
+    });
+    return refs;
+  }
+
+  feeEvidenceMatrixSourceRefs(draft = {}) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (cache.sourceRefs) return cache.sourceRefs;
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const refs = [];
+    (matrix.rows || []).forEach((row) => {
+      Object.values(row.cells || {}).forEach((cell) => {
+        (cell?.proposals || []).forEach((index) => {
+          refs.push(...this.feeEvidenceComponentSourceRefs(this.feeEvidenceComponentAt(draft, index) || {}));
+        });
+        (cell?.saved || []).forEach((index) => {
+          refs.push(...this.feeEvidenceComponentSourceRefs((matrix.saved_components || [])[index] || {}));
+        });
+      });
+    });
+    cache.sourceRefs = this.feeEvidenceUniqueSourceRefs(refs);
+    return cache.sourceRefs;
+  }
+
+  feeEvidenceReviewSourceRefs(draft = {}) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (cache.allSourceRefs) return cache.allSourceRefs;
+    cache.allSourceRefs = this.feeEvidenceUniqueSourceRefs([
+      ...(draft.evidence?.source_refs || []),
+      ...(draft.fee_splits || []).flatMap((row) => row.source_refs || []),
+      ...this.feeEvidenceLedgerComponents(draft).flatMap((row) => this.feeEvidenceComponentSourceRefs(row)),
+      ...this.feeEvidenceMatrixSourceRefs(draft),
+    ]);
+    return cache.allSourceRefs;
   }
 
   feeEvidenceLedgerComponents(draft = {}) {
@@ -213,6 +310,9 @@
   }
 
   resolveFeeEvidenceMatrixCell(draft = {}, rowIndex, columnKey) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    const cacheKey = `${rowIndex}:${columnKey}`;
+    if (cache.cells.has(cacheKey)) return cache.cells.get(cacheKey);
     const matrix = this.feeEvidenceMaterialMatrix(draft);
     const row = matrix.rows?.[rowIndex] || {};
     const compact = row.cells?.[columnKey] || { proposals: [], saved: [] };
@@ -233,7 +333,7 @@
     if (hsSuggestions.length) warnings.push(`HS 差异：凭证建议 ${hsSuggestions.join("、")}，当前物料为 ${row.hs_code || "未填写"}。`);
     if (current.missingFx || suggestion.missingFx) warnings.push("缺汇率");
     if (saved.length && proposals.length) warnings.push("已保存值优先，AI／规则建议仅供对照。");
-    return {
+    const resolved = {
       originalAmount: current.originalAmount,
       currency: current.currency,
       amountRmb: current.amountRmb,
@@ -245,6 +345,8 @@
       sourceProposalIds: suggestion.sourceProposalIds,
       warning: [...new Set(warnings.filter(Boolean))].join(" "),
     };
+    cache.cells.set(cacheKey, resolved);
+    return resolved;
   }
 
   feeEvidenceMatrixEditKey(item, columnKey) {
@@ -253,12 +355,20 @@
 
   ensureFeeEvidenceMatrixState(review = {}, draft = {}) {
     review.matrixEdits = review.matrixEdits || {};
+    if (!Number.isInteger(review.matrixRevision)) review.matrixRevision = 0;
     if (review.matrixDetailsOpen === undefined) review.matrixDetailsOpen = false;
+    if (!Number.isInteger(review.matrixPage)) review.matrixPage = 0;
+    if (!Number.isInteger(review.sourcePage)) review.sourcePage = 0;
+    this.setFeeEvidenceMatrixPage(review, draft, review.matrixPage);
     return review.matrixEdits;
   }
 
   feeEvidenceMatrixRowIndex(draft = {}, item) {
-    return this.feeEvidenceMaterialMatrix(draft).rows.findIndex((row) => String(row.item || "") === String(item || ""));
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (!cache.rowIndexes) {
+      cache.rowIndexes = new Map(this.feeEvidenceMaterialMatrix(draft).rows.map((row, index) => [String(row.item || ""), index]));
+    }
+    return cache.rowIndexes.get(String(item || "")) ?? -1;
   }
 
   setFeeEvidenceMatrixValue(review, draft, item, columnKey, rawValue) {
@@ -267,25 +377,109 @@
     if (rowIndex < 0 || !this.feeEvidenceMatrixColumns().some((column) => column.key === columnKey)) throw new Error("物料或税费列已变更，请刷新草稿。");
     const base = this.resolveFeeEvidenceMatrixCell(draft, rowIndex, columnKey);
     const value = String(rawValue ?? "").trim();
-    review.matrixEdits[this.feeEvidenceMatrixEditKey(item, columnKey)] = {
+    this.setFeeEvidenceMatrixEdit(review, draft, rowIndex, columnKey, {
       value,
       dirty: true,
       cleared: value === "",
       sourceProposalIds: [...base.sourceProposalIds],
-    };
+    });
   }
 
   adoptFeeEvidenceMatrixSuggestion(review, draft, item, columnKey) {
     this.ensureFeeEvidenceMatrixState(review, draft);
     const rowIndex = this.feeEvidenceMatrixRowIndex(draft, item);
     const base = this.resolveFeeEvidenceMatrixCell(draft, rowIndex, columnKey);
-    review.matrixEdits[this.feeEvidenceMatrixEditKey(item, columnKey)] = {
+    this.setFeeEvidenceMatrixEdit(review, draft, rowIndex, columnKey, {
       value: String(base.suggestedOriginalAmount || ""),
       dirty: true,
       cleared: !base.suggestedOriginalAmount,
       adoptedAI: true,
       sourceProposalIds: [...base.sourceProposalIds],
-    };
+    });
+  }
+
+  setFeeEvidenceMatrixEdit(review, draft, rowIndex, columnKey, edit) {
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const row = matrix.rows[rowIndex] || {};
+    const totalsCache = review._feeEvidenceMatrixTotals;
+    const signature = this.feeEvidenceMatrixTotalsSignature(draft, review);
+    const canApplyDelta = totalsCache?.revision === review.matrixRevision && totalsCache.signature === signature;
+    const previous = canApplyDelta ? this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey) : null;
+    review.matrixEdits[this.feeEvidenceMatrixEditKey(row.item, columnKey)] = edit;
+    review.matrixRevision += 1;
+    if (!canApplyDelta) return;
+    try {
+      const current = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey);
+      const column = this.feeEvidenceMatrixColumns().find((candidate) => candidate.key === columnKey);
+      const group = totalsCache.value[column?.feeLogicalKey];
+      if (!group) throw new Error("税费列已变更。");
+      this.feeEvidenceAccumulateTotalCell(group, previous, -1);
+      this.feeEvidenceAccumulateTotalCell(group, current, 1);
+      this.feeEvidenceFinalizeTotalGroup(group);
+      totalsCache.revision = review.matrixRevision;
+    } catch (_error) {
+      review._feeEvidenceMatrixTotals = null;
+    }
+  }
+
+  feeEvidenceMatrixPopulatedCoordinates(draft = {}, review = {}) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (!cache.populatedCoordinates) {
+      const allowed = new Set(this.feeEvidenceMatrixColumns().map((column) => column.key));
+      cache.populatedCoordinates = [];
+      this.feeEvidenceMaterialMatrix(draft).rows.forEach((row, rowIndex) => {
+        Object.keys(row.cells || {}).forEach((columnKey) => {
+          if (allowed.has(columnKey)) cache.populatedCoordinates.push([rowIndex, columnKey]);
+        });
+      });
+    }
+    const result = [...cache.populatedCoordinates];
+    const seen = new Set(result.map(([rowIndex, columnKey]) => `${rowIndex}:${columnKey}`));
+    Object.keys(review.matrixEdits || {}).forEach((editKey) => {
+      const [item, columnKey] = editKey.split("\u001f");
+      const rowIndex = this.feeEvidenceMatrixRowIndex(draft, item);
+      const key = `${rowIndex}:${columnKey}`;
+      if (rowIndex >= 0 && !seen.has(key)) {
+        seen.add(key);
+        result.push([rowIndex, columnKey]);
+      }
+    });
+    return result;
+  }
+
+  feeEvidenceMatrixTotalsSignature(draft = {}, review = {}) {
+    const feeIds = new Set((draft.fee_splits || []).map((row) => String(row.proposal_id || "")));
+    const edits = {};
+    Object.entries(review.edits || {}).forEach(([proposalId, values]) => {
+      if (feeIds.has(proposalId)) edits[proposalId] = values;
+    });
+    return JSON.stringify({
+      selections: review.selections && typeof review.selections[Symbol.iterator] === "function" ? [...review.selections].filter((id) => feeIds.has(String(id))).sort() : null,
+      edits,
+    });
+  }
+
+  invalidateFeeEvidenceMatrixTotals(review = {}) {
+    review._feeEvidenceMatrixTotals = null;
+  }
+
+  feeEvidenceAccumulateTotalCell(group, cell, direction) {
+    if (!String(cell?.value || "").trim()) return;
+    const multiplier = BigInt(direction);
+    group.activeCount += direction;
+    group.allocatedMinor += this.feeEvidenceAmountMinor(cell.value) * multiplier;
+    if (cell.missingFx || cell.amountRmb === null) group.missingFxCount += direction;
+    else if (Number.isFinite(Number(cell.amountRmb))) group.allocatedRmb += direction * Number(cell.amountRmb);
+  }
+
+  feeEvidenceFinalizeTotalGroup(group) {
+    group.allocatedText = this.feeEvidenceMinorText(group.allocatedMinor);
+    group.allocatedOriginal = Number(group.allocatedText);
+    group.remainingMinor = group.feeTotalMinor - group.allocatedMinor;
+    group.remainingText = this.feeEvidenceMinorText(group.remainingMinor);
+    group.remaining = Number(group.remainingText);
+    group.missingFx = group.missingFxCount > 0;
+    group.overage = group.remainingMinor < 0n;
   }
 
   feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey) {
@@ -295,24 +489,31 @@
     const edit = review?.matrixEdits?.[this.feeEvidenceMatrixEditKey(row.item, columnKey)];
     const value = edit ? String(edit.value ?? "") : String(base.originalAmount || "");
     const column = this.feeEvidenceMatrixColumns().find((candidate) => candidate.key === columnKey);
-    const feeCurrency = this.feeEvidenceFeeTotals(draft, review)[column?.feeLogicalKey]?.currency || "";
-    const currency = base.currency || feeCurrency || String(draft.evidence?.currency || "").toUpperCase();
-    let amountRmb = base.amountRmb;
-    let missingFx = base.missingFx;
+    const feeAuthority = this.feeEvidenceFeeTotals(draft, review)[column?.feeLogicalKey] || {};
+    const currency = String(feeAuthority.currency || "");
+    const hasAuthority = Number(feeAuthority.selectedCount || 0) > 0 && currency && currency !== "MIXED";
+    let amountRmb = null;
+    let missingFx = Boolean(value);
     const baseAmount = Number(base.originalAmount);
     const editedAmount = Number(value);
-    if (edit?.adoptedAI && value) {
-      amountRmb = base.suggestedAmountRmb;
-      missingFx = base.suggestedAmountRmb === null;
-    } else if (edit && value && Number.isFinite(baseAmount) && baseAmount > 0 && base.amountRmb !== null && base.amountRmb !== "") {
-      amountRmb = this.feeEvidencePlainNumber(editedAmount * Number(base.amountRmb) / baseAmount);
-      missingFx = false;
-    } else if (edit && value && (!Number.isFinite(baseAmount) || baseAmount <= 0)) {
-      amountRmb = currency === "RMB" ? this.feeEvidencePlainNumber(editedAmount) : null;
-      missingFx = currency !== "RMB";
-    } else if (!value) {
+    if (!value) {
       amountRmb = "";
       missingFx = false;
+    } else if (!hasAuthority) {
+      amountRmb = null;
+      missingFx = true;
+    } else if (currency === "RMB") {
+      amountRmb = this.normalizeFeeEvidenceMatrixAmount(value);
+      missingFx = false;
+    } else if (edit?.adoptedAI && base.suggestedCurrency === currency) {
+      amountRmb = base.suggestedAmountRmb;
+      missingFx = base.suggestedAmountRmb === null;
+    } else if (base.currency === currency && edit && Number.isFinite(baseAmount) && baseAmount > 0 && base.amountRmb !== null && base.amountRmb !== "") {
+      amountRmb = this.feeEvidencePlainNumber(editedAmount * Number(base.amountRmb) / baseAmount);
+      missingFx = false;
+    } else if (base.currency === currency && !edit) {
+      amountRmb = base.amountRmb;
+      missingFx = base.missingFx || base.amountRmb === null;
     }
     return {
       ...base,
@@ -328,15 +529,28 @@
   }
 
   normalizeFeeEvidenceMatrixAmount(rawValue) {
+    return this.feeEvidenceMinorText(this.feeEvidenceAmountMinor(rawValue));
+  }
+
+  feeEvidenceAmountMinor(rawValue) {
     const value = String(rawValue ?? "").trim();
-    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) || !Number.isFinite(Number(value)) || Number(value) < 0) {
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) {
       throw new Error("物料税费金额必须是非负有限数。");
     }
     const [integerRaw, decimalRaw = ""] = (value.startsWith(".") ? `0${value}` : value).split(".");
     const integer = integerRaw.replace(/^0+(?=\d)/, "") || "0";
     const decimal = decimalRaw.replace(/0+$/, "");
     if (decimal.length > 2) throw new Error("物料税费金额最多保留两位小数。");
-    return decimal ? `${integer}.${decimal}` : integer;
+    return (BigInt(integer) * 100n) + BigInt((decimal + "00").slice(0, 2));
+  }
+
+  feeEvidenceMinorText(rawMinor) {
+    const minor = typeof rawMinor === "bigint" ? rawMinor : BigInt(rawMinor || 0);
+    const negative = minor < 0n;
+    const absolute = negative ? -minor : minor;
+    const integer = absolute / 100n;
+    const decimal = String(absolute % 100n).padStart(2, "0").replace(/0+$/, "");
+    return `${negative ? "-" : ""}${integer}${decimal ? `.${decimal}` : ""}`;
   }
 
   serializeFeeEvidenceMatrix(draft = {}, review = {}) {
@@ -358,46 +572,68 @@
   }
 
   feeEvidenceFeeTotals(draft = {}, review = {}) {
-    const result = { import_tax: { feeTotal: 0, currency: "" }, customs_clearance_fee: { feeTotal: 0, currency: "" } };
+    const create = () => ({ feeTotal: 0, feeTotalMinor: 0n, feeTotalText: "0", currency: "", selectedCount: 0, amountValid: true, currencyValid: true });
+    const result = { import_tax: create(), customs_clearance_fee: create() };
+    const hasSelectionState = review.selections && typeof review.selections.has === "function";
     (draft.fee_splits || []).forEach((split) => {
       const key = String(split.logical_fee_key || "");
       if (!result[key]) return;
+      const proposalId = String(split.proposal_id || "");
+      const isSelected = hasSelectionState ? review.selections.has(proposalId) : Boolean(split.default_selected);
+      if (!isSelected) return;
       const edit = review.edits?.[String(split.proposal_id || "")] || {};
-      const amount = Number(edit.amount ?? split.amount);
-      if (Number.isFinite(amount)) result[key].feeTotal += amount;
-      const currency = String(edit.currency ?? split.currency ?? "").toUpperCase();
+      try {
+        result[key].feeTotalMinor += this.feeEvidenceAmountMinor(edit.amount ?? split.amount);
+      } catch (_error) {
+        result[key].amountValid = false;
+      }
+      const currency = String(edit.currency ?? split.currency ?? "").toUpperCase().replace("CNY", "RMB");
       if (currency) result[key].currency = result[key].currency && result[key].currency !== currency ? "MIXED" : currency;
+      if (!{"RMB": 1, "MXN": 1, "USD": 1}[currency]) result[key].currencyValid = false;
+      result[key].selectedCount += 1;
+    });
+    Object.values(result).forEach((group) => {
+      group.feeTotalText = this.feeEvidenceMinorText(group.feeTotalMinor);
+      group.feeTotal = Number(group.feeTotalText);
     });
     return result;
   }
 
   feeEvidenceMatrixTotals(draft = {}, review = {}) {
+    this.ensureFeeEvidenceMatrixState(review, draft);
+    const signature = this.feeEvidenceMatrixTotalsSignature(draft, review);
+    if (review._feeEvidenceMatrixTotals?.revision === review.matrixRevision && review._feeEvidenceMatrixTotals.signature === signature) {
+      return review._feeEvidenceMatrixTotals.value;
+    }
     const feeTotals = this.feeEvidenceFeeTotals(draft, review);
     const totals = {
-      import_tax: { ...feeTotals.import_tax, allocatedOriginal: 0, allocatedRmb: 0, missingFx: false },
-      customs_clearance_fee: { ...feeTotals.customs_clearance_fee, allocatedOriginal: 0, allocatedRmb: 0, missingFx: false },
+      import_tax: { ...feeTotals.import_tax, allocatedMinor: 0n, allocatedOriginal: 0, allocatedText: "0", allocatedRmb: 0, missingFx: false, missingFxCount: 0, activeCount: 0 },
+      customs_clearance_fee: { ...feeTotals.customs_clearance_fee, allocatedMinor: 0n, allocatedOriginal: 0, allocatedText: "0", allocatedRmb: 0, missingFx: false, missingFxCount: 0, activeCount: 0 },
     };
-    const matrix = this.feeEvidenceMaterialMatrix(draft);
-    matrix.rows.forEach((_row, rowIndex) => {
-      this.feeEvidenceMatrixColumns().forEach((column) => {
-        const cell = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, column.key);
-        if (!String(cell.value || "").trim()) return;
-        const amount = Number(cell.value);
-        if (Number.isFinite(amount)) totals[column.feeLogicalKey].allocatedOriginal += amount;
-        if (cell.missingFx || cell.amountRmb === null) totals[column.feeLogicalKey].missingFx = true;
-        else if (Number.isFinite(Number(cell.amountRmb))) totals[column.feeLogicalKey].allocatedRmb += Number(cell.amountRmb);
-      });
+    const columns = new Map(this.feeEvidenceMatrixColumns().map((column) => [column.key, column]));
+    this.feeEvidenceMatrixPopulatedCoordinates(draft, review).forEach(([rowIndex, columnKey]) => {
+        const column = columns.get(columnKey);
+        if (!column) return;
+        const cell = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey);
+        this.feeEvidenceAccumulateTotalCell(totals[column.feeLogicalKey], cell, 1);
     });
     Object.values(totals).forEach((group) => {
-      group.remaining = group.feeTotal - group.allocatedOriginal;
-      group.overage = group.remaining < -0.000001;
+      this.feeEvidenceFinalizeTotalGroup(group);
     });
+    review._feeEvidenceMatrixTotals = { revision: review.matrixRevision, signature, value: totals };
     return totals;
   }
 
   validateFeeEvidenceMatrix(draft = {}, review = {}) {
     const payload = this.serializeFeeEvidenceMatrix(draft, review);
     const totals = this.feeEvidenceMatrixTotals(draft, review);
+    const labels = { import_tax: "进口税费", customs_clearance_fee: "清关费" };
+    Object.entries(totals).forEach(([key, group]) => {
+      if (!group.activeCount) return;
+      if (!group.selectedCount) throw new Error(`请选择${labels[key] || key}费用拆分后再确认。`);
+      if (!group.currencyValid || !group.currency || group.currency === "MIXED") throw new Error(`${labels[key] || key}费用拆分必须使用唯一支持币种。`);
+      if (!group.amountValid) throw new Error(`${labels[key] || key}费用总额必须是有效非负金额。`);
+    });
     const overage = Object.values(totals).find((group) => group.overage);
     if (overage) throw new Error("已分摊金额超过费用总额，请调整后再确认。");
     return payload;
@@ -466,10 +702,11 @@
     const cell = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, column.key);
     const classes = [cell.warning ? "is-warning" : "", cell.dirty ? "is-dirty" : "", cell.origin === "SAVED" ? "is-manual" : ""].filter(Boolean).join(" ");
     const rmb = cell.value ? (cell.missingFx || cell.amountRmb === null ? "缺汇率" : `¥ ${this.escape(cell.amountRmb || "0")}`) : "未分摊";
+    const currencyLabel = cell.currency || "待选择费用币种";
     const suggestion = cell.origin === "SAVED" && cell.suggestedOriginalAmount ? `<div class="ocw-mf-matrix-suggestion"><span>AI 建议 ${this.escape(cell.suggestedCurrency || cell.currency)} ${this.escape(cell.suggestedOriginalAmount)}</span><button type="button" data-action="mf-fee-matrix-use-ai" data-item="${this.escape(row.item || "")}" data-column-key="${column.key}">采用 AI 建议</button></div>` : "";
     return `<td class="ocw-mf-matrix-cell ${classes}" data-mf-fee-matrix-cell="${this.escape(row.item || "")}:${column.key}">
       <label><span class="sr-only">${this.escape(row.material_code || row.item || "")} ${column.label}</span><input data-mf-fee-matrix-input="1" data-item="${this.escape(row.item || "")}" data-column-key="${column.key}" inputmode="decimal" value="${this.escape(cell.value)}" placeholder="补录"></label>
-      <small>${this.escape(cell.currency || this.feeEvidenceFeeTotals(draft, review)[column.feeLogicalKey]?.currency || draft.evidence?.currency || "")} · ${rmb}</small>
+      <small>${this.escape(currencyLabel)} · ${rmb}</small>
       ${cell.dirty && !cell.adoptedAI ? `<b class="ocw-mf-matrix-manual-badge">人工调整</b>` : (cell.origin === "SAVED" && !cell.adoptedAI ? `<b class="ocw-mf-matrix-manual-badge">人工值</b>` : (cell.value ? `<b class="ocw-mf-matrix-ai-badge">AI／规则</b>` : ""))}
       ${suggestion}${cell.warning ? `<em>${this.escape(cell.warning)}</em>` : ""}
     </td>`;
@@ -477,7 +714,7 @@
 
   renderFeeEvidenceMatrixFooter(draft, review) {
     const totals = this.feeEvidenceMatrixTotals(draft, review);
-    const render = (label, group) => `<div class="${group.overage ? "is-overage" : ""}"><b>${label}已分摊</b><span>${this.escape(group.currency || draft.evidence?.currency || "")} ${this.feeEvidencePlainNumber(group.allocatedOriginal)}${group.missingFx ? " · RMB 缺汇率" : ` · RMB ${this.feeEvidencePlainNumber(group.allocatedRmb)}`}</span><small>费用总额 ${this.feeEvidencePlainNumber(group.feeTotal)} · 剩余差额 ${this.feeEvidencePlainNumber(group.remaining)}</small></div>`;
+    const render = (label, group) => `<div class="${group.overage ? "is-overage" : ""}"><b>${label}已分摊</b><span>${this.escape(group.currency || "待选择费用币种")} ${group.allocatedText}${group.missingFx ? " · RMB 缺汇率" : ` · RMB ${this.feeEvidencePlainNumber(group.allocatedRmb)}`}</span><small>费用总额 ${group.feeTotalText} · 剩余差额 ${group.remainingText}</small></div>`;
     return `<div class="ocw-mf-matrix-totals" data-mf-fee-matrix-totals>${render("进口税费", totals.import_tax)}${render("清关费", totals.customs_clearance_fee)}<p>确认应用仅写入费用分项，不会自动试算、确认版本或推送 ERP。</p></div>`;
   }
 
@@ -485,20 +722,24 @@
     this.ensureFeeEvidenceMatrixState(review, draft);
     const matrix = this.feeEvidenceMaterialMatrix(draft);
     const columns = this.feeEvidenceMatrixColumns();
+    const pageWindow = this.feeEvidenceMatrixPageWindow(draft, review);
     const unmatched = (matrix.unmatched_lines || draft.unmatched_lines || []).filter(
       (row) => String(row?.reason_code || "") !== "MATERIAL_MATRIX_LEDGER_ONLY"
     );
-    const sourceRefs = [
-      ...(draft.evidence?.source_refs || []),
-      ...(draft.fee_splits || []).flatMap((row) => row.source_refs || []),
-      ...this.feeEvidenceLedgerComponents(draft).flatMap((row) => this.feeEvidenceComponentSourceRefs(row)),
-    ];
-    const rows = matrix.rows.map((row, rowIndex) => {
+    const sourceWindow = this.feeEvidenceSourcePageWindow(draft, review);
+    const sourceRefs = sourceWindow.refs.slice(sourceWindow.start, sourceWindow.end);
+    const rows = matrix.rows.slice(pageWindow.start, pageWindow.end).map((row, pageRowIndex) => {
+      const rowIndex = pageWindow.start + pageRowIndex;
       const cells = columns.map((column) => this.renderFeeEvidenceMatrixCell(draft, review, rowIndex, column)).join("");
       const rowCells = columns.map((column) => this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, column.key));
       const active = rowCells.filter((cell) => String(cell.value || "").trim());
       const originalCurrencies = [...new Set(active.map((cell) => cell.currency).filter(Boolean))];
-      const originalTotal = active.reduce((sum, cell) => sum + (Number(cell.value) || 0), 0);
+      let originalTotal = "";
+      try {
+        originalTotal = this.feeEvidenceMinorText(active.reduce((sum, cell) => sum + this.feeEvidenceAmountMinor(cell.value), 0n));
+      } catch (_error) {
+        originalTotal = "待修正";
+      }
       const rmbTotal = active.reduce((sum, cell) => cell.missingFx ? sum : sum + (Number(cell.amountRmb) || 0), 0);
       const hasWarning = rowCells.some((cell) => cell.warning);
       const dirty = rowCells.some((cell) => cell.dirty);
@@ -507,7 +748,7 @@
         <th scope="row"><strong>${this.escape(row.material_code || row.item || "--")}</strong><small>${this.escape(row.product_name || row.item || "")}</small></th>
         <td class="ocw-mf-matrix-hs" data-mf-fee-matrix-hs="${this.escape(row.item || "")}"><span>${this.escape(row.hs_code || "--")}</span>${hsSuggestions.length ? `<em>HS 差异：${hsSuggestions.map((value) => this.escape(value)).join("、")}</em>` : ""}</td>
         ${cells}
-        <td class="ocw-mf-matrix-row-total"><strong>${originalCurrencies.length === 1 ? `${this.escape(originalCurrencies[0])} ${this.feeEvidencePlainNumber(originalTotal)}` : (active.length ? "多币种" : "--")}</strong><small>RMB ${this.feeEvidencePlainNumber(rmbTotal)}${active.some((cell) => cell.missingFx) ? " + 缺汇率" : ""}</small></td>
+        <td class="ocw-mf-matrix-row-total"><strong>${originalCurrencies.length === 1 ? `${this.escape(originalCurrencies[0])} ${originalTotal}` : (active.length ? "多币种" : "--")}</strong><small>RMB ${this.feeEvidencePlainNumber(rmbTotal)}${active.some((cell) => cell.missingFx) ? " + 缺汇率" : ""}</small></td>
         <td class="ocw-mf-matrix-status"><b>${dirty ? "已人工调整" : (hasWarning || hsSuggestions.length ? "待核对" : "已预览")}</b><small>${active.length} 个分项</small></td>
       </tr>`;
     }).join("");
@@ -516,10 +757,10 @@
       ${this.renderFeeEvidenceVoucherDetails(draft, review)}
       ${warnings}
       ${matrix.missing_fx || draft.missing_fx ? `<div class="ocw-mf-review-warning is-block">缺汇率：可保存原币事实，RMB 小计不计入试算。</div>` : ""}
-      <section class="ocw-mf-matrix-section"><header><div><h4>物料税费预览</h4><p>每个物料一行；AI／规则建议已默认纳入，清空单元格即不采用。</p></div></header>
+      <section class="ocw-mf-matrix-section"><header><div><h4>物料税费预览</h4><p>每个物料一行；AI／规则建议已默认纳入，清空单元格即不采用。</p></div><nav class="ocw-mf-matrix-pager" aria-label="物料分页"><span>第 ${pageWindow.page + 1} / ${pageWindow.pageCount} 页 · 共 ${pageWindow.total} 行</span><button type="button" data-action="mf-fee-matrix-prev-page" ${pageWindow.page === 0 ? "disabled" : ""}>上一页</button><button type="button" data-action="mf-fee-matrix-next-page" ${pageWindow.page >= pageWindow.pageCount - 1 ? "disabled" : ""}>下一页</button></nav></header>
         <div class="ocw-mf-matrix-scroll"><table class="ocw-mf-matrix-table"><thead><tr><th>物料 / SKU</th><th>HS</th>${columns.map((column) => `<th>${column.label}</th>`).join("")}<th>物料合计</th><th>核对状态</th></tr></thead><tbody>${rows || `<tr><td colspan="10">当前批次暂无物料</td></tr>`}</tbody></table></div>
       </section>
-      ${sourceRefs.length ? `<details class="ocw-mf-matrix-sources"><summary>来源证据</summary><p>${sourceRefs.map((ref) => this.escape(this.feeEvidenceSourceLabel(ref))).filter(Boolean).join("；")}</p></details>` : ""}
+      ${sourceWindow.total ? `<details class="ocw-mf-matrix-sources"><summary>来源证据（${sourceWindow.total}）</summary><p>${sourceRefs.map((ref) => this.escape(this.feeEvidenceSourceLabel(ref))).filter(Boolean).join("；")}</p>${sourceWindow.pageCount > 1 ? `<nav class="ocw-mf-source-pager"><span>来源第 ${sourceWindow.page + 1} / ${sourceWindow.pageCount} 页</span><button type="button" data-action="mf-fee-source-prev-page" ${sourceWindow.page === 0 ? "disabled" : ""}>上一页</button><button type="button" data-action="mf-fee-source-next-page" ${sourceWindow.page >= sourceWindow.pageCount - 1 ? "disabled" : ""}>下一页</button></nav>` : ""}</details>` : ""}
       ${this.renderFeeEvidenceMatrixFooter(draft, review)}
     </div>`;
   }

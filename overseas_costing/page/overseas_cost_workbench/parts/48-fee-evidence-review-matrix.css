@@ -80,6 +80,10 @@
 .ocw-mf-matrix-section > header { display: flex; justify-content: space-between; gap: 12px; padding: 11px 13px; border-bottom: 1px solid var(--mf-border); }
 .ocw-mf-matrix-section h4 { margin: 0; font-size: 14px; }
 .ocw-mf-matrix-section p { margin: 3px 0 0; color: var(--mf-muted); font-size: 11px; }
+.ocw-mf-matrix-pager { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.ocw-mf-matrix-pager span { color: var(--mf-muted); font-size: 11px; white-space: nowrap; }
+.ocw-mf-matrix-pager button { min-height: 32px; border: 1px solid #cfd9e6; border-radius: 6px; padding: 4px 9px; background: #fff; color: #344054; cursor: pointer; }
+.ocw-mf-matrix-pager button:disabled { cursor: default; opacity: .45; }
 .ocw-mf-matrix-scroll { max-height: min(54vh,620px); overflow: auto; overscroll-behavior: contain; }
 .ocw-mf-matrix-table { width: 100%; min-width: 1580px; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 11px; }
 .ocw-mf-matrix-table :is(th,td) { min-width: 142px; padding: 7px; border-right: 1px solid #e5eaf1; border-bottom: 1px solid #e5eaf1; vertical-align: top; }
@@ -125,6 +129,10 @@
 .ocw-mf-matrix-totals > p { align-self: center; margin: 0; color: #667085; font-size: 10px; line-height: 1.45; }
 .ocw-mf-matrix-sources { border: 1px solid var(--mf-border); border-radius: 8px; padding: 8px 10px; color: #475467; font-size: 11px; }
 .ocw-mf-matrix-sources p { margin: 7px 0 0; line-height: 1.5; }
+.ocw-mf-source-pager { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 8px; }
+.ocw-mf-source-pager span { margin-right: auto; color: var(--mf-muted); }
+.ocw-mf-source-pager button { min-height: 30px; border: 1px solid #cfd9e6; border-radius: 6px; padding: 3px 9px; background: #fff; }
+.ocw-mf-source-pager button:disabled { opacity: .45; }
 
 @media (max-width: 900px) {
   .ocw-mf-evidence-review-modal .modal-dialog { width: calc(100vw - 16px); max-width: calc(100vw - 16px); margin: 8px auto; }
@@ -148,6 +156,9 @@
   .ocw-mf-voucher-fee-splits { grid-template-columns: 1fr; }
   .ocw-mf-voucher-fee-splits > h4 { grid-column: 1; }
   .ocw-mf-matrix-section > header { padding: 9px 10px; }
+  .ocw-mf-matrix-section > header { align-items: stretch; flex-direction: column; }
+  .ocw-mf-matrix-pager { justify-content: space-between; }
+  .ocw-mf-matrix-pager button { min-height: 40px; }
   .ocw-mf-matrix-scroll { max-height: 47vh; }
   .ocw-mf-matrix-table { min-width: 1470px; }
   .ocw-mf-matrix-table :is(th,td):first-child { width: 150px; min-width: 150px; }
