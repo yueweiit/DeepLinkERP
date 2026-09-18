@@ -2660,6 +2660,7 @@ def test_repository_parses_saved_component_evidence_and_confidence(monkeypatch) 
                 {
                     "name": "COMP-SAVED",
                     "confidence": "0.98",
+                    "reverses_component": "COMP-PARENT",
                     "source_evidence_json": '{"attachment":"ATT-OLD","row":2}',
                 }
             ]
@@ -2672,8 +2673,10 @@ def test_repository_parses_saved_component_evidence_and_confidence(monkeypatch) 
 
     assert "source_evidence_json" in captured["fields"]
     assert "confidence" in captured["fields"]
+    assert "reverses_component" in captured["fields"]
     assert rows[0]["source_evidence"] == {"attachment": "ATT-OLD", "row": 2}
     assert rows[0]["confidence"] == "0.98"
+    assert rows[0]["reverses_component"] == "COMP-PARENT"
 
 
 def test_repository_builds_raw_and_projected_item_views_from_one_snapshot(
@@ -3152,6 +3155,7 @@ class _MatrixApplyRepository(_ApplyRepository):
         }
         self.items = _items()
         self.replaced = []
+        self.get_items_calls = 0
         self.fail_replace = fail_replace
         self.fees = {
             "import_tax": {
@@ -3211,7 +3215,12 @@ class _MatrixApplyRepository(_ApplyRepository):
                 start=1,
             )
         ]
+        self.draft["material_matrix"] = service.build_material_matrix(
+            items=self.items,
+            components=self.draft["components"],
+        )
         self.run["draft_json"] = self.draft
+        self.current_components = []
 
     def get_context(self, batch_name, version_name):
         self.calls.append(("context", batch_name, version_name))
@@ -3221,7 +3230,11 @@ class _MatrixApplyRepository(_ApplyRepository):
         return {"items": [{"name": "AI-SCOPE-SHOULD-NOT-BE-USED"}], "matrix_items": self.items}
 
     def get_items(self, _batch_name, _version_name):
-        raise AssertionError("matrix apply must validate against the raw matrix snapshot")
+        self.get_items_calls += 1
+        return self.items
+
+    def get_evidence_components(self, _evidence_name):
+        return [dict(row) for row in self.current_components]
 
     def save_fee_split(self, **kwargs):
         fee_key = kwargs["fee_row"]["logical_fee_key"]
@@ -3301,6 +3314,7 @@ def test_apply_material_matrix_maps_all_six_columns_and_recomputes_server_values
     assert all(row["source_evidence"]["review_run"] == "RUN-1" for row in saved)
     assert all(row["source_evidence"]["operator"] for row in saved)
     assert all(row["source_evidence"]["source_proposals"] for row in saved)
+    assert repository.get_items_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -3436,6 +3450,10 @@ def test_apply_material_matrix_indexed_draft_materializes_only_referenced_propos
         }
         for index in range(1000)
     ]
+    repository.draft["material_matrix"] = service.build_material_matrix(
+        items=repository.items,
+        components=components,
+    )
     repository.draft["components"] = []
     repository.draft["component_store"] = service._build_component_store(components)
     repository.draft["component_contract"] = {
@@ -3459,6 +3477,319 @@ def test_apply_material_matrix_indexed_draft_materializes_only_referenced_propos
     )
 
     assert calls == [999]
+
+
+def test_apply_material_matrix_preserves_selected_ledger_component_like_legacy_apply() -> None:
+    ledger = {
+        "proposal_id": "ledger:settlement:1",
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "component_type": "IMPORT_TAX",
+        "accounting_role": "SETTLEMENT",
+        "cost_effect": "LEDGER_ONLY",
+        "tax_code": "IGI",
+        "hs_code": "90041000",
+        "currency": "MXN",
+        "original_amount": "4.00",
+        "amount_rmb": "2.00",
+        "exchange_rate": "0.5",
+        "allocation_basis": "settlement_ledger",
+        "source_evidence": {"attachment": "ATT-1", "ledger": "payment"},
+        "confidence": "1.00",
+        "fee_logical_key": "import_tax",
+    }
+    old_repository = _MatrixApplyRepository()
+    old_repository.draft["components"].append(ledger)
+    old_repository.run["draft_json"] = old_repository.draft
+    matrix_repository = _MatrixApplyRepository()
+    matrix_repository.draft["components"].append(ledger)
+    matrix_repository.current_components = [
+        {
+            **ledger,
+            "name": "CURRENT-LEDGER-SAME",
+            "logical_fee_key": "import_tax",
+            "fee_logical_key": "",
+            "original_amount": Decimal("4"),
+            "amount_rmb": Decimal("2"),
+            "exchange_rate": Decimal("0.500000"),
+        }
+    ]
+    matrix_repository.run["draft_json"] = matrix_repository.draft
+    selections = [
+        "evidence:classification",
+        "fee:import_tax",
+        "ledger:settlement:1",
+    ]
+
+    service.apply_fee_evidence_review(
+        "B1",
+        "RUN-1",
+        selections,
+        {},
+        "EDIT",
+        "m1",
+        repository=old_repository,
+    )
+    _apply_matrix(matrix_repository, {"cells": []}, selections=selections)
+
+    old_components = [
+        component
+        for saved in old_repository.replaced
+        for component in saved["components"]
+    ]
+    matrix_components = [
+        component
+        for saved in matrix_repository.replaced
+        for component in saved["components"]
+    ]
+    assert len(old_components) == 1
+    assert matrix_components == old_components
+    assert matrix_components[0]["cost_effect"] == "LEDGER_ONLY"
+    assert matrix_components[0]["source_evidence"] == {
+        "attachment": "ATT-1",
+        "ledger": "payment",
+    }
+
+
+def test_apply_material_matrix_clear_voids_matrix_cost_but_reinserts_existing_ledger() -> None:
+    repository = _MatrixApplyRepository()
+    repository.current_components = [
+        {
+            "name": "CURRENT-COST",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "logical_fee_key": "import_tax",
+            "component_type": "IMPORT_TAX",
+            "accounting_role": "FINAL_BILL",
+            "cost_effect": "COST",
+            "tax_code": "IGI",
+            "hs_code": "90041000",
+            "currency": "MXN",
+            "original_amount": "10.00",
+            "amount_rmb": "5.00",
+            "exchange_rate": "0.5",
+            "allocation_basis": "voucher",
+            "source_evidence": {"attachment": "ATT-1", "kind": "cost"},
+            "confidence": "1.00",
+        },
+        {
+            "name": "CURRENT-LEDGER",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "logical_fee_key": "import_tax",
+            "component_type": "IMPORT_TAX",
+            "accounting_role": "SETTLEMENT",
+            "cost_effect": "LEDGER_ONLY",
+            "tax_code": "IGI",
+            "hs_code": "90041000",
+            "currency": "MXN",
+            "original_amount": "4.00",
+            "amount_rmb": "2.00",
+            "exchange_rate": "0.5",
+            "allocation_basis": "settlement_ledger",
+            "source_evidence": {"attachment": "ATT-1", "kind": "ledger"},
+            "confidence": "1.00",
+        },
+    ]
+
+    _apply_matrix(repository, {"cells": []})
+
+    import_tax = next(
+        row for row in repository.replaced if row["logical_fee_key"] == "import_tax"
+    )
+    assert len(import_tax["components"]) == 1
+    saved = import_tax["components"][0]
+    assert saved["cost_effect"] == "LEDGER_ONLY"
+    assert saved["source_evidence"] == {
+        "attachment": "ATT-1",
+        "kind": "ledger",
+    }
+    assert all(
+        component["allocation_basis"] != "voucher"
+        for row in repository.replaced
+        for component in row["components"]
+    )
+
+
+def test_apply_material_matrix_preserves_selected_refund_reversal_and_parent_link() -> None:
+    repository = _MatrixApplyRepository()
+    repository.draft["evidence"].update(
+        evidence_type="REFUND",
+        accounting_role="SETTLEMENT",
+        direction="CREDIT",
+        original_amount="4.00",
+        related_evidence="E-PARENT",
+        is_final=0,
+    )
+    repository.draft["fee_splits"] = []
+    repository.draft["components"].append(
+        {
+            "proposal_id": "refund-component:1",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "component_type": "REFUND_REVERSAL",
+            "accounting_role": "SETTLEMENT",
+            "cost_effect": "LEDGER_ONLY",
+            "tax_code": "IGI",
+            "hs_code": "90041000",
+            "currency": "MXN",
+            "original_amount": "-4.00",
+            "amount_rmb": "-2.00",
+            "exchange_rate": "0.5",
+            "allocation_basis": "original_component_proportion",
+            "reverses_component": "PARENT-COMP",
+            "source_evidence": {"reverses_component": "PARENT-COMP"},
+            "confidence": "1.00",
+            "fee_logical_key": "import_tax",
+        }
+    )
+    repository.run["draft_json"] = repository.draft
+    repository.get_evidence = lambda _name: {
+        "name": "E-PARENT",
+        "batch": "B1",
+        "version": "V1",
+        "fee_rule": "F1",
+        "evidence_type": "PAYMENT",
+        "accounting_role": "SETTLEMENT",
+        "validation_status": "VALID",
+        "currency": "MXN",
+    }
+
+    def evidence_components(name):
+        if name == "E-PARENT":
+            return [{"name": "PARENT-COMP"}]
+        return []
+
+    repository.get_evidence_components = evidence_components
+
+    result = _apply_matrix(
+        repository,
+        {"cells": []},
+        selections=["evidence:classification", "refund-component:1"],
+    )
+
+    assert result["component_count"] == 1
+    saved = next(
+        component
+        for row in repository.replaced
+        for component in row["components"]
+    )
+    assert saved["component_type"] == "REFUND_REVERSAL"
+    assert saved["cost_effect"] == "LEDGER_ONLY"
+    assert saved["original_amount"] == Decimal("-4.00")
+    assert saved["reverses_component"] == "PARENT-COMP"
+    assert saved["source_evidence"] == {"reverses_component": "PARENT-COMP"}
+
+
+def test_apply_material_matrix_preserves_distinct_existing_ledger_rows_with_same_values() -> None:
+    repository = _MatrixApplyRepository()
+    shared = {
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "logical_fee_key": "import_tax",
+        "component_type": "IMPORT_TAX",
+        "accounting_role": "SETTLEMENT",
+        "cost_effect": "LEDGER_ONLY",
+        "tax_code": "IGI",
+        "hs_code": "90041000",
+        "currency": "MXN",
+        "original_amount": "4.00",
+        "amount_rmb": "2.00",
+        "exchange_rate": "0.5",
+        "allocation_basis": "settlement_ledger",
+        "source_evidence": {"attachment": "ATT-1", "ledger": "payment"},
+        "confidence": "1.00",
+    }
+    repository.current_components = [
+        {**shared, "name": "CURRENT-LEDGER-1"},
+        {**shared, "name": "CURRENT-LEDGER-2"},
+    ]
+
+    _apply_matrix(repository, {"cells": []})
+
+    saved = [
+        component
+        for row in repository.replaced
+        for component in row["components"]
+        if component["cost_effect"] == "LEDGER_ONLY"
+    ]
+    assert len(saved) == 2
+
+
+@pytest.mark.parametrize("hard_problem", ["ledger", "currency", "not_in_cell"])
+def test_apply_material_matrix_source_must_be_valid_member_of_draft_cell(
+    hard_problem,
+) -> None:
+    repository = _MatrixApplyRepository()
+    proposal = {
+        **repository.draft["components"][0],
+        "proposal_id": f"component:forged:{hard_problem}",
+    }
+    if hard_problem == "ledger":
+        proposal.update(accounting_role="SETTLEMENT", cost_effect="LEDGER_ONLY")
+    elif hard_problem == "currency":
+        proposal["currency"] = "EUR"
+    repository.draft["components"].append(proposal)
+    if hard_problem != "not_in_cell":
+        first_row = repository.draft["material_matrix"]["rows"][0]
+        first_row["cells"]["IGI"]["proposals"].append(
+            len(repository.draft["components"]) - 1
+        )
+    repository.run["draft_json"] = repository.draft
+
+    with pytest.raises(ValueError, match="单元格|不匹配|分项|来源"):
+        _apply_matrix(
+            repository,
+            _matrix_apply_payload(
+                _matrix_cell(
+                    "IGI",
+                    sources=[f"component:forged:{hard_problem}"],
+                )
+            ),
+        )
+
+    assert repository.replaced == []
+    assert repository.rollbacks == 1
+
+
+def test_apply_material_matrix_accepts_more_than_256_valid_sources_in_one_cell() -> None:
+    repository = _MatrixApplyRepository()
+    template = repository.draft["components"][0]
+    proposals = [
+        {
+            **template,
+            "proposal_id": f"component:igi:aggregate:{index}",
+            "original_amount": "0.01",
+            "amount_rmb": "0.005",
+        }
+        for index in range(300)
+    ]
+    repository.draft["components"] = proposals
+    repository.draft["material_matrix"] = service.build_material_matrix(
+        items=repository.items,
+        components=proposals,
+    )
+    repository.run["draft_json"] = repository.draft
+
+    result = _apply_matrix(
+        repository,
+        _matrix_apply_payload(
+            _matrix_cell(
+                "IGI",
+                amount="3.00",
+                sources=[row["proposal_id"] for row in proposals],
+            )
+        ),
+    )
+
+    assert result["component_count"] == 1
+    saved = next(
+        component
+        for row in repository.replaced
+        for component in row["components"]
+    )
+    assert len(saved["source_evidence"]["source_proposal_ids"]) == 300
+    assert len(saved["source_evidence"]["source_proposals"]) == 300
 
 
 def test_apply_material_matrix_rolls_back_when_replace_fails() -> None:

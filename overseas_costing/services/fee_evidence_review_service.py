@@ -72,7 +72,7 @@ FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT = 60000
 FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES = 48 * 1024 * 1024
 FEE_EVIDENCE_COMPONENT_ESTIMATED_BASE_BYTES = 384
 MATERIAL_MATRIX_APPLY_CELL_LIMIT = 60000
-MATERIAL_MATRIX_SOURCE_IDS_PER_CELL_LIMIT = 256
+MATERIAL_MATRIX_SOURCE_IDS_PER_CELL_LIMIT = FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT
 MATERIAL_MATRIX_SOURCE_ID_LENGTH_LIMIT = 300
 MATERIAL_MATRIX_CELL_FIELDS = frozenset(
     {"item", "column_key", "original_amount", "source_proposal_ids"}
@@ -2609,6 +2609,7 @@ class FrappeFeeEvidenceReviewRepository:
                 "allocation_basis",
                 "accounting_role",
                 "cost_effect",
+                "reverses_component",
                 "source_evidence_json",
                 "confidence",
             ],
@@ -3677,7 +3678,7 @@ def _material_matrix_current_items(repo: Any, context: dict) -> list[dict]:
     ]
 
 
-def _material_matrix_proposal_resolver(draft: dict):
+def _material_matrix_component_access(draft: dict):
     component_draft = draft
     if (
         str((draft.get("component_contract") or {}).get("mode") or "")
@@ -3699,7 +3700,20 @@ def _material_matrix_proposal_resolver(draft: dict):
                 else None
             )
 
-        return resolve_indexed
+        def identity_indexed(row_index: int) -> dict:
+            if row_index < 0 or row_index >= int(component_store.get("count") or 0):
+                raise ValueError("物料税费矩阵提案索引越界。")
+            return {
+                "proposal_id": _component_store_value(
+                    component_store, "proposal_id", row_index
+                ),
+                "item": _component_store_value(component_store, "item", row_index),
+                "stable_line_key": _component_store_value(
+                    component_store, "stable_line_key", row_index
+                ),
+            }
+
+        return resolve_indexed, identity_indexed, int(component_store.get("count") or 0)
 
     components = component_draft.get("components") or []
     if not isinstance(components, list) or any(
@@ -3714,7 +3728,83 @@ def _material_matrix_proposal_resolver(draft: dict):
         if proposal_id in lookup:
             raise ValueError("费用凭证分项提案标识重复。")
         lookup[proposal_id] = dict(row)
-    return lookup.get
+    def identity_legacy(row_index: int) -> dict:
+        if row_index < 0 or row_index >= len(components):
+            raise ValueError("物料税费矩阵提案索引越界。")
+        row = components[row_index]
+        return {
+            "proposal_id": row.get("proposal_id"),
+            "item": row.get("item"),
+            "stable_line_key": row.get("stable_line_key"),
+        }
+
+    return lookup.get, identity_legacy, len(components)
+
+
+def _material_matrix_allowed_proposals(
+    draft: dict,
+    *,
+    item_by_name: dict[str, dict],
+    item_by_stable_key: dict[str, dict],
+    identity_at: Any,
+    component_count: int,
+) -> dict[tuple[str, str], set[str]]:
+    matrix = draft.get("material_matrix")
+    if not isinstance(matrix, dict):
+        return {}
+    rows = matrix.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("费用凭证草稿的物料矩阵行无效。")
+    allowed_columns = {str(column["key"]) for column in MATERIAL_MATRIX_COLUMNS}
+    allowed: dict[tuple[str, str], set[str]] = {}
+    seen_items = set()
+    for matrix_row in rows:
+        if not isinstance(matrix_row, dict):
+            raise ValueError("费用凭证草稿的物料矩阵行无效。")
+        row_item_name = str(matrix_row.get("item") or "")
+        current_item = item_by_name.get(row_item_name)
+        if current_item is None or row_item_name in seen_items:
+            raise ValueError("费用凭证草稿的物料矩阵行归属无效。")
+        seen_items.add(row_item_name)
+        matrix_stable_key = str(matrix_row.get("stable_line_key") or "")
+        current_stable_key = str(current_item.get("stable_line_key") or row_item_name)
+        if matrix_stable_key and matrix_stable_key != current_stable_key:
+            raise ValueError("费用凭证草稿的物料矩阵行已过期。")
+        compact_cells = matrix_row.get("cells") or {}
+        if not isinstance(compact_cells, dict) or set(compact_cells) - allowed_columns:
+            raise ValueError("费用凭证草稿的物料矩阵列无效。")
+        for column_key, compact_cell in compact_cells.items():
+            if not isinstance(compact_cell, dict):
+                raise ValueError("费用凭证草稿的物料矩阵单元格无效。")
+            proposal_indexes = compact_cell.get("proposals") or []
+            if not isinstance(proposal_indexes, list):
+                raise ValueError("费用凭证草稿的提案索引无效。")
+            if any(
+                isinstance(row_index, bool) or not isinstance(row_index, int)
+                for row_index in proposal_indexes
+            ):
+                raise ValueError("费用凭证草稿的提案索引无效。")
+            if len(set(proposal_indexes)) != len(proposal_indexes):
+                raise ValueError("费用凭证草稿的提案索引重复。")
+            member_ids = allowed.setdefault((row_item_name, str(column_key)), set())
+            for row_index in proposal_indexes:
+                if row_index < 0 or row_index >= component_count:
+                    raise ValueError("费用凭证草稿的提案索引越界。")
+                identity = identity_at(row_index)
+                proposal_id = identity.get("proposal_id")
+                if not isinstance(proposal_id, str) or not proposal_id:
+                    raise ValueError("费用凭证草稿的提案标识无效。")
+                proposal_item = item_by_name.get(str(identity.get("item") or ""))
+                stable_key = identity.get("stable_line_key")
+                if proposal_item is None and stable_key is not _MISSING_COMPONENT_VALUE:
+                    proposal_item = item_by_stable_key.get(str(stable_key or ""))
+                if (
+                    proposal_item is None
+                    or str(proposal_item.get("name") or "") != row_item_name
+                ):
+                    raise ValueError("费用凭证草稿的提案物料归属无效。")
+                member_ids.add(proposal_id)
+    return allowed
 
 
 def validate_material_matrix_submission(
@@ -3747,7 +3837,26 @@ def validate_material_matrix_submission(
         if str(row.get("stable_line_key") or "")
     }
     columns = {str(row["key"]): dict(row) for row in MATERIAL_MATRIX_COLUMNS}
-    resolve_proposal = _material_matrix_proposal_resolver(draft)
+    resolve_proposal, identity_at, component_count = _material_matrix_component_access(
+        draft
+    )
+    has_source_ids = any(
+        isinstance(raw_cell, dict)
+        and isinstance(raw_cell.get("source_proposal_ids"), list)
+        and bool(raw_cell.get("source_proposal_ids"))
+        for raw_cell in cells
+    )
+    allowed_proposals = (
+        _material_matrix_allowed_proposals(
+            draft,
+            item_by_name=item_by_name,
+            item_by_stable_key=item_by_stable_key,
+            identity_at=identity_at,
+            component_count=component_count,
+        )
+        if has_source_ids
+        else {}
+    )
     seen_cells: set[tuple[str, str]] = set()
     normalized = []
     for raw_cell in cells:
@@ -3801,7 +3910,12 @@ def validate_material_matrix_submission(
             proposal = resolve_proposal(proposal_id)
             if proposal is None:
                 raise ValueError(f"来源提案 {proposal_id} 不存在于当前草稿。")
+            if proposal_id not in allowed_proposals.get(cell_key, set()):
+                raise ValueError("来源提案不属于当前物料税费单元格。")
             route = _matrix_component_route(proposal)
+            problem = _matrix_component_problem(proposal, route=route)
+            if problem:
+                raise ValueError(f"来源提案包含不可应用的分项：{problem[1]}")
             proposal_item = item_by_name.get(str(proposal.get("item") or ""))
             if proposal_item is None:
                 proposal_item = item_by_stable_key.get(
@@ -3844,6 +3958,68 @@ def _material_matrix_saved_fee_keys(draft: dict) -> set[str]:
         if route[1] or route[0] not in columns:
             continue
         result.add(columns[route[0]])
+    return result
+
+
+def _is_matrix_external_ledger_component(row: dict) -> bool:
+    return bool(
+        str(row.get("component_type") or "").upper() == "REFUND_REVERSAL"
+        or str(row.get("accounting_role") or "").upper() == "SETTLEMENT"
+        or str(row.get("cost_effect") or "").upper() == "LEDGER_ONLY"
+    )
+
+
+def _ledger_component_identity(row: dict) -> str:
+    values = {
+        fieldname: row.get(fieldname)
+        for fieldname in (
+            "item",
+            "stable_line_key",
+            "component_type",
+            "accounting_role",
+            "cost_effect",
+            "tax_code",
+            "hs_code",
+            "currency",
+            "original_amount",
+            "amount_rmb",
+            "exchange_rate",
+            "allocation_basis",
+            "reverses_component",
+            "source_evidence",
+        )
+    }
+    values["logical_fee_key"] = str(
+        row.get("logical_fee_key") or row.get("fee_logical_key") or ""
+    )
+    for fieldname in ("original_amount", "amount_rmb", "exchange_rate"):
+        number = _decimal(row.get(fieldname))
+        values[fieldname] = _decimal_amount(number) if number is not None else None
+    return _dedupe_key(values)
+
+
+def _merge_matrix_external_ledger_components(
+    selected_components: list[dict], existing_components: list[dict]
+) -> list[dict]:
+    selected_rows = [
+        dict(row)
+        for row in (selected_components or [])
+        if isinstance(row, dict) and _is_matrix_external_ledger_component(row)
+    ]
+    result = list(selected_rows)
+    selected_matches: dict[str, int] = {}
+    for row in selected_rows:
+        identity = _ledger_component_identity(row)
+        selected_matches[identity] = selected_matches.get(identity, 0) + 1
+    for raw in existing_components or []:
+        if not isinstance(raw, dict) or not _is_matrix_external_ledger_component(raw):
+            continue
+        row = dict(raw)
+        identity = _ledger_component_identity(row)
+        if selected_matches.get(identity, 0) > 0:
+            selected_matches[identity] -= 1
+            continue
+        result.append(row)
     return result
 
 
@@ -4003,12 +4179,29 @@ def apply_fee_evidence_review(
             components = matrix_cells
         else:
             components = legacy_components
-        if not evidence_values.get("selected") and not fee_rows and not components:
-            raise ValueError("请至少选择一项凭证审核草稿。")
-        validate_review_selections(evidence_values, fee_rows, components)
         evidence_name = str(_run_value(run, "evidence") or "")
         if not evidence_name:
             raise ValueError("凭证关联记录缺失，请重新发起审核。")
+        selected_ledger_components: list[dict] = []
+        preserved_ledger_components: list[dict] = []
+        if matrix_cells is not None:
+            selected_ledger_components = _merge_matrix_external_ledger_components(
+                legacy_components, []
+            )
+            get_evidence_components = getattr(repo, "get_evidence_components", None)
+            existing_components = (
+                get_evidence_components(evidence_name)
+                if callable(get_evidence_components)
+                else []
+            )
+            preserved_ledger_components = _merge_matrix_external_ledger_components(
+                selected_ledger_components,
+                existing_components,
+            )
+            components = [*matrix_cells, *preserved_ledger_components]
+        if not evidence_values.get("selected") and not fee_rows and not components:
+            raise ValueError("请至少选择一项凭证审核草稿。")
+        validate_review_selections(evidence_values, fee_rows, components)
         normalized_evidence = normalize_evidence_for_apply(
             evidence_values,
             context=context,
@@ -4038,7 +4231,12 @@ def apply_fee_evidence_review(
                 else:
                     repo.rollback()
                 return {**adopted,'run_id':run_id}
-            if any(str(component.get('fee_logical_key') or component.get('logical_fee_key') or '') not in reviewed_rules for component in components):
+            adoption_components = (
+                [*matrix_cells, *selected_ledger_components]
+                if matrix_cells is not None
+                else components
+            )
+            if any(str(component.get('fee_logical_key') or component.get('logical_fee_key') or '') not in reviewed_rules for component in adoption_components):
                 raise ValueError('费用分项必须对应本次已采用的最终费用拆分。')
 
         parent_components: list[dict] = []
@@ -4092,22 +4290,31 @@ def apply_fee_evidence_review(
             }
             if matrix_cells is not None:
                 grouped_components = group_components_by_fee_key(matrix_cells)
+                grouped_ledger_components = group_components_by_fee_key(
+                    preserved_ledger_components
+                )
                 replacement_fee_keys = {
                     str(row.get("logical_fee_key") or "")
                     for row in fee_rows
                     if str(row.get("logical_fee_key") or "") in MATERIAL_MATRIX_FEE_KEYS
                 }
                 replacement_fee_keys.update(grouped_components)
+                replacement_fee_keys.update(grouped_ledger_components)
                 replacement_fee_keys.update(_material_matrix_saved_fee_keys(draft))
                 run_fee_key = str(_run_value(run, "logical_fee_key") or "")
                 if not replacement_fee_keys and run_fee_key in MATERIAL_MATRIX_FEE_KEYS:
                     replacement_fee_keys.add(run_fee_key)
             else:
                 grouped_components = group_components_by_fee_key(components)
+                grouped_ledger_components = {}
                 replacement_fee_keys = set(grouped_components)
 
             valid_items = None
-            if matrix_cells is None:
+            if matrix_cells is not None:
+                valid_items = {
+                    str(row.get("name") or ""): row for row in (matrix_items or [])
+                }
+            else:
                 valid_items = {
                     row["name"]: row
                     for row in repo.get_items(context["batch"], context["version"])
@@ -4129,6 +4336,17 @@ def apply_fee_evidence_review(
                         )
                         for row in fee_components
                     ]
+                    for row in grouped_ledger_components.get(fee_key, []):
+                        item = (valid_items or {}).get(str(row.get("item") or ""))
+                        if not item:
+                            raise ValueError("台账分项关联的 SKU 不属于当前批次。")
+                        normalized_components.append(
+                            normalize_component_for_apply(
+                                row,
+                                item=item,
+                                parent_component_names=parent_component_names,
+                            )
+                        )
                 else:
                     normalized_components = []
                     for row in fee_components:
