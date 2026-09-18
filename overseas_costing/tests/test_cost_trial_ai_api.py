@@ -25,7 +25,7 @@ def test_start_status_preview_confirm_and_discard_delegate_with_permissions(monk
     monkeypatch.setattr(service, "confirm_cost_trial", lambda **kwargs: calls.append(("confirm", kwargs)) or {"ok": True})
     monkeypatch.setattr(service, "discard_cost_trial_ai_review", lambda **kwargs: calls.append(("discard", kwargs)) or {"ok": True})
 
-    api.start_cost_trial_ai_review("NO", "V1", "T", "M", "1")
+    api.start_cost_trial_ai_review("NO", "V1", "T", "M", "1", "1")
     api.get_cost_trial_ai_review_status("NO", "RUN", "2")
     api.preview_cost_trial("NO", "RUN", '[{"suggestion_id":"S","basis":"goods_value"}]')
     api.confirm_cost_trial("NO", "RUN", "TOKEN", '[{"suggestion_id":"S","basis":"goods_value"}]', "T", "M")
@@ -34,4 +34,5 @@ def test_start_status_preview_confirm_and_discard_delegate_with_permissions(monk
     assert permissions == [("NO", "write"), ("NO", "read"), ("NO", "read"), ("NO", "write"), ("NO", "write")]
     assert [name for name, _kwargs in calls] == ["start", "status", "preview", "confirm", "discard"]
     assert calls[0][1]["force"] is True
+    assert calls[0][1]["reuse_only"] is True
     assert calls[3][1]["preview_token"] == "TOKEN"

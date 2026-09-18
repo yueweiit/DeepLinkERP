@@ -43,6 +43,7 @@ def run_integrated_js(body: str) -> None:
 const fs=require('fs');
 const Workbench=new Function('return class {{'+fs.readFileSync({json.dumps(str(MATRIX_PART))},'utf8')+fs.readFileSync({json.dumps(str(workspace_part))},'utf8')+'}}')();
 const w=new Workbench();
+global.frappe={{show_alert:()=>{{}}}};
 w.escape=v=>String(v??'');
 const assert=require('assert').strict;
 """

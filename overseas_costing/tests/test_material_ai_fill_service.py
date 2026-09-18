@@ -3925,9 +3925,14 @@ def test_unified_worker_is_ready_with_system_approval_results_when_ai_is_unavail
     proposals = repository.run["candidates_json"]
     assert len(proposals) == 1
     assert proposals[0]["result_origin"] == "SYSTEM"
-    assert proposals[0]["payload"]["fields"] == {
+    assert proposals[0]["proposal_type"] == "logistics_reconcile"
+    assert proposals[0]["payload"]["excluded_item_names"] == ["ITEM-2"]
+    row = proposals[0]["payload"]["rows"][0]
+    assert {key: row.get(key) for key in (
+        "actual_shipped_qty", "shipped_uom", "net_weight_kg", "gross_weight_kg"
+    )} == {
         "actual_shipped_qty": "1494",
-        "shipped_uom": "kg",
+        "shipped_uom": "KG",
         "net_weight_kg": "1494",
         "gross_weight_kg": "4200",
     }

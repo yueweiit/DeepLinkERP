@@ -364,20 +364,20 @@ def test_old_lightweight_receipt_policy_must_be_repreviewed():
         confirm(repo,preview)
 
 
-def test_proc3_ready_draft_is_rejected_by_review_prepare_and_confirm():
+def test_previous_processing_version_is_rejected_by_review_prepare_and_confirm():
     review_repo=Repo()
-    review_repo.run['draft_json']['processing_version']='procurement-source-3'
+    review_repo.run['draft_json']['processing_version']='procurement-source-9'
     with pytest.raises(ValueError,match='重新分析'):
         service.review_catalog(review_repo,'B1',review_repo.run)
 
     prepare_repo=Repo()
-    prepare_repo.run['draft_json']['processing_version']='procurement-source-3'
+    prepare_repo.run['draft_json']['processing_version']='procurement-source-9'
     with pytest.raises(ValueError,match='重新分析'):
         service.prepare(
             'B1',prepare_repo.run['name'],[],[],'fill_missing','V1',repository=prepare_repo)
 
     confirm_repo=Repo();preview=prepare(confirm_repo)
-    confirm_repo.run['draft_json']['processing_version']='procurement-source-3'
+    confirm_repo.run['draft_json']['processing_version']='procurement-source-9'
     with pytest.raises(ValueError,match='重新分析'):
         confirm(confirm_repo,preview)
     assert not confirm_repo.writes
@@ -692,6 +692,93 @@ def test_packing_assignment_can_apply_group_facts_to_exactly_one_material():
     assert rows['I2']['volume_m3']=='0.01518'
     assert preview['selected_packing_assignments']=={'PACK-1':'PACK-1:LINE-2'}
     assert preview['packing_group_candidates']==[]
+
+
+def test_packing_assignment_is_validated_against_authoritative_projected_rows():
+    repo=Repo()
+    repo.items=[{**repo.items[0],'stable_line_key':'OLD-LINE','row_no':1}]
+    repo.run['candidates_json']=[{
+        'proposal_id':'LOGISTICS-SCOPE','proposal_type':'logistics_reconcile',
+        'default_selected':True,'result_origin':'SYSTEM','source_refs':[{'source_id':'DOC'}],
+        'payload':{'scope_status':'AUTHORITATIVE','original_item_names':['I1'],
+                   'excluded_item_names':[],'unresolved':[],'rows':[
+                       {**repo.items[0],'name':'I1','_existing_name':'I1','_review_origin':'source',
+                        'stable_line_key':'NEW-LINE','row_no':1,
+                        '_review_source_values':{'material_code':'SKU1','product_name':'SKU1',
+                                                 'actual_shipped_qty':1,'stable_line_key':'NEW-LINE'}}]},
+    }]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'PACK-NEW','member_keys':['NEW-LINE'],
+        'gross_weight_kg':'42.05','can_apply':True,'default_selected':True,
+        'assignment_options':[
+            {'assignment_id':'PACK-NEW:NEW-LINE','mode':'single_item','member_keys':['NEW-LINE'],
+             'default_selected':True,'can_apply':True},
+        ],
+    }]
+
+    preview=prepare(repo,mode='update_selected',packing_assignments={
+        'PACK-NEW':'PACK-NEW:NEW-LINE',
+    })
+
+    assert preview['rows'][0]['stable_line_key']=='OLD-LINE'
+    assert preview['rows'][0]['gross_weight_kg']=='42.05'
+
+
+def test_packing_assignment_maps_legacy_item_identity_into_authoritative_scope():
+    repo=Repo()
+    repo.items=[{**repo.items[0],'stable_line_key':'','row_no':1}]
+    repo.run['candidates_json']=[{
+        'proposal_id':'LOGISTICS-SCOPE','proposal_type':'logistics_reconcile',
+        'default_selected':True,'result_origin':'SYSTEM','source_refs':[{'source_id':'DOC'}],
+        'payload':{'scope_status':'AUTHORITATIVE','original_item_names':['I1'],
+                   'excluded_item_names':[],'unresolved':[],'rows':[
+                       {**repo.items[0],'name':'I1','_existing_name':'I1','_review_origin':'source',
+                        'stable_line_key':'NEW-LINE','row_no':1,
+                        '_review_source_values':{'material_code':'SKU1','product_name':'SKU1',
+                                                 'actual_shipped_qty':1,'stable_line_key':'NEW-LINE'}}]},
+    }]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'PACK-LEGACY','member_keys':['legacy:I1'],
+        'gross_weight_kg':'42.05','can_apply':True,'default_selected':True,
+        'assignment_options':[
+            {'assignment_id':'PACK-LEGACY:legacy:I1','mode':'single_item',
+             'member_keys':['legacy:I1'],'default_selected':True,'can_apply':True},
+        ],
+    }]
+
+    preview=prepare(repo,mode='update_selected')
+
+    assert preview['rows'][0]['gross_weight_kg']=='42.05'
+
+
+def test_packing_assignment_maps_server_candidate_by_unique_material_label():
+    repo=Repo()
+    repo.items=[{**repo.items[0],'stable_line_key':'OLD-LINE','row_no':1}]
+    repo.run['input_fingerprint']=ai._source_review_fingerprint(
+        'B1','V1',repo.items,repo.sources,'',context=repo.context)
+    repo.run['draft_json']['material_input_fingerprint']=service.material_fingerprint(
+        repo.items,repo.sources,repo.context)
+    repo.run['draft_json']['packing_group_candidates']=[{
+        'candidate_id':'PACK-LABEL','member_keys':['SOURCE-LINE'],
+        'member_labels':['SKU1'],'gross_weight_kg':'42.05',
+        'can_apply':True,'default_selected':True,
+        'assignment_options':[
+            {'assignment_id':'PACK-LABEL:SOURCE-LINE','mode':'single_item',
+             'member_keys':['SOURCE-LINE'],'default_selected':True,'can_apply':True},
+        ],
+    }]
+
+    preview=prepare(repo,mode='update_selected')
+
+    assert preview['rows'][0]['gross_weight_kg']=='42.05'
 
 
 def test_packing_assignment_group_is_the_only_adopted_relation():
@@ -1159,17 +1246,38 @@ def test_pending_source_estimated_fee_confirmation_uses_estimate_dependency_chec
     assert len(repo.writes)==1
 
 
-def test_pending_source_actual_fee_confirmation_requires_final_adoption_check():
+def test_active_source_actual_fee_confirmation_rechecks_final_adoption_and_writes():
     repo=Repo();pending_adopted_scope(repo)
     repo.run['candidates_json'].append({'proposal_id':'F1','proposal_type':'fee_update',
         'default_selected':True,'payload':{'logical_fee_key':'international_express_fee',
             'amount':'100','currency':'RMB','amount_status':'ACTUAL'}})
     repo.capture_row_dependencies=lambda *args,**kwargs:[{'kind':'approval','source_id':'PENDING','fingerprint':'LOCKED'}]
+    checks=[]
     repo.assert_row_dependencies=lambda *args,**kwargs:None
-    repo.assert_adoption_dependencies=lambda *args,**kwargs:(_ for _ in ()).throw(ValueError('审批中，实际费用不能采用'))
+    repo.assert_adoption_dependencies=lambda *args,**kwargs:checks.append('adoption')
     preview=prepare(repo,fees=['F1'])
 
-    with pytest.raises(ValueError,match='审批中'):
+    assert confirm(repo,preview)['ok']
+    assert checks == ['adoption']
+    assert len(repo.writes) == 1
+
+
+def test_source_becoming_invalid_before_actual_fee_confirmation_blocks_without_write():
+    repo=Repo();pending_adopted_scope(repo)
+    repo.run['candidates_json'].append({'proposal_id':'F1','proposal_type':'fee_update',
+        'default_selected':True,'payload':{'logical_fee_key':'international_express_fee',
+            'amount':'100','currency':'RMB','amount_status':'ACTUAL'}})
+    repo.capture_row_dependencies=lambda *args,**kwargs:[{'kind':'approval','source_id':'PENDING','fingerprint':'LOCKED'}]
+    invalid={'value':False}
+    repo.assert_row_dependencies=lambda *args,**kwargs:None
+    def recheck(*args,**kwargs):
+        if invalid['value']:
+            raise ValueError('审批已拒绝或撤销')
+    repo.assert_adoption_dependencies=recheck
+    preview=prepare(repo,fees=['F1'])
+    invalid['value']=True
+
+    with pytest.raises(ValueError,match='审批已拒绝或撤销'):
         confirm(repo,preview)
     assert not repo.writes
 

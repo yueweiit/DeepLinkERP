@@ -109,6 +109,49 @@ def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:
     assert "white-space: nowrap" in css
 
 
+def test_local_packing_upload_actions_are_grouped_and_responsive() -> None:
+    result = _fee_workspace_result(r"""
+const workspace=Object.create(Harness.prototype);
+workspace.escape=(value)=>String(value??'');
+const base={materialSourceTab:'local',wikiMaterialBusy:'',materialAttachmentSources:[]};
+const localHtml=workspace.renderMaterialAttachmentSources({...base,sourceContext:{root_kind:'logistics'}});
+const expenseHtml=workspace.renderMaterialAttachmentSources({...base,sourceContext:{root_kind:'expense'}});
+console.log(JSON.stringify({
+  localHasActions:localHtml.includes('class="ocw-mf-wiki-toolbar-actions"'),
+  localHasRefresh:localHtml.includes('data-action="mf-source-reload"'),
+  localHasUpload:localHtml.includes('class="ocw-primary-btn" type="button" data-action="mf-source-upload"'),
+  refreshBeforeUpload:localHtml.indexOf('data-action="mf-source-reload"')<localHtml.indexOf('data-action="mf-source-upload"'),
+  expenseHasActions:expenseHtml.includes('class="ocw-mf-wiki-toolbar-actions"'),
+  expenseHasRefresh:expenseHtml.includes('data-action="mf-source-reload"'),
+  expenseHasUpload:expenseHtml.includes('data-action="mf-source-upload"')
+}));
+""")
+
+    assert result == {
+        "localHasActions": True,
+        "localHasRefresh": True,
+        "localHasUpload": True,
+        "refreshBeforeUpload": True,
+        "expenseHasActions": True,
+        "expenseHasRefresh": True,
+        "expenseHasUpload": False,
+    }
+
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    actions_rule = css.split(".ocw-mf-wiki-toolbar-actions {", 1)[1].split("}", 1)[0]
+    assert "display: flex" in actions_rule
+    assert "justify-content: flex-end" in actions_rule
+    assert "flex-wrap: wrap" in actions_rule
+    assert ".ocw-mf-wiki-toolbar-actions > button" in css
+    assert ".ocw-mf-wiki-toolbar > button" not in css
+
+    responsive = css.rsplit("@media (max-width: 700px) {", 1)[1]
+    assert ".ocw-mf-wiki-toolbar" in responsive
+    assert "grid-template-columns: minmax(0, 1fr)" in responsive
+    assert ".ocw-mf-wiki-toolbar-actions" in responsive
+    assert "justify-content: flex-end" in responsive
+
+
 def test_material_grid_uses_sticky_readable_identity_columns_and_scroll_controls() -> None:
     source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
     css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")

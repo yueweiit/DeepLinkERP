@@ -260,6 +260,12 @@
     this.$root.on("click", "[data-action='open-voucher-record']", (event) =>
       this.openTaxCertificateRecordDialog($(event.currentTarget).attr("data-record-name"))
     );
+    this.$root.on("click", "[data-action='ai-review-voucher']", (event) => {
+      event.preventDefault();
+      return this.startVoucherFeeEvidenceReview($(event.currentTarget), {
+        fallbackBatchName: String(this.detailState.batchName || ""),
+      });
+    });
     this.$root.on("click", "[data-action='manual-fill-gap']", (event) => {
       const $button = $(event.currentTarget);
       this.openManualGapFillDialog(this.getDetailBatch(), {

@@ -122,6 +122,22 @@ def write_rows(store,ledger,preview,context):
         values.update(batch=batch_name,version=version['name'],row_no=index,extra_json=persist_item_meta(meta),**{k:0 for k in DERIVED_FIELDS})
         saved=ledger.put('item',name,values) if name else ledger.create('item',values)
         kept.add(saved['name']);adopted.append(saved)
+    scope_excluded = {
+        str(name or '') for name in preview.get('scope_excluded_item_names') or []
+        if str(name or '')
+    }
+    if scope_excluded - originals.keys() or scope_excluded & kept:
+        raise ValueError('国际物流物料范围已变化，请重新预览。')
+    if scope_excluded:
+        from .logistics_autofill_service import AUTO_SCOPE_EXCLUSION_REASON
+        excluded_at = datetime.now().isoformat(timespec='seconds')
+        for name in sorted(scope_excluded):
+            ledger.put('item',name,{
+                'is_excluded':1,
+                'excluded_at':excluded_at,
+                'excluded_by':'system',
+                'exclusion_reason':AUTO_SCOPE_EXCLUSION_REASON,
+            })
     removed={i['name'] for i in ledger.rows('item',batch=batch_name,version=version['name'])}-kept
     issues=[]
     if preview['mode']=='replace_all':
@@ -214,6 +230,7 @@ def _confirm_and_reconstruct_payment_match(store,ledger,run,preview,draft,contex
 def _write_rows_and_payment_relation(store,ledger,preview,context,actor):
     version_name=write_rows(store,ledger,preview,context) if (
         preview['selected_row_ids'] or preview.get('selected_field_choices')
+        or preview.get('scope_excluded_item_names')
         or preview.get('selected_packing_assignments')
         or any(candidate.get('default_selected') and candidate.get('can_apply')
                for candidate in preview.get('packing_group_candidates') or [])
