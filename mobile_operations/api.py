@@ -89,7 +89,7 @@ def search_mobile_material_request_items(search=None, limit=20):
 			["Item", "item_name", "like", search_value],
 			["Item", "description", "like", search_value],
 		],
-		fields=["name", "item_name", "stock_uom"],
+		fields=["name", "item_name", "description", "stock_uom"],
 		order_by="name asc",
 		limit_page_length=max(1, min(cint(limit) or 20, 30)),
 	)
@@ -211,6 +211,200 @@ def create_mobile_material_request_stock_entry(material_request_name=None, items
 	result = create_issue_stock_entry_from_mobile(material_request_name, items)
 	_clear_mobile_inventory_summary_cache()
 	return result
+
+
+@frappe.whitelist()
+def get_mobile_stock_entry_form_options():
+	"""Return the permission-aware options used by the mobile Stock Entry create form."""
+	if not frappe.has_permission("Stock Entry", "create"):
+		frappe.throw(_("当前账号没有创建物料移动的权限"), frappe.PermissionError)
+
+	stock_entry_types = frappe.get_list(
+		"Stock Entry Type",
+		fields=["name", "purpose", "add_to_transit"],
+		order_by="name asc",
+		limit_page_length=0,
+	)
+	companies = frappe.get_list(
+		"Company",
+		fields=["name"],
+		order_by="name asc",
+		limit_page_length=100,
+	)
+	warehouses = frappe.get_list(
+		"Warehouse",
+		filters={"is_group": 0, "disabled": 0},
+		fields=["name", "warehouse_name", "parent_warehouse", "company"],
+		order_by="warehouse_name asc, name asc",
+		limit_page_length=500,
+	)
+	defaults = frappe.defaults.get_defaults()
+	default_company = frappe.defaults.get_user_default("Company") or defaults.get("company")
+	if not default_company and companies:
+		default_company = companies[0]["name"]
+
+	return {
+		"stock_entry_types": stock_entry_types,
+		"companies": companies,
+		"warehouses": warehouses,
+		"default_company": default_company,
+		"today": nowdate(),
+	}
+
+
+@frappe.whitelist()
+def search_mobile_stock_entry_items(search=None, limit=20):
+	"""Search stock items for the mobile Stock Entry item selector."""
+	if not frappe.has_permission("Stock Entry", "create"):
+		frappe.throw(_("当前账号没有创建物料移动的权限"), frappe.PermissionError)
+
+	search = (search or "").strip()
+	if len(search) < 2:
+		return []
+
+	search_value = f"%{search}%"
+	return frappe.get_list(
+		"Item",
+		filters={"disabled": 0},
+		or_filters=[
+			["Item", "name", "like", search_value],
+			["Item", "item_name", "like", search_value],
+			["Item", "description", "like", search_value],
+		],
+		fields=["name", "item_name", "description", "stock_uom"],
+		order_by="name asc",
+		limit_page_length=max(1, min(cint(limit) or 20, 30)),
+	)
+
+
+@frappe.whitelist()
+def create_mobile_stock_entry(data=None, submit=0):
+	"""Create and optionally submit a standalone Stock Entry from mobile."""
+	if not frappe.has_permission("Stock Entry", "create"):
+		frappe.throw(_("当前账号没有创建物料移动的权限"), frappe.PermissionError)
+	should_submit = cint(submit)
+	if should_submit and not frappe.has_permission("Stock Entry", "submit"):
+		frappe.throw(_("当前账号没有提交物料移动的权限"), frappe.PermissionError)
+
+	data = frappe.parse_json(data or {})
+	if not isinstance(data, dict):
+		frappe.throw(_("物料移动数据格式不正确"))
+
+	company = (data.get("company") or "").strip()
+	if not company:
+		frappe.throw(_("请选择公司"))
+	if not frappe.db.exists("Company", company):
+		frappe.throw(_("公司不存在"))
+
+	stock_entry_type = (data.get("stock_entry_type") or "").strip()
+	if stock_entry_type:
+		type_row = frappe.get_list(
+			"Stock Entry Type",
+			filters={"name": stock_entry_type},
+			fields=["name", "purpose"],
+			limit_page_length=1,
+		)
+		if not type_row:
+			frappe.throw(_("物料移动类型不正确"))
+		purpose = type_row[0].purpose
+	else:
+		purpose = (data.get("purpose") or "").strip()
+		if not purpose:
+			frappe.throw(_("请选择移动类型"))
+		stock_entry_type = frappe.db.get_value(
+			"Stock Entry Type",
+			{"purpose": purpose, "name": purpose},
+			"name",
+		)
+		stock_entry_type = stock_entry_type or frappe.db.get_value(
+			"Stock Entry Type",
+			{"purpose": purpose},
+			"name",
+			order_by="name asc",
+		)
+		if not stock_entry_type:
+			frappe.throw(_("没有可用的物料移动单据类型"))
+	requested_purpose = (data.get("purpose") or "").strip()
+	if requested_purpose and requested_purpose != purpose:
+		frappe.throw(_("物料移动类型与单据类型不匹配"))
+
+	from_warehouse = (data.get("from_warehouse") or "").strip()
+	to_warehouse = (data.get("to_warehouse") or "").strip()
+	source_required = purpose in {
+		"Material Issue",
+		"Material Transfer",
+		"Send to Subcontractor",
+		"Material Transfer for Manufacture",
+		"Material Consumption for Manufacture",
+		"Return Raw Material to Customer",
+		"Subcontracting Delivery",
+	}
+	target_required = purpose in {
+		"Material Receipt",
+		"Material Transfer",
+		"Send to Subcontractor",
+		"Material Transfer for Manufacture",
+		"Receive from Customer",
+		"Subcontracting Return",
+	}
+	if source_required and not from_warehouse:
+		frappe.throw(_("请选择来源仓库"))
+	if target_required and not to_warehouse:
+		frappe.throw(_("请选择目标仓库"))
+	if purpose == "Material Transfer" and from_warehouse == to_warehouse:
+		frappe.throw(_("来源仓库和目标仓库不能相同"))
+
+	for warehouse_name, label in ((from_warehouse, _("来源仓库")), (to_warehouse, _("目标仓库"))):
+		if not warehouse_name:
+			continue
+		warehouse = frappe.get_cached_doc("Warehouse", warehouse_name)
+		if warehouse.disabled or warehouse.is_group:
+			frappe.throw(_("{0}必须是启用的明细仓库").format(label))
+		if warehouse.company != company:
+			frappe.throw(_("{0}必须属于所选公司").format(label))
+
+	items = data.get("items") or []
+	if not items:
+		frappe.throw(_("请至少添加一项物料"))
+
+	doc = frappe.new_doc("Stock Entry")
+	doc.stock_entry_type = stock_entry_type
+	doc.purpose = purpose
+	doc.company = company
+	doc.posting_date = data.get("posting_date") or nowdate()
+	doc.from_warehouse = from_warehouse or None
+	doc.to_warehouse = to_warehouse or None
+
+	for index, item_data in enumerate(items, start=1):
+		if not isinstance(item_data, dict):
+			frappe.throw(_("第 {0} 行物料数据不正确").format(index))
+		item_code = (item_data.get("item_code") or "").strip()
+		qty = flt(item_data.get("qty"))
+		if not item_code or qty <= 0:
+			frappe.throw(_("第 {0} 行物料和数量不能为空").format(index))
+
+		item = frappe.get_cached_doc("Item", item_code)
+		if item.disabled:
+			frappe.throw(_("物料 {0} 已停用").format(item_code))
+		doc.append(
+			"items",
+			{
+				"item_code": item_code,
+				"item_name": item.item_name,
+				"qty": qty,
+				"uom": item_data.get("uom") or item.stock_uom,
+				"stock_uom": item.stock_uom,
+				"conversion_factor": flt(item_data.get("conversion_factor")) or 1,
+				"s_warehouse": from_warehouse or None,
+				"t_warehouse": to_warehouse or None,
+			},
+		)
+
+	doc.insert()
+	if should_submit:
+		doc.submit()
+	_clear_mobile_inventory_summary_cache()
+	return {"name": doc.name, "docstatus": doc.docstatus, "status": _get_stock_entry_status_label(doc)}
 
 
 @frappe.whitelist()

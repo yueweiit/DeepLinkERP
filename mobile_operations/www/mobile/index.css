@@ -806,6 +806,90 @@ body {
 	margin: 0 0 4px;
 }
 
+.mobile-mr-warehouse-parent-picker {
+	position: relative;
+}
+
+.mobile-mr-warehouse-parent-picker.is-open { z-index: 60; }
+
+.mobile-mr-warehouse-parent-trigger {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	width: 100%;
+	min-height: 34px;
+	box-sizing: border-box;
+	padding: 5px 8px;
+	border: 1px solid #e3e5ed;
+	border-radius: 7px;
+	background: #fafbfe;
+	color: #374151;
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.mobile-mr-warehouse-parent-trigger:hover,
+.mobile-mr-warehouse-parent-trigger[aria-expanded="true"] {
+	border-color: var(--mobile-mr-create-primary);
+	box-shadow: 0 0 0 2px rgba(79, 70, 165, 0.12);
+}
+
+.mobile-mr-warehouse-parent-trigger span {
+	display: -webkit-box;
+	min-width: 0;
+	overflow: hidden;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+	line-height: 1.2;
+}
+
+.mobile-mr-warehouse-parent-trigger i {
+	flex: 0 0 auto;
+	color: #6b7280;
+	font-size: 10px;
+}
+
+.mobile-mr-warehouse-parent-options[hidden] { display: none; }
+
+.mobile-mr-warehouse-parent-options {
+	position: absolute;
+	top: calc(100% + 3px);
+	right: 0;
+	left: 0;
+	z-index: 70;
+	max-height: 170px;
+	overflow-y: auto;
+	padding: 4px;
+	border: 1px solid #dfe2eb;
+	border-radius: 8px;
+	background: #fff;
+	box-shadow: 0 8px 20px rgba(30, 36, 70, 0.16);
+}
+
+.mobile-mr-warehouse-parent-option {
+	display: block;
+	width: 100%;
+	padding: 8px;
+	border: 0;
+	border-radius: 6px;
+	background: #fff;
+	color: #374151;
+	font-size: 12px;
+	line-height: 1.35;
+	text-align: left;
+	white-space: normal;
+	word-break: break-word;
+	cursor: pointer;
+}
+
+.mobile-mr-warehouse-parent-option:hover,
+.mobile-mr-warehouse-parent-option.is-selected {
+	background: var(--mobile-mr-create-primary-soft);
+	color: var(--mobile-mr-create-primary);
+}
+
 .mobile-mr-warehouse-filter select,
 .mobile-mr-warehouse-location-input {
 	width: 100%;
@@ -1676,6 +1760,28 @@ body {
 	margin: 4px 0 0;
 	color: #6b7280;
 	font-size: 12px;
+}
+
+.mobile-se-heading-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: 0 0 auto;
+}
+
+.mobile-se-new {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	min-height: 34px;
+	padding: 0 10px;
+	border: 1px solid var(--mobile-primary);
+	border-radius: 9px;
+	background: var(--mobile-primary);
+	color: #fff;
+	font-size: 12px;
+	cursor: pointer;
 }
 
 .mobile-se-refresh,

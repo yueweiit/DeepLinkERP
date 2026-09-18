@@ -89,6 +89,12 @@ class MobileOperationsApp {
 			return;
 		}
 
+		if (this.route === "/mobile/stock-entry/new") {
+			title.textContent = __("新建物料移动");
+			this.stock_entry_create = new MobileStockEntryCreateView(main, this);
+			return;
+		}
+
 		if (this.route === "/mobile/stock-entry" || this.route.startsWith("/mobile/stock-entry/")) {
 			title.textContent = __("物料移动");
 			this.stock_entry = new MobileStockEntryView(main, this);
@@ -236,6 +242,8 @@ class MobileOperationsApp {
 	refresh() {
 		if (this.material_request && this.route === "/mobile/material-request") {
 			this.material_request.refresh();
+		} else if (this.stock_entry_create && this.route === "/mobile/stock-entry/new") {
+			this.stock_entry_create.load_options();
 		} else if (this.stock_entry && (this.route === "/mobile/stock-entry" || this.route.startsWith("/mobile/stock-entry/"))) {
 			this.stock_entry.refresh();
 		} else if (this.inventory && this.route === "/mobile/inventory") {
@@ -1128,7 +1136,7 @@ class MobileStockEntryView {
 			<div class="mobile-se-page">
 				<div class="mobile-se-heading">
 					<div><h2>${__("物料移动")}</h2><p>${__("库存转移和发料单据")}</p></div>
-					<button class="mobile-se-refresh" data-action="se-refresh" aria-label="${__("刷新")}"><i class="fa fa-refresh"></i></button>
+					<div class="mobile-se-heading-actions"><button class="mobile-se-new" data-action="se-new"><i class="fa fa-plus"></i><span>${__("新建")}</span></button><button class="mobile-se-refresh" data-action="se-refresh" aria-label="${__("刷新")}"><i class="fa fa-refresh"></i></button></div>
 				</div>
 				<div class="mobile-se-summary" data-region="summary"></div>
 				<div class="mobile-se-section-title"><h3>${__("物料移动单")}</h3><span data-region="list-count"></span></div>
@@ -1159,6 +1167,10 @@ class MobileStockEntryView {
 			const action = target?.dataset.action;
 			if (action === "se-toggle-status") {
 				this.toggle_status_filter();
+				return;
+			}
+			if (action === "se-new") {
+				this.app.go("/mobile/stock-entry/new");
 				return;
 			}
 			if (action === "se-refresh") this.refresh();
@@ -1395,6 +1407,565 @@ class MobileStockEntryView {
 			status.className = `mobile-se-action-status${tone ? ` is-${tone}` : ""}`;
 		}
 		this.parent.querySelectorAll("[data-action='se-submit'], [data-action='se-push']").forEach((button) => { button.disabled = false; });
+	}
+}
+
+class MobileStockEntryCreateView {
+	constructor(parent, app) {
+		this.parent = parent;
+		this.app = app;
+		this.options = { purposes: [], stock_entry_types: [], companies: [], warehouses: [] };
+		this.item_results = {};
+		this.item_search_timers = {};
+		this.item_search_sequences = {};
+		this.form = {
+			purpose: "Material Issue",
+			stock_entry_type: "Material Issue",
+			company: "",
+			posting_date: "",
+			from_warehouse: "",
+			to_warehouse: "",
+			items: [this.empty_item()],
+		};
+		this.render_shell();
+		this.bind_events();
+		this.load_options();
+	}
+
+	empty_item() {
+		return { item_code: "", item_name: "", search: "", qty: "", uom: "", stock_uom: "" };
+	}
+
+	render_shell() {
+		this.parent.innerHTML = `
+			<div class="mobile-mr-create-page mobile-se-create-page">
+				<div class="mobile-mr-create-heading">
+					<button class="mobile-mr-create-back" data-action="se-create-back" aria-label="${__("返回")}"><i class="fa fa-arrow-left"></i></button>
+					<div><h2>${__("新建物料移动")}</h2><p>${__("现场快速创建物料移动")}</p></div>
+				</div>
+				<section class="mobile-mr-create-card">
+					<div class="mobile-mr-create-card-title">${__("基本信息")}</div>
+					<div class="mobile-mr-field">
+						<span class="mobile-mr-field-label">${__("移动类型")}</span>
+						<div class="mobile-mr-type-picker" data-region="stock-entry-type-picker">
+							<button class="mobile-mr-select-trigger" type="button" data-action="se-create-toggle-type" aria-haspopup="listbox" aria-expanded="false"><span data-region="stock-entry-type-label"></span><i class="fa fa-chevron-down" aria-hidden="true"></i></button>
+							<div class="mobile-mr-select-menu" data-region="stock-entry-type-options" role="listbox" hidden></div>
+							<select data-field="stock_entry_type" hidden tabindex="-1" aria-hidden="true"></select>
+						</div>
+					</div>
+					<div class="mobile-mr-create-two-columns">
+						<div class="mobile-mr-field">
+							<span class="mobile-mr-field-label">${__("公司")}</span>
+							<div class="mobile-mr-type-picker" data-region="stock-entry-company-picker">
+								<button class="mobile-mr-select-trigger" type="button" data-action="se-create-toggle-company" aria-haspopup="listbox" aria-expanded="false"><span data-region="stock-entry-company-label"></span><i class="fa fa-chevron-down" aria-hidden="true"></i></button>
+								<div class="mobile-mr-select-menu" data-region="stock-entry-company-options" role="listbox" hidden></div>
+								<select data-field="company" hidden tabindex="-1" aria-hidden="true"></select>
+							</div>
+						</div>
+						<label class="mobile-mr-field">${__("记账日期")}<input type="date" data-field="posting_date"></label>
+					</div>
+					<div class="mobile-mr-field" data-region="from-warehouse-field">
+						<span data-region="from-warehouse-label">${__("来源仓库")}</span>
+						<div class="mobile-mr-warehouse-picker" data-region="stock-entry-warehouse-picker" data-warehouse-field="from_warehouse">
+							<button class="mobile-mr-select-trigger" type="button" data-action="se-create-toggle-warehouse" data-warehouse-field="from_warehouse" aria-haspopup="listbox" aria-expanded="false"><span data-region="warehouse-value"></span><i class="fa fa-chevron-down" aria-hidden="true"></i></button>
+							<div class="mobile-mr-select-menu mobile-mr-warehouse-menu" data-region="warehouse-options" role="listbox" hidden><div class="mobile-mr-warehouse-filters"><label class="mobile-mr-warehouse-filter"><span>${__("仓库名称")}</span><div class="mobile-mr-warehouse-parent-picker" data-warehouse-parent-picker><button class="mobile-mr-warehouse-parent-trigger" type="button" data-action="se-create-toggle-warehouse-parent" aria-haspopup="listbox" aria-expanded="false"><span data-region="warehouse-parent-label">${__("全部仓库名称")}</span><i class="fa fa-chevron-down" aria-hidden="true"></i></button><div class="mobile-mr-warehouse-parent-options" data-region="warehouse-parent-options" role="listbox" hidden></div></div></label><label class="mobile-mr-warehouse-filter"><span>${__("库位号")}</span><div class="mobile-mr-warehouse-location-input"><i class="fa fa-search" aria-hidden="true"></i><input type="search" data-warehouse-location-search placeholder="${__("输入库位号，如 P17R02T")}" autocomplete="off"></div></label></div><div data-region="warehouse-list"></div></div>
+						</div>
+					</div>
+					<div class="mobile-mr-field" data-region="to-warehouse-field">
+						<span data-region="to-warehouse-label">${__("目标仓库")}</span>
+						<div class="mobile-mr-warehouse-picker" data-region="stock-entry-warehouse-picker" data-warehouse-field="to_warehouse">
+							<button class="mobile-mr-select-trigger" type="button" data-action="se-create-toggle-warehouse" data-warehouse-field="to_warehouse" aria-haspopup="listbox" aria-expanded="false"><span data-region="warehouse-value"></span><i class="fa fa-chevron-down" aria-hidden="true"></i></button>
+							<div class="mobile-mr-select-menu mobile-mr-warehouse-menu" data-region="warehouse-options" role="listbox" hidden><div class="mobile-mr-warehouse-filters"><label class="mobile-mr-warehouse-filter"><span>${__("仓库名称")}</span><div class="mobile-mr-warehouse-parent-picker" data-warehouse-parent-picker><button class="mobile-mr-warehouse-parent-trigger" type="button" data-action="se-create-toggle-warehouse-parent" aria-haspopup="listbox" aria-expanded="false"><span data-region="warehouse-parent-label">${__("全部仓库名称")}</span><i class="fa fa-chevron-down" aria-hidden="true"></i></button><div class="mobile-mr-warehouse-parent-options" data-region="warehouse-parent-options" role="listbox" hidden></div></div></label><label class="mobile-mr-warehouse-filter"><span>${__("库位号")}</span><div class="mobile-mr-warehouse-location-input"><i class="fa fa-search" aria-hidden="true"></i><input type="search" data-warehouse-location-search placeholder="${__("输入库位号，如 P17R02T")}" autocomplete="off"></div></label></div><div data-region="warehouse-list"></div></div>
+						</div>
+					</div>
+				</section>
+
+				<section class="mobile-mr-create-card">
+					<div class="mobile-mr-create-card-heading"><div class="mobile-mr-create-card-title">${__("物料明细")}</div><span data-region="item-count"></span></div>
+					<div class="mobile-mr-create-items" data-region="item-rows"></div>
+					<button class="mobile-mr-add-item" data-action="se-create-add-item"><i class="fa fa-plus"></i>${__("添加物料")}</button>
+				</section>
+
+				<div class="mobile-mr-create-status" data-region="create-status" role="alert"></div>
+				<div class="mobile-mr-create-actions">
+					<button class="mobile-mr-create-save" data-action="se-create-save" data-mode="draft">${__("保存草稿")}</button>
+					<button class="mobile-mr-create-submit" data-action="se-create-save" data-mode="submit">${__("保存并提交")}</button>
+				</div>
+			</div>
+		`;
+		this.render_form_options();
+		this.render_item_rows();
+	}
+
+	bind_events() {
+		this.parent.addEventListener("click", (event) => {
+			const event_target = event.target instanceof Element ? event.target : event.target.parentElement;
+			if (!event_target) return;
+			const target = event_target.closest("[data-action]");
+			const action = target?.dataset.action;
+			if (!action && !event_target.closest("[data-region='stock-entry-type-picker'], [data-region='stock-entry-company-picker'], [data-region='stock-entry-warehouse-picker']")) {
+				this.close_picker_menus();
+				return;
+			}
+			if (action === "se-create-back") this.app.go("/mobile/stock-entry");
+			if (action === "se-create-toggle-type") {
+				this.toggle_picker_menu(target.closest("[data-region='stock-entry-type-picker']"));
+				return;
+			}
+			if (action === "se-create-select-type") {
+				this.form.stock_entry_type = target.dataset.value || "";
+				this.set_default_stock_entry_type();
+				this.close_picker_menus();
+				this.render_form_options();
+				return;
+			}
+			if (action === "se-create-toggle-company") {
+				this.toggle_picker_menu(target.closest("[data-region='stock-entry-company-picker']"));
+				return;
+			}
+			if (action === "se-create-select-company") {
+				this.form.company = target.dataset.value || "";
+				this.close_picker_menus();
+				this.render_form_options();
+				return;
+			}
+			if (action === "se-create-toggle-warehouse") {
+				event.preventDefault();
+				this.toggle_picker_menu(target.closest("[data-region='stock-entry-warehouse-picker']"));
+				return;
+			}
+			if (action === "se-create-toggle-warehouse-parent") {
+				event.preventDefault();
+				this.toggle_warehouse_parent_menu(target.closest("[data-warehouse-parent-picker]"));
+				return;
+			}
+			if (action === "se-create-select-warehouse-parent") {
+				const warehouse_picker = target.closest("[data-region='stock-entry-warehouse-picker']");
+				if (warehouse_picker) {
+					warehouse_picker.dataset.warehouseParent = target.dataset.value || "";
+					this.close_warehouse_parent_menus();
+					this.render_warehouse_options(warehouse_picker);
+				}
+				return;
+			}
+			if (action === "se-create-select-warehouse") {
+				this.form[target.dataset.warehouseField] = target.dataset.value || "";
+				this.close_picker_menus();
+				this.render_form_options();
+				return;
+			}
+			if (action === "se-create-add-item") {
+				this.form.items.push(this.empty_item());
+				this.render_item_rows();
+			}
+			if (action === "se-create-remove-item") {
+				const index = Number(target.dataset.index);
+				if (this.form.items.length === 1) this.form.items[0] = this.empty_item();
+				else this.form.items.splice(index, 1);
+				this.render_item_rows();
+			}
+			if (action === "se-create-select-item") this.select_item(Number(target.dataset.index), target.dataset.itemCode);
+			if (action === "se-create-save") this.save(target.dataset.mode);
+		});
+		this.parent.addEventListener("input", (event) => {
+			const item_search = event.target.closest("[data-item-search]");
+			if (item_search) {
+				this.search_items(item_search);
+				return;
+			}
+			if (event.target.matches("[data-warehouse-location-search]")) {
+				this.render_warehouse_options(event.target.closest("[data-region='stock-entry-warehouse-picker']"));
+				return;
+			}
+			const item_qty = event.target.closest("[data-item-qty]");
+			if (item_qty) {
+				const row = item_qty.closest("[data-item-index]");
+				if (row) this.form.items[Number(row.dataset.itemIndex)].qty = item_qty.value;
+			}
+		});
+		this.parent.addEventListener("change", (event) => {
+			const field = event.target.dataset.field;
+			if (!field) return;
+			this.form[field] = event.target.value;
+			if (field === "stock_entry_type") {
+				this.set_default_stock_entry_type();
+				this.render_form_options();
+			}
+			if (field === "company") this.render_form_options();
+		});
+	}
+
+	load_options() {
+		frappe.call({
+			method: "mobile_operations.api.get_mobile_stock_entry_form_options",
+			freeze: false,
+			callback: (response) => {
+				this.options = response.message || this.options;
+				this.form.company = this.form.company || this.options.default_company || this.options.companies?.[0]?.name || "";
+				this.form.posting_date = this.form.posting_date || this.options.today || "";
+				this.set_default_stock_entry_type();
+				this.render_form_options();
+			},
+			error: () => this.set_status(__("物料移动选项加载失败，请稍后重试"), "error"),
+		});
+	}
+
+	set_default_stock_entry_type() {
+		const types = this.get_stock_entry_types();
+		let type = types.find((item) => item.name === this.form.stock_entry_type);
+		if (!type) type = types.find((item) => item.name === "Material Issue") || types[0];
+		this.form.stock_entry_type = type?.name || "";
+		this.form.purpose = type?.purpose || "";
+	}
+
+	get_stock_entry_types() {
+		return this.options.stock_entry_types?.length ? this.options.stock_entry_types : [
+			{ name: "Material Issue", purpose: "Material Issue" },
+			{ name: "Material Receipt", purpose: "Material Receipt" },
+			{ name: "Material Transfer", purpose: "Material Transfer" },
+		];
+	}
+
+	stock_entry_type_label(stock_entry_type) {
+		const labels = {
+			"Material Issue": __("物料发料"),
+			"Material Receipt": __("物料收料"),
+			"Material Transfer": __("物料调拨"),
+			"Material Transfer for Manufacture": __("生产领料"),
+			"Material Consumption for Manufacture": __("生产耗用"),
+			"Injection Molding Issuance": __("注塑发料"),
+			Manufacture: __("生产入库"),
+			Disassemble: __("拆解"),
+			Repack: __("物料重包装"),
+			"Receive from Customer": __("客户收料"),
+			"Return Raw Material to Customer": __("退回客户原料"),
+			"Send to Subcontractor": __("发送给委外商"),
+			"Subcontracting Delivery": __("委外发料"),
+			"Subcontracting Return": __("委外退料"),
+			"Semi Finished Goods Receipt": __("半成品入库"),
+			"Finished Goods Receipt": __("成品入库"),
+		};
+		return labels[stock_entry_type.name] || stock_entry_type.label || stock_entry_type.name || stock_entry_type.purpose;
+	}
+
+	purpose_label(purpose) {
+		return {
+			"Material Issue": __("物料发料"),
+			"Material Receipt": __("物料收料"),
+			"Material Transfer": __("物料调拨"),
+		}[purpose] || purpose;
+	}
+
+	warehouse_options() {
+		return (this.options.warehouses || []).filter((item) => !this.form.company || item.company === this.form.company);
+	}
+
+	source_warehouse_required() {
+		return new Set([
+			"Material Issue",
+			"Material Transfer",
+			"Send to Subcontractor",
+			"Material Transfer for Manufacture",
+			"Material Consumption for Manufacture",
+			"Return Raw Material to Customer",
+			"Subcontracting Delivery",
+		]).has(this.form.purpose);
+	}
+
+	target_warehouse_required() {
+		return new Set([
+			"Material Receipt",
+			"Material Transfer",
+			"Send to Subcontractor",
+			"Material Transfer for Manufacture",
+			"Receive from Customer",
+			"Subcontracting Return",
+		]).has(this.form.purpose);
+	}
+
+	toggle_picker_menu(picker) {
+		const menu = picker?.querySelector(".mobile-mr-select-menu");
+		const trigger = picker?.querySelector(".mobile-mr-select-trigger");
+		if (!picker || !menu || !trigger) return;
+		const open = menu.hidden;
+		this.close_picker_menus();
+		if (!open) return;
+		if (picker.matches("[data-region='stock-entry-warehouse-picker']")) this.render_warehouse_options(picker);
+		menu.removeAttribute("hidden");
+		picker.classList.add("is-open");
+		picker.closest(".mobile-mr-create-card")?.classList.add("is-picker-open");
+		trigger.setAttribute("aria-expanded", "true");
+	}
+
+	toggle_warehouse_parent_menu(parent_picker) {
+		const menu = parent_picker?.querySelector("[data-region='warehouse-parent-options']");
+		const trigger = parent_picker?.querySelector(".mobile-mr-warehouse-parent-trigger");
+		if (!parent_picker || !menu || !trigger) return;
+		const open = menu.hidden;
+		this.close_warehouse_parent_menus();
+		if (!open) return;
+		menu.removeAttribute("hidden");
+		parent_picker.classList.add("is-open");
+		trigger.setAttribute("aria-expanded", "true");
+	}
+
+	close_warehouse_parent_menus() {
+		this.parent.querySelectorAll("[data-warehouse-parent-picker]").forEach((picker) => {
+			const menu = picker.querySelector("[data-region='warehouse-parent-options']");
+			const trigger = picker.querySelector(".mobile-mr-warehouse-parent-trigger");
+			if (menu) menu.setAttribute("hidden", "");
+			picker.classList.remove("is-open");
+			if (trigger) trigger.setAttribute("aria-expanded", "false");
+		});
+	}
+
+	close_picker_menus() {
+		this.close_warehouse_parent_menus();
+		this.parent.querySelectorAll("[data-region='stock-entry-type-picker'], [data-region='stock-entry-company-picker'], [data-region='stock-entry-warehouse-picker']").forEach((picker) => {
+			const menu = picker.querySelector(".mobile-mr-select-menu");
+			const trigger = picker.querySelector(".mobile-mr-select-trigger");
+			if (menu) menu.setAttribute("hidden", "");
+			picker.classList.remove("is-open");
+			picker.closest(".mobile-mr-create-card")?.classList.remove("is-picker-open");
+			if (trigger) trigger.setAttribute("aria-expanded", "false");
+		});
+	}
+
+	render_form_options() {
+		this.set_default_stock_entry_type();
+		const type_select = this.parent.querySelector("[data-field='stock_entry_type']");
+		if (type_select) {
+			const types = this.get_stock_entry_types();
+			type_select.innerHTML = types.map((item) => `<option value="${escape_attribute(item.name)}">${escape_html(this.stock_entry_type_label(item))}</option>`).join("");
+			type_select.value = this.form.stock_entry_type;
+		}
+		const type_label = this.parent.querySelector("[data-region='stock-entry-type-label']");
+		const type_menu = this.parent.querySelector("[data-region='stock-entry-type-options']");
+		if (type_label && type_menu) {
+			const types = this.get_stock_entry_types();
+			const selected_type = types.find((item) => item.name === this.form.stock_entry_type);
+			type_label.textContent = selected_type ? this.stock_entry_type_label(selected_type) : __("请选择移动类型");
+			type_menu.innerHTML = types.map((item) => {
+				const selected = item.name === this.form.stock_entry_type;
+				return `<button type="button" class="mobile-mr-select-option${selected ? " is-selected" : ""}" role="option" aria-selected="${selected}" data-action="se-create-select-type" data-value="${escape_attribute(item.name)}">${escape_html(this.stock_entry_type_label(item))}</button>`;
+			}).join("");
+		}
+		const company_select = this.parent.querySelector("[data-field='company']");
+		if (company_select) {
+			company_select.innerHTML = `<option value="">${escape_html(__("请选择公司"))}</option>` + (this.options.companies || []).map((item) => `<option value="${escape_attribute(item.name)}">${escape_html(item.name)}</option>`).join("");
+			company_select.value = this.form.company;
+		}
+		const company_label = this.parent.querySelector("[data-region='stock-entry-company-label']");
+		const company_menu = this.parent.querySelector("[data-region='stock-entry-company-options']");
+		if (company_label && company_menu) {
+			const companies = this.options.companies || [];
+			const selected_company = companies.find((item) => item.name === this.form.company);
+			company_label.textContent = selected_company?.name || __("请选择公司");
+			company_menu.innerHTML = companies.map((item) => {
+				const selected = item.name === this.form.company;
+				return `<button type="button" class="mobile-mr-select-option${selected ? " is-selected" : ""}" role="option" aria-selected="${selected}" data-action="se-create-select-company" data-value="${escape_attribute(item.name)}">${escape_html(item.name)}</button>`;
+			}).join("");
+		}
+		const date = this.parent.querySelector("[data-field='posting_date']");
+		if (date) date.value = this.form.posting_date || "";
+
+		const source_required = this.source_warehouse_required();
+		const target_required = this.target_warehouse_required();
+		const show_source = source_required || !target_required;
+		const show_target = target_required || !source_required;
+		const source_field = this.parent.querySelector("[data-region='from-warehouse-field']");
+		const target_field = this.parent.querySelector("[data-region='to-warehouse-field']");
+		if (source_field) source_field.hidden = !show_source;
+		if (target_field) target_field.hidden = !show_target;
+		if (!show_source) this.form.from_warehouse = "";
+		if (!show_target) this.form.to_warehouse = "";
+		this.render_warehouse_pickers();
+	}
+
+	render_warehouse_pickers() {
+		this.parent.querySelectorAll("[data-region='stock-entry-warehouse-picker']").forEach((picker) => {
+			const field = picker.dataset.warehouseField;
+			const warehouses = this.warehouse_options();
+			const value = this.form[field] || "";
+			const selected_warehouse = warehouses.find((item) => item.name === value);
+			const value_region = picker.querySelector("[data-region='warehouse-value']");
+			const placeholder = field === "from_warehouse" ? __("请选择来源仓库") : __("请选择目标仓库");
+			if (value_region) value_region.textContent = selected_warehouse ? warehouse_display_name(selected_warehouse) : placeholder;
+			if (!selected_warehouse) this.form[field] = "";
+			this.render_warehouse_options(picker, warehouses);
+		});
+	}
+
+	render_warehouse_options(picker, warehouses = null) {
+		if (!picker) return;
+		const field = picker.dataset.warehouseField;
+		const list = picker.querySelector("[data-region='warehouse-list']");
+		const parent_picker = picker.querySelector("[data-warehouse-parent-picker]");
+		const parent_options = picker.querySelector("[data-region='warehouse-parent-options']");
+		const location_input = picker.querySelector("[data-warehouse-location-search]");
+		if (!list) return;
+		const available_warehouses = warehouses || this.warehouse_options();
+		const parent_values = [...new Set(available_warehouses.map((item) => item.parent_warehouse).filter(Boolean))]
+			.sort((first, second) => warehouse_parent_display_name({ parent_warehouse: first }).localeCompare(warehouse_parent_display_name({ parent_warehouse: second })));
+		const previous_parent = picker.dataset.warehouseParent || "";
+		const active_parent = parent_values.includes(previous_parent) ? previous_parent : "";
+		picker.dataset.warehouseParent = active_parent;
+		if (parent_picker) {
+			const parent_label = parent_picker.querySelector("[data-region='warehouse-parent-label']");
+			if (parent_label) parent_label.textContent = active_parent ? warehouse_parent_display_name({ parent_warehouse: active_parent }) : __("全部仓库名称");
+		}
+		if (parent_options) {
+			parent_options.innerHTML = `<button type="button" class="mobile-mr-warehouse-parent-option${!active_parent ? " is-selected" : ""}" role="option" aria-selected="${!active_parent}" data-action="se-create-select-warehouse-parent" data-value="">${escape_html(__("全部仓库名称"))}</button>` + parent_values.map((parent_name) => {
+				const selected = parent_name === active_parent;
+				return `<button type="button" class="mobile-mr-warehouse-parent-option${selected ? " is-selected" : ""}" role="option" aria-selected="${selected}" data-action="se-create-select-warehouse-parent" data-value="${escape_attribute(parent_name)}">${escape_html(warehouse_parent_display_name({ parent_warehouse: parent_name }))}</button>`;
+			}).join("");
+		}
+		const location_query = (location_input?.value || "").trim().toLowerCase();
+		const filtered = available_warehouses.filter((item) => {
+			if (active_parent && item.parent_warehouse !== active_parent) return false;
+			if (!location_query) return true;
+			return [warehouse_location_code(item), warehouse_display_name(item)]
+				.filter(Boolean)
+				.some((value) => value.toLowerCase().includes(location_query));
+		});
+		const selected = this.form[field] || "";
+		list.innerHTML = filtered.length ? filtered.map((item) => {
+			const display_name = warehouse_display_name(item);
+			const location_code = warehouse_location_code(item);
+			const warehouse_label = display_name.slice(location_code.length).trim();
+			const parent_name = active_parent ? "" : warehouse_parent_display_name(item);
+			return `<button type="button" class="mobile-mr-warehouse-option${item.name === selected ? " is-selected" : ""}" role="option" aria-selected="${item.name === selected}" data-action="se-create-select-warehouse" data-warehouse-field="${escape_attribute(field)}" data-value="${escape_attribute(item.name)}"><strong><b class="mobile-mr-warehouse-code">${escape_html(location_code)}</b>${warehouse_label ? ` ${escape_html(warehouse_label)}` : ""}</strong>${parent_name ? `<span>${escape_html(parent_name)}</span>` : ""}</button>`;
+		}).join("") : `<div class="mobile-mr-warehouse-empty">${__("没有匹配的仓库")}</div>`;
+	}
+
+	render_item_rows() {
+		const container = this.parent.querySelector("[data-region='item-rows']");
+		if (!container) return;
+		render_mobile_create_item_rows(container, this.form.items, "se-create-remove-item");
+		const count = this.parent.querySelector("[data-region='item-count']");
+		if (count) count.textContent = `${this.form.items.length} ${__("项")}`;
+	}
+
+	search_items(input) {
+		const item_row = input.closest("[data-item-index]");
+		const index = Number(item_row?.dataset.itemIndex);
+		const row = this.form.items[index];
+		if (!row) return;
+		row.search = input.value;
+		row.item_code = "";
+		row.item_name = "";
+		row.uom = "";
+		row.stock_uom = "";
+		window.clearTimeout(this.item_search_timers[index]);
+		this.item_results[index] = [];
+		if (input.value.trim().length < 2) {
+			this.render_item_suggestions(index, []);
+			return;
+		}
+		const sequence = (this.item_search_sequences[index] || 0) + 1;
+		this.item_search_sequences[index] = sequence;
+		this.item_search_timers[index] = window.setTimeout(() => {
+			const search_args = { search: input.value.trim(), limit: 15 };
+			const render_results = (response) => {
+				if (sequence !== this.item_search_sequences[index]) return;
+				if (response?.exc) return this.search_items_fallback(index, sequence, search_args);
+				this.item_results[index] = response?.message || [];
+				this.render_item_suggestions(index, this.item_results[index]);
+			};
+			frappe.call({
+				method: "mobile_operations.api.search_mobile_stock_entry_items",
+				args: search_args,
+				freeze: false,
+				callback: render_results,
+				error: () => this.search_items_fallback(index, sequence, search_args),
+			});
+		}, 250);
+	}
+
+	search_items_fallback(index, sequence, args) {
+		frappe.call({
+			method: "mobile_operations.api.search_mobile_material_request_items",
+			args,
+			freeze: false,
+			callback: (response) => {
+				if (sequence !== this.item_search_sequences[index]) return;
+				this.item_results[index] = response?.message || [];
+				this.render_item_suggestions(index, this.item_results[index]);
+			},
+			error: () => {
+				if (sequence === this.item_search_sequences[index]) this.render_item_suggestions(index, []);
+			},
+		});
+	}
+
+	render_item_suggestions(index, items) {
+		const container = this.parent.querySelector(`[data-item-suggestions="${index}"]`);
+		if (!container) return;
+		render_mobile_item_suggestions(container, items, index, "se-create-select-item");
+	}
+
+	select_item(index, code) {
+		const item = (this.item_results[index] || []).find((result) => result.name === code);
+		if (!item || !this.form.items[index]) return;
+		this.form.items[index] = { ...this.form.items[index], item_code: item.name, item_name: item.item_name || "", search: item.name, uom: item.stock_uom || "", stock_uom: item.stock_uom || "" };
+		this.render_item_rows();
+	}
+
+	save(mode) {
+		const items = this.form.items.filter((item) => item.item_code);
+		const source_required = this.source_warehouse_required();
+		const target_required = this.target_warehouse_required();
+		const show_source = source_required || !target_required;
+		const show_target = target_required || !source_required;
+		if (!this.form.purpose) return this.set_status(__("请选择移动类型"), "error");
+		if (!this.form.company) return this.set_status(__("请选择公司"), "error");
+		if (!this.form.posting_date) return this.set_status(__("请选择记账日期"), "error");
+		if (source_required && !this.form.from_warehouse) return this.set_status(__("请选择来源仓库"), "error");
+		if (target_required && !this.form.to_warehouse) return this.set_status(__("请选择目标仓库"), "error");
+		if (!source_required && !target_required && !this.form.from_warehouse && !this.form.to_warehouse) return this.set_status(__("请选择来源或目标仓库"), "error");
+		if (this.form.purpose === "Material Transfer" && this.form.from_warehouse === this.form.to_warehouse) return this.set_status(__("来源仓库和目标仓库不能相同"), "error");
+		if (!items.length || items.some((item) => !item.qty || Number(item.qty) <= 0)) return this.set_status(__("请为每项物料选择数量"), "error");
+
+		const payload = {
+			purpose: this.form.purpose,
+			stock_entry_type: this.form.stock_entry_type,
+			company: this.form.company,
+			posting_date: this.form.posting_date,
+			from_warehouse: show_source ? this.form.from_warehouse : "",
+			to_warehouse: show_target ? this.form.to_warehouse : "",
+			items: items.map((item) => ({ item_code: item.item_code, qty: Number(item.qty), uom: item.uom })),
+		};
+		this.set_buttons_disabled(true);
+		this.set_status(mode === "submit" ? __("正在提交...") : __("正在保存..."), "loading");
+		frappe.call({
+			method: "mobile_operations.api.create_mobile_stock_entry",
+			args: { data: JSON.stringify(payload), submit: mode === "submit" ? 1 : 0 },
+			freeze: false,
+			callback: (response) => {
+				if (response.exc || !response.message?.name) {
+					this.set_buttons_disabled(false);
+					this.set_status(__("物料移动保存失败，请检查必填信息和权限"), "error");
+					return;
+				}
+				this.app.go(`/mobile/stock-entry/${encodeURIComponent(response.message.name)}`);
+			},
+			error: () => {
+				this.set_buttons_disabled(false);
+				this.set_status(__("物料移动保存失败，请检查必填信息和权限"), "error");
+			},
+		});
+	}
+
+	set_buttons_disabled(disabled) {
+		this.parent.querySelectorAll("[data-action='se-create-save']").forEach((button) => { button.disabled = disabled; });
+	}
+
+	set_status(message, tone) {
+		const status = this.parent.querySelector("[data-region='create-status']");
+		if (status) {
+			status.textContent = message || "";
+			status.className = `mobile-mr-create-status${tone ? ` is-${tone}` : ""}`;
+		}
 	}
 }
 
@@ -1707,14 +2278,7 @@ class MobileMaterialRequestCreateView {
 	render_item_rows() {
 		const container = this.parent.querySelector("[data-region='item-rows']");
 		if (!container) return;
-		container.innerHTML = this.form.items.map((item, item_index) => `
-			<div class="mobile-mr-create-item" data-item-index="${item_index}">
-				<div class="mobile-mr-create-item-heading"><strong>${escape_html(__("物料"))} ${item_index + 1}</strong><button class="mobile-mr-remove-item" type="button" data-action="mr-create-remove-item" data-index="${item_index}" title="${escape_attribute(__("删除物料"))}"><i class="fa fa-trash-o" aria-hidden="true"></i><span class="mobile-sr-only">${escape_html(__("删除物料"))}</span></button></div>
-				<div class="mobile-mr-item-search"><i class="fa fa-search"></i><input type="search" data-item-search value="${escape_attribute(item.search || item.item_code)}" placeholder="${__("搜索物料编码或名称")}" autocomplete="off"></div>
-				<div class="mobile-mr-item-suggestions" data-item-suggestions="${item_index}"></div>
-				<div class="mobile-mr-quantity-row"><label>${__("数量")}<input type="number" min="0.0001" step="any" data-item-qty value="${escape_attribute(item.qty)}" placeholder="0"></label><span class="mobile-mr-item-uom">${escape_html(item.uom || item.stock_uom || __("单位待自动带出"))}</span></div>
-			</div>
-		`).join("");
+		render_mobile_create_item_rows(container, this.form.items, "mr-create-remove-item");
 		const count = this.parent.querySelector("[data-region='item-count']");
 		if (count) count.textContent = `${this.form.items.length} ${__("项")}`;
 	}
@@ -1754,7 +2318,7 @@ class MobileMaterialRequestCreateView {
 	render_item_suggestions(item_index, items) {
 		const container = this.parent.querySelector(`[data-item-suggestions="${item_index}"]`);
 		if (!container) return;
-		container.innerHTML = items.length ? items.map((item) => `<button type="button" class="mobile-mr-item-suggestion" data-action="mr-create-select-item" data-index="${item_index}" data-item-code="${escape_attribute(item.name)}"><strong>${escape_html(item.name)}</strong><span>${escape_html(item.item_name || "")} · ${escape_html(item.stock_uom || "")}</span></button>`).join("") : `<div class="mobile-mr-item-no-result">${__("没有找到匹配物料")}</div>`;
+		render_mobile_item_suggestions(container, items, item_index, "mr-create-select-item");
 	}
 
 	select_item(index, code) {
@@ -1826,6 +2390,92 @@ class MobileMaterialRequestCreateView {
 	}
 }
 
+function render_mobile_create_item_rows(container, items, remove_action) {
+	container.replaceChildren();
+	items.forEach((item, index) => {
+		const row = document.createElement("div");
+		row.className = "mobile-mr-create-item";
+		row.dataset.itemIndex = String(index);
+
+		const heading = document.createElement("div");
+		heading.className = "mobile-mr-create-item-heading";
+		const label = document.createElement("strong");
+		label.textContent = `${__("物料")} ${index + 1}`;
+		const remove = document.createElement("button");
+		remove.className = "mobile-mr-remove-item";
+		remove.type = "button";
+		remove.dataset.action = remove_action;
+		remove.dataset.index = String(index);
+		remove.setAttribute("aria-label", __("删除物料"));
+		const remove_icon = document.createElement("i");
+		remove_icon.className = "fa fa-trash-o";
+		remove_icon.setAttribute("aria-hidden", "true");
+		remove.appendChild(remove_icon);
+		heading.append(label, remove);
+
+		const search = document.createElement("div");
+		search.className = "mobile-mr-item-search";
+		const search_icon = document.createElement("i");
+		search_icon.className = "fa fa-search";
+		const search_input = document.createElement("input");
+		search_input.type = "search";
+		search_input.dataset.itemSearch = "";
+		search_input.value = item.search || item.item_code || "";
+		search_input.placeholder = __("搜索物料编码或名称");
+		search_input.autocomplete = "off";
+		search.append(search_icon, search_input);
+
+		const suggestions = document.createElement("div");
+		suggestions.className = "mobile-mr-item-suggestions";
+		suggestions.dataset.itemSuggestions = String(index);
+
+		const quantity = document.createElement("div");
+		quantity.className = "mobile-mr-quantity-row";
+		const quantity_label = document.createElement("label");
+		quantity_label.append(document.createTextNode(__("数量")));
+		const quantity_input = document.createElement("input");
+		quantity_input.type = "number";
+		quantity_input.min = "0.0001";
+		quantity_input.step = "any";
+		quantity_input.dataset.itemQty = "";
+		quantity_input.value = item.qty || "";
+		quantity_input.placeholder = "0";
+		quantity_label.appendChild(quantity_input);
+		const uom = document.createElement("span");
+		uom.className = "mobile-mr-item-uom";
+		uom.textContent = item.uom || item.stock_uom || __("单位待自动带出");
+		quantity.append(quantity_label, uom);
+
+		row.append(heading, search, suggestions, quantity);
+		container.appendChild(row);
+	});
+}
+
+function render_mobile_item_suggestions(container, items, index, select_action) {
+	container.replaceChildren();
+	if (!items.length) {
+		const empty = document.createElement("div");
+		empty.className = "mobile-mr-item-no-result";
+		empty.textContent = __("没有找到匹配物料");
+		container.appendChild(empty);
+		return;
+	}
+	items.forEach((item) => {
+		const option = document.createElement("button");
+		option.type = "button";
+		option.className = "mobile-mr-item-suggestion";
+		option.dataset.action = select_action;
+		option.dataset.index = String(index);
+		option.dataset.itemCode = item.name || "";
+		const item_code = document.createElement("strong");
+		item_code.textContent = item.name || "";
+		const item_detail = document.createElement("span");
+		item_detail.textContent = `${item.item_name || item.description || ""} · ${item.stock_uom || ""}`;
+		option.append(item_code, item_detail);
+		container.appendChild(option);
+	});
+}
+
 function normalize_mobile_route(path) {
 	path = path.replace(/\/+$/, "") || "/mobile";
 	return path === "/mobile/material-request/" ? "/mobile/material-request" : path;
@@ -1841,7 +2491,7 @@ function route_nav_key(route) {
 }
 
 function route_title(route) {
-	return { "/mobile/inventory": __("库存"), "/mobile/inventory/query": __("库存查询"), "/mobile/stock-entry": __("物料移动"), "/mobile/production": __("生产作业"), "/mobile/material-request/new": __("新建物料需求"), "/mobile/more": __("更多") }[route] || __("移动作业");
+	return { "/mobile/inventory": __("库存"), "/mobile/inventory/query": __("库存查询"), "/mobile/stock-entry": __("物料移动"), "/mobile/stock-entry/new": __("新建物料移动"), "/mobile/production": __("生产作业"), "/mobile/material-request/new": __("新建物料需求"), "/mobile/more": __("更多") }[route] || __("移动作业");
 }
 
 function material_request_type_label(value) {
@@ -1891,6 +2541,13 @@ function status_tone(bucket) {
 	if (bucket === "completed") return "is-success";
 	if (bucket === "exception") return "is-danger";
 	if (bucket === "to_issue" || bucket === "transit") return "is-warning";
+	return "";
+}
+
+function stock_entry_status_tone(status) {
+	if (status === "draft") return "is-warning";
+	if (status === "cancelled") return "is-danger";
+	if (status === "submitted") return "is-success";
 	return "";
 }
 
