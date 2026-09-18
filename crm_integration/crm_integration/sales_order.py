@@ -30,6 +30,7 @@ CRM_STATUS_FINANCE_REJECTED = "FINANCE_REJECTED"
 CRM_STATUS_SHIPMENT_CREATED = "SHIPMENT_CREATED"
 CRM_STATUS_PENDING_SHIPMENT = "PENDING_SHIPMENT"
 CRM_STATUS_PRODUCTION_PROGRESS_REPORTED = "PRODUCTION_PROGRESS_REPORTED"
+CRM_TRACE_ID_MAX_LENGTH = 128
 
 CRM_STATUS_EVENTS = {
 	CRM_STATUS_FINANCE_REJECTED: "Sales Order Rejected",
@@ -164,7 +165,9 @@ def get_crm_status_event(external_status):
 	return CRM_STATUS_EVENTS.get(external_status) or "Sales Order Status Push"
 
 
-def push_sales_order_status_to_crm(sales_order, external_status, remark=None):
+def push_sales_order_status_to_crm(
+	sales_order, external_status, remark=None, production_batch_no=None
+):
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		throw_crm_integration_disabled(sales_order.get("company"))
 
@@ -172,12 +175,17 @@ def push_sales_order_status_to_crm(sales_order, external_status, remark=None):
 	if not external_order_id:
 		frappe.throw(_("缺少 CRM 订单编号，无法推送状态到 CRM。"))
 
+	trace_id = (
+		make_production_progress_trace_id(external_order_id, production_batch_no)
+		if external_status == CRM_STATUS_PRODUCTION_PROGRESS_REPORTED
+		else make_crm_trace_id(sales_order.name, external_status)
+	)
 	payload = {
 		"sourceSystem": "ERP",
 		"externalStatus": external_status,
 		"externalOrderId": external_order_id,
 		"remark": remark if remark is not None else sales_order.get("custom_remark") or "",
-		"traceId": make_crm_trace_id(sales_order.name, external_status),
+		"traceId": trace_id,
 		"attachments": [],
 	}
 	request_url = get_crm_status_api_url()
@@ -243,18 +251,25 @@ def enqueue_sales_order_status_to_crm(
 	delivery_note_name=None,
 	items=None,
 	remark=None,
+	production_batch_no=None,
 ):
+	job_args = {
+		"sales_order_name": sales_order_name,
+		"external_status": external_status,
+		"triggered_status": triggered_status,
+		"trigger_event": trigger_event,
+		"delivery_note_name": delivery_note_name,
+		"items": items or [],
+		"remark": remark,
+	}
+	if production_batch_no is not None:
+		job_args["production_batch_no"] = production_batch_no
+
 	frappe.enqueue(
 		"crm_integration.crm_integration.sales_order.push_sales_order_status_to_crm_job",
 		queue="short",
 		enqueue_after_commit=True,
-		sales_order_name=sales_order_name,
-		external_status=external_status,
-		triggered_status=triggered_status,
-		trigger_event=trigger_event,
-		delivery_note_name=delivery_note_name,
-		items=items or [],
-		remark=remark,
+		**job_args,
 	)
 
 
@@ -266,6 +281,7 @@ def push_sales_order_status_to_crm_job(
 	delivery_note_name=None,
 	items=None,
 	remark=None,
+	production_batch_no=None,
 ):
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
@@ -279,6 +295,7 @@ def push_sales_order_status_to_crm_job(
 		delivery_note_name=delivery_note_name,
 		items=items or [],
 		remark=remark,
+		production_batch_no=production_batch_no,
 	)
 
 
@@ -290,12 +307,19 @@ def push_sales_order_status_payload_to_crm(
 	delivery_note_name=None,
 	items=None,
 	remark=None,
+	production_batch_no=None,
 ):
 	external_order_id = sales_order.get("custom_crm_order_no")
-	trace_id = make_crm_trace_id(
-		sales_order.name,
-		"-".join(filter(None, [external_status, delivery_note_name])),
-	)
+	if external_status == CRM_STATUS_PRODUCTION_PROGRESS_REPORTED:
+		trace_id = make_production_progress_trace_id(
+			external_order_id,
+			production_batch_no or delivery_note_name,
+		)
+	else:
+		trace_id = make_crm_trace_id(
+			sales_order.name,
+			"-".join(filter(None, [external_status, delivery_note_name])),
+		)
 	payload = {
 		"sourceSystem": "ERP",
 		"externalStatus": external_status,
@@ -388,6 +412,20 @@ def get_crm_status_remark(sales_order, triggered_status=None, delivery_note_name
 def make_crm_trace_id(sales_order_name, external_status):
 	timestamp = get_datetime().strftime("%Y%m%d%H%M%S")
 	return f"erp-{sales_order_name}-{external_status}-{timestamp}"
+
+
+def make_production_progress_trace_id(external_order_id, production_batch_no):
+	"""Build the stable idempotency key for one MES production batch."""
+	external_order_id = str(external_order_id or "").strip()
+	production_batch_no = str(production_batch_no or "").strip()
+	if not external_order_id or not production_batch_no:
+		frappe.throw(_("生产进度回传缺少 CRM 订单号或生产批次号，无法生成 traceId。"))
+
+	trace_id = f"MES:PRODUCTION:{external_order_id}:{production_batch_no}"
+	if len(trace_id) > CRM_TRACE_ID_MAX_LENGTH:
+		frappe.throw(_("生产进度回传 traceId 不能超过 {0} 个字符。").format(CRM_TRACE_ID_MAX_LENGTH))
+
+	return trace_id
 
 
 def parse_crm_response(response):
@@ -776,4 +814,3 @@ def enqueue_mes_sales_order_status_callback(
 			title="Failed to enqueue MES Sales Order status callback",
 			message=frappe.get_traceback(),
 		)
-
