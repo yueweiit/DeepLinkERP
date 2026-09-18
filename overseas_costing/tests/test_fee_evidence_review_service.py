@@ -1575,6 +1575,42 @@ def test_human_amount_edits_are_recorded_as_manual_review_evidence() -> None:
     assert fee_rows[0]["source_refs"][-1]["field"] == "amount"
 
 
+def test_legacy_component_item_edit_records_manual_review_provenance(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(service, "_session_user", lambda: "reviewer@example.com")
+
+    _evidence, _fee_rows, components = service._selected_proposals(
+        {
+            "evidence": {
+                "proposal_id": "evidence:classification",
+                "evidence_type": "FINAL_INVOICE",
+                "accounting_role": "FINAL_BILL",
+            },
+            "fee_splits": [],
+            "components": [
+                {
+                    "proposal_id": "component:1",
+                    "item": "ITEM-GLASSES",
+                    "source_refs": [{"attachment": "ATT-1", "row": 2}],
+                }
+            ],
+        },
+        ["evidence:classification", "component:1"],
+        {"component:1": {"item": "ITEM-SUNGLASSES"}},
+    )
+
+    assert components[0]["item"] == "ITEM-SUNGLASSES"
+    assert components[0]["human_edits"] == ["item"]
+    assert components[0]["source_refs"][-1] == {
+        "type": "MANUAL_REVIEW",
+        "field": "item",
+        "operator": "reviewer@example.com",
+        "from": "ITEM-GLASSES",
+        "to": "ITEM-SUNGLASSES",
+    }
+
+
 def test_refund_parent_is_an_allowed_evidence_edit() -> None:
     evidence, _fee_rows, _components = service._selected_proposals(
         {
@@ -2679,6 +2715,265 @@ def test_repository_parses_saved_component_evidence_and_confidence(monkeypatch) 
     assert rows[0]["reverses_component"] == "COMP-PARENT"
 
 
+def test_repository_pages_exact_component_limit_and_keeps_tail_parent(
+    monkeypatch,
+) -> None:
+    total = service.EVIDENCE_COMPONENT_READ_LIMIT
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(_doctype, **kwargs):
+            calls.append(dict(kwargs))
+            start = int(kwargs.get("limit_start") or 0)
+            page_length = int(kwargs["limit_page_length"])
+            stop = min(start + page_length, total)
+            rows = []
+            for index in range(start, stop):
+                is_tail = index == total - 1
+                rows.append(
+                    {
+                        "name": "PARENT-TAIL" if is_tail else f"COMP-{index:05d}",
+                        "item": "ITEM-GLASSES",
+                        "stable_line_key": "LINE-GLASSES",
+                        "source_evidence_json": (
+                            '{"kind":"tail-parent"}' if is_tail else "{}"
+                        ),
+                    }
+                )
+            return rows
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+
+    rows = service.FrappeFeeEvidenceReviewRepository().get_evidence_components(
+        "EVIDENCE-1"
+    )
+
+    assert len(rows) == total
+    assert rows[-1]["name"] == "PARENT-TAIL"
+    assert rows[-1]["source_evidence"] == {"kind": "tail-parent"}
+    assert calls[-1]["limit_start"] == total
+    assert calls[-1]["limit_page_length"] == 1
+    assert all(
+        call["limit_page_length"] <= service.EVIDENCE_COMPONENT_READ_PAGE_SIZE
+        for call in calls[:-1]
+    )
+    parent_by_name = {str(row.get("name") or ""): row for row in rows}
+    normalized = service.normalize_component_for_apply(
+        {
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "component_type": "REFUND_REVERSAL",
+            "accounting_role": "SETTLEMENT",
+            "cost_effect": "LEDGER_ONLY",
+            "currency": "MXN",
+            "original_amount": "-1",
+            "amount_rmb": "-0.5",
+            "reverses_component": "PARENT-TAIL",
+        },
+        item={"name": "ITEM-GLASSES", "stable_line_key": "LINE-GLASSES"},
+        parent_components_by_name=parent_by_name,
+    )
+    assert normalized["reverses_component"] == "PARENT-TAIL"
+
+
+def test_repository_rejects_component_count_above_explicit_limit(monkeypatch) -> None:
+    total = service.EVIDENCE_COMPONENT_READ_LIMIT + 1
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(_doctype, **kwargs):
+            start = int(kwargs.get("limit_start") or 0)
+            stop = min(start + int(kwargs["limit_page_length"]), total)
+            return [
+                {"name": f"COMP-{index}", "source_evidence_json": "{}"}
+                for index in range(start, stop)
+            ]
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+
+    with pytest.raises(ValueError, match="60,000"):
+        service.FrappeFeeEvidenceReviewRepository().get_evidence_components(
+            "EVIDENCE-1"
+        )
+
+
+def test_repository_bulk_inserts_sixty_thousand_components_in_bounded_chunks(
+    monkeypatch,
+) -> None:
+    class FakeDB:
+        def __init__(self):
+            self.sql_calls = []
+            self.bulk_calls = []
+
+        def sql(self, query, values):
+            self.sql_calls.append((query, values))
+
+        def bulk_insert(
+            self,
+            doctype,
+            fields,
+            values,
+            ignore_duplicates=False,
+            *,
+            chunk_size,
+        ):
+            rows = list(values)
+            self.bulk_calls.append(
+                {
+                    "doctype": doctype,
+                    "fields": list(fields),
+                    "rows": rows,
+                    "ignore_duplicates": ignore_duplicates,
+                    "chunk_size": chunk_size,
+                    "chunks": [
+                        len(rows[index : index + chunk_size])
+                        for index in range(0, len(rows), chunk_size)
+                    ],
+                }
+            )
+
+    fake_db = FakeDB()
+    hashes = iter(f"HASH-{index:06d}" for index in range(60000))
+
+    class FakeFrappe:
+        db = fake_db
+        session = type("Session", (), {"user": "reviewer@example.com"})()
+        utils = type("Utils", (), {"now": staticmethod(lambda: "2026-09-18 12:00:00")})()
+
+        @staticmethod
+        def generate_hash(*, length):
+            assert length == 10
+            return next(hashes)
+
+        @staticmethod
+        def get_doc(_values):
+            raise AssertionError("large component replacement must not use ORM inserts")
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+    component = {
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "component_type": "IMPORT_TAX",
+        "accounting_role": "FINAL_BILL",
+        "cost_effect": "COST",
+        "tax_code": "IGI",
+        "hs_code": "90041000",
+        "currency": "MXN",
+        "original_amount": Decimal("1.00"),
+        "amount_rmb": Decimal("0.50"),
+        "exchange_rate": Decimal("0.50"),
+        "allocation_basis": "matrix_review",
+        "source_evidence": {"type": "MANUAL_REVIEW", "operator": "reviewer@example.com"},
+        "confidence": Decimal("1.00"),
+        "reverses_component": None,
+    }
+
+    service.FrappeFeeEvidenceReviewRepository().replace_components(
+        context={"batch": "B1", "version": "V1"},
+        fee_rule={"name": "F-import_tax"},
+        evidence_name="EVIDENCE-1",
+        attachment_name="ATT-1",
+        logical_fee_key="import_tax",
+        components=[component] * 60000,
+    )
+
+    assert len(fake_db.sql_calls) == 1
+    assert len(fake_db.bulk_calls) == 1
+    bulk = fake_db.bulk_calls[0]
+    assert bulk["doctype"] == "Overseas Cost Fee SKU Component"
+    assert bulk["ignore_duplicates"] is False
+    assert bulk["chunk_size"] == service.COMPONENT_BULK_INSERT_CHUNK_SIZE
+    assert len(bulk["rows"]) == 60000
+    assert max(bulk["chunks"]) <= service.COMPONENT_BULK_INSERT_CHUNK_SIZE
+    assert len(bulk["chunks"]) < 60000
+    field_index = {fieldname: index for index, fieldname in enumerate(bulk["fields"])}
+    first = bulk["rows"][0]
+    assert first[field_index["name"]] == "HASH-000000"
+    assert first[field_index["owner"]] == "reviewer@example.com"
+    assert first[field_index["status"]] == "CONFIRMED"
+    assert first[field_index["is_active"]] == 1
+    assert first[field_index["source_evidence_json"]] == (
+        '{"operator":"reviewer@example.com","type":"MANUAL_REVIEW"}'
+    )
+
+
+def test_repository_small_component_replace_falls_back_without_bulk_insert(
+    monkeypatch,
+) -> None:
+    inserted = []
+
+    class FakeDocument:
+        def __init__(self, values):
+            self.values = values
+
+        def insert(self, **_kwargs):
+            inserted.append(self.values)
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def sql(_query, _values):
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_doc(values):
+            return FakeDocument(values)
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+
+    service.FrappeFeeEvidenceReviewRepository().replace_components(
+        context={"batch": "B1", "version": "V1"},
+        fee_rule={"name": "F-import_tax"},
+        evidence_name="EVIDENCE-1",
+        attachment_name="ATT-1",
+        logical_fee_key="import_tax",
+        components=[
+            {
+                "item": "ITEM-GLASSES",
+                "stable_line_key": "LINE-GLASSES",
+                "component_type": "IMPORT_TAX",
+                "accounting_role": "FINAL_BILL",
+                "cost_effect": "COST",
+                "tax_code": "IGI",
+                "currency": "MXN",
+                "original_amount": Decimal("1.00"),
+                "source_evidence": {},
+            }
+        ],
+    )
+
+    assert len(inserted) == 1
+    assert inserted[0]["doctype"] == "Overseas Cost Fee SKU Component"
+
+
+def test_repository_large_component_replace_fails_without_bulk_insert(
+    monkeypatch,
+) -> None:
+    class FakeDB:
+        @staticmethod
+        def sql(_query, _values):
+            raise AssertionError("capability must be checked before voiding current rows")
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+
+    with pytest.raises(RuntimeError, match="不支持批量写入"):
+        service.FrappeFeeEvidenceReviewRepository().replace_components(
+            context={"batch": "B1", "version": "V1"},
+            fee_rule={"name": "F-import_tax"},
+            evidence_name="EVIDENCE-1",
+            attachment_name="ATT-1",
+            logical_fee_key="import_tax",
+            components=[{}] * (service.COMPONENT_ORM_FALLBACK_LIMIT + 1),
+        )
+
+
 def test_repository_builds_raw_and_projected_item_views_from_one_snapshot(
     monkeypatch,
 ) -> None:
@@ -3346,6 +3641,61 @@ def test_apply_material_matrix_rejects_untrusted_or_invalid_cells(payload, messa
     assert repository.replaced == []
 
 
+@pytest.mark.parametrize(
+    "amount",
+    [
+        "9" * 65,
+        10**28,
+    ],
+)
+def test_material_matrix_rejects_oversized_amount_before_decimal_conversion(
+    amount,
+) -> None:
+    repository = _MatrixApplyRepository()
+
+    with pytest.raises(ValueError, match="金额.*(过长|位数)"):
+        service.validate_material_matrix_submission(
+            _matrix_apply_payload(
+                _matrix_cell("IGI", amount=amount, sources=[]),
+            ),
+            draft=repository.draft,
+            items=repository.items,
+        )
+
+
+def test_material_matrix_rejects_combined_cells_and_external_components_above_limit(
+    monkeypatch,
+) -> None:
+    repository = _MatrixApplyRepository()
+    repository.current_components = [
+        {
+            "name": "CURRENT-LEDGER",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "logical_fee_key": "import_tax",
+            "component_type": "IMPORT_TAX",
+            "accounting_role": "SETTLEMENT",
+            "cost_effect": "LEDGER_ONLY",
+            "tax_code": "IGI",
+            "currency": "MXN",
+            "original_amount": "1.00",
+            "amount_rmb": "0.50",
+            "exchange_rate": "0.5",
+            "source_evidence": {"attachment": "ATT-1", "kind": "ledger"},
+        }
+    ]
+    monkeypatch.setattr(service, "EVIDENCE_COMPONENT_READ_LIMIT", 1)
+
+    with pytest.raises(ValueError, match="SKU 分项.*1"):
+        _apply_matrix(
+            repository,
+            _matrix_apply_payload(_matrix_cell("IGI", amount="1.00")),
+        )
+
+    assert repository.replaced == []
+    assert repository.rollbacks == 1
+
+
 def test_apply_material_matrix_rejects_component_total_above_fee() -> None:
     repository = _MatrixApplyRepository()
 
@@ -3611,6 +3961,115 @@ def test_apply_material_matrix_clear_voids_matrix_cost_but_reinserts_existing_le
     )
 
 
+def test_legacy_component_item_edit_persists_manual_review_audit(monkeypatch) -> None:
+    repository = _MatrixApplyRepository()
+    monkeypatch.setattr(service, "_session_user", lambda: "reviewer@example.com")
+    igi = next(
+        row
+        for row in repository.draft["components"]
+        if row["proposal_id"] == "component:igi"
+    )
+    igi["amount_rmb"] = "2.50"
+    igi["exchange_rate"] = "0.50"
+
+    result = service.apply_fee_evidence_review(
+        "B1",
+        "RUN-1",
+        ["evidence:classification", "fee:import_tax", "component:igi"],
+        {"component:igi": {"item": "ITEM-SUNGLASSES"}},
+        "EDIT",
+        "m1",
+        repository=repository,
+    )
+
+    assert result["component_count"] == 1
+    saved = repository.replaced[0]["components"][0]
+    assert saved["item"] == "ITEM-SUNGLASSES"
+    assert saved["source_evidence"]["human_edits"] == ["item"]
+    assert saved["source_evidence"]["source_refs"][-1] == {
+        "type": "MANUAL_REVIEW",
+        "field": "item",
+        "operator": "reviewer@example.com",
+        "from": "ITEM-GLASSES",
+        "to": "ITEM-SUNGLASSES",
+    }
+
+
+@pytest.mark.parametrize("component_matrix", [None, {"cells": []}])
+def test_refund_reversal_rejects_item_edit_that_disagrees_with_parent(
+    component_matrix,
+) -> None:
+    repository = _MatrixApplyRepository()
+    repository.draft["evidence"].update(
+        evidence_type="REFUND",
+        accounting_role="SETTLEMENT",
+        direction="CREDIT",
+        original_amount="4.00",
+        related_evidence="E-PARENT",
+        is_final=0,
+    )
+    repository.draft["fee_splits"] = []
+    repository.draft["components"].append(
+        {
+            "proposal_id": "refund-component:forged-item",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "component_type": "REFUND_REVERSAL",
+            "accounting_role": "SETTLEMENT",
+            "cost_effect": "LEDGER_ONLY",
+            "tax_code": "IGI",
+            "currency": "MXN",
+            "original_amount": "-4.00",
+            "amount_rmb": "-2.00",
+            "exchange_rate": "0.5",
+            "allocation_basis": "original_component_proportion",
+            "reverses_component": "PARENT-COMP",
+            "source_evidence": {"reverses_component": "PARENT-COMP"},
+            "fee_logical_key": "import_tax",
+        }
+    )
+    repository.run["draft_json"] = repository.draft
+    repository.get_evidence = lambda _name: {
+        "name": "E-PARENT",
+        "batch": "B1",
+        "version": "V1",
+        "fee_rule": "F1",
+        "evidence_type": "PAYMENT",
+        "accounting_role": "SETTLEMENT",
+        "validation_status": "VALID",
+        "currency": "MXN",
+    }
+
+    def evidence_components(name):
+        if name == "E-PARENT":
+            return [
+                {
+                    "name": "PARENT-COMP",
+                    "item": "ITEM-GLASSES",
+                    "stable_line_key": "LINE-GLASSES",
+                }
+            ]
+        return []
+
+    repository.get_evidence_components = evidence_components
+
+    with pytest.raises(ValueError, match="原付款.*SKU"):
+        service.apply_fee_evidence_review(
+            "B1",
+            "RUN-1",
+            ["evidence:classification", "refund-component:forged-item"],
+            {"refund-component:forged-item": {"item": "ITEM-SUNGLASSES"}},
+            "EDIT",
+            "m1",
+            component_matrix=component_matrix,
+            repository=repository,
+        )
+
+    assert repository.replaced == []
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+
+
 def test_apply_material_matrix_preserves_selected_refund_reversal_and_parent_link() -> None:
     repository = _MatrixApplyRepository()
     repository.draft["evidence"].update(
@@ -3657,7 +4116,13 @@ def test_apply_material_matrix_preserves_selected_refund_reversal_and_parent_lin
 
     def evidence_components(name):
         if name == "E-PARENT":
-            return [{"name": "PARENT-COMP"}]
+            return [
+                {
+                    "name": "PARENT-COMP",
+                    "item": "ITEM-GLASSES",
+                    "stable_line_key": "LINE-GLASSES",
+                }
+            ]
         return []
 
     repository.get_evidence_components = evidence_components

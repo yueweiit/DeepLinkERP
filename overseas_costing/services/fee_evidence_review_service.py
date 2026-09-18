@@ -77,12 +77,18 @@ FEE_EVIDENCE_COMPONENT_ESTIMATED_BASE_BYTES = 384
 MATERIAL_MATRIX_APPLY_CELL_LIMIT = 60000
 MATERIAL_MATRIX_SOURCE_IDS_PER_CELL_LIMIT = FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT
 MATERIAL_MATRIX_SOURCE_ID_LENGTH_LIMIT = 300
+MATERIAL_MATRIX_AMOUNT_TEXT_LENGTH_LIMIT = 64
+MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT = 28
 MATERIAL_MATRIX_CELL_FIELDS = frozenset(
     {"item", "column_key", "original_amount", "source_proposal_ids"}
 )
 MATERIAL_MATRIX_FEE_KEYS = frozenset(
     str(column["fee_logical_key"]) for column in MATERIAL_MATRIX_COLUMNS
 )
+EVIDENCE_COMPONENT_READ_LIMIT = MATERIAL_MATRIX_APPLY_CELL_LIMIT
+EVIDENCE_COMPONENT_READ_PAGE_SIZE = 5000
+COMPONENT_BULK_INSERT_CHUNK_SIZE = 1000
+COMPONENT_ORM_FALLBACK_LIMIT = 100
 
 
 def _decimal(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -2590,35 +2596,50 @@ class FrappeFeeEvidenceReviewRepository:
         )
 
     def get_evidence_components(self, evidence_name: str) -> list[dict]:
-        rows = frappe.get_all(
-            "Overseas Cost Fee SKU Component",
-            filters={
-                "evidence": evidence_name,
-                "status": "CONFIRMED",
-                "is_active": 1,
-            },
-            fields=[
-                "name",
-                "item",
-                "stable_line_key",
-                "logical_fee_key",
-                "component_type",
-                "tax_code",
-                "hs_code",
-                "currency",
-                "original_amount",
-                "amount_rmb",
-                "exchange_rate",
-                "allocation_basis",
-                "accounting_role",
-                "cost_effect",
-                "reverses_component",
-                "source_evidence_json",
-                "confidence",
-            ],
-            order_by="logical_fee_key asc, tax_code asc, item asc, name asc",
-            limit_page_length=10000,
-        )
+        fields = [
+            "name",
+            "item",
+            "stable_line_key",
+            "logical_fee_key",
+            "component_type",
+            "tax_code",
+            "hs_code",
+            "currency",
+            "original_amount",
+            "amount_rmb",
+            "exchange_rate",
+            "allocation_basis",
+            "accounting_role",
+            "cost_effect",
+            "reverses_component",
+            "source_evidence_json",
+            "confidence",
+        ]
+        rows = []
+        while len(rows) <= EVIDENCE_COMPONENT_READ_LIMIT:
+            page_length = min(
+                EVIDENCE_COMPONENT_READ_PAGE_SIZE,
+                EVIDENCE_COMPONENT_READ_LIMIT + 1 - len(rows),
+            )
+            page = frappe.get_all(
+                "Overseas Cost Fee SKU Component",
+                filters={
+                    "evidence": evidence_name,
+                    "status": "CONFIRMED",
+                    "is_active": 1,
+                },
+                fields=fields,
+                order_by="logical_fee_key asc, tax_code asc, item asc, name asc",
+                limit_start=len(rows),
+                limit_page_length=page_length,
+            )
+            rows.extend(page or [])
+            if len(rows) > EVIDENCE_COMPONENT_READ_LIMIT:
+                raise ValueError(
+                    "单张凭证的有效 SKU 分项不能超过 60,000 条，请拆分凭证后重试。"
+                )
+            if len(page or []) < page_length:
+                break
         result = []
         for raw in rows:
             row = dict(raw)
@@ -2841,14 +2862,24 @@ class FrappeFeeEvidenceReviewRepository:
         logical_fee_key: str,
         components: list[dict],
     ) -> None:
+        if len(components) > EVIDENCE_COMPONENT_READ_LIMIT:
+            raise ValueError("单次保存的 SKU 分项不能超过 60,000 条。")
+        bulk_insert = getattr(getattr(frappe, "db", None), "bulk_insert", None)
+        if not callable(bulk_insert) and len(components) > COMPONENT_ORM_FALLBACK_LIMIT:
+            raise RuntimeError(
+                "当前 Frappe 运行环境不支持批量写入，无法安全保存大批量 SKU 分项。"
+            )
         frappe.db.sql(
             "UPDATE `tabOverseas Cost Fee SKU Component` "
             "SET status='VOID', is_active=0 "
             "WHERE evidence=%s AND logical_fee_key=%s AND is_active=1",
             (evidence_name, logical_fee_key),
         )
-        for row in components:
-            component_values = {
+        if not components:
+            return
+
+        def component_values(row: dict) -> dict:
+            values = {
                 key: row.get(key)
                 for key in (
                     "item",
@@ -2867,21 +2898,93 @@ class FrappeFeeEvidenceReviewRepository:
                     "reverses_component",
                 )
             }
-            frappe.get_doc(
-                {
-                    "doctype": "Overseas Cost Fee SKU Component",
-                    "batch": context["batch"],
-                    "version": context["version"],
-                    "fee_rule": fee_rule["name"],
-                    "logical_fee_key": logical_fee_key,
-                    "evidence": evidence_name,
-                    "attachment": attachment_name,
-                    **component_values,
-                    "source_evidence_json": _json(row.get("source_evidence") or {}),
-                    "status": "CONFIRMED",
-                    "is_active": 1,
+            return {
+                "batch": context["batch"],
+                "version": context["version"],
+                "fee_rule": fee_rule["name"],
+                "logical_fee_key": logical_fee_key,
+                "evidence": evidence_name,
+                "attachment": attachment_name,
+                **values,
+                "source_evidence_json": _json(row.get("source_evidence") or {}),
+                "status": "CONFIRMED",
+                "is_active": 1,
+            }
+
+        if not callable(bulk_insert):
+            for row in components:
+                frappe.get_doc(
+                    {
+                        "doctype": "Overseas Cost Fee SKU Component",
+                        **component_values(row),
+                    }
+                ).insert(ignore_permissions=True)
+            return
+
+        fields = [
+            "name",
+            "creation",
+            "modified",
+            "modified_by",
+            "owner",
+            "docstatus",
+            "idx",
+            "batch",
+            "version",
+            "fee_rule",
+            "logical_fee_key",
+            "evidence",
+            "attachment",
+            "item",
+            "stable_line_key",
+            "component_type",
+            "accounting_role",
+            "cost_effect",
+            "tax_code",
+            "hs_code",
+            "currency",
+            "original_amount",
+            "amount_rmb",
+            "exchange_rate",
+            "allocation_basis",
+            "confidence",
+            "reverses_component",
+            "source_evidence_json",
+            "status",
+            "is_active",
+        ]
+        timestamp = _now()
+        operator = _session_user() or "Administrator"
+        generated_names: set[str] = set()
+
+        def values_for_bulk_insert():
+            for index, row in enumerate(components, start=1):
+                for _attempt in range(10):
+                    name = str(frappe.generate_hash(length=10) or "")
+                    if name and name not in generated_names:
+                        generated_names.add(name)
+                        break
+                else:
+                    raise RuntimeError("生成 SKU 分项名称失败，请重试。")
+                values = {
+                    "name": name,
+                    "creation": timestamp,
+                    "modified": timestamp,
+                    "modified_by": operator,
+                    "owner": operator,
+                    "docstatus": 0,
+                    "idx": index,
+                    **component_values(row),
                 }
-            ).insert(ignore_permissions=True)
+                yield tuple(values.get(fieldname) for fieldname in fields)
+
+        bulk_insert(
+            "Overseas Cost Fee SKU Component",
+            fields,
+            values_for_bulk_insert(),
+            ignore_duplicates=False,
+            chunk_size=COMPONENT_BULK_INSERT_CHUNK_SIZE,
+        )
 
     def mark_batch_dirty(self, batch_name: str) -> None:
         frappe.db.set_value(
@@ -3356,8 +3459,12 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
         for fieldname in allowed:
             if fieldname not in values:
                 continue
+            previous_value = row.get(fieldname)
             row[fieldname] = values[fieldname]
-            if fieldname not in {"original_amount", "amount"}:
+            if (
+                fieldname not in {"original_amount", "amount", "item"}
+                or previous_value == values[fieldname]
+            ):
                 continue
             row["human_edits"] = sorted(
                 set([*(row.get("human_edits") or []), fieldname])
@@ -3368,6 +3475,8 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
                     "type": "MANUAL_REVIEW",
                     "field": fieldname,
                     "operator": _session_user(),
+                    "from": previous_value,
+                    "to": values[fieldname],
                 },
             ]
         return row
@@ -3600,7 +3709,7 @@ def normalize_component_for_apply(
     row: dict,
     *,
     item: dict,
-    parent_component_names: set[str] | None = None,
+    parent_components_by_name: dict[str, dict] | None = None,
 ) -> dict:
     component_type = str(row.get("component_type") or "IMPORT_TAX").upper()
     accounting_role = str(row.get("accounting_role") or "FINAL_BILL").upper()
@@ -3635,12 +3744,51 @@ def normalize_component_for_apply(
     if accounting_role == "SETTLEMENT" and cost_effect != "LEDGER_ONLY":
         raise ValueError("结算流水 SKU 分项不能重复计入成本。")
     if component_type == "REFUND_REVERSAL":
-        if not is_reversal or reversal_link not in (parent_component_names or set()):
+        parent_component = (parent_components_by_name or {}).get(reversal_link)
+        if not is_reversal or not parent_component:
             raise ValueError("退款冲回分项必须关联原付款的有效 SKU 分项。")
+        parent_item = str(parent_component.get("item") or "")
+        parent_stable_line_key = str(
+            parent_component.get("stable_line_key") or ""
+        )
+        item_name = str(item.get("name") or "")
+        item_stable_line_key = str(
+            item.get("stable_line_key") or item_name
+        )
+        submitted_stable_line_key = str(
+            row.get("stable_line_key") or item_stable_line_key
+        )
+        if (
+            not parent_item
+            or not parent_stable_line_key
+            or item_name != parent_item
+            or item_stable_line_key != parent_stable_line_key
+            or submitted_stable_line_key != parent_stable_line_key
+        ):
+            raise ValueError("退款冲回分项必须与原付款分项使用同一 SKU 及稳定物料行。")
         if rmb_amount is not None and rmb_amount > 0:
             raise ValueError("退款冲回分项人民币金额必须为负数。")
     elif rmb_amount is not None and rmb_amount < 0:
         raise ValueError("SKU 税费分项人民币金额不合法。")
+    source_evidence = row.get("source_evidence") or {}
+    if not isinstance(source_evidence, dict):
+        source_evidence = {}
+    else:
+        source_evidence = dict(source_evidence)
+    human_edits = sorted(
+        {
+            str(fieldname)
+            for fieldname in (row.get("human_edits") or [])
+            if str(fieldname)
+        }
+    )
+    if human_edits:
+        source_evidence["human_edits"] = human_edits
+        source_evidence["source_refs"] = [
+            dict(ref)
+            for ref in (row.get("source_refs") or [])
+            if isinstance(ref, dict)
+        ]
     return {
         "item": item["name"],
         "stable_line_key": item.get("stable_line_key") or item["name"],
@@ -3654,7 +3802,7 @@ def normalize_component_for_apply(
         "amount_rmb": rmb_amount,
         "exchange_rate": _decimal(row.get("exchange_rate")),
         "allocation_basis": str(row.get("allocation_basis") or "")[:140],
-        "source_evidence": row.get("source_evidence") or {},
+        "source_evidence": source_evidence,
         "confidence": _decimal(row.get("confidence")),
         "reverses_component": reversal_link or None,
     }
@@ -3810,6 +3958,34 @@ def _material_matrix_allowed_proposals(
     return allowed
 
 
+def _bounded_material_matrix_amount_text(raw_amount: Any) -> str:
+    if isinstance(raw_amount, bool) or raw_amount in (None, ""):
+        raise ValueError("物料税费单元格金额必须是有限非负数。")
+    if isinstance(raw_amount, str):
+        if len(raw_amount) > MATERIAL_MATRIX_AMOUNT_TEXT_LENGTH_LIMIT:
+            raise ValueError("物料税费单元格金额文本过长。")
+        amount_text = raw_amount
+    elif isinstance(raw_amount, int):
+        if abs(raw_amount) >= 10**MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT:
+            raise ValueError("物料税费单元格金额数字位数过多。")
+        amount_text = str(raw_amount)
+    elif isinstance(raw_amount, Decimal):
+        if len(raw_amount.as_tuple().digits) > MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT:
+            raise ValueError("物料税费单元格金额数字位数过多。")
+        amount_text = str(raw_amount)
+    elif isinstance(raw_amount, float):
+        amount_text = str(raw_amount)
+    else:
+        raise ValueError("物料税费单元格金额必须是有限非负数。")
+    if len(amount_text) > MATERIAL_MATRIX_AMOUNT_TEXT_LENGTH_LIMIT:
+        raise ValueError("物料税费单元格金额文本过长。")
+    if sum(character.isdigit() for character in amount_text) > (
+        MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT
+    ):
+        raise ValueError("物料税费单元格金额数字位数过多。")
+    return amount_text.replace(",", "")
+
+
 def validate_material_matrix_submission(
     component_matrix: Any,
     *,
@@ -3879,10 +4055,9 @@ def validate_material_matrix_submission(
         seen_cells.add(cell_key)
 
         raw_amount = raw_cell.get("original_amount")
-        if isinstance(raw_amount, bool) or raw_amount in (None, ""):
-            raise ValueError("物料税费单元格金额必须是有限非负数。")
+        amount_text = _bounded_material_matrix_amount_text(raw_amount)
         try:
-            amount = Decimal(str(raw_amount).replace(",", ""))
+            amount = Decimal(amount_text)
         except (InvalidOperation, TypeError, ValueError):
             raise ValueError("物料税费单元格金额必须是有限非负数。") from None
         if not amount.is_finite() or amount < 0:
@@ -4208,6 +4383,11 @@ def apply_fee_evidence_review(
                 existing_components,
             )
             components = [*matrix_cells, *preserved_external_components]
+        if len(components) > EVIDENCE_COMPONENT_READ_LIMIT:
+            raise ValueError(
+                f"单张凭证的有效 SKU 分项不能超过 "
+                f"{EVIDENCE_COMPONENT_READ_LIMIT:,} 条。"
+            )
         if not evidence_values.get("selected") and not fee_rows and not components:
             raise ValueError("请至少选择一项凭证审核草稿。")
         validate_review_selections(evidence_values, fee_rows, components)
@@ -4294,8 +4474,10 @@ def apply_fee_evidence_review(
                 run_id=str(run_id),
             )
         if components or matrix_cells is not None:
-            parent_component_names = {
-                str(row.get("name") or "") for row in parent_components
+            parent_components_by_name = {
+                str(row.get("name") or ""): dict(row)
+                for row in parent_components
+                if str(row.get("name") or "")
             }
             if matrix_cells is not None:
                 grouped_components = group_components_by_fee_key(matrix_cells)
@@ -4353,7 +4535,7 @@ def apply_fee_evidence_review(
                             normalize_component_for_apply(
                                 row,
                                 item=item,
-                                parent_component_names=parent_component_names,
+                                parent_components_by_name=parent_components_by_name,
                             )
                         )
                 else:
@@ -4366,7 +4548,7 @@ def apply_fee_evidence_review(
                             normalize_component_for_apply(
                                 row,
                                 item=item,
-                                parent_component_names=parent_component_names,
+                                parent_components_by_name=parent_components_by_name,
                             )
                         )
                 if any(
