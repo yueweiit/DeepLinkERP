@@ -17,6 +17,10 @@ from mes_integration.mes_integration.integration_log import (
 )
 
 
+class MESStockEntryIdentityConflict(frappe.ValidationError):
+    http_status_code = 409
+
+
 @frappe.whitelist()
 def push_to_mes(stock_entry_name):
     """
@@ -430,7 +434,10 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None, submit=False)
     # is not enough because two concurrent MES retries could both see no row.
     with lock_mes_receipt_idempotency(stock_entry_data.get("company"), receipt_no):
         existing_stock_entry = get_existing_mes_receipt_stock_entry(
-            stock_entry_data.get("company"), receipt_no
+            stock_entry_data.get("company"),
+            receipt_no,
+            request_data=stock_entry_data,
+            sales_order_doc=sales_order_doc,
         )
         if existing_stock_entry:
             validate_mes_receipt_identity(
@@ -509,8 +516,18 @@ def release_mes_receipt_idempotency_lock(lock_name):
     frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_name,))
 
 
-def get_existing_mes_receipt_stock_entry(company, receipt_no):
-    """Return the only ERP receipt for a MES number, or reject duplicates."""
+def get_existing_mes_receipt_stock_entry(
+    company,
+    receipt_no,
+    request_data=None,
+    sales_order_doc=None,
+):
+    """Return the MES receipt matching an idempotent retry.
+
+    A production reference may temporarily be shared by distinct MES receipt
+    payloads. Exact retries reuse the matching document; a different payload
+    is allowed to create a separate receipt under the same reference.
+    """
     if (
         not company
         or not receipt_no
@@ -518,16 +535,42 @@ def get_existing_mes_receipt_stock_entry(company, receipt_no):
     ):
         return None
 
+    filters = {
+        "company": company,
+        "custom_stock_entry_no": receipt_no,
+        "stock_entry_type": ["in", sorted(MES_RECEIPT_STOCK_ENTRY_TYPES)],
+    }
+    if frappe.db.has_column("Stock Entry", "custom_mes_receipt"):
+        # The same production/batch number is also carried by Material Issue
+        # documents. Only records created through the MES receipt API belong to
+        # this idempotency scope.
+        filters["custom_mes_receipt"] = 1
+
     names = frappe.get_all(
         "Stock Entry",
-        filters={
-            "company": company,
-            "custom_stock_entry_no": receipt_no,
-        },
+        filters=filters,
         pluck="name",
         order_by="creation asc",
         limit_page_length=0,
     )
+    if request_data is not None:
+        matching_stock_entries = []
+        for name in names:
+            stock_entry = frappe.get_doc("Stock Entry", name)
+            if not get_mes_receipt_identity_mismatches(
+                stock_entry, request_data, sales_order_doc
+            ):
+                matching_stock_entries.append(stock_entry)
+
+        if len(matching_stock_entries) > 1:
+            throw_mes_receipt_identity_conflict(
+                f"MES 入库编号 {receipt_no} 的相同请求已对应多个 ERP Stock Entry："
+                f"{', '.join(doc.name for doc in matching_stock_entries)}。"
+                "请先人工确认正确单据，ERP 不会自动选择其中一张。"
+            )
+
+        return matching_stock_entries[0] if matching_stock_entries else None
+
     if len(names) > 1:
         throw_mes_receipt_identity_conflict(
             f"MES 入库编号 {receipt_no} 已对应多个 ERP Stock Entry：{', '.join(names)}。"
@@ -539,6 +582,19 @@ def get_existing_mes_receipt_stock_entry(company, receipt_no):
 
 def validate_mes_receipt_identity(stock_entry, request_data, sales_order_doc):
     """Reject reuse of a MES number for a different receipt payload."""
+    mismatches = get_mes_receipt_identity_mismatches(
+        stock_entry, request_data, sales_order_doc
+    )
+
+    if mismatches:
+        throw_mes_receipt_identity_conflict(
+            f"MES 入库编号 {stock_entry.get('custom_stock_entry_no')} 已存在于 "
+            f"ERP Stock Entry {stock_entry.name}，但请求字段不一致：{', '.join(mismatches)}。"
+        )
+
+
+def get_mes_receipt_identity_mismatches(stock_entry, request_data, sales_order_doc):
+    """Return fields that differ between an ERP receipt and an MES request."""
     mismatches = []
     if stock_entry.company != request_data.get("company"):
         mismatches.append("company")
@@ -556,11 +612,7 @@ def validate_mes_receipt_identity(stock_entry, request_data, sales_order_doc):
     ):
         mismatches.append("items")
 
-    if mismatches:
-        throw_mes_receipt_identity_conflict(
-            f"MES 入库编号 {stock_entry.get('custom_stock_entry_no')} 已存在于 "
-            f"ERP Stock Entry {stock_entry.name}，但请求字段不一致：{', '.join(mismatches)}。"
-        )
+    return mismatches
 
 
 def mes_receipt_items_match(request_items, existing_items):
@@ -633,10 +685,10 @@ def get_mes_receipt_item_identity(items):
 
 def throw_mes_receipt_identity_conflict(message):
     """Return a stable 409 business error that MES must not solve by new IDs."""
-    frappe.response["http_status_code"] = 409
     frappe.response["error_code"] = "ERP_STOCK_ENTRY_IDENTITY_CONFLICT"
     frappe.throw(
         f"ERP_STOCK_ENTRY_IDENTITY_CONFLICT: {message}",
+        exc=MESStockEntryIdentityConflict,
         title=frappe._("MES 入库幂等编号冲突"),
     )
 
