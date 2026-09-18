@@ -786,6 +786,130 @@ def test_component_expansion_byte_budget_rejects_large_source_before_allocation(
     assert allocator_called is False
 
 
+def test_match_plan_indexes_10000_one_to_one_lines_once_and_is_reused(
+    monkeypatch,
+) -> None:
+    item_count = 10000
+    items = [
+        {
+            "name": f"ITEM-{index:05d}",
+            "stable_line_key": f"LINE-{index:05d}",
+            "hs_code": str(10000000 + index),
+            "customs_declared_value_mxn": "1",
+            "goods_value": "1",
+        }
+        for index in range(item_count)
+    ]
+    lines = [
+        {
+            "row_no": index + 1,
+            "hs_code": str(10000000 + index),
+            "taxes": {"igi_amount_mxn": "1"},
+        }
+        for index in range(item_count)
+    ]
+    service_fees = [
+        {
+            "code": "broker_service",
+            "amount_mxn": "1",
+            "item_names": ["ITEM-00000"],
+        }
+    ]
+    normalize_calls = 0
+    original_normalize = service._normalize_hs
+
+    def counted_normalize(value):
+        nonlocal normalize_calls
+        normalize_calls += 1
+        if normalize_calls > item_count * 2 + 10:
+            raise AssertionError("HS matching rescanned the item collection")
+        return original_normalize(value)
+
+    monkeypatch.setattr(service, "_normalize_hs", counted_normalize)
+
+    match_plan = service._validate_component_expansion_budget(
+        line_items=lines,
+        service_fees=service_fees,
+        items=items,
+        source_ref={"attachment": "ATT-10K"},
+        explicit_matches={},
+    )
+    tax_result = service.allocate_tax_certificate_components(
+        lines,
+        items,
+        source_ref={"attachment": "ATT-10K"},
+        match_plan=match_plan,
+    )
+    service_result = service.allocate_service_fee_components(
+        service_fees,
+        items,
+        source_ref={"attachment": "ATT-10K"},
+        match_plan=match_plan,
+    )
+
+    assert match_plan["proposal_count"] == item_count + 1
+    assert len(tax_result["components"]) == item_count
+    assert len(service_result["components"]) == 1
+    assert normalize_calls == item_count * 2
+
+
+def test_draft_builder_passes_one_preflight_match_plan_to_both_allocators(
+    monkeypatch,
+) -> None:
+    match_plan = {
+        "proposal_count": 0,
+        "estimated_bytes": 0,
+        "tax_matches": [],
+        "service_matches": [],
+        "items_by_name": {},
+    }
+    received = []
+
+    monkeypatch.setattr(
+        service,
+        "_validate_component_expansion_budget",
+        lambda **_kwargs: match_plan,
+    )
+
+    def tax_allocator(*_args, **kwargs):
+        received.append(kwargs.get("match_plan"))
+        return {
+            "components": [],
+            "unmatched_lines": [],
+            "needs_review": False,
+            "allocation_basis": "",
+            "missing_fx": False,
+        }
+
+    def service_allocator(*_args, **kwargs):
+        received.append(kwargs.get("match_plan"))
+        return {
+            "components": [],
+            "unmatched_lines": [],
+            "needs_review": False,
+            "reason_code": "",
+            "missing_fx": False,
+        }
+
+    monkeypatch.setattr(service, "allocate_tax_certificate_components", tax_allocator)
+    monkeypatch.setattr(service, "allocate_service_fee_components", service_allocator)
+
+    service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "1"},
+            },
+            total="1",
+        ),
+        items=[_items()[0]],
+    )
+
+    assert received == [match_plan, match_plan]
+
+
 def _valid_component_store() -> dict:
     return service._build_component_store(
         [

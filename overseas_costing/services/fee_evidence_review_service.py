@@ -987,13 +987,42 @@ def _decimal_amount(value: Decimal | None) -> str | None:
     return rendered or "0"
 
 
-def _line_matches(line: dict, items: list[dict], explicit_matches: dict[str, list[str]]) -> list[dict]:
+def _build_component_match_indexes(
+    items: list[dict],
+) -> tuple[list[dict], dict[str, dict], dict[str, list[dict]]]:
+    """Index the current material snapshot once for all evidence rows."""
+
+    item_rows = items if isinstance(items, list) else list(items or [])
+    items_by_name: dict[str, dict] = {}
+    items_by_hs: dict[str, list[dict]] = {}
+    for item in item_rows:
+        items_by_name[str(item.get("name") or "")] = item
+        hs_code = _normalize_hs(item.get("hs_code"))
+        if hs_code:
+            items_by_hs.setdefault(hs_code, []).append(item)
+    return item_rows, items_by_name, items_by_hs
+
+
+def _line_matches(
+    line: dict,
+    items_by_name: dict[str, dict],
+    items_by_hs: dict[str, list[dict]],
+    explicit_matches: dict[str, list[str]],
+) -> list[dict]:
     line_key = str(line.get("row_no") or line.get("item_seq") or "")
-    selected_names = set(explicit_matches.get(line_key) or [])
+    selected_names = explicit_matches.get(line_key) or []
     if selected_names:
-        return [row for row in items if str(row.get("name") or "") in selected_names]
+        result = []
+        seen_names = set()
+        for value in selected_names:
+            name = str(value or "")
+            item = items_by_name.get(name)
+            if item is not None and name not in seen_names:
+                result.append(item)
+                seen_names.add(name)
+        return result
     hs_code = _normalize_hs(line.get("hs_code"))
-    return [row for row in items if hs_code and _normalize_hs(row.get("hs_code")) == hs_code]
+    return items_by_hs.get(hs_code, []) if hs_code else []
 
 
 def _allocation_weights(matches: list[dict]) -> tuple[str, list[tuple[str, Decimal]]]:
@@ -1027,10 +1056,13 @@ def _validate_component_expansion_budget(
     source_ref: dict,
     explicit_matches: dict[str, list[str]],
 ) -> dict:
-    """Reject unsafe many-to-many expansion before component rows are allocated."""
+    """Build one reusable match plan and reject unsafe expansion before allocation."""
 
     proposal_count = 0
     estimated_bytes = 0
+    item_rows, items_by_name, items_by_hs = _build_component_match_indexes(items)
+    tax_matches: list[list[dict]] = []
+    service_matches: list[list[dict] | None] = []
 
     def add_group(matches: list[dict], evidence: dict) -> None:
         nonlocal proposal_count, estimated_bytes
@@ -1055,6 +1087,7 @@ def _validate_component_expansion_budget(
 
     for line in line_items or []:
         if not isinstance(line, dict):
+            tax_matches.append([])
             continue
         taxes = line.get("taxes") if isinstance(line.get("taxes"), dict) else {}
         tax_fields = [
@@ -1063,8 +1096,15 @@ def _validate_component_expansion_budget(
             if _decimal(taxes.get(fieldname)) not in (None, Decimal("0"))
         ]
         if not tax_fields:
+            tax_matches.append([])
             continue
-        matches = _line_matches(line, items or [], explicit_matches or {})
+        matches = _line_matches(
+            line,
+            items_by_name,
+            items_by_hs,
+            explicit_matches or {},
+        )
+        tax_matches.append(matches)
         _, weights = _allocation_weights(matches)
         if not weights:
             continue
@@ -1091,12 +1131,13 @@ def _validate_component_expansion_budget(
                 },
             )
 
-    by_name = {str(row.get("name") or ""): row for row in items or []}
     for index, service_fee in enumerate(service_fees or []):
         if not isinstance(service_fee, dict):
+            service_matches.append(None)
             continue
         amount = _decimal(service_fee.get("amount_mxn"))
         if amount is None or amount < 0:
+            service_matches.append(None)
             continue
         explicit_names = [
             str(value)
@@ -1104,11 +1145,13 @@ def _validate_component_expansion_budget(
             if str(value)
         ]
         if explicit_names:
-            if any(name not in by_name for name in explicit_names):
+            if any(name not in items_by_name for name in explicit_names):
+                service_matches.append(None)
                 continue
-            matches = [by_name[name] for name in explicit_names]
+            matches = [items_by_name[name] for name in explicit_names]
         else:
-            matches = list(items or [])
+            matches = item_rows
+        service_matches.append(matches)
         weights = [
             (str(row.get("name") or ""), _positive(row.get("goods_value")))
             for row in matches
@@ -1132,6 +1175,9 @@ def _validate_component_expansion_budget(
     return {
         "proposal_count": proposal_count,
         "estimated_bytes": estimated_bytes,
+        "tax_matches": tax_matches,
+        "service_matches": service_matches,
+        "items_by_name": items_by_name,
     }
 
 
@@ -1142,18 +1188,32 @@ def allocate_tax_certificate_components(
     fx_context: dict | None = None,
     source_ref: dict | None = None,
     explicit_matches: dict[str, list[str]] | None = None,
+    match_plan: dict | None = None,
 ) -> dict:
     """Allocate evidence-backed line taxes to existing SKU rows without inventing amounts."""
 
     explicit_matches = explicit_matches or {}
     source_ref = dict(source_ref or {})
     rmb_to_mxn = _positive((fx_context or {}).get("fx_rmb_to_mxn"))
-    by_name = {str(row.get("name") or ""): row for row in items or []}
+    if match_plan is None:
+        match_plan = _validate_component_expansion_budget(
+            line_items=line_items,
+            service_fees=[],
+            items=items,
+            source_ref=source_ref,
+            explicit_matches=explicit_matches,
+        )
+    by_name = match_plan.get("items_by_name")
+    planned_matches = match_plan.get("tax_matches")
+    if not isinstance(by_name, dict) or not isinstance(planned_matches, list) or len(
+        planned_matches
+    ) != len(line_items or []):
+        raise ValueError("费用凭证税费分项匹配计划无效。")
     components: list[dict] = []
     unmatched: list[dict] = []
     bases: set[str] = set()
 
-    for line in line_items or []:
+    for line_index, line in enumerate(line_items or []):
         taxes = line.get("taxes") if isinstance(line.get("taxes"), dict) else {}
         tax_amounts = [
             (fieldname, tax_code, _decimal(taxes.get(fieldname)))
@@ -1162,7 +1222,9 @@ def allocate_tax_certificate_components(
         ]
         if not tax_amounts:
             continue
-        matches = _line_matches(line, items or [], explicit_matches)
+        matches = planned_matches[line_index]
+        if not isinstance(matches, list):
+            raise ValueError("费用凭证税费分项匹配计划无效。")
         if not matches:
             unmatched.append(
                 {
@@ -1244,11 +1306,25 @@ def allocate_service_fee_components(
     *,
     fx_context: dict | None = None,
     source_ref: dict | None = None,
+    match_plan: dict | None = None,
 ) -> dict:
     """Allocate broker/service rows by explicit SKU scope or complete purchase value."""
 
     source_ref = dict(source_ref or {})
-    by_name = {str(row.get("name") or ""): row for row in items or []}
+    if match_plan is None:
+        match_plan = _validate_component_expansion_budget(
+            line_items=[],
+            service_fees=service_fees,
+            items=items,
+            source_ref=source_ref,
+            explicit_matches={},
+        )
+    by_name = match_plan.get("items_by_name")
+    planned_matches = match_plan.get("service_matches")
+    if not isinstance(by_name, dict) or not isinstance(planned_matches, list) or len(
+        planned_matches
+    ) != len(service_fees or []):
+        raise ValueError("费用凭证清关服务费匹配计划无效。")
     rmb_to_mxn = _positive((fx_context or {}).get("fx_rmb_to_mxn"))
     components = []
     unmatched = []
@@ -1291,12 +1367,12 @@ def allocate_service_fee_components(
             if str(value)
         ]
         if explicit_names:
-            if any(name not in by_name for name in explicit_names):
+            if planned_matches[index] is None:
                 append_problem("SKU_MATCH_REQUIRED", "清关服务费未能可靠匹配到当前批次 SKU。")
                 continue
-            matches = [by_name[name] for name in explicit_names]
-        else:
-            matches = list(items or [])
+        matches = planned_matches[index]
+        if not isinstance(matches, list):
+            raise ValueError("费用凭证清关服务费匹配计划无效。")
         weights = [
             (str(row.get("name") or ""), _positive(row.get("goods_value")))
             for row in matches
@@ -1874,8 +1950,9 @@ def build_fee_evidence_review_draft(
             }
         )
 
+    component_match_plan = None
     if deterministic_is_tax:
-        _validate_component_expansion_budget(
+        component_match_plan = _validate_component_expansion_budget(
             line_items=combined.get("line_items") or [],
             service_fees=combined.get("service_fees") or [],
             items=items,
@@ -1891,12 +1968,14 @@ def build_fee_evidence_review_draft(
         fx_context=fx_context or {},
         source_ref={"attachment": attachment.get("name"), "file": attachment.get("file_name")},
         explicit_matches=(ai_review or {}).get("line_item_matches") or {},
+        match_plan=component_match_plan,
     ) if deterministic_is_tax else {"components": [], "unmatched_lines": [], "needs_review": False, "allocation_basis": "", "missing_fx": False}
     service_component_result = allocate_service_fee_components(
         combined.get("service_fees") or [],
         items,
         fx_context=fx_context or {},
         source_ref={"attachment": attachment.get("name"), "file": attachment.get("file_name")},
+        match_plan=component_match_plan,
     ) if deterministic_is_tax else {"components": [], "unmatched_lines": [], "needs_review": False, "reason_code": "", "missing_fx": False}
     components = []
     component_candidates = [
