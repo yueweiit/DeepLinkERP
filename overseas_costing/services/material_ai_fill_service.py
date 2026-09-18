@@ -2832,7 +2832,7 @@ def _source_review_context(context: dict | None) -> dict:
     }
 
 
-SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-9'
+SOURCE_REVIEW_PROCESSING_VERSION = 'procurement-source-10'
 
 
 def _source_review_fingerprint(

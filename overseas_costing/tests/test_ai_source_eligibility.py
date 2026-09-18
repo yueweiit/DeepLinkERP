@@ -1,4 +1,4 @@
-"""Analysis can read pending archives without granting final adoption rights."""
+"""Active DingTalk archives stay usable while invalid decisions remain excluded."""
 from copy import deepcopy
 import json
 
@@ -21,7 +21,7 @@ def pending_archive(kind='expense'):
 
 @pytest.mark.parametrize('kind', ['expense', 'logistics', 'unclassified'])
 @pytest.mark.parametrize('source_kind', ['approval_form', 'approval_comment', 'approval_attachment', 'approval_comment_attachment'])
-def test_pending_archives_analyze_consistently_and_never_become_approved(kind, source_kind):
+def test_pending_archives_allow_final_fees_without_becoming_approved(kind, source_kind):
     store, ledger, batch, source = pending_archive(kind)
     raw = {'source_id': 'S', 'process_instance_id': 'E', 'source_kind': source_kind,
            'source_label': '关联采购资料', 'available': True, 'approval_role': 'purchase'}
@@ -30,24 +30,50 @@ def test_pending_archives_analyze_consistently_and_never_become_approved(kind, s
         raw['source_id'] = attachment['name']
     sources = deps.annotate_source_eligibility([raw], store=store, ledger=ledger, batch_name=batch['name'])
     assert sources[0]['analysis_allowed'] and sources[0]['adoption_allowed']
-    assert sources[0]['final_fee_allowed'] is False
-    assert '审批中' in sources[0]['adoption_restriction']
-    assert '物料资料可先填充用于暂估' in sources[0]['adoption_restriction']
+    assert sources[0]['final_fee_allowed'] is True
+    assert sources[0]['adoption_restriction'] == ''
+    assert source['approved'] is False
     manifest = prepare_source_manifest(sources)
     assert manifest[0]['selected'] and source_progress_manifest(manifest)[0]['analysis_allowed']
     baseline = deps.capture_dependencies(manifest, store=store, ledger=ledger,
         batch_name=batch['name'], source_context={}, purpose='analysis')
     assert not deps.dependency_issues({'dependencies': baseline}, store=store, ledger=ledger,
         batch_name=batch['name'], purpose='analysis')
-    if kind == 'expense':
-        assert deps.dependency_issues({'dependencies': baseline}, store=store, ledger=ledger, batch_name=batch['name'])
+    assert not deps.dependency_issues(
+        {'dependencies': baseline}, store=store, ledger=ledger, batch_name=batch['name'])
     source['raw']['comments'] = [{'text': 'Changed'}]
     store.put('source', {'id': source['id'], 'data': dumps(source)})
     assert deps.dependency_issues({'dependencies': baseline}, store=store, ledger=ledger,
         batch_name=batch['name'], purpose='analysis')
 
 
-@pytest.mark.parametrize('state,result', [('REJECTED','agree'), ('TERMINATED','agree'), ('RUNNING','refuse')])
+@pytest.mark.parametrize('state,result', [
+    ('REJECTED', 'agree'),
+    ('REFUSED', 'agree'),
+    ('DENIED', 'agree'),
+    ('TERMINATED', 'agree'),
+    ('CANCELED', 'agree'),
+    ('CANCELLED', 'agree'),
+    ('WITHDRAWN', 'agree'),
+    ('WITHDRAW', 'agree'),
+    ('REVOKED', 'agree'),
+    ('ABORTED', 'agree'),
+    ('DELETED', 'agree'),
+    ('COMPLETED', 'refuse'),
+    ('RUNNING', 'refuse'),
+    ('RUNNING', 'refused'),
+    ('RUNNING', 'reject'),
+    ('RUNNING', 'rejected'),
+    ('RUNNING', 'deny'),
+    ('RUNNING', 'denied'),
+    ('RUNNING', 'disagree'),
+    ('已撤销', 'agree'),
+    ('已拒绝', 'agree'),
+    ('已终止', 'agree'),
+    ('已取消', 'agree'),
+    ('已作废', 'agree'),
+    ('RUNNING', '驳回'),
+])
 def test_invalid_status_is_rejected_even_if_cached_flags_are_wrong(state, result):
     store, ledger, batch, source = pending_archive()
     source.update(status=state, approval_result=result, approved=True, invalid=False)
@@ -56,6 +82,48 @@ def test_invalid_status_is_rejected_even_if_cached_flags_are_wrong(state, result
     annotated = deps.annotate_source_eligibility([raw], store=store, ledger=ledger, batch_name=batch['name'])
     assert not annotated[0]['analysis_allowed']
     assert not prepare_source_manifest(annotated)[0]['selectable']
+
+
+@pytest.mark.parametrize('state,result', [
+    ('RUNNING', 'agree'),
+    ('PENDING', ''),
+    ('', ''),
+    ('UNKNOWN', ''),
+    ('COMPLETED', 'agree'),
+])
+def test_non_invalid_status_is_allowed_as_final_fee(state, result):
+    eligibility = deps.approval_eligibility({
+        'id': 'DINGTALK', 'status': state, 'approval_result': result,
+        'approved': state == 'COMPLETED', 'invalid': False,
+    })
+
+    assert eligibility == {
+        'analysis_allowed': True,
+        'analysis_reason': '',
+        'analysis_code': '',
+        'adoption_allowed': True,
+        'final_fee_allowed': True,
+        'adoption_restriction': '',
+    }
+
+
+@pytest.mark.parametrize('field,value', [
+    ('invalid', True),
+    ('disabled', True),
+    ('excluded', True),
+    ('retired_at', '2026-09-18T00:00:00+00:00'),
+    ('available', False),
+    ('is_active', 0),
+])
+def test_disabled_or_retired_source_remains_excluded(field, value):
+    source = {'id': 'DINGTALK', 'status': 'RUNNING', 'approval_result': 'agree'}
+    source[field] = value
+
+    eligibility = deps.approval_eligibility(source)
+
+    assert eligibility['analysis_allowed'] is False
+    assert eligibility['adoption_allowed'] is False
+    assert eligibility['final_fee_allowed'] is False
 
 
 def test_missing_required_source_has_actionable_error_instead_of_false_network_message():
@@ -67,16 +135,23 @@ def test_missing_required_source_has_actionable_error_instead_of_false_network_m
         prepare_source_manifest(annotated)
 
 
-def test_adoption_rechecks_current_status_not_cached_approved_flag():
+def test_adoption_allows_active_source_then_rechecks_current_invalid_status():
     store, ledger, batch, source = pending_archive()
-    source['approved'] = True
+    baseline = deps.capture_dependencies(
+        [{'source_id':'F','source_kind':'approval_form','process_instance_id':'E'}],
+        store=store, ledger=ledger, batch_name=batch['name'], source_context={})
+    assert not deps.dependency_issues(
+        {'dependencies': baseline}, store=store, ledger=ledger, batch_name=batch['name'])
+
+    source.update(status='REJECTED', approval_result='refuse', approved=False, invalid=True)
     store.put('source', {'id': source['id'], 'data': dumps(source)})
-    with pytest.raises(ValueError, match='审批中'):
-        deps.capture_dependencies([{'source_id':'F','source_kind':'approval_form','process_instance_id':'E'}],
-            store=store, ledger=ledger, batch_name=batch['name'], source_context={})
+
+    issues = deps.dependency_issues(
+        {'dependencies': baseline}, store=store, ledger=ledger, batch_name=batch['name'])
+    assert issues and '审批已拒绝、撤销或停用' in issues[0]
 
 
-def test_pending_expense_rows_can_be_saved_and_reanalyzed_without_becoming_final(monkeypatch):
+def test_pending_expense_rows_remain_saved_and_become_review_only_after_rejection(monkeypatch):
     from overseas_costing.services.effective_logistics_source import load_source_bundle
     from overseas_costing.services.effective_source_values import project_source_values
     from overseas_costing.services import packing_snapshot_service as packing
@@ -109,18 +184,26 @@ def test_pending_expense_rows_can_be_saved_and_reanalyzed_without_becoming_final
                         lambda *args, **kwargs: packing.selected_packing_ai_sources(batch['name'], current))
     listed = packing.list_material_ai_sources(batch['name'], new_version)
     assert listed[0]['analysis_allowed'] and listed[0]['adoption_allowed']
-    assert listed[0]['final_fee_allowed'] is False
+    assert listed[0]['final_fee_allowed'] is True
     manifest = prepare_source_manifest(listed)
     progress = source_progress_manifest(manifest)
     assert manifest[0]['selected'] and manifest[0]['selectable']
     assert progress[0]['analysis_allowed'] and progress[0]['adoption_allowed']
-    assert progress[0]['final_fee_allowed'] is False
+    assert progress[0]['final_fee_allowed'] is True
     adoption = json.loads(current['version']['extra_json'])['ai_row_adoption']
     baseline = deps.capture_dependencies(manifest, store=store, ledger=ledger,
         batch_name=batch['name'], source_context=current['context'],
         inherited=adoption, purpose='analysis')
     assert not deps.dependency_issues({'dependencies': baseline}, store=store, ledger=ledger,
         batch_name=batch['name'], purpose='analysis')
+
+    source.update(status='REJECTED', approval_result='refuse', approved=False, invalid=True)
+    store.put('source', {'id': source['id'], 'data': dumps(source)})
+    invalidated = load_source_bundle(batch['name'], new_version, store=store, ledger=ledger)
+    retained = ledger.rows('item', batch=batch['name'], version=new_version)
+    assert retained and retained[0]['material_code'] == saved[0]['material_code']
+    assert invalidated['context']['packing']['available'] is False
+    assert invalidated['context']['packing']['dependency_issues']
 
 
 def test_public_listing_and_real_repository_worker_use_same_analysis_checks(monkeypatch):
@@ -137,7 +220,8 @@ def test_public_listing_and_real_repository_worker_use_same_analysis_checks(monk
     monkeypatch.setattr(packing, '_list_material_ai_sources', lambda *a, **kw: deepcopy(raw))
     listed = packing.list_material_ai_sources('B1','V1')
     assert listed[0]['analysis_allowed'] and listed[0]['adoption_allowed']
-    assert not listed[0]['final_fee_allowed']
+    assert listed[0]['final_fee_allowed']
+    assert listed[0]['adoption_restriction'] == ''
 
     class Repo(_LifecycleRepository):
         capture_row_dependencies = ai.FrappeMaterialAIFillRepository.capture_row_dependencies
@@ -161,7 +245,11 @@ def test_public_listing_and_real_repository_worker_use_same_analysis_checks(monk
     assert '相邻票' not in str(requests)
     baseline=ai._load_json(repo.run['draft_json'],{})['review_input']['source_dependencies']
     repo.assert_row_dependencies('B1',baseline)
-    with pytest.raises(ValueError,match='审批中'):
+    repo.assert_adoption_dependencies('B1',baseline)
+
+    source.update(status='REJECTED', approval_result='refuse', approved=False, invalid=True)
+    store.put('source', {'id': source['id'], 'data': dumps(source)})
+    with pytest.raises(ValueError,match='审批已拒绝'):
         repo.assert_adoption_dependencies('B1',baseline)
 
 

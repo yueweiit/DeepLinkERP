@@ -6,6 +6,18 @@ from .logistics_settlement.document_writer import document_retired
 from .logistics_settlement.model import digest
 
 
+INVALID_APPROVAL_STATUSES = {
+    'TERMINATED', 'CANCELED', 'CANCELLED', 'DELETED', 'REJECTED', 'REFUSED',
+    'DENIED', 'ABORTED', 'WITHDRAWN', 'WITHDRAW', 'REVOKED',
+    '撤销', '已撤销', '拒绝', '已拒绝', '驳回', '已驳回', '不通过', '未通过',
+    '终止', '已终止', '取消', '已取消', '作废', '已作废',
+}
+INVALID_APPROVAL_RESULTS = {
+    'refuse', 'refused', 'reject', 'rejected', 'deny', 'denied', 'disagree',
+    '拒绝', '已拒绝', '驳回', '已驳回', '不通过', '未通过',
+}
+
+
 class SourceEligibilityError(ValueError):
     """Safe source identity and a business reason, never archived document contents."""
     def __init__(self, reason, *, source=None, code='SOURCE_UNAVAILABLE'):
@@ -22,20 +34,13 @@ def approval_eligibility(source):
     """Archive readability is independent of settlement classification/approval."""
     status = str(source.get('status') or '').upper()
     result = str(source.get('approval_result') or '').lower()
-    invalid = status in {'TERMINATED', 'CANCELED', 'CANCELLED', 'DELETED', 'REJECTED',
-                         'WITHDRAWN', 'WITHDRAW', 'REVOKED'} or result in {'refuse', 'reject', 'disagree'}
+    invalid = status in INVALID_APPROVAL_STATUSES or result in INVALID_APPROVAL_RESULTS
     readable = _enabled(source) and not invalid
-    approved = readable and status == 'COMPLETED' and result in {'agree', 'approved', 'pass'}
-    pending = status == 'RUNNING'
     reason = '' if readable else ('审批已拒绝、撤销或停用，不能用于当前分析。' if source else '本地审批归档缺失，请核对资料。')
-    restriction = '' if approved else (
-        '审批中，物料资料可先填充用于暂估；费用不能作为最终结算费用。'
-        if pending else '审批尚未通过，物料资料可先填充用于暂估；费用不能作为最终结算费用。'
-    )
     return {'analysis_allowed': bool(readable), 'analysis_reason': reason,
             'analysis_code': '' if readable else ('SOURCE_INVALID' if source else 'SOURCE_ARCHIVE_MISSING'),
             'adoption_allowed': bool(readable),
-            'final_fee_allowed': bool(approved), 'adoption_restriction': restriction}
+            'final_fee_allowed': bool(readable), 'adoption_restriction': ''}
 
 
 def annotate_source_eligibility(sources, *, store, ledger, batch_name):
