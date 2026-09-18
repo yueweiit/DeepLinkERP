@@ -31,6 +31,7 @@
     }));
     const byItem = new Map(rows.map((row) => [row.item, row]));
     (draft.components || []).forEach((component, index) => {
+      if (this.feeEvidenceIsLedgerComponent(component || {})) return;
       const row = byItem.get(String(component?.item || ""));
       const columnKey = this.feeEvidenceMatrixColumnKey(component || {});
       if (!row || !columnKey) return;
@@ -50,6 +51,55 @@
     };
   }
 
+  feeEvidenceIsLedgerComponent(component = {}) {
+    return String(component.component_type || "").toUpperCase() === "REFUND_REVERSAL" ||
+      String(component.accounting_role || "").toUpperCase() === "SETTLEMENT" ||
+      String(component.cost_effect || "").toUpperCase() === "LEDGER_ONLY";
+  }
+
+  feeEvidenceLedgerComponentLabel(component = {}) {
+    if (String(component.component_type || "").toUpperCase() === "REFUND_REVERSAL") return "退款／冲回";
+    if (String(component.accounting_role || "").toUpperCase() === "SETTLEMENT") return "结算台账";
+    return "仅记台账";
+  }
+
+  feeEvidenceComponentSourceRefs(component = {}) {
+    const refs = [];
+    const seen = new Set();
+    const append = (ref) => {
+      if (!ref || typeof ref !== "object" || Array.isArray(ref)) return;
+      const key = JSON.stringify(ref);
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push(ref);
+    };
+    (component.source_refs || []).forEach(append);
+    append(component.source_evidence);
+    return refs;
+  }
+
+  feeEvidenceLedgerComponents(draft = {}) {
+    const result = [];
+    const seen = new Set();
+    const append = (component) => {
+      if (!component || !this.feeEvidenceIsLedgerComponent(component)) return;
+      const proposalId = String(component.proposal_id || "");
+      if (!proposalId || seen.has(proposalId)) return;
+      seen.add(proposalId);
+      result.push(component);
+    };
+    if (String(draft.component_contract?.mode || "") === "INDEXED_COLUMNS_V1") {
+      const matrix = this.feeEvidenceMaterialMatrix(draft);
+      (matrix.unmatched_lines || []).forEach((line) => {
+        if (String(line?.reason_code || "") !== "MATERIAL_MATRIX_LEDGER_ONLY") return;
+        append(this.feeEvidenceComponentAt(draft, line.proposal_index));
+      });
+    } else {
+      (draft.components || []).forEach(append);
+    }
+    return result;
+  }
+
   defaultFeeEvidenceReviewSelections(draft = {}) {
     const matrix = this.feeEvidenceMaterialMatrix(draft);
     const columnFeeKeys = new Map(this.feeEvidenceMatrixColumns().map((column) => [column.key, column.feeLogicalKey]));
@@ -57,14 +107,22 @@
     (matrix.rows || []).forEach((row) => Object.entries(row.cells || {}).forEach(([columnKey, cell]) => {
       if ((cell?.proposals || []).length || (cell?.saved || []).length) matrixFeeKeys.add(columnFeeKeys.get(columnKey));
     }));
+    const ledgerComponents = this.feeEvidenceLedgerComponents(draft);
+    const hasDefaultLedgerComponent = ledgerComponents.some((row) => row.default_selected && String(row.proposal_id || ""));
     const selected = new Set();
     const evidence = draft.evidence || {};
-    if (evidence.default_selected || matrixFeeKeys.size) selected.add(String(evidence.proposal_id || "evidence:classification"));
+    if (evidence.default_selected || matrixFeeKeys.size || hasDefaultLedgerComponent) {
+      selected.add(String(evidence.proposal_id || "evidence:classification"));
+    }
     (draft.fee_splits || []).forEach((row) => {
       if (row.default_selected || matrixFeeKeys.has(String(row.logical_fee_key || ""))) {
         const proposalId = String(row.proposal_id || "");
         if (proposalId) selected.add(proposalId);
       }
+    });
+    ledgerComponents.forEach((row) => {
+      const proposalId = String(row.proposal_id || "");
+      if (row.default_selected && proposalId) selected.add(proposalId);
     });
     return selected;
   }
@@ -370,10 +428,12 @@
     const evidenceId = this.escape(evidence.proposal_id || "evidence:classification");
     const statusOptions = [["ESTIMATED", "暂估"], ["ACTUAL", "实际"]];
     const refundParents = draft.refund_parent_options || [];
-    const selected = (row) => review.selections?.has(String(row?.proposal_id || "")) || row?.default_selected ? "checked" : "";
+    const hasSelectionState = review.selections && typeof review.selections.has === "function";
+    const selected = (row) => (hasSelectionState ? review.selections.has(String(row?.proposal_id || "")) : Boolean(row?.default_selected)) ? "checked" : "";
     const editValue = (row, fieldname, fallback = "") => review.edits?.[String(row?.proposal_id || "")]?.[fieldname] ?? row?.[fieldname] ?? fallback;
     const open = review.matrixDetailsOpen ? " open" : "";
     const feeRows = draft.fee_splits || [];
+    const ledgerRows = this.feeEvidenceLedgerComponents(draft);
     return `<details class="ocw-mf-voucher-details" data-mf-fee-voucher-details${open}>
       <summary><span><b>凭证摘要</b><small>${this.escape(evidence.evidence_type || "待核对")} · ${this.escape(evidence.accounting_role || "待核对")} · ${this.escape(evidence.currency || "")} ${this.escape(evidence.original_amount || "待补录")}</small></span><em>展开核对详情</em></summary>
       <div class="ocw-mf-voucher-detail-body">
@@ -390,6 +450,11 @@
           <label class="is-checkbox"><input type="checkbox" data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="is_final" ${Number(editValue(evidence,"is_final",0)) ? "checked" : ""}> 最终凭证</label>
         </div>
         <div class="ocw-mf-voucher-fee-splits"><h4>费用拆分</h4>${feeRows.length ? feeRows.map((row) => `<label class="ocw-mf-review-choice ${row.has_conflict || row.needs_review ? "is-warning" : ""}"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}><span><strong>${this.escape(row.label || row.logical_fee_key)} · ${this.escape(editValue(row,"currency",row.currency || ""))} <input data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount" value="${this.escape(editValue(row,"amount"))}" inputmode="decimal"></strong><small><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount_status">${statusOptions.map(([value,label]) => `<option value="${value}" ${value === editValue(row,"amount_status",evidence.suggested_amount_status) ? "selected" : ""}>${label}</option>`).join("")}</select></small>${this.renderFeeEvidenceReviewWarning(row)}</span></label>`).join("") : "<p>未识别出可安全拆分的金额，可保留凭证后人工补录。</p>"}</div>
+        ${ledgerRows.length ? `<section class="ocw-mf-ledger-components"><header><h4>矩阵外台账分项</h4><p>结算、退款或冲回只记入台账，不重复计入物料成本。</p></header>${ledgerRows.map((row) => {
+          const proposalId = this.escape(row.proposal_id || "");
+          const refs = this.feeEvidenceComponentSourceRefs(row).map((ref) => this.feeEvidenceSourceLabel(ref)).filter(Boolean);
+          return `<label class="ocw-mf-ledger-component ${row.has_conflict || row.needs_review || row.warning ? "is-warning" : ""}"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${proposalId}" ${selected(row)}><span><strong>${this.feeEvidenceLedgerComponentLabel(row)} · ${this.escape(row.currency || "")} ${this.escape(row.original_amount ?? "--")}</strong><small>${refs.map((value) => this.escape(value)).join("；") || "来源位置待核对"}</small>${this.renderFeeEvidenceReviewWarning(row)}</span></label>`;
+        }).join("")}</section>` : ""}
         <div class="ocw-mf-voucher-unclassified"><b>凭证待归类差额</b><span>${this.escape(draft.unclassified_difference || "0.00")} ${this.escape(evidence.currency || "")}</span><small>未明确归属前不伪造物料分摊。</small></div>
       </div>
     </details>`;
@@ -420,10 +485,13 @@
     this.ensureFeeEvidenceMatrixState(review, draft);
     const matrix = this.feeEvidenceMaterialMatrix(draft);
     const columns = this.feeEvidenceMatrixColumns();
-    const unmatched = matrix.unmatched_lines || draft.unmatched_lines || [];
+    const unmatched = (matrix.unmatched_lines || draft.unmatched_lines || []).filter(
+      (row) => String(row?.reason_code || "") !== "MATERIAL_MATRIX_LEDGER_ONLY"
+    );
     const sourceRefs = [
       ...(draft.evidence?.source_refs || []),
       ...(draft.fee_splits || []).flatMap((row) => row.source_refs || []),
+      ...this.feeEvidenceLedgerComponents(draft).flatMap((row) => this.feeEvidenceComponentSourceRefs(row)),
     ];
     const rows = matrix.rows.map((row, rowIndex) => {
       const cells = columns.map((column) => this.renderFeeEvidenceMatrixCell(draft, review, rowIndex, column)).join("");

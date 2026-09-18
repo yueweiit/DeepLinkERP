@@ -55,7 +55,8 @@ const draft={
   components:[
     {proposal_id:'component:1',item:'ITEM-1',tax_code:'IGI',fee_logical_key:'import_tax',currency:'MXN',original_amount:'10',amount_rmb:'4',needs_review:true,warning:'低信心'},
     {proposal_id:'component:2',item:'ITEM-1',tax_code:'IGI',fee_logical_key:'import_tax',currency:'MXN',original_amount:'5',amount_rmb:'2'},
-    {proposal_id:'component:3',item:'ITEM-2',component_type:'CUSTOMS_SERVICE',fee_logical_key:'customs_clearance_fee',currency:'MXN',original_amount:'30',amount_rmb:null}
+    {proposal_id:'component:3',item:'ITEM-2',component_type:'CUSTOMS_SERVICE',fee_logical_key:'customs_clearance_fee',currency:'MXN',original_amount:'30',amount_rmb:null},
+    {proposal_id:'component:ledger',item:'ITEM-1',component_type:'REFUND_REVERSAL',accounting_role:'SETTLEMENT',cost_effect:'LEDGER_ONLY',currency:'MXN',original_amount:'8',amount_rmb:'3.2',default_selected:true,warning:'只记录退款台账',source_refs:[{file_name:'refund.pdf',page:5,text_line:12}]}
   ],
   material_matrix:{
     columns:[
@@ -129,6 +130,22 @@ assert.equal(cell.originalAmount,'3');assert.equal(cell.amountRmb,'1.5');assert.
     )
 
 
+def test_indexed_ledger_component_is_resolved_only_from_ledger_unmatched_reference() -> None:
+    run_js(
+        r"""
+const draft={components:[],component_contract:{mode:'INDEXED_COLUMNS_V1'},component_store:{format:'INDEXED_COLUMNS_V1',count:2,columns:{
+ proposal_id:{values:['ledger','matrix']},component_type:{values:['REFUND_REVERSAL','IMPORT_TAX']},accounting_role:{values:['SETTLEMENT','FINAL_BILL']},cost_effect:{values:['LEDGER_ONLY','COST']},default_selected:{values:[true,true]},currency:{constant:'MXN'},original_amount:{values:['8','2']},item:{constant:'ITEM-1'},tax_code:{values:['','IGI']},source_refs:{values:[[{file_name:'indexed-refund.pdf',page:6}],[]]}
+}},material_matrix:{columns:w.feeEvidenceMatrixColumns(),saved_components:[],unmatched_lines:[{reason_code:'MATERIAL_MATRIX_LEDGER_ONLY',message:'只保留台账',proposal_index:0}],rows:[{item:'ITEM-1',material_code:'SKU',hs_code:'1',cells:{IGI:{proposals:[1],saved:[]}}}]}};
+assert.deepEqual(w.feeEvidenceLedgerComponents(draft).map(x=>x.proposal_id),['ledger']);
+const selected=w.defaultFeeEvidenceReviewSelections(draft);
+assert(selected.has('ledger'));assert(!selected.has('matrix'));
+const html=w.renderFeeEvidenceReviewDraft(draft,{selections:selected,edits:{},matrixEdits:{}});
+assert(html.includes('indexed-refund.pdf')&&html.includes('第 6 页'));
+assert(!html.includes('无法归属到具体物料的凭证明细'));
+"""
+    )
+
+
 def test_legacy_draft_without_matrix_still_builds_every_item_row() -> None:
     run_js(
         r"""
@@ -136,6 +153,20 @@ const draft={item_options:[{item:'A',material_code:'A-1',product_name:'A'},{item
 const matrix=w.feeEvidenceMaterialMatrix(draft);
 assert.deepEqual(matrix.rows.map(x=>x.item),['A','B']);
 assert.deepEqual(matrix.rows[0].cells.IVA.proposals,[0]);assert.deepEqual(matrix.rows[1].cells,{});
+"""
+    )
+
+
+def test_legacy_ledger_component_with_tax_code_stays_outside_matrix() -> None:
+    run_js(
+        r"""
+const draft={item_options:[{item:'A',material_code:'A-1'}],components:[
+ {proposal_id:'ledger',item:'A',component_type:'REFUND_REVERSAL',accounting_role:'SETTLEMENT',cost_effect:'LEDGER_ONLY',tax_code:'IGI',currency:'MXN',original_amount:'4',default_selected:true}
+]};
+const matrix=w.feeEvidenceMaterialMatrix(draft);
+assert.deepEqual(matrix.rows[0].cells,{});
+assert.deepEqual(w.feeEvidenceLedgerComponents(draft).map(x=>x.proposal_id),['ledger']);
+assert.deepEqual(w.serializeFeeEvidenceMatrix(draft,{matrixEdits:{}}),{cells:[]});
 """
     )
 
@@ -150,6 +181,59 @@ const selected=w.defaultFeeEvidenceReviewSelections(draft);
 assert(selected.has('evidence:classification'));
 assert(selected.has('fee:import_tax'));
 assert(selected.has('fee:customs_clearance_fee'));
+assert(selected.has('component:ledger'));
+assert(!selected.has('component:1'));
+"""
+    )
+
+
+def test_ledger_only_component_is_visible_outside_matrix_with_amount_source_and_warning() -> None:
+    run_js(
+        DRAFT
+        + r"""
+const ledger=w.feeEvidenceLedgerComponents(draft);
+assert.deepEqual(ledger.map(x=>x.proposal_id),['component:ledger']);
+const review={selections:w.defaultFeeEvidenceReviewSelections(draft),edits:{},matrixEdits:{}};
+const html=w.renderFeeEvidenceReviewDraft(draft,review);
+assert(html.includes('矩阵外台账分项'));
+assert(html.includes('component:ledger'));
+assert(html.includes('MXN 8'));
+assert(html.includes('<strong>退款／冲回 · MXN 8</strong>'));
+assert(html.includes('refund.pdf')&&html.includes('第 5 页')&&html.includes('文本第 12 行'));
+assert(html.includes('只记录退款台账'));
+assert.deepEqual(w.serializeFeeEvidenceMatrix(draft,review).cells.filter(x=>x.source_proposal_ids.includes('component:ledger')),[]);
+review.selections.delete('component:ledger');
+const cancelled=w.renderFeeEvidenceReviewDraft(draft,review);
+assert(!cancelled.includes('data-proposal-id="component:ledger" checked'));
+"""
+    )
+
+
+def test_default_ledger_selection_also_selects_its_evidence_when_matrix_is_empty() -> None:
+    run_js(
+        DRAFT
+        + r"""
+draft.evidence.default_selected=false;
+draft.fee_splits.forEach(row=>row.default_selected=false);
+draft.material_matrix.rows.forEach(row=>row.cells={});
+const selected=w.defaultFeeEvidenceReviewSelections(draft);
+assert(selected.has('component:ledger'));
+assert(selected.has('evidence:classification'));
+assert(!selected.has('component:1'));
+"""
+    )
+
+
+def test_ledger_source_refs_keep_distinct_nested_image_regions() -> None:
+    run_js(
+        r"""
+const component={source_refs:[
+ {file_name:'voucher.png',image_region:{x:1,y:2}},
+ {file_name:'voucher.png',image_region:{x:8,y:9}}
+]};
+const labels=w.feeEvidenceComponentSourceRefs(component).map(ref=>w.feeEvidenceSourceLabel(ref));
+assert.equal(labels.length,2);
+assert(labels[0].includes('"x":1')&&labels[1].includes('"x":8'));
 """
     )
 
@@ -268,6 +352,33 @@ const payload=JSON.parse(calls[0].args.component_matrix_json);
 assert.deepEqual(payload.cells.find(x=>x.item==='ITEM-1'&&x.column_key==='IGI'),{item:'ITEM-1',column_key:'IGI',original_amount:'20',source_proposal_ids:['component:1','component:2']});
 assert(!calls[0].method.toLowerCase().includes('calculate'));
 assert(!calls[0].method.toLowerCase().includes('erp'));
+"""
+    )
+
+
+def test_empty_matrix_still_submits_selected_ledger_and_honors_cancellation() -> None:
+    run_integrated_js(
+        DRAFT
+        + r"""
+const emptyDraft=structuredClone(draft);
+emptyDraft.material_matrix.rows.forEach(row=>row.cells={});
+const calls=[];
+w.detailState={batchName:'B',versionName:'V',editToken:'TOKEN',expectedModified:'M',tab:'overview'};
+w.ensureMaterialFeeEditSession=async()=>true;
+w.call=async(method,args)=>{calls.push({method,args});return {ok:true,message:'ok'}};
+w.updateMaterialFeeExpectedModified=()=>{};
+global.frappe={show_alert:()=>{}};
+const makeState=selections=>({batchName:'B',feeDrafts:{},pendingWrites:new Set(),materialCellWrites:new Map(),materialCellWriteTargets:{},materialCellSaveErrors:{},materialDrafts:{},packingGroupSelections:new Set(),feeEvidenceReview:{status:'READY',batchName:'B',runId:'RUN',draft:emptyDraft,selections,edits:{},matrixEdits:{}},feeEvidenceReviewDialog:{$wrapper:{find:()=>({length:0})},hide:()=>{}}});
+let selections=w.defaultFeeEvidenceReviewSelections(emptyDraft);
+assert(selections.has('component:ledger'));assert(!selections.has('component:1'));
+w.materialFeeState=makeState(selections);
+await w.applyFeeEvidenceReview();
+assert.deepEqual(JSON.parse(calls[0].args.component_matrix_json),{cells:[]});
+assert(JSON.parse(calls[0].args.selections_json).includes('component:ledger'));
+selections=w.defaultFeeEvidenceReviewSelections(emptyDraft);selections.delete('component:ledger');
+w.materialFeeState=makeState(selections);
+await w.applyFeeEvidenceReview();
+assert(!JSON.parse(calls[1].args.selections_json).includes('component:ledger'));
 """
     )
 
