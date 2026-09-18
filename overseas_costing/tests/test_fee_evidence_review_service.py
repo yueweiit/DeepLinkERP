@@ -3141,6 +3141,363 @@ def test_apply_review_rolls_back_all_writes_and_leaves_run_unfinished_on_error()
     assert not any(call[0] == "finish" for call in repository.calls)
 
 
+class _MatrixApplyRepository(_ApplyRepository):
+    def __init__(self, *, fx_context=None, fail_replace=False):
+        super().__init__()
+        self.context = {
+            "batch": "B1",
+            "version": "V1",
+            "transport_mode": "AIR",
+            "fx_context": {"fx_rmb_to_mxn": "2"} if fx_context is None else fx_context,
+        }
+        self.items = _items()
+        self.replaced = []
+        self.fail_replace = fail_replace
+        self.fees = {
+            "import_tax": {
+                "name": "F-import_tax",
+                "logical_fee_key": "import_tax",
+                "amount": "50",
+                "currency": "MXN",
+            },
+            "customs_clearance_fee": {
+                "name": "F-customs_clearance_fee",
+                "logical_fee_key": "customs_clearance_fee",
+                "amount": "20",
+                "currency": "MXN",
+            },
+        }
+        self.draft["evidence"]["original_amount"] = "70"
+        self.draft["fee_splits"] = [
+            {
+                "proposal_id": "fee:import_tax",
+                "logical_fee_key": "import_tax",
+                "amount": "50",
+                "currency": "MXN",
+                "amount_status": "ACTUAL",
+            },
+            {
+                "proposal_id": "fee:customs_clearance_fee",
+                "logical_fee_key": "customs_clearance_fee",
+                "amount": "20",
+                "currency": "MXN",
+                "amount_status": "ACTUAL",
+            },
+        ]
+        self.draft["components"] = [
+            {
+                "proposal_id": f"component:{column_key.lower()}",
+                "item": "ITEM-GLASSES",
+                "stable_line_key": "LINE-GLASSES",
+                "component_type": (
+                    "CUSTOMS_SERVICE" if column_key == "CUSTOMS_SERVICE" else "IMPORT_TAX"
+                ),
+                "tax_code": "" if column_key == "CUSTOMS_SERVICE" else column_key,
+                "fee_logical_key": (
+                    "customs_clearance_fee"
+                    if column_key == "CUSTOMS_SERVICE"
+                    else "import_tax"
+                ),
+                "currency": "MXN",
+                "original_amount": "5.00",
+                "amount_rmb": "999999",
+                "exchange_rate": "999999",
+                "source_evidence": {"page": 1, "text_line": index},
+                "source_refs": [{"page": 1, "text_line": index, "field": column_key}],
+                "confidence": "0.80",
+            }
+            for index, column_key in enumerate(
+                ("IGI", "IVA", "DTA", "PRV", "PRV_IVA", "CUSTOMS_SERVICE"),
+                start=1,
+            )
+        ]
+        self.run["draft_json"] = self.draft
+
+    def get_context(self, batch_name, version_name):
+        self.calls.append(("context", batch_name, version_name))
+        return {**self.context, "batch": batch_name, "version": version_name}
+
+    def get_review_items(self, _batch_name, _version_name):
+        return {"items": [{"name": "AI-SCOPE-SHOULD-NOT-BE-USED"}], "matrix_items": self.items}
+
+    def get_items(self, _batch_name, _version_name):
+        raise AssertionError("matrix apply must validate against the raw matrix snapshot")
+
+    def save_fee_split(self, **kwargs):
+        fee_key = kwargs["fee_row"]["logical_fee_key"]
+        self.calls.append(("fee", fee_key))
+        return dict(self.fees[fee_key])
+
+    def materialize_fee_rule(self, _batch, _version, logical_fee_key):
+        return dict(self.fees[logical_fee_key])
+
+    def replace_components(self, **kwargs):
+        self.replaced.append(kwargs)
+        if self.fail_replace:
+            raise RuntimeError("replace failed")
+
+
+def _matrix_apply_payload(*cells: dict) -> dict:
+    return {"cells": list(cells)}
+
+
+def _matrix_cell(column_key, amount="5.00", *, item="ITEM-GLASSES", sources=None, **extra):
+    return {
+        "item": item,
+        "column_key": column_key,
+        "original_amount": amount,
+        "source_proposal_ids": (
+            [f"component:{column_key.lower()}"] if sources is None else sources
+        ),
+        **extra,
+    }
+
+
+def _apply_matrix(repository, matrix, *, selections=None):
+    return service.apply_fee_evidence_review(
+        "B1",
+        "RUN-1",
+        selections
+        or ["evidence:classification", "fee:import_tax", "fee:customs_clearance_fee"],
+        {},
+        "EDIT",
+        "m1",
+        component_matrix=matrix,
+        repository=repository,
+    )
+
+
+def test_apply_material_matrix_maps_all_six_columns_and_recomputes_server_values() -> None:
+    repository = _MatrixApplyRepository()
+    columns = ("IGI", "IVA", "DTA", "PRV", "PRV_IVA", "CUSTOMS_SERVICE")
+
+    result = _apply_matrix(
+        repository,
+        _matrix_apply_payload(*[_matrix_cell(column) for column in columns]),
+    )
+
+    assert result["component_count"] == 6
+    assert {row["logical_fee_key"] for row in repository.replaced} == {
+        "import_tax",
+        "customs_clearance_fee",
+    }
+    saved = [component for row in repository.replaced for component in row["components"]]
+    assert {row["tax_code"] for row in saved} == {
+        "IGI",
+        "IVA",
+        "DTA",
+        "PRV",
+        "PRV_IVA",
+        "",
+    }
+    assert all(row["component_type"] == ("CUSTOMS_SERVICE" if not row["tax_code"] else "IMPORT_TAX") for row in saved)
+    assert all(row["currency"] == "MXN" for row in saved)
+    assert all(row["amount_rmb"] == Decimal("2.5") for row in saved)
+    assert all(row["exchange_rate"] == Decimal("0.5") for row in saved)
+    assert all(row["stable_line_key"] == "LINE-GLASSES" for row in saved)
+    assert all(row["hs_code"] == "90041000" for row in saved)
+    assert all(row["source_evidence"]["type"] == "MANUAL_REVIEW" for row in saved)
+    assert all(row["source_evidence"]["attachment"] == "ATT-1" for row in saved)
+    assert all(row["source_evidence"]["review_run"] == "RUN-1" for row in saved)
+    assert all(row["source_evidence"]["operator"] for row in saved)
+    assert all(row["source_evidence"]["source_proposals"] for row in saved)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"cells": [], "rmb_total": "1"}, "顶层|unknown|未知"),
+        (_matrix_apply_payload(_matrix_cell("IGI", amount="1", amount_rmb="99")), "字段"),
+        (_matrix_apply_payload(_matrix_cell("IGI", item="ITEM-UNKNOWN")), "物料|SKU"),
+        (_matrix_apply_payload(_matrix_cell("UNKNOWN", sources=[])), "列"),
+        (_matrix_apply_payload(_matrix_cell("IGI"), _matrix_cell("IGI", amount="1")), "重复"),
+        (_matrix_apply_payload(_matrix_cell("IGI", amount="-1")), "非负|金额"),
+        (_matrix_apply_payload(_matrix_cell("IGI", amount="NaN")), "有限|金额"),
+        (_matrix_apply_payload(_matrix_cell("IGI", amount="Infinity")), "有限|金额"),
+        (_matrix_apply_payload(_matrix_cell("IGI", amount="1e1000000")), "金额|精度"),
+        (_matrix_apply_payload(_matrix_cell("IGI", amount="1.001")), "精度|小数"),
+        (_matrix_apply_payload(_matrix_cell("IGI", sources=["missing"])), "不存在"),
+        (_matrix_apply_payload(_matrix_cell("IGI", sources=["component:iva"])), "单元格|不匹配"),
+        (_matrix_apply_payload(_matrix_cell("IGI", sources=["component:igi", "component:igi"])), "重复"),
+    ],
+)
+def test_apply_material_matrix_rejects_untrusted_or_invalid_cells(payload, message) -> None:
+    repository = _MatrixApplyRepository()
+
+    with pytest.raises(ValueError, match=message):
+        _apply_matrix(repository, payload)
+
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+    assert repository.replaced == []
+
+
+def test_apply_material_matrix_rejects_component_total_above_fee() -> None:
+    repository = _MatrixApplyRepository()
+
+    with pytest.raises(ValueError, match="超过费用总额"):
+        _apply_matrix(repository, _matrix_apply_payload(_matrix_cell("IGI", amount="50.01")))
+
+    assert repository.rollbacks == 1
+
+
+def test_apply_material_matrix_missing_fx_keeps_original_and_blank_rmb() -> None:
+    repository = _MatrixApplyRepository(fx_context={})
+
+    _apply_matrix(repository, _matrix_apply_payload(_matrix_cell("IGI", amount="12.34", sources=[])))
+
+    component = next(row for saved in repository.replaced for row in saved["components"])
+    assert component["currency"] == "MXN"
+    assert component["original_amount"] == Decimal("12.34")
+    assert component["amount_rmb"] is None
+    assert component["exchange_rate"] is None
+    assert component["source_evidence"]["source_proposal_ids"] == []
+    assert component["source_evidence"]["manual_change"] is True
+
+
+def test_apply_material_matrix_empty_cells_replace_selected_fee_components_with_empty_lists() -> None:
+    repository = _MatrixApplyRepository()
+
+    result = _apply_matrix(repository, {"cells": []})
+
+    assert result["component_count"] == 0
+    assert {row["logical_fee_key"] for row in repository.replaced} == {
+        "import_tax",
+        "customs_clearance_fee",
+    }
+    assert all(row["components"] == [] for row in repository.replaced)
+
+
+def test_apply_material_matrix_clear_replaces_fee_keys_from_saved_preview_values() -> None:
+    repository = _MatrixApplyRepository()
+    repository.draft["material_matrix"] = {
+        "saved_components": [
+            {
+                "id": "SAVED-CUSTOMS",
+                "item": "ITEM-GLASSES",
+                "stable_line_key": "LINE-GLASSES",
+                "logical_fee_key": "customs_clearance_fee",
+                "component_type": "CUSTOMS_SERVICE",
+                "tax_code": "",
+                "currency": "MXN",
+                "original_amount": "7.00",
+            }
+        ]
+    }
+    repository.run["draft_json"] = repository.draft
+
+    _apply_matrix(
+        repository,
+        {"cells": []},
+        selections=["evidence:classification", "fee:import_tax"],
+    )
+
+    assert {row["logical_fee_key"] for row in repository.replaced} == {
+        "import_tax",
+        "customs_clearance_fee",
+    }
+    assert all(row["components"] == [] for row in repository.replaced)
+
+
+def test_apply_material_matrix_reads_source_proposals_from_indexed_draft() -> None:
+    repository = _MatrixApplyRepository()
+    components = repository.draft.pop("components")
+    repository.draft["component_store"] = service._build_component_store(components)
+    repository.draft["component_contract"] = {
+        "mode": "INDEXED_COLUMNS_V1",
+        "component_count": len(components),
+    }
+    repository.run["draft_json"] = repository.draft
+
+    _apply_matrix(
+        repository,
+        _matrix_apply_payload(_matrix_cell("PRV_IVA", amount="4.00")),
+    )
+
+    component = next(row for saved in repository.replaced for row in saved["components"])
+    source = component["source_evidence"]["source_proposals"][0]
+    assert source["proposal_id"] == "component:prv_iva"
+    assert source["source_refs"][0]["field"] == "PRV_IVA"
+    assert source["original_amount"] == "5.00"
+    assert component["source_evidence"]["manual_change"] is True
+    assert component["source_evidence"]["suggested_original_amounts_by_currency"] == {"MXN": "5.00"}
+
+
+def test_apply_material_matrix_indexed_draft_materializes_only_referenced_proposals(
+    monkeypatch,
+) -> None:
+    repository = _MatrixApplyRepository()
+    template = repository.draft["components"][0]
+    components = [
+        {
+            **template,
+            "proposal_id": f"component:igi:{index}",
+            "original_amount": "0.01",
+        }
+        for index in range(1000)
+    ]
+    repository.draft["components"] = []
+    repository.draft["component_store"] = service._build_component_store(components)
+    repository.draft["component_contract"] = {
+        "mode": "INDEXED_COLUMNS_V1",
+        "component_count": len(components),
+    }
+    repository.run["draft_json"] = repository.draft
+    original = service._component_store_row
+    calls = []
+
+    def counted(store, row_index):
+        calls.append(row_index)
+        return original(store, row_index)
+
+    monkeypatch.setattr(service, "_component_store_row", counted)
+    _apply_matrix(
+        repository,
+        _matrix_apply_payload(
+            _matrix_cell("IGI", amount="0.01", sources=["component:igi:999"])
+        ),
+    )
+
+    assert calls == [999]
+
+
+def test_apply_material_matrix_rolls_back_when_replace_fails() -> None:
+    repository = _MatrixApplyRepository(fail_replace=True)
+
+    with pytest.raises(RuntimeError, match="replace failed"):
+        _apply_matrix(repository, _matrix_apply_payload(_matrix_cell("IGI")))
+
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+    assert not any(call[0] == "finish" for call in repository.calls)
+
+
+def test_apply_material_matrix_attachment_change_returns_stale_without_writes() -> None:
+    repository = _MatrixApplyRepository()
+    repository.run["attachment_fingerprint"] = "old"
+    repository.mark_stale = lambda run_id: repository.calls.append(("stale", run_id))
+
+    result = _apply_matrix(repository, _matrix_apply_payload(_matrix_cell("IGI")))
+
+    assert result["stale"] is True
+    assert repository.replaced == []
+    assert repository.commits == 0
+
+
+def test_apply_material_matrix_concurrent_batch_change_rolls_back() -> None:
+    repository = _MatrixApplyRepository()
+
+    def reject_concurrent(*_args, **_kwargs):
+        raise ValueError("批次已被修改")
+
+    repository.assert_batch_write = reject_concurrent
+    with pytest.raises(ValueError, match="批次已被修改"):
+        _apply_matrix(repository, _matrix_apply_payload(_matrix_cell("IGI")))
+
+    assert repository.rollbacks == 1
+    assert repository.replaced == []
+
+
 def test_settlement_evidence_cannot_be_selected_as_a_fee_total() -> None:
     with pytest.raises(ValueError, match="结算流水"):
         service.validate_fee_split_conservation(

@@ -14,6 +14,8 @@ MAX_FEE_PAYLOAD_BYTES = 100_000
 MAX_IDENTIFIER_LENGTH = 300
 MAX_REMARK_LENGTH = 2_000
 MAX_REVIEW_PAYLOAD_BYTES = 1_000_000
+MAX_COMPONENT_MATRIX_PAYLOAD_BYTES = 24 * 1024 * 1024
+MAX_COMPONENT_MATRIX_CELLS = 60_000
 
 
 def _bounded_json_object(value) -> dict:
@@ -58,6 +60,32 @@ def _bounded_json(value, expected_type, label):
         raise ValueError(f"{label}内容过大。")
     if not isinstance(payload, expected_type):
         raise ValueError(f"{label}格式不正确。")
+    return payload
+
+
+def _bounded_component_matrix_json(value) -> dict | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        payload = value
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        encoded = str(value)
+        if len(encoded.encode("utf-8")) > MAX_COMPONENT_MATRIX_PAYLOAD_BYTES:
+            raise ValueError("物料税费矩阵内容过大。")
+        try:
+            payload = json.loads(encoded)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("物料税费矩阵不是有效 JSON。") from error
+    if len(encoded.encode("utf-8")) > MAX_COMPONENT_MATRIX_PAYLOAD_BYTES:
+        raise ValueError("物料税费矩阵内容过大。")
+    if not isinstance(payload, dict):
+        raise ValueError("物料税费矩阵必须是 JSON 对象。")
+    cells = payload.get("cells")
+    if isinstance(cells, list) and len(cells) > MAX_COMPONENT_MATRIX_CELLS:
+        raise ValueError(
+            f"物料税费矩阵单元格数量不能超过 {MAX_COMPONENT_MATRIX_CELLS}。"
+        )
     return payload
 
 
@@ -161,6 +189,7 @@ def apply_fee_evidence_review(
     edits_json,
     edit_token,
     expected_modified,
+    component_matrix_json=None,
 ):
     batch_name = require_batch_permission(batch_name, "write")
     return fee_evidence_review_service.apply_fee_evidence_review(
@@ -168,6 +197,7 @@ def apply_fee_evidence_review(
         run_id=_identifier(run_id),
         selections=_bounded_json(selections_json, list, "草稿选择"),
         edits=_bounded_json(edits_json, dict, "草稿修改"),
+        component_matrix=_bounded_component_matrix_json(component_matrix_json),
         edit_token=str(edit_token or "")[:MAX_IDENTIFIER_LENGTH],
         expected_modified=str(expected_modified or "")[:MAX_IDENTIFIER_LENGTH],
     )
