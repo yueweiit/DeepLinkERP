@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 from overseas_costing import install
+from overseas_costing.services.erp_capability_service import build_erpnext_standard_field_spec
+
+
+def test_erpnext_standard_field_spec_has_unique_fields_per_doctype() -> None:
+    for fields in build_erpnext_standard_field_spec().values():
+        names = [field["fieldname"] for field in fields]
+        assert len(names) == len(set(names))
 
 
 def test_after_migrate_restores_deeplink_desktop_entry(monkeypatch) -> None:

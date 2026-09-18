@@ -69,6 +69,10 @@ def test_runtime_installer_backs_up_image_and_requires_ocr_tools() -> None:
     assert 'mode="${5:-install}"' in installer
     assert 'if [ "$mode" = "preflight" ]' in installer
     assert installer.count('restart frontend') >= 2
+    assert 'script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' in installer
+    assert 'asset_sync_script="${ASSET_SYNC_SCRIPT:-}"' in installer
+    assert 'asset_sync_script="$script_dir/sync_and_verify_assets.sh"' in installer
+    assert 'COMPOSE_FILE="$compose_file" SITE_NAME="$site_name" bash "$asset_sync_script"' in installer
 
 
 def test_material_ai_configuration_reloads_frontend_after_backend_restart() -> None:
@@ -76,6 +80,10 @@ def test_material_ai_configuration_reloads_frontend_after_backend_restart() -> N
     configurator = (scripts / "configure_material_ai.sh").read_text(encoding="utf-8")
 
     assert configurator.index("restart backend") < configurator.index("restart frontend")
+    assert 'script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' in configurator
+    assert 'asset_sync_script="${ASSET_SYNC_SCRIPT:-}"' in configurator
+    assert 'asset_sync_script="$script_dir/sync_and_verify_assets.sh"' in configurator
+    assert 'COMPOSE_FILE="$compose_file" SITE_NAME="$site_name" bash "$asset_sync_script"' in configurator
 
 
 def test_failed_release_can_restore_image_database_files_and_site_config() -> None:
@@ -133,7 +141,23 @@ def test_asset_script_is_uploaded_and_executed_as_a_remote_file():
     )
     assert "scp -o BatchMode=yes -o StrictHostKeyChecking=yes" in deploy_block
     assert "bash '$remote_asset_script'" in deploy_block
-    assert "rm -f '$remote_asset_script'" in deploy_block
+    assert "rm -f '/tmp/manage_material_ai_release-" in deploy_block
+    assert "'/tmp/sync_and_verify_assets-" in deploy_block
+
+
+def test_container_restart_scripts_reuse_asset_sync_gate() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy_block = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+    release = (WORKFLOW_PATH.parents[1] / "scripts" / "manage_material_ai_release.sh").read_text(encoding="utf-8")
+    asset_script = (WORKFLOW_PATH.parents[1] / "scripts" / "sync_and_verify_assets.sh").read_text(encoding="utf-8")
+
+    assert "ASSET_SYNC_SCRIPT='/tmp/sync_and_verify_assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh'" in deploy_block
+    assert deploy_block.index("sync_and_verify_assets.sh") < deploy_block.index("Install document parsing runtime")
+    assert 'script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' in release
+    assert 'asset_sync_script="$script_dir/sync_and_verify_assets.sh"' in release
+    assert "VERIFY_APP_RELEASE=0" in release
+    assert 'VERIFY_APP_RELEASE="${VERIFY_APP_RELEASE:-1}"' in asset_script
+    assert "Skip overseas costing application release verification" in asset_script
 
 
 def test_asset_script_rejects_stale_overseas_costing_release():

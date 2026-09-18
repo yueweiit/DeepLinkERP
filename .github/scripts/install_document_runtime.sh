@@ -10,9 +10,21 @@ compose_file="$compose_root/compose.custom.yaml"
 base_image="deeplinkerp-custom:v16.23.0-latest"
 runtime_image="deeplinkerp-custom:material-ai-$release_id"
 backup_image="deeplinkerp-custom:pre-material-ai-runtime-$release_id"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+asset_sync_script="${ASSET_SYNC_SCRIPT:-}"
+if [ -z "$asset_sync_script" ] && [ -f "$script_dir/sync_and_verify_assets.sh" ]; then
+  asset_sync_script="$script_dir/sync_and_verify_assets.sh"
+fi
 
 cd "$compose_root"
 docker image inspect "$base_image" >/dev/null
+
+sync_and_verify_assets() {
+  if [ -n "$asset_sync_script" ]; then
+    test -f "$asset_sync_script"
+    COMPOSE_FILE="$compose_file" SITE_NAME="$site_name" bash "$asset_sync_script"
+  fi
+}
 
 verify_runtime_image() {
   docker run --rm --entrypoint sh "$1" -lc '
@@ -44,6 +56,7 @@ rollback_runtime() {
   docker compose -f "$compose_file" up -d --no-deps --force-recreate \
     backend queue-short queue-long scheduler
   docker compose -f "$compose_file" restart frontend
+  sync_and_verify_assets
 }
 trap rollback_runtime ERR
 
@@ -57,5 +70,6 @@ docker compose -f "$compose_file" up -d --no-deps --force-recreate \
   backend queue-short queue-long scheduler
 docker compose -f "$compose_file" restart frontend
 verify_runtime_image "$base_image"
+sync_and_verify_assets
 
 trap - ERR

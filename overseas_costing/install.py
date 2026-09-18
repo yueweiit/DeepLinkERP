@@ -347,6 +347,8 @@ def ensure_erpnext_standard_fields() -> dict:
     只新增展示/追溯字段，不改库存估值、入库成本和总账逻辑。
     """
 
+    from overseas_costing.services.erp_capability_service import build_erpnext_standard_field_spec
+
     try:
         import frappe
         from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
@@ -504,6 +506,9 @@ def ensure_erpnext_standard_fields() -> dict:
             },
         ],
     }
+    for doctype, fields in build_erpnext_standard_field_spec().items():
+        existing = {field["fieldname"] for field in custom_fields.get(doctype, [])}
+        custom_fields.setdefault(doctype, []).extend(field for field in fields if field["fieldname"] not in existing)
     try:
         create_custom_fields(custom_fields, ignore_validate=True)
     except TypeError:

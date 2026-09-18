@@ -67,9 +67,6 @@ class Store:
                 self.sql(f'CREATE INDEX IF NOT EXISTS oc_ls_{name} ON oc_ls_{table} ({columns})')
             elif not self.sql(f"SHOW INDEX FROM oc_ls_{table} WHERE Key_name=%s", (f'oc_ls_{name}',)):
                 self.sql(f'CREATE INDEX oc_ls_{name} ON oc_ls_{table} ({columns})')
-        for lock_id in ('job_lock', 'match_lock'):
-            if not self.get('state', lock_id):
-                self.insert('state', {'id': lock_id, 'updated_at': '', 'data': '{}'})
         for column in ('waybill','approval_no','source_id','charge_key'):
             name='oc_ls_freight_'+column
             if self.is_sqlite:
@@ -89,6 +86,9 @@ class Store:
                 self.sql(f'CREATE INDEX IF NOT EXISTS {index_name} ON oc_ls_{table} ({columns})')
             elif not self.sql(f'SHOW INDEX FROM oc_ls_{table} WHERE Key_name=%s', (index_name,)):
                 self.sql(f'CREATE INDEX {index_name} ON oc_ls_{table} ({columns})')
+        for lock_id in ('job_lock', 'match_lock'):
+            if not self.get('state', lock_id):
+                self.insert('state', {'id': lock_id, 'updated_at': '', 'data': '{}'})
 
     @staticmethod
     def validate_columns(table, keys):

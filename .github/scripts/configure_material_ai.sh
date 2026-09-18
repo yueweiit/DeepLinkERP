@@ -5,6 +5,11 @@ compose_root="${1:-/home/yuewei/ERPNext-Docker/frappe_docker}"
 site_name="${2:-deeplinkerp.com}"
 key_file="${3:?DeepSeek key file is required}"
 compose_file="$compose_root/compose.custom.yaml"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+asset_sync_script="${ASSET_SYNC_SCRIPT:-}"
+if [ -z "$asset_sync_script" ] && [ -f "$script_dir/sync_and_verify_assets.sh" ]; then
+  asset_sync_script="$script_dir/sync_and_verify_assets.sh"
+fi
 
 cleanup_key() {
   if command -v shred >/dev/null 2>&1; then
@@ -52,3 +57,7 @@ docker compose -f "$compose_file" restart backend queue-short queue-long schedul
 # The runtime install recreates backend and can change its container IP. Nginx
 # resolves the upstream when it starts, so reload it after backend is available.
 docker compose -f "$compose_file" restart frontend >/dev/null
+if [ -n "$asset_sync_script" ]; then
+  test -f "$asset_sync_script"
+  COMPOSE_FILE="$compose_file" SITE_NAME="$site_name" bash "$asset_sync_script"
+fi

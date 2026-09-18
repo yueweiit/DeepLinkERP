@@ -3,6 +3,7 @@ set -euo pipefail
 
 COMPOSE_FILE="${COMPOSE_FILE:-compose.custom.yaml}"
 SITE_NAME="${SITE_NAME:-deeplinkerp.com}"
+VERIFY_APP_RELEASE="${VERIFY_APP_RELEASE:-1}"
 BACKEND_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q backend)"
 FRONTEND_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q frontend)"
 ASSETS_DIR="/home/frappe/frappe-bench/assets"
@@ -26,6 +27,7 @@ docker compose -f "$COMPOSE_FILE" exec -T backend \
 docker compose -f "$COMPOSE_FILE" exec -T backend \
     bench --site "$SITE_NAME" clear-website-cache
 
+if [ "$VERIFY_APP_RELEASE" = "1" ]; then
 echo "== Verify overseas costing application release =="
 docker compose -f "$COMPOSE_FILE" exec -T backend \
     env FRAPPE_STREAM_LOGGING=1 SITE_NAME="$SITE_NAME" \
@@ -169,6 +171,9 @@ finally:
 
 print("OK approval, packing API, DocTypes, PostgreSQL read-only grants/views and MinIO read-only enforcement")
 PY
+else
+echo "== Skip overseas costing application release verification =="
+fi
 
 echo "== Verify assets.json and frontend files =="
 docker compose -f "$COMPOSE_FILE" exec -T frontend \

@@ -25,6 +25,10 @@ PUSH_MODE_STANDARD = "standard_purchase"
 PUSH_MODE_GENERIC = "generic_resource"
 
 
+class AmbiguousRemoteBusinessKey(RuntimeError):
+    """同一稳定业务键查到多个远端单据时，禁止自行挑选一张。"""
+
+
 if frappe is not None:
     whitelist = frappe.whitelist
 else:  # pragma: no cover - 本地单测无 Frappe 时保持可导入
@@ -233,6 +237,107 @@ def _push_standard_purchase_flow(payload: dict, config: dict) -> dict:
         }
 
 
+def create_purchase(payload: dict, config: dict) -> dict:
+    """以显式站点配置创建采购订单，先核验稳定业务键防止重复创建。"""
+
+    existing = lookup_purchase_by_business_key(payload, config)
+    if existing["found"]:
+        return {
+            "ok": True,
+            "status": "EXISTS",
+            "erp_target_doc": existing["name"],
+            "message": f"DeepLinkERP 已存在采购订单 {existing['name']}，本次未写入物料或采购订单。",
+        }
+
+    item_results = [_ensure_item(item, payload, config) for item in payload.get("items") or []]
+    response_body = _request_json(
+        config,
+        method="POST",
+        url=_build_doctype_url(config, "Purchase Order"),
+        body=_build_purchase_order_body(payload, config),
+    )
+    return {
+        "ok": True,
+        "status": "CREATED",
+        "erp_target_doc": _extract_target_doc(response_body),
+        "items": item_results,
+        "response": response_body,
+    }
+
+
+def lookup_purchase_by_business_key(payload: dict, config: dict) -> dict:
+    name = _find_existing_purchase_order_by_business_key(payload, config)
+    return {"found": bool(name), "name": name}
+
+
+def read_erpnext_doctype_metadata(config: dict, doctypes: list[str] | tuple[str, ...]) -> dict:
+    """只读读取目标 ERPNext 站点的 DocType 元数据，用于字段能力核验。"""
+
+    safe_request = _redact_request_config(config)
+    missing = _metadata_config_errors(config)
+    if missing:
+        return {
+            "ok": False,
+            "metadata": {},
+            "errors": {"config": missing},
+            "request": safe_request,
+            "message": "ERP 元数据读取配置未完成：" + "；".join(missing),
+        }
+
+    metadata = {}
+    errors = {}
+    timeout = config.get("timeout") or DEFAULT_TIMEOUT
+    for doctype in doctypes:
+        doctype = _clean(doctype)
+        if not doctype:
+            continue
+        url = _build_doctype_url(config, "DocType", doctype)
+        request = _build_request(config, url=url, method="GET")
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                response_text = response.read().decode("utf-8", errors="ignore")
+                response_body = _load_json_response(response_text)
+                metadata[doctype] = response_body.get("data") if isinstance(response_body, dict) else response_body
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            errors[doctype] = {
+                "http_status": exc.code,
+                "message": f"HTTP {exc.code} {_compact_text(detail)}",
+                "response": _load_json_response(detail),
+            }
+        except (URLError, TimeoutError, OSError) as exc:
+            errors[doctype] = {
+                "message": str(exc),
+                "response": {},
+            }
+
+    return {
+        "ok": not errors,
+        "metadata": metadata,
+        "errors": errors,
+        "request": safe_request,
+        "message": "ERP 元数据读取完成。" if not errors else "ERP 元数据读取失败。",
+    }
+
+
+def _find_existing_purchase_order_by_business_key(payload: dict, config: dict) -> str:
+    business_key = _clean(payload.get("business_key"))
+    if not business_key:
+        raise ValueError("business_key is required")
+
+    filters = [["custom_overseas_business_key", "=", business_key]]
+    url = (
+        f"{_build_doctype_url(config, 'Purchase Order')}"
+        f"?fields={quote(json.dumps(['name'], ensure_ascii=False), safe='')}"
+        f"&filters={quote(json.dumps(filters, ensure_ascii=False), safe='')}"
+        "&limit_page_length=2"
+    )
+    data = (_request_json(config, method="GET", url=url).get("data") or [])
+    if len(data) > 1:
+        raise AmbiguousRemoteBusinessKey(business_key)
+    return str((data[0] if data else {}).get("name") or "")
+
+
 def get_erp_push_config() -> dict:
     settings = _load_erp_settings()
     base_url = _conf_value(
@@ -409,6 +514,15 @@ def _missing_config_reasons(config: dict, payload: dict | None = None) -> list[s
     return reasons
 
 
+def _metadata_config_errors(config: dict) -> list[str]:
+    reasons = []
+    if not config.get("base_url"):
+        reasons.append("缺少 DeepLinkERP 接口地址配置")
+    if not config.get("authorization"):
+        reasons.append("缺少 DeepLinkERP 鉴权配置")
+    return reasons
+
+
 def _payload_has_supplier(payload: dict) -> bool:
     if str(payload.get("supplier") or "").strip():
         return True
@@ -440,6 +554,12 @@ def _build_request(config: dict, url: str, method: str, body: dict | None = None
         },
         method=method,
     )
+
+
+def _request_json(config: dict, *, method: str, url: str, body: dict | None = None) -> dict:
+    request = _build_request(config, url=url, method=method, body=body)
+    with urlopen(request, timeout=config["timeout"]) as response:
+        return _load_json_response(response.read().decode("utf-8", errors="ignore"))
 
 
 def _connection_check_urls(config: dict) -> list[str]:
@@ -601,6 +721,9 @@ def _build_purchase_order_body(payload: dict, config: dict) -> dict:
         "custom_overseas_total_cost_rmb": payload.get("total_cost_rmb") or 0,
         "custom_overseas_supplier_source": supplier_source,
         "custom_overseas_cost_payload_json": json.dumps(payload, ensure_ascii=False, default=str),
+        "custom_overseas_business_key": payload.get("business_key") or "",
+        "custom_overseas_cost_result_hash": payload.get("cost_result_hash") or "",
+        "custom_overseas_amount_status": payload.get("amount_status") or "",
         "items": [_build_purchase_order_item(row, payload, config, schedule_date) for row in items],
     }
 
@@ -658,6 +781,7 @@ def _build_purchase_order_item(item: dict, payload: dict, config: dict, schedule
         "custom_overseas_cost_version": payload.get("version_code") or payload.get("version_name") or "",
         "custom_overseas_business_entity": payload.get("subsidiary_code") or "",
         "custom_overseas_cost_center": config.get("cost_center") or payload.get("cost_center") or "",
+        "custom_overseas_stable_line_key": item.get("stable_line_key") or "",
     }
     if config.get("cost_center"):
         row["cost_center"] = config.get("cost_center")
