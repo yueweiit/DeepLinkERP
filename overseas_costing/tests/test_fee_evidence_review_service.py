@@ -19,6 +19,8 @@ def _items():
             "hs_code": "90041000",
             "customs_declared_value_mxn": "200",
             "goods_value": "400",
+            "quantity": "20",
+            "unit": "PCS",
         },
         {
             "name": "ITEM-SUNGLASSES",
@@ -29,8 +31,28 @@ def _items():
             "hs_code": "90041000",
             "customs_declared_value_mxn": "100",
             "goods_value": "200",
+            "quantity": "10",
+            "unit": "PCS",
         },
     ]
+
+
+def _tax_attachment(*line_items: dict, total: str = "15") -> dict:
+    return {
+        "name": "ATT-MATRIX",
+        "file_name": "完税凭证.pdf",
+        "parse_result_json": {
+            "parser": "mexico_tax_certificate_pedimento",
+            "header": {"paid_total_mxn": total},
+            "tax_totals": {"igi_mxn": total},
+            "line_items": list(line_items),
+            "source_evidence": {
+                "header.paid_total_mxn": {"page": 1, "text_line": 2},
+                "tax_totals.igi_mxn": {"page": 1, "text_line": 3},
+            },
+            "validation": {"status": "passed"},
+        },
+    }
 
 
 def test_fee_status_transition_requires_reason_for_unproved_actual_and_actual_rollback() -> None:
@@ -270,6 +292,251 @@ def test_review_draft_uses_only_evidenced_numbers_and_defaults_final_tax_certifi
         "ITEM-SUNGLASSES",
     }
     assert all(row["source_evidence"] for row in draft["components"])
+
+
+def test_material_matrix_has_fixed_columns_and_every_item_in_repository_order() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "10"},
+                "source_evidence": {
+                    "igi_amount_mxn": {"page": 3, "text_line": 20}
+                },
+            },
+            total="10",
+        ),
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+        ai_review={"line_item_matches": {"8": ["ITEM-GLASSES"]}},
+    )
+
+    matrix = draft["material_matrix"]
+    assert [column["key"] for column in matrix["columns"]] == [
+        "IGI",
+        "IVA",
+        "DTA",
+        "PRV",
+        "PRV_IVA",
+        "CUSTOMS_SERVICE",
+    ]
+    assert [column["fee_logical_key"] for column in matrix["columns"]] == [
+        "import_tax",
+        "import_tax",
+        "import_tax",
+        "import_tax",
+        "import_tax",
+        "customs_clearance_fee",
+    ]
+    assert [row["item"] for row in matrix["rows"]] == [
+        "ITEM-GLASSES",
+        "ITEM-SUNGLASSES",
+    ]
+    assert {
+        key: matrix["rows"][0][key]
+        for key in (
+            "item",
+            "stable_line_key",
+            "material_code",
+            "product_name",
+            "quantity",
+            "unit",
+            "hs_code",
+        )
+    } == {
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "material_code": "GL-01",
+        "product_name": "眼镜",
+        "quantity": "20",
+        "unit": "PCS",
+        "hs_code": "90041000",
+    }
+    assert list(matrix["rows"][0]["cells"]) == [
+        "IGI",
+        "IVA",
+        "DTA",
+        "PRV",
+        "PRV_IVA",
+        "CUSTOMS_SERVICE",
+    ]
+    assert matrix["rows"][1]["cells"]["IGI"]["origin"] == "EMPTY"
+
+
+def test_material_matrix_aggregates_soft_anomaly_component_suggestions() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "10"},
+            },
+            {
+                "row_no": 9,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "5"},
+            },
+            total="15",
+        ),
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+        ai_review={
+            "line_item_matches": {
+                "8": ["ITEM-GLASSES"],
+                "9": ["ITEM-GLASSES"],
+            }
+        },
+    )
+
+    proposals = [
+        component
+        for component in draft["components"]
+        if component["item"] == "ITEM-GLASSES" and component["tax_code"] == "IGI"
+    ]
+    assert proposals and all(component["default_selected"] is False for component in proposals)
+    assert all(component["needs_review"] is True for component in proposals)
+    cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
+    assert cell["original_amount"] == "15.00"
+    assert cell["amount_rmb"] == "7.5"
+    assert cell["suggested_amount"] == "7.5"
+    assert cell["origin"] == "AI"
+    assert cell["source_proposal_ids"] == ["component:1", "component:2"]
+    assert len(cell["source_refs"]) == 2
+    assert cell["has_warning"] is True
+
+
+def test_material_matrix_saved_value_precedes_new_suggestion() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "10"},
+                "source_evidence": {
+                    "igi_amount_mxn": {"page": 3, "text_line": 20}
+                },
+            },
+            total="10",
+        ),
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+        ai_review={"line_item_matches": {"8": ["ITEM-GLASSES"]}},
+        existing_components=[
+            {
+                "name": "COMP-SAVED",
+                "item": "ITEM-GLASSES",
+                "stable_line_key": "LINE-GLASSES",
+                "logical_fee_key": "import_tax",
+                "component_type": "IMPORT_TAX",
+                "tax_code": "IGI",
+                "hs_code": "90041000",
+                "currency": "MXN",
+                "original_amount": "198",
+                "amount_rmb": "99",
+                "status": "CONFIRMED",
+                "source_evidence": {"attachment": "ATT-OLD", "row": 2},
+                "confidence": "1",
+            }
+        ],
+    )
+
+    cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
+    assert cell["origin"] == "SAVED"
+    assert cell["status"] == "CONFIRMED"
+    assert cell["original_amount"] == "198.00"
+    assert cell["amount_rmb"] == "99"
+    assert cell["suggested_original_amount"] == "10.00"
+    assert cell["suggested_amount"] == "5"
+    assert cell["source_proposal_ids"] == ["component:1"]
+    assert cell["saved_component_ids"] == ["COMP-SAVED"]
+    assert cell["saved_source_refs"] == [{"attachment": "ATT-OLD", "row": 2}]
+
+
+def test_material_matrix_keeps_current_hs_and_exposes_voucher_hs_difference() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "99999999",
+                "taxes": {"igi_amount_mxn": "10"},
+                "source_evidence": {
+                    "igi_amount_mxn": {"page": 3, "text_line": 20}
+                },
+            },
+            total="10",
+        ),
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+        ai_review={"line_item_matches": {"8": ["ITEM-GLASSES"]}},
+    )
+
+    row = draft["material_matrix"]["rows"][0]
+    assert row["hs_code"] == "90041000"
+    assert row["hs_suggestions"] == ["99999999"]
+    assert row["cells"]["IGI"]["has_warning"] is True
+    assert "99999999" in row["cells"]["IGI"]["warning"]
+
+
+def test_material_matrix_keeps_unmatched_lines_outside_material_rows() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 77,
+                "hs_code": "12345678",
+                "taxes": {"igi_amount_mxn": "10"},
+            },
+            total="10",
+        ),
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+    )
+
+    matrix = draft["material_matrix"]
+    assert [row["item"] for row in matrix["rows"]] == [
+        "ITEM-GLASSES",
+        "ITEM-SUNGLASSES",
+    ]
+    assert all(
+        cell["origin"] == "EMPTY"
+        for row in matrix["rows"]
+        for cell in row["cells"].values()
+    )
+    assert matrix["unmatched_lines"] == draft["unmatched_lines"]
+    assert matrix["unmatched_lines"][0]["row_no"] == 77
+    assert matrix["unmatched_lines"][0]["reason_code"] == "SKU_MATCH_REQUIRED"
+
+
+def test_material_matrix_missing_fx_keeps_rmb_blank() -> None:
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "10"},
+                "source_evidence": {
+                    "igi_amount_mxn": {"page": 3, "text_line": 20}
+                },
+            },
+            total="10",
+        ),
+        items=_items(),
+        fx_context={},
+        ai_review={"line_item_matches": {"8": ["ITEM-GLASSES"]}},
+    )
+
+    cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
+    assert cell["original_amount"] == "10.00"
+    assert cell["amount_rmb"] is None
+    assert cell["suggested_amount"] is None
+    assert cell["missing_fx"] is True
+    assert draft["material_matrix"]["missing_fx"] is True
 
 
 def test_amount_without_precise_locator_is_not_default_selected() -> None:
@@ -1081,6 +1348,122 @@ def test_execute_passes_persisted_evidence_role_to_draft(monkeypatch) -> None:
 
     assert result["status"] == "READY"
     assert captured["evidence_role"] == "refund"
+
+
+def test_execute_loads_current_evidence_components_for_material_matrix(monkeypatch) -> None:
+    saved_components = [
+        {
+            "name": "COMP-SAVED",
+            "item": "ITEM-GLASSES",
+            "tax_code": "IGI",
+            "amount_rmb": "99",
+        }
+    ]
+
+    class Repository:
+        def __init__(self):
+            self.run = {
+                "name": "RUN-1",
+                "batch": "B1",
+                "version": "V1",
+                "logical_fee_key": "import_tax",
+                "evidence_role": "tax_certificate",
+                "attachment": "ATT-1",
+                "evidence": "EVIDENCE-1",
+                "status": "QUEUED",
+                "source_progress_json": [{}],
+            }
+
+        def get_run(self, _run_id):
+            return self.run
+
+        def claim_run(self, _run_id, token):
+            self.run = {**self.run, "status": "RUNNING", "execution_token": token}
+            return self.run
+
+        def get_context(self, _batch, _version):
+            return {"batch": "B1", "version": "V1", "fx_context": {}}
+
+        def get_attachment(self, _batch, _attachment):
+            return {
+                "name": "ATT-1",
+                "file_name": "完税凭证.pdf",
+                "modified": "m1",
+                "parse_status": "Parsed",
+                "parse_result_json": {"parser": "mexico_tax_certificate_pedimento"},
+                "mapped_result_json": {},
+            }
+
+        def get_items(self, _batch, _version):
+            return _items()
+
+        def get_evidence_components(self, evidence_name):
+            assert evidence_name == "EVIDENCE-1"
+            return saved_components
+
+        def save_claimed(self, _run_id, token, **updates):
+            assert token == self.run["execution_token"]
+            self.run = {**self.run, **updates}
+            return self.run
+
+        def rollback(self):
+            return None
+
+    captured = {}
+    monkeypatch.setattr(
+        service,
+        "_parse_attachment_for_review",
+        lambda _attachment, _batch: ({"parser": "mexico_tax_certificate_pedimento"}, ""),
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_ai_review",
+        lambda *_args: {"ok": False, "warning": "", "model": ""},
+    )
+    monkeypatch.setattr(
+        service,
+        "build_fee_evidence_review_draft",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "summary": {},
+            "evidence": {},
+            "fee_splits": [],
+            "components": [],
+            "material_matrix": {},
+        },
+    )
+
+    result = service.execute_fee_evidence_review("RUN-1", repository=Repository())
+
+    assert result["status"] == "READY"
+    assert captured["existing_components"] is saved_components
+
+
+def test_repository_parses_saved_component_evidence_and_confidence(monkeypatch) -> None:
+    captured = {}
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(_doctype, **kwargs):
+            captured.update(kwargs)
+            return [
+                {
+                    "name": "COMP-SAVED",
+                    "confidence": "0.98",
+                    "source_evidence_json": '{"attachment":"ATT-OLD","row":2}',
+                }
+            ]
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+
+    rows = service.FrappeFeeEvidenceReviewRepository().get_evidence_components(
+        "EVIDENCE-1"
+    )
+
+    assert "source_evidence_json" in captured["fields"]
+    assert "confidence" in captured["fields"]
+    assert rows[0]["source_evidence"] == {"attachment": "ATT-OLD", "row": 2}
+    assert rows[0]["confidence"] == "0.98"
 
 
 def test_execute_claim_loss_never_writes_with_a_new_owners_token() -> None:

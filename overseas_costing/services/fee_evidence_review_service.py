@@ -50,6 +50,21 @@ LINE_TAX_FIELDS = {
     "prv_amount_mxn": "PRV",
     "prv_iva_amount_mxn": "PRV_IVA",
 }
+MATERIAL_MATRIX_COLUMNS = (
+    {"key": "IGI", "label": "IGI", "fee_logical_key": "import_tax"},
+    {"key": "IVA", "label": "IVA", "fee_logical_key": "import_tax"},
+    {"key": "DTA", "label": "DTA", "fee_logical_key": "import_tax"},
+    {"key": "PRV", "label": "PRV", "fee_logical_key": "import_tax"},
+    {"key": "PRV_IVA", "label": "PRV_IVA", "fee_logical_key": "import_tax"},
+    {
+        "key": "CUSTOMS_SERVICE",
+        "label": "CUSTOMS_SERVICE",
+        "fee_logical_key": "customs_clearance_fee",
+    },
+)
+MATERIAL_MATRIX_COLUMN_KEYS = frozenset(
+    column["key"] for column in MATERIAL_MATRIX_COLUMNS
+)
 
 
 def _decimal(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -97,6 +112,267 @@ def _positive(value: Any) -> Decimal | None:
 
 def _checked(value: Any) -> bool:
     return value in (1, True, "1", "true", "TRUE", "yes", "YES")
+
+
+def _matrix_column_key(component: dict) -> str:
+    if (
+        str(component.get("component_type") or "").upper() == "CUSTOMS_SERVICE"
+        or str(component.get("logical_fee_key") or component.get("fee_logical_key") or "")
+        == "customs_clearance_fee"
+    ):
+        return "CUSTOMS_SERVICE"
+    tax_code = str(component.get("tax_code") or "").strip().upper()
+    return tax_code if tax_code in MATERIAL_MATRIX_COLUMN_KEYS else ""
+
+
+def _component_source_refs(component: dict) -> list[dict]:
+    refs = []
+    for raw in component.get("source_refs") or []:
+        if isinstance(raw, dict) and raw not in refs:
+            refs.append(dict(raw))
+    source = component.get("source_evidence")
+    if isinstance(source, dict) and source and source not in refs:
+        refs.append(dict(source))
+    return refs
+
+
+def _component_amounts(rows: list[dict]) -> dict:
+    original_by_currency: dict[str, Decimal] = {}
+    rmb_total = Decimal("0")
+    has_rmb = False
+    missing_rmb = False
+    for row in rows:
+        original = _decimal(row.get("original_amount"))
+        amount_rmb = _decimal(row.get("amount_rmb"))
+        if original is not None:
+            currency = str(row.get("currency") or "").upper() or "UNKNOWN"
+            original_by_currency[currency] = (
+                original_by_currency.get(currency, Decimal("0")) + original
+            )
+            if amount_rmb is None:
+                missing_rmb = True
+        if amount_rmb is not None:
+            rmb_total += amount_rmb
+            has_rmb = True
+    original_amount = ""
+    currency = ""
+    if len(original_by_currency) == 1:
+        currency, original_total = next(iter(original_by_currency.items()))
+        original_amount = _money(original_total)
+    elif len(original_by_currency) > 1:
+        currency = "MIXED"
+    return {
+        "original_amount": original_amount,
+        "currency": currency,
+        "original_amounts_by_currency": {
+            key: _money(value) for key, value in sorted(original_by_currency.items())
+        },
+        "amount_rmb": None if missing_rmb else (_decimal_amount(rmb_total) if has_rmb else ""),
+        "missing_fx": missing_rmb,
+        "mixed_currency": len(original_by_currency) > 1,
+    }
+
+
+def _valid_matrix_component(component: dict) -> bool:
+    has_original = component.get("original_amount") not in (None, "")
+    has_rmb = component.get("amount_rmb") not in (None, "")
+    return bool(
+        _matrix_column_key(component)
+        and (
+            (has_original and _decimal(component.get("original_amount")) is not None)
+            or (has_rmb and _decimal(component.get("amount_rmb")) is not None)
+        )
+    )
+
+
+def build_material_matrix(
+    *,
+    items: list[dict],
+    components: list[dict],
+    existing_components: list[dict] | None = None,
+    unmatched_lines: list[dict] | None = None,
+    missing_fx: bool = False,
+) -> dict:
+    """Project deterministic component proposals onto the fixed material tax matrix."""
+
+    proposal_groups: dict[tuple[str, str], list[dict]] = {}
+    saved_groups: dict[tuple[str, str], list[dict]] = {}
+    matrix_unmatched = [
+        dict(row) if isinstance(row, dict) else {"message": str(row)}
+        for row in (unmatched_lines or [])
+    ]
+    item_by_name = {
+        str(row.get("name") or ""): row for row in (items or []) if row.get("name")
+    }
+    item_by_stable_key = {
+        str(row.get("stable_line_key") or ""): row
+        for row in (items or [])
+        if row.get("stable_line_key")
+    }
+
+    def collect(
+        raw_rows: list[dict],
+        target: dict[tuple[str, str], list[dict]],
+        origin: str,
+    ) -> None:
+        for raw in raw_rows or []:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            item_name = str(row.get("item") or "")
+            item = item_by_name.get(item_name)
+            if item is None:
+                item = item_by_stable_key.get(str(row.get("stable_line_key") or ""))
+                item_name = str((item or {}).get("name") or "")
+            column_key = _matrix_column_key(row)
+            if item is None or not column_key or not _valid_matrix_component(row):
+                matrix_unmatched.append(
+                    {
+                        "reason_code": "MATERIAL_MATRIX_COMPONENT_INVALID",
+                        "message": "分项缺少有效的物料、税种或金额，未写入物料矩阵。",
+                        "origin": origin,
+                        "item": str(row.get("item") or ""),
+                        "stable_line_key": str(row.get("stable_line_key") or ""),
+                        "tax_code": str(row.get("tax_code") or ""),
+                        "proposal_id": str(row.get("proposal_id") or ""),
+                        "source_refs": _component_source_refs(row),
+                    }
+                )
+                continue
+            row["item"] = item_name
+            target.setdefault((item_name, column_key), []).append(row)
+
+    collect(components or [], proposal_groups, "AI")
+    collect(existing_components or [], saved_groups, "SAVED")
+
+    matrix_rows = []
+    matrix_missing_fx = bool(missing_fx)
+    for item in items or []:
+        item_name = str(item.get("name") or "")
+        current_hs = str(item.get("hs_code") or "")
+        hs_suggestions: list[str] = []
+        hs_suggestion_details: list[dict] = []
+        cells = {}
+        for column in MATERIAL_MATRIX_COLUMNS:
+            column_key = column["key"]
+            proposals = proposal_groups.get((item_name, column_key), [])
+            saved = saved_groups.get((item_name, column_key), [])
+            proposed_amounts = _component_amounts(proposals)
+            saved_amounts = _component_amounts(saved)
+            current_amounts = saved_amounts if saved else proposed_amounts
+            origin = "SAVED" if saved else ("AI" if proposals else "EMPTY")
+            warnings: list[str] = []
+            source_proposal_ids = []
+            source_refs = []
+            saved_component_ids = []
+            saved_source_refs = []
+            confidences = []
+            for component in proposals:
+                proposal_id = str(component.get("proposal_id") or "")
+                if proposal_id and proposal_id not in source_proposal_ids:
+                    source_proposal_ids.append(proposal_id)
+                for ref in _component_source_refs(component):
+                    if ref not in source_refs:
+                        source_refs.append(ref)
+                if component.get("confidence") not in (None, ""):
+                    confidences.append(str(component.get("confidence")))
+                if component.get("warning"):
+                    warnings.append(str(component.get("warning")))
+                if _checked(component.get("needs_review")):
+                    warnings.append("建议需人工复核。")
+                if _checked(component.get("has_conflict")):
+                    warnings.append("建议存在冲突。")
+            for component in saved:
+                component_id = str(component.get("name") or "")
+                if component_id and component_id not in saved_component_ids:
+                    saved_component_ids.append(component_id)
+                for ref in _component_source_refs(component):
+                    if ref not in saved_source_refs:
+                        saved_source_refs.append(ref)
+                if component.get("confidence") not in (None, ""):
+                    confidences.append(str(component.get("confidence")))
+
+            for component_origin, component_rows in (("AI", proposals), ("SAVED", saved)):
+                for component in component_rows:
+                    voucher_hs = str(component.get("hs_code") or "")
+                    if not voucher_hs or _normalize_hs(voucher_hs) == _normalize_hs(current_hs):
+                        continue
+                    if voucher_hs not in hs_suggestions:
+                        hs_suggestions.append(voucher_hs)
+                    detail = {
+                        "hs_code": voucher_hs,
+                        "origin": component_origin,
+                        "source_proposal_id": str(component.get("proposal_id") or ""),
+                        "source_component_id": str(component.get("name") or ""),
+                        "source_refs": _component_source_refs(component),
+                    }
+                    if detail not in hs_suggestion_details:
+                        hs_suggestion_details.append(detail)
+                    warnings.append(
+                        (
+                            f"凭证 HS {voucher_hs} 与当前物料 HS {current_hs} 不一致。"
+                            if current_hs
+                            else f"当前物料未填写 HS，凭证建议为 {voucher_hs}。"
+                        )
+                    )
+            cell_missing_fx = bool(
+                proposed_amounts["missing_fx"] or saved_amounts["missing_fx"]
+            )
+            matrix_missing_fx = matrix_missing_fx or cell_missing_fx
+            if cell_missing_fx:
+                warnings.append("缺少人民币换算汇率。")
+            if proposed_amounts["mixed_currency"] or saved_amounts["mixed_currency"]:
+                warnings.append("同一单元格包含多种原币，原币合计仅按币种展示。")
+            if saved and proposals:
+                warnings.append("已保存值优先，AI／规则建议仅供对照。")
+            unique_warnings = []
+            for warning in warnings:
+                if warning and warning not in unique_warnings:
+                    unique_warnings.append(warning)
+            cells[column_key] = {
+                "original_amount": current_amounts["original_amount"] if origin != "EMPTY" else "",
+                "currency": current_amounts["currency"] if origin != "EMPTY" else "",
+                "original_amounts_by_currency": (
+                    current_amounts["original_amounts_by_currency"] if origin != "EMPTY" else {}
+                ),
+                "amount_rmb": current_amounts["amount_rmb"] if origin != "EMPTY" else None,
+                "suggested_original_amount": proposed_amounts["original_amount"] if proposals else "",
+                "suggested_currency": proposed_amounts["currency"] if proposals else "",
+                "suggested_original_amounts_by_currency": (
+                    proposed_amounts["original_amounts_by_currency"] if proposals else {}
+                ),
+                "suggested_amount": proposed_amounts["amount_rmb"] if proposals else "",
+                "origin": origin,
+                "status": "CONFIRMED" if saved else ("SUGGESTED" if proposals else "EMPTY"),
+                "source_proposal_ids": source_proposal_ids,
+                "source_refs": source_refs,
+                "saved_component_ids": saved_component_ids,
+                "saved_source_refs": saved_source_refs,
+                "confidences": confidences,
+                "has_warning": bool(unique_warnings),
+                "warning": " ".join(unique_warnings),
+                "missing_fx": cell_missing_fx,
+            }
+        matrix_rows.append(
+            {
+                "item": item_name,
+                "stable_line_key": str(item.get("stable_line_key") or item_name),
+                "material_code": str(item.get("material_code") or ""),
+                "product_name": str(item.get("product_name") or ""),
+                "quantity": item.get("quantity"),
+                "unit": str(item.get("unit") or ""),
+                "hs_code": current_hs,
+                "hs_suggestions": hs_suggestions,
+                "hs_suggestion_details": hs_suggestion_details,
+                "cells": cells,
+            }
+        )
+    return {
+        "columns": [dict(column) for column in MATERIAL_MATRIX_COLUMNS],
+        "rows": matrix_rows,
+        "unmatched_lines": matrix_unmatched,
+        "missing_fx": matrix_missing_fx,
+    }
 
 
 def _allocate_money(amount: Decimal, weighted_keys: list[tuple[str, Decimal]]) -> dict[str, Decimal]:
@@ -749,6 +1025,7 @@ def build_fee_evidence_review_draft(
     fx_context: dict | None = None,
     evidence_role: str = "",
     ai_review: dict | None = None,
+    existing_components: list[dict] | None = None,
 ) -> dict:
     """Create an editable draft; deterministic numbers remain the only numeric source."""
 
@@ -940,6 +1217,20 @@ def build_fee_evidence_review_draft(
                 "needs_review": not component_selected,
             }
         )
+    unmatched_lines = [
+        *component_result["unmatched_lines"],
+        *(
+            [{
+                "reason_code": service_component_result.get("reason_code"),
+                "message": "清关服务费缺少完整采购货值或明确 SKU 范围。",
+            }]
+            if service_component_result.get("needs_review")
+            else []
+        ),
+    ]
+    draft_missing_fx = bool(
+        component_result["missing_fx"] or service_component_result["missing_fx"]
+    )
     return {
         "evidence": evidence,
         "fee_splits": fee_splits,
@@ -955,19 +1246,16 @@ def build_fee_evidence_review_draft(
             for row in items
             if row.get("name")
         ],
-        "unmatched_lines": [
-            *component_result["unmatched_lines"],
-            *(
-                [{
-                    "reason_code": service_component_result.get("reason_code"),
-                    "message": "清关服务费缺少完整采购货值或明确 SKU 范围。",
-                }]
-                if service_component_result.get("needs_review")
-                else []
-            ),
-        ],
+        "unmatched_lines": unmatched_lines,
         "unclassified_difference": split["unclassified_difference"] if deterministic_is_tax else "0.00",
-        "missing_fx": component_result["missing_fx"] or service_component_result["missing_fx"],
+        "missing_fx": draft_missing_fx,
+        "material_matrix": build_material_matrix(
+            items=items,
+            components=components,
+            existing_components=existing_components,
+            unmatched_lines=unmatched_lines,
+            missing_fx=draft_missing_fx,
+        ),
         "summary": {
             "fee_proposal_count": len(fee_splits),
             "component_proposal_count": len(components),
@@ -1489,7 +1777,7 @@ class FrappeFeeEvidenceReviewRepository:
         )
 
     def get_evidence_components(self, evidence_name: str) -> list[dict]:
-        return frappe.get_all(
+        rows = frappe.get_all(
             "Overseas Cost Fee SKU Component",
             filters={
                 "evidence": evidence_name,
@@ -1508,12 +1796,21 @@ class FrappeFeeEvidenceReviewRepository:
                 "original_amount",
                 "amount_rmb",
                 "exchange_rate",
+                "allocation_basis",
                 "accounting_role",
                 "cost_effect",
+                "source_evidence_json",
+                "confidence",
             ],
             order_by="logical_fee_key asc, tax_code asc, item asc, name asc",
             limit_page_length=10000,
         )
+        result = []
+        for raw in rows:
+            row = dict(raw)
+            row["source_evidence"] = _json_dict(row.get("source_evidence_json"))
+            result.append(row)
+        return result
 
     def get_refund_candidates(
         self, batch_name: str, version_name: str, fee_rule: str
@@ -2099,6 +2396,10 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
             return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
         ai = _semantic_ai_review(parsed, attachment, items) if parsed else {"ok": False, "warning": parse_warning, "model": ""}
+        evidence_name = str(_run_value(run, "evidence") or "")
+        existing_components = (
+            repo.get_evidence_components(evidence_name) if evidence_name else []
+        )
         draft = build_fee_evidence_review_draft(
             logical_fee_key=str(_run_value(run, "logical_fee_key")),
             attachment=attachment,
@@ -2106,6 +2407,7 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             fx_context=context["fx_context"],
             evidence_role=str(_run_value(run, "evidence_role")),
             ai_review=ai.get("review") if ai.get("ok") else None,
+            existing_components=existing_components,
         )
         if str((draft.get("evidence") or {}).get("evidence_type") or "").upper() == "REFUND":
             candidates = repo.get_refund_candidates(
