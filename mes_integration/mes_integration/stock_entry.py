@@ -1,4 +1,6 @@
+import hashlib
 import json
+from contextlib import contextmanager
 
 from requests.exceptions import RequestException
 
@@ -370,6 +372,7 @@ MES_RECEIPT_STOCK_ENTRY_TYPES = {
     STANDARD_MATERIAL_RECEIPT,
 }
 MES_RECEIPT_FALLBACK_TARGET_WAREHOUSE = "半成品 - YC"
+MES_RECEIPT_IDEMPOTENCY_LOCK_TIMEOUT_SECONDS = 30
 DLM_ISSUE_STOCK_ENTRY_TYPES = {
     "Material Issue",
     "Material Transfer for Manufacture",
@@ -421,43 +424,246 @@ def create_draft_stock_entry_from_mes(data=None, stock_entry=None, submit=False)
     stock_entry_data["purpose"] = "Material Receipt"
     mark_mes_receipt_stock_entry(stock_entry_data)
     set_mes_stock_entry_sales_order(stock_entry_data, sales_order_doc)
-    set_mes_stock_entry_default_target_warehouses(stock_entry_data)
+    receipt_no = (stock_entry_data.get("custom_stock_entry_no") or "").strip()
 
-    stock_entry_doc = frappe.get_doc(stock_entry_data)
-    set_mes_stock_entry_item_defaults(stock_entry_doc)
-    validate_mes_stock_entry_data(stock_entry_doc, sales_order_doc)
-    prepare_mes_stock_entry_for_submit(stock_entry_doc)
-    set_allow_zero_valuation_rate_for_mes_items_without_cost(stock_entry_doc)
-    # Keep an explicit marker for standard receipts created through this API.
-    # It allows the submit hook to distinguish them from ordinary ERP receipts.
-    stock_entry_doc.flags.mes_receipt_request = True
-    stock_entry_doc.insert()
-    stock_entry_doc.db_set("stock_entry_type", stock_entry_type, update_modified=False)
-    stock_entry_doc.reload()
+    # The idempotency lock covers the lookup and insert. A plain exists() check
+    # is not enough because two concurrent MES retries could both see no row.
+    with lock_mes_receipt_idempotency(stock_entry_data.get("company"), receipt_no):
+        existing_stock_entry = get_existing_mes_receipt_stock_entry(
+            stock_entry_data.get("company"), receipt_no
+        )
+        if existing_stock_entry:
+            validate_mes_receipt_identity(
+                existing_stock_entry, stock_entry_data, sales_order_doc
+            )
+            if existing_stock_entry.docstatus == 2:
+                throw_mes_receipt_identity_conflict(
+                    f"MES 入库编号 {receipt_no} 已对应已取消的 ERP Stock Entry "
+                    f"{existing_stock_entry.name}，不能重新创建。"
+                )
 
-    if cint(submit):
+            if cint(submit) and existing_stock_entry.docstatus == 0:
+                existing_stock_entry.flags.mes_receipt_request = True
+                existing_stock_entry.submit()
+                existing_stock_entry.reload()
+
+            return build_mes_stock_entry_response(
+                existing_stock_entry, sales_order_doc, reused=True
+            )
+
+        set_mes_stock_entry_default_target_warehouses(stock_entry_data)
+        stock_entry_doc = frappe.get_doc(stock_entry_data)
+        set_mes_stock_entry_item_defaults(stock_entry_doc)
+        validate_mes_stock_entry_data(stock_entry_doc, sales_order_doc)
+        prepare_mes_stock_entry_for_submit(stock_entry_doc)
+        set_allow_zero_valuation_rate_for_mes_items_without_cost(stock_entry_doc)
+        # Keep an explicit marker for standard receipts created through this API.
+        # It allows the submit hook to distinguish them from ordinary ERP receipts.
         stock_entry_doc.flags.mes_receipt_request = True
-        stock_entry_doc.submit()
+        stock_entry_doc.insert()
+        stock_entry_doc.db_set("stock_entry_type", stock_entry_type, update_modified=False)
         stock_entry_doc.reload()
 
-    submitted = stock_entry_doc.docstatus == 1
+        if cint(submit):
+            stock_entry_doc.flags.mes_receipt_request = True
+            stock_entry_doc.submit()
+            stock_entry_doc.reload()
 
+        return build_mes_stock_entry_response(
+            stock_entry_doc, sales_order_doc, reused=False
+        )
+
+
+@contextmanager
+def lock_mes_receipt_idempotency(company, receipt_no):
+    """Serialize concurrent creation attempts for one MES receipt number."""
+    if (
+        not company
+        or not receipt_no
+        or getattr(frappe.db, "db_type", None) != "mariadb"
+    ):
+        yield
+        return
+
+    lock_name = "mes_receipt_" + hashlib.sha256(
+        f"{getattr(frappe.local, 'site', '')}|{company}|{receipt_no}".encode("utf-8")
+    ).hexdigest()
+    result = frappe.db.sql(
+        "SELECT GET_LOCK(%s, %s)",
+        (lock_name, MES_RECEIPT_IDEMPOTENCY_LOCK_TIMEOUT_SECONDS),
+    )
+    if not result or cint(result[0][0]) != 1:
+        raise frappe.QueryDeadlockError(
+            f"Timed out waiting for MES receipt idempotency lock: {receipt_no}"
+        )
+
+    try:
+        yield
+    finally:
+        release_lock = lambda: release_mes_receipt_idempotency_lock(lock_name)
+        frappe.db.after_commit.add(release_lock)
+        frappe.db.after_rollback.add(release_lock)
+
+
+def release_mes_receipt_idempotency_lock(lock_name):
+    frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_name,))
+
+
+def get_existing_mes_receipt_stock_entry(company, receipt_no):
+    """Return the only ERP receipt for a MES number, or reject duplicates."""
+    if (
+        not company
+        or not receipt_no
+        or not frappe.db.has_column("Stock Entry", "custom_stock_entry_no")
+    ):
+        return None
+
+    names = frappe.get_all(
+        "Stock Entry",
+        filters={
+            "company": company,
+            "custom_stock_entry_no": receipt_no,
+        },
+        pluck="name",
+        order_by="creation asc",
+        limit_page_length=0,
+    )
+    if len(names) > 1:
+        throw_mes_receipt_identity_conflict(
+            f"MES 入库编号 {receipt_no} 已对应多个 ERP Stock Entry：{', '.join(names)}。"
+            "请先人工确认正确单据，ERP 不会自动选择其中一张。"
+        )
+
+    return frappe.get_doc("Stock Entry", names[0]) if names else None
+
+
+def validate_mes_receipt_identity(stock_entry, request_data, sales_order_doc):
+    """Reject reuse of a MES number for a different receipt payload."""
+    mismatches = []
+    if stock_entry.company != request_data.get("company"):
+        mismatches.append("company")
+    if stock_entry.stock_entry_type != request_data.get("stock_entry_type"):
+        mismatches.append("stock_entry_type")
+
+    requested_sales_order = sales_order_doc.name if sales_order_doc else None
+    existing_sales_order = stock_entry.get("custom_sales_order")
+    if requested_sales_order and existing_sales_order:
+        if requested_sales_order != existing_sales_order:
+            mismatches.append("sales_order")
+
+    if request_data.get("items") is not None and not mes_receipt_items_match(
+        request_data.get("items"), stock_entry.get("items")
+    ):
+        mismatches.append("items")
+
+    if mismatches:
+        throw_mes_receipt_identity_conflict(
+            f"MES 入库编号 {stock_entry.get('custom_stock_entry_no')} 已存在于 "
+            f"ERP Stock Entry {stock_entry.name}，但请求字段不一致：{', '.join(mismatches)}。"
+        )
+
+
+def mes_receipt_items_match(request_items, existing_items):
+    """Compare supplied item identity without penalizing ERP-filled defaults."""
+    requested_items = get_mes_receipt_item_identity(request_items)
+    existing_items = get_mes_receipt_item_identity(existing_items)
+    if len(requested_items) != len(existing_items):
+        return False
+
+    optional_fields = (
+        "uom",
+        "stock_uom",
+        "conversion_factor",
+        "s_warehouse",
+        "t_warehouse",
+    )
+    unmatched_items = list(existing_items)
+    for requested in requested_items:
+        match_index = next(
+            (
+                index
+                for index, existing in enumerate(unmatched_items)
+                if requested["item_code"] == existing["item_code"]
+                and requested["qty"] == existing["qty"]
+                and all(
+                    not requested[fieldname]
+                    or requested[fieldname] == existing[fieldname]
+                    for fieldname in optional_fields
+                )
+            ),
+            None,
+        )
+        if match_index is None:
+            return False
+        unmatched_items.pop(match_index)
+
+    return True
+
+
+def get_mes_receipt_item_identity(items):
+    """Build a stable, business-level identity for receipt item comparisons."""
+    identity = []
+    for row in items or []:
+        identity.append(
+            {
+                "item_code": row.get("item_code"),
+                "qty": flt(row.get("qty")),
+                "uom": row.get("uom") or "",
+                "stock_uom": row.get("stock_uom") or "",
+                "conversion_factor": (
+                    flt(row.get("conversion_factor"))
+                    if row.get("conversion_factor") not in (None, "")
+                    else None
+                ),
+                "s_warehouse": row.get("s_warehouse") or "",
+                "t_warehouse": row.get("t_warehouse") or "",
+            }
+        )
+
+    return sorted(
+        identity,
+        key=lambda row: (
+            row["item_code"] or "",
+            row["s_warehouse"],
+            row["t_warehouse"],
+            row["qty"],
+        ),
+    )
+
+
+def throw_mes_receipt_identity_conflict(message):
+    """Return a stable 409 business error that MES must not solve by new IDs."""
+    frappe.response["http_status_code"] = 409
+    frappe.response["error_code"] = "ERP_STOCK_ENTRY_IDENTITY_CONFLICT"
+    frappe.throw(
+        f"ERP_STOCK_ENTRY_IDENTITY_CONFLICT: {message}",
+        title=frappe._("MES 入库幂等编号冲突"),
+    )
+
+
+def build_mes_stock_entry_response(stock_entry, sales_order_doc, reused=False):
+    submitted = stock_entry.docstatus == 1
     return {
         "status": "success",
         "message": (
-            frappe._("入库单已创建并提交。")
-            if submitted
-            else frappe._("物料移动草稿已创建，可在 ERP 审核后直接提交。")
+            frappe._("已复用原入库单，未创建新单据。")
+            if reused
+            else (
+                frappe._("入库单已创建并提交。")
+                if submitted
+                else frappe._("物料移动草稿已创建，可在 ERP 审核后直接提交。")
+            )
         ),
-        "stock_entry": stock_entry_doc.name,
-        "stock_entry_type": stock_entry_doc.stock_entry_type,
-        "stock_entry_docstatus": stock_entry_doc.docstatus,
+        "stock_entry": stock_entry.name,
+        "stock_entry_type": stock_entry.stock_entry_type,
+        "stock_entry_docstatus": stock_entry.docstatus,
         "submitted": submitted,
+        "idempotent_reuse": reused,
         "sales_order": sales_order_doc.name if sales_order_doc else None,
         "sales_order_crm_order_no": (
             sales_order_doc.get("custom_crm_order_no") if sales_order_doc else None
         ),
-        "stock_entry_url": frappe.utils.get_url_to_form("Stock Entry", stock_entry_doc.name),
+        "stock_entry_url": frappe.utils.get_url_to_form("Stock Entry", stock_entry.name),
         "timestamp": now(),
     }
 

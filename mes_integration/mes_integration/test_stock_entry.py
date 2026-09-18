@@ -5,12 +5,16 @@ from frappe.tests import UnitTestCase
 
 from mes_integration.mes_integration.stock_entry import (
 	build_stock_entry_status_payload,
+	build_mes_stock_entry_response,
 	create_and_submit_stock_entry_from_mes,
 	enqueue_mes_stock_entry_status_callback,
+	get_existing_mes_receipt_stock_entry,
+	get_mes_receipt_item_identity,
 	get_sales_order_by_reference,
 	is_mes_receipt_stock_entry,
 	notify_mes_stock_entry_status,
 	set_mes_stock_entry_sales_order,
+	validate_mes_receipt_identity,
 	validate_mes_receipt_stock_entry_type,
 )
 
@@ -165,6 +169,73 @@ class TestMESStockEntry(UnitTestCase):
 
 		self.assertEqual(payload["docstatus"], 1)
 		self.assertEqual(payload["erpStatus"], "submitted")
+
+	def test_mes_receipt_item_identity_is_order_independent(self):
+		first = get_mes_receipt_item_identity(
+			[
+				{"item_code": "ITEM-B", "qty": 2},
+				{"item_code": "ITEM-A", "qty": 1},
+			]
+		)
+		second = get_mes_receipt_item_identity(
+			[
+				{"item_code": "ITEM-A", "qty": 1},
+				{"item_code": "ITEM-B", "qty": 2},
+			]
+		)
+
+		self.assertEqual(first, second)
+
+	def test_mes_receipt_identity_rejects_changed_request(self):
+		existing = frappe._dict(
+			name="MAT-STE-2026-00001",
+			company="Test Company",
+			stock_entry_type="Finished Goods Receipt",
+			custom_stock_entry_no="MES-RECEIPT-001",
+			custom_sales_order="SAL-ORD-2026-00001",
+			items=[{"item_code": "ITEM-A", "qty": 1}],
+		)
+		request_data = {
+			"company": "Test Company",
+			"stock_entry_type": "Finished Goods Receipt",
+			"custom_stock_entry_no": "MES-RECEIPT-001",
+			"items": [{"item_code": "ITEM-B", "qty": 1}],
+		}
+
+		with self.assertRaises(frappe.ValidationError):
+			validate_mes_receipt_identity(existing, request_data, None)
+
+		self.assertEqual(
+			frappe.response.get("error_code"),
+			"ERP_STOCK_ENTRY_IDENTITY_CONFLICT",
+		)
+
+	def test_duplicate_mes_receipt_numbers_are_not_auto_selected(self):
+		with (
+			patch(
+				"mes_integration.mes_integration.stock_entry.frappe.db.has_column",
+				return_value=True,
+			),
+			patch(
+				"mes_integration.mes_integration.stock_entry.frappe.get_all",
+				return_value=["MAT-STE-2026-00001", "MAT-STE-2026-00002"],
+			),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				get_existing_mes_receipt_stock_entry("Test Company", "MES-RECEIPT-001")
+
+	def test_reused_mes_receipt_response_marks_idempotent_reuse(self):
+		stock_entry = frappe._dict(
+			name="MAT-STE-2026-00001",
+			stock_entry_type="Finished Goods Receipt",
+			docstatus=1,
+		)
+
+		response = build_mes_stock_entry_response(stock_entry, None, reused=True)
+
+		self.assertTrue(response["idempotent_reuse"])
+		self.assertEqual(response["stock_entry"], stock_entry.name)
+		self.assertTrue(response["submitted"])
 
 	def test_receipt_status_enqueue_has_stable_deduplication_key(self):
 		with patch("mes_integration.mes_integration.stock_entry.frappe.enqueue") as enqueue:
