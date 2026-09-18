@@ -7,6 +7,16 @@ from pathlib import Path
 
 PARTS = Path(__file__).resolve().parents[1] / "page/overseas_cost_workbench/parts"
 MATRIX_PART = PARTS / "78-fee-evidence-review-matrix.js"
+MATRIX_CSS_PART = PARTS / "48-fee-evidence-review-matrix.css"
+
+
+def test_desktop_matrix_fits_the_1440_acceptance_width_without_disabling_narrow_scroll() -> None:
+    css = MATRIX_CSS_PART.read_text()
+
+    assert "@media (min-width: 1200px)" in css
+    assert ".ocw-mf-matrix-table { min-width: 1320px; }" in css
+    assert "@media (max-width: 560px)" in css
+    assert ".ocw-mf-matrix-table { min-width: 1470px; }" in css
 
 
 def run_js(body: str) -> None:
