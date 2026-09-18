@@ -82,6 +82,93 @@ def test_ai_allocation_suggestion_skips_without_api_key(monkeypatch) -> None:
     assert "未配置 AI 接口密钥" in result["reason"]
 
 
+def test_ai_is_constrained_to_server_supplied_available_bases(monkeypatch) -> None:
+    captured_messages = []
+    monkeypatch.setattr(
+        allocation_service,
+        "_ai_config",
+        lambda: {
+            "api_key": "test-key",
+            "base_url": "https://example.test/v1",
+            "model": "test-model",
+            "timeout": 3,
+        },
+    )
+
+    def fake_call(_config, messages):
+        captured_messages.extend(messages)
+        return json.dumps({
+            "rules": [{
+                "rule_code": "freight",
+                "allocation_basis": "volume",
+                "reason": "错误地选择不可用体积",
+                "confidence": 0.9,
+            }],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(allocation_service, "_call_chat_completions", fake_call)
+    result = allocation_service.suggest_allocation_rules_with_ai(
+        items=[{"row_no": 1, "goods_value": 100, "gross_weight_kg": 10}],
+        candidate_rules=[{
+            "rule_code": "freight",
+            "amount": 100,
+            "currency": "RMB",
+            "allocation_basis": "goods_value",
+            "available_bases": ["goods_value", "gross_weight"],
+        }],
+        context={},
+    )
+
+    prompt = json.loads(captured_messages[1]["content"])
+    assert prompt["data"]["candidate_rules"][0]["available_bases"] == ["goods_value", "gross_weight"]
+    assert "available_bases" in captured_messages[0]["content"]
+    assert result["rules"][0]["allocation_basis"] == "goods_value"
+    assert result["rules"][0]["is_ai_suggestion"] == 0
+
+
+def test_decision_request_prompt_omits_existing_basis_and_internal_marker(monkeypatch) -> None:
+    captured_messages = []
+    monkeypatch.setattr(
+        allocation_service,
+        "_ai_config",
+        lambda: {
+            "api_key": "test-key",
+            "base_url": "https://example.test/v1",
+            "model": "test-model",
+            "timeout": 3,
+        },
+    )
+
+    def fake_call(_config, messages):
+        captured_messages.extend(messages)
+        return json.dumps({
+            "rules": [{
+                "rule_code": "freight",
+                "allocation_basis": "gross_weight",
+                "reason": "重新判断",
+                "confidence": 0.8,
+            }],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(allocation_service, "_call_chat_completions", fake_call)
+    allocation_service.suggest_allocation_rules_with_ai(
+        items=[{"row_no": 1, "goods_value": 100, "gross_weight_kg": 10}],
+        candidate_rules=[{
+            "rule_code": "freight",
+            "amount": 100,
+            "currency": "RMB",
+            "available_bases": ["goods_value", "gross_weight"],
+            "_decision_request": True,
+        }],
+        context={},
+    )
+
+    candidate = json.loads(captured_messages[1]["content"])["data"]["candidate_rules"][0]
+    assert "_decision_request" not in candidate
+    assert "allocation_basis" not in candidate
+    assert "basis_field" not in candidate
+
+
 def test_ai_config_uses_deepseek_defaults_when_key_exists(monkeypatch) -> None:
     monkeypatch.setattr(allocation_service, "_conf_value", lambda _key: None)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")

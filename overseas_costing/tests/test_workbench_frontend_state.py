@@ -98,9 +98,13 @@ def test_cost_trial_entry_uses_ai_review_and_exposes_user_recovery_actions() -> 
         "discard_cost_trial_ai_review",
     ):
         assert endpoint in source
-    for label in ("重试 AI", "返回补资料", "放弃试算", "确认并试算", "凭证优先"):
+    for label in ("重新让 AI 判断", "返回补资料", "放弃试算", "应用调整并试算", "凭证优先"):
         assert label in source
-    assert "AI 只建议分摊口径" in source
+    assert "确认说明" not in trial_block
+    assert "系统优先沿用已有口径，仅在必要时请求 AI" in source
+    assert "逐 SKU 金额由服务端规则引擎计算" in source
+    assert 'result.status === "CONFIRMING"' in source
+    assert 'result.status === "CONFIRMED"' in source
     assert "未采用的 AI 结果不计入" not in source
 
 
@@ -1617,7 +1621,11 @@ console.log(JSON.stringify({hasDingtalk:html.includes('钉钉秘密附件'),hasL
 def test_trial_waits_for_pending_writes_and_ignores_duplicate_clicks():
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + r"""
 workspace.openCostTrialAIReviewDialog=()=>{workspace.opened=true};
-workspace.call=async(endpoint)=>{workspace.calls++;if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'READY'};return {ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[]}}};
+workspace.call=async(endpoint)=>{workspace.calls++;
+ if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'READY'};
+ if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[],default_selections:[]}};
+ if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'TOKEN'};
+ return {ok:true,saved:true,batch_modified:'m2',summary:{total_cost_rmb:'100.00'},summary_snapshot:{}}};
 let release;const writing=workspace.trackMaterialFeeWrite(()=>new Promise(resolve=>{release=resolve}));
 const first=workspace.refreshMaterialFeeCostPreview();
 await new Promise(resolve=>setImmediate(resolve));
@@ -1625,9 +1633,9 @@ const before={calls:workspace.calls,disabled:button.disabled,label:button.label}
 await workspace.refreshMaterialFeeCostPreview();release();await writing;await first;
 console.log(JSON.stringify({before,calls:workspace.calls,opened:workspace.opened,disabled:button.disabled,running:state.previewRunning}));
 """)
-    assert result["before"] == {"calls": 0, "disabled": True, "label": "计算中…"}
-    assert result["calls"] == 2
-    assert result["opened"] is True
+    assert result["before"] == {"calls": 0, "disabled": True, "label": "读取已有口径…"}
+    assert result["calls"] == 4
+    assert not result.get("opened")
     assert result["disabled"] is False and result["running"] is False
 
 
@@ -1685,10 +1693,24 @@ state.fees={fees:[{logical_fee_key:'fee'}]};state.feeDrafts={fee:{amount:'20',cu
 const input={attr(){return 'fee'}};global.$=value=>value;const originalFind=workspace.$root.find;
 workspace.$root.find=selector=>selector==='[data-mf-fee-amount]'?{each(callback){callback(0,input)}}:originalFind(selector);
 workspace.openCostTrialAIReviewDialog=()=>{};
-const order=[];workspace.saveMaterialFeeInlineAmount=async()=>{order.push('save');delete state.feeDrafts.fee};workspace.call=async(endpoint)=>{order.push(endpoint.endsWith('start_cost_trial_ai_review')?'start':'status');return endpoint.endsWith('start_cost_trial_ai_review')?{ok:true,run_id:'RUN',status:'READY'}:{ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[]}}};
+const order=[];workspace.saveMaterialFeeInlineAmount=async()=>{order.push('save');delete state.feeDrafts.fee};workspace.call=async(endpoint)=>{
+ const action=endpoint.split('.').pop();order.push(action);
+ if(action==='start_cost_trial_ai_review')return {ok:true,run_id:'RUN',status:'READY'};
+ if(action==='get_cost_trial_ai_review_status')return {ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[],default_selections:[]}};
+ if(action==='preview_cost_trial')return {ok:true,preview_token:'TOKEN'};
+ return {ok:true,saved:true,batch_modified:'m2',summary:{total_cost_rmb:'100.00'},summary_snapshot:{}}};
 await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({order,status:state.costTrialAI.status}));
 """)
-    assert result == {"order": ["save", "start", "status"], "status": "READY"}
+    assert result == {
+        "order": [
+            "save",
+            "start_cost_trial_ai_review",
+            "get_cost_trial_ai_review_status",
+            "preview_cost_trial",
+            "confirm_cost_trial",
+        ],
+        "status": "READY",
+    }
 
 
 MATERIAL_SAVE_FIXTURE = r"""
@@ -1764,10 +1786,21 @@ state.materialDrafts={'A:volume_m3':{itemName:'A',fieldname:'volume_m3',value:'2
 const input={attr(name){return {'data-item-name':'A','data-fieldname':'volume_m3'}[name]}};global.$=value=>value;const originalFind=workspace.$root.find;
 workspace.$root.find=selector=>selector==='[data-mf-cell-input]'?{each(callback){callback(0,input)}}:originalFind(selector);
 workspace.openCostTrialAIReviewDialog=()=>{};
-const order=[];workspace.saveMaterialFeeCell=async()=>{order.push('save');delete state.materialDrafts['A:volume_m3']};workspace.call=async(endpoint)=>{order.push(endpoint.endsWith('start_cost_trial_ai_review')?'start':'status');return endpoint.endsWith('start_cost_trial_ai_review')?{ok:true,run_id:'RUN',status:'READY'}:{ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[]}}};
+const order=[];workspace.saveMaterialFeeCell=async()=>{order.push('save');delete state.materialDrafts['A:volume_m3']};workspace.call=async(endpoint)=>{
+ const action=endpoint.split('.').pop();order.push(action);
+ if(action==='start_cost_trial_ai_review')return {ok:true,run_id:'RUN',status:'READY'};
+ if(action==='get_cost_trial_ai_review_status')return {ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[],default_selections:[]}};
+ if(action==='preview_cost_trial')return {ok:true,preview_token:'TOKEN'};
+ return {ok:true,saved:true,batch_modified:'m2',summary:{total_cost_rmb:'100.00'},summary_snapshot:{}}};
 await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({order}));
 """)
-    assert result["order"] == ["save", "start", "status"]
+    assert result["order"] == [
+        "save",
+        "start_cost_trial_ai_review",
+        "get_cost_trial_ai_review_status",
+        "preview_cost_trial",
+        "confirm_cost_trial",
+    ]
 
 
 def test_trial_stops_if_another_material_is_edited_while_flushing():

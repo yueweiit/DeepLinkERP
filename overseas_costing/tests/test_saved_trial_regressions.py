@@ -152,44 +152,104 @@ console.log(JSON.stringify(events));
     assert result == [["header", "Calculated", "m2"], ["lease", "T"], ["result", "120"]]
 
 
-def test_start_trial_opens_ai_review_instead_of_saving_cost_directly():
+def test_start_trial_uses_defaults_and_saves_directly_without_opening_dialog():
     result = _frontend_result(FRONTEND_SETUP + """
 h.renderCostTrialAIProgress=()=>{};
-h.openCostTrialAIReviewDialog=()=>{h.opened=true};
+h.openCostTrialAIReviewDialog=()=>{h.opened=true};h.renderDetailShell=()=>{};h.updateEditLeaseStatus=()=>{};
 const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
   if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'READY',progress_revision:0};
-  if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[]}};
+  if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'RUN',status:'READY',draft:{
+    fee_suggestions:[{suggestion_id:'S',requires_user_choice:true,blocked:false,default_basis:'goods_value'}],
+    default_selections:[{suggestion_id:'S',basis:'goods_value',reason:''}]
+  }};
+  if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'P',summary:{total_cost_rmb:'130'}};
+  if(endpoint.endsWith('confirm_cost_trial'))return saved;
   throw new Error('unexpected endpoint '+endpoint);
 };
 await h.refreshMaterialFeeCostPreview();
-console.log(JSON.stringify({calls,opened:h.opened,trial:state.costTrialAI}));
+console.log(JSON.stringify({calls,opened:h.opened===true,trial:state.costTrialAI,preview:state.preview}));
 """)
     assert [row["endpoint"].split(".")[-1] for row in result["calls"]] == [
         "start_cost_trial_ai_review",
         "get_cost_trial_ai_review_status",
+        "preview_cost_trial",
+        "confirm_cost_trial",
     ]
-    assert result["opened"] is True
+    assert result["opened"] is False
     assert result["trial"]["status"] == "READY"
+    assert result["preview"]["saved"] is True
 
 
-def test_trial_opens_running_dialog_before_deepseek_finishes():
+def test_automatic_trial_ignores_choices_from_a_previous_hidden_adjustment_dialog():
     result = _frontend_result(FRONTEND_SETUP + """
-let releaseStatus;let opens=0;h.openCostTrialAIReviewDialog=()=>{opens+=1};
-h.renderCostTrialAIReviewDialog=()=>{};
-h.call=async(endpoint)=>{
-  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'QUEUED',progress_revision:0};
-  return await new Promise(resolve=>{releaseStatus=resolve});
+const stale={val:()=> 'gross_weight',attr:name=>({'data-suggestion-id':'OLD','data-recommended-basis':'gross_weight'}[name]||'')};
+global.$=value=>value;
+state.costTrialDialog={hide(){this.hidden=true},$wrapper:{find(){return {each(callback){callback(0,stale)}}}}};
+h.renderDetailShell=()=>{};h.updateEditLeaseStatus=()=>{};
+let previewSelections=null;h.call=async(endpoint,args)=>{
+  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'READY',progress_revision:0};
+  if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'RUN',status:'READY',draft:{
+    fee_suggestions:[{suggestion_id:'NEW',requires_user_choice:true,blocked:false,default_basis:'goods_value'}],
+    default_selections:[{suggestion_id:'NEW',basis:'goods_value',reason:''}]
+  }};
+  if(endpoint.endsWith('preview_cost_trial')){previewSelections=JSON.parse(args.selections);return {ok:true,preview_token:'P'}};
+  return saved;
 };
-const running=h.refreshMaterialFeeCostPreview();await new Promise(resolve=>setImmediate(resolve));
-const before={opens,status:state.costTrialAI.status};
-releaseStatus({ok:true,run_id:'RUN',status:'READY',progress_revision:1,draft:{fee_suggestions:[]}});
-await running;
-console.log(JSON.stringify({before,opens,status:state.costTrialAI.status}));
+await h.refreshMaterialFeeCostPreview();
+console.log(JSON.stringify({previewSelections,dialog:state.costTrialDialog}));
 """)
 
-    assert result["before"] == {"opens": 1, "status": "QUEUED"}
-    assert result["opens"] == 1
+    assert result["previewSelections"] == [
+        {"suggestion_id": "NEW", "basis": "goods_value", "reason": ""}
+    ]
+    assert result["dialog"] is None
+
+
+def test_trial_shows_ai_stage_without_opening_dialog_while_deepseek_runs():
+    result = _frontend_result(FRONTEND_SETUP + """
+let releaseStatus;let opens=0;const stages=[];h.openCostTrialAIReviewDialog=()=>{opens+=1};
+h.renderCostTrialAIReviewDialog=()=>{};h.renderDetailShell=()=>{};h.updateEditLeaseStatus=()=>{};
+h.updateMaterialFeeWriteControls=(current)=>{stages.push(current.costTrialAI?.actionStage||'')};
+h.call=async(endpoint)=>{
+  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'QUEUED',progress_revision:0,ai_candidate_count:2};
+  if(endpoint.endsWith('get_cost_trial_ai_review_status'))return await new Promise(resolve=>{releaseStatus=resolve});
+  if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'P'};
+  if(endpoint.endsWith('confirm_cost_trial'))return saved;
+};
+const running=h.refreshMaterialFeeCostPreview();await new Promise(resolve=>setImmediate(resolve));
+const before={opens,status:state.costTrialAI.status,stage:state.costTrialAI.actionStage};
+releaseStatus({ok:true,run_id:'RUN',status:'READY',progress_revision:1,draft:{fee_suggestions:[],default_selections:[]}});
+await running;
+console.log(JSON.stringify({before,opens,status:state.costTrialAI.status,stages}));
+""")
+
+    assert result["before"] == {"opens": 0, "status": "QUEUED", "stage": "ai"}
+    assert result["opens"] == 0
     assert result["status"] == "READY"
+    assert "ai" in result["stages"]
+
+
+def test_trial_with_no_complete_basis_stops_before_preview_and_names_missing_data():
+    result = _frontend_result(FRONTEND_SETUP + """
+let opens=0;h.openCostTrialAIReviewDialog=()=>{opens+=1};
+const calls=[];h.call=async(endpoint)=>{calls.push(endpoint.split('.').pop());
+  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'RUN',status:'READY',progress_revision:0};
+  return {ok:true,run_id:'RUN',status:'READY',draft:{fee_suggestions:[{
+    suggestion_id:'S',expense_category:'国际快递费',blocked:true,
+    missing_fields:['gross_weight_kg','chargeable_weight_kg'],available_alternatives:[]
+  }],default_selections:[]}};
+};
+let error='';try{await h.refreshMaterialFeeCostPreview()}catch(exc){error=exc.message}
+console.log(JSON.stringify({calls,opens,error,preview:state.preview}));
+""")
+
+    assert result["calls"] == [
+        "start_cost_trial_ai_review",
+        "get_cost_trial_ai_review_status",
+    ]
+    assert result["opens"] == 1
+    assert "国际快递费" in result["error"]
+    assert "毛重" in result["error"] and "计费重" in result["error"]
 
 
 def test_trial_preview_and_confirmation_use_server_token_and_saved_result():
@@ -246,9 +306,9 @@ const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
   if(endpoint.endsWith('confirm_cost_trial'))return saved;
   throw new Error('unexpected endpoint '+endpoint);
 };
-state.costTrialDialog={hide(){this.hidden=true}};
+const dialog=state.costTrialDialog={hide(){this.hidden=true}};
 await h.confirmCostTrialAI();
-console.log(JSON.stringify({calls,hidden:state.costTrialDialog.hidden,confirming:state.costTrialAI.confirming}));
+console.log(JSON.stringify({calls,hidden:dialog.hidden,dialogCleared:state.costTrialDialog===null,confirming:state.costTrialAI.confirming}));
 """)
 
     assert [row["endpoint"].split(".")[-1] for row in result["calls"]] == [
@@ -257,6 +317,7 @@ console.log(JSON.stringify({calls,hidden:state.costTrialDialog.hidden,confirming
     ]
     assert result["calls"][1]["args"]["preview_token"] == "P"
     assert result["hidden"] is True
+    assert result["dialogCleared"] is True
     assert result["confirming"] is False
 
 
@@ -326,29 +387,32 @@ h.invalidateCostTrialAIPreview();
 console.log(JSON.stringify({preview:state.costTrialAI.preview,selections:state.costTrialAI.selections,renders:dialogRenders}));
 """)
 
-    assert result == {"preview": None, "selections": [], "renders": 1}
+    assert result == {
+        "preview": None,
+        "selections": [{"suggestion_id": "S", "basis": "goods_value", "reason": ""}],
+        "renders": 1,
+    }
 
 
-def test_trial_primary_enables_only_after_basis_and_required_reason_are_complete():
+def test_trial_primary_enables_after_basis_without_requiring_reason():
     result = _frontend_result(FRONTEND_SETUP + """
 const basis={value:'',attrs:{'data-suggestion-id':'S','data-recommended-basis':'volume'},val(){return this.value},attr(name){return this.attrs[name]||''}};
-const reason={value:'',val(){return this.value}};global.$=value=>value;
+global.$=value=>value;
 const collection=element=>({each(callback){callback(0,element)}});
-const wrapper={find(selector){return selector==='[data-cost-trial-basis]'?collection(basis):collection(reason)}};
+const wrapper={find(selector){return selector==='[data-cost-trial-basis]'?collection(basis):{each(){},prop(){return this}}}};
 const button={disabled:null,label:'',prop(name,value){if(name==='disabled')this.disabled=value;return this},text(value){this.label=value;return this}};
 state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[{suggestion_id:'S',recommended_basis:'volume',blocked:false}]},preview:null,selections:[]};
 state.costTrialDialog={$wrapper:wrapper,get_primary_btn:()=>button};
 h.updateCostTrialAIPrimaryAction();const missingBasis=button.disabled;
 basis.value='gross_weight';h.updateCostTrialAIPrimaryAction();const missingReason=button.disabled;
-reason.value='缺体积，改按重量';h.updateCostTrialAIPrimaryAction();
 console.log(JSON.stringify({missingBasis,missingReason,complete:button.disabled,label:button.label}));
 """)
 
     assert result == {
         "missingBasis": True,
-        "missingReason": True,
+        "missingReason": False,
         "complete": False,
-        "label": "确认并试算",
+        "label": "应用调整并试算",
     }
 
 
@@ -366,7 +430,52 @@ console.log(JSON.stringify(h.renderCostTrialAIReview()));
 
     assert "凭证分项合计" in html and "费用金额" in html
     assert 'data-cost-trial-basis' in html
-    assert 'data-cost-trial-reason' in html
+    assert 'data-cost-trial-reason' not in html
+
+
+def test_adjustment_starts_in_reuse_only_mode_and_never_requests_ai():
+    result = _frontend_result(FRONTEND_SETUP + """
+let opens=0;h.openCostTrialAIReviewDialog=()=>{opens+=1};
+const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
+  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'ADJUST',status:'READY',progress_revision:0};
+  if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'ADJUST',status:'READY',draft:{
+    fee_suggestions:[{suggestion_id:'S',default_basis:'gross_weight',blocked:false}],
+    default_selections:[{suggestion_id:'S',basis:'gross_weight',reason:''}]
+  }};
+  throw new Error('unexpected endpoint '+endpoint);
+};
+await h.openCostTrialAdjustment();
+console.log(JSON.stringify({calls,opens,trial:state.costTrialAI}));
+""")
+
+    assert [row["endpoint"].split(".")[-1] for row in result["calls"]] == [
+        "start_cost_trial_ai_review",
+        "get_cost_trial_ai_review_status",
+    ]
+    assert result["calls"][0]["args"]["reuse_only"] == 1
+    assert result["calls"][0]["args"]["force"] == 0
+    assert result["opens"] == 1
+    assert result["trial"]["dialogMode"] == "adjust"
+
+
+def test_saved_result_shows_decision_source_counts_and_adjustment_action():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=value=>String(value ?? '');
+h.detailState.header={status:'Calculated',summary_snapshot:{comprehensive_cost:{
+  summary:{total_cost_rmb:'120'},items:[],
+  trial_review:{fee_choices:[
+    {decision_source:'REUSED'},{decision_source:'AI'},{decision_source:'AI'},
+    {decision_source:'SYSTEM_FALLBACK'},{decision_source:'EVIDENCE'}
+  ]}
+}}};
+console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
+""")
+
+    assert 'data-action="mf-adjust-cost"' in html
+    assert "沿用上次 1" in html
+    assert "AI 判断 2" in html
+    assert "系统兜底 1" in html
+    assert "凭证优先 1" in html
 
 
 def test_ai_trial_dialog_shows_server_calculated_alternative_differences():
@@ -412,6 +521,30 @@ console.log(JSON.stringify({endpoints,opened:h.opened===true,trial:state.costTri
     assert result["trial"]["requestId"] == 3
     assert result["trial"]["feeRequestId"] == 4
     assert result["trial"]["inputRevision"] == 5
+
+
+def test_retry_ai_double_click_uses_one_discard_and_one_forced_start():
+    result = _frontend_result(FRONTEND_SETUP + """
+state.requestId=3;state.feeRequestId=4;state.inputRevision=5;
+state.costTrialAI={runId:'OLD',status:'READY'};state.costTrialDialog={hide(){}};
+let releaseDiscard;const endpoints=[];h.call=async(endpoint)=>{endpoints.push(endpoint.split('.').pop());
+  if(endpoint.endsWith('discard_cost_trial_ai_review'))return await new Promise(resolve=>{releaseDiscard=resolve});
+  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'NEW',status:'READY',progress_revision:0};
+  return {ok:true,run_id:'NEW',status:'READY',progress_revision:1,draft:{fee_suggestions:[],default_selections:[]}};
+};
+h.openCostTrialAIReviewDialog=()=>{};
+const first=h.retryCostTrialAI();const second=h.retryCostTrialAI();await new Promise(resolve=>setImmediate(resolve));
+const before=[...endpoints];releaseDiscard({ok:true,status:'DISCARDED'});await Promise.all([first,second]);
+console.log(JSON.stringify({before,endpoints,restarting:state.costTrialRestarting===true}));
+""")
+
+    assert result["before"] == ["discard_cost_trial_ai_review"]
+    assert result["endpoints"] == [
+        "discard_cost_trial_ai_review",
+        "start_cost_trial_ai_review",
+        "get_cost_trial_ai_review_status",
+    ]
+    assert result["restarting"] is False
 
 
 def test_overview_recalculate_runs_after_visiting_material_workspace():

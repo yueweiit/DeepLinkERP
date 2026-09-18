@@ -9555,6 +9555,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='mf-preview-cost']", () => {
       this.refreshMaterialFeeCostPreview(true).catch((error) => this.showError(error));
     });
+    this.$root.on("click", "[data-action='mf-adjust-cost']", () => {
+      this.openCostTrialAdjustment().catch((error) => this.showError(error));
+    });
     this.$root.on("click", "[data-action='mf-show-sources']", () => this.openMaterialFeeSourcesDialog());
     this.$root.on("click", "[data-action='mf-import-wiki']", async () => {
       try {
@@ -14244,7 +14247,8 @@ class OverseasCostWorkbench {
   }
 
   isMaterialFeeCalculationBusy(state = this.materialFeeState) {
-    return Boolean(state?.previewRunning || state?.calculationWrite || state?.costTrialAI?.previewing || state?.costTrialAI?.confirming);
+    return Boolean(state?.previewRunning || state?.calculationWrite || state?.costTrialRestarting
+      || state?.costTrialAI?.previewing || state?.costTrialAI?.confirming);
   }
 
   canApplyMaterialAIFill(fill) {
@@ -14255,8 +14259,17 @@ class OverseasCostWorkbench {
   updateMaterialFeeWriteControls(state) {
     if (this.materialFeeState !== state) return;
     const calculating = this.isMaterialFeeCalculationBusy(state);
+    const trial = state.costTrialAI || {};
+    const stageLabel = trial.actionStage === "reuse"
+      ? "读取已有口径…"
+      : trial.actionStage === "ai"
+        ? "AI 判断" + (Number(trial.aiCandidateCount || 0) ? " " + Number(trial.aiCandidateCount) + " 项" : "") + "…"
+        : trial.actionStage === "preview"
+          ? "校验分摊…"
+          : trial.actionStage === "confirm" ? "保存试算…" : "计算中…";
     this.$root?.find("[data-action='mf-preview-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying))
-      ?.text?.(calculating ? "计算中…" : "开始试算");
+      ?.text?.(calculating ? stageLabel : "开始试算");
+    this.$root?.find("[data-action='mf-adjust-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying));
     for (const root of [this.$root, state.aiProgressDialog?.$wrapper]) {
       root?.find("[data-action='mf-ai-apply']")?.prop?.("disabled", !this.canApplyMaterialAIFill(state.aiFill));
     }
@@ -14315,7 +14328,10 @@ class OverseasCostWorkbench {
       && this.detailState.batchName === batchName
       && this.detailState.versionName === versionName
       && this.detailState.tab === "documents";
+    state.costTrialDialog?.hide?.();
+    state.costTrialDialog = null;
     state.previewRunning = true;
+    state.costTrialAI = { status: "STARTING", actionStage: "reuse" };
     this.updateMaterialFeeWriteControls(state);
     try {
       if (!(await this.flushMaterialFeeInputs(state)) || !isCurrent()) return false;
@@ -14334,6 +14350,7 @@ class OverseasCostWorkbench {
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
         force: 0,
+        reuse_only: 0,
       });
       if (!started?.ok) throw new Error(started?.message || "AI 试算任务启动失败。");
       if (!inputsUnchanged()) return false;
@@ -14345,12 +14362,21 @@ class OverseasCostWorkbench {
         requestId,
         feeRequestId,
         inputRevision,
+        actionStage: ["QUEUED", "RUNNING"].includes(String(started.status || "")) ? "ai" : "reuse",
+        aiCandidateCount: Number(started.ai_candidate_count || 0),
       };
-      this.openCostTrialAIReviewDialog();
+      this.updateMaterialFeeWriteControls(state);
       await this.pollCostTrialAI(state, batchName, started.run_id);
       if (!isCurrent() || state.costTrialAI?.status !== "READY") return false;
-      this.renderCostTrialAIReviewDialog();
-      return true;
+      const blocked = (state.costTrialAI.draft?.fee_suggestions || []).filter((row) => Boolean(row.blocked));
+      if (blocked.length) {
+        state.costTrialAI.dialogMode = "repair";
+        state.costTrialAI.actionStage = "";
+        this.openCostTrialAIReviewDialog({ mode: "repair" });
+        throw new Error(this.costTrialBlockingMessage(blocked));
+      }
+      state.costTrialAI.selections = (state.costTrialAI.draft?.default_selections || []).map((row) => ({ ...row }));
+      return await this.confirmCostTrialAI();
     } finally {
       state.previewRunning = false;
       this.updateMaterialFeeWriteControls(state);
@@ -14379,11 +14405,18 @@ class OverseasCostWorkbench {
         progressRevision: Number(result.progress_revision || current.progressRevision || 0),
         draft: result.draft || current.draft || null,
       };
+      if (["QUEUED", "RUNNING"].includes(String(result.status || ""))) {
+        state.costTrialAI.actionStage = "ai";
+      } else if (result.status === "CONFIRMING") {
+        state.costTrialAI.actionStage = "confirm";
+      }
+      this.updateMaterialFeeWriteControls(state);
       this.renderCostTrialAIReviewDialog();
-      if (!["QUEUED", "RUNNING", "READY", "FAILED", "STALE", "DISCARDED"].includes(String(result.status || ""))) {
+      if (!["QUEUED", "RUNNING", "READY", "CONFIRMING", "CONFIRMED", "FAILED", "STALE", "DISCARDED"].includes(String(result.status || ""))) {
         throw new Error(result.message || "AI 试算状态无效，请重试。");
       }
       if (result.status === "READY") return true;
+      if (result.status === "CONFIRMED") return false;
       if (["FAILED", "STALE", "DISCARDED"].includes(String(result.status || ""))) {
         throw new Error(result.error_message || (result.status === "STALE"
           ? "试算输入已变化，请重试 AI。"
@@ -14399,6 +14432,31 @@ class OverseasCostWorkbench {
     return { goods_value: "货值", gross_weight: "毛重", volume: "体积", chargeable_weight: "计费重" }[basis] || basis || "--";
   }
 
+  costTrialDecisionSourceLabel(source) {
+    return {
+      REUSED: "沿用上次",
+      AI: "AI 判断",
+      SYSTEM_FALLBACK: "系统兜底",
+      EVIDENCE: "凭证优先",
+      USER_OVERRIDE: "用户调整",
+    }[String(source || "")] || "系统口径";
+  }
+
+  costTrialBlockingMessage(rows = []) {
+    const details = rows.map((row) => {
+      const missing = (row.missing_fields || []).map((field) => ({
+        goods_value: "货值",
+        gross_weight_kg: "毛重",
+        volume_m3: "体积",
+        chargeable_weight_kg: "计费重",
+      }[field] || field)).join("、");
+      if (row.evidence_issue === "SKU_MATCH_INVALID") return `${row.expense_category || row.fee_key}：凭证 SKU 匹配无效`;
+      if (row.evidence_issue === "AMOUNT_INVALID") return `${row.expense_category || row.fee_key}：凭证金额无效`;
+      return `${row.expense_category || row.fee_key}：缺少 ${missing || "可用分摊数据"}`;
+    });
+    return `当前无法试算，请先补充：${details.join("；")}`;
+  }
+
   renderCostTrialAIReview() {
     const trial = this.ensureMaterialFeeState().costTrialAI || {};
     const draft = trial.draft || {};
@@ -14410,12 +14468,11 @@ class OverseasCostWorkbench {
     const rows = suggestions.map((row) => {
       const savedChoice = selectedById.get(row.suggestion_id) || {};
       const options = (row.available_alternatives || []).map((option) => {
-        const selectedBasis = savedChoice.basis || (row.recommended_basis_available ? row.recommended_basis : "");
+        const selectedBasis = savedChoice.basis || row.default_basis || (row.recommended_basis_available ? row.recommended_basis : "");
         const selected = option.basis === selectedBasis ? "selected" : "";
         return `<option value="${this.escape(option.basis)}" ${selected}>${this.escape(option.label)}·可用</option>`;
       }).join("");
       const basisControl = `<label><span>本次分摊口径</span><select data-cost-trial-basis data-suggestion-id="${this.escape(row.suggestion_id)}" data-recommended-basis="${this.escape(row.recommended_basis || "")}"><option value="">请选择</option>${options}</select></label>`;
-      const requiresEvidenceRepair = ["SKU_MATCH_INVALID", "AMOUNT_INVALID"].includes(String(row.evidence_issue || ""));
       const evidence = row.evidence_locked
         ? `<div class="ocw-cost-trial-evidence"><strong>凭证优先</strong><span>${Number(row.evidence_component_count || 0)} 条 SKU 分项·RMB ${this.escape(row.evidence_amount_rmb || "0.00")}</span></div>`
         : row.evidence_issue === "SKU_MATCH_INVALID"
@@ -14425,38 +14482,42 @@ class OverseasCostWorkbench {
             : row.evidence_issue === "TOTAL_MISMATCH"
               ? `<div class="ocw-cost-trial-warning">凭证分项合计 RMB ${this.escape(row.evidence_amount_rmb || "0.00")} 与费用金额不一致，本次不采用凭证分项。</div>${basisControl}`
               : basisControl;
-      const unavailable = row.recommended_basis_available ? "" : `<p class="is-warning">AI 建议按${this.escape(row.recommended_basis_label)}，但缺少 ${this.escape((row.missing_fields || []).join("、"))}。可暂用其他完整口径，结果将标记为非完整成本。</p>`;
+      const unavailable = row.default_basis ? "" : `<p class="is-warning">当前没有完整可用口径，缺少 ${this.escape((row.missing_fields || []).join("、"))}。请补齐后再试算。</p>`;
       const alternativeDiffs = (row.available_alternatives || []).length > 1
         ? `<div class="ocw-cost-trial-alternatives"><strong>可选口径的逐行试算差异</strong>${row.available_alternatives.map((option) => `<span>${this.escape(option.label)}：RMB ${this.escape((option.allocation_preview || []).map((item) => item.amount_rmb).join(" / ") || "--")}</span>`).join("")}</div>`
         : "";
       return `<article class="ocw-cost-trial-fee ${row.evidence_locked ? "is-evidence" : ""}">
-        <header><div><strong>${this.escape(row.expense_category || row.fee_key)}</strong><span>${this.escape(row.currency)} ${this.escape(row.amount)}</span></div><em>AI 建议·${this.escape(row.recommended_basis_label)}·${Math.round(Number(row.confidence || 0) * 100)}%</em></header>
-        <p>${this.escape(row.reason || "AI 未给出说明，可选择已保存的完整口径。")}</p>${unavailable}${alternativeDiffs}${evidence}
-        ${row.evidence_locked || requiresEvidenceRepair ? "" : `<label><span>确认说明</span><input data-cost-trial-reason data-suggestion-id="${this.escape(row.suggestion_id)}" maxlength="500" value="${this.escape(savedChoice.reason || "")}" placeholder="仅在改用其他口径时填写" /></label>`}
+        <header><div><strong>${this.escape(row.expense_category || row.fee_key)}</strong><span>${this.escape(row.currency)} ${this.escape(row.amount)}</span></div><em>${this.escape(this.costTrialDecisionSourceLabel(row.decision_source))}·${this.escape(this.costTrialBasisLabel(row.default_basis || row.recommended_basis))}</em></header>
+        <p>${this.escape(row.reason || "已选用当前完整可计算的口径，可直接调整后试算。")}</p>${unavailable}${alternativeDiffs}${evidence}
       </article>`;
     }).join("");
     const previewHtml = preview ? `<section class="ocw-cost-trial-preview ${preview.trial_review?.is_temporary ? "is-temporary" : ""}"><strong>${preview.trial_review?.is_temporary ? "暂行口径试算·非完整成本" : "完整口径预览"}</strong><span>综合成本 RMB ${this.escape(preview.summary?.total_cost_rmb || "0.00")}</span><small>服务器已校验逐 SKU 分摊与金额守恒。</small></section>` : "";
-    return `<div class="ocw-cost-trial-review"><header><div><strong>AI 分摊口径建议</strong><span>${this.escape(draft.model || trial.model || "DeepSeek")}·每项费用单独确认</span></div></header>
+    const summary = draft.decision_summary || {};
+    const sourceSummary = [["reused", "沿用上次"], ["ai", "AI 判断"], ["system_fallback", "系统兜底"], ["evidence", "凭证优先"]]
+      .filter(([key]) => Number(summary[key] || 0) > 0)
+      .map(([key, label]) => `${label} ${Number(summary[key] || 0)}`).join(" · ");
+    return `<div class="ocw-cost-trial-review"><header><div><strong>${trial.dialogMode === "repair" ? "试算所需资料待补" : "调整分摊口径"}</strong><span>${this.escape(sourceSummary || "已自动选择完整可用口径")}</span></div></header>
       ${draft.ai_warning ? `<div class="ocw-cost-trial-warning">${this.escape(draft.ai_warning)}</div>` : ""}
       <main>${waiting ? `<div class="ocw-cost-trial-running"><strong>${this.escape(trial.progress_step || "DeepSeek 正在分析费用口径")}</strong><span>${Math.max(0, Math.min(100, Number(trial.progress_percent || 0)))}%</span></div>` : rows || `<div class="ocw-detail-empty"><strong>当前没有需要分摊的费用</strong></div>`}${previewHtml}</main>
-      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重试 AI</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">请先补齐被阻止的费用资料</span>` : ""}</footer>
+      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重新让 AI 判断</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">${this.escape(this.costTrialBlockingMessage(suggestions.filter((row) => row.blocked)))}</span>` : ""}</footer>
     </div>`;
   }
 
-  openCostTrialAIReviewDialog() {
+  openCostTrialAIReviewDialog({ mode = "adjust" } = {}) {
     const state = this.ensureMaterialFeeState();
     if (!globalThis.frappe?.ui?.Dialog) return;
+    if (state.costTrialAI) state.costTrialAI.dialogMode = mode;
     state.costTrialDialog?.hide?.();
     const dialog = new frappe.ui.Dialog({
-      title: "AI 试算确认",
+      title: mode === "repair" ? "试算资料待补" : "调整试算分摊",
       size: "extra-large",
       fields: [{ fieldname: "review_html", fieldtype: "HTML" }],
-      primary_action_label: "确认并试算",
+      primary_action_label: mode === "repair" ? "补齐资料后重试" : "应用调整并试算",
       primary_action: () => this.confirmCostTrialAI().catch((error) => this.showError(error)),
     });
     state.costTrialDialog = dialog;
     dialog.$wrapper?.addClass?.("ocw-cost-trial-dialog");
-    dialog.$wrapper?.on?.("input change", "[data-cost-trial-basis], [data-cost-trial-reason]", () => {
+    dialog.$wrapper?.on?.("input change", "[data-cost-trial-basis]", () => {
       this.invalidateCostTrialAIPreview({ render: false });
       this.updateCostTrialAIPrimaryAction();
     });
@@ -14477,21 +14538,33 @@ class OverseasCostWorkbench {
 
   collectCostTrialAISelections({ validate = true } = {}) {
     const state = this.ensureMaterialFeeState();
+    const trial = state.costTrialAI || {};
     const wrapper = state.costTrialDialog?.$wrapper;
     const selections = [];
+    let renderedInputs = 0;
     wrapper?.find?.("[data-cost-trial-basis]")?.each?.((_index, element) => {
+      renderedInputs += 1;
       const $input = $(element);
       const suggestionId = String($input.attr("data-suggestion-id") || "");
       const basis = String($input.val() || "");
       if (validate && !basis) throw new Error("请为每项费用选择可用的分摊口径。");
-      let reason = "";
-      wrapper.find(`[data-cost-trial-reason][data-suggestion-id='${suggestionId}']`).each((_i, input) => { reason = String($(input).val() || ""); });
-      const recommendedBasis = String($input.attr("data-recommended-basis") || "");
-      if (validate && basis && recommendedBasis && basis !== recommendedBasis && !reason.trim()) {
-        throw new Error("改用其他分摊口径时，请填写确认说明。");
-      }
-      selections.push({ suggestion_id: suggestionId, basis, reason });
+      selections.push({ suggestion_id: suggestionId, basis, reason: "" });
     });
+    if (!renderedInputs) {
+      const defaults = trial.selections?.length ? trial.selections : (trial.draft?.default_selections || []);
+      defaults.forEach((row) => selections.push({
+        suggestion_id: String(row.suggestion_id || ""),
+        basis: String(row.basis || ""),
+        reason: "",
+      }));
+    }
+    if (validate) {
+      const blocked = (trial.draft?.fee_suggestions || []).filter((row) => Boolean(row.blocked));
+      if (blocked.length) throw new Error(this.costTrialBlockingMessage(blocked));
+      if (selections.some((row) => !row.suggestion_id || !row.basis)) {
+        throw new Error("请为每项费用选择可用的分摊口径。");
+      }
+    }
     return selections;
   }
 
@@ -14513,11 +14586,13 @@ class OverseasCostWorkbench {
     const $button = state.costTrialDialog?.get_primary_btn?.();
     const label = trial.actionStage === "preview"
       ? "校验分摊…"
-      : trial.actionStage === "confirm" ? "保存试算…" : "确认并试算";
+      : trial.actionStage === "confirm"
+        ? "保存试算…"
+        : trial.dialogMode === "repair" ? "补齐资料后重试" : "应用调整并试算";
     $button?.text?.(label);
     $button?.prop?.("disabled", !this.costTrialAIReadyToConfirm());
-    const busy = Boolean(trial.confirming || trial.previewing);
-    state.costTrialDialog?.$wrapper?.find?.("[data-cost-trial-basis], [data-cost-trial-reason]")?.prop?.("disabled", busy);
+    const busy = Boolean(trial.confirming || trial.previewing || state.costTrialRestarting);
+    state.costTrialDialog?.$wrapper?.find?.("[data-cost-trial-basis]")?.prop?.("disabled", busy);
     state.costTrialDialog?.$wrapper?.find?.("[data-action^='cost-trial-']")?.prop?.("disabled", busy);
   }
 
@@ -14593,7 +14668,7 @@ class OverseasCostWorkbench {
         if (JSON.stringify(latestSelections) !== JSON.stringify(currentSelections)) {
           trial.preview = null;
           trial.selections = latestSelections;
-          throw new Error("分摊口径或说明已变化，未保存旧选择，请再次确认。");
+          throw new Error("分摊口径已变化，未保存旧选择，请再次确认。");
         }
         trial.preview = preview;
       }
@@ -14616,11 +14691,12 @@ class OverseasCostWorkbench {
         && String(this.detailState.expectedModified) > String(result.batch_modified)) return false;
       state.preview = result;
       state.costTrialDialog?.hide?.();
+      state.costTrialDialog = null;
       this.renderDetailShell?.();
       if (this.detailState.editToken) this.updateEditLeaseStatus?.();
       this.renderMaterialFeeWorkspace();
       if (trial.scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
-      frappe.show_alert({ message: result.trial_review?.is_temporary ? "暂行口径试算已保存" : "AI 试算完成", indicator: "green" });
+      frappe.show_alert({ message: result.trial_review?.is_temporary ? "暂行口径试算已保存" : "试算完成", indicator: "green" });
       return result;
     } finally {
       if (state.calculationWrite === calculationWrite) state.calculationWrite = null;
@@ -14638,51 +14714,127 @@ class OverseasCostWorkbench {
       batch_name: this.detailState.batchName, run_id: trial.runId,
     });
     state.costTrialDialog?.hide?.();
+    state.costTrialDialog = null;
     state.costTrialAI = null;
     this.updateMaterialFeeWriteControls(state);
   }
 
-  async retryCostTrialAI() {
+  async openCostTrialAdjustment() {
     const state = this.ensureMaterialFeeState();
-    const trial = state.costTrialAI;
+    if (this.isMaterialFeeCalculationBusy(state)) return false;
     const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName;
-    const requestId = state.requestId;
-    const feeRequestId = state.feeRequestId;
-    const inputRevision = state.inputRevision;
     const isCurrent = () => this.materialFeeState === state
       && this.detailState.batchName === batchName
       && this.detailState.versionName === versionName
-      && this.detailState.tab === "documents"
-      && state.requestId === requestId
-      && state.feeRequestId === feeRequestId
-      && state.inputRevision === inputRevision;
-    if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
-      batch_name: batchName, run_id: trial.runId,
-    });
+      && this.detailState.tab === "documents";
     state.costTrialDialog?.hide?.();
-    state.costTrialAI = null;
-    if (!isCurrent()) return false;
-    const started = await this.call("overseas_costing.api.calculate.start_cost_trial_ai_review", {
-      batch_name: batchName,
-      version_name: versionName || null,
-      edit_token: this.detailState.editToken,
-      expected_modified: this.detailState.expectedModified,
-      force: 1,
-    });
-    if (!started?.ok) throw new Error(started?.message || "AI 试算任务重试失败。");
-    if (!isCurrent()) return false;
-    state.costTrialAI = {
-      runId: started.run_id,
-      status: started.status,
-      progressRevision: Number(started.progress_revision || 0),
-      requestId,
-      feeRequestId,
-      inputRevision,
-    };
-    await this.pollCostTrialAI(state, batchName, started.run_id);
-    if (state.costTrialAI?.status === "READY") this.openCostTrialAIReviewDialog();
-    return state.costTrialAI?.status === "READY";
+    state.costTrialDialog = null;
+    state.previewRunning = true;
+    state.costTrialAI = { status: "STARTING", actionStage: "reuse", dialogMode: "adjust" };
+    this.updateMaterialFeeWriteControls(state);
+    try {
+      if (!(await this.flushMaterialFeeInputs(state)) || !isCurrent()) return false;
+      if (this.ensureEditSession && !(await this.ensureEditSession())) return false;
+      if (!isCurrent()) return false;
+      const requestId = state.requestId;
+      const feeRequestId = state.feeRequestId;
+      const inputRevision = state.inputRevision;
+      const started = await this.call("overseas_costing.api.calculate.start_cost_trial_ai_review", {
+        batch_name: batchName,
+        version_name: versionName || null,
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+        force: 0,
+        reuse_only: 1,
+      });
+      if (!started?.ok) throw new Error(started?.message || "读取已保存分摊口径失败。");
+      if (!isCurrent() || state.requestId !== requestId || state.feeRequestId !== feeRequestId
+        || state.inputRevision !== inputRevision) return false;
+      state.costTrialAI = {
+        runId: started.run_id,
+        status: started.status,
+        progressRevision: Number(started.progress_revision || 0),
+        requestId,
+        feeRequestId,
+        inputRevision,
+        actionStage: "reuse",
+        dialogMode: "adjust",
+        aiCandidateCount: 0,
+      };
+      await this.pollCostTrialAI(state, batchName, started.run_id);
+      if (!isCurrent() || state.costTrialAI?.status !== "READY") return false;
+      state.costTrialAI.actionStage = "";
+      const mode = (state.costTrialAI.draft?.fee_suggestions || []).some((row) => row.blocked) ? "repair" : "adjust";
+      state.costTrialAI.dialogMode = mode;
+      state.costTrialAI.selections = (state.costTrialAI.draft?.default_selections || []).map((row) => ({ ...row }));
+      this.openCostTrialAIReviewDialog({ mode });
+      return true;
+    } finally {
+      state.previewRunning = false;
+      this.updateMaterialFeeWriteControls(state);
+    }
+  }
+
+  async retryCostTrialAI() {
+    const state = this.ensureMaterialFeeState();
+    if (state.costTrialRestarting) return false;
+    state.costTrialRestarting = true;
+    this.updateMaterialFeeWriteControls(state);
+    try {
+      const trial = state.costTrialAI;
+      const batchName = this.detailState.batchName;
+      const versionName = this.detailState.versionName;
+      const requestId = state.requestId;
+      const feeRequestId = state.feeRequestId;
+      const inputRevision = state.inputRevision;
+      const isCurrent = () => this.materialFeeState === state
+        && this.detailState.batchName === batchName
+        && this.detailState.versionName === versionName
+        && this.detailState.tab === "documents"
+        && state.requestId === requestId
+        && state.feeRequestId === feeRequestId
+        && state.inputRevision === inputRevision;
+      if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
+        batch_name: batchName, run_id: trial.runId,
+      });
+      state.costTrialDialog?.hide?.();
+      state.costTrialDialog = null;
+      state.costTrialAI = null;
+      if (!isCurrent()) return false;
+      const started = await this.call("overseas_costing.api.calculate.start_cost_trial_ai_review", {
+        batch_name: batchName,
+        version_name: versionName || null,
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+        force: 1,
+        reuse_only: 0,
+      });
+      if (!started?.ok) throw new Error(started?.message || "AI 试算任务重试失败。");
+      if (!isCurrent()) return false;
+      state.costTrialAI = {
+        runId: started.run_id,
+        status: started.status,
+        progressRevision: Number(started.progress_revision || 0),
+        requestId,
+        feeRequestId,
+        inputRevision,
+        actionStage: ["QUEUED", "RUNNING"].includes(String(started.status || "")) ? "ai" : "reuse",
+        aiCandidateCount: Number(started.ai_candidate_count || 0),
+        dialogMode: "adjust",
+      };
+      await this.pollCostTrialAI(state, batchName, started.run_id);
+      if (state.costTrialAI?.status === "READY") {
+        state.costTrialAI.actionStage = "";
+        state.costTrialAI.selections = (state.costTrialAI.draft?.default_selections || []).map((row) => ({ ...row }));
+        this.openCostTrialAIReviewDialog({ mode: "adjust" });
+      }
+      return state.costTrialAI?.status === "READY";
+    } finally {
+      state.costTrialRestarting = false;
+      this.updateCostTrialAIPrimaryAction();
+      this.updateMaterialFeeWriteControls(state);
+    }
   }
 
   acceptSavedComprehensiveCost(result, batchName, { versionName = result.version_name, preserveDirty = false } = {}) {
@@ -14744,6 +14896,18 @@ class OverseasCostWorkbench {
       || (this.materialFeeState?.preview?.saved === true && this.materialFeeState.preview.read_only === false ? this.materialFeeState.preview : null);
   }
 
+  materialFeeTrialDecisionSummary(preview = {}) {
+    const choices = preview.trial_review?.fee_choices || [];
+    const counts = choices.reduce((result, row) => {
+      const source = String(row.decision_source || "");
+      result[source] = Number(result[source] || 0) + 1;
+      return result;
+    }, {});
+    return [["REUSED", "沿用上次"], ["AI", "AI 判断"], ["SYSTEM_FALLBACK", "系统兜底"], ["EVIDENCE", "凭证优先"], ["USER_OVERRIDE", "用户调整"]]
+      .filter(([source]) => Number(counts[source] || 0) > 0)
+      .map(([source, label]) => `${label} ${Number(counts[source] || 0)}`).join(" · ");
+  }
+
   renderMaterialFeeCostTable() {
     const state = this.ensureMaterialFeeState();
     const header = this.detailState.header || {};
@@ -14752,9 +14916,10 @@ class OverseasCostWorkbench {
     const hasLegacyTotal = legacyTotal !== undefined && legacyTotal !== null && legacyTotal !== "" && Number.isFinite(Number(legacyTotal));
     const sourcePending = state.materials?.calculation_stale || state.fees?.summary?.source_pending;
     const staleCost = (header.status === "Dirty" || sourcePending) && Boolean(preview || hasLegacyTotal);
+    const decisionSummary = preview ? this.materialFeeTrialDecisionSummary(preview) : "";
     const sectionTitle = `<div class="ocw-mf-section-title">
-      <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p><p>AI 只建议分摊口径，逐 SKU 金额由服务端规则引擎计算；可信关税凭证的明细优先。</p></div>
-      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
+      <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p><p>系统优先沿用已有口径，仅在必要时请求 AI；逐 SKU 金额由服务端规则引擎计算，可信关税凭证明细优先。</p></div>
+      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span>${preview ? `<button class="ocw-outline-btn" type="button" data-action="mf-adjust-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>调整分摊</button>` : ""}<button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
     </div>`;
     if (!preview) {
       return `<section class="ocw-mf-section ocw-mf-cost-section">${sectionTitle}
@@ -14778,6 +14943,7 @@ class OverseasCostWorkbench {
         <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : header.status === "Dirty" ? "上次试算 · 结果待更新" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
         <dl><div><dt>本次发货货值</dt><dd>${this.escape(summary.purchase_goods_value_rmb || "0.00")}</dd></div><div><dt>直接费用</dt><dd>${this.escape(summary.direct_fees_rmb || "0.00")}</dd></div><div><dt>分摊费用</dt><dd>${this.escape(summary.allocated_fees_rmb || "0.00")}</dd></div><div><dt>已计入费用</dt><dd>${Number(summary.included_fee_count || 0)} 笔</dd></div></dl>
       </div>
+      ${decisionSummary ? `<p class="ocw-mf-trial-note">本次口径：${this.escape(decisionSummary)}</p>` : ""}
       <p class="ocw-mf-trial-note">试算不生成正式成本版本；凭证待补单独保留，已知金额可先参与计算。${summary.estimated_fee_count ? `含 ${Number(summary.estimated_fee_count)} 笔暂估费用，需后续核实。` : ""}</p>
       <div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>本次发货货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}${Number(item.shipping_quantity_difference) < 0 ? `<small class="ocw-mf-warning">少发 ${this.escape(String(-Number(item.shipping_quantity_difference)))} ${this.escape(item.shipping_unit_cost?.uom || "")}</small>` : ""}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>
       ${preview.excluded_fees?.length ? `<div class="ocw-mf-excluded"><strong>未计入费用</strong>${preview.excluded_fees.map((fee) => `<span>${this.escape(fee.expense_category || fee.fee_key || "费用")} · ${this.escape(this.materialFeeExclusionReason(fee))}</span>`).join("")}</div>` : ""}

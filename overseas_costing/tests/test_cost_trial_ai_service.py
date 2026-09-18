@@ -110,7 +110,7 @@ def test_zero_fee_needs_no_choice_and_remains_in_cost_snapshot():
     assert result["included_fees"][0]["amount_rmb"] == "0.00"
 
 
-def test_build_review_exposes_complete_alternatives_when_ai_basis_is_missing():
+def test_build_review_falls_back_to_a_complete_basis_when_ai_basis_is_missing():
     result = cost_trial_ai_service.build_cost_trial_review_draft(
         items=ITEMS,
         fees=[_fee()],
@@ -129,15 +129,18 @@ def test_build_review_exposes_complete_alternatives_when_ai_basis_is_missing():
     )
 
     proposal = result["fee_suggestions"][0]
-    assert proposal["recommended_basis"] == "volume"
-    assert proposal["recommended_basis_available"] is False
-    assert proposal["requires_temporary_basis"] is True
+    assert proposal["ai_recommended_basis"] == "volume"
+    assert proposal["default_basis"] == "chargeable_weight"
+    assert proposal["recommended_basis"] == "chargeable_weight"
+    assert proposal["recommended_basis_available"] is True
+    assert proposal["requires_temporary_basis"] is False
+    assert proposal["decision_source"] == "SYSTEM_FALLBACK"
     assert [row["basis"] for row in proposal["available_alternatives"]] == [
         "goods_value",
         "gross_weight",
         "chargeable_weight",
     ]
-    assert proposal["missing_fields"] == ["volume_m3"]
+    assert proposal["missing_fields"] == []
     assert result["trial_context"] == {
         "transport_mode": "AIR",
         "project": "",
@@ -145,6 +148,37 @@ def test_build_review_exposes_complete_alternatives_when_ai_basis_is_missing():
     }
     assert result["retrieval_context"] == []
     assert result["retrieval_version"] == ""
+
+
+def test_ai_normalizer_system_placeholder_is_recorded_as_system_fallback_not_ai():
+    result = cost_trial_ai_service.build_cost_trial_review_draft(
+        items=ITEMS,
+        fees=[_fee()],
+        fx_context={},
+        context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR"},
+        ai_result={
+            "ok": True,
+            "model": "deepseek-test",
+            "rules": [{
+                **_fee(),
+                "allocation_basis": "goods_value",
+                "is_ai_suggestion": 0,
+                "is_system_suggestion": 1,
+                "remark": "AI未返回该费用池，沿用系统基础分摊",
+            }],
+        },
+    )
+
+    proposal = result["fee_suggestions"][0]
+    assert proposal["ai_recommended_basis"] == ""
+    assert proposal["default_basis"] == "chargeable_weight"
+    assert proposal["decision_source"] == "SYSTEM_FALLBACK"
+    assert result["decision_summary"] == {
+        "reused": 0,
+        "ai": 0,
+        "system_fallback": 1,
+        "evidence": 0,
+    }
 
 
 def test_review_exposes_scope_and_deterministic_alternative_differences():
@@ -173,7 +207,7 @@ def test_review_exposes_scope_and_deterministic_alternative_differences():
     ]
 
 
-def test_preview_uses_selected_temporary_basis_and_marks_non_complete():
+def test_preview_uses_selected_complete_basis_without_marking_result_temporary():
     draft = cost_trial_ai_service.build_cost_trial_review_draft(
         items=ITEMS,
         fees=[_fee()],
@@ -203,9 +237,8 @@ def test_preview_uses_selected_temporary_basis_and_marks_non_complete():
     fee = result["included_fees"][0]
     assert fee["allocation_basis"] == "gross_weight"
     assert fee["allocations"] == {"line-1": "25.00", "line-2": "75.00"}
-    assert result["summary"]["is_complete"] is False
-    assert result["trial_review"]["is_temporary"] is True
-    assert any(row["reason_code"] == "TEMPORARY_ALLOCATION_BASIS" for row in result["incomplete_reasons"])
+    assert result["trial_review"]["is_temporary"] is False
+    assert not any(row["reason_code"] == "TEMPORARY_ALLOCATION_BASIS" for row in result["incomplete_reasons"])
 
 
 def test_preview_rejects_client_basis_that_server_did_not_offer():
@@ -229,7 +262,7 @@ def test_preview_rejects_client_basis_that_server_did_not_offer():
         )
 
 
-def test_complete_manual_override_is_formal_and_requires_a_reason():
+def test_complete_manual_override_is_formal_without_requiring_a_reason():
     draft = cost_trial_ai_service.build_cost_trial_review_draft(
         items=ITEMS,
         fees=[_fee()],
@@ -238,16 +271,6 @@ def test_complete_manual_override_is_formal_and_requires_a_reason():
         ai_result={"ok": True, "rules": [{**_fee(), "allocation_basis": "goods_value"}]},
     )
     proposal = draft["fee_suggestions"][0]
-
-    with pytest.raises(ValueError, match="原因"):
-        cost_trial_ai_service.preview_selected_cost_trial(
-            items=ITEMS,
-            fees=[_fee()],
-            fx_context={},
-            fee_components=[],
-            draft=draft,
-            selections=[{"suggestion_id": proposal["suggestion_id"], "basis": "gross_weight", "reason": ""}],
-        )
 
     result = cost_trial_ai_service.preview_selected_cost_trial(
         items=ITEMS,
@@ -258,12 +281,15 @@ def test_complete_manual_override_is_formal_and_requires_a_reason():
         selections=[{
             "suggestion_id": proposal["suggestion_id"],
             "basis": "gross_weight",
-            "reason": "当前费用为按重量计价的操作费",
+            "reason": "",
         }],
     )
 
     assert result["trial_review"]["is_temporary"] is False
-    assert result["trial_review"]["fee_choices"][0]["modified_ai_suggestion"] is True
+    choice = result["trial_review"]["fee_choices"][0]
+    assert choice["modified_ai_suggestion"] is True
+    assert choice["decision_source"] == "USER_OVERRIDE"
+    assert choice["reason"] == ""
 
 
 def test_saved_projection_hashes_formal_basis_but_keeps_temporary_basis_private():
@@ -283,6 +309,20 @@ def test_saved_projection_hashes_formal_basis_but_keeps_temporary_basis_private(
     assert "trial_allocation_basis" not in formal
     assert temporary["allocation_basis"] == fee["allocation_basis"]
     assert temporary["trial_allocation_basis"] == "volume"
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected"),
+    [
+        ({"basis": "gross_weight", "decision_source": "REUSED"}, "试算沿用上次：gross_weight"),
+        ({"basis": "goods_value", "decision_source": "AI"}, "AI试算自动：goods_value"),
+        ({"basis": "goods_value", "decision_source": "SYSTEM_FALLBACK"}, "试算系统兜底：goods_value"),
+        ({"basis": "volume", "decision_source": "USER_OVERRIDE", "previous_basis": "goods_value"},
+         "试算人工调整：goods_value→volume"),
+    ],
+)
+def test_choice_audit_remark_records_decision_source(choice, expected):
+    assert cost_trial_ai_service._choice_audit_remark(choice) == expected
 
 
 def test_temporary_saved_trial_is_marked_incomplete_and_blocks_formal_use():
@@ -405,7 +445,18 @@ def test_component_with_unmatched_sku_cannot_be_evidence_locked():
 
 class TrialRepository:
     def __init__(self):
-        self.context = {"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR", "batch_modified": "m1"}
+        self.context = {
+            "batch_name": "B1",
+            "version_name": "V1",
+            "batch": "B1",
+            "version": "V1",
+            "current_version": "V1",
+            "version_status": "Draft",
+            "confirm_status": "Unconfirmed",
+            "is_locked": 0,
+            "transport_mode": "AIR",
+            "batch_modified": "m1",
+        }
         self.items = ITEMS
         self.fees = [_fee()]
         self.fx = {}
@@ -413,6 +464,9 @@ class TrialRepository:
         self.runs = {}
         self.created = 0
         self.saved_calculation = None
+        self.save_calculation_hook = None
+        self.save_calculation_error = None
+        self.previous_trial_review = {}
         self.commits = 0
         self.rollbacks = 0
 
@@ -434,6 +488,10 @@ class TrialRepository:
     def find_reusable(self, batch_name, version_name, fingerprint):
         return next((row for row in self.runs.values() if row["input_fingerprint"] == fingerprint and row["status"] == "READY"), None)
 
+    def load_previous_trial_review(self, batch_name, version_name):
+        assert batch_name == "B1" and version_name == "V1"
+        return dict(self.previous_trial_review)
+
     def create_run(self, values):
         self.created += 1
         row = {"name": f"RUN-{self.created}", **values}
@@ -448,7 +506,28 @@ class TrialRepository:
         self.runs[run_id]["progress_revision"] = int(self.runs[run_id].get("progress_revision") or 0) + 1
         return self.runs[run_id]
 
+    def claim_run(self, run_id):
+        if self.runs[run_id]["status"] != "QUEUED":
+            return False
+        self.save_run(
+            run_id,
+            status="RUNNING",
+            progress_step="DeepSeek 正在分析费用口径",
+            progress_percent=30,
+        )
+        return True
+
+    def save_run_if_status(self, run_id, expected_status, **values):
+        if self.runs[run_id]["status"] != expected_status:
+            return False
+        self.save_run(run_id, **values)
+        return True
+
     def save_calculation(self, inputs, preview, trial_review):
+        if callable(self.save_calculation_hook):
+            self.save_calculation_hook()
+        if self.save_calculation_error:
+            raise self.save_calculation_error
         self.saved_calculation = {"preview": preview, "trial_review": trial_review}
         return {**preview, "ok": True, "saved": True, "batch_modified": "m2"}
 
@@ -474,7 +553,16 @@ def test_lifecycle_reuses_same_ready_input_unless_force_is_requested():
     first = cost_trial_ai_service.start_cost_trial_ai_review(
         "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=queued.append
     )
-    assert first == {"ok": True, "run_id": "RUN-1", "status": "QUEUED", "reused": False, "progress_revision": 0}
+    assert first == {
+        "ok": True,
+        "run_id": "RUN-1",
+        "status": "QUEUED",
+        "reused": False,
+        "progress_revision": 0,
+        "ai_invoked": False,
+        "ai_required": True,
+        "ai_candidate_count": 1,
+    }
     assert queued == ["RUN-1"]
 
     cost_trial_ai_service.execute_cost_trial_ai_review("RUN-1", repository=repo, ai_suggester=_ai_volume)
@@ -488,6 +576,420 @@ def test_lifecycle_reuses_same_ready_input_unless_force_is_requested():
     assert reused["run_id"] == "RUN-1" and reused["reused"] is True
     assert forced["run_id"] == "RUN-2" and forced["reused"] is False
     assert queued == ["RUN-1", "RUN-2"]
+
+
+def test_previous_valid_choice_makes_run_ready_without_calling_ai():
+    repo = TrialRepository()
+    repo.previous_trial_review = {
+        "fee_choices": [{
+            "fee_key": "international_air_freight",
+            "basis": "gross_weight",
+            "decision_source": "AI",
+        }],
+    }
+    queued = []
+
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=queued.append
+    )
+
+    assert started["status"] == "READY"
+    assert started["ai_invoked"] is False
+    assert queued == []
+    proposal = repo.runs[started["run_id"]]["draft_json"]["fee_suggestions"][0]
+    assert proposal["default_basis"] == "gross_weight"
+    assert proposal["decision_source"] == "REUSED"
+    assert proposal["available_bases"] == ["goods_value", "gross_weight", "chargeable_weight"]
+
+
+def test_adjustment_reuse_only_never_queues_ai_and_uses_complete_local_default():
+    repo = TrialRepository()
+    queued = []
+
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", reuse_only=True,
+        repository=repo, enqueue=queued.append,
+    )
+
+    assert started["status"] == "READY"
+    assert started["ai_invoked"] is False
+    assert started["ai_required"] is False
+    assert started["reuse_reason"] == "ADJUSTMENT_DEFAULTS"
+    assert queued == []
+    proposal = repo.runs[started["run_id"]]["draft_json"]["fee_suggestions"][0]
+    assert proposal["default_basis"] == "chargeable_weight"
+    assert proposal["decision_source"] == "SYSTEM_FALLBACK"
+
+
+def test_adjustment_reuse_only_does_not_attach_to_an_active_ai_run():
+    repo = TrialRepository()
+    queued = []
+    active = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=queued.append,
+    )
+
+    adjustment = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", reuse_only=True,
+        repository=repo, enqueue=queued.append,
+    )
+
+    assert active["status"] == "QUEUED"
+    assert adjustment["status"] == "READY"
+    assert adjustment["run_id"] != active["run_id"]
+    assert queued == [active["run_id"]]
+
+
+def test_only_unresolved_fees_are_sent_in_one_ai_request():
+    repo = TrialRepository()
+    repo.fees = [_fee("international_air_freight", 100), _fee("destination_delivery", 50)]
+    repo.previous_trial_review = {
+        "fee_choices": [{"fee_key": "international_air_freight", "basis": "gross_weight"}],
+    }
+    received = []
+
+    def capture_suggester(*, items, candidate_rules, context):
+        received.append([dict(row) for row in candidate_rules])
+        return {
+            "ok": True,
+            "action": "suggested",
+            "model": "deepseek-test",
+            "rules": [{**candidate_rules[0], "allocation_basis": "chargeable_weight", "ai_confidence": 0.9}],
+        }
+
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=lambda _run: None
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=capture_suggester
+    )
+
+    assert len(received) == 1
+    assert [row["logical_fee_key"] for row in received[0]] == ["destination_delivery"]
+    assert received[0][0]["available_bases"] == ["goods_value", "gross_weight", "chargeable_weight"]
+    proposals = {row["fee_key"]: row for row in repo.runs[started["run_id"]]["draft_json"]["fee_suggestions"]}
+    assert proposals["international_air_freight"]["decision_source"] == "REUSED"
+    assert proposals["destination_delivery"]["decision_source"] == "AI"
+    assert repo.runs[started["run_id"]]["draft_json"]["decision_summary"] == {
+        "reused": 1,
+        "ai": 1,
+        "system_fallback": 0,
+        "evidence": 0,
+    }
+
+
+def test_confirmed_review_takes_precedence_over_an_older_ready_run():
+    repo = TrialRepository()
+    first = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        first["run_id"], repository=repo,
+        ai_suggester=lambda **_kwargs: {
+            "ok": True,
+            "model": "deepseek-test",
+            "rules": [{**_fee(), "allocation_basis": "goods_value"}],
+        },
+    )
+    repo.previous_trial_review = {
+        "fee_choices": [{"fee_key": "international_air_freight", "basis": "gross_weight"}],
+    }
+
+    second = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+
+    assert second["run_id"] != first["run_id"]
+    assert second["status"] == "READY"
+    proposal = repo.runs[second["run_id"]]["draft_json"]["fee_suggestions"][0]
+    assert proposal["default_basis"] == "gross_weight"
+    assert proposal["decision_source"] == "REUSED"
+
+
+def test_confirmed_review_source_takes_precedence_even_when_old_ready_basis_matches():
+    repo = TrialRepository()
+    first = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        first["run_id"], repository=repo,
+        ai_suggester=lambda **_kwargs: {
+            "ok": True,
+            "model": "deepseek-test",
+            "rules": [{**_fee(), "allocation_basis": "gross_weight"}],
+        },
+    )
+    repo.previous_trial_review = {
+        "fee_choices": [{
+            "fee_key": "international_air_freight",
+            "basis": "gross_weight",
+            "decision_source": "USER_OVERRIDE",
+        }],
+    }
+
+    second = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+
+    assert second["run_id"] != first["run_id"]
+    proposal = repo.runs[second["run_id"]]["draft_json"]["fee_suggestions"][0]
+    assert proposal["decision_source"] == "REUSED"
+    assert repo.runs[second["run_id"]]["draft_json"]["decision_summary"]["reused"] == 1
+
+
+def test_ai_failure_is_not_retried_and_uses_a_complete_system_fallback():
+    repo = TrialRepository()
+    calls = 0
+
+    def failing_suggester(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("upstream timeout")
+
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    result = cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=failing_suggester,
+    )
+
+    assert calls == 1
+    assert result["status"] == "READY"
+    draft = repo.runs[started["run_id"]]["draft_json"]
+    assert draft["ai_invoked"] is True
+    assert draft["fee_suggestions"][0]["decision_source"] == "SYSTEM_FALLBACK"
+    assert draft["fee_suggestions"][0]["default_basis"] == "chargeable_weight"
+
+
+def test_discard_during_ai_call_cannot_be_revived_to_ready():
+    repo = TrialRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+
+    def discard_then_reply(**_kwargs):
+        cost_trial_ai_service.discard_cost_trial_ai_review(
+            "B1", started["run_id"], repository=repo,
+        )
+        return {"ok": True, "model": "deepseek-test", "rules": []}
+
+    result = cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=discard_then_reply,
+    )
+
+    assert result["status"] == "DISCARDED"
+    assert repo.runs[started["run_id"]]["status"] == "DISCARDED"
+
+
+def test_second_worker_does_not_call_ai_for_an_already_running_run():
+    repo = TrialRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    repo.save_run(started["run_id"], status="RUNNING")
+    calls = 0
+
+    def count_calls(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "rules": []}
+
+    result = cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=count_calls,
+    )
+
+    assert result["status"] == "RUNNING"
+    assert calls == 0
+
+
+def test_force_ai_ignores_reusable_choice_but_keeps_available_basis_limits():
+    repo = TrialRepository()
+    repo.previous_trial_review = {
+        "fee_choices": [{"fee_key": "international_air_freight", "basis": "gross_weight"}],
+    }
+    received = []
+
+    def capture_suggester(*, candidate_rules, **_kwargs):
+        received.extend(candidate_rules)
+        return {"ok": False, "action": "failed", "rules": [], "reason": "unavailable"}
+
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", force=True,
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=capture_suggester,
+    )
+
+    assert len(received) == 1
+    assert received[0]["available_bases"] == ["goods_value", "gross_weight", "chargeable_weight"]
+    proposal = repo.runs[started["run_id"]]["draft_json"]["fee_suggestions"][0]
+    assert proposal["decision_source"] == "SYSTEM_FALLBACK"
+
+
+def test_force_ai_ignores_legacy_confirmed_rule_and_active_run():
+    repo = TrialRepository()
+    queued = []
+    normal = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=queued.append,
+    )
+    repo.fees[0]["remark"] = "AI试算自动：按计费重分摊"
+
+    forced = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", force=True,
+        repository=repo, enqueue=queued.append,
+    )
+
+    assert normal["status"] == "QUEUED"
+    assert forced["status"] == "QUEUED"
+    assert forced["run_id"] != normal["run_id"]
+    assert queued == [normal["run_id"], forced["run_id"]]
+
+
+def test_force_ai_candidate_does_not_carry_old_decision_outputs():
+    repo = TrialRepository()
+    repo.fees[0].update({
+        "allocation_basis": "gross_weight",
+        "basis_field": "gross_weight",
+        "remark": "AI试算自动：旧口径",
+        "scope_revision": "manual:old",
+        "priority_no": 999,
+    })
+    received = []
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", force=True,
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo,
+        ai_suggester=lambda **kwargs: received.extend(kwargs["candidate_rules"]) or {
+            "ok": False, "rules": [],
+        },
+    )
+
+    assert len(received) == 1
+    for field in ("allocation_basis", "basis_field", "remark", "scope_revision", "priority_no"):
+        assert field not in received[0]
+    assert received[0]["available_bases"] == ["goods_value", "gross_weight", "chargeable_weight"]
+
+
+def test_no_complete_basis_blocks_without_calling_ai():
+    repo = TrialRepository()
+    repo.items = [
+        {**ITEMS[0], "goods_value": 0, "shipment_value_rmb": 0, "gross_weight_kg": 0,
+         "volume_m3": 0, "chargeable_weight_kg": 0},
+        {**ITEMS[1], "goods_value": 0, "shipment_value_rmb": 0, "gross_weight_kg": 0,
+         "volume_m3": 0, "chargeable_weight_kg": 0},
+    ]
+    queued = []
+
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=queued.append
+    )
+
+    assert started["status"] == "READY"
+    assert started["ai_invoked"] is False
+    assert queued == []
+    proposal = repo.runs[started["run_id"]]["draft_json"]["fee_suggestions"][0]
+    assert proposal["blocked"] is True
+    assert proposal["available_bases"] == []
+    assert proposal["missing_fields"] == [
+        "goods_value", "gross_weight_kg", "volume_m3", "chargeable_weight_kg",
+    ]
+
+
+def test_decision_fingerprint_ignores_output_metadata_but_tracks_cost_inputs():
+    base = cost_trial_ai_service.build_input_fingerprint(
+        context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR", "batch_modified": "m1"},
+        items=ITEMS,
+        fees=[_fee()],
+        fx_context={},
+        fee_components=[],
+    )
+    output_changed = cost_trial_ai_service.build_input_fingerprint(
+        context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR", "batch_modified": "m2"},
+        items=ITEMS,
+        fees=[{**_fee(), "allocation_basis": "gross_weight", "remark": "AI 试算确认"}],
+        fx_context={},
+        fee_components=[],
+    )
+    input_changed = cost_trial_ai_service.build_input_fingerprint(
+        context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR", "batch_modified": "m2"},
+        items=ITEMS,
+        fees=[_fee(amount=101)],
+        fx_context={},
+        fee_components=[],
+    )
+
+    assert output_changed == base
+    assert input_changed != base
+
+
+def test_decision_fingerprint_uses_effective_shipment_value_not_extra_json_timestamps():
+    item = {
+        **ITEMS[0],
+        "actual_shipped_qty": 1,
+        "shipped_uom": "PCS",
+        "extra_json": '{"shipment_valuation":{"amount_rmb":100,"currency":"RMB","quantity":1,"uom":"PCS","calculated_at":"t1"}}',
+    }
+    timestamp_changed = {
+        **item,
+        "extra_json": '{"shipment_valuation":{"amount_rmb":100,"currency":"RMB","quantity":1,"uom":"PCS","calculated_at":"t2"}}',
+    }
+    value_changed = {
+        **item,
+        "extra_json": '{"shipment_valuation":{"amount_rmb":110,"currency":"RMB","quantity":1,"uom":"PCS","calculated_at":"t2"}}',
+    }
+
+    def fingerprint(row):
+        return cost_trial_ai_service.build_input_fingerprint(
+            context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR"},
+            items=[row], fees=[_fee()], fx_context={}, fee_components=[],
+        )
+
+    assert fingerprint(timestamp_changed) == fingerprint(item)
+    assert fingerprint(value_changed) != fingerprint(item)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("material_code", "MAT-CHANGED"),
+        ("product_name", "新品名"),
+        ("category", "新分类"),
+        ("quantity", 99),
+        ("volume_weight_kg", 88),
+        ("project_collection", "PROJECT-2"),
+        ("supplier", "SUPPLIER-2"),
+    ],
+)
+def test_decision_fingerprint_tracks_all_ai_decision_item_inputs(field, value):
+    item = {
+        **ITEMS[0],
+        "material_code": "MAT-1",
+        "product_name": "品名",
+        "category": "分类",
+        "quantity": 1,
+        "volume_weight_kg": 2,
+        "project_collection": "PROJECT-1",
+        "supplier": "SUPPLIER-1",
+    }
+
+    def fingerprint(row):
+        return cost_trial_ai_service.build_input_fingerprint(
+            context={"batch_name": "B1", "version_name": "V1", "transport_mode": "AIR"},
+            items=[row], fees=[_fee()], fx_context={}, fee_components=[],
+        )
+
+    assert fingerprint({**item, field: value}) != fingerprint(item)
 
 
 def test_execute_does_not_send_zero_amount_fee_to_deepseek():
@@ -611,9 +1113,184 @@ def test_confirm_validates_server_preview_token_and_saves_trial_audit():
 
     assert saved["saved"] is True
     assert saved["trial_review"]["run_id"] == "RUN-1"
-    assert saved["trial_review"]["is_temporary"] is True
+    assert saved["trial_review"]["is_temporary"] is False
     assert repo.runs["RUN-1"]["status"] == "CONFIRMED"
     assert repo.saved_calculation["trial_review"]["fee_choices"][0]["basis"] == "gross_weight"
+
+
+def test_confirm_claim_prevents_discard_from_overwriting_a_saved_trial():
+    repo = TrialRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=_ai_volume,
+    )
+    preview = cost_trial_ai_service.preview_cost_trial(
+        "B1", started["run_id"], [], repository=repo,
+    )
+    discard_errors = []
+
+    def try_discard_while_saving():
+        try:
+            cost_trial_ai_service.discard_cost_trial_ai_review(
+                "B1", started["run_id"], repository=repo,
+            )
+        except ValueError as exc:
+            discard_errors.append(str(exc))
+
+    repo.save_calculation_hook = try_discard_while_saving
+    saved = cost_trial_ai_service.confirm_cost_trial(
+        "B1", started["run_id"], preview["preview_token"], [],
+        edit_token="T", expected_modified="m1", repository=repo,
+    )
+
+    assert saved["saved"] is True
+    assert repo.runs[started["run_id"]]["status"] == "CONFIRMED"
+    assert discard_errors and "正在保存" in discard_errors[0]
+
+
+def test_confirm_does_not_save_if_ready_claim_loses_to_discard():
+    class LoseReadyClaimRepository(TrialRepository):
+        def save_run_if_status(self, run_id, expected_status, **values):
+            if expected_status == "READY":
+                self.runs[run_id]["status"] = "DISCARDED"
+                return False
+            return super().save_run_if_status(run_id, expected_status, **values)
+
+    repo = LoseReadyClaimRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=_ai_volume,
+    )
+    preview = cost_trial_ai_service.preview_cost_trial(
+        "B1", started["run_id"], [], repository=repo,
+    )
+
+    with pytest.raises(ValueError, match="已不可确认"):
+        cost_trial_ai_service.confirm_cost_trial(
+            "B1", started["run_id"], preview["preview_token"], [],
+            edit_token="T", expected_modified="m1", repository=repo,
+        )
+    assert repo.saved_calculation is None
+    assert repo.runs[started["run_id"]]["status"] == "DISCARDED"
+
+
+def test_failed_save_releases_confirm_claim_and_preserves_ready_choices():
+    repo = TrialRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=_ai_volume,
+    )
+    preview = cost_trial_ai_service.preview_cost_trial(
+        "B1", started["run_id"], [], repository=repo,
+    )
+    repo.save_calculation_error = RuntimeError("database unavailable")
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        cost_trial_ai_service.confirm_cost_trial(
+            "B1", started["run_id"], preview["preview_token"], [],
+            edit_token="T", expected_modified="m1", repository=repo,
+        )
+
+    assert repo.runs[started["run_id"]]["status"] == "READY"
+    assert repo.runs[started["run_id"]]["draft_json"]
+    assert repo.runs[started["run_id"]]["error_message"] == "database unavailable"
+
+    repo.save_calculation_error = None
+    saved = cost_trial_ai_service.confirm_cost_trial(
+        "B1", started["run_id"], preview["preview_token"], [],
+        edit_token="T", expected_modified="m1", repository=repo,
+    )
+
+    assert saved["saved"] is True
+    assert repo.runs[started["run_id"]]["status"] == "CONFIRMED"
+    assert repo.runs[started["run_id"]]["error_message"] == ""
+
+
+@pytest.mark.parametrize(
+    ("context_change", "message"),
+    [
+        ({"current_version": "V2"}, "只能试算当前版本"),
+        ({"version_status": "Confirmed"}, "已确认或归档版本不能覆盖"),
+        ({"confirm_status": "Confirmed"}, "已确认或归档版本不能覆盖"),
+        ({"is_locked": 1}, "已确认或归档版本不能覆盖"),
+    ],
+)
+def test_confirm_rechecks_current_version_and_confirmation_boundaries(context_change, message):
+    repo = TrialRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=_ai_volume,
+    )
+    preview = cost_trial_ai_service.preview_cost_trial(
+        "B1", started["run_id"], [], repository=repo,
+    )
+    repo.context.update(context_change)
+
+    with pytest.raises((ValueError, PermissionError), match=message):
+        cost_trial_ai_service.confirm_cost_trial(
+            "B1", started["run_id"], preview["preview_token"], [],
+            edit_token="T", expected_modified="m1", repository=repo,
+        )
+    assert repo.saved_calculation is None
+
+
+def test_start_rejects_a_non_current_or_locked_version():
+    repo = TrialRepository()
+    repo.context["current_version"] = "V2"
+
+    with pytest.raises(ValueError, match="只能试算当前版本"):
+        cost_trial_ai_service.start_cost_trial_ai_review(
+            "B1", "V1", edit_token="T", expected_modified="m1",
+            repository=repo, enqueue=lambda _run: None,
+        )
+
+
+def test_start_fails_closed_when_current_version_is_missing():
+    repo = TrialRepository()
+    repo.context["current_version"] = ""
+
+    with pytest.raises(ValueError, match="只能试算当前版本"):
+        cost_trial_ai_service.start_cost_trial_ai_review(
+            "B1", "V1", edit_token="T", expected_modified="m1",
+            repository=repo, enqueue=lambda _run: None,
+        )
+
+
+def test_preview_token_is_bound_to_the_ready_run_and_draft():
+    repo = TrialRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1",
+        repository=repo, enqueue=lambda _run: None,
+    )
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=_ai_volume,
+    )
+    preview = cost_trial_ai_service.preview_cost_trial(
+        "B1", started["run_id"], [], repository=repo,
+    )
+    repo.runs["RUN-2"] = {
+        **repo.runs[started["run_id"]],
+        "name": "RUN-2",
+        "status": "READY",
+    }
+
+    with pytest.raises(ValueError, match="预览已失效"):
+        cost_trial_ai_service.confirm_cost_trial(
+            "B1", "RUN-2", preview["preview_token"], [],
+            edit_token="T", expected_modified="m1", repository=repo,
+        )
 
 
 def test_preview_token_is_server_signed(monkeypatch):

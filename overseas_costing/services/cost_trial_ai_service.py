@@ -31,8 +31,8 @@ BASIS_FIELDS = {
     "chargeable_weight": "chargeable_weight_kg",
 }
 EVIDENCE_PRIORITY_FEES = frozenset({"import_tax", "customs_clearance_fee"})
-INPUT_SCHEMA_VERSION = 2
-PROMPT_VERSION = "cost-trial-v2"
+INPUT_SCHEMA_VERSION = 3
+PROMPT_VERSION = "cost-trial-v3"
 
 
 def cost_trial_ai_enabled() -> bool:
@@ -176,17 +176,146 @@ def _suggestion_id(fingerprint: str, fee_key: str) -> str:
     return "trial:" + hashlib.sha256(f"{fingerprint}:{fee_key}".encode("utf-8")).hexdigest()[:24]
 
 
+def _stable_item_input(item: dict) -> dict:
+    return {
+        "name": item.get("name"),
+        "stable_line_key": item.get("stable_line_key"),
+        "row_no": item.get("row_no"),
+        "material_code": item.get("material_code"),
+        "product_name": item.get("product_name"),
+        "category": item.get("category"),
+        "transport_mode": item.get("transport_mode"),
+        "quantity": item.get("quantity"),
+        "goods_value_rmb": _basis_value(item, "goods_value"),
+        "gross_weight_kg": item.get("gross_weight_kg"),
+        "volume_m3": item.get("volume_m3"),
+        "volume_weight_kg": item.get("volume_weight_kg"),
+        "chargeable_weight_kg": item.get("chargeable_weight_kg"),
+        "project_collection": item.get("project_collection"),
+        "supplier": item.get("supplier"),
+    }
+
+
+def _stable_fee_input(fee: dict) -> dict:
+    return {
+        key: fee.get(key)
+        for key in (
+            "name", "logical_fee_key", "rule_code", "expense_category", "amount_status",
+            "currency", "amount", "scope_type", "scope_value_json", "required_evidence_role",
+            "scope_item_keys",
+            "included_in_fee_key", "is_enabled", "is_active", "is_final", "source_binding_id",
+            "covered_scopes",
+        )
+    }
+
+
+def _ai_candidate_fee(fee: dict, available_bases: list[str]) -> dict:
+    """Build a prompt-safe fee row without prior decision outputs."""
+
+    return {
+        **_stable_fee_input(fee),
+        "fee_key": _fee_key(fee),
+        "available_bases": list(available_bases),
+        "_decision_request": True,
+    }
+
+
+def _stable_component_input(component: dict) -> dict:
+    return {
+        key: component.get(key)
+        for key in (
+            "name", "fee_rule", "evidence", "attachment", "item", "stable_line_key",
+            "logical_fee_key", "component_type", "tax_code", "hs_code", "currency",
+            "original_amount", "amount_rmb", "exchange_rate", "allocation_basis",
+            "source_evidence_json", "accounting_role", "cost_effect", "reverses_component",
+            "status", "is_active",
+        )
+    }
+
+
 def build_input_fingerprint(*, context: dict, items: list[dict], fees: list[dict], fx_context: dict,
                             fee_components: list[dict] | None = None) -> str:
+    """Fingerprint decision inputs without calculation outputs or mutable timestamps."""
+
     payload = {
         "schema": INPUT_SCHEMA_VERSION,
-        "context": context,
-        "items": items,
-        "fees": fees,
+        "context": {
+            "batch_name": context.get("batch_name") or context.get("batch") or "",
+            "version_name": context.get("version_name") or context.get("version") or "",
+            "transport_mode": context.get("transport_mode") or "",
+            "project": context.get("project") or context.get("project_collection") or "",
+            "supplier": context.get("supplier") or context.get("vendor") or "",
+        },
+        "items": sorted(
+            (_stable_item_input(row) for row in items or []),
+            key=lambda row: str(row.get("stable_line_key") or row.get("name") or row.get("row_no") or ""),
+        ),
+        "fees": sorted(
+            (_stable_fee_input(row) for row in fees or []),
+            key=lambda row: (str(row.get("logical_fee_key") or row.get("rule_code") or ""), str(row.get("name") or "")),
+        ),
         "fx_context": fx_context,
-        "fee_components": fee_components or [],
+        "fee_components": sorted(
+            (_stable_component_input(row) for row in fee_components or []),
+            key=lambda row: str(row.get("name") or ""),
+        ),
     }
     return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
+
+
+def _previous_choice_map(review: dict | None) -> dict[str, dict]:
+    return {
+        str(row.get("fee_key") or ""): dict(row)
+        for row in (review or {}).get("fee_choices") or []
+        if str(row.get("fee_key") or "")
+    }
+
+
+def _legacy_confirmed_basis(fee: dict) -> str:
+    basis = str(fee.get("allocation_basis") or fee.get("basis_field") or "")
+    if basis not in BASIS_ORDER:
+        return ""
+    remark = str(fee.get("remark") or "").strip()
+    scope_revision = str(fee.get("scope_revision") or "").strip().lower()
+    if remark.startswith(("AI 试算确认", "AI试算自动", "试算人工调整")) or scope_revision.startswith("manual:"):
+        return basis
+    return ""
+
+
+def _system_fallback_basis(fee: dict, available: list[str]) -> str:
+    preferred = str(fee_allocation_service.preferred_allocation_basis(fee) or "")
+    return preferred if preferred in available else (available[0] if available else "")
+
+
+def _decision_plan(inputs: dict, previous_review: dict | None = None, *, force: bool = False) -> dict:
+    previous = {} if force else _previous_choice_map(previous_review)
+    resolved: dict[str, dict] = {}
+    unresolved: list[dict] = []
+    blocked: list[str] = []
+    for fee in inputs.get("fees") or []:
+        if not requires_ai_allocation(fee):
+            continue
+        key = _fee_key(fee)
+        profiles = {basis: _basis_profile(fee, inputs.get("items") or [], basis) for basis in BASIS_ORDER}
+        available = [basis for basis in BASIS_ORDER if profiles[basis]["available"]]
+        evidence = _evidence_profile(
+            fee, inputs.get("fee_components") or [], inputs.get("fx_context") or {}, inputs.get("items") or []
+        )
+        if evidence.get("locked"):
+            resolved[key] = {"basis": available[0] if available else "goods_value", "source": "EVIDENCE"}
+            continue
+        if evidence.get("issue") in {"SKU_MATCH_INVALID", "AMOUNT_INVALID"} or not available:
+            blocked.append(key)
+            continue
+        previous_basis = str((previous.get(key) or {}).get("basis") or "")
+        if not previous_basis and not force:
+            previous_basis = _legacy_confirmed_basis(fee)
+        if previous_basis in available:
+            resolved[key] = {"basis": previous_basis, "source": "REUSED"}
+            continue
+        unresolved.append(_ai_candidate_fee(fee, available))
+    unresolved.sort(key=lambda row: (str(row.get("fee_key") or ""), str(row.get("name") or "")))
+    return {"resolved": resolved, "unresolved": unresolved, "blocked": blocked}
 
 
 def build_cost_trial_review_draft(
@@ -197,8 +326,9 @@ def build_cost_trial_review_draft(
     context: dict,
     fee_components: list[dict] | None = None,
     ai_result: dict | None = None,
+    decision_overrides: dict[str, dict] | None = None,
 ) -> dict:
-    """Build the browser-safe proposal. AI chooses bases; it never supplies allocations."""
+    """Build browser-safe defaults; only complete server-validated bases can be selected."""
 
     components = list(fee_components or [])
     fingerprint = build_input_fingerprint(
@@ -219,12 +349,10 @@ def build_cost_trial_review_draft(
         },
     )
     ai_by_key = {_fee_key(row): row for row in (ai.get("rules") or [])}
+    overrides = {str(key): dict(value or {}) for key, value in (decision_overrides or {}).items()}
     suggestions = []
     for fee in counted:
         key = _fee_key(fee)
-        recommended = str((ai_by_key.get(key) or fee).get("allocation_basis") or "goods_value")
-        if recommended not in BASIS_ORDER:
-            recommended = "goods_value"
         profiles = {basis: _basis_profile(fee, items, basis) for basis in BASIS_ORDER}
         evidence = _evidence_profile(fee, components, fx_context, items)
         evidence_blocks = evidence.get("issue") in {"SKU_MATCH_INVALID", "AMOUNT_INVALID"}
@@ -233,8 +361,33 @@ def build_cost_trial_review_draft(
             for basis in BASIS_ORDER
             if profiles[basis]["available"]
         ]
-        recommendation_available = profiles[recommended]["available"]
         ai_row = ai_by_key.get(key) or {}
+        system_placeholder = bool(ai_row.get("is_system_suggestion")) or ai_row.get("is_ai_suggestion") in {
+            0, False, "0", "false", "False",
+        }
+        ai_recommended = "" if system_placeholder else str(ai_row.get("allocation_basis") or "")
+        if ai_recommended not in BASIS_ORDER:
+            ai_recommended = ""
+        available_bases = [row["basis"] for row in available]
+        override = overrides.get(key) or {}
+        override_basis = str(override.get("basis") or "")
+        if evidence.get("locked"):
+            default_basis = available_bases[0] if available_bases else "goods_value"
+            decision_source = "EVIDENCE"
+        elif override_basis in available_bases:
+            default_basis = override_basis
+            decision_source = str(override.get("source") or "REUSED")
+        elif ai.get("ok") and ai_recommended in available_bases:
+            default_basis = ai_recommended
+            decision_source = "AI"
+        elif available_bases and not evidence_blocks:
+            default_basis = _system_fallback_basis(fee, available_bases)
+            decision_source = "SYSTEM_FALLBACK"
+        else:
+            default_basis = ""
+            decision_source = ""
+        blocked = evidence_blocks or (not evidence.get("locked") and not available_bases)
+        effective_basis = default_basis or (ai_recommended if ai_recommended in BASIS_ORDER else "goods_value")
         evidence_summary = [
             {
                 "component_id": str(row.get("name") or ""),
@@ -258,17 +411,28 @@ def build_cost_trial_review_draft(
                 "amount": str(fee.get("amount") or "0"),
                 "scope_type": str(fee.get("scope_type") or "ALL_ITEMS").upper(),
                 "scope_item_keys": [_item_key(row) for row in fee_allocation_service.resolve_eligible_items(fee, items)],
-                "recommended_basis": recommended,
-                "recommended_basis_label": BASIS_LABELS[recommended],
-                "recommended_basis_available": recommendation_available,
+                "recommended_basis": effective_basis,
+                "recommended_basis_label": BASIS_LABELS[effective_basis],
+                "recommended_basis_available": bool(default_basis),
+                "ai_recommended_basis": ai_recommended,
+                "default_basis": default_basis,
+                "decision_source": decision_source,
+                "available_bases": available_bases,
                 "confidence": str(ai_row.get("ai_confidence") or ai_row.get("confidence") or "0"),
-                "reason": str(ai_row.get("remark") or ai_row.get("reason") or ai.get("reason") or ""),
+                "reason": str(
+                    ai_row.get("remark") or ai_row.get("reason")
+                    or ("沿用当前版本上次已确认口径。" if decision_source == "REUSED" else "")
+                    or ("AI 未返回可用口径，已采用完整可计算的系统口径。" if decision_source == "SYSTEM_FALLBACK" else "")
+                    or ai.get("reason") or ""
+                ),
                 "basis_profiles": list(profiles.values()),
                 "available_alternatives": available,
-                "missing_fields": [] if recommendation_available else [profiles[recommended]["field"]],
-                "requires_temporary_basis": not evidence["locked"] and not recommendation_available and bool(available),
+                "missing_fields": [] if default_basis else [
+                    profiles[basis]["field"] for basis in BASIS_ORDER if not profiles[basis]["available"]
+                ],
+                "requires_temporary_basis": False,
                 "requires_user_choice": not evidence["locked"] and not evidence_blocks,
-                "blocked": evidence_blocks or (not evidence["locked"] and not available),
+                "blocked": blocked,
                 "evidence_locked": evidence["locked"],
                 "evidence_component_count": len(evidence["rows"]),
                 "evidence_amount_rmb": format(evidence["amount_rmb"], ".2f"),
@@ -276,8 +440,14 @@ def build_cost_trial_review_draft(
                 "evidence_summary": evidence_summary,
             }
         )
+    decision_summary = {
+        "reused": sum(row.get("decision_source") == "REUSED" for row in suggestions),
+        "ai": sum(row.get("decision_source") == "AI" for row in suggestions),
+        "system_fallback": sum(row.get("decision_source") == "SYSTEM_FALLBACK" for row in suggestions),
+        "evidence": sum(row.get("decision_source") == "EVIDENCE" for row in suggestions),
+    }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "input_fingerprint": fingerprint,
         "model": str(ai.get("model") or ""),
         "ai_status": str(ai.get("action") or ("suggested" if ai.get("ok") else "failed")),
@@ -285,6 +455,13 @@ def build_cost_trial_review_draft(
         "ai_warning": "" if ai.get("ok") else str(ai.get("reason") or "AI 未完成建议。"),
         "summary": str(ai.get("summary") or ""),
         "fee_suggestions": suggestions,
+        "default_selections": [
+            {"suggestion_id": row["suggestion_id"], "basis": row["default_basis"], "reason": ""}
+            for row in suggestions
+            if row.get("default_basis") and not row.get("evidence_locked") and not row.get("blocked")
+        ],
+        "decision_summary": decision_summary,
+        "ai_invoked": bool(ai.get("_invoked")),
         "trial_context": {
             "transport_mode": str(context.get("transport_mode") or ""),
             "project": str(context.get("project") or context.get("project_collection")
@@ -319,30 +496,35 @@ def _selection_map(draft: dict, selections: Any) -> dict[str, dict]:
     if invalid_amount:
         raise ValueError(f"费用“{invalid_amount['expense_category']}”的凭证金额无效，请先处理凭证。")
     selected: dict[str, dict] = {}
-    for raw in selections:
-        row = dict(raw or {})
-        proposal = proposals.get(str(row.get("suggestion_id") or ""))
-        if not proposal:
-            raise ValueError("试算建议已失效，请重新运行 AI。")
-        basis = str(row.get("basis") or "")
+
+    def select(proposal: dict, raw: dict) -> None:
+        basis = str(raw.get("basis") or "")
         available = {value["basis"] for value in proposal.get("available_alternatives") or []}
         if basis not in available:
             raise ValueError(f"分摊口径 {basis or '-'} 当前不可用。")
-        reason = str(row.get("reason") or "").strip()[:500]
-        modified = basis != proposal["recommended_basis"]
-        if modified and not reason:
-            raise ValueError(f"修改费用“{proposal['expense_category']}”的 AI 建议时必须填写原因。")
+        reason = str(raw.get("reason") or "").strip()[:500]
+        default_basis = str(proposal.get("default_basis") or proposal.get("recommended_basis") or "")
+        modified = basis != default_basis
         selected[proposal["fee_key"]] = {
             "suggestion_id": proposal["suggestion_id"],
             "fee_key": proposal["fee_key"],
             "expense_category": proposal["expense_category"],
             "basis": basis,
             "reason": reason,
-            "temporary": modified and not bool(proposal.get("recommended_basis_available")),
+            "temporary": False,
             "modified_ai_suggestion": modified,
-            "ai_recommended_basis": proposal["recommended_basis"],
+            "decision_source": "USER_OVERRIDE" if modified else str(proposal.get("decision_source") or "SYSTEM_FALLBACK"),
+            "previous_basis": default_basis if modified else "",
+            "ai_recommended_basis": proposal.get("ai_recommended_basis") or proposal.get("recommended_basis") or "",
             "ai_confidence": proposal.get("confidence") or "0",
         }
+
+    for raw in selections:
+        row = dict(raw or {})
+        proposal = proposals.get(str(row.get("suggestion_id") or ""))
+        if not proposal:
+            raise ValueError("试算建议已失效，请重新运行 AI。")
+        select(proposal, row)
     for proposal in proposals.values():
         if proposal.get("evidence_locked"):
             selected[proposal["fee_key"]] = {
@@ -353,11 +535,15 @@ def _selection_map(draft: dict, selections: Any) -> dict[str, dict]:
                 "reason": "税费／清关凭证已提供逐 SKU 分项，凭证优先。",
                 "temporary": False,
                 "evidence_locked": True,
-                "ai_recommended_basis": proposal["recommended_basis"],
+                "decision_source": "EVIDENCE",
+                "ai_recommended_basis": proposal.get("ai_recommended_basis") or proposal["recommended_basis"],
                 "ai_confidence": proposal.get("confidence") or "0",
             }
         elif proposal.get("requires_user_choice") and proposal["fee_key"] not in selected:
-            raise ValueError(f"请确认费用“{proposal['expense_category']}”的分摊口径。")
+            if proposal.get("blocked") or not proposal.get("default_basis"):
+                missing = "、".join(proposal.get("missing_fields") or [])
+                raise ValueError(f"费用“{proposal['expense_category']}”没有完整可用的分摊口径，请补充：{missing or '分摊数据'}。")
+            select(proposal, {"basis": proposal["default_basis"], "reason": ""})
     return selected
 
 
@@ -373,6 +559,20 @@ def project_fees_for_trial(fees: list[dict], choices: dict[str, dict], *, for_sa
         else:
             projected.append({**fee, "trial_allocation_basis": choice["basis"]})
     return projected
+
+
+def _choice_audit_remark(choice: dict) -> str:
+    basis = str(choice.get("basis") or "")
+    source = str(choice.get("decision_source") or "")
+    if source == "USER_OVERRIDE":
+        previous = str(choice.get("previous_basis") or "-")
+        return f"试算人工调整：{previous}→{basis}"
+    prefix = {
+        "REUSED": "试算沿用上次",
+        "AI": "AI试算自动",
+        "SYSTEM_FALLBACK": "试算系统兜底",
+    }.get(source, "试算确认")
+    return f"{prefix}：{basis}"
 
 
 def annotate_saved_trial_result(result: dict, trial_review: dict) -> dict:
@@ -479,6 +679,69 @@ def _input_fingerprint(inputs: dict) -> str:
     )
 
 
+def _run_preview_token(run_id: str, draft: dict, choices: list[dict]) -> str:
+    return _sign_preview(
+        {
+            "run_id": str(run_id or ""),
+            "fingerprint": draft.get("input_fingerprint") or "",
+            "draft_digest": hashlib.sha256(_json(draft).encode("utf-8")).hexdigest(),
+            "choices": choices,
+        }
+    )
+
+
+def _load_previous_trial_review(repo: Any, batch: str, version: str) -> dict:
+    loader = getattr(repo, "load_previous_trial_review", None)
+    if not callable(loader):
+        return {}
+    loaded = loader(batch, version)
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def _assert_trial_writable_context(context: dict) -> None:
+    version = str(context.get("version") or context.get("version_name") or "")
+    current_version = str(context.get("current_version") or "")
+    if current_version != version:
+        raise ValueError("只能试算当前版本，请刷新批次。")
+    if (
+        str(context.get("version_status") or "") in {"Confirmed", "Archived"}
+        or str(context.get("confirm_status") or "") == "Confirmed"
+        or bool(context.get("is_locked"))
+    ):
+        raise PermissionError("已确认或归档版本不能覆盖，请先创建调整版本。")
+
+
+def _ready_matches_previous_review(run: dict, previous_review: dict) -> bool:
+    previous = _previous_choice_map(previous_review)
+    if not previous:
+        return True
+    draft = _json_dict(run.get("draft_json"))
+    defaults = {
+        str(row.get("fee_key") or ""): {
+            "basis": str(row.get("default_basis") or ""),
+            "source": str(row.get("decision_source") or ""),
+        }
+        for row in draft.get("fee_suggestions") or []
+        if str(row.get("fee_key") or "")
+    }
+    return all(
+        defaults.get(key, {}).get("basis") == str(choice.get("basis") or "")
+        and defaults.get(key, {}).get("source") in {"REUSED", "EVIDENCE"}
+        for key, choice in previous.items()
+    )
+
+
+def _save_run_if_status(repo: Any, run_id: str, expected_status: str, **values) -> bool:
+    saver = getattr(repo, "save_run_if_status", None)
+    if callable(saver):
+        return bool(saver(run_id, expected_status, **values))
+    current = repo.get_run(run_id)
+    if str(current.get("status") or "") != expected_status:
+        return False
+    repo.save_run(run_id, **values)
+    return True
+
+
 def start_cost_trial_ai_review(
     batch_name: str,
     version_name: str | None = None,
@@ -486,22 +749,29 @@ def start_cost_trial_ai_review(
     edit_token: str = "",
     expected_modified: str = "",
     force: bool = False,
+    reuse_only: bool = False,
     repository: Any | None = None,
     enqueue: Any | None = None,
 ) -> dict:
     if not cost_trial_ai_enabled():
         raise RuntimeError("AI 成本试算功能开关未启用，请暂用兼容计算接口。")
+    if force and reuse_only:
+        raise ValueError("重新让 AI 判断与仅复用已有口径不能同时执行。")
     repo = _repo(repository)
     try:
         inputs = repo.load_trial_inputs(
             str(batch_name), str(version_name or "") or None,
             edit_token=edit_token, expected_modified=expected_modified, write=True,
         )
+        _assert_trial_writable_context(inputs["context"])
         fingerprint = _input_fingerprint(inputs)
         context = inputs["context"]
         batch = str(context.get("batch_name") or context.get("batch") or batch_name)
         version = str(context.get("version_name") or context.get("version") or version_name or "")
-        active = repo.find_active(batch, version, fingerprint)
+        previous_review = _load_previous_trial_review(repo, batch, version)
+        active = None if (force or reuse_only) else repo.find_active(batch, version, fingerprint)
+        if active and bool(_json_dict(active.get("draft_json")).get("force_ai")):
+            active = None
         if active:
             repo.commit()
             return {
@@ -513,6 +783,8 @@ def start_cost_trial_ai_review(
                 "progress_revision": int(active.get("progress_revision") or 0),
             }
         reusable = None if force else repo.find_reusable(batch, version, fingerprint)
+        if reusable and not _ready_matches_previous_review(reusable, previous_review):
+            reusable = None
         if reusable:
             repo.commit()
             return {
@@ -522,6 +794,61 @@ def start_cost_trial_ai_review(
                 "reused": True,
                 "reuse_reason": "SAME_INPUT",
                 "progress_revision": int(reusable.get("progress_revision") or 0),
+            }
+        plan = _decision_plan(inputs, previous_review, force=force)
+        if reuse_only and plan["unresolved"]:
+            for fee in plan["unresolved"]:
+                available = list(fee.get("available_bases") or [])
+                if available:
+                    plan["resolved"][_fee_key(fee)] = {
+                        "basis": _system_fallback_basis(fee, available),
+                        "source": "SYSTEM_FALLBACK",
+                    }
+            plan["unresolved"] = []
+        if not plan["unresolved"]:
+            draft = build_cost_trial_review_draft(
+                items=inputs["items"], fees=inputs["fees"], fx_context=inputs["fx_context"],
+                context=inputs["context"], fee_components=inputs.get("fee_components") or [],
+                ai_result={
+                    "ok": True,
+                    "action": "not_needed",
+                    "model": "",
+                    "rules": [],
+                    "summary": "已沿用当前版本口径，无需调用 AI。",
+                    "_invoked": False,
+                },
+                decision_overrides=plan["resolved"],
+            )
+            created = repo.create_run(
+                {
+                    "batch": batch,
+                    "version": version,
+                    "operator_name": _session_user(),
+                    "status": "READY",
+                    "input_fingerprint": fingerprint,
+                    "progress_revision": 0,
+                    "progress_step": "已有口径已就绪",
+                    "progress_percent": 100,
+                    "model": "",
+                    "prompt_version": PROMPT_VERSION,
+                    "draft_json": draft,
+                    "error_message": "",
+                    "completed_at": _now(),
+                }
+            )
+            repo.commit()
+            return {
+                "ok": True,
+                "run_id": str(created.get("name") or ""),
+                "status": "READY",
+                "reused": bool(plan["resolved"]),
+                "reuse_reason": (
+                    "ADJUSTMENT_DEFAULTS" if reuse_only
+                    else ("PREVIOUS_CHOICES" if plan["resolved"] else "NO_AI_NEEDED")
+                ),
+                "progress_revision": int(created.get("progress_revision") or 0),
+                "ai_invoked": False,
+                "ai_required": False,
             }
         created = repo.create_run(
             {
@@ -535,14 +862,23 @@ def start_cost_trial_ai_review(
                 "progress_percent": 0,
                 "model": "",
                 "prompt_version": PROMPT_VERSION,
-                "draft_json": {},
+                "draft_json": {"force_ai": bool(force)},
                 "error_message": "",
             }
         )
         run_id = str(created.get("name") or "")
         (enqueue or _default_enqueue)(run_id)
         repo.commit()
-        return {"ok": True, "run_id": run_id, "status": "QUEUED", "reused": False, "progress_revision": 0}
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "status": "QUEUED",
+            "reused": False,
+            "progress_revision": 0,
+            "ai_invoked": False,
+            "ai_required": True,
+            "ai_candidate_count": len(plan["unresolved"]),
+        }
     except Exception:
         repo.rollback()
         raise
@@ -556,55 +892,128 @@ def execute_cost_trial_ai_review(
 ) -> dict:
     repo = _repo(repository)
     run = repo.get_run(str(run_id or ""))
-    if str(run.get("status") or "") not in {"QUEUED", "RUNNING"}:
+    if str(run.get("status") or "") != "QUEUED":
         return {"ok": True, "run_id": str(run_id), "status": str(run.get("status") or "")}
     try:
-        repo.save_run(str(run_id), status="RUNNING", progress_step="DeepSeek 正在分析费用口径", progress_percent=30)
+        claimed = _save_run_if_status(
+            repo,
+            str(run_id),
+            "QUEUED",
+            status="RUNNING",
+            progress_step="DeepSeek 正在分析费用口径",
+            progress_percent=30,
+        )
+        if not claimed:
+            current = repo.get_run(str(run_id))
+            repo.commit()
+            return {"ok": True, "run_id": str(run_id), "status": str(current.get("status") or "")}
+        # Publish the claim before loading inputs or calling the external model so a
+        # second worker cannot enter the same run, and later failures can transition
+        # the durable RUNNING state to FAILED.
+        repo.commit()
+        run = repo.get_run(str(run_id))
         inputs = repo.load_trial_inputs(
             str(run.get("batch") or ""), str(run.get("version") or "") or None,
             write=False, trusted=True,
         )
+        _assert_trial_writable_context(inputs["context"])
         if _input_fingerprint(inputs) != str(run.get("input_fingerprint") or ""):
-            repo.save_run(str(run_id), status="STALE", progress_step="试算输入已变化", progress_percent=100)
+            stale = _save_run_if_status(
+                repo, str(run_id), "RUNNING",
+                status="STALE", progress_step="试算输入已变化", progress_percent=100,
+            )
             repo.commit()
+            if not stale:
+                current = repo.get_run(str(run_id))
+                return {"ok": True, "run_id": str(run_id), "status": str(current.get("status") or "")}
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
+        run_meta = _json_dict(run.get("draft_json"))
+        previous_review = _load_previous_trial_review(
+            repo, str(run.get("batch") or ""), str(run.get("version") or "")
+        )
+        plan = _decision_plan(inputs, previous_review, force=bool(run_meta.get("force_ai")))
         # Do not keep cost rows locked while waiting for the external model.
         repo.commit()
-        candidate_fees = [fee for fee in inputs["fees"] if requires_ai_allocation(fee)]
+        candidate_fees = plan["unresolved"]
         suggester = ai_suggester or allocation_service.suggest_allocation_rules_with_ai
-        ai = suggester(
-            items=inputs["items"],
-            candidate_rules=candidate_fees,
-            context={
-                **inputs["context"],
-                "retrieval_context": [],
-                "retrieval_version": "",
-            },
-        )
+        try:
+            ai = suggester(
+                items=inputs["items"],
+                candidate_rules=candidate_fees,
+                context={
+                    **inputs["context"],
+                    "retrieval_context": [],
+                    "retrieval_version": "",
+                },
+            )
+        except Exception as exc:
+            ai = {
+                "ok": False,
+                "action": "failed",
+                "model": "",
+                "rules": [],
+                "reason": f"AI 分摊口径调用失败，已采用系统可用口径：{exc}",
+            }
+        ai = {**dict(ai or {}), "_invoked": bool(candidate_fees)}
         draft = build_cost_trial_review_draft(
             items=inputs["items"], fees=inputs["fees"], fx_context=inputs["fx_context"],
             context=inputs["context"], fee_components=inputs.get("fee_components") or [], ai_result=ai,
+            decision_overrides=plan["resolved"],
         )
         refreshed = repo.load_trial_inputs(
             str(run.get("batch") or ""), str(run.get("version") or "") or None,
             write=False, trusted=True,
         )
+        _assert_trial_writable_context(refreshed["context"])
         if _input_fingerprint(refreshed) != str(run.get("input_fingerprint") or ""):
-            repo.save_run(str(run_id), status="STALE", progress_step="试算输入已变化", progress_percent=100)
+            stale = _save_run_if_status(
+                repo, str(run_id), "RUNNING",
+                status="STALE", progress_step="试算输入已变化", progress_percent=100,
+            )
             repo.commit()
+            if not stale:
+                current = repo.get_run(str(run_id))
+                return {"ok": True, "run_id": str(run_id), "status": str(current.get("status") or "")}
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
-        repo.save_run(
-            str(run_id), status="READY", progress_step="AI 试算建议已生成", progress_percent=100,
+        saved = _save_run_if_status(
+            repo, str(run_id), "RUNNING",
+            status="READY", progress_step="试算口径已准备", progress_percent=100,
             model=draft.get("model") or "", draft_json=draft, error_message="", completed_at=_now(),
         )
+        if not saved:
+            current = repo.get_run(str(run_id))
+            repo.commit()
+            return {
+                "ok": True,
+                "run_id": str(run_id),
+                "status": str(current.get("status") or ""),
+            }
         repo.commit()
-        return {"ok": True, "run_id": str(run_id), "status": "READY"}
+        return {
+            "ok": True,
+            "run_id": str(run_id),
+            "status": "READY",
+            "ai_invoked": bool(draft.get("ai_invoked")),
+            "decision_summary": draft.get("decision_summary") or {},
+        }
     except Exception as exc:
         repo.rollback()
         try:
-            repo.save_run(str(run_id), status="FAILED", progress_step="AI 试算失败", progress_percent=100,
-                          error_message=str(exc)[:2000])
-            repo.commit()
+            failed = _save_run_if_status(
+                repo, str(run_id), "RUNNING",
+                status="FAILED", progress_step="AI 试算失败", progress_percent=100,
+                error_message=str(exc)[:2000],
+            )
+            if failed:
+                repo.commit()
+            else:
+                current = repo.get_run(str(run_id))
+                repo.commit()
+                return {
+                    "ok": True,
+                    "run_id": str(run_id),
+                    "status": str(current.get("status") or ""),
+                }
         except Exception:
             repo.rollback()
         return {"ok": False, "run_id": str(run_id), "status": "FAILED", "message": str(exc)}
@@ -622,8 +1031,9 @@ def get_cost_trial_ai_review_status(
         raise ValueError("AI 试算任务不属于当前批次。")
     revision = int(run.get("progress_revision") or 0)
     status = str(run.get("status") or "")
-    if after_revision is not None and int(after_revision) == revision and status in {"QUEUED", "RUNNING"}:
+    if after_revision is not None and int(after_revision) == revision and status in {"QUEUED", "RUNNING", "CONFIRMING"}:
         return {"ok": True, "run_id": run_id, "status": status, "progress_revision": revision, "unchanged": True}
+    draft = _json_dict(run.get("draft_json"))
     return {
         "ok": True,
         "run_id": str(run.get("name") or run_id),
@@ -636,7 +1046,9 @@ def get_cost_trial_ai_review_status(
         "model": str(run.get("model") or ""),
         "prompt_version": str(run.get("prompt_version") or ""),
         "error_message": str(run.get("error_message") or ""),
-        "draft": _json_dict(run.get("draft_json")),
+        "draft": draft,
+        "ai_invoked": bool(draft.get("ai_invoked")),
+        "decision_summary": draft.get("decision_summary") or {},
         "unchanged": False,
     }
 
@@ -668,11 +1080,15 @@ def preview_cost_trial(
     if str(run.get("status") or "") != "READY":
         raise ValueError("AI 试算建议尚未就绪。")
     inputs = _load_current_run_inputs(repo, batch_name, run)
+    draft = _json_dict(run.get("draft_json"))
     preview = preview_selected_cost_trial(
         items=inputs["items"], fees=inputs["fees"], fx_context=inputs["fx_context"],
-        fee_components=inputs.get("fee_components") or [], draft=_json_dict(run.get("draft_json")), selections=selections,
+        fee_components=inputs.get("fee_components") or [], draft=draft, selections=selections,
     )
     preview["run_id"] = str(run_id)
+    preview["preview_token"] = _run_preview_token(
+        str(run_id), draft, preview["trial_review"]["fee_choices"],
+    )
     return preview
 
 
@@ -692,26 +1108,70 @@ def confirm_cost_trial(
         raise ValueError("AI 试算任务不属于当前批次。")
     if str(run.get("status") or "") != "READY":
         raise ValueError("AI 试算建议已不可确认。")
+    claimed = _save_run_if_status(
+        repo,
+        str(run_id),
+        "READY",
+        status="CONFIRMING",
+        progress_step="正在保存试算",
+        progress_percent=95,
+    )
+    if not claimed:
+        repo.commit()
+        raise ValueError("AI 试算建议已不可确认。")
     try:
+        run = repo.get_run(str(run_id))
         inputs = _load_current_run_inputs(
             repo, batch_name, run, write=True,
             edit_token=edit_token, expected_modified=expected_modified,
         )
+        _assert_trial_writable_context(inputs["context"])
+        draft = _json_dict(run.get("draft_json"))
         preview = preview_selected_cost_trial(
             items=inputs["items"], fees=inputs["fees"], fx_context=inputs["fx_context"],
-            fee_components=inputs.get("fee_components") or [], draft=_json_dict(run.get("draft_json")), selections=selections,
+            fee_components=inputs.get("fee_components") or [], draft=draft, selections=selections,
         )
-        if not hmac.compare_digest(str(preview.get("preview_token") or ""), str(preview_token or "")):
+        expected_token = _run_preview_token(
+            str(run_id), draft, preview["trial_review"]["fee_choices"],
+        )
+        if not hmac.compare_digest(expected_token, str(preview_token or "")):
             raise ValueError("试算预览已失效，请重新预览。")
         trial_review = {**preview["trial_review"], "run_id": str(run_id), "confirmed_by": _session_user()}
         saved = repo.save_calculation(inputs, preview, trial_review)
         saved["trial_review"] = trial_review
-        repo.save_run(str(run_id), status="CONFIRMED", progress_step="AI 试算已确认", progress_percent=100,
-                      selection_json=trial_review, confirmed_at=_now())
+        confirmed = _save_run_if_status(
+            repo,
+            str(run_id),
+            "CONFIRMING",
+            status="CONFIRMED",
+            progress_step="试算已保存",
+            progress_percent=100,
+            selection_json=trial_review,
+            error_message="",
+            confirmed_at=_now(),
+        )
+        if not confirmed:
+            raise RuntimeError("试算任务状态已变化，未保存本次结果。")
         repo.commit()
         return saved
-    except Exception:
+    except Exception as exc:
         repo.rollback()
+        try:
+            released = _save_run_if_status(
+                repo,
+                str(run_id),
+                "CONFIRMING",
+                status="READY",
+                progress_step="试算口径已准备",
+                progress_percent=100,
+                error_message=str(exc)[:2000],
+            )
+            if released:
+                repo.commit()
+            else:
+                repo.rollback()
+        except Exception:
+            repo.rollback()
         raise
 
 
@@ -722,16 +1182,32 @@ def discard_cost_trial_ai_review(
     repository: Any | None = None,
 ) -> dict:
     repo = _repo(repository)
-    run = repo.get_run(str(run_id or ""))
-    if str(run.get("batch") or "") != str(batch_name or ""):
-        raise ValueError("AI 试算任务不属于当前批次。")
-    status = str(run.get("status") or "")
-    if status == "CONFIRMED":
-        return {"ok": True, "run_id": str(run_id), "status": "CONFIRMED"}
-    if status != "DISCARDED":
-        repo.save_run(str(run_id), status="DISCARDED", progress_step="已放弃试算", progress_percent=100)
+    for _attempt in range(2):
+        run = repo.get_run(str(run_id or ""))
+        if str(run.get("batch") or "") != str(batch_name or ""):
+            raise ValueError("AI 试算任务不属于当前批次。")
+        status = str(run.get("status") or "")
+        if status in {"CONFIRMED", "DISCARDED"}:
+            return {"ok": True, "run_id": str(run_id), "status": status}
+        if status == "CONFIRMING":
+            raise ValueError("试算结果正在保存，暂时不能放弃。")
+        discarded = _save_run_if_status(
+            repo,
+            str(run_id),
+            status,
+            status="DISCARDED",
+            progress_step="已放弃试算",
+            progress_percent=100,
+        )
+        if discarded:
+            repo.commit()
+            return {"ok": True, "run_id": str(run_id), "status": "DISCARDED"}
         repo.commit()
-    return {"ok": True, "run_id": str(run_id), "status": "DISCARDED"}
+    current = repo.get_run(str(run_id or ""))
+    current_status = str(current.get("status") or "")
+    if current_status == "CONFIRMING":
+        raise ValueError("试算结果正在保存，暂时不能放弃。")
+    return {"ok": True, "run_id": str(run_id), "status": current_status}
 
 
 def _json_dict(value: Any) -> dict:
@@ -777,6 +1253,21 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
             edit_token=edit_token, expected_modified=expected_modified,
             trusted=bool(trusted or not write),
         )
+        decision_rows = frappe.get_all(
+            "Overseas Cost Item",
+            filters={
+                "batch": context["batch"],
+                "version": context["version"],
+                "is_excluded": 0,
+            },
+            fields=["name", "category", "transport_mode"],
+            limit_page_length=10000,
+        )
+        decision_by_name = {str(row.get("name") or ""): row for row in decision_rows}
+        items = [
+            {**row, **decision_by_name.get(str(row.get("name") or ""), {})}
+            for row in items
+        ]
         public_context = {
             "batch_name": context["batch"],
             "version_name": context["version"],
@@ -793,6 +1284,15 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
             "fx_context": fx_context,
             "fee_components": cost_repo.load_fee_components(context),
         }
+
+    def load_previous_trial_review(self, batch_name, version_name):
+        raw = frappe.db.get_value("Overseas Cost Version", version_name, "summary_snapshot_json")
+        snapshot = _json_dict(raw)
+        review = snapshot.get("ai_cost_trial")
+        if not isinstance(review, dict):
+            comprehensive = snapshot.get("comprehensive_cost")
+            review = comprehensive.get("trial_review") if isinstance(comprehensive, dict) else {}
+        return dict(review) if isinstance(review, dict) else {}
 
     def find_active(self, batch_name, version_name, fingerprint):
         rows = frappe.get_all(
@@ -838,6 +1338,23 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
         frappe.db.set_value(self.RUN_DOCTYPE, run_id, payload, update_modified=True)
         return self.get_run(run_id)
 
+    def save_run_if_status(self, run_id, expected_status, **values):
+        locked = frappe.db.sql(
+            f"SELECT name,status,progress_revision FROM `tab{self.RUN_DOCTYPE}` WHERE name=%s FOR UPDATE",
+            (run_id,), as_dict=True,
+        )
+        if not locked:
+            raise ValueError("未找到 AI 试算任务。")
+        if str(locked[0].get("status") or "") != str(expected_status or ""):
+            return False
+        payload = {
+            key: _json(value) if key.endswith("_json") and not isinstance(value, str) else value
+            for key, value in values.items()
+        }
+        payload["progress_revision"] = int(locked[0].get("progress_revision") or 0) + 1
+        frappe.db.set_value(self.RUN_DOCTYPE, run_id, payload, update_modified=True)
+        return True
+
     def save_calculation(self, inputs, preview, trial_review):
         choices = {row["suggestion_id"]: row for row in trial_review.get("fee_choices") or []}
         draft = _json_dict(self.get_run(trial_review["run_id"]).get("draft_json"))
@@ -863,7 +1380,7 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
             if fee and fee.get("name"):
                 frappe.db.set_value(
                     "Overseas Cost Allocation Rule", fee["name"],
-                    {"allocation_basis": choice["basis"], "remark": f"AI 试算确认：{choice.get('reason') or ''}"[:500]},
+                    {"allocation_basis": choice["basis"], "remark": _choice_audit_remark(choice)[:500]},
                     update_modified=False,
                 )
         result.pop("item_updates", None)
@@ -871,7 +1388,7 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
             **result, "ok": True, "saved": True, "read_only": False,
             "batch_name": inputs["context"]["batch"], "version_name": inputs["context"]["version"],
             "batch_modified": modified, "transport_mode": inputs["context"]["transport_mode"],
-            "message": "AI 口径已确认，试算结果已保存。",
+            "message": "分摊口径已保存，试算结果已更新。",
         }
 
     def commit(self):
