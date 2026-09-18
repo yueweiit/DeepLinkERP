@@ -397,6 +397,44 @@ class TestMESMaterialRequest(UnitTestCase):
 		self.assertEqual(log.status, "Failed")
 		self.assertEqual(log.error_message, "warehouse is mandatory")
 
+	def test_missing_material_request_task_does_not_leave_rq_failure(self):
+		task_name = build_material_request_task_name(
+			"Test Company", f"MES-MISSING-{frappe.generate_hash(length=10)}"
+		)
+
+		with patch(
+			"mes_integration.mes_integration.material_request.frappe.log_error"
+		) as log_error:
+			process_material_request_task(task_name)
+
+		log_error.assert_called_once()
+		self.assertEqual(
+			log_error.call_args.kwargs["reference_doctype"],
+			"MES Material Request Task",
+		)
+		self.assertEqual(log_error.call_args.kwargs["reference_name"], task_name)
+		self.assertIn(task_name, log_error.call_args.kwargs["message"])
+
+	def test_missing_material_request_task_is_not_enqueued(self):
+		task_name = build_material_request_task_name(
+			"Test Company", f"MES-MISSING-QUEUE-{frappe.generate_hash(length=10)}"
+		)
+
+		with (
+			patch("frappe.enqueue") as enqueue,
+			patch(
+				"mes_integration.mes_integration.material_request.frappe.log_error"
+			) as log_error,
+		):
+			from mes_integration.mes_integration.material_request import (
+				enqueue_material_request_task_job,
+			)
+
+			enqueue_material_request_task_job(task_name)
+
+		enqueue.assert_not_called()
+		log_error.assert_called_once()
+
 	def test_rq_wrapper_failure_is_reconciled_to_failed_task(self):
 		task_name = build_material_request_task_name("Test Company", "MES-RQ-FAILED")
 		task = frappe.get_doc(

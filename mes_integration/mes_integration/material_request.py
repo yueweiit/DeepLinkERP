@@ -424,6 +424,16 @@ def schedule_material_request_task(task_name):
 
 def enqueue_material_request_task_job(task_name):
     try:
+        # A queued callback can outlive the task row after a restore, cleanup,
+        # or a manually retried stale RQ job. Do not create another orphan RQ
+        # job in that case; leave a searchable Error Log instead.
+        if not frappe.db.exists(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name):
+            log_missing_material_request_task(
+                task_name,
+                "尝试入队时未找到任务记录，未创建新的 RQ 任务。",
+            )
+            return
+
         frappe.enqueue(
             "mes_integration.mes_integration.material_request.process_material_request_task",
             queue=MES_TASK_QUEUE,
@@ -447,7 +457,19 @@ def enqueue_material_request_task_job(task_name):
 
 def process_material_request_task(task_name):
     """Create and submit one persisted MES task in a background worker."""
-    task = frappe.get_doc(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
+    try:
+        task = frappe.get_doc(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
+    except frappe.DoesNotExistError:
+        # The RQ job may remain in Redis after its ERP task row was deleted or
+        # lost during a restore. Returning normally prevents RQ from retrying
+        # an operation that cannot possibly succeed, while Error Log keeps the
+        # orphan reference and the original job context for diagnosis.
+        log_missing_material_request_task(
+            task_name,
+            "RQ worker 执行时未找到任务记录，任务无法继续处理。",
+        )
+        return
+
     if task.status == "Success":
         return
 
@@ -514,11 +536,21 @@ def process_material_request_task(task_name):
     frappe.db.commit()
 
 
+def log_missing_material_request_task(task_name, message):
+    """Record an orphan MES task reference without raising another RQ error."""
+    frappe.log_error(
+        title="Missing MES Material Request task",
+        message=f"{task_name}\n\n{message}",
+        reference_doctype=MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+        reference_name=task_name,
+    )
+
+
 def mark_material_request_task_failed(task_name, error_message):
     if not frappe.db.exists(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name):
-        frappe.log_error(
-            title="Missing MES Material Request task",
-            message=f"{task_name}\n\n{error_message}",
+        log_missing_material_request_task(
+            task_name,
+            error_message,
         )
         return
 
