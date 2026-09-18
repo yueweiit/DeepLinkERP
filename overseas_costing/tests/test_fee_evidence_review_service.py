@@ -1,5 +1,7 @@
 """费用凭证审核、结算净额与 SKU 税种分项测试。"""
 
+import json
+
 from decimal import Decimal
 
 import pytest
@@ -354,15 +356,77 @@ def test_material_matrix_has_fixed_columns_and_every_item_in_repository_order() 
         "unit": "PCS",
         "hs_code": "90041000",
     }
-    assert list(matrix["rows"][0]["cells"]) == [
-        "IGI",
-        "IVA",
-        "DTA",
-        "PRV",
-        "PRV_IVA",
-        "CUSTOMS_SERVICE",
+    assert list(matrix["rows"][0]["cells"]) == ["IGI"]
+    assert matrix["rows"][1]["cells"] == {}
+    assert matrix["empty_cell"]["origin"] == "EMPTY"
+
+
+def test_material_matrix_empty_rows_use_sparse_cells_and_compact_shared_default() -> None:
+    items = [
+        {
+            "name": f"ITEM-{index:05d}",
+            "stable_line_key": f"LINE-{index:05d}",
+            "material_code": f"M-{index:05d}",
+            "product_name": "测试物料",
+            "quantity": "1",
+            "unit": "PCS",
+            "hs_code": "90041000",
+        }
+        for index in range(10000)
     ]
-    assert matrix["rows"][1]["cells"]["IGI"]["origin"] == "EMPTY"
+
+    matrix = service.build_material_matrix(items=items, components=[])
+    serialized = json.dumps(
+        matrix, ensure_ascii=False, separators=(",", ":"), default=str
+    ).encode("utf-8")
+
+    assert len(matrix["rows"]) == 10000
+    assert all(row["cells"] == {} for row in matrix["rows"])
+    assert matrix["empty_cell"]["origin"] == "EMPTY"
+    assert matrix["empty_cell"]["amount_rmb"] is None
+    assert len(serialized) < 5 * 1024 * 1024
+
+
+def test_material_matrix_high_proposal_dedup_avoids_pairwise_ref_comparisons(
+    monkeypatch,
+) -> None:
+    class CountingRef(dict):
+        comparisons = 0
+
+        def __eq__(self, other):
+            type(self).comparisons += 1
+            return super().__eq__(other)
+
+    components = [
+        {
+            "proposal_id": f"component:{index}",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "component_type": "IMPORT_TAX",
+            "fee_logical_key": "import_tax",
+            "tax_code": "IGI",
+            "currency": "MXN",
+            "original_amount": "1",
+            "amount_rmb": "0.5",
+            "source_evidence": {"row": index},
+            "needs_review": True,
+        }
+        for index in range(300)
+    ]
+    monkeypatch.setattr(
+        service,
+        "_component_source_refs",
+        lambda component: [CountingRef({"row": component["source_evidence"]["row"]})],
+    )
+
+    matrix = service.build_material_matrix(items=_items(), components=components)
+
+    cell = matrix["rows"][0]["cells"]["IGI"]
+    assert cell["original_amount"] == "300.00"
+    assert cell["suggested_amount_rmb"] == "150"
+    assert len(cell["source_proposal_ids"]) == 300
+    assert len(cell["source_refs"]) == 300
+    assert CountingRef.comparisons < 2000
 
 
 def test_material_matrix_uses_complete_raw_items_without_expanding_ai_scope() -> None:
@@ -449,7 +513,7 @@ def test_material_matrix_aggregates_soft_anomaly_component_suggestions() -> None
     cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
     assert cell["original_amount"] == "15.00"
     assert cell["amount_rmb"] == "7.5"
-    assert cell["suggested_amount"] == "7.5"
+    assert cell["suggested_amount_rmb"] == "7.5"
     assert cell["origin"] == "AI"
     assert cell["source_proposal_ids"] == ["component:1", "component:2"]
     assert len(cell["source_refs"]) == 2
@@ -498,7 +562,7 @@ def test_material_matrix_saved_value_precedes_new_suggestion() -> None:
     assert cell["original_amount"] == "198.00"
     assert cell["amount_rmb"] == "99"
     assert cell["suggested_original_amount"] == "10.00"
-    assert cell["suggested_amount"] == "5"
+    assert cell["suggested_amount_rmb"] == "5"
     assert cell["source_proposal_ids"] == ["component:1"]
     assert cell["saved_component_ids"] == ["COMP-SAVED"]
     assert cell["saved_source_refs"] == [{"attachment": "ATT-OLD", "row": 2}]
@@ -550,11 +614,7 @@ def test_material_matrix_keeps_unmatched_lines_outside_material_rows() -> None:
         "ITEM-GLASSES",
         "ITEM-SUNGLASSES",
     ]
-    assert all(
-        cell["origin"] == "EMPTY"
-        for row in matrix["rows"]
-        for cell in row["cells"].values()
-    )
+    assert all(row["cells"] == {} for row in matrix["rows"])
     assert matrix["unmatched_lines"] == draft["unmatched_lines"]
     assert matrix["unmatched_lines"][0]["row_no"] == 77
     assert matrix["unmatched_lines"][0]["reason_code"] == "SKU_MATCH_REQUIRED"
@@ -582,7 +642,7 @@ def test_material_matrix_missing_fx_keeps_rmb_blank() -> None:
     cell = draft["material_matrix"]["rows"][0]["cells"]["IGI"]
     assert cell["original_amount"] == "10.00"
     assert cell["amount_rmb"] is None
-    assert cell["suggested_amount"] is None
+    assert cell["suggested_amount_rmb"] is None
     assert cell["missing_fx"] is True
     assert draft["material_matrix"]["missing_fx"] is True
 
@@ -618,12 +678,58 @@ def test_material_matrix_rejects_structurally_invalid_components(
 
     matrix = service.build_material_matrix(items=_items(), components=[component])
 
-    assert matrix["rows"][0]["cells"]["IGI"]["origin"] == "EMPTY"
+    assert matrix["rows"][0]["cells"] == {}
     assert matrix["unmatched_lines"][0]["reason_code"] == reason_code
     assert matrix["unmatched_lines"][0]["proposal_id"] == "component:invalid"
     assert matrix["unmatched_lines"][0]["source_refs"] == [
         {"attachment": "ATT-1", "row": 8}
     ]
+
+
+@pytest.mark.parametrize(
+    "routing",
+    [
+        {
+            "component_type": "IMPORT_TAX",
+            "logical_fee_key": "import_tax",
+            "tax_code": "CUSTOMS_SERVICE",
+        },
+        {
+            "component_type": "IMPORT_TAX",
+            "logical_fee_key": "customs_clearance_fee",
+            "tax_code": "IGI",
+        },
+        {
+            "component_type": "CUSTOMS_SERVICE",
+            "logical_fee_key": "customs_clearance_fee",
+            "tax_code": "IGI",
+        },
+        {
+            "component_type": "CUSTOMS_SERVICE",
+            "logical_fee_key": "import_tax",
+            "tax_code": "",
+        },
+    ],
+)
+def test_material_matrix_isolates_conflicting_component_routing(routing: dict) -> None:
+    component = {
+        "proposal_id": "component:conflict",
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "currency": "MXN",
+        "original_amount": "10",
+        "amount_rmb": "5",
+        "source_evidence": {"attachment": "ATT-1", "row": 8},
+        **routing,
+    }
+
+    matrix = service.build_material_matrix(items=_items(), components=[component])
+
+    assert matrix["rows"][0]["cells"] == {}
+    assert matrix["unmatched_lines"][0]["reason_code"] == (
+        "MATERIAL_MATRIX_COMPONENT_CONFLICT"
+    )
+    assert matrix["unmatched_lines"][0]["proposal_id"] == "component:conflict"
 
 
 def test_material_matrix_intentionally_excludes_refund_reversals_as_ledger_only() -> None:
@@ -646,7 +752,7 @@ def test_material_matrix_intentionally_excludes_refund_reversals_as_ledger_only(
         ],
     )
 
-    assert matrix["rows"][0]["cells"]["IGI"]["origin"] == "EMPTY"
+    assert matrix["rows"][0]["cells"] == {}
     assert matrix["unmatched_lines"][0]["reason_code"] == "MATERIAL_MATRIX_LEDGER_ONLY"
     assert matrix["component_policy"]["ledger_only"] == "UNMATCHED"
     assert matrix["component_policy"]["negative_amounts"] == "UNMATCHED"
@@ -1449,6 +1555,7 @@ def test_execute_passes_persisted_evidence_role_to_draft(monkeypatch) -> None:
                 "logical_fee_key": "import_tax",
                 "evidence_role": "refund",
                 "attachment": "ATT-1",
+                "evidence": "E-LEGACY",
                 "status": "QUEUED",
                 "source_progress_json": [{}],
             }
@@ -1512,6 +1619,7 @@ def test_execute_passes_persisted_evidence_role_to_draft(monkeypatch) -> None:
 
     assert result["status"] == "READY"
     assert captured["evidence_role"] == "refund"
+    assert captured["existing_components"] == []
 
 
 def test_execute_loads_current_evidence_components_for_material_matrix(monkeypatch) -> None:
@@ -1643,6 +1751,124 @@ def test_repository_parses_saved_component_evidence_and_confidence(monkeypatch) 
     assert "confidence" in captured["fields"]
     assert rows[0]["source_evidence"] == {"attachment": "ATT-OLD", "row": 2}
     assert rows[0]["confidence"] == "0.98"
+
+
+def test_repository_builds_raw_and_projected_item_views_from_one_snapshot(
+    monkeypatch,
+) -> None:
+    raw_items = _items()
+    calls = {"get_all": 0, "project": 0}
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(_doctype, **_kwargs):
+            calls["get_all"] += 1
+            return raw_items
+
+    bundle = {"context": {"root_kind": "expense"}, "source": {}}
+
+    def project_ai_items(items, received_bundle):
+        calls["project"] += 1
+        assert items is raw_items
+        assert received_bundle is bundle
+        return [items[0]]
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe())
+    monkeypatch.setattr(
+        service.effective_source,
+        "current_source_bundle",
+        lambda _batch, _version: bundle,
+    )
+    monkeypatch.setattr(service.effective_source, "project_ai_items", project_ai_items)
+
+    views = service.FrappeFeeEvidenceReviewRepository().get_review_items("B1", "V1")
+
+    assert calls == {"get_all": 1, "project": 1}
+    assert views["matrix_items"] is raw_items
+    assert views["items"] == [raw_items[0]]
+
+
+def test_execute_uses_repository_item_views_once(monkeypatch) -> None:
+    class Repository:
+        def __init__(self):
+            self.item_view_calls = 0
+            self.run = {
+                "name": "RUN-1",
+                "batch": "B1",
+                "version": "V1",
+                "logical_fee_key": "import_tax",
+                "evidence_role": "tax_certificate",
+                "attachment": "ATT-1",
+                "status": "QUEUED",
+                "source_progress_json": [{}],
+            }
+
+        def get_run(self, _run_id):
+            return self.run
+
+        def claim_run(self, _run_id, token):
+            self.run = {**self.run, "status": "RUNNING", "execution_token": token}
+            return self.run
+
+        def get_context(self, _batch, _version):
+            return {"batch": "B1", "version": "V1", "fx_context": {}}
+
+        def get_attachment(self, _batch, _attachment):
+            return {
+                "name": "ATT-1",
+                "file_name": "完税凭证.pdf",
+                "modified": "m1",
+                "parse_status": "Parsed",
+                "parse_result_json": {"parser": "mexico_tax_certificate_pedimento"},
+                "mapped_result_json": {},
+            }
+
+        def get_review_items(self, _batch, _version):
+            self.item_view_calls += 1
+            return {"items": [_items()[0]], "matrix_items": _items()}
+
+        def get_items(self, *_args):
+            raise AssertionError("execution must use the combined item snapshot")
+
+        def get_matrix_items(self, *_args):
+            raise AssertionError("execution must use the combined item snapshot")
+
+        def save_claimed(self, _run_id, token, **updates):
+            assert token == self.run["execution_token"]
+            self.run = {**self.run, **updates}
+            return self.run
+
+        def rollback(self):
+            return None
+
+    repository = Repository()
+    captured = {}
+    monkeypatch.setattr(
+        service,
+        "_parse_attachment_for_review",
+        lambda _attachment, _batch: ({"parser": "mexico_tax_certificate_pedimento"}, ""),
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_ai_review",
+        lambda *_args: {"ok": False, "warning": "", "model": ""},
+    )
+    monkeypatch.setattr(
+        service,
+        "build_fee_evidence_review_draft",
+        lambda **kwargs: captured.update(kwargs)
+        or {"summary": {}, "evidence": {}, "fee_splits": [], "components": []},
+    )
+
+    result = service.execute_fee_evidence_review("RUN-1", repository=repository)
+
+    assert result["status"] == "READY"
+    assert repository.item_view_calls == 1
+    assert [row["name"] for row in captured["items"]] == ["ITEM-GLASSES"]
+    assert [row["name"] for row in captured["matrix_items"]] == [
+        "ITEM-GLASSES",
+        "ITEM-SUNGLASSES",
+    ]
 
 
 def test_execute_claim_loss_never_writes_with_a_new_owners_token() -> None:

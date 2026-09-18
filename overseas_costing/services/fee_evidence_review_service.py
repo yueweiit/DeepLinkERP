@@ -62,9 +62,7 @@ MATERIAL_MATRIX_COLUMNS = (
         "fee_logical_key": "customs_clearance_fee",
     },
 )
-MATERIAL_MATRIX_COLUMN_KEYS = frozenset(
-    column["key"] for column in MATERIAL_MATRIX_COLUMNS
-)
+MATERIAL_MATRIX_TAX_CODES = frozenset({"IGI", "IVA", "DTA", "PRV", "PRV_IVA"})
 MATERIAL_MATRIX_CURRENCIES = frozenset({"RMB", "MXN", "USD"})
 
 
@@ -115,26 +113,92 @@ def _checked(value: Any) -> bool:
     return value in (1, True, "1", "true", "TRUE", "yes", "YES")
 
 
-def _matrix_column_key(component: dict) -> str:
-    if (
-        str(component.get("component_type") or "").upper() == "CUSTOMS_SERVICE"
-        or str(component.get("logical_fee_key") or component.get("fee_logical_key") or "")
-        == "customs_clearance_fee"
-    ):
-        return "CUSTOMS_SERVICE"
+def _matrix_component_route(component: dict) -> tuple[str, bool]:
+    component_type = str(component.get("component_type") or "").upper()
     tax_code = str(component.get("tax_code") or "").strip().upper()
-    return tax_code if tax_code in MATERIAL_MATRIX_COLUMN_KEYS else ""
+    logical_keys = {
+        str(component.get(fieldname) or "")
+        for fieldname in ("logical_fee_key", "fee_logical_key")
+        if component.get(fieldname)
+    }
+    has_tax_metadata = bool(
+        component_type == "IMPORT_TAX"
+        or "import_tax" in logical_keys
+        or tax_code in MATERIAL_MATRIX_TAX_CODES
+    )
+    has_customs_metadata = bool(
+        component_type == "CUSTOMS_SERVICE"
+        or "customs_clearance_fee" in logical_keys
+        or tax_code == "CUSTOMS_SERVICE"
+    )
+    if has_tax_metadata and has_customs_metadata:
+        return "", True
+    if has_customs_metadata:
+        if (
+            tax_code
+            or (component_type and component_type != "CUSTOMS_SERVICE")
+            or any(key != "customs_clearance_fee" for key in logical_keys)
+        ):
+            return "", True
+        return "CUSTOMS_SERVICE", False
+    if has_tax_metadata:
+        if (
+            (component_type and component_type != "IMPORT_TAX")
+            or any(key != "import_tax" for key in logical_keys)
+        ):
+            return "", True
+        return (tax_code, False) if tax_code in MATERIAL_MATRIX_TAX_CODES else ("", False)
+    return "", False
+
+
+def _matrix_column_key(component: dict) -> str:
+    return _matrix_component_route(component)[0]
 
 
 def _component_source_refs(component: dict) -> list[dict]:
-    refs = []
+    refs: dict[str, dict] = {}
     for raw in component.get("source_refs") or []:
-        if isinstance(raw, dict) and raw not in refs:
-            refs.append(dict(raw))
+        if isinstance(raw, dict):
+            normalized = dict(raw)
+            refs.setdefault(_dedupe_key(normalized), normalized)
     source = component.get("source_evidence")
-    if isinstance(source, dict) and source and source not in refs:
-        refs.append(dict(source))
-    return refs
+    if isinstance(source, dict) and source:
+        normalized = dict(source)
+        refs.setdefault(_dedupe_key(normalized), normalized)
+    return list(refs.values())
+
+
+def _dedupe_key(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+
+
+def _empty_material_matrix_cell() -> dict:
+    return {
+        "original_amount": "",
+        "currency": "",
+        "original_amounts_by_currency": {},
+        "amount_rmb": None,
+        "suggested_original_amount": "",
+        "suggested_currency": "",
+        "suggested_original_amounts_by_currency": {},
+        "suggested_amount_rmb": "",
+        "origin": "EMPTY",
+        "status": "EMPTY",
+        "source_proposal_ids": [],
+        "source_refs": [],
+        "saved_component_ids": [],
+        "saved_source_refs": [],
+        "confidences": [],
+        "has_warning": False,
+        "warning": "",
+        "missing_fx": False,
+    }
 
 
 def _component_amounts(rows: list[dict]) -> dict:
@@ -185,7 +249,13 @@ def _matrix_component_problem(component: dict) -> tuple[str, str] | None:
             "MATERIAL_MATRIX_LEDGER_ONLY",
             "结算或冲回分项只保留在台账，不写入物料税费矩阵。",
         )
-    if not _matrix_column_key(component):
+    column_key, has_routing_conflict = _matrix_component_route(component)
+    if has_routing_conflict:
+        return (
+            "MATERIAL_MATRIX_COMPONENT_CONFLICT",
+            "分项类型、逻辑费用与税种路由相互冲突，未写入物料矩阵。",
+        )
+    if not column_key:
         return (
             "MATERIAL_MATRIX_COLUMN_INVALID",
             "分项缺少有效的税种，未写入物料矩阵。",
@@ -217,10 +287,6 @@ def _matrix_component_problem(component: dict) -> tuple[str, str] | None:
             "分项人民币金额必须是有限的非负数。",
         )
     return None
-
-
-def _valid_matrix_component(component: dict) -> bool:
-    return _matrix_component_problem(component) is None
 
 
 def build_material_matrix(
@@ -263,9 +329,7 @@ def build_material_matrix(
                 item = item_by_stable_key.get(str(row.get("stable_line_key") or ""))
                 item_name = str((item or {}).get("name") or "")
             column_key = _matrix_column_key(row)
-            problem = (
-                None if _valid_matrix_component(row) else _matrix_component_problem(row)
-            )
+            problem = _matrix_component_problem(row)
             if item is None:
                 problem = (
                     "MATERIAL_MATRIX_ITEM_INVALID",
@@ -296,55 +360,54 @@ def build_material_matrix(
     for item in items or []:
         item_name = str(item.get("name") or "")
         current_hs = str(item.get("hs_code") or "")
-        hs_suggestions: list[str] = []
-        hs_suggestion_details: list[dict] = []
+        hs_suggestions: dict[str, None] = {}
+        hs_suggestion_details: dict[str, dict] = {}
         cells = {}
         for column in MATERIAL_MATRIX_COLUMNS:
             column_key = column["key"]
             proposals = proposal_groups.get((item_name, column_key), [])
             saved = saved_groups.get((item_name, column_key), [])
+            if not proposals and not saved:
+                continue
             proposed_amounts = _component_amounts(proposals)
             saved_amounts = _component_amounts(saved)
             current_amounts = saved_amounts if saved else proposed_amounts
             origin = "SAVED" if saved else ("AI" if proposals else "EMPTY")
-            warnings: list[str] = []
-            source_proposal_ids = []
-            source_refs = []
-            saved_component_ids = []
-            saved_source_refs = []
-            confidences = []
+            warnings: dict[str, None] = {}
+            source_proposal_ids: dict[str, None] = {}
+            source_refs: dict[str, dict] = {}
+            saved_component_ids: dict[str, None] = {}
+            saved_source_refs: dict[str, dict] = {}
+            confidences: dict[str, None] = {}
             for component in proposals:
                 proposal_id = str(component.get("proposal_id") or "")
-                if proposal_id and proposal_id not in source_proposal_ids:
-                    source_proposal_ids.append(proposal_id)
+                if proposal_id:
+                    source_proposal_ids.setdefault(proposal_id, None)
                 for ref in _component_source_refs(component):
-                    if ref not in source_refs:
-                        source_refs.append(ref)
+                    source_refs.setdefault(_dedupe_key(ref), ref)
                 if component.get("confidence") not in (None, ""):
-                    confidences.append(str(component.get("confidence")))
+                    confidences.setdefault(str(component.get("confidence")), None)
                 if component.get("warning"):
-                    warnings.append(str(component.get("warning")))
+                    warnings.setdefault(str(component.get("warning")), None)
                 if _checked(component.get("needs_review")):
-                    warnings.append("建议需人工复核。")
+                    warnings.setdefault("建议需人工复核。", None)
                 if _checked(component.get("has_conflict")):
-                    warnings.append("建议存在冲突。")
+                    warnings.setdefault("建议存在冲突。", None)
             for component in saved:
                 component_id = str(component.get("name") or "")
-                if component_id and component_id not in saved_component_ids:
-                    saved_component_ids.append(component_id)
+                if component_id:
+                    saved_component_ids.setdefault(component_id, None)
                 for ref in _component_source_refs(component):
-                    if ref not in saved_source_refs:
-                        saved_source_refs.append(ref)
+                    saved_source_refs.setdefault(_dedupe_key(ref), ref)
                 if component.get("confidence") not in (None, ""):
-                    confidences.append(str(component.get("confidence")))
+                    confidences.setdefault(str(component.get("confidence")), None)
 
             for component_origin, component_rows in (("AI", proposals), ("SAVED", saved)):
                 for component in component_rows:
                     voucher_hs = str(component.get("hs_code") or "")
                     if not voucher_hs or _normalize_hs(voucher_hs) == _normalize_hs(current_hs):
                         continue
-                    if voucher_hs not in hs_suggestions:
-                        hs_suggestions.append(voucher_hs)
+                    hs_suggestions.setdefault(voucher_hs, None)
                     detail = {
                         "hs_code": voucher_hs,
                         "origin": component_origin,
@@ -352,29 +415,24 @@ def build_material_matrix(
                         "source_component_id": str(component.get("name") or ""),
                         "source_refs": _component_source_refs(component),
                     }
-                    if detail not in hs_suggestion_details:
-                        hs_suggestion_details.append(detail)
-                    warnings.append(
-                        (
-                            f"凭证 HS {voucher_hs} 与当前物料 HS {current_hs} 不一致。"
-                            if current_hs
-                            else f"当前物料未填写 HS，凭证建议为 {voucher_hs}。"
-                        )
+                    hs_suggestion_details.setdefault(_dedupe_key(detail), detail)
+                    warning = (
+                        f"凭证 HS {voucher_hs} 与当前物料 HS {current_hs} 不一致。"
+                        if current_hs
+                        else f"当前物料未填写 HS，凭证建议为 {voucher_hs}。"
                     )
+                    warnings.setdefault(warning, None)
             cell_missing_fx = bool(
                 proposed_amounts["missing_fx"] or saved_amounts["missing_fx"]
             )
             matrix_missing_fx = matrix_missing_fx or cell_missing_fx
             if cell_missing_fx:
-                warnings.append("缺少人民币换算汇率。")
+                warnings.setdefault("缺少人民币换算汇率。", None)
             if proposed_amounts["mixed_currency"] or saved_amounts["mixed_currency"]:
-                warnings.append("同一单元格包含多种原币，原币合计仅按币种展示。")
+                warnings.setdefault("同一单元格包含多种原币，原币合计仅按币种展示。", None)
             if saved and proposals:
-                warnings.append("已保存值优先，AI／规则建议仅供对照。")
-            unique_warnings = []
-            for warning in warnings:
-                if warning and warning not in unique_warnings:
-                    unique_warnings.append(warning)
+                warnings.setdefault("已保存值优先，AI／规则建议仅供对照。", None)
+            unique_warnings = list(warnings)
             cells[column_key] = {
                 "original_amount": current_amounts["original_amount"] if origin != "EMPTY" else "",
                 "currency": current_amounts["currency"] if origin != "EMPTY" else "",
@@ -387,14 +445,14 @@ def build_material_matrix(
                 "suggested_original_amounts_by_currency": (
                     proposed_amounts["original_amounts_by_currency"] if proposals else {}
                 ),
-                "suggested_amount": proposed_amounts["amount_rmb"] if proposals else "",
+                "suggested_amount_rmb": proposed_amounts["amount_rmb"] if proposals else "",
                 "origin": origin,
                 "status": "CONFIRMED" if saved else ("SUGGESTED" if proposals else "EMPTY"),
-                "source_proposal_ids": source_proposal_ids,
-                "source_refs": source_refs,
-                "saved_component_ids": saved_component_ids,
-                "saved_source_refs": saved_source_refs,
-                "confidences": confidences,
+                "source_proposal_ids": list(source_proposal_ids),
+                "source_refs": list(source_refs.values()),
+                "saved_component_ids": list(saved_component_ids),
+                "saved_source_refs": list(saved_source_refs.values()),
+                "confidences": list(confidences),
                 "has_warning": bool(unique_warnings),
                 "warning": " ".join(unique_warnings),
                 "missing_fx": cell_missing_fx,
@@ -408,13 +466,14 @@ def build_material_matrix(
                 "quantity": item.get("quantity"),
                 "unit": str(item.get("unit") or ""),
                 "hs_code": current_hs,
-                "hs_suggestions": hs_suggestions,
-                "hs_suggestion_details": hs_suggestion_details,
+                "hs_suggestions": list(hs_suggestions),
+                "hs_suggestion_details": list(hs_suggestion_details.values()),
                 "cells": cells,
             }
         )
     return {
         "columns": [dict(column) for column in MATERIAL_MATRIX_COLUMNS],
+        "empty_cell": _empty_material_matrix_cell(),
         "rows": matrix_rows,
         "unmatched_lines": matrix_unmatched,
         "missing_fx": matrix_missing_fx,
@@ -1607,9 +1666,18 @@ class FrappeFeeEvidenceReviewRepository:
         )
         return rows
 
+    def get_review_items(self, batch_name: str, version_name: str) -> dict:
+        """Derive raw matrix rows and AI projection from one database snapshot."""
+
+        matrix_items = self.get_matrix_items(batch_name, version_name)
+        items = effective_source.project_ai_items(
+            matrix_items,
+            effective_source.current_source_bundle(batch_name, version_name),
+        )
+        return {"items": items, "matrix_items": matrix_items}
+
     def get_items(self, batch_name: str, version_name: str) -> list[dict]:
-        rows = self.get_matrix_items(batch_name, version_name)
-        return effective_source.project_ai_items(rows, effective_source.current_source_bundle(batch_name, version_name))
+        return self.get_review_items(batch_name, version_name)["items"]
 
     def lock_batch(self, batch_name: str) -> None:
         effective_source.current_source_bundle(batch_name, lock=True)
@@ -2441,13 +2509,19 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
         if attachment.get('source_context') and initial_fingerprint != str(_run_value(run, 'input_fingerprint') or ''):
             persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
             return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
-        items = repo.get_items(context["batch"], context["version"])
-        get_matrix_items = getattr(repo, "get_matrix_items", None)
-        matrix_items = (
-            get_matrix_items(context["batch"], context["version"])
-            if callable(get_matrix_items)
-            else items
-        )
+        get_review_items = getattr(repo, "get_review_items", None)
+        if callable(get_review_items):
+            item_views = get_review_items(context["batch"], context["version"])
+            items = item_views.get("items") or []
+            matrix_items = item_views.get("matrix_items") or []
+        else:
+            items = repo.get_items(context["batch"], context["version"])
+            get_matrix_items = getattr(repo, "get_matrix_items", None)
+            matrix_items = (
+                get_matrix_items(context["batch"], context["version"])
+                if callable(get_matrix_items)
+                else items
+            )
         progress = _json_list(_run_value(run, "source_progress_json")) or [{}]
         progress[0].update({"status": "READING", "detail": "正在解析/OCR"})
         persist(progress_step="解析／OCR", progress_percent=30, source_progress_json=progress)
@@ -2468,8 +2542,11 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
         ai = _semantic_ai_review(parsed, attachment, items) if parsed else {"ok": False, "warning": parse_warning, "model": ""}
         evidence_name = str(_run_value(run, "evidence") or "")
+        load_evidence_components = getattr(repo, "get_evidence_components", None)
         existing_components = (
-            repo.get_evidence_components(evidence_name) if evidence_name else []
+            load_evidence_components(evidence_name)
+            if evidence_name and callable(load_evidence_components)
+            else []
         )
         draft = build_fee_evidence_review_draft(
             logical_fee_key=str(_run_value(run, "logical_fee_key")),
@@ -2494,8 +2571,10 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
                 fee_rule=str(_run_value(run, "fee_rule") or ""),
                 candidates=candidates,
                 components_by_evidence={
-                    str(row.get("name") or ""): repo.get_evidence_components(
-                        str(row.get("name") or "")
+                    str(row.get("name") or ""): (
+                        load_evidence_components(str(row.get("name") or ""))
+                        if callable(load_evidence_components)
+                        else []
                     )
                     for row in candidates
                 },
