@@ -24,6 +24,23 @@ frappe.query_reports["Stock Projected Qty"] = {
 			},
 		},
 		{
+			fieldname: "warehouse_name",
+			label: __("Warehouse Name"),
+			fieldtype: "Link",
+			options: "Warehouse",
+			get_query: () => {
+				const company = frappe.query_report.get_filter_value("company");
+				const filters = { is_group: 1, disabled: 0 };
+				if (company) filters.company = company;
+				return { filters };
+			},
+		},
+		{
+			fieldname: "location_code",
+			label: __("Location Code"),
+			fieldtype: "Data",
+		},
+		{
 			fieldname: "item_code",
 			label: __("Item"),
 			fieldtype: "Link",

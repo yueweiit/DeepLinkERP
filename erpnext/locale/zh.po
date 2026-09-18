@@ -28018,6 +28018,10 @@ msgstr "借款及预付款（资产）"
 msgid "Local"
 msgstr "当地"
 
+#: erpnext/stock/report/stock_projected_qty/stock_projected_qty.py:145
+msgid "Location Code"
+msgstr "库位号"
+
 #. Label of the sb_location_details (Section Break) field in DocType 'Location'
 #: erpnext/assets/doctype/location/location.json
 msgid "Location Details"

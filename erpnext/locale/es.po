@@ -28025,6 +28025,10 @@ msgstr "INVERSIONES Y PRESTAMOS"
 msgid "Local"
 msgstr "Local"
 
+#: erpnext/stock/report/stock_projected_qty/stock_projected_qty.py:145
+msgid "Location Code"
+msgstr "Código de ubicación"
+
 #. Label of the sb_location_details (Section Break) field in DocType 'Location'
 #: erpnext/assets/doctype/location/location.json
 msgid "Location Details"
@@ -59916,4 +59920,3 @@ msgstr "{} {} ya está vinculado con {} {}"
 #: erpnext/accounts/doctype/bank_transaction/bank_transaction.py:391
 msgid "{} {} is not affecting bank account {}"
 msgstr ""
-
