@@ -465,12 +465,42 @@ def _finalize_component_contract(draft: dict) -> dict:
     instead of returning a plausible but incomplete legacy list.
     """
 
-    if str((draft.get("component_contract") or {}).get("mode") or "") == (
-        "INDEXED_COLUMNS_V1"
-    ):
-        if _serialized_payload_size(draft) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
+    contract = draft.get("component_contract") or {}
+    if str(contract.get("mode") or "") == "INDEXED_COLUMNS_V1":
+        component_store = draft.get("component_store") or {}
+        if str(component_store.get("format") or "") != "INDEXED_COLUMNS_V1":
+            raise ValueError("费用凭证分项索引存储结构无效，请重新发起审核。")
+        existing_count = int(component_store.get("count") or 0)
+        if int(contract.get("component_count") or 0) != existing_count:
+            raise ValueError("费用凭证分项索引数量不一致，请重新发起审核。")
+        additions = draft.get("components") or []
+        if any(not isinstance(row, dict) for row in additions):
+            raise ValueError("费用凭证分项草稿包含无效记录。")
+        result = draft
+        if additions:
+            merged = [
+                _component_store_row(component_store, row_index)
+                for row_index in range(existing_count)
+            ]
+            if any(not row for row in merged):
+                raise ValueError("费用凭证分项索引存储结构无效，请重新发起审核。")
+            merged.extend(dict(row) for row in additions)
+            result = {
+                **draft,
+                "components": [],
+                "component_store": _build_component_store(merged),
+                "component_contract": {
+                    **contract,
+                    "component_count": len(merged),
+                },
+                "summary": {
+                    **(draft.get("summary") or {}),
+                    "component_proposal_count": len(merged),
+                },
+            }
+        if _serialized_payload_size(result) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
             raise ValueError("费用凭证审核草稿超过安全上限，请缩小本次审核范围。")
-        return draft
+        return result
 
     raw_components = draft.get("components") or []
     if any(not isinstance(row, dict) for row in raw_components):
@@ -512,7 +542,7 @@ def _matrix_proposal_components(
     components: list[dict],
     component_store: dict | None,
 ) -> list[dict]:
-    if components:
+    if str((component_store or {}).get("format") or "") != "INDEXED_COLUMNS_V1":
         return _indexed_matrix_components(indexes, components)
     result = []
     for raw_index in indexes or []:
@@ -1183,7 +1213,7 @@ def add_refund_review_proposals(
     }
     evidence = result["evidence"]
     if str(evidence.get("evidence_type") or "").upper() != "REFUND":
-        return result
+        return _finalize_component_contract(result)
     refund = {
         **evidence,
         "batch": batch_name,
@@ -1235,14 +1265,14 @@ def add_refund_review_proposals(
                 row["warning"] = "请先确认该冲回分项对应的原付款。"
                 result["components"].append(row)
         result["summary"]["component_proposal_count"] = len(result["components"])
-        return result
+        return _finalize_component_contract(result)
     parent = compatible[0]
     original_components = components_by_evidence.get(str(parent.get("name") or "")) or []
     if not original_components:
         evidence["needs_review"] = True
         evidence["default_selected"] = False
         evidence["warning"] = "原付款没有可验证的 SKU 分项，退款暂不自动冲回。"
-        return result
+        return _finalize_component_contract(result)
     try:
         reversals = build_refund_reversal_components(
             evidence.get("original_amount"), original_components
@@ -1251,7 +1281,7 @@ def add_refund_review_proposals(
         evidence["needs_review"] = True
         evidence["default_selected"] = False
         evidence["warning"] = str(exc)
-        return result
+        return _finalize_component_contract(result)
     evidence["related_evidence"] = parent["name"]
     refund_source = next(
         (
@@ -1272,7 +1302,7 @@ def add_refund_review_proposals(
         row["needs_review"] = not default_selected
         result["components"].append(row)
     result["summary"]["component_proposal_count"] = len(result["components"])
-    return result
+    return _finalize_component_contract(result)
 
 
 def split_customs_evidence(parsed: dict) -> dict:
@@ -2898,6 +2928,7 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
         )
         attachment_fingerprint = _attachment_fingerprint(attachment)
         draft['source_context'] = effective_source.public_context(context.get('effective_source') or attachment.get('source_context') or {})
+        draft = _finalize_component_contract(draft)
         if hasattr(repo, 'lock_batch'):
             repo.lock_batch(context['batch'])
         refreshed = repo.get_context(context['batch'], context['version'])
@@ -3008,17 +3039,24 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
         if str(row.get("proposal_id") or "") in selected:
             fee_rows.append(row)
     components = []
-    legacy_components = draft.get("components") or []
+    component_draft = draft
+    if (
+        str((draft.get("component_contract") or {}).get("mode") or "")
+        == "INDEXED_COLUMNS_V1"
+        and draft.get("components")
+    ):
+        component_draft = _finalize_component_contract(draft)
+    legacy_components = component_draft.get("components") or []
     if legacy_components:
         for raw in legacy_components:
             row = dict(raw)
             apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
             if str(row.get("proposal_id") or "") in selected:
                 components.append(row)
-    elif str((draft.get("component_contract") or {}).get("mode") or "") == (
+    elif str((component_draft.get("component_contract") or {}).get("mode") or "") == (
         "INDEXED_COLUMNS_V1"
     ):
-        component_store = draft.get("component_store") or {}
+        component_store = component_draft.get("component_store") or {}
         if str(component_store.get("format") or "") != "INDEXED_COLUMNS_V1":
             raise ValueError("费用凭证分项索引存储结构无效，请重新发起审核。")
         for row_index in range(int(component_store.get("count") or 0)):

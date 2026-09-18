@@ -1629,6 +1629,95 @@ def test_unique_refund_parent_adds_reviewable_sku_reversal_proposals() -> None:
     assert all(row["default_selected"] for row in result["components"])
 
 
+def test_large_indexed_draft_keeps_original_and_refund_components_in_one_contract() -> None:
+    draft = service._finalize_component_contract(
+        {
+            "evidence": {
+                "proposal_id": "evidence:classification",
+                "evidence_type": "REFUND",
+                "accounting_role": "SETTLEMENT",
+                "direction": "CREDIT",
+                "currency": "MXN",
+                "original_amount": "5",
+                "default_selected": True,
+                "source_refs": [
+                    {"attachment": "ATT-R", "page": 1, "text_line": 8}
+                ],
+            },
+            "components": [
+                {
+                    "proposal_id": f"component:{index + 1}",
+                    "fee_logical_key": "import_tax",
+                    "item": "ITEM-GLASSES",
+                    "stable_line_key": "LINE-GLASSES",
+                    "component_type": "IMPORT_TAX",
+                    "accounting_role": "FINAL_BILL",
+                    "cost_effect": "COST",
+                    "tax_code": "IGI",
+                    "currency": "MXN",
+                    "original_amount": "1",
+                    "amount_rmb": "0.5",
+                }
+                for index in range(service.LEGACY_COMPONENT_LIMIT + 1)
+            ],
+            "summary": {
+                "component_proposal_count": service.LEGACY_COMPONENT_LIMIT + 1
+            },
+        }
+    )
+    payment = {
+        "name": "PAYMENT-1",
+        "batch": "B1",
+        "version": "V1",
+        "fee_rule": "F1",
+        "evidence_type": "PAYMENT",
+        "accounting_role": "SETTLEMENT",
+        "currency": "MXN",
+        "validation_status": "VALID",
+    }
+
+    result = service.add_refund_review_proposals(
+        draft,
+        batch_name="B1",
+        version_name="V1",
+        fee_rule="F1",
+        candidates=[payment],
+        components_by_evidence={
+            "PAYMENT-1": [
+                {
+                    "name": "PARENT-COMPONENT",
+                    "logical_fee_key": "import_tax",
+                    "item": "ITEM-GLASSES",
+                    "stable_line_key": "LINE-GLASSES",
+                    "currency": "MXN",
+                    "original_amount": "10",
+                    "amount_rmb": "5",
+                }
+            ]
+        },
+    )
+
+    assert result["components"] == []
+    assert result["component_store"]["count"] == service.LEGACY_COMPONENT_LIMIT + 2
+    assert result["component_contract"]["component_count"] == (
+        service.LEGACY_COMPONENT_LIMIT + 2
+    )
+    assert result["summary"]["component_proposal_count"] == (
+        service.LEGACY_COMPONENT_LIMIT + 2
+    )
+    _, _, selected = service._selected_proposals(
+        result,
+        ["component:1", "refund-component:1"],
+        {},
+    )
+    assert [row["proposal_id"] for row in selected] == [
+        "component:1",
+        "refund-component:1",
+    ]
+    assert selected[0]["original_amount"] == "1"
+    assert selected[1]["original_amount"] == "-5.00"
+
+
 def test_ambiguous_refund_parent_stays_unlinked_and_requires_review() -> None:
     draft = {
         "evidence": {
@@ -1957,6 +2046,106 @@ def test_execute_passes_persisted_evidence_role_to_draft(monkeypatch) -> None:
     assert result["status"] == "READY"
     assert captured["evidence_role"] == "refund"
     assert captured["existing_components"] == []
+
+
+def test_execute_rechecks_final_draft_size_after_adding_source_context(
+    monkeypatch,
+) -> None:
+    class Repository:
+        def __init__(self):
+            self.run = {
+                "name": "RUN-LIMIT",
+                "batch": "B1",
+                "version": "V1",
+                "logical_fee_key": "import_tax",
+                "evidence_role": "tax_certificate",
+                "attachment": "ATT-1",
+                "status": "QUEUED",
+                "source_progress_json": [{}],
+            }
+
+        def get_run(self, _run_id):
+            return self.run
+
+        def claim_run(self, _run_id, token):
+            self.run = {**self.run, "status": "RUNNING", "execution_token": token}
+            return self.run
+
+        def get_context(self, _batch, _version):
+            return {
+                "batch": "B1",
+                "version": "V1",
+                "fx_context": {},
+                "effective_source": {},
+            }
+
+        def get_attachment(self, _batch, _attachment):
+            return {
+                "name": "ATT-1",
+                "file_name": "tax.pdf",
+                "modified": "m1",
+                "parse_status": "Parsed",
+                "parse_result_json": {"parser": "test"},
+                "mapped_result_json": {},
+            }
+
+        def get_items(self, _batch, _version):
+            return []
+
+        def save_claimed(self, _run_id, token, **updates):
+            assert token == self.run["execution_token"]
+            self.run = {**self.run, **updates}
+            return self.run
+
+        def rollback(self):
+            return None
+
+    draft = {
+        "summary": {},
+        "evidence": {},
+        "fee_splits": [],
+        "components": [],
+        "padding": "",
+    }
+    draft["padding"] = "x" * (
+        service.FEE_EVIDENCE_DRAFT_MAX_BYTES
+        - service._serialized_payload_size(draft)
+        - 128
+    )
+    assert service._serialized_payload_size(draft) < (
+        service.FEE_EVIDENCE_DRAFT_MAX_BYTES
+    )
+    repository = Repository()
+    monkeypatch.setattr(
+        service,
+        "_parse_attachment_for_review",
+        lambda _attachment, _batch: ({"parser": "test"}, ""),
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_ai_review",
+        lambda *_args: {"ok": False, "warning": "", "model": ""},
+    )
+    monkeypatch.setattr(
+        service,
+        "build_fee_evidence_review_draft",
+        lambda **_kwargs: dict(draft),
+    )
+    monkeypatch.setattr(
+        service.effective_source,
+        "public_context",
+        lambda _context: {"detail": "y" * 512},
+    )
+
+    result = service.execute_fee_evidence_review(
+        "RUN-LIMIT",
+        repository=repository,
+    )
+
+    assert result["status"] == "FAILED"
+    assert repository.run["status"] == "FAILED"
+    assert "安全上限" in repository.run["error_message"]
+    assert "draft_json" not in repository.run
 
 
 def test_execute_loads_current_evidence_components_for_material_matrix(monkeypatch) -> None:
