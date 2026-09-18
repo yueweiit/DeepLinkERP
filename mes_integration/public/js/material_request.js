@@ -19,31 +19,26 @@ frappe.ui.form.on("Material Request", {
 	},
 
 	onload: function(frm) {
-		load_mes_integration_enabled(frm).then(function() {
-			refresh_mes_material_request_ui(frm);
-		});
+		return load_mes_material_request_integration_enabled(frm);
 	},
 
 	onload_post_render: function(frm) {
-		refresh_mes_material_request_ui(frm);
+		return load_and_refresh_mes_material_request_ui(frm);
 	},
 
 	refresh: function(frm) {
-		load_mes_integration_enabled(frm).then(function() {
-			refresh_mes_material_request_ui(frm);
-		});
+		return load_and_refresh_mes_material_request_ui(frm);
 	},
 
 	company: function(frm) {
 		frm._mes_integration_company = null;
 		frm._mes_integration_enabled = false;
-		load_mes_integration_enabled(frm).then(function() {
-			refresh_mes_material_request_ui(frm);
-		});
+		frm._mes_integration_enabled_promise = null;
+		return load_and_refresh_mes_material_request_ui(frm);
 	},
 
 	on_submit: function(frm) {
-		if (frm._mes_submit_and_issue || !is_mes_integration_enabled(frm)) {
+		if (frm._mes_submit_and_issue || !is_mes_material_request_integration_enabled(frm)) {
 			return;
 		}
 
@@ -72,30 +67,65 @@ frappe.ui.form.on("MES Material Request Item Detail", {
 });
 
 
-function load_mes_integration_enabled(frm) {
+function load_and_refresh_mes_material_request_ui(frm) {
+	return load_mes_material_request_integration_enabled(frm).then(function() {
+		refresh_mes_material_request_ui(frm);
+	});
+}
+
+function load_mes_material_request_integration_enabled(frm) {
 	if (!frm || !frm.doc || !frm.doc.company) {
-		frm._mes_integration_enabled = false;
+		if (frm) {
+			frm._mes_integration_company = null;
+			frm._mes_integration_enabled = false;
+			frm._mes_integration_enabled_promise = null;
+		}
 		return Promise.resolve(false);
 	}
 
 	if (frm._mes_integration_company === frm.doc.company) {
+		if (frm._mes_integration_enabled_promise) {
+			return frm._mes_integration_enabled_promise;
+		}
 		return Promise.resolve(Boolean(frm._mes_integration_enabled));
 	}
 
-	frm._mes_integration_company = frm.doc.company;
-	return frappe.db.get_value("Company", frm.doc.company, "custom_enable_mes_integration").then(function(r) {
-		const value = r && r.message ? r.message.custom_enable_mes_integration : 0;
-		frm._mes_integration_enabled = cint(value) === 1;
-		return frm._mes_integration_enabled;
-	});
+	const company = frm.doc.company;
+	frm._mes_integration_company = company;
+	frm._mes_integration_enabled = false;
+
+	const enabled_promise = frappe.db
+		.get_value("Company", company, "custom_enable_mes_integration")
+		.then(function(r) {
+			const value = r && r.message ? r.message.custom_enable_mes_integration : 0;
+			const enabled = cint(value) === 1;
+			if (frm.doc && frm.doc.company === company && frm._mes_integration_company === company) {
+				frm._mes_integration_enabled = enabled;
+			}
+			return enabled;
+		})
+		.catch(function() {
+			if (frm.doc && frm.doc.company === company && frm._mes_integration_company === company) {
+				frm._mes_integration_enabled = false;
+			}
+			return false;
+		})
+		.finally(function() {
+			if (frm._mes_integration_enabled_promise === enabled_promise) {
+				frm._mes_integration_enabled_promise = null;
+			}
+		});
+
+	frm._mes_integration_enabled_promise = enabled_promise;
+	return enabled_promise;
 }
 
-function is_mes_integration_enabled(frm) {
+function is_mes_material_request_integration_enabled(frm) {
 	return Boolean(frm && frm._mes_integration_enabled);
 }
 
 function refresh_mes_material_request_ui(frm) {
-	if (!is_mes_integration_enabled(frm)) {
+	if (!is_mes_material_request_integration_enabled(frm)) {
 		frm.remove_custom_button(__("提交并发料"));
 		frm.remove_custom_button(__("发料并推送至DLM"));
 		frm.remove_custom_button(__("生成物料移动"));
@@ -353,7 +383,7 @@ function add_custom_issue_stock_entry_button(frm) {
 
 function can_submit_and_issue_material_request(frm) {
 
-	if (!is_mes_integration_enabled(frm)) {
+	if (!is_mes_material_request_integration_enabled(frm)) {
 		return false;
 	}
 	return (
@@ -912,7 +942,7 @@ function style_submit_and_issue_button(frm) {
 
 function show_issue_stock_entry_prompt(frm) {
 
-	if (!is_mes_integration_enabled(frm)) {
+	if (!is_mes_material_request_integration_enabled(frm)) {
 		return;
 	}
 	if (!can_create_issue_stock_entry(frm)) {
@@ -939,7 +969,7 @@ function show_issue_stock_entry_prompt(frm) {
 }
 
 function can_create_issue_stock_entry(frm) {
-	if (!is_mes_integration_enabled(frm) || !is_mes_material_request(frm)) {
+	if (!is_mes_material_request_integration_enabled(frm) || !is_mes_material_request(frm)) {
 		return false;
 	}
 
