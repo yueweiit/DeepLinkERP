@@ -3716,6 +3716,160 @@ def test_apply_material_matrix_preserves_distinct_existing_ledger_rows_with_same
     assert len(saved) == 2
 
 
+def test_apply_material_matrix_reinserts_all_external_components_for_other_fee() -> None:
+    repository = _MatrixApplyRepository()
+    repository.fees["other_fee"] = {
+        "name": "F-other_fee",
+        "logical_fee_key": "other_fee",
+        "amount": "20",
+        "currency": "MXN",
+    }
+    shared = {
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "logical_fee_key": "other_fee",
+        "component_type": "OTHER",
+        "tax_code": "",
+        "hs_code": "90041000",
+        "currency": "MXN",
+        "original_amount": "5.00",
+        "amount_rmb": "2.50",
+        "exchange_rate": "0.5",
+        "allocation_basis": "legacy_external",
+        "confidence": "1.00",
+    }
+    repository.current_components = [
+        {
+            **shared,
+            "name": "OTHER-COST",
+            "accounting_role": "FINAL_BILL",
+            "cost_effect": "COST",
+            "source_evidence": {"attachment": "ATT-1", "kind": "other-cost"},
+        },
+        {
+            **shared,
+            "name": "OTHER-LEDGER",
+            "accounting_role": "SETTLEMENT",
+            "cost_effect": "LEDGER_ONLY",
+            "source_evidence": {"attachment": "ATT-1", "kind": "other-ledger"},
+        },
+    ]
+
+    _apply_matrix(repository, {"cells": []})
+
+    other_fee = next(
+        row for row in repository.replaced if row["logical_fee_key"] == "other_fee"
+    )
+    assert len(other_fee["components"]) == 2
+    assert {row["cost_effect"] for row in other_fee["components"]} == {
+        "COST",
+        "LEDGER_ONLY",
+    }
+    assert {
+        row["source_evidence"]["kind"] for row in other_fee["components"]
+    } == {"other-cost", "other-ledger"}
+
+
+def test_apply_material_matrix_clear_preserves_unroutable_cost_with_same_import_tax_key() -> None:
+    repository = _MatrixApplyRepository()
+    repository.current_components = [
+        {
+            "name": "MATRIX-MANAGED-COST",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "logical_fee_key": "import_tax",
+            "component_type": "IMPORT_TAX",
+            "accounting_role": "FINAL_BILL",
+            "cost_effect": "COST",
+            "tax_code": "IGI",
+            "hs_code": "90041000",
+            "currency": "MXN",
+            "original_amount": "8.00",
+            "amount_rmb": "4.00",
+            "exchange_rate": "0.5",
+            "allocation_basis": "matrix_managed",
+            "source_evidence": {"attachment": "ATT-1", "kind": "managed"},
+        },
+        {
+            "name": "UNROUTABLE-COST",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "logical_fee_key": "import_tax",
+            "component_type": "OTHER",
+            "accounting_role": "FINAL_BILL",
+            "cost_effect": "COST",
+            "tax_code": "",
+            "hs_code": "90041000",
+            "currency": "MXN",
+            "original_amount": "6.00",
+            "amount_rmb": "3.00",
+            "exchange_rate": "0.5",
+            "allocation_basis": "legacy_external",
+            "source_evidence": {"attachment": "ATT-1", "kind": "unroutable"},
+        },
+    ]
+
+    _apply_matrix(repository, {"cells": []})
+
+    import_tax = next(
+        row for row in repository.replaced if row["logical_fee_key"] == "import_tax"
+    )
+    assert len(import_tax["components"]) == 1
+    saved = import_tax["components"][0]
+    assert saved["component_type"] == "OTHER"
+    assert saved["cost_effect"] == "COST"
+    assert saved["source_evidence"]["kind"] == "unroutable"
+
+
+def test_apply_material_matrix_preserves_selected_external_cost_proposal() -> None:
+    repository = _MatrixApplyRepository()
+    repository.fees["other_fee"] = {
+        "name": "F-other_fee",
+        "logical_fee_key": "other_fee",
+        "amount": "20",
+        "currency": "MXN",
+    }
+    repository.draft["components"].append(
+        {
+            "proposal_id": "component:external-other",
+            "item": "ITEM-GLASSES",
+            "stable_line_key": "LINE-GLASSES",
+            "component_type": "OTHER",
+            "accounting_role": "FINAL_BILL",
+            "cost_effect": "COST",
+            "tax_code": "",
+            "hs_code": "90041000",
+            "currency": "MXN",
+            "original_amount": "5.00",
+            "amount_rmb": "2.50",
+            "exchange_rate": "0.5",
+            "allocation_basis": "selected_external",
+            "source_evidence": {"attachment": "ATT-1", "kind": "selected"},
+            "confidence": "1.00",
+            "fee_logical_key": "other_fee",
+        }
+    )
+    repository.run["draft_json"] = repository.draft
+
+    _apply_matrix(
+        repository,
+        {"cells": []},
+        selections=[
+            "evidence:classification",
+            "fee:import_tax",
+            "component:external-other",
+        ],
+    )
+
+    other_fee = next(
+        row for row in repository.replaced if row["logical_fee_key"] == "other_fee"
+    )
+    assert len(other_fee["components"]) == 1
+    saved = other_fee["components"][0]
+    assert saved["component_type"] == "OTHER"
+    assert saved["source_evidence"]["kind"] == "selected"
+
+
 @pytest.mark.parametrize("hard_problem", ["ledger", "currency", "not_in_cell"])
 def test_apply_material_matrix_source_must_be_valid_member_of_draft_cell(
     hard_problem,

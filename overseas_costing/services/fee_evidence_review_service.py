@@ -64,6 +64,9 @@ MATERIAL_MATRIX_COLUMNS = (
     },
 )
 MATERIAL_MATRIX_TAX_CODES = frozenset({"IGI", "IVA", "DTA", "PRV", "PRV_IVA"})
+MATERIAL_MATRIX_COLUMN_KEYS = frozenset(
+    str(column["key"]) for column in MATERIAL_MATRIX_COLUMNS
+)
 MATERIAL_MATRIX_CURRENCIES = frozenset({"RMB", "MXN", "USD"})
 LEGACY_COMPONENT_LIMIT = 5000
 FEE_EVIDENCE_DRAFT_MAX_BYTES = 12 * 1024 * 1024
@@ -3961,15 +3964,21 @@ def _material_matrix_saved_fee_keys(draft: dict) -> set[str]:
     return result
 
 
-def _is_matrix_external_ledger_component(row: dict) -> bool:
+def _is_matrix_managed_cost_component(row: dict) -> bool:
+    route = _matrix_component_route(row)
     return bool(
-        str(row.get("component_type") or "").upper() == "REFUND_REVERSAL"
-        or str(row.get("accounting_role") or "").upper() == "SETTLEMENT"
-        or str(row.get("cost_effect") or "").upper() == "LEDGER_ONLY"
+        str(row.get("cost_effect") or "COST").upper() == "COST"
+        and route[0]
+        and route[0] in MATERIAL_MATRIX_COLUMN_KEYS
+        and _matrix_component_problem(row, route=route) is None
     )
 
 
-def _ledger_component_identity(row: dict) -> str:
+def _is_matrix_external_component(row: dict) -> bool:
+    return not _is_matrix_managed_cost_component(row)
+
+
+def _external_component_identity(row: dict) -> str:
     values = {
         fieldname: row.get(fieldname)
         for fieldname in (
@@ -3998,24 +4007,24 @@ def _ledger_component_identity(row: dict) -> str:
     return _dedupe_key(values)
 
 
-def _merge_matrix_external_ledger_components(
+def _merge_matrix_external_components(
     selected_components: list[dict], existing_components: list[dict]
 ) -> list[dict]:
     selected_rows = [
         dict(row)
         for row in (selected_components or [])
-        if isinstance(row, dict) and _is_matrix_external_ledger_component(row)
+        if isinstance(row, dict) and _is_matrix_external_component(row)
     ]
     result = list(selected_rows)
     selected_matches: dict[str, int] = {}
     for row in selected_rows:
-        identity = _ledger_component_identity(row)
+        identity = _external_component_identity(row)
         selected_matches[identity] = selected_matches.get(identity, 0) + 1
     for raw in existing_components or []:
-        if not isinstance(raw, dict) or not _is_matrix_external_ledger_component(raw):
+        if not isinstance(raw, dict) or not _is_matrix_external_component(raw):
             continue
         row = dict(raw)
-        identity = _ledger_component_identity(row)
+        identity = _external_component_identity(row)
         if selected_matches.get(identity, 0) > 0:
             selected_matches[identity] -= 1
             continue
@@ -4182,10 +4191,10 @@ def apply_fee_evidence_review(
         evidence_name = str(_run_value(run, "evidence") or "")
         if not evidence_name:
             raise ValueError("凭证关联记录缺失，请重新发起审核。")
-        selected_ledger_components: list[dict] = []
-        preserved_ledger_components: list[dict] = []
+        selected_external_components: list[dict] = []
+        preserved_external_components: list[dict] = []
         if matrix_cells is not None:
-            selected_ledger_components = _merge_matrix_external_ledger_components(
+            selected_external_components = _merge_matrix_external_components(
                 legacy_components, []
             )
             get_evidence_components = getattr(repo, "get_evidence_components", None)
@@ -4194,11 +4203,11 @@ def apply_fee_evidence_review(
                 if callable(get_evidence_components)
                 else []
             )
-            preserved_ledger_components = _merge_matrix_external_ledger_components(
-                selected_ledger_components,
+            preserved_external_components = _merge_matrix_external_components(
+                selected_external_components,
                 existing_components,
             )
-            components = [*matrix_cells, *preserved_ledger_components]
+            components = [*matrix_cells, *preserved_external_components]
         if not evidence_values.get("selected") and not fee_rows and not components:
             raise ValueError("请至少选择一项凭证审核草稿。")
         validate_review_selections(evidence_values, fee_rows, components)
@@ -4232,7 +4241,7 @@ def apply_fee_evidence_review(
                     repo.rollback()
                 return {**adopted,'run_id':run_id}
             adoption_components = (
-                [*matrix_cells, *selected_ledger_components]
+                [*matrix_cells, *selected_external_components]
                 if matrix_cells is not None
                 else components
             )
@@ -4290,8 +4299,8 @@ def apply_fee_evidence_review(
             }
             if matrix_cells is not None:
                 grouped_components = group_components_by_fee_key(matrix_cells)
-                grouped_ledger_components = group_components_by_fee_key(
-                    preserved_ledger_components
+                grouped_external_components = group_components_by_fee_key(
+                    preserved_external_components
                 )
                 replacement_fee_keys = {
                     str(row.get("logical_fee_key") or "")
@@ -4299,14 +4308,14 @@ def apply_fee_evidence_review(
                     if str(row.get("logical_fee_key") or "") in MATERIAL_MATRIX_FEE_KEYS
                 }
                 replacement_fee_keys.update(grouped_components)
-                replacement_fee_keys.update(grouped_ledger_components)
+                replacement_fee_keys.update(grouped_external_components)
                 replacement_fee_keys.update(_material_matrix_saved_fee_keys(draft))
                 run_fee_key = str(_run_value(run, "logical_fee_key") or "")
                 if not replacement_fee_keys and run_fee_key in MATERIAL_MATRIX_FEE_KEYS:
                     replacement_fee_keys.add(run_fee_key)
             else:
                 grouped_components = group_components_by_fee_key(components)
-                grouped_ledger_components = {}
+                grouped_external_components = {}
                 replacement_fee_keys = set(grouped_components)
 
             valid_items = None
@@ -4336,10 +4345,10 @@ def apply_fee_evidence_review(
                         )
                         for row in fee_components
                     ]
-                    for row in grouped_ledger_components.get(fee_key, []):
+                    for row in grouped_external_components.get(fee_key, []):
                         item = (valid_items or {}).get(str(row.get("item") or ""))
                         if not item:
-                            raise ValueError("台账分项关联的 SKU 不属于当前批次。")
+                            raise ValueError("矩阵外分项关联的 SKU 不属于当前批次。")
                         normalized_components.append(
                             normalize_component_for_apply(
                                 row,
