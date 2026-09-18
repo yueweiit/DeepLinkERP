@@ -6,6 +6,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from bisect import bisect_left
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
@@ -64,6 +65,8 @@ MATERIAL_MATRIX_COLUMNS = (
 )
 MATERIAL_MATRIX_TAX_CODES = frozenset({"IGI", "IVA", "DTA", "PRV", "PRV_IVA"})
 MATERIAL_MATRIX_CURRENCIES = frozenset({"RMB", "MXN", "USD"})
+LEGACY_COMPONENT_LIMIT = 5000
+FEE_EVIDENCE_DRAFT_MAX_BYTES = 12 * 1024 * 1024
 
 
 def _decimal(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -334,6 +337,166 @@ def _compact_saved_matrix_component(component: dict) -> dict:
     return compact
 
 
+_MISSING_COMPONENT_VALUE = object()
+
+
+def _component_value_key(value: Any) -> str:
+    return f"{type(value).__name__}:{_dedupe_key(value)}"
+
+
+def _encode_component_column(rows: list[dict], fieldname: str) -> dict:
+    positions = []
+    values = []
+    for index, row in enumerate(rows):
+        if fieldname not in row:
+            continue
+        positions.append(index)
+        values.append(row[fieldname])
+
+    encoded: dict[str, Any]
+    unique_values: dict[str, int] = {}
+    dictionary = []
+    indices = []
+    for value in values:
+        key = _component_value_key(value)
+        value_index = unique_values.get(key)
+        if value_index is None:
+            value_index = len(dictionary)
+            unique_values[key] = value_index
+            dictionary.append(value)
+        indices.append(value_index)
+    if len(dictionary) == 1:
+        encoded = {"constant": dictionary[0]}
+    elif len(dictionary) * 2 <= len(values):
+        encoded = {"dictionary": dictionary, "indices": indices}
+    else:
+        encoded = {"values": values}
+    if len(positions) != len(rows):
+        encoded["rows"] = positions
+    return encoded
+
+
+def _build_component_store(components: list[dict]) -> dict:
+    """Encode component rows column-wise for bounded persistence and indexed reads."""
+
+    fieldnames: dict[str, None] = {}
+    if any(not isinstance(row, dict) for row in components):
+        raise ValueError("费用凭证分项草稿包含无效记录。")
+    rows = [dict(row) for row in components]
+    for row in rows:
+        for fieldname in row:
+            fieldnames.setdefault(str(fieldname), None)
+    return {
+        "format": "INDEXED_COLUMNS_V1",
+        "count": len(rows),
+        "columns": {
+            fieldname: _encode_component_column(rows, fieldname)
+            for fieldname in fieldnames
+        },
+    }
+
+
+def _component_store_value(
+    component_store: dict,
+    fieldname: str,
+    row_index: int,
+) -> Any:
+    column = (component_store.get("columns") or {}).get(fieldname)
+    if not isinstance(column, dict):
+        return _MISSING_COMPONENT_VALUE
+    value_index = row_index
+    positions = column.get("rows")
+    if isinstance(positions, list):
+        value_index = bisect_left(positions, row_index)
+        if value_index >= len(positions) or positions[value_index] != row_index:
+            return _MISSING_COMPONENT_VALUE
+    if "constant" in column:
+        return column["constant"]
+    if isinstance(column.get("dictionary"), list) and isinstance(
+        column.get("indices"), list
+    ):
+        indices = column["indices"]
+        if value_index < 0 or value_index >= len(indices):
+            return _MISSING_COMPONENT_VALUE
+        dictionary_index = indices[value_index]
+        dictionary = column["dictionary"]
+        if (
+            isinstance(dictionary_index, bool)
+            or not isinstance(dictionary_index, int)
+            or dictionary_index < 0
+            or dictionary_index >= len(dictionary)
+        ):
+            return _MISSING_COMPONENT_VALUE
+        return dictionary[dictionary_index]
+    values = column.get("values")
+    if not isinstance(values, list) or value_index < 0 or value_index >= len(values):
+        return _MISSING_COMPONENT_VALUE
+    return values[value_index]
+
+
+def _component_store_row(component_store: dict, row_index: int) -> dict:
+    count = int(component_store.get("count") or 0)
+    if row_index < 0 or row_index >= count:
+        return {}
+    row = {}
+    for fieldname in component_store.get("columns") or {}:
+        value = _component_store_value(component_store, fieldname, row_index)
+        if value is not _MISSING_COMPONENT_VALUE:
+            row[fieldname] = value
+    return row
+
+
+def _serialized_payload_size(payload: dict) -> int:
+    return len(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
+
+
+def _finalize_component_contract(draft: dict) -> dict:
+    """Keep legacy rows when safe; otherwise persist an explicit indexed contract.
+
+    Existing clients retain the historical list shape within the documented
+    count/size boundary. Large drafts advertise the incompatible representation
+    instead of returning a plausible but incomplete legacy list.
+    """
+
+    if str((draft.get("component_contract") or {}).get("mode") or "") == (
+        "INDEXED_COLUMNS_V1"
+    ):
+        if _serialized_payload_size(draft) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
+            raise ValueError("费用凭证审核草稿超过安全上限，请缩小本次审核范围。")
+        return draft
+
+    raw_components = draft.get("components") or []
+    if any(not isinstance(row, dict) for row in raw_components):
+        raise ValueError("费用凭证分项草稿包含无效记录。")
+    components = [dict(row) for row in raw_components]
+    if len(components) <= LEGACY_COMPONENT_LIMIT:
+        if _serialized_payload_size(draft) <= FEE_EVIDENCE_DRAFT_MAX_BYTES:
+            return draft
+
+    result = {
+        **draft,
+        "components": [],
+        "component_store": _build_component_store(components),
+        "component_contract": {
+            "mode": "INDEXED_COLUMNS_V1",
+            "component_count": len(components),
+            "legacy_components_included": False,
+            "legacy_component_limit": LEGACY_COMPONENT_LIMIT,
+            "max_draft_bytes": FEE_EVIDENCE_DRAFT_MAX_BYTES,
+        },
+    }
+    if _serialized_payload_size(result) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
+        raise ValueError("费用凭证审核草稿超过安全上限，请缩小本次审核范围。")
+    return result
+
+
 def _indexed_matrix_components(indexes: Any, rows: list[dict]) -> list[dict]:
     result = []
     for raw_index in indexes or []:
@@ -344,14 +507,32 @@ def _indexed_matrix_components(indexes: Any, rows: list[dict]) -> list[dict]:
     return result
 
 
+def _matrix_proposal_components(
+    indexes: Any,
+    components: list[dict],
+    component_store: dict | None,
+) -> list[dict]:
+    if components:
+        return _indexed_matrix_components(indexes, components)
+    result = []
+    for raw_index in indexes or []:
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+            continue
+        row = _component_store_row(component_store or {}, raw_index)
+        if row:
+            result.append(row)
+    return result
+
+
 def resolve_material_matrix_cell(
     material_matrix: dict,
     components: list[dict],
     *,
+    component_store: dict | None = None,
     row_index: int,
     column_key: str,
 ) -> dict:
-    """Resolve a compact matrix cell into its display model without persisting copies."""
+    """Resolve a cell, reading only referenced legacy or indexed-store proposals."""
 
     rows = material_matrix.get("rows") or []
     if row_index < 0 or row_index >= len(rows) or not isinstance(rows[row_index], dict):
@@ -363,7 +544,11 @@ def resolve_material_matrix_cell(
 
     proposal_indexes = compact_cell.get("proposals") or []
     saved_indexes = compact_cell.get("saved") or []
-    proposals = _indexed_matrix_components(proposal_indexes, components or [])
+    proposals = _matrix_proposal_components(
+        proposal_indexes,
+        components or [],
+        component_store,
+    )
     saved = _indexed_matrix_components(
         saved_indexes, material_matrix.get("saved_components") or []
     )
@@ -1471,7 +1656,7 @@ def build_fee_evidence_review_draft(
     draft_missing_fx = bool(
         component_result["missing_fx"] or service_component_result["missing_fx"]
     )
-    return {
+    draft = {
         "evidence": evidence,
         "fee_splits": fee_splits,
         "tax_breakdown": split["tax_breakdown"] if deterministic_is_tax else [],
@@ -1503,6 +1688,7 @@ def build_fee_evidence_review_draft(
             + len(service_component_result.get("unmatched_lines") or []),
         },
     }
+    return _finalize_component_contract(draft)
 
 
 def build_input_fingerprint(
@@ -2701,6 +2887,7 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
                     for row in candidates
                 },
             )
+        draft = _finalize_component_contract(draft)
         progress[0].update(
             {
                 "status": "COMPLETED",
@@ -2821,10 +3008,32 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
         if str(row.get("proposal_id") or "") in selected:
             fee_rows.append(row)
     components = []
-    for raw in draft.get("components") or []:
-        row = dict(raw)
-        apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
-        if str(row.get("proposal_id") or "") in selected:
+    legacy_components = draft.get("components") or []
+    if legacy_components:
+        for raw in legacy_components:
+            row = dict(raw)
+            apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
+            if str(row.get("proposal_id") or "") in selected:
+                components.append(row)
+    elif str((draft.get("component_contract") or {}).get("mode") or "") == (
+        "INDEXED_COLUMNS_V1"
+    ):
+        component_store = draft.get("component_store") or {}
+        if str(component_store.get("format") or "") != "INDEXED_COLUMNS_V1":
+            raise ValueError("费用凭证分项索引存储结构无效，请重新发起审核。")
+        for row_index in range(int(component_store.get("count") or 0)):
+            proposal_id = _component_store_value(
+                component_store,
+                "proposal_id",
+                row_index,
+            )
+            if (
+                proposal_id is _MISSING_COMPONENT_VALUE
+                or str(proposal_id) not in selected
+            ):
+                continue
+            row = _component_store_row(component_store, row_index)
+            apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
             components.append(row)
     return evidence, fee_rows, components
 

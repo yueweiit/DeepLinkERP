@@ -61,6 +61,7 @@ def _resolved_cell(draft: dict, row_index: int, column_key: str) -> dict:
     return service.resolve_material_matrix_cell(
         draft["material_matrix"],
         draft["components"],
+        component_store=draft.get("component_store"),
         row_index=row_index,
         column_key=column_key,
     )
@@ -298,6 +299,8 @@ def test_review_draft_uses_only_evidenced_numbers_and_defaults_final_tax_certifi
     assert draft["fee_splits"][0]["logical_fee_key"] == "import_tax"
     assert draft["fee_splits"][0]["amount"] == "30.01"
     assert draft["components"]
+    assert "component_store" not in draft
+    assert "component_contract" not in draft
     assert {row["item"] for row in draft["item_options"]} == {
         "ITEM-GLASSES",
         "ITEM-SUNGLASSES",
@@ -490,6 +493,185 @@ def test_material_matrix_cells_store_only_compact_component_references() -> None
     assert resolved["source_proposal_ids"] == ["component:1", "component:2"]
     assert len(resolved["source_refs"]) == 2
     assert resolved["has_warning"] is True
+
+
+@pytest.fixture(scope="module")
+def large_six_column_draft() -> dict:
+    items = [
+        {
+            "name": f"ITEM-{index:05d}",
+            "stable_line_key": f"LINE-{index:05d}",
+            "material_code": f"M-{index:05d}",
+            "product_name": "测试物料",
+            "quantity": "1",
+            "unit": "PCS",
+            "hs_code": "90041000",
+            "customs_declared_value_mxn": "1",
+            "goods_value": "1",
+        }
+        for index in range(10000)
+    ]
+    tax_amounts = {
+        "igi_amount_mxn": "10000",
+        "iva_amount_mxn": "10000",
+        "dta_amount_mxn": "10000",
+        "prv_amount_mxn": "10000",
+        "prv_iva_amount_mxn": "10000",
+    }
+    attachment = {
+        "name": "ATT-LARGE-MATRIX",
+        "file_name": "large-tax.pdf",
+        "parse_result_json": {
+            "parser": "mexico_tax_certificate_pedimento",
+            "header": {"paid_total_mxn": "60000"},
+            "tax_totals": {
+                "igi_mxn": "10000",
+                "iva_mxn": "10000",
+                "dta_mxn": "10000",
+                "prv_mxn": "10000",
+                "prv_iva_mxn": "10000",
+            },
+            "line_items": [
+                {
+                    "row_no": 1,
+                    "hs_code": "90041000",
+                    "taxes": tax_amounts,
+                }
+            ],
+            "service_fees": [
+                {
+                    "code": "broker_service",
+                    "amount_mxn": "10000",
+                }
+            ],
+            "validation": {"status": "passed"},
+        },
+    }
+    return service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=attachment,
+        items=items,
+        fx_context={"fx_rmb_to_mxn": "2"},
+    )
+
+
+def test_large_draft_uses_auditable_bounded_component_storage(
+    large_six_column_draft: dict,
+) -> None:
+    draft = large_six_column_draft
+    serialized = json.dumps(
+        draft, ensure_ascii=False, separators=(",", ":"), default=str
+    ).encode("utf-8")
+
+    assert draft["components"] == []
+    assert draft["component_contract"] == {
+        "mode": "INDEXED_COLUMNS_V1",
+        "component_count": 60000,
+        "legacy_components_included": False,
+        "legacy_component_limit": service.LEGACY_COMPONENT_LIMIT,
+        "max_draft_bytes": service.FEE_EVIDENCE_DRAFT_MAX_BYTES,
+    }
+    assert draft["component_store"]["format"] == "INDEXED_COLUMNS_V1"
+    assert draft["component_store"]["count"] == 60000
+    assert draft["summary"]["component_proposal_count"] == 60000
+    assert all(len(row["cells"]) == 6 for row in draft["material_matrix"]["rows"])
+    assert len(serialized) <= service.FEE_EVIDENCE_DRAFT_MAX_BYTES
+
+
+def test_large_draft_matrix_resolves_and_confirms_compact_components(
+    large_six_column_draft: dict,
+) -> None:
+    draft = large_six_column_draft
+    first = service.resolve_material_matrix_cell(
+        draft["material_matrix"],
+        draft["components"],
+        component_store=draft["component_store"],
+        row_index=0,
+        column_key="IGI",
+    )
+    last = service.resolve_material_matrix_cell(
+        draft["material_matrix"],
+        draft["components"],
+        component_store=draft["component_store"],
+        row_index=9999,
+        column_key="CUSTOMS_SERVICE",
+    )
+
+    assert first["original_amount"] == "1.00"
+    assert first["amount_rmb"] == "0.5"
+    assert first["source_proposal_ids"] == ["component:1"]
+    assert first["source_refs"][0]["tax_code"] == "IGI"
+    assert first["has_warning"] is True
+    assert last["original_amount"] == "1.00"
+    assert last["source_proposal_ids"] == ["component:60000"]
+    assert last["source_refs"][0]["service_code"] == "broker_service"
+
+    _, _, selected_components = service._selected_proposals(
+        draft,
+        ["component:1", "component:60000"],
+        {},
+    )
+    assert [row["proposal_id"] for row in selected_components] == [
+        "component:1",
+        "component:60000",
+    ]
+    assert selected_components[0]["original_amount"] == "1.00"
+    assert selected_components[0]["source_evidence"]["tax_code"] == "IGI"
+    assert selected_components[1]["source_evidence"]["service_code"] == (
+        "broker_service"
+    )
+
+
+def test_large_ready_status_returns_compact_draft_without_expansion(
+    large_six_column_draft: dict,
+) -> None:
+    class Repository:
+        @staticmethod
+        def get_run(_run_id):
+            return {
+                "name": "RUN-LARGE",
+                "batch": "BATCH-LARGE",
+                "version": "VERSION-LARGE",
+                "logical_fee_key": "import_tax",
+                "status": "READY",
+                "progress_revision": 1,
+                "draft_json": json.dumps(
+                    large_six_column_draft,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            }
+
+    status = service.get_fee_evidence_review_status(
+        "BATCH-LARGE",
+        "RUN-LARGE",
+        repository=Repository(),
+    )
+    returned = status["draft"]
+    serialized = json.dumps(
+        returned, ensure_ascii=False, separators=(",", ":"), default=str
+    ).encode("utf-8")
+
+    assert returned["components"] == []
+    assert returned["component_store"]["count"] == 60000
+    assert len(serialized) <= service.FEE_EVIDENCE_DRAFT_MAX_BYTES
+
+
+def test_component_contract_rejects_unpersistable_oversized_draft_explicitly() -> None:
+    draft = {
+        "components": [
+            {
+                "proposal_id": "component:1",
+                "source_evidence": {
+                    "text": "x" * service.FEE_EVIDENCE_DRAFT_MAX_BYTES
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="安全上限"):
+        service._finalize_component_contract(draft)
 
 
 def test_material_matrix_computes_component_routing_once_per_collected_row(
