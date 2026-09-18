@@ -67,6 +67,10 @@ MATERIAL_MATRIX_TAX_CODES = frozenset({"IGI", "IVA", "DTA", "PRV", "PRV_IVA"})
 MATERIAL_MATRIX_CURRENCIES = frozenset({"RMB", "MXN", "USD"})
 LEGACY_COMPONENT_LIMIT = 5000
 FEE_EVIDENCE_DRAFT_MAX_BYTES = 12 * 1024 * 1024
+# The supported stress case is 10,000 material rows across the six fixed columns.
+FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT = 60000
+FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES = 48 * 1024 * 1024
+FEE_EVIDENCE_COMPONENT_ESTIMATED_BASE_BYTES = 384
 
 
 def _decimal(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -180,10 +184,10 @@ def _dedupe_key(value: Any) -> str:
 def _empty_material_matrix_cell() -> dict:
     """Return the persisted sparse-cell shape.
 
-    ``proposals`` indexes the draft's top-level ``components`` list and ``saved``
-    indexes ``material_matrix.saved_components``.  Amounts, evidence, warnings,
-    and confidence stay in those canonical records instead of being copied into
-    every material row.
+    ``proposals`` indexes either the legacy top-level ``components`` list or the
+    large-draft ``component_store`` selected by ``component_contract``. ``saved``
+    indexes ``material_matrix.saved_components``. Amounts, evidence, warnings,
+    and confidence stay in those canonical records instead of being copied.
     """
 
     return {"proposals": [], "saved": []}
@@ -446,6 +450,107 @@ def _component_store_row(component_store: dict, row_index: int) -> dict:
     return row
 
 
+def _validate_component_store(component_store: dict) -> dict[str, int]:
+    """Validate the indexed contract once and return its proposal lookup."""
+
+    if not isinstance(component_store, dict) or str(
+        component_store.get("format") or ""
+    ) != "INDEXED_COLUMNS_V1":
+        raise ValueError("费用凭证分项索引存储结构无效。")
+    count = component_store.get("count")
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+        or count > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT
+    ):
+        raise ValueError(
+            "费用凭证分项索引 count 数量无效或超过安全上限。"
+        )
+    columns = component_store.get("columns")
+    if not isinstance(columns, dict) or any(
+        not isinstance(fieldname, str) or not isinstance(column, dict)
+        for fieldname, column in (columns or {}).items()
+    ):
+        raise ValueError("费用凭证分项索引 columns 结构无效。")
+
+    allowed_keys = {"rows", "constant", "values", "dictionary", "indices"}
+    for fieldname, column in columns.items():
+        if set(column) - allowed_keys:
+            raise ValueError(f"分项索引列 {fieldname} 结构包含未知字段。")
+        positions = column.get("rows")
+        if "rows" in column:
+            if not isinstance(positions, list):
+                raise ValueError(f"分项索引列 {fieldname} rows 必须为列表。")
+            previous = -1
+            for row_index in positions:
+                if (
+                    isinstance(row_index, bool)
+                    or not isinstance(row_index, int)
+                    or row_index <= previous
+                    or row_index >= count
+                ):
+                    raise ValueError(
+                        f"分项索引列 {fieldname} rows 行索引必须严格递增且在范围内。"
+                    )
+                previous = row_index
+            value_count = len(positions)
+        else:
+            value_count = count
+
+        has_constant = "constant" in column
+        has_values = "values" in column
+        has_dictionary = "dictionary" in column or "indices" in column
+        if sum((has_constant, has_values, has_dictionary)) != 1:
+            raise ValueError(f"分项索引列 {fieldname} 值编码结构无效。")
+        if has_constant:
+            continue
+        if has_values:
+            values = column.get("values")
+            if not isinstance(values, list) or len(values) != value_count:
+                raise ValueError(f"分项索引列 {fieldname} values 长度无效。")
+            continue
+        dictionary = column.get("dictionary")
+        indices = column.get("indices")
+        if (
+            not isinstance(dictionary, list)
+            or not isinstance(indices, list)
+            or len(indices) != value_count
+            or (value_count and not dictionary)
+        ):
+            raise ValueError(f"分项索引列 {fieldname} dictionary 长度无效。")
+        for dictionary_index in indices:
+            if (
+                isinstance(dictionary_index, bool)
+                or not isinstance(dictionary_index, int)
+                or dictionary_index < 0
+                or dictionary_index >= len(dictionary)
+            ):
+                raise ValueError(f"分项索引列 {fieldname} dictionary 索引无效。")
+
+    if count == 0:
+        return {}
+    proposal_column = columns.get("proposal_id")
+    if not isinstance(proposal_column, dict) or "rows" in proposal_column:
+        raise ValueError("分项索引 proposal_id 必须是完整密集列。")
+    proposal_lookup = {}
+    for row_index in range(count):
+        proposal_id = _component_store_value(
+            component_store,
+            "proposal_id",
+            row_index,
+        )
+        if (
+            proposal_id is _MISSING_COMPONENT_VALUE
+            or not isinstance(proposal_id, str)
+            or not proposal_id.strip()
+            or proposal_id in proposal_lookup
+        ):
+            raise ValueError("分项索引 proposal_id 必须非空、唯一且完整。")
+        proposal_lookup[proposal_id] = row_index
+    return proposal_lookup
+
+
 def _serialized_payload_size(payload: dict) -> int:
     return len(
         json.dumps(
@@ -468,14 +573,18 @@ def _finalize_component_contract(draft: dict) -> dict:
     contract = draft.get("component_contract") or {}
     if str(contract.get("mode") or "") == "INDEXED_COLUMNS_V1":
         component_store = draft.get("component_store") or {}
-        if str(component_store.get("format") or "") != "INDEXED_COLUMNS_V1":
-            raise ValueError("费用凭证分项索引存储结构无效，请重新发起审核。")
+        _validate_component_store(component_store)
         existing_count = int(component_store.get("count") or 0)
         if int(contract.get("component_count") or 0) != existing_count:
             raise ValueError("费用凭证分项索引数量不一致，请重新发起审核。")
         additions = draft.get("components") or []
         if any(not isinstance(row, dict) for row in additions):
             raise ValueError("费用凭证分项草稿包含无效记录。")
+        if existing_count + len(additions) > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT:
+            raise ValueError(
+                f"费用凭证分项数量超过安全上限 "
+                f"{FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT}。"
+            )
         result = draft
         if additions:
             merged = [
@@ -498,6 +607,7 @@ def _finalize_component_contract(draft: dict) -> dict:
                     "component_proposal_count": len(merged),
                 },
             }
+            _validate_component_store(result["component_store"])
         if _serialized_payload_size(result) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
             raise ValueError("费用凭证审核草稿超过安全上限，请缩小本次审核范围。")
         return result
@@ -505,6 +615,11 @@ def _finalize_component_contract(draft: dict) -> dict:
     raw_components = draft.get("components") or []
     if any(not isinstance(row, dict) for row in raw_components):
         raise ValueError("费用凭证分项草稿包含无效记录。")
+    if len(raw_components) > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT:
+        raise ValueError(
+            f"费用凭证分项数量超过安全上限 "
+            f"{FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT}。"
+        )
     components = [dict(row) for row in raw_components]
     if len(components) <= LEGACY_COMPONENT_LIMIT:
         if _serialized_payload_size(draft) <= FEE_EVIDENCE_DRAFT_MAX_BYTES:
@@ -522,6 +637,7 @@ def _finalize_component_contract(draft: dict) -> dict:
             "max_draft_bytes": FEE_EVIDENCE_DRAFT_MAX_BYTES,
         },
     }
+    _validate_component_store(result["component_store"])
     if _serialized_payload_size(result) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
         raise ValueError("费用凭证审核草稿超过安全上限，请缩小本次审核范围。")
     return result
@@ -544,6 +660,7 @@ def _matrix_proposal_components(
 ) -> list[dict]:
     if str((component_store or {}).get("format") or "") != "INDEXED_COLUMNS_V1":
         return _indexed_matrix_components(indexes, components)
+    _validate_component_store(component_store or {})
     result = []
     for raw_index in indexes or []:
         if isinstance(raw_index, bool) or not isinstance(raw_index, int):
@@ -893,6 +1010,129 @@ def _allocation_weights(matches: list[dict]) -> tuple[str, list[tuple[str, Decim
     if goods and all(value is not None for _, value in goods):
         return "purchase_goods_value", [(key, value) for key, value in goods if value is not None]
     return "", []
+
+
+def _component_identity_estimated_bytes(item: dict) -> int:
+    return sum(
+        len(str(item.get(fieldname) or "").encode("utf-8"))
+        for fieldname in ("name", "stable_line_key", "hs_code")
+    )
+
+
+def _validate_component_expansion_budget(
+    *,
+    line_items: list[dict],
+    service_fees: list[dict],
+    items: list[dict],
+    source_ref: dict,
+    explicit_matches: dict[str, list[str]],
+) -> dict:
+    """Reject unsafe many-to-many expansion before component rows are allocated."""
+
+    proposal_count = 0
+    estimated_bytes = 0
+
+    def add_group(matches: list[dict], evidence: dict) -> None:
+        nonlocal proposal_count, estimated_bytes
+        match_count = len(matches)
+        proposal_count += match_count
+        if proposal_count > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT:
+            raise ValueError(
+                f"费用凭证分项展开数量 {proposal_count} 超过安全上限 "
+                f"{FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT}，请缩小明细与物料的多对多匹配范围。"
+            )
+        evidence_bytes = len(_dedupe_key(evidence).encode("utf-8"))
+        estimated_bytes += (
+            match_count
+            * (FEE_EVIDENCE_COMPONENT_ESTIMATED_BASE_BYTES + evidence_bytes)
+            + sum(_component_identity_estimated_bytes(item) for item in matches)
+        )
+        if estimated_bytes > FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES:
+            raise ValueError(
+                f"费用凭证分项展开预算 {estimated_bytes} 字节超过安全上限 "
+                f"{FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES} 字节。"
+            )
+
+    for line in line_items or []:
+        if not isinstance(line, dict):
+            continue
+        taxes = line.get("taxes") if isinstance(line.get("taxes"), dict) else {}
+        tax_fields = [
+            (fieldname, tax_code)
+            for fieldname, tax_code in LINE_TAX_FIELDS.items()
+            if _decimal(taxes.get(fieldname)) not in (None, Decimal("0"))
+        ]
+        if not tax_fields:
+            continue
+        matches = _line_matches(line, items or [], explicit_matches or {})
+        _, weights = _allocation_weights(matches)
+        if not weights:
+            continue
+        line_source = (
+            line.get("source_evidence")
+            if isinstance(line.get("source_evidence"), dict)
+            else {}
+        )
+        for fieldname, tax_code in tax_fields:
+            locator = (
+                line_source.get(fieldname)
+                if isinstance(line_source.get(fieldname), dict)
+                else {}
+            )
+            add_group(
+                matches,
+                {
+                    **source_ref,
+                    **locator,
+                    "row": line.get("row_no"),
+                    "hs_code": str(line.get("hs_code") or ""),
+                    "import_name": str(line.get("import_name") or ""),
+                    "tax_code": tax_code,
+                },
+            )
+
+    by_name = {str(row.get("name") or ""): row for row in items or []}
+    for index, service_fee in enumerate(service_fees or []):
+        if not isinstance(service_fee, dict):
+            continue
+        amount = _decimal(service_fee.get("amount_mxn"))
+        if amount is None or amount < 0:
+            continue
+        explicit_names = [
+            str(value)
+            for value in (service_fee.get("item_names") or service_fee.get("items") or [])
+            if str(value)
+        ]
+        if explicit_names:
+            if any(name not in by_name for name in explicit_names):
+                continue
+            matches = [by_name[name] for name in explicit_names]
+        else:
+            matches = list(items or [])
+        weights = [
+            (str(row.get("name") or ""), _positive(row.get("goods_value")))
+            for row in matches
+        ]
+        if not weights or any(value is None for _, value in weights):
+            continue
+        locator = (
+            service_fee.get("source_evidence")
+            if isinstance(service_fee.get("source_evidence"), dict)
+            else {}
+        )
+        add_group(
+            matches,
+            {
+                **source_ref,
+                **locator,
+                "service_row": index + 1,
+                "service_code": str(service_fee.get("code") or ""),
+            },
+        )
+    return {
+        "proposal_count": proposal_count,
+        "estimated_bytes": estimated_bytes,
+    }
 
 
 def allocate_tax_certificate_components(
@@ -1634,6 +1874,17 @@ def build_fee_evidence_review_draft(
             }
         )
 
+    if deterministic_is_tax:
+        _validate_component_expansion_budget(
+            line_items=combined.get("line_items") or [],
+            service_fees=combined.get("service_fees") or [],
+            items=items,
+            source_ref={
+                "attachment": attachment.get("name"),
+                "file": attachment.get("file_name"),
+            },
+            explicit_matches=(ai_review or {}).get("line_item_matches") or {},
+        )
     component_result = allocate_tax_certificate_components(
         combined.get("line_items") or [],
         items,
@@ -3057,19 +3308,13 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
         "INDEXED_COLUMNS_V1"
     ):
         component_store = component_draft.get("component_store") or {}
-        if str(component_store.get("format") or "") != "INDEXED_COLUMNS_V1":
-            raise ValueError("费用凭证分项索引存储结构无效，请重新发起审核。")
-        for row_index in range(int(component_store.get("count") or 0)):
-            proposal_id = _component_store_value(
-                component_store,
-                "proposal_id",
-                row_index,
-            )
-            if (
-                proposal_id is _MISSING_COMPONENT_VALUE
-                or str(proposal_id) not in selected
-            ):
-                continue
+        proposal_lookup = _validate_component_store(component_store)
+        selected_indexes = sorted(
+            proposal_lookup[proposal_id]
+            for proposal_id in selected
+            if proposal_id in proposal_lookup
+        )
+        for row_index in selected_indexes:
             row = _component_store_row(component_store, row_index)
             apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
             components.append(row)

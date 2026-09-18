@@ -575,7 +575,7 @@ def test_large_draft_uses_auditable_bounded_component_storage(
     assert draft["component_store"]["count"] == 60000
     assert draft["summary"]["component_proposal_count"] == 60000
     assert all(len(row["cells"]) == 6 for row in draft["material_matrix"]["rows"])
-    assert len(serialized) <= service.FEE_EVIDENCE_DRAFT_MAX_BYTES
+    assert len(serialized) < 8 * 1024 * 1024
 
 
 def test_large_draft_matrix_resolves_and_confirms_compact_components(
@@ -672,6 +672,279 @@ def test_component_contract_rejects_unpersistable_oversized_draft_explicitly() -
 
     with pytest.raises(ValueError, match="安全上限"):
         service._finalize_component_contract(draft)
+
+
+def test_component_expansion_count_budget_rejects_before_allocators(
+    monkeypatch,
+) -> None:
+    items = [
+        {
+            "name": f"ITEM-{index}",
+            "stable_line_key": f"LINE-{index}",
+            "hs_code": "90041000",
+            "customs_declared_value_mxn": "1",
+            "goods_value": "1",
+        }
+        for index in range(10001)
+    ]
+    attachment = {
+        "name": "ATT-OVER-BUDGET",
+        "parse_result_json": {
+            "parser": "mexico_tax_certificate_pedimento",
+            "header": {"paid_total_mxn": "6"},
+            "tax_totals": {"igi_mxn": "1"},
+            "line_items": [
+                {
+                    "row_no": 1,
+                    "hs_code": "90041000",
+                    "taxes": {
+                        "igi_amount_mxn": "1",
+                        "iva_amount_mxn": "1",
+                        "dta_amount_mxn": "1",
+                        "prv_amount_mxn": "1",
+                        "prv_iva_amount_mxn": "1",
+                    },
+                }
+            ],
+            "service_fees": [{"code": "broker", "amount_mxn": "1"}],
+            "validation": {"status": "passed"},
+        },
+    }
+    allocator_called = False
+
+    def unexpected_allocator(*_args, **_kwargs):
+        nonlocal allocator_called
+        allocator_called = True
+        raise AssertionError("allocator must not run after expansion budget failure")
+
+    monkeypatch.setattr(
+        service,
+        "allocate_tax_certificate_components",
+        unexpected_allocator,
+    )
+    monkeypatch.setattr(
+        service,
+        "allocate_service_fee_components",
+        unexpected_allocator,
+    )
+
+    with pytest.raises(ValueError, match="分项展开数量.*60000"):
+        service.build_fee_evidence_review_draft(
+            logical_fee_key="import_tax",
+            attachment=attachment,
+            items=items,
+        )
+
+    assert allocator_called is False
+
+
+def test_component_expansion_byte_budget_rejects_large_source_before_allocation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        service,
+        "FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES",
+        512,
+        raising=False,
+    )
+    attachment = _tax_attachment(
+        {
+            "row_no": 1,
+            "hs_code": "90041000",
+            "taxes": {"igi_amount_mxn": "1"},
+            "source_evidence": {
+                "igi_amount_mxn": {"region": "x" * 1024}
+            },
+        },
+        total="1",
+    )
+    allocator_called = False
+
+    def unexpected_allocator(*_args, **_kwargs):
+        nonlocal allocator_called
+        allocator_called = True
+        raise AssertionError("allocator must not run after expansion budget failure")
+
+    monkeypatch.setattr(
+        service,
+        "allocate_tax_certificate_components",
+        unexpected_allocator,
+    )
+    monkeypatch.setattr(
+        service,
+        "allocate_service_fee_components",
+        unexpected_allocator,
+    )
+
+    with pytest.raises(ValueError, match="分项展开预算"):
+        service.build_fee_evidence_review_draft(
+            logical_fee_key="import_tax",
+            attachment=attachment,
+            items=[_items()[0]],
+        )
+
+    assert allocator_called is False
+
+
+def _valid_component_store() -> dict:
+    return service._build_component_store(
+        [
+            {"proposal_id": "component:1", "item": "ITEM-1"},
+            {"proposal_id": "component:2", "item": "ITEM-2"},
+        ]
+    )
+
+
+def test_indexed_store_rejects_abnormal_count() -> None:
+    store = {
+        "format": "INDEXED_COLUMNS_V1",
+        "count": 10**9,
+        "columns": {},
+    }
+
+    with pytest.raises(ValueError, match="count|数量"):
+        service._validate_component_store(store)
+
+
+def test_abnormal_store_count_is_rejected_by_finalize_resolve_and_apply() -> None:
+    store = {
+        "format": "INDEXED_COLUMNS_V1",
+        "count": 10**9,
+        "columns": {},
+    }
+    draft = {
+        "evidence": {},
+        "fee_splits": [],
+        "components": [],
+        "component_store": store,
+        "component_contract": {
+            "mode": "INDEXED_COLUMNS_V1",
+            "component_count": 10**9,
+        },
+    }
+    matrix = {
+        "rows": [
+            {
+                "hs_code": "",
+                "hs_suggestion_details": [],
+                "cells": {"IGI": {"proposals": [0], "saved": []}},
+            }
+        ],
+        "saved_components": [],
+    }
+
+    with pytest.raises(ValueError, match="count|数量"):
+        service._finalize_component_contract(draft)
+    with pytest.raises(ValueError, match="count|数量"):
+        service.resolve_material_matrix_cell(
+            matrix,
+            [],
+            component_store=store,
+            row_index=0,
+            column_key="IGI",
+        )
+    with pytest.raises(ValueError, match="count|数量"):
+        service._selected_proposals(draft, ["component:1"], {})
+
+
+def test_indexed_store_rejects_dense_column_length_mismatch() -> None:
+    store = _valid_component_store()
+    store["columns"]["proposal_id"] = {"values": ["component:1"]}
+
+    with pytest.raises(ValueError, match="长度"):
+        service._validate_component_store(store)
+
+
+@pytest.mark.parametrize("rows", ([1, 0], [0, 0], [2]))
+def test_indexed_store_rejects_invalid_sparse_rows(rows: list[int]) -> None:
+    store = _valid_component_store()
+    store["columns"]["optional"] = {"constant": "x", "rows": rows}
+
+    with pytest.raises(ValueError, match="rows|行索引"):
+        service._validate_component_store(store)
+
+
+def test_indexed_store_rejects_invalid_dictionary_index() -> None:
+    store = _valid_component_store()
+    store["columns"]["item"] = {
+        "dictionary": ["ITEM-1"],
+        "indices": [0, 1],
+    }
+
+    with pytest.raises(ValueError, match="dictionary|字典"):
+        service._validate_component_store(store)
+
+
+@pytest.mark.parametrize(
+    "proposal_column",
+    [
+        None,
+        {"values": ["component:1", "component:1"]},
+        {"values": ["component:1", ""]},
+    ],
+)
+def test_indexed_store_requires_dense_unique_nonempty_proposal_ids(
+    proposal_column,
+) -> None:
+    store = _valid_component_store()
+    if proposal_column is None:
+        del store["columns"]["proposal_id"]
+    else:
+        store["columns"]["proposal_id"] = proposal_column
+
+    with pytest.raises(ValueError, match="proposal_id"):
+        service._validate_component_store(store)
+
+
+def test_indexed_apply_uses_validated_proposal_lookup_without_blind_scan(
+    monkeypatch,
+) -> None:
+    store = _valid_component_store()
+    draft = {
+        "evidence": {},
+        "fee_splits": [],
+        "components": [],
+        "component_store": store,
+        "component_contract": {
+            "mode": "INDEXED_COLUMNS_V1",
+            "component_count": 2,
+        },
+    }
+    decoded = []
+    proposal_reads = []
+    original_row = service._component_store_row
+    original_value = service._component_store_value
+    monkeypatch.setattr(
+        service,
+        "_validate_component_store",
+        lambda _store: {"component:1": 0, "component:2": 1},
+    )
+
+    def tracked_row(component_store, row_index):
+        decoded.append(row_index)
+        return original_row(component_store, row_index)
+
+    def tracked_value(component_store, fieldname, row_index):
+        if fieldname == "proposal_id":
+            proposal_reads.append(row_index)
+        return original_value(component_store, fieldname, row_index)
+
+    monkeypatch.setattr(service, "_component_store_row", tracked_row)
+    monkeypatch.setattr(
+        service,
+        "_component_store_value",
+        tracked_value,
+    )
+
+    _, _, selected = service._selected_proposals(
+        draft,
+        ["component:2"],
+        {},
+    )
+
+    assert [row["proposal_id"] for row in selected] == ["component:2"]
+    assert decoded == [1]
+    assert proposal_reads == [1]
 
 
 def test_material_matrix_computes_component_routing_once_per_collected_row(
