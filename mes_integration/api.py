@@ -70,9 +70,12 @@ def get_batch_bin_rows(item_codes=None):
     The response deliberately uses a fixed field set so callers do not need to
     send a long ``fields`` query parameter.
 
-    An item that exists in ERPNext but has no Bin row is a valid zero-stock
-    result, not an invalid request.  Only item codes that do not exist in the
-    Item master are returned as ``invalid_item_codes``.
+    An item that exists in ERPNext but has no Bin row is returned as a
+    synthetic zero-stock row, not an invalid request.  This keeps clients that
+    identify returned items from ``rows`` compatible while
+    ``no_stock_item_codes`` still identifies why the row contains zero stock.
+    Only item codes that do not exist in the Item master are returned as
+    ``invalid_item_codes``.
     """
     from mes_integration.mes_integration.stock_entry import validate_mes_api_user
 
@@ -93,14 +96,17 @@ def get_batch_bin_rows(item_codes=None):
         limit_page_length=0,
     )
 
-    existing_item_codes = set(
-        frappe.get_list(
-            "Item",
-            filters={"name": ["in", requested_item_codes]},
-            pluck="name",
-            limit_page_length=0,
-        )
+    item_rows = frappe.get_list(
+        "Item",
+        filters={"name": ["in", requested_item_codes]},
+        fields=["name", "stock_uom"],
+        limit_page_length=0,
     )
+    item_stock_uoms = {
+        row.get("name"): row.get("stock_uom")
+        for row in item_rows
+    }
+    existing_item_codes = set(item_stock_uoms)
     returned_item_codes = {row.get("item_code") for row in rows}
     no_stock_item_codes = [
         item_code
@@ -112,6 +118,19 @@ def get_batch_bin_rows(item_codes=None):
         for item_code in requested_item_codes
         if item_code not in existing_item_codes
     ]
+
+    rows.extend(
+        {
+            "item_code": item_code,
+            "warehouse": None,
+            "actual_qty": 0,
+            "reserved_qty": 0,
+            "projected_qty": 0,
+            "stock_uom": item_stock_uoms.get(item_code),
+        }
+        for item_code in no_stock_item_codes
+    )
+    rows.sort(key=lambda row: (row.get("item_code") or "", row.get("warehouse") or ""))
 
     return {
         "success": True,

@@ -22,7 +22,10 @@ class TestMESAPI(UnitTestCase):
 		def get_list(doctype, *args, **kwargs):
 			if doctype == "Bin":
 				return bin_rows
-			return ["ITEM-WITH-STOCK", "ITEM-WITHOUT-STOCK"]
+			return [
+				{"name": "ITEM-WITH-STOCK", "stock_uom": "Nos"},
+				{"name": "ITEM-WITHOUT-STOCK", "stock_uom": "Kg"},
+			]
 
 		with (
 			patch(
@@ -36,7 +39,20 @@ class TestMESAPI(UnitTestCase):
 			)
 
 		self.assertTrue(result["success"])
-		self.assertEqual(result["rows"], bin_rows)
+		self.assertEqual(
+			result["rows"],
+			[
+				bin_rows[0],
+				{
+					"item_code": "ITEM-WITHOUT-STOCK",
+					"warehouse": None,
+					"actual_qty": 0,
+					"reserved_qty": 0,
+					"projected_qty": 0,
+					"stock_uom": "Kg",
+				},
+			],
+		)
 		self.assertEqual(result["no_stock_item_codes"], ["ITEM-WITHOUT-STOCK"])
 		self.assertEqual(result["invalid_item_codes"], ["ITEM-UNKNOWN"])
 		self.assertEqual(result["missing_item_codes"], ["ITEM-UNKNOWN"])
