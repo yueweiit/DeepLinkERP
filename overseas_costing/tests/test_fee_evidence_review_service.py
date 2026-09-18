@@ -365,6 +365,54 @@ def test_material_matrix_has_fixed_columns_and_every_item_in_repository_order() 
     assert matrix["rows"][1]["cells"]["IGI"]["origin"] == "EMPTY"
 
 
+def test_material_matrix_uses_complete_raw_items_without_expanding_ai_scope() -> None:
+    raw_items = _items()
+    projected_items = [
+        {
+            "name": "ITEM-GLASSES",
+            "material_code": "GL-01",
+            "product_name": "投影后眼镜",
+            "goods_value": "400",
+            "customs_declared_value_mxn": "200",
+        }
+    ]
+
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="import_tax",
+        attachment=_tax_attachment(
+            {
+                "row_no": 8,
+                "hs_code": "90041000",
+                "taxes": {"igi_amount_mxn": "10"},
+                "source_evidence": {
+                    "igi_amount_mxn": {"page": 3, "text_line": 20}
+                },
+            },
+            total="10",
+        ),
+        items=projected_items,
+        matrix_items=raw_items,
+        fx_context={"fx_rmb_to_mxn": "2"},
+        ai_review={"line_item_matches": {"8": ["ITEM-GLASSES"]}},
+    )
+
+    assert [component["item"] for component in draft["components"]] == [
+        "ITEM-GLASSES"
+    ]
+    assert [row["item"] for row in draft["material_matrix"]["rows"]] == [
+        "ITEM-GLASSES",
+        "ITEM-SUNGLASSES",
+    ]
+    second_row = draft["material_matrix"]["rows"][1]
+    assert {
+        key: second_row[key] for key in ("stable_line_key", "hs_code", "unit")
+    } == {
+        "stable_line_key": "LINE-SUNGLASSES",
+        "hs_code": "90041000",
+        "unit": "PCS",
+    }
+
+
 def test_material_matrix_aggregates_soft_anomaly_component_suggestions() -> None:
     draft = service.build_fee_evidence_review_draft(
         logical_fee_key="import_tax",
@@ -537,6 +585,71 @@ def test_material_matrix_missing_fx_keeps_rmb_blank() -> None:
     assert cell["suggested_amount"] is None
     assert cell["missing_fx"] is True
     assert draft["material_matrix"]["missing_fx"] is True
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason_code"),
+    [
+        ({"original_amount": ""}, "MATERIAL_MATRIX_ORIGINAL_AMOUNT_INVALID"),
+        ({"original_amount": "NaN"}, "MATERIAL_MATRIX_ORIGINAL_AMOUNT_INVALID"),
+        ({"original_amount": "-1"}, "MATERIAL_MATRIX_ORIGINAL_AMOUNT_INVALID"),
+        ({"currency": "EUR"}, "MATERIAL_MATRIX_CURRENCY_UNSUPPORTED"),
+        ({"currency": ""}, "MATERIAL_MATRIX_CURRENCY_UNSUPPORTED"),
+        ({"amount_rmb": "-1"}, "MATERIAL_MATRIX_RMB_AMOUNT_INVALID"),
+        ({"amount_rmb": "NaN"}, "MATERIAL_MATRIX_RMB_AMOUNT_INVALID"),
+        ({"currency": "RMB", "amount_rmb": None}, "MATERIAL_MATRIX_RMB_AMOUNT_REQUIRED"),
+    ],
+)
+def test_material_matrix_rejects_structurally_invalid_components(
+    overrides: dict, reason_code: str
+) -> None:
+    component = {
+        "proposal_id": "component:invalid",
+        "item": "ITEM-GLASSES",
+        "stable_line_key": "LINE-GLASSES",
+        "component_type": "IMPORT_TAX",
+        "tax_code": "IGI",
+        "currency": "MXN",
+        "original_amount": "10",
+        "amount_rmb": "5",
+        "source_evidence": {"attachment": "ATT-1", "row": 8},
+        **overrides,
+    }
+
+    matrix = service.build_material_matrix(items=_items(), components=[component])
+
+    assert matrix["rows"][0]["cells"]["IGI"]["origin"] == "EMPTY"
+    assert matrix["unmatched_lines"][0]["reason_code"] == reason_code
+    assert matrix["unmatched_lines"][0]["proposal_id"] == "component:invalid"
+    assert matrix["unmatched_lines"][0]["source_refs"] == [
+        {"attachment": "ATT-1", "row": 8}
+    ]
+
+
+def test_material_matrix_intentionally_excludes_refund_reversals_as_ledger_only() -> None:
+    matrix = service.build_material_matrix(
+        items=_items(),
+        components=[
+            {
+                "proposal_id": "component:refund",
+                "item": "ITEM-GLASSES",
+                "stable_line_key": "LINE-GLASSES",
+                "component_type": "REFUND_REVERSAL",
+                "accounting_role": "SETTLEMENT",
+                "cost_effect": "LEDGER_ONLY",
+                "tax_code": "IGI",
+                "currency": "MXN",
+                "original_amount": "-10",
+                "amount_rmb": "-5",
+                "source_evidence": {"reverses_component": "COMP-1"},
+            }
+        ],
+    )
+
+    assert matrix["rows"][0]["cells"]["IGI"]["origin"] == "EMPTY"
+    assert matrix["unmatched_lines"][0]["reason_code"] == "MATERIAL_MATRIX_LEDGER_ONLY"
+    assert matrix["component_policy"]["ledger_only"] == "UNMATCHED"
+    assert matrix["component_policy"]["negative_amounts"] == "UNMATCHED"
 
 
 def test_amount_without_precise_locator_is_not_default_selected() -> None:
@@ -842,6 +955,57 @@ def test_clearance_service_requires_complete_purchase_values() -> None:
     assert result["components"] == []
     assert result["needs_review"] is True
     assert result["reason_code"] == "SKU_ALLOCATION_BASIS_MISSING"
+
+
+def test_invalid_service_row_does_not_discard_valid_sibling_from_matrix() -> None:
+    parsed = {
+        "parser": "mexico_tax_certificate_pedimento",
+        "header": {"paid_total_mxn": "30"},
+        "tax_totals": {},
+        "service_fees": [
+            {
+                "code": "invalid_negative",
+                "amount_mxn": "-5",
+                "source_evidence": {"page": 2, "text_line": 7},
+            },
+            {
+                "code": "broker_service",
+                "amount_mxn": "30",
+                "item_names": ["ITEM-GLASSES"],
+                "source_evidence": {"page": 2, "text_line": 8},
+            },
+        ],
+        "source_evidence": {
+            "header.paid_total_mxn": {"page": 2, "text_line": 10},
+        },
+        "validation": {"status": "passed"},
+    }
+
+    draft = service.build_fee_evidence_review_draft(
+        logical_fee_key="customs_clearance_fee",
+        attachment={"name": "ATT-MIXED-SERVICE", "parse_result_json": parsed},
+        items=_items(),
+        fx_context={"fx_rmb_to_mxn": "2"},
+    )
+
+    clearance = [
+        row
+        for row in draft["components"]
+        if row["fee_logical_key"] == "customs_clearance_fee"
+    ]
+    assert [row["item"] for row in clearance] == ["ITEM-GLASSES"]
+    cell = draft["material_matrix"]["rows"][0]["cells"]["CUSTOMS_SERVICE"]
+    assert cell["original_amount"] == "30.00"
+    assert cell["amount_rmb"] == "15"
+    assert draft["unmatched_lines"] == [
+        {
+            "service_row": 1,
+            "service_code": "invalid_negative",
+            "reason_code": "SERVICE_AMOUNT_INVALID",
+            "message": "清关服务费金额无效。",
+            "source_evidence": {"page": 2, "text_line": 7},
+        }
+    ]
 
 
 def test_mixed_customs_draft_includes_clearance_service_components() -> None:
@@ -1395,6 +1559,15 @@ def test_execute_loads_current_evidence_components_for_material_matrix(monkeypat
             }
 
         def get_items(self, _batch, _version):
+            return [
+                {
+                    "name": "ITEM-GLASSES",
+                    "material_code": "GL-01",
+                    "goods_value": "400",
+                }
+            ]
+
+        def get_matrix_items(self, _batch, _version):
             return _items()
 
         def get_evidence_components(self, evidence_name):
@@ -1437,6 +1610,12 @@ def test_execute_loads_current_evidence_components_for_material_matrix(monkeypat
 
     assert result["status"] == "READY"
     assert captured["existing_components"] is saved_components
+    assert [row["name"] for row in captured["items"]] == ["ITEM-GLASSES"]
+    assert [row["name"] for row in captured["matrix_items"]] == [
+        "ITEM-GLASSES",
+        "ITEM-SUNGLASSES",
+    ]
+    assert captured["matrix_items"][1]["stable_line_key"] == "LINE-SUNGLASSES"
 
 
 def test_repository_parses_saved_component_evidence_and_confidence(monkeypatch) -> None:
