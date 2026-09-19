@@ -668,12 +668,13 @@ def compact_dict(data):
 	return {key: value for key, value in data.items() if value not in (None, "", [])}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reject_sales_order(sales_order_name, remark=None):
 	"""Reject and cancel a submitted Sales Order while it is waiting for deposit confirmation."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		throw_crm_integration_disabled(sales_order.get("company"))
+	sales_order.check_permission("cancel")
 	assert_sales_order_not_closed(sales_order)
 
 	if sales_order.docstatus != 1:
@@ -730,12 +731,13 @@ def prevent_rejected_sales_order_submit(doc, method=None):
 		frappe.throw(_("已驳回的销售订单不能提交。"))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def confirm_deposit_and_push_to_mes(sales_order_name):
 	"""Confirm deposit, notify CRM, and push the Sales Order to MES."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		throw_crm_integration_disabled(sales_order.get("company"))
+	sales_order.check_permission("write")
 	assert_sales_order_not_closed(sales_order)
 
 	if sales_order.docstatus != 1:
@@ -757,12 +759,13 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reconcile_final_payment(sales_order_name):
 	"""Release Sales Order for delivery after user confirmation."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		throw_crm_integration_disabled(sales_order.get("company"))
+	sales_order.check_permission("write")
 	assert_sales_order_not_closed(sales_order)
 
 	if sales_order.docstatus != 1:

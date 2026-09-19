@@ -4,15 +4,27 @@ import frappe
 from frappe import _
 from frappe.utils import flt
 
+from crm_integration.crm_integration.auth import validate_crm_api_user
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from crm_integration.crm_integration.sales_order import PENDING_DEPOSIT_CONFIRMATION
 from crm_integration.crm_integration.sales_order import PENDING_CONFIRMATION, PENDING_PRODUCTION
 from crm_integration.crm_integration.settings import is_crm_integration_enabled, throw_crm_integration_disabled
 
 
+SALES_ORDER_UPDATE_ALLOWED_FIELDS = {
+	"custom_crm_order_no",
+	"custom_odt",
+	"custom_remark",
+	"delivery_date",
+	"po_date",
+	"po_no",
+}
+
+
 @frappe.whitelist(methods=["POST"])
 def create_and_submit_sales_order(sales_order=None):
 	"""Create a Sales Order from an external system and submit it immediately."""
+	validate_crm_api_user()
 	payload = get_request_payload(sales_order)
 	validate_sales_order_payload(payload)
 	if not is_crm_integration_enabled(payload.get("company")):
@@ -86,6 +98,7 @@ def preserve_explicit_zero_rates(doc, payload):
 @frappe.whitelist(methods=["POST"])
 def update_sales_order_by_crm_order_no(sales_order: Any = None):
 	"""Update an existing Sales Order using its CRM order number."""
+	validate_crm_api_user()
 	payload = get_request_payload(sales_order)
 	validate_sales_order_update_payload(payload)
 
@@ -102,10 +115,12 @@ def update_sales_order_by_crm_order_no(sales_order: Any = None):
 		frappe.throw(_("CRM 销售订单号 {0} 对应多笔销售订单，无法安全修改。").format(crm_order_no))
 
 	doc = frappe.get_doc("Sales Order", sales_order_names[0])
+	if not is_crm_integration_enabled(doc.get("company")):
+		throw_crm_integration_disabled(doc.get("company"))
 	validate_sales_order_update_status(doc)
 	update_sales_order_items(doc, payload.get("items"))
 	for field, value in payload.items():
-		if field not in {"doctype", "name", "docstatus", "items"}:
+		if field in SALES_ORDER_UPDATE_ALLOWED_FIELDS:
 			doc.set(field, value)
 
 	if payload.get("items"):
@@ -216,6 +231,15 @@ def validate_sales_order_update_payload(payload: Any):
 	if not payload.get("custom_crm_order_no"):
 		frappe.throw(_("缺少必填字段：custom_crm_order_no"))
 
+	unsupported_fields = set(payload) - SALES_ORDER_UPDATE_ALLOWED_FIELDS - {
+		"doctype",
+		"items",
+	}
+	if unsupported_fields:
+		frappe.throw(
+			_("不支持修改销售订单字段：{0}。").format(", ".join(sorted(unsupported_fields)))
+		)
+
 
 def ensure_sales_persons_exist(payload):
 	"""Ensure every Sales Person referenced in sales_team exists in ERP.
@@ -279,6 +303,7 @@ def _validate_uom(uom):
 @frappe.whitelist()
 def get_item_group_list(keyword=None):
 	"""查询物料组列表，支持模糊搜索。返回叶子物料组。"""
+	validate_crm_api_user()
 	filters = {"is_group": 0}
 	if keyword:
 		filters["name"] = ["like", "%{}%".format(keyword)]
@@ -296,6 +321,7 @@ def get_item_group_list(keyword=None):
 @frappe.whitelist()
 def check_item_exists(item_code):
 	"""检查物料是否已存在，返回完整物料信息"""
+	validate_crm_api_user()
 	if not item_code:
 		frappe.throw(_("缺少必填字段：item_code"))
 
@@ -323,6 +349,7 @@ def check_item_exists(item_code):
 @frappe.whitelist(methods=["POST"])
 def create_item_from_crm(item_data=None):
 	"""从 CRM 创建物料到 ERP。"""
+	validate_crm_api_user()
 	payload = get_request_payload(item_data)
 	validate_item_payload(payload)
 

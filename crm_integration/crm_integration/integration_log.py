@@ -1,9 +1,7 @@
 import frappe
 
+from crm_integration.crm_integration.auth import is_crm_api_user
 from crm_integration.crm_integration.settings import is_crm_integration_enabled
-
-
-CRM_SYSTEM_USER = "crm system"
 
 
 def create_crm_log(
@@ -103,7 +101,7 @@ def get_request_source():
 
 	path = getattr(frappe.request, "path", "") or ""
 	if path.startswith("/api/"):
-		if get_current_user() == CRM_SYSTEM_USER:
+		if is_crm_api_user():
 			return "CRM"
 		return "External API"
 
@@ -115,4 +113,3 @@ def get_request_url():
 		return None
 
 	return getattr(frappe.request, "url", None)
-
