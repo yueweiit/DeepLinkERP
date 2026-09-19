@@ -9,6 +9,7 @@ const original_period_closing_custom_filter_configs =
 // layout and database schema remain unchanged.
 const period_closing_voucher_meta = frappe.get_meta(period_closing_voucher_doctype);
 const period_closing_voucher_list_fields = [
+	"custom_china_voucher_number",
 	"period_start_date",
 	"period_end_date",
 	"amended_from",
@@ -100,6 +101,7 @@ frappe.listview_settings[period_closing_voucher_doctype] = {
 		...new Set([
 			...(existing_period_closing_voucher_settings.add_fields || []),
 			"docstatus",
+			"custom_china_voucher_number",
 			"period_start_date",
 			"period_end_date",
 			"amended_from",

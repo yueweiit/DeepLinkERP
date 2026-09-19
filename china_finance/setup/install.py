@@ -493,17 +493,33 @@ def sync_sales_settlement_custom_fields():
 			{"fieldname": "custom_china_sales_settlement", "label": "销售结算单", "fieldtype": "Link", "options": "China Sales Settlement", "read_only": 1, "insert_after": "customer_name"},
 		],
 	}, update=True)
+	sync_period_closing_voucher_number_field()
 	backfill_source_voucher_numbers()
+
+
+def sync_period_closing_voucher_number_field():
+	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+
+	create_custom_fields({
+		"Period Closing Voucher": [
+			{
+				"fieldname": "custom_china_voucher_number", "label": "凭证字号", "fieldtype": "Data",
+				"read_only": 1, "in_list_view": 1, "insert_after": "company",
+			},
+		],
+	}, update=True)
 
 
 def backfill_source_voucher_numbers():
 	"""Keep source-document list columns synchronized with voucher snapshots."""
+	from china_finance.services.voucher import FORMAL_VOUCHER_SOURCES
+
 	for voucher in frappe.get_all(
 		"China Accounting Voucher",
-		filters={"docstatus": 1},
-		fields=["source_doctype", "source_name", "statutory_number"],
+		filters={"docstatus": 1, "source_event": "Posting", "source_doctype": ["in", FORMAL_VOUCHER_SOURCES]},
+		fields=["source_doctype", "source_name", "source_key", "statutory_number"],
 	):
-		if voucher.source_doctype not in ("Journal Entry", "Payment Entry"):
+		if not voucher.statutory_number or voucher.source_key != f"Posting|{voucher.source_doctype}|{voucher.source_name}":
 			continue
 		if not frappe.db.has_column(voucher.source_doctype, "custom_china_voucher_number"):
 			continue

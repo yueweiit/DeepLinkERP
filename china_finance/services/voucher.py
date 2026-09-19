@@ -22,7 +22,7 @@ GL_SOURCE_DOCTYPES = (
 	"Period Closing Voucher",
 )
 
-FORMAL_VOUCHER_SOURCES = ("Journal Entry", "Payment Entry")
+FORMAL_VOUCHER_SOURCES = ("Journal Entry", "Payment Entry", "Period Closing Voucher")
 
 SNAPSHOT_RETRY_ROLES = ("System Manager", "China Finance Manager")
 SNAPSHOT_BACKLINK_DOCTYPES = ("China Accounting Voucher", "China Cash Flow Assignment")
@@ -883,6 +883,10 @@ def _get_or_create_formal_sequence(voucher, sequence_key):
 
 def _get_inherited_formal_number(voucher):
 	"""Return the original posting number for an amended formal source document."""
+	if voucher.source_doctype == "Period Closing Voucher":
+		# Reclosing after supplementary postings must take the new month-end
+		# number, not inherit an earlier closing's number ahead of those postings.
+		return None
 	if voucher.source_doctype not in FORMAL_VOUCHER_SOURCES:
 		return None
 	if not frappe.db.has_column(voucher.source_doctype, "amended_from"):
@@ -985,6 +989,73 @@ def assign_voucher_number(voucher):
 		sequence,
 		update_modified=False,
 	)
+
+
+def backfill_period_closing_voucher_numbers(company=None, apply=False):
+	"""Number active, unnumbered closing snapshots after each month's existing vouchers.
+
+	The default is a read-only preview. Cancelled closings and superseded audit
+	snapshots keep their history; existing formal numbers are never reassigned.
+	The caller owns the transaction, including the sequence and source backlink.
+	"""
+	frappe.only_for(SNAPSHOT_RETRY_ROLES)
+	rows = frappe.db.sql(
+		"""
+		SELECT v.name, v.company, v.source_name, pcv.period_end_date
+		FROM `tabChina Accounting Voucher` v
+		INNER JOIN `tabPeriod Closing Voucher` pcv ON pcv.name=v.source_name
+		WHERE v.source_doctype='Period Closing Voucher' AND v.source_event='Posting'
+			AND v.source_key=CONCAT('Posting|Period Closing Voucher|', pcv.name)
+			AND v.docstatus=1 AND v.status='Posted' AND pcv.docstatus=1
+			AND v.company=pcv.company AND COALESCE(v.statutory_number, '')=''
+			AND (%(company)s IS NULL OR v.company=%(company)s)
+		ORDER BY v.company, pcv.period_end_date, v.creation, v.name
+		""",
+		{"company": company},
+		as_dict=True,
+	)
+	result = []
+	for row in rows:
+		if not get_company_settings(row.company):
+			continue
+		if not cint(apply):
+			result.append(row)
+			continue
+
+		# Serialize against cancellation and another migration of the same source.
+		frappe.db.sql("SELECT name FROM `tabPeriod Closing Voucher` WHERE name=%s FOR UPDATE", row.source_name)
+		frappe.db.sql("SELECT name FROM `tabChina Accounting Voucher` WHERE name=%s FOR UPDATE", row.name)
+		source = frappe.get_doc("Period Closing Voucher", row.source_name)
+		voucher = frappe.get_doc("China Accounting Voucher", row.name)
+		if (
+			source.docstatus != 1 or voucher.docstatus != 1 or voucher.status != "Posted"
+			or voucher.statutory_number
+			or voucher.source_key != f"Posting|Period Closing Voucher|{source.name}"
+		):
+			continue
+		if voucher.sequence_number or (voucher.voucher_key and not voucher.voucher_key.startswith("business|")):
+			frappe.throw(_("期末结转快照 {0} 的原编号状态异常，请先核查").format(voucher.name))
+
+		voucher.posting_date = get_posting_date(source)
+		voucher.fiscal_year = str(voucher.posting_date.year)
+		voucher.accounting_period = voucher.posting_date.strftime("%Y-%m")
+		voucher.voucher_key = None
+		assign_voucher_number(voucher)
+		# This controlled metadata migration does not resubmit or recreate entries.
+		frappe.db.set_value(
+			"China Accounting Voucher", voucher.name,
+			{fieldname: voucher.get(fieldname) for fieldname in (
+				"posting_date", "fiscal_year", "accounting_period",
+				"sequence_number", "statutory_number", "voucher_key",
+			)},
+			update_modified=False,
+		)
+		_sync_source_voucher_number(source.doctype, source.name, voucher.statutory_number)
+		voucher.add_comment(
+			"Info", _("按所属月份补齐期末结转凭证字号：{0}；会计分录未变更。").format(voucher.statutory_number)
+		)
+		result.append({**row, "accounting_period": voucher.accounting_period, "statutory_number": voucher.statutory_number})
+	return result
 
 
 def calculate_entries_hash(entries):

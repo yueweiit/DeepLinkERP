@@ -26,6 +26,7 @@ frappe.query_reports["China Voucher Ledger"] = {
 			label: __("状态"),
 			fieldtype: "Select",
 			options: ["", __("已记账"), __("已冲销")],
+			default: __("已记账"),
 		},
 		{ fieldname: "accounting_period", label: __("会计期间"), fieldtype: "Data" },
 		{

@@ -70,7 +70,8 @@ def execute(filters=None):
 			{effective_posting_date} AS posting_date,
 			{effective_accounting_period} AS accounting_period,
 			CASE
-				WHEN v.source_doctype='Period Closing Voucher' THEN '期末结账'
+				WHEN v.source_doctype='Period Closing Voucher'
+					THEN COALESCE(NULLIF(v.statutory_number, ''), '期末结账')
 				ELSE v.statutory_number
 			END AS statutory_number,
 			v.voucher_word, v.source_doctype, v.source_name, v.source_event,
@@ -97,7 +98,9 @@ def execute(filters=None):
 		LEFT JOIN `tabPeriod Closing Voucher` pcv
 			ON v.source_doctype='Period Closing Voucher' AND pcv.name=v.source_name
 		WHERE {' AND '.join(conditions)}
-		ORDER BY {effective_accounting_period}, v.voucher_word, {effective_posting_date}, v.sequence_number, v.name, e.idx
+		ORDER BY {effective_accounting_period},
+			CASE WHEN v.source_doctype='Period Closing Voucher' THEN 1 ELSE 0 END,
+			v.voucher_word, {effective_posting_date}, v.sequence_number, v.name, e.idx
 		""",
 		filters,
 		as_dict=True,
