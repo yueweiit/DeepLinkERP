@@ -8,6 +8,10 @@ from crm_integration.crm_integration.auth import validate_crm_api_user
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from crm_integration.crm_integration.sales_order import PENDING_DEPOSIT_CONFIRMATION
 from crm_integration.crm_integration.sales_order import PENDING_CONFIRMATION, PENDING_PRODUCTION
+from crm_integration.crm_integration.sales_order_identity import (
+	crm_sales_order_creation_lock,
+	get_sales_order_names_by_crm_order_no,
+)
 from crm_integration.crm_integration.settings import is_crm_integration_enabled, throw_crm_integration_disabled
 
 
@@ -29,8 +33,18 @@ def create_and_submit_sales_order(sales_order=None):
 	validate_sales_order_payload(payload)
 	if not is_crm_integration_enabled(payload.get("company")):
 		throw_crm_integration_disabled(payload.get("company"))
-	ensure_sales_persons_exist(payload)
 
+	with crm_sales_order_creation_lock(payload["custom_crm_order_no"]):
+		existing_response = get_existing_sales_order_response(payload)
+		if existing_response:
+			log_existing_sales_order_request(payload, existing_response)
+			return existing_response
+
+		return create_sales_order(payload)
+
+
+def create_sales_order(payload):
+	ensure_sales_persons_exist(payload)
 	crm_log = create_crm_log(
 		direction="Inbound",
 		event="Sales Order Create And Submit",
@@ -75,6 +89,47 @@ def create_and_submit_sales_order(sales_order=None):
 			http_status_code=500,
 		)
 		raise
+
+
+def get_existing_sales_order_response(payload):
+	crm_order_no = payload["custom_crm_order_no"]
+	sales_order_names = get_sales_order_names_by_crm_order_no(crm_order_no)
+	if not sales_order_names:
+		return None
+	if len(sales_order_names) > 1:
+		frappe.throw(_("CRM 销售订单号 {0} 已对应多笔销售订单，请先处理重复数据。").format(crm_order_no))
+
+	doc = frappe.get_doc("Sales Order", sales_order_names[0])
+	if doc.get("company") != payload.get("company"):
+		frappe.throw(_("CRM 销售订单号 {0} 已被其他公司使用。").format(crm_order_no))
+	if doc.docstatus != 1:
+		frappe.throw(
+			_("CRM 销售订单号 {0} 已存在，但对应销售订单不是已提交状态。").format(crm_order_no)
+		)
+
+	return {
+		"status": "success",
+		"message": _("销售订单已存在，本次请求按幂等方式返回原单据。"),
+		"name": doc.name,
+		"docstatus": doc.docstatus,
+		"process_status": doc.get("custom_process_status"),
+		"idempotent_replay": True,
+	}
+
+
+def log_existing_sales_order_request(payload, response):
+	create_crm_log(
+		direction="Inbound",
+		event="Sales Order Create And Submit",
+		status="Success",
+		source="CRM",
+		reference_doctype="Sales Order",
+		reference_name=response["name"],
+		request_url=get_request_url(),
+		request_payload=payload,
+		response_payload=response,
+		http_status_code=200,
+	)
 
 
 def preserve_explicit_zero_rates(doc, payload):
@@ -213,6 +268,9 @@ def validate_sales_order_payload(payload):
 
 	if not payload.get("customer"):
 		frappe.throw(_("缺少必填字段：customer"))
+
+	if not payload.get("custom_crm_order_no"):
+		frappe.throw(_("缺少必填字段：custom_crm_order_no"))
 
 	if not payload.get("items"):
 		frappe.throw(_("缺少销售订单明细：items"))

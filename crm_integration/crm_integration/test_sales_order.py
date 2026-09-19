@@ -5,12 +5,25 @@ from frappe.tests import UnitTestCase
 
 from crm_integration.crm_integration.sales_order import (
 	confirm_deposit_and_push_to_mes,
+	prevent_duplicate_crm_order_no,
 	reconcile_final_payment,
 	reject_sales_order,
 )
 
 
 class TestSalesOrderPermissions(UnitTestCase):
+	def test_duplicate_crm_order_no_is_rejected_before_insert(self):
+		doc = frappe._dict(custom_crm_order_no="CRM-001")
+
+		with (
+			patch(
+				"crm_integration.crm_integration.sales_order.get_sales_order_names_by_crm_order_no",
+				return_value=["SO-EXISTING"],
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			prevent_duplicate_crm_order_no(doc)
+
 	def test_reject_checks_cancel_permission_before_crm_push(self):
 		doc = self.make_sales_order()
 		doc.check_permission.side_effect = frappe.PermissionError

@@ -6,6 +6,7 @@ from frappe.utils import cint, flt, now
 from frappe.utils.data import get_datetime
 
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
+from crm_integration.crm_integration.sales_order_identity import get_sales_order_names_by_crm_order_no
 from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
 from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
 
@@ -50,6 +51,20 @@ PRODUCT_SERIES_NAME_MAP = {
 	"NWV": "薇武士",
 	"NBD": "圣殿",
 }
+
+
+def prevent_duplicate_crm_order_no(doc, method=None):
+	crm_order_no = doc.get("custom_crm_order_no")
+	if not crm_order_no:
+		return
+
+	existing_names = get_sales_order_names_by_crm_order_no(crm_order_no, limit=1)
+	if existing_names:
+		frappe.throw(
+			_("CRM 销售订单号 {0} 已被销售订单 {1} 使用。").format(
+				crm_order_no, existing_names[0]
+			)
+		)
 
 
 @frappe.whitelist()
