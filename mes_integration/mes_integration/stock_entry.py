@@ -524,9 +524,9 @@ def get_existing_mes_receipt_stock_entry(
 ):
     """Return the MES receipt matching an idempotent retry.
 
-    A production reference may temporarily be shared by distinct MES receipt
-    payloads. Exact retries reuse the matching document; a different payload
-    is allowed to create a separate receipt under the same reference.
+    ``custom_stock_entry_no`` is the MES receipt identity within one company.
+    Exact retries reuse the existing document; a different payload is rejected
+    instead of creating another inventory movement under the same identity.
     """
     if (
         not company
@@ -553,29 +553,27 @@ def get_existing_mes_receipt_stock_entry(
         order_by="creation asc",
         limit_page_length=0,
     )
-    if request_data is not None:
-        matching_stock_entries = []
-        for name in names:
-            stock_entry = frappe.get_doc("Stock Entry", name)
-            if not get_mes_receipt_identity_mismatches(
-                stock_entry, request_data, sales_order_doc
-            ):
-                matching_stock_entries.append(stock_entry)
-
-        if len(matching_stock_entries) > 1:
-            throw_mes_receipt_identity_conflict(
-                f"MES 入库编号 {receipt_no} 的相同请求已对应多个 ERP Stock Entry："
-                f"{', '.join(doc.name for doc in matching_stock_entries)}。"
-                "请先人工确认正确单据，ERP 不会自动选择其中一张。"
-            )
-
-        return matching_stock_entries[0] if matching_stock_entries else None
-
     if len(names) > 1:
         throw_mes_receipt_identity_conflict(
             f"MES 入库编号 {receipt_no} 已对应多个 ERP Stock Entry：{', '.join(names)}。"
-            "请先人工确认正确单据，ERP 不会自动选择其中一张。"
+            "请先人工确认并清理重复单据，ERP 不会自动选择其中一张。"
         )
+
+    if request_data is not None:
+        if not names:
+            return None
+
+        stock_entry = frappe.get_doc("Stock Entry", names[0])
+        mismatches = get_mes_receipt_identity_mismatches(
+            stock_entry, request_data, sales_order_doc
+        )
+        if mismatches:
+            throw_mes_receipt_identity_conflict(
+                f"MES 入库编号 {receipt_no} 已对应 ERP Stock Entry {stock_entry.name}，"
+                f"但本次请求字段不一致：{', '.join(mismatches)}。"
+            )
+
+        return stock_entry
 
     return frappe.get_doc("Stock Entry", names[0]) if names else None
 

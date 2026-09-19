@@ -257,7 +257,7 @@ class TestMESStockEntry(UnitTestCase):
 			},
 		)
 
-	def test_distinct_payload_with_shared_receipt_number_is_allowed(self):
+	def test_distinct_payload_with_shared_receipt_number_is_rejected(self):
 		existing = frappe._dict(
 			name="MAT-STE-2026-00001",
 			company="Test Company",
@@ -288,14 +288,18 @@ class TestMESStockEntry(UnitTestCase):
 				return_value=existing,
 			),
 		):
-			result = get_existing_mes_receipt_stock_entry(
-				"Test Company",
-				"MES-RECEIPT-001",
-				request_data=request_data,
-				sales_order_doc=sales_order,
-			)
+			with self.assertRaises(frappe.ValidationError):
+				get_existing_mes_receipt_stock_entry(
+					"Test Company",
+					"MES-RECEIPT-001",
+					request_data=request_data,
+					sales_order_doc=sales_order,
+				)
 
-		self.assertIsNone(result)
+		self.assertEqual(
+			frappe.response.get("error_code"),
+			"ERP_STOCK_ENTRY_IDENTITY_CONFLICT",
+		)
 
 	def test_exact_retry_with_shared_receipt_number_reuses_existing_entry(self):
 		existing = frappe._dict(
