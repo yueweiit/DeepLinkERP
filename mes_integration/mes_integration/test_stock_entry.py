@@ -210,6 +210,68 @@ class TestMESStockEntry(UnitTestCase):
 			"ERP_STOCK_ENTRY_IDENTITY_CONFLICT",
 		)
 
+	def test_mes_receipt_identity_rejects_changed_batch(self):
+		existing = frappe._dict(
+			name="MAT-STE-2026-00001",
+			company="Test Company",
+			stock_entry_type="Finished Goods Receipt",
+			custom_stock_entry_no="MES-RECEIPT-001",
+			custom_sales_order="SAL-ORD-2026-00001",
+			posting_date="2026-09-19",
+			items=[
+				{
+					"item_code": "ITEM-A",
+					"qty": 1,
+					"batch_no": "BATCH-001",
+				}
+			],
+		)
+		request_data = {
+			"company": "Test Company",
+			"stock_entry_type": "Finished Goods Receipt",
+			"custom_stock_entry_no": "MES-RECEIPT-001",
+			"posting_date": "2026-09-19",
+			"items": [
+				{
+					"item_code": "ITEM-A",
+					"qty": 1,
+					"batch_no": "BATCH-002",
+				}
+			],
+		}
+
+		with self.assertRaises(frappe.ValidationError):
+			validate_mes_receipt_identity(
+				existing,
+				request_data,
+				frappe._dict(name="SAL-ORD-2026-00001"),
+			)
+
+	def test_mes_receipt_identity_rejects_changed_posting_date(self):
+		existing = frappe._dict(
+			name="MAT-STE-2026-00001",
+			company="Test Company",
+			stock_entry_type="Finished Goods Receipt",
+			custom_stock_entry_no="MES-RECEIPT-001",
+			custom_sales_order="SAL-ORD-2026-00001",
+			posting_date="2026-09-18",
+			items=[{"item_code": "ITEM-A", "qty": 1}],
+		)
+		request_data = {
+			"company": "Test Company",
+			"stock_entry_type": "Finished Goods Receipt",
+			"custom_stock_entry_no": "MES-RECEIPT-001",
+			"posting_date": "2026-09-19",
+			"items": [{"item_code": "ITEM-A", "qty": 1}],
+		}
+
+		with self.assertRaises(frappe.ValidationError):
+			validate_mes_receipt_identity(
+				existing,
+				request_data,
+				frappe._dict(name="SAL-ORD-2026-00001"),
+			)
+
 	def test_duplicate_mes_receipt_numbers_are_not_auto_selected(self):
 		with (
 			patch(

@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from requests.exceptions import RequestException
 
 import frappe
-from frappe.utils import cint, flt, get_request_session, getdate, now
+from frappe.utils import cint, flt, get_request_session, get_time, getdate, now
 
 from erpnext.stock.doctype.item.item import get_item_defaults
 
@@ -601,9 +601,21 @@ def get_mes_receipt_identity_mismatches(stock_entry, request_data, sales_order_d
 
     requested_sales_order = sales_order_doc.name if sales_order_doc else None
     existing_sales_order = stock_entry.get("custom_sales_order")
-    if requested_sales_order and existing_sales_order:
-        if requested_sales_order != existing_sales_order:
-            mismatches.append("sales_order")
+    if requested_sales_order and requested_sales_order != existing_sales_order:
+        mismatches.append("sales_order")
+
+    for fieldname in ("posting_date", "posting_time"):
+        requested_value = get_mes_receipt_header_identity_value(
+            fieldname, request_data.get(fieldname)
+        )
+        if requested_value is None:
+            continue
+
+        existing_value = get_mes_receipt_header_identity_value(
+            fieldname, stock_entry.get(fieldname)
+        )
+        if requested_value != existing_value:
+            mismatches.append(fieldname)
 
     if request_data.get("items") is not None and not mes_receipt_items_match(
         request_data.get("items"), stock_entry.get("items")
@@ -626,6 +638,12 @@ def mes_receipt_items_match(request_items, existing_items):
         "conversion_factor",
         "s_warehouse",
         "t_warehouse",
+        "batch_no",
+        "serial_no",
+        "basic_rate",
+        "valuation_rate",
+        "incoming_rate",
+        "allow_zero_valuation_rate",
     )
     unmatched_items = list(existing_items)
     for requested in requested_items:
@@ -636,7 +654,7 @@ def mes_receipt_items_match(request_items, existing_items):
                 if requested["item_code"] == existing["item_code"]
                 and requested["qty"] == existing["qty"]
                 and all(
-                    not requested[fieldname]
+                    requested[fieldname] is None
                     or requested[fieldname] == existing[fieldname]
                     for fieldname in optional_fields
                 )
@@ -658,15 +676,27 @@ def get_mes_receipt_item_identity(items):
             {
                 "item_code": row.get("item_code"),
                 "qty": flt(row.get("qty")),
-                "uom": row.get("uom") or "",
-                "stock_uom": row.get("stock_uom") or "",
-                "conversion_factor": (
-                    flt(row.get("conversion_factor"))
-                    if row.get("conversion_factor") not in (None, "")
-                    else None
+                "uom": get_mes_receipt_item_identity_value(row, "uom"),
+                "stock_uom": get_mes_receipt_item_identity_value(row, "stock_uom"),
+                "conversion_factor": get_mes_receipt_item_identity_value(
+                    row, "conversion_factor", numeric=True
                 ),
-                "s_warehouse": row.get("s_warehouse") or "",
-                "t_warehouse": row.get("t_warehouse") or "",
+                "s_warehouse": get_mes_receipt_item_identity_value(row, "s_warehouse"),
+                "t_warehouse": get_mes_receipt_item_identity_value(row, "t_warehouse"),
+                "batch_no": get_mes_receipt_item_identity_value(row, "batch_no"),
+                "serial_no": get_mes_receipt_item_identity_value(row, "serial_no"),
+                "basic_rate": get_mes_receipt_item_identity_value(
+                    row, "basic_rate", numeric=True
+                ),
+                "valuation_rate": get_mes_receipt_item_identity_value(
+                    row, "valuation_rate", numeric=True
+                ),
+                "incoming_rate": get_mes_receipt_item_identity_value(
+                    row, "incoming_rate", numeric=True
+                ),
+                "allow_zero_valuation_rate": get_mes_receipt_item_identity_value(
+                    row, "allow_zero_valuation_rate", integer=True
+                ),
             }
         )
 
@@ -674,11 +704,34 @@ def get_mes_receipt_item_identity(items):
         identity,
         key=lambda row: (
             row["item_code"] or "",
-            row["s_warehouse"],
-            row["t_warehouse"],
+            row["s_warehouse"] or "",
+            row["t_warehouse"] or "",
             row["qty"],
         ),
     )
+
+
+def get_mes_receipt_header_identity_value(fieldname, value):
+    if value in (None, ""):
+        return None
+
+    if fieldname == "posting_date":
+        return getdate(value).isoformat()
+    if fieldname == "posting_time":
+        return get_time(value).isoformat()
+
+    return value
+
+
+def get_mes_receipt_item_identity_value(row, fieldname, numeric=False, integer=False):
+    value = row.get(fieldname)
+    if value in (None, ""):
+        return None
+    if integer:
+        return cint(value)
+    if numeric:
+        return flt(value)
+    return str(value).strip()
 
 
 def throw_mes_receipt_identity_conflict(message):
