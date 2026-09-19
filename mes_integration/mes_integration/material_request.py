@@ -1,4 +1,5 @@
 import hashlib
+import json
 import time
 from contextlib import contextmanager
 from copy import deepcopy
@@ -46,6 +47,35 @@ MES_TASK_JOB_ID_PREFIX = "mes-material-request-task:"
 MES_TASK_TIMEOUT = 1500
 MES_TASK_STALE_SECONDS = 1800
 MES_TASK_RECOVERY_BATCH_SIZE = 100
+MES_MATERIAL_REQUEST_HASH_FIELD = "custom_mes_request_hash"
+MES_MATERIAL_REQUEST_NUMERIC_IDENTITY_FIELDS = {
+    "qty",
+    "stock_qty",
+    "conversion_factor",
+    "custom_new_material_weight",
+    "custom_recycled_material_weight",
+    "order_qty",
+    "issue_qty",
+}
+MES_MATERIAL_REQUEST_IGNORED_IDENTITY_FIELDS = {
+    "doctype",
+    "name",
+    "owner",
+    "creation",
+    "modified",
+    "modified_by",
+    "parent",
+    "parenttype",
+    "parentfield",
+    "idx",
+    "docstatus",
+    "__islocal",
+    MES_MATERIAL_REQUEST_HASH_FIELD,
+}
+
+
+class MESMaterialRequestIdentityConflict(frappe.ValidationError):
+    http_status_code = 409
 
 
 class MESMaterialRequestPerformanceMixin:
@@ -130,6 +160,7 @@ def queue_material_request_task(payload):
     task_payload = material_request_data.copy()
     if request_key and frappe.db.has_column("Material Request", "custom_material_request_no"):
         task_payload["custom_material_request_no"] = request_key
+    request_hash = get_material_request_identity_hash(task_payload)
     task_name = build_material_request_task_name(
         material_request_data.get("company"), request_key
     )
@@ -148,6 +179,7 @@ def queue_material_request_task(payload):
                     "status": "Queued",
                     "material_request": None,
                     "request_payload": frappe.as_json(task_payload),
+                    "request_hash": request_hash,
                     "item_count": len(material_request_data.get("items") or []),
                     "detail_count": len(
                         material_request_data.get(MES_ITEM_DETAILS_FIELD) or []
@@ -160,20 +192,22 @@ def queue_material_request_task(payload):
             )
             task.reload()
             starts_new_attempt = True
-        elif task.status == "Processing" and is_stale_material_request_task(task):
-            frappe.db.set_value(
-                MES_MATERIAL_REQUEST_TASK_DOCTYPE,
-                task.name,
-                {
-                    "status": "Queued",
-                    "error_message": None,
-                    "started_at": None,
-                    "finished_at": None,
-                },
-                update_modified=True,
-            )
-            task.reload()
-            starts_new_attempt = True
+        else:
+            validate_material_request_task_identity(task, task_payload, request_hash)
+            if task.status == "Processing" and is_stale_material_request_task(task):
+                frappe.db.set_value(
+                    MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+                    task.name,
+                    {
+                        "status": "Queued",
+                        "error_message": None,
+                        "started_at": None,
+                        "finished_at": None,
+                    },
+                    update_modified=True,
+                )
+                task.reload()
+                starts_new_attempt = True
 
         if starts_new_attempt:
             create_material_request_task_log(task, task_payload)
@@ -187,11 +221,18 @@ def queue_material_request_task(payload):
     existing_material_request = get_existing_material_request_name(
         material_request_data.get("company"), request_key
     )
+    if existing_material_request:
+        validate_existing_material_request_identity(
+            frappe.get_doc("Material Request", existing_material_request),
+            task_payload,
+            request_hash,
+        )
     task = frappe.get_doc(
         {
             "doctype": MES_MATERIAL_REQUEST_TASK_DOCTYPE,
             "name": task_name,
             "request_key": request_key,
+            "request_hash": request_hash,
             "company": material_request_data.get("company"),
             "status": "Success" if existing_material_request else "Queued",
             "submitted_by": frappe.session.user,
@@ -212,6 +253,7 @@ def queue_material_request_task(payload):
         frappe.db.rollback()
         task = frappe.get_doc(MES_MATERIAL_REQUEST_TASK_DOCTYPE, task_name)
         validate_material_request_task_access(task)
+        validate_material_request_task_identity(task, task_payload, request_hash)
         set_material_request_task_response(task, reused=True)
         return
 
@@ -278,12 +320,20 @@ def create_and_submit_material_request_payload(payload):
 
     if request_key and frappe.db.has_column("Material Request", "custom_material_request_no"):
         material_request_data["custom_material_request_no"] = request_key
+    request_hash = get_material_request_identity_hash(material_request_data)
+    if frappe.db.has_column("Material Request", MES_MATERIAL_REQUEST_HASH_FIELD):
+        material_request_data[MES_MATERIAL_REQUEST_HASH_FIELD] = request_hash
 
     existing_name = get_existing_material_request_name(
         material_request_data.get("company"), request_key
     )
     if existing_name:
         existing_doc = frappe.get_doc("Material Request", existing_name)
+        validate_existing_material_request_identity(
+            existing_doc,
+            material_request_data,
+            request_hash,
+        )
         if existing_doc.docstatus != 1:
             frappe.throw(
                 _("MES 请求号 {0} 已存在，但对应物料需求尚未提交。请稍后重试。").format(
@@ -313,6 +363,11 @@ def create_and_submit_material_request_payload(payload):
                 raise
 
             existing_doc = frappe.get_doc("Material Request", existing_name)
+            validate_existing_material_request_identity(
+                existing_doc,
+                material_request_data,
+                request_hash,
+            )
             if existing_doc.docstatus != 1:
                 raise
             set_material_request_response(existing_doc, reused=True)
@@ -364,6 +419,213 @@ def build_material_request_task_name(company, request_key=None):
     seed = f"{company or ''}\0{request_key or frappe.generate_hash(length=32)}"
     suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
     return f"MES-MRT-{suffix}"
+
+
+def get_material_request_identity_hash(material_request_data):
+    """Return a deterministic fingerprint for the effective ERP request payload."""
+    identity = deepcopy(material_request_data or {})
+    for fieldname in (
+        "request_id",
+        "idempotency_key",
+        MES_MATERIAL_REQUEST_HASH_FIELD,
+    ):
+        identity.pop(fieldname, None)
+
+    canonical_payload = json.dumps(
+        canonicalize_material_request_identity(identity),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+
+def canonicalize_material_request_identity(value, fieldname=None):
+    if isinstance(value, dict):
+        return {
+            key: canonicalize_material_request_identity(child, key)
+            for key, child in value.items()
+            if key not in MES_MATERIAL_REQUEST_IGNORED_IDENTITY_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [canonicalize_material_request_identity(child) for child in value]
+    if fieldname in MES_MATERIAL_REQUEST_NUMERIC_IDENTITY_FIELDS and value not in (None, ""):
+        return format(flt(value), ".12g")
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
+def validate_material_request_task_identity(task, task_payload, request_hash):
+    existing_hash = task.get("request_hash")
+    if not existing_hash and task.get("request_payload"):
+        try:
+            existing_hash = get_material_request_identity_hash(
+                frappe.parse_json(task.request_payload)
+            )
+        except (TypeError, ValueError):
+            existing_hash = None
+
+    if existing_hash and existing_hash != request_hash:
+        throw_material_request_identity_conflict(
+            f"MES 申请号 {task.request_key} 已对应任务 {task.name}，但本次请求内容不同。"
+        )
+
+    if not existing_hash and task.get("material_request"):
+        existing_doc = frappe.get_doc("Material Request", task.material_request)
+        validate_existing_material_request_identity(
+            existing_doc,
+            task_payload,
+            request_hash,
+        )
+
+    if not task.get("request_hash"):
+        frappe.db.set_value(
+            MES_MATERIAL_REQUEST_TASK_DOCTYPE,
+            task.name,
+            "request_hash",
+            request_hash,
+            update_modified=False,
+        )
+        task.request_hash = request_hash
+
+
+def validate_existing_material_request_identity(
+    material_request,
+    material_request_data,
+    request_hash,
+):
+    existing_hash = material_request.get(MES_MATERIAL_REQUEST_HASH_FIELD)
+    if existing_hash:
+        if existing_hash != request_hash:
+            throw_material_request_identity_conflict(
+                f"MES 申请号 {material_request_data.get('custom_material_request_no')} "
+                f"已对应物料需求 {material_request.name}，但本次请求内容不同。"
+            )
+        return
+
+    mismatches = get_legacy_material_request_identity_mismatches(
+        material_request,
+        material_request_data,
+    )
+    if mismatches:
+        throw_material_request_identity_conflict(
+            f"MES 申请号 {material_request_data.get('custom_material_request_no')} "
+            f"已对应历史物料需求 {material_request.name}，但本次请求字段不一致："
+            f"{', '.join(mismatches)}。"
+        )
+
+    if frappe.db.has_column("Material Request", MES_MATERIAL_REQUEST_HASH_FIELD):
+        frappe.db.set_value(
+            "Material Request",
+            material_request.name,
+            MES_MATERIAL_REQUEST_HASH_FIELD,
+            request_hash,
+            update_modified=False,
+        )
+        material_request.set(MES_MATERIAL_REQUEST_HASH_FIELD, request_hash)
+
+
+def get_legacy_material_request_identity_mismatches(material_request, request_data):
+    """Compare request-owned fields before backfilling a legacy document hash."""
+    mismatches = []
+    header_fields = (
+        "material_request_type",
+        "company",
+        "transaction_date",
+        "schedule_date",
+        "set_from_warehouse",
+        "custom_material_request_no",
+        "custom_stock_entry_no",
+        "custom_odt",
+        "batch_no",
+    )
+    for fieldname in header_fields:
+        if fieldname in request_data and normalize_identity_value(
+            material_request.get(fieldname), fieldname
+        ) != normalize_identity_value(request_data.get(fieldname), fieldname):
+            mismatches.append(fieldname)
+
+    compare_material_request_rows(
+        mismatches,
+        "items",
+        material_request.get("items") or [],
+        request_data.get("items") or [],
+        (
+            "item_code",
+            "qty",
+            "uom",
+            "stock_uom",
+            "conversion_factor",
+            "warehouse",
+            "schedule_date",
+            "custom_new_material_weight",
+            "custom_recycled_material_weight",
+        ),
+    )
+    compare_material_request_rows(
+        mismatches,
+        MES_ITEM_DETAILS_FIELD,
+        material_request.get(MES_ITEM_DETAILS_FIELD) or [],
+        request_data.get(MES_ITEM_DETAILS_FIELD) or [],
+        (
+            "material_request_item_idx",
+            "item_code",
+            "item_name",
+            "model",
+            "model_code",
+            "color",
+            "color_code",
+            "article_code",
+            "batch_no",
+            "order_qty",
+            "issue_qty",
+            "remarks",
+        ),
+    )
+    return mismatches
+
+
+def compare_material_request_rows(
+    mismatches,
+    label,
+    existing_rows,
+    requested_rows,
+    fields,
+):
+    if len(existing_rows) != len(requested_rows):
+        mismatches.append(f"{label}.length")
+        return
+
+    for index, (existing_row, requested_row) in enumerate(
+        zip(existing_rows, requested_rows, strict=True),
+        start=1,
+    ):
+        for fieldname in fields:
+            if fieldname not in requested_row:
+                continue
+            if normalize_identity_value(
+                existing_row.get(fieldname), fieldname
+            ) != normalize_identity_value(requested_row.get(fieldname), fieldname):
+                mismatches.append(f"{label}[{index}].{fieldname}")
+
+
+def normalize_identity_value(value, fieldname=None):
+    if value is None:
+        return ""
+    if fieldname in MES_MATERIAL_REQUEST_NUMERIC_IDENTITY_FIELDS:
+        return format(flt(value), ".12g")
+    return str(value).strip()
+
+
+def throw_material_request_identity_conflict(message):
+    frappe.response["error_code"] = "ERP_MATERIAL_REQUEST_IDENTITY_CONFLICT"
+    frappe.throw(
+        f"ERP_MATERIAL_REQUEST_IDENTITY_CONFLICT: {message}",
+        exc=MESMaterialRequestIdentityConflict,
+        title=_("MES 物料需求幂等编号冲突"),
+    )
 
 
 def is_stale_material_request_task(task):

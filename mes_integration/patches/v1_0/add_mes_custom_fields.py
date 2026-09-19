@@ -58,6 +58,14 @@ def execute():
 					"in_list_view": 1,
 				},
 				{
+					"fieldname": "custom_mes_request_hash",
+					"fieldtype": "Data",
+					"insert_after": "custom_material_request_no",
+					"label": "MES请求指纹",
+					"read_only": 1,
+					"hidden": 1,
+				},
+				{
 					"fieldname": "custom_stock_entry_no",
 					"fieldtype": "Data",
 					"insert_after": "custom_material_request_no",

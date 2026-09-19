@@ -12,17 +12,20 @@ from mes_integration.mes_integration.integration_log import (
 	write_material_request_creation_log,
 )
 from mes_integration.mes_integration.material_request import (
+	MESMaterialRequestIdentityConflict,
 	build_material_request_task_name,
 	build_mes_material_request_name,
 	create_and_submit_material_request_payload,
 	create_and_submit_material_request_from_mes,
 	enqueue_mes_material_request_bin_sync_job,
 	get_mes_idempotency_key,
+	get_material_request_identity_hash,
 	get_issue_dialog_max_issue_stock_qty,
 	mark_material_request_task_failed,
 	recover_material_request_tasks,
 	reconcile_material_request_task_rq_failure,
 	process_material_request_task,
+	queue_material_request_task,
 	sync_material_request_bins,
 )
 
@@ -35,6 +38,22 @@ class TestMESMaterialRequest(UnitTestCase):
 	def test_issue_uom_conversion_does_not_increase_remaining_quantity(self):
 		self.assertEqual(get_issue_dialog_max_issue_stock_qty(13, 12), 13)
 		self.assertEqual(get_issue_dialog_max_issue_stock_qty(0, 12), 0)
+
+	def test_material_request_hash_normalizes_numeric_representations(self):
+		base = {
+			"doctype": "Material Request",
+			"company": "Test Company",
+			"items": [{"item_code": "ITEM-A", "qty": 1}],
+		}
+		string_quantity = {
+			**base,
+			"items": [{"item_code": "ITEM-A", "qty": "1.000"}],
+		}
+
+		self.assertEqual(
+			get_material_request_identity_hash(base),
+			get_material_request_identity_hash(string_quantity),
+		)
 
 	def test_mes_request_number_precedes_conflicting_idempotency_header(self):
 		business_request_number = "MIR-TEST-001"
@@ -203,6 +222,19 @@ class TestMESMaterialRequest(UnitTestCase):
 			1,
 		)
 
+		changed_request = {
+			**material_request,
+			"items": [{**material_request["items"][0], "qty": 2}],
+		}
+		with (
+			patch(
+				"mes_integration.mes_integration.material_request.is_mes_integration_enabled",
+				return_value=True,
+			),
+			self.assertRaises(MESMaterialRequestIdentityConflict),
+		):
+			create_and_submit_material_request_payload(changed_request)
+
 	def test_async_material_request_returns_task_without_creating_request(self):
 		company = frappe.db.get_value("Company", {"is_group": 0}, "name")
 		item = frappe.db.get_value(
@@ -305,6 +337,43 @@ class TestMESMaterialRequest(UnitTestCase):
 				},
 			),
 			1,
+		)
+
+	def test_queued_material_request_rejects_changed_payload_for_same_key(self):
+		company = frappe.db.get_value("Company", {"is_group": 0}, "name")
+		if not company:
+			self.skipTest("需要至少一个公司")
+
+		request_number = f"MES-IDENTITY-{frappe.generate_hash(length=10)}"
+		payload = {
+			"doctype": "Material Request",
+			"material_request_type": "Material Issue",
+			"company": company,
+			"custom_material_request_no": request_number,
+			"items": [{"item_code": "TEST-ITEM", "qty": 1}],
+		}
+
+		with (
+			patch(
+				"mes_integration.mes_integration.material_request.is_mes_integration_enabled",
+				return_value=True,
+			),
+			patch(
+				"mes_integration.mes_integration.material_request.schedule_material_request_task"
+			),
+		):
+			queue_material_request_task(payload)
+			with self.assertRaises(MESMaterialRequestIdentityConflict):
+				queue_material_request_task(
+					{
+						**payload,
+						"items": [{"item_code": "TEST-ITEM", "qty": 2}],
+					}
+				)
+
+		self.assertEqual(
+			frappe.response.get("error_code"),
+			"ERP_MATERIAL_REQUEST_IDENTITY_CONFLICT",
 		)
 
 	def test_material_request_task_worker_updates_success(self):
