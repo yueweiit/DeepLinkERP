@@ -14,12 +14,39 @@ from mes_integration.mes_integration.stock_entry import (
 	is_mes_receipt_stock_entry,
 	notify_mes_stock_entry_status,
 	set_mes_stock_entry_sales_order,
+	validate_issue_confirm_response,
 	validate_mes_receipt_identity,
 	validate_mes_receipt_stock_entry_type,
 )
 
 
 class TestMESStockEntry(UnitTestCase):
+	def test_dlm_issue_confirm_accepts_processed_status(self):
+		validate_issue_confirm_response(
+			{"success": True, "data": {"status": "processed"}},
+			{"stock_entry": "MAT-STE-2026-00001"},
+		)
+
+	def test_dlm_issue_confirm_rejects_partial_status(self):
+		with (
+			patch("mes_integration.mes_integration.stock_entry.log_mes_push_error"),
+			self.assertRaises(frappe.ValidationError),
+		):
+			validate_issue_confirm_response(
+				{"success": True, "data": {"status": "partial"}},
+				{"stock_entry": "MAT-STE-2026-00001"},
+			)
+
+	def test_dlm_issue_confirm_rejects_missing_status(self):
+		with (
+			patch("mes_integration.mes_integration.stock_entry.log_mes_push_error"),
+			self.assertRaises(frappe.ValidationError),
+		):
+			validate_issue_confirm_response(
+				{"success": True, "data": {}},
+				{"stock_entry": "MAT-STE-2026-00001"},
+			)
+
 	def test_receipt_type_accepts_standard_material_receipt(self):
 		validate_mes_receipt_stock_entry_type("Material Receipt")
 

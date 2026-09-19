@@ -219,13 +219,13 @@ def validate_issue_confirm_response(response, payload):
 
     data = response.get("data") or {}
     status = data.get("status")
-    valid_statuses = {"processed", "already_issued", "partial"}
+    valid_statuses = {"processed", "already_issued"}
 
-    if status and status not in valid_statuses:
+    if status not in valid_statuses:
         log_mes_push_error("DLM 发料回调业务状态异常", payload, response)
         frappe.throw(
             get_mes_error_message(response)
-            or frappe._("DLM 发料回调业务状态异常：{0}").format(status)
+            or frappe._("DLM 发料回调业务状态异常：{0}").format(status or "missing")
         )
 
 
