@@ -1,3 +1,5 @@
+import hashlib
+
 import frappe
 import requests
 from requests.exceptions import RequestException
@@ -425,8 +427,13 @@ def get_crm_status_remark(sales_order, triggered_status=None, delivery_note_name
 
 
 def make_crm_trace_id(sales_order_name, external_status):
-	timestamp = get_datetime().strftime("%Y%m%d%H%M%S")
-	return f"erp-{sales_order_name}-{external_status}-{timestamp}"
+	"""Build a stable idempotency key for one Sales Order status event."""
+	trace_id = f"erp-{sales_order_name}-{external_status}"
+	if len(trace_id) <= CRM_TRACE_ID_MAX_LENGTH:
+		return trace_id
+
+	digest = hashlib.sha256(trace_id.encode()).hexdigest()
+	return f"erp-sales-order-{digest}"
 
 
 def make_production_progress_trace_id(external_order_id, production_batch_no):
@@ -748,7 +755,7 @@ def prevent_rejected_sales_order_submit(doc, method=None):
 
 @frappe.whitelist(methods=["POST"])
 def confirm_deposit_and_push_to_mes(sales_order_name):
-	"""Confirm deposit, notify CRM, and push the Sales Order to MES."""
+	"""Validate the action and queue external synchronization after commit."""
 	sales_order = frappe.get_doc("Sales Order", sales_order_name)
 	if not is_crm_integration_enabled(sales_order.get("company")):
 		throw_crm_integration_disabled(sales_order.get("company"))
@@ -759,6 +766,69 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 		frappe.throw(_("销售订单必须提交后才能确认定金。"))
 
 	if sales_order.get("custom_process_status") != PENDING_DEPOSIT_CONFIRMATION:
+		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
+
+	enqueue_confirm_deposit_and_push_to_mes(sales_order.name)
+
+	return {
+		"status": "success",
+		"message": _("定金确认任务已提交，系统将在后台同步 CRM 和 MES。"),
+		"process_status": sales_order.get("custom_process_status"),
+		"queued": True,
+		"timestamp": now(),
+	}
+
+
+def enqueue_confirm_deposit_and_push_to_mes(sales_order_name):
+	frappe.enqueue(
+		"crm_integration.crm_integration.sales_order.confirm_deposit_and_push_to_mes_job",
+		queue="short",
+		enqueue_after_commit=True,
+		job_id=f"crm-confirm-deposit-{sales_order_name}",
+		deduplicate=True,
+		sales_order_name=sales_order_name,
+	)
+
+
+def confirm_deposit_and_push_to_mes_job(sales_order_name):
+	"""Synchronize the confirmed order; retries are safe through stable external identities."""
+	sales_order = frappe.get_doc("Sales Order", sales_order_name)
+	if not is_crm_integration_enabled(sales_order.get("company")):
+		return None
+
+	try:
+		return run_confirm_deposit_sync(sales_order)
+	except Exception:
+		error_message = frappe.get_traceback()
+		frappe.db.rollback()
+		create_crm_log(
+			direction="Outbound",
+			event="Confirm Deposit External Sync",
+			status="Failed",
+			reference_doctype="Sales Order",
+			reference_name=sales_order_name,
+			source="ERPNext",
+			request_payload={"sales_order": sales_order_name},
+			error_message=error_message,
+		)
+		frappe.db.commit()
+		raise
+
+
+def run_confirm_deposit_sync(sales_order):
+	assert_sales_order_not_closed(sales_order)
+	if sales_order.docstatus != 1:
+		frappe.throw(_("销售订单必须提交后才能确认定金。"))
+
+	process_status = sales_order.get("custom_process_status")
+	if process_status == PENDING_PRODUCTION:
+		return {
+			"status": "success",
+			"message": _("销售订单已经完成定金确认同步。"),
+			"process_status": PENDING_PRODUCTION,
+			"idempotent_replay": True,
+		}
+	if process_status != PENDING_DEPOSIT_CONFIRMATION:
 		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
 
 	push_sales_order_status_to_crm(sales_order, CRM_STATUS_CONFIRMED_DEPOSIT_PUSH_PRODUCTION)
