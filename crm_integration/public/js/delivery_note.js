@@ -53,7 +53,7 @@ function restrict_sales_order_item_selection(frm) {
 					},
 					get_query_filters: {
 						docstatus: 1,
-						custom_process_status: "Deliverable",
+							custom_process_status: ["in", ["Deliverable", "Partially Delivered"]],
 						status: ["not in", ["Closed", "On Hold"]],
 						per_delivered: ["<", 99.99],
 						company: frm.doc.company,
