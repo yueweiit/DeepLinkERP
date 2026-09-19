@@ -73,6 +73,17 @@ def execute():
 					"read_only": 1,
 				},
 			],
+			"Delivery Note": [
+				{
+					"fieldname": "custom_mes_delivery_request_no",
+					"fieldtype": "Data",
+					"insert_after": "customer",
+					"label": "MES销售出库请求号",
+					"read_only": 1,
+					"in_list_view": 1,
+					"in_standard_filter": 1,
+				},
+			],
 			"Material Request Item": [
 				{
 					"fieldname": "custom_recycled_material_weight",
@@ -131,5 +142,11 @@ def execute():
 		update=True,
 	)
 
-	for doctype in ("Stock Entry", "Material Request", "Material Request Item", "Item"):
+	for doctype in (
+		"Stock Entry",
+		"Material Request",
+		"Delivery Note",
+		"Material Request Item",
+		"Item",
+	):
 		frappe.clear_cache(doctype=doctype)

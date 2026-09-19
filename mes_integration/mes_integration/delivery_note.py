@@ -1,8 +1,10 @@
+import hashlib
 import json
+from contextlib import contextmanager
 
 import frappe
 from frappe import _
-from frappe.utils import flt, now
+from frappe.utils import cint, flt, now
 
 from erpnext.selling.doctype.sales_order.sales_order import make_delivery_note
 from erpnext.stock.doctype.item.item import get_item_defaults
@@ -47,6 +49,14 @@ from mes_integration.mes_integration.stock_entry import (
 )
 
 
+MES_DELIVERY_REQUEST_FIELD = "custom_mes_delivery_request_no"
+MES_DELIVERY_IDEMPOTENCY_LOCK_TIMEOUT_SECONDS = 30
+
+
+class MESDeliveryNoteIdentityConflict(frappe.ValidationError):
+    http_status_code = 409
+
+
 @frappe.whitelist()
 def create_draft_delivery_note_from_mes(data=None):
     payload = parse_json_if_needed(data)
@@ -57,6 +67,7 @@ def create_draft_delivery_note_from_mes(data=None):
     ensure_crm_integration_available()
 
     sales_order_name = payload.get("sales_order")
+    request_key = get_mes_delivery_request_key(payload)
     company = frappe.db.get_value("Sales Order", sales_order_name, "company") if sales_order_name else None
     if not is_mes_integration_enabled(company):
         throw_mes_integration_disabled(company)
@@ -75,8 +86,22 @@ def create_draft_delivery_note_from_mes(data=None):
         request_payload=payload,
     )
 
+    reused = False
     try:
-        delivery_note = create_draft_delivery_note(payload)
+        with lock_mes_delivery_note_request(company, sales_order_name, request_key):
+            lock_sales_order_for_mes_delivery_note(sales_order_name)
+            delivery_note = get_existing_mes_delivery_note(
+                company,
+                request_key,
+                payload,
+            )
+            if delivery_note:
+                reused = True
+            else:
+                delivery_note = create_draft_delivery_note(
+                    payload,
+                    request_key=request_key,
+                )
     except Exception:
         update_mes_log(
             mes_log,
@@ -87,9 +112,13 @@ def create_draft_delivery_note_from_mes(data=None):
 
     response = {
         "status": "success",
-        "message": _("销售出库草稿已创建"),
+        "message": _("已复用原销售出库草稿，未创建新单据。")
+        if reused
+        else _("销售出库草稿已创建"),
         "delivery_note": delivery_note.name,
         "sales_order": payload.get("sales_order"),
+        "request_id": request_key,
+        "idempotent_reuse": reused,
         "sales_order_status": frappe.db.get_value(
             "Sales Order", payload.get("sales_order"), "custom_process_status"
         ),
@@ -105,7 +134,8 @@ def create_draft_delivery_note_from_mes(data=None):
         response_payload=response,
     )
 
-    enqueue_crm_production_progress_event(payload, delivery_note)
+    if not reused:
+        enqueue_crm_production_progress_event(payload, delivery_note)
 
     return response
 
@@ -185,7 +215,7 @@ def get_crm_production_progress_remark(delivery_note_name, items):
     return _("本次生产：{0}").format(", ".join(item_descriptions))
 
 
-def create_draft_delivery_note(payload):
+def create_draft_delivery_note(payload, request_key=None):
     ensure_crm_integration_available()
 
     sales_order_name = payload.get("sales_order")
@@ -218,6 +248,8 @@ def create_draft_delivery_note(payload):
     delivery_note.run_method("set_po_nos")
     delivery_note.run_method("calculate_taxes_and_totals")
     delivery_note.run_method("set_use_serial_batch_fields")
+    if request_key and frappe.db.has_column("Delivery Note", MES_DELIVERY_REQUEST_FIELD):
+        delivery_note.set(MES_DELIVERY_REQUEST_FIELD, request_key)
     delivery_note.insert()
 
     if sales_order.get("custom_process_status") == PENDING_PRODUCTION:
@@ -225,6 +257,188 @@ def create_draft_delivery_note(payload):
     if sales_order.get("custom_process_status") == PARTIALLY_DELIVERED:
         delivery_note.db_set("custom_delivery_readiness_status", "Ready to Deliver", update_modified=False)
     return delivery_note
+
+
+def get_mes_delivery_request_key(payload):
+    candidates = [
+        payload.get("request_id"),
+        payload.get("idempotency_key"),
+        payload.get("production_batch_no"),
+        payload.get("productionBatchNo"),
+        payload.get("batch_no"),
+        payload.get("batchNo"),
+    ]
+    request_key = next(
+        (
+            str(candidate).strip()
+            for candidate in candidates
+            if candidate is not None and str(candidate).strip()
+        ),
+        None,
+    )
+    if not request_key:
+        frappe.throw(
+            _("缺少销售出库幂等请求号，请传 request_id 或 production_batch_no。")
+        )
+    if len(request_key) > 140:
+        frappe.throw(_("销售出库幂等请求号长度不能超过 140 个字符。"))
+    return request_key
+
+
+@contextmanager
+def lock_mes_delivery_note_request(company, sales_order_name, request_key):
+    """Serialize retries for one MES delivery request until commit or rollback."""
+    if (
+        not company
+        or not sales_order_name
+        or not request_key
+        or getattr(frappe.db, "db_type", None) != "mariadb"
+    ):
+        yield
+        return
+
+    lock_name = "mes_delivery_" + hashlib.sha256(
+        f"{getattr(frappe.local, 'site', '')}|{company}|{sales_order_name}|{request_key}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    result = frappe.db.sql(
+        "SELECT GET_LOCK(%s, %s)",
+        (lock_name, MES_DELIVERY_IDEMPOTENCY_LOCK_TIMEOUT_SECONDS),
+    )
+    if not result or cint(result[0][0]) != 1:
+        raise frappe.QueryDeadlockError(
+            f"Timed out waiting for MES Delivery Note idempotency lock: {request_key}"
+        )
+
+    try:
+        yield
+    finally:
+        release_lock = lambda: release_mes_delivery_note_lock(lock_name)
+        frappe.db.after_commit.add(release_lock)
+        frappe.db.after_rollback.add(release_lock)
+
+
+def release_mes_delivery_note_lock(lock_name):
+    frappe.db.sql("SELECT RELEASE_LOCK(%s)", (lock_name,))
+
+
+def lock_sales_order_for_mes_delivery_note(sales_order_name):
+    if not sales_order_name or getattr(frappe.db, "db_type", None) == "sqlite":
+        return
+
+    frappe.db.sql(
+        "SELECT name FROM `tabSales Order` WHERE name = %s FOR UPDATE",
+        (sales_order_name,),
+    )
+
+
+def get_existing_mes_delivery_note(company, request_key, payload):
+    if not frappe.db.has_column("Delivery Note", MES_DELIVERY_REQUEST_FIELD):
+        frappe.throw(
+            _("缺少 Delivery Note MES 幂等字段，请先执行 bench migrate。")
+        )
+
+    names = frappe.get_all(
+        "Delivery Note",
+        filters={
+            "company": company,
+            MES_DELIVERY_REQUEST_FIELD: request_key,
+        },
+        pluck="name",
+        order_by="creation asc",
+        limit_page_length=2,
+    )
+    if len(names) > 1:
+        throw_mes_delivery_note_identity_conflict(
+            f"MES 销售出库请求号 {request_key} 已对应多张 Delivery Note：{', '.join(names)}。"
+        )
+    if not names:
+        return None
+
+    delivery_note = frappe.get_doc("Delivery Note", names[0])
+    if delivery_note.docstatus == 2:
+        throw_mes_delivery_note_identity_conflict(
+            f"MES 销售出库请求号 {request_key} 已对应取消单据 {delivery_note.name}。"
+        )
+
+    mismatches = get_mes_delivery_note_identity_mismatches(delivery_note, payload)
+    if mismatches:
+        throw_mes_delivery_note_identity_conflict(
+            f"MES 销售出库请求号 {request_key} 已对应 {delivery_note.name}，"
+            f"但本次请求字段不一致：{', '.join(mismatches)}。"
+        )
+
+    return delivery_note
+
+
+def get_mes_delivery_note_identity_mismatches(delivery_note, payload):
+    mismatches = []
+    requested_sales_order = payload.get("sales_order")
+    existing_sales_orders = get_linked_sales_orders(delivery_note)
+    if existing_sales_orders != [requested_sales_order]:
+        mismatches.append("sales_order")
+
+    requested_items = payload.get("items") or []
+    if get_mes_delivery_note_qty_by_item(requested_items) != get_mes_delivery_note_qty_by_item(
+        delivery_note.get("items") or []
+    ):
+        mismatches.append("items.qty")
+
+    if any(row.get("warehouse") for row in requested_items if isinstance(row, dict)):
+        if get_mes_delivery_note_qty_by_item_field(
+            requested_items, "warehouse"
+        ) != get_mes_delivery_note_qty_by_item_field(
+            delivery_note.get("items") or [], "warehouse"
+        ):
+            mismatches.append("items.warehouse")
+
+    if any(row.get("batch_no") for row in requested_items if isinstance(row, dict)):
+        if get_mes_delivery_note_qty_by_item_field(
+            requested_items, "batch_no"
+        ) != get_mes_delivery_note_qty_by_item_field(
+            delivery_note.get("items") or [], "batch_no"
+        ):
+            mismatches.append("items.batch_no")
+
+    return mismatches
+
+
+def get_mes_delivery_note_qty_by_item(items):
+    quantities = {}
+    for row in items or []:
+        if not hasattr(row, "get"):
+            continue
+        item_code = row.get("item_code")
+        if item_code:
+            quantities[item_code] = flt(
+                flt(quantities.get(item_code)) + flt(row.get("qty")),
+                9,
+            )
+    return quantities
+
+
+def get_mes_delivery_note_qty_by_item_field(items, fieldname):
+    quantities = {}
+    for row in items or []:
+        if not hasattr(row, "get"):
+            continue
+        item_code = row.get("item_code")
+        field_value = row.get(fieldname)
+        if not item_code:
+            continue
+        key = (item_code, field_value or "")
+        quantities[key] = flt(flt(quantities.get(key)) + flt(row.get("qty")), 9)
+    return quantities
+
+
+def throw_mes_delivery_note_identity_conflict(message):
+    frappe.response["error_code"] = "ERP_DELIVERY_NOTE_IDENTITY_CONFLICT"
+    frappe.throw(
+        f"ERP_DELIVERY_NOTE_IDENTITY_CONFLICT: {message}",
+        exc=MESDeliveryNoteIdentityConflict,
+        title=_("MES 销售出库幂等编号冲突"),
+    )
 
 
 def validate_sales_order_for_mes_delivery_note(sales_order):
