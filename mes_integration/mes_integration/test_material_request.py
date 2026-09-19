@@ -18,6 +18,7 @@ from mes_integration.mes_integration.material_request import (
 	create_and_submit_material_request_from_mes,
 	enqueue_mes_material_request_bin_sync_job,
 	get_mes_idempotency_key,
+	get_issue_dialog_max_issue_stock_qty,
 	mark_material_request_task_failed,
 	recover_material_request_tasks,
 	reconcile_material_request_task_rq_failure,
@@ -30,6 +31,10 @@ class TestMESMaterialRequest(UnitTestCase):
 	def tearDown(self):
 		frappe.db.rollback()
 		super().tearDown()
+
+	def test_issue_uom_conversion_does_not_increase_remaining_quantity(self):
+		self.assertEqual(get_issue_dialog_max_issue_stock_qty(13, 12), 13)
+		self.assertEqual(get_issue_dialog_max_issue_stock_qty(0, 12), 0)
 
 	def test_mes_request_number_precedes_conflicting_idempotency_header(self):
 		business_request_number = "MIR-TEST-001"

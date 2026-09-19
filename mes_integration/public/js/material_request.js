@@ -756,12 +756,12 @@ function update_issue_dialog_row_projected_remaining_qty(row) {
 
 function get_issue_dialog_max_issue_stock_qty(remaining_stock_qty, conversion_factor) {
 	remaining_stock_qty = flt(remaining_stock_qty);
-	conversion_factor = flt(conversion_factor) || 1;
 	if (remaining_stock_qty <= 0) {
 		return 0;
 	}
 
-	return Math.ceil(remaining_stock_qty / conversion_factor) * conversion_factor;
+	// Changing the display UOM must not increase the remaining stock quantity.
+	return remaining_stock_qty;
 }
 
 function get_issue_dialog_grid_row_doc(grid, cdt, cdn) {

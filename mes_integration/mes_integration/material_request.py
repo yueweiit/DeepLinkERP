@@ -2,7 +2,6 @@ import hashlib
 import time
 from contextlib import contextmanager
 from copy import deepcopy
-from math import ceil
 
 import frappe
 from frappe import _
@@ -1676,11 +1675,13 @@ def get_material_request_item_remaining_stock_qty(mr_item, real_time_issued_stoc
 
 def get_issue_dialog_max_issue_stock_qty(remaining_stock_qty, conversion_factor):
     remaining_stock_qty = flt(remaining_stock_qty)
-    conversion_factor = flt(conversion_factor) or 1
     if remaining_stock_qty <= 0:
         return 0
 
-    return ceil(remaining_stock_qty / conversion_factor) * conversion_factor
+    # A UOM conversion changes how the quantity is displayed, but it must not
+    # increase the remaining stock quantity. Fractional issue-UOM quantities
+    # are safer than silently issuing a complete extra package.
+    return remaining_stock_qty
 
 
 def get_issue_dialog_row_uom(issue_row, mr_item):
