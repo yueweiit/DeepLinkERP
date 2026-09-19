@@ -1,3 +1,4 @@
+import builtins
 from unittest.mock import MagicMock, call, patch
 
 import frappe
@@ -10,6 +11,7 @@ from crm_integration.crm_integration.sales_order import (
 	confirm_deposit_and_push_to_mes_job,
 	confirm_deposit_and_push_to_mes,
 	enqueue_confirm_deposit_and_push_to_mes,
+	get_mes_integration_services,
 	make_crm_trace_id,
 	prevent_duplicate_crm_order_no,
 	reconcile_final_payment,
@@ -83,6 +85,7 @@ class TestSalesOrderPermissions(UnitTestCase):
 			patch(
 				"crm_integration.crm_integration.sales_order.enqueue_confirm_deposit_and_push_to_mes"
 			) as enqueue_sync,
+			patch("crm_integration.crm_integration.sales_order.validate_mes_sync_available"),
 			patch(
 				"crm_integration.crm_integration.sales_order.push_sales_order_status_to_crm"
 			) as push_status,
@@ -94,6 +97,22 @@ class TestSalesOrderPermissions(UnitTestCase):
 		push_status.assert_not_called()
 		push_mes.assert_not_called()
 		self.assertTrue(result["queued"])
+
+	def test_missing_mes_app_returns_clear_validation_error(self):
+		original_import = builtins.__import__
+
+		def import_without_mes(name, *args, **kwargs):
+			if name.startswith("mes_integration"):
+				error = ModuleNotFoundError("No module named 'mes_integration'")
+				error.name = "mes_integration"
+				raise error
+			return original_import(name, *args, **kwargs)
+
+		with (
+			patch("builtins.__import__", side_effect=import_without_mes),
+			self.assertRaisesRegex(frappe.ValidationError, "mes_integration"),
+		):
+			get_mes_integration_services()
 
 	def test_confirm_deposit_job_is_deduplicated(self):
 		with patch.object(frappe, "enqueue") as enqueue:

@@ -9,9 +9,6 @@ from frappe.utils.data import get_datetime
 
 from crm_integration.crm_integration.integration_log import create_crm_log, update_crm_log
 from crm_integration.crm_integration.sales_order_identity import get_sales_order_names_by_crm_order_no
-from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
-from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
-
 from crm_integration.crm_integration.settings import is_crm_integration_enabled, throw_crm_integration_disabled
 
 
@@ -150,6 +147,10 @@ def update_related_delivery_note_readiness_status(sales_order_name):
 		)
 
 		update_delivery_readiness_status_for_sales_orders([sales_order_name])
+	except ModuleNotFoundError as exc:
+		if is_missing_mes_integration_error(exc):
+			return
+		raise
 	except Exception:
 		frappe.log_error(
 			title="Failed to update Delivery Note readiness status",
@@ -479,9 +480,39 @@ def get_mes_sales_order_push_authorization():
 	return authorization
 
 
+def is_missing_mes_integration_error(exc):
+	return bool(exc.name and exc.name.startswith("mes_integration"))
+
+
+def get_mes_integration_services():
+	try:
+		from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
+		from mes_integration.mes_integration.settings import (
+			is_mes_integration_enabled,
+			throw_mes_integration_disabled,
+		)
+	except ModuleNotFoundError as exc:
+		if not is_missing_mes_integration_error(exc):
+			raise
+		frappe.throw(_("推送销售订单到 MES 需要安装 mes_integration 应用。"))
+
+	return frappe._dict(
+		create_log=create_mes_log,
+		update_log=update_mes_log,
+		is_enabled=is_mes_integration_enabled,
+		throw_disabled=throw_mes_integration_disabled,
+	)
+
+
+def validate_mes_sync_available(sales_order):
+	services = get_mes_integration_services()
+	if not services.is_enabled(sales_order.get("company")):
+		services.throw_disabled(sales_order.get("company"))
+	return services
+
+
 def push_sales_order_to_mes(sales_order):
-	if not is_mes_integration_enabled(sales_order.get("company")):
-		throw_mes_integration_disabled(sales_order.get("company"))
+	services = validate_mes_sync_available(sales_order)
 
 	payload = None
 	request_url = None
@@ -496,7 +527,7 @@ def push_sales_order_to_mes(sales_order):
 			"Content-Type": "application/json",
 			"Authorization": get_mes_sales_order_push_authorization(),
 		}
-		mes_log = create_mes_log(
+		mes_log = services.create_log(
 			direction="Outbound",
 			event="Sales Order Push To MES",
 			status="Pending",
@@ -526,6 +557,7 @@ def push_sales_order_to_mes(sales_order):
 			response_payload=response_payload,
 			error_message=frappe.get_traceback(),
 			http_status_code=getattr(response, "status_code", None),
+			services=services,
 		)
 		frappe.log_error(title=_("MES 销售订单推送失败"), message=frappe.get_traceback())
 		frappe.throw(_("MES 销售订单推送失败：{0}").format(str(exc)))
@@ -538,11 +570,12 @@ def push_sales_order_to_mes(sales_order):
 			response_payload=response_payload,
 			error_message=frappe.get_traceback(),
 			http_status_code=getattr(response, "status_code", None),
+			services=services,
 		)
 		frappe.log_error(title=_("MES 销售订单推送失败"), message=frappe.get_traceback())
 		raise
 
-	update_mes_log(
+	services.update_log(
 		mes_log,
 		status="Success",
 		response_payload=response_payload,
@@ -559,7 +592,9 @@ def log_failed_mes_sales_order_push(
 	response_payload=None,
 	error_message=None,
 	http_status_code=None,
+	services=None,
 ):
+	services = services or get_mes_integration_services()
 	log_values = {
 		"status": "Failed",
 		"response_payload": response_payload,
@@ -567,9 +602,9 @@ def log_failed_mes_sales_order_push(
 		"http_status_code": http_status_code,
 	}
 	if mes_log:
-		update_mes_log(mes_log, **log_values)
+		services.update_log(mes_log, **log_values)
 	else:
-		create_mes_log(
+		services.create_log(
 			direction="Outbound",
 			event="Sales Order Push To MES",
 			status="Failed",
@@ -770,6 +805,7 @@ def confirm_deposit_and_push_to_mes(sales_order_name):
 	if sales_order.get("custom_process_status") != PENDING_DEPOSIT_CONFIRMATION:
 		frappe.throw(_("只有待确认定金的销售订单可以推送至MES。"))
 
+	validate_mes_sync_available(sales_order)
 	enqueue_confirm_deposit_and_push_to_mes(sales_order.name)
 
 	return {
@@ -899,6 +935,10 @@ def enqueue_mes_sales_order_status_callback(
 			triggered_status=triggered_status,
 			trigger_event=trigger_event,
 		)
+	except ModuleNotFoundError as exc:
+		if is_missing_mes_integration_error(exc):
+			return
+		raise
 	except Exception:
 		frappe.log_error(
 			title="Failed to enqueue MES Sales Order status callback",

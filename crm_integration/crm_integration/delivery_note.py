@@ -10,6 +10,7 @@ from crm_integration.crm_integration.sales_order import (
 	PENDING_FINAL_PAYMENT,
 	PENDING_PRODUCTION,
 	enqueue_sales_order_status_to_crm,
+	is_missing_mes_integration_error,
 	set_process_status,
 )
 
@@ -209,6 +210,10 @@ def enqueue_mes_delivery_note_status_callback(delivery_note_name):
 		)
 
 		enqueue_delivery_note_status_callback(delivery_note_name)
+	except ModuleNotFoundError as exc:
+		if is_missing_mes_integration_error(exc):
+			return
+		raise
 	except Exception:
 		frappe.log_error(
 			title="Failed to enqueue MES Delivery Note status callback",

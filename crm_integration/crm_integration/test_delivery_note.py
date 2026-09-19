@@ -1,3 +1,4 @@
+import builtins
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -5,12 +6,31 @@ from frappe.tests import UnitTestCase
 
 from crm_integration.crm_integration.delivery_note import (
 	enqueue_crm_delivery_note_cancellation_event,
+	enqueue_mes_delivery_note_status_callback,
 	update_sales_orders_delivery_process_status,
 )
 from crm_integration.crm_integration.sales_order import CRM_STATUS_SHIPMENT_CANCELLED
 
 
 class TestDeliveryNoteCRMEvents(UnitTestCase):
+	def test_missing_optional_mes_app_does_not_break_delivery_note(self):
+		original_import = builtins.__import__
+
+		def import_without_mes(name, *args, **kwargs):
+			if name.startswith("mes_integration"):
+				error = ModuleNotFoundError("No module named 'mes_integration'")
+				error.name = "mes_integration"
+				raise error
+			return original_import(name, *args, **kwargs)
+
+		with (
+			patch("builtins.__import__", side_effect=import_without_mes),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			enqueue_mes_delivery_note_status_callback("DN-001")
+
+		log_error.assert_not_called()
+
 	def test_cancelled_delivery_note_enqueues_crm_reversal(self):
 		doc = frappe._dict(
 			name="DN-001",
