@@ -217,7 +217,7 @@ class MobileOperationsApp {
 		this.drawer_open = true;
 		this.root.querySelector("[data-region='drawer']").innerHTML = `
 			<div class="mobile-app-drawer-backdrop" data-action="close-drawer">
-				<aside class="mobile-app-drawer" onclick="event.stopPropagation()">
+				<aside class="mobile-app-drawer">
 					<h2>${__("移动作业")}</h2><p>${escape_html(window.frappe?.boot?.user?.name || "")}</p>
 					<button class="mobile-app-drawer-link" data-route="/mobile"><i class="fa fa-home"></i>${__("首页")}</button>
 					<button class="mobile-app-drawer-link" data-route="/mobile/inventory"><i class="fa fa-cubes"></i>${__("库存")}</button>
