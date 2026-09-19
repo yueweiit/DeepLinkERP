@@ -4,6 +4,7 @@ from frappe.utils import flt
 
 from crm_integration.crm_integration.settings import is_crm_integration_enabled
 from crm_integration.crm_integration.sales_order import (
+	CRM_STATUS_SHIPMENT_CANCELLED,
 	CRM_STATUS_SHIPMENT_CREATED,
 	DELIVERABLE,
 	PENDING_FINAL_PAYMENT,
@@ -97,6 +98,10 @@ def update_sales_orders_delivery_process_status(doc):
 			enqueue_crm_delivery_note_shipment_event(
 				doc, sales_order_name, process_status
 			)
+		elif doc.docstatus == 2:
+			enqueue_crm_delivery_note_cancellation_event(
+				doc, sales_order_name, process_status
+			)
 
 	frappe.logger().info(
 		f"Delivery Note {doc.name} updated Sales Order delivery process statuses: {', '.join(updated_statuses)}"
@@ -125,6 +130,30 @@ def enqueue_crm_delivery_note_shipment_event(doc, sales_order_name, process_stat
 	except Exception:
 		frappe.log_error(
 			title="Failed to enqueue CRM Delivery Note shipment event",
+			message=frappe.get_traceback(),
+		)
+
+
+def enqueue_crm_delivery_note_cancellation_event(doc, sales_order_name, process_status):
+	items = get_delivery_note_shipment_items(doc, sales_order_name)
+	if not items:
+		return
+
+	try:
+		enqueue_sales_order_status_to_crm(
+			sales_order_name=sales_order_name,
+			external_status=CRM_STATUS_SHIPMENT_CANCELLED,
+			triggered_status=process_status,
+			trigger_event="delivery_note_cancelled",
+			delivery_note_name=doc.name,
+			items=items,
+			remark=_("销售出库 {0} 已取消，ERP流程状态：{1}").format(
+				doc.name, process_status
+			),
+		)
+	except Exception:
+		frappe.log_error(
+			title="Failed to enqueue CRM Delivery Note cancellation event",
 			message=frappe.get_traceback(),
 		)
 
