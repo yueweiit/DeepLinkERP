@@ -4997,15 +4997,26 @@
       this.updateMaterialFeeWriteControls(state);
       await this.pollCostTrialAI(state, batchName, started.run_id);
       if (!isCurrent() || state.costTrialAI?.status !== "READY") return false;
-      const blocked = (state.costTrialAI.draft?.fee_suggestions || []).filter((row) => Boolean(row.blocked));
-      if (blocked.length) {
+      const draft = state.costTrialAI.draft || {};
+      const blocked = (draft.fee_suggestions || []).filter((row) => Boolean(row.blocked));
+      const fxResolution = draft.fx_resolution || null;
+      if (blocked.length || this.costTrialFxIsBlocked(fxResolution)) {
         state.costTrialAI.dialogMode = "repair";
         state.costTrialAI.actionStage = "";
         this.openCostTrialAIReviewDialog({ mode: "repair" });
-        throw new Error(this.costTrialBlockingMessage(blocked));
+        throw new Error(blocked.length
+          ? this.costTrialBlockingMessage(blocked)
+          : this.costTrialFxBlockingMessage(fxResolution));
       }
-      state.costTrialAI.selections = (state.costTrialAI.draft?.default_selections || []).map((row) => ({ ...row }));
-      return await this.confirmCostTrialAI();
+      state.costTrialAI.selections = (draft.default_selections || []).map((row) => ({ ...row }));
+      state.costTrialAI.dialogMode = "adjust";
+      state.costTrialAI.actionStage = "preview";
+      this.updateMaterialFeeWriteControls(state);
+      const preview = await this.previewCostTrialAI();
+      if (!preview || !isCurrent()) return false;
+      state.costTrialAI.actionStage = "";
+      this.openCostTrialAIReviewDialog({ mode: "adjust" });
+      return preview;
     } finally {
       state.previewRunning = false;
       this.updateMaterialFeeWriteControls(state);

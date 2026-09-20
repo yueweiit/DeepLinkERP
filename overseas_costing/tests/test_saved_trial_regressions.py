@@ -152,7 +152,7 @@ console.log(JSON.stringify(events));
     assert result == [["header", "Calculated", "m2"], ["lease", "T"], ["result", "120"]]
 
 
-def test_start_trial_uses_defaults_and_saves_directly_without_opening_dialog():
+def test_start_trial_uses_defaults_then_waits_for_explicit_confirmation():
     result = _frontend_result(FRONTEND_SETUP + """
 h.renderCostTrialAIProgress=()=>{};
 h.openCostTrialAIReviewDialog=()=>{h.opened=true};h.renderDetailShell=()=>{};h.updateEditLeaseStatus=()=>{};
@@ -163,21 +163,20 @@ const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
     default_selections:[{suggestion_id:'S',basis:'goods_value',reason:''}]
   }};
   if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'P',summary:{total_cost_rmb:'130'}};
-  if(endpoint.endsWith('confirm_cost_trial'))return saved;
   throw new Error('unexpected endpoint '+endpoint);
 };
 await h.refreshMaterialFeeCostPreview();
-console.log(JSON.stringify({calls,opened:h.opened===true,trial:state.costTrialAI,preview:state.preview}));
+console.log(JSON.stringify({calls,opened:h.opened===true,trial:state.costTrialAI,savedPreview:state.preview||null}));
 """)
     assert [row["endpoint"].split(".")[-1] for row in result["calls"]] == [
         "start_cost_trial_ai_review",
         "get_cost_trial_ai_review_status",
         "preview_cost_trial",
-        "confirm_cost_trial",
     ]
-    assert result["opened"] is False
+    assert result["opened"] is True
     assert result["trial"]["status"] == "READY"
-    assert result["preview"]["saved"] is True
+    assert result["trial"]["preview"]["summary"]["total_cost_rmb"] == "130"
+    assert result["savedPreview"] is None
 
 
 def test_automatic_trial_ignores_choices_from_a_previous_hidden_adjustment_dialog():
@@ -224,9 +223,10 @@ console.log(JSON.stringify({before,opens,status:state.costTrialAI.status,stages}
 """)
 
     assert result["before"] == {"opens": 0, "status": "QUEUED", "stage": "ai"}
-    assert result["opens"] == 0
+    assert result["opens"] == 1
     assert result["status"] == "READY"
     assert "ai" in result["stages"]
+    assert "preview" in result["stages"]
 
 
 def test_trial_with_no_complete_basis_stops_before_preview_and_names_missing_data():

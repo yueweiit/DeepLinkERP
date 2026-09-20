@@ -1635,8 +1635,8 @@ await workspace.refreshMaterialFeeCostPreview();release();await writing;await fi
 console.log(JSON.stringify({before,calls:workspace.calls,opened:workspace.opened,disabled:button.disabled,running:state.previewRunning}));
 """)
     assert result["before"] == {"calls": 0, "disabled": True, "label": "读取已有口径…"}
-    assert result["calls"] == 4
-    assert not result.get("opened")
+    assert result["calls"] == 3
+    assert result.get("opened") is True
     assert result["disabled"] is False and result["running"] is False
 
 
@@ -1708,7 +1708,6 @@ await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({orde
             "start_cost_trial_ai_review",
             "get_cost_trial_ai_review_status",
             "preview_cost_trial",
-            "confirm_cost_trial",
         ],
         "status": "READY",
     }
@@ -1800,7 +1799,6 @@ await workspace.refreshMaterialFeeCostPreview();console.log(JSON.stringify({orde
         "start_cost_trial_ai_review",
         "get_cost_trial_ai_review_status",
         "preview_cost_trial",
-        "confirm_cost_trial",
     ]
 
 

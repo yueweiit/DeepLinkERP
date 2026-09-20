@@ -37,14 +37,13 @@ console.log(JSON.stringify({ok,requests,retained:state.aiFill===fill,selected:[.
  unchanged:before===JSON.stringify({materials:state.materials,fees:state.fees}),total:state.preview.summary.total_cost_rmb,
  opened:workspace.opened===true}));
 """)
-    assert result["ok"] and result["retained"] and result["unchanged"] and not result["opened"]
+    assert result["ok"] and result["retained"] and result["unchanged"] and result["opened"]
     assert result["selected"] == ["unadopted"]
     assert result["total"] == "100.00"
     assert [row["endpoint"].split(".")[-1] for row in result["requests"]] == [
         "start_cost_trial_ai_review",
         "get_cost_trial_ai_review_status",
         "preview_cost_trial",
-        "confirm_cost_trial",
     ]
     assert set(result["requests"][0]["args"]) == {"batch_name", "version_name", "force", "reuse_only"}
     assert "ai_fill" not in result["requests"][0]["args"]
@@ -73,7 +72,6 @@ console.log(JSON.stringify({before,endpoints,canApply:workspace.canConfirmMateri
             "start_cost_trial_ai_review",
             "get_cost_trial_ai_review_status",
             "preview_cost_trial",
-            "confirm_cost_trial",
         ],
         "canApply": True,
         "retained": True,
