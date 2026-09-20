@@ -59,7 +59,7 @@ class MESDeliveryNoteIdentityConflict(frappe.ValidationError):
     http_status_code = 409
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_draft_delivery_note_from_mes(data=None):
     payload = parse_json_if_needed(data)
 
@@ -845,7 +845,7 @@ def push_delivery_note_sales_order_status_to_mes(delivery_note, sales_order_name
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def retry_push_delivery_note_status_to_mes(delivery_note_name):
     ensure_crm_integration_available()
 

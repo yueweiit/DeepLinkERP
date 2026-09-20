@@ -127,7 +127,7 @@ def set_material_request_source(doc, method=None):
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_and_submit_material_request_from_mes(data=None, material_request=None):
     """Accept a Material Request from MES and process it asynchronously."""
     from mes_integration.mes_integration.stock_entry import validate_mes_api_user
@@ -264,7 +264,7 @@ def queue_material_request_task(payload):
     set_material_request_task_response(task)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 def get_material_request_task_status(task_id=None, request_id=None):
     """Return the current status of an asynchronously created Material Request."""
     from mes_integration.mes_integration.stock_entry import validate_mes_api_user
@@ -1429,7 +1429,7 @@ def validate_mes_material_request_data(material_request):
             frappe.throw(_("第 {0} 行数量必须大于 0").format(row.idx))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def make_stock_entry_from_material_request(source_name, target_doc=None):
     material_request_type = frappe.db.get_value("Material Request", source_name, "material_request_type")
 
@@ -1441,7 +1441,7 @@ def make_stock_entry_from_material_request(source_name, target_doc=None):
     return make_stock_entry(source_name, target_doc)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def make_issue_stock_entry(source_name, target_doc=None):
     def update_item(source, target, source_parent):
         qty = (
@@ -1533,7 +1533,7 @@ def get_single_material_request_item_source_warehouse(material_request):
     return warehouses.pop() if len(warehouses) == 1 else None
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 @frappe.validate_and_sanitize_search_inputs
 def issue_warehouse_query(doctype, txt, searchfield, start, page_len, filters):
     filters = filters or {}
@@ -1572,7 +1572,7 @@ def issue_warehouse_query(doctype, txt, searchfield, start, page_len, filters):
     )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 def get_item_warehouse_actual_qty(item_code, warehouse):
     if not item_code or not warehouse:
         return 0
@@ -1589,7 +1589,7 @@ def get_item_warehouse_actual_qty(item_code, warehouse):
     return flt(rows[0].get("actual_qty")) if rows else 0
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 def get_issue_dialog_default_uoms(item_codes=None):
     """Return configured MES default issue UOMs for the Material Request issue dialog."""
     from erpnext.stock.get_item_details import get_conversion_factor
@@ -1644,7 +1644,7 @@ def get_issue_dialog_default_uoms(item_codes=None):
     return {"default_uoms": default_uoms, "warnings": warnings}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def issue_and_push_to_dlm_from_dialog(material_request_name, items=None):
     """Create, submit and push a Stock Entry from editable Material Request issue rows."""
     from mes_integration.mes_integration.stock_entry import push_to_mes
@@ -1683,7 +1683,7 @@ def issue_and_push_to_dlm_from_dialog(material_request_name, items=None):
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_issue_stock_entry_from_mobile(material_request_name, items=None):
 	"""Create a draft Stock Entry for a manually created Material Request."""
 	mr = frappe.get_doc("Material Request", material_request_name)
@@ -1983,7 +1983,7 @@ def get_stock_entry_target_warehouse(mr, issue_rows, mr_items):
     return mr.get("set_warehouse")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def submit_issue_and_push_to_dlm(material_request_name):
     """
     一键操作：提交物料需求 → 发料出库 → 提交出库单 → 推送至 DLM。
@@ -2040,7 +2040,7 @@ def submit_issue_and_push_to_dlm(material_request_name):
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def batch_issue_and_push_to_dlm(material_requests=None, items=None):
     """Issue and push submitted, partially unissued Material Requests one by one."""
     from mes_integration.mes_integration.stock_entry import parse_json_if_needed

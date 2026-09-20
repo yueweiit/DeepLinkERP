@@ -21,7 +21,7 @@ class MESStockEntryIdentityConflict(frappe.ValidationError):
     http_status_code = 409
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def push_to_mes(stock_entry_name):
     """
     将已提交的 Stock Entry 发料结果回写到 MES。
@@ -332,7 +332,7 @@ def is_dlm_issue_stock_entry(stock_entry):
     return stock_entry.get("stock_entry_type") in DLM_ISSUE_STOCK_ENTRY_TYPES
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reset_mes_status(stock_entry_name):
     """
     重置库存转移单的 MES Status 为 Unpushed（当已推送的订单被修改时）
@@ -384,7 +384,7 @@ DLM_ISSUE_STOCK_ENTRY_TYPES = {
 }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_draft_stock_entry_from_mes(data=None, stock_entry=None, submit=False):
     """
     Create a Stock Entry from MES, optionally submitting it immediately.
@@ -771,7 +771,7 @@ def build_mes_stock_entry_response(stock_entry, sales_order_doc, reused=False):
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_and_submit_stock_entry_from_mes(data=None, stock_entry=None):
     """Create and submit a MES receipt Stock Entry in one transaction."""
     return create_draft_stock_entry_from_mes(
@@ -1318,7 +1318,7 @@ def push_stock_entry_status_to_mes(
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def retry_push_stock_entry_status_to_mes(stock_entry_name):
     """
     Manually re-trigger the MES status callback for a receipt Stock Entry.

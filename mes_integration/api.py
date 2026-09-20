@@ -13,7 +13,7 @@ BATCH_BIN_FIELDS = [
 ]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_stock_entry(data=None, stock_entry=None, submit=False):
     """Create a MES receipt Stock Entry; pass submit=1 to submit it too."""
     from mes_integration.mes_integration.stock_entry import (
@@ -27,7 +27,7 @@ def create_stock_entry(data=None, stock_entry=None, submit=False):
     )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_and_submit_stock_entry(data=None, stock_entry=None):
     """Create and submit a MES receipt Stock Entry."""
     from mes_integration.mes_integration.stock_entry import (
@@ -40,7 +40,7 @@ def create_and_submit_stock_entry(data=None, stock_entry=None):
     )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_material_request(data=None, material_request=None):
     """Short public alias for MES to enqueue a Material Request creation task."""
     from mes_integration.mes_integration.material_request import (
@@ -52,7 +52,7 @@ def create_material_request(data=None, material_request=None):
     )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 def get_material_request_task_status(task_id=None, request_id=None):
     """Short public alias for MES to query an async Material Request task."""
     from mes_integration.mes_integration.material_request import (
@@ -62,7 +62,7 @@ def get_material_request_task_status(task_id=None, request_id=None):
     return get_task_status(task_id=task_id, request_id=request_id)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 def get_batch_bin_rows(item_codes=None):
     """Return inventory rows for multiple item codes using the current user's permissions.
 
