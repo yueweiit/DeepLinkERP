@@ -175,6 +175,32 @@
     return `<span class="ocw-detail-status is-${tone}"><small>${this.escape(label)}</small><strong>${this.escape(this.formatValue(value || "--"))}</strong></span>`;
   }
 
+  detailCalculationAction(batch = {}) {
+    const status = String(batch.status || "").toLowerCase();
+    const summary = batch.summary_snapshot || {};
+    const hasSavedResult = Boolean(
+      batch.calculated_at
+      || batch.result_is_current === false
+      || summary.calculation_schema
+      || status.includes("calculated")
+      || status.includes("confirmed")
+      || Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0) > 0
+    );
+    return { action: "recalculate", label: hasSavedResult ? "重新计算" : "开始试算" };
+  }
+
+  renderDetailReviewBlockers(batch = {}) {
+    if (this.viewState?.task !== "pending") return "";
+    const blockers = Array.isArray(batch.review_blockers) ? batch.review_blockers : [];
+    if (!blockers.length) return "";
+    return `
+      <section class="ocw-erp-block-dialog ocw-detail-review-blockers" role="status">
+        <strong>仍需处理</strong>
+        <ul>${blockers.map((row) => `<li>${this.escape(row.message || row.code || "待补信息")}</li>`).join("")}</ul>
+      </section>
+    `;
+  }
+
   renderDetailErpAction(batch = {}) {
     const erpAction = this.erpPushActionState(batch, Number(batch.item_count || 0));
     const reasonId = "ocw-detail-erp-action-reason";
@@ -197,7 +223,7 @@
     this.cleanupMaterialGridScrollControls?.();
     const batch = this.getDetailBatch();
     const issue = this.inferDetailIssue(batch);
-    const action = OverseasCostWorkbenchState.primaryActionForIssue(issue);
+    const action = this.detailCalculationAction(batch);
     const reference = batch.batch_no || batch.source_approval_no || batch.customs_no || batch.name;
     const logistics = batch.waybill_no || batch.container_no || batch.sea_bill_no || "未填写物流单号";
     const sourceStatus = batch.source_status || {};
@@ -239,6 +265,7 @@
           ${this.detailStatusChip("最后更新", this.formatDateTimeMinute(updatedAt) || updatedAt, "neutral")}
           <span class="ocw-edit-lease-status" data-area="edit-lease-status">浏览模式 · 开始修改时自动申请编辑权</span>
         </section>
+        ${this.renderDetailReviewBlockers(batch)}
         <nav class="ocw-detail-tabs" aria-label="批次详情分类">
           ${[
             ["overview", "总览"],
@@ -299,7 +326,7 @@
     }
     this.$root.find("[data-area='detail-content']").html(`
       <div class="ocw-detail-overview">
-        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button><button class="ocw-outline-btn" type="button" data-action="detail-recalculate">重新计算</button></div></div>
+        <div class="ocw-detail-section-head"><div><span>批次概况</span><h2>成本与 ERP 流程</h2></div><div class="ocw-detail-section-actions"><button class="ocw-outline-btn" type="button" data-action="view-dingtalk-approval">查看钉钉审批</button></div></div>
         ${this.renderBatchDrawerOverview(batch, [])}
       </div>
     `);

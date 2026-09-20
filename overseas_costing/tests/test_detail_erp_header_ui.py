@@ -26,6 +26,7 @@ const classSource=calculation
 const Harness=Function(`return class Harness {{${{classSource}}}}`)();
 function makeView(batch) {{
   const view=new Harness();
+  view.viewState={{task:'cost'}};
   view.batches=[batch];
   view.detailState={{batchName:batch.name,versionName:batch.current_version||'',tab:'items',header:batch,detail:null,refreshRequestId:0,editToken:''}};
   view.findBatch=name=>view.batches.find(row=>row.name===name);

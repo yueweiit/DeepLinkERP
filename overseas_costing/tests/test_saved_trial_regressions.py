@@ -620,14 +620,22 @@ console.log(JSON.stringify({before,endpoints,restarting:state.costTrialRestartin
 def test_overview_recalculate_runs_after_visiting_material_workspace():
     result = _frontend_result(FRONTEND_SETUP + """
 h.detailState.tab='overview';h.getActiveBatch=()=>h.batches[0];
-const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});return saved};
+const calls=[];h.call=async(endpoint,args)=>{calls.push({endpoint,args});
+  if(endpoint.endsWith('get_batches'))return {ok:true,items:[{...h.batches[0],review_state:'ready'}],total:1,page:1};
+  return saved};
 const errors=[];h.showError=error=>errors.push(error.message);h.recordUsage=()=>{};
+h.viewState={task:'pending',screen:'detail',batch:'B',tab:'overview',page:1};
+h.filters={review_status:'pending',review_warning:'',issue:''};h.findBatch=name=>h.batches.find(row=>row.name===name);
+h.replaceViewState=values=>{h.viewState={...h.viewState,...values}};h.loadBatches=async()=>{};
+h.renderDetailShell=()=>{};h.switchDetailTab=async()=>{};
 h.applyRecalculateSummary=()=>{};h.refreshDetailSummary=async()=>{};
 await h.recalculate();console.log(JSON.stringify({calls,errors,modified:h.detailState.expectedModified}));
 """)
     assert result["errors"] == []
-    assert len(result["calls"]) == 1
+    assert len(result["calls"]) == 2
     assert result["calls"][0]["endpoint"].endswith("recalculate_batch")
+    assert result["calls"][1]["endpoint"].endswith("get_batches")
+    assert result["calls"][1]["args"]["task"] == "cost"
     assert result["modified"] == "m2"
 
 

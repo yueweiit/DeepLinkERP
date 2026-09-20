@@ -119,12 +119,21 @@ def test_other_recalculate_entry_allows_ready_ai_and_reserves_write_guard():
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + AI_FIXTURE + f"""
 const Recalc=Function('Base','return class extends Base {{'+fs.readFileSync({source_path},'utf8').split('  setMainView(')[0]+'}}')(Harness);
 workspace.recalculate=Recalc.prototype.recalculate;
+workspace.getAuthoritativeReviewClassification=Recalc.prototype.getAuthoritativeReviewClassification;
+workspace.refreshRecalculatedDetailClassification=Recalc.prototype.refreshRecalculatedDetailClassification;
 """ + r"""
 workspace.detailState.tab='overview';
+workspace.viewState={task:'pending',screen:'detail',batch:'B-1',tab:'overview',page:1};
+workspace.filters={review_status:'pending',review_warning:'',issue:''};
+workspace.batches=[];
 workspace.findBatch=()=>({name:'B-1',current_version:'V-1'});
 workspace.recordUsage=()=>{};workspace.showError=e=>{workspace.error=e.message};
 workspace.applyRecalculateSummary=()=>{};workspace.$root.attr=()=> 'detail';workspace.refreshDetailSummary=async()=>{};
-let release;const endpoints=[];workspace.call=(endpoint)=>{endpoints.push(endpoint);return new Promise(resolve=>release=resolve)};
+workspace.replaceViewState=values=>{workspace.viewState={...workspace.viewState,...values}};workspace.loadBatches=async()=>{};
+workspace.renderDetailShell=()=>{};workspace.switchDetailTab=async()=>{};
+let release;const endpoints=[];workspace.call=(endpoint,args)=>{endpoints.push(endpoint);
+ if(endpoint.endsWith('get_batches'))return Promise.resolve({ok:true,items:[{name:'B-1',review_state:'ready'}],total:1,page:1});
+ return new Promise(resolve=>release=resolve)};
 const running=workspace.recalculate('B-1');await new Promise(resolve=>setImmediate(resolve));
 const before={canApply:workspace.canConfirmMaterialAIRowSelection(fill),requests:endpoints.length};
 await workspace.recalculate('B-1');
@@ -133,5 +142,8 @@ await running;
 console.log(JSON.stringify({before,endpoints,error:workspace.error||'',retained:state.aiFill===fill,running:!!state.previewRunning}));
 """)
     assert result["before"] == {"canApply": False, "requests": 1}
-    assert result["endpoints"] == ["overseas_costing.api.calculate.recalculate_batch"]
+    assert result["endpoints"] == [
+        "overseas_costing.api.calculate.recalculate_batch",
+        "overseas_costing.api.workbench.get_batches",
+    ]
     assert not result["error"] and result["retained"] and not result["running"]

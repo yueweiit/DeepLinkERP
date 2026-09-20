@@ -458,7 +458,11 @@
       return { label: "推送 ERP", enabled: false, reason: "请先完成试算。" };
     }
     if (!confirmed) {
-      return { label: "推送 ERP", enabled: false, reason: "请先校验计算结果。" };
+      return {
+        label: "推送 ERP",
+        enabled: false,
+        reason: this.viewState?.task === "cost" ? "请先校验计算结果。" : "请先在成本核对中完成人工确认。",
+      };
     }
     const pushBlock = this.activeErpPushBlock(batch);
     if (pushBlock) {
@@ -481,7 +485,8 @@
     const confirmed = this.isCalculationConfirmed(batch);
     const writebackInfo = this.erpWritebackStatusInfo(batch);
     const invalidBusiness = Boolean((batch.source_status || {}).invalid_business);
-    const canConfirm = hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
+    const isCostReview = this.viewState?.task === "cost";
+    const canConfirm = isCostReview && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
     const canPreview = confirmed && !invalidBusiness;
     const erpAction = this.erpPushActionState(batch, itemCount);
     const note = invalidBusiness
@@ -502,7 +507,7 @@
       <div class="ocw-batch-drawer-section">
         <div class="ocw-erp-flow-panel">
           <div class="ocw-erp-flow-head">
-            <h4>校验计算结果</h4>
+            <h4>${isCostReview ? "校验计算结果" : "成本与 ERP 状态"}</h4>
             <span>${this.escape(statusInfo.label || "")}</span>
           </div>
           <div class="ocw-erp-flow-grid">
@@ -518,7 +523,7 @@
               .join("")}
           </div>
           <div class="ocw-erp-flow-actions">
-            <button class="ocw-primary-btn ocw-mini-btn" data-action="confirm-calculation-result"${canConfirm ? "" : " disabled"}>校验计算结果</button>
+            ${isCostReview ? `<button class="ocw-primary-btn ocw-mini-btn" data-action="confirm-calculation-result"${canConfirm ? "" : " disabled"}>校验计算结果</button>` : ""}
             <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-erp-payload"${canPreview ? "" : " disabled"}>预览 ERP 报文</button>
             <button class="ocw-outline-btn ocw-mini-btn" data-action="writeback-to-erp" aria-label="${this.escape(`${erpAction.label}：${erpAction.reason}`)}" title="${this.escape(erpAction.reason)}"${erpAction.enabled ? "" : " disabled"}>${this.escape(erpAction.label)}</button>
           </div>

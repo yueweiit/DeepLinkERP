@@ -51,7 +51,9 @@
       if (this.resetBatchResultPreview) {
         this.resetBatchResultPreview({ clearCache: true, render: false });
       }
-      if (this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
+      if (result.saved && this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
+        await this.refreshRecalculatedDetailClassification(batch.name);
+      } else if (this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
         await this.refreshDetailSummary();
       } else if (this.viewState?.screen === "workbench") {
         await this.loadBatches();
@@ -73,6 +75,57 @@
         this.updateMaterialFeeWriteControls(feeState);
       }
       if (acquired?.edit_token) await this.call("overseas_costing.api.edit_session.release", { batch_name: batch.name, edit_token: acquired.edit_token });
+    }
+  }
+
+  async getAuthoritativeReviewClassification(batchName) {
+    const current = this.findBatch(batchName) || this.detailState?.header || {};
+    const keyword = current.batch_no || current.source_approval_no || current.customs_no || current.waybill_no || batchName;
+    const filtersJson = JSON.stringify({ keyword, review_status: "pending", include_history: 1 });
+    for (const task of ["cost", "pending"]) {
+      const result = await this.call("overseas_costing.api.workbench.get_batches", {
+        filters_json: filtersJson,
+        task,
+        page: 1,
+        page_length: 10,
+      });
+      if (!result?.ok) throw new Error(result?.message || "试算后工作台分类刷新失败");
+      const batch = (result.items || []).find((row) => row.name === batchName);
+      if (batch) return { task, batch };
+    }
+    return { task: "pending", batch: null };
+  }
+
+  async refreshRecalculatedDetailClassification(batchName) {
+    const authoritative = await this.getAuthoritativeReviewClassification(batchName);
+    const task = authoritative.task === "cost" ? "cost" : "pending";
+    const tab = this.detailState?.tab || this.viewState?.tab || "overview";
+    if (authoritative.batch && this.detailState?.batchName === batchName) {
+      this.detailState.header = { ...(this.detailState.header || {}), ...authoritative.batch };
+    }
+    this.viewState.task = task;
+    this.viewState.page = 1;
+    this.filters.review_status = "pending";
+    this.filters.review_warning = "";
+    this.filters.issue = "";
+    this.replaceViewState({
+      task,
+      review_status: "pending",
+      review_warning: "",
+      issue: "",
+      page: 1,
+      screen: "detail",
+      batch: batchName,
+      tab,
+    });
+    await this.loadBatches();
+    if (authoritative.batch && this.detailState?.batchName === batchName) {
+      const merged = { ...(this.detailState.header || {}), ...authoritative.batch };
+      const index = this.batches.findIndex((row) => row.name === batchName);
+      if (index >= 0) this.batches[index] = { ...this.batches[index], ...authoritative.batch };
+      this.detailState.header = merged;
+      this.renderDetailShell();
+      await this.switchDetailTab(tab, { updateUrl: false });
     }
   }
 
@@ -380,6 +433,10 @@
   }
 
   async confirmCalculationResult(batchName = "") {
+    if (this.viewState?.task !== "cost") {
+      this.showPendingFeature("请在“成本核对”任务中人工确认计算结果。");
+      return;
+    }
     const batch = this.findBatch(batchName || this.drawerBatchName);
     if (!batch) return;
     try {
@@ -400,7 +457,24 @@
       batch.confirm_status = "Confirmed";
       batch.is_locked = 1;
       batch.writeback_status = batch.writeback_status || "Not Started";
-      await this.refreshBatch(batch.name);
+      const keepDetailOpen = this.detailState?.batchName === batch.name;
+      const tab = this.detailState?.tab || this.viewState?.tab || "overview";
+      this.viewState.task = "erp";
+      this.viewState.page = 1;
+      this.filters.review_status = "pending";
+      this.filters.review_warning = "";
+      this.filters.issue = "";
+      this.replaceViewState({
+        task: "erp",
+        review_status: "pending",
+        review_warning: "",
+        issue: "",
+        page: 1,
+        screen: keepDetailOpen ? "detail" : "workbench",
+        batch: keepDetailOpen ? batch.name : "",
+        tab: keepDetailOpen ? tab : "overview",
+      });
+      await this.loadBatches();
       this.recordUsage("CONFIRM_RESULT", { batch, remark: "人工校验计算结果通过" });
       frappe.show_alert({ message: result.message || "计算结果已确认", indicator: "green" });
     } catch (error) {
@@ -658,6 +732,7 @@
       <div class="ocw-erp-gap-summary">
         <div class="ocw-erp-gap-total">待补信息共 ${this.escape(String(total))} 项</div>
         ${html}
+        ${batch ? `<div class="ocw-erp-flow-note">补齐后请使用页头计算入口开始试算或重新计算。</div>` : ""}
       </div>
     `;
   }
@@ -689,9 +764,6 @@
         buttons.push(`<button class="ocw-link-btn" type="button" data-action="gap-confirm-actual-qty" data-batch-name="${this.escape(batch.name)}">按采购数量确认</button>`);
       }
       buttons.push(`<button class="ocw-link-btn" type="button" data-action="gap-open-item-edit" data-batch-name="${this.escape(batch.name)}" data-item-name="${this.escape((matchedExample && matchedExample.item_name) || row.item_name || "")}" data-fieldname="${this.escape(row.fieldname || "")}">去补录</button>`);
-    }
-    if (batch) {
-      buttons.push(`<button class="ocw-link-btn" type="button" data-action="gap-recalculate" data-batch-name="${this.escape(batch.name)}">重新试算</button>`);
     }
     return `
       <li class="ocw-erp-gap-row">
