@@ -49,6 +49,10 @@ bench --site SITE execute china_finance.api.initialize_company --kwargs \
 
 所有批量接口均返回处理数、成功数、跳过数、失败数和逐条错误，不会静默跳过失败记录。
 
+## 旧财务数据核查
+
+管理员可通过 `bench execute china_finance.services.finance_cleanup.preview_finance_cleanup`，按公司及日期只读预览旧凭证、关联记录和清理阻塞项。该命令不提供删除功能。参数、结果说明和后续处理边界见 [旧财务凭证清理预览](docs/旧财务凭证清理.md)。
+
 ## 发布约束
 
 应用必须能够进入现有自定义镜像，并兼容服务器既有的 `deploy_akivision_apps.sh` 更新流程。应用代码不得要求在服务器上执行额外手工 SQL、临时补丁或应用外数据修复。
