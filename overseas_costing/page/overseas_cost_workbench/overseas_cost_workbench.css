@@ -8127,6 +8127,19 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-cost-trial-review > header strong { font-size: 16px; }
 .ocw-cost-trial-review > header span { color: #667085; font-size: 12px; }
 .ocw-cost-trial-review > main { display: grid; gap: 12px; padding: 16px 20px; overflow: auto; }
+.ocw-cost-trial-fx { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid #98c8ef; border-radius: 8px; background: #eef7ff; color: #344054; }
+.ocw-cost-trial-fx > header,
+.ocw-cost-trial-fx > div,
+.ocw-cost-trial-fx > p { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 18px; margin: 0; }
+.ocw-cost-trial-fx > header span,
+.ocw-cost-trial-fx > div { color: #52647a; font-size: 12px; }
+.ocw-cost-trial-fx > p strong { color: #076fbe; font-variant-numeric: tabular-nums; }
+.ocw-cost-trial-fx.is-estimated { border-color: #efd29a; background: #fff8e8; }
+.ocw-cost-trial-fx.is-estimated > header strong,
+.ocw-cost-trial-fx.is-estimated > p strong { color: #8a5700; }
+.ocw-cost-trial-fx.is-blocked { border-color: #f0b5b5; background: #fff3f2; color: #a92727; }
+.ocw-cost-trial-fx.is-blocked > header span,
+.ocw-cost-trial-fx.is-blocked > p { color: #a92727; }
 .ocw-cost-trial-running { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 92px; padding: 18px; border: 1px solid #c8ddf0; border-radius: 9px; background: #eef7ff; color: #076fbe; }
 .ocw-cost-trial-running span { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .ocw-cost-trial-review > footer { position: sticky; bottom: 0; border-top: 1px solid #dce6f2; box-shadow: 0 -6px 18px rgba(16, 24, 40, 0.05); }

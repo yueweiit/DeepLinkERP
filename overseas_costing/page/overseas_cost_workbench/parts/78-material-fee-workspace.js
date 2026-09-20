@@ -5086,13 +5086,71 @@
     return `当前无法试算，请先补充：${details.join("；")}`;
   }
 
+  costTrialFxResolution() {
+    const trial = this.ensureMaterialFeeState().costTrialAI || {};
+    return trial.preview?.fx_resolution || trial.draft?.fx_resolution || null;
+  }
+
+  costTrialFxBlockingMessage(resolution = this.costTrialFxResolution()) {
+    const errors = (resolution?.blocking_errors || []).map((error) => String(error?.message || error || "").trim()).filter(Boolean);
+    return errors.join("；") || "未取得有效汇率，请刷新后重新试算。";
+  }
+
+  costTrialFxIsBlocked(resolution = this.costTrialFxResolution()) {
+    return Boolean(resolution && (resolution.ok === false || (resolution.blocking_errors || []).length));
+  }
+
+  formatCostTrialFxRate(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "--";
+    return number.toFixed(6).replace(/\.?0+$/, "");
+  }
+
+  costTrialFxSourceLabel(rate = {}) {
+    return rate.source_label || {
+      version_snapshot: "当前版本汇率",
+      currency_exchange: "当日汇率库",
+      fx_api: "当日汇率 API",
+      historical_currency_exchange: "历史汇率暂估",
+    }[String(rate.source || "")] || "已解析汇率";
+  }
+
+  renderCostTrialFxResolution(resolution = this.costTrialFxResolution()) {
+    if (!resolution) return "";
+    if (this.costTrialFxIsBlocked(resolution)) {
+      return `<section class="ocw-cost-trial-fx is-blocked"><header><strong>汇率未就绪</strong><span>汇率日期 ${this.escape(resolution.calculation_date || "--")}</span></header><p>${this.escape(this.costTrialFxBlockingMessage(resolution))}</p></section>`;
+    }
+    const rates = resolution.rates || {};
+    const usd = rates.USD || {};
+    const mxn = rates.MXN || {};
+    const estimated = Boolean(resolution.is_estimated || usd.is_estimated || mxn.is_estimated);
+    const sourceLabels = [...new Set([this.costTrialFxSourceLabel(usd), this.costTrialFxSourceLabel(mxn)].filter(Boolean))].join(" · ");
+    const rateDates = [...new Set([usd.rate_date, mxn.rate_date].filter(Boolean))];
+    const dateDetail = rateDates.length
+      ? `实际采用 ${rateDates.join(" / ")}`
+      : `实际采用 ${resolution.calculation_date || "--"}`;
+    return `<section class="ocw-cost-trial-fx ${estimated ? "is-estimated" : ""}">
+      <header><strong>${estimated ? "历史汇率暂估" : "计算汇率"}</strong><span>汇率日期 ${this.escape(resolution.calculation_date || "--")}</span></header>
+      <div><span>${this.escape(sourceLabels)}</span><span>${this.escape(dateDetail)}</span></div>
+      <p><strong>1 USD = ${this.escape(this.formatCostTrialFxRate(resolution.fx_usd_to_rmb))} RMB</strong><strong>1 RMB = ${this.escape(this.formatCostTrialFxRate(resolution.fx_rmb_to_mxn))} MXN</strong></p>
+    </section>`;
+  }
+
   renderCostTrialAIReview() {
     const trial = this.ensureMaterialFeeState().costTrialAI || {};
     const draft = trial.draft || {};
     const preview = trial.preview || null;
     const suggestions = draft.fee_suggestions || [];
     const waiting = ["QUEUED", "RUNNING"].includes(String(trial.status || ""));
-    const hasBlockedSuggestion = waiting || suggestions.some((row) => Boolean(row.blocked));
+    const fxResolution = preview?.fx_resolution || draft.fx_resolution || null;
+    const fxBlocked = this.costTrialFxIsBlocked(fxResolution);
+    const blockedSuggestions = suggestions.filter((row) => row.blocked);
+    const hasBlockedSuggestion = waiting || fxBlocked || blockedSuggestions.length > 0;
+    const blockingHint = waiting
+      ? "AI 正在分析费用口径，请稍候。"
+      : fxBlocked
+        ? this.costTrialFxBlockingMessage(fxResolution)
+        : this.costTrialBlockingMessage(blockedSuggestions);
     const selectedById = new Map((trial.selections || []).map((row) => [row.suggestion_id, row]));
     const rows = suggestions.map((row) => {
       const savedChoice = selectedById.get(row.suggestion_id) || {};
@@ -5127,8 +5185,8 @@
       .map(([key, label]) => `${label} ${Number(summary[key] || 0)}`).join(" · ");
     return `<div class="ocw-cost-trial-review"><header><div><strong>${trial.dialogMode === "repair" ? "试算所需资料待补" : "调整分摊口径"}</strong><span>${this.escape(sourceSummary || "已自动选择完整可用口径")}</span></div></header>
       ${draft.ai_warning ? `<div class="ocw-cost-trial-warning">${this.escape(draft.ai_warning)}</div>` : ""}
-      <main>${waiting ? `<div class="ocw-cost-trial-running"><strong>${this.escape(trial.progress_step || "DeepSeek 正在分析费用口径")}</strong><span>${Math.max(0, Math.min(100, Number(trial.progress_percent || 0)))}%</span></div>` : rows || `<div class="ocw-detail-empty"><strong>当前没有需要分摊的费用</strong></div>`}${previewHtml}</main>
-      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重新让 AI 判断</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">${this.escape(this.costTrialBlockingMessage(suggestions.filter((row) => row.blocked)))}</span>` : ""}</footer>
+      <main>${this.renderCostTrialFxResolution(fxResolution)}${waiting ? `<div class="ocw-cost-trial-running"><strong>${this.escape(trial.progress_step || "DeepSeek 正在分析费用口径")}</strong><span>${Math.max(0, Math.min(100, Number(trial.progress_percent || 0)))}%</span></div>` : rows || `<div class="ocw-detail-empty"><strong>当前没有需要分摊的费用</strong></div>`}${previewHtml}</main>
+      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重新让 AI 判断</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">${this.escape(blockingHint)}</span>` : ""}</footer>
     </div>`;
   }
 
@@ -5188,6 +5246,10 @@
       }));
     }
     if (validate) {
+      const fxResolution = trial.preview?.fx_resolution || trial.draft?.fx_resolution || null;
+      if (this.costTrialFxIsBlocked(fxResolution)) {
+        throw new Error(this.costTrialFxBlockingMessage(fxResolution));
+      }
       const blocked = (trial.draft?.fee_suggestions || []).filter((row) => Boolean(row.blocked));
       if (blocked.length) throw new Error(this.costTrialBlockingMessage(blocked));
       if (selections.some((row) => !row.suggestion_id || !row.basis)) {
@@ -5200,6 +5262,7 @@
   costTrialAIReadyToConfirm() {
     const trial = this.ensureMaterialFeeState().costTrialAI;
     if (!trial || trial.status !== "READY" || trial.confirming || trial.previewing) return false;
+    if (this.costTrialFxIsBlocked(trial.preview?.fx_resolution || trial.draft?.fx_resolution || null)) return false;
     if ((trial.draft?.fee_suggestions || []).some((row) => Boolean(row.blocked))) return false;
     try {
       this.collectCostTrialAISelections();

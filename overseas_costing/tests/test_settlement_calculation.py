@@ -261,13 +261,12 @@ def test_rule_item_read_keeps_chargeable_weight_for_final_allocation(monkeypatch
     assert [row['freight_alloc_rmb'] for row in rows] == [75, 25]
 
 
-def test_formal_legacy_missing_snapshot_fx_is_excluded_without_fake_conversion(monkeypatch):
+def test_formal_legacy_missing_snapshot_fx_blocks_before_database_write(monkeypatch):
     rules = [{'rule_code': 'legacy_freight', 'amount': 100, 'currency': 'MXN'}]
     writes = mock_formal_calculation(monkeypatch, rules, {'fx_rmb_to_mxn': None})
-    result = service.recalculate_batch('B')
-    assert result['ok'] and not result['summary']['is_complete']
-    assert Decimal(result['summary']['total_cost_rmb']) == 100
-    assert result['excluded_fees'][0]['reason_code'] == 'FX_RATE_MISSING'
+    with pytest.raises(ValueError, match='人民币兑比索汇率'):
+        service.recalculate_batch('B')
+    assert writes == []
 
 
 def test_superseded_freight_rule_does_not_drop_uncovered_misc_fallback():

@@ -415,3 +415,212 @@ def test_cost_input_hash_sorts_components_but_changes_when_a_component_changes()
 
     assert first == reordered
     assert first != changed
+
+
+class AutoFxCalculationRepository:
+    def __init__(self, *, persist_error=None):
+        self.persist_error = persist_error
+        self.prepared = 0
+        self.persisted = 0
+        self.saved = None
+        self.commits = 0
+        self.rollbacks = 0
+
+    def prepare_fx_resolution(self, batch_name, version_name):
+        assert batch_name == "B1" and version_name == "V1"
+        self.prepared += 1
+        return {
+            "ok": True,
+            "batch_name": "B1",
+            "version_name": "V1",
+            "calculation_date": "2026-09-20",
+            "fx_usd_to_rmb": 6.71,
+            "fx_rmb_to_mxn": 2.564103,
+            "rates": {},
+            "blocking_errors": [],
+        }
+
+    def lock_and_load(self, batch_name, version_name, **_kwargs):
+        return (
+            {
+                "batch": batch_name,
+                "version": version_name,
+                "current_version": version_name,
+                "version_status": "Active",
+                "confirm_status": "Pending",
+                "is_locked": 0,
+                "transport_mode": "AIR",
+            },
+            _items(),
+            [{
+                "name": "F1", "logical_fee_key": "international_air_freight",
+                "expense_category": "国际空运费", "amount_status": "ACTUAL", "amount": "100",
+                "currency": "RMB", "allocation_basis": "goods_value", "scope_type": "ALL_ITEMS",
+            }],
+            {"fx_usd_to_rmb": 0, "fx_rmb_to_mxn": 0},
+        )
+
+    def load_fee_components(self, _context):
+        return []
+
+    def persist_fx_resolution(self, context, resolution):
+        assert context["version"] == "V1"
+        self.persisted += 1
+        if self.persist_error:
+            raise self.persist_error
+        return {
+            "fx_context": {
+                "fx_usd_to_rmb": resolution["fx_usd_to_rmb"],
+                "fx_rmb_to_mxn": resolution["fx_rmb_to_mxn"],
+            },
+            "fx_resolution": dict(resolution),
+            "changed_fields": ["fx_usd_to_rmb", "fx_rmb_to_mxn"],
+        }
+
+    def assert_unchanged(self, _context):
+        return None
+
+    def save(self, _context, result):
+        self.saved = deepcopy(result)
+        return "m2"
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_direct_calculation_persists_resolved_fx_before_saving_non_null_mxn_fields() -> None:
+    repository = AutoFxCalculationRepository()
+
+    result = cost_preview_service.calculate_comprehensive_cost(
+        "B1", "V1", repository=repository,
+    )
+
+    assert repository.prepared == 1
+    assert repository.persisted == 1
+    assert repository.commits == 1
+    assert result["fx_resolution"]["calculation_date"] == "2026-09-20"
+    assert all(row["freight_alloc_mxn"] is not None for row in repository.saved["item_updates"])
+    assert all(row["total_logistics_mxn"] is not None for row in repository.saved["item_updates"])
+
+
+def test_direct_calculation_rolls_back_when_fx_persistence_fails() -> None:
+    repository = AutoFxCalculationRepository(persist_error=ValueError("当日汇率已变化"))
+
+    with pytest.raises(ValueError, match="当日汇率已变化"):
+        cost_preview_service.calculate_comprehensive_cost("B1", "V1", repository=repository)
+
+    assert repository.saved is None
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+
+
+def test_persistable_item_updates_reject_null_mxn_before_database_write() -> None:
+    with pytest.raises(ValueError, match="人民币兑比索汇率"):
+        cost_preview_service.assert_persistable_item_updates(
+            {"item_updates": [{"name": "ITEM-1", "freight_alloc_mxn": None, "total_logistics_mxn": None}]}
+        )
+
+
+def test_frappe_cost_repository_prepares_server_day_fx_without_writing(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    calls = []
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            calls.append((doctype, name, fields, as_dict))
+            if doctype == "Overseas Cost Batch":
+                return "V1"
+            return {
+                "name": "V1", "batch": "B1", "status": "Active",
+                "fx_usd_to_rmb": 0, "fx_rmb_to_mxn": 0, "extra_json": "{}",
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+        utils = type("Utils", (), {"nowdate": staticmethod(lambda: "2026-09-20")})
+
+    captured = {}
+
+    def fake_resolve(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True, "calculation_date": kwargs["calculation_date"],
+            "fx_usd_to_rmb": 6.71, "fx_rmb_to_mxn": 2.564103,
+            "rates": {}, "blocking_errors": [],
+        }
+
+    monkeypatch.setattr(cost_preview_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda name: name)
+    monkeypatch.setattr(cost_preview_service.fx_rate_service, "resolve_costing_fx", fake_resolve)
+
+    result = cost_preview_service.FrappeCostRepository().prepare_fx_resolution("B1", None)
+
+    assert captured["calculation_date"] == "2026-09-20"
+    assert captured["version_fx"]["fx_rmb_to_mxn"] == 0
+    assert result["batch_name"] == "B1"
+    assert result["version_name"] == "V1"
+    assert all(call[0] != "Currency Exchange" for call in calls)
+
+
+def test_read_only_preview_uses_resolved_fx_and_returns_provenance(monkeypatch) -> None:
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            if doctype == "Overseas Cost Batch" and fields == "current_version":
+                return "V1"
+            if doctype == "Overseas Cost Version" and fields == "batch":
+                return "B1"
+            if doctype == "Overseas Cost Batch" and fields == "transport_mode":
+                return "AIR"
+            if doctype == "Overseas Cost Version" and as_dict:
+                return {"fx_usd_to_rmb": 0, "fx_rmb_to_mxn": 0, "extra_json": "{}"}
+            raise AssertionError((doctype, name, fields, as_dict))
+
+    class FakeFrappe:
+        db = FakeDB()
+        utils = type("Utils", (), {"nowdate": staticmethod(lambda: "2026-09-20")})
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Item":
+                return _items()
+            if doctype == "Overseas Cost Fee SKU Component":
+                return []
+            raise AssertionError(doctype)
+
+    resolution = {
+        "ok": True, "calculation_date": "2026-09-20",
+        "fx_usd_to_rmb": 6.71, "fx_rmb_to_mxn": 2.564103,
+        "rates": {
+            "USD": {"source": "fx_api", "rate_date": "2026-09-20", "cny_per_unit": 6.71},
+            "MXN": {"source": "fx_api", "rate_date": "2026-09-20", "cny_per_unit": 0.39},
+        },
+        "blocking_errors": [], "is_estimated": False,
+    }
+    fee = {
+        "name": "F1", "logical_fee_key": "import_tax", "expense_category": "进口税费",
+        "amount_status": "ACTUAL", "amount": "100", "currency": "MXN",
+        "allocation_basis": "goods_value", "scope_type": "ALL_ITEMS",
+    }
+
+    monkeypatch.setattr(cost_preview_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(cost_preview_service.fx_rate_service, "resolve_costing_fx", lambda **_kwargs: dict(resolution))
+    monkeypatch.setattr(cost_preview_service, "project_batch_items", lambda rows, _batch, _version: (rows, {}))
+    monkeypatch.setattr(cost_preview_service.fee_service, "_query_rules", lambda _batch, _version: [fee])
+    monkeypatch.setattr(
+        cost_preview_service.fee_service,
+        "compose_fee_worklist_rows",
+        lambda rows, _mode, source_context=None: rows,
+    )
+
+    result = cost_preview_service.preview_comprehensive_cost("B1", "V1")
+
+    assert result["read_only"] is True
+    assert result["fx_resolution"]["rates"]["MXN"]["source"] == "fx_api"
+    assert result["fx_context"]["fx_rmb_to_mxn"] == pytest.approx(2.564103)
+    assert result["excluded_fees"] == []

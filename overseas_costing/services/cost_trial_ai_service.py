@@ -449,6 +449,7 @@ def build_cost_trial_review_draft(
     return {
         "schema_version": 2,
         "input_fingerprint": fingerprint,
+        "fx_resolution": dict(context.get("fx_resolution") or fx_context.get("fx_resolution") or {}),
         "model": str(ai.get("model") or ""),
         "ai_status": str(ai.get("action") or ("suggested" if ai.get("ok") else "failed")),
         "ai_ok": bool(ai.get("ok")),
@@ -679,6 +680,30 @@ def _input_fingerprint(inputs: dict) -> str:
     )
 
 
+def _apply_fx_resolution(inputs: dict, resolution: dict | None) -> dict:
+    if not isinstance(resolution, dict) or not resolution:
+        return inputs
+    effective = dict(inputs)
+    fx_context = dict(effective.get("fx_context") or {})
+    for fieldname in ("fx_usd_to_rmb", "fx_rmb_to_mxn"):
+        if resolution.get(fieldname) not in (None, ""):
+            fx_context[fieldname] = resolution.get(fieldname)
+    fx_context["fx_resolution"] = dict(resolution)
+    effective["fx_context"] = fx_context
+    context = dict(effective.get("context") or {})
+    context["fx_resolution"] = dict(resolution)
+    effective["context"] = context
+    return effective
+
+
+def _prepare_fx_resolution(repo: Any, batch_name: str, version_name: str | None) -> dict:
+    preparer = getattr(repo, "prepare_fx_resolution", None)
+    if not callable(preparer):
+        return {}
+    prepared = preparer(str(batch_name or ""), str(version_name or ""))
+    return dict(prepared or {})
+
+
 def _run_preview_token(run_id: str, draft: dict, choices: list[dict]) -> str:
     return _sign_preview(
         {
@@ -759,10 +784,12 @@ def start_cost_trial_ai_review(
         raise ValueError("重新让 AI 判断与仅复用已有口径不能同时执行。")
     repo = _repo(repository)
     try:
+        fx_resolution = _prepare_fx_resolution(repo, str(batch_name), str(version_name or "") or None)
         inputs = repo.load_trial_inputs(
             str(batch_name), str(version_name or "") or None,
             edit_token=edit_token, expected_modified=expected_modified, write=True,
         )
+        inputs = _apply_fx_resolution(inputs, fx_resolution)
         _assert_trial_writable_context(inputs["context"])
         fingerprint = _input_fingerprint(inputs)
         context = inputs["context"]
@@ -862,7 +889,7 @@ def start_cost_trial_ai_review(
                 "progress_percent": 0,
                 "model": "",
                 "prompt_version": PROMPT_VERSION,
-                "draft_json": {"force_ai": bool(force)},
+                "draft_json": {"force_ai": bool(force), "fx_resolution": fx_resolution},
                 "error_message": "",
             }
         )
@@ -912,10 +939,12 @@ def execute_cost_trial_ai_review(
         # the durable RUNNING state to FAILED.
         repo.commit()
         run = repo.get_run(str(run_id))
+        run_meta = _json_dict(run.get("draft_json"))
         inputs = repo.load_trial_inputs(
             str(run.get("batch") or ""), str(run.get("version") or "") or None,
             write=False, trusted=True,
         )
+        inputs = _apply_fx_resolution(inputs, run_meta.get("fx_resolution"))
         _assert_trial_writable_context(inputs["context"])
         if _input_fingerprint(inputs) != str(run.get("input_fingerprint") or ""):
             stale = _save_run_if_status(
@@ -927,7 +956,6 @@ def execute_cost_trial_ai_review(
                 current = repo.get_run(str(run_id))
                 return {"ok": True, "run_id": str(run_id), "status": str(current.get("status") or "")}
             return {"ok": False, "run_id": str(run_id), "status": "STALE"}
-        run_meta = _json_dict(run.get("draft_json"))
         previous_review = _load_previous_trial_review(
             repo, str(run.get("batch") or ""), str(run.get("version") or "")
         )
@@ -964,6 +992,7 @@ def execute_cost_trial_ai_review(
             str(run.get("batch") or ""), str(run.get("version") or "") or None,
             write=False, trusted=True,
         )
+        refreshed = _apply_fx_resolution(refreshed, run_meta.get("fx_resolution"))
         _assert_trial_writable_context(refreshed["context"])
         if _input_fingerprint(refreshed) != str(run.get("input_fingerprint") or ""):
             stale = _save_run_if_status(
@@ -1059,6 +1088,7 @@ def _load_current_run_inputs(repo: Any, batch_name: str, run: dict, *, write: bo
         str(batch_name), str(run.get("version") or "") or None,
         edit_token=edit_token, expected_modified=expected_modified, write=write, trusted=not write,
     )
+    inputs = _apply_fx_resolution(inputs, _json_dict(run.get("draft_json")).get("fx_resolution"))
     if _input_fingerprint(inputs) != str(run.get("input_fingerprint") or ""):
         repo.save_run(str(run.get("name") or ""), status="STALE", progress_step="试算输入已变化", progress_percent=100)
         repo.commit()
@@ -1085,6 +1115,7 @@ def preview_cost_trial(
         items=inputs["items"], fees=inputs["fees"], fx_context=inputs["fx_context"],
         fee_components=inputs.get("fee_components") or [], draft=draft, selections=selections,
     )
+    preview["fx_resolution"] = dict(draft.get("fx_resolution") or {})
     preview["run_id"] = str(run_id)
     preview["preview_token"] = _run_preview_token(
         str(run_id), draft, preview["trial_review"]["fee_choices"],
@@ -1136,6 +1167,16 @@ def confirm_cost_trial(
         )
         if not hmac.compare_digest(expected_token, str(preview_token or "")):
             raise ValueError("试算预览已失效，请重新预览。")
+        fx_resolution = dict(draft.get("fx_resolution") or {})
+        persister = getattr(repo, "persist_fx_resolution", None)
+        if callable(persister) and fx_resolution:
+            persisted_fx = persister(inputs, fx_resolution) or {}
+            inputs["fx_context"] = {
+                **dict(inputs.get("fx_context") or {}),
+                **dict(persisted_fx.get("fx_context") or {}),
+            }
+            fx_resolution = dict(persisted_fx.get("fx_resolution") or fx_resolution)
+        preview["fx_resolution"] = fx_resolution
         trial_review = {**preview["trial_review"], "run_id": str(run_id), "confirmed_by": _session_user()}
         saved = repo.save_calculation(inputs, preview, trial_review)
         saved["trial_review"] = trial_review
@@ -1244,6 +1285,12 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
     def __init__(self):
         if frappe is None:
             raise RuntimeError("当前未连接 Frappe 数据库。")
+
+    def prepare_fx_resolution(self, batch_name, version_name):
+        return cost_preview_service.FrappeCostRepository().prepare_fx_resolution(batch_name, version_name)
+
+    def persist_fx_resolution(self, inputs, resolution):
+        return cost_preview_service.FrappeCostRepository().persist_fx_resolution(inputs["context"], resolution)
 
     def load_trial_inputs(self, batch_name, version_name, *, edit_token="", expected_modified="",
                           write=False, trusted=False):
@@ -1370,6 +1417,7 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
             fee_components=inputs.get("fee_components") or [],
         )
         annotate_saved_trial_result(result, trial_review)
+        cost_preview_service.assert_persistable_item_updates(result)
         cost_repo = cost_preview_service.FrappeCostRepository()
         cost_repo.assert_unchanged(inputs["context"])
         modified = cost_repo.save(inputs["context"], result)

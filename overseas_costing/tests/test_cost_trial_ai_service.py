@@ -538,6 +538,43 @@ class TrialRepository:
         self.rollbacks += 1
 
 
+class FxTrialRepository(TrialRepository):
+    def __init__(self):
+        super().__init__()
+        self.fx_resolution = {
+            "ok": True,
+            "calculation_date": "2026-09-20",
+            "fx_usd_to_rmb": 6.71,
+            "fx_rmb_to_mxn": 2.564103,
+            "is_estimated": False,
+            "blocking_errors": [],
+            "rates": {
+                "USD": {"currency": "USD", "source": "fx_api", "rate_date": "2026-09-20", "cny_per_unit": 6.71},
+                "MXN": {"currency": "MXN", "source": "fx_api", "rate_date": "2026-09-20", "cny_per_unit": 0.39},
+            },
+        }
+        self.prepared = 0
+        self.persisted = 0
+
+    def prepare_fx_resolution(self, batch_name, version_name):
+        assert batch_name == "B1" and version_name == "V1"
+        self.prepared += 1
+        return dict(self.fx_resolution)
+
+    def persist_fx_resolution(self, inputs, resolution):
+        assert inputs["context"]["batch"] == "B1"
+        assert resolution["calculation_date"] == "2026-09-20"
+        self.persisted += 1
+        return {
+            "fx_context": {
+                "fx_usd_to_rmb": resolution["fx_usd_to_rmb"],
+                "fx_rmb_to_mxn": resolution["fx_rmb_to_mxn"],
+            },
+            "fx_resolution": dict(resolution),
+            "changed_fields": ["fx_usd_to_rmb", "fx_rmb_to_mxn"],
+        }
+
+
 def _ai_volume(**_kwargs):
     return {
         "ok": True,
@@ -1116,6 +1153,74 @@ def test_confirm_validates_server_preview_token_and_saves_trial_audit():
     assert saved["trial_review"]["is_temporary"] is False
     assert repo.runs["RUN-1"]["status"] == "CONFIRMED"
     assert repo.saved_calculation["trial_review"]["fee_choices"][0]["basis"] == "gross_weight"
+
+
+def test_trial_carries_signed_fx_resolution_and_persists_it_only_on_valid_confirm():
+    repo = FxTrialRepository()
+    started = cost_trial_ai_service.start_cost_trial_ai_review(
+        "B1", "V1", edit_token="T", expected_modified="m1", repository=repo, enqueue=lambda _run: None
+    )
+    assert repo.prepared == 1
+    assert repo.runs[started["run_id"]]["draft_json"]["fx_resolution"]["fx_rmb_to_mxn"] == pytest.approx(2.564103)
+
+    cost_trial_ai_service.execute_cost_trial_ai_review(
+        started["run_id"], repository=repo, ai_suggester=_ai_volume,
+    )
+    preview = cost_trial_ai_service.preview_cost_trial(
+        "B1", started["run_id"], [], repository=repo,
+    )
+
+    assert preview["fx_resolution"]["calculation_date"] == "2026-09-20"
+    assert preview["summary"]["total_cost_rmb"] == "500.00"
+    assert repo.persisted == 0
+
+    with pytest.raises(ValueError, match="预览已失效"):
+        cost_trial_ai_service.confirm_cost_trial(
+            "B1", started["run_id"], "wrong", [], edit_token="T", expected_modified="m1", repository=repo,
+        )
+    assert repo.persisted == 0
+
+    saved = cost_trial_ai_service.confirm_cost_trial(
+        "B1", started["run_id"], preview["preview_token"], [],
+        edit_token="T", expected_modified="m1", repository=repo,
+    )
+
+    assert saved["saved"] is True
+    assert saved["fx_resolution"]["fx_usd_to_rmb"] == pytest.approx(6.71)
+    assert repo.persisted == 1
+    assert repo.saved_calculation["preview"]["fx_resolution"]["fx_rmb_to_mxn"] == pytest.approx(2.564103)
+
+
+def test_frappe_trial_save_rejects_null_mxn_before_repository_write(monkeypatch):
+    saved = []
+
+    class FakeCostRepository:
+        def assert_unchanged(self, _context):
+            return None
+
+        def save(self, _context, result):
+            saved.append(result)
+            return "m2"
+
+    monkeypatch.setattr(cost_trial_ai_service, "frappe", object())
+    monkeypatch.setattr(cost_trial_ai_service.cost_preview_service, "FrappeCostRepository", FakeCostRepository)
+    repository = cost_trial_ai_service.FrappeCostTrialAIRepository()
+    monkeypatch.setattr(repository, "get_run", lambda _run_id: {"draft_json": {"fee_suggestions": []}})
+
+    with pytest.raises(ValueError, match="人民币兑比索汇率"):
+        repository.save_calculation(
+            {
+                "context": {"batch": "B1", "version": "V1", "transport_mode": "AIR"},
+                "items": [dict(row) for row in ITEMS],
+                "fees": [],
+                "fx_context": {},
+                "fee_components": [],
+            },
+            {"summary": {}, "trial_review": {}},
+            {"run_id": "RUN-1", "fee_choices": []},
+        )
+
+    assert saved == []
 
 
 def test_confirm_claim_prevents_discard_from_overwriting_a_saved_trial():

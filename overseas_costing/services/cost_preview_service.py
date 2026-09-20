@@ -11,7 +11,7 @@ try:
 except Exception:  # pragma: no cover - pure tests do not require Frappe
     frappe = None
 
-from overseas_costing.services import fee_allocation_service, fee_service
+from overseas_costing.services import fee_allocation_service, fee_service, fx_rate_service
 from overseas_costing.services.material_input_service import present_material_row
 from overseas_costing.services.effective_source_values import source_context_from_items, project_batch_items, batch_source_context
 from overseas_costing.services.transport_fee_service import assert_no_duplicate_fees, fee_is_active, mark_duplicate_fees
@@ -590,6 +590,20 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
         ["fx_usd_to_rmb", "fx_rmb_to_mxn", "extra_json"],
         as_dict=True,
     ) or {}
+    nowdate = getattr(getattr(frappe, "utils", None), "nowdate", None)
+    fx_resolution = (
+        fx_rate_service.resolve_costing_fx(
+            version_fx=version_row,
+            calculation_date=nowdate(),
+        )
+        if callable(nowdate)
+        else {}
+    )
+    effective_fx = {
+        **version_row,
+        "fx_usd_to_rmb": fx_resolution.get("fx_usd_to_rmb", version_row.get("fx_usd_to_rmb")),
+        "fx_rmb_to_mxn": fx_resolution.get("fx_rmb_to_mxn", version_row.get("fx_rmb_to_mxn")),
+    }
     from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
     raw_items = project_packing_groups(raw_items, groups_from_version(version_row))['items']
     fee_components = frappe.get_all(
@@ -604,7 +618,7 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
         limit_page_length=10000,
     )
     result = preview_comprehensive_cost_data(
-        raw_items, rules, version_row, fee_components=fee_components
+        raw_items, rules, effective_fx, fee_components=fee_components
     )
     result.update(
         {
@@ -612,9 +626,10 @@ def preview_comprehensive_cost(batch_name: str, version_name: str | None = None)
             "version_name": version,
             "transport_mode": transport_mode,
             "fx_context": {
-                "fx_usd_to_rmb": version_row.get("fx_usd_to_rmb"),
-                "fx_rmb_to_mxn": version_row.get("fx_rmb_to_mxn"),
+                "fx_usd_to_rmb": effective_fx.get("fx_usd_to_rmb"),
+                "fx_rmb_to_mxn": effective_fx.get("fx_rmb_to_mxn"),
             },
+            "fx_resolution": fx_resolution,
         }
     )
     return result
@@ -754,7 +769,55 @@ def build_saved_cost_data(
     return {**result, "item_updates": updates, "summary_snapshot": summary}
 
 
+def assert_persistable_item_updates(result: dict) -> None:
+    """Reject missing derived MXN values before MariaDB can expose a NOT NULL error."""
+
+    for row in result.get("item_updates") or []:
+        if row.get("freight_alloc_mxn") is None or row.get("total_logistics_mxn") is None:
+            raise ValueError("未取得可用的人民币兑比索汇率，本次试算未保存。")
+        if row.get("alloc_price_mxn") is None:
+            raise ValueError("物料缺少可用数量，无法保存比索分摊单价。")
+
+
 class FrappeCostRepository:
+    def prepare_fx_resolution(self, batch_name, version_name=None):
+        from overseas_costing.services import batch_service
+
+        name = batch_service._resolve_batch_name(batch_name)
+        if not name:
+            raise ValueError("未找到当前批次。")
+        version = version_name or frappe.db.get_value("Overseas Cost Batch", name, "current_version")
+        if not version:
+            raise ValueError("当前批次没有可用成本版本。")
+        version_row = frappe.db.get_value(
+            "Overseas Cost Version",
+            version,
+            ["name", "batch", "status", "fx_usd_to_rmb", "fx_rmb_to_mxn", "extra_json"],
+            as_dict=True,
+        ) or {}
+        if str(version_row.get("batch") or "") != str(name):
+            raise ValueError("成本版本不属于当前批次。")
+        resolution = fx_rate_service.resolve_costing_fx(
+            version_fx=version_row,
+            calculation_date=frappe.utils.nowdate(),
+        )
+        return {**resolution, "batch_name": name, "version_name": version}
+
+    def persist_fx_resolution(self, context, resolution):
+        if str(resolution.get("batch_name") or "") != str(context.get("batch") or ""):
+            raise ValueError("试算汇率所属批次已变化，请重新预览。")
+        if str(resolution.get("version_name") or "") != str(context.get("version") or ""):
+            raise ValueError("试算汇率所属版本已变化，请重新预览。")
+        session_user = getattr(getattr(frappe, "session", None), "user", None)
+        return fx_rate_service.persist_costing_fx_resolution(
+            resolution=resolution,
+            batch_name=context["batch"],
+            version_name=context["version"],
+            current_date=frappe.utils.nowdate(),
+            repository=fx_rate_service.FrappeCurrencyExchangeRepository(),
+            operator=str(session_user or ""),
+        )
+
     def lock_and_load(self, batch_name, version_name, *, edit_token, expected_modified, trusted=False):
         from overseas_costing.services import batch_service, edit_session_service
         name = batch_service._resolve_batch_name(batch_name)
@@ -866,12 +929,33 @@ def calculate_comprehensive_cost(batch_name, version_name=None, *, edit_token=No
     """Save a trial atomically; never confirms a version or sends an ERP request."""
     repo = repository or FrappeCostRepository()
     try:
+        preparer = getattr(repo, "prepare_fx_resolution", None)
+        explicitly_supports_fx = (
+            "prepare_fx_resolution" in getattr(type(repo), "__dict__", {})
+            or "prepare_fx_resolution" in getattr(repo, "__dict__", {})
+        )
+        fx_resolution = (
+            dict(preparer(batch_name, version_name) or {})
+            if callable(preparer) and explicitly_supports_fx
+            else {}
+        )
         context, items, fees, fx = repo.lock_and_load(batch_name, version_name, edit_token=edit_token,
             expected_modified=expected_modified, trusted=trusted)
         if context.get("current_version") != context["version"]:
             raise ValueError("只能试算当前版本，请刷新批次。")
         if context.get("version_status") in {"Confirmed", "Archived"} or context.get("confirm_status") == "Confirmed" or context.get("is_locked"):
             raise PermissionError("已确认或归档版本不能覆盖，请先创建调整版本。")
+        persister = getattr(repo, "persist_fx_resolution", None)
+        if fx_resolution and callable(persister):
+            persisted_fx = persister(context, fx_resolution) or {}
+            fx = {**dict(fx or {}), **dict(persisted_fx.get("fx_context") or {})}
+            fx_resolution = dict(persisted_fx.get("fx_resolution") or fx_resolution)
+        elif fx_resolution:
+            fx = {
+                **dict(fx or {}),
+                "fx_usd_to_rmb": fx_resolution.get("fx_usd_to_rmb"),
+                "fx_rmb_to_mxn": fx_resolution.get("fx_rmb_to_mxn"),
+            }
         fee_components = repo.load_fee_components(context) if hasattr(repo, "load_fee_components") else []
         result = build_saved_cost_data(
             items,
@@ -880,6 +964,9 @@ def calculate_comprehensive_cost(batch_name, version_name=None, *, edit_token=No
             context["transport_mode"],
             fee_components=fee_components,
         )
+        result["fx_resolution"] = fx_resolution
+        result["summary_snapshot"]["fx_resolution"] = fx_resolution
+        assert_persistable_item_updates(result)
         repo.assert_unchanged(context)
         modified = repo.save(context, result)
         if commit_after_calculate:

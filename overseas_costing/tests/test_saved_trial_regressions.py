@@ -498,6 +498,53 @@ console.log(JSON.stringify(h.renderCostTrialAIReview()));
     assert "毛重：RMB 75.00 / 25.00" in html
 
 
+def test_ai_trial_dialog_shows_calculation_day_fx_source_and_values():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=value=>String(value ?? '');
+state.costTrialAI={status:'READY',draft:{fee_suggestions:[],fx_resolution:{
+  ok:true,calculation_date:'2026-09-20',fx_usd_to_rmb:6.71,fx_rmb_to_mxn:2.564103,is_estimated:false,
+  rates:{USD:{source:'fx_api',source_label:'当日汇率 API',rate_date:'2026-09-20'},MXN:{source:'fx_api',source_label:'当日汇率 API',rate_date:'2026-09-20'}},
+  blocking_errors:[]
+}}};
+console.log(JSON.stringify(h.renderCostTrialAIReview()));
+""")
+
+    assert "汇率日期 2026-09-20" in html
+    assert "当日汇率 API" in html
+    assert "1 USD = 6.71 RMB" in html
+    assert "1 RMB = 2.564103 MXN" in html
+
+
+def test_ai_trial_dialog_marks_historical_fx_estimated():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=value=>String(value ?? '');
+state.costTrialAI={status:'READY',draft:{fee_suggestions:[],fx_resolution:{
+  ok:true,calculation_date:'2026-09-20',fx_usd_to_rmb:6.5,fx_rmb_to_mxn:2.5,is_estimated:true,
+  rates:{USD:{source:'historical_currency_exchange',rate_date:'2024-01-02'},MXN:{source:'historical_currency_exchange',rate_date:'2023-12-29'}},
+  blocking_errors:[]
+}}};
+console.log(JSON.stringify(h.renderCostTrialAIReview()));
+""")
+
+    assert "历史汇率暂估" in html
+    assert "2024-01-02" in html
+    assert "2023-12-29" in html
+
+
+def test_ai_trial_missing_fx_disables_confirmation_and_shows_chinese_error():
+    result = _frontend_result(FRONTEND_SETUP + """
+h.escape=value=>String(value ?? '');
+state.costTrialAI={status:'READY',draft:{fee_suggestions:[],default_selections:[],fx_resolution:{
+  ok:false,calculation_date:'2026-09-20',fx_usd_to_rmb:null,fx_rmb_to_mxn:null,
+  rates:{},blocking_errors:[{currency:'MXN',message:'未取得 2026-09-20 的 MXN 汇率，汇率库也没有可用历史值。'}]
+}}};
+console.log(JSON.stringify({ready:h.costTrialAIReadyToConfirm(),html:h.renderCostTrialAIReview()}));
+""")
+
+    assert result["ready"] is False
+    assert "未取得 2026-09-20 的 MXN 汇率" in result["html"]
+
+
 def test_retry_ai_keeps_revision_guards_and_opens_the_refreshed_review():
     result = _frontend_result(FRONTEND_SETUP + """
 state.requestId=3;state.feeRequestId=4;state.inputRevision=5;
