@@ -268,6 +268,17 @@ def test_sql_page_ranking_does_not_truncate_exact_reference_sources():
     assert page['sources'][0]['id']==omitted
 
 
+def test_rule_source_ids_exclude_the_logistics_source_itself():
+    from overseas_costing.services.logistics_settlement.freight_matching import _rule_source_ids
+    import sqlite3
+    store=Store.sqlite(sqlite3.connect(':memory:'));store.install()
+    logistics=store.ingest(parse_source(source('self-reference-boundary','logistics'),logistics_codes={'logistics'}))
+
+    source_ids=_rule_source_ids(store,logistics)
+
+    assert logistics['id'] not in source_ids
+
+
 def test_explicit_reference_ranks_above_ordinary_shared_identifier_with_matching_public_score():
     from overseas_costing.services.logistics_settlement.freight_matching import payment_pool
     from overseas_costing.services.logistics_settlement.model import digest

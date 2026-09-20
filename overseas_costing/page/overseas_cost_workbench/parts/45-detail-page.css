@@ -61,7 +61,16 @@
   color: var(--ocw-accent-dark);
 }
 
-.ocw-detail-header-actions { gap: 8px; }
+.ocw-detail-header-actions { gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+.ocw-detail-erp-action {
+  display: grid;
+  flex: 0 1 230px;
+  gap: 3px;
+}
+
+.ocw-detail-erp-action button { width: 100%; }
+.ocw-detail-erp-action small { color: var(--ocw-muted); font-size: 11px; line-height: 1.3; }
 
 .ocw-detail-tools {
   position: absolute;
@@ -206,7 +215,8 @@
 
 @media (max-width: 900px) {
   .ocw-detail-header { flex-direction: column; }
-  .ocw-detail-header-actions { width: 100%; justify-content: flex-end; }
+  .ocw-detail-header-actions { width: 100%; justify-content: flex-start; }
+  .ocw-detail-erp-action { flex: 1 1 100%; max-width: 100%; }
   .ocw-detail-tabs { overflow-x: auto; }
   .ocw-detail-tabs button { flex: 0 0 auto; }
   .ocw-sku-toolbar { align-items: stretch; flex-direction: column; }

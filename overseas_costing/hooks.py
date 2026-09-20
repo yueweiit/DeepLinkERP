@@ -16,6 +16,7 @@ app_email = "dev@yuewei.local"
 app_license = "MIT"
 
 after_install = "overseas_costing.install.after_install"
+before_migrate = "overseas_costing.install.before_migrate"
 after_migrate = "overseas_costing.install.after_migrate"
 
 auth_hooks = ["overseas_costing.services.access_control.validate_api_access"]

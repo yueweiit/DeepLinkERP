@@ -28,21 +28,25 @@ const before=JSON.stringify({materials:state.materials,fees:state.fees});
 const requests=[];workspace.openCostTrialAIReviewDialog=()=>{workspace.opened=true};
 workspace.call=async(endpoint,args)=>{requests.push({endpoint,args});
  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'TRIAL',status:'READY',progress_revision:0};
- if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'TRIAL',status:'READY',draft:{fee_suggestions:[]}};
+ if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'TRIAL',status:'READY',draft:{fee_suggestions:[],default_selections:[]}};
+ if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'TOKEN',summary:{total_cost_rmb:'100.00'}};
+ if(endpoint.endsWith('confirm_cost_trial'))return {ok:true,saved:true,batch_modified:'m2',summary:{total_cost_rmb:'100.00'},summary_snapshot:{}};
  throw new Error('unexpected '+endpoint)};
 const ok=await workspace.refreshMaterialFeeCostPreview();
 console.log(JSON.stringify({ok,requests,retained:state.aiFill===fill,selected:[...selection.rows],
  unchanged:before===JSON.stringify({materials:state.materials,fees:state.fees}),total:state.preview.summary.total_cost_rmb,
  opened:workspace.opened===true}));
 """)
-    assert result["ok"] and result["retained"] and result["unchanged"] and result["opened"]
+    assert result["ok"] and result["retained"] and result["unchanged"] and not result["opened"]
     assert result["selected"] == ["unadopted"]
     assert result["total"] == "100.00"
     assert [row["endpoint"].split(".")[-1] for row in result["requests"]] == [
         "start_cost_trial_ai_review",
         "get_cost_trial_ai_review_status",
+        "preview_cost_trial",
+        "confirm_cost_trial",
     ]
-    assert set(result["requests"][0]["args"]) == {"batch_name", "version_name", "force"}
+    assert set(result["requests"][0]["args"]) == {"batch_name", "version_name", "force", "reuse_only"}
     assert "ai_fill" not in result["requests"][0]["args"]
 
 
@@ -51,7 +55,9 @@ def test_trial_waits_only_for_actual_saves_and_blocks_ai_confirm_until_done():
 const endpoints=[];workspace.openCostTrialAIReviewDialog=()=>{};
 workspace.call=async(endpoint)=>{endpoints.push(endpoint.split('.').pop());
  if(endpoint.endsWith('start_cost_trial_ai_review'))return {ok:true,run_id:'TRIAL',status:'READY'};
- return {ok:true,run_id:'TRIAL',status:'READY',draft:{fee_suggestions:[]}}};
+ if(endpoint.endsWith('get_cost_trial_ai_review_status'))return {ok:true,run_id:'TRIAL',status:'READY',draft:{fee_suggestions:[],default_selections:[]}};
+ if(endpoint.endsWith('preview_cost_trial'))return {ok:true,preview_token:'TOKEN'};
+ return {ok:true,saved:true,batch_modified:'m2',summary:{total_cost_rmb:'100.00'},summary_snapshot:{}}};
 let release;const writing=workspace.trackMaterialFeeWrite(()=>new Promise(resolve=>release=resolve));
 const running=workspace.refreshMaterialFeeCostPreview();
 await new Promise(resolve=>setImmediate(resolve));
@@ -63,7 +69,12 @@ console.log(JSON.stringify({before,endpoints,canApply:workspace.canConfirmMateri
 """)
     assert result == {
         "before": {"calls": 0, "canApply": False},
-        "endpoints": ["start_cost_trial_ai_review", "get_cost_trial_ai_review_status"],
+        "endpoints": [
+            "start_cost_trial_ai_review",
+            "get_cost_trial_ai_review_status",
+            "preview_cost_trial",
+            "confirm_cost_trial",
+        ],
         "canApply": True,
         "retained": True,
     }

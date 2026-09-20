@@ -1,0 +1,31 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost ERP Sync Request",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "request_id",
+  "track_changes": 1,
+  "field_order": ["request_id", "operation", "batch", "version", "cost_result_hash", "site_code", "business_key", "payload_hash", "status", "attempt_count", "safe_payload_json", "safe_response_json", "error_code", "error_message", "started_at", "finished_at"],
+  "fields": [
+    {"fieldname": "request_id", "fieldtype": "Data", "label": "请求幂等键", "reqd": 1, "unique": 1, "in_list_view": 1},
+    {"fieldname": "operation", "fieldtype": "Select", "label": "同步操作", "options": "CREATE\nUPDATE_COST\nVERIFY", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "batch", "fieldtype": "Link", "label": "所属批次", "options": "Overseas Cost Batch", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "version", "fieldtype": "Link", "label": "成本版本", "options": "Overseas Cost Version"},
+    {"fieldname": "cost_result_hash", "fieldtype": "Data", "label": "成本结果哈希"},
+    {"fieldname": "site_code", "fieldtype": "Data", "label": "ERP站点编码", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "business_key", "fieldtype": "Data", "label": "稳定业务键", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "payload_hash", "fieldtype": "Data", "label": "报文哈希"},
+    {"fieldname": "status", "fieldtype": "Select", "label": "同步状态", "options": "PENDING\nRUNNING\nSUCCESS\nFAILED\nUNCERTAIN\nMANUAL_REQUIRED\nSUPERSEDED", "default": "PENDING", "in_list_view": 1},
+    {"fieldname": "attempt_count", "fieldtype": "Int", "label": "尝试次数", "default": "0", "read_only": 1},
+    {"fieldname": "safe_payload_json", "fieldtype": "Long Text", "label": "脱敏请求报文", "read_only": 1},
+    {"fieldname": "safe_response_json", "fieldtype": "Long Text", "label": "脱敏响应报文", "read_only": 1},
+    {"fieldname": "error_code", "fieldtype": "Data", "label": "错误编码", "read_only": 1},
+    {"fieldname": "error_message", "fieldtype": "Small Text", "label": "错误说明", "read_only": 1},
+    {"fieldname": "started_at", "fieldtype": "Datetime", "label": "开始时间", "read_only": 1},
+    {"fieldname": "finished_at", "fieldtype": "Datetime", "label": "结束时间", "read_only": 1}
+  ],
+  "permissions": [
+    {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1, "share": 1, "print": 1, "email": 1, "export": 1},
+    {"role": "海外成本核算用户", "read": 1, "print": 1, "email": 1, "export": 1}
+  ]
+}

@@ -42,7 +42,8 @@ def _decimal_text(value: object) -> str:
 
 def _material_key(item: dict) -> str:
     return str(
-        item.get("stable_line_key")
+        item.get("material_key")
+        or item.get("stable_line_key")
         or (f"legacy:{item.get('name')}" if item.get("name") else "")
     ).strip()
 
@@ -328,7 +329,33 @@ def _explicit_goods_value(line: dict) -> tuple[str, str]:
     return _decimal_text(raw_amount), normalize_currency(raw_currency)
 
 
-def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> list[dict]:
+def _payment_extension_target(line: dict) -> dict | None:
+    structured_goods = [row for row in line.get("goods") or [] if isinstance(row, dict)]
+    codes = {
+        str(value or "").strip()
+        for value in [line.get("material_code"), *(row.get("material_code") for row in structured_goods)]
+        if str(value or "").strip()
+    }
+    if len(codes) != 1:
+        return None
+    code = next(iter(codes))
+    names = {
+        str(value or "").strip()
+        for value in [line.get("product_name"), *(row.get("product_name") for row in structured_goods)]
+        if str(value or "").strip()
+    }
+    product_name = next(iter(names)) if len(names) == 1 else ""
+    return {
+        "item_name": "",
+        "material_key": "payment-extension:" + digest(POLICY, code, product_name),
+        "material_code": code,
+        "product_name": product_name,
+    }
+
+
+def build_payment_facts(
+    items: list[dict], source: dict, lines: list[dict], *, shipment_identifiers=None
+) -> list[dict]:
     """Normalize selected payment rows against the current material baseline."""
 
     baseline = [row for row in items or [] if not int(row.get("is_excluded") or 0)]
@@ -377,6 +404,16 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
     row_records = []
     for line in ordered_lines:
         targets, match_method, reason = _match_targets(baseline, line)
+        proposed_new_item = False
+        if not targets and shipment_identifiers:
+            from .shipment_material_scope import same_shipment
+
+            extension_target = _payment_extension_target(line)
+            if extension_target and same_shipment(line, shipment_identifiers):
+                targets = [extension_target]
+                match_method = "same_shipment_extension"
+                reason = "付款明细的物流标识与当前国际物流完整一致，作为同票补充物料。"
+                proposed_new_item = True
         locator_valid = _locator_is_valid(line)
         if line.get("_semantic_locator_conflict"):
             scope_status = "ambiguous"
@@ -387,7 +424,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             match_method = "malformed_locator"
             reason = "证据位置缺失或行号无效，不能作为可采用事实。"
         elif len(targets) == 1:
-            scope_status = "in_scope"
+            scope_status = "same_shipment_extension" if proposed_new_item else "in_scope"
         elif len(targets) > 1:
             scope_status = "ambiguous"
         elif match_method == "ambiguous_name":
@@ -430,6 +467,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
                 "match_method": match_method,
                 "reason": reason,
                 "evidence_chain": evidence_chain,
+                "proposed_new_item": proposed_new_item,
             }
         )
 
@@ -462,6 +500,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             )
 
     physical_facts = []
+    material_extension_facts = []
     goods_value_facts = []
     component_facts = []
     for record in row_records:
@@ -478,8 +517,21 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             "scope_status": scope_status,
             "match_method": record["match_method"],
             "evidence_chain": deepcopy(record["evidence_chain"]),
+            "proposed_new_item": bool(record.get("proposed_new_item")),
         }
         physical = _physical(line)
+        if scope_status == 'same_shipment_extension' and not physical:
+            material_extension_facts.append({
+                **base,
+                'fact_id':digest(
+                    POLICY,'payment_material_extension',record['process'],
+                    record['stable_row_identity'],record['package_identity'],material_targets,
+                ),
+                'fact_kind':'payment_material_extension',
+                'default_eligible':True,
+                'physical':{},'monetary':{},
+                'reason':record['reason'],'allowed_actions':[],
+            })
         if physical:
             allowed_actions = []
             if scope_status == "in_scope" and len(material_targets) == 1:
@@ -507,7 +559,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
                         physical,
                     ),
                     "fact_kind": "payment_physical",
-                    "default_eligible": scope_status == "in_scope",
+                    "default_eligible": scope_status in {"in_scope", "same_shipment_extension"},
                     "physical": physical,
                     "monetary": {},
                     "reason": record["reason"],
@@ -570,7 +622,6 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
             and currency
             and line_scope == "freight"
             and material_targets
-            and scope_status != "out_of_scope"
         ):
             component_facts.append(
                 {
@@ -598,7 +649,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
     totals = []
     components_by_currency: dict[str, list[dict]] = {}
     for fact in component_facts:
-        if fact["scope_status"] != "in_scope":
+        if fact["scope_status"] not in {"in_scope", "same_shipment_extension"}:
             continue
         components_by_currency.setdefault(fact["monetary"]["currency"], []).append(fact)
     for currency, components in sorted(components_by_currency.items()):
@@ -649,7 +700,7 @@ def build_payment_facts(items: list[dict], source: dict, lines: list[dict]) -> l
                 "allowed_actions": [],
             }
         )
-    return [*physical_facts, *goods_value_facts, *component_facts, *totals]
+    return [*material_extension_facts, *physical_facts, *goods_value_facts, *component_facts, *totals]
 
 
 def eligible_physical_facts(facts: list[dict]) -> list[dict]:
@@ -668,6 +719,7 @@ def eligible_evidence_facts(facts: list[dict]) -> list[dict]:
 
     priority = {
         "payment_physical": 0,
+        "payment_material_extension": 0,
         "payment_goods_value": 1,
         "payment_freight_component": 2,
     }
@@ -675,7 +727,7 @@ def eligible_evidence_facts(facts: list[dict]) -> list[dict]:
     for fact in facts or []:
         if (
             fact.get("fact_kind") not in priority
-            or fact.get("scope_status") != "in_scope"
+            or fact.get("scope_status") not in {"in_scope", "same_shipment_extension"}
             or len(fact.get("material_targets") or []) != 1
         ):
             continue

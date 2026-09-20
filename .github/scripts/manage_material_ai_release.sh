@@ -12,8 +12,20 @@ compose_file="$compose_root/compose.custom.yaml"
 base_image="deeplinkerp-custom:v16.23.0-latest"
 backup_image="deeplinkerp-custom:pre-material-ai-release-$release_id"
 backup_archive="$compose_root/backups/material-ai-release-$release_id.tar.gz"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+asset_sync_script="${ASSET_SYNC_SCRIPT:-}"
+if [ -z "$asset_sync_script" ] && [ -f "$script_dir/sync_and_verify_assets.sh" ]; then
+  asset_sync_script="$script_dir/sync_and_verify_assets.sh"
+fi
 
 cd "$compose_root"
+
+sync_and_verify_assets_only() {
+  if [ -n "$asset_sync_script" ]; then
+    test -f "$asset_sync_script"
+    COMPOSE_FILE="$compose_file" SITE_NAME="$site_name" VERIFY_APP_RELEASE=0 bash "$asset_sync_script"
+  fi
+}
 
 prepare_release() {
   mkdir -p "$compose_root/backups"
@@ -71,6 +83,7 @@ rollback_release() {
     backend websocket queue-short queue-long scheduler frontend
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" clear-cache
+  sync_and_verify_assets_only
 }
 
 rollback_code_release() {
@@ -127,6 +140,7 @@ PY
     bench --site "$site_name" clear-cache
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" clear-website-cache
+  sync_and_verify_assets_only
 }
 
 case "$mode" in

@@ -7,6 +7,63 @@ from urllib.error import HTTPError
 from overseas_costing.services import erp_client
 
 
+def test_read_erpnext_doctype_metadata_rejects_incomplete_config_without_leaking_secret() -> None:
+    result = erp_client.read_erpnext_doctype_metadata(
+        {"base_url": "https://erp.example.com/api/resource", "authorization": ""},
+        ["Purchase Order"],
+    )
+
+    assert result["ok"] is False
+    assert result["request"]["authorization_configured"] is False
+    assert "缺少 DeepLinkERP 鉴权配置" in result["errors"]["config"]
+
+
+def test_read_erpnext_doctype_metadata_reads_each_doctype_with_get(monkeypatch) -> None:
+    captured = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        @staticmethod
+        def read():
+            return b'{"data":{"fields":[{"fieldname":"custom_field"}]}}'
+
+    def fake_urlopen(request, timeout):
+        captured.append({"url": request.full_url, "method": request.get_method(), "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+    result = erp_client.read_erpnext_doctype_metadata(
+        {"base_url": "https://erp.example.com/api/resource", "authorization": "token abc:def", "timeout": 7},
+        ["Purchase Order", "Purchase Order Item"],
+    )
+
+    assert result["ok"] is True
+    assert [row["method"] for row in captured] == ["GET", "GET"]
+    assert captured[0]["url"].endswith("/DocType/Purchase%20Order")
+    assert captured[1]["url"].endswith("/DocType/Purchase%20Order%20Item")
+    assert result["metadata"]["Purchase Order"]["fields"][0]["fieldname"] == "custom_field"
+
+
+def test_read_erpnext_doctype_metadata_returns_structured_http_error(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 403, "Forbidden", None, io.BytesIO(b'{"exc":"forbidden"}'))
+
+    monkeypatch.setattr(erp_client, "urlopen", fake_urlopen)
+    result = erp_client.read_erpnext_doctype_metadata(
+        {"base_url": "https://erp.example.com/api/resource", "authorization": "token abc:def"},
+        ["Purchase Order"],
+    )
+
+    assert result["ok"] is False
+    assert result["errors"]["Purchase Order"]["http_status"] == 403
+    assert result["errors"]["Purchase Order"]["response"] == {"exc": "forbidden"}
+
+
 def test_get_erp_push_config_prefers_single_settings(monkeypatch) -> None:
     class FakeSettings:
         def get(self, fieldname, default=None):
@@ -233,6 +290,41 @@ def test_purchase_order_item_reconciles_displayed_cost_amounts() -> None:
             "custom_overseas_tax_alloc_amount",
         )
     ) == row["custom_overseas_comprehensive_amount"]
+
+
+def test_existing_purchase_order_is_checked_before_any_item_write(monkeypatch) -> None:
+    writes = []
+    monkeypatch.setattr(
+        erp_client,
+        "lookup_purchase_by_business_key",
+        lambda payload, config: {"found": True, "name": "PO-1"},
+    )
+    monkeypatch.setattr(erp_client, "_ensure_item", lambda item, payload, config: writes.append(item))
+
+    result = erp_client.create_purchase(
+        {"business_key": "BK1", "items": [{"material_code": "M1"}]},
+        {"base_url": "https://erp.invalid/api/resource", "authorization": "token hidden", "timeout": 1},
+    )
+
+    assert result["status"] == "EXISTS"
+    assert writes == []
+
+
+def test_explicit_purchase_body_carries_stable_sync_fields() -> None:
+    body = erp_client._build_purchase_order_body(
+        {
+            "batch_no": "B1",
+            "business_key": "BK1",
+            "cost_result_hash": "H1",
+            "amount_status": "ESTIMATED",
+            "items": [{"material_code": "M1", "stable_line_key": "L1"}],
+        },
+        {"stock_uom": "Nos", "default_currency": "CNY"},
+    )
+
+    assert body["custom_overseas_business_key"] == "BK1"
+    assert body["custom_overseas_cost_result_hash"] == "H1"
+    assert body["items"][0]["custom_overseas_stable_line_key"] == "L1"
 
 
 def test_standard_purchase_flow_uses_default_supplier_when_item_suppliers_conflict(monkeypatch) -> None:

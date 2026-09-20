@@ -1,0 +1,33 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost ERP Site",
+  "module": "Overseas Costing",
+  "autoname": "field:site_code",
+  "title_field": "label",
+  "track_changes": 1,
+  "field_order": ["site_code", "label", "subsidiary_code", "enabled", "connection_section", "base_url", "authorization", "push_mode", "company", "default_supplier", "cost_center", "default_currency", "stock_uom", "capability_section", "cost_update_mode", "capability_status", "capability_checked_at", "capability_summary_json", "remark"],
+  "fields": [
+    {"fieldname": "site_code", "fieldtype": "Data", "label": "ERP站点编码", "reqd": 1, "unique": 1, "in_list_view": 1},
+    {"fieldname": "label", "fieldtype": "Data", "label": "ERP站点名称", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "subsidiary_code", "fieldtype": "Data", "label": "业务主体", "in_list_view": 1},
+    {"fieldname": "enabled", "fieldtype": "Check", "label": "启用", "default": "1", "in_list_view": 1},
+    {"fieldname": "connection_section", "fieldtype": "Section Break", "label": "连接配置"},
+    {"fieldname": "base_url", "fieldtype": "Data", "label": "接口地址"},
+    {"fieldname": "authorization", "fieldtype": "Password", "label": "鉴权Token"},
+    {"fieldname": "push_mode", "fieldtype": "Select", "label": "推送模式", "options": "standard_purchase\ngeneric_resource", "default": "standard_purchase"},
+    {"fieldname": "company", "fieldtype": "Data", "label": "目标公司"},
+    {"fieldname": "default_supplier", "fieldtype": "Data", "label": "默认供应商"},
+    {"fieldname": "cost_center", "fieldtype": "Data", "label": "默认成本中心"},
+    {"fieldname": "default_currency", "fieldtype": "Data", "label": "默认币种", "default": "CNY"},
+    {"fieldname": "stock_uom", "fieldtype": "Data", "label": "默认库存单位", "default": "Nos"},
+    {"fieldname": "capability_section", "fieldtype": "Section Break", "label": "能力核验"},
+    {"fieldname": "cost_update_mode", "fieldtype": "Select", "label": "成本更新模式", "options": "DISABLED\nMANUAL\nDRAFT_PURCHASE_ORDER", "default": "DISABLED"},
+    {"fieldname": "capability_status", "fieldtype": "Select", "label": "能力核验状态", "options": "UNVERIFIED\nVERIFIED\nFAILED", "default": "UNVERIFIED", "read_only": 1},
+    {"fieldname": "capability_checked_at", "fieldtype": "Datetime", "label": "最近核验时间", "read_only": 1},
+    {"fieldname": "capability_summary_json", "fieldtype": "Long Text", "label": "能力核验摘要", "read_only": 1},
+    {"fieldname": "remark", "fieldtype": "Small Text", "label": "备注"}
+  ],
+  "permissions": [
+    {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1, "share": 1, "print": 1, "email": 1, "export": 1}
+  ]
+}

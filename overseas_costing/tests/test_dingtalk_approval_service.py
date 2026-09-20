@@ -117,6 +117,37 @@ def test_missing_main_returns_structured_repair_state_not_false_unlinked_message
     assert "正在补同步" in result["message"]
 
 
+def test_missing_postgres_config_returns_structured_unavailable_state(monkeypatch) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    class DB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {
+                "name": "B1",
+                "batch_no": "OA-1",
+                "source_type": "oa_logistics",
+                "source_approval_no": "OA-1",
+                "source_instance_id": "PROC-1",
+                "extra_json": "{}",
+            }
+
+    def fail_source():
+        raise ValueError("missing PostgreSQL OA source config")
+
+    monkeypatch.setattr(service, "frappe", type("F", (), {"db": DB()})())
+    monkeypatch.setattr(service, "_get_approval_source", fail_source)
+
+    result = service.get_batch_dingtalk_approval_detail("B1")
+
+    assert result["ok"] is False
+    assert result["data_source"] == "postgres"
+    assert result["source_state"]["code"] == "data_source_unavailable"
+    assert result["source_state"]["failure_code"] == "missing_postgres_config"
+    assert result["source_state"]["repairable"] is False
+    assert "PostgreSQL OA" in result["message"]
+
+
 def test_main_payload_links_are_trusted_even_when_old_batch_trace_is_empty(monkeypatch) -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

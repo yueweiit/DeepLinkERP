@@ -25,7 +25,10 @@ if args and args[0]=='cp' and args[1].startswith('old-backend:'):
     path=pathlib.Path(args[2]);path.mkdir(parents=True,exist_ok=True)
     (path/'assets.json').write_text('{}')
 if 'python' in ' '.join(args) and args[-1]=='-':
-    pathlib.Path(os.environ['ROLLBACK_PYTHON_LOG']).write_text(sys.stdin.read())
+    python_log = pathlib.Path(os.environ['ROLLBACK_PYTHON_LOG'])
+    with python_log.open('a') as handle:
+        handle.write(sys.stdin.read())
+        handle.write('\\n# --- next python payload ---\\n')
 """)
     docker.chmod(0o755)
     commands = tmp_path / "commands.jsonl"
@@ -54,12 +57,12 @@ def test_code_rollback_restores_old_image_assets_and_ui_without_restoring_databa
     assert any("clear-website-cache" in command for command in rendered)
     assert any("backend websocket queue-short queue-long scheduler frontend" in command for command in rendered)
     assert not any(token in command for command in commands for token in ("restore", "migrate", "--with-public-files", "--with-private-files"))
-    body = python_body.read_text()
-    ast.parse(body)
-    assert "install.ensure_workspace_sidebar()" in body
-    assert "install._set_workspace_content(" in body
-    assert "install.ensure_workspace()" not in body
-    assert "drop" not in body.lower() and "delete" not in body.lower()
+    bodies = python_body.read_text().split("\n# --- next python payload ---\n")
+    rollback_body = next(body for body in bodies if "install.ensure_workspace_sidebar()" in body)
+    ast.parse(rollback_body)
+    assert "install._set_workspace_content(" in rollback_body
+    assert "install.ensure_workspace()" not in rollback_body
+    assert "drop" not in rollback_body.lower() and "delete" not in rollback_body.lower()
 
 
 def test_code_rollback_with_missing_backup_image_stops_before_service_changes(tmp_path):

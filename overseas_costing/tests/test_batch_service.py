@@ -716,6 +716,58 @@ def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
     assert result["checks"]["items_have_unit_price"] is True
 
 
+def test_build_writeback_readiness_blocks_estimated_fee_but_allows_confirmed_zero_fee() -> None:
+    base = {
+        "status": "Clean",
+        "confirm_status": "Confirmed",
+        "current_version": "VERSION-001",
+        "subsidiary_code": "MX01",
+        "item_count": 1,
+        "actual_total_cost_rmb": 25,
+    }
+    items = [{"row_no": 1, "material_code": "YL000001", "product_name": "太阳眼镜", "quantity": 2,
+              "actual_shipped_qty": 2, "unit_price": 8, "purchase_currency": "RMB", "goods_value": 16,
+              "total_unit_rmb": 12.5}]
+
+    blocked = _build_writeback_readiness(
+        batch=base,
+        resolved_version_name="VERSION-001",
+        items=items,
+        rules=[{"expense_category": "进口税费", "amount_status": "ESTIMATED", "is_enabled": 1, "is_active": 1}],
+    )
+    allowed = _build_writeback_readiness(
+        batch=base,
+        resolved_version_name="VERSION-001",
+        items=items,
+        rules=[{"expense_category": "目的地配送费", "amount_status": "NOT_INCURRED", "is_enabled": 1, "is_active": 1}],
+    )
+
+    assert blocked["ready"] is False
+    assert blocked["checks"]["all_cost_fees_final"] is False
+    assert "进口税费尚未取得实际费用或确认结果（当前：ESTIMATED）。" in blocked["blocking_reasons"]
+    assert allowed["ready"] is True
+    assert allowed["checks"]["all_cost_fees_final"] is True
+
+
+def test_schema_two_writeback_blocks_estimated_fee_without_blocking_cost_calculation() -> None:
+    batch = {
+        "status": "Clean",
+        "confirm_status": "Confirmed",
+        "subsidiary_code": "MX01",
+        "summary_snapshot": {"calculation_schema": 2, "total_cost_rmb": 25, "comprehensive_cost": {}},
+    }
+    items = [{"row_no": 1, "material_code": "YL000001", "product_name": "太阳眼镜", "quantity": 2,
+              "actual_shipped_qty": 2, "unit_price": 8, "purchase_currency": "RMB", "goods_value": 16,
+              "total_unit_rmb": 12.5}]
+    rules = [{"expense_category": "清关费", "amount_status": "ESTIMATED", "is_enabled": 1, "is_active": 1}]
+
+    calculation = batch_service._comprehensive_readiness(batch, items, rules, "VERSION-001")
+    writeback = batch_service._comprehensive_readiness(batch, items, rules, "VERSION-001", for_writeback=True)
+
+    assert "清关费尚未取得实际费用或确认结果（当前：ESTIMATED）。" not in calculation["blocking_reasons"]
+    assert "清关费尚未取得实际费用或确认结果（当前：ESTIMATED）。" in writeback["blocking_reasons"]
+
+
 def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
     result = _build_writeback_readiness(
         batch={

@@ -454,7 +454,26 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
         }
     candidate_linked_ids = [value for value in _linked_instance_ids(batch.get("extra_json")) if value != main_id]
     instance_ids = [main_id, *candidate_linked_ids]
-    source = _get_approval_source()
+    try:
+        source = _get_approval_source()
+    except ValueError as error:
+        message = str(error)
+        if "PostgreSQL OA" not in message:
+            raise
+        return {
+            "ok": False,
+            "batch_name": batch.get("name") or batch_name,
+            "message": message,
+            "data_source": "postgres",
+            "fallback_used": False,
+            "source_state": {
+                "code": "data_source_unavailable",
+                "repairable": False,
+                "purchase_link_state": "unknown",
+                "failure_code": "missing_postgres_config",
+                "failure_reason": message,
+            },
+        }
     bundle = source.get_instance_bundle(instance_ids)
     instances = bundle.get("instances") or {}
     main_payload = instances.get(main_id)

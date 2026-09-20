@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -9,6 +10,7 @@ import re
 import signal
 import threading
 import time
+import unicodedata
 
 
 class SupplementBudgetExceeded(BaseException):
@@ -41,12 +43,14 @@ def run_supplement(callback, *, seconds: float = 60) -> dict:
         if old_timer[0]:
             signal.setitimer(signal.ITIMER_REAL, max(0.001, old_timer[0] - (time.monotonic() - started)), old_timer[1])
 
+from overseas_costing.services.material_value_semantics import is_placeholder_token
 from overseas_costing.services.source_review_extract_service import _approval_goods_rows
 from overseas_costing.utils.field_mapper import map_oa_row_to_item
 
 PURCHASE_FIELDS = ("quantity", "goods_value", "unit_price", "purchase_currency", "purchase_uom",
                    "unit_price_uom", "source_doc_no", "source_type")
 PHYSICAL_FIELDS = ("net_weight_kg", "gross_weight_kg", "volume_m3", "chargeable_weight_kg")
+AUTO_SCOPE_EXCLUSION_REASON = "系统按国际物流物料范围自动排除"
 
 
 def extra(item: dict) -> dict:
@@ -76,6 +80,21 @@ def _purchase_decimal(value) -> Decimal | None:
     except (InvalidOperation, TypeError, ValueError):
         return None
     return number if number.is_finite() else None
+
+
+def _manual_scope_protected(item: dict) -> bool:
+    """A human-confirmed row survives automatic logistics scope contraction."""
+
+    if str(item.get("manual_override_flag") or "0").strip().casefold() not in {
+        "", "0", "false", "no", "none",
+    }:
+        return True
+    metadata = extra(item)
+    return bool(
+        metadata.get("manual_scope_include")
+        or metadata.get("manual_scope_restored")
+        or (metadata.get("shipment_material_scope") or {}).get("manual_include")
+    )
 
 
 def _reconcile_purchase_allocations(rows: list[dict], items: list[dict], facts: dict, used: set) -> None:
@@ -134,29 +153,215 @@ def _reconcile_purchase_allocations(rows: list[dict], items: list[dict], facts: 
             row["extra_json"] = json.dumps(row_metadata, ensure_ascii=False, default=str)
 
 
-def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | None:
-    """Build a row-preserving draft; never mutate inputs, DB or purchase facts."""
+def _normalized_material_name(value: object) -> str:
+    return re.sub(
+        r"\s+", "", unicodedata.normalize("NFKC", str(value or ""))
+    ).casefold()
+
+
+def _display_material_code(value: object) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or ""))).strip()
+
+
+def _normalized_material_code(value: object) -> str:
+    return _display_material_code(value).casefold()
+
+
+def _is_material_code_placeholder(value: object) -> bool:
+    display = _display_material_code(value)
+    if is_placeholder_token(display) or display.casefold() in {"0", "new"}:
+        return True
+    return bool(display) and all(character in "/\\|_-—–" for character in display)
+
+
+def build_material_identity_hints(sources: list[dict]) -> list[dict]:
+    """Return lower-stage identities that may fill, but never add, logistics rows."""
+
+    hints, seen = [], set()
+    role_rank = {"purchase": 0, "payment": 1, "logistics_expense": 1}
+    for source in sources or []:
+        role = str(source.get("approval_role") or "").strip().casefold()
+        if (role not in role_rank or source.get("excluded")
+                or not source.get("available", True)):
+            continue
+        if role in {"payment", "logistics_expense"} and not source.get("scoped_packing"):
+            continue
+        raw_rows = source.get("scoped_goods") or _approval_goods_rows(source)
+        for index, raw in enumerate(raw_rows or [], 1):
+            mapped = map_oa_row_to_item(raw)
+            material_code = _display_material_code(mapped.get("material_code"))
+            product_name = str(mapped.get("product_name") or "").strip()
+            if _is_material_code_placeholder(material_code) or not product_name:
+                continue
+            source_id = f"{str(source.get('source_id') or '')}:{index}".strip(":")
+            identity = (
+                _normalized_material_code(material_code),
+                _normalized_material_name(product_name),
+                source_id,
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            hints.append({
+                "material_code": material_code,
+                "product_name": product_name,
+                "source_id": source_id,
+                "approval_role": role,
+                "_role_rank": role_rank[role],
+            })
+    hints.sort(key=lambda row: (
+        row.get("_role_rank", 9), str(row.get("source_id") or ""),
+        _normalized_material_code(row.get("material_code")),
+        _normalized_material_name(row.get("product_name")),
+    ))
+    for row in hints:
+        row.pop("_role_rank", None)
+    return hints
+
+
+def _scope_source_fingerprint(
+    source: dict, goods: list[dict], identity_hints: list[dict] | None = None,
+) -> str:
+    payload = {
+        "source_id": str(source.get("source_id") or ""),
+        "source_hash": str(source.get("source_hash") or source.get("content_hash") or ""),
+        "approval_no": str(source.get("approval_no") or ""),
+        "goods": [
+            {
+                "material_code": (
+                    "" if _is_material_code_placeholder(row.get("material_code"))
+                    else _normalized_material_code(row.get("material_code"))
+                ),
+                "product_name": _normalized_material_name(row.get("product_name")),
+                "quantity": str(row.get("quantity") or ""),
+                "unit": str(row.get("unit") or ""),
+            }
+            for row in goods
+        ],
+        "identity_hints": [
+            {
+                "material_code": _normalized_material_code(row.get("material_code")),
+                "product_name": _normalized_material_name(row.get("product_name")),
+                "source_id": str(row.get("source_id") or ""),
+                "approval_role": str(row.get("approval_role") or ""),
+            }
+            for row in identity_hints or []
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def build_logistics_reconciliation(
+    items: list[dict], source: dict, *, reset_manual_scope: bool = False,
+    identity_hints: list[dict] | None = None,
+) -> dict | None:
+    """Build an authoritative logistics-scope draft without mutating inputs."""
     if source.get("approval_role") != "international_logistics":
         return None
     goods = [map_oa_row_to_item(row) for row in _approval_goods_rows(source)]
+    by_name: dict[str, list[dict]] = {}
+    for item in items:
+        normalized_name = _normalized_material_name(item.get("product_name"))
+        if normalized_name:
+            by_name.setdefault(normalized_name, []).append(item)
+    hint_by_name: dict[str, list[dict]] = {}
+    hint_by_code: dict[str, list[dict]] = {}
+    for hint in identity_hints or []:
+        normalized_name = _normalized_material_name(hint.get("product_name"))
+        code_key = _normalized_material_code(hint.get("material_code"))
+        if (normalized_name and code_key
+                and not _is_material_code_placeholder(hint.get("material_code"))):
+            hint_by_name.setdefault(normalized_name, []).append(hint)
+            hint_by_code.setdefault(code_key, []).append(hint)
+    identity_source_ids = set()
+    for row in goods:
+        if row.get("material_code") and not _is_material_code_placeholder(
+            row.get("material_code")
+        ):
+            row["material_code"] = _display_material_code(row.get("material_code"))
+            continue
+        row["material_code"] = ""
+        name_key = _normalized_material_name(row.get("product_name"))
+        matches = by_name.get(name_key, [])
+        matching_hints = hint_by_name.get(name_key, [])
+        candidates = [
+            candidate for candidate in [*matches, *matching_hints]
+            if not _is_material_code_placeholder(candidate.get("material_code"))
+        ]
+        code_keys = {
+            _normalized_material_code(candidate.get("material_code"))
+            for candidate in candidates
+        }
+        if len(code_keys) != 1:
+            return None
+        selected = next(
+            candidate for candidate in candidates
+            if _normalized_material_code(candidate.get("material_code")) in code_keys
+        )
+        row["material_code"] = _display_material_code(selected.get("material_code"))
+        row["product_name"] = selected.get("product_name") or row.get("product_name")
+        identity_source_ids.update(
+            str(hint.get("source_id") or "") for hint in matching_hints
+            if (_normalized_material_code(hint.get("material_code")) in code_keys
+                and str(hint.get("source_id") or ""))
+        )
     if not goods or any(not row.get("material_code") or Decimal(str(row.get("quantity") or 0)) <= 0 for row in goods):
         return None
     for item in items:
-        if not extra(item).get("logistics_row", {}).get("identity") and item.get("actual_shipped_qty_mode") == "MANUAL_CONFIRMED" and sum(str(g.get("material_code") or "").casefold() == str(item.get("material_code") or "").casefold() for g in goods) > 1:
+        if (not reset_manual_scope
+                and not extra(item).get("logistics_row", {}).get("identity")
+                and item.get("actual_shipped_qty_mode") == "MANUAL_CONFIRMED"
+                and sum(_normalized_material_code(g.get("material_code"))
+                        == _normalized_material_code(item.get("material_code"))
+                        for g in goods) > 1):
             message = f"{item.get('material_code')} 的现有人工实发数量属于聚合行，无法直接拆分；已保留现有物料，请先核对这项人工差异。"
             return {"proposal_id": "logistics-manual-conflict", "proposal_type": "logistics_reconcile", "result_origin": "SYSTEM", "default_selected": False,
                     "conflict": True, "blocked": True, "reason": message, "source_refs": [],
                     "payload": {"rows": deepcopy(items), "unresolved": [{"message": message}], "original_item_names": [row["name"] for row in items]}}
     by_code: dict[str, list[dict]] = {}
     for item in items:
-        by_code.setdefault(str(item.get("material_code") or "").casefold(), []).append(item)
-    rows, used, unresolved = [], set(), []
+        by_code.setdefault(_normalized_material_code(item.get("material_code")), []).append(item)
+    rows, used, unresolved, name_mismatches = [], set(), [], []
     facts: dict[str, dict] = {}
     for index, goods_row in enumerate(goods, 1):
-        code = str(goods_row["material_code"])
-        identity = f"{source['source_id']}:{index}:{code}"
+        source_code = _display_material_code(goods_row["material_code"])
+        code_key = _normalized_material_code(source_code)
+        matches = by_code.get(code_key, [])
+        matching_code_hints = hint_by_code.get(code_key, [])
+        identity_source_ids.update(
+            str(hint.get("source_id") or "") for hint in matching_code_hints
+            if str(hint.get("source_id") or "")
+        )
+        code = _display_material_code(
+            (matches[0] if matches else {}).get("material_code") or source_code)
+        identity = f"{source['source_id']}:{index}:{code_key}"
         key = "logistics:" + hashlib.sha256(identity.encode()).hexdigest()[:32]
-        matches = by_code.get(code.casefold(), [])
+        canonical_by_name: dict[str, str] = {}
+        for match in matches:
+            display_name = str(match.get("product_name") or "").strip()
+            if display_name:
+                canonical_by_name.setdefault(_normalized_material_name(display_name), display_name)
+        shared_canonical_name = (
+            next(iter(canonical_by_name.values())) if len(canonical_by_name) == 1 else ""
+        )
+        preferred_hints = [
+            hint for hint in matching_code_hints
+            if str(hint.get("approval_role") or "").casefold() == "purchase"
+        ] or matching_code_hints
+        canonical_hint_names: dict[str, str] = {}
+        for hint in preferred_hints:
+            display_name = str(hint.get("product_name") or "").strip()
+            if display_name:
+                canonical_hint_names.setdefault(
+                    _normalized_material_name(display_name), display_name,
+                )
+        hinted_canonical_name = (
+            next(iter(canonical_hint_names.values()))
+            if len(canonical_hint_names) == 1 else ""
+        )
+        canonical_item_name = str((matches[0] if matches else {}).get("name") or "")
         old = next((row for row in matches if row.get("stable_line_key") == key or extra(row).get("logistics_row", {}).get("identity") == key), None)
         if old is None:
             # Distinct purchases must not be silently resolved by SKU alone.
@@ -167,10 +372,20 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
             remaining = [row for row in matches if row.get("name") not in used]
             exact = [row for row in remaining if Decimal(str(row.get("actual_shipped_qty") or row.get("quantity") or 0)) == Decimal(str(goods_row["quantity"]))]
             old = (exact or remaining or matches or [{}])[0]
+        if len(canonical_by_name) > 1 and not old:
+            return None
         metadata = extra(old)
         prior = metadata.get("logistics_row") or {}
         fact = prior.get("purchase_fact") or {field: old.get(field) for field in PURCHASE_FIELDS}
-        purchase_key = prior.get("purchase_key") or old.get("name") or ""
+        # An auto-created logistics row records an explicit empty purchase key.
+        # Preserve that decision on later audits instead of treating the newly
+        # created item name as a purchase-row link and manufacturing allocation
+        # metadata on the second pass.
+        purchase_key = (
+            prior.get("purchase_key")
+            if "purchase_key" in prior
+            else old.get("name") or ""
+        )
         if purchase_key:
             facts[purchase_key] = fact
         existing_name = str(old.get("name") or "")
@@ -179,10 +394,24 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
             used.add(retained_name)
         row = {field: old.get(field) for field in (*PURCHASE_FIELDS, *PHYSICAL_FIELDS,
                 "project_collection", "manual_override_flag", "manual_override_reason", "spec_model")}
+        source_name = str(goods_row.get("product_name") or "").strip()
+        canonical_name = str(
+            old.get("product_name") or shared_canonical_name
+            or hinted_canonical_name or ""
+        ).strip()
+        if (source_name and canonical_name
+                and _normalized_material_name(source_name)
+                != _normalized_material_name(canonical_name)):
+            name_mismatches.append({
+                "material_code": code,
+                "source_name": source_name,
+                "canonical_name": canonical_name,
+                "item_name": retained_name or canonical_item_name,
+            })
         row.update({"name": retained_name or f"draft-{key[10:]}", "stable_line_key": (old.get("stable_line_key") if retained_name else None) or key,
                     "unit": old.get('unit') or goods_row.get('unit') or '',
                     "row_no": index, "material_code": code, "_review_origin": "source",
-                    "product_name": goods_row.get("product_name") or old.get("product_name") or code,
+                    "product_name": canonical_name or source_name or code,
                     "spec_model": goods_row.get("spec_model") or old.get("spec_model"),
                     "actual_shipped_qty": str(goods_row["quantity"]),
                     "actual_shipped_qty_mode": "EXPLICIT_SOURCE",
@@ -195,7 +424,8 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
                         if "_existing_stable_line_key" in old
                         else old.get("stable_line_key")
                     )})
-        if retained_name and str(old.get("actual_shipped_qty_mode") or "") == "MANUAL_CONFIRMED":
+        if (not reset_manual_scope and retained_name
+                and str(old.get("actual_shipped_qty_mode") or "") == "MANUAL_CONFIRMED"):
             row["actual_shipped_qty"] = old.get("actual_shipped_qty")
             row["actual_shipped_qty_mode"] = "MANUAL_CONFIRMED"
             row["shipped_uom"] = old.get("shipped_uom")
@@ -211,9 +441,15 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         row['_review_source_values'] = {key: row.get(key) for key in ('material_code','product_name','spec_model','actual_shipped_qty','shipped_uom','unit','stable_line_key')}
         # Physical fields copied/apportioned above are historical context, not evidence from this approval.
         rows.append(row)
-    # Never silently remove unrelated or manually added rows.
+    # International logistics defines this shipment.  Preserve only explicit
+    # human inclusions; unrelated purchase rows remain recoverable by soft
+    # exclusion when the reviewed projection is confirmed.
     unmatched = [row for row in items if str(row.get("name")) not in used]
+    excluded_item_names = []
     for original in unmatched:
+        if reset_manual_scope or not _manual_scope_protected(original):
+            excluded_item_names.append(str(original.get("name") or ""))
+            continue
         row = deepcopy(original)
         row["_existing_name"] = row["name"]
         row["_existing_stable_line_key"] = (
@@ -225,7 +461,7 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
         row["stable_line_key"] = row.get("stable_line_key") or "retained:" + hashlib.sha256(row["name"].encode()).hexdigest()[:32]
         row["row_no"] = len(rows) + 1
         rows.append(row)
-        unresolved.append({"message": f"保留审批之外的现有物料 {row.get('material_code') or row['name']}。"})
+        unresolved.append({"message": f"保留人工确认纳入的物料 {row.get('material_code') or row['name']}。"})
     _reconcile_purchase_allocations(rows, items, facts, used)
     for purchase_key in facts:
         group = [row for row in rows if extra(row).get("logistics_row", {}).get("purchase_key") == purchase_key]
@@ -241,10 +477,31 @@ def build_logistics_reconciliation(items: list[dict], source: dict) -> dict | No
             "default_selected": True, "conflict": False, "reason": "按物流审批逐行填充，保留采购事实。",
             "source_refs": [{"source": "approval_form", "source_id": source["source_id"],
                              "file": source.get("source_label"), "approval_no": source.get("approval_no"), "field": "货物信息"}],
-            "payload": {"rows": rows, "unresolved": unresolved, "original_item_names": [row["name"] for row in items]}}
+            "payload": {"rows": rows, "unresolved": unresolved,
+                        "original_item_names": [row["name"] for row in items],
+                        "excluded_item_names": sorted(name for name in excluded_item_names if name),
+                        "scope_status": "AUTHORITATIVE",
+                        "scope_origin": "international_logistics",
+                        "active_item_names": sorted(
+                            str(row.get("_existing_name") or "") for row in rows
+                            if str(row.get("_existing_name") or "")
+                        ),
+                        "restored_item_names": [],
+                        "name_mismatches": name_mismatches,
+                        "source_fact_ids": [
+                            f"{source.get('source_id')}:{index}"
+                            for index, _row in enumerate(goods, 1)
+                        ] + sorted(identity_source_ids),
+                        "source_fingerprint": _scope_source_fingerprint(
+                            source, goods, identity_hints,
+                        )}}
 
 
-def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, current: list[dict], run_id: str) -> list[str]:
+def apply_reconciliation(
+    frappe, proposal: dict, *, batch: str, version: str,
+    current: list[dict], run_id: str, update_batch_count: bool = True,
+    initialization_reset: bool = False,
+) -> list[str]:
     """Called only inside the review transaction with locked, fingerprinted rows."""
     from overseas_costing.services.material_input_service import GRID_FIELDS
     payload = proposal["payload"]
@@ -255,13 +512,15 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
         raise ValueError("物流行已变化，请重新分析。")
     rows = payload.get("rows") or []
     retained = [row["_existing_name"] for row in rows if row.get("_existing_name")]
-    if set(retained) != existing or len(retained) != len(existing):
-        raise ValueError("物流行重整必须保留每条原记录，不能删除或重复采购事实。")
+    excluded = [str(name or "") for name in payload.get("excluded_item_names") or []]
+    if (set(retained).intersection(excluded) or set(retained).union(excluded) != existing
+            or len(retained) != len(set(retained)) or len(excluded) != len(set(excluded))):
+        raise ValueError("物流物料范围已变化，请重新分析。")
     keys = [row.get("stable_line_key") for row in rows]
     if not all(keys) or len(set(keys)) != len(keys):
         raise ValueError("物流行身份重复或缺失。")
     settled = {row['name']:row for row in current if extra(row).get('settlement_cargo')}
-    if settled:
+    if settled and not initialization_reset:
         if len(rows) != len(current) or any(not row.get('_existing_name') for row in rows):
             raise ValueError('已采用物流结算货物清单，不能从装箱来源拆分或新增结算物料行；请核对采购支出关联。')
         for row in rows:
@@ -271,9 +530,23 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
                 raise ValueError('结算货物身份由采购支出确定，装箱资料只能补充物理信息。')
     allowed = (set(GRID_FIELDS) | {"extra_json", "manual_override_flag", "manual_override_reason"}) - {"name", "modified"}
     created = []
+    excluded_at = datetime.now().isoformat(timespec="seconds")
+    for item_name in excluded:
+        frappe.db.set_value(
+            "Overseas Cost Item",
+            item_name,
+            {
+                "is_excluded": 1,
+                "excluded_at": excluded_at,
+                "excluded_by": "system",
+                "exclusion_reason": AUTO_SCOPE_EXCLUSION_REASON,
+            },
+            update_modified=True,
+        )
     for row in rows:
         values = {key: value for key, value in row.items() if key in allowed}
         values.update(batch=batch, version=version, actual_shipped_qty_source_revision=run_id,
+                      is_excluded=0, excluded_at=None, excluded_by="", exclusion_reason="",
                       cost_output_uom=row.get("shipped_uom") or "")
         metadata = extra(row)
         metadata["autofill_review"] = {"run_id": run_id, "proposal_id": proposal["proposal_id"], "source_refs": proposal.get("source_refs") or []}
@@ -282,8 +555,87 @@ def apply_reconciliation(frappe, proposal: dict, *, batch: str, version: str, cu
             frappe.db.set_value("Overseas Cost Item", row["_existing_name"], values, update_modified=True)
         else:
             created.append(frappe.get_doc({"doctype": "Overseas Cost Item", **values}).insert(ignore_permissions=True).name)
-    frappe.db.set_value("Overseas Cost Batch", batch, "item_count", len(rows), update_modified=False)
+    if update_batch_count:
+        frappe.db.set_value("Overseas Cost Batch", batch, "item_count", len(rows), update_modified=False)
     return created
+
+
+def plan_authoritative_scope_membership(
+    items: list[dict], proposal: dict, *, reset_all_existing: bool = False
+) -> dict:
+    """Return idempotent soft-exclusion changes for an existing current version."""
+
+    payload = proposal.get('payload') or {}
+    eligible = {
+        str(item.get('name') or ''): item
+        for item in items or []
+        if str(item.get('name') or '') and (
+            reset_all_existing
+            or
+            not int(item.get('is_excluded') or 0)
+            or str(item.get('exclusion_reason') or '') == AUTO_SCOPE_EXCLUSION_REASON
+        )
+    }
+    expected = {str(name or '') for name in payload.get('original_item_names') or []}
+    if expected != set(eligible):
+        raise ValueError('历史版本物料范围已变化，请重新生成修复计划。')
+    retained = {
+        str(row.get('_existing_name') or '')
+        for row in payload.get('rows') or []
+        if str(row.get('_existing_name') or '')
+    }
+    excluded = {str(name or '') for name in payload.get('excluded_item_names') or []}
+    if retained & excluded or retained | excluded != set(eligible):
+        raise ValueError('国际物流物料范围不完整，不执行历史修复。')
+    exclude = sorted(
+        name for name in excluded if not int(eligible[name].get('is_excluded') or 0)
+    )
+    restore = sorted(name for name in retained
+        if int(eligible[name].get('is_excluded') or 0)
+        and (reset_all_existing
+             or str(eligible[name].get('exclusion_reason') or '') == AUTO_SCOPE_EXCLUSION_REASON))
+    active = sorted(
+        name for name in retained
+        if name not in excluded
+    )
+    create_rows = [deepcopy(row) for row in payload.get('rows') or []
+                   if not str(row.get('_existing_name') or '')]
+    plan = {
+        'exclude':exclude,
+        'restore':restore,
+        'active_item_names':active,
+        'create_rows':create_rows,
+        'name_mismatches':deepcopy(payload.get('name_mismatches') or []),
+        'scope_status':str(payload.get('scope_status') or 'AUTHORITATIVE'),
+        'scope_origin':str(payload.get('scope_origin') or 'international_logistics'),
+        'source_fact_ids':deepcopy(payload.get('source_fact_ids') or []),
+        'source_fingerprint':str(payload.get('source_fingerprint') or ''),
+    }
+    plan['plan_hash'] = hashlib.sha256(json.dumps(
+        plan, ensure_ascii=False, sort_keys=True, default=str
+    ).encode()).hexdigest()
+    return plan
+
+
+def backfill_current_material_scopes(batch_names=None, *, dry_run=True, limit=500):
+    """Compatibility wrapper for the safer current-version reset audit."""
+
+    from .material_scope_reset_service import reset_all_material_scopes
+    if not dry_run:
+        raise ValueError('正式执行需先调用 reset_all_material_scopes 生成只读计划哈希。')
+    result = reset_all_material_scopes(
+        batch_names=batch_names, dry_run=True,
+        include_all_versions=False, limit=limit)
+    return {
+        'dry_run':True,
+        'checked':result.get('checked_versions',0),
+        'changed':result.get('changed_versions',0),
+        'excluded':result.get('excluded',0),
+        'restored':result.get('restored',0),
+        'batches':result.get('entries') or [],
+        'skipped':result.get('skipped') or [],
+        'plan_hash':result.get('plan_hash'),
+    }
 
 
 def selected_carrier(candidates: list[dict], decisions: list[dict]) -> str:

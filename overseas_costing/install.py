@@ -55,6 +55,51 @@ def after_install() -> None:
     clear_permission_cache()
 
 
+def before_migrate() -> None:
+    """在 DocType 同步前清洗旧版 ERP 路由修订号。"""
+
+    try:
+        import frappe
+    except Exception:
+        return
+
+    tables = frappe.db.sql("show tables like 'tabOverseas Cost Item'")
+    if not tables:
+        return
+
+    columns = frappe.db.sql(
+        "show columns from `tabOverseas Cost Item` like 'route_revision'"
+    )
+    if not columns:
+        return
+
+    # 旧环境可能把该字段建成文本并留下空字符串或非数字值；
+    # 先归一化默认值和历史数据，避免严格模式下迁移为 Int 时报 Data truncated。
+    frappe.db.sql(
+        """
+        alter table `tabOverseas Cost Item`
+        alter column `route_revision` set default 0
+        """
+    )
+    safe_updates = frappe.db.sql("select @@SQL_SAFE_UPDATES")[0][0]
+    try:
+        frappe.db.sql("set SQL_SAFE_UPDATES = 0")
+        frappe.db.sql(
+            """
+            update `tabOverseas Cost Item`
+            set route_revision = 0
+            where route_revision is null
+              or (
+                  trim(cast(route_revision as char)) = ''
+                  or cast(route_revision as char) not regexp '^[0-9]+$'
+              )
+            """
+        )
+    finally:
+        frappe.db.sql(f"set SQL_SAFE_UPDATES = {int(safe_updates or 0)}")
+    frappe.db.commit()
+
+
 def after_migrate() -> None:
     """中文用途：Frappe migrate 后确保桌面入口存在。"""
 
@@ -347,6 +392,8 @@ def ensure_erpnext_standard_fields() -> dict:
     只新增展示/追溯字段，不改库存估值、入库成本和总账逻辑。
     """
 
+    from overseas_costing.services.erp_capability_service import build_erpnext_standard_field_spec
+
     try:
         import frappe
         from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
@@ -504,6 +551,9 @@ def ensure_erpnext_standard_fields() -> dict:
             },
         ],
     }
+    for doctype, fields in build_erpnext_standard_field_spec().items():
+        existing = {field["fieldname"] for field in custom_fields.get(doctype, [])}
+        custom_fields.setdefault(doctype, []).extend(field for field in fields if field["fieldname"] not in existing)
     try:
         create_custom_fields(custom_fields, ignore_validate=True)
     except TypeError:

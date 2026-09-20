@@ -175,6 +175,23 @@
     return `<span class="ocw-detail-status is-${tone}"><small>${this.escape(label)}</small><strong>${this.escape(this.formatValue(value || "--"))}</strong></span>`;
   }
 
+  renderDetailErpAction(batch = {}) {
+    const erpAction = this.erpPushActionState(batch, Number(batch.item_count || 0));
+    const reasonId = "ocw-detail-erp-action-reason";
+    return `
+      <span class="ocw-detail-erp-action" data-area="detail-erp-action" title="${this.escape(erpAction.reason)}">
+        <button class="ocw-outline-btn" type="button" data-action="detail-writeback-to-erp" aria-label="${this.escape(`${erpAction.label}：${erpAction.reason}`)}" aria-describedby="${reasonId}"${erpAction.enabled ? "" : " disabled"}>${this.escape(erpAction.label)}</button>
+        <small id="${reasonId}">${this.escape(erpAction.reason)}</small>
+      </span>
+    `;
+  }
+
+  updateDetailErpAction(batch = null) {
+    const current = batch || this.getDetailBatch();
+    if (!current || this.detailState?.batchName !== current.name) return;
+    this.$root.find("[data-area='detail-erp-action']").replaceWith(this.renderDetailErpAction(current));
+  }
+
   renderDetailShell() {
     this.cleanupSkuScrollControls();
     this.cleanupMaterialGridScrollControls?.();
@@ -200,6 +217,7 @@
           </div>
           <div class="ocw-detail-header-actions">
             <button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>
+            ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
               <div class="ocw-detail-tools" data-area="detail-tools" hidden>

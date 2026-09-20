@@ -29,7 +29,7 @@
     {"fieldname": "batch", "fieldtype": "Link", "label": "所属批次", "options": "Overseas Cost Batch", "reqd": 1, "in_list_view": 1},
     {"fieldname": "version", "fieldtype": "Link", "label": "所属版本", "options": "Overseas Cost Version", "reqd": 1},
     {"fieldname": "operator_name", "fieldtype": "Data", "label": "操作者"},
-    {"fieldname": "status", "fieldtype": "Select", "label": "状态", "options": "QUEUED\nRUNNING\nREADY\nCONFIRMED\nDISCARDED\nSTALE\nFAILED", "default": "QUEUED", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "status", "fieldtype": "Select", "label": "状态", "options": "QUEUED\nRUNNING\nREADY\nCONFIRMING\nCONFIRMED\nDISCARDED\nSTALE\nFAILED", "default": "QUEUED", "reqd": 1, "in_list_view": 1},
     {"fieldname": "input_fingerprint", "fieldtype": "Data", "label": "输入指纹", "reqd": 1, "read_only": 1},
     {"fieldname": "prompt_version", "fieldtype": "Data", "label": "提示词版本", "reqd": 1, "read_only": 1},
     {"fieldname": "model", "fieldtype": "Data", "label": "AI 模型", "read_only": 1},

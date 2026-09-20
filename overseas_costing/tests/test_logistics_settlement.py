@@ -27,6 +27,31 @@ def store():
     return value
 
 
+def test_mariadb_install_creates_all_schema_before_lock_rows():
+    class MariaDb:
+        def __init__(self):
+            self.queries = []
+
+        def sql(self, query, values=(), as_dict=False):
+            self.queries.append(query)
+            return []
+
+    db = MariaDb()
+    Store(db).install()
+    create_indexes = [
+        index for index, query in enumerate(db.queries)
+        if query.lstrip().upper().startswith(("CREATE TABLE", "CREATE INDEX"))
+    ]
+    inserts = [
+        index for index, query in enumerate(db.queries)
+        if query.lstrip().upper().startswith("INSERT INTO")
+    ]
+
+    assert create_indexes
+    assert inserts
+    assert max(create_indexes) < min(inserts)
+
+
 def ingest(store, row):
     return store.ingest(parse_source(row, logistics_codes={'logistics'}))
 

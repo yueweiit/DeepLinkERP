@@ -13,6 +13,22 @@ console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
     assert '完整成本' not in html
 
 
+def test_blocked_packing_group_disables_cost_trial_entry() -> None:
+    result = _fee_workspace_result(r"""
+const w=Object.create(Harness.prototype);w.detailState={header:{status:'Dirty'}};
+const state=w.ensureMaterialFeeState();state.materials={packing_groups:[{
+  group_id:'G-OLD',status:'confirmed',blocking:true,member_keys:['OLD-1','OLD-2']}],items:[]};
+state.fees={summary:{}};state.preview={summary:{is_complete:false},items:[],incomplete_reasons:[]};
+w.escape=value=>String(value??'');w.materialFeeSavedCostPreview=()=>null;
+const html=w.renderMaterialFeeCostTable();
+console.log(JSON.stringify({html,blocked:w.hasBlockingPackingGroups(state)}));
+""")
+
+    assert result["blocked"] is True
+    assert 'data-action="mf-preview-cost" disabled' in result["html"]
+    assert "请先重新确认装箱组" in result["html"]
+
+
 def test_autofill_renders_shipment_value_and_project_summary():
     html=_frontend_result(FRONTEND_SETUP + """
 h.escape=x=>String(x ?? '');

@@ -192,6 +192,55 @@ def test_unmatched_source_adds_only_in_separate_add_selected_mode():
         service.project(items, review, [selected['row_id']], ['FEE'], 'add_selected')
 
 
+def test_payment_same_shipment_extension_is_visible_without_expanding_logistics_baseline():
+    items = [item('I-LOG', 'SKU-LOG'), item('I-PURCHASE', 'SKU-PURCHASE')]
+    logistics = reconcile([
+        source('SKU-LOG', _existing_name='I-LOG', gross_weight_kg='5')
+    ])
+    logistics['source_refs'] = [{'source_id': 'LOG'}]
+    extension = {
+        'proposal_id': 'PAY-EXT',
+        'proposal_type': 'payment_material_extension',
+        'default_selected': False,
+        'confidence': 0.99,
+        'source_refs': [{'source_id': 'PAY', 'row': 14}],
+        'fact_ids': ['FACT-14'],
+        'payload': {'rows': [{
+            'material_code': 'SKU-EXTRA',
+            'product_name': '同运单新物料',
+            'stable_line_key': 'payment-extension:14',
+            'package_count': '1',
+            'gross_weight_kg': '42.05',
+            'volume_m3': '0.01518',
+            'chargeable_weight_kg': '46',
+        }]},
+    }
+    sources = [
+        {'source_id': 'LOG', 'source_kind': 'approval_form',
+         'approval_role': 'international_logistics', 'workflow_stage': 'international_logistics'},
+        {'source_id': 'PAY', 'source_kind': 'approval_attachment',
+         'approval_role': 'payment', 'workflow_stage': 'payment'},
+    ]
+
+    review = catalog(items, [logistics, extension], sources)
+
+    codes = {row['values'].get('material_code') for row in review['rows']}
+    assert codes == {'SKU-LOG', 'SKU-EXTRA'}
+    extension_row = next(row for row in review['rows'] if row['values'].get('material_code') == 'SKU-EXTRA')
+    assert extension_row['proposal_type'] == 'payment_material_extension'
+    assert extension_row['can_add'] is True
+    assert extension_row['target_item_name'] == ''
+    assert review['material_scope_source'] == 'international_logistics'
+    assert review['material_scope_constrained'] is True
+
+    projected = service.project(items, review, [extension_row['row_id']], [], 'add_selected')
+    assert {row.get('material_code') for row in projected['rows']} == {
+        'SKU-LOG', 'SKU-EXTRA'
+    }
+    assert projected['added_count'] == 1
+    assert projected['scope_excluded_item_names'] == ['I-PURCHASE']
+
+
 def test_catalog_keeps_legacy_source_groups_but_plain_same_stage_conflict_is_manual():
     items = [item('I1', 'SKU-1', gross_weight_kg=None, volume_m3=None)]
     sources = [
@@ -366,6 +415,7 @@ def _stage_source(stage, source_id):
         'source_id': source_id, 'process_instance_id': source_id,
         'source_kind': 'approval_form', 'approval_role': role,
         'approval_title': source_id, 'read_status': 'COMPLETED',
+        'material_scope_authoritative': True,
     }
 
 

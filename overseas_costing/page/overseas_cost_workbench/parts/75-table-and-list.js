@@ -379,7 +379,7 @@
     const writebackInfo = this.erpWritebackStatusInfo(batch);
     const stage = this.erpQueueStageInfo(batch, itemCount, totalCost);
     const batchLabel = batch.batch_no || batch.customs_no || batch.waybill_no || batch.name;
-    const canPreview = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
+    const canPreview = this.isCalculationConfirmed(batch);
     const canPush = canPreview && !String(batch.writeback_status || "").toLowerCase().includes("success");
     const previewTip = canPreview
       ? "点击预览 ERP 报文"
@@ -416,7 +416,7 @@
 
   erpQueueStageInfo(batch = {}, itemCount = 0, totalCost = 0) {
     const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
-    const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
+    const confirmed = this.isCalculationConfirmed(batch);
     const queueKey = this.erpWritebackQueueKey(batch);
     if (queueKey === "success") return { label: "推送成功", note: "ERP 已返回成功", className: "is-ok" };
     if (queueKey === "failed") return { label: "推送失败", note: "可查看原因后重试", className: "is-warn" };

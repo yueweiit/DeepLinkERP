@@ -1,0 +1,124 @@
+name: Reset international-logistics material scope
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Generate an audit, or apply an unchanged audited plan
+        required: true
+        type: choice
+        default: audit
+        options:
+          - audit
+          - apply
+      plan_hash:
+        description: Required for apply; copy the 64-character plan_hash from audit output
+        required: false
+        type: string
+      run_id:
+        description: Optional stable run id for resuming an apply run
+        required: false
+        type: string
+      batch_name:
+        description: Optional single batch name for a focused audit or apply
+        required: false
+        type: string
+      include_all_versions:
+        description: Include historical versions; disable for a current-version-only repair
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  reset-material-scope:
+    name: ${{ inputs.operation }} all material scopes
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate request
+        env:
+          RESET_OPERATION: ${{ inputs.operation }}
+          RESET_PLAN_HASH: ${{ inputs.plan_hash }}
+          RESET_RUN_ID: ${{ inputs.run_id }}
+          RESET_BATCH_NAME: ${{ inputs.batch_name }}
+          RESET_INCLUDE_ALL_VERSIONS: ${{ inputs.include_all_versions }}
+        run: |
+          set -euo pipefail
+          if [ "$RESET_OPERATION" = "apply" ]; then
+            [[ "$RESET_PLAN_HASH" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "apply requires the exact 64-character audit plan_hash" >&2
+              exit 1
+            }
+          fi
+          if [ -n "$RESET_RUN_ID" ]; then
+            [[ "$RESET_RUN_ID" =~ ^[A-Za-z0-9._:-]{1,100}$ ]] || {
+              echo "run_id contains unsupported characters" >&2
+              exit 1
+            }
+          fi
+          if [ -n "$RESET_BATCH_NAME" ]; then
+            [[ "$RESET_BATCH_NAME" =~ ^[A-Za-z0-9._-]{1,140}$ ]] || {
+              echo "batch_name contains unsupported characters" >&2
+              exit 1
+            }
+          fi
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_SSH_PRIVATE_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Run audited reset command
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          RESET_OPERATION: ${{ inputs.operation }}
+          RESET_PLAN_HASH: ${{ inputs.plan_hash }}
+          RESET_RUN_ID: ${{ inputs.run_id }}
+          RESET_BATCH_NAME: ${{ inputs.batch_name }}
+          RESET_INCLUDE_ALL_VERSIONS: ${{ inputs.include_all_versions }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          if [ -n "$RESET_BATCH_NAME" ]; then
+            batch_arg=", \"batch_names\": [\"$RESET_BATCH_NAME\"]"
+          else
+            batch_arg=""
+          fi
+          if [ "$RESET_INCLUDE_ALL_VERSIONS" = "true" ]; then
+            versions_arg="True"
+          else
+            versions_arg="False"
+          fi
+          if [ "$RESET_OPERATION" = "audit" ]; then
+            kwargs="{\"dry_run\": True, \"include_all_versions\": $versions_arg$batch_arg}"
+          else
+            effective_run_id="${RESET_RUN_ID:-material-scope-reset-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
+            kwargs="{\"dry_run\": False, \"include_all_versions\": $versions_arg, \"expected_plan_hash\": \"$RESET_PLAN_HASH\", \"run_id\": \"$effective_run_id\", \"raise_on_incomplete\": True$batch_arg}"
+          fi
+          ssh -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd /home/yuewei/ERPNext-Docker/frappe_docker && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.services.material_scope_reset_service.reset_all_material_scopes --kwargs '$kwargs'" \
+            2>&1 | tee material-scope-reset-output.txt
+
+      - name: Upload reset report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: material-scope-${{ inputs.operation }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: material-scope-reset-output.txt
+          if-no-files-found: warn
+          retention-days: 30

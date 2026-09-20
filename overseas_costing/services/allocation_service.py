@@ -222,7 +222,8 @@ def _build_ai_messages(payload: dict) -> list[dict]:
         "你必须遵守：1. 不得新增费用池；2. 不得修改金额和币种；"
         "3. allocation_basis 只能是 goods_value、gross_weight、volume、chargeable_weight；"
         "4. 不得输出或推算逐 SKU 分摊金额；5. 输出必须是 JSON 对象；"
-        "6. 如果证据不足，选择最保守、最容易解释的分摊依据。"
+        "6. 如果证据不足，选择最保守、最容易解释的分摊依据；"
+        "7. candidate_rules 提供 available_bases 时，allocation_basis 必须从该列表中选择。"
     )
     user_prompt = {
         "task": "请为 candidate_rules 中每个费用池选择基础分摊依据，并给出中文理由。不要输出逐 SKU 金额。",
@@ -302,6 +303,8 @@ def _normalize_candidate_rules(candidate_rules: list[dict]) -> list[dict]:
     normalized = []
     seen = set()
     for index, rule in enumerate(candidate_rules or [], start=1):
+        decision_request = bool(rule.get("_decision_request"))
+        public_rule = {key: value for key, value in rule.items() if key != "_decision_request"}
         amount = _to_float(rule.get("amount"))
         rule_code = str(rule.get("rule_code") or rule.get("fee_key") or f"fee_{index}").strip()
         if not rule_code or not amount:
@@ -313,19 +316,18 @@ def _normalize_candidate_rules(candidate_rules: list[dict]) -> list[dict]:
         basis = str(rule.get("allocation_basis") or rule.get("basis_field") or "goods_value").strip()
         if basis not in SUPPORTED_ALLOCATION_BASES:
             basis = "goods_value"
-        normalized.append(
-            {
-                **rule,
-                "rule_code": rule_code,
-                "expense_category": str(rule.get("expense_category") or rule_code).strip(),
-                "allocation_basis": basis,
-                "basis_field": basis,
-                "currency": _normalize_currency_code(rule.get("currency")),
-                "amount": amount,
-                "priority_no": int(_to_float(rule.get("priority_no"), default=float(index * 10))),
-                "is_enabled": 1,
-            }
-        )
+        normalized_rule = {
+            **public_rule,
+            "rule_code": rule_code,
+            "expense_category": str(rule.get("expense_category") or rule_code).strip(),
+            "currency": _normalize_currency_code(rule.get("currency")),
+            "amount": amount,
+            "priority_no": int(_to_float(rule.get("priority_no"), default=float(index * 10))),
+            "is_enabled": 1,
+        }
+        if not decision_request:
+            normalized_rule.update({"allocation_basis": basis, "basis_field": basis})
+        normalized.append(normalized_rule)
     return normalized
 
 
@@ -346,6 +348,9 @@ def _normalize_ai_rules(parsed: dict, candidate_rules: list[dict]) -> list[dict]
         if basis not in SUPPORTED_ALLOCATION_BASES:
             continue
         base = dict(candidates_by_code[rule_code])
+        allowed = base.get("available_bases")
+        if isinstance(allowed, list) and allowed and basis not in allowed:
+            continue
         reason = str(row.get("reason") or "").strip()
         confidence = _to_float(row.get("confidence"), default=0.0)
         base.update(
@@ -365,6 +370,8 @@ def _normalize_ai_rules(parsed: dict, candidate_rules: list[dict]) -> list[dict]
         if candidate["rule_code"] not in used_codes:
             fallback = dict(candidate)
             fallback["remark"] = f"AI未返回该费用池，沿用系统基础分摊：{fallback.get('remark') or ''}".strip()
+            fallback["is_ai_suggestion"] = 0
+            fallback["is_system_suggestion"] = 1
             normalized.append(fallback)
     return normalized
 

@@ -63,6 +63,8 @@ class OverseasCostWorkbench {
     Object.assign(this.filters, this.getDefaultPullDateRange());
     this.moreFiltersOpen = false;
     this.erpFlowBlockState = null;
+    this.erpPushBlockState = null;
+    this.erpWritebackInFlight = new Set();
     this.childPriorityFields = this.loadChildPriorityFields();
     this.transportSidebarCollapsed = this.loadTransportSidebarState();
     this.viewState = OverseasCostWorkbenchState.parseWorkbenchState(window.location.href);
@@ -503,6 +505,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='confirm-calculation-result']", () => this.confirmCalculationResult(this.drawerBatchName));
     this.$root.on("click", "[data-action='preview-erp-payload']", () => this.previewErpPayload(this.drawerBatchName));
     this.$root.on("click", "[data-action='writeback-to-erp']", () => this.writebackToErp(this.drawerBatchName));
+    this.$root.on("click", "[data-action='detail-writeback-to-erp']", () => this.writebackToErp(this.detailState.batchName));
     this.$root.on("click", "[data-action='queue-preview-erp']", (event) => {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const batch = this.findBatch(batchName);

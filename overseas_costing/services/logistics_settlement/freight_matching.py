@@ -175,6 +175,10 @@ def _rule_source_ids(store,logistics):
             source_ids.update(_current_line_source_ids(store,column,token))
             source_ids.update(r['source_id'] for r in store.find('identifier',corp=logistics['corp'],token=token,token_type=kind))
     source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
+    # Identifier lookups include the logistics source itself. This helper is
+    # consumed as an expense-source set, so keep that non-expense row out of the
+    # result instead of relying on callers to filter it after ranking/paging.
+    source_ids.discard(logistics['id'])
     return source_ids
 
 
@@ -184,6 +188,7 @@ def _ranking_priority_source_ids(store,logistics):
         column='approval_no' if kind=='approval' else 'waybill' if kind=='waybill' else None
         if column:source_ids.update(_current_line_source_ids(store,column,token))
     source_ids.update(r['source_id'] for r in store.find('reference',corp=logistics['corp'],target_instance=logistics['instance']))
+    source_ids.discard(logistics['id'])
     return source_ids
 
 

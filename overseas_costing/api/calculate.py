@@ -235,12 +235,14 @@ def calculate_comprehensive_cost(batch_name: str, version_name: str | None = Non
 @frappe.whitelist()
 def start_cost_trial_ai_review(batch_name: str, version_name: str | None = None,
                                edit_token: str | None = None, expected_modified: str | None = None,
-                               force: str | int | bool = False) -> dict:
+                               force: str | int | bool = False,
+                               reuse_only: str | int | bool = False) -> dict:
     batch_name = require_batch_permission(batch_name, "write")
     return cost_trial_ai_service.start_cost_trial_ai_review(
         batch_name=batch_name, version_name=str(version_name or "") or None,
         edit_token=str(edit_token or ""), expected_modified=str(expected_modified or ""),
         force=str(force).strip().lower() in {"1", "true", "yes"},
+        reuse_only=str(reuse_only).strip().lower() in {"1", "true", "yes"},
     )
 
 

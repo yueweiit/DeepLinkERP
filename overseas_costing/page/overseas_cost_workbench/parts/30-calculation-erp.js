@@ -444,32 +444,80 @@
   async queueErpWriteback(batchName = "") {
     const batch = this.findBatch(batchName || this.drawerBatchName);
     if (!batch) return;
-    const result = await this.call(
-      "overseas_costing.api.writeback.writeback_to_erp",
-      {
-        batch_name: batch.name,
-        version_name: batch.current_version || null,
-      },
-      true
-    );
-    if (!result.ok) {
-      this.recordUsage("PUSH_ERP", { batch, status: "Failed", remark: result.message || "ERP 推送未进入队列" });
-      this.showErpFlowBlock(result, "ERP 推送未进入队列");
-      return;
+    const requestKey = `${batch.name}::${batch.current_version || ""}`;
+    this.erpWritebackInFlight ||= new Set();
+    if (this.erpWritebackInFlight.has(requestKey)) return;
+    this.erpWritebackInFlight.add(requestKey);
+    try {
+      let result;
+      try {
+        result = await this.call(
+          "overseas_costing.api.writeback.writeback_to_erp",
+          {
+            batch_name: batch.name,
+            version_name: batch.current_version || null,
+          },
+          true
+        );
+      } catch (error) {
+        const message = String(error?.message || error || "ERP 推送请求失败").trim();
+        const failure = {
+          batch_name: batch.name,
+          version_name: batch.current_version || null,
+          message,
+          blocking_reasons: [],
+        };
+        this.recordUsage("PUSH_ERP", { batch, status: "Failed", remark: message });
+        this.setErpPushFailureState(batch, failure);
+        throw error;
+      }
+      if (!result.ok) {
+        if (result.writeback_status) batch.writeback_status = result.writeback_status;
+        if (result.message) batch.writeback_message = result.message;
+        this.recordUsage("PUSH_ERP", { batch, status: "Failed", remark: result.message || "ERP 推送未进入队列" });
+        try {
+          await this.refreshBatch(batch.name);
+        } catch (refreshError) {
+          console.warn("[overseas-cost-workbench] ERP 失败后刷新批次未完成", refreshError);
+        } finally {
+          this.setErpPushFailureState(batch, result);
+        }
+        return;
+      }
+      batch.writeback_status = result.writeback_status || "Pending";
+      batch.writeback_message = result.message || "";
+      if (this.erpPushBlockState?.batchName === batch.name) {
+        this.erpPushBlockState = null;
+        this.updateDetailErpAction?.(batch);
+      }
+      if (this.erpFlowBlockState?.batchName === batch.name && this.erpFlowBlockState.action === "PUSH_ERP") {
+        this.erpFlowBlockState = null;
+      }
+      await this.refreshBatch(batch.name);
+      this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
+      const indicator = String(result.writeback_status || "").toLowerCase().includes("success") ? "green" : "orange";
+      frappe.show_alert({ message: result.message || "DeepLinkERP 推送已处理", indicator });
+    } finally {
+      this.erpWritebackInFlight.delete(requestKey);
     }
-    batch.writeback_status = result.writeback_status || "Pending";
-    batch.writeback_message = result.message || "";
-    await this.refreshBatch(batch.name);
-    this.recordUsage("PUSH_ERP", { batch, remark: result.message || "推送 DeepLinkERP" });
-    const indicator = String(result.writeback_status || "").toLowerCase().includes("success") ? "green" : "orange";
-    frappe.show_alert({ message: result.message || "DeepLinkERP 推送已处理", indicator });
   }
 
-  showErpFlowBlock(result = {}, title = "流程阻断") {
+  setErpPushFailureState(batch, result = {}) {
+    this.erpPushBlockState = {
+      batchName: batch.name,
+      versionName: String(result.version_name || batch.current_version || ""),
+      message: String(result.message || "").trim(),
+      blocking_reasons: Array.isArray(result.blocking_reasons) ? [...result.blocking_reasons] : [],
+    };
+    this.showErpFlowBlock(result, "ERP 推送未进入队列", { action: "PUSH_ERP" });
+  }
+
+  showErpFlowBlock(result = {}, title = "流程阻断", options = {}) {
     const batchName = result.batch_name || this.drawerBatchName || this.activeBatchName;
     this.erpFlowBlockState = {
       batchName,
       title,
+      action: options.action || "",
       result: {
         ...result,
         batch_name: batchName,
@@ -478,6 +526,7 @@
     if (this.drawerBatchName === batchName && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
       this.renderBatchDrawer();
     }
+    if (this.detailState?.batchName === batchName) this.updateDetailErpAction?.(this.getDetailBatch());
   }
 
   async syncErpFlowBlock(batchName = "") {
@@ -495,6 +544,7 @@
       if (this.erpFlowBlockState && this.erpFlowBlockState.batchName === batch.name) {
         this.erpFlowBlockState = null;
       }
+      if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());
       return readiness;
     }
     this.erpFlowBlockState = {
@@ -502,6 +552,7 @@
       title: "校验未通过",
       result: readiness || {},
     };
+    if (this.detailState?.batchName === batch.name) this.updateDetailErpAction?.(this.getDetailBatch());
     return readiness;
   }
 

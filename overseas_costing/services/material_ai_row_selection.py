@@ -97,7 +97,8 @@ def _matches(row, items):
 
 
 def _source_values(row):
-    values = {k:deepcopy(row.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','stable_line_key','actual_shipped_qty_mode')}
+    values = {k:deepcopy(row.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit',
+        'stable_line_key','source_doc_no','actual_shipped_qty_mode')}
     code = str(values.get('material_code') or '')
     if re.search(r'[/／、,，+＋;；]',code):
         values['material_code']=''
@@ -1193,6 +1194,11 @@ def _fee_stage_snapshots(fees, sources):
 def _material_scope(catalog_rows, sources=None):
     """Choose row identity separately from per-field source precedence."""
 
+    authoritative_source_ids = {
+        str(source.get('source_id') or '')
+        for source in sources or []
+        if source.get('material_scope_authoritative')
+    }
     current_names = {
         str(row.get('target_item_name') or '')
         for row in catalog_rows if row.get('origin') == 'current'
@@ -1202,6 +1208,14 @@ def _material_scope(catalog_rows, sources=None):
             row for row in catalog_rows
             if row.get('origin') == 'source'
             and row.get('workflow_stage') == stage
+            and (
+                stage != 'international_logistics'
+                or row.get('proposal_type') == 'logistics_reconcile'
+                or any(
+                    str(ref.get('source_id') or '') in authoritative_source_ids
+                    for ref in row.get('source_refs') or []
+                )
+            )
             and row.get('can_replace')
             and (str(row.get('target_item_name') or '') in current_names
                  or row.get('can_add'))
@@ -1215,13 +1229,20 @@ def _material_scope(catalog_rows, sources=None):
         }
         names.discard('')
         if stage_rows:
+            extension_row_ids = {
+                str(row.get('row_id') or '')
+                for row in catalog_rows
+                if row.get('origin') == 'source'
+                and row.get('proposal_type') == 'payment_material_extension'
+                and row.get('can_add')
+            }
             label = dict((name, label) for name, _rank, label in STAGE_SPECS)[stage]
             return {
                 'source': stage,
                 'item_names': names,
                 'source_row_ids':sorted({
                     str(row.get('row_id') or '') for row in stage_rows
-                }),
+                } | extension_row_ids),
                 'constrained': True,
                 'fallback': stage != 'international_logistics',
                 'reason': (
@@ -1270,6 +1291,16 @@ def _rows_in_material_scope(catalog_rows, item_names, source_row_ids, *, constra
         if str(row.get('target_item_name') or '') in item_names
         or str(row.get('row_id') or '') in source_row_ids
     ]
+
+
+def _manual_scope_protected(row):
+    metadata = json_dict(row.get('extra_json'))
+    return bool(
+        row.get('manual_override_flag')
+        or metadata.get('manual_override_flag')
+        or metadata.get('manual_material')
+        or metadata.get('manually_added')
+    )
 
 
 def catalog(items, proposals, fees, context, *, run_id, sources=None):
@@ -1367,6 +1398,14 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
             for row in payload.get('replacement_rows') or []:
                 values=_source_values(row);values['material_code']=''
                 add(values,proposal)
+        elif kind=='payment_material_extension':
+            # Server fact-engine rows that share an exact shipment identity
+            # with the logistics baseline.  Keep them on the existing,
+            # explicit add-selected path rather than inventing a second
+            # confirmation workflow.
+            for row in payload.get('rows') or []:
+                add(_source_values(row),proposal,
+                    stable=row.get('stable_line_key') or row.get('package_identity'))
         elif kind=='item_update':
             target=str(proposal.get('target_item_name') or payload.get('item_name') or '')
             fields={k:v for k,v in (payload.get('fields') or {}).items() if k in FILL_FIELDS}
@@ -1401,6 +1440,13 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
             row_id in scoped_row_ids for row_id in group.get('row_ids') or [])]
     fee_rows=[p for p in material_ai_fee_policy.decorate(proposals,fees,context) if p.get('proposal_type')=='fee_update']
     fee_stage_snapshots=_fee_stage_snapshots(fee_rows,sources or [])
+    scope_excluded_item_names = sorted(
+        str(item.get('name') or '')
+        for item in items
+        if scope['constrained']
+        and str(item.get('name') or '') not in scope['item_names']
+        and not _manual_scope_protected(item)
+    )
     return {'policy':POLICY,'rows':scoped_rows,'fees':fee_rows,'source_groups':source_groups,
             'field_candidates':field_candidates,'stage_snapshots':stage_snapshots,
             'fee_stage_snapshots':fee_stage_snapshots,
@@ -1409,6 +1455,7 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
             'material_scope_fallback':scope['fallback'],
             'material_scope_constrained':scope['constrained'],
             'material_scope_item_names':sorted(scope['item_names']),
+            'material_scope_excluded_item_names':scope_excluded_item_names,
             'fingerprint':digest(POLICY,run_id,scoped_rows,fee_rows,source_groups,field_candidates,
                                  stage_snapshots,fee_stage_snapshots,scope)}
 
@@ -1460,7 +1507,9 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
         raise ValueError('同一费用有多份报价，请只选择一份；其他报价保留参考。')
     if mode=='replace_all' and not chosen:raise ValueError('至少选择一条物料，不能用空结果清空整票。')
     effective={r['target_item_name']:r['values'] for r in catalog['rows'] if r['origin']=='current'}
-    items=[deepcopy(effective.get(i['name'],i)) for i in items]
+    scope_excluded=set(catalog.get('material_scope_excluded_item_names') or [])
+    items=[deepcopy(effective.get(i['name'],i)) for i in items
+           if str(i.get('name') or '') not in scope_excluded]
     result=[{**deepcopy(i),'_row_action':'retain'} for i in items] if mode in ('fill_missing','update_selected','add_selected') else []
     original={i['name']:i for i in items};used=set();used_choices={};changes=[];added=0
     if field_choices is not None and mode in ('fill_missing','update_selected'):
@@ -1491,7 +1540,9 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
                 'selected_row_ids':row_ids,'selected_fee_ids':fee_ids,'selected_field_choices':deepcopy(field_choices),
                 'added_count':0,'removed_count':0,'updated_count':len({change['item_name'] for change in changes}),
                 'actual_sources':list(actual_by_field.values()),'missing_fields':missing_fields,'unresolved':[],
-                'can_apply':bool(changes or selected_fees),'catalog_fingerprint':catalog['fingerprint']}
+                'can_apply':bool(changes or selected_fees or scope_excluded),
+                'scope_excluded_item_names':sorted(scope_excluded),
+                'catalog_fingerprint':catalog['fingerprint']}
     for choice in chosen:
         incoming=choice['values'];target=choice['target_item_name'];refs=choice['source_refs']
         duplicate_target=False
@@ -1558,4 +1609,6 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             'updated_count':len({c['item_name'] for c in changes if c['item_name']}),
             'actual_sources':list(actual_by_field.values()),
             'missing_fields':missing_fields,'unresolved':(['来源完整性未确认，缺失资料请继续补充。'] if mode=='replace_all' else []),
-            'can_apply':bool(chosen or selected_fees),'catalog_fingerprint':catalog['fingerprint']}
+            'can_apply':bool(chosen or selected_fees or scope_excluded),
+            'scope_excluded_item_names':sorted(scope_excluded),
+            'catalog_fingerprint':catalog['fingerprint']}

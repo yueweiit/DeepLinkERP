@@ -2272,6 +2272,11 @@ ERP_PAYLOAD_ITEM_FIELDS = list(
             "iva_amount",
             "total_cost_rmb",
             "total_unit_rmb",
+            "project_collection",
+            "subsidiary_code",
+            "erp_site_code",
+            "route_status",
+            "route_revision",
         ]
     )
 )
@@ -2637,6 +2642,20 @@ def _current_cost_total(batch: dict) -> float:
     return _as_float(batch.get("actual_total_cost_rmb") or batch.get("estimated_total_cost_rmb"))
 
 
+def _non_final_fee_reasons(rules: list[dict]) -> list[str]:
+    """返回尚不能进入 ERP 的启用费用项；暂估可核算但不可推送。"""
+
+    reasons = []
+    for rule in rules or []:
+        if rule.get("is_enabled") in (0, False, "0") or rule.get("is_active") in (0, False, "0"):
+            continue
+        status = str(rule.get("amount_status") or "MISSING").strip().upper()
+        if status not in {"ACTUAL", "NOT_INCURRED", "INCLUDED"}:
+            label = str(rule.get("expense_category") or rule.get("rule_code") or "未命名费用").strip()
+            reasons.append(f"{label}尚未取得实际费用或确认结果（当前：{status}）。")
+    return reasons
+
+
 def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback=False):
     snapshot = batch["summary_snapshot"]
     result = snapshot.get("comprehensive_cost") or {}
@@ -2669,12 +2688,15 @@ def _comprehensive_readiness(batch, items, rules, version_name, *, for_writeback
     missing.extend(quality["blocking_reasons"])
     if for_writeback and batch.get("confirm_status") != "Confirmed":
         missing.append("当前批次还没有确认。")
+    if for_writeback:
+        missing.extend(_non_final_fee_reasons(rules))
     known = {fee.get("fee_key") for key in ("included_fees", "ignored_fees") for fee in result.get(key, [])}
     checks = {"batch_exists": True, "has_current_version": bool(version_name),
               "has_subsidiary_code": bool(_resolve_batch_subsidiary_code(batch)), "has_dirty_data": dirty,
               "has_invalid_business_approval": bool(invalid.get("invalid")), "has_items": bool(items),
               "has_total_cost": _current_cost_total(batch) > 0,
               "has_formal_confirmation_block": formal_confirmation_blocked,
+              "all_cost_fees_final": not _non_final_fee_reasons(rules),
               "has_international_freight": any(str(k).startswith("international_") for k in known),
               "has_clearance_fee": "customs_clearance_fee" in known, "has_tariff": "import_tax" in known,
               "is_confirmed": batch.get("confirm_status") == "Confirmed", **quality["checks"]}
@@ -2799,8 +2821,9 @@ def _build_writeback_readiness(
 ) -> dict:
     if (batch.get("summary_snapshot") or {}).get("calculation_schema") == 2:
         return _comprehensive_readiness(batch, items, rules or [], resolved_version_name, for_writeback=True)
+    rules = rules or []
     item_quality = _build_writeback_item_quality(items)
-    field_gaps = _build_writeback_field_gaps(batch, items, rules or [], resolved_version_name)
+    field_gaps = _build_writeback_field_gaps(batch, items, rules, resolved_version_name)
     actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
     estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
     total_cost = actual_total_cost or estimated_total_cost
@@ -2817,6 +2840,7 @@ def _build_writeback_readiness(
         "has_dirty_data": batch.get("status") == "Dirty",
         "has_items": actual_item_count > 0,
         "has_total_cost": total_cost > 0,
+        "all_cost_fees_final": not _non_final_fee_reasons(rules),
         **item_quality["checks"],
     }
 
@@ -2836,6 +2860,7 @@ def _build_writeback_readiness(
         blocking_reasons.append("当前批次没有 SKU 明细。")
     if not checks["has_total_cost"]:
         blocking_reasons.append("当前批次没有可回写的综合成本结果。")
+    blocking_reasons.extend(_non_final_fee_reasons(rules))
     blocking_reasons.extend(item_quality["blocking_reasons"])
 
     warning_reasons = []
