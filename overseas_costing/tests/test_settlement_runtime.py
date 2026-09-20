@@ -234,6 +234,90 @@ def test_comment_waybill_sync_accepts_running_logistics_source(monkeypatch):
     assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_synced') == 1
 
 
+def test_comment_waybill_backfill_defaults_to_read_only_preview(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context('DHL 4104020185\nETA 2026-9-17\n已签收')
+    parsed.update(status='RUNNING', approved=False, invalid=False)
+    attach_runtime(monkeypatch, s, ledger)
+
+    result = runtime.backfill_comment_waybills()
+
+    assert result['ok'] is True
+    assert result['dry_run'] is True
+    assert result['summary'] == {'ready': 1}
+    assert result['rows'] == [{
+        'batch_name': batch['name'],
+        'source_id': parsed['id'],
+        'source_snapshot': parsed['snapshot'],
+        'status': 'ready',
+        'current_value': '',
+        'candidates': ['4104020185'],
+    }]
+    assert result['plan_hash']
+    assert ledger.get('batch', batch['name'])['waybill_no'] == ''
+    assert s.count('audit') == 0
+
+
+def test_comment_waybill_backfill_applies_exact_preview_once(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context('DHL 410 402 0185')
+    parsed.update(status='RUNNING', approved=False, invalid=False)
+    attach_runtime(monkeypatch, s, ledger)
+    preview = runtime.backfill_comment_waybills()
+
+    result = runtime.backfill_comment_waybills(
+        dry_run=False,
+        expected_plan_hash=preview['plan_hash'],
+        actor='release-test',
+    )
+
+    assert result['dry_run'] is False
+    assert result['summary'] == {'updated': 1}
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == '4104020185'
+    assert saved['status'] == 'Calculated'
+    assert saved['confirm_status'] == 'Pending'
+    provenance = json.loads(saved['extra_json'])['waybill_source']
+    assert provenance['actor'] == 'release-test'
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_synced') == 1
+
+    repeated = runtime.backfill_comment_waybills(dry_run=False)
+    assert repeated['summary'] == {'already_set': 1}
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_synced') == 1
+
+
+def test_comment_waybill_backfill_rejects_changed_preview(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context('DHL 4104020185')
+    parsed.update(status='RUNNING', approved=False, invalid=False)
+    attach_runtime(monkeypatch, s, ledger)
+
+    with pytest.raises(ValueError, match='回填清单已变化'):
+        runtime.backfill_comment_waybills(dry_run=False, expected_plan_hash='stale')
+
+    assert ledger.get('batch', batch['name'])['waybill_no'] == ''
+    assert s.count('audit') == 0
+
+
+@pytest.mark.parametrize(('confirm_status', 'writeback_status', 'expected_status'), [
+    ('Confirmed', 'Not Started', 'confirmed'),
+    ('Pending', 'Success', 'erp_success'),
+])
+def test_comment_waybill_backfill_skips_finalized_batches(
+    monkeypatch, confirm_status, writeback_status, expected_status,
+):
+    s, ledger, batch, parsed = waybill_runtime_context('DHL 4104020185')
+    parsed.update(status='RUNNING', approved=False, invalid=False)
+    ledger.put('batch', batch['name'], {
+        'confirm_status': confirm_status,
+        'writeback_status': writeback_status,
+    })
+    attach_runtime(monkeypatch, s, ledger)
+
+    result = runtime.backfill_comment_waybills()
+
+    assert result['summary'] == {expected_status: 1}
+    assert result['rows'][0]['status'] == expected_status
+    assert ledger.get('batch', batch['name'])['waybill_no'] == ''
+
+
 @pytest.mark.parametrize(('kind', 'status', 'approved', 'invalid'), [
     ('logistics', 'COMPLETED', False, False),
     ('logistics', 'RUNNING', False, True),

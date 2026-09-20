@@ -244,7 +244,7 @@ console.log(JSON.stringify({{delegated,backendCalls,bindingCount:detailHandlers.
     }
 
 
-def test_overview_keeps_confirmation_preview_and_push_safety_gates():
+def test_overview_keeps_confirmation_and_preview_without_duplicate_push():
     result = run_view_js(
         """
 function render(batch){const view=makeView(batch);const html=view.renderErpFlowPanel(batch,[]);return {
@@ -263,18 +263,18 @@ console.log(JSON.stringify({
 
     assert result["unconfirmed"]["confirm"]["disabled"] is False
     assert result["unconfirmed"]["preview"]["disabled"] is True
-    assert result["unconfirmed"]["push"]["disabled"] is True
+    assert result["unconfirmed"]["push"] is None
     assert result["partial"]["preview"]["disabled"] is True
-    assert result["partial"]["push"]["disabled"] is True
+    assert result["partial"]["push"] is None
     assert result["statusOnly"]["preview"]["disabled"] is True
-    assert result["statusOnly"]["push"]["disabled"] is True
+    assert result["statusOnly"]["push"] is None
     assert result["ready"]["preview"]["disabled"] is False
-    assert result["ready"]["push"]["disabled"] is False
+    assert result["ready"]["push"] is None
     assert result["stale"]["confirm"]["disabled"] is True
-    assert result["stale"]["push"]["disabled"] is True
+    assert result["stale"]["push"] is None
     assert result["invalid"]["confirm"]["disabled"] is True
     assert result["invalid"]["preview"]["disabled"] is True
-    assert result["invalid"]["push"]["disabled"] is True
+    assert result["invalid"]["push"] is None
 
 
 @pytest.mark.parametrize("confirm_status", ["Partially Confirmed", ""])

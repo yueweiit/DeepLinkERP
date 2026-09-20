@@ -167,6 +167,30 @@ def test_stale_saved_trial_stays_in_cost_review_not_pending() -> None:
     assert filter_batches_for_task([row], "cost", "pending") == [row]
 
 
+def test_saved_trial_without_reviewable_purchase_value_stays_pending() -> None:
+    row = {
+        "name": "SAVED-WITHOUT-GOODS",
+        "review_state": "processing",
+        "cost_review_started": True,
+        "cost_review_eligible": False,
+    }
+
+    assert filter_batches_for_task([row], "pending") == [row]
+    assert filter_batches_for_task([row], "cost", "pending") == []
+
+
+def test_saved_trial_with_partial_purchase_value_enters_cost_review() -> None:
+    row = {
+        "name": "SAVED-WITH-PARTIAL-GOODS",
+        "review_state": "processing",
+        "cost_review_started": True,
+        "cost_review_eligible": True,
+    }
+
+    assert filter_batches_for_task([row], "pending") == []
+    assert filter_batches_for_task([row], "cost", "pending") == [row]
+
+
 def test_logistics_group_keeps_two_fixed_columns() -> None:
     fields = [column["fieldname"] for column in select_item_columns(EXCEL_COLUMNS, "logistics")]
     assert fields[:2] == ["material_code", "product_name"]

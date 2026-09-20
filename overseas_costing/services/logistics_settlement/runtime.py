@@ -550,6 +550,139 @@ def _sync_comment_waybill(db, ledger, batch_name, source, actor='archive-sync'):
     return {'status': 'updated', 'value': candidate}
 
 
+def _comment_waybill_backfill_row(db, ledger, mapping):
+    batch_name = str(mapping.get('batch') or '')
+    source_id = str(mapping.get('source_id') or '')
+    batch = ledger.get('batch', batch_name) or {}
+    source = db.get('source', source_id) or {}
+    current = str(batch.get('waybill_no') or '').strip()
+    candidates = _comment_waybills(source) if source else []
+    row = {
+        'batch_name': batch_name,
+        'source_id': source_id,
+        'source_snapshot': source.get('snapshot'),
+        'status': 'ready',
+        'current_value': current,
+        'candidates': candidates,
+    }
+    if not batch:
+        row['status'] = 'batch_missing'
+    elif current:
+        row['status'] = 'already_set'
+    elif str(batch.get('confirm_status') or '').strip().lower() == 'confirmed':
+        row['status'] = 'confirmed'
+    elif str(batch.get('writeback_status') or '').strip().lower() == 'success':
+        row['status'] = 'erp_success'
+    elif not source or not _comment_waybill_source_eligible(source):
+        row['status'] = 'ineligible'
+    elif len(candidates) > 1:
+        row['status'] = 'ambiguous'
+    elif not candidates:
+        row['status'] = 'missing'
+    return row
+
+
+def _comment_waybill_backfill_preview(db, ledger, batch_names=None, limit=1000):
+    requested = {str(value) for value in (batch_names or []) if str(value)}
+    mappings = db.find('batch_map', limit=max(1, min(1000, int(limit or 1000))))
+    if requested:
+        mappings = [row for row in mappings if str(row.get('batch') or '') in requested]
+    rows = [_comment_waybill_backfill_row(db, ledger, row) for row in mappings]
+    ready = [
+        {
+            'batch_name': row['batch_name'],
+            'source_id': row['source_id'],
+            'source_snapshot': row['source_snapshot'],
+            'candidate': row['candidates'][0],
+        }
+        for row in rows if row['status'] == 'ready'
+    ]
+    return {
+        'rows': rows,
+        'plan_hash': digest('comment-waybill-backfill-1', ready),
+    }
+
+
+def backfill_comment_waybills(
+    batch_names=None, *, dry_run=True, expected_plan_hash='', limit=1000,
+    actor='comment-waybill-backfill',
+):
+    """Preview by default; apply only one-candidate blank waybills per transaction."""
+    if not installed():
+        return {
+            'ok': False,
+            'dry_run': True,
+            'plan_hash': '',
+            'rows': [],
+            'summary': {},
+            'message': '物流结算数据库尚未就绪。',
+        }
+    if isinstance(batch_names, str):
+        try:
+            decoded = json.loads(batch_names)
+        except (TypeError, ValueError):
+            decoded = [part.strip() for part in batch_names.split(',') if part.strip()]
+        batch_names = decoded if isinstance(decoded, list) else [decoded]
+
+    db = store()
+    ledger = FrappeLedger()
+    preview = _comment_waybill_backfill_preview(db, ledger, batch_names, limit)
+    rows = preview['rows']
+    ready = [row for row in rows if row['status'] == 'ready']
+    if dry_run:
+        summary = {}
+        for row in rows:
+            summary[row['status']] = summary.get(row['status'], 0) + 1
+        return {
+            'ok': True,
+            'dry_run': True,
+            'plan_hash': preview['plan_hash'],
+            'rows': rows,
+            'summary': summary,
+        }
+    if ready and not expected_plan_hash:
+        raise ValueError('请先生成运单号回填清单并传入 plan_hash。')
+    if expected_plan_hash and expected_plan_hash != preview['plan_hash']:
+        raise ValueError('运单号回填清单已变化，请重新预览。')
+
+    applied = []
+    for planned in rows:
+        if planned['status'] != 'ready':
+            applied.append(planned)
+            continue
+        try:
+            with db.atomic():
+                mapping = {'batch': planned['batch_name'], 'source_id': planned['source_id']}
+                current = _comment_waybill_backfill_row(db, ledger, mapping)
+                if (
+                    current['status'] != 'ready'
+                    or current['source_snapshot'] != planned['source_snapshot']
+                    or current['candidates'] != planned['candidates']
+                ):
+                    current['status'] = 'changed'
+                    applied.append(current)
+                    continue
+                source = db.get('source', planned['source_id'], lock=True)
+                result = _sync_comment_waybill(
+                    db, ledger, planned['batch_name'], source, actor=actor,
+                )
+                applied.append({**planned, **result})
+            db.commit()
+        except Exception as exc:
+            applied.append({**planned, 'status': 'error', 'message': str(exc)})
+
+    summary = {}
+    for row in applied:
+        summary[row['status']] = summary.get(row['status'], 0) + 1
+    return {
+        'ok': not summary.get('error'),
+        'dry_run': False,
+        'plan_hash': preview['plan_hash'],
+        'rows': applied,
+        'summary': summary,
+    }
+
+
 def ensure_batch(db, source):
     ledger = FrappeLedger()
     mapping = db.find('batch_map', source_id=source['id'], limit=1)

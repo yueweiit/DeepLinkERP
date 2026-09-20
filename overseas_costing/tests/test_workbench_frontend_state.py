@@ -377,6 +377,17 @@ def test_interactive_theme_uses_deeplink_blue_without_legacy_teal() -> None:
     assert ".ocw-issue.is-ready { color: #067647; }" in redesign
 
 
+def test_detail_blocker_strip_uses_compact_single_line_summary() -> None:
+    detail = (PARTS / "45-detail-page.css").read_text(encoding="utf-8").lower()
+    strip = detail.split(".ocw-detail-review-strip {", 1)[1].split("}", 1)[0]
+    message = detail.split(".ocw-detail-review-strip > span {", 1)[1].split("}", 1)[0]
+
+    assert "white-space: nowrap" in strip
+    assert "min-height: 0" in strip
+    assert "overflow: hidden" in message
+    assert "text-overflow: ellipsis" in message
+
+
 def test_dingtalk_timeline_renders_name_as_primary_and_id_as_secondary() -> None:
     approval_page = (PARTS / "84-dingtalk-approval.js").read_text(encoding="utf-8")
 

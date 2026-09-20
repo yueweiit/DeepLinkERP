@@ -165,7 +165,10 @@ def filter_batches_for_task(rows: list[dict], task: str, review_status: str = "p
         return [
             row for row in rows
             if row.get("review_state") == "processing"
-            and not row.get("cost_review_started")
+            and (
+                not row.get("cost_review_started")
+                or row.get("cost_review_eligible", True) is False
+            )
         ]
     if task == "cost":
         if str(review_status).lower() == "confirmed":
@@ -173,6 +176,7 @@ def filter_batches_for_task(rows: list[dict], task: str, review_status: str = "p
         return [
             row for row in rows
             if row.get("cost_review_started")
+            and row.get("cost_review_eligible", True) is not False
             and row.get("review_state") != "confirmed"
         ]
     if task == "erp":

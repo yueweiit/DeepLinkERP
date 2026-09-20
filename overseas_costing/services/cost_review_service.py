@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from overseas_costing.services import cost_preview_service, fee_service, fee_status_service
 from overseas_costing.services.material_input_service import present_material_row
+from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
 from overseas_costing.services.transport_fee_service import fee_is_active
 
 
@@ -81,6 +82,18 @@ def _source_invalid(source: dict, items: list[dict]) -> bool:
         if (source.get("purchase_approval_sync_state") == "partial"
                 and str(row.get("source_type") or "").upper() == "PURCHASE_EXPENSE_OA"
                 and instance_id not in valid_ids):
+            return True
+    return False
+
+
+def _has_reviewable_goods_value(items: list[dict]) -> bool:
+    """Return whether at least one active row has a trusted shipment value."""
+    for item in items:
+        presented = present_material_row(dict(item or {}))
+        amount = cost_preview_service._decimal(presented.get("shipment_value_rmb"))
+        if amount is not None and (
+            amount > 0 or is_explicit_shipment_zero(presented.get("shipment_valuation"))
+        ):
             return True
     return False
 
@@ -158,6 +171,7 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
     inputs = project_packing_groups(inputs, groups_from_version(version))["items"]
     inputs.sort(key=lambda row: (cost_preview_service._decimal(row.get("row_no")) or Decimal(0), str(row.get("name") or "")))
+    cost_review_eligible = _has_reviewable_goods_value(inputs)
     raw_fees = [{field: row.get(field) for field in fee_service._rule_fields()} for row in fees]
     from overseas_costing.services.effective_source_values import source_context_from_items
     composed = fee_service.compose_fee_worklist_rows(raw_fees, mode,source_context=source_context_from_items(inputs))
@@ -279,6 +293,7 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     return {"review_state": state, "review_blockers": list(blockers.values()),
             "review_warnings": list(warnings.values()), "result_is_current": result_current,
             "cost_review_started": cost_review_started,
+            "cost_review_eligible": cost_review_eligible,
             "issue_codes": [code for code in ISSUE_ORDER if code in issues], "primary_issue": primary,
             "primary_action": action, "reviewed_at": version.get("reviewed_at") or version.get("confirmed_at") if confirmed else None,
             "reviewed_version": version.get("name") if confirmed else None,

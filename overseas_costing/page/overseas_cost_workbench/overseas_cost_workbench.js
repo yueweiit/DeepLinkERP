@@ -17513,7 +17513,6 @@ class OverseasCostWorkbench {
     const isCostReview = this.viewState?.task === "cost";
     const canConfirm = isCostReview && batch.review_state === "ready" && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
     const canPreview = confirmed && !invalidBusiness;
-    const erpAction = this.erpPushActionState(batch, itemCount);
     const note = invalidBusiness
       ? "关联采购审批已拒绝、撤销或终止，当前批次保留用于追溯，但不会进入成本确认或 ERP 推送。"
       : confirmed
@@ -17550,7 +17549,6 @@ class OverseasCostWorkbench {
           <div class="ocw-erp-flow-actions">
             ${isCostReview ? `<button class="ocw-primary-btn ocw-mini-btn" data-action="confirm-calculation-result"${canConfirm ? "" : " disabled"}>校验计算结果</button>` : ""}
             <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-erp-payload"${canPreview ? "" : " disabled"}>预览 ERP 报文</button>
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="writeback-to-erp" aria-label="${this.escape(`${erpAction.label}：${erpAction.reason}`)}" title="${this.escape(erpAction.reason)}"${erpAction.enabled ? "" : " disabled"}>${this.escape(erpAction.label)}</button>
           </div>
           <div class="ocw-erp-flow-note">${this.escape(note)}</div>
         </div>

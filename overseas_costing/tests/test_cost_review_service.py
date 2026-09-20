@@ -286,6 +286,52 @@ def test_saved_trial_starts_cost_review_even_after_input_change():
     assert result["result_is_current"] is False
 
 
+def test_saved_trial_without_any_purchase_goods_value_is_not_cost_review_eligible():
+    context = saved_context()
+    context["items"][0]["goods_value"] = None
+    save_result(context)
+
+    result = evaluate(context)
+
+    assert result["cost_review_started"] is True
+    assert result["cost_review_eligible"] is False
+    assert "GOODS_VALUE_MISSING" in codes(result)
+
+
+def test_saved_trial_with_one_trusted_purchase_value_is_cost_review_eligible():
+    context = saved_context()
+    missing = deepcopy(context["items"][0])
+    missing.update(name="I-2", row_no=2, stable_line_key="line-2", material_code="SKU-2", goods_value=None)
+    context["items"].append(missing)
+    save_result(context)
+
+    result = evaluate(context)
+
+    assert result["cost_review_eligible"] is True
+    assert "GOODS_VALUE_MISSING" in codes(result)
+
+
+def test_explicitly_confirmed_zero_purchase_value_is_cost_review_eligible():
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    context = saved_context()
+    item = context["items"][0]
+    item["goods_value"] = 0
+    item["extra_json"] = json.dumps({
+        "manual_shipment_valuation": build_manual_shipment_valuation(
+            item,
+            "0",
+            actor="tester@example.com",
+            reason="确认免费样品",
+        )
+    })
+    save_result(context)
+
+    result = evaluate(context)
+
+    assert result["cost_review_eligible"] is True
+
+
 def test_confirmed_sku_component_is_part_of_saved_result_fingerprint():
     context = saved_context()
     tax = next(row for row in context["fees"] if row.get("logical_fee_key") == "import_tax")
