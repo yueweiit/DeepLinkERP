@@ -6,6 +6,12 @@ from frappe.utils import flt, getdate, nowdate
 from frappe.utils.file_manager import save_file
 from frappe.utils.pdf import get_pdf
 
+from china_finance.services.expense_turnover import (
+	adjust_account_expense_turnover,
+	adjust_party_expense_turnover,
+	get_activity_gl_query,
+	get_expense_turnover_offsets,
+)
 from china_finance.services.financial_statement import (
 	build_statement,
 	get_comparison_period,
@@ -120,13 +126,13 @@ def execute(filters=None):
 	return get_columns(include_comparison=bool(comparison_to), company=filters.company), result["rows"], message
 
 
-def execute_native_trial_balance(filters, activity_balance=False):
-	"""Render ERPNext's native Trial Balance for both balance-table entries.
+def _native_project_filter(project):
+	# This report has a single Project Link; native Trial Balance expects a list.
+	return [project] if isinstance(project, str) and project else project
 
-	The Chinese label "发生额及余额表" is an entry point only. Keeping the
-	calculation in ERPNext's report prevents a second GL aggregation engine from
-	drifting away from the native accounting semantics.
-	"""
+
+def execute_native_trial_balance(filters, activity_balance=False):
+	"""Reuse native balances, with signed expense turnover for Chinese reports."""
 	from erpnext.accounts.report.trial_balance.trial_balance import execute as execute_trial_balance
 
 	native_filters = frappe._dict({
@@ -136,7 +142,7 @@ def execute_native_trial_balance(filters, activity_balance=False):
 		"to_date": filters.to_date,
 		"finance_book": filters.finance_book,
 		"cost_center": filters.cost_center,
-		"project": filters.project,
+		"project": _native_project_filter(filters.project),
 		"include_default_book_entries": 1,
 		"show_net_values": 1,
 		"show_group_accounts": 1,
@@ -146,12 +152,24 @@ def execute_native_trial_balance(filters, activity_balance=False):
 	})
 	columns, data = execute_trial_balance(native_filters)
 	_adjust_opening_entries_by_posting_date(data, filters)
+	_apply_expense_turnover_presentation(data, native_filters)
 	_keep_numbered_group_accounts(data)
 	_format_native_account_labels(columns, data, filters.company)
 	if activity_balance:
 		_rename_activity_balance_columns(columns)
 		return columns, data, _activity_balance_message(filters)
 	return columns, data
+
+
+def _apply_expense_turnover_presentation(rows, native_filters):
+	account_names = [
+		row["account"] for row in rows or []
+		if row.get("account") and row.get("is_group_account") == 0
+		and row["account"] not in ("'Total'", "Total")
+	]
+	offsets = get_expense_turnover_offsets(native_filters, account_names)
+	adjust_account_expense_turnover(rows or [], offsets)
+	return offsets
 
 
 def _format_native_account_labels(columns, rows, company):
@@ -468,7 +486,7 @@ def execute_account_activity_balance(filters):
 		"to_date": filters.to_date,
 		"finance_book": filters.finance_book,
 		"cost_center": filters.cost_center,
-		"project": filters.project,
+		"project": _native_project_filter(filters.project),
 		"include_default_book_entries": 1,
 		"show_net_values": 1,
 		"show_group_accounts": 1,
@@ -478,6 +496,7 @@ def execute_account_activity_balance(filters):
 	})
 	columns, native_rows = execute_trial_balance(native_filters)
 	_adjust_opening_entries_by_posting_date(native_rows, filters)
+	expense_offsets = _apply_expense_turnover_presentation(native_rows, native_filters)
 	_keep_numbered_group_accounts(native_rows)
 	if not filters.get("expand_party"):
 		_format_native_account_labels(columns, native_rows, filters.company)
@@ -486,37 +505,8 @@ def execute_account_activity_balance(filters):
 	account_names = [row.get("account") for row in native_rows if row.get("account") and row.get("is_group_account") == 0]
 	if not account_names:
 		return columns, native_rows, _activity_balance_message(filters)
-	params = {"company": filters.company, "from_date": filters.from_date, "to_date": filters.to_date, "accounts": tuple(account_names)}
-	conditions = ["gle.company=%(company)s", "gle.is_cancelled=0", "gle.account IN %(accounts)s"]
-	if filters.finance_book:
-		conditions.append("gle.finance_book=%(finance_book)s")
-		params["finance_book"] = filters.finance_book
-	if filters.cost_center:
-		conditions.append("gle.cost_center=%(cost_center)s")
-		params["cost_center"] = filters.cost_center
-	if filters.project:
-		conditions.append("gle.project=%(project)s")
-		params["project"] = filters.project
-	party_rows = frappe.db.sql(
-		f"""
-		SELECT gle.account,
-			COALESCE(NULLIF(gle.party_type, ''), '') AS party_type,
-			COALESCE(NULLIF(gle.party, ''), '') AS party,
-			SUM(CASE WHEN gle.posting_date < %(from_date)s THEN gle.debit ELSE 0 END) opening_debit,
-			SUM(CASE WHEN gle.posting_date < %(from_date)s THEN gle.credit ELSE 0 END) opening_credit,
-			SUM(CASE WHEN gle.posting_date BETWEEN %(from_date)s AND %(to_date)s
-				AND gle.is_opening = 'No' THEN gle.debit ELSE 0 END) debit,
-			SUM(CASE WHEN gle.posting_date BETWEEN %(from_date)s AND %(to_date)s
-				AND gle.is_opening = 'No' THEN gle.credit ELSE 0 END) credit
-		FROM `tabGL Entry` gle
-		WHERE {' AND '.join(conditions)}
-		GROUP BY gle.account,
-			COALESCE(NULLIF(gle.party_type, ''), ''),
-			COALESCE(NULLIF(gle.party, ''), '')
-		""",
-		params,
-		as_dict=True,
-	)
+	party_rows = _get_activity_party_rows(native_filters, account_names)
+	adjust_party_expense_turnover(party_rows, expense_offsets)
 	by_account = {}
 	for row in party_rows:
 		opening = (row.get("opening_debit") or 0) - (row.get("opening_credit") or 0)
@@ -563,6 +553,31 @@ def execute_account_activity_balance(filters):
 	return party_columns, output, _activity_balance_message(filters)
 
 
+def _get_activity_party_rows(native_filters, account_names):
+	from frappe.query_builder import Case
+	from frappe.query_builder.functions import Coalesce, Sum
+
+	gle = frappe.qb.DocType("GL Entry")
+	opening = gle.posting_date < native_filters.from_date
+	current = gle.posting_date >= native_filters.from_date
+	if not frappe.get_single_value("Accounts Settings", "ignore_is_opening_check_for_reporting"):
+		current &= gle.is_opening == "No"
+	party_type = Coalesce(gle.party_type, "")
+	party = Coalesce(gle.party, "")
+	return (
+		get_activity_gl_query(native_filters, account_names, current_period_only=False)
+		.select(
+			gle.account, party_type.as_("party_type"), party.as_("party"),
+			Sum(Case().when(opening, gle.debit).else_(0)).as_("opening_debit"),
+			Sum(Case().when(opening, gle.credit).else_(0)).as_("opening_credit"),
+			Sum(Case().when(current, gle.debit).else_(0)).as_("debit"),
+			Sum(Case().when(current, gle.credit).else_(0)).as_("credit"),
+		)
+		.groupby(gle.account, party_type, party)
+		.run(as_dict=True)
+	)
+
+
 def _keep_numbered_group_accounts(rows):
 	"""Keep coded parent accounts as summary rows, but hide chart root nodes.
 
@@ -601,6 +616,7 @@ def _keep_numbered_group_accounts(rows):
 
 def _activity_balance_message(filters):
 	message = _("数据来源：ERPNext 原生试算平衡表")
+	message += _("；费用冲减按负借方列示，反向损益结转按负贷方列示")
 	open_profit = get_unclosed_profit(
 		filters.company,
 		filters.to_date,
