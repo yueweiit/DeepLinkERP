@@ -64,6 +64,8 @@ def test_route_revision_migration_script_backups_and_bounds_legacy_values() -> N
     assert "information_schema.columns" in script
     assert "ALTER COLUMN `route_revision` SET DEFAULT 0" in script
     assert "NOT REGEXP ''^[0-9]+$''" in script
+    assert "`route_revision` IS NULL" in script
+    assert "SQL_SAFE_UPDATES = 0" in script
     assert "2147483647" in script
 
 

@@ -81,17 +81,22 @@ def before_migrate() -> None:
         alter column `route_revision` set default 0
         """
     )
-    frappe.db.sql(
-        """
-        update `tabOverseas Cost Item`
-        set route_revision = 0
-        where route_revision is not null
-          and (
-              trim(cast(route_revision as char)) = ''
-              or cast(route_revision as char) not regexp '^[0-9]+$'
-          )
-        """
-    )
+    safe_updates = frappe.db.sql("select @@SQL_SAFE_UPDATES")[0][0]
+    try:
+        frappe.db.sql("set SQL_SAFE_UPDATES = 0")
+        frappe.db.sql(
+            """
+            update `tabOverseas Cost Item`
+            set route_revision = 0
+            where route_revision is null
+              or (
+                  trim(cast(route_revision as char)) = ''
+                  or cast(route_revision as char) not regexp '^[0-9]+$'
+              )
+            """
+        )
+    finally:
+        frappe.db.sql(f"set SQL_SAFE_UPDATES = {int(safe_updates or 0)}")
     frappe.db.commit()
 
 

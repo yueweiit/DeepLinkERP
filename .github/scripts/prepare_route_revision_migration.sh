@@ -33,8 +33,8 @@ SET @sql := IF(
   'SELECT COUNT(*) AS total_rows,
           SUM(
             CASE
-              WHEN `route_revision` IS NOT NULL
-               AND (
+              WHEN `route_revision` IS NULL
+               OR (
                  TRIM(CAST(`route_revision` AS CHAR)) = ''''
                  OR TRIM(CAST(`route_revision` AS CHAR)) NOT REGEXP ''^[0-9]+$''
                  OR CHAR_LENGTH(TRIM(CAST(`route_revision` AS CHAR))) > 10
@@ -63,12 +63,14 @@ PREPARE route_revision_default FROM @sql;
 EXECUTE route_revision_default;
 DEALLOCATE PREPARE route_revision_default;
 
+SET @route_revision_safe_updates := @@SQL_SAFE_UPDATES;
+SET SQL_SAFE_UPDATES = 0;
 SET @sql := IF(
   @has_route_revision,
   'UPDATE `tabOverseas Cost Item`
    SET `route_revision` = 0
-   WHERE `route_revision` IS NOT NULL
-     AND (
+   WHERE `route_revision` IS NULL
+     OR (
        TRIM(CAST(`route_revision` AS CHAR)) = ''''
        OR TRIM(CAST(`route_revision` AS CHAR)) NOT REGEXP ''^[0-9]+$''
        OR CHAR_LENGTH(TRIM(CAST(`route_revision` AS CHAR))) > 10
@@ -82,6 +84,7 @@ SET @sql := IF(
 PREPARE route_revision_values FROM @sql;
 EXECUTE route_revision_values;
 DEALLOCATE PREPARE route_revision_values;
+SET SQL_SAFE_UPDATES = @route_revision_safe_updates;
 
 SELECT 'route_revision cleanup complete' AS status;
 SQL

@@ -51,7 +51,12 @@ def test_before_migrate_normalizes_legacy_route_revision_values(monkeypatch) -> 
     class FakeDB:
         def sql(self, query: str):
             queries.append(query)
-            return [("tabOverseas Cost Item",)] if "show tables" in query.lower() else [("route_revision",)]
+            lowered = query.lower()
+            if "show tables" in lowered:
+                return [("tabOverseas Cost Item",)]
+            if "@@sql_safe_updates" in lowered:
+                return [(1,)]
+            return [("route_revision",)]
 
         def commit(self) -> None:
             queries.append("commit")
@@ -60,11 +65,15 @@ def test_before_migrate_normalizes_legacy_route_revision_values(monkeypatch) -> 
 
     install.before_migrate()
 
-    assert len(queries) == 5
+    assert len(queries) == 8
     assert "show tables" in queries[0].lower()
     assert "show columns" in queries[1].lower()
     assert "alter table `taboverseas cost item`" in queries[2].lower()
     assert "alter column `route_revision` set default 0" in queries[2].lower()
-    assert "update `taboverseas cost item`" in queries[3].lower()
-    assert "not regexp '^[0-9]+$'" in queries[3].lower()
-    assert queries[4] == "commit"
+    assert "@@sql_safe_updates" in queries[3].lower()
+    assert queries[4].lower() == "set sql_safe_updates = 0"
+    assert "update `taboverseas cost item`" in queries[5].lower()
+    assert "route_revision is null" in queries[5].lower()
+    assert "not regexp '^[0-9]+$'" in queries[5].lower()
+    assert queries[6].lower() == "set sql_safe_updates = 1"
+    assert queries[7] == "commit"
