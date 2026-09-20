@@ -1564,6 +1564,104 @@ def test_direct_confirmation_rejects_authoritative_stale_result(monkeypatch) -> 
     assert audits == []
 
 
+def test_direct_confirmation_rejects_estimated_fee_even_when_cost_review_is_ready(monkeypatch) -> None:
+    writes = []
+    audits = []
+
+    class DB:
+        def set_value(self, *args, **kwargs):
+            writes.append((args, kwargs))
+
+        def commit(self):
+            writes.append(("commit",))
+
+        def sql(self, *args, **kwargs):
+            return []
+
+    class Audit:
+        def insert(self, **kwargs):
+            audits.append(kwargs)
+
+    context = {
+        "ok": True,
+        "batch_doc_name": "BATCH-ESTIMATED",
+        "version_name": "VERSION-ESTIMATED",
+        "batch": {
+            "name": "BATCH-ESTIMATED",
+            "status": "Calculated",
+            "confirm_status": "Pending",
+            "current_version": "VERSION-ESTIMATED",
+            "subsidiary_code": "MX01",
+            "item_count": 1,
+            "estimated_total_cost_rmb": 25,
+            "summary_snapshot": {
+                "calculation_schema": 2,
+                "total_cost_rmb": 25,
+                "comprehensive_cost": {
+                    "incomplete_reasons": [{
+                        "fee_key": "international_express",
+                        "reason_code": "ESTIMATED_AMOUNT",
+                        "message": "当前费用仍为暂估金额。",
+                    }],
+                    "excluded_fees": [{
+                        "fee_key": "international_express",
+                        "expense_category": "国际快递费",
+                    }],
+                },
+            },
+        },
+        "version": {"name": "VERSION-ESTIMATED", "status": "Calculated"},
+        "items": [{
+            "name": "ITEM-001",
+            "row_no": 1,
+            "material_code": "YL000001",
+            "product_name": "太阳眼镜",
+            "quantity": 2,
+            "actual_shipped_qty": 2,
+            "unit_price": 8,
+            "purchase_currency": "RMB",
+            "goods_value": 16,
+            "total_unit_rmb": 12.5,
+        }],
+        "rules": [{
+            "rule_code": "international_express",
+            "expense_category": "国际快递费",
+            "amount": 9,
+            "amount_status": "ESTIMATED",
+        }],
+    }
+    fake_frappe = SimpleNamespace(
+        db=DB(),
+        session=SimpleNamespace(user="reviewer@example.com"),
+        get_doc=lambda values: Audit(),
+    )
+    monkeypatch.setattr(batch_service, "frappe", fake_frappe)
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda value: "BATCH-ESTIMATED")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *args: "VERSION-ESTIMATED")
+    monkeypatch.setattr(batch_service, "_load_erp_push_context", lambda *args: context)
+    monkeypatch.setattr(
+        batch_service,
+        "_build_authoritative_review_readiness",
+        lambda value: {
+            "review_state": "ready",
+            "review_blockers": [],
+            "review_warnings": [{"code": "ESTIMATED_AMOUNT", "message": "当前费用仍为暂估金额。"}],
+        },
+    )
+    from overseas_costing.services.logistics_settlement import runtime
+    monkeypatch.setattr(runtime, "installed", lambda: False)
+
+    result = batch_service.confirm_calculation_result("BATCH-ESTIMATED", "VERSION-ESTIMATED")
+
+    assert result["ok"] is False
+    assert result["confirmed"] is False
+    assert result["review_state"] == "ready"
+    assert result["ready"] is False
+    assert "国际快递费：当前费用仍为暂估金额。" in result["blocking_reasons"]
+    assert writes == []
+    assert audits == []
+
+
 def test_authoritative_confirmation_readiness_reuses_cost_review_evaluator(monkeypatch) -> None:
     from overseas_costing.services import cost_review_service
 
@@ -1598,7 +1696,7 @@ def test_authoritative_confirmation_readiness_reuses_cost_review_evaluator(monke
     }
 
 
-def test_direct_confirmation_writes_only_once_when_authoritative_state_is_ready(monkeypatch) -> None:
+def test_direct_confirmation_writes_final_derived_price_result_only_once(monkeypatch) -> None:
     state = {"confirmed": False, "audit_count": 0, "commit_count": 0}
 
     class DB:
@@ -1631,17 +1729,42 @@ def test_direct_confirmation_writes_only_once_when_authoritative_state_is_ready(
                 "name": "BATCH-001",
                 "status": "Confirmed" if state["confirmed"] else "Calculated",
                 "confirm_status": "Confirmed" if state["confirmed"] else "Pending",
+                "current_version": "VERSION-001",
+                "subsidiary_code": "MX01",
+                "item_count": 1,
+                "estimated_total_cost_rmb": 4230,
+                "summary_snapshot": {
+                    "calculation_schema": 2,
+                    "total_cost_rmb": 4230,
+                    "comprehensive_cost": {"incomplete_reasons": [], "included_fees": []},
+                },
             },
             "version": {"name": "VERSION-001", "status": "Calculated"},
-            "items": [],
-            "rules": [],
+            "items": [{
+                "name": "ITEM-001",
+                "row_no": 1,
+                "material_code": "CW000214",
+                "product_name": "Dog tag",
+                "quantity": 1700,
+                "actual_shipped_qty": 1500,
+                "purchase_uom": "个",
+                "unit_price": "0.000000",
+                "purchase_currency": "",
+                "goods_value": 2067,
+                "total_unit_rmb": 2.82,
+            }],
+            "rules": [{
+                "rule_code": "international_express",
+                "expense_category": "国际快递费",
+                "amount": 2163,
+                "amount_status": "ACTUAL",
+            }],
         }
 
     monkeypatch.setattr(batch_service, "frappe", fake_frappe)
     monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda value: "BATCH-001")
     monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *args: "VERSION-001")
     monkeypatch.setattr(batch_service, "_load_erp_push_context", load_context)
-    monkeypatch.setattr(batch_service, "_build_calculation_confirmation_readiness", lambda *args, **kwargs: {"ready": True})
     monkeypatch.setattr(
         batch_service,
         "_build_authoritative_review_readiness",

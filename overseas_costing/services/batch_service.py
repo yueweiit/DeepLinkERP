@@ -3344,6 +3344,42 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
             **readiness,
         }
 
+    confirmation_readiness = _build_calculation_confirmation_readiness(
+        batch=context["batch"],
+        items=context["items"],
+        rules=context["rules"],
+        resolved_version_name=context["version_name"],
+    )
+    if not confirmation_readiness.get("ready"):
+        review_blocking_reasons = [
+            str(row.get("message") or row.get("code") or "").strip()
+            for row in readiness.get("review_blockers") or []
+            if str(row.get("message") or row.get("code") or "").strip()
+        ]
+        blocking_reasons = list(dict.fromkeys([
+            *review_blocking_reasons,
+            *[
+                str(reason).strip()
+                for reason in confirmation_readiness.get("blocking_reasons") or []
+                if str(reason).strip()
+            ],
+        ]))
+        return {
+            "ok": False,
+            "confirmed": False,
+            "batch_name": context["batch_doc_name"],
+            "version_name": context["version_name"],
+            **readiness,
+            **confirmation_readiness,
+            "review_state": readiness.get("review_state"),
+            "review_blockers": readiness.get("review_blockers") or [],
+            "review_warnings": readiness.get("review_warnings") or [],
+            "ready": False,
+            "blocking_reasons": blocking_reasons,
+            "confirmation_readiness": confirmation_readiness,
+            "message": "；".join(blocking_reasons) or "当前计算结果尚不满足最终确认条件。",
+        }
+
     old_status = {
         "status": context["batch"].get("status"),
         "confirm_status": context["batch"].get("confirm_status"),
@@ -3386,6 +3422,7 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
         "batch_name": context["batch_doc_name"],
         "version_name": context["version_name"],
         **readiness,
+        "confirmation_readiness": confirmation_readiness,
         "review_state": "confirmed",
         "message": "计算结果已确认，可预览并组织 DeepLinkERP 推送报文。",
     }
