@@ -51,6 +51,8 @@ from mes_integration.mes_integration.stock_entry import (
 
 MES_DELIVERY_REQUEST_FIELD = "custom_mes_delivery_request_no"
 MES_DELIVERY_IDEMPOTENCY_LOCK_TIMEOUT_SECONDS = 30
+MES_DELIVERY_STATUS_QUEUE = "short"
+MES_DELIVERY_STATUS_TIMEOUT = 300
 
 
 class MESDeliveryNoteIdentityConflict(frappe.ValidationError):
@@ -739,11 +741,38 @@ def get_draft_delivery_notes_for_sales_orders(sales_orders):
 
 
 def enqueue_delivery_note_status_callback(delivery_note_name):
-    frappe.enqueue(
-        "mes_integration.mes_integration.delivery_note.push_delivery_note_status_to_mes",
-        queue="short",
-        enqueue_after_commit=True,
-        delivery_note_name=delivery_note_name,
+    try:
+        event_docstatus = cint(
+            frappe.db.get_value("Delivery Note", delivery_note_name, "docstatus")
+        )
+        frappe.enqueue(
+            "mes_integration.mes_integration.delivery_note.push_delivery_note_status_to_mes_job",
+            queue=MES_DELIVERY_STATUS_QUEUE,
+            timeout=MES_DELIVERY_STATUS_TIMEOUT,
+            enqueue_after_commit=True,
+            job_id=f"mes-delivery-note-status:{delivery_note_name}:{event_docstatus}",
+            deduplicate=True,
+            delivery_note_name=delivery_note_name,
+        )
+    except Exception:
+        frappe.log_error(
+            title="Failed to enqueue MES Delivery Note status callback",
+            message=frappe.get_traceback(),
+        )
+
+
+def push_delivery_note_status_to_mes_job(delivery_note_name):
+    """Run the callback in RQ and request a retry when any linked order fails."""
+    results = push_delivery_note_status_to_mes(delivery_note_name)
+    if not any(result.get("status") == "failed" for result in results):
+        return results
+
+    try:
+        frappe.db.commit()
+    except Exception:
+        pass
+    raise frappe.RetryBackgroundJobError(
+        f"MES Delivery Note status callback failed for {delivery_note_name}"
     )
 
 

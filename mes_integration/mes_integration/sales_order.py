@@ -1,3 +1,5 @@
+import hashlib
+
 import frappe
 from frappe import _
 from frappe.utils import now
@@ -16,19 +18,69 @@ from mes_integration.mes_integration.stock_entry import (
 
 SALES_ORDER_STATUS_EVENT = "Sales Order Status Callback"
 SALES_ORDER_STATUS_DOCUMENT_TYPE = "sales_order"
+MES_SALES_ORDER_STATUS_QUEUE = "short"
+MES_SALES_ORDER_STATUS_TIMEOUT = 300
 
 
 def enqueue_sales_order_status_callback(
     sales_order_name, triggered_status=None, trigger_event=None
 ):
-    frappe.enqueue(
-        "mes_integration.mes_integration.sales_order.push_sales_order_status_to_mes",
-        queue="short",
-        enqueue_after_commit=True,
-        sales_order_name=sales_order_name,
-        triggered_status=triggered_status,
-        trigger_event=trigger_event,
-    )
+    try:
+        frappe.enqueue(
+            "mes_integration.mes_integration.sales_order.push_sales_order_status_to_mes_job",
+            queue=MES_SALES_ORDER_STATUS_QUEUE,
+            timeout=MES_SALES_ORDER_STATUS_TIMEOUT,
+            enqueue_after_commit=True,
+            job_id=get_sales_order_status_job_id(
+                sales_order_name,
+                triggered_status,
+                trigger_event,
+            ),
+            deduplicate=True,
+            sales_order_name=sales_order_name,
+            triggered_status=triggered_status,
+            trigger_event=trigger_event,
+        )
+    except Exception:
+        frappe.log_error(
+            title="Failed to enqueue MES Sales Order status callback",
+            message=frappe.get_traceback(),
+        )
+
+
+def get_sales_order_status_job_id(
+    sales_order_name,
+    triggered_status=None,
+    trigger_event=None,
+):
+    event_key = hashlib.sha256(
+        f"{triggered_status or ''}\0{trigger_event or ''}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"mes-sales-order-status:{sales_order_name}:{event_key}"
+
+
+def push_sales_order_status_to_mes_job(
+    sales_order_name,
+    triggered_status=None,
+    trigger_event=None,
+):
+    """Push one callback and let Frappe retry transient failures."""
+    try:
+        return push_sales_order_status_to_mes(
+            sales_order_name,
+            triggered_status=triggered_status,
+            trigger_event=trigger_event,
+        )
+    except frappe.RetryBackgroundJobError:
+        raise
+    except Exception as exc:
+        try:
+            frappe.db.commit()
+        except Exception:
+            pass
+        raise frappe.RetryBackgroundJobError(
+            f"MES Sales Order status callback failed for {sales_order_name}"
+        ) from exc
 
 
 def push_sales_order_status_to_mes(
