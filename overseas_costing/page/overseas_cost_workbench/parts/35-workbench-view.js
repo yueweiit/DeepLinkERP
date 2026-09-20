@@ -247,10 +247,9 @@
     this.$root.on("click", "[data-action='detail-primary']", (event) => {
       const action = $(event.currentTarget).attr("data-primary-action");
       if (action === "supplement") return this.switchDetailTab("documents");
-      if (action === "recalculate") return this.recalculate(this.detailState.batchName);
+      if (action === "recalculate") return this.startDetailCostTrial().catch((error) => this.showError(error));
       return this.switchDetailTab(OverseasCostWorkbenchState.detailTabForAction(action));
     });
-    this.$root.on("click", "[data-action='detail-recalculate']", () => this.recalculate(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-export']", () => this.exportDrawerBatch().catch((error) => this.showError(error)));
     this.$root.on("click", "[data-action='detail-voucher']", () => this.openFileParseDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-category']", () => this.openCategoryPreviewDialog(this.detailState.batchName));
@@ -336,6 +335,21 @@
       const direction = Number($(event.currentTarget).attr("data-direction") || 1);
       this.$root.find("[data-role='sku-table-scroll']").get(0)?.scrollBy({ left: direction * 320, behavior: "smooth" });
     });
+  }
+
+  async startDetailCostTrial() {
+    const batchName = String(this.detailState?.batchName || "");
+    if (!batchName || this.viewState?.screen !== "detail") return;
+    if (this.detailState.tab !== "documents") await this.switchDetailTab("documents");
+    const rootScreen = this.$root?.attr?.("data-screen");
+    if (
+      this.viewState?.screen !== "detail"
+      || (rootScreen && rootScreen !== "detail")
+      || this.detailState?.batchName !== batchName
+      || (this.viewState?.batch && this.viewState.batch !== batchName)
+      || this.detailState?.tab !== "documents"
+    ) return;
+    return this.refreshMaterialFeeCostPreview(true);
   }
 
   replaceViewState(values, { push = false } = {}) {

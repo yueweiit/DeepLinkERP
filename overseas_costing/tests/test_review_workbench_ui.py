@@ -251,6 +251,66 @@ console.log(JSON.stringify({{shell,overview}}));
     assert 'data-action="detail-recalculate"' not in result['overview']
 
 
+def test_header_calculation_entry_switches_to_documents_and_opens_trial_without_direct_recalculate():
+    result = run_js("""
+const v=makeView('pending'),events=[];
+v.viewState={task:'pending',screen:'detail',batch:'B',tab:'overview'};
+v.detailState={batchName:'B',tab:'overview'};
+v.$root={attr:key=>key==='data-screen'?'detail':undefined};
+v.switchDetailTab=async tab=>{events.push(`tab:${tab}`);v.detailState.tab=tab;v.viewState.tab=tab};
+v.refreshMaterialFeeCostPreview=async scroll=>events.push(`trial:${scroll}`);
+v.recalculate=async()=>events.push('direct-recalculate');
+await v.startDetailCostTrial();
+console.log(JSON.stringify({events,tab:v.detailState.tab}));
+""")
+    assert result == {'events': ['tab:documents', 'trial:true'], 'tab': 'documents'}
+
+
+def test_header_calculation_entry_stops_if_detail_changed_while_switching_tabs():
+    result = run_js("""
+const v=makeView('pending'),events=[];
+v.viewState={task:'pending',screen:'detail',batch:'B',tab:'overview'};
+v.detailState={batchName:'B',tab:'overview'};
+v.$root={attr:key=>key==='data-screen'?v.viewState.screen:undefined};
+v.switchDetailTab=async tab=>{events.push(`tab:${tab}`);v.detailState={...v.detailState,batchName:'OTHER',tab};v.viewState={...v.viewState,batch:'OTHER',tab}};
+v.refreshMaterialFeeCostPreview=async()=>events.push('trial');
+await v.startDetailCostTrial();
+console.log(JSON.stringify({events,batch:v.detailState.batchName}));
+""")
+    assert result == {'events': ['tab:documents'], 'batch': 'OTHER'}
+
+
+def test_detail_and_workspace_sources_have_no_legacy_trial_handlers():
+    workbench = (PARTS / '35-workbench-view.js').read_text(encoding='utf-8')
+    workspace = (PARTS / '78-material-fee-workspace.js').read_text(encoding='utf-8')
+    assert "[data-action='detail-recalculate']" not in workbench
+    assert "[data-action='mf-preview-cost']" not in workspace
+
+
+@pytest.mark.parametrize(
+    ('task', 'batch'),
+    [
+        ('cost', {'status': 'Calculated', 'review_state': 'ready'}),
+        ('erp', {'status': 'Confirmed', 'confirm_status': 'Confirmed', 'is_locked': 1}),
+        ('pending', {'status': 'Confirmed'}),
+        ('pending', {'status': 'Calculated', 'is_locked': 1}),
+    ],
+)
+def test_detail_hides_calculation_entry_outside_pending_editable_flow(task, batch):
+    result = run_js(f"""
+const v=makeView({json.dumps(task)});const batch={{name:'B',current_version:'V',...{json.dumps(batch)}}};
+v.viewState={{task:{json.dumps(task)},screen:'detail',batch:'B',tab:'overview'}};
+v.detailState={{batchName:'B',tab:'overview',header:batch}};v.batches=[batch];v.getDetailBatch=()=>batch;
+v.cleanupSkuScrollControls=()=>{{}};v.cleanupMaterialGridScrollControls=()=>{{}};
+v.sourceStatusLabel=()=>'已齐备';v.erpWritebackStatusInfo=()=>({{label:'未开始',state:'neutral'}});
+v.batchStatusInfo=()=>({{label:'已试算',needsRecalculate:false}});v.renderDetailErpAction=()=>'';
+v.issueLabel=x=>x;v.transportLabel=x=>x;v.formatValue=x=>String(x??'');
+v.renderDetailReviewBlockers=()=>'';v.renderDetailShell();
+console.log(JSON.stringify(v.html["[data-area='detail-screen']"]));
+""")
+    assert 'data-primary-action="recalculate"' not in result
+
+
 def test_gap_rows_keep_supplement_actions_but_point_to_the_header_calculation_entry():
     html = run_js("""
 const v=makeView('pending');const batch={name:'B'};v.findBatch=()=>batch;

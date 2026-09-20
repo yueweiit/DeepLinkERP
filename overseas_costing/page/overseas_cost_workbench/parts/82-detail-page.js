@@ -177,6 +177,15 @@
 
   detailCalculationAction(batch = {}) {
     const status = String(batch.status || "").toLowerCase();
+    const confirmStatus = String(batch.confirm_status || "").toLowerCase();
+    const task = this.viewState?.task || "pending";
+    if (
+      task === "cost"
+      || task === "erp"
+      || status.includes("confirmed")
+      || confirmStatus === "confirmed"
+      || Number(batch.is_locked || 0) === 1
+    ) return null;
     const summary = batch.summary_snapshot || {};
     const hasSavedResult = Boolean(
       batch.calculated_at
@@ -242,7 +251,7 @@
             </div>
           </div>
           <div class="ocw-detail-header-actions">
-            <button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>
+            ${action ? `<button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>` : ""}
             ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>

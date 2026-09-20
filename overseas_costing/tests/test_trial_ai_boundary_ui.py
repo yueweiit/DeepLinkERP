@@ -81,11 +81,11 @@ console.log(JSON.stringify({before,endpoints,canApply:workspace.canConfirmMateri
 def test_trial_rejects_actual_ai_write_with_specific_message():
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + AI_FIXTURE + r"""
 fill.applying=true;let error='';try{await workspace.refreshMaterialFeeCostPreview()}catch(e){error=e.message}
-console.log(JSON.stringify({error,calls:workspace.calls,disabled:button.disabled,running:state.previewRunning}));
+console.log(JSON.stringify({error,calls:workspace.calls,applying:fill.applying,running:state.previewRunning}));
 """)
     assert "正在保存" in result["error"]
     assert "放弃" not in result["error"]
-    assert result["calls"] == 0 and result["disabled"] is True and result["running"] is False
+    assert result["calls"] == 0 and result["applying"] is True and result["running"] is False
 
 
 @pytest.mark.parametrize("failure", ["fee", "material", "api"])
@@ -97,11 +97,11 @@ def test_ready_ai_does_not_bypass_save_or_calculation_failures(failure):
     }[failure]
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + AI_FIXTURE + setup + r"""
 let error='';try{await workspace.refreshMaterialFeeCostPreview()}catch(e){error=e.message}
-console.log(JSON.stringify({error,calls:workspace.calls,retained:state.aiFill===fill,preview:state.preview.summary.total_cost_rmb,disabled:button.disabled}));
+console.log(JSON.stringify({error,calls:workspace.calls,retained:state.aiFill===fill,preview:state.preview.summary.total_cost_rmb,running:state.previewRunning}));
 """)
     assert result["error"] and "放弃" not in result["error"]
     assert result["calls"] == (1 if failure == "api" else 0)
-    assert result["retained"] and result["preview"] == "100.00" and not result["disabled"]
+    assert result["retained"] and result["preview"] == "100.00" and not result["running"]
 
 
 def test_legacy_ai_confirmation_is_disabled_during_trial():

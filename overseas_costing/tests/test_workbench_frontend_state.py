@@ -1651,14 +1651,14 @@ workspace.call=async(endpoint)=>{workspace.calls++;
 let release;const writing=workspace.trackMaterialFeeWrite(()=>new Promise(resolve=>{release=resolve}));
 const first=workspace.refreshMaterialFeeCostPreview();
 await new Promise(resolve=>setImmediate(resolve));
-const before={calls:workspace.calls,disabled:button.disabled,label:button.label};
+const before={calls:workspace.calls,running:state.previewRunning,stage:state.costTrialAI.actionStage};
 await workspace.refreshMaterialFeeCostPreview();release();await writing;await first;
-console.log(JSON.stringify({before,calls:workspace.calls,opened:workspace.opened,disabled:button.disabled,running:state.previewRunning}));
+console.log(JSON.stringify({before,calls:workspace.calls,opened:workspace.opened,running:state.previewRunning}));
 """)
-    assert result["before"] == {"calls": 0, "disabled": True, "label": "读取已有口径…"}
+    assert result["before"] == {"calls": 0, "running": True, "stage": "reuse"}
     assert result["calls"] == 3
     assert result.get("opened") is True
-    assert result["disabled"] is False and result["running"] is False
+    assert result["running"] is False
 
 
 @pytest.mark.parametrize("change", ["batch", "version", "tab", "reload", "input"])
@@ -1689,12 +1689,12 @@ def test_trial_does_not_replace_result_after_invalid_input_or_failed_request(fai
     }[failure]
     result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + setup + r"""
 let error='';try {await workspace.refreshMaterialFeeCostPreview()}catch(e){error=e.message}
-console.log(JSON.stringify({error,calls:workspace.calls,preview:state.preview,disabled:button.disabled}));
+console.log(JSON.stringify({error,calls:workspace.calls,preview:state.preview,running:state.previewRunning}));
 """)
     assert result["error"]
     assert result["calls"] == (1 if failure == "api" else 0)
     assert result["preview"]["summary"]["total_cost_rmb"] == "100.00"
-    assert result["disabled"] is False
+    assert result["running"] is False
 
 
 def test_unsupported_historical_currency_requires_explicit_selection_in_dialog():
