@@ -3896,10 +3896,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='detail-primary']", (event) => {
       const action = $(event.currentTarget).attr("data-primary-action");
       if (action === "supplement") return this.switchDetailTab("documents");
-      if (action === "recalculate") return this.recalculate(this.detailState.batchName);
+      if (action === "recalculate") return this.startDetailCostTrial().catch((error) => this.showError(error));
       return this.switchDetailTab(OverseasCostWorkbenchState.detailTabForAction(action));
     });
-    this.$root.on("click", "[data-action='detail-recalculate']", () => this.recalculate(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-export']", () => this.exportDrawerBatch().catch((error) => this.showError(error)));
     this.$root.on("click", "[data-action='detail-voucher']", () => this.openFileParseDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-category']", () => this.openCategoryPreviewDialog(this.detailState.batchName));
@@ -3985,6 +3984,21 @@ class OverseasCostWorkbench {
       const direction = Number($(event.currentTarget).attr("data-direction") || 1);
       this.$root.find("[data-role='sku-table-scroll']").get(0)?.scrollBy({ left: direction * 320, behavior: "smooth" });
     });
+  }
+
+  async startDetailCostTrial() {
+    const batchName = String(this.detailState?.batchName || "");
+    if (!batchName || this.viewState?.screen !== "detail") return;
+    if (this.detailState.tab !== "documents") await this.switchDetailTab("documents");
+    const rootScreen = this.$root?.attr?.("data-screen");
+    if (
+      this.viewState?.screen !== "detail"
+      || (rootScreen && rootScreen !== "detail")
+      || this.detailState?.batchName !== batchName
+      || (this.viewState?.batch && this.viewState.batch !== batchName)
+      || this.detailState?.tab !== "documents"
+    ) return;
+    return this.refreshMaterialFeeCostPreview(true);
   }
 
   replaceViewState(values, { push = false } = {}) {
@@ -10595,9 +10609,6 @@ class OverseasCostWorkbench {
         $button.attr("data-status")
       ).catch((error) => this.showError(error));
     });
-    this.$root.on("click", "[data-action='mf-preview-cost']", () => {
-      this.refreshMaterialFeeCostPreview(true).catch((error) => this.showError(error));
-    });
     this.$root.on("click", "[data-action='mf-adjust-cost']", () => {
       this.openCostTrialAdjustment().catch((error) => this.showError(error));
     });
@@ -15380,16 +15391,6 @@ class OverseasCostWorkbench {
   updateMaterialFeeWriteControls(state) {
     if (this.materialFeeState !== state) return;
     const calculating = this.isMaterialFeeCalculationBusy(state);
-    const trial = state.costTrialAI || {};
-    const stageLabel = trial.actionStage === "reuse"
-      ? "读取已有口径…"
-      : trial.actionStage === "ai"
-        ? "AI 判断" + (Number(trial.aiCandidateCount || 0) ? " " + Number(trial.aiCandidateCount) + " 项" : "") + "…"
-        : trial.actionStage === "preview"
-          ? "校验分摊…"
-          : trial.actionStage === "confirm" ? "保存试算…" : "计算中…";
-    this.$root?.find("[data-action='mf-preview-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying) || this.hasBlockingPackingGroups(state))
-      ?.text?.(calculating ? stageLabel : "开始试算");
     this.$root?.find("[data-action='mf-adjust-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying));
     for (const root of [this.$root, state.aiProgressDialog?.$wrapper]) {
       root?.find("[data-action='mf-ai-apply']")?.prop?.("disabled", !this.canApplyMaterialAIFill(state.aiFill));
@@ -16143,13 +16144,13 @@ class OverseasCostWorkbench {
     const trialDisabled = this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying || packingGroupBlocked;
     const sectionTitle = `<div class="ocw-mf-section-title">
       <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p><p>系统优先沿用已有口径，仅在必要时请求 AI；逐 SKU 金额由服务端规则引擎计算，可信关税凭证明细优先。</p></div>
-      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span>${preview ? `<button class="ocw-outline-btn" type="button" data-action="mf-adjust-cost" ${trialDisabled ? "disabled" : ""}>调整分摊</button>` : ""}<button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${trialDisabled ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
+      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span>${preview ? `<button class="ocw-outline-btn" type="button" data-action="mf-adjust-cost" ${trialDisabled ? "disabled" : ""}>调整分摊</button>` : ""}</div>
     </div>`;
     if (!preview) {
       return `<section class="ocw-mf-section ocw-mf-cost-section">${sectionTitle}
         ${packingGroupBlocked ? '<p class="ocw-mf-trial-note">装箱组成员已变化，请先重新确认装箱组，再开始试算。</p>' : ""}
         ${hasLegacyTotal ? `<div class="ocw-mf-cost-summary"><div class="ocw-mf-cost-total"><span>上次已保存成本 · 待重新试算</span><strong>RMB ${this.escape(Number(legacyTotal).toFixed(2))}</strong></div></div>` : ""}
-        <div class="ocw-detail-empty"><strong>${hasLegacyTotal ? "当前费用尚未汇总到已保存成本" : "尚未保存试算结果"}</strong><p>点击“开始试算”，按当前物料和费用更新总览、SKU 明细及本区结果。</p></div>
+        <div class="ocw-detail-empty"><strong>${hasLegacyTotal ? "当前费用尚未汇总到已保存成本" : "尚未保存试算结果"}</strong><p>请使用页头开始试算，按当前物料和费用更新总览、SKU 明细及本区结果。</p></div>
       </section>`;
     }
     const summary = preview.summary || {};
@@ -16162,7 +16163,7 @@ class OverseasCostWorkbench {
     }).join("");
     return `<section class="ocw-mf-section ocw-mf-cost-section">
       ${sectionTitle}
-      ${staleCost ? '<p class="ocw-mf-trial-note">资料已更新，请点击“开始试算”。以下为历史结果。</p><details class="ocw-mf-cost-history"><summary>查看上次试算</summary>' : ""}
+      ${staleCost ? '<p class="ocw-mf-trial-note">资料已更新，请使用页头重新计算。以下为历史结果。</p><details class="ocw-mf-cost-history"><summary>查看上次试算</summary>' : ""}
       ${this.renderShipmentProjectSummary(preview.project_summary || [])}
       <div class="ocw-mf-cost-summary">
         <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : header.status === "Dirty" ? "上次试算 · 结果待更新" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
@@ -17786,6 +17787,15 @@ class OverseasCostWorkbench {
 
   detailCalculationAction(batch = {}) {
     const status = String(batch.status || "").toLowerCase();
+    const confirmStatus = String(batch.confirm_status || "").toLowerCase();
+    const task = this.viewState?.task || "pending";
+    if (
+      task === "cost"
+      || task === "erp"
+      || status.includes("confirmed")
+      || confirmStatus === "confirmed"
+      || Number(batch.is_locked || 0) === 1
+    ) return null;
     const summary = batch.summary_snapshot || {};
     const hasSavedResult = Boolean(
       batch.calculated_at
@@ -17851,7 +17861,7 @@ class OverseasCostWorkbench {
             </div>
           </div>
           <div class="ocw-detail-header-actions">
-            <button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>
+            ${action ? `<button class="ocw-primary-btn" type="button" data-action="detail-primary" data-primary-action="${action.action}">${action.label}</button>` : ""}
             ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
