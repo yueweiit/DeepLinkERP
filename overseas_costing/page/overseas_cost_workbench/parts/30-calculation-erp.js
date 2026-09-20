@@ -51,21 +51,39 @@
       if (this.resetBatchResultPreview) {
         this.resetBatchResultPreview({ clearCache: true, render: false });
       }
-      if (result.saved && this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
-        await this.refreshRecalculatedDetailClassification(batch.name);
-      } else if (this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
-        await this.refreshDetailSummary();
-      } else if (this.viewState?.screen === "workbench") {
-        await this.loadBatches();
-      } else {
-        await this.loadBatchItems(batch.name, batch.current_version, true);
-        await this.loadAuditLogs(batch.name, batch.current_version);
-        this.renderTable();
-        this.renderRecalculateResult(batch.name, summary);
-        if (this.renderWorkbenchBatchList) this.renderWorkbenchBatchList();
+      let refreshWarning = "";
+      try {
+        if (result.saved && this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
+          await this.refreshRecalculatedDetailClassification(batch.name);
+        } else if (this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
+          await this.refreshDetailSummary();
+        } else if (this.viewState?.screen === "workbench") {
+          await this.loadBatches();
+        } else {
+          await this.loadBatchItems(batch.name, batch.current_version, true);
+          await this.loadAuditLogs(batch.name, batch.current_version);
+          this.renderTable();
+          this.renderRecalculateResult(batch.name, summary);
+          if (this.renderWorkbenchBatchList) this.renderWorkbenchBatchList();
+        }
+      } catch (refreshError) {
+        if (!result.saved) throw refreshError;
+        refreshWarning = refreshError?.message || "工作台分类刷新失败";
+        if (this.detailState?.batchName === batch.name && this.$root.attr("data-screen") === "detail") {
+          try {
+            await this.refreshDetailSummary();
+          } catch (_fallbackError) {
+            // 试算结果已经原子保存；详情回读失败不能把已保存的试算误报为失败。
+          }
+        }
       }
       this.recordUsage("RECALCULATE", { batch, remark: "重新试算批次成本" });
-      frappe.show_alert({ message: result.message || "重新试算完成", indicator: "green" });
+      frappe.show_alert({
+        message: refreshWarning
+          ? `试算已保存，但工作台分类刷新失败：${refreshWarning}。已保留当前详情，请稍后刷新。`
+          : result.message || "重新试算完成",
+        indicator: refreshWarning ? "orange" : "green",
+      });
     } catch (error) {
       this.recordUsage("RECALCULATE", { batch, status: "Failed", remark: error.message || "重新试算失败" });
       this.showError(error);
@@ -82,25 +100,58 @@
     const current = this.findBatch(batchName) || this.detailState?.header || {};
     const keyword = current.batch_no || current.source_approval_no || current.customs_no || current.waybill_no || batchName;
     const filtersJson = JSON.stringify({ keyword, review_status: "pending", include_history: 1 });
+    const pageLength = 100;
     for (const task of ["cost", "pending"]) {
-      const result = await this.call("overseas_costing.api.workbench.get_batches", {
-        filters_json: filtersJson,
-        task,
-        page: 1,
-        page_length: 10,
-      });
-      if (!result?.ok) throw new Error(result?.message || "试算后工作台分类刷新失败");
-      const batch = (result.items || []).find((row) => row.name === batchName);
-      if (batch) return { task, batch };
+      for (let page = 1; ; page += 1) {
+        const result = await this.call("overseas_costing.api.workbench.get_batches", {
+          filters_json: filtersJson,
+          task,
+          page,
+          page_length: pageLength,
+        });
+        if (!result?.ok) throw new Error(result?.message || "试算后工作台分类刷新失败");
+        const items = result.items || [];
+        const batch = items.find((row) => row.name === batchName);
+        if (batch) return { task, batch };
+        const total = Number(result.total || 0);
+        if (!items.length || (total > 0 ? page * pageLength >= total : items.length < pageLength)) break;
+      }
     }
     return { task: "pending", batch: null };
   }
 
-  async refreshRecalculatedDetailClassification(batchName) {
-    const authoritative = await this.getAuthoritativeReviewClassification(batchName);
-    const task = authoritative.task === "cost" ? "cost" : "pending";
+  captureReviewNavigationContext(batchName) {
+    return {
+      batchName,
+      task: this.viewState?.task || "pending",
+      screen: this.viewState?.screen || this.$root?.attr?.("data-screen") || "workbench",
+      viewBatch: this.viewState?.batch || "",
+      detailBatch: this.detailState?.batchName || "",
+      drawerBatch: this.drawerBatchName || "",
+      detailRequestId: this.detailState?.requestId,
+    };
+  }
+
+  reviewNavigationContextMatches(context) {
+    if (!context || this.viewState?.task !== context.task) return false;
+    const screen = this.viewState?.screen || this.$root?.attr?.("data-screen") || "workbench";
+    if (screen !== context.screen) return false;
+    if (context.screen === "detail") {
+      if (this.detailState?.batchName !== context.batchName) return false;
+      if (this.viewState?.batch && this.viewState.batch !== context.batchName) return false;
+      if (this.detailState?.requestId !== context.detailRequestId) return false;
+    } else if (context.drawerBatch && this.drawerBatchName !== context.drawerBatch) {
+      return false;
+    }
+    return true;
+  }
+
+  async applyAuthoritativeReviewClassification(batchName, authoritative, context, options = {}) {
+    if (context && !this.reviewNavigationContextMatches(context)) return false;
+    const task = authoritative?.task === "cost" && authoritative?.batch?.review_state === "ready" ? "cost" : "pending";
+    const keepDetailOpen = context?.screen === "detail" && this.detailState?.batchName === batchName;
     const tab = this.detailState?.tab || this.viewState?.tab || "overview";
-    if (authoritative.batch && this.detailState?.batchName === batchName) {
+    if (authoritative?.batch && keepDetailOpen) {
       this.detailState.header = { ...(this.detailState.header || {}), ...authoritative.batch };
     }
     this.viewState.task = task;
@@ -114,19 +165,28 @@
       review_warning: "",
       issue: "",
       page: 1,
-      screen: "detail",
-      batch: batchName,
-      tab,
+      screen: keepDetailOpen ? "detail" : "workbench",
+      batch: keepDetailOpen ? batchName : "",
+      tab: keepDetailOpen ? tab : "overview",
     });
-    await this.loadBatches();
-    if (authoritative.batch && this.detailState?.batchName === batchName) {
+    if (options.reload !== false) await this.loadBatches();
+    if (authoritative?.batch && keepDetailOpen && this.detailState?.batchName === batchName) {
       const merged = { ...(this.detailState.header || {}), ...authoritative.batch };
       const index = this.batches.findIndex((row) => row.name === batchName);
       if (index >= 0) this.batches[index] = { ...this.batches[index], ...authoritative.batch };
       this.detailState.header = merged;
-      this.renderDetailShell();
-      await this.switchDetailTab(tab, { updateUrl: false });
+      if (options.render !== false) {
+        this.renderDetailShell?.();
+        if (this.switchDetailTab) await this.switchDetailTab(tab, { updateUrl: false });
+      }
     }
+    return true;
+  }
+
+  async refreshRecalculatedDetailClassification(batchName) {
+    const context = this.captureReviewNavigationContext(batchName);
+    const authoritative = await this.getAuthoritativeReviewClassification(batchName);
+    return this.applyAuthoritativeReviewClassification(batchName, authoritative, context);
   }
 
   setMainView(view = "cost") {
@@ -439,7 +499,26 @@
     }
     const batch = this.findBatch(batchName || this.drawerBatchName);
     if (!batch) return;
+    const context = this.captureReviewNavigationContext(batch.name);
+    if (batch.review_state !== "ready") {
+      await this.applyAuthoritativeReviewClassification(
+        batch.name,
+        { task: "pending", batch },
+        context,
+        { reload: false, render: false }
+      );
+      this.showPendingFeature("当前批次仍在待处理，请完成补录或重新计算后再到“成本核对”确认。");
+      return;
+    }
     try {
+      const authoritative = await this.getAuthoritativeReviewClassification(batch.name);
+      if (!this.reviewNavigationContextMatches(context)) return;
+      if (authoritative.task !== "cost" || authoritative.batch?.review_state !== "ready") {
+        await this.applyAuthoritativeReviewClassification(batch.name, authoritative, context);
+        this.showPendingFeature("批次权威状态已变化，已返回待处理，请按服务端提示处理。");
+        return;
+      }
+      Object.assign(batch, authoritative.batch);
       const result = await this.call(
         "overseas_costing.api.writeback.confirm_calculation_result",
         {

@@ -120,6 +120,9 @@ def test_other_recalculate_entry_allows_ready_ai_and_reserves_write_guard():
 const Recalc=Function('Base','return class extends Base {{'+fs.readFileSync({source_path},'utf8').split('  setMainView(')[0]+'}}')(Harness);
 workspace.recalculate=Recalc.prototype.recalculate;
 workspace.getAuthoritativeReviewClassification=Recalc.prototype.getAuthoritativeReviewClassification;
+workspace.captureReviewNavigationContext=Recalc.prototype.captureReviewNavigationContext;
+workspace.reviewNavigationContextMatches=Recalc.prototype.reviewNavigationContextMatches;
+workspace.applyAuthoritativeReviewClassification=Recalc.prototype.applyAuthoritativeReviewClassification;
 workspace.refreshRecalculatedDetailClassification=Recalc.prototype.refreshRecalculatedDetailClassification;
 """ + r"""
 workspace.detailState.tab='overview';

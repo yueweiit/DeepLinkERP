@@ -349,6 +349,7 @@ console.log(JSON.stringify({pendingHtml,costHtml,calls,blocked:v.blocked}));
     assert 'data-action="confirm-calculation-result"' not in result['pendingHtml']
     assert '校验计算结果' not in result['pendingHtml']
     assert 'data-action="confirm-calculation-result"' in result['costHtml']
+    assert 'data-action="confirm-calculation-result" disabled' in result['costHtml']
     assert result['calls'] == []
     assert '成本核对' in result['blocked']
 
@@ -357,11 +358,13 @@ def test_cost_confirmation_refreshes_authoritative_erp_queue_without_auto_push()
     result = run_js("""
 global.frappe={show_alert:()=>{}};
 const v=makeView('cost'),calls=[],replacements=[];
-const batch={name:'B',current_version:'V',status:'Calculated'};v.batches=[batch];v.findBatch=()=>batch;
+const batch={name:'B',current_version:'V',status:'Calculated',review_state:'ready'};v.batches=[batch];v.findBatch=()=>batch;
 v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};v.detailState={batchName:'B',tab:'overview'};
 v.replaceViewState=values=>{replacements.push(values);v.viewState={...v.viewState,...values};};
 v.loadBatches=async()=>calls.push('loadBatches');v.refreshBatch=async()=>calls.push('refreshBatch');v.recordUsage=()=>{};v.showError=e=>{throw e};
-v.call=async method=>{calls.push(method);return {ok:true,confirmed:true,message:'已确认'};};
+v.call=async(method,args)=>{calls.push(method);
+ if(method.endsWith('get_batches'))return {ok:true,items:[batch],total:1,page:1,page_length:100};
+ return {ok:true,confirmed:true,message:'已确认'};};
 await v.confirmCalculationResult('B');
 console.log(JSON.stringify({task:v.viewState.task,calls,replacements}));
 """)
@@ -370,3 +373,123 @@ console.log(JSON.stringify({task:v.viewState.task,calls,replacements}));
     assert not any('writeback_to_erp' in call or 'queue_erp' in call for call in result['calls'])
     assert result['replacements'][-1]['screen'] == 'detail'
     assert result['replacements'][-1]['batch'] == 'B'
+
+
+def test_cost_confirmation_requires_local_ready_state_before_any_api_call():
+    result = run_js("""
+global.frappe={show_alert:()=>{}};
+const v=makeView('cost'),calls=[];
+const batch={name:'B',current_version:'V',status:'Calculated',review_state:'processing'};
+v.batches=[batch];v.findBatch=()=>batch;v.drawerBatchName='B';
+v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};
+v.detailState={batchName:'B',tab:'overview',header:batch};
+v.showPendingFeature=message=>{v.blocked=message};v.replaceViewState=values=>{v.viewState={...v.viewState,...values};};
+v.loadBatches=async()=>{};v.recordUsage=()=>{};v.showError=e=>{v.blocked=e.message};
+v.call=async method=>{calls.push(method);return {ok:true}};
+await v.confirmCalculationResult('B');
+console.log(JSON.stringify({task:v.viewState.task,calls,blocked:v.blocked}));
+""")
+    assert result['calls'] == []
+    assert result['task'] == 'pending'
+    assert '待处理' in result['blocked']
+
+
+def test_cost_confirmation_rechecks_authoritative_ready_state_before_confirming():
+    result = run_js("""
+global.frappe={show_alert:()=>{}};
+const v=makeView('cost'),calls=[];
+const batch={name:'B',batch_no:'B-NO',current_version:'V',status:'Calculated',review_state:'ready'};
+v.batches=[batch];v.findBatch=()=>batch;v.drawerBatchName='B';
+v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};v.detailState={batchName:'B',tab:'overview',header:batch,requestId:4};
+v.replaceViewState=values=>{v.viewState={...v.viewState,...values};};v.loadBatches=async()=>{};
+v.recordUsage=()=>{};v.showError=e=>{throw e};
+v.call=async(method,args)=>{calls.push({method,args});
+ if(method.endsWith('get_batches'))return {ok:true,items:[batch],total:1,page:1,page_length:100};
+ if(method.endsWith('confirm_calculation_result'))return {ok:true,confirmed:true};
+ throw new Error(method);};
+await v.confirmCalculationResult('B');
+console.log(JSON.stringify({calls,task:v.viewState.task}));
+""")
+    assert [call['method'].rsplit('.', 1)[-1] for call in result['calls']] == [
+        'get_batches',
+        'confirm_calculation_result',
+    ]
+    assert result['calls'][0]['args']['task'] == 'cost'
+
+
+def test_cost_confirmation_downgrade_blocks_confirm_and_returns_to_pending():
+    result = run_js("""
+const v=makeView('cost'),calls=[];
+const local={name:'B',batch_no:'B-NO',current_version:'V',status:'Calculated',review_state:'ready'};
+const processing={...local,review_state:'processing',review_blockers:[{code:'STALE',message:'费用已变更'}]};
+v.batches=[local];v.findBatch=()=>local;v.drawerBatchName='B';
+v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};v.detailState={batchName:'B',tab:'overview',header:local,requestId:2};
+v.replaceViewState=values=>{v.viewState={...v.viewState,...values};};v.loadBatches=async()=>{};
+v.renderDetailShell=()=>{};v.switchDetailTab=async()=>{};v.showPendingFeature=message=>{v.blocked=message};
+v.recordUsage=()=>{};v.showError=e=>{v.blocked=e.message};
+v.call=async(method,args)=>{calls.push({method,args});
+ if(method.endsWith('get_batches')&&args.task==='cost')return {ok:true,items:[],total:0,page:1,page_length:100};
+ if(method.endsWith('get_batches')&&args.task==='pending')return {ok:true,items:[processing],total:1,page:1,page_length:100};
+ throw new Error('confirmation must stay blocked');};
+await v.confirmCalculationResult('B');
+console.log(JSON.stringify({calls,task:v.viewState.task,header:v.detailState.header,blocked:v.blocked}));
+""")
+    assert [call['args']['task'] for call in result['calls']] == ['cost', 'pending']
+    assert result['task'] == 'pending'
+    assert result['header']['review_state'] == 'processing'
+    assert '待处理' in result['blocked']
+
+
+def test_authoritative_classification_walks_pages_until_exact_batch_is_found():
+    result = run_js("""
+const v=makeView('pending'),calls=[];
+const current={name:'TARGET',batch_no:'B-NO'};v.batches=[current];v.findBatch=()=>current;v.detailState={header:current};
+v.call=async(method,args)=>{calls.push(args);
+ if(args.task==='cost'&&args.page===1)return {ok:true,items:Array.from({length:100},(_,i)=>({name:`OTHER-${i}`})),total:101,page:1,page_length:100};
+ if(args.task==='cost'&&args.page===2)return {ok:true,items:[{...current,review_state:'ready'}],total:101,page:2,page_length:100};
+ throw new Error('pending should not be queried');};
+const found=await v.getAuthoritativeReviewClassification('TARGET');
+console.log(JSON.stringify({found,calls}));
+""")
+    assert result['found']['task'] == 'cost'
+    assert result['found']['batch']['name'] == 'TARGET'
+    assert [call['page'] for call in result['calls']] == [1, 2]
+    assert all(call['page_length'] == 100 for call in result['calls'])
+
+
+def test_saved_recalculation_refresh_failure_warns_without_marking_calculation_failed():
+    result = run_js("""
+const alerts=[];global.frappe={show_alert:value=>alerts.push(value)};
+const v=makeView('pending'),events=[];
+const batch={name:'B',batch_no:'B-NO',current_version:'V',review_state:'processing',status:'Dirty'};
+v.batches=[batch];v.findBatch=()=>batch;v.viewState={task:'pending',screen:'detail',batch:'B',tab:'overview',page:1};
+v.detailState={batchName:'B',tab:'overview',header:batch,editToken:'TOKEN',expectedModified:'M1',requestId:1};
+v.ensureEditSession=async()=>true;v.acceptSavedComprehensiveCost=()=>{};v.applyRecalculateSummary=()=>{};v.resetBatchResultPreview=()=>{};
+v.call=async method=>{if(method.endsWith('recalculate_batch'))return {ok:true,saved:true,summary_snapshot:{}};throw new Error('分类服务不可用')};
+v.refreshDetailSummary=async()=>{events.push('fallback')};v.recordUsage=(action,payload)=>events.push(payload.status||'Success');v.showError=e=>events.push(`error:${e.message}`);
+await v.recalculate('B');
+console.log(JSON.stringify({events,alerts}));
+""")
+    assert result['events'] == ['fallback', 'Success']
+    assert any('已保存' in alert['message'] for alert in result['alerts'])
+    assert not any('试算失败' in alert['message'] for alert in result['alerts'])
+
+
+def test_stale_recalculation_classification_cannot_navigate_a_new_detail_context():
+    result = run_js("""
+const alerts=[];global.frappe={show_alert:value=>alerts.push(value)};
+const v=makeView('pending'),replacements=[];
+const batch={name:'B',batch_no:'B-NO',current_version:'V',review_state:'processing',status:'Dirty'};
+v.batches=[batch];v.findBatch=name=>v.batches.find(row=>row.name===name)||null;
+v.viewState={task:'pending',screen:'detail',batch:'B',tab:'overview',page:1};
+v.detailState={batchName:'B',tab:'overview',header:batch,editToken:'TOKEN',expectedModified:'M1',requestId:7};
+v.ensureEditSession=async()=>true;v.acceptSavedComprehensiveCost=()=>{};v.applyRecalculateSummary=()=>{};v.resetBatchResultPreview=()=>{};
+let release;v.call=async(method,args)=>{if(method.endsWith('recalculate_batch'))return {ok:true,saved:true,summary_snapshot:{}};
+ return await new Promise(resolve=>{release=resolve})};
+v.replaceViewState=values=>replacements.push(values);v.loadBatches=async()=>{};v.refreshDetailSummary=async()=>{};v.recordUsage=()=>{};v.showError=e=>{throw e};
+const running=v.recalculate('B');await new Promise(resolve=>setImmediate(resolve));
+v.detailState.batchName='OTHER';v.detailState.requestId=8;v.viewState.batch='OTHER';
+release({ok:true,items:[{...batch,review_state:'ready'}],total:1,page:1,page_length:100});await running;
+console.log(JSON.stringify({task:v.viewState.task,batch:v.detailState.batchName,replacements}));
+""")
+    assert result == {'task': 'pending', 'batch': 'OTHER', 'replacements': []}

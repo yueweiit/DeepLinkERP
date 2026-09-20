@@ -25,6 +25,7 @@ const classSource=calculation
   +fs.readFileSync(parts+'/82-detail-page.js','utf8');
 const Harness=Function(`return class Harness {{${{classSource}}}}`)();
 function makeView(batch) {{
+  batch.review_state=batch.review_state||'ready';
   const view=new Harness();
   view.viewState={{task:'cost'}};
   view.batches=[batch];

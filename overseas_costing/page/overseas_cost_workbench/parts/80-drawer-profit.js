@@ -486,7 +486,7 @@
     const writebackInfo = this.erpWritebackStatusInfo(batch);
     const invalidBusiness = Boolean((batch.source_status || {}).invalid_business);
     const isCostReview = this.viewState?.task === "cost";
-    const canConfirm = isCostReview && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
+    const canConfirm = isCostReview && batch.review_state === "ready" && hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
     const canPreview = confirmed && !invalidBusiness;
     const erpAction = this.erpPushActionState(batch, itemCount);
     const note = invalidBusiness
