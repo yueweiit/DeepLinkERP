@@ -28,9 +28,11 @@
 
 应用随自定义镜像发布后，按公司执行初始化。启用日期是法定凭证切换日；切换日前的总账分录仍可在 ERPNext 报表中查询，但不会倒排法定凭证号。
 
+新建中国财务设置及公司自动初始化默认采用“小企业会计准则”；需要“企业会计准则”时可显式选择。更新应用或重复初始化不会覆盖已有公司的会计准则。
+
 ```bash
 bench --site SITE execute china_finance.api.initialize_company --kwargs \
-  '{"company":"公司全称","accounting_standard":"企业会计准则","taxpayer_type":"一般纳税人","activation_date":"2026-01-01","enforce_role_separation":1}'
+  '{"company":"公司全称","accounting_standard":"小企业会计准则","taxpayer_type":"一般纳税人","activation_date":"2026-01-01","enforce_role_separation":1}'
 ```
 
 初始化会为资产负债表和利润表生成建议科目映射，所有建议映射默认处于“未复核”状态，必须由财务人员确认。现金流量表和所有者权益变动表取决于企业会计政策及现金流分类，需手工配置。

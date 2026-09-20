@@ -14,8 +14,12 @@ from china_finance.setup.china_coa_profile import (
 	sync_china_coa_master_data,
 )
 from china_finance.setup.templates import (
-	_classify_known_profile_fallback, classify_account_number, refine_classification_for_template,
-	SMALL_ENTERPRISE_ROWS, get_supplementary_row_code, is_strictly_excluded_from_statement,
+	SMALL_ENTERPRISE_ROWS,
+	_classify_known_profile_fallback,
+	classify_account_number,
+	get_supplementary_row_code,
+	is_strictly_excluded_from_statement,
+	refine_classification_for_template,
 	requires_manual_cash_flow_assignment,
 )
 
@@ -38,6 +42,9 @@ class TestChinaCoaProfileIntegration(IntegrationTestCase):
 		# The Company hook initializes a China-template company after ERPNext creates
 		# its accounts. A repeated initialization must only fill missing metadata.
 		self.assertTrue(frappe.db.exists("China Finance Settings", {"company": company.name}))
+		self.assertEqual(
+			frappe.db.get_value("China Finance Settings", company.name, "accounting_standard"), "小企业会计准则"
+		)
 		self.assertFalse(
 			frappe.db.get_value("China Finance Settings", company.name, "enforce_role_separation")
 		)
@@ -51,7 +58,9 @@ class TestChinaCoaProfileIntegration(IntegrationTestCase):
 		self.assertGreater(
 			frappe.db.count("China Financial Statement Mapping", {"company": company.name}), 0
 		)
-		from china_finance.china_finance.report.china_financial_statements.china_financial_statements import execute
+		from china_finance.china_finance.report.china_financial_statements.china_financial_statements import (
+			execute,
+		)
 		columns, rows, *_ = execute({"company": company.name, "statement_type": "Balance Sheet"})
 		self.assertTrue(columns)
 		self.assertTrue(rows)
@@ -78,6 +87,15 @@ class TestChinaCoaProfileIntegration(IntegrationTestCase):
 		company.db_set("default_income_account", None)
 		sync_china_coa_master_data(company.name, repair=True)
 		self.assertEqual(frappe.db.get_value("Company", company.name, "default_income_account"), original_income)
+
+		# Changing the installation default must not overwrite an existing choice.
+		settings = frappe.get_doc("China Finance Settings", company.name)
+		settings.accounting_standard = "企业会计准则"
+		settings.save()
+		initialize_company(company.name)
+		self.assertEqual(
+			frappe.db.get_value("China Finance Settings", company.name, "accounting_standard"), "企业会计准则"
+		)
 
 
 class TestChinaCoaProfile(UnitTestCase):

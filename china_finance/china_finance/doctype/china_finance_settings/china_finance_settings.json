@@ -17,7 +17,7 @@
   {"fieldname":"company","fieldtype":"Link","label":"公司","options":"Company","reqd":1,"unique":1,"in_list_view":1},
   {"default":"1","fieldname":"enabled","fieldtype":"Check","label":"启用中国财务"},
   {"fieldname":"activation_date","fieldtype":"Date","label":"启用日期","reqd":1},
-  {"default":"企业会计准则","fieldname":"accounting_standard","fieldtype":"Select","label":"会计准则","options":"企业会计准则\n小企业会计准则","reqd":1,"in_list_view":1},
+  {"default":"小企业会计准则","fieldname":"accounting_standard","fieldtype":"Select","label":"会计准则","options":"企业会计准则\n小企业会计准则","reqd":1,"in_list_view":1},
   {"default":"一般纳税人","fieldname":"taxpayer_type","fieldtype":"Select","label":"纳税人类型","options":"一般纳税人\n小规模纳税人","reqd":1},
   {"fieldname":"coa_section","fieldtype":"Section Break","label":"中国科目模板档案"},
   {"fieldname":"coa_template","fieldtype":"Data","label":"科目模板","read_only":1},

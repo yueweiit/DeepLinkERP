@@ -4,15 +4,26 @@ from frappe.utils import cint, getdate, nowdate
 
 from china_finance.services.closing import run_closing_checks
 from china_finance.services.voucher import GL_SOURCE_DOCTYPES
-from china_finance.setup.install import ROLES, validate_deployment_schema
-from china_finance.setup.templates import (
-	create_automatic_mappings, seed_statement_templates, sync_unreviewed_automatic_mappings,
+from china_finance.setup.china_coa_profile import (
+	apply_company_defaults,
+	ensure_cash_scope,
+	ensure_tax_mappings,
+	get_profile_status,
+	is_profile_company,
+	normalize_generic_vat_templates,
+	update_settings_profile,
 )
 from china_finance.setup.china_coa_profile import (
-	apply_company_defaults, ensure_cash_scope, ensure_tax_mappings, get_profile_status,
 	get_china_coa_master_data_readiness as get_master_data_readiness,
-	is_profile_company, normalize_generic_vat_templates,
-	sync_china_coa_master_data as sync_master_data, update_settings_profile,
+)
+from china_finance.setup.china_coa_profile import (
+	sync_china_coa_master_data as sync_master_data,
+)
+from china_finance.setup.install import ROLES, validate_deployment_schema
+from china_finance.setup.templates import (
+	create_automatic_mappings,
+	seed_statement_templates,
+	sync_unreviewed_automatic_mappings,
 )
 
 
@@ -34,7 +45,7 @@ def submit_prior_period_error_adjustment(name):
 
 def _initialize_company(
 	company,
-	accounting_standard="企业会计准则",
+	accounting_standard="小企业会计准则",
 	taxpayer_type="一般纳税人",
 	activation_date=None,
 	voucher_mode="收付转记",
@@ -92,7 +103,7 @@ def _initialize_company(
 @frappe.whitelist()
 def initialize_company(
 	company,
-	accounting_standard="企业会计准则",
+	accounting_standard="小企业会计准则",
 	taxpayer_type="一般纳税人",
 	activation_date=None,
 	voucher_mode="收付转记",
