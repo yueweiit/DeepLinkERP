@@ -290,9 +290,9 @@ function make_balance_sheet_side_row(row, side) {
 
 function source_account_link(label, accounts) {
 	if (!accounts?.length) return label;
-	const account = accounts[0];
+	const source_accounts = JSON.stringify([...new Set(accounts)]);
 	const title = frappe.utils.escape_html(__("查看来源科目总账") + "：\n" + accounts.join("\n"));
-	return `<a href="#" class="china-finance-source-account-link" title="${title}" data-account="${frappe.utils.escape_html(account)}">${label}</a>`;
+	return `<a href="#" class="china-finance-source-account-link" title="${title}" data-accounts="${frappe.utils.escape_html(source_accounts)}">${label}</a>`;
 }
 
 function bind_native_statement_table_layout(report, datatable) {
@@ -324,19 +324,22 @@ function bind_source_account_links() {
 	frappe._china_finance_source_account_links_bound = true;
 	$(document).on("click.china_finance_source_account", ".china-finance-source-account-link", function (event) {
 		event.preventDefault();
-		const account = $(this).attr("data-account");
+		const accounts = JSON.parse($(this).attr("data-accounts") || "[]");
 		const report = frappe.query_report;
 		const company = report?.get_filter_value("company");
-		if (!account || !company) return;
+		if (!accounts.length || !company) return;
 		const filters = {
 			company,
-			account,
+			account: accounts,
 			from_date: report.get_filter_value("from_date"),
 			to_date: report.get_filter_value("to_date"),
 		};
 		for (const fieldname of ["finance_book", "cost_center", "project"]) {
 			const value = report.get_filter_value(fieldname);
 			if (value) filters[fieldname] = value;
+		}
+		if (report.get_filter_value("statement_type") === "Profit and Loss") {
+			frappe.show_alert({message: __("已打开全部来源科目。总账包含结转分录，核对利润表时请剔除损益结转。"), indicator: "blue"}, 10);
 		}
 		frappe.set_route("query-report", "General Ledger", filters);
 	});

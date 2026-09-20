@@ -5,6 +5,7 @@ import frappe
 
 from china_finance.services.statement_mapping_repair import corrected_cash_flow_classification, repair_cash_flow_mappings
 from china_finance.setup.templates import classify_account_number
+from china_finance.services.financial_statement import get_statement_source_accounts, render_rows
 
 
 def account(number, name):
@@ -13,6 +14,11 @@ def account(number, name):
 
 def mapping(account_name, code, **kwargs):
 	return frappe._dict(account=account_name, row_code=code, **kwargs)
+
+
+def row(code, indent=0, formula=None):
+	return frappe._dict(row_code=code, label=code, row_type="Formula" if formula else "Mapped Accounts",
+		indent=indent, formula=formula, show_zero=1, bold=0)
 
 
 class TestStatementReconciliation(unittest.TestCase):
@@ -51,3 +57,35 @@ class TestStatementReconciliation(unittest.TestCase):
 		with patch("frappe.get_all", side_effect=[["Cash Flow Template"], []]) as get_all:
 			self.assertEqual(repair_cash_flow_mappings(), [])
 			self.assertEqual(get_all.call_args.kwargs["filters"]["mapping_source"], "Automatic")
+
+	def test_finance_parent_and_formula_include_interest_source(self):
+		template = frappe._dict(accounting_standard="小企业会计准则", statement_type="Profit and Loss",
+			rows=[row("NET", formula="0-FINANCE_EXPENSES"), row("FINANCE_EXPENSES", 1), row("INTEREST_EXPENSES", 2)])
+		mappings = [mapping("fees", "FINANCE_EXPENSES"), mapping("interest", "INTEREST_EXPENSES")]
+		sources = get_statement_source_accounts(template, mappings)
+		self.assertEqual(sources["FINANCE_EXPENSES"], {"fees", "interest"})
+		self.assertEqual(sources["NET"], {"fees", "interest"})
+		values = {r["row_code"]: r["amount"] for r in render_rows(template, {"FINANCE_EXPENSES":104.87, "INTEREST_EXPENSES":-.48})}
+		self.assertEqual(values["FINANCE_EXPENSES"], 104.39)
+
+	def test_supplementary_mapping_does_not_double_count(self):
+		template = frappe._dict(accounting_standard="小企业会计准则", statement_type="Profit and Loss",
+			rows=[row("FINANCE_EXPENSES", 1), row("INTEREST_EXPENSES", 2)])
+		mappings = [mapping("interest", "FINANCE_EXPENSES", supplementary_row_code="INTEREST_EXPENSES")]
+		sources = get_statement_source_accounts(template, mappings)
+		self.assertEqual(sources["FINANCE_EXPENSES"], {"interest"})
+		self.assertEqual(sources["INTEREST_EXPENSES"], {"interest"})
+		values = render_rows(template, {"FINANCE_EXPENSES": -.48, "INTEREST_EXPENSES": -.48}, {"INTEREST_EXPENSES"})
+		self.assertEqual(values[0]["amount"], -.48)
+
+	def test_cash_flow_sources_follow_direction_not_main_row(self):
+		template = frappe._dict(statement_type="Cash Flow", rows=[row("IN"), row("OUT"), row("NET", formula="IN-OUT")])
+		sources = get_statement_source_accounts(template, [mapping("interest", "OUT", cash_inflow_row_code="IN", cash_outflow_row_code="OUT")])
+		self.assertEqual(sources["IN"], {"interest"})
+		self.assertEqual(sources["NET"], {"interest"})
+
+	def test_sources_keep_all_mapping_revisions(self):
+		template = frappe._dict(statement_type="Profit and Loss", rows=[row("A"), row("B")])
+		sources = get_statement_source_accounts(template, [mapping("old_account", "A"), mapping("new_account", "A"), mapping("old_account", "B")])
+		self.assertEqual(sources["A"], {"old_account", "new_account"})
+		self.assertEqual(sources["B"], {"old_account"})

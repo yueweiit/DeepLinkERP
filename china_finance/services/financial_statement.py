@@ -206,9 +206,11 @@ def build_statement(
 		mapping.supplementary_row_code for mapping in mappings if mapping.get("supplementary_row_code")
 	}
 	period_rows = render_rows(template, period_values, supplementary_row_codes)
-	accounts_by_row = defaultdict(list)
-	for mapping in mappings:
-		accounts_by_row[mapping.row_code].append(mapping.account)
+	source_mappings = (
+		get_mapping_revisions(company, template, from_date, to_date)
+		if statement_type in {"Profit and Loss", "Cash Flow"} else mappings
+	)
+	accounts_by_row = get_statement_source_accounts(template, source_mappings)
 	for result_row in period_rows:
 		result_row["source_accounts"] = sorted(set(accounts_by_row.get(result_row["row_code"], [])))
 	opening_rows = (
@@ -642,14 +644,20 @@ def render_rows(template, source_values, supplementary_row_codes=None):
 
 def _roll_up_small_profit_and_loss_rows(template, values, supplementary_row_codes=None):
 	"""Show child expense rows in their statutory parent without double counting."""
+	for parent, children in get_small_profit_and_loss_children(template, supplementary_row_codes).items():
+		values[parent] += sum(flt(values[code]) for code in children)
+
+
+def get_small_profit_and_loss_children(template, supplementary_row_codes=None):
 	if getattr(template, "accounting_standard", None) != "小企业会计准则" or getattr(template, "statement_type", None) != "Profit and Loss":
-		return
+		return {}
 
 	parent_codes = {
 		"TAX_SURCHARGES", "SELLING_EXPENSES", "ADMIN_EXPENSES", "FINANCE_EXPENSES",
 		"NONOPERATING_INCOME", "NONOPERATING_EXPENSE",
 	}
 	rows = template.rows
+	result = {}
 	supplementary_row_codes = set(supplementary_row_codes or ())
 	for index, parent in enumerate(rows):
 		if parent.row_code not in parent_codes:
@@ -661,7 +669,39 @@ def _roll_up_small_profit_and_loss_rows(template, values, supplementary_row_code
 			if child.row_type == "Mapped Accounts" and child.row_code not in supplementary_row_codes:
 				children.append(child.row_code)
 		if children:
-			values[parent.row_code] += sum(flt(values[code]) for code in children)
+			result[parent.row_code] = children
+	return result
+
+
+def get_statement_source_accounts(template, mappings):
+	"""Follow the same child/formula dependencies as the displayed amounts."""
+	accounts = defaultdict(set)
+	for mapping in mappings:
+		codes = [mapping.row_code, mapping.get("supplementary_row_code")]
+		if template.statement_type == "Cash Flow":
+			codes = [mapping.get("cash_inflow_row_code"), mapping.get("cash_outflow_row_code")]
+		for code in codes:
+			if code:
+				accounts[code].add(mapping.account)
+	children = get_small_profit_and_loss_children(
+		template, {m.get("supplementary_row_code") for m in mappings if m.get("supplementary_row_code")}
+	)
+	valid_codes = {row.row_code for row in template.rows}
+	dependencies = dict(children)
+	for row in template.rows:
+		if row.row_type == "Formula":
+			dependencies[row.row_code] = get_formula_dependencies(row.formula, valid_codes)
+	# Monotonic set union also handles formulas stored before their dependencies.
+	for _ in template.rows:
+		changed = False
+		for code, sources in dependencies.items():
+			before = len(accounts[code])
+			for source in sources:
+				accounts[code].update(accounts[source])
+			changed |= len(accounts[code]) != before
+		if not changed:
+			break
+	return accounts
 
 
 def get_statement_values(
