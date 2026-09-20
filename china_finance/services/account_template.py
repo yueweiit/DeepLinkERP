@@ -9,7 +9,6 @@ import frappe
 from frappe import _
 from frappe.utils import cint
 
-
 SOURCE_COMPANY = "悦为智能技术(东莞)有限公司"
 COMPANY_TEMPLATE = f"{SOURCE_COMPANY}（公司科目模板）"
 TEMPLATE_COUNTRY = "China"
@@ -208,10 +207,15 @@ def preview_existing_company_template_sync(company):
 		if _account_metadata_differs(account, row):
 			metadata_updates.append(row["account_number"] or row["account_name"])
 
+	blockers = _get_template_sync_blockers(company)
 	return {
+		"site": frappe.local.site,
 		"company": company,
+		"template": COMPANY_TEMPLATE,
 		"general_ledger_entry_count": frappe.db.count("GL Entry", {"company": company}),
-		"can_apply": not frappe.db.exists("GL Entry", {"company": company}),
+		"can_apply": not blockers,
+		"blockers": blockers,
+		"configuration_updates": _plan_configuration_updates(company),
 		"template_account_count": len(template_rows),
 		"existing_account_count": len(existing),
 		"matched_count": len(matched),
@@ -238,20 +242,167 @@ def preview_existing_company_template_sync(company):
 	}
 
 
+def _get_template_sync_blockers(company):
+	"""A chart conversion must happen before business or reviewed configuration exists."""
+	blockers = []
+	# ERPNext propagates account renames to descendants. Keep this operation
+	# confined to one independent company instead of changing a group chart.
+	if frappe.db.get_value("Company", company, "parent_company") or frappe.db.exists(
+		"Company", {"parent_company": company}
+	):
+		blockers.append({"doctype": "Company", "reason": "公司存在上下级公司关系，需单独规划科目迁移"})
+	for doctype in (
+		"GL Entry",
+		"Stock Ledger Entry",
+		"Journal Entry",
+		"Payment Entry",
+		"Sales Invoice",
+		"Purchase Invoice",
+		"Sales Order",
+		"Purchase Order",
+		"Delivery Note",
+		"Purchase Receipt",
+		"Stock Entry",
+		"Asset",
+		"Bank Transaction",
+		"Period Closing Voucher",
+		"China Accounting Voucher",
+		"China Period Closing",
+	):
+		if not frappe.db.exists("DocType", doctype) or not frappe.db.has_column(doctype, "company"):
+			continue
+		count = frappe.db.count(doctype, {"company": company})
+		if count:
+			blockers.append(
+				{"doctype": doctype, "count": count, "reason": "公司已有业务数据（含草稿和已取消数据）"}
+			)
+	for doctype, filters in (
+		("China Financial Statement Mapping", {"reviewed": 1}),
+		("China Financial Statement Mapping", {"mapping_source": "Manual"}),
+		("China Cash Equivalent Scope", {"reviewed": 1}),
+	):
+		count = frappe.db.count(doctype, {"company": company, **filters})
+		if count:
+			blockers.append(
+				{"doctype": doctype, "count": count, "reason": "公司已有人工或已复核配置，需单独核对科目含义"}
+			)
+	return blockers
+
+
+def _plan_configuration_updates(company):
+	"""List references whose meaning changes when standard numbers are reused."""
+	from china_finance.setup.china_coa_profile import get_account_by_number
+
+	updates = []
+	old_profit = get_account_by_number(company, "410401", required=False)
+	settings = frappe.db.get_value("China Finance Settings", {"company": company}, "name")
+	if settings and old_profit:
+		current = frappe.db.get_value("China Finance Settings", settings, "retained_earnings_account")
+		if current == old_profit.name:
+			updates.append(
+				{
+					"doctype": "China Finance Settings",
+					"name": settings,
+					"fieldname": "retained_earnings_account",
+					"current": current,
+					"target_number": "410411",
+				}
+			)
+	old_output = get_account_by_number(company, "22210102", required=False)
+	if old_output and old_output.account_name.endswith("销项税额"):
+		# Retire the old ordinary output-VAT mapping; initialization creates the
+		# correct 22210107 mapping without overlapping any existing target periods.
+		for name in frappe.get_all(
+			"China Tax Account Mapping",
+			filters={
+				"company": company,
+				"direction": "Output",
+				"account": old_output.name,
+				"enabled": 1,
+			},
+			pluck="name",
+		):
+			updates.append(
+				{
+					"doctype": "China Tax Account Mapping",
+					"name": name,
+					"fieldname": "enabled",
+					"current": 1,
+					"value": 0,
+				}
+			)
+		for parenttype, childtype, fieldname in (
+			("Sales Taxes and Charges Template", "Sales Taxes and Charges", "account_head"),
+			("Item Tax Template", "Item Tax Template Detail", "tax_type"),
+		):
+			parents = frappe.get_all(parenttype, filters={"company": company}, pluck="name")
+			if not parents:
+				continue
+			for row in frappe.get_all(
+				childtype,
+				filters={
+					"parenttype": parenttype,
+					"parent": ["in", parents],
+					fieldname: old_output.name,
+				},
+				fields=["name", "parent"],
+			):
+				updates.append(
+					{
+						"doctype": childtype,
+						"name": row.name,
+						"parenttype": parenttype,
+						"parent": row.parent,
+						"fieldname": fieldname,
+						"current": old_output.name,
+						"target_number": "22210107",
+					}
+				)
+	deposit = get_account_by_number(company, "101201", required=False)
+	if deposit:
+		for row in frappe.get_all(
+			"China Cash Equivalent Scope",
+			filters={
+				"company": company,
+				"account": deposit.name,
+				"reviewed": 0,
+				"policy_basis": "按中国科目模板编号自动建议，须由财务人员复核资金可随时支用性。",
+			},
+			fields=["name", "restricted", "restriction_reason"],
+		):
+			for fieldname, value in {
+				"restricted": 0,
+				"restriction_reason": "外埠存款是否可随时支用需财务人员复核，不能按保证金认定为受限资金。",
+			}.items():
+				if row.get(fieldname) != value:
+					updates.append(
+						{
+							"doctype": "China Cash Equivalent Scope",
+							"name": row.name,
+							"fieldname": fieldname,
+							"current": row.get(fieldname),
+							"value": value,
+						}
+					)
+	return updates
+
+
 def sync_existing_company_to_template(company, apply=False):
 	"""Upgrade one zero-ledger company to the bundled Yuewei account template.
 
 	The dry-run preview is the default. ``apply=True`` renames matching numbered
 	accounts, repairs their hierarchy and metadata, creates missing accounts, and
-	repairs company/payment defaults. Accounts outside the template are retained.
+	repairs company/payment defaults and dependent setup references. Existing
+	business records or reviewed/manual mappings block conversion. Accounts
+	outside the template are retained.
 	"""
 	preview = preview_existing_company_template_sync(company)
 	if not cint(apply):
 		return preview
 	if not preview["can_apply"]:
 		frappe.throw(
-			_("公司 {0} 已有 {1} 条总账分录，禁止直接更新科目模板").format(
-				company, preview["general_ledger_entry_count"]
+			_("公司 {0} 已有业务数据或人工复核配置，禁止直接更新科目模板：{1}").format(
+				company, preview["blockers"]
 			)
 		)
 
@@ -397,6 +548,21 @@ def _apply_existing_company_template_sync(company, preview):
 	payment_defaults_updated = _repair_invalid_mode_of_payment_accounts(company)
 	frappe.clear_document_cache("Company", company)
 
+	from china_finance.api import _initialize_company
+	from china_finance.setup.china_coa_profile import get_account_by_number
+
+	for update in preview["configuration_updates"]:
+		value = (
+			get_account_by_number(company, update["target_number"], leaf=True).name
+			if update.get("target_number")
+			else update["value"]
+		)
+		frappe.db.set_value(update["doctype"], update["name"], update["fieldname"], value)
+		frappe.clear_document_cache(update["doctype"], update["name"])
+		if update.get("parenttype"):
+			frappe.clear_document_cache(update["parenttype"], update["parent"])
+	profile_sync = _initialize_company(company)
+
 	return {
 		**preview,
 		"applied": True,
@@ -407,6 +573,8 @@ def _apply_existing_company_template_sync(company, preview):
 		"retained_group_accounts": retained_group_accounts,
 		"company_defaults_updated": defaults["updated"],
 		"mode_of_payment_accounts_updated": payment_defaults_updated,
+		"configuration_updates_applied": len(preview["configuration_updates"]),
+		"profile_sync": profile_sync,
 	}
 
 

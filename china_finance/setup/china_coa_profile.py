@@ -6,7 +6,6 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, cint, getdate, now_datetime
 
-
 CHART_TEMPLATE = "中国企业会计准则－一般纳税人制造业（1.0）"
 CHART_VERSION = "1.0"
 MAPPING_RULE_VERSION = "1.7"
@@ -77,7 +76,7 @@ def uses_yuewei_company_chart(company):
 
 
 def get_company_default_accounts(company):
-	overrides = COMPANY_DEFAULT_ACCOUNT_OVERRIDES.get(company, {})
+	overrides = {}
 	if uses_yuewei_company_chart(company):
 		overrides = COMPANY_DEFAULT_ACCOUNT_OVERRIDES["悦为智能技术(东莞)有限公司"]
 	return {
@@ -87,7 +86,7 @@ def get_company_default_accounts(company):
 
 
 def get_tax_account_rules(company):
-	overrides = TAX_ACCOUNT_RULE_OVERRIDES.get(company, {})
+	overrides = {}
 	if uses_yuewei_company_chart(company):
 		overrides = TAX_ACCOUNT_RULE_OVERRIDES["悦为智能技术(东莞)有限公司"]
 	return {
@@ -97,10 +96,17 @@ def get_tax_account_rules(company):
 
 
 def get_company_account_type_overrides(company):
-	overrides = COMPANY_ACCOUNT_TYPE_OVERRIDES.get(company, {})
+	overrides = {}
 	if uses_yuewei_company_chart(company):
 		overrides = COMPANY_ACCOUNT_TYPE_OVERRIDES["悦为智能技术(东莞)有限公司"]
 	return overrides
+
+
+def get_settings_accounts(company):
+	"""Resolve closing defaults from the actual chart, including renamed companies."""
+	if uses_yuewei_company_chart(company):
+		return {**SETTINGS_ACCOUNTS, "retained_earnings_account": "410411"}
+	return dict(SETTINGS_ACCOUNTS)
 
 
 @lru_cache(maxsize=1)
@@ -289,7 +295,7 @@ def update_settings_profile(settings, status=None):
 	}
 	if not settings.coa_initialized_on:
 		values["coa_initialized_on"] = now_datetime()
-	for fieldname, number in SETTINGS_ACCOUNTS.items():
+	for fieldname, number in get_settings_accounts(settings.company).items():
 		if not settings.get(fieldname):
 			account = get_account_by_number(settings.company, number, leaf=True, required=False)
 			if account:
@@ -613,6 +619,8 @@ def ensure_cash_scope(company, effective_from):
 		"101201": ("排除项", 0, 1, "银行承兑汇票保证金属于受限资金"),
 		"101299": ("排除项", 0, 0, "其他货币资金是否可随时支用无法由科目编号判断，需财务人员复核。"),
 	}
+	if uses_yuewei_company_chart(company):
+		rules["101201"] = ("排除项", 0, 0, "外埠存款是否可随时支用需财务人员复核，不能按保证金认定为受限资金。")
 	accounts, _duplicates = get_company_accounts_by_number(company)
 	for number, (classification, included, restricted, reason) in rules.items():
 		account = accounts.get(number)
