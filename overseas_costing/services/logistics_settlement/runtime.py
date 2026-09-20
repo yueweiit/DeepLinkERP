@@ -392,22 +392,53 @@ def _batch_metadata(value):
     return result if isinstance(result, dict) else {}
 
 
-_COMMENT_WAYBILL_LINE = re.compile(
-    r'^[ \t]*(?:DHL|FEDEX|UPS)\s*'
+_COMMENT_WAYBILL_LABEL = (
     r'(?:(?:快递)?(?:单号|运单号?)|tracking(?:\s+(?:number|code))?)?'
-    r'[ \t:：#-]*((?:\d[ ]*){8,20}|1Z[A-Z0-9]{16})'
-    r'(?![ \t]*(?:RMB|CNY|USD|MXN|人民币|元|[$¥￥]))'
-    r'(?=$|[ \t,，;；。])',
-    re.IGNORECASE | re.MULTILINE,
+    r'[ \t:：#-]*'
 )
+_COMMENT_WAYBILL_TAIL = r'(?=$|[ \t,，;；。:：、()（）\[\]【】])'
+_COMMENT_WAYBILL_LINES = (
+    re.compile(
+        r'^[ \t]*DHL\s*' + _COMMENT_WAYBILL_LABEL
+        + r'(?P<token>(?:\d[ ]*){10})' + _COMMENT_WAYBILL_TAIL,
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'^[ \t]*FEDEX\s*' + _COMMENT_WAYBILL_LABEL
+        + r'(?P<token>(?:(?:\d[ ]*){15}|(?:\d[ ]*){12}))'
+        + _COMMENT_WAYBILL_TAIL,
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'^[ \t]*UPS\s*' + _COMMENT_WAYBILL_LABEL
+        + r'(?P<token>1Z[A-Z0-9]{16})' + _COMMENT_WAYBILL_TAIL,
+        re.IGNORECASE,
+    ),
+)
+_COMMENT_WAYBILL_FORBIDDEN = re.compile(
+    r'RMB|CNY|MXN|USD|PESOS?|比索|金额|AMOUNT|审批|APPROVAL|'
+    r'(?<![A-Z0-9])ID(?![A-Z0-9])',
+    re.IGNORECASE,
+)
+_COMMENT_TEXT_FIELDS = {
+    'remark', 'text', 'comment', 'content', 'commenttext', 'commentcontent',
+    'remarktext', 'operationremark', '评论', '评论内容', '备注', '内容',
+}
 
 
 def _comment_texts(value):
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for child in value.values():
-            yield from _comment_texts(child)
+        for key, child in value.items():
+            normalized = re.sub(r'[^a-z]', '', str(key).lower())
+            field = normalized if normalized else str(key).strip()
+            if field not in _COMMENT_TEXT_FIELDS:
+                continue
+            if isinstance(child, str):
+                yield child
+            elif isinstance(child, (dict, list, tuple)):
+                yield from _comment_texts(child)
     elif isinstance(value, (list, tuple)):
         for child in value:
             yield from _comment_texts(child)
@@ -419,8 +450,14 @@ def _comment_waybills(source):
     values = (raw.get('comments') or [], raw.get('operationRecords') or [])
     tokens = set()
     for text in _comment_texts(values):
-        for match in _COMMENT_WAYBILL_LINE.finditer(text):
-            tokens.add(re.sub(r'\s+', '', match.group(1)).upper())
+        for line in text.splitlines():
+            if _COMMENT_WAYBILL_FORBIDDEN.search(line):
+                continue
+            for pattern in _COMMENT_WAYBILL_LINES:
+                match = pattern.search(line)
+                if match:
+                    tokens.add(re.sub(r'\s+', '', match.group('token')).upper())
+                    break
     return sorted(tokens)
 
 

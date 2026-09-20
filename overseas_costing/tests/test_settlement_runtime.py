@@ -157,15 +157,58 @@ def test_ambiguous_comment_waybills_do_not_change_batch(monkeypatch):
 
 
 @pytest.mark.parametrize('comment', [
+    'DHL 12345678',
+    'DHL 2026091214550001731',
+    'DHL 20260912145500017316',
     'DHL 202609121455000173161',
     'DHL 2,385.37 RMB',
     'DHL 23853700 RMB',
     'DHL 2026-09-18',
     '备注 DHL 3080665836',
     'DHL 3080665836XYZ',
+    'DHL 3080665836，金额：RMB 2,385.37',
+    'DHL 3080665836 (approval ID: 20260912145500017316)',
+    'DHL 3080665836；pesos 100',
+    'DHL 3080665836、比索 100',
 ])
 def test_comment_waybill_sync_rejects_unanchored_or_non_tracking_values(monkeypatch, comment):
     s, ledger, batch, parsed = waybill_runtime_context(comment)
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == ''
+    assert json.loads(saved['extra_json']) == {}
+    assert s.count('audit') == 0
+
+
+@pytest.mark.parametrize('comment', [
+    'DHL 3080665836',
+    'FedEx 123456789012',
+    'FedEx 123456789012345',
+    'UPS 1Z999AA10123456784',
+])
+def test_comment_waybill_sync_accepts_only_real_carrier_shapes(monkeypatch, comment):
+    s, ledger, batch, parsed = waybill_runtime_context(comment)
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == comment.split(' ', 1)[1]
+
+
+def test_comment_waybill_sync_ignores_operator_name_ids_and_timestamps(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context('ETA 2026-9-18已签收')
+    parsed['raw']['operationRecords'] = [{
+        'operatorName': 'DHL 3080665836',
+        'operatorId': '0217304551217188371',
+        'time': '2026-09-19 14:08',
+        'remark': 'ETA 2026-9-18已签收',
+    }]
     attach_runtime(monkeypatch, s, ledger)
 
     with s.atomic():
