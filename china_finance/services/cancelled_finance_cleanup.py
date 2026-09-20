@@ -240,6 +240,14 @@ def _build_plan(preview, include_orphans, lock=False):
 		{"cancellation_voucher": ["in", sorted(voucher_names)]},
 		voucher_names,
 	)
+	# Older sync issues may identify the China snapshot itself as the source,
+	# rather than its original Journal Entry or a cancellation_voucher link.
+	_collect(
+		related,
+		"China Voucher Sync Issue",
+		{"source_doctype": "China Accounting Voucher", "source_name": ["in", sorted(voucher_names)]},
+		voucher_names,
+	)
 	for dt, rows in related.items():
 		for name in rows:
 			doc = _get_doc(dt, name, lock)
@@ -360,11 +368,12 @@ def _payment_ledger_blockers(documents):
 	return [
 		{
 			"reason": "支付分类账仍有有效余额，未自动删除",
+			"group": dict(zip(fields, key, strict=True)),
 			"names": names,
 			"amount": str(amount),
 			"amount_in_account_currency": str(currency_amount),
 		}
-		for amount, currency_amount, names in groups.values()
+		for key, (amount, currency_amount, names) in groups.items()
 		if amount != 0 or currency_amount != 0
 	]
 

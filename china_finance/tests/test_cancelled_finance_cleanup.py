@@ -160,6 +160,55 @@ class TestCancelledFinanceCleanup(unittest.TestCase):
 		self.assertEqual(result["status"], "ready")
 		self.assertTrue(frappe.db.exists("Journal Entry", self.source))
 
+	def test_sync_issue_referencing_snapshot_is_archived_once_with_its_source(self):
+		issue = self.insert(
+			"China Voucher Sync Issue",
+			"Snapshot Issue",
+			company=self.company,
+			source_doctype="China Accounting Voucher",
+			source_name=self.snapshot,
+			cancellation_voucher=self.reversal,
+			issue_key=self.prefix + "|Snapshot Issue",
+		)
+		plan = self.run_cleanup()
+		self.assertEqual(plan["status"], "ready", plan["blockers"])
+		self.assertEqual(plan["delete_names"]["China Voucher Sync Issue"], [issue])
+		result = self.apply_with_local_export()
+		self.assertEqual(result["status"], "removed", result["blockers"])
+		self.assertFalse(frappe.db.exists("China Voucher Sync Issue", issue))
+		archives = frappe.get_all(
+			"Deleted Document", filters={"deleted_doctype": "China Voucher Sync Issue", "deleted_name": issue}
+		)
+		self.assertEqual(len(archives), 1)
+
+	def test_snapshot_sync_issue_cross_company_and_outside_snapshot_links_still_block(self):
+		issue = self.insert(
+			"China Voucher Sync Issue",
+			"Snapshot Issue",
+			company=self.other_company,
+			source_doctype="China Accounting Voucher",
+			source_name=self.snapshot,
+			issue_key=self.prefix + "|Snapshot Issue",
+		)
+		result = self.apply_with_local_export()
+		self.assertEqual(result["status"], "blocked")
+		self.assertTrue(any(b.get("name") == issue and "其他公司" in b["reason"] for b in result["blockers"]))
+		frappe.db.set_value(
+			"China Voucher Sync Issue",
+			issue,
+			{"company": self.company, "cancellation_voucher": self.prefix + "-Outside Snapshot"},
+		)
+		result = self.apply_with_local_export()
+		self.assertEqual(result["status"], "blocked")
+		self.assertTrue(
+			any(
+				b.get("name") == issue and b.get("reference_name") == self.prefix + "-Outside Snapshot"
+				for b in result["blockers"]
+			)
+		)
+		self.assertTrue(frappe.db.exists("China Voucher Sync Issue", issue))
+		self.assertTrue(frappe.db.exists("Journal Entry", self.source))
+
 	def test_apply_archives_and_cleans_cancelled_chain_without_touching_business_or_sequences(self):
 		result = self.apply_with_local_export()
 		self.assertEqual(result["status"], "removed")
@@ -261,7 +310,11 @@ class TestCancelledFinanceCleanup(unittest.TestCase):
 		)
 		self.assertEqual(self.run_cleanup()["status"], "ready")
 		frappe.db.set_value("Payment Ledger Entry", reverse, "posting_date", "2026-07-02")
-		self.assertEqual(self.run_cleanup()["status"], "blocked")
+		result = self.run_cleanup()
+		self.assertEqual(result["status"], "blocked")
+		groups = [b["group"] for b in result["blockers"] if "group" in b]
+		self.assertEqual({g["posting_date"] for g in groups}, {"2026-07-01", "2026-07-02"})
+		self.assertTrue(all(g["voucher_no"] == self.source for g in groups))
 
 	def test_changed_source_and_bank_allocation_block_cleanup(self):
 		frappe.db.set_value("Journal Entry", self.source, "docstatus", 1)
@@ -338,6 +391,14 @@ class TestCancelledFinanceCleanup(unittest.TestCase):
 			source_name=missing,
 			issue_key=self.prefix,
 		)
+		snapshot_issue = self.insert(
+			"China Voucher Sync Issue",
+			"Orphan Snapshot Issue",
+			company=self.company,
+			source_doctype="China Accounting Voucher",
+			source_name=orphan,
+			issue_key=self.prefix + "|Orphan Snapshot",
+		)
 		assignment = self.insert(
 			"China Cash Flow Assignment",
 			"Orphan Assignment",
@@ -360,6 +421,14 @@ class TestCancelledFinanceCleanup(unittest.TestCase):
 			source_event="Posting",
 			source_key=self.prefix + "|Invoice",
 		)
+		preserved_issue = self.insert(
+			"China Voucher Sync Issue",
+			"Preserved Snapshot Issue",
+			company=self.company,
+			source_doctype="China Accounting Voucher",
+			source_name=preserved,
+			issue_key=self.prefix + "|Preserved Snapshot",
+		)
 		self.save_preview()
 		# A voucher created after inventory must never be silently absorbed.
 		new_source = self.insert(
@@ -371,12 +440,14 @@ class TestCancelledFinanceCleanup(unittest.TestCase):
 			("China Accounting Voucher", orphan),
 			("China Accounting Voucher Entry", child),
 			("China Voucher Sync Issue", issue),
+			("China Voucher Sync Issue", snapshot_issue),
 			("China Cash Flow Assignment", assignment),
 		):
 			self.assertFalse(frappe.db.exists(dt, name), (dt, name))
 		for dt, name in (
 			("Sales Invoice", invoice),
 			("China Accounting Voucher", preserved),
+			("China Voucher Sync Issue", preserved_issue),
 			("Journal Entry", new_source),
 		):
 			self.assertTrue(frappe.db.exists(dt, name), (dt, name))
