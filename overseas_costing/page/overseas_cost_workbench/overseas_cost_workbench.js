@@ -9441,6 +9441,823 @@ class OverseasCostWorkbench {
     });
   }
 
+  feeEvidenceMatrixColumns() {
+    return [
+      { key: "IGI", label: "IGI", feeLogicalKey: "import_tax" },
+      { key: "IVA", label: "IVA", feeLogicalKey: "import_tax" },
+      { key: "DTA", label: "DTA", feeLogicalKey: "import_tax" },
+      { key: "PRV", label: "PRV", feeLogicalKey: "import_tax" },
+      { key: "PRV_IVA", label: "PRV IVA", feeLogicalKey: "import_tax" },
+      { key: "CUSTOMS_SERVICE", label: "清关服务费", feeLogicalKey: "customs_clearance_fee" },
+    ];
+  }
+
+  feeEvidenceMatrixPageSize() {
+    return 100;
+  }
+
+  feeEvidenceMatrixPageWindow(draft = {}, review = {}) {
+    const rows = this.feeEvidenceMaterialMatrix(draft).rows || [];
+    const pageSize = this.feeEvidenceMatrixPageSize();
+    const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+    const page = Math.max(0, Math.min(pageCount - 1, Number.isInteger(review.matrixPage) ? review.matrixPage : 0));
+    const start = page * pageSize;
+    return { page, pageCount, pageSize, start, end: Math.min(rows.length, start + pageSize), total: rows.length };
+  }
+
+  setFeeEvidenceMatrixPage(review = {}, draft = {}, page = 0) {
+    const window = this.feeEvidenceMatrixPageWindow(draft, { ...review, matrixPage: Number(page) });
+    review.matrixPage = window.page;
+    return window;
+  }
+
+  feeEvidenceSourcePageWindow(draft = {}, review = {}) {
+    const refs = this.feeEvidenceReviewSourceRefs(draft);
+    const pageSize = 100;
+    const pageCount = Math.max(1, Math.ceil(refs.length / pageSize));
+    const page = Math.max(0, Math.min(pageCount - 1, Number.isInteger(review.sourcePage) ? review.sourcePage : 0));
+    const start = page * pageSize;
+    return { refs, page, pageCount, start, end: Math.min(refs.length, start + pageSize), total: refs.length };
+  }
+
+  setFeeEvidenceSourcePage(review = {}, draft = {}, page = 0) {
+    const window = this.feeEvidenceSourcePageWindow(draft, { ...review, sourcePage: Number(page) });
+    review.sourcePage = window.page;
+    return window;
+  }
+
+  feeEvidenceUnmatchedWarnings(draft = {}) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (cache.unmatchedWarnings) return cache.unmatchedWarnings;
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const seen = new Set();
+    cache.unmatchedWarnings = (matrix.unmatched_lines || draft.unmatched_lines || []).filter((row) => {
+      if (String(row?.reason_code || "") === "MATERIAL_MATRIX_LEDGER_ONLY") return false;
+      const key = String(row?.message || row?.reason || row?.reason_code || "请核对原附件");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return cache.unmatchedWarnings;
+  }
+
+  feeEvidenceWarningPageWindow(draft = {}, review = {}) {
+    const rows = this.feeEvidenceUnmatchedWarnings(draft);
+    const pageSize = 100;
+    const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+    const page = Math.max(0, Math.min(pageCount - 1, Number.isInteger(review.warningPage) ? review.warningPage : 0));
+    const start = page * pageSize;
+    return { rows, page, pageCount, start, end: Math.min(rows.length, start + pageSize), total: rows.length };
+  }
+
+  setFeeEvidenceWarningPage(review = {}, draft = {}, page = 0) {
+    const window = this.feeEvidenceWarningPageWindow(draft, { ...review, warningPage: Number(page) });
+    review.warningPage = window.page;
+    return window;
+  }
+
+  feeEvidenceMatrixColumnKey(component = {}) {
+    const type = String(component.component_type || "").toUpperCase();
+    const taxCode = String(component.tax_code || "").toUpperCase();
+    const feeKey = String(component.fee_logical_key || component.logical_fee_key || "");
+    if (type === "CUSTOMS_SERVICE" || taxCode === "CUSTOMS_SERVICE" || feeKey === "customs_clearance_fee") return "CUSTOMS_SERVICE";
+    return this.feeEvidenceMatrixColumns().some((column) => column.key === taxCode && column.feeLogicalKey === "import_tax") ? taxCode : "";
+  }
+
+  feeEvidenceDraftMatrixCache(draft = {}) {
+    this._feeEvidenceDraftMatrixCaches = this._feeEvidenceDraftMatrixCaches || new WeakMap();
+    let cache = this._feeEvidenceDraftMatrixCaches.get(draft);
+    const matrix = draft.material_matrix || null;
+    if (!cache || cache.matrix !== matrix) {
+      cache = { matrix, cells: new Map(), rowIndexes: null, populatedCoordinates: null, sourceRefs: null, allSourceRefs: null, unmatchedWarnings: null };
+      this._feeEvidenceDraftMatrixCaches.set(draft, cache);
+    }
+    return cache;
+  }
+
+  feeEvidenceMaterialMatrix(draft = {}) {
+    const matrix = draft.material_matrix;
+    if (matrix && Array.isArray(matrix.rows)) return matrix;
+    const rows = (draft.item_options || []).map((item) => ({
+      item: String(item.item || item.name || ""),
+      stable_line_key: String(item.stable_line_key || item.item || item.name || ""),
+      material_code: String(item.material_code || ""),
+      product_name: String(item.product_name || ""),
+      hs_code: String(item.hs_code || ""),
+      hs_suggestions: [],
+      cells: {},
+    }));
+    const byItem = new Map(rows.map((row) => [row.item, row]));
+    (draft.components || []).forEach((component, index) => {
+      if (this.feeEvidenceIsLedgerComponent(component || {})) return;
+      const row = byItem.get(String(component?.item || ""));
+      const columnKey = this.feeEvidenceMatrixColumnKey(component || {});
+      if (!row || !columnKey) return;
+      row.cells[columnKey] = row.cells[columnKey] || { proposals: [], saved: [] };
+      row.cells[columnKey].proposals.push(index);
+    });
+    return {
+      columns: this.feeEvidenceMatrixColumns().map((column) => ({
+        key: column.key,
+        label: column.label,
+        fee_logical_key: column.feeLogicalKey,
+      })),
+      rows,
+      saved_components: [],
+      unmatched_lines: draft.unmatched_lines || [],
+      missing_fx: Boolean(draft.missing_fx),
+    };
+  }
+
+  feeEvidenceIsLedgerComponent(component = {}) {
+    return String(component.component_type || "").toUpperCase() === "REFUND_REVERSAL" ||
+      String(component.accounting_role || "").toUpperCase() === "SETTLEMENT" ||
+      String(component.cost_effect || "").toUpperCase() === "LEDGER_ONLY";
+  }
+
+  feeEvidenceLedgerComponentLabel(component = {}) {
+    if (String(component.component_type || "").toUpperCase() === "REFUND_REVERSAL") return "退款／冲回";
+    if (String(component.accounting_role || "").toUpperCase() === "SETTLEMENT") return "结算台账";
+    return "仅记台账";
+  }
+
+  feeEvidenceStableKey(value) {
+    if (Array.isArray(value)) return `[${value.map((item) => this.feeEvidenceStableKey(item)).join(",")}]`;
+    if (value && typeof value === "object") {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${this.feeEvidenceStableKey(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  feeEvidenceComponentSourceRefs(component = {}) {
+    const refs = [];
+    const seen = new Set();
+    const append = (ref) => {
+      if (!ref || typeof ref !== "object" || Array.isArray(ref)) return;
+      const key = this.feeEvidenceStableKey(ref);
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push(ref);
+    };
+    (component.source_refs || []).forEach(append);
+    append(component.source_evidence);
+    return refs;
+  }
+
+  feeEvidenceUniqueSourceRefs(rows = []) {
+    const refs = [];
+    const seen = new Set();
+    rows.forEach((ref) => {
+      if (!ref || typeof ref !== "object" || Array.isArray(ref)) return;
+      const key = this.feeEvidenceStableKey(ref);
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push(ref);
+    });
+    return refs;
+  }
+
+  feeEvidenceMatrixSourceRefs(draft = {}) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (cache.sourceRefs) return cache.sourceRefs;
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const refs = [];
+    (matrix.rows || []).forEach((row) => {
+      Object.values(row.cells || {}).forEach((cell) => {
+        (cell?.proposals || []).forEach((index) => {
+          refs.push(...this.feeEvidenceComponentSourceRefs(this.feeEvidenceComponentAt(draft, index) || {}));
+        });
+        (cell?.saved || []).forEach((index) => {
+          refs.push(...this.feeEvidenceComponentSourceRefs((matrix.saved_components || [])[index] || {}));
+        });
+      });
+    });
+    cache.sourceRefs = this.feeEvidenceUniqueSourceRefs(refs);
+    return cache.sourceRefs;
+  }
+
+  feeEvidenceReviewSourceRefs(draft = {}) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (cache.allSourceRefs) return cache.allSourceRefs;
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const unmatched = matrix.unmatched_lines || draft.unmatched_lines || [];
+    cache.allSourceRefs = this.feeEvidenceUniqueSourceRefs([
+      ...(draft.evidence?.source_refs || []),
+      ...(draft.fee_splits || []).flatMap((row) => row.source_refs || []),
+      ...this.feeEvidenceLedgerComponents(draft).flatMap((row) => this.feeEvidenceComponentSourceRefs(row)),
+      ...this.feeEvidenceMatrixSourceRefs(draft),
+      ...unmatched.flatMap((row) => this.feeEvidenceComponentSourceRefs(row)),
+    ]);
+    return cache.allSourceRefs;
+  }
+
+  feeEvidenceLedgerComponents(draft = {}) {
+    const result = [];
+    const seen = new Set();
+    const append = (component) => {
+      if (!component || !this.feeEvidenceIsLedgerComponent(component)) return;
+      const proposalId = String(component.proposal_id || "");
+      if (!proposalId || seen.has(proposalId)) return;
+      seen.add(proposalId);
+      result.push(component);
+    };
+    if (String(draft.component_contract?.mode || "") === "INDEXED_COLUMNS_V1") {
+      const matrix = this.feeEvidenceMaterialMatrix(draft);
+      (matrix.unmatched_lines || []).forEach((line) => {
+        if (String(line?.reason_code || "") !== "MATERIAL_MATRIX_LEDGER_ONLY") return;
+        append(this.feeEvidenceComponentAt(draft, line.proposal_index));
+      });
+    } else {
+      (draft.components || []).forEach(append);
+    }
+    return result;
+  }
+
+  defaultFeeEvidenceReviewSelections(draft = {}) {
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const columnFeeKeys = new Map(this.feeEvidenceMatrixColumns().map((column) => [column.key, column.feeLogicalKey]));
+    const matrixFeeKeys = new Set();
+    (matrix.rows || []).forEach((row) => Object.entries(row.cells || {}).forEach(([columnKey, cell]) => {
+      if ((cell?.proposals || []).length || (cell?.saved || []).length) matrixFeeKeys.add(columnFeeKeys.get(columnKey));
+    }));
+    const ledgerComponents = this.feeEvidenceLedgerComponents(draft);
+    const hasDefaultLedgerComponent = ledgerComponents.some((row) => row.default_selected && String(row.proposal_id || ""));
+    const selected = new Set();
+    const evidence = draft.evidence || {};
+    if (evidence.default_selected || matrixFeeKeys.size || hasDefaultLedgerComponent) {
+      selected.add(String(evidence.proposal_id || "evidence:classification"));
+    }
+    (draft.fee_splits || []).forEach((row) => {
+      if (row.default_selected || matrixFeeKeys.has(String(row.logical_fee_key || ""))) {
+        const proposalId = String(row.proposal_id || "");
+        if (proposalId) selected.add(proposalId);
+      }
+    });
+    ledgerComponents.forEach((row) => {
+      const proposalId = String(row.proposal_id || "");
+      if (row.default_selected && proposalId) selected.add(proposalId);
+    });
+    return selected;
+  }
+
+  feeEvidenceIndexedValue(store = {}, fieldname, rowIndex) {
+    const column = store?.columns?.[fieldname];
+    if (!column || typeof column !== "object") return undefined;
+    let valueIndex = rowIndex;
+    if (Array.isArray(column.rows)) {
+      let low = 0;
+      let high = column.rows.length - 1;
+      let found = -1;
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const candidate = Number(column.rows[middle]);
+        if (candidate === rowIndex) { found = middle; break; }
+        if (candidate < rowIndex) low = middle + 1;
+        else high = middle - 1;
+      }
+      if (found < 0) return undefined;
+      valueIndex = found;
+    }
+    if (Object.prototype.hasOwnProperty.call(column, "constant")) return column.constant;
+    if (Array.isArray(column.values)) return column.values[valueIndex];
+    if (Array.isArray(column.dictionary) && Array.isArray(column.indices)) {
+      return column.dictionary[column.indices[valueIndex]];
+    }
+    return undefined;
+  }
+
+  feeEvidenceComponentAt(draft = {}, rowIndex) {
+    if (!Number.isInteger(rowIndex) || rowIndex < 0) return null;
+    const store = draft.component_store || {};
+    if (String(draft.component_contract?.mode || "") !== "INDEXED_COLUMNS_V1" || store.format !== "INDEXED_COLUMNS_V1") {
+      const component = (draft.components || [])[rowIndex];
+      return component && typeof component === "object" ? component : null;
+    }
+    if (rowIndex >= Number(store.count || 0)) return null;
+    const component = {};
+    Object.keys(store.columns || {}).forEach((fieldname) => {
+      const value = this.feeEvidenceIndexedValue(store, fieldname, rowIndex);
+      if (value !== undefined) component[fieldname] = value;
+    });
+    return Object.keys(component).length ? component : null;
+  }
+
+  feeEvidencePlainNumber(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "";
+    return Number(number.toFixed(6)).toString();
+  }
+
+  feeEvidenceAggregateComponents(components = []) {
+    const originalByCurrency = new Map();
+    let amountRmb = 0;
+    let hasRmb = false;
+    let missingFx = false;
+    const sourceProposalIds = new Set();
+    const warnings = [];
+    components.forEach((component) => {
+      const currency = String(component?.currency || "").toUpperCase() || "UNKNOWN";
+      const rawRmb = component?.amount_rmb;
+      try {
+        const originalMinor = this.feeEvidenceAmountMinor(component?.original_amount);
+        originalByCurrency.set(currency, (originalByCurrency.get(currency) || 0n) + originalMinor);
+        if (rawRmb === null || rawRmb === undefined || rawRmb === "") missingFx = true;
+      } catch (_error) {}
+      const rmb = Number(rawRmb);
+      if (rawRmb !== null && rawRmb !== undefined && rawRmb !== "" && Number.isFinite(rmb)) {
+        amountRmb += rmb;
+        hasRmb = true;
+      }
+      const proposalId = String(component?.proposal_id || "");
+      if (proposalId) sourceProposalIds.add(proposalId);
+      if (component?.warning) warnings.push(String(component.warning));
+      if (component?.needs_review) warnings.push("建议需人工复核。");
+      if (component?.has_conflict) warnings.push("建议存在冲突。");
+    });
+    const currencies = [...originalByCurrency.keys()];
+    return {
+      originalAmount: currencies.length === 1 ? this.feeEvidenceMinorText(originalByCurrency.get(currencies[0])) : "",
+      currency: currencies.length === 1 ? currencies[0] : (currencies.length ? "MIXED" : ""),
+      amountRmb: missingFx ? null : (hasRmb ? this.feeEvidencePlainNumber(amountRmb) : ""),
+      missingFx,
+      sourceProposalIds: [...sourceProposalIds],
+      warning: [...new Set(warnings)].join(" "),
+    };
+  }
+
+  resolveFeeEvidenceMatrixCell(draft = {}, rowIndex, columnKey) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    const cacheKey = `${rowIndex}:${columnKey}`;
+    if (cache.cells.has(cacheKey)) return cache.cells.get(cacheKey);
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const row = matrix.rows?.[rowIndex] || {};
+    const compact = row.cells?.[columnKey] || { proposals: [], saved: [] };
+    const proposals = (compact.proposals || []).map((index) => this.feeEvidenceComponentAt(draft, index)).filter(Boolean);
+    const savedRows = matrix.saved_components || [];
+    const saved = (compact.saved || []).map((index) => savedRows[index]).filter((value) => value && typeof value === "object");
+    const suggestion = this.feeEvidenceAggregateComponents(proposals);
+    const current = this.feeEvidenceAggregateComponents(saved.length ? saved : proposals);
+    const proposalIndexes = new Set((compact.proposals || []).filter(Number.isInteger));
+    const savedIndexes = new Set((compact.saved || []).filter(Number.isInteger));
+    const suggestionDetails = (row.hs_suggestion_details || []).filter((detail) => detail && typeof detail === "object");
+    const hsSuggestions = suggestionDetails.length ? suggestionDetails.filter((detail) =>
+      (detail.proposals || []).some((index) => proposalIndexes.has(index)) ||
+      (detail.saved || []).some((index) => savedIndexes.has(index))
+    ).map((detail) => detail.hs_code).filter(Boolean) :
+      (proposalIndexes.size || savedIndexes.size ? (row.hs_suggestions || []).filter(Boolean) : []);
+    const warnings = [current.warning, suggestion.warning];
+    if (hsSuggestions.length) warnings.push(`HS 差异：凭证建议 ${hsSuggestions.join("、")}，当前物料为 ${row.hs_code || "未填写"}。`);
+    if (current.missingFx || suggestion.missingFx) warnings.push("缺汇率");
+    if (saved.length && proposals.length) warnings.push("已保存值优先，AI／规则建议仅供对照。");
+    const resolved = {
+      originalAmount: current.originalAmount,
+      currency: current.currency,
+      amountRmb: current.amountRmb,
+      missingFx: current.missingFx,
+      origin: saved.length ? "SAVED" : (proposals.length ? "AI" : "EMPTY"),
+      suggestedOriginalAmount: suggestion.originalAmount,
+      suggestedCurrency: suggestion.currency,
+      suggestedAmountRmb: suggestion.amountRmb,
+      sourceProposalIds: suggestion.sourceProposalIds,
+      warning: [...new Set(warnings.filter(Boolean))].join(" "),
+    };
+    cache.cells.set(cacheKey, resolved);
+    return resolved;
+  }
+
+  feeEvidenceMatrixEditKey(item, columnKey) {
+    return `${String(item || "")}\u001f${String(columnKey || "")}`;
+  }
+
+  ensureFeeEvidenceMatrixState(review = {}, draft = {}) {
+    review.matrixEdits = review.matrixEdits || {};
+    if (!Number.isInteger(review.matrixRevision)) review.matrixRevision = 0;
+    if (review.matrixDetailsOpen === undefined) review.matrixDetailsOpen = false;
+    if (!Number.isInteger(review.matrixPage)) review.matrixPage = 0;
+    if (!Number.isInteger(review.sourcePage)) review.sourcePage = 0;
+    if (!Number.isInteger(review.warningPage)) review.warningPage = 0;
+    this.setFeeEvidenceMatrixPage(review, draft, review.matrixPage);
+    return review.matrixEdits;
+  }
+
+  feeEvidenceMatrixRowIndex(draft = {}, item) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (!cache.rowIndexes) {
+      cache.rowIndexes = new Map(this.feeEvidenceMaterialMatrix(draft).rows.map((row, index) => [String(row.item || ""), index]));
+    }
+    return cache.rowIndexes.get(String(item || "")) ?? -1;
+  }
+
+  setFeeEvidenceMatrixValue(review, draft, item, columnKey, rawValue) {
+    const value = String(rawValue ?? "").trim();
+    if (value) this.feeEvidenceValidateAmountBounds(value);
+    this.ensureFeeEvidenceMatrixState(review, draft);
+    const rowIndex = this.feeEvidenceMatrixRowIndex(draft, item);
+    if (rowIndex < 0 || !this.feeEvidenceMatrixColumns().some((column) => column.key === columnKey)) throw new Error("物料或税费列已变更，请刷新草稿。");
+    const base = this.resolveFeeEvidenceMatrixCell(draft, rowIndex, columnKey);
+    this.setFeeEvidenceMatrixEdit(review, draft, rowIndex, columnKey, {
+      value,
+      dirty: true,
+      cleared: value === "",
+      sourceProposalIds: [...base.sourceProposalIds],
+    });
+  }
+
+  adoptFeeEvidenceMatrixSuggestion(review, draft, item, columnKey) {
+    this.ensureFeeEvidenceMatrixState(review, draft);
+    const rowIndex = this.feeEvidenceMatrixRowIndex(draft, item);
+    const base = this.resolveFeeEvidenceMatrixCell(draft, rowIndex, columnKey);
+    this.setFeeEvidenceMatrixEdit(review, draft, rowIndex, columnKey, {
+      value: String(base.suggestedOriginalAmount || ""),
+      dirty: true,
+      cleared: !base.suggestedOriginalAmount,
+      adoptedAI: true,
+      sourceProposalIds: [...base.sourceProposalIds],
+    });
+  }
+
+  setFeeEvidenceMatrixEdit(review, draft, rowIndex, columnKey, edit) {
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const row = matrix.rows[rowIndex] || {};
+    const totalsCache = review._feeEvidenceMatrixTotals;
+    const signature = this.feeEvidenceMatrixTotalsSignature(draft, review);
+    const canApplyDelta = totalsCache?.revision === review.matrixRevision && totalsCache.signature === signature;
+    const previous = canApplyDelta ? this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey) : null;
+    review.matrixEdits[this.feeEvidenceMatrixEditKey(row.item, columnKey)] = edit;
+    review.matrixRevision += 1;
+    if (!canApplyDelta) return;
+    try {
+      const current = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey);
+      const column = this.feeEvidenceMatrixColumns().find((candidate) => candidate.key === columnKey);
+      const group = totalsCache.value[column?.feeLogicalKey];
+      if (!group) throw new Error("税费列已变更。");
+      this.feeEvidenceAccumulateTotalCell(group, previous, -1);
+      this.feeEvidenceAccumulateTotalCell(group, current, 1);
+      this.feeEvidenceFinalizeTotalGroup(group);
+      totalsCache.revision = review.matrixRevision;
+    } catch (_error) {
+      review._feeEvidenceMatrixTotals = null;
+    }
+  }
+
+  feeEvidenceMatrixPopulatedCoordinates(draft = {}, review = {}) {
+    const cache = this.feeEvidenceDraftMatrixCache(draft);
+    if (!cache.populatedCoordinates) {
+      const allowed = new Set(this.feeEvidenceMatrixColumns().map((column) => column.key));
+      cache.populatedCoordinates = [];
+      this.feeEvidenceMaterialMatrix(draft).rows.forEach((row, rowIndex) => {
+        Object.keys(row.cells || {}).forEach((columnKey) => {
+          if (allowed.has(columnKey)) cache.populatedCoordinates.push([rowIndex, columnKey]);
+        });
+      });
+    }
+    const result = [...cache.populatedCoordinates];
+    const seen = new Set(result.map(([rowIndex, columnKey]) => `${rowIndex}:${columnKey}`));
+    Object.keys(review.matrixEdits || {}).forEach((editKey) => {
+      const [item, columnKey] = editKey.split("\u001f");
+      const rowIndex = this.feeEvidenceMatrixRowIndex(draft, item);
+      const key = `${rowIndex}:${columnKey}`;
+      if (rowIndex >= 0 && !seen.has(key)) {
+        seen.add(key);
+        result.push([rowIndex, columnKey]);
+      }
+    });
+    return result;
+  }
+
+  feeEvidenceMatrixTotalsSignature(draft = {}, review = {}) {
+    const feeIds = new Set((draft.fee_splits || []).map((row) => String(row.proposal_id || "")));
+    const edits = {};
+    Object.entries(review.edits || {}).forEach(([proposalId, values]) => {
+      if (feeIds.has(proposalId)) edits[proposalId] = values;
+    });
+    return JSON.stringify({
+      selections: review.selections && typeof review.selections[Symbol.iterator] === "function" ? [...review.selections].filter((id) => feeIds.has(String(id))).sort() : null,
+      edits,
+    });
+  }
+
+  invalidateFeeEvidenceMatrixTotals(review = {}) {
+    review._feeEvidenceMatrixTotals = null;
+  }
+
+  feeEvidenceAccumulateTotalCell(group, cell, direction) {
+    if (!String(cell?.value || "").trim()) return;
+    const multiplier = BigInt(direction);
+    group.activeCount += direction;
+    group.allocatedMinor += this.feeEvidenceAmountMinor(cell.value) * multiplier;
+    if (cell.missingFx || cell.amountRmb === null) group.missingFxCount += direction;
+    else if (Number.isFinite(Number(cell.amountRmb))) group.allocatedRmb += direction * Number(cell.amountRmb);
+  }
+
+  feeEvidenceFinalizeTotalGroup(group) {
+    group.allocatedText = this.feeEvidenceMinorText(group.allocatedMinor);
+    group.allocatedOriginal = group.allocatedText;
+    group.remainingMinor = group.feeTotalMinor - group.allocatedMinor;
+    group.remainingText = this.feeEvidenceMinorText(group.remainingMinor);
+    group.remaining = group.remainingText;
+    group.missingFx = group.missingFxCount > 0;
+    group.overage = group.remainingMinor < 0n;
+  }
+
+  feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey) {
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const row = matrix.rows[rowIndex] || {};
+    const base = this.resolveFeeEvidenceMatrixCell(draft, rowIndex, columnKey);
+    const edit = review?.matrixEdits?.[this.feeEvidenceMatrixEditKey(row.item, columnKey)];
+    const value = edit ? String(edit.value ?? "") : String(base.originalAmount || "");
+    const column = this.feeEvidenceMatrixColumns().find((candidate) => candidate.key === columnKey);
+    const feeAuthority = this.feeEvidenceFeeTotals(draft, review)[column?.feeLogicalKey] || {};
+    const currency = String(feeAuthority.currency || "");
+    const hasAuthority = Number(feeAuthority.selectedCount || 0) > 0 && currency && currency !== "MIXED";
+    let amountRmb = null;
+    let missingFx = Boolean(value);
+    let originalRatio = null;
+    try {
+      const baseMinor = this.feeEvidenceAmountMinor(base.originalAmount);
+      if (baseMinor > 0n) {
+        const ratioScale = 1000000000n;
+        originalRatio = Number((this.feeEvidenceAmountMinor(value) * ratioScale) / baseMinor) / Number(ratioScale);
+      }
+    } catch (_error) {}
+    if (!value) {
+      amountRmb = "";
+      missingFx = false;
+    } else if (!hasAuthority) {
+      amountRmb = null;
+      missingFx = true;
+    } else if (currency === "RMB") {
+      amountRmb = this.normalizeFeeEvidenceMatrixAmount(value);
+      missingFx = false;
+    } else if (edit?.adoptedAI && base.suggestedCurrency === currency) {
+      amountRmb = base.suggestedAmountRmb;
+      missingFx = base.suggestedAmountRmb === null;
+    } else if (base.currency === currency && edit && Number.isFinite(originalRatio) && base.amountRmb !== null && base.amountRmb !== "") {
+      amountRmb = this.feeEvidencePlainNumber(originalRatio * Number(base.amountRmb));
+      missingFx = false;
+    } else if (base.currency === currency && !edit) {
+      amountRmb = base.amountRmb;
+      missingFx = base.missingFx || base.amountRmb === null;
+    }
+    return {
+      ...base,
+      value,
+      currency,
+      amountRmb,
+      missingFx,
+      dirty: Boolean(edit?.dirty),
+      cleared: Boolean(edit?.cleared),
+      adoptedAI: Boolean(edit?.adoptedAI),
+      sourceProposalIds: edit ? [...(edit.sourceProposalIds || [])] : [...base.sourceProposalIds],
+    };
+  }
+
+  normalizeFeeEvidenceMatrixAmount(rawValue) {
+    return this.feeEvidenceMinorText(this.feeEvidenceAmountMinor(rawValue));
+  }
+
+  feeEvidenceValidateAmountBounds(rawValue) {
+    const value = String(rawValue ?? "").trim();
+    if (value.length > 64) throw new Error("物料税费金额文本过长。");
+    if ((value.match(/\d/g) || []).length > 28) throw new Error("物料税费金额数字位数过多。");
+    const decimalMatch = value.match(/^(?:\d+|\d*\.(\d*))$/);
+    if (decimalMatch && String(decimalMatch[1] || "").replace(/0+$/, "").length > 2) throw new Error("物料税费金额最多保留两位小数。");
+    return value;
+  }
+
+  feeEvidenceAmountMinor(rawValue) {
+    const value = this.feeEvidenceValidateAmountBounds(rawValue);
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) {
+      throw new Error("物料税费金额必须是非负有限数。");
+    }
+    const [integerRaw, decimalRaw = ""] = (value.startsWith(".") ? `0${value}` : value).split(".");
+    const integer = integerRaw.replace(/^0+(?=\d)/, "") || "0";
+    const decimal = decimalRaw.replace(/0+$/, "");
+    if (decimal.length > 2) throw new Error("物料税费金额最多保留两位小数。");
+    return (BigInt(integer) * 100n) + BigInt((decimal + "00").slice(0, 2));
+  }
+
+  feeEvidenceMinorText(rawMinor) {
+    const minor = typeof rawMinor === "bigint" ? rawMinor : BigInt(rawMinor || 0);
+    const negative = minor < 0n;
+    const absolute = negative ? -minor : minor;
+    const integer = absolute / 100n;
+    const decimal = String(absolute % 100n).padStart(2, "0").replace(/0+$/, "");
+    return `${negative ? "-" : ""}${integer}${decimal ? `.${decimal}` : ""}`;
+  }
+
+  serializeFeeEvidenceMatrix(draft = {}, review = {}) {
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const cells = [];
+    matrix.rows.forEach((row, rowIndex) => {
+      this.feeEvidenceMatrixColumns().forEach((column) => {
+        const effective = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, column.key);
+        if (!String(effective.value || "").trim()) return;
+        cells.push({
+          item: String(row.item || ""),
+          column_key: column.key,
+          original_amount: this.normalizeFeeEvidenceMatrixAmount(effective.value),
+          source_proposal_ids: [...new Set((effective.sourceProposalIds || []).map(String).filter(Boolean))],
+        });
+      });
+    });
+    return { cells };
+  }
+
+  feeEvidenceFeeTotals(draft = {}, review = {}) {
+    const create = () => ({ feeTotal: "0", feeTotalMinor: 0n, feeTotalText: "0", currency: "", selectedCount: 0, amountValid: true, currencyValid: true });
+    const result = { import_tax: create(), customs_clearance_fee: create() };
+    const hasSelectionState = review.selections && typeof review.selections.has === "function";
+    (draft.fee_splits || []).forEach((split) => {
+      const key = String(split.logical_fee_key || "");
+      if (!result[key]) return;
+      const proposalId = String(split.proposal_id || "");
+      const isSelected = hasSelectionState ? review.selections.has(proposalId) : Boolean(split.default_selected);
+      if (!isSelected) return;
+      const edit = review.edits?.[String(split.proposal_id || "")] || {};
+      try {
+        result[key].feeTotalMinor += this.feeEvidenceAmountMinor(edit.amount ?? split.amount);
+      } catch (_error) {
+        result[key].amountValid = false;
+      }
+      const currency = String(edit.currency ?? split.currency ?? "").toUpperCase().replace("CNY", "RMB");
+      if (currency) result[key].currency = result[key].currency && result[key].currency !== currency ? "MIXED" : currency;
+      if (!{"RMB": 1, "MXN": 1, "USD": 1}[currency]) result[key].currencyValid = false;
+      result[key].selectedCount += 1;
+    });
+    Object.values(result).forEach((group) => {
+      group.feeTotalText = this.feeEvidenceMinorText(group.feeTotalMinor);
+      group.feeTotal = group.feeTotalText;
+    });
+    return result;
+  }
+
+  feeEvidenceMatrixTotals(draft = {}, review = {}) {
+    this.ensureFeeEvidenceMatrixState(review, draft);
+    const signature = this.feeEvidenceMatrixTotalsSignature(draft, review);
+    if (review._feeEvidenceMatrixTotals?.revision === review.matrixRevision && review._feeEvidenceMatrixTotals.signature === signature) {
+      return review._feeEvidenceMatrixTotals.value;
+    }
+    const feeTotals = this.feeEvidenceFeeTotals(draft, review);
+    const totals = {
+      import_tax: { ...feeTotals.import_tax, allocatedMinor: 0n, allocatedOriginal: "0", allocatedText: "0", allocatedRmb: 0, missingFx: false, missingFxCount: 0, activeCount: 0 },
+      customs_clearance_fee: { ...feeTotals.customs_clearance_fee, allocatedMinor: 0n, allocatedOriginal: "0", allocatedText: "0", allocatedRmb: 0, missingFx: false, missingFxCount: 0, activeCount: 0 },
+    };
+    const columns = new Map(this.feeEvidenceMatrixColumns().map((column) => [column.key, column]));
+    this.feeEvidenceMatrixPopulatedCoordinates(draft, review).forEach(([rowIndex, columnKey]) => {
+        const column = columns.get(columnKey);
+        if (!column) return;
+        const cell = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, columnKey);
+        this.feeEvidenceAccumulateTotalCell(totals[column.feeLogicalKey], cell, 1);
+    });
+    Object.values(totals).forEach((group) => {
+      this.feeEvidenceFinalizeTotalGroup(group);
+    });
+    review._feeEvidenceMatrixTotals = { revision: review.matrixRevision, signature, value: totals };
+    return totals;
+  }
+
+  validateFeeEvidenceMatrix(draft = {}, review = {}) {
+    const payload = this.serializeFeeEvidenceMatrix(draft, review);
+    const totals = this.feeEvidenceMatrixTotals(draft, review);
+    const labels = { import_tax: "进口税费", customs_clearance_fee: "清关费" };
+    Object.entries(totals).forEach(([key, group]) => {
+      if (!group.activeCount) return;
+      if (!group.selectedCount) throw new Error(`请选择${labels[key] || key}费用拆分后再确认。`);
+      if (group.selectedCount !== 1) throw new Error(`${labels[key] || key}只能选择一条费用拆分作为金额和币种权威。`);
+      if (!group.currencyValid || !group.currency || group.currency === "MIXED") throw new Error(`${labels[key] || key}费用拆分必须使用唯一支持币种。`);
+      if (!group.amountValid) throw new Error(`${labels[key] || key}费用总额必须是有效非负金额。`);
+    });
+    const overage = Object.values(totals).find((group) => group.overage);
+    if (overage) throw new Error("已分摊金额超过费用总额，请调整后再确认。");
+    return payload;
+  }
+
+  feeEvidenceSourceLabel(ref = {}) {
+    const region = ref.region || ref.image_region;
+    return [
+      ref.file_name || ref.attachment || ref.file,
+      ref.sheet,
+      ref.page ? `第 ${ref.page} 页` : "",
+      ref.text_line ? `文本第 ${ref.text_line} 行` : "",
+      ref.row ? `表格第 ${ref.row} 行` : "",
+      ref.cell ? `单元格 ${ref.cell}` : "",
+      region ? `图片区域 ${typeof region === "string" ? region : JSON.stringify(region)}` : "",
+      ref.path,
+    ].filter(Boolean).join(" · ");
+  }
+
+  renderFeeEvidenceReviewWarning(row = {}) {
+    if (!row.has_conflict && !row.needs_review && !row.warning) return "";
+    const message = row.warning || (row.has_conflict ? "AI 与规则结果冲突，已纳入预览，请人工核对。" : "证据或匹配信心不足，已纳入预览，可修改或清空。");
+    return `<em class="ocw-mf-review-warning">${this.escape(message)}</em>`;
+  }
+
+  renderFeeEvidenceVoucherDetails(draft = {}, review = {}) {
+    const evidence = draft.evidence || {};
+    const evidenceId = this.escape(evidence.proposal_id || "evidence:classification");
+    const statusOptions = [["ESTIMATED", "暂估"], ["ACTUAL", "实际"]];
+    const refundParents = draft.refund_parent_options || [];
+    const hasSelectionState = review.selections && typeof review.selections.has === "function";
+    const selected = (row) => (hasSelectionState ? review.selections.has(String(row?.proposal_id || "")) : Boolean(row?.default_selected)) ? "checked" : "";
+    const editValue = (row, fieldname, fallback = "") => review.edits?.[String(row?.proposal_id || "")]?.[fieldname] ?? row?.[fieldname] ?? fallback;
+    const open = review.matrixDetailsOpen ? " open" : "";
+    const feeRows = draft.fee_splits || [];
+    const ledgerRows = this.feeEvidenceLedgerComponents(draft);
+    return `<details class="ocw-mf-voucher-details" data-mf-fee-voucher-details${open}>
+      <summary><span><b>凭证摘要</b><small>${this.escape(evidence.evidence_type || "待核对")} · ${this.escape(evidence.accounting_role || "待核对")} · ${this.escape(evidence.currency || "")} ${this.escape(evidence.original_amount || "待补录")}</small></span><em>展开核对详情</em></summary>
+      <div class="ocw-mf-voucher-detail-body">
+        ${this.renderCurrentSourceReviewControls(draft.source_context || {}, null, { fees: true })}
+        ${this.renderFeeEvidenceReviewWarning(evidence)}
+        <label class="ocw-mf-review-choice"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${evidenceId}" ${selected(evidence)}><span><strong>采纳凭证事实</strong><small>${this.escape(evidence.reason || "请核对凭证类型和会计作用")}</small></span></label>
+        <div class="ocw-mf-review-fields">
+          <label>凭证类型<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="evidence_type">${[["QUOTE","报价"],["PREPAYMENT","预付款／暂缴"],["FINAL_INVOICE","最终发票／结算单"],["TAX_CERTIFICATE","完税凭证"],["PAYMENT","付款流水"],["REFUND","退款／贷项"],["OTHER","其他"]].map(([value,label]) => `<option value="${value}" ${value === editValue(evidence,"evidence_type") ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+          <label>会计作用<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="accounting_role">${[["ESTIMATE","更新暂估"],["FINAL_BILL","最终账单"],["SETTLEMENT","付款／退款流水"],["REFERENCE","仅作参考"]].map(([value,label]) => `<option value="${value}" ${value === editValue(evidence,"accounting_role") ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+          <label>凭证总额<input data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="original_amount" value="${this.escape(editValue(evidence,"original_amount"))}" inputmode="decimal"></label>
+          <label>币种<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="currency">${this.materialFeeCurrencyOptions().map((option) => `<option value="${option.value}" ${option.value === editValue(evidence,"currency","RMB") ? "selected" : ""}>${option.label}</option>`).join("")}</select></label>
+          <label>方向<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="direction"><option value="DEBIT" ${editValue(evidence,"direction","DEBIT") !== "CREDIT" ? "selected" : ""}>付款／应付</option><option value="CREDIT" ${editValue(evidence,"direction") === "CREDIT" ? "selected" : ""}>退款／冲回</option></select></label>
+          <label>关联原付款<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="related_evidence"><option value="">无／待核对</option>${refundParents.map((row) => `<option value="${this.escape(row.name || "")}" ${String(row.name || "") === String(editValue(evidence,"related_evidence")) ? "selected" : ""}>${this.escape([row.currency,row.original_amount,row.attachment || row.name].filter(Boolean).join(" · "))}</option>`).join("")}</select></label>
+          <label class="is-checkbox"><input type="checkbox" data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="is_final" ${Number(editValue(evidence,"is_final",0)) ? "checked" : ""}> 最终凭证</label>
+        </div>
+        <div class="ocw-mf-voucher-fee-splits"><h4>费用拆分</h4>${feeRows.length ? feeRows.map((row) => `<label class="ocw-mf-review-choice ${row.has_conflict || row.needs_review ? "is-warning" : ""}"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}><span><strong>${this.escape(row.label || row.logical_fee_key)} · ${this.escape(editValue(row,"currency",row.currency || ""))} <input data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount" value="${this.escape(editValue(row,"amount"))}" inputmode="decimal"></strong><small><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount_status">${statusOptions.map(([value,label]) => `<option value="${value}" ${value === editValue(row,"amount_status",evidence.suggested_amount_status) ? "selected" : ""}>${label}</option>`).join("")}</select></small>${this.renderFeeEvidenceReviewWarning(row)}</span></label>`).join("") : "<p>未识别出可安全拆分的金额，可保留凭证后人工补录。</p>"}</div>
+        ${ledgerRows.length ? `<section class="ocw-mf-ledger-components"><header><h4>矩阵外台账分项</h4><p>结算、退款或冲回只记入台账，不重复计入物料成本。</p></header>${ledgerRows.map((row) => {
+          const proposalId = this.escape(row.proposal_id || "");
+          const refs = this.feeEvidenceComponentSourceRefs(row).map((ref) => this.feeEvidenceSourceLabel(ref)).filter(Boolean);
+          return `<label class="ocw-mf-ledger-component ${row.has_conflict || row.needs_review || row.warning ? "is-warning" : ""}"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${proposalId}" ${selected(row)}><span><strong>${this.feeEvidenceLedgerComponentLabel(row)} · ${this.escape(row.currency || "")} ${this.escape(row.original_amount ?? "--")}</strong><small>${refs.map((value) => this.escape(value)).join("；") || "来源位置待核对"}</small>${this.renderFeeEvidenceReviewWarning(row)}</span></label>`;
+        }).join("")}</section>` : ""}
+        <div class="ocw-mf-voucher-unclassified"><b>凭证待归类差额</b><span>${this.escape(draft.unclassified_difference || "0.00")} ${this.escape(evidence.currency || "")}</span><small>未明确归属前不伪造物料分摊。</small></div>
+      </div>
+    </details>`;
+  }
+
+  renderFeeEvidenceMatrixCell(draft, review, rowIndex, column) {
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const row = matrix.rows[rowIndex] || {};
+    const cell = this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, column.key);
+    const classes = [cell.warning ? "is-warning" : "", cell.dirty ? "is-dirty" : "", cell.origin === "SAVED" ? "is-manual" : ""].filter(Boolean).join(" ");
+    const rmb = cell.value ? (cell.missingFx || cell.amountRmb === null ? "缺汇率" : `¥ ${this.escape(cell.amountRmb || "0")}`) : "未分摊";
+    const currencyLabel = cell.currency || "待选择费用币种";
+    const suggestion = cell.origin === "SAVED" && cell.suggestedOriginalAmount ? `<div class="ocw-mf-matrix-suggestion"><span>AI 建议 ${this.escape(cell.suggestedCurrency || cell.currency)} ${this.escape(cell.suggestedOriginalAmount)}</span><button type="button" data-action="mf-fee-matrix-use-ai" data-item="${this.escape(row.item || "")}" data-column-key="${column.key}">采用 AI 建议</button></div>` : "";
+    return `<td class="ocw-mf-matrix-cell ${classes}" data-mf-fee-matrix-cell="${this.escape(row.item || "")}:${column.key}">
+      <label><span class="sr-only">${this.escape(row.material_code || row.item || "")} ${column.label}</span><input data-mf-fee-matrix-input="1" data-item="${this.escape(row.item || "")}" data-column-key="${column.key}" inputmode="decimal" value="${this.escape(cell.value)}" placeholder="补录"></label>
+      <small>${this.escape(currencyLabel)} · ${rmb}</small>
+      ${cell.dirty && !cell.adoptedAI ? `<b class="ocw-mf-matrix-manual-badge">人工调整</b>` : (cell.origin === "SAVED" && !cell.adoptedAI ? `<b class="ocw-mf-matrix-manual-badge">人工值</b>` : (cell.value ? `<b class="ocw-mf-matrix-ai-badge">AI／规则</b>` : ""))}
+      ${suggestion}${cell.warning ? `<em>${this.escape(cell.warning)}</em>` : ""}
+    </td>`;
+  }
+
+  renderFeeEvidenceMatrixFooter(draft, review) {
+    const totals = this.feeEvidenceMatrixTotals(draft, review);
+    const render = (label, group) => `<div class="${group.overage ? "is-overage" : ""}"><b>${label}已分摊</b><span>${this.escape(group.currency || "待选择费用币种")} ${group.allocatedText}${group.missingFx ? " · RMB 缺汇率" : ` · RMB ${this.feeEvidencePlainNumber(group.allocatedRmb)}`}</span><small>费用总额 ${group.feeTotalText} · 剩余差额 ${group.remainingText}</small></div>`;
+    return `<div class="ocw-mf-matrix-totals" data-mf-fee-matrix-totals>${render("进口税费", totals.import_tax)}${render("清关费", totals.customs_clearance_fee)}<p>确认应用仅写入费用分项，不会自动试算、确认版本或推送 ERP。</p></div>`;
+  }
+
+  renderFeeEvidenceReviewDraft(draft = {}, review = {}) {
+    this.ensureFeeEvidenceMatrixState(review, draft);
+    const matrix = this.feeEvidenceMaterialMatrix(draft);
+    const columns = this.feeEvidenceMatrixColumns();
+    const pageWindow = this.feeEvidenceMatrixPageWindow(draft, review);
+    const warningWindow = this.feeEvidenceWarningPageWindow(draft, review);
+    const unmatched = warningWindow.rows.slice(warningWindow.start, warningWindow.end);
+    const sourceWindow = this.feeEvidenceSourcePageWindow(draft, review);
+    const sourceRefs = sourceWindow.refs.slice(sourceWindow.start, sourceWindow.end);
+    const rows = matrix.rows.slice(pageWindow.start, pageWindow.end).map((row, pageRowIndex) => {
+      const rowIndex = pageWindow.start + pageRowIndex;
+      const cells = columns.map((column) => this.renderFeeEvidenceMatrixCell(draft, review, rowIndex, column)).join("");
+      const rowCells = columns.map((column) => this.feeEvidenceMatrixEffectiveCell(draft, review, rowIndex, column.key));
+      const active = rowCells.filter((cell) => String(cell.value || "").trim());
+      const originalCurrencies = [...new Set(active.map((cell) => cell.currency).filter(Boolean))];
+      let originalTotal = "";
+      try {
+        originalTotal = this.feeEvidenceMinorText(active.reduce((sum, cell) => sum + this.feeEvidenceAmountMinor(cell.value), 0n));
+      } catch (_error) {
+        originalTotal = "待修正";
+      }
+      const rmbTotal = active.reduce((sum, cell) => cell.missingFx ? sum : sum + (Number(cell.amountRmb) || 0), 0);
+      const hasWarning = rowCells.some((cell) => cell.warning);
+      const dirty = rowCells.some((cell) => cell.dirty);
+      const hsSuggestions = (row.hs_suggestions || []).filter(Boolean);
+      return `<tr class="${hasWarning || hsSuggestions.length ? "is-warning" : ""}">
+        <th scope="row"><strong>${this.escape(row.material_code || row.item || "--")}</strong><small>${this.escape(row.product_name || row.item || "")}</small></th>
+        <td class="ocw-mf-matrix-hs" data-mf-fee-matrix-hs="${this.escape(row.item || "")}"><span>${this.escape(row.hs_code || "--")}</span>${hsSuggestions.length ? `<em>HS 差异：${hsSuggestions.map((value) => this.escape(value)).join("、")}</em>` : ""}</td>
+        ${cells}
+        <td class="ocw-mf-matrix-row-total"><strong>${originalCurrencies.length === 1 ? `${this.escape(originalCurrencies[0])} ${originalTotal}` : (active.length ? "多币种" : "--")}</strong><small>RMB ${this.feeEvidencePlainNumber(rmbTotal)}${active.some((cell) => cell.missingFx) ? " + 缺汇率" : ""}</small></td>
+        <td class="ocw-mf-matrix-status"><b>${dirty ? "已人工调整" : (hasWarning || hsSuggestions.length ? "待核对" : "已预览")}</b><small>${active.length} 个分项</small></td>
+      </tr>`;
+    }).join("");
+    const warnings = warningWindow.total ? `<aside class="ocw-mf-matrix-unmatched"><b>无法归属到具体物料的凭证明细（${warningWindow.total}）</b>${unmatched.map((row) => `<p>${this.escape(row.message || row.reason || row.reason_code || "请核对原附件")}</p>`).join("")}${warningWindow.pageCount > 1 ? `<nav class="ocw-mf-source-pager"><span>异常第 ${warningWindow.page + 1} / ${warningWindow.pageCount} 页</span><button type="button" data-action="mf-fee-warning-prev-page" ${warningWindow.page === 0 ? "disabled" : ""}>上一页</button><button type="button" data-action="mf-fee-warning-next-page" ${warningWindow.page >= warningWindow.pageCount - 1 ? "disabled" : ""}>下一页</button></nav>` : ""}</aside>` : "";
+    return `<div class="ocw-mf-fee-review-draft ocw-mf-fee-review-a1">
+      ${this.renderFeeEvidenceVoucherDetails(draft, review)}
+      ${warnings}
+      ${matrix.missing_fx || draft.missing_fx ? `<div class="ocw-mf-review-warning is-block">缺汇率：可保存原币事实，RMB 小计不计入试算。</div>` : ""}
+      <section class="ocw-mf-matrix-section"><header><div><h4>物料税费预览</h4><p>每个物料一行；AI／规则建议已默认纳入，清空单元格即不采用。</p></div><nav class="ocw-mf-matrix-pager" aria-label="物料分页"><span>第 ${pageWindow.page + 1} / ${pageWindow.pageCount} 页 · 共 ${pageWindow.total} 行</span><button type="button" data-action="mf-fee-matrix-prev-page" ${pageWindow.page === 0 ? "disabled" : ""}>上一页</button><button type="button" data-action="mf-fee-matrix-next-page" ${pageWindow.page >= pageWindow.pageCount - 1 ? "disabled" : ""}>下一页</button></nav></header>
+        <div class="ocw-mf-matrix-scroll"><table class="ocw-mf-matrix-table"><thead><tr><th>物料 / SKU</th><th>HS</th>${columns.map((column) => `<th>${column.label}</th>`).join("")}<th>物料合计</th><th>核对状态</th></tr></thead><tbody>${rows || `<tr><td colspan="10">当前批次暂无物料</td></tr>`}</tbody></table></div>
+      </section>
+      ${sourceWindow.total ? `<details class="ocw-mf-matrix-sources"><summary>来源证据（${sourceWindow.total}）</summary><p>${sourceRefs.map((ref) => this.escape(this.feeEvidenceSourceLabel(ref))).filter(Boolean).join("；")}</p>${sourceWindow.pageCount > 1 ? `<nav class="ocw-mf-source-pager"><span>来源第 ${sourceWindow.page + 1} / ${sourceWindow.pageCount} 页</span><button type="button" data-action="mf-fee-source-prev-page" ${sourceWindow.page === 0 ? "disabled" : ""}>上一页</button><button type="button" data-action="mf-fee-source-next-page" ${sourceWindow.page >= sourceWindow.pageCount - 1 ? "disabled" : ""}>下一页</button></nav>` : ""}</details>` : ""}
+      ${this.renderFeeEvidenceMatrixFooter(draft, review)}
+    </div>`;
+  }
+
   ensureMaterialFeeState() {
     const batchName = String(this.detailState?.batchName || "");
     if (!this.materialFeeState || this.materialFeeState.batchName !== batchName) {
@@ -9554,6 +10371,9 @@ class OverseasCostWorkbench {
     });
     this.$root.on("click", "[data-action='mf-preview-cost']", () => {
       this.refreshMaterialFeeCostPreview(true).catch((error) => this.showError(error));
+    });
+    this.$root.on("click", "[data-action='mf-adjust-cost']", () => {
+      this.openCostTrialAdjustment().catch((error) => this.showError(error));
     });
     this.$root.on("click", "[data-action='mf-show-sources']", () => this.openMaterialFeeSourcesDialog());
     this.$root.on("click", "[data-action='mf-import-wiki']", async () => {
@@ -13969,7 +14789,7 @@ class OverseasCostWorkbench {
       <div class="ocw-mf-fee-review-source"><i></i><div><strong data-mf-fee-review-source-name>读取凭证资料</strong><span data-mf-fee-review-source-detail>等待后台任务</span></div><em data-mf-fee-review-source-status>等待</em></div>
       <div class="ocw-mf-ai-progress-warning" data-mf-fee-review-warning hidden></div>
       <div data-mf-fee-review-draft></div>
-      <footer><button class="ocw-outline-btn" type="button" data-action="mf-fee-review-discard" hidden>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-fee-review-apply" hidden>确认所选草稿</button></footer>
+      <footer><span>预览、编辑和关闭均不写入业务数据。</span><div><button class="ocw-outline-btn" type="button" data-action="mf-fee-review-discard" hidden>放弃草稿</button><button class="ocw-primary-btn" type="button" data-action="mf-fee-review-apply" hidden>确认应用</button></div></footer>
     </div>`;
   }
 
@@ -14000,12 +14820,18 @@ class OverseasCostWorkbench {
       return false;
     }
     state.feeEvidenceReviewActiveRequestKey = requestKey;
+    this._feeEvidenceReviewRequestSequence = Number(this._feeEvidenceReviewRequestSequence || 0) + 1;
+    const requestToken = `fee-evidence-review-${this._feeEvidenceReviewRequestSequence}`;
+    state.feeEvidenceReviewStartToken = requestToken;
+    const isCurrentRequest = () => this.materialFeeState === state &&
+      String(state.feeEvidenceReview?.requestToken || "") === requestToken;
     let monitorStarted = false;
     const startPromise = Promise.resolve().then(async () => {
       if (!(await this.ensureMaterialFeeEditSession())) return false;
+      if (this.materialFeeState !== state || state.feeEvidenceReviewActiveRequestKey !== requestKey) return false;
       state.feeEvidenceReview = {
         status: "STARTING", logicalFeeKey: request.logicalFeeKey, attachment: request.attachment,
-        batchName: request.batchName, versionName: request.versionName, requestKey,
+        batchName: request.batchName, versionName: request.versionName, requestKey, requestToken,
         progress_percent: 0, progress_step: "正在启动凭证分析", progress_revision: 0,
       };
       if (!state.feeEvidenceReviewDialog) {
@@ -14020,6 +14846,9 @@ class OverseasCostWorkbench {
           const id = String($(event.currentTarget).attr("data-proposal-id") || "");
           if ($(event.currentTarget).prop("checked")) review.selections.add(id);
           else review.selections.delete(id);
+          this.invalidateFeeEvidenceMatrixTotals(review);
+          const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+          if (review.draft && $totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
         });
         dialog.$wrapper.on("input change", "[data-mf-fee-review-edit]", (event) => {
           const $input = $(event.currentTarget);
@@ -14029,7 +14858,60 @@ class OverseasCostWorkbench {
           review.edits[proposalId] = review.edits[proposalId] || {};
           review.edits[proposalId][fieldname] = $input.attr("type") === "checkbox" ? ($input.prop("checked") ? 1 : 0) : String($input.val() ?? "");
           review.selections.add(proposalId);
+          this.invalidateFeeEvidenceMatrixTotals(review);
           dialog.$wrapper.find(`[data-mf-fee-review-select][data-proposal-id='${proposalId.replace(/'/g, "\\'")}']`).prop("checked", true);
+          const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+          if (review.draft && $totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
+        });
+        dialog.$wrapper.on("input", "[data-mf-fee-matrix-input]", (event) => {
+          const $input = $(event.currentTarget);
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          this.setFeeEvidenceMatrixValue(review, review.draft, String($input.attr("data-item") || ""), String($input.attr("data-column-key") || ""), String($input.val() ?? ""));
+          const $totals = dialog.$wrapper.find("[data-mf-fee-matrix-totals]");
+          if ($totals.length) $totals.replaceWith(this.renderFeeEvidenceMatrixFooter(review.draft, review));
+        });
+        dialog.$wrapper.on("change", "[data-mf-fee-review-edit]", () => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("change", "[data-mf-fee-matrix-input]", () => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-matrix-prev-page'], [data-action='mf-fee-matrix-next-page']", (event) => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
+          this.setFeeEvidenceMatrixPage(review, review.draft, Number(review.matrixPage || 0) + direction);
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-source-prev-page'], [data-action='mf-fee-source-next-page']", (event) => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
+          this.setFeeEvidenceSourcePage(review, review.draft, Number(review.sourcePage || 0) + direction);
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-warning-prev-page'], [data-action='mf-fee-warning-next-page']", (event) => {
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          const direction = String($(event.currentTarget).attr("data-action") || "").includes("next") ? 1 : -1;
+          this.setFeeEvidenceWarningPage(review, review.draft, Number(review.warningPage || 0) + direction);
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-action='mf-fee-matrix-use-ai']", (event) => {
+          const $button = $(event.currentTarget);
+          const review = state.feeEvidenceReview;
+          if (!review?.draft) return;
+          this.adoptFeeEvidenceMatrixSuggestion(review, review.draft, String($button.attr("data-item") || ""), String($button.attr("data-column-key") || ""));
+          dialog.$wrapper.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
+        });
+        dialog.$wrapper.on("click", "[data-mf-fee-voucher-details] > summary", (event) => {
+          const review = state.feeEvidenceReview;
+          if (review) review.matrixDetailsOpen = !Boolean($(event.currentTarget).closest("details").prop("open"));
         });
         dialog.$wrapper.on("click", "[data-action='mf-fee-review-apply']", () => this.applyFeeEvidenceReview().catch((error) => this.showError(error)));
         dialog.$wrapper.on("click", "[data-action='mf-fee-review-discard']", () => this.discardFeeEvidenceReview().catch((error) => this.showError(error)));
@@ -14047,6 +14929,7 @@ class OverseasCostWorkbench {
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
       }, false);
+      if (!isCurrentRequest()) return;
       if (!started?.ok) throw new Error(started?.message || "凭证分析任务启动失败");
       state.feeEvidenceReview = {
         ...state.feeEvidenceReview, runId: started.run_id, status: started.status,
@@ -14055,20 +14938,22 @@ class OverseasCostWorkbench {
       this.updateFeeEvidenceReviewProgress();
       let monitorPromise;
       monitorPromise = Promise.resolve()
-        .then(() => this.pollFeeEvidenceReview(state, request.batchName, started.run_id))
+        .then(() => this.pollFeeEvidenceReview(state, request.batchName, started.run_id, requestToken))
         .catch((error) => {
+          if (!isCurrentRequest()) return;
           state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
           this.updateFeeEvidenceReviewProgress();
         })
         .finally(() => {
           if (state.feeEvidenceReviewMonitorPromise === monitorPromise) state.feeEvidenceReviewMonitorPromise = null;
           if (state.feeEvidenceReviewActiveRequestKey === requestKey) state.feeEvidenceReviewActiveRequestKey = "";
+          if (state.feeEvidenceReviewStartToken === requestToken) state.feeEvidenceReviewStartToken = null;
         });
       state.feeEvidenceReviewMonitorPromise = monitorPromise;
       monitorStarted = true;
       return true;
     }).catch((error) => {
-      if (state.feeEvidenceReview?.requestKey === requestKey && state.feeEvidenceReviewDialog) {
+      if (isCurrentRequest() && state.feeEvidenceReviewDialog) {
         state.feeEvidenceReview = { ...state.feeEvidenceReview, status: "FAILED", progress_step: "分析失败", error_message: this.materialAIErrorMessage(error, "凭证分析失败，请重试。") };
         this.updateFeeEvidenceReviewProgress();
       } else {
@@ -14078,15 +14963,19 @@ class OverseasCostWorkbench {
     }).finally(() => {
       if (state.feeEvidenceReviewStartPromise === startPromise) state.feeEvidenceReviewStartPromise = null;
       if (!monitorStarted && state.feeEvidenceReviewActiveRequestKey === requestKey) state.feeEvidenceReviewActiveRequestKey = "";
+      if (!monitorStarted && state.feeEvidenceReviewStartToken === requestToken) state.feeEvidenceReviewStartToken = null;
     });
     state.feeEvidenceReviewStartPromise = startPromise;
     return startPromise;
   }
 
-  async pollFeeEvidenceReview(state, batchName, runId) {
+  async pollFeeEvidenceReview(state, batchName, runId, requestToken) {
+    const isCurrentRequest = () => this.materialFeeState === state &&
+      String(state.feeEvidenceReview?.runId || "") === String(runId || "") &&
+      String(state.feeEvidenceReview?.requestToken || "") === String(requestToken || "");
     let failures = 0;
     for (let attempt = 0; attempt < 300; attempt += 1) {
-      if (this.materialFeeState !== state) return;
+      if (!isCurrentRequest()) return;
       let result;
       try {
         result = await this.call("overseas_costing.api.fees.get_fee_evidence_review_status", {
@@ -14094,28 +14983,33 @@ class OverseasCostWorkbench {
           run_id: runId,
           after_revision: Number(state.feeEvidenceReview?.progress_revision || 0),
         }, false);
+        if (!isCurrentRequest()) return;
         failures = 0;
       } catch (error) {
+        if (!isCurrentRequest()) return;
         failures += 1;
         state.feeEvidenceReview.connection_error = this.materialAIErrorMessage(error, "状态连接暂时中断，正在重试。 ");
         this.updateFeeEvidenceReviewProgress();
         await new Promise((resolve) => window.setTimeout(resolve, Math.min(5000, 800 * failures)));
+        if (!isCurrentRequest()) return;
         continue;
       }
       if (!result?.ok) throw new Error(result?.message || "凭证分析状态读取失败");
       if (!result.unchanged) {
-        state.feeEvidenceReview = { ...state.feeEvidenceReview, ...result, runId };
+        state.feeEvidenceReview = { ...state.feeEvidenceReview, ...result, runId, requestToken };
         delete state.feeEvidenceReview.connection_error;
         if (result.status === "READY") {
           const draft = result.draft || {};
-          const proposals = [draft.evidence, ...(draft.fee_splits || []), ...(draft.components || [])].filter(Boolean);
-          state.feeEvidenceReview.selections = new Set(proposals.filter((row) => row.default_selected).map((row) => String(row.proposal_id || "")));
-          state.feeEvidenceReview.edits = {};
+          state.feeEvidenceReview.selections = state.feeEvidenceReview.selections || this.defaultFeeEvidenceReviewSelections(draft);
+          state.feeEvidenceReview.edits = state.feeEvidenceReview.edits || {};
+          state.feeEvidenceReview.draft = draft;
+          this.ensureFeeEvidenceMatrixState(state.feeEvidenceReview, draft);
         }
         this.updateFeeEvidenceReviewProgress();
       }
       if (["READY", "FAILED", "STALE", "APPLIED", "DISCARDED"].includes(String(result.status || ""))) return;
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      if (!isCurrentRequest()) return;
     }
     throw new Error("凭证分析超时，请稍后重新分析。 ");
   }
@@ -14140,92 +15034,83 @@ class OverseasCostWorkbench {
     const ready = review.status === "READY";
     $host.find("[data-action='mf-fee-review-apply'], [data-action='mf-fee-review-discard']").prop("hidden", !ready);
     if (ready && !$host.find("[data-mf-fee-review-draft]").data("rendered")) {
-      $host.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft || {})).data("rendered", true);
+      review.draft = review.draft || {};
+      this.ensureFeeEvidenceMatrixState(review, review.draft);
+      $host.find("[data-mf-fee-review-draft]").html(this.renderFeeEvidenceReviewDraft(review.draft, review)).data("rendered", true);
     }
   }
 
-  feeEvidenceSourceLabel(ref = {}) {
-    const region = ref.region || ref.image_region;
-    return [
-      ref.file_name || ref.attachment || ref.file,
-      ref.sheet,
-      ref.page ? `第 ${ref.page} 页` : "",
-      ref.text_line ? `文本第 ${ref.text_line} 行` : "",
-      ref.row ? `表格第 ${ref.row} 行` : "",
-      ref.cell ? `单元格 ${ref.cell}` : "",
-      region ? `图片区域 ${typeof region === "string" ? region : JSON.stringify(region)}` : "",
-      ref.path,
-    ].filter(Boolean).join(" · ");
-  }
-
-  renderFeeEvidenceReviewWarning(row = {}) {
-    if (!row.has_conflict && !row.needs_review && !row.warning) return "";
-    const message = row.warning || (row.has_conflict ? "AI 与规则结果冲突，请人工核对；默认不勾选。" : "证据或匹配信心不足，请人工核对；默认不勾选。");
-    return `<em class="ocw-mf-review-warning">${this.escape(message)}</em>`;
-  }
-
-  renderFeeEvidenceReviewDraft(draft) {
-    const evidence = draft.evidence || {};
-    const selected = (row) => row?.default_selected ? "checked" : "";
-    const statusOptions = [["ESTIMATED", "暂估"], ["ACTUAL", "实际"]];
-    const feeRows = draft.fee_splits || [];
-    const componentRows = draft.components || [];
-    const itemOptions = draft.item_options || [];
-    const refundParents = draft.refund_parent_options || [];
-    const evidenceId = this.escape(evidence.proposal_id || "evidence:classification");
-    const sourceRefs = [
-      ...(evidence.source_refs || []),
-      ...feeRows.flatMap((row) => row.source_refs || []),
-      ...componentRows.map((row) => row.source_evidence || {}).filter((row) => Object.keys(row).length),
-    ];
-    return `<div class="ocw-mf-fee-review-draft">
-      ${this.renderCurrentSourceReviewControls(draft.source_context || {}, null, { fees: true })}
-      <section class="${evidence.has_conflict || evidence.needs_review ? "is-warning" : ""}"><h4>凭证总额</h4>${this.renderFeeEvidenceReviewWarning(evidence)}<label class="ocw-mf-review-choice"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${evidenceId}" ${selected(evidence)}><span><strong>${this.escape(evidence.currency || "RMB")} ${this.escape(evidence.original_amount || "待人工补录")}</strong><small>${this.escape(evidence.reason || "请核对凭证类型和会计作用")}</small></span></label><div class="ocw-mf-review-fields"><label>凭证类型<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="evidence_type">${[["QUOTE","报价"],["PREPAYMENT","预付款／暂缴"],["FINAL_INVOICE","最终发票／结算单"],["TAX_CERTIFICATE","完税凭证"],["PAYMENT","付款流水"],["REFUND","退款／贷项"],["OTHER","其他"]].map(([value,label]) => `<option value="${value}" ${value === evidence.evidence_type ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>会计作用<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="accounting_role">${[["ESTIMATE","更新暂估"],["FINAL_BILL","最终账单"],["SETTLEMENT","付款／退款流水"],["REFERENCE","仅作参考"]].map(([value,label]) => `<option value="${value}" ${value === evidence.accounting_role ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>金额<input data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="original_amount" value="${this.escape(evidence.original_amount || "")}" inputmode="decimal"></label><label>币种<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="currency">${this.materialFeeCurrencyOptions().map((option) => `<option value="${option.value}" ${option.value === (evidence.currency || "RMB") ? "selected" : ""}>${option.label}</option>`).join("")}</select></label><label>方向<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="direction"><option value="DEBIT" ${evidence.direction !== "CREDIT" ? "selected" : ""}>付款／应付</option><option value="CREDIT" ${evidence.direction === "CREDIT" ? "selected" : ""}>退款／冲回</option></select></label><label>关联原付款<select data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="related_evidence"><option value="">无／待核对</option>${refundParents.map((row) => `<option value="${this.escape(row.name || "")}" ${String(row.name || "") === String(evidence.related_evidence || "") ? "selected" : ""}>${this.escape([row.currency, row.original_amount, row.attachment || row.name].filter(Boolean).join(" · "))}</option>`).join("")}</select></label><label class="is-checkbox"><input type="checkbox" data-mf-fee-review-edit data-proposal-id="${evidenceId}" data-fieldname="is_final" ${evidence.is_final ? "checked" : ""}> 已确认是最终凭证</label></div></section>
-      <section><h4>费用拆分</h4>${feeRows.length ? feeRows.map((row) => `<label class="ocw-mf-review-choice ${row.has_conflict || row.needs_review ? "is-warning" : ""}"><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}><span><strong>${this.escape(row.label || row.logical_fee_key)} · ${this.escape(row.currency)} <input data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount" value="${this.escape(row.amount || "")}" inputmode="decimal"></strong><small><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="amount_status">${statusOptions.map(([value,label]) => `<option value="${value}" ${value === (row.amount_status || evidence.suggested_amount_status) ? "selected" : ""}>${label}</option>`).join("")}</select></small>${this.renderFeeEvidenceReviewWarning(row)}</span></label>`).join("") : "<p>未识别出可安全拆分的金额，可保留凭证后人工补录。</p>"}</section>
-      ${draft.missing_fx ? `<div class="ocw-mf-review-warning is-block">缺汇率：可保存原币事实，本次试算不会计入。</div>` : ""}
-      <section><h4>税种 · HS / SKU 匹配与分摊结果</h4><div class="ocw-mf-review-table"><table><thead><tr><th>选择</th><th>税种</th><th>HS</th><th>SKU 匹配</th><th>原币金额</th><th>RMB</th><th>依据</th></tr></thead><tbody>${componentRows.length ? componentRows.map((row) => `<tr class="${row.has_conflict || row.needs_review ? "is-warning" : ""}"><td><input type="checkbox" data-mf-fee-review-select data-proposal-id="${this.escape(row.proposal_id || "")}" ${selected(row)}></td><td>${this.escape(row.tax_code || "--")}</td><td>${this.escape(row.hs_code || "--")}</td><td><select data-mf-fee-review-edit data-proposal-id="${this.escape(row.proposal_id || "")}" data-fieldname="item" aria-label="选择税费分项对应 SKU">${itemOptions.map((option) => `<option value="${this.escape(option.item || "")}" ${String(option.item || "") === String(row.item || "") ? "selected" : ""}>${this.escape([option.material_code, option.product_name].filter(Boolean).join(" · ") || option.stable_line_key || option.item)}</option>`).join("")}</select></td><td>${this.escape(row.currency || "MXN")} ${this.escape(row.original_amount || "--")}</td><td>${this.escape(row.amount_rmb || "缺汇率")}</td><td>${row.refund_parent ? `<small>原付款 ${this.escape(row.refund_parent)}</small>` : ""}${this.escape(row.allocation_basis || "--")}${this.renderFeeEvidenceReviewWarning(row)}</td></tr>`).join("") : `<tr><td colspan="7">暂无可精确归集的 SKU 税费分项</td></tr>`}</tbody></table></div></section>
-      <section class="is-difference"><h4>待归类差额</h4><strong>${this.escape(draft.unclassified_difference || "0.00")} ${this.escape(evidence.currency || "")}</strong><small>人工确认前不计入成本。</small></section>
-      <section><h4>来源证据</h4><p>${sourceRefs.map((ref) => this.escape(this.feeEvidenceSourceLabel(ref))).filter(Boolean).join("；") || "证据位置未完整提取，请人工核对原附件。"}</p></section>
-    </div>`;
+  setFeeEvidenceReviewActionBusy(dialog, busy) {
+    const $buttons = dialog?.$wrapper?.find("[data-action='mf-fee-review-apply'], [data-action='mf-fee-review-discard']");
+    if (typeof $buttons?.prop === "function") $buttons.prop("disabled", Boolean(busy));
   }
 
   async applyFeeEvidenceReview() {
     const state = this.ensureMaterialFeeState();
     const review = state.feeEvidenceReview;
-    if (review?.status !== "READY" || !(await this.ensureMaterialFeeEditSession())) return;
-    if (state.feeEvidenceReviewDialog?.$wrapper?.find("[data-current-source-review]").length) {
-      review.edits = { ...(review.edits || {}), _source_review: this.collectCurrentSourceReviewControls(state.feeEvidenceReviewDialog.$wrapper) };
+    if (review?.actionPromise) return review.actionPromise;
+    if (review?.status !== "READY") return;
+    const dialog = state.feeEvidenceReviewDialog;
+    const actionPromise = (async () => {
+      if (!(await this.ensureMaterialFeeEditSession())) return;
+      if (dialog?.$wrapper?.find("[data-current-source-review]").length) {
+        review.edits = { ...(review.edits || {}), _source_review: this.collectCurrentSourceReviewControls(dialog.$wrapper) };
+      }
+      const componentMatrix = this.validateFeeEvidenceMatrix(review.draft || {}, review);
+      const result = await this.call("overseas_costing.api.fees.apply_fee_evidence_review", {
+        batch_name: review.batchName || this.detailState.batchName,
+        run_id: review.runId,
+        selections_json: JSON.stringify([...review.selections]),
+        edits_json: JSON.stringify(review.edits || {}),
+        component_matrix_json: JSON.stringify(componentMatrix),
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+      }, false);
+      if (!result?.ok) throw new Error(result?.message || "凭证审核草稿保存失败");
+      this.updateMaterialFeeExpectedModified(result);
+      dialog?.hide();
+      state.feeEvidenceReviewDialog = null;
+      state.feeEvidenceReview = null;
+      frappe.show_alert({ message: result.message || "凭证草稿已保存", indicator: "green" });
+      if (this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });
+      return result;
+    })();
+    review.actionPromise = actionPromise;
+    this.setFeeEvidenceReviewActionBusy(dialog, true);
+    try {
+      return await actionPromise;
+    } finally {
+      if (review.actionPromise === actionPromise) review.actionPromise = null;
+      this.setFeeEvidenceReviewActionBusy(dialog, false);
     }
-    const result = await this.call("overseas_costing.api.fees.apply_fee_evidence_review", {
-      batch_name: review.batchName || this.detailState.batchName,
-      run_id: review.runId,
-      selections_json: JSON.stringify([...review.selections]),
-      edits_json: JSON.stringify(review.edits || {}),
-      edit_token: this.detailState.editToken,
-      expected_modified: this.detailState.expectedModified,
-    }, false);
-    if (!result?.ok) throw new Error(result?.message || "凭证审核草稿保存失败");
-    this.updateMaterialFeeExpectedModified(result);
-    state.feeEvidenceReviewDialog?.hide();
-    state.feeEvidenceReviewDialog = null;
-    state.feeEvidenceReview = null;
-    frappe.show_alert({ message: result.message || "凭证草稿已保存", indicator: "green" });
-    if (this.detailState.tab === "documents") await this.loadMaterialFeeWorkspace({ quiet: true });
   }
 
   async discardFeeEvidenceReview() {
     const state = this.ensureMaterialFeeState();
     const review = state.feeEvidenceReview;
+    if (review?.actionPromise) return review.actionPromise;
     if (!review?.runId) return;
-    const result = await this.call("overseas_costing.api.fees.discard_fee_evidence_review", {
-      batch_name: review.batchName || this.detailState.batchName,
-      run_id: review.runId,
-    }, false);
-    if (!result?.ok) throw new Error(result?.message || "放弃凭证草稿失败");
-    state.feeEvidenceReviewDialog?.hide();
-    state.feeEvidenceReviewDialog = null;
-    state.feeEvidenceReview = null;
-    frappe.show_alert({ message: result.message, indicator: "green" });
+    const dialog = state.feeEvidenceReviewDialog;
+    const actionPromise = (async () => {
+      const result = await this.call("overseas_costing.api.fees.discard_fee_evidence_review", {
+        batch_name: review.batchName || this.detailState.batchName,
+        run_id: review.runId,
+      }, false);
+      if (!result?.ok) throw new Error(result?.message || "放弃凭证草稿失败");
+      dialog?.hide();
+      state.feeEvidenceReviewDialog = null;
+      state.feeEvidenceReview = null;
+      frappe.show_alert({ message: result.message, indicator: "green" });
+      return result;
+    })();
+    review.actionPromise = actionPromise;
+    this.setFeeEvidenceReviewActionBusy(dialog, true);
+    try {
+      return await actionPromise;
+    } finally {
+      if (review.actionPromise === actionPromise) review.actionPromise = null;
+      this.setFeeEvidenceReviewActionBusy(dialog, false);
+    }
   }
 
   async setMaterialFeeEvidenceStatus(evidenceName, status) {
@@ -14244,7 +15129,8 @@ class OverseasCostWorkbench {
   }
 
   isMaterialFeeCalculationBusy(state = this.materialFeeState) {
-    return Boolean(state?.previewRunning || state?.calculationWrite || state?.costTrialAI?.previewing || state?.costTrialAI?.confirming);
+    return Boolean(state?.previewRunning || state?.calculationWrite || state?.costTrialRestarting
+      || state?.costTrialAI?.previewing || state?.costTrialAI?.confirming);
   }
 
   canApplyMaterialAIFill(fill) {
@@ -14255,8 +15141,17 @@ class OverseasCostWorkbench {
   updateMaterialFeeWriteControls(state) {
     if (this.materialFeeState !== state) return;
     const calculating = this.isMaterialFeeCalculationBusy(state);
+    const trial = state.costTrialAI || {};
+    const stageLabel = trial.actionStage === "reuse"
+      ? "读取已有口径…"
+      : trial.actionStage === "ai"
+        ? "AI 判断" + (Number(trial.aiCandidateCount || 0) ? " " + Number(trial.aiCandidateCount) + " 项" : "") + "…"
+        : trial.actionStage === "preview"
+          ? "校验分摊…"
+          : trial.actionStage === "confirm" ? "保存试算…" : "计算中…";
     this.$root?.find("[data-action='mf-preview-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying))
-      ?.text?.(calculating ? "计算中…" : "开始试算");
+      ?.text?.(calculating ? stageLabel : "开始试算");
+    this.$root?.find("[data-action='mf-adjust-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying));
     for (const root of [this.$root, state.aiProgressDialog?.$wrapper]) {
       root?.find("[data-action='mf-ai-apply']")?.prop?.("disabled", !this.canApplyMaterialAIFill(state.aiFill));
     }
@@ -14315,7 +15210,10 @@ class OverseasCostWorkbench {
       && this.detailState.batchName === batchName
       && this.detailState.versionName === versionName
       && this.detailState.tab === "documents";
+    state.costTrialDialog?.hide?.();
+    state.costTrialDialog = null;
     state.previewRunning = true;
+    state.costTrialAI = { status: "STARTING", actionStage: "reuse" };
     this.updateMaterialFeeWriteControls(state);
     try {
       if (!(await this.flushMaterialFeeInputs(state)) || !isCurrent()) return false;
@@ -14334,6 +15232,7 @@ class OverseasCostWorkbench {
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
         force: 0,
+        reuse_only: 0,
       });
       if (!started?.ok) throw new Error(started?.message || "AI 试算任务启动失败。");
       if (!inputsUnchanged()) return false;
@@ -14345,12 +15244,21 @@ class OverseasCostWorkbench {
         requestId,
         feeRequestId,
         inputRevision,
+        actionStage: ["QUEUED", "RUNNING"].includes(String(started.status || "")) ? "ai" : "reuse",
+        aiCandidateCount: Number(started.ai_candidate_count || 0),
       };
-      this.openCostTrialAIReviewDialog();
+      this.updateMaterialFeeWriteControls(state);
       await this.pollCostTrialAI(state, batchName, started.run_id);
       if (!isCurrent() || state.costTrialAI?.status !== "READY") return false;
-      this.renderCostTrialAIReviewDialog();
-      return true;
+      const blocked = (state.costTrialAI.draft?.fee_suggestions || []).filter((row) => Boolean(row.blocked));
+      if (blocked.length) {
+        state.costTrialAI.dialogMode = "repair";
+        state.costTrialAI.actionStage = "";
+        this.openCostTrialAIReviewDialog({ mode: "repair" });
+        throw new Error(this.costTrialBlockingMessage(blocked));
+      }
+      state.costTrialAI.selections = (state.costTrialAI.draft?.default_selections || []).map((row) => ({ ...row }));
+      return await this.confirmCostTrialAI();
     } finally {
       state.previewRunning = false;
       this.updateMaterialFeeWriteControls(state);
@@ -14379,11 +15287,18 @@ class OverseasCostWorkbench {
         progressRevision: Number(result.progress_revision || current.progressRevision || 0),
         draft: result.draft || current.draft || null,
       };
+      if (["QUEUED", "RUNNING"].includes(String(result.status || ""))) {
+        state.costTrialAI.actionStage = "ai";
+      } else if (result.status === "CONFIRMING") {
+        state.costTrialAI.actionStage = "confirm";
+      }
+      this.updateMaterialFeeWriteControls(state);
       this.renderCostTrialAIReviewDialog();
-      if (!["QUEUED", "RUNNING", "READY", "FAILED", "STALE", "DISCARDED"].includes(String(result.status || ""))) {
+      if (!["QUEUED", "RUNNING", "READY", "CONFIRMING", "CONFIRMED", "FAILED", "STALE", "DISCARDED"].includes(String(result.status || ""))) {
         throw new Error(result.message || "AI 试算状态无效，请重试。");
       }
       if (result.status === "READY") return true;
+      if (result.status === "CONFIRMED") return false;
       if (["FAILED", "STALE", "DISCARDED"].includes(String(result.status || ""))) {
         throw new Error(result.error_message || (result.status === "STALE"
           ? "试算输入已变化，请重试 AI。"
@@ -14399,6 +15314,31 @@ class OverseasCostWorkbench {
     return { goods_value: "货值", gross_weight: "毛重", volume: "体积", chargeable_weight: "计费重" }[basis] || basis || "--";
   }
 
+  costTrialDecisionSourceLabel(source) {
+    return {
+      REUSED: "沿用上次",
+      AI: "AI 判断",
+      SYSTEM_FALLBACK: "系统兜底",
+      EVIDENCE: "凭证优先",
+      USER_OVERRIDE: "用户调整",
+    }[String(source || "")] || "系统口径";
+  }
+
+  costTrialBlockingMessage(rows = []) {
+    const details = rows.map((row) => {
+      const missing = (row.missing_fields || []).map((field) => ({
+        goods_value: "货值",
+        gross_weight_kg: "毛重",
+        volume_m3: "体积",
+        chargeable_weight_kg: "计费重",
+      }[field] || field)).join("、");
+      if (row.evidence_issue === "SKU_MATCH_INVALID") return `${row.expense_category || row.fee_key}：凭证 SKU 匹配无效`;
+      if (row.evidence_issue === "AMOUNT_INVALID") return `${row.expense_category || row.fee_key}：凭证金额无效`;
+      return `${row.expense_category || row.fee_key}：缺少 ${missing || "可用分摊数据"}`;
+    });
+    return `当前无法试算，请先补充：${details.join("；")}`;
+  }
+
   renderCostTrialAIReview() {
     const trial = this.ensureMaterialFeeState().costTrialAI || {};
     const draft = trial.draft || {};
@@ -14410,12 +15350,11 @@ class OverseasCostWorkbench {
     const rows = suggestions.map((row) => {
       const savedChoice = selectedById.get(row.suggestion_id) || {};
       const options = (row.available_alternatives || []).map((option) => {
-        const selectedBasis = savedChoice.basis || (row.recommended_basis_available ? row.recommended_basis : "");
+        const selectedBasis = savedChoice.basis || row.default_basis || (row.recommended_basis_available ? row.recommended_basis : "");
         const selected = option.basis === selectedBasis ? "selected" : "";
         return `<option value="${this.escape(option.basis)}" ${selected}>${this.escape(option.label)}·可用</option>`;
       }).join("");
       const basisControl = `<label><span>本次分摊口径</span><select data-cost-trial-basis data-suggestion-id="${this.escape(row.suggestion_id)}" data-recommended-basis="${this.escape(row.recommended_basis || "")}"><option value="">请选择</option>${options}</select></label>`;
-      const requiresEvidenceRepair = ["SKU_MATCH_INVALID", "AMOUNT_INVALID"].includes(String(row.evidence_issue || ""));
       const evidence = row.evidence_locked
         ? `<div class="ocw-cost-trial-evidence"><strong>凭证优先</strong><span>${Number(row.evidence_component_count || 0)} 条 SKU 分项·RMB ${this.escape(row.evidence_amount_rmb || "0.00")}</span></div>`
         : row.evidence_issue === "SKU_MATCH_INVALID"
@@ -14425,38 +15364,42 @@ class OverseasCostWorkbench {
             : row.evidence_issue === "TOTAL_MISMATCH"
               ? `<div class="ocw-cost-trial-warning">凭证分项合计 RMB ${this.escape(row.evidence_amount_rmb || "0.00")} 与费用金额不一致，本次不采用凭证分项。</div>${basisControl}`
               : basisControl;
-      const unavailable = row.recommended_basis_available ? "" : `<p class="is-warning">AI 建议按${this.escape(row.recommended_basis_label)}，但缺少 ${this.escape((row.missing_fields || []).join("、"))}。可暂用其他完整口径，结果将标记为非完整成本。</p>`;
+      const unavailable = row.default_basis ? "" : `<p class="is-warning">当前没有完整可用口径，缺少 ${this.escape((row.missing_fields || []).join("、"))}。请补齐后再试算。</p>`;
       const alternativeDiffs = (row.available_alternatives || []).length > 1
         ? `<div class="ocw-cost-trial-alternatives"><strong>可选口径的逐行试算差异</strong>${row.available_alternatives.map((option) => `<span>${this.escape(option.label)}：RMB ${this.escape((option.allocation_preview || []).map((item) => item.amount_rmb).join(" / ") || "--")}</span>`).join("")}</div>`
         : "";
       return `<article class="ocw-cost-trial-fee ${row.evidence_locked ? "is-evidence" : ""}">
-        <header><div><strong>${this.escape(row.expense_category || row.fee_key)}</strong><span>${this.escape(row.currency)} ${this.escape(row.amount)}</span></div><em>AI 建议·${this.escape(row.recommended_basis_label)}·${Math.round(Number(row.confidence || 0) * 100)}%</em></header>
-        <p>${this.escape(row.reason || "AI 未给出说明，可选择已保存的完整口径。")}</p>${unavailable}${alternativeDiffs}${evidence}
-        ${row.evidence_locked || requiresEvidenceRepair ? "" : `<label><span>确认说明</span><input data-cost-trial-reason data-suggestion-id="${this.escape(row.suggestion_id)}" maxlength="500" value="${this.escape(savedChoice.reason || "")}" placeholder="仅在改用其他口径时填写" /></label>`}
+        <header><div><strong>${this.escape(row.expense_category || row.fee_key)}</strong><span>${this.escape(row.currency)} ${this.escape(row.amount)}</span></div><em>${this.escape(this.costTrialDecisionSourceLabel(row.decision_source))}·${this.escape(this.costTrialBasisLabel(row.default_basis || row.recommended_basis))}</em></header>
+        <p>${this.escape(row.reason || "已选用当前完整可计算的口径，可直接调整后试算。")}</p>${unavailable}${alternativeDiffs}${evidence}
       </article>`;
     }).join("");
     const previewHtml = preview ? `<section class="ocw-cost-trial-preview ${preview.trial_review?.is_temporary ? "is-temporary" : ""}"><strong>${preview.trial_review?.is_temporary ? "暂行口径试算·非完整成本" : "完整口径预览"}</strong><span>综合成本 RMB ${this.escape(preview.summary?.total_cost_rmb || "0.00")}</span><small>服务器已校验逐 SKU 分摊与金额守恒。</small></section>` : "";
-    return `<div class="ocw-cost-trial-review"><header><div><strong>AI 分摊口径建议</strong><span>${this.escape(draft.model || trial.model || "DeepSeek")}·每项费用单独确认</span></div></header>
+    const summary = draft.decision_summary || {};
+    const sourceSummary = [["reused", "沿用上次"], ["ai", "AI 判断"], ["system_fallback", "系统兜底"], ["evidence", "凭证优先"]]
+      .filter(([key]) => Number(summary[key] || 0) > 0)
+      .map(([key, label]) => `${label} ${Number(summary[key] || 0)}`).join(" · ");
+    return `<div class="ocw-cost-trial-review"><header><div><strong>${trial.dialogMode === "repair" ? "试算所需资料待补" : "调整分摊口径"}</strong><span>${this.escape(sourceSummary || "已自动选择完整可用口径")}</span></div></header>
       ${draft.ai_warning ? `<div class="ocw-cost-trial-warning">${this.escape(draft.ai_warning)}</div>` : ""}
       <main>${waiting ? `<div class="ocw-cost-trial-running"><strong>${this.escape(trial.progress_step || "DeepSeek 正在分析费用口径")}</strong><span>${Math.max(0, Math.min(100, Number(trial.progress_percent || 0)))}%</span></div>` : rows || `<div class="ocw-detail-empty"><strong>当前没有需要分摊的费用</strong></div>`}${previewHtml}</main>
-      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重试 AI</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">请先补齐被阻止的费用资料</span>` : ""}</footer>
+      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重新让 AI 判断</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">${this.escape(this.costTrialBlockingMessage(suggestions.filter((row) => row.blocked)))}</span>` : ""}</footer>
     </div>`;
   }
 
-  openCostTrialAIReviewDialog() {
+  openCostTrialAIReviewDialog({ mode = "adjust" } = {}) {
     const state = this.ensureMaterialFeeState();
     if (!globalThis.frappe?.ui?.Dialog) return;
+    if (state.costTrialAI) state.costTrialAI.dialogMode = mode;
     state.costTrialDialog?.hide?.();
     const dialog = new frappe.ui.Dialog({
-      title: "AI 试算确认",
+      title: mode === "repair" ? "试算资料待补" : "调整试算分摊",
       size: "extra-large",
       fields: [{ fieldname: "review_html", fieldtype: "HTML" }],
-      primary_action_label: "确认并试算",
+      primary_action_label: mode === "repair" ? "补齐资料后重试" : "应用调整并试算",
       primary_action: () => this.confirmCostTrialAI().catch((error) => this.showError(error)),
     });
     state.costTrialDialog = dialog;
     dialog.$wrapper?.addClass?.("ocw-cost-trial-dialog");
-    dialog.$wrapper?.on?.("input change", "[data-cost-trial-basis], [data-cost-trial-reason]", () => {
+    dialog.$wrapper?.on?.("input change", "[data-cost-trial-basis]", () => {
       this.invalidateCostTrialAIPreview({ render: false });
       this.updateCostTrialAIPrimaryAction();
     });
@@ -14477,21 +15420,33 @@ class OverseasCostWorkbench {
 
   collectCostTrialAISelections({ validate = true } = {}) {
     const state = this.ensureMaterialFeeState();
+    const trial = state.costTrialAI || {};
     const wrapper = state.costTrialDialog?.$wrapper;
     const selections = [];
+    let renderedInputs = 0;
     wrapper?.find?.("[data-cost-trial-basis]")?.each?.((_index, element) => {
+      renderedInputs += 1;
       const $input = $(element);
       const suggestionId = String($input.attr("data-suggestion-id") || "");
       const basis = String($input.val() || "");
       if (validate && !basis) throw new Error("请为每项费用选择可用的分摊口径。");
-      let reason = "";
-      wrapper.find(`[data-cost-trial-reason][data-suggestion-id='${suggestionId}']`).each((_i, input) => { reason = String($(input).val() || ""); });
-      const recommendedBasis = String($input.attr("data-recommended-basis") || "");
-      if (validate && basis && recommendedBasis && basis !== recommendedBasis && !reason.trim()) {
-        throw new Error("改用其他分摊口径时，请填写确认说明。");
-      }
-      selections.push({ suggestion_id: suggestionId, basis, reason });
+      selections.push({ suggestion_id: suggestionId, basis, reason: "" });
     });
+    if (!renderedInputs) {
+      const defaults = trial.selections?.length ? trial.selections : (trial.draft?.default_selections || []);
+      defaults.forEach((row) => selections.push({
+        suggestion_id: String(row.suggestion_id || ""),
+        basis: String(row.basis || ""),
+        reason: "",
+      }));
+    }
+    if (validate) {
+      const blocked = (trial.draft?.fee_suggestions || []).filter((row) => Boolean(row.blocked));
+      if (blocked.length) throw new Error(this.costTrialBlockingMessage(blocked));
+      if (selections.some((row) => !row.suggestion_id || !row.basis)) {
+        throw new Error("请为每项费用选择可用的分摊口径。");
+      }
+    }
     return selections;
   }
 
@@ -14513,11 +15468,13 @@ class OverseasCostWorkbench {
     const $button = state.costTrialDialog?.get_primary_btn?.();
     const label = trial.actionStage === "preview"
       ? "校验分摊…"
-      : trial.actionStage === "confirm" ? "保存试算…" : "确认并试算";
+      : trial.actionStage === "confirm"
+        ? "保存试算…"
+        : trial.dialogMode === "repair" ? "补齐资料后重试" : "应用调整并试算";
     $button?.text?.(label);
     $button?.prop?.("disabled", !this.costTrialAIReadyToConfirm());
-    const busy = Boolean(trial.confirming || trial.previewing);
-    state.costTrialDialog?.$wrapper?.find?.("[data-cost-trial-basis], [data-cost-trial-reason]")?.prop?.("disabled", busy);
+    const busy = Boolean(trial.confirming || trial.previewing || state.costTrialRestarting);
+    state.costTrialDialog?.$wrapper?.find?.("[data-cost-trial-basis]")?.prop?.("disabled", busy);
     state.costTrialDialog?.$wrapper?.find?.("[data-action^='cost-trial-']")?.prop?.("disabled", busy);
   }
 
@@ -14593,7 +15550,7 @@ class OverseasCostWorkbench {
         if (JSON.stringify(latestSelections) !== JSON.stringify(currentSelections)) {
           trial.preview = null;
           trial.selections = latestSelections;
-          throw new Error("分摊口径或说明已变化，未保存旧选择，请再次确认。");
+          throw new Error("分摊口径已变化，未保存旧选择，请再次确认。");
         }
         trial.preview = preview;
       }
@@ -14616,11 +15573,12 @@ class OverseasCostWorkbench {
         && String(this.detailState.expectedModified) > String(result.batch_modified)) return false;
       state.preview = result;
       state.costTrialDialog?.hide?.();
+      state.costTrialDialog = null;
       this.renderDetailShell?.();
       if (this.detailState.editToken) this.updateEditLeaseStatus?.();
       this.renderMaterialFeeWorkspace();
       if (trial.scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
-      frappe.show_alert({ message: result.trial_review?.is_temporary ? "暂行口径试算已保存" : "AI 试算完成", indicator: "green" });
+      frappe.show_alert({ message: result.trial_review?.is_temporary ? "暂行口径试算已保存" : "试算完成", indicator: "green" });
       return result;
     } finally {
       if (state.calculationWrite === calculationWrite) state.calculationWrite = null;
@@ -14638,51 +15596,127 @@ class OverseasCostWorkbench {
       batch_name: this.detailState.batchName, run_id: trial.runId,
     });
     state.costTrialDialog?.hide?.();
+    state.costTrialDialog = null;
     state.costTrialAI = null;
     this.updateMaterialFeeWriteControls(state);
   }
 
-  async retryCostTrialAI() {
+  async openCostTrialAdjustment() {
     const state = this.ensureMaterialFeeState();
-    const trial = state.costTrialAI;
+    if (this.isMaterialFeeCalculationBusy(state)) return false;
     const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName;
-    const requestId = state.requestId;
-    const feeRequestId = state.feeRequestId;
-    const inputRevision = state.inputRevision;
     const isCurrent = () => this.materialFeeState === state
       && this.detailState.batchName === batchName
       && this.detailState.versionName === versionName
-      && this.detailState.tab === "documents"
-      && state.requestId === requestId
-      && state.feeRequestId === feeRequestId
-      && state.inputRevision === inputRevision;
-    if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
-      batch_name: batchName, run_id: trial.runId,
-    });
+      && this.detailState.tab === "documents";
     state.costTrialDialog?.hide?.();
-    state.costTrialAI = null;
-    if (!isCurrent()) return false;
-    const started = await this.call("overseas_costing.api.calculate.start_cost_trial_ai_review", {
-      batch_name: batchName,
-      version_name: versionName || null,
-      edit_token: this.detailState.editToken,
-      expected_modified: this.detailState.expectedModified,
-      force: 1,
-    });
-    if (!started?.ok) throw new Error(started?.message || "AI 试算任务重试失败。");
-    if (!isCurrent()) return false;
-    state.costTrialAI = {
-      runId: started.run_id,
-      status: started.status,
-      progressRevision: Number(started.progress_revision || 0),
-      requestId,
-      feeRequestId,
-      inputRevision,
-    };
-    await this.pollCostTrialAI(state, batchName, started.run_id);
-    if (state.costTrialAI?.status === "READY") this.openCostTrialAIReviewDialog();
-    return state.costTrialAI?.status === "READY";
+    state.costTrialDialog = null;
+    state.previewRunning = true;
+    state.costTrialAI = { status: "STARTING", actionStage: "reuse", dialogMode: "adjust" };
+    this.updateMaterialFeeWriteControls(state);
+    try {
+      if (!(await this.flushMaterialFeeInputs(state)) || !isCurrent()) return false;
+      if (this.ensureEditSession && !(await this.ensureEditSession())) return false;
+      if (!isCurrent()) return false;
+      const requestId = state.requestId;
+      const feeRequestId = state.feeRequestId;
+      const inputRevision = state.inputRevision;
+      const started = await this.call("overseas_costing.api.calculate.start_cost_trial_ai_review", {
+        batch_name: batchName,
+        version_name: versionName || null,
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+        force: 0,
+        reuse_only: 1,
+      });
+      if (!started?.ok) throw new Error(started?.message || "读取已保存分摊口径失败。");
+      if (!isCurrent() || state.requestId !== requestId || state.feeRequestId !== feeRequestId
+        || state.inputRevision !== inputRevision) return false;
+      state.costTrialAI = {
+        runId: started.run_id,
+        status: started.status,
+        progressRevision: Number(started.progress_revision || 0),
+        requestId,
+        feeRequestId,
+        inputRevision,
+        actionStage: "reuse",
+        dialogMode: "adjust",
+        aiCandidateCount: 0,
+      };
+      await this.pollCostTrialAI(state, batchName, started.run_id);
+      if (!isCurrent() || state.costTrialAI?.status !== "READY") return false;
+      state.costTrialAI.actionStage = "";
+      const mode = (state.costTrialAI.draft?.fee_suggestions || []).some((row) => row.blocked) ? "repair" : "adjust";
+      state.costTrialAI.dialogMode = mode;
+      state.costTrialAI.selections = (state.costTrialAI.draft?.default_selections || []).map((row) => ({ ...row }));
+      this.openCostTrialAIReviewDialog({ mode });
+      return true;
+    } finally {
+      state.previewRunning = false;
+      this.updateMaterialFeeWriteControls(state);
+    }
+  }
+
+  async retryCostTrialAI() {
+    const state = this.ensureMaterialFeeState();
+    if (state.costTrialRestarting) return false;
+    state.costTrialRestarting = true;
+    this.updateMaterialFeeWriteControls(state);
+    try {
+      const trial = state.costTrialAI;
+      const batchName = this.detailState.batchName;
+      const versionName = this.detailState.versionName;
+      const requestId = state.requestId;
+      const feeRequestId = state.feeRequestId;
+      const inputRevision = state.inputRevision;
+      const isCurrent = () => this.materialFeeState === state
+        && this.detailState.batchName === batchName
+        && this.detailState.versionName === versionName
+        && this.detailState.tab === "documents"
+        && state.requestId === requestId
+        && state.feeRequestId === feeRequestId
+        && state.inputRevision === inputRevision;
+      if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
+        batch_name: batchName, run_id: trial.runId,
+      });
+      state.costTrialDialog?.hide?.();
+      state.costTrialDialog = null;
+      state.costTrialAI = null;
+      if (!isCurrent()) return false;
+      const started = await this.call("overseas_costing.api.calculate.start_cost_trial_ai_review", {
+        batch_name: batchName,
+        version_name: versionName || null,
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+        force: 1,
+        reuse_only: 0,
+      });
+      if (!started?.ok) throw new Error(started?.message || "AI 试算任务重试失败。");
+      if (!isCurrent()) return false;
+      state.costTrialAI = {
+        runId: started.run_id,
+        status: started.status,
+        progressRevision: Number(started.progress_revision || 0),
+        requestId,
+        feeRequestId,
+        inputRevision,
+        actionStage: ["QUEUED", "RUNNING"].includes(String(started.status || "")) ? "ai" : "reuse",
+        aiCandidateCount: Number(started.ai_candidate_count || 0),
+        dialogMode: "adjust",
+      };
+      await this.pollCostTrialAI(state, batchName, started.run_id);
+      if (state.costTrialAI?.status === "READY") {
+        state.costTrialAI.actionStage = "";
+        state.costTrialAI.selections = (state.costTrialAI.draft?.default_selections || []).map((row) => ({ ...row }));
+        this.openCostTrialAIReviewDialog({ mode: "adjust" });
+      }
+      return state.costTrialAI?.status === "READY";
+    } finally {
+      state.costTrialRestarting = false;
+      this.updateCostTrialAIPrimaryAction();
+      this.updateMaterialFeeWriteControls(state);
+    }
   }
 
   acceptSavedComprehensiveCost(result, batchName, { versionName = result.version_name, preserveDirty = false } = {}) {
@@ -14744,6 +15778,18 @@ class OverseasCostWorkbench {
       || (this.materialFeeState?.preview?.saved === true && this.materialFeeState.preview.read_only === false ? this.materialFeeState.preview : null);
   }
 
+  materialFeeTrialDecisionSummary(preview = {}) {
+    const choices = preview.trial_review?.fee_choices || [];
+    const counts = choices.reduce((result, row) => {
+      const source = String(row.decision_source || "");
+      result[source] = Number(result[source] || 0) + 1;
+      return result;
+    }, {});
+    return [["REUSED", "沿用上次"], ["AI", "AI 判断"], ["SYSTEM_FALLBACK", "系统兜底"], ["EVIDENCE", "凭证优先"], ["USER_OVERRIDE", "用户调整"]]
+      .filter(([source]) => Number(counts[source] || 0) > 0)
+      .map(([source, label]) => `${label} ${Number(counts[source] || 0)}`).join(" · ");
+  }
+
   renderMaterialFeeCostTable() {
     const state = this.ensureMaterialFeeState();
     const header = this.detailState.header || {};
@@ -14752,9 +15798,10 @@ class OverseasCostWorkbench {
     const hasLegacyTotal = legacyTotal !== undefined && legacyTotal !== null && legacyTotal !== "" && Number.isFinite(Number(legacyTotal));
     const sourcePending = state.materials?.calculation_stale || state.fees?.summary?.source_pending;
     const staleCost = (header.status === "Dirty" || sourcePending) && Boolean(preview || hasLegacyTotal);
+    const decisionSummary = preview ? this.materialFeeTrialDecisionSummary(preview) : "";
     const sectionTitle = `<div class="ocw-mf-section-title">
-      <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p><p>AI 只建议分摊口径，逐 SKU 金额由服务端规则引擎计算；可信关税凭证的明细优先。</p></div>
-      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span><button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
+      <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p><p>系统优先沿用已有口径，仅在必要时请求 AI；逐 SKU 金额由服务端规则引擎计算，可信关税凭证明细优先。</p></div>
+      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span>${preview ? `<button class="ocw-outline-btn" type="button" data-action="mf-adjust-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>调整分摊</button>` : ""}<button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
     </div>`;
     if (!preview) {
       return `<section class="ocw-mf-section ocw-mf-cost-section">${sectionTitle}
@@ -14778,6 +15825,7 @@ class OverseasCostWorkbench {
         <div class="ocw-mf-cost-total"><span>${hasUnsaved ? "上次试算 · 有修改待保存" : header.status === "Dirty" ? "上次试算 · 结果待更新" : "当前试算总成本"}</span><strong>RMB ${this.escape(summary.total_cost_rmb || "0.00")}</strong></div>
         <dl><div><dt>本次发货货值</dt><dd>${this.escape(summary.purchase_goods_value_rmb || "0.00")}</dd></div><div><dt>直接费用</dt><dd>${this.escape(summary.direct_fees_rmb || "0.00")}</dd></div><div><dt>分摊费用</dt><dd>${this.escape(summary.allocated_fees_rmb || "0.00")}</dd></div><div><dt>已计入费用</dt><dd>${Number(summary.included_fee_count || 0)} 笔</dd></div></dl>
       </div>
+      ${decisionSummary ? `<p class="ocw-mf-trial-note">本次口径：${this.escape(decisionSummary)}</p>` : ""}
       <p class="ocw-mf-trial-note">试算不生成正式成本版本；凭证待补单独保留，已知金额可先参与计算。${summary.estimated_fee_count ? `含 ${Number(summary.estimated_fee_count)} 笔暂估费用，需后续核实。` : ""}</p>
       <div class="ocw-mf-cost-scroll"><table><thead><tr><th>物料编码</th><th>物料名称</th><th>本次发货货值</th><th>直接费用</th><th>分摊费用</th><th>综合成本</th><th>每发货单位</th><th>每采购计价单位</th></tr></thead><tbody>${items.length ? items.map((item) => `<tr><td>${this.escape(item.material_code || "--")}</td><td>${this.escape(item.product_name || "--")}${Number(item.shipping_quantity_difference) < 0 ? `<small class="ocw-mf-warning">少发 ${this.escape(String(-Number(item.shipping_quantity_difference)))} ${this.escape(item.shipping_unit_cost?.uom || "")}</small>` : ""}</td><td>${this.escape(item.goods_value_rmb || "0.00")}</td><td>${this.escape(item.direct_fees_rmb || "0.00")}</td><td>${this.escape(item.allocated_fees_rmb || "0.00")}</td><td><strong>${this.escape(item.total_cost_rmb || "0.00")}</strong></td><td>${item.shipping_unit_cost ? `${this.escape(item.shipping_unit_cost.amount_rmb)} / ${this.escape(item.shipping_unit_cost.uom)}` : "--"}</td><td>${item.purchase_pricing_unit_cost ? `${this.escape(item.purchase_pricing_unit_cost.amount_rmb)} / ${this.escape(item.purchase_pricing_unit_cost.uom)}` : `<span class="ocw-mf-muted">单位换算未明确</span>`}</td></tr>`).join("") : `<tr><td colspan="8">暂无可试算物料</td></tr>`}</tbody></table></div>
       ${preview.excluded_fees?.length ? `<div class="ocw-mf-excluded"><strong>未计入费用</strong>${preview.excluded_fees.map((fee) => `<span>${this.escape(fee.expense_category || fee.fee_key || "费用")} · ${this.escape(this.materialFeeExclusionReason(fee))}</span>`).join("")}</div>` : ""}
@@ -15056,7 +16104,9 @@ class OverseasCostWorkbench {
       ${this.renderMaterialSourceTabs(dialog)}
       <div class="ocw-mf-wiki-toolbar">
         <label class="ocw-mf-wiki-search"><span>查找 Sheet</span><input type="search" data-action="mf-wiki-filter" placeholder="输入装箱单、日期或品类"></label>
-        <button class="ocw-outline-btn" type="button" data-action="mf-wiki-refresh-selected" ${busy || !selectedId ? "disabled" : ""}>${busy === `sheet:${selectedId}` ? "正在刷新…" : "刷新所选 Sheet"}</button>
+        <div class="ocw-mf-wiki-toolbar-actions">
+          <button class="ocw-outline-btn" type="button" data-action="mf-wiki-refresh-selected" ${busy || !selectedId ? "disabled" : ""}>${busy === `sheet:${selectedId}` ? "正在刷新…" : "刷新所选 Sheet"}</button>
+        </div>
       </div>
       ${dialog.wikiMaterialError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialError)}</div>` : ""}
       ${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}
@@ -15078,7 +16128,17 @@ class OverseasCostWorkbench {
       const status = semanticOnly ? (row.available ? "可供 AI 识别" : "选择 AI 填充后自动获取并识别") : row.available ? "可预览" : ({ archived: "已归档，选择后自动获取", pending: "等待归档，可重试", manual_required: "需从钉钉下载后手动上传" }[row.archive_status] || "选择后获取附件");
       return `<article class="ocw-mf-wiki-card"><strong>${this.escape(row.source_label || row.source_id)}</strong><small>${this.escape(status)}</small><div class="ocw-mf-wiki-card-meta">${semanticOnly ? `<span>AI 资料</span>` : sheets.map((sheet) => `<button class="ocw-outline-btn" type="button" data-mf-attachment-source="${this.escape(row.source_id)}" data-sheet-name="${this.escape(sheet)}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${dialog.wikiMaterialBusy === `attachment:${row.source_id}` ? "正在获取…" : sheet ? `预览 ${this.escape(sheet)}` : row.available ? "预览" : "获取并预览"}</button>`).join("")}</div></article>`;
     }).join("");
-    return `<div class="ocw-mf-wiki-toolbar"><span>${bound ? "当前资料来源：采购支出。正文、评论和附件也会纳入“AI 分析资料”。" : "本地装箱单；国际物流正文、附件和评论由 AI 自动收集。"}</span><button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>${bound ? "" : '<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>'}</div>${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}<div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>${bound ? "采购支出装箱附件待补" : "暂无本地装箱单"}</strong></div>`}</div>`;
+    return `
+      <div class="ocw-mf-wiki-toolbar">
+        <span>${bound ? "当前资料来源：采购支出。正文、评论和附件也会纳入“AI 分析资料”。" : "本地装箱单；国际物流正文、附件和评论由 AI 自动收集。"}</span>
+        <div class="ocw-mf-wiki-toolbar-actions">
+          <button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>
+          ${bound ? "" : '<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>'}
+        </div>
+      </div>
+      ${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}
+      <div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>${bound ? "采购支出装箱附件待补" : "暂无本地装箱单"}</strong></div>`}</div>
+    `;
   }
 
   async previewMaterialAttachmentSource(dialog, sourceId, sheetName = "") {

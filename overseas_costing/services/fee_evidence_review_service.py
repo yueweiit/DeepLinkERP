@@ -6,6 +6,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from bisect import bisect_left
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
@@ -50,6 +51,44 @@ LINE_TAX_FIELDS = {
     "prv_amount_mxn": "PRV",
     "prv_iva_amount_mxn": "PRV_IVA",
 }
+MATERIAL_MATRIX_COLUMNS = (
+    {"key": "IGI", "label": "IGI", "fee_logical_key": "import_tax"},
+    {"key": "IVA", "label": "IVA", "fee_logical_key": "import_tax"},
+    {"key": "DTA", "label": "DTA", "fee_logical_key": "import_tax"},
+    {"key": "PRV", "label": "PRV", "fee_logical_key": "import_tax"},
+    {"key": "PRV_IVA", "label": "PRV_IVA", "fee_logical_key": "import_tax"},
+    {
+        "key": "CUSTOMS_SERVICE",
+        "label": "CUSTOMS_SERVICE",
+        "fee_logical_key": "customs_clearance_fee",
+    },
+)
+MATERIAL_MATRIX_TAX_CODES = frozenset({"IGI", "IVA", "DTA", "PRV", "PRV_IVA"})
+MATERIAL_MATRIX_COLUMN_KEYS = frozenset(
+    str(column["key"]) for column in MATERIAL_MATRIX_COLUMNS
+)
+MATERIAL_MATRIX_CURRENCIES = frozenset({"RMB", "MXN", "USD"})
+LEGACY_COMPONENT_LIMIT = 5000
+FEE_EVIDENCE_DRAFT_MAX_BYTES = 12 * 1024 * 1024
+# The supported stress case is 10,000 material rows across the six fixed columns.
+FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT = 60000
+FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES = 48 * 1024 * 1024
+FEE_EVIDENCE_COMPONENT_ESTIMATED_BASE_BYTES = 384
+MATERIAL_MATRIX_APPLY_CELL_LIMIT = 60000
+MATERIAL_MATRIX_SOURCE_IDS_PER_CELL_LIMIT = FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT
+MATERIAL_MATRIX_SOURCE_ID_LENGTH_LIMIT = 300
+MATERIAL_MATRIX_AMOUNT_TEXT_LENGTH_LIMIT = 64
+MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT = 28
+MATERIAL_MATRIX_CELL_FIELDS = frozenset(
+    {"item", "column_key", "original_amount", "source_proposal_ids"}
+)
+MATERIAL_MATRIX_FEE_KEYS = frozenset(
+    str(column["fee_logical_key"]) for column in MATERIAL_MATRIX_COLUMNS
+)
+EVIDENCE_COMPONENT_READ_LIMIT = MATERIAL_MATRIX_APPLY_CELL_LIMIT
+EVIDENCE_COMPONENT_READ_PAGE_SIZE = 5000
+COMPONENT_BULK_INSERT_CHUNK_SIZE = 1000
+COMPONENT_ORM_FALLBACK_LIMIT = 100
 
 
 def _decimal(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -97,6 +136,825 @@ def _positive(value: Any) -> Decimal | None:
 
 def _checked(value: Any) -> bool:
     return value in (1, True, "1", "true", "TRUE", "yes", "YES")
+
+
+def _matrix_component_route(component: dict) -> tuple[str, bool]:
+    component_type = str(component.get("component_type") or "").upper()
+    tax_code = str(component.get("tax_code") or "").strip().upper()
+    logical_keys = {
+        str(component.get(fieldname) or "")
+        for fieldname in ("logical_fee_key", "fee_logical_key")
+        if component.get(fieldname)
+    }
+    has_tax_metadata = bool(
+        component_type == "IMPORT_TAX"
+        or "import_tax" in logical_keys
+        or tax_code in MATERIAL_MATRIX_TAX_CODES
+    )
+    has_customs_metadata = bool(
+        component_type == "CUSTOMS_SERVICE"
+        or "customs_clearance_fee" in logical_keys
+        or tax_code == "CUSTOMS_SERVICE"
+    )
+    if has_tax_metadata and has_customs_metadata:
+        return "", True
+    if has_customs_metadata:
+        if (
+            tax_code
+            or (component_type and component_type != "CUSTOMS_SERVICE")
+            or any(key != "customs_clearance_fee" for key in logical_keys)
+        ):
+            return "", True
+        return "CUSTOMS_SERVICE", False
+    if has_tax_metadata:
+        if (
+            (component_type and component_type != "IMPORT_TAX")
+            or any(key != "import_tax" for key in logical_keys)
+        ):
+            return "", True
+        return (tax_code, False) if tax_code in MATERIAL_MATRIX_TAX_CODES else ("", False)
+    return "", False
+
+
+def _component_source_refs(component: dict) -> list[dict]:
+    refs: dict[str, dict] = {}
+    for raw in component.get("source_refs") or []:
+        if isinstance(raw, dict):
+            normalized = dict(raw)
+            refs.setdefault(_dedupe_key(normalized), normalized)
+    source = component.get("source_evidence")
+    if isinstance(source, dict) and source:
+        normalized = dict(source)
+        refs.setdefault(_dedupe_key(normalized), normalized)
+    return list(refs.values())
+
+
+def _dedupe_key(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+
+
+def _empty_material_matrix_cell() -> dict:
+    """Return the persisted sparse-cell shape.
+
+    ``proposals`` indexes either the legacy top-level ``components`` list or the
+    large-draft ``component_store`` selected by ``component_contract``. ``saved``
+    indexes ``material_matrix.saved_components``. Amounts, evidence, warnings,
+    and confidence stay in those canonical records instead of being copied.
+    """
+
+    return {"proposals": [], "saved": []}
+
+
+def _empty_resolved_material_matrix_cell() -> dict:
+    return {
+        "original_amount": "",
+        "currency": "",
+        "original_amounts_by_currency": {},
+        "amount_rmb": None,
+        "suggested_original_amount": "",
+        "suggested_currency": "",
+        "suggested_original_amounts_by_currency": {},
+        "suggested_amount_rmb": "",
+        "origin": "EMPTY",
+        "status": "EMPTY",
+        "source_proposal_ids": [],
+        "source_refs": [],
+        "saved_component_ids": [],
+        "saved_source_refs": [],
+        "confidences": [],
+        "has_warning": False,
+        "warning": "",
+        "missing_fx": False,
+    }
+
+
+def _component_amounts(rows: list[dict]) -> dict:
+    original_by_currency: dict[str, Decimal] = {}
+    rmb_total = Decimal("0")
+    has_rmb = False
+    missing_rmb = False
+    for row in rows:
+        original = _decimal(row.get("original_amount"))
+        amount_rmb = _decimal(row.get("amount_rmb"))
+        if original is not None:
+            currency = str(row.get("currency") or "").upper() or "UNKNOWN"
+            original_by_currency[currency] = (
+                original_by_currency.get(currency, Decimal("0")) + original
+            )
+            if amount_rmb is None:
+                missing_rmb = True
+        if amount_rmb is not None:
+            rmb_total += amount_rmb
+            has_rmb = True
+    original_amount = ""
+    currency = ""
+    if len(original_by_currency) == 1:
+        currency, original_total = next(iter(original_by_currency.items()))
+        original_amount = _money(original_total)
+    elif len(original_by_currency) > 1:
+        currency = "MIXED"
+    return {
+        "original_amount": original_amount,
+        "currency": currency,
+        "original_amounts_by_currency": {
+            key: _money(value) for key, value in sorted(original_by_currency.items())
+        },
+        "amount_rmb": None if missing_rmb else (_decimal_amount(rmb_total) if has_rmb else ""),
+        "missing_fx": missing_rmb,
+        "mixed_currency": len(original_by_currency) > 1,
+    }
+
+
+def _matrix_component_problem(
+    component: dict,
+    *,
+    route: tuple[str, bool] | None = None,
+) -> tuple[str, str] | None:
+    if (
+        str(component.get("component_type") or "").upper() == "REFUND_REVERSAL"
+        or str(component.get("accounting_role") or "").upper() == "SETTLEMENT"
+        or str(component.get("cost_effect") or "").upper() == "LEDGER_ONLY"
+    ):
+        # Refunds and settlement entries remain auditable ledger proposals, not editable costs.
+        return (
+            "MATERIAL_MATRIX_LEDGER_ONLY",
+            "结算或冲回分项只保留在台账，不写入物料税费矩阵。",
+        )
+    column_key, has_routing_conflict = (
+        route if route is not None else _matrix_component_route(component)
+    )
+    if has_routing_conflict:
+        return (
+            "MATERIAL_MATRIX_COMPONENT_CONFLICT",
+            "分项类型、逻辑费用与税种路由相互冲突，未写入物料矩阵。",
+        )
+    if not column_key:
+        return (
+            "MATERIAL_MATRIX_COLUMN_INVALID",
+            "分项缺少有效的税种，未写入物料矩阵。",
+        )
+    original_amount = _decimal(component.get("original_amount"))
+    if original_amount is None or original_amount < 0:
+        return (
+            "MATERIAL_MATRIX_ORIGINAL_AMOUNT_INVALID",
+            "分项原币金额必须是有限的非负数。",
+        )
+    currency = str(component.get("currency") or "").upper()
+    if currency not in MATERIAL_MATRIX_CURRENCIES:
+        return (
+            "MATERIAL_MATRIX_CURRENCY_UNSUPPORTED",
+            "分项币种必须是 RMB、MXN 或 USD。",
+        )
+    raw_amount_rmb = component.get("amount_rmb")
+    if raw_amount_rmb in (None, ""):
+        if currency == "RMB":
+            return (
+                "MATERIAL_MATRIX_RMB_AMOUNT_REQUIRED",
+                "RMB 分项必须包含人民币金额。",
+            )
+        return None
+    amount_rmb = _decimal(raw_amount_rmb)
+    if amount_rmb is None or amount_rmb < 0:
+        return (
+            "MATERIAL_MATRIX_RMB_AMOUNT_INVALID",
+            "分项人民币金额必须是有限的非负数。",
+        )
+    return None
+
+
+def _compact_saved_matrix_component(component: dict) -> dict:
+    """Keep one compact saved-value record for all cells that reference it."""
+
+    compact = {
+        "id": str(component.get("name") or component.get("id") or ""),
+        "item": str(component.get("item") or ""),
+        "stable_line_key": str(component.get("stable_line_key") or ""),
+        "logical_fee_key": str(
+            component.get("logical_fee_key") or component.get("fee_logical_key") or ""
+        ),
+        "component_type": str(component.get("component_type") or ""),
+        "accounting_role": str(component.get("accounting_role") or ""),
+        "cost_effect": str(component.get("cost_effect") or ""),
+        "tax_code": str(component.get("tax_code") or ""),
+        "hs_code": str(component.get("hs_code") or ""),
+        "currency": str(component.get("currency") or ""),
+        "original_amount": component.get("original_amount"),
+        "amount_rmb": component.get("amount_rmb"),
+        "source_refs": _component_source_refs(component),
+        "confidence": component.get("confidence"),
+        "status": str(component.get("status") or "CONFIRMED"),
+    }
+    for fieldname in ("exchange_rate", "allocation_basis", "warning"):
+        if component.get(fieldname) not in (None, ""):
+            compact[fieldname] = component[fieldname]
+    for fieldname in ("needs_review", "has_conflict"):
+        if _checked(component.get(fieldname)):
+            compact[fieldname] = True
+    return compact
+
+
+_MISSING_COMPONENT_VALUE = object()
+
+
+def _component_value_key(value: Any) -> str:
+    return f"{type(value).__name__}:{_dedupe_key(value)}"
+
+
+def _encode_component_column(rows: list[dict], fieldname: str) -> dict:
+    positions = []
+    values = []
+    for index, row in enumerate(rows):
+        if fieldname not in row:
+            continue
+        positions.append(index)
+        values.append(row[fieldname])
+
+    encoded: dict[str, Any]
+    unique_values: dict[str, int] = {}
+    dictionary = []
+    indices = []
+    for value in values:
+        key = _component_value_key(value)
+        value_index = unique_values.get(key)
+        if value_index is None:
+            value_index = len(dictionary)
+            unique_values[key] = value_index
+            dictionary.append(value)
+        indices.append(value_index)
+    if len(dictionary) == 1:
+        encoded = {"constant": dictionary[0]}
+    elif len(dictionary) * 2 <= len(values):
+        encoded = {"dictionary": dictionary, "indices": indices}
+    else:
+        encoded = {"values": values}
+    if len(positions) != len(rows):
+        encoded["rows"] = positions
+    return encoded
+
+
+def _build_component_store(components: list[dict]) -> dict:
+    """Encode component rows column-wise for bounded persistence and indexed reads."""
+
+    fieldnames: dict[str, None] = {}
+    if any(not isinstance(row, dict) for row in components):
+        raise ValueError("费用凭证分项草稿包含无效记录。")
+    rows = [dict(row) for row in components]
+    for row in rows:
+        for fieldname in row:
+            fieldnames.setdefault(str(fieldname), None)
+    return {
+        "format": "INDEXED_COLUMNS_V1",
+        "count": len(rows),
+        "columns": {
+            fieldname: _encode_component_column(rows, fieldname)
+            for fieldname in fieldnames
+        },
+    }
+
+
+def _component_store_value(
+    component_store: dict,
+    fieldname: str,
+    row_index: int,
+) -> Any:
+    column = (component_store.get("columns") or {}).get(fieldname)
+    if not isinstance(column, dict):
+        return _MISSING_COMPONENT_VALUE
+    value_index = row_index
+    positions = column.get("rows")
+    if isinstance(positions, list):
+        value_index = bisect_left(positions, row_index)
+        if value_index >= len(positions) or positions[value_index] != row_index:
+            return _MISSING_COMPONENT_VALUE
+    if "constant" in column:
+        return column["constant"]
+    if isinstance(column.get("dictionary"), list) and isinstance(
+        column.get("indices"), list
+    ):
+        indices = column["indices"]
+        if value_index < 0 or value_index >= len(indices):
+            return _MISSING_COMPONENT_VALUE
+        dictionary_index = indices[value_index]
+        dictionary = column["dictionary"]
+        if (
+            isinstance(dictionary_index, bool)
+            or not isinstance(dictionary_index, int)
+            or dictionary_index < 0
+            or dictionary_index >= len(dictionary)
+        ):
+            return _MISSING_COMPONENT_VALUE
+        return dictionary[dictionary_index]
+    values = column.get("values")
+    if not isinstance(values, list) or value_index < 0 or value_index >= len(values):
+        return _MISSING_COMPONENT_VALUE
+    return values[value_index]
+
+
+def _component_store_row(component_store: dict, row_index: int) -> dict:
+    count = int(component_store.get("count") or 0)
+    if row_index < 0 or row_index >= count:
+        return {}
+    row = {}
+    for fieldname in component_store.get("columns") or {}:
+        value = _component_store_value(component_store, fieldname, row_index)
+        if value is not _MISSING_COMPONENT_VALUE:
+            row[fieldname] = value
+    return row
+
+
+def _validate_component_store(component_store: dict) -> dict[str, int]:
+    """Validate the indexed contract once and return its proposal lookup."""
+
+    if not isinstance(component_store, dict) or str(
+        component_store.get("format") or ""
+    ) != "INDEXED_COLUMNS_V1":
+        raise ValueError("费用凭证分项索引存储结构无效。")
+    count = component_store.get("count")
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+        or count > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT
+    ):
+        raise ValueError(
+            "费用凭证分项索引 count 数量无效或超过安全上限。"
+        )
+    columns = component_store.get("columns")
+    if not isinstance(columns, dict) or any(
+        not isinstance(fieldname, str) or not isinstance(column, dict)
+        for fieldname, column in (columns or {}).items()
+    ):
+        raise ValueError("费用凭证分项索引 columns 结构无效。")
+
+    allowed_keys = {"rows", "constant", "values", "dictionary", "indices"}
+    for fieldname, column in columns.items():
+        if set(column) - allowed_keys:
+            raise ValueError(f"分项索引列 {fieldname} 结构包含未知字段。")
+        positions = column.get("rows")
+        if "rows" in column:
+            if not isinstance(positions, list):
+                raise ValueError(f"分项索引列 {fieldname} rows 必须为列表。")
+            previous = -1
+            for row_index in positions:
+                if (
+                    isinstance(row_index, bool)
+                    or not isinstance(row_index, int)
+                    or row_index <= previous
+                    or row_index >= count
+                ):
+                    raise ValueError(
+                        f"分项索引列 {fieldname} rows 行索引必须严格递增且在范围内。"
+                    )
+                previous = row_index
+            value_count = len(positions)
+        else:
+            value_count = count
+
+        has_constant = "constant" in column
+        has_values = "values" in column
+        has_dictionary = "dictionary" in column or "indices" in column
+        if sum((has_constant, has_values, has_dictionary)) != 1:
+            raise ValueError(f"分项索引列 {fieldname} 值编码结构无效。")
+        if has_constant:
+            continue
+        if has_values:
+            values = column.get("values")
+            if not isinstance(values, list) or len(values) != value_count:
+                raise ValueError(f"分项索引列 {fieldname} values 长度无效。")
+            continue
+        dictionary = column.get("dictionary")
+        indices = column.get("indices")
+        if (
+            not isinstance(dictionary, list)
+            or not isinstance(indices, list)
+            or len(indices) != value_count
+            or (value_count and not dictionary)
+        ):
+            raise ValueError(f"分项索引列 {fieldname} dictionary 长度无效。")
+        for dictionary_index in indices:
+            if (
+                isinstance(dictionary_index, bool)
+                or not isinstance(dictionary_index, int)
+                or dictionary_index < 0
+                or dictionary_index >= len(dictionary)
+            ):
+                raise ValueError(f"分项索引列 {fieldname} dictionary 索引无效。")
+
+    if count == 0:
+        return {}
+    proposal_column = columns.get("proposal_id")
+    if not isinstance(proposal_column, dict) or "rows" in proposal_column:
+        raise ValueError("分项索引 proposal_id 必须是完整密集列。")
+    proposal_lookup = {}
+    for row_index in range(count):
+        proposal_id = _component_store_value(
+            component_store,
+            "proposal_id",
+            row_index,
+        )
+        if (
+            proposal_id is _MISSING_COMPONENT_VALUE
+            or not isinstance(proposal_id, str)
+            or not proposal_id.strip()
+            or proposal_id in proposal_lookup
+        ):
+            raise ValueError("分项索引 proposal_id 必须非空、唯一且完整。")
+        proposal_lookup[proposal_id] = row_index
+    return proposal_lookup
+
+
+def _serialized_payload_size(payload: dict) -> int:
+    return len(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
+
+
+def _finalize_component_contract(draft: dict) -> dict:
+    """Keep legacy rows when safe; otherwise persist an explicit indexed contract.
+
+    Existing clients retain the historical list shape within the documented
+    count/size boundary. Large drafts advertise the incompatible representation
+    instead of returning a plausible but incomplete legacy list.
+    """
+
+    contract = draft.get("component_contract") or {}
+    if str(contract.get("mode") or "") == "INDEXED_COLUMNS_V1":
+        component_store = draft.get("component_store") or {}
+        _validate_component_store(component_store)
+        existing_count = int(component_store.get("count") or 0)
+        if int(contract.get("component_count") or 0) != existing_count:
+            raise ValueError("费用凭证分项索引数量不一致，请重新发起审核。")
+        additions = draft.get("components") or []
+        if any(not isinstance(row, dict) for row in additions):
+            raise ValueError("费用凭证分项草稿包含无效记录。")
+        if existing_count + len(additions) > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT:
+            raise ValueError(
+                f"费用凭证分项数量超过安全上限 "
+                f"{FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT}。"
+            )
+        result = draft
+        if additions:
+            merged = [
+                _component_store_row(component_store, row_index)
+                for row_index in range(existing_count)
+            ]
+            if any(not row for row in merged):
+                raise ValueError("费用凭证分项索引存储结构无效，请重新发起审核。")
+            merged.extend(dict(row) for row in additions)
+            result = {
+                **draft,
+                "components": [],
+                "component_store": _build_component_store(merged),
+                "component_contract": {
+                    **contract,
+                    "component_count": len(merged),
+                },
+                "summary": {
+                    **(draft.get("summary") or {}),
+                    "component_proposal_count": len(merged),
+                },
+            }
+            _validate_component_store(result["component_store"])
+        if _serialized_payload_size(result) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
+            raise ValueError("费用凭证审核草稿超过安全上限，请缩小本次审核范围。")
+        return result
+
+    raw_components = draft.get("components") or []
+    if any(not isinstance(row, dict) for row in raw_components):
+        raise ValueError("费用凭证分项草稿包含无效记录。")
+    if len(raw_components) > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT:
+        raise ValueError(
+            f"费用凭证分项数量超过安全上限 "
+            f"{FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT}。"
+        )
+    components = [dict(row) for row in raw_components]
+    if len(components) <= LEGACY_COMPONENT_LIMIT:
+        if _serialized_payload_size(draft) <= FEE_EVIDENCE_DRAFT_MAX_BYTES:
+            return draft
+
+    result = {
+        **draft,
+        "components": [],
+        "component_store": _build_component_store(components),
+        "component_contract": {
+            "mode": "INDEXED_COLUMNS_V1",
+            "component_count": len(components),
+            "legacy_components_included": False,
+            "legacy_component_limit": LEGACY_COMPONENT_LIMIT,
+            "max_draft_bytes": FEE_EVIDENCE_DRAFT_MAX_BYTES,
+        },
+    }
+    _validate_component_store(result["component_store"])
+    if _serialized_payload_size(result) > FEE_EVIDENCE_DRAFT_MAX_BYTES:
+        raise ValueError("费用凭证审核草稿超过安全上限，请缩小本次审核范围。")
+    return result
+
+
+def _indexed_matrix_components(indexes: Any, rows: list[dict]) -> list[dict]:
+    result = []
+    for raw_index in indexes or []:
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+            continue
+        if 0 <= raw_index < len(rows) and isinstance(rows[raw_index], dict):
+            result.append(rows[raw_index])
+    return result
+
+
+def _matrix_proposal_components(
+    indexes: Any,
+    components: list[dict],
+    component_store: dict | None,
+) -> list[dict]:
+    if str((component_store or {}).get("format") or "") != "INDEXED_COLUMNS_V1":
+        return _indexed_matrix_components(indexes, components)
+    _validate_component_store(component_store or {})
+    result = []
+    for raw_index in indexes or []:
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+            continue
+        row = _component_store_row(component_store or {}, raw_index)
+        if row:
+            result.append(row)
+    return result
+
+
+def resolve_material_matrix_cell(
+    material_matrix: dict,
+    components: list[dict],
+    *,
+    component_store: dict | None = None,
+    row_index: int,
+    column_key: str,
+) -> dict:
+    """Resolve a cell, reading only referenced legacy or indexed-store proposals."""
+
+    rows = material_matrix.get("rows") or []
+    if row_index < 0 or row_index >= len(rows) or not isinstance(rows[row_index], dict):
+        return _empty_resolved_material_matrix_cell()
+    material_row = rows[row_index]
+    compact_cell = (material_row.get("cells") or {}).get(column_key)
+    if not isinstance(compact_cell, dict):
+        return _empty_resolved_material_matrix_cell()
+
+    proposal_indexes = compact_cell.get("proposals") or []
+    saved_indexes = compact_cell.get("saved") or []
+    proposals = _matrix_proposal_components(
+        proposal_indexes,
+        components or [],
+        component_store,
+    )
+    saved = _indexed_matrix_components(
+        saved_indexes, material_matrix.get("saved_components") or []
+    )
+    if not proposals and not saved:
+        return _empty_resolved_material_matrix_cell()
+
+    proposed_amounts = _component_amounts(proposals)
+    saved_amounts = _component_amounts(saved)
+    current_amounts = saved_amounts if saved else proposed_amounts
+    origin = "SAVED" if saved else "AI"
+    warnings: dict[str, None] = {}
+    source_proposal_ids: dict[str, None] = {}
+    source_refs: dict[str, dict] = {}
+    saved_component_ids: dict[str, None] = {}
+    saved_source_refs: dict[str, dict] = {}
+    confidences: dict[str, None] = {}
+
+    for component in proposals:
+        proposal_id = str(component.get("proposal_id") or "")
+        if proposal_id:
+            source_proposal_ids.setdefault(proposal_id, None)
+        for ref in _component_source_refs(component):
+            source_refs.setdefault(_dedupe_key(ref), ref)
+        if component.get("confidence") not in (None, ""):
+            confidences.setdefault(str(component.get("confidence")), None)
+        if component.get("warning"):
+            warnings.setdefault(str(component.get("warning")), None)
+        if _checked(component.get("needs_review")):
+            warnings.setdefault("建议需人工复核。", None)
+        if _checked(component.get("has_conflict")):
+            warnings.setdefault("建议存在冲突。", None)
+    for component in saved:
+        component_id = str(component.get("id") or component.get("name") or "")
+        if component_id:
+            saved_component_ids.setdefault(component_id, None)
+        for ref in _component_source_refs(component):
+            saved_source_refs.setdefault(_dedupe_key(ref), ref)
+        if component.get("confidence") not in (None, ""):
+            confidences.setdefault(str(component.get("confidence")), None)
+        if component.get("warning"):
+            warnings.setdefault(str(component.get("warning")), None)
+
+    proposal_index_set = {
+        value
+        for value in proposal_indexes
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    saved_index_set = {
+        value
+        for value in saved_indexes
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    current_hs = str(material_row.get("hs_code") or "")
+    for detail in material_row.get("hs_suggestion_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        if not (
+            proposal_index_set.intersection(detail.get("proposals") or [])
+            or saved_index_set.intersection(detail.get("saved") or [])
+        ):
+            continue
+        voucher_hs = str(detail.get("hs_code") or "")
+        warning = (
+            f"凭证 HS {voucher_hs} 与当前物料 HS {current_hs} 不一致。"
+            if current_hs
+            else f"当前物料未填写 HS，凭证建议为 {voucher_hs}。"
+        )
+        warnings.setdefault(warning, None)
+
+    cell_missing_fx = bool(
+        proposed_amounts["missing_fx"] or saved_amounts["missing_fx"]
+    )
+    if cell_missing_fx:
+        warnings.setdefault("缺少人民币换算汇率。", None)
+    if proposed_amounts["mixed_currency"] or saved_amounts["mixed_currency"]:
+        warnings.setdefault("同一单元格包含多种原币，原币合计仅按币种展示。", None)
+    if saved and proposals:
+        warnings.setdefault("已保存值优先，AI／规则建议仅供对照。", None)
+    unique_warnings = list(warnings)
+    return {
+        "original_amount": current_amounts["original_amount"],
+        "currency": current_amounts["currency"],
+        "original_amounts_by_currency": current_amounts["original_amounts_by_currency"],
+        "amount_rmb": current_amounts["amount_rmb"],
+        "suggested_original_amount": proposed_amounts["original_amount"] if proposals else "",
+        "suggested_currency": proposed_amounts["currency"] if proposals else "",
+        "suggested_original_amounts_by_currency": (
+            proposed_amounts["original_amounts_by_currency"] if proposals else {}
+        ),
+        "suggested_amount_rmb": proposed_amounts["amount_rmb"] if proposals else "",
+        "origin": origin,
+        "status": "CONFIRMED" if saved else "SUGGESTED",
+        "source_proposal_ids": list(source_proposal_ids),
+        "source_refs": list(source_refs.values()),
+        "saved_component_ids": list(saved_component_ids),
+        "saved_source_refs": list(saved_source_refs.values()),
+        "confidences": list(confidences),
+        "has_warning": bool(unique_warnings),
+        "warning": " ".join(unique_warnings),
+        "missing_fx": cell_missing_fx,
+    }
+
+
+def build_material_matrix(
+    *,
+    items: list[dict],
+    components: list[dict],
+    existing_components: list[dict] | None = None,
+    unmatched_lines: list[dict] | None = None,
+    missing_fx: bool = False,
+) -> dict:
+    """Project proposal/saved indexes onto a fixed, sparse material tax matrix."""
+
+    proposal_groups: dict[tuple[str, str], list[int]] = {}
+    saved_groups: dict[tuple[str, str], list[int]] = {}
+    saved_rows = [
+        dict(row) for row in (existing_components or []) if isinstance(row, dict)
+    ]
+    saved_components = [_compact_saved_matrix_component(row) for row in saved_rows]
+    matrix_unmatched = [
+        dict(row) if isinstance(row, dict) else {"message": str(row)}
+        for row in (unmatched_lines or [])
+    ]
+    item_by_name = {
+        str(row.get("name") or ""): row for row in (items or []) if row.get("name")
+    }
+    item_by_stable_key = {
+        str(row.get("stable_line_key") or ""): row
+        for row in (items or [])
+        if row.get("stable_line_key")
+    }
+
+    def collect(
+        raw_rows: list[dict],
+        target: dict[tuple[str, str], list[int]],
+        origin: str,
+    ) -> None:
+        for source_index, raw in enumerate(raw_rows or []):
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            item_name = str(row.get("item") or "")
+            item = item_by_name.get(item_name)
+            if item is None:
+                item = item_by_stable_key.get(str(row.get("stable_line_key") or ""))
+                item_name = str((item or {}).get("name") or "")
+            route = _matrix_component_route(row)
+            column_key = route[0]
+            problem = _matrix_component_problem(row, route=route)
+            if item is None:
+                problem = (
+                    "MATERIAL_MATRIX_ITEM_INVALID",
+                    "分项缺少有效的物料，未写入物料矩阵。",
+                )
+            if problem:
+                problem_row = {
+                    "reason_code": problem[0],
+                    "message": problem[1],
+                    "origin": origin,
+                    "item": str(row.get("item") or ""),
+                    "stable_line_key": str(row.get("stable_line_key") or ""),
+                    "tax_code": str(row.get("tax_code") or ""),
+                    "proposal_id": str(row.get("proposal_id") or ""),
+                    "source_refs": _component_source_refs(row),
+                }
+                index_key = "proposal_index" if origin == "AI" else "saved_index"
+                problem_row[index_key] = source_index
+                matrix_unmatched.append(problem_row)
+                continue
+            target.setdefault((item_name, column_key), []).append(source_index)
+
+    collect(components or [], proposal_groups, "AI")
+    collect(saved_rows, saved_groups, "SAVED")
+
+    matrix_rows = []
+    matrix_missing_fx = bool(missing_fx)
+    for item in items or []:
+        item_name = str(item.get("name") or "")
+        current_hs = str(item.get("hs_code") or "")
+        hs_suggestions: dict[str, None] = {}
+        hs_suggestion_details: dict[str, dict] = {}
+        cells = {}
+        for column in MATERIAL_MATRIX_COLUMNS:
+            column_key = column["key"]
+            proposal_indexes = proposal_groups.get((item_name, column_key), [])
+            saved_indexes = saved_groups.get((item_name, column_key), [])
+            if not proposal_indexes and not saved_indexes:
+                continue
+            proposals = _indexed_matrix_components(proposal_indexes, components or [])
+            saved = _indexed_matrix_components(saved_indexes, saved_components)
+            proposed_amounts = _component_amounts(proposals)
+            saved_amounts = _component_amounts(saved)
+            for component_origin, indexes, component_rows in (
+                ("proposals", proposal_indexes, proposals),
+                ("saved", saved_indexes, saved),
+            ):
+                for source_index, component in zip(indexes, component_rows):
+                    voucher_hs = str(component.get("hs_code") or "")
+                    if not voucher_hs or _normalize_hs(voucher_hs) == _normalize_hs(current_hs):
+                        continue
+                    hs_suggestions.setdefault(voucher_hs, None)
+                    detail = hs_suggestion_details.setdefault(
+                        voucher_hs,
+                        {"hs_code": voucher_hs, "proposals": [], "saved": []},
+                    )
+                    detail[component_origin].append(source_index)
+            cell_missing_fx = bool(
+                proposed_amounts["missing_fx"] or saved_amounts["missing_fx"]
+            )
+            matrix_missing_fx = matrix_missing_fx or cell_missing_fx
+            cells[column_key] = {
+                "proposals": list(proposal_indexes),
+                "saved": list(saved_indexes),
+            }
+        matrix_rows.append(
+            {
+                "item": item_name,
+                "stable_line_key": str(item.get("stable_line_key") or item_name),
+                "material_code": str(item.get("material_code") or ""),
+                "product_name": str(item.get("product_name") or ""),
+                "quantity": item.get("quantity"),
+                "unit": str(item.get("unit") or ""),
+                "hs_code": current_hs,
+                "hs_suggestions": list(hs_suggestions),
+                "hs_suggestion_details": list(hs_suggestion_details.values()),
+                "cells": cells,
+            }
+        )
+    return {
+        "columns": [dict(column) for column in MATERIAL_MATRIX_COLUMNS],
+        "empty_cell": _empty_material_matrix_cell(),
+        "saved_components": saved_components,
+        "rows": matrix_rows,
+        "unmatched_lines": matrix_unmatched,
+        "missing_fx": matrix_missing_fx,
+        "component_policy": {
+            "allowed_currencies": sorted(MATERIAL_MATRIX_CURRENCIES),
+            "ledger_only": "UNMATCHED",
+            "negative_amounts": "UNMATCHED",
+        },
+    }
 
 
 def _allocate_money(amount: Decimal, weighted_keys: list[tuple[str, Decimal]]) -> dict[str, Decimal]:
@@ -147,13 +1005,42 @@ def _decimal_amount(value: Decimal | None) -> str | None:
     return rendered or "0"
 
 
-def _line_matches(line: dict, items: list[dict], explicit_matches: dict[str, list[str]]) -> list[dict]:
+def _build_component_match_indexes(
+    items: list[dict],
+) -> tuple[list[dict], dict[str, dict], dict[str, list[dict]]]:
+    """Index the current material snapshot once for all evidence rows."""
+
+    item_rows = items if isinstance(items, list) else list(items or [])
+    items_by_name: dict[str, dict] = {}
+    items_by_hs: dict[str, list[dict]] = {}
+    for item in item_rows:
+        items_by_name[str(item.get("name") or "")] = item
+        hs_code = _normalize_hs(item.get("hs_code"))
+        if hs_code:
+            items_by_hs.setdefault(hs_code, []).append(item)
+    return item_rows, items_by_name, items_by_hs
+
+
+def _line_matches(
+    line: dict,
+    items_by_name: dict[str, dict],
+    items_by_hs: dict[str, list[dict]],
+    explicit_matches: dict[str, list[str]],
+) -> list[dict]:
     line_key = str(line.get("row_no") or line.get("item_seq") or "")
-    selected_names = set(explicit_matches.get(line_key) or [])
+    selected_names = explicit_matches.get(line_key) or []
     if selected_names:
-        return [row for row in items if str(row.get("name") or "") in selected_names]
+        result = []
+        seen_names = set()
+        for value in selected_names:
+            name = str(value or "")
+            item = items_by_name.get(name)
+            if item is not None and name not in seen_names:
+                result.append(item)
+                seen_names.add(name)
+        return result
     hs_code = _normalize_hs(line.get("hs_code"))
-    return [row for row in items if hs_code and _normalize_hs(row.get("hs_code")) == hs_code]
+    return items_by_hs.get(hs_code, []) if hs_code else []
 
 
 def _allocation_weights(matches: list[dict]) -> tuple[str, list[tuple[str, Decimal]]]:
@@ -172,6 +1059,146 @@ def _allocation_weights(matches: list[dict]) -> tuple[str, list[tuple[str, Decim
     return "", []
 
 
+def _component_identity_estimated_bytes(item: dict) -> int:
+    return sum(
+        len(str(item.get(fieldname) or "").encode("utf-8"))
+        for fieldname in ("name", "stable_line_key", "hs_code")
+    )
+
+
+def _validate_component_expansion_budget(
+    *,
+    line_items: list[dict],
+    service_fees: list[dict],
+    items: list[dict],
+    source_ref: dict,
+    explicit_matches: dict[str, list[str]],
+) -> dict:
+    """Build one reusable match plan and reject unsafe expansion before allocation."""
+
+    proposal_count = 0
+    estimated_bytes = 0
+    item_rows, items_by_name, items_by_hs = _build_component_match_indexes(items)
+    tax_matches: list[list[dict]] = []
+    service_matches: list[list[dict] | None] = []
+
+    def add_group(matches: list[dict], evidence: dict) -> None:
+        nonlocal proposal_count, estimated_bytes
+        match_count = len(matches)
+        proposal_count += match_count
+        if proposal_count > FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT:
+            raise ValueError(
+                f"费用凭证分项展开数量 {proposal_count} 超过安全上限 "
+                f"{FEE_EVIDENCE_COMPONENT_PROPOSAL_LIMIT}，请缩小明细与物料的多对多匹配范围。"
+            )
+        evidence_bytes = len(_dedupe_key(evidence).encode("utf-8"))
+        estimated_bytes += (
+            match_count
+            * (FEE_EVIDENCE_COMPONENT_ESTIMATED_BASE_BYTES + evidence_bytes)
+            + sum(_component_identity_estimated_bytes(item) for item in matches)
+        )
+        if estimated_bytes > FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES:
+            raise ValueError(
+                f"费用凭证分项展开预算 {estimated_bytes} 字节超过安全上限 "
+                f"{FEE_EVIDENCE_COMPONENT_EXPANSION_MAX_BYTES} 字节。"
+            )
+
+    for line in line_items or []:
+        if not isinstance(line, dict):
+            tax_matches.append([])
+            continue
+        taxes = line.get("taxes") if isinstance(line.get("taxes"), dict) else {}
+        tax_fields = [
+            (fieldname, tax_code)
+            for fieldname, tax_code in LINE_TAX_FIELDS.items()
+            if _decimal(taxes.get(fieldname)) not in (None, Decimal("0"))
+        ]
+        if not tax_fields:
+            tax_matches.append([])
+            continue
+        matches = _line_matches(
+            line,
+            items_by_name,
+            items_by_hs,
+            explicit_matches or {},
+        )
+        tax_matches.append(matches)
+        _, weights = _allocation_weights(matches)
+        if not weights:
+            continue
+        line_source = (
+            line.get("source_evidence")
+            if isinstance(line.get("source_evidence"), dict)
+            else {}
+        )
+        for fieldname, tax_code in tax_fields:
+            locator = (
+                line_source.get(fieldname)
+                if isinstance(line_source.get(fieldname), dict)
+                else {}
+            )
+            add_group(
+                matches,
+                {
+                    **source_ref,
+                    **locator,
+                    "row": line.get("row_no"),
+                    "hs_code": str(line.get("hs_code") or ""),
+                    "import_name": str(line.get("import_name") or ""),
+                    "tax_code": tax_code,
+                },
+            )
+
+    for index, service_fee in enumerate(service_fees or []):
+        if not isinstance(service_fee, dict):
+            service_matches.append(None)
+            continue
+        amount = _decimal(service_fee.get("amount_mxn"))
+        if amount is None or amount < 0:
+            service_matches.append(None)
+            continue
+        explicit_names = [
+            str(value)
+            for value in (service_fee.get("item_names") or service_fee.get("items") or [])
+            if str(value)
+        ]
+        if explicit_names:
+            if any(name not in items_by_name for name in explicit_names):
+                service_matches.append(None)
+                continue
+            matches = [items_by_name[name] for name in explicit_names]
+        else:
+            matches = item_rows
+        service_matches.append(matches)
+        weights = [
+            (str(row.get("name") or ""), _positive(row.get("goods_value")))
+            for row in matches
+        ]
+        if not weights or any(value is None for _, value in weights):
+            continue
+        locator = (
+            service_fee.get("source_evidence")
+            if isinstance(service_fee.get("source_evidence"), dict)
+            else {}
+        )
+        add_group(
+            matches,
+            {
+                **source_ref,
+                **locator,
+                "service_row": index + 1,
+                "service_code": str(service_fee.get("code") or ""),
+            },
+        )
+    return {
+        "proposal_count": proposal_count,
+        "estimated_bytes": estimated_bytes,
+        "tax_matches": tax_matches,
+        "service_matches": service_matches,
+        "items_by_name": items_by_name,
+    }
+
+
 def allocate_tax_certificate_components(
     line_items: list[dict],
     items: list[dict],
@@ -179,18 +1206,32 @@ def allocate_tax_certificate_components(
     fx_context: dict | None = None,
     source_ref: dict | None = None,
     explicit_matches: dict[str, list[str]] | None = None,
+    match_plan: dict | None = None,
 ) -> dict:
     """Allocate evidence-backed line taxes to existing SKU rows without inventing amounts."""
 
     explicit_matches = explicit_matches or {}
     source_ref = dict(source_ref or {})
     rmb_to_mxn = _positive((fx_context or {}).get("fx_rmb_to_mxn"))
-    by_name = {str(row.get("name") or ""): row for row in items or []}
+    if match_plan is None:
+        match_plan = _validate_component_expansion_budget(
+            line_items=line_items,
+            service_fees=[],
+            items=items,
+            source_ref=source_ref,
+            explicit_matches=explicit_matches,
+        )
+    by_name = match_plan.get("items_by_name")
+    planned_matches = match_plan.get("tax_matches")
+    if not isinstance(by_name, dict) or not isinstance(planned_matches, list) or len(
+        planned_matches
+    ) != len(line_items or []):
+        raise ValueError("费用凭证税费分项匹配计划无效。")
     components: list[dict] = []
     unmatched: list[dict] = []
     bases: set[str] = set()
 
-    for line in line_items or []:
+    for line_index, line in enumerate(line_items or []):
         taxes = line.get("taxes") if isinstance(line.get("taxes"), dict) else {}
         tax_amounts = [
             (fieldname, tax_code, _decimal(taxes.get(fieldname)))
@@ -199,7 +1240,9 @@ def allocate_tax_certificate_components(
         ]
         if not tax_amounts:
             continue
-        matches = _line_matches(line, items or [], explicit_matches)
+        matches = planned_matches[line_index]
+        if not isinstance(matches, list):
+            raise ValueError("费用凭证税费分项匹配计划无效。")
         if not matches:
             unmatched.append(
                 {
@@ -281,61 +1324,88 @@ def allocate_service_fee_components(
     *,
     fx_context: dict | None = None,
     source_ref: dict | None = None,
+    match_plan: dict | None = None,
 ) -> dict:
     """Allocate broker/service rows by explicit SKU scope or complete purchase value."""
 
     source_ref = dict(source_ref or {})
-    by_name = {str(row.get("name") or ""): row for row in items or []}
+    if match_plan is None:
+        match_plan = _validate_component_expansion_budget(
+            line_items=[],
+            service_fees=service_fees,
+            items=items,
+            source_ref=source_ref,
+            explicit_matches={},
+        )
+    by_name = match_plan.get("items_by_name")
+    planned_matches = match_plan.get("service_matches")
+    if not isinstance(by_name, dict) or not isinstance(planned_matches, list) or len(
+        planned_matches
+    ) != len(service_fees or []):
+        raise ValueError("费用凭证清关服务费匹配计划无效。")
     rmb_to_mxn = _positive((fx_context or {}).get("fx_rmb_to_mxn"))
     components = []
+    unmatched = []
     for index, service_fee in enumerate(service_fees or []):
         if not isinstance(service_fee, dict):
+            unmatched.append(
+                {
+                    "service_row": index + 1,
+                    "service_code": "",
+                    "reason_code": "SERVICE_ROW_INVALID",
+                    "message": "清关服务费明细结构无效。",
+                    "source_evidence": {},
+                }
+            )
             continue
+        locator = (
+            service_fee.get("source_evidence")
+            if isinstance(service_fee.get("source_evidence"), dict)
+            else {}
+        )
+
+        def append_problem(reason_code: str, message: str) -> None:
+            unmatched.append(
+                {
+                    "service_row": index + 1,
+                    "service_code": str(service_fee.get("code") or ""),
+                    "reason_code": reason_code,
+                    "message": message,
+                    "source_evidence": dict(locator),
+                }
+            )
+
         amount = _decimal(service_fee.get("amount_mxn"))
         if amount is None or amount < 0:
-            return {
-                "components": [],
-                "needs_review": True,
-                "reason_code": "SERVICE_AMOUNT_INVALID",
-                "missing_fx": False,
-            }
+            append_problem("SERVICE_AMOUNT_INVALID", "清关服务费金额无效。")
+            continue
         explicit_names = [
             str(value)
             for value in (service_fee.get("item_names") or service_fee.get("items") or [])
             if str(value)
         ]
         if explicit_names:
-            if any(name not in by_name for name in explicit_names):
-                return {
-                    "components": [],
-                    "needs_review": True,
-                    "reason_code": "SKU_MATCH_REQUIRED",
-                    "missing_fx": False,
-                }
-            matches = [by_name[name] for name in explicit_names]
-        else:
-            matches = list(items or [])
+            if planned_matches[index] is None:
+                append_problem("SKU_MATCH_REQUIRED", "清关服务费未能可靠匹配到当前批次 SKU。")
+                continue
+        matches = planned_matches[index]
+        if not isinstance(matches, list):
+            raise ValueError("费用凭证清关服务费匹配计划无效。")
         weights = [
             (str(row.get("name") or ""), _positive(row.get("goods_value")))
             for row in matches
         ]
         if not weights or any(value is None for _, value in weights):
-            return {
-                "components": [],
-                "needs_review": True,
-                "reason_code": "SKU_ALLOCATION_BASIS_MISSING",
-                "missing_fx": False,
-            }
+            append_problem(
+                "SKU_ALLOCATION_BASIS_MISSING",
+                "清关服务费缺少完整采购货值或明确 SKU 范围。",
+            )
+            continue
         usable_weights = [(key, value) for key, value in weights if value is not None]
         original_allocations = _allocate_money(amount, usable_weights)
         rmb_allocations = (
             _allocate_decimal(amount / rmb_to_mxn, usable_weights)
             if rmb_to_mxn
-            else {}
-        )
-        locator = (
-            service_fee.get("source_evidence")
-            if isinstance(service_fee.get("source_evidence"), dict)
             else {}
         )
         for item_name, original_amount in original_allocations.items():
@@ -368,8 +1438,9 @@ def allocate_service_fee_components(
             )
     return {
         "components": components,
-        "needs_review": False,
-        "reason_code": "",
+        "unmatched_lines": unmatched,
+        "needs_review": bool(unmatched),
+        "reason_code": str((unmatched[0] if unmatched else {}).get("reason_code") or ""),
         "missing_fx": bool(components and not rmb_to_mxn),
     }
 
@@ -476,7 +1547,7 @@ def add_refund_review_proposals(
     }
     evidence = result["evidence"]
     if str(evidence.get("evidence_type") or "").upper() != "REFUND":
-        return result
+        return _finalize_component_contract(result)
     refund = {
         **evidence,
         "batch": batch_name,
@@ -528,14 +1599,14 @@ def add_refund_review_proposals(
                 row["warning"] = "请先确认该冲回分项对应的原付款。"
                 result["components"].append(row)
         result["summary"]["component_proposal_count"] = len(result["components"])
-        return result
+        return _finalize_component_contract(result)
     parent = compatible[0]
     original_components = components_by_evidence.get(str(parent.get("name") or "")) or []
     if not original_components:
         evidence["needs_review"] = True
         evidence["default_selected"] = False
         evidence["warning"] = "原付款没有可验证的 SKU 分项，退款暂不自动冲回。"
-        return result
+        return _finalize_component_contract(result)
     try:
         reversals = build_refund_reversal_components(
             evidence.get("original_amount"), original_components
@@ -544,7 +1615,7 @@ def add_refund_review_proposals(
         evidence["needs_review"] = True
         evidence["default_selected"] = False
         evidence["warning"] = str(exc)
-        return result
+        return _finalize_component_contract(result)
     evidence["related_evidence"] = parent["name"]
     refund_source = next(
         (
@@ -565,7 +1636,7 @@ def add_refund_review_proposals(
         row["needs_review"] = not default_selected
         result["components"].append(row)
     result["summary"]["component_proposal_count"] = len(result["components"])
-    return result
+    return _finalize_component_contract(result)
 
 
 def split_customs_evidence(parsed: dict) -> dict:
@@ -749,6 +1820,8 @@ def build_fee_evidence_review_draft(
     fx_context: dict | None = None,
     evidence_role: str = "",
     ai_review: dict | None = None,
+    existing_components: list[dict] | None = None,
+    matrix_items: list[dict] | None = None,
 ) -> dict:
     """Create an editable draft; deterministic numbers remain the only numeric source."""
 
@@ -895,19 +1968,33 @@ def build_fee_evidence_review_draft(
             }
         )
 
+    component_match_plan = None
+    if deterministic_is_tax:
+        component_match_plan = _validate_component_expansion_budget(
+            line_items=combined.get("line_items") or [],
+            service_fees=combined.get("service_fees") or [],
+            items=items,
+            source_ref={
+                "attachment": attachment.get("name"),
+                "file": attachment.get("file_name"),
+            },
+            explicit_matches=(ai_review or {}).get("line_item_matches") or {},
+        )
     component_result = allocate_tax_certificate_components(
         combined.get("line_items") or [],
         items,
         fx_context=fx_context or {},
         source_ref={"attachment": attachment.get("name"), "file": attachment.get("file_name")},
         explicit_matches=(ai_review or {}).get("line_item_matches") or {},
+        match_plan=component_match_plan,
     ) if deterministic_is_tax else {"components": [], "unmatched_lines": [], "needs_review": False, "allocation_basis": "", "missing_fx": False}
     service_component_result = allocate_service_fee_components(
         combined.get("service_fees") or [],
         items,
         fx_context=fx_context or {},
         source_ref={"attachment": attachment.get("name"), "file": attachment.get("file_name")},
-    ) if deterministic_is_tax else {"components": [], "needs_review": False, "reason_code": "", "missing_fx": False}
+        match_plan=component_match_plan,
+    ) if deterministic_is_tax else {"components": [], "unmatched_lines": [], "needs_review": False, "reason_code": "", "missing_fx": False}
     components = []
     component_candidates = [
         *component_result["components"],
@@ -940,7 +2027,14 @@ def build_fee_evidence_review_draft(
                 "needs_review": not component_selected,
             }
         )
-    return {
+    unmatched_lines = [
+        *component_result["unmatched_lines"],
+        *(service_component_result.get("unmatched_lines") or []),
+    ]
+    draft_missing_fx = bool(
+        component_result["missing_fx"] or service_component_result["missing_fx"]
+    )
+    draft = {
         "evidence": evidence,
         "fee_splits": fee_splits,
         "tax_breakdown": split["tax_breakdown"] if deterministic_is_tax else [],
@@ -955,26 +2049,24 @@ def build_fee_evidence_review_draft(
             for row in items
             if row.get("name")
         ],
-        "unmatched_lines": [
-            *component_result["unmatched_lines"],
-            *(
-                [{
-                    "reason_code": service_component_result.get("reason_code"),
-                    "message": "清关服务费缺少完整采购货值或明确 SKU 范围。",
-                }]
-                if service_component_result.get("needs_review")
-                else []
-            ),
-        ],
+        "unmatched_lines": unmatched_lines,
         "unclassified_difference": split["unclassified_difference"] if deterministic_is_tax else "0.00",
-        "missing_fx": component_result["missing_fx"] or service_component_result["missing_fx"],
+        "missing_fx": draft_missing_fx,
+        "material_matrix": build_material_matrix(
+            items=items if matrix_items is None else matrix_items,
+            components=components,
+            existing_components=existing_components,
+            unmatched_lines=unmatched_lines,
+            missing_fx=draft_missing_fx,
+        ),
         "summary": {
             "fee_proposal_count": len(fee_splits),
             "component_proposal_count": len(components),
             "unmatched_line_count": len(component_result["unmatched_lines"])
-            + (1 if service_component_result.get("needs_review") else 0),
+            + len(service_component_result.get("unmatched_lines") or []),
         },
     }
+    return _finalize_component_contract(draft)
 
 
 def build_input_fingerprint(
@@ -1244,7 +2336,9 @@ class FrappeFeeEvidenceReviewRepository:
         row["content_sha256"] = content_sha256
         return row
 
-    def get_items(self, batch_name: str, version_name: str) -> list[dict]:
+    def get_matrix_items(self, batch_name: str, version_name: str) -> list[dict]:
+        """Return every current non-excluded item without AI source projection."""
+
         fields = [
             "name", "row_no", "stable_line_key", "material_code", "product_name", "import_name",
             "hs_code", "customs_declared_value_mxn", "goods_value", "spec_model", "quantity", "unit", "extra_json",
@@ -1256,7 +2350,20 @@ class FrappeFeeEvidenceReviewRepository:
             order_by="row_no asc, name asc",
             limit_page_length=10000,
         )
-        return effective_source.project_ai_items(rows, effective_source.current_source_bundle(batch_name, version_name))
+        return rows
+
+    def get_review_items(self, batch_name: str, version_name: str) -> dict:
+        """Derive raw matrix rows and AI projection from one database snapshot."""
+
+        matrix_items = self.get_matrix_items(batch_name, version_name)
+        items = effective_source.project_ai_items(
+            matrix_items,
+            effective_source.current_source_bundle(batch_name, version_name),
+        )
+        return {"items": items, "matrix_items": matrix_items}
+
+    def get_items(self, batch_name: str, version_name: str) -> list[dict]:
+        return self.get_review_items(batch_name, version_name)["items"]
 
     def lock_batch(self, batch_name: str) -> None:
         effective_source.current_source_bundle(batch_name, lock=True)
@@ -1489,31 +2596,56 @@ class FrappeFeeEvidenceReviewRepository:
         )
 
     def get_evidence_components(self, evidence_name: str) -> list[dict]:
-        return frappe.get_all(
-            "Overseas Cost Fee SKU Component",
-            filters={
-                "evidence": evidence_name,
-                "status": "CONFIRMED",
-                "is_active": 1,
-            },
-            fields=[
-                "name",
-                "item",
-                "stable_line_key",
-                "logical_fee_key",
-                "component_type",
-                "tax_code",
-                "hs_code",
-                "currency",
-                "original_amount",
-                "amount_rmb",
-                "exchange_rate",
-                "accounting_role",
-                "cost_effect",
-            ],
-            order_by="logical_fee_key asc, tax_code asc, item asc, name asc",
-            limit_page_length=10000,
-        )
+        fields = [
+            "name",
+            "item",
+            "stable_line_key",
+            "logical_fee_key",
+            "component_type",
+            "tax_code",
+            "hs_code",
+            "currency",
+            "original_amount",
+            "amount_rmb",
+            "exchange_rate",
+            "allocation_basis",
+            "accounting_role",
+            "cost_effect",
+            "reverses_component",
+            "source_evidence_json",
+            "confidence",
+        ]
+        rows = []
+        while len(rows) <= EVIDENCE_COMPONENT_READ_LIMIT:
+            page_length = min(
+                EVIDENCE_COMPONENT_READ_PAGE_SIZE,
+                EVIDENCE_COMPONENT_READ_LIMIT + 1 - len(rows),
+            )
+            page = frappe.get_all(
+                "Overseas Cost Fee SKU Component",
+                filters={
+                    "evidence": evidence_name,
+                    "status": "CONFIRMED",
+                    "is_active": 1,
+                },
+                fields=fields,
+                order_by="logical_fee_key asc, tax_code asc, item asc, name asc",
+                limit_start=len(rows),
+                limit_page_length=page_length,
+            )
+            rows.extend(page or [])
+            if len(rows) > EVIDENCE_COMPONENT_READ_LIMIT:
+                raise ValueError(
+                    "单张凭证的有效 SKU 分项不能超过 60,000 条，请拆分凭证后重试。"
+                )
+            if len(page or []) < page_length:
+                break
+        result = []
+        for raw in rows:
+            row = dict(raw)
+            row["source_evidence"] = _json_dict(row.get("source_evidence_json"))
+            result.append(row)
+        return result
 
     def get_refund_candidates(
         self, batch_name: str, version_name: str, fee_rule: str
@@ -1730,14 +2862,24 @@ class FrappeFeeEvidenceReviewRepository:
         logical_fee_key: str,
         components: list[dict],
     ) -> None:
+        if len(components) > EVIDENCE_COMPONENT_READ_LIMIT:
+            raise ValueError("单次保存的 SKU 分项不能超过 60,000 条。")
+        bulk_insert = getattr(getattr(frappe, "db", None), "bulk_insert", None)
+        if not callable(bulk_insert) and len(components) > COMPONENT_ORM_FALLBACK_LIMIT:
+            raise RuntimeError(
+                "当前 Frappe 运行环境不支持批量写入，无法安全保存大批量 SKU 分项。"
+            )
         frappe.db.sql(
             "UPDATE `tabOverseas Cost Fee SKU Component` "
             "SET status='VOID', is_active=0 "
             "WHERE evidence=%s AND logical_fee_key=%s AND is_active=1",
             (evidence_name, logical_fee_key),
         )
-        for row in components:
-            component_values = {
+        if not components:
+            return
+
+        def component_values(row: dict) -> dict:
+            values = {
                 key: row.get(key)
                 for key in (
                     "item",
@@ -1756,21 +2898,93 @@ class FrappeFeeEvidenceReviewRepository:
                     "reverses_component",
                 )
             }
-            frappe.get_doc(
-                {
-                    "doctype": "Overseas Cost Fee SKU Component",
-                    "batch": context["batch"],
-                    "version": context["version"],
-                    "fee_rule": fee_rule["name"],
-                    "logical_fee_key": logical_fee_key,
-                    "evidence": evidence_name,
-                    "attachment": attachment_name,
-                    **component_values,
-                    "source_evidence_json": _json(row.get("source_evidence") or {}),
-                    "status": "CONFIRMED",
-                    "is_active": 1,
+            return {
+                "batch": context["batch"],
+                "version": context["version"],
+                "fee_rule": fee_rule["name"],
+                "logical_fee_key": logical_fee_key,
+                "evidence": evidence_name,
+                "attachment": attachment_name,
+                **values,
+                "source_evidence_json": _json(row.get("source_evidence") or {}),
+                "status": "CONFIRMED",
+                "is_active": 1,
+            }
+
+        if not callable(bulk_insert):
+            for row in components:
+                frappe.get_doc(
+                    {
+                        "doctype": "Overseas Cost Fee SKU Component",
+                        **component_values(row),
+                    }
+                ).insert(ignore_permissions=True)
+            return
+
+        fields = [
+            "name",
+            "creation",
+            "modified",
+            "modified_by",
+            "owner",
+            "docstatus",
+            "idx",
+            "batch",
+            "version",
+            "fee_rule",
+            "logical_fee_key",
+            "evidence",
+            "attachment",
+            "item",
+            "stable_line_key",
+            "component_type",
+            "accounting_role",
+            "cost_effect",
+            "tax_code",
+            "hs_code",
+            "currency",
+            "original_amount",
+            "amount_rmb",
+            "exchange_rate",
+            "allocation_basis",
+            "confidence",
+            "reverses_component",
+            "source_evidence_json",
+            "status",
+            "is_active",
+        ]
+        timestamp = _now()
+        operator = _session_user() or "Administrator"
+        generated_names: set[str] = set()
+
+        def values_for_bulk_insert():
+            for index, row in enumerate(components, start=1):
+                for _attempt in range(10):
+                    name = str(frappe.generate_hash(length=10) or "")
+                    if name and name not in generated_names:
+                        generated_names.add(name)
+                        break
+                else:
+                    raise RuntimeError("生成 SKU 分项名称失败，请重试。")
+                values = {
+                    "name": name,
+                    "creation": timestamp,
+                    "modified": timestamp,
+                    "modified_by": operator,
+                    "owner": operator,
+                    "docstatus": 0,
+                    "idx": index,
+                    **component_values(row),
                 }
-            ).insert(ignore_permissions=True)
+                yield tuple(values.get(fieldname) for fieldname in fields)
+
+        bulk_insert(
+            "Overseas Cost Fee SKU Component",
+            fields,
+            values_for_bulk_insert(),
+            ignore_duplicates=False,
+            chunk_size=COMPONENT_BULK_INSERT_CHUNK_SIZE,
+        )
 
     def mark_batch_dirty(self, batch_name: str) -> None:
         frappe.db.set_value(
@@ -2079,7 +3293,19 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
         if attachment.get('source_context') and initial_fingerprint != str(_run_value(run, 'input_fingerprint') or ''):
             persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
             return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
-        items = repo.get_items(context["batch"], context["version"])
+        get_review_items = getattr(repo, "get_review_items", None)
+        if callable(get_review_items):
+            item_views = get_review_items(context["batch"], context["version"])
+            items = item_views.get("items") or []
+            matrix_items = item_views.get("matrix_items") or []
+        else:
+            items = repo.get_items(context["batch"], context["version"])
+            get_matrix_items = getattr(repo, "get_matrix_items", None)
+            matrix_items = (
+                get_matrix_items(context["batch"], context["version"])
+                if callable(get_matrix_items)
+                else items
+            )
         progress = _json_list(_run_value(run, "source_progress_json")) or [{}]
         progress[0].update({"status": "READING", "detail": "正在解析/OCR"})
         persist(progress_step="解析／OCR", progress_percent=30, source_progress_json=progress)
@@ -2099,6 +3325,13 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             persist(status='STALE', progress_step='采用来源已变化', completed_at=_now())
             return {'ok': False, 'run_id': run_id, 'status': 'STALE'}
         ai = _semantic_ai_review(parsed, attachment, items) if parsed else {"ok": False, "warning": parse_warning, "model": ""}
+        evidence_name = str(_run_value(run, "evidence") or "")
+        load_evidence_components = getattr(repo, "get_evidence_components", None)
+        existing_components = (
+            load_evidence_components(evidence_name)
+            if evidence_name and callable(load_evidence_components)
+            else []
+        )
         draft = build_fee_evidence_review_draft(
             logical_fee_key=str(_run_value(run, "logical_fee_key")),
             attachment=attachment,
@@ -2106,6 +3339,8 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
             fx_context=context["fx_context"],
             evidence_role=str(_run_value(run, "evidence_role")),
             ai_review=ai.get("review") if ai.get("ok") else None,
+            existing_components=existing_components,
+            matrix_items=matrix_items,
         )
         if str((draft.get("evidence") or {}).get("evidence_type") or "").upper() == "REFUND":
             candidates = repo.get_refund_candidates(
@@ -2120,12 +3355,15 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
                 fee_rule=str(_run_value(run, "fee_rule") or ""),
                 candidates=candidates,
                 components_by_evidence={
-                    str(row.get("name") or ""): repo.get_evidence_components(
-                        str(row.get("name") or "")
+                    str(row.get("name") or ""): (
+                        load_evidence_components(str(row.get("name") or ""))
+                        if callable(load_evidence_components)
+                        else []
                     )
                     for row in candidates
                 },
             )
+        draft = _finalize_component_contract(draft)
         progress[0].update(
             {
                 "status": "COMPLETED",
@@ -2136,6 +3374,7 @@ def execute_fee_evidence_review(run_id: str, *, repository: Any | None = None) -
         )
         attachment_fingerprint = _attachment_fingerprint(attachment)
         draft['source_context'] = effective_source.public_context(context.get('effective_source') or attachment.get('source_context') or {})
+        draft = _finalize_component_contract(draft)
         if hasattr(repo, 'lock_batch'):
             repo.lock_batch(context['batch'])
         refreshed = repo.get_context(context['batch'], context['version'])
@@ -2220,8 +3459,12 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
         for fieldname in allowed:
             if fieldname not in values:
                 continue
+            previous_value = row.get(fieldname)
             row[fieldname] = values[fieldname]
-            if fieldname not in {"original_amount", "amount"}:
+            if (
+                fieldname not in {"original_amount", "amount", "item"}
+                or previous_value == values[fieldname]
+            ):
                 continue
             row["human_edits"] = sorted(
                 set([*(row.get("human_edits") or []), fieldname])
@@ -2232,6 +3475,8 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
                     "type": "MANUAL_REVIEW",
                     "field": fieldname,
                     "operator": _session_user(),
+                    "from": previous_value,
+                    "to": values[fieldname],
                 },
             ]
         return row
@@ -2246,10 +3491,33 @@ def _selected_proposals(draft: dict, selections: Any, edits: Any) -> tuple[dict,
         if str(row.get("proposal_id") or "") in selected:
             fee_rows.append(row)
     components = []
-    for raw in draft.get("components") or []:
-        row = dict(raw)
-        apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
-        if str(row.get("proposal_id") or "") in selected:
+    component_draft = draft
+    if (
+        str((draft.get("component_contract") or {}).get("mode") or "")
+        == "INDEXED_COLUMNS_V1"
+        and draft.get("components")
+    ):
+        component_draft = _finalize_component_contract(draft)
+    legacy_components = component_draft.get("components") or []
+    if legacy_components:
+        for raw in legacy_components:
+            row = dict(raw)
+            apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
+            if str(row.get("proposal_id") or "") in selected:
+                components.append(row)
+    elif str((component_draft.get("component_contract") or {}).get("mode") or "") == (
+        "INDEXED_COLUMNS_V1"
+    ):
+        component_store = component_draft.get("component_store") or {}
+        proposal_lookup = _validate_component_store(component_store)
+        selected_indexes = sorted(
+            proposal_lookup[proposal_id]
+            for proposal_id in selected
+            if proposal_id in proposal_lookup
+        )
+        for row_index in selected_indexes:
+            row = _component_store_row(component_store, row_index)
+            apply_allowed_edits(row, COMPONENT_EDIT_FIELDS)
             components.append(row)
     return evidence, fee_rows, components
 
@@ -2317,6 +3585,13 @@ def validate_component_amount_conservation(
             component_total_rmb += amount_rmb
 
     fee_result = convert_fee_amount_to_rmb(fee or {}, fx_context or {})
+    same_currency_total = grouped.get(fee_currency, {}).get(
+        "original", Decimal("0")
+    )
+    if set(grouped) == {fee_currency} and same_currency_total - fee_amount > Decimal(
+        "0.005"
+    ):
+        raise ValueError("SKU 税费分项合计超过费用总额。")
     if not fee_result.get("ok"):
         if fee_result.get("reason_code") == "FX_RATE_MISSING":
             if set(grouped) - {fee_currency}:
@@ -2434,7 +3709,7 @@ def normalize_component_for_apply(
     row: dict,
     *,
     item: dict,
-    parent_component_names: set[str] | None = None,
+    parent_components_by_name: dict[str, dict] | None = None,
 ) -> dict:
     component_type = str(row.get("component_type") or "IMPORT_TAX").upper()
     accounting_role = str(row.get("accounting_role") or "FINAL_BILL").upper()
@@ -2469,12 +3744,51 @@ def normalize_component_for_apply(
     if accounting_role == "SETTLEMENT" and cost_effect != "LEDGER_ONLY":
         raise ValueError("结算流水 SKU 分项不能重复计入成本。")
     if component_type == "REFUND_REVERSAL":
-        if not is_reversal or reversal_link not in (parent_component_names or set()):
+        parent_component = (parent_components_by_name or {}).get(reversal_link)
+        if not is_reversal or not parent_component:
             raise ValueError("退款冲回分项必须关联原付款的有效 SKU 分项。")
+        parent_item = str(parent_component.get("item") or "")
+        parent_stable_line_key = str(
+            parent_component.get("stable_line_key") or ""
+        )
+        item_name = str(item.get("name") or "")
+        item_stable_line_key = str(
+            item.get("stable_line_key") or item_name
+        )
+        submitted_stable_line_key = str(
+            row.get("stable_line_key") or item_stable_line_key
+        )
+        if (
+            not parent_item
+            or not parent_stable_line_key
+            or item_name != parent_item
+            or item_stable_line_key != parent_stable_line_key
+            or submitted_stable_line_key != parent_stable_line_key
+        ):
+            raise ValueError("退款冲回分项必须与原付款分项使用同一 SKU 及稳定物料行。")
         if rmb_amount is not None and rmb_amount > 0:
             raise ValueError("退款冲回分项人民币金额必须为负数。")
     elif rmb_amount is not None and rmb_amount < 0:
         raise ValueError("SKU 税费分项人民币金额不合法。")
+    source_evidence = row.get("source_evidence") or {}
+    if not isinstance(source_evidence, dict):
+        source_evidence = {}
+    else:
+        source_evidence = dict(source_evidence)
+    human_edits = sorted(
+        {
+            str(fieldname)
+            for fieldname in (row.get("human_edits") or [])
+            if str(fieldname)
+        }
+    )
+    if human_edits:
+        source_evidence["human_edits"] = human_edits
+        source_evidence["source_refs"] = [
+            dict(ref)
+            for ref in (row.get("source_refs") or [])
+            if isinstance(ref, dict)
+        ]
     return {
         "item": item["name"],
         "stable_line_key": item.get("stable_line_key") or item["name"],
@@ -2488,10 +3802,501 @@ def normalize_component_for_apply(
         "amount_rmb": rmb_amount,
         "exchange_rate": _decimal(row.get("exchange_rate")),
         "allocation_basis": str(row.get("allocation_basis") or "")[:140],
-        "source_evidence": row.get("source_evidence") or {},
+        "source_evidence": source_evidence,
         "confidence": _decimal(row.get("confidence")),
         "reverses_component": reversal_link or None,
     }
+
+
+def _material_matrix_current_items(repo: Any, context: dict) -> list[dict]:
+    get_review_items = getattr(repo, "get_review_items", None)
+    if callable(get_review_items):
+        views = get_review_items(context["batch"], context["version"])
+        if not isinstance(views, dict) or not isinstance(views.get("matrix_items"), list):
+            raise ValueError("当前物料矩阵快照无效。")
+        return [dict(row) for row in views["matrix_items"] if isinstance(row, dict)]
+    get_matrix_items = getattr(repo, "get_matrix_items", None)
+    if callable(get_matrix_items):
+        return [
+            dict(row)
+            for row in get_matrix_items(context["batch"], context["version"])
+            if isinstance(row, dict)
+        ]
+    return [
+        dict(row)
+        for row in repo.get_items(context["batch"], context["version"])
+        if isinstance(row, dict)
+    ]
+
+
+def _material_matrix_component_access(draft: dict):
+    component_draft = draft
+    if (
+        str((draft.get("component_contract") or {}).get("mode") or "")
+        == "INDEXED_COLUMNS_V1"
+        and draft.get("components")
+    ):
+        component_draft = _finalize_component_contract(draft)
+    if str((component_draft.get("component_contract") or {}).get("mode") or "") == (
+        "INDEXED_COLUMNS_V1"
+    ):
+        component_store = component_draft.get("component_store") or {}
+        indexes = _validate_component_store(component_store)
+
+        def resolve_indexed(proposal_id: str) -> dict | None:
+            row_index = indexes.get(proposal_id)
+            return (
+                _component_store_row(component_store, row_index)
+                if row_index is not None
+                else None
+            )
+
+        def identity_indexed(row_index: int) -> dict:
+            if row_index < 0 or row_index >= int(component_store.get("count") or 0):
+                raise ValueError("物料税费矩阵提案索引越界。")
+            return {
+                "proposal_id": _component_store_value(
+                    component_store, "proposal_id", row_index
+                ),
+                "item": _component_store_value(component_store, "item", row_index),
+                "stable_line_key": _component_store_value(
+                    component_store, "stable_line_key", row_index
+                ),
+            }
+
+        return resolve_indexed, identity_indexed, int(component_store.get("count") or 0)
+
+    components = component_draft.get("components") or []
+    if not isinstance(components, list) or any(
+        not isinstance(row, dict) for row in components
+    ):
+        raise ValueError("费用凭证分项草稿包含无效记录。")
+    lookup: dict[str, dict] = {}
+    for row in components:
+        proposal_id = row.get("proposal_id")
+        if not isinstance(proposal_id, str) or not proposal_id.strip():
+            continue
+        if proposal_id in lookup:
+            raise ValueError("费用凭证分项提案标识重复。")
+        lookup[proposal_id] = dict(row)
+    def identity_legacy(row_index: int) -> dict:
+        if row_index < 0 or row_index >= len(components):
+            raise ValueError("物料税费矩阵提案索引越界。")
+        row = components[row_index]
+        return {
+            "proposal_id": row.get("proposal_id"),
+            "item": row.get("item"),
+            "stable_line_key": row.get("stable_line_key"),
+        }
+
+    return lookup.get, identity_legacy, len(components)
+
+
+def _material_matrix_allowed_proposals(
+    draft: dict,
+    *,
+    item_by_name: dict[str, dict],
+    item_by_stable_key: dict[str, dict],
+    identity_at: Any,
+    component_count: int,
+) -> dict[tuple[str, str], set[str]]:
+    matrix = draft.get("material_matrix")
+    if not isinstance(matrix, dict):
+        return {}
+    rows = matrix.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("费用凭证草稿的物料矩阵行无效。")
+    allowed_columns = {str(column["key"]) for column in MATERIAL_MATRIX_COLUMNS}
+    allowed: dict[tuple[str, str], set[str]] = {}
+    seen_items = set()
+    for matrix_row in rows:
+        if not isinstance(matrix_row, dict):
+            raise ValueError("费用凭证草稿的物料矩阵行无效。")
+        row_item_name = str(matrix_row.get("item") or "")
+        current_item = item_by_name.get(row_item_name)
+        if current_item is None or row_item_name in seen_items:
+            raise ValueError("费用凭证草稿的物料矩阵行归属无效。")
+        seen_items.add(row_item_name)
+        matrix_stable_key = str(matrix_row.get("stable_line_key") or "")
+        current_stable_key = str(current_item.get("stable_line_key") or row_item_name)
+        if matrix_stable_key and matrix_stable_key != current_stable_key:
+            raise ValueError("费用凭证草稿的物料矩阵行已过期。")
+        compact_cells = matrix_row.get("cells") or {}
+        if not isinstance(compact_cells, dict) or set(compact_cells) - allowed_columns:
+            raise ValueError("费用凭证草稿的物料矩阵列无效。")
+        for column_key, compact_cell in compact_cells.items():
+            if not isinstance(compact_cell, dict):
+                raise ValueError("费用凭证草稿的物料矩阵单元格无效。")
+            proposal_indexes = compact_cell.get("proposals") or []
+            if not isinstance(proposal_indexes, list):
+                raise ValueError("费用凭证草稿的提案索引无效。")
+            if any(
+                isinstance(row_index, bool) or not isinstance(row_index, int)
+                for row_index in proposal_indexes
+            ):
+                raise ValueError("费用凭证草稿的提案索引无效。")
+            if len(set(proposal_indexes)) != len(proposal_indexes):
+                raise ValueError("费用凭证草稿的提案索引重复。")
+            member_ids = allowed.setdefault((row_item_name, str(column_key)), set())
+            for row_index in proposal_indexes:
+                if row_index < 0 or row_index >= component_count:
+                    raise ValueError("费用凭证草稿的提案索引越界。")
+                identity = identity_at(row_index)
+                proposal_id = identity.get("proposal_id")
+                if not isinstance(proposal_id, str) or not proposal_id:
+                    raise ValueError("费用凭证草稿的提案标识无效。")
+                proposal_item = item_by_name.get(str(identity.get("item") or ""))
+                stable_key = identity.get("stable_line_key")
+                if proposal_item is None and stable_key is not _MISSING_COMPONENT_VALUE:
+                    proposal_item = item_by_stable_key.get(str(stable_key or ""))
+                if (
+                    proposal_item is None
+                    or str(proposal_item.get("name") or "") != row_item_name
+                ):
+                    raise ValueError("费用凭证草稿的提案物料归属无效。")
+                member_ids.add(proposal_id)
+    return allowed
+
+
+def _bounded_material_matrix_amount_text(raw_amount: Any) -> str:
+    if isinstance(raw_amount, bool) or raw_amount in (None, ""):
+        raise ValueError("物料税费单元格金额必须是有限非负数。")
+    if isinstance(raw_amount, str):
+        if len(raw_amount) > MATERIAL_MATRIX_AMOUNT_TEXT_LENGTH_LIMIT:
+            raise ValueError("物料税费单元格金额文本过长。")
+        amount_text = raw_amount
+    elif isinstance(raw_amount, int):
+        if abs(raw_amount) >= 10**MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT:
+            raise ValueError("物料税费单元格金额数字位数过多。")
+        amount_text = str(raw_amount)
+    elif isinstance(raw_amount, Decimal):
+        if len(raw_amount.as_tuple().digits) > MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT:
+            raise ValueError("物料税费单元格金额数字位数过多。")
+        amount_text = str(raw_amount)
+    elif isinstance(raw_amount, float):
+        amount_text = str(raw_amount)
+    else:
+        raise ValueError("物料税费单元格金额必须是有限非负数。")
+    if len(amount_text) > MATERIAL_MATRIX_AMOUNT_TEXT_LENGTH_LIMIT:
+        raise ValueError("物料税费单元格金额文本过长。")
+    if sum(character.isdigit() for character in amount_text) > (
+        MATERIAL_MATRIX_AMOUNT_DIGIT_LIMIT
+    ):
+        raise ValueError("物料税费单元格金额数字位数过多。")
+    return amount_text.replace(",", "")
+
+
+def validate_material_matrix_submission(
+    component_matrix: Any,
+    *,
+    draft: dict,
+    items: list[dict],
+) -> list[dict]:
+    if not isinstance(component_matrix, dict):
+        raise ValueError("物料税费矩阵必须是对象。")
+    if set(component_matrix) != {"cells"}:
+        raise ValueError("物料税费矩阵顶层包含未知字段。")
+    cells = component_matrix.get("cells")
+    if not isinstance(cells, list):
+        raise ValueError("物料税费矩阵 cells 必须是列表。")
+    if len(cells) > MATERIAL_MATRIX_APPLY_CELL_LIMIT:
+        raise ValueError(
+            f"物料税费矩阵单元格数量不能超过 "
+            f"{MATERIAL_MATRIX_APPLY_CELL_LIMIT}。"
+        )
+
+    item_by_name = {
+        str(row.get("name") or ""): dict(row)
+        for row in items
+        if str(row.get("name") or "")
+    }
+    item_by_stable_key = {
+        str(row.get("stable_line_key") or ""): dict(row)
+        for row in items
+        if str(row.get("stable_line_key") or "")
+    }
+    columns = {str(row["key"]): dict(row) for row in MATERIAL_MATRIX_COLUMNS}
+    resolve_proposal, identity_at, component_count = _material_matrix_component_access(
+        draft
+    )
+    has_source_ids = any(
+        isinstance(raw_cell, dict)
+        and isinstance(raw_cell.get("source_proposal_ids"), list)
+        and bool(raw_cell.get("source_proposal_ids"))
+        for raw_cell in cells
+    )
+    allowed_proposals = (
+        _material_matrix_allowed_proposals(
+            draft,
+            item_by_name=item_by_name,
+            item_by_stable_key=item_by_stable_key,
+            identity_at=identity_at,
+            component_count=component_count,
+        )
+        if has_source_ids
+        else {}
+    )
+    seen_cells: set[tuple[str, str]] = set()
+    normalized = []
+    for raw_cell in cells:
+        if not isinstance(raw_cell, dict):
+            raise ValueError("物料税费矩阵单元格必须是对象。")
+        if set(raw_cell) != MATERIAL_MATRIX_CELL_FIELDS:
+            raise ValueError("物料税费矩阵单元格字段不合法。")
+        item_name = raw_cell.get("item")
+        column_key = raw_cell.get("column_key")
+        if not isinstance(item_name, str) or item_name not in item_by_name:
+            raise ValueError("物料税费矩阵关联的 SKU 不属于当前批次版本。")
+        if not isinstance(column_key, str) or column_key not in columns:
+            raise ValueError("物料税费矩阵列不合法。")
+        cell_key = (item_name, column_key)
+        if cell_key in seen_cells:
+            raise ValueError("同一物料税费单元格不能重复提交。")
+        seen_cells.add(cell_key)
+
+        raw_amount = raw_cell.get("original_amount")
+        amount_text = _bounded_material_matrix_amount_text(raw_amount)
+        try:
+            amount = Decimal(amount_text)
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError("物料税费单元格金额必须是有限非负数。") from None
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("物料税费单元格金额必须是有限非负数。")
+        try:
+            normalized_amount = amount.quantize(Decimal("0.01"))
+        except InvalidOperation:
+            raise ValueError("物料税费单元格金额超出可支持范围。") from None
+        if amount != normalized_amount:
+            raise ValueError("物料税费单元格金额最多保留两位小数精度。")
+
+        source_ids = raw_cell.get("source_proposal_ids")
+        if not isinstance(source_ids, list) or len(source_ids) > (
+            MATERIAL_MATRIX_SOURCE_IDS_PER_CELL_LIMIT
+        ):
+            raise ValueError("物料税费单元格来源提案列表无效或过大。")
+        if any(
+            not isinstance(proposal_id, str)
+            or not proposal_id
+            or len(proposal_id) > MATERIAL_MATRIX_SOURCE_ID_LENGTH_LIMIT
+            for proposal_id in source_ids
+        ):
+            raise ValueError("物料税费单元格来源提案标识无效。")
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("物料税费单元格来源提案标识重复。")
+        proposals = []
+        for proposal_id in source_ids:
+            proposal = resolve_proposal(proposal_id)
+            if proposal is None:
+                raise ValueError(f"来源提案 {proposal_id} 不存在于当前草稿。")
+            if proposal_id not in allowed_proposals.get(cell_key, set()):
+                raise ValueError("来源提案不属于当前物料税费单元格。")
+            route = _matrix_component_route(proposal)
+            problem = _matrix_component_problem(proposal, route=route)
+            if problem:
+                raise ValueError(f"来源提案包含不可应用的分项：{problem[1]}")
+            proposal_item = item_by_name.get(str(proposal.get("item") or ""))
+            if proposal_item is None:
+                proposal_item = item_by_stable_key.get(
+                    str(proposal.get("stable_line_key") or "")
+                )
+            if (
+                proposal_item is None
+                or str(proposal_item.get("name") or "") != item_name
+                or route[1]
+                or route[0] != column_key
+            ):
+                raise ValueError("来源提案与所提交的物料税费单元格不匹配。")
+            proposals.append(dict(proposal))
+        normalized.append(
+            {
+                "item": item_by_name[item_name],
+                "column": columns[column_key],
+                "original_amount": amount,
+                "source_proposal_ids": list(source_ids),
+                "source_proposals": proposals,
+                "fee_logical_key": columns[column_key]["fee_logical_key"],
+            }
+        )
+    return normalized
+
+
+def _material_matrix_saved_fee_keys(draft: dict) -> set[str]:
+    columns = {
+        str(column["key"]): str(column["fee_logical_key"])
+        for column in MATERIAL_MATRIX_COLUMNS
+    }
+    result = set()
+    material_matrix = draft.get("material_matrix")
+    if not isinstance(material_matrix, dict):
+        return result
+    for row in material_matrix.get("saved_components") or []:
+        if not isinstance(row, dict):
+            continue
+        route = _matrix_component_route(row)
+        if route[1] or route[0] not in columns:
+            continue
+        result.add(columns[route[0]])
+    return result
+
+
+def _is_matrix_managed_cost_component(row: dict) -> bool:
+    route = _matrix_component_route(row)
+    return bool(
+        str(row.get("cost_effect") or "COST").upper() == "COST"
+        and route[0]
+        and route[0] in MATERIAL_MATRIX_COLUMN_KEYS
+        and _matrix_component_problem(row, route=route) is None
+    )
+
+
+def _is_matrix_external_component(row: dict) -> bool:
+    return not _is_matrix_managed_cost_component(row)
+
+
+def _external_component_identity(row: dict) -> str:
+    values = {
+        fieldname: row.get(fieldname)
+        for fieldname in (
+            "item",
+            "stable_line_key",
+            "component_type",
+            "accounting_role",
+            "cost_effect",
+            "tax_code",
+            "hs_code",
+            "currency",
+            "original_amount",
+            "amount_rmb",
+            "exchange_rate",
+            "allocation_basis",
+            "reverses_component",
+            "source_evidence",
+        )
+    }
+    values["logical_fee_key"] = str(
+        row.get("logical_fee_key") or row.get("fee_logical_key") or ""
+    )
+    for fieldname in ("original_amount", "amount_rmb", "exchange_rate"):
+        number = _decimal(row.get(fieldname))
+        values[fieldname] = _decimal_amount(number) if number is not None else None
+    return _dedupe_key(values)
+
+
+def _merge_matrix_external_components(
+    selected_components: list[dict], existing_components: list[dict]
+) -> list[dict]:
+    selected_rows = [
+        dict(row)
+        for row in (selected_components or [])
+        if isinstance(row, dict) and _is_matrix_external_component(row)
+    ]
+    result = list(selected_rows)
+    selected_matches: dict[str, int] = {}
+    for row in selected_rows:
+        identity = _external_component_identity(row)
+        selected_matches[identity] = selected_matches.get(identity, 0) + 1
+    for raw in existing_components or []:
+        if not isinstance(raw, dict) or not _is_matrix_external_component(raw):
+            continue
+        row = dict(raw)
+        identity = _external_component_identity(row)
+        if selected_matches.get(identity, 0) > 0:
+            selected_matches[identity] -= 1
+            continue
+        result.append(row)
+    return result
+
+
+def _matrix_source_proposal_audit(proposal: dict) -> dict:
+    return {
+        "proposal_id": str(proposal.get("proposal_id") or ""),
+        "original_amount": (
+            str(proposal.get("original_amount"))
+            if _decimal(proposal.get("original_amount")) is not None
+            else None
+        ),
+        "currency": str(proposal.get("currency") or "").upper(),
+        "amount_rmb": (
+            str(proposal.get("amount_rmb"))
+            if _decimal(proposal.get("amount_rmb")) is not None
+            else None
+        ),
+        "source_refs": _component_source_refs(proposal),
+    }
+
+
+def normalize_material_matrix_component(
+    cell: dict,
+    *,
+    fee_rule: dict,
+    fx_context: dict,
+    normalized_evidence: dict,
+    attachment: dict,
+    run_id: str,
+) -> dict:
+    from overseas_costing.services.cost_preview_service import convert_fee_amount_to_rmb
+
+    currency = str(fee_rule.get("currency") or "RMB").upper().replace("CNY", "RMB")
+    if currency not in MATERIAL_MATRIX_CURRENCIES:
+        raise ValueError("物料税费对应费用的币种不合法。")
+    amount = cell["original_amount"]
+    converted = convert_fee_amount_to_rmb(
+        {"amount": amount, "currency": currency}, fx_context or {}
+    )
+    if converted.get("ok"):
+        amount_rmb = _decimal(converted.get("amount_rmb"))
+        exchange_rate = _decimal(converted.get("rate"))
+    elif converted.get("reason_code") == "FX_RATE_MISSING":
+        amount_rmb = None
+        exchange_rate = None
+    else:
+        raise ValueError("无法使用当前费用币种换算物料税费。")
+
+    proposals = cell["source_proposals"]
+    proposed_amounts = _component_amounts(proposals)
+    suggested_by_currency = proposed_amounts["original_amounts_by_currency"]
+    suggested_same_currency = _decimal(suggested_by_currency.get(currency))
+    manual_change = not proposals or len(suggested_by_currency) != 1 or (
+        suggested_same_currency != amount
+    )
+    column_key = str(cell["column"]["key"])
+    component_type = (
+        "CUSTOMS_SERVICE" if column_key == "CUSTOMS_SERVICE" else "IMPORT_TAX"
+    )
+    evidence_role = str(normalized_evidence.get("accounting_role") or "FINAL_BILL").upper()
+    if evidence_role not in {"ESTIMATE", "FINAL_BILL", "SETTLEMENT"}:
+        evidence_role = "FINAL_BILL"
+    source_evidence = {
+        "type": "MANUAL_REVIEW",
+        "attachment": str(attachment.get("name") or ""),
+        "attachment_fingerprint": _attachment_fingerprint(attachment),
+        "review_run": str(run_id),
+        "operator": _session_user() or "system",
+        "source_proposal_ids": list(cell["source_proposal_ids"]),
+        "source_proposals": [
+            _matrix_source_proposal_audit(proposal) for proposal in proposals
+        ],
+        "submitted_original_amount": _money(amount),
+        "suggested_original_amounts_by_currency": suggested_by_currency,
+        "manual_change": manual_change,
+    }
+    return normalize_component_for_apply(
+        {
+            "component_type": component_type,
+            "accounting_role": evidence_role,
+            "cost_effect": "COST",
+            "tax_code": "" if component_type == "CUSTOMS_SERVICE" else column_key,
+            "hs_code": str(cell["item"].get("hs_code") or ""),
+            "currency": currency,
+            "original_amount": amount,
+            "amount_rmb": amount_rmb,
+            "exchange_rate": exchange_rate,
+            "allocation_basis": "manual_review_matrix",
+            "source_evidence": source_evidence,
+            "confidence": None,
+        },
+        item=cell["item"],
+    )
 
 
 def apply_fee_evidence_review(
@@ -2502,6 +4307,7 @@ def apply_fee_evidence_review(
     edit_token: str,
     expected_modified: str,
     *,
+    component_matrix: Any | None = None,
     repository: Any | None = None,
 ) -> dict:
     repo = repository or FrappeFeeEvidenceReviewRepository()
@@ -2542,15 +4348,49 @@ def apply_fee_evidence_review(
             }
         draft = _json_dict(_run_value(run, "draft_json"))
         effective_source.require_available(context.get('effective_source') or attachment.get('source_context') or {})
-        evidence_values, fee_rows, components = _selected_proposals(
+        evidence_values, fee_rows, legacy_components = _selected_proposals(
             draft, selections, edits
         )
-        if not evidence_values.get("selected") and not fee_rows and not components:
-            raise ValueError("请至少选择一项凭证审核草稿。")
-        validate_review_selections(evidence_values, fee_rows, components)
+        matrix_cells: list[dict] | None = None
+        matrix_items: list[dict] | None = None
+        if component_matrix is not None:
+            matrix_items = _material_matrix_current_items(repo, context)
+            matrix_cells = validate_material_matrix_submission(
+                component_matrix,
+                draft=draft,
+                items=matrix_items,
+            )
+            components = matrix_cells
+        else:
+            components = legacy_components
         evidence_name = str(_run_value(run, "evidence") or "")
         if not evidence_name:
             raise ValueError("凭证关联记录缺失，请重新发起审核。")
+        selected_external_components: list[dict] = []
+        preserved_external_components: list[dict] = []
+        if matrix_cells is not None:
+            selected_external_components = _merge_matrix_external_components(
+                legacy_components, []
+            )
+            get_evidence_components = getattr(repo, "get_evidence_components", None)
+            existing_components = (
+                get_evidence_components(evidence_name)
+                if callable(get_evidence_components)
+                else []
+            )
+            preserved_external_components = _merge_matrix_external_components(
+                selected_external_components,
+                existing_components,
+            )
+            components = [*matrix_cells, *preserved_external_components]
+        if len(components) > EVIDENCE_COMPONENT_READ_LIMIT:
+            raise ValueError(
+                f"单张凭证的有效 SKU 分项不能超过 "
+                f"{EVIDENCE_COMPONENT_READ_LIMIT:,} 条。"
+            )
+        if not evidence_values.get("selected") and not fee_rows and not components:
+            raise ValueError("请至少选择一项凭证审核草稿。")
+        validate_review_selections(evidence_values, fee_rows, components)
         normalized_evidence = normalize_evidence_for_apply(
             evidence_values,
             context=context,
@@ -2580,7 +4420,12 @@ def apply_fee_evidence_review(
                 else:
                     repo.rollback()
                 return {**adopted,'run_id':run_id}
-            if any(str(component.get('fee_logical_key') or component.get('logical_fee_key') or '') not in reviewed_rules for component in components):
+            adoption_components = (
+                [*matrix_cells, *selected_external_components]
+                if matrix_cells is not None
+                else components
+            )
+            if any(str(component.get('fee_logical_key') or component.get('logical_fee_key') or '') not in reviewed_rules for component in adoption_components):
                 raise ValueError('费用分项必须对应本次已采用的最终费用拆分。')
 
         parent_components: list[dict] = []
@@ -2628,30 +4473,84 @@ def apply_fee_evidence_review(
                 draft=draft,
                 run_id=str(run_id),
             )
-        if components:
-            valid_items = {
-                row["name"]: row
-                for row in repo.get_items(context["batch"], context["version"])
+        if components or matrix_cells is not None:
+            parent_components_by_name = {
+                str(row.get("name") or ""): dict(row)
+                for row in parent_components
+                if str(row.get("name") or "")
             }
-            parent_component_names = {
-                str(row.get("name") or "") for row in parent_components
-            }
-            for fee_key, fee_components in group_components_by_fee_key(components).items():
+            if matrix_cells is not None:
+                grouped_components = group_components_by_fee_key(matrix_cells)
+                grouped_external_components = group_components_by_fee_key(
+                    preserved_external_components
+                )
+                replacement_fee_keys = {
+                    str(row.get("logical_fee_key") or "")
+                    for row in fee_rows
+                    if str(row.get("logical_fee_key") or "") in MATERIAL_MATRIX_FEE_KEYS
+                }
+                replacement_fee_keys.update(grouped_components)
+                replacement_fee_keys.update(grouped_external_components)
+                replacement_fee_keys.update(_material_matrix_saved_fee_keys(draft))
+                run_fee_key = str(_run_value(run, "logical_fee_key") or "")
+                if not replacement_fee_keys and run_fee_key in MATERIAL_MATRIX_FEE_KEYS:
+                    replacement_fee_keys.add(run_fee_key)
+            else:
+                grouped_components = group_components_by_fee_key(components)
+                grouped_external_components = {}
+                replacement_fee_keys = set(grouped_components)
+
+            valid_items = None
+            if matrix_cells is not None:
+                valid_items = {
+                    str(row.get("name") or ""): row for row in (matrix_items or [])
+                }
+            else:
+                valid_items = {
+                    row["name"]: row
+                    for row in repo.get_items(context["batch"], context["version"])
+                }
+            for fee_key in sorted(replacement_fee_keys):
+                fee_components = grouped_components.get(fee_key, [])
                 fee_rule = fee_rules_by_key.get(fee_key) or repo.materialize_fee_rule(
                     context["batch"], context["version"], fee_key
                 )
-                normalized_components = []
-                for row in fee_components:
-                    item = valid_items.get(str(row.get("item") or ""))
-                    if not item:
-                        raise ValueError("凭证分项关联的 SKU 不属于当前批次。")
-                    normalized_components.append(
-                        normalize_component_for_apply(
+                if matrix_cells is not None:
+                    normalized_components = [
+                        normalize_material_matrix_component(
                             row,
-                            item=item,
-                            parent_component_names=parent_component_names,
+                            fee_rule=fee_rule,
+                            fx_context=context.get("fx_context") or {},
+                            normalized_evidence=normalized_evidence,
+                            attachment=attachment,
+                            run_id=str(run_id),
                         )
-                    )
+                        for row in fee_components
+                    ]
+                    for row in grouped_external_components.get(fee_key, []):
+                        item = (valid_items or {}).get(str(row.get("item") or ""))
+                        if not item:
+                            raise ValueError("矩阵外分项关联的 SKU 不属于当前批次。")
+                        normalized_components.append(
+                            normalize_component_for_apply(
+                                row,
+                                item=item,
+                                parent_components_by_name=parent_components_by_name,
+                            )
+                        )
+                else:
+                    normalized_components = []
+                    for row in fee_components:
+                        item = (valid_items or {}).get(str(row.get("item") or ""))
+                        if not item:
+                            raise ValueError("凭证分项关联的 SKU 不属于当前批次。")
+                        normalized_components.append(
+                            normalize_component_for_apply(
+                                row,
+                                item=item,
+                                parent_components_by_name=parent_components_by_name,
+                            )
+                        )
                 if any(
                     row["cost_effect"] == "COST" for row in normalized_components
                 ):

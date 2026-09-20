@@ -1,6 +1,7 @@
 """费用与凭证 API 的权限、输入上限和薄层契约测试。"""
 
 import importlib
+import json
 import sys
 from types import ModuleType
 
@@ -118,5 +119,65 @@ def test_fee_evidence_review_endpoints_enforce_permissions_and_bounded_drafts(mo
     assert captured["status"]["after_revision"] == 3
     assert captured["apply"]["selections"] == ["evidence:classification"]
     assert captured["apply"]["edits"]["evidence:classification"]["currency"] == "MXN"
+    assert captured["apply"]["component_matrix"] is None
     with pytest.raises(ValueError, match="过大"):
         api.apply_fee_evidence_review("BATCH", "RUN", "[]", "x" * 1_100_000, "EDIT", "MOD")
+
+
+def test_apply_fee_evidence_review_accepts_separately_bounded_matrix_payload(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    monkeypatch.setattr(api, "require_batch_permission", lambda batch, _ptype: batch)
+    captured = {}
+    monkeypatch.setattr(
+        api.fee_evidence_review_service,
+        "apply_fee_evidence_review",
+        lambda **kwargs: captured.update(kwargs) or {"ok": True},
+    )
+    matrix = {
+        "cells": [
+            {
+                "item": "ITEM-1",
+                "column_key": "IGI",
+                "original_amount": "12.50",
+                "source_proposal_ids": ["component:1"],
+            }
+        ]
+    }
+
+    result = api.apply_fee_evidence_review(
+        "BATCH", "RUN", "[]", "{}", "EDIT", "MOD", json.dumps(matrix)
+    )
+
+    assert result == {"ok": True}
+    assert captured["component_matrix"] == matrix
+
+
+def test_apply_fee_evidence_review_matrix_has_independent_byte_and_cell_limits(monkeypatch) -> None:
+    api = _load_api(monkeypatch)
+    monkeypatch.setattr(api, "require_batch_permission", lambda batch, _ptype: batch)
+    monkeypatch.setattr(
+        api.fee_evidence_review_service,
+        "apply_fee_evidence_review",
+        lambda **_kwargs: {"ok": True},
+    )
+
+    with pytest.raises(ValueError, match="矩阵.*过大"):
+        api.apply_fee_evidence_review(
+            "BATCH",
+            "RUN",
+            "[]",
+            "{}",
+            "EDIT",
+            "MOD",
+            '{"cells":[],"padding":"' + ("x" * (api.MAX_COMPONENT_MATRIX_PAYLOAD_BYTES + 1)) + '"}',
+        )
+    with pytest.raises(ValueError, match="60000"):
+        api.apply_fee_evidence_review(
+            "BATCH",
+            "RUN",
+            [],
+            {},
+            "EDIT",
+            "MOD",
+            {"cells": [{}] * 60_001},
+        )
