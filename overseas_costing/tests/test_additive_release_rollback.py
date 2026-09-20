@@ -28,7 +28,7 @@ if 'python' in ' '.join(args) and args[-1]=='-':
     python_log = pathlib.Path(os.environ['ROLLBACK_PYTHON_LOG'])
     with python_log.open('a') as handle:
         handle.write(sys.stdin.read())
-        handle.write('\n# --- next python payload ---\n')
+        handle.write('\\n# --- next python payload ---\\n')
 """)
     docker.chmod(0o755)
     commands = tmp_path / "commands.jsonl"
