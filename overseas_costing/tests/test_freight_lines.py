@@ -72,6 +72,17 @@ def test_comment_waybill_is_indexed_without_treating_bank_account_as_waybill():
     assert not any(t[1]=='9876543210' for t in tokens)
 
 
+def test_plain_dhl_comment_waybill_is_indexed():
+    row = source('L', 'logistics', text='发货')
+    row['raw_payload']['operationRecords'] = [
+        {'remark': 'DHL 3080665836\nETA 2026-9-18已签收'}
+    ]
+
+    tokens = parse_source(row, logistics_codes={'logistics'})['identifiers']
+
+    assert ('waybill', '3080665836') in tokens
+
+
 def test_monthly_extracts_own_row_and_never_total_project_or_other_goods():
     from overseas_costing.services.logistics_settlement.freight_lines import lines_for_source, matching_lines
     s=parse_source(monthly(),logistics_codes={'logistics'})

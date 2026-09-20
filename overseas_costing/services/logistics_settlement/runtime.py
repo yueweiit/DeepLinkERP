@@ -381,11 +381,90 @@ def run_payment_ai_matching(payment_ai_job_id):
         current_version=lambda batch,lock=False:(FrappeLedger().get('batch',batch,lock=lock) or {}).get('current_version'))
 
 
+def _batch_metadata(value):
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        result = json.loads(value or '{}')
+    except (TypeError, ValueError):
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+def _comment_waybills(source):
+    """Only return tracking numbers explicitly found in DingTalk comments/operations."""
+    from .freight_lines import identifiers_in
+
+    raw = source.get('raw') if isinstance(source.get('raw'), dict) else {}
+    identifiers = (
+        identifiers_in(raw.get('comments') or [])
+        | identifiers_in(raw.get('operationRecords') or [])
+    )
+    return sorted({token for token_type, token in identifiers if token_type == 'waybill'})
+
+
+def _sync_comment_waybill(db, ledger, batch_name, source, actor='archive-sync'):
+    """Adopt one comment-derived waybill without claiming or replacing manual data."""
+    candidates = _comment_waybills(source)
+    if len(candidates) != 1:
+        return {'status': 'ambiguous' if candidates else 'missing', 'candidates': candidates}
+
+    candidate = candidates[0]
+    batch = ledger.get('batch', batch_name, lock=True) or {}
+    current = str(batch.get('waybill_no') or '').strip()
+    metadata = _batch_metadata(batch.get('extra_json'))
+    provenance = metadata.get('waybill_source') if isinstance(metadata.get('waybill_source'), dict) else {}
+    source_owned = bool(
+        current
+        and provenance.get('kind') == 'comment-derived'
+        and provenance.get('source_id') == source.get('id')
+        and str(provenance.get('value') or '').strip() == current
+    )
+
+    if current == candidate:
+        return {'status': 'unchanged', 'value': candidate}
+    if current and not source_owned:
+        db.audit(
+            source['id'], 'batch_waybill_conflict', actor,
+            batch=batch_name,
+            current_value=current,
+            candidate_values=candidates,
+            source_snapshot=source.get('snapshot'),
+            kind='comment-derived',
+        )
+        return {'status': 'conflict', 'value': current, 'candidates': candidates}
+
+    synced_at = utcnow()
+    metadata['waybill_source'] = {
+        'source_id': source['id'],
+        'source_snapshot': source.get('snapshot'),
+        'value': candidate,
+        'kind': 'comment-derived',
+        'synced_at': synced_at,
+        'actor': actor,
+    }
+    ledger.put('batch', batch_name, {
+        'waybill_no': candidate,
+        'extra_json': dumps(metadata),
+    })
+    db.audit(
+        source['id'], 'batch_waybill_synced', actor,
+        batch=batch_name,
+        old_value=current,
+        new_value=candidate,
+        source_snapshot=source.get('snapshot'),
+        kind='comment-derived',
+    )
+    return {'status': 'updated', 'value': candidate}
+
+
 def ensure_batch(db, source):
+    ledger = FrappeLedger()
     mapping = db.find('batch_map', source_id=source['id'], limit=1)
     if mapping:
-        return mapping[0]['batch']
-    ledger = FrappeLedger()
+        batch_name = mapping[0]['batch']
+        _sync_comment_waybill(db, ledger, batch_name, source)
+        return batch_name
     matches = ledger.rows('batch', source_instance_id=source['instance'])
     exact = [b for b in matches if b.get('source_corp_id') == source['corp']]
     legacy_corp = str(frappe.conf.get('overseas_costing_settlement_legacy_corp_id') or frappe.conf.get('overseas_costing_dingtalk_corp_id') or '')
@@ -417,6 +496,7 @@ def ensure_batch(db, source):
                                   'expense_category': '初始物流暂估', 'amount': source['amount'], 'currency': source['currency'],
                                   'allocation_basis': 'goods_value', 'is_enabled': 1, 'is_active': 1})
     db.insert('batch_map', {'id': source['id'], 'source_id': source['id'], 'batch': batch['name'], 'data': '{}'})
+    _sync_comment_waybill(db, ledger, batch['name'], source)
     return batch['name']
 
 

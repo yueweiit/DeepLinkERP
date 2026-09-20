@@ -1,8 +1,14 @@
 import pytest
+import json
+import sqlite3
+
 from overseas_costing.tests.test_settlement_writer import setup
+from overseas_costing.tests.test_settlement_writer import Ledger
 from overseas_costing.tests.test_logistics_settlement import source, ingest, store
 from overseas_costing.services.logistics_settlement.writer import apply_binding
 from overseas_costing.services.logistics_settlement import runtime
+from overseas_costing.services.logistics_settlement.model import parse_source
+from overseas_costing.services.logistics_settlement.store import Store
 
 
 def attach_runtime(monkeypatch, s, ledger):
@@ -10,6 +16,148 @@ def attach_runtime(monkeypatch, s, ledger):
     monkeypatch.setattr(runtime.Store, 'frappe', lambda: s)
     monkeypatch.setattr(runtime, 'FrappeLedger', lambda: ledger)
     monkeypatch.setattr(runtime, 'archive', lambda: pytest.fail('normal page query contacted upstream'))
+
+
+def waybill_runtime_context(comment='DHL 3080665836\nETA 2026-9-18已签收'):
+    s = Store.sqlite(sqlite3.connect(':memory:'))
+    s.install()
+    ledger = Ledger(s)
+    batch = ledger.create('batch', {
+        'batch_no': 'B-WAYBILL',
+        'source_corp_id': 'C',
+        'source_instance_id': 'L-WAYBILL',
+        'waybill_no': '',
+        'status': 'Calculated',
+        'confirm_status': 'Pending',
+        'extra_json': '{}',
+    })
+    raw = source('L-WAYBILL', 'logistics', text='国际快递')
+    raw['raw_payload']['operationRecords'] = [{'remark': comment}]
+    parsed = s.ingest(parse_source(raw, logistics_codes={'logistics'}))
+    s.insert('batch_map', {
+        'id': parsed['id'], 'source_id': parsed['id'], 'batch': batch['name'], 'data': '{}',
+    })
+    return s, ledger, batch, parsed
+
+
+def test_existing_batch_mapping_syncs_one_comment_waybill_without_dirtying_cost(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context()
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        result = runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    provenance = json.loads(saved['extra_json'])['waybill_source']
+    assert result == batch['name']
+    assert saved['waybill_no'] == '3080665836'
+    assert saved['status'] == 'Calculated'
+    assert saved['confirm_status'] == 'Pending'
+    assert provenance == {
+        'actor': 'archive-sync',
+        'kind': 'comment-derived',
+        'source_id': parsed['id'],
+        'source_snapshot': parsed['snapshot'],
+        'synced_at': provenance['synced_at'],
+        'value': '3080665836',
+    }
+    audits = s.find('audit', binding_id=parsed['id'], action='batch_waybill_synced')
+    assert len(audits) == 1
+    assert audits[0]['batch'] == batch['name']
+    assert audits[0]['new_value'] == '3080665836'
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_synced') == 1
+
+
+def test_comment_waybill_preserves_manual_value_and_audits_conflict(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context()
+    ledger.put('batch', batch['name'], {'waybill_no': 'MANUAL-88888888'})
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == 'MANUAL-88888888'
+    assert 'waybill_source' not in json.loads(saved['extra_json'])
+    conflicts = s.find('audit', binding_id=parsed['id'], action='batch_waybill_conflict')
+    assert len(conflicts) == 1
+    assert conflicts[0]['current_value'] == 'MANUAL-88888888'
+    assert conflicts[0]['candidate_values'] == ['3080665836']
+
+
+def test_comment_waybill_same_source_provenance_allows_later_update(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context()
+    attach_runtime(monkeypatch, s, ledger)
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    refreshed_raw = source('L-WAYBILL', 'logistics', text='国际快递')
+    refreshed_raw['updated_at'] = '2026-09-20T12:00:00+00:00'
+    refreshed_raw['raw_payload']['operationRecords'] = [{'remark': 'DHL 9988776655'}]
+    refreshed = s.ingest(parse_source(refreshed_raw, logistics_codes={'logistics'}))
+    with s.atomic():
+        runtime.ensure_batch(s, refreshed)
+
+    saved = ledger.get('batch', batch['name'])
+    provenance = json.loads(saved['extra_json'])['waybill_source']
+    assert saved['waybill_no'] == '9988776655'
+    assert provenance['source_id'] == parsed['id']
+    assert provenance['source_snapshot'] == refreshed['snapshot']
+    assert provenance['value'] == '9988776655'
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_synced') == 2
+
+
+def test_matching_unproven_waybill_never_claims_future_overwrite_rights(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context()
+    ledger.put('batch', batch['name'], {'waybill_no': '3080665836'})
+    attach_runtime(monkeypatch, s, ledger)
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    assert 'waybill_source' not in json.loads(ledger.get('batch', batch['name'])['extra_json'])
+
+    refreshed_raw = source('L-WAYBILL', 'logistics', text='国际快递')
+    refreshed_raw['updated_at'] = '2026-09-20T12:00:00+00:00'
+    refreshed_raw['raw_payload']['operationRecords'] = [{'remark': 'DHL 9988776655'}]
+    refreshed = s.ingest(parse_source(refreshed_raw, logistics_codes={'logistics'}))
+    with s.atomic():
+        runtime.ensure_batch(s, refreshed)
+
+    assert ledger.get('batch', batch['name'])['waybill_no'] == '3080665836'
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_synced') == 0
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_conflict') == 1
+
+
+def test_ambiguous_comment_waybills_do_not_change_batch(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context(
+        'DHL 3080665836\n运单号 9988776655\nETA 2026-9-18已签收'
+    )
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == ''
+    assert json.loads(saved['extra_json']) == {}
+    assert s.count('audit') == 0
+
+
+def test_waybill_sync_and_audit_roll_back_together(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context()
+    attach_runtime(monkeypatch, s, ledger)
+    monkeypatch.setattr(s, 'audit', lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('audit failed')))
+
+    with pytest.raises(RuntimeError, match='audit failed'):
+        with s.atomic():
+            runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == ''
+    assert json.loads(saved['extra_json']) == {}
 
 
 def test_single_batch_mapping_uses_exact_local_source_without_creating_batch(setup, monkeypatch):
