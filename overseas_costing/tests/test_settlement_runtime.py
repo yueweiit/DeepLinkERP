@@ -220,16 +220,31 @@ def test_comment_waybill_sync_ignores_operator_name_ids_and_timestamps(monkeypat
     assert s.count('audit') == 0
 
 
-@pytest.mark.parametrize(('kind', 'approved', 'invalid'), [
-    ('logistics', False, False),
-    ('logistics', False, True),
-    ('expense', True, False),
+def test_comment_waybill_sync_accepts_running_logistics_source(monkeypatch):
+    s, ledger, batch, parsed = waybill_runtime_context()
+    parsed.update(status='RUNNING', approved=False, invalid=False)
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == '3080665836'
+    assert json.loads(saved['extra_json'])['waybill_source']['source_id'] == parsed['id']
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_synced') == 1
+
+
+@pytest.mark.parametrize(('kind', 'status', 'approved', 'invalid'), [
+    ('logistics', 'COMPLETED', False, False),
+    ('logistics', 'RUNNING', False, True),
+    ('expense', 'RUNNING', False, False),
+    ('logistics', 'TERMINATED', False, False),
 ])
-def test_comment_waybill_sync_requires_live_approved_logistics_source(
-    monkeypatch, kind, approved, invalid,
+def test_comment_waybill_sync_rejects_ineligible_source_state(
+    monkeypatch, kind, status, approved, invalid,
 ):
     s, ledger, batch, parsed = waybill_runtime_context()
-    parsed.update(kind=kind, approved=approved, invalid=invalid)
+    parsed.update(kind=kind, status=status, approved=approved, invalid=invalid)
     attach_runtime(monkeypatch, s, ledger)
 
     with s.atomic():

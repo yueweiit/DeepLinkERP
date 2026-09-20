@@ -461,13 +461,19 @@ def _comment_waybills(source):
     return sorted(tokens)
 
 
+def _comment_waybill_source_eligible(source):
+    """Allow active logistics comments without weakening terminal-state checks."""
+    if source.get('kind') != 'logistics' or bool(source.get('invalid')):
+        return False
+    status = str(source.get('status') or '').strip().upper()
+    if status == 'RUNNING':
+        return True
+    return status == 'COMPLETED' and source.get('approved') is True
+
+
 def _sync_comment_waybill(db, ledger, batch_name, source, actor='archive-sync'):
     """Adopt one comment-derived waybill without claiming or replacing manual data."""
-    if (
-        source.get('kind') != 'logistics'
-        or source.get('approved') is not True
-        or bool(source.get('invalid'))
-    ):
+    if not _comment_waybill_source_eligible(source):
         return {'status': 'ineligible', 'candidates': []}
     candidates = _comment_waybills(source)
     if len(candidates) != 1:
