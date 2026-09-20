@@ -170,7 +170,7 @@
     if (!authoritative || authoritative.task === "unknown") return false;
     let task = "pending";
     let reviewStatus = "pending";
-    if (authoritative.task === "cost" && authoritative.batch?.review_state === "ready") task = "cost";
+    if (authoritative.task === "cost") task = "cost";
     else if (authoritative.task === "erp") task = "erp";
     else if (authoritative.task === "confirmed") {
       task = "cost";

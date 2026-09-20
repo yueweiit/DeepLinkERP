@@ -150,3 +150,38 @@ console.log(JSON.stringify({before,endpoints,error:workspace.error||'',retained:
         "overseas_costing.api.workbench.get_batches",
     ]
     assert not result["error"] and result["retained"] and not result["running"]
+
+
+def test_successful_ai_trial_moves_open_detail_to_authoritative_cost_review_scope():
+    source_path = json.dumps(str(PARTS / "30-calculation-erp.js"))
+    result = _fee_workspace_result(PREVIEW_WORKSPACE_FIXTURE + f"""
+const Recalc=Function('Base','return class extends Base {{'+fs.readFileSync({source_path},'utf8').split('  setMainView(')[0]+'}}')(Harness);
+workspace.getAuthoritativeReviewClassification=Recalc.prototype.getAuthoritativeReviewClassification;
+workspace.captureReviewNavigationContext=Recalc.prototype.captureReviewNavigationContext;
+workspace.reviewNavigationContextMatches=Recalc.prototype.reviewNavigationContextMatches;
+workspace.reviewNavigationTargetMatches=Recalc.prototype.reviewNavigationTargetMatches;
+workspace.applyAuthoritativeReviewClassification=Recalc.prototype.applyAuthoritativeReviewClassification;
+workspace.refreshRecalculatedDetailClassification=Recalc.prototype.refreshRecalculatedDetailClassification;
+""" + r"""
+workspace.detailState={...workspace.detailState,tab:'documents',editToken:'TOKEN',expectedModified:'M1',requestId:7,header:{name:'B-1',current_version:'V-1'}};
+workspace.viewState={task:'pending',screen:'detail',batch:'B-1',tab:'documents',page:1};
+workspace.filters={review_status:'pending',review_warning:'',issue:''};
+workspace.batches=[{name:'B-1',current_version:'V-1'}];
+workspace.findBatch=name=>workspace.batches.find(row=>row.name===name);
+workspace.replaceViewState=values=>{workspace.viewState={...workspace.viewState,...values}};
+workspace.loadBatches=async()=>{};workspace.renderDetailShell=()=>{};workspace.switchDetailTab=async()=>{};
+workspace.updateEditLeaseStatus=()=>{};workspace.renderCostTrialAIReviewDialog=()=>{};
+state.costTrialAI={runId:'RUN',status:'READY',draft:{fee_suggestions:[]},selections:[],preview:{preview_token:'P'}};
+state.costTrialDialog={hide(){this.hidden=true}};
+const calls=[];workspace.call=async(endpoint,args)=>{calls.push({endpoint,args});
+ if(endpoint.endsWith('confirm_cost_trial'))return {ok:true,saved:true,batch_modified:'M2',version_name:'V-1',summary:{total_cost_rmb:'120.00'},summary_snapshot:{calculation_schema:2,total_cost_rmb:'120.00'}};
+ if(endpoint.endsWith('get_batches')&&args.task==='cost')return {ok:true,items:[{name:'B-1',review_state:'processing',cost_review_started:true}],total:1,page:1};
+ return {ok:true,items:[],total:0,page:1};};
+await workspace.confirmCostTrialAI();
+console.log(JSON.stringify({task:workspace.viewState.task,screen:workspace.viewState.screen,batch:workspace.viewState.batch,tab:workspace.viewState.tab,calls:calls.map(row=>[row.endpoint.split('.').pop(),row.args.task||''])}));
+""")
+    assert result["task"] == "cost"
+    assert result["screen"] == "detail"
+    assert result["batch"] == "B-1"
+    assert result["tab"] == "documents"
+    assert result["calls"] == [["confirm_cost_trial", ""], ["get_batches", "cost"]]

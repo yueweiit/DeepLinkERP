@@ -624,6 +624,24 @@ console.log(JSON.stringify({applied,task:v.viewState.task,header:v.detailState.h
     assert result['renders'] == []
 
 
+def test_authoritative_cost_list_placement_starts_review_even_with_processing_state():
+    result = run_js("""
+const v=makeView('pending'),replacements=[];
+const batch={name:'B',review_state:'processing',cost_review_started:true};
+v.batches=[batch];v.viewState={task:'pending',screen:'detail',batch:'B',tab:'documents',page:1};
+v.detailState={batchName:'B',tab:'documents',header:batch,requestId:2};
+v.replaceViewState=values=>{replacements.push(values);v.viewState={...v.viewState,...values}};
+v.loadBatches=async()=>{};
+const context=v.captureReviewNavigationContext('B');
+const applied=await v.applyAuthoritativeReviewClassification('B',{task:'cost',batch},context);
+console.log(JSON.stringify({applied,task:v.viewState.task,reviewStatus:v.filters.review_status,replacements}));
+""")
+    assert result['applied'] is True
+    assert result['task'] == 'cost'
+    assert result['reviewStatus'] == 'pending'
+    assert result['replacements'][-1]['screen'] == 'detail'
+
+
 def test_confirm_success_after_navigation_does_not_overwrite_new_view():
     result = run_js("""
 const alerts=[];global.frappe={show_alert:value=>alerts.push(value)};

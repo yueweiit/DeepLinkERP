@@ -5419,7 +5419,21 @@
       if (this.detailState.editToken) this.updateEditLeaseStatus?.();
       this.renderMaterialFeeWorkspace();
       if (trial.scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
-      frappe.show_alert({ message: result.trial_review?.is_temporary ? "暂行口径试算已保存" : "试算完成", indicator: "green" });
+      let refreshWarning = "";
+      if (this.viewState?.screen === "detail" && this.refreshRecalculatedDetailClassification) {
+        try {
+          await this.refreshRecalculatedDetailClassification(batchName);
+        } catch (refreshError) {
+          // 试算已经事务保存；分类回读失败不应把已保存结果误报为失败。
+          refreshWarning = refreshError?.message || "工作台分类刷新失败";
+        }
+      }
+      frappe.show_alert({
+        message: refreshWarning
+          ? `试算已保存，但工作台分类刷新失败：${refreshWarning}。请稍后刷新。`
+          : (result.trial_review?.is_temporary ? "暂行口径试算已保存" : "试算完成"),
+        indicator: refreshWarning ? "orange" : "green",
+      });
       return result;
     } finally {
       if (state.calculationWrite === calculationWrite) state.calculationWrite = null;
