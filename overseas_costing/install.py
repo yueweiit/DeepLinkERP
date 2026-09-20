@@ -55,6 +55,38 @@ def after_install() -> None:
     clear_permission_cache()
 
 
+def before_migrate() -> None:
+    """在 DocType 同步前清洗旧版 ERP 路由修订号。"""
+
+    try:
+        import frappe
+    except Exception:
+        return
+
+    if not frappe.db.table_exists("Overseas Cost Item"):
+        return
+
+    columns = frappe.db.sql(
+        "show columns from `tabOverseas Cost Item` like 'route_revision'"
+    )
+    if not columns:
+        return
+
+    # 旧环境可能把该字段建成文本并留下空字符串或非数字值；
+    # 先归一化，避免严格模式下迁移为 Int 时报 Data truncated。
+    frappe.db.sql(
+        """
+        update `tabOverseas Cost Item`
+        set route_revision = 0
+        where route_revision is not null
+          and (
+              trim(cast(route_revision as char)) = ''
+              or cast(route_revision as char) not regexp '^[0-9]+$'
+          )
+        """
+    )
+
+
 def after_migrate() -> None:
     """中文用途：Frappe migrate 后确保桌面入口存在。"""
 
