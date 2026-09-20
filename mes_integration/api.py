@@ -1,6 +1,7 @@
 import json
 
 import frappe
+from frappe.utils import cint
 
 
 BATCH_BIN_FIELDS = [
@@ -74,8 +75,9 @@ def get_batch_bin_rows(item_codes=None):
     synthetic zero-stock row, not an invalid request.  This keeps clients that
     identify returned items from ``rows`` compatible while
     ``no_stock_item_codes`` still identifies why the row contains zero stock.
-    Only item codes that do not exist in the Item master are returned as
-    ``invalid_item_codes``.
+    Disabled and non-stock items are returned in dedicated lists and do not
+    receive synthetic inventory rows. Only codes missing from Item master are
+    returned as ``invalid_item_codes``.
     """
     from mes_integration.mes_integration.stock_entry import validate_mes_api_user
 
@@ -99,19 +101,37 @@ def get_batch_bin_rows(item_codes=None):
     item_rows = frappe.get_list(
         "Item",
         filters={"name": ["in", requested_item_codes]},
-        fields=["name", "stock_uom"],
+        fields=["name", "stock_uom", "is_stock_item", "disabled"],
         limit_page_length=0,
     )
-    item_stock_uoms = {
-        row.get("name"): row.get("stock_uom")
-        for row in item_rows
+    items_by_code = {row.get("name"): row for row in item_rows}
+    existing_item_codes = set(items_by_code)
+    disabled_item_codes = [
+        item_code
+        for item_code in requested_item_codes
+        if item_code in existing_item_codes
+        and cint(items_by_code[item_code].get("disabled"))
+    ]
+    non_stock_item_codes = [
+        item_code
+        for item_code in requested_item_codes
+        if item_code in existing_item_codes
+        and not cint(items_by_code[item_code].get("disabled"))
+        and not cint(items_by_code[item_code].get("is_stock_item"))
+    ]
+    available_item_codes = {
+        item_code
+        for item_code in requested_item_codes
+        if item_code in existing_item_codes
+        and not cint(items_by_code[item_code].get("disabled"))
+        and cint(items_by_code[item_code].get("is_stock_item"))
     }
-    existing_item_codes = set(item_stock_uoms)
+    rows = [row for row in rows if row.get("item_code") in available_item_codes]
     returned_item_codes = {row.get("item_code") for row in rows}
     no_stock_item_codes = [
         item_code
         for item_code in requested_item_codes
-        if item_code in existing_item_codes and item_code not in returned_item_codes
+        if item_code in available_item_codes and item_code not in returned_item_codes
     ]
     invalid_item_codes = [
         item_code
@@ -126,7 +146,7 @@ def get_batch_bin_rows(item_codes=None):
             "actual_qty": 0,
             "reserved_qty": 0,
             "projected_qty": 0,
-            "stock_uom": item_stock_uoms.get(item_code),
+            "stock_uom": items_by_code[item_code].get("stock_uom"),
         }
         for item_code in no_stock_item_codes
     )
@@ -136,6 +156,9 @@ def get_batch_bin_rows(item_codes=None):
         "success": True,
         "rows": rows,
         "no_stock_item_codes": no_stock_item_codes,
+        "disabled_item_codes": disabled_item_codes,
+        "non_stock_item_codes": non_stock_item_codes,
+        "unavailable_item_codes": disabled_item_codes + non_stock_item_codes,
         "invalid_item_codes": invalid_item_codes,
         # Keep the old key for MES clients that still read it.  It now means
         # genuinely unknown Item codes, not valid items with zero stock.

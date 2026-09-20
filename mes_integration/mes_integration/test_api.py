@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import UnitTestCase
 
@@ -24,6 +26,62 @@ from mes_integration.mes_integration.stock_entry import (
 
 
 class TestMESAPIHTTPMethods(UnitTestCase):
+	def test_inventory_distinguishes_zero_disabled_nonstock_and_missing_items(self):
+		bin_rows = [
+			frappe._dict(
+				item_code="ITEM-WITH-STOCK",
+				warehouse="Stores - TC",
+				actual_qty=5,
+				reserved_qty=0,
+				projected_qty=5,
+				stock_uom="Nos",
+			),
+			frappe._dict(
+				item_code="ITEM-DISABLED",
+				warehouse="Stores - TC",
+				actual_qty=3,
+			),
+		]
+		item_rows = [
+			frappe._dict(name="ITEM-ZERO", stock_uom="Nos", is_stock_item=1, disabled=0),
+			frappe._dict(
+				name="ITEM-WITH-STOCK", stock_uom="Nos", is_stock_item=1, disabled=0
+			),
+			frappe._dict(
+				name="ITEM-DISABLED", stock_uom="Nos", is_stock_item=1, disabled=1
+			),
+			frappe._dict(
+				name="ITEM-NONSTOCK", stock_uom="Nos", is_stock_item=0, disabled=0
+			),
+		]
+
+		with (
+			patch(
+				"mes_integration.mes_integration.stock_entry.validate_mes_api_user"
+			),
+			patch.object(frappe, "has_permission", return_value=True),
+			patch.object(frappe, "get_list", side_effect=[bin_rows, item_rows]),
+		):
+			result = api.get_batch_bin_rows(
+				[
+					"ITEM-ZERO",
+					"ITEM-WITH-STOCK",
+					"ITEM-DISABLED",
+					"ITEM-NONSTOCK",
+					"ITEM-MISSING",
+				]
+			)
+
+		self.assertEqual(result["no_stock_item_codes"], ["ITEM-ZERO"])
+		self.assertEqual(result["disabled_item_codes"], ["ITEM-DISABLED"])
+		self.assertEqual(result["non_stock_item_codes"], ["ITEM-NONSTOCK"])
+		self.assertEqual(result["invalid_item_codes"], ["ITEM-MISSING"])
+		self.assertEqual(
+			[row["item_code"] for row in result["rows"]],
+			["ITEM-WITH-STOCK", "ITEM-ZERO"],
+		)
+		self.assertEqual(result["rows"][1]["actual_qty"], 0)
+
 	def test_write_endpoints_only_allow_post(self):
 		write_endpoints = (
 			api.create_stock_entry,
