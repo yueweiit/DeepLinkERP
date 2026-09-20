@@ -63,7 +63,8 @@ def before_migrate() -> None:
     except Exception:
         return
 
-    if not frappe.db.table_exists("Overseas Cost Item"):
+    tables = frappe.db.sql("show tables like 'tabOverseas Cost Item'")
+    if not tables:
         return
 
     columns = frappe.db.sql(
@@ -85,6 +86,7 @@ def before_migrate() -> None:
           )
         """
     )
+    frappe.db.commit()
 
 
 def after_migrate() -> None:

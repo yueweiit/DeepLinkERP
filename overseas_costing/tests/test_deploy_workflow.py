@@ -39,6 +39,15 @@ def test_deploy_prewarms_packing_cache_before_switching_frontend_assets() -> Non
     assert deploy.index("Upgrade and migrate ERP") < deploy.index(prewarm) < deploy.index(assets)
 
 
+def test_deploy_cleans_legacy_route_revision_before_migrate() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+
+    cleanup = "bench --site deeplinkerp.com execute overseas_costing.install.before_migrate"
+    assert cleanup in deploy
+    assert deploy.index("upgrade_bench.sh") < deploy.index(cleanup) < deploy.index("migrate_site.sh")
+
+
 def test_production_deploy_requires_deepseek_and_installs_document_runtime() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]

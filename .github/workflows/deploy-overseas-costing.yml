@@ -163,7 +163,7 @@ jobs:
           PY'
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "cd /home/yuewei/ERPNext-Docker/frappe_docker && git pull --ff-only && ./upgrade_bench.sh && ./migrate_site.sh deeplinkerp.com"
+            "cd /home/yuewei/ERPNext-Docker/frappe_docker && git pull --ff-only && ./upgrade_bench.sh && docker compose -f compose.custom.yaml exec -T -w /home/frappe/frappe-bench backend bench --site deeplinkerp.com execute overseas_costing.install.before_migrate && ./migrate_site.sh deeplinkerp.com"
 
       - name: Install document parsing runtime
         env:
