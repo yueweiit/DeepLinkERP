@@ -233,6 +233,10 @@
     return this.applyAuthoritativeReviewClassification(batchName, authoritative, context);
   }
 
+  async refreshSavedTrialReviewClassification(batchName) {
+    return this.refreshRecalculatedDetailClassification(batchName);
+  }
+
   setMainView(view = "cost") {
     this.erpQueueMode = view === "erp_queue";
     if (this.erpQueueMode) {

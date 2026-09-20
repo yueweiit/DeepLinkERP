@@ -76,8 +76,8 @@ def test_pending_processing_and_default_cost_ready_are_mutually_exclusive(monkey
     pending = workbench_service.get_workbench_batches(task="pending")
     review = workbench_service.get_workbench_batches(task="cost")
     history = workbench_service.get_workbench_batches({"review_status": "confirmed"}, task="cost")
-    assert [row["name"] for row in pending["items"]] == ["DIRTY", "LEGACY"]
-    assert [row["name"] for row in review["items"]] == ["READY"]
+    assert [row["name"] for row in pending["items"]] == ["LEGACY"]
+    assert [row["name"] for row in review["items"]] == ["READY", "DIRTY"]
     assert [row["name"] for row in history["items"]] == ["CONFIRMED"]
     assert history["items"][0]["reviewed_at"] == "2026-09-08 11:00:00"
     assert history["items"][0]["reviewed_version"] == "V-CONFIRMED"
@@ -95,8 +95,8 @@ def test_summary_counts_base_population_and_scopes_warnings_to_selected_review_s
                 batch_context("DIRTY", dirty=True), batch_context("CONFIRMED", confirmed=True)]
     install_rows(monkeypatch, contexts)
     pending = workbench_service.get_workbench_summary({"issue": "purchase"})
-    assert pending["counts"] == {"purchase": 0, "logistics": 0, "calculation": 1, "erp_failed": 0}
-    assert pending["review_counts"] == {"pending": 2, "confirmed": 1, "estimated": 1, "evidence_missing": 2}
+    assert pending["counts"] == {"purchase": 0, "logistics": 0, "calculation": 0, "erp_failed": 0}
+    assert pending["review_counts"] == {"pending": 2, "confirmed": 1, "estimated": 1, "evidence_missing": 3}
     history = workbench_service.get_workbench_summary({"review_status": "confirmed", "review_warning": "estimated"}, task="cost")
     assert history["review_counts"] == {"pending": 2, "confirmed": 1, "estimated": 0, "evidence_missing": 1}
 

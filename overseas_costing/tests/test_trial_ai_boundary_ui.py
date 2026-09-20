@@ -162,6 +162,7 @@ workspace.reviewNavigationContextMatches=Recalc.prototype.reviewNavigationContex
 workspace.reviewNavigationTargetMatches=Recalc.prototype.reviewNavigationTargetMatches;
 workspace.applyAuthoritativeReviewClassification=Recalc.prototype.applyAuthoritativeReviewClassification;
 workspace.refreshRecalculatedDetailClassification=Recalc.prototype.refreshRecalculatedDetailClassification;
+workspace.refreshSavedTrialReviewClassification=Recalc.prototype.refreshSavedTrialReviewClassification;
 """ + r"""
 workspace.detailState={...workspace.detailState,tab:'documents',editToken:'TOKEN',expectedModified:'M1',requestId:7,header:{name:'B-1',current_version:'V-1'}};
 workspace.viewState={task:'pending',screen:'detail',batch:'B-1',tab:'documents',page:1};

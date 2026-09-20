@@ -5420,9 +5420,9 @@
       this.renderMaterialFeeWorkspace();
       if (trial.scrollToResult) this.$root.find(".ocw-mf-cost-section").get(0)?.scrollIntoView({ behavior: "smooth", block: "start" });
       let refreshWarning = "";
-      if (this.viewState?.screen === "detail" && this.refreshRecalculatedDetailClassification) {
+      if (this.viewState?.screen === "detail" && this.refreshSavedTrialReviewClassification) {
         try {
-          await this.refreshRecalculatedDetailClassification(batchName);
+          await this.refreshSavedTrialReviewClassification(batchName);
         } catch (refreshError) {
           // 试算已经事务保存；分类回读失败不应把已保存结果误报为失败。
           refreshWarning = refreshError?.message || "工作台分类刷新失败";
