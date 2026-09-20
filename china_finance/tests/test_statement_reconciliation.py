@@ -1,11 +1,17 @@
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import frappe
 
+from china_finance.services.financial_statement import get_statement_source_accounts, render_rows
 from china_finance.services.statement_mapping_repair import corrected_cash_flow_classification, repair_cash_flow_mappings
 from china_finance.setup.templates import classify_account_number
-from china_finance.services.financial_statement import get_statement_source_accounts, render_rows
+from china_finance.china_finance.report.china_financial_statements.china_financial_statements import (
+	execute_native_trial_balance,
+	execute_account_activity_balance,
+)
 
 
 def account(number, name):
@@ -22,6 +28,12 @@ def row(code, indent=0, formula=None):
 
 
 class TestStatementReconciliation(unittest.TestCase):
+	def test_closing_filter_is_removed_from_both_definitions(self):
+		from china_finance.setup.install import CHINA_FINANCIAL_STATEMENT_REPORT_FILTERS
+		definition = Path(__file__).resolve().parents[1] / "china_finance/report/china_financial_statements/china_financial_statements.json"
+		for filters in (CHINA_FINANCIAL_STATEMENT_REPORT_FILTERS, json.loads(definition.read_text())["filters"]):
+			self.assertNotIn("include_period_closing_entries", {f["fieldname"] for f in filters})
+
 	def test_payroll_and_employee_deductions(self):
 		for number, name in [("660209", "管理费用－工资"), ("660208", "管理费用－社会保险费"),
 			("660229", "管理费用－公积金"), ("122102", "其他应收款-社保"), ("122103", "其他应收款-公积金")]:
@@ -57,6 +69,22 @@ class TestStatementReconciliation(unittest.TestCase):
 		with patch("frappe.get_all", side_effect=[["Cash Flow Template"], []]) as get_all:
 			self.assertEqual(repair_cash_flow_mappings(), [])
 			self.assertEqual(get_all.call_args.kwargs["filters"]["mapping_source"], "Automatic")
+
+	def test_both_balance_paths_always_include_closing_despite_old_filters(self):
+		module = "china_finance.china_finance.report.china_financial_statements.china_financial_statements"
+		for run in (execute_native_trial_balance, execute_account_activity_balance):
+			for value in (None, 0, 1):
+				filters = frappe._dict(company="Test", from_date="2026-01-01", to_date="2026-12-31",
+					include_period_closing_entries=value)
+				if value is None:
+					filters.pop("include_period_closing_entries")
+				with patch("erpnext.accounts.report.trial_balance.trial_balance.execute", return_value=([], [])) as native, \
+					patch(module + "._adjust_opening_entries_by_posting_date"), \
+					patch(module + "._format_native_account_labels"), \
+					patch(module + "._activity_balance_message", return_value=""):
+					run(filters)
+					self.assertEqual(native.call_args.args[0].with_period_closing_entry_for_current_period, 1)
+					self.assertEqual(native.call_args.args[0].with_period_closing_entry_for_opening, 1)
 
 	def test_finance_parent_and_formula_include_interest_source(self):
 		template = frappe._dict(accounting_standard="小企业会计准则", statement_type="Profit and Loss",

@@ -257,10 +257,12 @@ def sync_china_financial_statement_report_filters():
 		for key in ("mandatory", "wildcard_filter"):
 			filter_row[key] = int(bool(filter_row[key]))
 		for key in ("options", "default"):
-			filter_row[key] = filter_row[key] or None
+			filter_row[key] = str(filter_row[key]) if filter_row[key] else None
 		return filter_row
 
 	known_fieldnames = {row["fieldname"] for row in CHINA_FINANCIAL_STATEMENT_REPORT_FILTERS}
+	# Retire the old toggle instead of keeping it as a user-added filter.
+	known_fieldnames.add("include_period_closing_entries")
 	custom_filters = [
 		normalize_filter(row)
 		for row in report.filters

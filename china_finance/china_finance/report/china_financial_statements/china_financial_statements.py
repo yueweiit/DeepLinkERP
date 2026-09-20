@@ -617,6 +617,7 @@ def _keep_numbered_group_accounts(rows):
 def _activity_balance_message(filters):
 	message = _("数据来源：ERPNext 原生试算平衡表")
 	message += _("；费用冲减按负借方列示，反向损益结转按负贷方列示")
+	message += _("；本期发生额包含损益结转凭证，期末余额按结转后列示")
 	open_profit = get_unclosed_profit(
 		filters.company,
 		filters.to_date,
