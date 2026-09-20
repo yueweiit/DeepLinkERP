@@ -36,6 +36,13 @@ class Ledger:
         self.store.sql('UPDATE cost_docs SET data=%s WHERE id=%s', (dumps(data), name))
         return data
 
+    def patch_batch_metadata(self, name, values):
+        if set(values) - {'waybill_no', 'extra_json'}:
+            raise ValueError('unexpected batch metadata field')
+        data = {**self.get('batch', name), **values}
+        self.store.sql('UPDATE cost_docs SET data=%s WHERE id=%s', (dumps(data), name))
+        return data
+
     def delete(self, kind, name):
         self.store.sql('DELETE FROM cost_docs WHERE id=%s AND kind=%s', (name, kind))
 

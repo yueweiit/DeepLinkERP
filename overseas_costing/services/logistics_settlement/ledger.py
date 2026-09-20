@@ -30,5 +30,18 @@ class FrappeLedger:
         self.frappe.db.set_value(DOCTYPES[kind], name, self.fields(kind, values), update_modified=True)
         return self.get(kind, name)
 
+    def patch_batch_metadata(self, name, values):
+        """Patch source metadata without invalidating active batch edit tokens."""
+        allowed = {'waybill_no', 'extra_json'}
+        if set(values) - allowed:
+            raise ValueError('批次后台元数据包含不允许的字段')
+        filtered = self.fields('batch', values)
+        if set(filtered) != set(values):
+            raise ValueError('批次后台元数据字段不存在')
+        self.frappe.db.set_value(
+            DOCTYPES['batch'], name, filtered, update_modified=False,
+        )
+        return self.get('batch', name)
+
     def delete(self, kind, name):
         self.frappe.delete_doc(DOCTYPES[kind], name, ignore_permissions=True)

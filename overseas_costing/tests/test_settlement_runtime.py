@@ -1,6 +1,7 @@
 import pytest
 import json
 import sqlite3
+from types import SimpleNamespace
 
 from overseas_costing.tests.test_settlement_writer import setup
 from overseas_costing.tests.test_settlement_writer import Ledger
@@ -9,6 +10,7 @@ from overseas_costing.services.logistics_settlement.writer import apply_binding
 from overseas_costing.services.logistics_settlement import runtime
 from overseas_costing.services.logistics_settlement.model import parse_source
 from overseas_costing.services.logistics_settlement.store import Store
+from overseas_costing.services.logistics_settlement.ledger import FrappeLedger
 
 
 def attach_runtime(monkeypatch, s, ledger):
@@ -87,6 +89,14 @@ def test_comment_waybill_preserves_manual_value_and_audits_conflict(monkeypatch)
     assert conflicts[0]['current_value'] == 'MANUAL-88888888'
     assert conflicts[0]['candidate_values'] == ['3080665836']
 
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+    assert s.count('audit', binding_id=parsed['id'], action='batch_waybill_conflict') == 1
+    conflict = json.loads(ledger.get('batch', batch['name'])['extra_json'])['waybill_conflict']
+    assert conflict['source_snapshot'] == parsed['snapshot']
+    assert conflict['current_value'] == 'MANUAL-88888888'
+    assert conflict['candidate_values'] == ['3080665836']
+
 
 def test_comment_waybill_same_source_provenance_allows_later_update(monkeypatch):
     s, ledger, batch, parsed = waybill_runtime_context()
@@ -133,8 +143,50 @@ def test_matching_unproven_waybill_never_claims_future_overwrite_rights(monkeypa
 
 def test_ambiguous_comment_waybills_do_not_change_batch(monkeypatch):
     s, ledger, batch, parsed = waybill_runtime_context(
-        'DHL 3080665836\n运单号 9988776655\nETA 2026-9-18已签收'
+        'DHL 3080665836\nDHL 9988776655\nETA 2026-9-18已签收'
     )
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == ''
+    assert json.loads(saved['extra_json']) == {}
+    assert s.count('audit') == 0
+
+
+@pytest.mark.parametrize('comment', [
+    'DHL 202609121455000173161',
+    'DHL 2,385.37 RMB',
+    'DHL 23853700 RMB',
+    'DHL 2026-09-18',
+    '备注 DHL 3080665836',
+    'DHL 3080665836XYZ',
+])
+def test_comment_waybill_sync_rejects_unanchored_or_non_tracking_values(monkeypatch, comment):
+    s, ledger, batch, parsed = waybill_runtime_context(comment)
+    attach_runtime(monkeypatch, s, ledger)
+
+    with s.atomic():
+        runtime.ensure_batch(s, parsed)
+
+    saved = ledger.get('batch', batch['name'])
+    assert saved['waybill_no'] == ''
+    assert json.loads(saved['extra_json']) == {}
+    assert s.count('audit') == 0
+
+
+@pytest.mark.parametrize(('kind', 'approved', 'invalid'), [
+    ('logistics', False, False),
+    ('logistics', False, True),
+    ('expense', True, False),
+])
+def test_comment_waybill_sync_requires_live_approved_logistics_source(
+    monkeypatch, kind, approved, invalid,
+):
+    s, ledger, batch, parsed = waybill_runtime_context()
+    parsed.update(kind=kind, approved=approved, invalid=invalid)
     attach_runtime(monkeypatch, s, ledger)
 
     with s.atomic():
@@ -158,6 +210,37 @@ def test_waybill_sync_and_audit_roll_back_together(monkeypatch):
     saved = ledger.get('batch', batch['name'])
     assert saved['waybill_no'] == ''
     assert json.loads(saved['extra_json']) == {}
+
+
+def test_frappe_ledger_batch_metadata_patch_preserves_modified_and_edit_lease():
+    writes = []
+
+    class Db:
+        def set_value(self, doctype, name, values, **kwargs):
+            writes.append((doctype, name, values, kwargs))
+
+    ledger = object.__new__(FrappeLedger)
+    ledger.frappe = SimpleNamespace(db=Db())
+    ledger.fields = lambda kind, values: dict(values)
+    ledger.get = lambda kind, name: {
+        'name': name,
+        'modified': '2026-09-20 17:59:00',
+        'edit_lock_owner': 'active-user',
+        'edit_lock_expires_at': '2099-01-01 00:00:00',
+        **writes[-1][2],
+    }
+
+    result = ledger.patch_batch_metadata('BATCH-1', {
+        'waybill_no': '3080665836', 'extra_json': '{"waybill_source":{}}',
+    })
+
+    assert writes == [(
+        'Overseas Cost Batch', 'BATCH-1',
+        {'waybill_no': '3080665836', 'extra_json': '{"waybill_source":{}}'},
+        {'update_modified': False},
+    )]
+    assert result['modified'] == '2026-09-20 17:59:00'
+    assert result['edit_lock_owner'] == 'active-user'
 
 
 def test_single_batch_mapping_uses_exact_local_source_without_creating_batch(setup, monkeypatch):

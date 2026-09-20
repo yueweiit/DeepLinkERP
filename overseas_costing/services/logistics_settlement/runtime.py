@@ -1,6 +1,7 @@
 """Local-only reads and background archive synchronization for logistics settlement."""
 from decimal import Decimal
 import json
+import re
 from time import monotonic
 
 try:
@@ -391,20 +392,46 @@ def _batch_metadata(value):
     return result if isinstance(result, dict) else {}
 
 
-def _comment_waybills(source):
-    """Only return tracking numbers explicitly found in DingTalk comments/operations."""
-    from .freight_lines import identifiers_in
+_COMMENT_WAYBILL_LINE = re.compile(
+    r'^[ \t]*(?:DHL|FEDEX|UPS)\s*'
+    r'(?:(?:快递)?(?:单号|运单号?)|tracking(?:\s+(?:number|code))?)?'
+    r'[ \t:：#-]*((?:\d[ ]*){8,20}|1Z[A-Z0-9]{16})'
+    r'(?![ \t]*(?:RMB|CNY|USD|MXN|人民币|元|[$¥￥]))'
+    r'(?=$|[ \t,，;；。])',
+    re.IGNORECASE | re.MULTILINE,
+)
 
+
+def _comment_texts(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _comment_texts(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _comment_texts(child)
+
+
+def _comment_waybills(source):
+    """Strict auto-adoption subset; broad identifiers remain search-only."""
     raw = source.get('raw') if isinstance(source.get('raw'), dict) else {}
-    identifiers = (
-        identifiers_in(raw.get('comments') or [])
-        | identifiers_in(raw.get('operationRecords') or [])
-    )
-    return sorted({token for token_type, token in identifiers if token_type == 'waybill'})
+    values = (raw.get('comments') or [], raw.get('operationRecords') or [])
+    tokens = set()
+    for text in _comment_texts(values):
+        for match in _COMMENT_WAYBILL_LINE.finditer(text):
+            tokens.add(re.sub(r'\s+', '', match.group(1)).upper())
+    return sorted(tokens)
 
 
 def _sync_comment_waybill(db, ledger, batch_name, source, actor='archive-sync'):
     """Adopt one comment-derived waybill without claiming or replacing manual data."""
+    if (
+        source.get('kind') != 'logistics'
+        or source.get('approved') is not True
+        or bool(source.get('invalid'))
+    ):
+        return {'status': 'ineligible', 'candidates': []}
     candidates = _comment_waybills(source)
     if len(candidates) != 1:
         return {'status': 'ambiguous' if candidates else 'missing', 'candidates': candidates}
@@ -424,6 +451,27 @@ def _sync_comment_waybill(db, ledger, batch_name, source, actor='archive-sync'):
     if current == candidate:
         return {'status': 'unchanged', 'value': candidate}
     if current and not source_owned:
+        conflict_fingerprint = digest(
+            'batch-waybill-conflict-1', batch_name, current, candidates,
+            source.get('id'), source.get('snapshot'),
+        )
+        prior_conflict = metadata.get('waybill_conflict')
+        if (
+            isinstance(prior_conflict, dict)
+            and prior_conflict.get('fingerprint') == conflict_fingerprint
+        ):
+            return {'status': 'conflict', 'value': current, 'candidates': candidates}
+        metadata['waybill_conflict'] = {
+            'fingerprint': conflict_fingerprint,
+            'source_id': source.get('id'),
+            'source_snapshot': source.get('snapshot'),
+            'current_value': current,
+            'candidate_values': candidates,
+            'kind': 'comment-derived',
+            'observed_at': utcnow(),
+            'actor': actor,
+        }
+        ledger.patch_batch_metadata(batch_name, {'extra_json': dumps(metadata)})
         db.audit(
             source['id'], 'batch_waybill_conflict', actor,
             batch=batch_name,
@@ -435,6 +483,7 @@ def _sync_comment_waybill(db, ledger, batch_name, source, actor='archive-sync'):
         return {'status': 'conflict', 'value': current, 'candidates': candidates}
 
     synced_at = utcnow()
+    metadata.pop('waybill_conflict', None)
     metadata['waybill_source'] = {
         'source_id': source['id'],
         'source_snapshot': source.get('snapshot'),
@@ -443,7 +492,7 @@ def _sync_comment_waybill(db, ledger, batch_name, source, actor='archive-sync'):
         'synced_at': synced_at,
         'actor': actor,
     }
-    ledger.put('batch', batch_name, {
+    ledger.patch_batch_metadata(batch_name, {
         'waybill_no': candidate,
         'extra_json': dumps(metadata),
     })
