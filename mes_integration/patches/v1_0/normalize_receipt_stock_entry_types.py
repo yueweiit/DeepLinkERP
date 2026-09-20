@@ -26,16 +26,15 @@ def rename_legacy_stock_entry_types():
         if not frappe.db.exists("Stock Entry Type", old_name):
             continue
 
-        if frappe.db.exists("Stock Entry Type", new_name):
-            frappe.delete_doc("Stock Entry Type", old_name, ignore_permissions=True, force=True)
-            continue
-
         frappe.rename_doc(
             "Stock Entry Type",
             old_name,
             new_name,
             force=True,
-            merge=False,
+            merge=bool(frappe.db.exists("Stock Entry Type", new_name)),
+            ignore_permissions=True,
+            show_alert=False,
+            rebuild_search=False,
         )
 
 
