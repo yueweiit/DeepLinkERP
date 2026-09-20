@@ -730,6 +730,21 @@ def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None
     ).hexdigest()
 
 
+def normalize_saved_cost_inputs(items, fees, fx_context, transport_mode):
+    """Return the exact material and fee projection used by saved fingerprints."""
+
+    mode = fee_service.resolve_transport_mode(transport_mode)
+    normalized_items = [persist_calculated_item(row) for row in items]
+    decorated = fee_service._decorate_historical_rules(fees, mode)
+    selected = select_fees(
+        decorated,
+        fx_context,
+        source_context=source_context_from_items(normalized_items),
+    )
+    normalized_fees = supplement_legacy_fees(normalized_items, selected)
+    return normalized_items, normalized_fees
+
+
 def build_saved_cost_data(
     items: list[dict],
     fees: list[dict],
@@ -740,12 +755,16 @@ def build_saved_cost_data(
 ) -> dict:
     """Project one preview into stored result fields without mutating source facts."""
     transport_mode = fee_service.resolve_transport_mode(transport_mode)
-    fees = supplement_legacy_fees(items, select_fees(fee_service._decorate_historical_rules(fees, transport_mode), fx_context, source_context=source_context_from_items(items)))
+    original_items, fees = normalize_saved_cost_inputs(
+        items,
+        fees,
+        fx_context,
+        transport_mode,
+    )
     precision = 6 if any(is_final(fee) for fee in fees) else 2
     money = lambda value: _result_money(value, precision)
     assert_no_duplicate_fees(fees)
     result = preview_comprehensive_cost_data(items, fees, fx_context, fee_components=fee_components or [])
-    original_items = [persist_calculated_item(row) for row in items]
     items = [present_material_row(row) for row in original_items]
     raw_by_key = {_item_key(row): row for row in items}
     fx = _decimal(fx_context.get("fx_rmb_to_mxn"))

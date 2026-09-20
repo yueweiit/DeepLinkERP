@@ -175,7 +175,19 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
             if row.get("fee_key") and row.get("temporary")
         }
         calculation_fees = project_fees_for_trial(composed, temporary_choices, for_save=True)
-    current_hash = cost_preview_service.cost_input_hash(inputs, canonical_fees, fx, mode, components)
+    saved_items, saved_fees = cost_preview_service.normalize_saved_cost_inputs(
+        inputs,
+        calculation_fees,
+        fx,
+        mode,
+    )
+    current_hash = cost_preview_service.cost_input_hash(
+        saved_items,
+        saved_fees,
+        fx,
+        mode,
+        components,
+    )
     if any(fee.get("duplicate_rule_names") for fee in canonical_fees):
         # The saver rejects duplicates. The preview retains them as blockers so
         # the read-only workbench can still explain how to repair the batch.

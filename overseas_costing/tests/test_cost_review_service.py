@@ -75,6 +75,56 @@ def test_current_saved_result_is_ready_with_goods_value_fallback_and_missing_syn
     assert context == before
 
 
+def test_saved_result_with_separate_logistics_source_is_immediately_current():
+    context = saved_context()
+    source_context = {
+        "root_kind": "logistics",
+        "available": True,
+        "approved": False,
+        "invalid": False,
+        "separate_adoption": True,
+        "fingerprint": "source-fingerprint",
+        "source_snapshot": "source-snapshot",
+        "freight": {"selected": False},
+        "packing": {},
+    }
+    context["source_context"] = source_context
+    inputs = [
+        {field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS}
+        for row in context["items"]
+    ]
+    from overseas_costing.services.effective_source_values import project_source_values
+    inputs = [project_source_values(row, source_context) for row in inputs]
+    fx = {
+        key: context["version"].get(key)
+        for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")
+    }
+    fees = fee_service.compose_fee_worklist_rows(
+        context["fees"],
+        context["batch"]["transport_mode"],
+        source_context=source_context,
+    )
+    saved = cost_preview_service.build_saved_cost_data(
+        inputs,
+        fees,
+        fx,
+        context["batch"]["transport_mode"],
+    )
+    context["version"]["calculated_at"] = "2026-09-20 21:14:05"
+    saved["summary_snapshot"]["calculated_at"] = context["version"]["calculated_at"]
+    context["version"]["summary_snapshot_json"] = json.dumps(saved["summary_snapshot"])
+    updates = {row["name"]: row for row in saved["item_updates"]}
+    for item in context["items"]:
+        item.update(updates[item["name"]])
+    context["batch"]["estimated_total_cost_rmb"] = saved["summary"]["total_cost_rmb"]
+
+    result = evaluate(context)
+
+    assert result["result_is_current"] is True
+    assert result["review_state"] == "ready"
+    assert "RESULT_STALE" not in codes(result)
+
+
 @pytest.mark.parametrize("confirm_status", ["Pending", "Partially Confirmed"])
 def test_latest_estimates_and_missing_evidence_are_review_warnings(confirm_status):
     context = saved_context()
