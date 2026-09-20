@@ -316,6 +316,120 @@ class TestCancelledFinanceCleanup(unittest.TestCase):
 		self.assertEqual({g["posting_date"] for g in groups}, {"2026-07-01", "2026-07-02"})
 		self.assertTrue(all(g["voucher_no"] == self.source for g in groups))
 
+	def make_mixed_delinked_pair(self):
+		values = {
+			"against_voucher_type": "Journal Entry",
+			"against_voucher_no": self.source,
+			"voucher_detail_no": self.child,
+			"account_type": "Payable",
+			"due_date": "2026-07-01",
+			"amount": 830.86,
+			"amount_in_account_currency": 830.86,
+		}
+		frappe.db.set_value("Payment Ledger Entry", self.ledger, values)
+		return self.insert(
+			"Payment Ledger Entry",
+			"Mixed Reverse",
+			company=self.company,
+			posting_date="2026-07-01",
+			voucher_type="Journal Entry",
+			voucher_no=self.source,
+			delinked=0,
+			**{**values, "amount": -830.86, "amount_in_account_currency": -830.86},
+		)
+
+	def test_mixed_delinked_cancellation_residue_requires_explicit_option(self):
+		reverse = self.make_mixed_delinked_pair()
+		result = self.run_cleanup()
+		self.assertEqual(result["status"], "blocked")
+		residue = result["cancelled_ledger_residue"]
+		self.assertEqual(len(residue), 1)
+		self.assertFalse(residue[0]["included"])
+		self.assertEqual(residue[0]["names"], [reverse])
+		self.assertEqual(residue[0]["delinked_names"], [self.ledger])
+		self.assertEqual(residue[0]["amount"], "-830.86")
+		result = self.apply_with_local_export(include_cancelled_ledger_residue=1)
+		self.assertEqual(result["status"], "removed", result["blockers"])
+		self.assertTrue(result["cancelled_ledger_residue"][0]["included"])
+		for name in (reverse, self.ledger):
+			self.assertFalse(frappe.db.exists("Payment Ledger Entry", name))
+		self.assertTrue(frappe.db.exists("Payment Entry", self.payment))
+		self.assertTrue(frappe.db.exists("Sales Order", self.order))
+
+	def test_residue_option_does_not_allow_unmatched_pairs_parties_other_vouchers_or_gl(self):
+		reverse = self.make_mixed_delinked_pair()
+		original = frappe.get_doc("Payment Ledger Entry", reverse).as_dict()
+		for values in (
+			{"amount": -830.85},
+			{"amount_in_account_currency": -830.85},
+			{"posting_date": "2026-07-02"},
+			{"party_type": "Customer", "party": "A"},
+			{"against_voucher_no": self.amendment},
+			{"voucher_detail_no": "different-row"},
+			{"account_type": "Receivable"},
+			{"due_date": "2026-07-02"},
+		):
+			with self.subTest(values=values):
+				frappe.db.set_value("Payment Ledger Entry", reverse, values)
+				self.assertEqual(self.run_cleanup(include_cancelled_ledger_residue=1)["status"], "blocked")
+				frappe.db.set_value("Payment Ledger Entry", reverse, {key: original[key] for key in values})
+		for name in (reverse, self.ledger):
+			frappe.db.set_value("Payment Ledger Entry", name, {"party_type": "Customer", "party": "A"})
+		self.assertEqual(self.run_cleanup(include_cancelled_ledger_residue=1)["status"], "blocked")
+		for name in (reverse, self.ledger):
+			frappe.db.set_value("Payment Ledger Entry", name, {"party_type": None, "party": None})
+		self.insert(
+			"GL Entry",
+			"Cancelled GL",
+			company=self.company,
+			posting_date="2026-07-01",
+			voucher_type="Journal Entry",
+			voucher_no=self.source,
+			is_cancelled=1,
+		)
+		self.assertEqual(self.run_cleanup(include_cancelled_ledger_residue=1)["status"], "blocked")
+
+	def test_residue_requires_exact_pairs_not_just_zero_total_and_external_references_still_block(self):
+		reverse = self.make_mixed_delinked_pair()
+		frappe.db.set_value(
+			"Payment Ledger Entry", self.ledger, {"amount": 800, "amount_in_account_currency": 800}
+		)
+		extra = self.insert(
+			"Payment Ledger Entry",
+			"Unmatched Split",
+			company=self.company,
+			posting_date="2026-07-01",
+			voucher_type="Journal Entry",
+			voucher_no=self.source,
+			delinked=1,
+			amount=30.86,
+			amount_in_account_currency=30.86,
+			against_voucher_type="Journal Entry",
+			against_voucher_no=self.source,
+			voucher_detail_no=self.child,
+			account_type="Payable",
+			due_date="2026-07-01",
+		)
+		self.assertEqual(self.run_cleanup(include_cancelled_ledger_residue=1)["status"], "blocked")
+		frappe.db.delete("Payment Ledger Entry", {"name": extra})
+		frappe.db.set_value(
+			"Payment Ledger Entry", self.ledger, {"amount": 830.86, "amount_in_account_currency": 830.86}
+		)
+		self.insert(
+			"Payment Entry Reference",
+			"Outside Reference",
+			parent=self.payment,
+			parenttype="Payment Entry",
+			parentfield="references",
+			reference_doctype="Journal Entry",
+			reference_name=self.source,
+		)
+		result = self.apply_with_local_export(include_cancelled_ledger_residue=1)
+		self.assertEqual(result["status"], "blocked")
+		self.assertTrue(any(b.get("reference_name") == self.payment for b in result["blockers"]))
+		self.assertTrue(frappe.db.exists("Payment Ledger Entry", reverse))
+		self.assertTrue(frappe.db.exists("Journal Entry", self.source))
+
 	def test_changed_source_and_bank_allocation_block_cleanup(self):
 		frappe.db.set_value("Journal Entry", self.source, "docstatus", 1)
 		self.assertEqual(self.run_cleanup()["status"], "blocked")

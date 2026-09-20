@@ -10,7 +10,7 @@ Live business vouchers, bank allocations and non-zero ledgers block deletion.
 import json
 import os
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
 
@@ -44,12 +44,18 @@ AUDIT_REFERENCE_FIELDS = {
 
 
 def cleanup_cancelled_finance(
-	company, preview_file="finance-cleanup-preview.json", apply=0, include_orphan_snapshots=0
+	company,
+	preview_file="finance-cleanup-preview.json",
+	apply=0,
+	include_orphan_snapshots=0,
+	include_cancelled_ledger_residue=0,
 ):
 	"""Preview by default; apply only the saved, cancelled-source scope.
 
 	A missing source's China snapshot can be included explicitly, but only if
 	its source is a known finance type and has no remaining ledger whatsoever.
+	Mixed delinked/live cancellation pairs need a separate explicit option,
+	and are eligible only for cancelled, self-referenced JEs without parties/GL.
 	The caller owns commit; failures roll back every database mutation here.
 	"""
 	frappe.only_for("System Manager")
@@ -73,7 +79,12 @@ def cleanup_cancelled_finance(
 	savepoint = "cancelled_finance_" + frappe.generate_hash(length=10)
 	frappe.db.savepoint(savepoint)
 	try:
-		plan = _build_plan(preview, bool(cint(include_orphan_snapshots)), lock=apply)
+		plan = _build_plan(
+			preview,
+			bool(cint(include_orphan_snapshots)),
+			lock=apply,
+			include_cancelled_ledger_residue=bool(cint(include_cancelled_ledger_residue)),
+		)
 		result = {
 			"site": frappe.local.site,
 			"company": company,
@@ -82,6 +93,7 @@ def cleanup_cancelled_finance(
 			"delete_names": {dt: sorted(docs) for dt, docs in plan["documents"].items() if docs},
 			"preserved_sources": plan["preserved_sources"],
 			"preserved_other_snapshots": plan["preserved_other_snapshots"],
+			"cancelled_ledger_residue": plan["cancelled_ledger_residue"],
 			"blockers": plan["blockers"],
 		}
 		if not apply or plan["blockers"]:
@@ -138,7 +150,7 @@ def _get_doc(doctype, name, lock=False):
 	return frappe.get_doc(doctype, name)
 
 
-def _build_plan(preview, include_orphans, lock=False):
+def _build_plan(preview, include_orphans, lock=False, include_cancelled_ledger_residue=False):
 	company = preview["company"]
 	documents = defaultdict(dict)
 	blockers, preserved = [], []
@@ -298,7 +310,12 @@ def _build_plan(preview, include_orphans, lock=False):
 			blockers.append(
 				{"reason": "仍存在有效总账，未自动删除", "doctype": doc.doctype, "name": doc.name}
 			)
-	blockers.extend(_payment_ledger_blockers(documents["Payment Ledger Entry"].values()))
+	ledger_blockers, ledger_residue = _payment_ledger_review(
+		documents["Payment Ledger Entry"].values(),
+		set(documents["Journal Entry"]),
+		include_cancelled_ledger_residue,
+	)
+	blockers.extend(ledger_blockers)
 	# A source-to-bank link can exist even when no bank allocation points back.
 	for doc in documents["Journal Entry"].values():
 		if doc.get("custom_china_bank_transaction"):
@@ -337,13 +354,14 @@ def _build_plan(preview, include_orphans, lock=False):
 		"blockers": blockers,
 		"preserved_sources": preserved,
 		"preserved_other_snapshots": preserved_snapshots,
+		"cancelled_ledger_residue": ledger_residue,
 	}
 
 
-def _payment_ledger_blockers(documents):
+def _payment_ledger_review(documents, cancelled_journals, include_residue):
 	# Immutable ledgers retain live cancellation pairs. Require zero by date,
 	# voucher, counterparty and against-voucher, not merely a zero grand total.
-	groups = defaultdict(lambda: [Decimal(0), Decimal(0), []])
+	groups = defaultdict(list)
 	fields = (
 		"posting_date",
 		"voucher_type",
@@ -359,23 +377,71 @@ def _payment_ledger_blockers(documents):
 		"finance_book",
 	)
 	for doc in documents:
-		if cint(doc.delinked):
+		groups[tuple(str(doc.get(field) or "") for field in fields)].append(doc)
+	blockers, residue = [], []
+	has_gl = {}
+	for key, rows in groups.items():
+		live = [doc for doc in rows if not cint(doc.delinked)]
+		amount = sum((Decimal(str(doc.amount or 0)) for doc in live), Decimal(0))
+		currency_amount = sum((Decimal(str(doc.amount_in_account_currency or 0)) for doc in live), Decimal(0))
+		if amount == 0 and currency_amount == 0:
 			continue
-		group = groups[tuple(str(doc.get(field) or "") for field in fields)]
-		group[0] += Decimal(str(doc.amount or 0))
-		group[1] += Decimal(str(doc.amount_in_account_currency or 0))
-		group[2].append(doc.name)
-	return [
-		{
-			"reason": "支付分类账仍有有效余额，未自动删除",
+		detail = {
 			"group": dict(zip(fields, key, strict=True)),
-			"names": names,
+			"names": [doc.name for doc in live],
 			"amount": str(amount),
 			"amount_in_account_currency": str(currency_amount),
 		}
-		for key, (amount, currency_amount, names) in groups.items()
-		if amount != 0 or currency_amount != 0
-	]
+		if _is_cancelled_ledger_residue(rows, cancelled_journals, has_gl):
+			residue.append(
+				{
+					**detail,
+					"delinked_names": [doc.name for doc in rows if cint(doc.delinked)],
+					"included": include_residue,
+				}
+			)
+			if include_residue:
+				continue
+		blockers.append({"reason": "支付分类账仍有有效余额，未自动删除", **detail})
+	return blockers, residue
+
+
+def _is_cancelled_ledger_residue(rows, cancelled_journals, has_gl):
+	"""Recognize a strictly bounded stale cancellation pair, not a live zero sum.
+
+	One side is already delinked, so deleting the remaining side changes the
+	active payment ledger. This exception is only for confirmed test JEs with
+	no party, no outside against-voucher, no GL, and exact per-detail reversals.
+	The caller separately checks all incoming and outgoing business references.
+	"""
+	first = rows[0]
+	if (
+		first.voucher_type != "Journal Entry"
+		or first.voucher_no not in cancelled_journals
+		or first.against_voucher_type != first.voucher_type
+		or first.against_voucher_no != first.voucher_no
+		or first.party_type
+		or first.party
+	):
+		return False
+	if first.voucher_no not in has_gl:
+		has_gl[first.voucher_no] = bool(
+			frappe.db.exists("GL Entry", {"voucher_type": "Journal Entry", "voucher_no": first.voucher_no})
+		)
+	if has_gl[first.voucher_no]:
+		return False
+	live, reversed_delinked = Counter(), Counter()
+	for doc in rows:
+		sign = -1 if cint(doc.delinked) else 1
+		pair = (
+			str(doc.get("voucher_detail_no") or ""),
+			str(doc.get("account_type") or ""),
+			str(doc.get("due_date") or ""),
+			Decimal(str(doc.amount or 0)) * sign,
+			Decimal(str(doc.amount_in_account_currency or 0)) * sign,
+		)
+		(reversed_delinked if cint(doc.delinked) else live)[pair] += 1
+	return bool(live) and live == reversed_delinked
 
 
 def _export_records(plan, result):
