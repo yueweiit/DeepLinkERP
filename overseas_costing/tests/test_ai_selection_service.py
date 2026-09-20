@@ -974,6 +974,39 @@ def test_unknown_row_and_fee_ids_are_rejected():
     assert not repo.writes
 
 
+def test_public_approval_fee_id_round_trips_into_locked_preview_without_leaking_process_id():
+    repo = Repo()
+    raw_process_id = 'P7BgLg53TRSLsYElgdX4Dg04891788440826'
+    raw_fee_id = f'approval-fee:{raw_process_id}:1'
+    repo.run['candidates_json'].append({
+        'proposal_id': raw_fee_id,
+        'proposal_type': 'fee_update',
+        'process_instance_id': raw_process_id,
+        'default_selected': True,
+        'payload': {
+            'logical_fee_key': 'international_sea_freight',
+            'amount': '7756.2',
+            'currency': 'RMB',
+            'amount_status': 'ESTIMATED',
+        },
+    })
+
+    catalog = service.review_catalog(repo, 'B1', repo.run)
+    public_fee_id = catalog['fees'][0]['proposal_id']
+
+    assert public_fee_id != raw_fee_id
+    assert raw_process_id not in json.dumps(catalog, ensure_ascii=False)
+    response = service.prepare(
+        'B1', repo.run['name'], [], [public_fee_id],
+        'update_selected', 'V1', repository=repo,
+    )
+    receipt = repo.run['draft_json']['row_previews'][response['preview']['id']]
+
+    assert response['preview']['fees'][0]['proposal_id'] == public_fee_id
+    assert receipt['selected_fee_ids'] == [raw_fee_id]
+    assert raw_process_id not in json.dumps(response, ensure_ascii=False)
+
+
 def test_ordinary_ai_selection_rejects_whole_table_replacement():
     repo = Repo()
     catalog = service.review_catalog(repo, 'B1', repo.run)

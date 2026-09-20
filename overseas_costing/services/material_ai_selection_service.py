@@ -527,6 +527,36 @@ def _apply_single_packing_assignments(projection,singles):
     return projection
 
 
+def _internal_fee_ids(catalog, fee_ids):
+    """Resolve public fee proposal ids back to the locked catalog ids."""
+
+    # Preserve the established validation errors for malformed request shapes.
+    if (not isinstance(fee_ids, list)
+            or any(not isinstance(value, str) for value in fee_ids)
+            or len(fee_ids) != len(set(fee_ids))):
+        return fee_ids
+
+    public_fees = public_catalog(catalog).get('fees') or []
+    internal_fees = catalog.get('fees') or []
+    if len(public_fees) != len(internal_fees):
+        raise ValueError('当前草稿费用标识无效，请刷新预览。')
+
+    mapping = {}
+    for public_fee, internal_fee in zip(public_fees, internal_fees):
+        public_id = str(public_fee.get('proposal_id') or '')
+        internal_id = str(internal_fee.get('proposal_id') or '')
+        if not public_id or not internal_id:
+            raise ValueError('当前草稿费用标识无效，请刷新预览。')
+        for accepted_id in (public_id, internal_id):
+            if accepted_id in mapping and mapping[accepted_id] != internal_id:
+                raise ValueError('当前草稿费用标识无效，请刷新预览。')
+            mapping[accepted_id] = internal_id
+
+    if set(fee_ids) - mapping.keys():
+        raise ValueError('所选内容不属于当前草稿，请刷新预览。')
+    return [mapping[value] for value in fee_ids]
+
+
 def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choices=None,
             packing_group_ids=None,packing_assignments=None,repository=None):
     from . import material_ai_fill_service as ai
@@ -558,7 +588,8 @@ def prepare(batch_name,run_id,row_ids,fee_ids,mode,expected_version,*,field_choi
         selected_packing_groups,selected_packing_group_ids=_selected_packing_groups(
             items,candidates,packing_group_ids)
         single_assignments=[];validated_assignments={}
-    projection=rows.project(items,catalog,row_ids,fee_ids,mode,field_choices=field_choices)
+    internal_fee_ids = _internal_fee_ids(catalog, fee_ids)
+    projection=rows.project(items,catalog,row_ids,internal_fee_ids,mode,field_choices=field_choices)
     _apply_single_packing_assignments(projection,single_assignments)
     projection=_attach_control_metadata(
         projection,draft.get('merged_amount_groups') or [],selected_packing_groups)
