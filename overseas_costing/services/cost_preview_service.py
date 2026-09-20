@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -16,7 +17,7 @@ from overseas_costing.services.material_input_service import present_material_ro
 from overseas_costing.services.effective_source_values import source_context_from_items, project_batch_items, batch_source_context
 from overseas_costing.services.transport_fee_service import assert_no_duplicate_fees, fee_is_active, mark_duplicate_fees
 from overseas_costing.services.logistics_settlement.item_metadata import persist_calculated_item, prune_version_meta
-from overseas_costing.services.shipment_cost_service import object_json
+from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero, object_json
 from overseas_costing.services.logistics_settlement.fee_policy import (
     LEGACY_POOL_CURRENCIES, METADATA_FIELDS, is_final, row_scopes, select_fees, validate_final, supplement_legacy_fees,
 )
@@ -71,6 +72,51 @@ def _result_money(value: Decimal, precision: int) -> str:
 
 def _unit_money(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.000001")), ".6f")
+
+
+def enrich_saved_unit_prices(snapshot: dict, item_rows: list[dict]) -> dict:
+    """Project missing unit prices for legacy snapshots without rewriting them."""
+
+    enriched = deepcopy(snapshot or {})
+    comprehensive = enriched.get("comprehensive_cost")
+    if not isinstance(comprehensive, dict):
+        return enriched
+    items = comprehensive.get("items")
+    if not isinstance(items, list):
+        return enriched
+
+    rows_by_name = {
+        str(row.get("name") or ""): row
+        for row in (item_rows or [])
+        if isinstance(row, dict) and row.get("name")
+    }
+    for item in items:
+        if not isinstance(item, dict) or item.get("shipping_unit_price"):
+            continue
+        row = rows_by_name.get(str(item.get("name") or ""))
+        if not row:
+            continue
+        derived = object_json(row.get("derived_json"))
+        quantity = _decimal(derived.get("shipping_quantity"))
+        goods_value = _decimal(item.get("goods_value_rmb"))
+        valuation = item.get("valuation_source")
+        if isinstance(valuation, dict) and (
+            valuation.get("error") or str(valuation.get("status") or "").lower() == "missing"
+        ):
+            continue
+        if goods_value == 0 and not is_explicit_shipment_zero(valuation):
+            continue
+        saved_cost = item.get("shipping_unit_cost")
+        derived_cost = derived.get("shipping_unit_cost")
+        cost = saved_cost if isinstance(saved_cost, dict) else derived_cost
+        uom = str((cost or {}).get("uom") or "").strip() if isinstance(cost, dict) else ""
+        if quantity is None or quantity <= 0 or goods_value is None or goods_value < 0 or not uom:
+            continue
+        item["shipping_unit_price"] = {
+            "amount_rmb": _unit_money(goods_value / quantity),
+            "uom": uom,
+        }
+    return enriched
 
 
 def _item_key(item: dict) -> str:
@@ -294,8 +340,6 @@ def preview_comprehensive_cost_data(
 ) -> dict:
     """Calculate a transparent preview from caller-provided snapshots only."""
 
-    from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
-
     source_issues=[]
     try:
         fees = supplement_legacy_fees(items, select_fees(fees, fx_context or {}, source_context=source_context_from_items(items)))
@@ -466,6 +510,7 @@ def preview_comprehensive_cost_data(
         key = _item_key(row)
         costs = item_costs[key]
         total = rounded_goods[key] + costs["direct_fees_rmb"] + costs["allocated_fees_rmb"]
+        calculation_total = costs["goods_value_rmb"] + costs["direct_fees_rmb"] + costs["allocated_fees_rmb"]
         effective = row.get("effective_shipping") or {}
         shipped_quantity = _decimal(effective.get("quantity"))
         shipped_uom = str(effective.get("uom") or "").strip()
@@ -474,10 +519,10 @@ def preview_comprehensive_cost_data(
         if shipped_quantity is not None and shipped_quantity > 0 and shipped_uom:
             if costs["goods_value_available"]:
                 shipping_unit_price = {
-                    "amount_rmb": _unit_money(rounded_goods[key] / shipped_quantity),
+                    "amount_rmb": _unit_money(costs["goods_value_rmb"] / shipped_quantity),
                     "uom": shipped_uom,
                 }
-            shipping_unit_cost = {"amount_rmb": _unit_money(total / shipped_quantity), "uom": shipped_uom}
+            shipping_unit_cost = {"amount_rmb": _unit_money(calculation_total / shipped_quantity), "uom": shipped_uom}
         else:
             incomplete_reasons.append(
                 {
@@ -503,7 +548,7 @@ def preview_comprehensive_cost_data(
             and pricing_uom == purchase_uom
         ):
             purchase_pricing_unit_cost = {
-                "amount_rmb": _unit_money(total / pricing_quantity),
+                "amount_rmb": _unit_money(calculation_total / pricing_quantity),
                 "uom": pricing_uom,
             }
         preview_items.append(

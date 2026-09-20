@@ -237,7 +237,8 @@ def test_shipment_value_normalizes_legacy_metadata_statuses_and_candidates():
     assert value['calculated_amount_rmb'] == '60'
     legacy = shipment_value(shipment(extra_json='{}'))
     assert legacy['status'] == 'automatic'
-    assert legacy['amount_rmb'] == 1000
+    assert legacy['amount_rmb'] == '40'
+    assert legacy['method'] == 'purchase_total_proration'
 
 
 def test_bare_legacy_zero_is_missing_and_not_an_automatic_prior():

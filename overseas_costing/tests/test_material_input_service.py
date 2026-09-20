@@ -1,6 +1,7 @@
 """物料数量、单位和稳定行标识的契约测试。"""
 
 from copy import deepcopy
+from decimal import Decimal
 import json
 from pathlib import Path
 
@@ -111,30 +112,20 @@ def test_legacy_rows_with_duplicate_sku_keep_distinct_row_identity() -> None:
     assert first["stable_line_key"] != second["stable_line_key"]
 
 
-def test_missing_purchase_price_is_derived_from_confirmed_shipment_value_without_mutating_source() -> None:
-    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
-
+def test_missing_purchase_price_uses_purchase_total_and_partial_shipment_is_prorated_without_mutation() -> None:
     source = {
         "name": "ITEM-1",
         "quantity": 1700,
-        "actual_shipped_qty": 1700,
+        "actual_shipped_qty": 1500,
         "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
         "shipped_uom": "个",
+        "purchase_uom": "pieza",
         "unit": "pieza",
         "unit_price": 0,
         "purchase_currency": "",
         "unit_price_uom": "",
         "goods_value": 2067,
     }
-    source["extra_json"] = json.dumps({
-        "manual_shipment_valuation": build_manual_shipment_valuation(
-            source,
-            2067,
-            actor="finance@example.com",
-            reason="原美金总额已换算人民币",
-            confirmed_at="2026-09-20 14:18:42",
-        )
-    })
     original = deepcopy(source)
 
     presented = present_material_row(source)
@@ -142,17 +133,46 @@ def test_missing_purchase_price_is_derived_from_confirmed_shipment_value_without
     assert presented["adopted_price"] == {
         "value": "1.22",
         "currency": "RMB",
-        "unit": "个",
+        "unit": "pieza",
         "error": "",
-        "source_type": "shipment_value",
-        "source": "manual_shipment_valuation",
+        "source_type": "purchase_total_derived",
+        "source": "LEGACY_PURCHASE",
         "evidence": {
-            "amount_rmb": "2067",
-            "quantity": "1700",
-            "uom": "个",
+            "total_goods_value_rmb": "2067",
+            "purchase_quantity": "1700",
+            "purchase_uom": "pieza",
         },
     }
+    assert Decimal(presented["shipment_value_rmb"]) == Decimal("2067") * Decimal("1500") / Decimal("1700")
+    assert presented["shipment_valuation"]["method"] == "purchase_total_proration"
+    assert presented["shipment_valuation"]["input_evidence"] == {
+        "total_goods_value_rmb": "2067",
+        "purchase_quantity": "1700",
+        "purchase_uom": "个",
+        "actual_shipped_qty": "1500",
+        "shipped_uom": "个",
+    }
     assert source == original
+
+
+def test_purchase_total_proration_refuses_incompatible_purchase_and_shipping_units() -> None:
+    source = {
+        "name": "ITEM-1",
+        "quantity": 10,
+        "actual_shipped_qty": 5,
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "kg",
+        "purchase_uom": "箱",
+        "unit": "箱",
+        "unit_price": 0,
+        "goods_value": 100,
+    }
+
+    presented = present_material_row(source)
+
+    assert presented["adopted_price"]["value"] == "10.00"
+    assert presented["shipment_value_rmb"] is None
+    assert presented["shipment_valuation"]["error"] == "PURCHASE_TOTAL_PRORATION_UOM_MISMATCH"
 
 
 def test_existing_purchase_price_wins_over_shipment_value_derived_price() -> None:

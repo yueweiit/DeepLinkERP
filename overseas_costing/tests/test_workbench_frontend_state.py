@@ -1111,6 +1111,7 @@ def test_calculation_red_cells_alone_use_green_check_when_clear() -> None:
 
 def test_cost_trial_dialog_defines_visible_brand_buttons_and_narrow_layout() -> None:
     stylesheet = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
 
     dialog_rule = stylesheet.split(".ocw-cost-trial-dialog {", 1)[1].split("}", 1)[0]
     assert "--ocw-brand:" in dialog_rule
@@ -1119,8 +1120,28 @@ def test_cost_trial_dialog_defines_visible_brand_buttons_and_narrow_layout() -> 
     assert "color: #fff" in stylesheet.split(
         ".ocw-cost-trial-dialog .ocw-primary-btn", 1
     )[1].split("}", 1)[0]
+    assert ".ocw-cost-trial-dialog .modal-content" in stylesheet
+    assert "max-height: calc(100vh - 24px)" in stylesheet
+    assert ".ocw-cost-trial-dialog .modal-body" in stylesheet
+    assert "overflow: hidden" in stylesheet.split(
+        ".ocw-cost-trial-dialog .modal-body", 1
+    )[1].split("}", 1)[0]
+    assert ".ocw-cost-trial-review > main" in stylesheet
+    assert "overflow: auto" in stylesheet.split(
+        ".ocw-cost-trial-review > main", 1
+    )[1].split("}", 1)[0]
+    assert ".ocw-cost-trial-review > footer" not in stylesheet
+    assert ".ocw-cost-trial-secondary-actions" in stylesheet
+    assert 'find?.(".modal-footer")' in source
+    assert 'class="ocw-cost-trial-secondary-actions"' in source
+    assert ".insertBefore?.($anchor)" in source
     mobile = stylesheet.split("@media (max-width: 720px)", 1)[1]
     assert ".ocw-cost-trial-dialog .modal-footer" in mobile
+    assert ".ocw-cost-trial-dialog .modal-footer .btn-primary" in mobile
+    assert "order: -3" in mobile
+    assert "width: 100%" in mobile
+    assert ".ocw-cost-trial-secondary-actions" in mobile
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in mobile
 
 
 def test_fee_workspace_save_does_not_render_after_switching_to_vouchers() -> None:

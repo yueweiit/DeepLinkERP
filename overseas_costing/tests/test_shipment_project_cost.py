@@ -69,11 +69,11 @@ def test_stale_shipment_quantity_does_not_use_old_value_or_full_purchase():
     assert any(r['reason_code']=='SHIPMENT_VALUATION_STALE' for r in result['incomplete_reasons'])
 
 
-def test_legacy_goods_value_behavior_unchanged():
+def test_legacy_purchase_total_is_prorated_for_partial_shipments():
     items=shipment_items()
     for r in items:r.pop('extra_json')
     result=cost_preview_service.preview_comprehensive_cost_data(items,[],{})
-    assert result['summary']['purchase_goods_value_rmb']=='86400.00'
+    assert result['summary']['purchase_goods_value_rmb']=='63260.00'
 
 
 def test_untrusted_project_policy_rejected():

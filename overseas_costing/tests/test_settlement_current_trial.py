@@ -40,7 +40,8 @@ def test_final_zero_suppresses_covered_pools_and_defaults_but_preserves_independ
         old('destination_delivery', '7'), old('misc', '3'),
         final(covered_scopes='freight,customs,tax')], 'SEA')
     result = save_data(fees)
-    assert Decimal(result['summary']['total_cost_rmb']) == Decimal('110')
+    assert Decimal(result['summary']['purchase_goods_value_rmb']) == Decimal('40')
+    assert Decimal(result['summary']['total_cost_rmb']) == Decimal('50')
     assert {f['fee_key'] for f in result['included_fees']} == {'settlement_freight_total', 'destination_delivery', 'misc'}
     assert not result['excluded_fees']
     assert result['summary_snapshot']['calculation_schema'] == 2
@@ -86,13 +87,13 @@ def test_final_details_have_distinct_identities_and_no_old_components_or_total()
     components = [{'fee_rule': 'FINAL', 'logical_fee_key': 'settlement_freight_total', 'item': 'A',
                    'stable_line_key': 'A', 'amount_rmb': 99, 'is_active': 1, 'status': 'CONFIRMED', 'cost_effect': 'COST'}]
     result = save_data(fees, components=components)
-    assert Decimal(result['summary']['total_cost_rmb']) == Decimal('100.3')
+    assert Decimal(result['summary']['total_cost_rmb']) == Decimal('40.3')
     assert len(result['included_fees']) == 2 and not result['excluded_fees']
 
 
 def test_explicit_inland_scope_suppresses_only_inland_and_keeps_freight():
     result = save_data([old('destination_delivery', '20'), old('international_sea_freight', '30'), final(covered_scopes='mexico_inland')])
-    assert Decimal(result['summary']['total_cost_rmb']) == 130
+    assert Decimal(result['summary']['total_cost_rmb']) == 70
 
 
 def test_partial_old_bundle_and_conflicting_final_source_block():
@@ -109,7 +110,7 @@ def test_final_project_policy_retains_two_stage_allocation_at_six_places():
     fee = result['included_fees'][0]
     assert sum(map(Decimal, fee['project_allocations'].values())) == Decimal('-0.000003')
     assert sum(map(Decimal, fee['allocations'].values())) == Decimal('-0.000003')
-    assert sum(Decimal(row['total_cost_rmb']) for row in result['project_summary']) == Decimal('199.999997')
+    assert sum(Decimal(row['total_cost_rmb']) for row in result['project_summary']) == Decimal('79.999997')
 
 
 def test_settlement_metadata_survives_fee_reads_and_exact_saved_rule_evidence():

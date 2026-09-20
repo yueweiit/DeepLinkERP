@@ -60,12 +60,12 @@ console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
 def test_derived_purchase_price_is_readonly_and_names_its_source():
     html = _frontend_result(FRONTEND_SETUP + """
 h.escape=x=>String(x ?? '');
-const item={name:'I1',unit_price:'1.22',adopted_price:{value:'1.22',currency:'RMB',unit:'个',source_type:'shipment_value',error:''}};
+const item={name:'I1',unit_price:'1.22',adopted_price:{value:'1.22',currency:'RMB',unit:'pieza',source_type:'purchase_total_derived',error:''}};
 console.log(JSON.stringify(h.renderMaterialFeeGridCell(item,{field:'unit_price',label:'采购单价',numeric:true},new Set(),0)));
 """)
 
     assert "1.22" in html
-    assert "按本次发货货值折算" in html
+    assert "按总货值÷采购数量计算" in html
     assert "data-mf-cell-input" not in html
 
 

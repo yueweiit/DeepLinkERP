@@ -30,8 +30,8 @@ def test_saved_projection_conserves_preview_cost_and_uses_shipped_quantity():
     items, fees, fx = inputs()
     original = deepcopy(items)
     result = service.build_saved_cost_data(items, fees, fx, "AIR")
-    assert result["summary"]["total_cost_rmb"] == "64800.00"
-    assert sum(Decimal(row["total_cost_rmb"]) for row in result["item_updates"]) == Decimal("64800")
+    assert result["summary"]["total_cost_rmb"] == "64677.00"
+    assert sum(Decimal(row["total_cost_rmb"]) for row in result["item_updates"]) == Decimal("64677")
     backpack = result["item_updates"][0]
     assert Decimal(backpack["total_unit_rmb"]) == (Decimal(backpack["total_cost_rmb"]) / 990).quantize(Decimal("0.000001"))
     assert backpack["transport_mode"] == "AIR"
@@ -72,7 +72,7 @@ def test_disabled_legacy_fee_never_blocks_or_counts_again():
     active = fee_service.compose_fee_worklist_rows(fees, "AIR")
     assert not any(row.get("name") == "OLD" for row in active)
     preview = service.preview_comprehensive_cost_data(items, active, fx)
-    assert preview["summary"]["total_cost_rmb"] == "64800.00"
+    assert preview["summary"]["total_cost_rmb"] == "64677.00"
     assert not preview["excluded_fees"]
 
 
@@ -121,7 +121,7 @@ def test_saved_trial_commits_one_coherent_result_without_confirming_or_pushing()
     assert result["ok"] and result["saved"] and not result["read_only"]
     assert result["batch_modified"] == "M2"
     assert len(repo.writes) == 1 and repo.committed
-    assert result["summary"]["total_cost_rmb"] == "64800.00"
+    assert result["summary"]["total_cost_rmb"] == "64677.00"
     assert "confirm_status" not in repo.writes[0]["summary_snapshot"]
 
 
@@ -155,7 +155,7 @@ def test_confirmation_uses_saved_snapshot_zero_fees_and_keeps_real_entity_gap():
                  estimated_total_cost_rmb=40800, actual_total_cost_rmb=100,
                  summary_snapshot=saved["summary_snapshot"])
     result = batch_service._build_calculation_confirmation_readiness(batch, items, fees, "V")
-    assert result["total_cost_rmb"] == 64800
+    assert result["total_cost_rmb"] == 64677
     assert result["checks"]["has_tariff"]
     assert not result["field_gaps"]["rules"]
     assert result["blocking_reasons"] == ["当前批次缺少归属业务主体。"]
@@ -177,7 +177,7 @@ def test_saved_consumers_ignore_replaced_raw_tax_and_use_effective_shipping():
     items, fees, fx = inputs()
     items[1].update(actual_shipped_qty=None, actual_shipped_qty_mode="DEFAULT_PURCHASE")
     saved = service.build_saved_cost_data(items, fees, fx, "AIR")
-    for item, update in zip(items, saved["item_updates"]):
+    for item, update, preview_item in zip(items, saved["item_updates"], saved["items"]):
         item.update(update, product_name="商品", unit_price=1, purchase_currency="RMB",
                     mexico_customs_rmb=50, import_tax_total=75)
         quick = workbench_service.build_batch_result_preview_item(item, calculated=True)
@@ -185,14 +185,14 @@ def test_saved_consumers_ignore_replaced_raw_tax_and_use_effective_shipping():
         assert quick["tax_alloc_rmb"] == detail["clearance_and_tax"]["tax_alloc_rmb"] == 0
         assert quick["clearance_alloc_rmb"] == detail["clearance_and_tax"]["clearance_alloc_rmb"]
         extras = sum(quick[key] for key in ("freight_alloc_rmb", "tax_alloc_rmb", "clearance_alloc_rmb", "unlisted_other_cost_rmb"))
-        assert extras == pytest.approx(float(item["total_cost_rmb"]) - item["goods_value"])
+        assert extras == pytest.approx(float(item["total_cost_rmb"]) - float(preview_item["goods_value_rmb"]))
     batch = dict(current_version="V", status="Calculated", subsidiary_code="MX01", summary_snapshot=saved["summary_snapshot"])
     ready = batch_service._build_calculation_confirmation_readiness(batch, items, fees, "V")
     assert ready["ready"], ready
     assert ready["expense_pools"]["item_allocations"]["tariff_tax_total"] == 0
     assert ready["expense_pools"]["item_allocations"]["clearance_fee_rmb"] == 12000
     quick = workbench_service.build_batch_result_preview_payload(batch=batch, version={"calculated_at": "NOW"}, items=items)
-    assert quick["summary"]["weighted_total_unit_rmb"] == pytest.approx(64800 / 7990, abs=1e-6)
+    assert quick["summary"]["weighted_total_unit_rmb"] == pytest.approx(64677 / 7990, abs=1e-6)
 
 
 def test_subcent_goods_rounding_conserves_saved_sku_and_summary_totals():
@@ -202,7 +202,7 @@ def test_subcent_goods_rounding_conserves_saved_sku_and_summary_totals():
     for fee in fees:
         fee["amount"] = 0
     saved = service.build_saved_cost_data(items, fees, fx, "AIR")
-    assert sum(Decimal(row["total_cost_rmb"]) for row in saved["item_updates"]) == Decimal(saved["summary"]["total_cost_rmb"]) == Decimal("200.01")
+    assert sum(Decimal(row["total_cost_rmb"]) for row in saved["item_updates"]) == Decimal(saved["summary"]["total_cost_rmb"]) == Decimal("199.01")
 
 
 def test_batch_detail_loads_purchase_source_status_without_visiting_approval_tab(monkeypatch):
@@ -224,3 +224,59 @@ def test_batch_detail_loads_purchase_source_status_without_visiting_approval_tab
     assert status["purchase_approval_sync_state"] == "valid"
     assert status["linked_purchase_count"] == 1 and status["linked_purchase_approval_statuses"] == ["COMPLETED"]
     assert "extra_json" not in result["header"]
+
+
+def test_batch_detail_projects_legacy_snapshot_unit_price_without_writing(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from overseas_costing.services import batch_service
+
+    snapshot = {
+        "comprehensive_cost": {
+            "items": [{
+                "name": "ITEM-1",
+                "goods_value_rmb": "2067.00",
+                "shipping_unit_cost": {"amount_rmb": "2.820924", "uom": "个"},
+            }]
+        }
+    }
+    stored = {
+        "name": "B",
+        "current_version": "V",
+        "transport_mode": "EXPRESS",
+        "extra_json": "{}",
+    }
+    version = {"name": "V", "summary_snapshot_json": json.dumps(snapshot)}
+    item_rows = [{
+        "name": "ITEM-1",
+        "derived_json": json.dumps({
+            "shipping_quantity": "1700",
+            "shipping_unit_cost": {"amount_rmb": "2.820924", "uom": "个"},
+        }),
+    }]
+
+    def get_value(doctype, name, fields, **kwargs):
+        data = stored if doctype == "Overseas Cost Batch" else version
+        return {key: data.get(key) for key in fields}
+
+    def get_all(doctype, *args, **kwargs):
+        if doctype == "Overseas Cost Item" and "derived_json" in kwargs.get("fields", []):
+            return item_rows
+        return []
+
+    monkeypatch.setattr(
+        batch_service,
+        "frappe",
+        SimpleNamespace(db=SimpleNamespace(get_value=get_value), get_all=get_all),
+    )
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda name: "B")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *args: "V")
+    monkeypatch.setattr(batch_service, "_db_has_column", lambda *args: True)
+
+    result = batch_service.get_batch_detail("B")
+
+    assert result["summary"]["comprehensive_cost"]["items"][0]["shipping_unit_price"] == {
+        "amount_rmb": "1.215882",
+        "uom": "个",
+    }
+    assert "shipping_unit_price" not in snapshot["comprehensive_cost"]["items"][0]

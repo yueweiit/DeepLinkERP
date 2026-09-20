@@ -527,6 +527,17 @@ console.log(JSON.stringify(h.renderCostTrialAIReview()));
     assert "1 RMB = 2.564103 MXN" in html
 
 
+def test_ai_trial_review_content_does_not_render_a_second_footer():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=value=>String(value ?? '');
+state.costTrialAI={status:'READY',draft:{fee_suggestions:[],default_selections:[]}};
+console.log(JSON.stringify(h.renderCostTrialAIReview()));
+""")
+
+    assert "<footer" not in html
+    assert 'data-action="cost-trial-retry"' not in html
+
+
 def test_ai_trial_dialog_marks_historical_fx_estimated():
     html = _frontend_result(FRONTEND_SETUP + """
 h.escape=value=>String(value ?? '');

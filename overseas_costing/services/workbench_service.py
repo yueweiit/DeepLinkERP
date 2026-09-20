@@ -649,7 +649,7 @@ def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
                     packing_quantity=current.get('actual_shipped_qty'),
                     unit_price=price.get('value'),purchase_currency=price.get('currency'),
                     goods_value=current.get('shipment_value_rmb'),adopted_price=price)
-    elif (current.get('adopted_price') or {}).get('source_type') == 'shipment_value':
+    elif (current.get('adopted_price') or {}).get('source_type') == 'purchase_total_derived':
         price = current['adopted_price']
         item.update(
             unit_price=price.get('value'),

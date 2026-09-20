@@ -147,8 +147,8 @@ def normalize_grid_page(page: object, page_length: object) -> tuple[int, int]:
     return normalized_page, normalized_length
 
 
-def _shipment_value_unit_price(row: dict, valuation: dict, quantity_state: dict) -> dict | None:
-    """Project a missing purchase price from the confirmed RMB shipment total.
+def _purchase_total_unit_price(row: dict) -> dict | None:
+    """Project a missing purchase price from the full RMB purchase total.
 
     This is display-only provenance.  It deliberately does not rewrite the
     original purchase fields because the source document may use another
@@ -159,15 +159,13 @@ def _shipment_value_unit_price(row: dict, valuation: dict, quantity_state: dict)
 
     if not is_effectively_missing("unit_price", row.get("unit_price"), row):
         return None
-    if valuation.get("error") or valuation.get("status") not in {"automatic", "manual"}:
-        return None
     try:
-        amount = Decimal(str(valuation.get("amount_rmb")))
-        quantity = Decimal(str(quantity_state.get("quantity")))
+        amount = Decimal(str(row.get("goods_value")))
+        quantity = Decimal(str(row.get("quantity")))
     except (InvalidOperation, TypeError, ValueError):
         return None
-    uom = str(quantity_state.get("uom") or "").strip()
-    if not amount.is_finite() or amount < 0 or not quantity.is_finite() or quantity <= 0 or not uom:
+    uom = str(row.get("purchase_uom") or row.get("unit_price_uom") or row.get("unit") or "").strip()
+    if not amount.is_finite() or amount <= 0 or not quantity.is_finite() or quantity <= 0 or not uom:
         return None
     try:
         value = (amount / quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -178,12 +176,12 @@ def _shipment_value_unit_price(row: dict, valuation: dict, quantity_state: dict)
         "currency": "RMB",
         "unit": uom,
         "error": "",
-        "source_type": "shipment_value",
-        "source": str(valuation.get("method") or ""),
+        "source_type": "purchase_total_derived",
+        "source": "LEGACY_PURCHASE",
         "evidence": {
-            "amount_rmb": format(amount.normalize(), "f"),
-            "quantity": format(quantity.normalize(), "f"),
-            "uom": uom,
+            "total_goods_value_rmb": format(amount.normalize(), "f"),
+            "purchase_quantity": format(quantity.normalize(), "f"),
+            "purchase_uom": uom,
         },
     }
 
@@ -230,7 +228,7 @@ def present_material_row(item: dict) -> dict:
                                 'source_type':'expense' if valuation.get('method') == 'settlement_expense_unit_price' else 'commodity_purchase',
                                 'source':evidence.get('purchase_source'), 'evidence':evidence.get('price_evidence')}
     else:
-        derived_price = _shipment_value_unit_price(row, valuation, quantity_state)
+        derived_price = _purchase_total_unit_price(row)
         if derived_price is not None:
             row['adopted_price'] = derived_price
     return row

@@ -1580,6 +1580,18 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
             as_dict=True,
         ) or {}
         summary = _load_json(version.get("summary_snapshot_json"))
+        comprehensive = summary.get("comprehensive_cost")
+        comprehensive_items = (comprehensive.get("items") or []) if isinstance(comprehensive, dict) else []
+        if any(isinstance(item, dict) and not item.get("shipping_unit_price") for item in comprehensive_items):
+            from overseas_costing.services import cost_preview_service
+
+            saved_item_rows = frappe.get_all(
+                "Overseas Cost Item",
+                filters={"batch": batch_doc_name, "version": resolved_version_name},
+                fields=["name", "derived_json"],
+                limit_page_length=10000,
+            )
+            summary = cost_preview_service.enrich_saved_unit_prices(summary, saved_item_rows)
 
     rules = []
     if resolved_version_name:

@@ -8108,7 +8108,19 @@ input[type="range"].ocw-result-scrollbar:disabled {
   --ocw-brand-soft: #eaf5ff;
 }
 .ocw-cost-trial-dialog .modal-dialog { max-width: min(1120px, calc(100vw - 32px)); }
-.ocw-cost-trial-dialog .modal-body { padding: 0; background: #f7f9fc; }
+.ocw-cost-trial-dialog .modal-content { display: flex; flex-direction: column; height: min(900px, calc(100vh - 24px)); max-height: calc(100vh - 24px); overflow: hidden; }
+.ocw-cost-trial-dialog .modal-body { flex: 1 1 auto; min-height: 0; padding: 0; overflow: hidden; background: #f7f9fc; }
+.ocw-cost-trial-dialog .modal-body .form-layout,
+.ocw-cost-trial-dialog .modal-body .form-page,
+.ocw-cost-trial-dialog .modal-body .form-section,
+.ocw-cost-trial-dialog .modal-body .section-body,
+.ocw-cost-trial-dialog .modal-body .form-column,
+.ocw-cost-trial-dialog .modal-body [data-fieldname="review_html"],
+.ocw-cost-trial-dialog .modal-body .control-input-wrapper,
+.ocw-cost-trial-dialog .modal-body .control-input { height: 100%; min-height: 0; }
+.ocw-cost-trial-dialog .modal-footer { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.ocw-cost-trial-dialog .modal-footer .btn-primary { margin-left: auto; }
+.ocw-cost-trial-secondary-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .ocw-cost-trial-dialog .ocw-primary-btn,
 .ocw-cost-trial-dialog .btn-primary {
   border-color: var(--ocw-brand-dark);
@@ -8119,14 +8131,13 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-cost-trial-dialog .btn-primary:hover { background: var(--ocw-brand-dark); color: #fff; }
 .ocw-cost-trial-dialog .ocw-primary-btn:disabled,
 .ocw-cost-trial-dialog .btn-primary:disabled { border-color: #98a2b3; background: #98a2b3; color: #fff; opacity: 1; }
-.ocw-cost-trial-review { display: grid; max-height: min(760px, calc(100vh - 170px)); color: #1d2939; }
-.ocw-cost-trial-review > header,
-.ocw-cost-trial-review > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; background: #fff; }
+.ocw-cost-trial-review { display: flex; flex-direction: column; height: 100%; min-height: 0; color: #1d2939; }
+.ocw-cost-trial-review > header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; background: #fff; }
 .ocw-cost-trial-review > header { border-bottom: 1px solid #dce6f2; }
 .ocw-cost-trial-review > header > div { display: grid; gap: 3px; }
 .ocw-cost-trial-review > header strong { font-size: 16px; }
 .ocw-cost-trial-review > header span { color: #667085; font-size: 12px; }
-.ocw-cost-trial-review > main { display: grid; gap: 12px; padding: 16px 20px; overflow: auto; }
+.ocw-cost-trial-review > main { display: grid; flex: 1 1 auto; gap: 12px; min-height: 0; padding: 16px 20px; overflow: auto; }
 .ocw-cost-trial-fx { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid #98c8ef; border-radius: 8px; background: #eef7ff; color: #344054; }
 .ocw-cost-trial-fx > header,
 .ocw-cost-trial-fx > div,
@@ -8142,9 +8153,7 @@ input[type="range"].ocw-result-scrollbar:disabled {
 .ocw-cost-trial-fx.is-blocked > p { color: #a92727; }
 .ocw-cost-trial-running { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 92px; padding: 18px; border: 1px solid #c8ddf0; border-radius: 9px; background: #eef7ff; color: #076fbe; }
 .ocw-cost-trial-running span { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.ocw-cost-trial-review > footer { position: sticky; bottom: 0; border-top: 1px solid #dce6f2; box-shadow: 0 -6px 18px rgba(16, 24, 40, 0.05); }
-.ocw-cost-trial-review > footer > div { display: flex; flex-wrap: wrap; gap: 8px; }
-.ocw-cost-trial-action-hint { color: #8a5700; font-size: 12px; }
+.ocw-cost-trial-action-hint { flex: 1 1 180px; color: #8a5700; font-size: 12px; }
 .ocw-cost-trial-fee { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.65fr); gap: 10px 18px; padding: 16px; border: 1px solid #dce6f2; border-radius: 9px; background: #fff; }
 .ocw-cost-trial-fee > header { grid-column: 1 / -1; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .ocw-cost-trial-fee > header > div { display: flex; align-items: baseline; gap: 10px; }
@@ -8167,12 +8176,17 @@ input[type="range"].ocw-result-scrollbar:disabled {
 
 @media (max-width: 720px) {
   .ocw-cost-trial-dialog .modal-dialog { max-width: calc(100vw - 16px); margin: 8px auto; }
-  .ocw-cost-trial-dialog .modal-footer { display: flex; gap: 8px; padding: 12px; }
+  .ocw-cost-trial-dialog .modal-content { height: calc(100vh - 16px); max-height: calc(100vh - 16px); }
+  .ocw-cost-trial-dialog .modal-footer { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 12px; }
   .ocw-cost-trial-dialog .modal-footer .btn { min-height: 40px; }
+  .ocw-cost-trial-dialog .modal-footer .btn-primary { order: -3; width: 100%; margin-left: 0; }
+  .ocw-cost-trial-dialog .modal-footer .standard-actions { order: -3; display: flex; width: 100%; }
+  .ocw-cost-trial-dialog .modal-footer .standard-actions .btn-primary { flex: 1 1 auto; }
+  .ocw-cost-trial-dialog .modal-footer .ocw-cost-trial-action-hint { order: -2; }
+  .ocw-cost-trial-dialog .modal-footer .ocw-cost-trial-secondary-actions { order: -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+  .ocw-cost-trial-dialog .modal-footer .ocw-cost-trial-secondary-actions .btn { width: 100%; min-width: 0; padding-inline: 6px; }
   .ocw-cost-trial-fee { grid-template-columns: 1fr; }
   .ocw-cost-trial-fee > header { align-items: stretch; flex-direction: column; }
-  .ocw-cost-trial-review > footer { align-items: stretch; flex-direction: column; }
-  .ocw-cost-trial-review > footer > button { width: 100%; }
 }
 
 /* Dialogs are mounted under body, outside .ocw-page: do not inherit page tokens. */

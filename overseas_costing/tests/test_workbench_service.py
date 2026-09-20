@@ -179,7 +179,7 @@ def test_item_query_defaults_to_fifty_rows() -> None:
     }
 
 
-def test_saved_sku_projects_missing_purchase_price_from_confirmed_shipment_value() -> None:
+def test_saved_sku_projects_missing_purchase_price_from_purchase_total() -> None:
     from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
 
     row = {
@@ -204,8 +204,8 @@ def test_saved_sku_projects_missing_purchase_price_from_confirmed_shipment_value
 
     assert presented["unit_price"] == "1.22"
     assert presented["purchase_currency"] == "RMB"
-    assert presented["unit_price_uom"] == "个"
-    assert presented["adopted_price"]["source_type"] == "shipment_value"
+    assert presented["unit_price_uom"] == "pieza"
+    assert presented["adopted_price"]["source_type"] == "purchase_total_derived"
 
 
 def test_item_page_queries_only_requested_slice(monkeypatch) -> None:

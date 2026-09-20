@@ -21,7 +21,7 @@ def test_express_default_zero_fees_count_as_estimates_without_fx_or_physical_val
     assert {fee['fee_key'] for fee in result['included_fees']} == {'express_surcharge', 'destination_delivery'}
     assert all(fee['amount_status'] == 'ESTIMATED' and fee['amount_rmb'] == '0.00' for fee in result['included_fees'])
     assert {fee['fee_key'] for fee in result['excluded_fees']} == {'international_express_fee', 'customs_clearance_fee', 'import_tax'}
-    assert result['summary']['total_cost_rmb'] == '200.00'
+    assert result['summary']['total_cost_rmb'] == '150.00'
     assert result['summary']['estimated_fee_count'] == 2
     assert result['summary']['is_complete'] is False
     assert (items, fees) == before
@@ -45,7 +45,7 @@ def test_saved_fees_from_reported_case_are_all_counted_without_packing_data():
         fee.update(amount_status="ACTUAL", amount=amount, currency="RMB")
     before = deepcopy((items, fees))
     result = preview_comprehensive_cost_data(items, fees, {})
-    assert result["summary"]["total_cost_rmb"] == "92404.00"
+    assert result["summary"]["total_cost_rmb"] == "79404.00"
     assert result["summary"]["allocated_fees_rmb"] == "6004.00"
     assert result["summary"]["included_fee_count"] == 5
     assert result["excluded_fees"] == []
@@ -63,7 +63,7 @@ def test_zero_foreign_fee_needs_no_fx_but_unknown_amount_is_still_excluded():
     assert len(result["excluded_fees"]) == 1
 
 
-@pytest.mark.parametrize(("currency", "amount", "expected"), [("RMB", "10", "210.00"), ("USD", "10", "270.00"), ("MXN", "25", "210.00")])
+@pytest.mark.parametrize(("currency", "amount", "expected"), [("RMB", "10", "160.00"), ("USD", "10", "220.00"), ("MXN", "25", "160.00")])
 def test_supported_currencies_convert_before_automatic_allocation(currency, amount, expected):
     result = preview_comprehensive_cost_data(_items(), [{"amount_status": "ACTUAL", "amount": amount, "currency": currency, "allocation_basis": "chargeable_weight"}], {"fx_usd_to_rmb": "7", "fx_rmb_to_mxn": "2.5"})
     assert result["summary"]["total_cost_rmb"] == expected
@@ -131,30 +131,31 @@ def test_preview_conserves_direct_and_allocated_fees_with_dual_unit_output() -> 
     )
 
     assert result["summary"] == {
-        "purchase_goods_value_rmb": "200.00",
+        "purchase_goods_value_rmb": "150.00",
         "direct_fees_rmb": "20.00",
         "allocated_fees_rmb": "100.00",
-        "total_cost_rmb": "320.00",
+        "total_cost_rmb": "270.00",
         "included_fee_count": 2,
         "excluded_fee_count": 0,
         "is_complete": True,
     }
-    assert result["items"][0]["total_cost_rmb"] == "170.00"
+    assert result["items"][0]["total_cost_rmb"] == "186.67"
     assert result["items"][0]["shipping_unit_price"] == {
         "amount_rmb": "10.000000",
         "uom": "件",
     }
-    assert result["items"][0]["shipping_unit_cost"] == {"amount_rmb": "17.000000", "uom": "件"}
+    assert result["items"][0]["shipping_unit_cost"] == {"amount_rmb": "18.667000", "uom": "件"}
     assert result["items"][0]["purchase_pricing_unit_cost"] == {
-        "amount_rmb": "17.000000",
+        "amount_rmb": "18.667000",
         "uom": "件",
     }
-    assert result["items"][1]["total_cost_rmb"] == "150.00"
+    assert result["items"][1]["goods_value_rmb"] == "50.00"
+    assert result["items"][1]["total_cost_rmb"] == "83.33"
     assert result["items"][1]["shipping_unit_price"] == {
-        "amount_rmb": "20.000000",
+        "amount_rmb": "10.000000",
         "uom": "桶",
     }
-    assert result["items"][1]["shipping_unit_cost"] == {"amount_rmb": "30.000000", "uom": "桶"}
+    assert result["items"][1]["shipping_unit_cost"] == {"amount_rmb": "16.666000", "uom": "桶"}
     assert result["items"][1]["purchase_pricing_unit_cost"] is None
 
 
@@ -232,6 +233,95 @@ def test_shipping_unit_prices_are_unavailable_without_effective_quantity_or_unit
     assert quantity_reason["message"] == "发货数量或单位缺失，无法计算单价和综合单价。"
 
 
+def test_old_saved_snapshot_unit_price_is_enriched_without_rewriting_history() -> None:
+    snapshot = {
+        "calculation_schema": 2,
+        "comprehensive_cost": {
+            "items": [
+                {
+                    "name": "ITEM-1",
+                    "goods_value_rmb": "2067.00",
+                    "total_cost_rmb": "4795.57",
+                    "shipping_unit_cost": {"amount_rmb": "2.820924", "uom": "个"},
+                },
+                {
+                    "name": "ITEM-2",
+                    "goods_value_rmb": "30.00",
+                    "shipping_unit_price": {"amount_rmb": "3.000000", "uom": "件"},
+                },
+                {
+                    "name": "ITEM-MISSING",
+                    "goods_value_rmb": "0.00",
+                    "valuation_source": {"status": "missing", "error": "GOODS_VALUE_MISSING"},
+                    "shipping_unit_cost": {"amount_rmb": "10.000000", "uom": "个"},
+                },
+                {
+                    "name": "ITEM-ZERO",
+                    "goods_value_rmb": "0.00",
+                    "valuation_source": {"amount_rmb": "0", "status": "manual", "error": ""},
+                    "shipping_unit_cost": {"amount_rmb": "2.000000", "uom": "个"},
+                },
+            ]
+        },
+    }
+    rows = [
+        {
+            "name": "ITEM-1",
+            "derived_json": json.dumps(
+                {"shipping_quantity": "1700", "shipping_unit_cost": {"uom": "个"}}
+            ),
+        },
+        {"name": "ITEM-MISSING", "derived_json": json.dumps({"shipping_quantity": "5"})},
+        {"name": "ITEM-ZERO", "derived_json": json.dumps({"shipping_quantity": "5"})},
+    ]
+    original_snapshot = deepcopy(snapshot)
+    original_rows = deepcopy(rows)
+
+    enriched = cost_preview_service.enrich_saved_unit_prices(snapshot, rows)
+
+    assert enriched["comprehensive_cost"]["items"][0]["shipping_unit_price"] == {
+        "amount_rmb": "1.215882",
+        "uom": "个",
+    }
+    assert enriched["comprehensive_cost"]["items"][1]["shipping_unit_price"] == {
+        "amount_rmb": "3.000000",
+        "uom": "件",
+    }
+    assert "shipping_unit_price" not in enriched["comprehensive_cost"]["items"][2]
+    assert enriched["comprehensive_cost"]["items"][3]["shipping_unit_price"] == {
+        "amount_rmb": "0.000000",
+        "uom": "个",
+    }
+    assert snapshot == original_snapshot
+    assert rows == original_rows
+
+
+def test_partial_shipment_unit_prices_use_unrounded_goods_value() -> None:
+    item = {
+        "name": "ITEM-1",
+        "stable_line_key": "ITEM-1",
+        "material_code": "CW000214",
+        "quantity": "1700",
+        "purchase_uom": "个",
+        "actual_shipped_qty": "1500",
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "个",
+        "goods_value": "2067",
+    }
+
+    result = preview_comprehensive_cost_data([item], [], {})
+
+    assert result["items"][0]["goods_value_rmb"] == "1823.82"
+    assert result["items"][0]["shipping_unit_price"] == {
+        "amount_rmb": "1.215882",
+        "uom": "个",
+    }
+    assert result["items"][0]["shipping_unit_cost"] == {
+        "amount_rmb": "1.215882",
+        "uom": "个",
+    }
+
+
 def test_preview_lists_missing_fx_and_unknown_amount_but_counts_estimated_fallback() -> None:
     result = preview_comprehensive_cost_data(
         _items(),
@@ -260,7 +350,7 @@ def test_preview_lists_missing_fx_and_unknown_amount_but_counts_estimated_fallba
         {"fx_usd_to_rmb": "", "fx_rmb_to_mxn": "2.5"},
     )
 
-    assert result["summary"]["total_cost_rmb"] == "250.00"
+    assert result["summary"]["total_cost_rmb"] == "200.00"
     assert result["summary"]["excluded_fee_count"] == 2
     assert result["summary"]["estimated_fee_count"] == 1
     assert result["summary"]["is_complete"] is False
@@ -432,7 +522,7 @@ def test_new_components_suppress_legacy_tax_fields_and_allocate_only_residual() 
     fee = result["included_fees"][0]
     assert fee["component_allocations"] == {"A": "50.00"}
     assert fee["residual_amount_rmb"] == "70.00"
-    assert fee["allocations"] == {"A": "85.00", "B": "35.00"}
+    assert fee["allocations"] == {"A": "96.67", "B": "23.33"}
 
 
 def test_legacy_tax_fields_are_compatibility_components_only_without_new_rows() -> None:
@@ -450,7 +540,7 @@ def test_legacy_tax_fields_are_compatibility_components_only_without_new_rows() 
     assert fee["component_source"] == "LEGACY_ITEM_FIELDS"
     assert fee["component_allocations"] == {"A": "10.00", "B": "5.00"}
     assert fee["residual_amount_rmb"] == "5.00"
-    assert fee["allocations"] == {"A": "12.50", "B": "7.50"}
+    assert fee["allocations"] == {"A": "13.34", "B": "6.66"}
 
 
 def test_component_without_rmb_conversion_blocks_fee_with_chinese_fx_reason() -> None:

@@ -174,6 +174,71 @@ def is_explicit_shipment_zero(valuation):
             and valuation.get('status') in {'automatic', 'manual'})
 
 
+def _legacy_purchase_total_valuation(row):
+    """Value the current shipment from a full-purchase RMB total."""
+
+    total = number(row.get('goods_value'))
+    purchase_quantity = number(row.get('quantity'))
+    purchase_uom = normalize_unit(
+        row.get('purchase_uom') or row.get('unit_price_uom') or row.get('unit')
+    )
+    shipment = shipment_input(row)
+    shipped_quantity = number(shipment.get('quantity'))
+    shipped_uom = normalize_unit(shipment.get('uom'))
+    base = {
+        'amount_rmb': None,
+        'currency': 'RMB',
+        'quantity': shipment.get('quantity'),
+        'uom': shipped_uom,
+        'method': 'LEGACY_PURCHASE',
+        'status': 'missing',
+    }
+    if total is None or total <= 0:
+        return {**base, 'error': 'GOODS_VALUE_MISSING'}
+    if (
+        purchase_quantity is None
+        or purchase_quantity <= 0
+        or not purchase_uom
+        or shipped_quantity is None
+        or shipped_quantity <= 0
+        or not shipped_uom
+    ):
+        # Old rows may only contain a frozen RMB total.  Preserve that proven
+        # amount; proportional valuation is permitted only with both complete
+        # quantity/unit contexts.
+        return {
+            **base,
+            'amount_rmb': row.get('goods_value'),
+            'method': 'LEGACY_PURCHASE',
+            'status': 'automatic',
+            'error': '',
+        }
+    if purchase_uom != shipped_uom:
+        return {
+            **base,
+            'method': 'purchase_total_proration',
+            'error': 'PURCHASE_TOTAL_PRORATION_UOM_MISMATCH',
+        }
+
+    amount = total * shipped_quantity / purchase_quantity
+    amount_text = format(amount.normalize(), 'f')
+    method = 'LEGACY_PURCHASE' if shipped_quantity == purchase_quantity else 'purchase_total_proration'
+    return {
+        **base,
+        'amount_rmb': row.get('goods_value') if method == 'LEGACY_PURCHASE' else amount_text,
+        'method': method,
+        'status': 'automatic',
+        'error': '',
+        'input_evidence': {
+            'total_goods_value_rmb': _decimal_text(total),
+            'purchase_quantity': _decimal_text(purchase_quantity),
+            'purchase_uom': purchase_uom,
+            'actual_shipped_qty': _decimal_text(shipped_quantity),
+            'shipped_uom': shipped_uom,
+        },
+    }
+
+
 def shipment_value(row):
     metadata = object_json(row.get('extra_json'))
     manual = _manual_value(row, metadata.get('manual_shipment_valuation'))
@@ -206,11 +271,7 @@ def shipment_value(row):
                 'status':status, 'error':error}
     valuation = metadata.get('shipment_valuation')
     if valuation is None:
-        amount = number(row.get('goods_value'))
-        valid = amount is not None and amount > 0
-        return {'amount_rmb': row.get('goods_value') if valid else None, 'method': 'LEGACY_PURCHASE',
-                'status': 'automatic' if valid else 'missing',
-                'error': '' if valid else 'GOODS_VALUE_MISSING'}
+        return _legacy_purchase_total_valuation(row)
     if not isinstance(valuation, dict):
         return {'amount_rmb': None, 'method': 'INVALID', 'status':'missing', 'error': 'SHIPMENT_VALUATION_INVALID'}
     legacy_manual = _manual_value(row, {

@@ -1519,8 +1519,8 @@
         ? "商品价待核对"
         : price.source_type === "expense"
           ? "采购支出商品价"
-          : price.source_type === "shipment_value"
-            ? "按本次发货货值折算"
+          : price.source_type === "purchase_total_derived"
+            ? "按总货值÷采购数量计算"
             : "原商品采购价";
       return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><span>${this.escape(current ?? "待补")}</span><small>${sourceLabel}</small></td>`;
     }
@@ -5161,14 +5161,6 @@
     const suggestions = draft.fee_suggestions || [];
     const waiting = ["QUEUED", "RUNNING"].includes(String(trial.status || ""));
     const fxResolution = preview?.fx_resolution || draft.fx_resolution || null;
-    const fxBlocked = this.costTrialFxIsBlocked(fxResolution);
-    const blockedSuggestions = suggestions.filter((row) => row.blocked);
-    const hasBlockedSuggestion = waiting || fxBlocked || blockedSuggestions.length > 0;
-    const blockingHint = waiting
-      ? "AI 正在分析费用口径，请稍候。"
-      : fxBlocked
-        ? this.costTrialFxBlockingMessage(fxResolution)
-        : this.costTrialBlockingMessage(blockedSuggestions);
     const selectedById = new Map((trial.selections || []).map((row) => [row.suggestion_id, row]));
     const rows = suggestions.map((row) => {
       const savedChoice = selectedById.get(row.suggestion_id) || {};
@@ -5204,8 +5196,41 @@
     return `<div class="ocw-cost-trial-review"><header><div><strong>${trial.dialogMode === "repair" ? "试算所需资料待补" : "调整分摊口径"}</strong><span>${this.escape(sourceSummary || "已自动选择完整可用口径")}</span></div></header>
       ${draft.ai_warning ? `<div class="ocw-cost-trial-warning">${this.escape(draft.ai_warning)}</div>` : ""}
       <main>${this.renderCostTrialFxResolution(fxResolution)}${waiting ? `<div class="ocw-cost-trial-running"><strong>${this.escape(trial.progress_step || "DeepSeek 正在分析费用口径")}</strong><span>${Math.max(0, Math.min(100, Number(trial.progress_percent || 0)))}%</span></div>` : rows || `<div class="ocw-detail-empty"><strong>当前没有需要分摊的费用</strong></div>`}${previewHtml}</main>
-      <footer><div><button type="button" class="ocw-outline-btn" data-action="cost-trial-retry">重新让 AI 判断</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockedSuggestion ? `<span class="ocw-cost-trial-action-hint">${this.escape(blockingHint)}</span>` : ""}</footer>
     </div>`;
+  }
+
+  costTrialFooterState() {
+    const trial = this.ensureMaterialFeeState().costTrialAI || {};
+    const draft = trial.draft || {};
+    const waiting = ["QUEUED", "RUNNING"].includes(String(trial.status || ""));
+    const fxResolution = trial.preview?.fx_resolution || draft.fx_resolution || null;
+    const fxBlocked = this.costTrialFxIsBlocked(fxResolution);
+    const blockedSuggestions = (draft.fee_suggestions || []).filter((row) => row.blocked);
+    const hasBlockingHint = waiting || fxBlocked || blockedSuggestions.length > 0;
+    const blockingHint = waiting
+      ? "AI 正在分析费用口径，请稍候。"
+      : fxBlocked
+        ? this.costTrialFxBlockingMessage(fxResolution)
+        : this.costTrialBlockingMessage(blockedSuggestions);
+    return { hasBlockingHint, blockingHint };
+  }
+
+  renderCostTrialNativeFooterActions() {
+    const { hasBlockingHint, blockingHint } = this.costTrialFooterState();
+    return `<div class="ocw-cost-trial-secondary-actions"><button type="button" class="btn btn-default ocw-outline-btn" data-action="cost-trial-retry">重新让 AI 判断</button><button type="button" class="btn btn-default ocw-outline-btn" data-action="cost-trial-back">返回补资料</button><button type="button" class="btn btn-default ocw-outline-btn" data-action="cost-trial-discard">放弃试算</button></div>${hasBlockingHint ? `<span class="ocw-cost-trial-action-hint">${this.escape(blockingHint)}</span>` : ""}`;
+  }
+
+  ensureCostTrialDialogFooter() {
+    const dialog = this.ensureMaterialFeeState().costTrialDialog;
+    const $footer = dialog?.$wrapper?.find?.(".modal-footer");
+    if (!$footer?.length || typeof globalThis.$ !== "function") return;
+    $footer.find?.(".ocw-cost-trial-secondary-actions, .ocw-cost-trial-action-hint")?.remove?.();
+    const $actions = $(this.renderCostTrialNativeFooterActions());
+    const $primary = dialog?.get_primary_btn?.() || $footer.find?.(".btn-primary");
+    const $standardActions = $footer.find?.(".standard-actions");
+    const $anchor = $standardActions?.length ? $standardActions : $primary;
+    if ($anchor?.length) $actions.insertBefore?.($anchor);
+    else $footer.append?.($actions);
   }
 
   openCostTrialAIReviewDialog({ mode = "adjust" } = {}) {
@@ -5238,6 +5263,7 @@
     const dialog = state.costTrialDialog;
     const host = dialog?.fields_dict?.review_html?.$wrapper;
     host?.html?.(this.renderCostTrialAIReview());
+    this.ensureCostTrialDialogFooter();
     this.updateCostTrialAIPrimaryAction();
   }
 
