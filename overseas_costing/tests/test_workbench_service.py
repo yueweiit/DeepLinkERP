@@ -179,6 +179,35 @@ def test_item_query_defaults_to_fifty_rows() -> None:
     }
 
 
+def test_saved_sku_projects_missing_purchase_price_from_confirmed_shipment_value() -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    row = {
+        "name": "ITEM-1",
+        "quantity": 1700,
+        "actual_shipped_qty": 1700,
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "个",
+        "unit": "pieza",
+        "unit_price": 0,
+        "purchase_currency": "",
+        "unit_price_uom": "",
+        "goods_value": 2067,
+    }
+    row["extra_json"] = json.dumps({
+        "manual_shipment_valuation": build_manual_shipment_valuation(
+            row, 2067, actor="finance@example.com", confirmed_at="2026-09-20 14:18:42"
+        )
+    })
+
+    presented = workbench_service.present_saved_sku_result(row)
+
+    assert presented["unit_price"] == "1.22"
+    assert presented["purchase_currency"] == "RMB"
+    assert presented["unit_price_uom"] == "个"
+    assert presented["adopted_price"]["source_type"] == "shipment_value"
+
+
 def test_item_page_queries_only_requested_slice(monkeypatch) -> None:
     calls = []
 

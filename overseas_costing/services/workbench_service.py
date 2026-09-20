@@ -639,9 +639,9 @@ def get_workbench_summary(filters: dict | None = None, task: str = "pending") ->
 
 def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
     item = dict(row)
+    from overseas_costing.services.material_input_service import present_material_row
+    current = present_material_row(item)
     if (item.get('source_context') or {}).get('root_kind') == 'expense':
-        from overseas_costing.services.material_input_service import present_material_row
-        current = present_material_row(item)
         price = current.get('adopted_price') or {}
         item.update(quantity=current.get('effective_shipping_quantity'),
                     actual_shipped_qty=current.get('effective_shipping_quantity'),
@@ -649,6 +649,14 @@ def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
                     packing_quantity=current.get('actual_shipped_qty'),
                     unit_price=price.get('value'),purchase_currency=price.get('currency'),
                     goods_value=current.get('shipment_value_rmb'),adopted_price=price)
+    elif (current.get('adopted_price') or {}).get('source_type') == 'shipment_value':
+        price = current['adopted_price']
+        item.update(
+            unit_price=price.get('value'),
+            purchase_currency=price.get('currency'),
+            unit_price_uom=price.get('unit'),
+            adopted_price=price,
+        )
     if transport_mode in {"SEA", "AIR", "EXPRESS"}:
         item["transport_mode"] = transport_mode
     derived = _load_result_preview_json(item.get("derived_json"))

@@ -1,5 +1,6 @@
 """物料数量、单位和稳定行标识的契约测试。"""
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -108,6 +109,67 @@ def test_legacy_rows_with_duplicate_sku_keep_distinct_row_identity() -> None:
     assert first["stable_line_key"] == "legacy:ITEM-1"
     assert second["stable_line_key"] == "legacy:ITEM-2"
     assert first["stable_line_key"] != second["stable_line_key"]
+
+
+def test_missing_purchase_price_is_derived_from_confirmed_shipment_value_without_mutating_source() -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    source = {
+        "name": "ITEM-1",
+        "quantity": 1700,
+        "actual_shipped_qty": 1700,
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "个",
+        "unit": "pieza",
+        "unit_price": 0,
+        "purchase_currency": "",
+        "unit_price_uom": "",
+        "goods_value": 2067,
+    }
+    source["extra_json"] = json.dumps({
+        "manual_shipment_valuation": build_manual_shipment_valuation(
+            source,
+            2067,
+            actor="finance@example.com",
+            reason="原美金总额已换算人民币",
+            confirmed_at="2026-09-20 14:18:42",
+        )
+    })
+    original = deepcopy(source)
+
+    presented = present_material_row(source)
+
+    assert presented["adopted_price"] == {
+        "value": "1.22",
+        "currency": "RMB",
+        "unit": "个",
+        "error": "",
+        "source_type": "shipment_value",
+        "source": "manual_shipment_valuation",
+        "evidence": {
+            "amount_rmb": "2067",
+            "quantity": "1700",
+            "uom": "个",
+        },
+    }
+    assert source == original
+
+
+def test_existing_purchase_price_wins_over_shipment_value_derived_price() -> None:
+    source = {
+        "name": "ITEM-1",
+        "quantity": 2,
+        "purchase_uom": "件",
+        "unit_price": "3.50",
+        "purchase_currency": "USD",
+        "unit_price_uom": "件",
+        "goods_value": 50,
+    }
+
+    presented = present_material_row(source)
+
+    assert "adopted_price" not in presented
+    assert presented["unit_price"] == "3.50"
 
 
 def test_grid_pagination_is_bounded_without_silently_skipping_page() -> None:

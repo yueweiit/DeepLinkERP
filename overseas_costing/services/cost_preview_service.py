@@ -316,6 +316,7 @@ def preview_comprehensive_cost_data(
         key = _item_key(row)
         goods_value = _decimal(row.get("shipment_value_rmb"))
         explicit_zero = is_explicit_shipment_zero(row.get("shipment_valuation"))
+        goods_value_available = goods_value is not None and (goods_value > 0 or explicit_zero)
         if goods_value is None or (goods_value <= 0 and not explicit_zero):
             incomplete_reasons.append(
                 {
@@ -329,6 +330,7 @@ def preview_comprehensive_cost_data(
         goods_total += goods_value
         item_costs[key] = {
             "goods_value_rmb": goods_value,
+            "goods_value_available": goods_value_available,
             "direct_fees_rmb": Decimal("0"),
             "allocated_fees_rmb": Decimal("0"),
         }
@@ -467,8 +469,14 @@ def preview_comprehensive_cost_data(
         effective = row.get("effective_shipping") or {}
         shipped_quantity = _decimal(effective.get("quantity"))
         shipped_uom = str(effective.get("uom") or "").strip()
+        shipping_unit_price = None
         shipping_unit_cost = None
         if shipped_quantity is not None and shipped_quantity > 0 and shipped_uom:
+            if costs["goods_value_available"]:
+                shipping_unit_price = {
+                    "amount_rmb": _unit_money(rounded_goods[key] / shipped_quantity),
+                    "uom": shipped_uom,
+                }
             shipping_unit_cost = {"amount_rmb": _unit_money(total / shipped_quantity), "uom": shipped_uom}
         else:
             incomplete_reasons.append(
@@ -476,7 +484,7 @@ def preview_comprehensive_cost_data(
                     "reason_code": "SHIPPING_UNIT_REQUIRED",
                     "item_key": key,
                     "field": "actual_shipped_qty",
-                    "message": "发货数量或单位缺失，无法展示每发货单位成本。",
+                    "message": "发货数量或单位缺失，无法计算单价和综合单价。",
                 }
             )
 
@@ -512,6 +520,7 @@ def preview_comprehensive_cost_data(
                 "direct_fees_rmb": money(costs["direct_fees_rmb"]),
                 "allocated_fees_rmb": money(costs["allocated_fees_rmb"]),
                 "total_cost_rmb": money(total),
+                "shipping_unit_price": shipping_unit_price,
                 "shipping_unit_cost": shipping_unit_cost,
                 "purchase_pricing_unit_cost": purchase_pricing_unit_cost,
                 "quantity_source_badge": row.get("quantity_source_badge") or "",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Callable, Dict, Optional
 from uuid import uuid4
 
@@ -147,6 +147,47 @@ def normalize_grid_page(page: object, page_length: object) -> tuple[int, int]:
     return normalized_page, normalized_length
 
 
+def _shipment_value_unit_price(row: dict, valuation: dict, quantity_state: dict) -> dict | None:
+    """Project a missing purchase price from the confirmed RMB shipment total.
+
+    This is display-only provenance.  It deliberately does not rewrite the
+    original purchase fields because the source document may use another
+    currency or purchase unit.
+    """
+
+    from overseas_costing.services.material_value_semantics import is_effectively_missing
+
+    if not is_effectively_missing("unit_price", row.get("unit_price"), row):
+        return None
+    if valuation.get("error") or valuation.get("status") not in {"automatic", "manual"}:
+        return None
+    try:
+        amount = Decimal(str(valuation.get("amount_rmb")))
+        quantity = Decimal(str(quantity_state.get("quantity")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    uom = str(quantity_state.get("uom") or "").strip()
+    if not amount.is_finite() or amount < 0 or not quantity.is_finite() or quantity <= 0 or not uom:
+        return None
+    try:
+        value = (amount / quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
+    return {
+        "value": format(value, ".2f"),
+        "currency": "RMB",
+        "unit": uom,
+        "error": "",
+        "source_type": "shipment_value",
+        "source": str(valuation.get("method") or ""),
+        "evidence": {
+            "amount_rmb": format(amount.normalize(), "f"),
+            "quantity": format(quantity.normalize(), "f"),
+            "uom": uom,
+        },
+    }
+
+
 def present_material_row(item: dict) -> dict:
     """Expose a stable row identity and lazy quantity provenance without backfilling."""
 
@@ -188,6 +229,10 @@ def present_material_row(item: dict) -> dict:
                                 'unit':evidence.get('price_uom'), 'error':valuation.get('error'),
                                 'source_type':'expense' if valuation.get('method') == 'settlement_expense_unit_price' else 'commodity_purchase',
                                 'source':evidence.get('purchase_source'), 'evidence':evidence.get('price_evidence')}
+    else:
+        derived_price = _shipment_value_unit_price(row, valuation, quantity_state)
+        if derived_price is not None:
+            row['adopted_price'] = derived_price
     return row
 
 

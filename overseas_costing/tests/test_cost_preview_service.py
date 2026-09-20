@@ -140,14 +140,96 @@ def test_preview_conserves_direct_and_allocated_fees_with_dual_unit_output() -> 
         "is_complete": True,
     }
     assert result["items"][0]["total_cost_rmb"] == "170.00"
+    assert result["items"][0]["shipping_unit_price"] == {
+        "amount_rmb": "10.000000",
+        "uom": "件",
+    }
     assert result["items"][0]["shipping_unit_cost"] == {"amount_rmb": "17.000000", "uom": "件"}
     assert result["items"][0]["purchase_pricing_unit_cost"] == {
         "amount_rmb": "17.000000",
         "uom": "件",
     }
     assert result["items"][1]["total_cost_rmb"] == "150.00"
+    assert result["items"][1]["shipping_unit_price"] == {
+        "amount_rmb": "20.000000",
+        "uom": "桶",
+    }
     assert result["items"][1]["shipping_unit_cost"] == {"amount_rmb": "30.000000", "uom": "桶"}
     assert result["items"][1]["purchase_pricing_unit_cost"] is None
+
+
+def test_shipping_unit_price_distinguishes_explicit_zero_from_missing_goods_value() -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    explicit_zero = {
+        "name": "ITEM-ZERO",
+        "stable_line_key": "ZERO",
+        "material_code": "SKU-ZERO",
+        "product_name": "Zero",
+        "quantity": "4",
+        "purchase_uom": "个",
+        "unit_price_uom": "个",
+        "actual_shipped_qty": "4",
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "个",
+        "goods_value": "99",
+    }
+    explicit_zero["extra_json"] = json.dumps(
+        {
+            "manual_shipment_valuation": build_manual_shipment_valuation(
+                explicit_zero,
+                "0",
+                actor="tester@example.com",
+                reason="确认本次发货为零货值",
+            )
+        }
+    )
+    missing_value = {
+        "name": "ITEM-MISSING",
+        "stable_line_key": "MISSING",
+        "material_code": "SKU-MISSING",
+        "product_name": "Missing",
+        "quantity": "5",
+        "purchase_uom": "个",
+        "unit_price_uom": "个",
+        "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+        "shipped_uom": "个",
+        "goods_value": "",
+    }
+
+    result = preview_comprehensive_cost_data([explicit_zero, missing_value], [], {})
+
+    assert result["items"][0]["shipping_unit_price"] == {
+        "amount_rmb": "0.000000",
+        "uom": "个",
+    }
+    assert result["items"][1]["shipping_unit_price"] is None
+
+
+def test_shipping_unit_prices_are_unavailable_without_effective_quantity_or_unit() -> None:
+    item = {
+        "name": "ITEM-NO-QUANTITY",
+        "stable_line_key": "NO-QUANTITY",
+        "material_code": "SKU-NO-QUANTITY",
+        "product_name": "No quantity",
+        "quantity": "",
+        "purchase_uom": "",
+        "unit_price_uom": "",
+        "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+        "shipped_uom": "",
+        "goods_value": "100",
+    }
+
+    result = preview_comprehensive_cost_data([item], [], {})
+
+    assert result["items"][0]["shipping_unit_price"] is None
+    assert result["items"][0]["shipping_unit_cost"] is None
+    quantity_reason = next(
+        reason
+        for reason in result["incomplete_reasons"]
+        if reason["reason_code"] == "SHIPPING_UNIT_REQUIRED"
+    )
+    assert quantity_reason["message"] == "发货数量或单位缺失，无法计算单价和综合单价。"
 
 
 def test_preview_lists_missing_fx_and_unknown_amount_but_counts_estimated_fallback() -> None:

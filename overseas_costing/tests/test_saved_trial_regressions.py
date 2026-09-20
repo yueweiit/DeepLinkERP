@@ -26,6 +26,18 @@ def test_saved_trial_keeps_legacy_item_identity_without_backfilling(stored_key):
     assert saved["items"][0]["stable_line_key"] == "legacy:OLD-1"
     assert saved["item_updates"][0]["name"] == "OLD-1"
     assert Decimal(saved["item_updates"][0]["total_cost_rmb"]) == Decimal("120")
+    assert saved["items"][0]["shipping_unit_price"] == {
+        "amount_rmb": "10.000000",
+        "uom": "个",
+    }
+    assert saved["items"][0]["shipping_unit_cost"] == {
+        "amount_rmb": "12.000000",
+        "uom": "个",
+    }
+    assert saved["item_updates"][0]["total_unit_rmb"] == "12.000000"
+    derived = json.loads(saved["item_updates"][0]["derived_json"])
+    assert "shipping_unit_price" not in derived
+    assert derived["shipping_unit_cost"] == saved["items"][0]["shipping_unit_cost"]
     assert "stable_line_key" not in saved["item_updates"][0]
     assert items == original
 

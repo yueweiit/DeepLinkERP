@@ -13,6 +13,62 @@ console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
     assert '完整成本' not in html
 
 
+def test_saved_trial_rows_show_comparable_unit_price_and_comprehensive_unit_price():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=x=>String(x ?? '');
+h.detailState.header={status:'Calculated',summary_snapshot:{comprehensive_cost:{summary:{is_complete:true,total_cost_rmb:'4795.57'},items:[{
+  material_code:'CW000214',product_name:'狗牌Dog tag',goods_value_rmb:'2067.00',direct_fees_rmb:'0.00',
+  allocated_fees_rmb:'2728.57',total_cost_rmb:'4795.57',
+  shipping_unit_price:{amount_rmb:'1.215882',uom:'个'},
+  shipping_unit_cost:{amount_rmb:'2.820924',uom:'个'},
+  purchase_pricing_unit_cost:{amount_rmb:'999.000000',uom:'箱'}
+}]}}};
+console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
+""")
+
+    assert "单价（RMB）" in html
+    assert "综合单价（RMB）" in html
+    assert "1.22 / 个" in html
+    assert "2.82 / 个" in html
+    assert "1.215882" not in html
+    assert "2.820924" not in html
+    assert "999.000000" not in html
+    assert "每发货单位" not in html
+    assert "每采购计价单位" not in html
+
+
+def test_saved_trial_rows_explain_missing_unit_price_inputs():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=x=>String(x ?? '');
+h.detailState.header={status:'Calculated',summary_snapshot:{comprehensive_cost:{summary:{is_complete:false,total_cost_rmb:'50.00'},items:[
+  {material_code:'MISSING-VALUE',product_name:'货值待补',goods_value_rmb:'0.00',direct_fees_rmb:'0.00',allocated_fees_rmb:'50.00',total_cost_rmb:'50.00',
+   valuation_source:{error:'GOODS_VALUE_MISSING'},shipping_unit_price:null,shipping_unit_cost:{amount_rmb:'10.000000',uom:'个'}},
+  {material_code:'MISSING-QUANTITY',product_name:'数量待补',goods_value_rmb:'20.00',direct_fees_rmb:'0.00',allocated_fees_rmb:'0.00',total_cost_rmb:'20.00',
+   shipping_unit_price:null,shipping_unit_cost:null},
+  {material_code:'LEGACY-SNAPSHOT',product_name:'旧试算',goods_value_rmb:'30.00',direct_fees_rmb:'0.00',allocated_fees_rmb:'15.00',total_cost_rmb:'45.00',
+   valuation_source:{error:''},shipping_unit_cost:{amount_rmb:'15.000000',uom:'个'}}
+]}}};
+console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
+""")
+
+    assert "货值待补" in html
+    assert html.count("待补发货数量/单位") == 2
+    assert "10.00 / 个" in html
+    assert "重新试算后显示" in html
+
+
+def test_derived_purchase_price_is_readonly_and_names_its_source():
+    html = _frontend_result(FRONTEND_SETUP + """
+h.escape=x=>String(x ?? '');
+const item={name:'I1',unit_price:'1.22',adopted_price:{value:'1.22',currency:'RMB',unit:'个',source_type:'shipment_value',error:''}};
+console.log(JSON.stringify(h.renderMaterialFeeGridCell(item,{field:'unit_price',label:'采购单价',numeric:true},new Set(),0)));
+""")
+
+    assert "1.22" in html
+    assert "按本次发货货值折算" in html
+    assert "data-mf-cell-input" not in html
+
+
 def test_blocked_packing_group_disables_cost_trial_entry() -> None:
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={header:{status:'Dirty'}};
