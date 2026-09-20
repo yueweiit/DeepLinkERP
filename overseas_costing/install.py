@@ -74,7 +74,13 @@ def before_migrate() -> None:
         return
 
     # 旧环境可能把该字段建成文本并留下空字符串或非数字值；
-    # 先归一化，避免严格模式下迁移为 Int 时报 Data truncated。
+    # 先归一化默认值和历史数据，避免严格模式下迁移为 Int 时报 Data truncated。
+    frappe.db.sql(
+        """
+        alter table `tabOverseas Cost Item`
+        alter column `route_revision` set default 0
+        """
+    )
     frappe.db.sql(
         """
         update `tabOverseas Cost Item`

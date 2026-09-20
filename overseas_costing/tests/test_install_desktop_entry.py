@@ -60,9 +60,11 @@ def test_before_migrate_normalizes_legacy_route_revision_values(monkeypatch) -> 
 
     install.before_migrate()
 
-    assert len(queries) == 4
+    assert len(queries) == 5
     assert "show tables" in queries[0].lower()
     assert "show columns" in queries[1].lower()
-    assert "update `taboverseas cost item`" in queries[2].lower()
-    assert "not regexp '^[0-9]+$'" in queries[2].lower()
-    assert queries[3] == "commit"
+    assert "alter table `taboverseas cost item`" in queries[2].lower()
+    assert "alter column `route_revision` set default 0" in queries[2].lower()
+    assert "update `taboverseas cost item`" in queries[3].lower()
+    assert "not regexp '^[0-9]+$'" in queries[3].lower()
+    assert queries[4] == "commit"
