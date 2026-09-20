@@ -493,3 +493,133 @@ release({ok:true,items:[{...batch,review_state:'ready'}],total:1,page:1,page_len
 console.log(JSON.stringify({task:v.viewState.task,batch:v.detailState.batchName,replacements}));
 """)
     assert result == {'task': 'pending', 'batch': 'OTHER', 'replacements': []}
+
+
+def test_double_confirmation_shares_one_batch_version_inflight_operation_and_releases_it():
+    result = run_js("""
+const alerts=[];global.frappe={show_alert:value=>alerts.push(value)};
+const v=makeView('cost'),calls=[];
+const batch={name:'B',batch_no:'B-NO',current_version:'V1',status:'Calculated',review_state:'ready'};
+v.batches=[batch];v.findBatch=()=>batch;v.drawerBatchName='B';
+v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};v.detailState={batchName:'B',tab:'overview',header:batch,requestId:3};
+v.replaceViewState=values=>{v.viewState={...v.viewState,...values}};v.loadBatches=async()=>{};
+v.recordUsage=()=>{};v.showError=e=>{throw e};
+const releaseClassifications=[];v.call=async(method,args)=>{calls.push({method,args});
+ if(method.endsWith('get_batches'))return await new Promise(resolve=>{releaseClassifications.push(resolve)});
+ if(method.endsWith('confirm_calculation_result'))return {ok:true,confirmed:true,message:'已确认'};
+ throw new Error(method)};
+const first=v.confirmCalculationResult('B');const second=v.confirmCalculationResult('B');
+await new Promise(resolve=>setImmediate(resolve));const before=calls.map(call=>call.method);
+releaseClassifications.forEach(release=>release({ok:true,items:[batch],total:1,page:1,page_length:100}));await Promise.all([first,second]);
+console.log(JSON.stringify({before,calls:calls.map(call=>call.method),task:v.viewState.task,inflight:v._confirmCalculationInFlight?.size||0}));
+""")
+    assert len(result['before']) == 1
+    assert result['calls'] == [
+        'overseas_costing.api.workbench.get_batches',
+        'overseas_costing.api.writeback.confirm_calculation_result',
+    ]
+    assert result['task'] == 'erp'
+    assert result['inflight'] == 0
+
+
+def test_failed_confirmation_releases_inflight_guard_for_retry():
+    result = run_js("""
+global.frappe={show_alert:()=>{}};
+const v=makeView('cost'),calls=[];
+const batch={name:'B',batch_no:'B-NO',current_version:'V1',status:'Calculated',review_state:'ready'};
+v.batches=[batch];v.findBatch=()=>batch;v.drawerBatchName='B';
+v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};v.detailState={batchName:'B',tab:'overview',header:batch,requestId:3};
+v.recordUsage=()=>{};v.showError=e=>{v.errors=(v.errors||0)+1};
+v.call=async method=>{calls.push(method);throw new Error('分类失败')};
+await v.confirmCalculationResult('B');await v.confirmCalculationResult('B');
+console.log(JSON.stringify({calls,errors:v.errors,inflight:v._confirmCalculationInFlight?.size||0}));
+""")
+    assert result['calls'] == [
+        'overseas_costing.api.workbench.get_batches',
+        'overseas_costing.api.workbench.get_batches',
+    ]
+    assert result['errors'] == 2
+    assert result['inflight'] == 0
+
+
+def test_authoritative_apply_rechecks_navigation_after_list_reload():
+    result = run_js("""
+const v=makeView('cost'),replacements=[],renders=[];
+const batch={name:'B',review_state:'ready'};const processing={name:'B',review_state:'processing'};
+v.batches=[batch];v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};
+v.detailState={batchName:'B',tab:'overview',header:batch,requestId:5};
+v.replaceViewState=values=>{replacements.push(values);v.viewState={...v.viewState,...values}};
+v.renderDetailShell=()=>renders.push('render');v.switchDetailTab=async()=>renders.push('tab');
+let release;v.loadBatches=()=>new Promise(resolve=>{release=resolve});
+const context=v.captureReviewNavigationContext('B');
+const running=v.applyAuthoritativeReviewClassification('B',{task:'pending',batch:processing},context);
+await new Promise(resolve=>setImmediate(resolve));
+v.viewState.task='erp';v.detailState.header={name:'B',marker:'new-navigation'};
+release();const applied=await running;
+console.log(JSON.stringify({applied,task:v.viewState.task,header:v.detailState.header,renders,replacements}));
+""")
+    assert result['applied'] is False
+    assert result['task'] == 'erp'
+    assert result['header'] == {'name': 'B', 'marker': 'new-navigation'}
+    assert result['renders'] == []
+
+
+def test_confirm_success_after_navigation_does_not_overwrite_new_view():
+    result = run_js("""
+const alerts=[];global.frappe={show_alert:value=>alerts.push(value)};
+const v=makeView('cost'),calls=[],replacements=[],usage=[];
+const batch={name:'B',batch_no:'B-NO',current_version:'V1',status:'Calculated',review_state:'ready'};
+v.batches=[batch];v.findBatch=()=>batch;v.drawerBatchName='B';
+v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};v.detailState={batchName:'B',tab:'overview',header:batch,requestId:1};
+v.replaceViewState=values=>{replacements.push(values);v.viewState={...v.viewState,...values}};v.loadBatches=async()=>{};
+v.recordUsage=(action,payload)=>usage.push({action,status:payload.status||'Success'});v.showError=e=>{throw e};
+let releaseConfirm;v.call=async(method,args)=>{calls.push(method);
+ if(method.endsWith('get_batches'))return {ok:true,items:[batch],total:1,page:1,page_length:100};
+ if(method.endsWith('confirm_calculation_result'))return await new Promise(resolve=>{releaseConfirm=resolve});
+ throw new Error(method)};
+const running=v.confirmCalculationResult('B');await new Promise(resolve=>setImmediate(resolve));
+v.viewState={...v.viewState,task:'pending',batch:'OTHER'};v.detailState={...v.detailState,batchName:'OTHER',requestId:2};
+releaseConfirm({ok:true,confirmed:true,message:'服务端已确认'});await running;
+console.log(JSON.stringify({task:v.viewState.task,batch:v.detailState.batchName,replacements,alerts,usage,calls}));
+""")
+    assert result['task'] == 'pending'
+    assert result['batch'] == 'OTHER'
+    assert result['replacements'] == []
+    assert any('已确认' in alert['message'] for alert in result['alerts'])
+    assert result['usage'] == [{'action': 'CONFIRM_RESULT', 'status': 'Success'}]
+
+
+def test_authoritative_classification_falls_through_to_erp_then_confirmed_scope():
+    result = run_js("""
+const v=makeView('cost'),calls=[];const batch={name:'B',batch_no:'B-NO',review_state:'confirmed',confirm_status:'Confirmed'};
+v.batches=[batch];v.findBatch=()=>batch;v.detailState={header:batch};
+let mode='erp';v.call=async(method,args)=>{const filters=JSON.parse(args.filters_json);calls.push({task:args.task,review_status:filters.review_status});
+ if(mode==='erp'&&args.task==='erp')return {ok:true,items:[batch],total:1,page:1};
+ if(mode==='confirmed'&&args.task==='cost'&&filters.review_status==='confirmed')return {ok:true,items:[batch],total:1,page:1};
+ return {ok:true,items:[],total:0,page:1}};
+const erp=await v.getAuthoritativeReviewClassification('B');const erpCalls=calls.splice(0);
+mode='confirmed';const confirmed=await v.getAuthoritativeReviewClassification('B');
+console.log(JSON.stringify({erp,erpCalls,confirmed,confirmedCalls:calls}));
+""")
+    assert result['erp']['task'] == 'erp'
+    assert [call['task'] for call in result['erpCalls']] == ['cost', 'pending', 'erp']
+    assert result['confirmed']['task'] == 'confirmed'
+    assert [call['task'] for call in result['confirmedCalls']] == ['cost', 'pending', 'erp', 'cost']
+    assert result['confirmedCalls'][-1]['review_status'] == 'confirmed'
+
+
+def test_unknown_authoritative_classification_only_refreshes_current_detail():
+    result = run_js("""
+const v=makeView('cost'),replacements=[];const batch={name:'B',batch_no:'B-NO',review_state:'ready'};
+v.batches=[batch];v.findBatch=()=>batch;v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview',page:1};
+v.detailState={batchName:'B',tab:'overview',header:batch,requestId:4};
+v.call=async()=>({ok:true,items:[],total:0,page:1});v.replaceViewState=values=>replacements.push(values);
+v.refreshDetailSummary=async()=>{v.refreshed=(v.refreshed||0)+1};v.loadBatches=async()=>{v.loaded=(v.loaded||0)+1};
+const found=await v.getAuthoritativeReviewClassification('B');await v.refreshRecalculatedDetailClassification('B');
+console.log(JSON.stringify({found,task:v.viewState.task,replacements,refreshed:v.refreshed||0,loaded:v.loaded||0}));
+""")
+    assert result['found']['task'] == 'unknown'
+    assert result['task'] == 'cost'
+    assert result['replacements'] == []
+    assert result['refreshed'] == 1
+    assert result['loaded'] == 0

@@ -99,25 +99,31 @@
   async getAuthoritativeReviewClassification(batchName) {
     const current = this.findBatch(batchName) || this.detailState?.header || {};
     const keyword = current.batch_no || current.source_approval_no || current.customs_no || current.waybill_no || batchName;
-    const filtersJson = JSON.stringify({ keyword, review_status: "pending", include_history: 1 });
     const pageLength = 100;
-    for (const task of ["cost", "pending"]) {
+    const scopes = [
+      { task: "cost", reviewStatus: "pending", classification: "cost" },
+      { task: "pending", reviewStatus: "pending", classification: "pending" },
+      { task: "erp", reviewStatus: "pending", classification: "erp" },
+      { task: "cost", reviewStatus: "confirmed", classification: "confirmed" },
+    ];
+    for (const scope of scopes) {
+      const filtersJson = JSON.stringify({ keyword, review_status: scope.reviewStatus, include_history: 1 });
       for (let page = 1; ; page += 1) {
         const result = await this.call("overseas_costing.api.workbench.get_batches", {
           filters_json: filtersJson,
-          task,
+          task: scope.task,
           page,
           page_length: pageLength,
         });
         if (!result?.ok) throw new Error(result?.message || "试算后工作台分类刷新失败");
         const items = result.items || [];
         const batch = items.find((row) => row.name === batchName);
-        if (batch) return { task, batch };
+        if (batch) return { task: scope.classification, reviewStatus: scope.reviewStatus, batch };
         const total = Number(result.total || 0);
         if (!items.length || (total > 0 ? page * pageLength >= total : items.length < pageLength)) break;
       }
     }
-    return { task: "pending", batch: null };
+    return { task: "unknown", reviewStatus: "", batch: null };
   }
 
   captureReviewNavigationContext(batchName) {
@@ -146,9 +152,30 @@
     return true;
   }
 
+  reviewNavigationTargetMatches(target) {
+    if (!target || this.viewState?.task !== target.task) return false;
+    if ((this.filters?.review_status || "pending") !== target.reviewStatus) return false;
+    const screen = this.viewState?.screen || this.$root?.attr?.("data-screen") || "workbench";
+    if (screen !== target.screen) return false;
+    if (target.screen === "detail") {
+      if (this.detailState?.batchName !== target.batchName) return false;
+      if (this.viewState?.batch !== target.batchName) return false;
+      if ((this.detailState?.tab || this.viewState?.tab || "overview") !== target.tab) return false;
+    }
+    return true;
+  }
+
   async applyAuthoritativeReviewClassification(batchName, authoritative, context, options = {}) {
     if (context && !this.reviewNavigationContextMatches(context)) return false;
-    const task = authoritative?.task === "cost" && authoritative?.batch?.review_state === "ready" ? "cost" : "pending";
+    if (!authoritative || authoritative.task === "unknown") return false;
+    let task = "pending";
+    let reviewStatus = "pending";
+    if (authoritative.task === "cost" && authoritative.batch?.review_state === "ready") task = "cost";
+    else if (authoritative.task === "erp") task = "erp";
+    else if (authoritative.task === "confirmed") {
+      task = "cost";
+      reviewStatus = "confirmed";
+    }
     const keepDetailOpen = context?.screen === "detail" && this.detailState?.batchName === batchName;
     const tab = this.detailState?.tab || this.viewState?.tab || "overview";
     if (authoritative?.batch && keepDetailOpen) {
@@ -156,12 +183,12 @@
     }
     this.viewState.task = task;
     this.viewState.page = 1;
-    this.filters.review_status = "pending";
+    this.filters.review_status = reviewStatus;
     this.filters.review_warning = "";
     this.filters.issue = "";
     this.replaceViewState({
       task,
-      review_status: "pending",
+      review_status: reviewStatus,
       review_warning: "",
       issue: "",
       page: 1,
@@ -169,7 +196,19 @@
       batch: keepDetailOpen ? batchName : "",
       tab: keepDetailOpen ? tab : "overview",
     });
-    if (options.reload !== false) await this.loadBatches();
+    const target = {
+      task,
+      reviewStatus,
+      screen: keepDetailOpen ? "detail" : "workbench",
+      batchName: keepDetailOpen ? batchName : "",
+      tab: keepDetailOpen ? tab : "overview",
+    };
+    if (options.reload !== false) {
+      await this.loadBatches();
+      if (!this.reviewNavigationTargetMatches(target)) return false;
+      // loadBatches 会按权威列表重开详情；不再用 await 前的分类快照二次覆盖。
+      return true;
+    }
     if (authoritative?.batch && keepDetailOpen && this.detailState?.batchName === batchName) {
       const merged = { ...(this.detailState.header || {}), ...authoritative.batch };
       const index = this.batches.findIndex((row) => row.name === batchName);
@@ -186,6 +225,11 @@
   async refreshRecalculatedDetailClassification(batchName) {
     const context = this.captureReviewNavigationContext(batchName);
     const authoritative = await this.getAuthoritativeReviewClassification(batchName);
+    if (authoritative.task === "unknown") {
+      if (!this.reviewNavigationContextMatches(context)) return false;
+      await this.refreshDetailSummary();
+      return this.reviewNavigationContextMatches(context);
+    }
     return this.applyAuthoritativeReviewClassification(batchName, authoritative, context);
   }
 
@@ -499,6 +543,22 @@
     }
     const batch = this.findBatch(batchName || this.drawerBatchName);
     if (!batch) return;
+    const operationKey = `${batch.name}::${batch.current_version || ""}`;
+    if (!(this._confirmCalculationInFlight instanceof Map)) this._confirmCalculationInFlight = new Map();
+    const existing = this._confirmCalculationInFlight.get(operationKey);
+    if (existing) return existing;
+    const operation = Promise.resolve().then(() => this.confirmCalculationResultOnce(batch));
+    this._confirmCalculationInFlight.set(operationKey, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this._confirmCalculationInFlight.get(operationKey) === operation) {
+        this._confirmCalculationInFlight.delete(operationKey);
+      }
+    }
+  }
+
+  async confirmCalculationResultOnce(batch) {
     const context = this.captureReviewNavigationContext(batch.name);
     if (batch.review_state !== "ready") {
       await this.applyAuthoritativeReviewClassification(
@@ -513,9 +573,17 @@
     try {
       const authoritative = await this.getAuthoritativeReviewClassification(batch.name);
       if (!this.reviewNavigationContextMatches(context)) return;
+      if (authoritative.task === "unknown") {
+        if (this.detailState?.batchName === batch.name && this.viewState?.screen === "detail") {
+          await this.refreshDetailSummary();
+        }
+        this.showPendingFeature("暂时无法确认批次的服务端分类，已保留当前页面，请刷新后重试。");
+        return;
+      }
       if (authoritative.task !== "cost" || authoritative.batch?.review_state !== "ready") {
         await this.applyAuthoritativeReviewClassification(batch.name, authoritative, context);
-        this.showPendingFeature("批次权威状态已变化，已返回待处理，请按服务端提示处理。");
+        const destination = authoritative.task === "pending" ? "待处理" : authoritative.task === "erp" ? "ERP 队列" : "已确认记录";
+        this.showPendingFeature(`批次权威状态已变化，已切换到${destination}。`);
         return;
       }
       Object.assign(batch, authoritative.batch);
@@ -528,6 +596,13 @@
         },
         true
       );
+      if (!this.reviewNavigationContextMatches(context)) {
+        if (result.ok && result.confirmed !== false) {
+          this.recordUsage("CONFIRM_RESULT", { batch, remark: "人工校验计算结果通过（页面已切换）" });
+          frappe.show_alert({ message: `${result.message || "计算结果已确认"}，当前页面未切换。`, indicator: "green" });
+        }
+        return;
+      }
       if (!result.ok || result.confirmed === false) {
         this.showErpFlowBlock(result, "校验未通过");
         return;
