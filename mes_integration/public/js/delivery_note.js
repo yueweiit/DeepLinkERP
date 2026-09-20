@@ -1,9 +1,18 @@
+(function() {
+"use strict";
+
 function load_mes_integration_enabled(frm) {
 	if (!frm || !frm.doc || !frm.doc.company) {
 		return Promise.resolve(false);
 	}
-	return frappe.db.get_value("Company", frm.doc.company, "custom_enable_mes_integration").then(function(r) {
+	const company = frm.doc.company;
+	return frappe.db.get_value("Company", company, "custom_enable_mes_integration").then(function(r) {
+		if (!frm.doc || frm.doc.company !== company) {
+			return false;
+		}
 		return cint(r && r.message ? r.message.custom_enable_mes_integration : 0) === 1;
+	}).catch(function() {
+		return false;
 	});
 }
 
@@ -62,3 +71,5 @@ function get_delivery_readiness_color(status) {
 		"Delivered": "green",
 	}[status] || "gray";
 }
+
+})();

@@ -1,3 +1,6 @@
+(function() {
+"use strict";
+
 frappe.ui.form.on("Stock Entry", {
 	onload: function(frm) {
 		load_mes_integration_enabled(frm).then(function() {
@@ -14,6 +17,7 @@ frappe.ui.form.on("Stock Entry", {
 	company: function(frm) {
 		frm._mes_integration_company = null;
 		frm._mes_integration_enabled = false;
+		frm._mes_integration_enabled_promise = null;
 		load_mes_integration_enabled(frm).then(function() {
 			refresh_mes_stock_entry_ui(frm);
 		});
@@ -74,20 +78,49 @@ frappe.ui.form.on("Stock Entry", {
 
 function load_mes_integration_enabled(frm) {
 	if (!frm || !frm.doc || !frm.doc.company) {
-		frm._mes_integration_enabled = false;
+		if (frm) {
+			frm._mes_integration_company = null;
+			frm._mes_integration_enabled = false;
+			frm._mes_integration_enabled_promise = null;
+		}
 		return Promise.resolve(false);
 	}
 
 	if (frm._mes_integration_company === frm.doc.company) {
+		if (frm._mes_integration_enabled_promise) {
+			return frm._mes_integration_enabled_promise;
+		}
 		return Promise.resolve(Boolean(frm._mes_integration_enabled));
 	}
 
-	frm._mes_integration_company = frm.doc.company;
-	return frappe.db.get_value("Company", frm.doc.company, "custom_enable_mes_integration").then(function(r) {
-		const value = r && r.message ? r.message.custom_enable_mes_integration : 0;
-		frm._mes_integration_enabled = cint(value) === 1;
-		return frm._mes_integration_enabled;
-	});
+	const company = frm.doc.company;
+	frm._mes_integration_company = company;
+	frm._mes_integration_enabled = false;
+
+	const enabledPromise = frappe.db
+		.get_value("Company", company, "custom_enable_mes_integration")
+		.then(function(r) {
+			const value = r && r.message ? r.message.custom_enable_mes_integration : 0;
+			const enabled = cint(value) === 1;
+			if (frm.doc && frm.doc.company === company && frm._mes_integration_company === company) {
+				frm._mes_integration_enabled = enabled;
+			}
+			return enabled;
+		})
+		.catch(function() {
+			if (frm.doc && frm.doc.company === company && frm._mes_integration_company === company) {
+				frm._mes_integration_enabled = false;
+			}
+			return false;
+		})
+		.finally(function() {
+			if (frm._mes_integration_enabled_promise === enabledPromise) {
+				frm._mes_integration_enabled_promise = null;
+			}
+		});
+
+	frm._mes_integration_enabled_promise = enabledPromise;
+	return enabledPromise;
 }
 
 function is_mes_integration_enabled(frm) {
@@ -868,3 +901,5 @@ function open_material_request_mapper(frm) {
 		},
 	});
 }
+
+})();
