@@ -165,6 +165,13 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
     components = list(fee_components or [])
     snapshot = _dict(version.get("summary_snapshot_json"))
+    cost_review_started = bool(
+        snapshot.get("calculation_schema") == 2
+        and snapshot.get("input_hash")
+        and isinstance(snapshot.get("comprehensive_cost"), dict)
+        and version.get("calculated_at")
+        and snapshot.get("calculated_at")
+    )
     trial_review = _dict(snapshot.get("ai_cost_trial"))
     calculation_fees = composed
     if trial_review.get("is_temporary"):
@@ -271,6 +278,7 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
         action = "recalculate"
     return {"review_state": state, "review_blockers": list(blockers.values()),
             "review_warnings": list(warnings.values()), "result_is_current": result_current,
+            "cost_review_started": cost_review_started,
             "issue_codes": [code for code in ISSUE_ORDER if code in issues], "primary_issue": primary,
             "primary_action": action, "reviewed_at": version.get("reviewed_at") or version.get("confirmed_at") if confirmed else None,
             "reviewed_version": version.get("name") if confirmed else None,

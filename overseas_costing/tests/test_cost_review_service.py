@@ -275,6 +275,17 @@ def test_changed_inputs_report_staleness_without_claiming_saved_result_is_corrup
     assert codes(evaluate(context)) == {"RESULT_STALE"}
 
 
+def test_saved_trial_starts_cost_review_even_after_input_change():
+    context = saved_context()
+    context["items"][0]["goods_value"] = 110.0
+
+    result = evaluate(context)
+
+    assert result["cost_review_started"] is True
+    assert result["review_state"] == "processing"
+    assert result["result_is_current"] is False
+
+
 def test_confirmed_sku_component_is_part_of_saved_result_fingerprint():
     context = saved_context()
     tax = next(row for row in context["fees"] if row.get("logical_fee_key") == "import_tax")

@@ -156,6 +156,17 @@ def test_erp_task_only_keeps_pending_or_failed_writeback() -> None:
     assert [row["name"] for row in filter_batches_for_task(rows, "erp")] == ["PENDING", "FAILED", "READY"]
 
 
+def test_stale_saved_trial_stays_in_cost_review_not_pending() -> None:
+    row = {
+        "name": "SAVED-STALE",
+        "review_state": "processing",
+        "cost_review_started": True,
+    }
+
+    assert filter_batches_for_task([row], "pending") == []
+    assert filter_batches_for_task([row], "cost", "pending") == [row]
+
+
 def test_logistics_group_keeps_two_fixed_columns() -> None:
     fields = [column["fieldname"] for column in select_item_columns(EXCEL_COLUMNS, "logistics")]
     assert fields[:2] == ["material_code", "product_name"]

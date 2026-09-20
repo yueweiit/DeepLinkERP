@@ -162,10 +162,19 @@ def classify_batch(batch: dict, stats: dict) -> dict:
 
 def filter_batches_for_task(rows: list[dict], task: str, review_status: str = "pending") -> list[dict]:
     if task == "pending":
-        return [row for row in rows if row.get("review_state") == "processing"]
+        return [
+            row for row in rows
+            if row.get("review_state") == "processing"
+            and not row.get("cost_review_started")
+        ]
     if task == "cost":
-        state = "confirmed" if str(review_status).lower() == "confirmed" else "ready"
-        return [row for row in rows if row.get("review_state") == state]
+        if str(review_status).lower() == "confirmed":
+            return [row for row in rows if row.get("review_state") == "confirmed"]
+        return [
+            row for row in rows
+            if row.get("cost_review_started")
+            and row.get("review_state") != "confirmed"
+        ]
     if task == "erp":
         return [
             row
