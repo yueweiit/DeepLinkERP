@@ -228,7 +228,7 @@ console.log(JSON.stringify({calls,rows:v.batches,counts:v.exceptionCounts,review
     ('batch', 'expected_label'),
     [
         ({'status': 'Draft', 'summary_snapshot': {}}, '开始试算'),
-        ({'status': 'Dirty', 'calculated_at': '2026-09-12 15:00:00', 'result_is_current': False}, '重新计算'),
+        ({'status': 'Dirty', 'calculated_at': '2026-09-12 15:00:00', 'result_is_current': False}, '重新试算'),
     ],
 )
 def test_detail_uses_one_header_calculation_entry_with_contextual_label(batch, expected_label):
@@ -248,6 +248,9 @@ console.log(JSON.stringify({{shell,overview}}));
 """)
     assert expected_label in result['shell']
     assert result['shell'].count('data-primary-action="recalculate"') == 1
+    header, status = result['shell'].split('<section class="ocw-detail-statusarea">', 1)
+    assert 'data-primary-action="recalculate"' not in header
+    assert 'data-primary-action="recalculate"' in status
     assert 'data-action="detail-recalculate"' not in result['overview']
 
 
@@ -290,7 +293,6 @@ def test_detail_and_workspace_sources_have_no_legacy_trial_handlers():
 @pytest.mark.parametrize(
     ('task', 'batch'),
     [
-        ('cost', {'status': 'Calculated', 'review_state': 'ready'}),
         ('erp', {'status': 'Confirmed', 'confirm_status': 'Confirmed', 'is_locked': 1}),
         ('pending', {'status': 'Confirmed'}),
         ('pending', {'status': 'Calculated', 'is_locked': 1}),
@@ -309,6 +311,21 @@ v.renderDetailReviewBlockers=()=>'';v.renderDetailShell();
 console.log(JSON.stringify(v.html["[data-area='detail-screen']"]));
 """)
     assert 'data-primary-action="recalculate"' not in result
+
+
+def test_cost_review_keeps_one_retrial_entry():
+    result = run_js("""
+const v=makeView('cost');const batch={name:'B',current_version:'V',status:'Calculated',review_state:'ready',calculated_at:'2026-09-20'};
+v.viewState={task:'cost',screen:'detail',batch:'B',tab:'overview'};
+v.detailState={batchName:'B',tab:'overview',header:batch};v.batches=[batch];v.getDetailBatch=()=>batch;
+v.cleanupSkuScrollControls=()=>{};v.cleanupMaterialGridScrollControls=()=>{};
+v.sourceStatusLabel=()=>'已齐备';v.erpWritebackStatusInfo=()=>({label:'未开始',state:'neutral'});
+v.batchStatusInfo=()=>({label:'已试算',needsRecalculate:false});v.renderDetailErpAction=()=>'';
+v.issueLabel=x=>x;v.transportLabel=x=>x;v.formatValue=x=>String(x??'');
+v.renderDetailShell();console.log(JSON.stringify(v.html["[data-area='detail-screen']"]));
+""")
+    assert result.count('data-primary-action="recalculate"') == 1
+    assert '重新试算' in result
 
 
 def test_gap_rows_keep_supplement_actions_but_point_to_the_header_calculation_entry():
@@ -385,9 +402,28 @@ console.log(JSON.stringify({task:v.viewState.task,header:v.detailState.header,ca
 def test_processing_detail_renders_authoritative_review_blockers():
     html = run_js("""
 const v=makeView('pending');
-console.log(JSON.stringify(v.renderDetailReviewBlockers({review_blockers:[{code:'MISSING_PRICE',message:'还有 1 行采购单价待补'}]})));
+console.log(JSON.stringify(v.renderDetailReviewBlockers({review_blockers:[
+ {code:'MISSING_PRICE',message:'还有 1 行采购单价待补'},
+ {code:'MISSING_EVIDENCE',message:'还有 2 项凭证待补'},
+ {code:'STALE',message:'费用已变化，请重新试算'}
+]})));
 """)
     assert '还有 1 行采购单价待补' in html
+    assert 'ocw-detail-review-strip' in html
+    assert 'ocw-erp-block-dialog' not in html
+    assert '<summary>更多 2</summary>' in html
+    assert '还有 2 项凭证待补' in html
+
+
+def test_cost_review_renders_blocker_strip_and_no_blocker_keeps_single_status_line():
+    result = run_js("""
+const v=makeView('cost');
+const withBlocker=v.renderDetailReviewBlockers({review_blockers:[{code:'STALE',message:'费用已变化，请重新试算'}]});
+const clear=v.renderDetailReviewBlockers({review_blockers:[]});
+console.log(JSON.stringify({withBlocker,clear}));
+""")
+    assert '费用已变化，请重新试算' in result['withBlocker']
+    assert result['clear'] == ''
 
 
 def test_calculation_confirmation_is_hidden_and_blocked_outside_cost_task():
