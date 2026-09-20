@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Canonicalize Saved Cost Inputs
+### Task 1: Canonicalize Saved Material and Fee Inputs
 
 **Files:**
 - Modify: overseas_costing/services/cost_preview_service.py
@@ -19,13 +19,26 @@
 
 - [ ] **Step 1: Add a failing production-shaped fingerprint regression**
 
-Add a test that composes a persisted international express fee together with virtual default fees, saves the result through build_saved_cost_data, and immediately evaluates review readiness using the same source context.
+Add a test with a separate-adoption international logistics source embedded in item extra_json. Project the source context before saving, persist the item update returned by build_saved_cost_data, and immediately evaluate review readiness using the same source context.
 
 ~~~python
 def test_saved_result_with_persisted_and_virtual_fees_is_immediately_current():
     context = saved_context()
-    context["batch"]["transport_mode"] = "EXPRESS"
-    context["fees"] = production_express_rules()
+    source_context = {
+        "root_kind": "logistics",
+        "available": True,
+        "approved": False,
+        "invalid": False,
+        "separate_adoption": True,
+        "fingerprint": "source-fingerprint",
+        "source_snapshot": "source-snapshot",
+        "freight": {"selected": False},
+        "packing": {},
+    }
+    context["source_context"] = source_context
+    context["items"][0]["extra_json"] = json.dumps(
+        {"effective_logistics_source": source_context}
+    )
     save_result(context)
 
     result = evaluate(context)
@@ -43,39 +56,41 @@ Run:
 python3 -m pytest -q overseas_costing/tests/test_cost_review_service.py::test_saved_result_with_persisted_and_virtual_fees_is_immediately_current
 ~~~
 
-Expected: FAIL because the snapshot input hash differs from the readiness hash.
+Expected: FAIL with RESULT_STALE because saving canonicalizes extra_json to a persisted string while readiness currently hashes the equivalent projected object.
 
-- [ ] **Step 3: Extract one canonical fee projection**
+- [ ] **Step 3: Extract one canonical saved-input projection**
 
 Add this public pure helper next to cost_input_hash:
 
 ~~~python
-def normalize_saved_cost_fees(items, fees, fx_context, transport_mode):
+def normalize_saved_cost_inputs(items, fees, fx_context, transport_mode):
     mode = fee_service.resolve_transport_mode(transport_mode)
+    normalized_items = [persist_calculated_item(row) for row in items]
     decorated = fee_service._decorate_historical_rules(fees, mode)
     selected = select_fees(
         decorated,
         fx_context,
-        source_context=source_context_from_items(items),
+        source_context=source_context_from_items(normalized_items),
     )
-    return supplement_legacy_fees(items, selected)
+    normalized_fees = supplement_legacy_fees(normalized_items, selected)
+    return normalized_items, normalized_fees
 ~~~
 
-Use normalize_saved_cost_fees inside build_saved_cost_data instead of repeating decorate, select, and supplement inline.
+Use normalize_saved_cost_inputs inside build_saved_cost_data instead of separately pruning item metadata and repeating decorate, select, and supplement inline.
 
 - [ ] **Step 4: Make readiness hash exactly what the saver hashes**
 
-After applying any saved AI trial projection, call normalize_saved_cost_fees and use that list for current_hash. Keep build_saved_cost_data as the authoritative expected-result calculator.
+After applying any saved AI trial projection, call normalize_saved_cost_inputs and use both returned lists for current_hash. Keep build_saved_cost_data as the authoritative expected-result calculator.
 
 ~~~python
-saved_fees = cost_preview_service.normalize_saved_cost_fees(
+saved_items, saved_fees = cost_preview_service.normalize_saved_cost_inputs(
     inputs,
     calculation_fees,
     fx,
     mode,
 )
 current_hash = cost_preview_service.cost_input_hash(
-    inputs,
+    saved_items,
     saved_fees,
     fx,
     mode,
