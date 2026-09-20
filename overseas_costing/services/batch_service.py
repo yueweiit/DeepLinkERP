@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import json
 
@@ -2364,7 +2365,47 @@ def _round_payload_amount(value, digits: int = 6):
     return round(number, digits) if number else 0
 
 
+def _finite_decimal(value) -> Decimal | None:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _positive_decimal(value) -> Decimal | None:
+    number = _finite_decimal(value)
+    return number if number is not None and number > 0 else None
+
+
+def _effective_purchase_item(item: dict) -> dict:
+    """Project a usable purchase price without changing the stored source row."""
+
+    projected = _effective_calculated_item(item)
+    raw_price = projected.get("unit_price")
+    parsed_price = _finite_decimal(raw_price)
+    purchase_currency = str(projected.get("purchase_currency") or "").strip()
+    if parsed_price is not None and parsed_price > 0 and purchase_currency:
+        return projected
+    # A zero/blank source price is a placeholder when the same row already has
+    # an RMB total, purchase quantity and purchase unit. Keep full Decimal
+    # precision here; two-decimal rounding belongs only to the UI projection.
+    if not _is_blank(raw_price) and (parsed_price is None or parsed_price < 0):
+        return projected
+    goods_value = _positive_decimal(projected.get("goods_value"))
+    quantity = _positive_decimal(projected.get("quantity"))
+    purchase_uom = str(projected.get("purchase_uom") or projected.get("unit") or "").strip()
+    if goods_value is None or quantity is None or not purchase_uom:
+        return projected
+    return {
+        **projected,
+        "unit_price": goods_value / quantity,
+        "purchase_currency": "RMB",
+    }
+
+
 def _build_cost_formula(item: dict) -> dict:
+    item = _effective_purchase_item(item)
     quantity = _as_float(item.get("actual_shipped_qty")) or _as_float(item.get("quantity"))
     total_cost = _as_float(item.get("total_cost_rmb"))
     unit_price = _as_float(item.get("unit_price"))
@@ -2513,7 +2554,7 @@ def _build_writeback_item_quality(items: list[dict]) -> dict:
     issue_examples = []
 
     for index, item in enumerate(items, start=1):
-        item = _effective_calculated_item(item)
+        item = _effective_purchase_item(item)
         item_missing_labels = []
         item_missing_fieldnames = []
         for fieldname, label, rule, _source in WRITEBACK_REQUIRED_ITEM_FIELDS:
@@ -2908,7 +2949,7 @@ def _build_erp_push_payload(
     supplier = _resolve_payload_supplier(items)
     payload_items = []
     for item in items:
-        item = _effective_calculated_item(item)
+        item = _effective_purchase_item(item)
         formula = _build_cost_formula(item)
         payload_items.append(
             {
@@ -2994,6 +3035,7 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
         "status",
         "confirm_status",
         "current_version",
+        "transport_mode",
         "item_count",
         "source_approval_status",
         "estimated_total_cost_rmb",
@@ -3020,28 +3062,23 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
             resolved_version_name,
             [
                 "name",
+                "batch",
                 "version_code",
                 "version_type",
                 "status",
+                "fx_usd_to_rmb",
+                "fx_rmb_to_mxn",
                 "calculated_at",
                 "rule_snapshot_json",
                 "summary_snapshot_json",
             ],
             as_dict=True,
         ) or {"name": resolved_version_name}
+        from overseas_costing.services import fee_service
         rules = frappe.get_all(
             "Overseas Cost Allocation Rule",
             filters={"batch": batch_doc_name, "version": resolved_version_name},
-            fields=[
-                "name",
-                "rule_code",
-                "expense_category",
-                "allocation_basis",
-                "basis_field",
-                "currency",
-                "amount",
-                "remark", "amount_status", "logical_fee_key", "is_enabled", "is_active", "is_final", "source_binding_id", "source_snapshot", "covered_scopes",
-            ],
+            fields=fee_service._rule_fields(),
             order_by="priority_no asc, modified asc",
             limit_page_length=1000,
         )
@@ -3055,13 +3092,44 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
     item_filters = {"batch": batch_doc_name, "is_excluded": 0}
     if resolved_version_name:
         item_filters["version"] = resolved_version_name
+    from overseas_costing.services import cost_preview_service, cost_review_service
+    item_fields = list(dict.fromkeys([
+        *ERP_PAYLOAD_ITEM_FIELDS,
+        *cost_preview_service.COST_INPUT_FIELDS,
+        *cost_review_service.SAVED_ITEM_OUTPUT_FIELDS,
+    ]))
     items = frappe.get_all(
         "Overseas Cost Item",
         filters=item_filters,
-        fields=ERP_PAYLOAD_ITEM_FIELDS,
+        fields=item_fields,
         order_by="row_no asc",
         limit_page_length=10000,
     )
+    evidence = []
+    fee_components = []
+    if resolved_version_name:
+        filters = {"batch": batch_doc_name, "version": resolved_version_name}
+        evidence = frappe.get_all(
+            "Overseas Cost Fee Evidence",
+            filters=filters,
+            fields=["batch", "version", "fee_rule", "evidence_role", "validation_status"],
+            limit_page_length=0,
+        )
+        fee_components = frappe.get_all(
+            "Overseas Cost Fee SKU Component",
+            filters={**filters, "status": "CONFIRMED", "is_active": 1},
+            fields=[
+                "name", "batch", "version", "fee_rule", "logical_fee_key", "evidence", "attachment",
+                "item", "stable_line_key", "component_type", "tax_code", "hs_code", "currency",
+                "original_amount", "amount_rmb", "exchange_rate", "allocation_basis",
+                "source_evidence_json", "accounting_role", "cost_effect", "reverses_component",
+                "status", "is_active",
+            ],
+            limit_page_length=0,
+        )
+    _attach_batch_source_status([batch])
+    from overseas_costing.services.effective_source_values import batch_source_context
+    source_context = batch_source_context(batch_doc_name, resolved_version_name)
     return {
         "ok": True,
         "batch_doc_name": batch_doc_name,
@@ -3070,7 +3138,38 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
         "version": version,
         "rules": rules,
         "items": items,
+        "evidence": evidence,
+        "fee_components": fee_components,
+        "source_context": source_context,
     }
+
+
+def _build_authoritative_review_readiness(context: dict) -> dict:
+    """Use the same canonical evaluator that classifies the cost-review queue."""
+
+    from overseas_costing.services import cost_review_service
+
+    return cost_review_service.evaluate_review_readiness(
+        batch=context["batch"],
+        version=context["version"],
+        items=context["items"],
+        fees=context["rules"],
+        evidence=context.get("evidence") or [],
+        fee_components=context.get("fee_components") or [],
+        source_context=context.get("source_context") or {},
+    )
+
+
+def _lock_confirmation_records(batch_doc_name: str, version_name: str | None) -> str | None:
+    """Serialize the readiness check and confirmation writes in one transaction."""
+
+    sql = getattr(getattr(frappe, "db", None), "sql", None)
+    if callable(sql):
+        sql("select name from `tabOverseas Cost Batch` where name=%s for update", (batch_doc_name,))
+    resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    if resolved_version_name and callable(sql):
+        sql("select name from `tabOverseas Cost Version` where name=%s for update", (resolved_version_name,))
+    return resolved_version_name
 
 
 def get_audit_logs(batch_name: str, version_name: str | None = None, limit: int | str = 80) -> dict:
@@ -3198,27 +3297,37 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
             "message": "当前未连接 Frappe，不能真实确认计算结果。",
         }
 
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {"ok": False, "confirmed": False, "message": f"未找到批次：{batch_name}"}
+
     from overseas_costing.services.logistics_settlement.runtime import lock_for_final_action, installed
-    settlement_issues = lock_for_final_action(_resolve_batch_name(batch_name) or batch_name, version_name) if installed() else []
+    settlement_issues = lock_for_final_action(batch_doc_name, version_name) if installed() else []
     if settlement_issues:
         return {'ok': False, 'confirmed': False, 'blocking_reasons': settlement_issues, 'message': '；'.join(settlement_issues)}
 
-    context = _load_erp_push_context(batch_name, version_name)
+    locked_version_name = _lock_confirmation_records(batch_doc_name, version_name)
+    context = _load_erp_push_context(batch_doc_name, locked_version_name)
     if not context.get("ok"):
         return {**context, "confirmed": False}
 
-    readiness = _build_calculation_confirmation_readiness(
-        batch=context["batch"],
-        items=context["items"],
-        rules=context["rules"],
-        resolved_version_name=context["version_name"],
-    )
-    if not readiness["ready"]:
+    readiness = _build_authoritative_review_readiness(context)
+    if readiness.get("review_state") != "ready":
+        blocking_reasons = [
+            str(row.get("message") or row.get("code") or "").strip()
+            for row in readiness.get("review_blockers") or []
+            if str(row.get("message") or row.get("code") or "").strip()
+        ]
+        if readiness.get("review_state") == "confirmed" and not blocking_reasons:
+            blocking_reasons.append("当前计算结果已确认，无需重复确认。")
         return {
             "ok": False,
             "confirmed": False,
+            "ready": False,
             "batch_name": context["batch_doc_name"],
             "version_name": context["version_name"],
+            "blocking_reasons": blocking_reasons,
+            "message": "；".join(blocking_reasons) or "当前计算结果尚未进入成本核对。",
             **readiness,
         }
 
@@ -3260,9 +3369,11 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
     return {
         "ok": True,
         "confirmed": True,
+        "ready": True,
         "batch_name": context["batch_doc_name"],
         "version_name": context["version_name"],
         **readiness,
+        "review_state": "confirmed",
         "message": "计算结果已确认，可预览并组织 DeepLinkERP 推送报文。",
     }
 

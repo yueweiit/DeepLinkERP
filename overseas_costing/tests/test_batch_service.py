@@ -2,6 +2,7 @@
 
 from io import BytesIO
 import json
+from types import SimpleNamespace
 
 from openpyxl import load_workbook
 
@@ -716,6 +717,41 @@ def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
     assert result["checks"]["items_have_unit_price"] is True
 
 
+def test_writeback_quality_uses_derived_purchase_price_without_mutating_item() -> None:
+    item = {
+        "row_no": 1,
+        "material_code": "CW000214",
+        "product_name": "Dog tag",
+        "quantity": 1700,
+        "actual_shipped_qty": 1500,
+        "purchase_uom": "个",
+        "unit_price": 0,
+        "purchase_currency": "",
+        "goods_value": 2067,
+        "total_unit_rmb": 2.82,
+    }
+    original = dict(item)
+
+    result = _build_writeback_readiness(
+        batch={
+            "status": "Clean",
+            "confirm_status": "Confirmed",
+            "current_version": "VERSION-001",
+            "subsidiary_code": "MX01",
+            "item_count": 1,
+            "actual_total_cost_rmb": 4230,
+        },
+        resolved_version_name="VERSION-001",
+        items=[item],
+    )
+
+    assert result["checks"]["items_have_unit_price"] is True
+    assert result["checks"]["items_have_purchase_currency"] is True
+    assert result["item_issue_counts"]["unit_price"] == 0
+    assert result["item_issue_counts"]["purchase_currency"] == 0
+    assert item == original
+
+
 def test_build_writeback_readiness_blocks_estimated_fee_but_allows_confirmed_zero_fee() -> None:
     base = {
         "status": "Clean",
@@ -1275,6 +1311,288 @@ def test_build_erp_push_payload_contains_core_fields_and_expense_details() -> No
     clearance_tax = payload["items"][0]["expense_detail"]["clearance_and_tax"]
     assert clearance_tax["clearance_alloc_rmb"] == 2
     assert clearance_tax["tax_alloc_rmb"] == 1
+
+
+def test_build_erp_push_payload_uses_full_precision_derived_purchase_price_and_rmb() -> None:
+    item = {
+        "material_code": "CW000214",
+        "product_name": "Dog tag",
+        "quantity": 1700,
+        "actual_shipped_qty": 1500,
+        "purchase_uom": "个",
+        "unit_price": 0,
+        "purchase_currency": "",
+        "goods_value": 2067,
+        "total_cost_rmb": 4230,
+        "total_unit_rmb": 2.82,
+    }
+    original = dict(item)
+
+    payload = _build_erp_push_payload(
+        batch={"name": "BATCH-001", "subsidiary_code": "MX01"},
+        version={"name": "VERSION-001"},
+        items=[item],
+        rules=[],
+        readiness={"total_cost_rmb": 4230},
+    )
+
+    assert payload["items"][0]["original_unit_price"] == 1.215882
+    assert payload["items"][0]["purchase_currency"] == "RMB"
+    assert item == original
+
+
+def test_build_erp_push_payload_keeps_existing_positive_purchase_price() -> None:
+    payload = _build_erp_push_payload(
+        batch={"name": "BATCH-001", "subsidiary_code": "MX01"},
+        version={"name": "VERSION-001"},
+        items=[{
+            "material_code": "CW000214",
+            "product_name": "Dog tag",
+            "quantity": 1700,
+            "actual_shipped_qty": 1500,
+            "purchase_uom": "个",
+            "unit_price": "1.25",
+            "purchase_currency": "USD",
+            "goods_value": 2067,
+            "total_cost_rmb": 4230,
+            "total_unit_rmb": 2.82,
+        }],
+        rules=[],
+        readiness={"total_cost_rmb": 4230},
+    )
+
+    assert payload["items"][0]["original_unit_price"] == 1.25
+    assert payload["items"][0]["purchase_currency"] == "USD"
+
+
+def test_derived_purchase_price_replaces_untrusted_positive_price_without_currency() -> None:
+    payload = _build_erp_push_payload(
+        batch={"name": "BATCH-001", "subsidiary_code": "MX01"},
+        version={"name": "VERSION-001"},
+        items=[{
+            "material_code": "CW000214",
+            "product_name": "Dog tag",
+            "quantity": 1700,
+            "actual_shipped_qty": 1500,
+            "purchase_uom": "个",
+            "unit_price": "99.99",
+            "purchase_currency": "",
+            "goods_value": 2067,
+            "total_cost_rmb": 4230,
+            "total_unit_rmb": 2.82,
+        }],
+        rules=[],
+        readiness={"total_cost_rmb": 4230},
+    )
+
+    assert payload["items"][0]["original_unit_price"] == 1.215882
+    assert payload["items"][0]["purchase_currency"] == "RMB"
+
+
+def test_zero_string_purchase_price_is_a_derivable_placeholder() -> None:
+    result = _build_writeback_readiness(
+        batch={
+            "status": "Clean",
+            "confirm_status": "Confirmed",
+            "current_version": "VERSION-001",
+            "subsidiary_code": "MX01",
+            "item_count": 1,
+            "actual_total_cost_rmb": 4230,
+        },
+        resolved_version_name="VERSION-001",
+        items=[{
+            "material_code": "CW000214",
+            "product_name": "Dog tag",
+            "quantity": 1700,
+            "actual_shipped_qty": 1500,
+            "purchase_uom": "个",
+            "unit_price": "0.000000",
+            "purchase_currency": "",
+            "goods_value": 2067,
+            "total_unit_rmb": 2.82,
+        }],
+    )
+
+    assert result["checks"]["items_have_unit_price"] is True
+    assert result["checks"]["items_have_purchase_currency"] is True
+
+
+def test_invalid_purchase_price_is_not_silently_replaced() -> None:
+    base = {
+        "material_code": "CW000214",
+        "product_name": "Dog tag",
+        "quantity": 1700,
+        "actual_shipped_qty": 1500,
+        "purchase_uom": "个",
+        "purchase_currency": "",
+        "goods_value": 2067,
+        "total_unit_rmb": 2.82,
+    }
+
+    for invalid_price in ("not-a-price", -1):
+        result = batch_service._build_writeback_item_quality([{**base, "unit_price": invalid_price}])
+        assert result["issue_counts"]["unit_price"] == 1
+        assert result["issue_counts"]["purchase_currency"] == 1
+
+
+def test_direct_confirmation_rejects_authoritative_stale_result(monkeypatch) -> None:
+    writes = []
+    audits = []
+
+    class DB:
+        def set_value(self, *args, **kwargs):
+            writes.append((args, kwargs))
+
+        def commit(self):
+            writes.append(("commit",))
+
+        def sql(self, *args, **kwargs):
+            return []
+
+    class Audit:
+        def insert(self, **kwargs):
+            audits.append(kwargs)
+
+    fake_frappe = SimpleNamespace(
+        db=DB(),
+        session=SimpleNamespace(user="reviewer@example.com"),
+        get_doc=lambda values: Audit(),
+    )
+    context = {
+        "ok": True,
+        "batch_doc_name": "BATCH-001",
+        "version_name": "VERSION-001",
+        "batch": {"name": "BATCH-001", "status": "Calculated", "confirm_status": "Pending"},
+        "version": {"name": "VERSION-001", "status": "Calculated"},
+        "items": [],
+        "rules": [],
+    }
+    monkeypatch.setattr(batch_service, "frappe", fake_frappe)
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda value: "BATCH-001")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *args: "VERSION-001")
+    monkeypatch.setattr(batch_service, "_load_erp_push_context", lambda *args: context)
+    monkeypatch.setattr(batch_service, "_build_calculation_confirmation_readiness", lambda *args, **kwargs: {"ready": True})
+    monkeypatch.setattr(
+        batch_service,
+        "_build_authoritative_review_readiness",
+        lambda value: {
+            "review_state": "processing",
+            "review_blockers": [{"code": "RESULT_STALE", "message": "计算输入或版本已变化，请重新计算。"}],
+        },
+        raising=False,
+    )
+    from overseas_costing.services.logistics_settlement import runtime
+    monkeypatch.setattr(runtime, "installed", lambda: False)
+
+    result = batch_service.confirm_calculation_result("BATCH-001", "VERSION-001")
+
+    assert result["ok"] is False
+    assert result["confirmed"] is False
+    assert result["review_state"] == "processing"
+    assert result["review_blockers"][0]["code"] == "RESULT_STALE"
+    assert writes == []
+    assert audits == []
+
+
+def test_authoritative_confirmation_readiness_reuses_cost_review_evaluator(monkeypatch) -> None:
+    from overseas_costing.services import cost_review_service
+
+    captured = {}
+
+    def evaluate(**kwargs):
+        captured.update(kwargs)
+        return {"review_state": "ready", "review_blockers": []}
+
+    monkeypatch.setattr(cost_review_service, "evaluate_review_readiness", evaluate)
+    context = {
+        "batch": {"name": "BATCH-001"},
+        "version": {"name": "VERSION-001"},
+        "items": [{"name": "ITEM-001"}],
+        "rules": [{"name": "RULE-001"}],
+        "evidence": [{"fee_rule": "RULE-001"}],
+        "fee_components": [{"item": "ITEM-001"}],
+        "source_context": {"fingerprint": "abc"},
+    }
+
+    result = batch_service._build_authoritative_review_readiness(context)
+
+    assert result["review_state"] == "ready"
+    assert captured == {
+        "batch": context["batch"],
+        "version": context["version"],
+        "items": context["items"],
+        "fees": context["rules"],
+        "evidence": context["evidence"],
+        "fee_components": context["fee_components"],
+        "source_context": context["source_context"],
+    }
+
+
+def test_direct_confirmation_writes_only_once_when_authoritative_state_is_ready(monkeypatch) -> None:
+    state = {"confirmed": False, "audit_count": 0, "commit_count": 0}
+
+    class DB:
+        def set_value(self, doctype, name, *values, **kwargs):
+            if doctype == "Overseas Cost Batch" and values:
+                state["confirmed"] = values[0].get("confirm_status") == "Confirmed"
+
+        def commit(self):
+            state["commit_count"] += 1
+
+        def sql(self, *args, **kwargs):
+            return []
+
+    class Audit:
+        def insert(self, **kwargs):
+            state["audit_count"] += 1
+
+    fake_frappe = SimpleNamespace(
+        db=DB(),
+        session=SimpleNamespace(user="reviewer@example.com"),
+        get_doc=lambda values: Audit(),
+    )
+
+    def load_context(*args):
+        return {
+            "ok": True,
+            "batch_doc_name": "BATCH-001",
+            "version_name": "VERSION-001",
+            "batch": {
+                "name": "BATCH-001",
+                "status": "Confirmed" if state["confirmed"] else "Calculated",
+                "confirm_status": "Confirmed" if state["confirmed"] else "Pending",
+            },
+            "version": {"name": "VERSION-001", "status": "Calculated"},
+            "items": [],
+            "rules": [],
+        }
+
+    monkeypatch.setattr(batch_service, "frappe", fake_frappe)
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda value: "BATCH-001")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *args: "VERSION-001")
+    monkeypatch.setattr(batch_service, "_load_erp_push_context", load_context)
+    monkeypatch.setattr(batch_service, "_build_calculation_confirmation_readiness", lambda *args, **kwargs: {"ready": True})
+    monkeypatch.setattr(
+        batch_service,
+        "_build_authoritative_review_readiness",
+        lambda context: {
+            "review_state": "confirmed" if state["confirmed"] else "ready",
+            "review_blockers": [],
+            "review_warnings": [],
+        },
+        raising=False,
+    )
+    from overseas_costing.services.logistics_settlement import runtime
+    monkeypatch.setattr(runtime, "installed", lambda: False)
+
+    first = batch_service.confirm_calculation_result("BATCH-001", "VERSION-001")
+    second = batch_service.confirm_calculation_result("BATCH-001", "VERSION-001")
+
+    assert first["confirmed"] is True
+    assert second["confirmed"] is False
+    assert second["review_state"] == "confirmed"
+    assert state["audit_count"] == 1
+    assert state["commit_count"] == 1
 
 
 def test_writeback_to_erp_records_failed_attempt_when_config_missing(monkeypatch) -> None:
