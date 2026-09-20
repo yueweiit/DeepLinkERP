@@ -14,6 +14,7 @@ from mes_integration.mes_integration.stock_entry import (
 	get_sales_order_by_reference,
 	is_mes_receipt_stock_entry,
 	notify_mes_stock_entry_status,
+	set_mes_stock_entry_default_target_warehouses,
 	set_mes_stock_entry_sales_order,
 	validate_issue_confirm_response,
 	validate_mes_receipt_identity,
@@ -22,6 +23,60 @@ from mes_integration.mes_integration.stock_entry import (
 
 
 class TestMESStockEntry(UnitTestCase):
+	def test_receipt_warehouse_uses_company_config_not_stock_balance(self):
+		stock_entry_data = {
+			"company": "Test Company",
+			"items": [{"item_code": "ITEM-A", "qty": 1}],
+		}
+
+		with (
+			patch.object(frappe.db, "exists", return_value=True),
+			patch(
+				"mes_integration.mes_integration.stock_entry.get_item_defaults",
+				return_value={},
+			),
+			patch(
+				"mes_integration.mes_integration.stock_entry.get_mes_company_warehouse",
+				return_value="MES Receipt - TC",
+			),
+			patch(
+				"mes_integration.mes_integration.stock_entry.validate_mes_warehouse_company"
+			) as validate_warehouse,
+			patch(
+				"mes_integration.mes_integration.stock_entry.get_mes_item_largest_stock_warehouse"
+			) as largest_stock_warehouse,
+		):
+			set_mes_stock_entry_default_target_warehouses(stock_entry_data)
+
+		self.assertEqual(
+			stock_entry_data["items"][0]["t_warehouse"],
+			"MES Receipt - TC",
+		)
+		validate_warehouse.assert_called_once_with(
+			"MES Receipt - TC", "Test Company", "入库"
+		)
+		largest_stock_warehouse.assert_not_called()
+
+	def test_receipt_warehouse_requires_explicit_default_or_company_config(self):
+		stock_entry_data = {
+			"company": "Test Company",
+			"items": [{"item_code": "ITEM-A", "qty": 1}],
+		}
+
+		with (
+			patch.object(frappe.db, "exists", return_value=True),
+			patch(
+				"mes_integration.mes_integration.stock_entry.get_item_defaults",
+				return_value={},
+			),
+			patch(
+				"mes_integration.mes_integration.stock_entry.get_mes_company_warehouse",
+				return_value=None,
+			),
+			self.assertRaises(frappe.ValidationError),
+		):
+			set_mes_stock_entry_default_target_warehouses(stock_entry_data)
+
 	def test_manual_stock_entry_is_not_written_to_mes_log(self):
 		stock_entry = frappe._dict(
 			doctype="Stock Entry",

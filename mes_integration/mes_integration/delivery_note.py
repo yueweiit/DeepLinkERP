@@ -40,8 +40,9 @@ else:
 from mes_integration.mes_integration.integration_log import create_mes_log, update_mes_log
 from mes_integration.mes_integration.settings import is_mes_integration_enabled, throw_mes_integration_disabled
 from mes_integration.mes_integration.stock_entry import (
+    MES_DELIVERY_WAREHOUSE_FIELD,
+    get_mes_company_warehouse,
     get_mes_item_largest_stock_warehouse,
-    get_mes_receipt_fallback_target_warehouse,
     get_mes_status_callback_url,
     post_stock_entry_status_to_mes,
     validate_mes_api_user,
@@ -562,18 +563,31 @@ def get_mes_delivery_note_item_warehouse(item_code, company, requested_warehouse
         validate_warehouse_company(requested_warehouse, company)
         return requested_warehouse
 
-    stock_warehouse = get_mes_item_largest_stock_warehouse(item_code, company)
-    if stock_warehouse:
-        return stock_warehouse
-
     default_warehouse = (get_item_defaults(item_code, company) or {}).get("default_warehouse")
     if default_warehouse:
         validate_warehouse_company(default_warehouse, company)
         return default_warehouse
 
-    fallback_warehouse = get_mes_receipt_fallback_target_warehouse()
-    validate_warehouse_company(fallback_warehouse, company)
-    return fallback_warehouse
+    configured_warehouse = get_mes_company_warehouse(
+        company,
+        MES_DELIVERY_WAREHOUSE_FIELD,
+    )
+    if configured_warehouse:
+        validate_warehouse_company(configured_warehouse, company)
+        return configured_warehouse
+
+    # Backward-compatible final fallback for existing companies. New
+    # integrations should send warehouse explicitly or configure the company.
+    stock_warehouse = get_mes_item_largest_stock_warehouse(item_code, company)
+    if stock_warehouse:
+        return stock_warehouse
+
+    frappe.throw(
+        _(
+            "物料 {0} 缺少出库仓库；请传 warehouse、设置物料默认仓库，"
+            "或配置公司 MES 默认出库仓。"
+        ).format(item_code)
+    )
 
 
 def validate_warehouse_company(warehouse, company):

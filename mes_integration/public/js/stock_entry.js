@@ -17,6 +17,7 @@ frappe.ui.form.on("Stock Entry", {
 	company: function(frm) {
 		frm._mes_integration_company = null;
 		frm._mes_integration_enabled = false;
+		frm._mes_manufacturing_warehouse = null;
 		frm._mes_integration_enabled_promise = null;
 		load_mes_integration_enabled(frm).then(function() {
 			refresh_mes_stock_entry_ui(frm);
@@ -81,6 +82,7 @@ function load_mes_integration_enabled(frm) {
 		if (frm) {
 			frm._mes_integration_company = null;
 			frm._mes_integration_enabled = false;
+			frm._mes_manufacturing_warehouse = null;
 			frm._mes_integration_enabled_promise = null;
 		}
 		return Promise.resolve(false);
@@ -96,20 +98,29 @@ function load_mes_integration_enabled(frm) {
 	const company = frm.doc.company;
 	frm._mes_integration_company = company;
 	frm._mes_integration_enabled = false;
+	frm._mes_manufacturing_warehouse = null;
 
 	const enabledPromise = frappe.db
-		.get_value("Company", company, "custom_enable_mes_integration")
+		.get_value("Company", company, [
+			"custom_enable_mes_integration",
+			"custom_mes_manufacturing_warehouse"
+		])
 		.then(function(r) {
 			const value = r && r.message ? r.message.custom_enable_mes_integration : 0;
+			const manufacturingWarehouse = r && r.message
+				? r.message.custom_mes_manufacturing_warehouse || null
+				: null;
 			const enabled = cint(value) === 1;
 			if (frm.doc && frm.doc.company === company && frm._mes_integration_company === company) {
 				frm._mes_integration_enabled = enabled;
+				frm._mes_manufacturing_warehouse = manufacturingWarehouse;
 			}
 			return enabled;
 		})
 		.catch(function() {
 			if (frm.doc && frm.doc.company === company && frm._mes_integration_company === company) {
 				frm._mes_integration_enabled = false;
+				frm._mes_manufacturing_warehouse = null;
 			}
 			return false;
 		})
@@ -455,8 +466,6 @@ function show_mes_receipt_stock_entry_no(frm) {
 	frm.refresh_field("custom_stock_entry_no");
 }
 
-const MES_MANUFACTURING_TARGET_WAREHOUSE = "Manufacturing - YC";
-
 frappe.ui.form.on("Stock Entry Detail", {
 	material_request: function(frm, cdt, cdn) {
 		set_manufacturing_warehouse(frm, cdt, cdn);
@@ -541,13 +550,14 @@ function set_manufacturing_warehouse(frm, cdt, cdn) {
 		return;
 	}
 	const row = locals[cdt] && locals[cdt][cdn];
+	const targetWarehouse = frm._mes_manufacturing_warehouse;
 
-	if (!row || frm.doc.purpose !== "Material Transfer for Manufacture") {
+	if (!row || !targetWarehouse || frm.doc.purpose !== "Material Transfer for Manufacture") {
 		return;
 	}
 
-	if ((row.material_request || row.material_request_item) && row.t_warehouse !== MES_MANUFACTURING_TARGET_WAREHOUSE) {
-		frappe.model.set_value(cdt, cdn, "t_warehouse", MES_MANUFACTURING_TARGET_WAREHOUSE);
+	if ((row.material_request || row.material_request_item) && row.t_warehouse !== targetWarehouse) {
+		frappe.model.set_value(cdt, cdn, "t_warehouse", targetWarehouse);
 	}
 }
 
@@ -562,13 +572,14 @@ function schedule_all_manufacturing_warehouses(frm) {
 }
 
 function set_all_manufacturing_warehouses(frm) {
-	if (frm.doc.purpose !== "Material Transfer for Manufacture") {
+	const targetWarehouse = frm._mes_manufacturing_warehouse;
+	if (!targetWarehouse || frm.doc.purpose !== "Material Transfer for Manufacture") {
 		return;
 	}
 
 	(frm.doc.items || []).forEach(function(row) {
-		if ((row.material_request || row.material_request_item) && row.t_warehouse !== MES_MANUFACTURING_TARGET_WAREHOUSE) {
-			frappe.model.set_value(row.doctype, row.name, "t_warehouse", MES_MANUFACTURING_TARGET_WAREHOUSE);
+		if ((row.material_request || row.material_request_item) && row.t_warehouse !== targetWarehouse) {
+			frappe.model.set_value(row.doctype, row.name, "t_warehouse", targetWarehouse);
 		}
 	});
 }

@@ -375,7 +375,9 @@ MES_RECEIPT_STOCK_ENTRY_TYPES = {
     *MES_CUSTOM_RECEIPT_STOCK_ENTRY_TYPES,
     STANDARD_MATERIAL_RECEIPT,
 }
-MES_RECEIPT_FALLBACK_TARGET_WAREHOUSE = "半成品 - YC"
+MES_RECEIPT_WAREHOUSE_FIELD = "custom_mes_receipt_warehouse"
+MES_DELIVERY_WAREHOUSE_FIELD = "custom_mes_delivery_warehouse"
+MES_MANUFACTURING_WAREHOUSE_FIELD = "custom_mes_manufacturing_warehouse"
 MES_RECEIPT_IDEMPOTENCY_LOCK_TIMEOUT_SECONDS = 30
 DLM_ISSUE_STOCK_ENTRY_TYPES = {
     "Material Issue",
@@ -894,6 +896,10 @@ def set_mes_stock_entry_default_target_warehouses(stock_entry_data):
         frappe.throw(frappe._("缺少物料移动公司，无法查询物料默认仓库"))
 
     missing_items = []
+    configured_warehouse = get_mes_company_warehouse(
+        company,
+        MES_RECEIPT_WAREHOUSE_FIELD,
+    )
 
     for index, row in enumerate(stock_entry_data.get("items") or [], start=1):
         if row.get("t_warehouse"):
@@ -907,12 +913,25 @@ def set_mes_stock_entry_default_target_warehouses(stock_entry_data):
             missing_items.append(frappe._("第 {0} 行物料 {1} 不存在").format(index, item_code))
             continue
 
-        stock_warehouse = get_mes_item_largest_stock_warehouse(item_code, company)
         default_warehouse = (get_item_defaults(item_code, company) or {}).get("default_warehouse")
-        row["t_warehouse"] = stock_warehouse or default_warehouse or get_mes_receipt_fallback_target_warehouse()
+        target_warehouse = default_warehouse or configured_warehouse
+        if not target_warehouse:
+            missing_items.append(
+                frappe._(
+                    "第 {0} 行物料 {1} 缺少目标仓库；请传 t_warehouse、设置物料默认仓库，"
+                    "或配置公司 MES 默认入库仓。"
+                ).format(index, item_code)
+            )
+            continue
+
+        validate_mes_warehouse_company(target_warehouse, company, "入库")
+        row["t_warehouse"] = target_warehouse
 
     if missing_items:
-        frappe.throw("<br>".join(missing_items), title=frappe._("物料不存在"))
+        frappe.throw(
+            "<br>".join(missing_items),
+            title=frappe._("MES 入库物料或仓库配置错误"),
+        )
 
 
 def get_mes_item_largest_stock_warehouse(item_code, company):
@@ -936,14 +955,30 @@ def get_mes_item_largest_stock_warehouse(item_code, company):
     return warehouses[0].warehouse if warehouses else None
 
 
-def get_mes_receipt_fallback_target_warehouse():
-    if not frappe.db.exists("Warehouse", MES_RECEIPT_FALLBACK_TARGET_WAREHOUSE):
-        frappe.throw(
-            frappe._("缺少半成品入库兜底仓库：{0}").format(MES_RECEIPT_FALLBACK_TARGET_WAREHOUSE),
-            title=frappe._("仓库配置错误"),
-        )
+def get_mes_company_warehouse(company, fieldname):
+    if not company or not frappe.db.has_column("Company", fieldname):
+        return None
 
-    return MES_RECEIPT_FALLBACK_TARGET_WAREHOUSE
+    return frappe.db.get_value("Company", company, fieldname)
+
+
+def validate_mes_warehouse_company(warehouse, company, operation="库存业务"):
+    warehouse_doc = frappe.db.get_value(
+        "Warehouse",
+        warehouse,
+        ["name", "company", "is_group", "disabled"],
+        as_dict=True,
+    )
+    if not warehouse_doc:
+        frappe.throw(frappe._("未找到仓库 {0}").format(warehouse))
+    if warehouse_doc.is_group or warehouse_doc.disabled:
+        frappe.throw(
+            frappe._("仓库 {0} 不可用于{1}").format(warehouse, operation)
+        )
+    if warehouse_doc.company and warehouse_doc.company != company:
+        frappe.throw(
+            frappe._("仓库 {0} 不属于公司 {1}").format(warehouse, company)
+        )
 
 
 def set_mes_stock_entry_item_defaults(stock_entry):

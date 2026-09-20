@@ -6,6 +6,7 @@ from frappe.tests import UnitTestCase
 from mes_integration.mes_integration.delivery_note import (
 	enqueue_delivery_note_status_callback,
 	get_existing_mes_delivery_note,
+	get_mes_delivery_note_item_warehouse,
 	get_mes_delivery_note_identity_mismatches,
 	get_mes_delivery_request_key,
 	push_delivery_note_status_to_mes_job,
@@ -13,6 +14,33 @@ from mes_integration.mes_integration.delivery_note import (
 
 
 class TestMESDeliveryNote(UnitTestCase):
+	def test_delivery_warehouse_prefers_company_config_before_stock_guess(self):
+		with (
+			patch(
+				"mes_integration.mes_integration.delivery_note.get_item_defaults",
+				return_value={},
+			),
+			patch(
+				"mes_integration.mes_integration.delivery_note.get_mes_company_warehouse",
+				return_value="MES Delivery - TC",
+			),
+			patch(
+				"mes_integration.mes_integration.delivery_note.validate_warehouse_company"
+			) as validate_warehouse,
+			patch(
+				"mes_integration.mes_integration.delivery_note.get_mes_item_largest_stock_warehouse"
+			) as largest_stock_warehouse,
+		):
+			warehouse = get_mes_delivery_note_item_warehouse(
+				"ITEM-A", "Test Company"
+			)
+
+		self.assertEqual(warehouse, "MES Delivery - TC")
+		validate_warehouse.assert_called_once_with(
+			"MES Delivery - TC", "Test Company"
+		)
+		largest_stock_warehouse.assert_not_called()
+
 	def test_delivery_status_enqueue_uses_stable_deduplication_key(self):
 		with (
 			patch(
