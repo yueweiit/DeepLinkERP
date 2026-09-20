@@ -2,7 +2,7 @@ import frappe
 from frappe.utils import add_days, getdate
 
 TEMPLATE_VERSION = "3.0"
-MAPPING_RULE_VERSION = "1.7"
+MAPPING_RULE_VERSION = "1.8"
 TEMPLATE_EFFECTIVE_FROM = "2026-01-01"
 
 # Depreciation and amortisation cannot be translated into a direct-method cash
@@ -1023,6 +1023,10 @@ def classify_account_number(number, statement_type, account=None):
 		return None
 	if statement_type == "Cash Flow":
 		if account and account.account_type in {"Cash", "Bank"}: return None
+		if is_employee_cash_account(number, account):
+			return ("CASH_PAID_EMPLOYEES", "OTHER_OPERATING_RECEIPTS", "CASH_PAID_EMPLOYEES")
+		if number.startswith("660302"):
+			return ("CASH_PAID_DIVIDENDS_INTEREST", "OTHER_OPERATING_RECEIPTS", "CASH_PAID_DIVIDENDS_INTEREST")
 		if number.startswith(("6001", "6051", "1122", "1123", "1121", "2203", "2204")):
 			return ("CASH_RECEIVED_SALES", "CASH_RECEIVED_SALES", "OTHER_OPERATING_PAYMENTS")
 		if number.startswith("1101"):
@@ -1053,7 +1057,7 @@ def classify_account_number(number, statement_type, account=None):
 			return ("CASH_PAID_LONG_TERM_ASSETS", "CASH_RECEIVED_ASSET_DISPOSAL", "CASH_PAID_LONG_TERM_ASSETS")
 		if number.startswith(("2001", "2501", "2502", "2701")):
 			return ("CASH_RECEIVED_BORROWINGS", "CASH_RECEIVED_BORROWINGS", "CASH_PAID_DEBT_REPAYMENT")
-		if number.startswith(("2231", "2232", "410403", "660302")):
+		if number.startswith(("2231", "2232", "410403")):
 			return ("CASH_PAID_DIVIDENDS_INTEREST", "OTHER_FINANCING_RECEIPTS", "CASH_PAID_DIVIDENDS_INTEREST")
 		if number.startswith(("6111", "1131", "1132")):
 			return ("CASH_RECEIVED_INVESTMENT_INCOME", "CASH_RECEIVED_INVESTMENT_INCOME", "OTHER_INVESTING_PAYMENTS")
@@ -1062,6 +1066,14 @@ def classify_account_number(number, statement_type, account=None):
 		if number.startswith(("660", "670", "6711", "1221", "2241")):
 			return ("OTHER_OPERATING_PAYMENTS", "OTHER_OPERATING_RECEIPTS", "OTHER_OPERATING_PAYMENTS")
 	return None
+
+
+def is_employee_cash_account(number, account):
+	"""Recognize direct payroll and employee deductions, not arbitrary 660/1221 accounts."""
+	name = getattr(account, "account_name", "") or ""
+	return str(number).startswith(("660", "1221")) and any(
+		word in name for word in ("工资", "薪资", "职工薪酬", "社会保险", "社保", "公积金")
+	)
 
 
 def _classify_balance_sheet_number(number):
