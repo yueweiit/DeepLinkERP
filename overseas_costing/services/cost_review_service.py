@@ -155,6 +155,8 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     inputs = [{field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS} for row in items]
     from overseas_costing.services.effective_source_values import project_source_values
     inputs = [project_source_values(row,source_context if source_context else None) for row in inputs]
+    from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
+    inputs = project_packing_groups(inputs, groups_from_version(version))["items"]
     inputs.sort(key=lambda row: (cost_preview_service._decimal(row.get("row_no")) or Decimal(0), str(row.get("name") or "")))
     raw_fees = [{field: row.get(field) for field in fee_service._rule_fields()} for row in fees]
     from overseas_costing.services.effective_source_values import source_context_from_items

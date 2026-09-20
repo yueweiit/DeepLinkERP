@@ -683,6 +683,15 @@ def test_load_erp_push_context_skips_subsidiary_column_when_schema_lags(monkeypa
     assert result["ok"] is True
     assert result["batch"]["subsidiary_code"] == ""
     assert queried_fields[0][0] == "Overseas Cost Batch"
+    assert {
+        "source_type",
+        "source_approval_no",
+        "source_instance_id",
+        "source_dingtalk_url",
+        "source_attachment_count",
+        "source_created_at",
+        "extra_json",
+    }.issubset(set(queried_fields[0][1]))
 
 
 def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
@@ -1365,28 +1374,89 @@ def test_build_erp_push_payload_keeps_existing_positive_purchase_price() -> None
     assert payload["items"][0]["purchase_currency"] == "USD"
 
 
-def test_derived_purchase_price_replaces_untrusted_positive_price_without_currency() -> None:
+def test_positive_purchase_price_without_currency_is_preserved_and_currency_stays_blocked() -> None:
+    item = {
+        "material_code": "CW000214",
+        "product_name": "Dog tag",
+        "quantity": 1700,
+        "actual_shipped_qty": 1500,
+        "purchase_uom": "个",
+        "unit_price": "99.99",
+        "purchase_currency": "",
+        "goods_value": 2067,
+        "total_cost_rmb": 4230,
+        "total_unit_rmb": 2.82,
+    }
     payload = _build_erp_push_payload(
         batch={"name": "BATCH-001", "subsidiary_code": "MX01"},
         version={"name": "VERSION-001"},
-        items=[{
-            "material_code": "CW000214",
-            "product_name": "Dog tag",
-            "quantity": 1700,
-            "actual_shipped_qty": 1500,
-            "purchase_uom": "个",
-            "unit_price": "99.99",
-            "purchase_currency": "",
-            "goods_value": 2067,
-            "total_cost_rmb": 4230,
-            "total_unit_rmb": 2.82,
-        }],
+        items=[item],
         rules=[],
         readiness={"total_cost_rmb": 4230},
     )
+    quality = batch_service._build_writeback_item_quality([item])
 
-    assert payload["items"][0]["original_unit_price"] == 1.215882
-    assert payload["items"][0]["purchase_currency"] == "RMB"
+    assert payload["items"][0]["original_unit_price"] == 99.99
+    assert payload["items"][0]["purchase_currency"] == ""
+    assert quality["checks"]["items_have_unit_price"] is True
+    assert quality["checks"]["items_have_purchase_currency"] is False
+
+
+def test_cost_formula_uses_partial_shipment_value_instead_of_full_purchase_total() -> None:
+    formula = batch_service._build_cost_formula({
+        "material_code": "CW000214",
+        "quantity": 1700,
+        "purchase_uom": "个",
+        "unit": "个",
+        "actual_shipped_qty": 1500,
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "个",
+        "unit_price": 0,
+        "purchase_currency": "",
+        "goods_value": 2067,
+        "total_cost_rmb": 4230,
+        "freight_alloc_rmb": 100,
+        "total_unit_rmb": 2.82,
+    })
+
+    assert formula["original_unit_price"] == 1.215882
+    assert formula["goods_value"] == 1823.823529
+    assert formula["allocated_total_cost"] == 2406.176471
+    assert formula["allocated_logistics_cost"] == 100
+    assert formula["allocated_clearance_tax_cost"] == 2306.176471
+
+
+def test_cost_formula_prefers_confirmed_shipment_valuation() -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    item = {
+        "material_code": "CW000214",
+        "quantity": 1700,
+        "purchase_uom": "个",
+        "unit": "个",
+        "actual_shipped_qty": 1500,
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "shipped_uom": "个",
+        "unit_price": 0,
+        "purchase_currency": "",
+        "goods_value": 2067,
+        "total_cost_rmb": 4230,
+        "freight_alloc_rmb": 100,
+        "total_unit_rmb": 2.82,
+    }
+    item["extra_json"] = json.dumps({
+        "manual_shipment_valuation": build_manual_shipment_valuation(
+            item,
+            "1900",
+            actor="reviewer@example.com",
+            reason="已核对本次发货货值",
+        )
+    })
+
+    formula = batch_service._build_cost_formula(item)
+
+    assert formula["goods_value"] == 1900
+    assert formula["allocated_total_cost"] == 2330
 
 
 def test_zero_string_purchase_price_is_a_derivable_placeholder() -> None:

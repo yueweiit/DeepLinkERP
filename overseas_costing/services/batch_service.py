@@ -2384,8 +2384,7 @@ def _effective_purchase_item(item: dict) -> dict:
     projected = _effective_calculated_item(item)
     raw_price = projected.get("unit_price")
     parsed_price = _finite_decimal(raw_price)
-    purchase_currency = str(projected.get("purchase_currency") or "").strip()
-    if parsed_price is not None and parsed_price > 0 and purchase_currency:
+    if parsed_price is not None and parsed_price > 0:
         return projected
     # A zero/blank source price is a placeholder when the same row already has
     # an RMB total, purchase quantity and purchase unit. Keep full Decimal
@@ -2406,13 +2405,17 @@ def _effective_purchase_item(item: dict) -> dict:
 
 def _build_cost_formula(item: dict) -> dict:
     item = _effective_purchase_item(item)
-    quantity = _as_float(item.get("actual_shipped_qty")) or _as_float(item.get("quantity"))
-    total_cost = _as_float(item.get("total_cost_rmb"))
-    unit_price = _as_float(item.get("unit_price"))
-    goods_value = _as_float(item.get("goods_value")) or unit_price * quantity
-    allocated_cost = max(total_cost - goods_value, 0) if total_cost else 0
-    logistics_cost = _as_float(item.get("freight_alloc_rmb"))
-    clearance_tax_cost = max(allocated_cost - logistics_cost, 0)
+    from overseas_costing.services.material_input_service import present_material_row
+
+    presented = present_material_row(item)
+    quantity = _positive_decimal(presented.get("effective_shipping_quantity")) or _positive_decimal(item.get("quantity"))
+    unit_price = _positive_decimal(item.get("unit_price")) or Decimal("0")
+    shipment_value = _finite_decimal(presented.get("shipment_value_rmb"))
+    goods_value = shipment_value if shipment_value is not None and shipment_value >= 0 else unit_price * (quantity or Decimal("0"))
+    total_cost = _positive_decimal(item.get("total_cost_rmb")) or Decimal("0")
+    allocated_cost = max(total_cost - goods_value, Decimal("0")) if total_cost else Decimal("0")
+    logistics_cost = _positive_decimal(item.get("freight_alloc_rmb")) or Decimal("0")
+    clearance_tax_cost = max(allocated_cost - logistics_cost, Decimal("0"))
     return {
         "original_unit_price": _round_payload_amount(unit_price),
         "quantity": _round_payload_amount(quantity),
@@ -3037,7 +3040,16 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
         "current_version",
         "transport_mode",
         "item_count",
+        "source_type",
+        "source_file_name",
+        "source_sheet",
+        "source_range",
+        "source_approval_no",
+        "source_instance_id",
+        "source_dingtalk_url",
         "source_approval_status",
+        "source_attachment_count",
+        "source_created_at",
         "estimated_total_cost_rmb",
         "actual_total_cost_rmb",
         "extra_json",
@@ -3069,6 +3081,7 @@ def _load_erp_push_context(batch_name: str, version_name: str | None = None) -> 
                 "fx_usd_to_rmb",
                 "fx_rmb_to_mxn",
                 "calculated_at",
+                "extra_json",
                 "rule_snapshot_json",
                 "summary_snapshot_json",
             ],

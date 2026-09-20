@@ -518,7 +518,7 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
             version_rows = frappe.get_all("Overseas Cost Version",
                 filters={"batch": ["in", names], "name": ["in", versions]},
                 fields=["name", "batch", "version_code", "status", "fx_usd_to_rmb", "fx_rmb_to_mxn",
-                        "calculated_at", "summary_snapshot_json"], limit_page_length=0)
+                        "calculated_at", "extra_json", "summary_snapshot_json"], limit_page_length=0)
             item_rows = frappe.get_all("Overseas Cost Item", filters={**filters, "is_excluded": 0},
                 fields=["batch", "version", *cost_preview_service.COST_INPUT_FIELDS, *cost_review_service.SAVED_ITEM_OUTPUT_FIELDS],
                 order_by="row_no asc, name asc", limit_page_length=0)

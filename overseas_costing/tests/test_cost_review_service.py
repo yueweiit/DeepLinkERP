@@ -35,6 +35,8 @@ def saved_context():
 def save_result(context):
     version = context["version"]
     inputs = [{field: row.get(field) for field in cost_preview_service.COST_INPUT_FIELDS} for row in context["items"]]
+    from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
+    inputs = project_packing_groups(inputs, groups_from_version(version))["items"]
     fx = {key: version.get(key) for key in ("fx_usd_to_rmb", "fx_rmb_to_mxn")}
     fees = fee_service.compose_fee_worklist_rows(context["fees"], context["batch"]["transport_mode"])
     saved = cost_preview_service.build_saved_cost_data(
@@ -47,8 +49,9 @@ def save_result(context):
     version["calculated_at"] = "2026-09-08 10:00:00"
     saved["summary_snapshot"]["calculated_at"] = version["calculated_at"]
     version["summary_snapshot_json"] = json.dumps(saved["summary_snapshot"])
-    for item, update in zip(context["items"], saved["item_updates"]):
-        item.update(update)
+    updates = {row["name"]: row for row in saved["item_updates"]}
+    for item in context["items"]:
+        item.update(updates[item["name"]])
     context["batch"]["estimated_total_cost_rmb"] = saved["summary"]["total_cost_rmb"]
 
 
@@ -237,12 +240,57 @@ def test_confirmed_sku_component_is_part_of_saved_result_fingerprint():
         "cost_effect": "COST",
     }]
     save_result(context)
+    # Bulk review loaders include these grouping columns; the saver does not.
+    # They must never become part of the business input fingerprint.
+    context["fee_components"][0].update(batch="B-1", version="V-1")
 
     assert evaluate(context)["result_is_current"] is True
     context["fee_components"][0]["amount_rmb"] = "99"
     result = evaluate(context)
     assert result["result_is_current"] is False
     assert codes(result) == {"RESULT_STALE"}
+
+
+def test_confirmed_material_packing_groups_use_the_same_projection_as_saved_trial():
+    context = saved_context()
+    first = context["items"][0]
+    first.update(actual_shipped_qty=10, shipped_uom="件", gross_weight_kg=4, volume_m3=1)
+    second = {
+        **first,
+        "name": "I-2",
+        "row_no": 2,
+        "stable_line_key": "line-2",
+        "material_code": "SKU-2",
+        "goods_value": 300,
+        "quantity": 30,
+        "actual_shipped_qty": 30,
+        "gross_weight_kg": 6,
+        "volume_m3": 3,
+    }
+    context["items"].append(second)
+    group = {
+        "group_id": "GROUP-1",
+        "member_keys": ["line-1", "line-2"],
+        "package_count": "1",
+        "net_weight_kg": "18",
+        "gross_weight_kg": "20",
+        "volume_m3": "8",
+        "status": "confirmed",
+    }
+    context["version"]["extra_json"] = json.dumps({"material_packing_groups": [group]})
+
+    save_result(context)
+
+    current = evaluate(context)
+    assert current["result_is_current"] is True
+    assert current["review_state"] == "ready"
+
+    changed = json.loads(context["version"]["extra_json"])
+    changed["material_packing_groups"][0]["gross_weight_kg"] = "21"
+    context["version"]["extra_json"] = json.dumps(changed)
+    stale = evaluate(context)
+    assert stale["result_is_current"] is False
+    assert "RESULT_STALE" in codes(stale)
 
 
 def test_saved_temporary_ai_basis_remains_verifiable_but_not_formally_reviewable():

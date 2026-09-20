@@ -208,6 +208,46 @@ def test_saved_sku_projects_missing_purchase_price_from_purchase_total() -> None
     assert presented["adopted_price"]["source_type"] == "purchase_total_derived"
 
 
+def test_review_readiness_loader_includes_version_packing_groups(monkeypatch) -> None:
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            if doctype == "Overseas Cost Version":
+                return [{
+                    "name": "VER-1",
+                    "batch": "BATCH-1",
+                    "extra_json": json.dumps({"material_packing_groups": [{"group_id": "GROUP-1"}]}),
+                }]
+            return []
+
+    captured = {}
+    def evaluate(**kwargs):
+        captured["version"] = kwargs["version"]
+        return {"review_state": "processing"}
+
+    monkeypatch.setattr(workbench_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        workbench_service.cost_review_service,
+        "evaluate_review_readiness",
+        evaluate,
+    )
+    from overseas_costing.services import effective_source_values
+    monkeypatch.setattr(effective_source_values, "batch_source_context", lambda *_args, **_kwargs: {})
+
+    workbench_service._load_review_readiness([{
+        "name": "BATCH-1",
+        "current_version": "VER-1",
+        "confirm_status": "Pending",
+    }])
+
+    version_query = next(kwargs for doctype, kwargs in calls if doctype == "Overseas Cost Version")
+    assert "extra_json" in version_query["fields"]
+    assert "material_packing_groups" in captured["version"]["extra_json"]
+
+
 def test_item_page_queries_only_requested_slice(monkeypatch) -> None:
     calls = []
 

@@ -49,6 +49,14 @@ LEGACY_CUSTOMS_SERVICE_FIELDS = (
     "limpieza_contenedor",
 )
 
+FEE_COMPONENT_INPUT_FIELDS = (
+    "name", "fee_rule", "logical_fee_key", "evidence", "attachment", "item",
+    "stable_line_key", "component_type", "tax_code", "hs_code", "currency",
+    "original_amount", "amount_rmb", "exchange_rate", "allocation_basis",
+    "source_evidence_json", "accounting_role", "cost_effect", "reverses_component",
+    "status", "is_active",
+)
+
 
 def _decimal(value) -> Decimal | None:
     if value in (None, ""):
@@ -707,7 +715,8 @@ def _without_private_trial_fields(value):
 
 def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None) -> str:
     components = sorted(
-        (dict(row or {}) for row in (fee_components or [])),
+        ({field: (row or {}).get(field) for field in FEE_COMPONENT_INPUT_FIELDS}
+         for row in (fee_components or [])),
         key=lambda row: (
             str(row.get("name") or ""),
             str(row.get("fee_rule") or ""),
