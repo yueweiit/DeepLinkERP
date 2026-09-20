@@ -51,7 +51,7 @@ bench --site SITE execute china_finance.api.initialize_company --kwargs \
 
 ## 旧财务数据核查
 
-管理员可通过 `bench execute china_finance.services.finance_cleanup.preview_finance_cleanup`，按公司及日期只读预览旧凭证、关联记录和清理阻塞项。另提供 `china_finance.services.cancelled_finance_cleanup.cleanup_cancelled_finance`，根据已保存的预览，清理已取消的测试凭证及经检查无来源的会计快照；默认只预览，执行删除须显式传入 `apply:1` 并开启维护模式。范围、备份步骤及服务器命令见 [旧财务凭证核查与清理](docs/旧财务凭证清理.md)。
+管理员可通过 `bench execute china_finance.services.finance_cleanup.preview_finance_cleanup`，按公司及日期只读预览旧凭证、关联记录和清理阻塞项。另提供 `china_finance.services.cancelled_finance_cleanup.cleanup_cancelled_finance`，根据已保存的预览，清理已取消的测试凭证及符合条件的关联记录；无来源会计快照和取消后的支付分类账残留分别通过显式开关纳入。默认只预览，执行删除须传入 `apply:1` 并开启维护模式。[旧财务凭证清理操作手册](docs/旧财务凭证清理.md) 包含服务器单行命令、站点私有目录中的预览文件、备份与复核步骤、常见报错处理，以及 2026-09-20 的实际清理记录。
 
 ## 发布约束
 
