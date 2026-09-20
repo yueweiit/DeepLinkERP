@@ -46,6 +46,25 @@ def test_deploy_cleans_legacy_route_revision_before_migrate() -> None:
     cleanup = "bench --site deeplinkerp.com execute overseas_costing.install.before_migrate"
     assert cleanup in deploy
     assert deploy.index("upgrade_bench.sh") < deploy.index(cleanup) < deploy.index("migrate_site.sh")
+    assert "Inspect and normalize route revision before upgrade" in deploy
+    assert ".github/scripts/prepare_route_revision_migration.sh" in deploy
+    assert deploy.index("Prepare production rollback point") < deploy.index(
+        "Inspect and normalize route revision before upgrade"
+    ) < deploy.index("Upgrade and migrate ERP")
+
+
+def test_route_revision_migration_script_backups_and_bounds_legacy_values() -> None:
+    script = (
+        WORKFLOW_PATH.parent.parent
+        / "scripts"
+        / "prepare_route_revision_migration.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "backup --with-files" in script
+    assert "information_schema.columns" in script
+    assert "ALTER COLUMN `route_revision` SET DEFAULT 0" in script
+    assert "NOT REGEXP ''^[0-9]+$''" in script
+    assert "2147483647" in script
 
 
 def test_production_deploy_requires_deepseek_and_installs_document_runtime() -> None:

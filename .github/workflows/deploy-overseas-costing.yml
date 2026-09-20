@@ -144,6 +144,19 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash '$remote_release_script' prepare /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com '${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'"
 
+      - name: Inspect and normalize route revision before upgrade
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          remote_route_revision_script="/tmp/prepare-route-revision-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            .github/scripts/prepare_route_revision_migration.sh \
+            "$DEPLOY_USER@$DEPLOY_HOST:$remote_route_revision_script"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash '$remote_route_revision_script' /home/yuewei/ERPNext-Docker/frappe_docker deeplinkerp.com; script_exit_code=\$?; rm -f '$remote_route_revision_script'; exit \$script_exit_code"
+
       - name: Upgrade and migrate ERP
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -255,4 +268,4 @@ jobs:
         run: |
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "rm -f '/tmp/manage_material_ai_release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' '/tmp/sync_and_verify_assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' '/tmp/deepseek-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key' '/tmp/configure_material_ai-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh'"
+            "rm -f '/tmp/manage_material_ai_release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' '/tmp/sync_and_verify_assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' '/tmp/prepare-route-revision-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh' '/tmp/deepseek-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.key' '/tmp/configure_material_ai-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh'"
