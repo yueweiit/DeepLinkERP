@@ -216,9 +216,7 @@ def get_material_request_task_log_payload(task, request_payload=None):
 
 def log_inbound_material_request(doc, method=None):
 	if method == "after_insert":
-		if not should_log_material_request_creation(doc) or not is_mes_integration_enabled(
-			doc.get("company")
-		):
+		if not should_log_material_request_creation(doc):
 			return
 
 		enqueue_material_request_creation_log(doc)
@@ -228,7 +226,13 @@ def log_inbound_material_request(doc, method=None):
 
 
 def should_log_material_request_creation(doc):
-	return doc.get("material_request_type") in LOGGED_MATERIAL_REQUEST_TYPES
+	from mes_integration.mes_integration.material_request import is_mes_material_request
+
+	return (
+		doc.get("material_request_type") in LOGGED_MATERIAL_REQUEST_TYPES
+		and is_mes_material_request(doc)
+		and is_mes_integration_enabled(doc.get("company"))
+	)
 
 
 def enqueue_material_request_creation_log(doc):
@@ -319,6 +323,14 @@ def write_material_request_creation_log(
 
 
 def log_inbound_stock_entry(doc, method=None):
+	from mes_integration.mes_integration.stock_entry import (
+		is_mes_receipt_stock_entry,
+		is_mes_source_stock_entry,
+	)
+
+	if not (is_mes_receipt_stock_entry(doc) or is_mes_source_stock_entry(doc)):
+		return
+
 	log_inbound_document(doc, method)
 
 

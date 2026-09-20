@@ -118,6 +118,50 @@ class TestMESMaterialRequest(UnitTestCase):
 
 		enqueue_log.assert_not_called()
 
+	def test_material_request_creation_log_skips_manual_request(self):
+		doc = frappe._dict(
+			doctype="Material Request",
+			material_request_type="Material Issue",
+			company="Enabled Company",
+			name="MAT-MR-MANUAL",
+			custom_request_source="手动创建",
+		)
+
+		with (
+			patch(
+				"mes_integration.mes_integration.integration_log.is_mes_integration_enabled",
+				return_value=True,
+			),
+			patch(
+				"mes_integration.mes_integration.integration_log.enqueue_material_request_creation_log"
+			) as enqueue_log,
+		):
+			log_inbound_material_request(doc, "after_insert")
+
+		enqueue_log.assert_not_called()
+
+	def test_material_request_creation_log_keeps_mes_request(self):
+		doc = frappe._dict(
+			doctype="Material Request",
+			material_request_type="Material Issue",
+			company="Enabled Company",
+			name="MAT-MR-MES-TEST",
+			custom_request_source="MES",
+		)
+
+		with (
+			patch(
+				"mes_integration.mes_integration.integration_log.is_mes_integration_enabled",
+				return_value=True,
+			),
+			patch(
+				"mes_integration.mes_integration.integration_log.enqueue_material_request_creation_log"
+			) as enqueue_log,
+		):
+			log_inbound_material_request(doc, "after_insert")
+
+		enqueue_log.assert_called_once_with(doc)
+
 	def test_material_request_creation_log_requests_background_retry(self):
 		with patch(
 			"mes_integration.mes_integration.integration_log.create_mes_log",

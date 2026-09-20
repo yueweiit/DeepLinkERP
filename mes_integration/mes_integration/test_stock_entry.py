@@ -3,6 +3,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import UnitTestCase
 
+from mes_integration.mes_integration.integration_log import log_inbound_stock_entry
 from mes_integration.mes_integration.stock_entry import (
 	build_stock_entry_status_payload,
 	build_mes_stock_entry_response,
@@ -21,6 +22,41 @@ from mes_integration.mes_integration.stock_entry import (
 
 
 class TestMESStockEntry(UnitTestCase):
+	def test_manual_stock_entry_is_not_written_to_mes_log(self):
+		stock_entry = frappe._dict(
+			doctype="Stock Entry",
+			name="MAT-STE-MANUAL",
+			company="Test Company",
+			stock_entry_type="Material Receipt",
+			items=[],
+			flags=frappe._dict(),
+		)
+
+		with patch(
+			"mes_integration.mes_integration.integration_log.log_inbound_document"
+		) as log_document:
+			log_inbound_stock_entry(stock_entry, "on_submit")
+
+		log_document.assert_not_called()
+
+	def test_mes_receipt_is_written_to_mes_log(self):
+		stock_entry = frappe._dict(
+			doctype="Stock Entry",
+			name="MAT-STE-MES",
+			company="Test Company",
+			stock_entry_type="Finished Goods Receipt",
+			docstatus=1,
+			items=[],
+			flags=frappe._dict(),
+		)
+
+		with patch(
+			"mes_integration.mes_integration.integration_log.log_inbound_document"
+		) as log_document:
+			log_inbound_stock_entry(stock_entry, "on_submit")
+
+		log_document.assert_called_once_with(stock_entry, "on_submit")
+
 	def test_dlm_issue_confirm_accepts_processed_status(self):
 		validate_issue_confirm_response(
 			{"success": True, "data": {"status": "processed"}},
