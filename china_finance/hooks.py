@@ -52,6 +52,7 @@ app_include_css = "/assets/china_finance/css/china_finance.css"
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
 doctype_js = {
+	"Bank Account": "public/js/bank_account.js",
 	"Bank Statement Import": "public/js/bank_statement_import.js",
 	"Sales Invoice": ["public/js/sales_invoice_invoice_control.js", "public/js/gl_source_snapshot.js"],
 	"Sales Order": "public/js/sales_order_settlement.js",
