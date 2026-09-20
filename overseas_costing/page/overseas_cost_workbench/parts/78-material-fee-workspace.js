@@ -4873,6 +4873,12 @@
       || state?.costTrialAI?.previewing || state?.costTrialAI?.confirming);
   }
 
+  hasBlockingPackingGroups(state = this.materialFeeState) {
+    return Boolean((state?.materials?.packing_groups || []).some(
+      group => group.blocking || group.status === "needs_reconfirmation"
+    ));
+  }
+
   canApplyMaterialAIFill(fill) {
     if (!this.isMaterialAIReadyStatus(fill?.status) || fill.applying || fill.discarding || this.isMaterialFeeCalculationBusy()) return false;
     return Boolean(fill.row_review) && this.canConfirmMaterialAIRowSelection(fill);
@@ -4889,7 +4895,7 @@
         : trial.actionStage === "preview"
           ? "校验分摊…"
           : trial.actionStage === "confirm" ? "保存试算…" : "计算中…";
-    this.$root?.find("[data-action='mf-preview-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying))
+    this.$root?.find("[data-action='mf-preview-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying) || this.hasBlockingPackingGroups(state))
       ?.text?.(calculating ? stageLabel : "开始试算");
     this.$root?.find("[data-action='mf-adjust-cost']")?.prop?.("disabled", calculating || Boolean(state.aiFill?.applying));
     for (const root of [this.$root, state.aiProgressDialog?.$wrapper]) {
@@ -4900,6 +4906,7 @@
   async flushMaterialFeeInputs(state) {
     // Analysis proposals are independent of saved facts. Only an actual AI write blocks a trial.
     if (state.aiFill?.applying) throw new Error("AI 资料正在保存，请保存完成后再开始试算。");
+    if (this.hasBlockingPackingGroups(state)) throw new Error("装箱组成员已变化，请先重新确认装箱组。");
     if (state.calculationWrite) await state.calculationWrite;
     while (state.pendingWrites.size) await Promise.all([...state.pendingWrites]);
     if (this.materialFeeState !== state || this.detailState.batchName !== state.batchName) return false;
@@ -5539,12 +5546,15 @@
     const sourcePending = state.materials?.calculation_stale || state.fees?.summary?.source_pending;
     const staleCost = (header.status === "Dirty" || sourcePending) && Boolean(preview || hasLegacyTotal);
     const decisionSummary = preview ? this.materialFeeTrialDecisionSummary(preview) : "";
+    const packingGroupBlocked = this.hasBlockingPackingGroups(state);
+    const trialDisabled = this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying || packingGroupBlocked;
     const sectionTitle = `<div class="ocw-mf-section-title">
       <div><span>03</span><h3>SKU 综合单价试算</h3><p>开始试算后保存当前计算结果，并同步总览与 SKU 明细；确认和 ERP 推送需单独操作。</p><p>系统优先沿用已有口径，仅在必要时请求 AI；逐 SKU 金额由服务端规则引擎计算，可信关税凭证明细优先。</p></div>
-      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span>${preview ? `<button class="ocw-outline-btn" type="button" data-action="mf-adjust-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>调整分摊</button>` : ""}<button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${this.isMaterialFeeCalculationBusy(state) || state.aiFill?.applying ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
+      <div class="ocw-mf-cost-actions"><span class="ocw-mf-completeness ${!staleCost && preview?.summary?.is_complete ? "is-complete" : "is-partial"}">${staleCost ? "待重新试算" : preview ? (preview.summary?.is_complete ? "完整成本" : "非完整成本") : (hasLegacyTotal ? "待重新试算" : "尚未试算")}</span>${preview ? `<button class="ocw-outline-btn" type="button" data-action="mf-adjust-cost" ${trialDisabled ? "disabled" : ""}>调整分摊</button>` : ""}<button class="ocw-primary-btn" type="button" data-action="mf-preview-cost" ${trialDisabled ? "disabled" : ""}>${this.isMaterialFeeCalculationBusy(state) ? "计算中…" : "开始试算"}</button></div>
     </div>`;
     if (!preview) {
       return `<section class="ocw-mf-section ocw-mf-cost-section">${sectionTitle}
+        ${packingGroupBlocked ? '<p class="ocw-mf-trial-note">装箱组成员已变化，请先重新确认装箱组，再开始试算。</p>' : ""}
         ${hasLegacyTotal ? `<div class="ocw-mf-cost-summary"><div class="ocw-mf-cost-total"><span>上次已保存成本 · 待重新试算</span><strong>RMB ${this.escape(Number(legacyTotal).toFixed(2))}</strong></div></div>` : ""}
         <div class="ocw-detail-empty"><strong>${hasLegacyTotal ? "当前费用尚未汇总到已保存成本" : "尚未保存试算结果"}</strong><p>点击“开始试算”，按当前物料和费用更新总览、SKU 明细及本区结果。</p></div>
       </section>`;

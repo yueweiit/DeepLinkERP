@@ -217,17 +217,39 @@ def build_workspace_snapshot(
         settlement = runtime.batch_status(batch_name, version_name)
     except Exception as error:  # Main workspace remains available when its optional strip fails.
         settlement = {"ok": False, "viewed_version": version_name, "message": str(error)}
+    materials = material_input_service.get_material_grid(
+        batch_name,
+        version_name,
+        page=page,
+        page_length=page_length,
+    )
+    blocking_packing_groups = [
+        group for group in materials.get("packing_groups") or []
+        if group.get("blocking") or group.get("status") == "needs_reconfirmation"
+    ]
+    if blocking_packing_groups:
+        preview = {
+            "ok": True,
+            "read_only": True,
+            "summary": {"is_complete": False},
+            "items": [],
+            "project_summary": [],
+            "included_fees": [],
+            "excluded_fees": [],
+            "ignored_fees": [],
+            "incomplete_reasons": [{
+                "reason_code": "PACKING_GROUP_RECONFIRMATION_REQUIRED",
+                "message": "装箱组成员已变化，请重新确认分组后再试算。",
+            }],
+        }
+    else:
+        preview = cost_preview_service.preview_comprehensive_cost(batch_name, version_name)
     return sanitize_snapshot(
         {
             "detail": batch_service.get_batch_detail(batch_name, version_name),
-            "materials": material_input_service.get_material_grid(
-                batch_name,
-                version_name,
-                page=page,
-                page_length=page_length,
-            ),
+            "materials": materials,
             "fees": fee_service.get_fee_worklist(batch_name, version_name),
-            "preview": cost_preview_service.preview_comprehensive_cost(batch_name, version_name),
+            "preview": preview,
             "settlement": _settlement_strip(settlement),
         }
     )

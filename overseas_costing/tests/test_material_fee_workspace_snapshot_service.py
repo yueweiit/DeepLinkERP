@@ -261,3 +261,41 @@ def test_incomplete_rebuild_never_replaces_last_good_snapshot() -> None:
     assert stale["cache"]["status"] == "stale"
     assert "preview" in stale["cache"]["refresh_error"]
     assert stale["data"]["preview"]["summary"]["total_cost_rmb"] == "100.00"
+
+
+def test_workspace_snapshot_stays_available_when_packing_group_is_blocked(monkeypatch) -> None:
+    from overseas_costing.services import (
+        batch_service,
+        cost_preview_service,
+        fee_service,
+        material_fee_workspace_snapshot_service as service,
+        material_input_service,
+    )
+
+    materials = {
+        "items": [{"name": "I-1", "stable_line_key": "LINE-1"}],
+        "packing_groups": [{
+            "group_id": "GROUP-OLD",
+            "member_keys": ["LINE-OLD-1", "LINE-OLD-2"],
+            "status": "confirmed",
+            "blocking": True,
+        }],
+    }
+    monkeypatch.setattr(batch_service, "get_batch_detail", lambda *_args: {"header": {"name": "B-1"}})
+    monkeypatch.setattr(material_input_service, "get_material_grid", lambda *_args, **_kwargs: materials)
+    monkeypatch.setattr(fee_service, "get_fee_worklist", lambda *_args: {"fees": [], "summary": {}})
+    monkeypatch.setattr(
+        cost_preview_service,
+        "preview_comprehensive_cost",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("blocked packing must skip strict preview")),
+    )
+
+    snapshot = service.build_workspace_snapshot("B-1", "V-1", 1, 200)
+
+    assert snapshot["materials"] == materials
+    assert snapshot["preview"]["summary"]["is_complete"] is False
+    assert snapshot["preview"]["items"] == []
+    assert snapshot["preview"]["incomplete_reasons"] == [{
+        "reason_code": "PACKING_GROUP_RECONFIRMATION_REQUIRED",
+        "message": "装箱组成员已变化，请重新确认分组后再试算。",
+    }]

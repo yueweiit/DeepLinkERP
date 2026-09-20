@@ -47,6 +47,130 @@ def _material_fingerprint(items: list[dict]) -> str:
     ])
 
 
+def _packing_member_signature(row: dict) -> tuple[str, str, str, str] | None:
+    material_code = str(row.get("material_code") or "").strip()
+    spec_model = str(row.get("spec_model") or "").strip()
+    unit = str(row.get("shipped_uom") or row.get("unit") or "").strip()
+    try:
+        quantity = Decimal(str(row.get("actual_shipped_qty")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not material_code or not spec_model or not unit or not quantity.is_finite() or quantity <= 0:
+        return None
+    return material_code, spec_model, format(quantity.normalize(), "f"), unit
+
+
+def plan_packing_group_changes(
+    items: list[dict], projected_rows: list[dict], groups: list[dict],
+) -> list[dict]:
+    """Plan conservative group repairs; ambiguous identities always require reconfirmation."""
+
+    old_rows_by_key: dict[str, list[dict]] = {}
+    for row in items or []:
+        key = str(row.get("stable_line_key") or "").strip()
+        if key:
+            old_rows_by_key.setdefault(key, []).append(row)
+    projected_by_key: dict[str, list[dict]] = {}
+    projected_by_name: dict[str, list[dict]] = {}
+    projected_by_signature: dict[tuple[str, str, str, str], list[dict]] = {}
+    for row in projected_rows or []:
+        key = str(row.get("stable_line_key") or "").strip()
+        if not key:
+            continue
+        projected_by_key.setdefault(key, []).append(row)
+        name = str(row.get("_existing_name") or row.get("name") or "").strip()
+        if name:
+            projected_by_name.setdefault(name, []).append(row)
+        signature = _packing_member_signature(row)
+        if signature:
+            projected_by_signature.setdefault(signature, []).append(row)
+
+    member_owners: dict[str, set[str]] = {}
+    candidates_to_plan = []
+    for raw_group in groups or []:
+        if raw_group.get("status") == "removed":
+            continue
+        group_id = str(raw_group.get("group_id") or "").strip()
+        before = [str(value or "").strip() for value in raw_group.get("member_keys") or []]
+        for member_key in before:
+            if group_id and member_key:
+                member_owners.setdefault(member_key, set()).add(group_id)
+        if raw_group.get("status") == "needs_reconfirmation":
+            continue
+        if not group_id or len(before) < 2 or any(not value for value in before):
+            continue
+        after = []
+        unresolved = False
+        for member_key in before:
+            direct = projected_by_key.get(member_key) or []
+            if len(direct) == 1:
+                after.append(member_key)
+                continue
+            old_rows = old_rows_by_key.get(member_key) or []
+            if len(old_rows) != 1:
+                unresolved = True
+                after.append(member_key)
+                continue
+            old_row = old_rows[0]
+            candidates = projected_by_name.get(str(old_row.get("name") or "").strip()) or []
+            if len(candidates) != 1:
+                signature = _packing_member_signature(old_row)
+                candidates = projected_by_signature.get(signature) or [] if signature else []
+            if len(candidates) != 1:
+                unresolved = True
+                after.append(member_key)
+                continue
+            after.append(str(candidates[0].get("stable_line_key") or "").strip())
+        if len(after) != len(set(after)):
+            unresolved = True
+        candidates_to_plan.append({
+            "group_id": group_id,
+            "before": before,
+            "after": after,
+            "status": str(raw_group.get("status") or "confirmed"),
+            "unresolved": unresolved,
+        })
+
+    proposed_owners: dict[str, set[str]] = {}
+    for candidate in candidates_to_plan:
+        candidate["unresolved"] = candidate["unresolved"] or any(
+            member_owners.get(member_key, set()) - {candidate["group_id"]}
+            for member_key in candidate["after"]
+        )
+        if candidate["unresolved"]:
+            continue
+        for member_key in candidate["after"]:
+            proposed_owners.setdefault(member_key, set()).add(candidate["group_id"])
+
+    planned = []
+    for candidate in candidates_to_plan:
+        group_id = candidate["group_id"]
+        before = candidate["before"]
+        after = candidate["after"]
+        unresolved = candidate["unresolved"] or any(
+            proposed_owners.get(member_key, set()) - {group_id}
+            for member_key in after
+        )
+        if unresolved:
+            planned.append({
+                "group_id": group_id,
+                "action": "reconfirm",
+                "before_member_keys": before,
+                "after_member_keys": before,
+                "after_status": "needs_reconfirmation",
+            })
+            continue
+        if after != before:
+            planned.append({
+                "group_id": group_id,
+                "action": "remap",
+                "before_member_keys": before,
+                "after_member_keys": after,
+                "after_status": candidate["status"],
+            })
+    return planned
+
+
 _NUMERIC_ITEM_FIELDS = {
     "row_no", "quantity", "goods_value", "unit_price",
     "actual_shipped_qty", "net_weight_kg", "gross_weight_kg",
@@ -180,6 +304,7 @@ def _authoritative_logistics_source(sources: list[dict]) -> tuple[dict | None, s
 def build_reset_entry(
     target: dict, items: list[dict], source: dict, *,
     identity_hints: list[dict] | None = None,
+    packing_groups: list[dict] | None = None,
 ) -> dict:
     proposal = build_logistics_reconciliation(
         items, source, reset_manual_scope=True,
@@ -223,6 +348,9 @@ def build_reset_entry(
         name: fields for name, fields in updated_item_fields.items() if fields
     }
     updated = sorted(updated_item_fields)
+    packing_group_changes = plan_packing_group_changes(
+        items, payload.get("rows") or [], packing_groups or [],
+    )
     updated_json_paths = {}
     for name, fields in updated_item_fields.items():
         if "extra_json" not in fields:
@@ -246,10 +374,13 @@ def build_reset_entry(
         "updated_item_names": updated,
         "updated_item_fields": updated_item_fields,
         "updated_json_paths": updated_json_paths,
+        "packing_group_changes": packing_group_changes,
         "proposal": proposal,
     }
-    entry["changed"] = bool(
-        entry["exclude"] or entry["restore"] or entry["create_rows"] or updated)
+    entry["material_changed"] = bool(
+        entry["exclude"] or entry["restore"] or entry["create_rows"] or updated
+    )
+    entry["changed"] = bool(entry["material_changed"] or packing_group_changes)
     entry["entry_hash"] = _hash({
         key: entry.get(key) for key in (
             "batch", "version", "current_version", "is_current",
@@ -257,6 +388,7 @@ def build_reset_entry(
             "material_fingerprint",
             "before_material_codes", "after_material_codes", "exclude", "restore",
             "create_rows", "updated_item_names", "name_mismatches",
+            "packing_group_changes",
         )
     })
     return entry
@@ -267,7 +399,8 @@ def build_reset_manifest(entries: list[dict], skipped: list[dict]) -> dict:
         if "changed" not in entry:
             entry["changed"] = bool(
                 entry.get("exclude") or entry.get("restore")
-                or entry.get("create_rows") or entry.get("updated_item_names"))
+                or entry.get("create_rows") or entry.get("updated_item_names")
+                or entry.get("packing_group_changes"))
     compact_entries = []
     for entry in entries:
         compact = {
@@ -283,7 +416,14 @@ def build_reset_manifest(entries: list[dict], skipped: list[dict]) -> dict:
             restored_item_count=len(entry.get("restore") or []),
             created_item_count=len(entry.get("create_rows") or []),
             updated_item_count=len(entry.get("updated_item_names") or []),
+            packing_group_change_count=len(entry.get("packing_group_changes") or []),
         )
+        compact["packing_group_changes"] = [{
+            key: deepcopy(change.get(key)) for key in (
+                "group_id", "action", "before_member_keys",
+                "after_member_keys", "after_status",
+            )
+        } for change in entry.get("packing_group_changes") or []]
         field_counts: dict[str, int] = {}
         for fields in (entry.get("updated_item_fields") or {}).values():
             for field in fields:
@@ -323,6 +463,8 @@ def build_reset_manifest(entries: list[dict], skipped: list[dict]) -> dict:
         "excluded": sum(len(row.get("exclude") or []) for row in entries),
         "restored": sum(len(row.get("restore") or []) for row in entries),
         "created": sum(len(row.get("create_rows") or []) for row in entries),
+        "packing_group_changes": sum(
+            len(row.get("packing_group_changes") or []) for row in entries),
         "name_mismatch_count": sum(len(row.get("name_mismatches") or []) for row in entries),
         "entries": compact_entries,
         "skipped": deepcopy(skipped),
@@ -352,9 +494,14 @@ def _reload_reset_entry(runtime, target: dict) -> dict:
         *sources,
         *_list_material_identity_sources(target["batch"], target["version"]),
     ]
+    from .material_packing_group_service import groups_from_version
+    version_meta = runtime.db.get_value(
+        "Overseas Cost Version", target["version"], ["extra_json"], as_dict=True,
+    ) or {}
     entry = build_reset_entry(
         target, items, source,
         identity_hints=build_material_identity_hints(identity_sources),
+        packing_groups=groups_from_version(version_meta),
     )
     entry["_items"] = items
     return entry
@@ -427,8 +574,37 @@ def _insert_reset_audit(entry: dict, run_id: str) -> None:
         old_value=json.dumps(entry.get("before_material_codes") or [], ensure_ascii=False),
         new_value=json.dumps(entry.get("after_material_codes") or [], ensure_ascii=False),
         action_remark=(f"国际物流主物料范围初始化 {run_id}；"
+                       f"packing_group_changes={len(entry.get('packing_group_changes') or [])}；"
                        f"plan={entry.get('entry_hash') or ''}"),
     )
+
+
+def _apply_packing_group_changes(metadata: dict, changes: list[dict], run_id: str) -> None:
+    groups = metadata.get("material_packing_groups") or []
+    by_id = {str(group.get("group_id") or ""): group for group in groups}
+    now = datetime.now().isoformat(timespec="seconds")
+    for change in changes or []:
+        group = by_id.get(str(change.get("group_id") or ""))
+        before = list(change.get("before_member_keys") or [])
+        if not group or list(group.get("member_keys") or []) != before:
+            raise ValueError("装箱组已变化，请重新生成只读审计。")
+        after = list(change.get("after_member_keys") or [])
+        group["member_keys"] = after
+        group["status"] = str(change.get("after_status") or "needs_reconfirmation")
+        event = {
+            "run_id": run_id,
+            "action": str(change.get("action") or ""),
+            "before_member_keys": before,
+            "after_member_keys": after,
+            "repaired_at": now,
+        }
+        history = deepcopy(group.get("scope_reset_repair_history") or [])
+        previous = group.get("scope_reset_repair")
+        if isinstance(previous, dict) and previous not in history:
+            history.append(deepcopy(previous))
+        history.append(deepcopy(event))
+        group["scope_reset_repair_history"] = history
+        group["scope_reset_repair"] = event
 
 
 def _mark_version_for_recalculation(runtime, entry: dict, run_id: str) -> None:
@@ -438,6 +614,9 @@ def _mark_version_for_recalculation(runtime, entry: dict, run_id: str) -> None:
         metadata = json.loads(metadata_raw) if isinstance(metadata_raw, str) else dict(metadata_raw)
     except (TypeError, ValueError):
         metadata = {}
+    _apply_packing_group_changes(
+        metadata, entry.get("packing_group_changes") or [], run_id,
+    )
     metadata["material_scope_reset"] = {
         "run_id": run_id,
         "entry_hash": entry.get("entry_hash"),
@@ -539,7 +718,7 @@ def reset_all_material_scopes(
                 version=current_entry["version"], current=current_entry["_items"], run_id=run_id,
                 update_batch_count=bool(current_entry.get("is_current")),
                 initialization_reset=True,
-            )
+            ) if current_entry.get("material_changed") else []
             _mark_version_for_recalculation(runtime, current_entry, run_id)
             _insert_reset_audit(current_entry, run_id)
             runtime.db.commit()
@@ -548,6 +727,7 @@ def reset_all_material_scopes(
                 "excluded": len(current_entry.get("exclude") or []),
                 "restored": len(current_entry.get("restore") or []),
                 "created": len(created), "entry_hash": current_entry.get("entry_hash"),
+                "packing_group_changes": len(current_entry.get("packing_group_changes") or []),
             })
         except Exception as error:
             runtime.db.rollback()

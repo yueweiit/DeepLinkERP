@@ -373,6 +373,157 @@ def test_marking_historical_version_preserves_its_lifecycle_status():
     assert not any(doctype == "Overseas Cost Batch" for doctype, _name, _values in writes)
 
 
+def test_packing_group_repair_uniquely_remaps_excluded_members() -> None:
+    from overseas_costing.services.material_scope_reset_service import plan_packing_group_changes
+
+    items = [
+        {"name": "OLD-1", "stable_line_key": "OLD-L1", "is_excluded": 1,
+         "material_code": "FL000429", "spec_model": "超队指环扣",
+         "actual_shipped_qty": "4000", "unit": "个"},
+        {"name": "OLD-2", "stable_line_key": "OLD-L2", "is_excluded": 1,
+         "material_code": "FL000427", "spec_model": "超队CD纹",
+         "actual_shipped_qty": "4000", "unit": "个"},
+    ]
+    projected = [
+        {"_existing_name": "NEW-1", "stable_line_key": "NEW-L1",
+         "material_code": "FL000429", "spec_model": "超队指环扣",
+         "actual_shipped_qty": "4000", "unit": "个"},
+        {"_existing_name": "NEW-2", "stable_line_key": "NEW-L2",
+         "material_code": "FL000427", "spec_model": "超队CD纹",
+         "actual_shipped_qty": "4000", "unit": "个"},
+    ]
+    groups = [{
+        "group_id": "GROUP-1", "status": "confirmed",
+        "member_keys": ["OLD-L1", "OLD-L2"],
+        "package_count": "1", "gross_weight_kg": "9.7",
+    }]
+
+    changes = plan_packing_group_changes(items, projected, groups)
+
+    assert changes == [{
+        "group_id": "GROUP-1",
+        "action": "remap",
+        "before_member_keys": ["OLD-L1", "OLD-L2"],
+        "after_member_keys": ["NEW-L1", "NEW-L2"],
+        "after_status": "confirmed",
+    }]
+
+
+def test_packing_group_repair_never_guesses_ambiguous_member() -> None:
+    from overseas_costing.services.material_scope_reset_service import plan_packing_group_changes
+
+    old = {"name": "OLD-1", "stable_line_key": "OLD-L1", "is_excluded": 1,
+           "material_code": "SKU-1", "spec_model": "S", "actual_shipped_qty": "4", "unit": "个"}
+    projected = [
+        {"stable_line_key": "NEW-L1", "material_code": "SKU-1", "spec_model": "S",
+         "actual_shipped_qty": "4", "unit": "个"},
+        {"stable_line_key": "NEW-L2", "material_code": "SKU-1", "spec_model": "S",
+         "actual_shipped_qty": "4", "unit": "个"},
+    ]
+
+    changes = plan_packing_group_changes(
+        [old], projected,
+        [{"group_id": "GROUP-1", "status": "confirmed", "member_keys": ["OLD-L1", "LIVE-L2"]}],
+    )
+
+    assert changes == [{
+        "group_id": "GROUP-1",
+        "action": "reconfirm",
+        "before_member_keys": ["OLD-L1", "LIVE-L2"],
+        "after_member_keys": ["OLD-L1", "LIVE-L2"],
+        "after_status": "needs_reconfirmation",
+    }]
+
+
+def test_packing_group_repair_does_not_take_key_owned_by_later_group() -> None:
+    from overseas_costing.services.material_scope_reset_service import plan_packing_group_changes
+
+    items = [
+        {"name": "OLD-1", "stable_line_key": "OLD-L1", "is_excluded": 1,
+         "material_code": "SKU-1", "spec_model": "S",
+         "actual_shipped_qty": "4", "unit": "个"},
+        {"name": "OLD-3", "stable_line_key": "OLD-L3", "is_excluded": 1,
+         "material_code": "SKU-3", "spec_model": "U",
+         "actual_shipped_qty": "6", "unit": "个"},
+    ]
+    projected = [
+        {"stable_line_key": "LIVE-L1", "material_code": "SKU-1", "spec_model": "S",
+         "actual_shipped_qty": "4", "unit": "个"},
+        {"stable_line_key": "LIVE-L2", "material_code": "SKU-2", "spec_model": "T",
+         "actual_shipped_qty": "5", "unit": "个"},
+        {"stable_line_key": "LIVE-L3", "material_code": "SKU-3", "spec_model": "U",
+         "actual_shipped_qty": "6", "unit": "个"},
+    ]
+    groups = [
+        {"group_id": "STALE-FIRST", "status": "confirmed",
+         "member_keys": ["OLD-L1", "OLD-L3"]},
+        {"group_id": "RIGHTFUL-LATER", "status": "confirmed",
+         "member_keys": ["LIVE-L1", "LIVE-L2"]},
+    ]
+
+    changes = plan_packing_group_changes(items, projected, groups)
+
+    assert changes == [{
+        "group_id": "STALE-FIRST", "action": "reconfirm",
+        "before_member_keys": ["OLD-L1", "OLD-L3"],
+        "after_member_keys": ["OLD-L1", "OLD-L3"],
+        "after_status": "needs_reconfirmation",
+    }]
+
+
+def test_mark_version_applies_audited_packing_group_remap() -> None:
+    from overseas_costing.services.material_scope_reset_service import _mark_version_for_recalculation
+
+    writes = []
+    existing = {
+        "material_packing_groups": [{
+            "group_id": "GROUP-1", "status": "confirmed",
+            "member_keys": ["OLD-L1", "OLD-L2"], "package_count": "1",
+            "scope_reset_repair": {
+                "run_id": "RESET-OLD", "action": "remap",
+                "before_member_keys": ["OLDER-1", "OLDER-2"],
+                "after_member_keys": ["OLD-L1", "OLD-L2"],
+                "repaired_at": "2026-09-01T00:00:00",
+            },
+        }]
+    }
+
+    class DB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return __import__("json").dumps(existing)
+
+        @staticmethod
+        def set_value(doctype, name, values, **_kwargs):
+            writes.append((doctype, name, values))
+
+    entry = {
+        "batch": "B-1", "version": "V-1", "is_current": True,
+        "version_status": "Active", "entry_hash": "ENTRY-1",
+        "after_material_codes": ["A", "B"],
+        "packing_group_changes": [{
+            "group_id": "GROUP-1", "action": "remap",
+            "before_member_keys": ["OLD-L1", "OLD-L2"],
+            "after_member_keys": ["NEW-L1", "NEW-L2"],
+            "after_status": "confirmed",
+        }],
+    }
+
+    _mark_version_for_recalculation(SimpleNamespace(db=DB()), entry, "RESET-1")
+
+    version_values = next(values for doctype, _name, values in writes
+                          if doctype == "Overseas Cost Version")
+    metadata = __import__("json").loads(version_values["extra_json"])
+    group = metadata["material_packing_groups"][0]
+    assert group["member_keys"] == ["NEW-L1", "NEW-L2"]
+    assert group["status"] == "confirmed"
+    assert group["scope_reset_repair"]["run_id"] == "RESET-1"
+    assert group["scope_reset_repair"]["before_member_keys"] == ["OLD-L1", "OLD-L2"]
+    assert [event["run_id"] for event in group["scope_reset_repair_history"]] == [
+        "RESET-OLD", "RESET-1",
+    ]
+
+
 def test_apply_requires_matching_dry_run_plan_hash(monkeypatch):
     from overseas_costing.services import material_scope_reset_service as service
 
@@ -404,6 +555,56 @@ def test_apply_is_idempotent_when_manifest_has_no_changes(monkeypatch):
     assert result["changed_versions"] == 0
     assert result["applied_versions"] == 0
     assert result["failed"] == []
+
+
+def test_apply_group_only_repair_does_not_rewrite_material_rows(monkeypatch):
+    from overseas_costing.services import material_scope_reset_service as service
+
+    planned = {
+        "batch": "B-1", "version": "V-1", "current_version": "V-1",
+        "is_current": True, "version_status": "Active",
+        "entry_hash": "ENTRY-1", "changed": True, "material_changed": False,
+        "exclude": [], "restore": [], "create_rows": [], "_items": [],
+        "proposal": {"payload": {}}, "packing_group_changes": [{
+            "group_id": "G-1", "action": "remap",
+            "before_member_keys": ["OLD-1", "OLD-2"],
+            "after_member_keys": ["NEW-1", "NEW-2"],
+            "after_status": "confirmed",
+        }],
+    }
+    monkeypatch.setattr(service, "_build_material_scope_reset_audit", lambda **_kwargs: {
+        "plan_hash": "PLAN", "entries": [], "skipped": [],
+        "checked_versions": 1, "changed_versions": 1,
+        "excluded": 0, "restored": 0, "created": 0,
+        "_entries_with_proposals": [planned],
+    })
+    monkeypatch.setattr(service, "_refresh_reset_target", lambda _runtime, target: target)
+    monkeypatch.setattr(service, "_reload_reset_entry", lambda *_args, **_kwargs: planned)
+    monkeypatch.setattr(
+        service, "apply_reconciliation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not rewrite items")),
+    )
+    marked = []
+    monkeypatch.setattr(service, "_mark_version_for_recalculation", lambda *_args: marked.append(True))
+    monkeypatch.setattr(service, "_insert_reset_audit", lambda *_args: None)
+    commits = []
+    fake = SimpleNamespace(db=SimpleNamespace(
+        commit=lambda: commits.append(True), rollback=lambda: None,
+        sql=lambda *_args, **_kwargs: [],
+    ))
+    monkeypatch.setattr(service, "_frappe", fake)
+
+    result = service.reset_all_material_scopes(
+        dry_run=False, expected_plan_hash="PLAN", run_id="RESET-1",
+    )
+
+    assert marked == [True]
+    assert commits == [True]
+    assert result["applied"] == [{
+        "batch": "B-1", "version": "V-1",
+        "excluded": 0, "restored": 0, "created": 0,
+        "entry_hash": "ENTRY-1", "packing_group_changes": 1,
+    }]
 
 
 def test_apply_skips_version_when_source_or_items_change_after_preflight(monkeypatch):
