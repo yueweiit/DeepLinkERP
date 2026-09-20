@@ -7,6 +7,7 @@ from china_finance.overrides.company import ChinaFinanceCompany
 from china_finance.services.account_template import (
 	COMPANY_TEMPLATE,
 	_get_template_sync_blockers,
+	build_company_template_chart,
 	count_chart_accounts,
 	flatten_company_template_chart,
 	get_charts_for_country,
@@ -20,10 +21,24 @@ from china_finance.setup.china_coa_profile import (
 	get_company_default_accounts,
 	get_settings_accounts,
 	get_tax_account_rules,
+	validate_profile,
 )
 
 
 class TestAccountTemplate(UnitTestCase):
+	def test_export_rejects_asset_under_expense_parent(self):
+		rows = [
+			frappe._dict(
+				name="研发支出", parent_account=None, root_type="Expense", report_type="Profit and Loss"
+			),
+			frappe._dict(
+				name="530102", parent_account="研发支出", root_type="Asset", report_type="Balance Sheet"
+			),
+		]
+		with patch.object(frappe, "get_all", return_value=rows):
+			with self.assertRaisesRegex(ValueError, "530102"):
+				build_company_template_chart("Test Company")
+
 	def test_company_hierarchy_blocks_template_conversion(self):
 		for has_parent, has_child in ((True, False), (False, True)):
 			with self.subTest(has_parent=has_parent, has_child=has_child):
@@ -59,6 +74,10 @@ class TestAccountTemplate(UnitTestCase):
 		self.assertEqual(len(rows), data["account_count"])
 		self.assertEqual(len({row["account_number"] for row in rows if row["account_number"]}), 313)
 		self.assertTrue(all(row["root_type"] for row in rows))
+		capitalized = next(row for row in rows if row["account_number"] == "530102")
+		self.assertEqual(capitalized["root_type"], "Asset")
+		self.assertEqual(capitalized["report_type"], "Balance Sheet")
+		self.assertEqual(capitalized["parent_key"], "资产/非流动资产/开发支出")
 
 	def test_source_company_template_uses_bundled_chart_path(self):
 		company = frappe.new_doc("Company")
@@ -105,6 +124,16 @@ class TestAccountTemplateIntegration(IntegrationTestCase):
 			get_company_template_data()["account_count"],
 		)
 		settings = frappe.get_doc("China Finance Settings", company.name)
+		self.assertEqual(settings.accounting_standard, "小企业会计准则")
+		status = validate_profile(company.name)
+		self.assertEqual(status["status"], "Ready", status["errors"])
+		self.assertEqual(status["warnings"], [])
+		self.assertEqual(settings.coa_template, COMPANY_TEMPLATE)
+		self.assertEqual(settings.coa_hash, status["hash"])
+		capitalized = frappe.db.get_value("Account", {"company": company.name, "account_number": "530102"})
+		frappe.db.set_value("Account", capitalized, "report_type", "Profit and Loss")
+		self.assertEqual(validate_profile(company.name)["status"], "Needs Attention")
+		frappe.db.set_value("Account", capitalized, "report_type", "Balance Sheet")
 		self.assertEqual(
 			frappe.db.get_value("Account", settings.retained_earnings_account, "account_number"), "410411"
 		)
@@ -200,6 +229,7 @@ class TestAccountTemplateIntegration(IntegrationTestCase):
 		self.assertEqual(after_sync["rename_count"], 0)
 		self.assertEqual(after_sync["reparent_count"], 0)
 		self.assertEqual(after_sync["configuration_updates"], [])
+		self.assertEqual(validate_profile(company.name)["status"], "Ready")
 		settings.reload()
 		self.assertEqual(settings.accounting_standard, "小企业会计准则")
 		for field in (
@@ -244,6 +274,28 @@ class TestAccountTemplateIntegration(IntegrationTestCase):
 			repeat = sync_existing_company_to_template(company.name, apply=True)
 		self.assertEqual(repeat["created_count"], 0)
 		self.assertEqual(repeat["configuration_updates_applied"], 0)
+		# Reproduce the previous bundled chart: capitalized R&D inherited Expense.
+		capitalized = frappe.db.get_value("Account", {"company": company.name, "account_number": "530102"})
+		expense_parent = frappe.db.get_value("Account", {"company": company.name, "account_number": "5301"})
+		frappe.db.set_value(
+			"Account",
+			capitalized,
+			{
+				"parent_account": expense_parent,
+				"root_type": "Expense",
+				"report_type": "Profit and Loss",
+			},
+		)
+		status = validate_profile(company.name)
+		self.assertEqual(status["status"], "Needs Attention")
+		self.assertTrue(any("530102" in error for error in status["errors"]))
+		self.assertEqual(preview_existing_company_template_sync(company.name)["reparent_count"], 1)
+		with patch.object(frappe.db, "commit"):
+			sync_existing_company_to_template(company.name, apply=True)
+		settings.reload()
+		self.assertEqual(settings.coa_integrity_status, "Ready")
+		self.assertEqual(settings.coa_template, COMPANY_TEMPLATE)
+
 		deposit = frappe.db.get_value("Account", {"company": company.name, "account_number": "101201"})
 		scopes = frappe.get_all(
 			"China Cash Equivalent Scope",

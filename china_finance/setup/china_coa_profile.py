@@ -155,6 +155,31 @@ def get_profile_account_numbers():
 	return frozenset(row["account_number"] for row in get_profile_accounts())
 
 
+def get_company_profile(company):
+	"""Validate against the selected chart snapshot, not a different chart's numbers."""
+	if uses_yuewei_company_chart(company):
+		from china_finance.services.account_template import (
+			COMPANY_TEMPLATE,
+			flatten_company_template_chart,
+			get_company_template_chart,
+		)
+
+		tree = get_company_template_chart()
+		payload = json.dumps(tree, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+		return {
+			"template": COMPANY_TEMPLATE,
+			"version": CHART_VERSION,
+			"hash": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+			"accounts": [row for row in flatten_company_template_chart() if row["account_number"]],
+		}
+	return {
+		"template": CHART_TEMPLATE,
+		"version": CHART_VERSION,
+		"hash": get_chart_hash(),
+		"accounts": get_profile_accounts(),
+	}
+
+
 def is_profile_company(company):
 	return frappe.db.get_value("Company", company, "chart_of_accounts") == CHART_TEMPLATE
 
@@ -162,7 +187,7 @@ def is_profile_company(company):
 def get_company_accounts_by_number(company):
 	rows = frappe.get_all(
 		"Account", filters={"company": company},
-		fields=["name", "account_name", "account_number", "root_type", "account_type", "is_group", "disabled", "parent_account"],
+		fields=["name", "account_name", "account_number", "root_type", "report_type", "account_type", "is_group", "disabled", "parent_account"],
 	)
 	by_number, duplicates = {}, {}
 	for row in rows:
@@ -197,7 +222,8 @@ def get_account_by_number(company, account_number, *, leaf=None, required=True):
 def validate_profile(company, include_defaults=True):
 	if not is_profile_company(company):
 		return {"supported": False, "status": "Legacy", "errors": [], "warnings": []}
-	expected = {row["account_number"]: row for row in get_profile_accounts()}
+	profile = get_company_profile(company)
+	expected = {row["account_number"]: row for row in profile["accounts"]}
 	actual, duplicates = get_company_accounts_by_number(company)
 	errors = [_("科目编号 {0} 重复：{1}").format(number, "、".join(names)) for number, names in duplicates.items()]
 	warnings = []
@@ -216,12 +242,15 @@ def validate_profile(company, include_defaults=True):
 			continue
 		if account.root_type != rule["root_type"]:
 			errors.append(_("科目 {0} 根类型应为 {1}").format(number, rule["root_type"]))
+		report_type = "Balance Sheet" if rule["root_type"] in {"Asset", "Liability", "Equity"} else "Profit and Loss"
+		if account.report_type != report_type:
+			errors.append(_("科目 {0} 报表类型应为 {1}").format(number, report_type))
 		if account.disabled:
 			errors.append(_("必需科目 {0} 已停用").format(number))
 		has_children = account.name in child_parents
 		if bool(account.is_group) != has_children:
 			errors.append(_("科目 {0} 分组属性与实际父子关系不一致").format(number))
-		expected_account_type = account_type_overrides.get(number, rule["account_type"])
+		expected_account_type = account_type_overrides.get(number, rule["account_type"]) or None
 		if not account.is_group and (account.account_type or None) != expected_account_type:
 			errors.append(_("科目 {0} 类型应为 {1}").format(number, expected_account_type or _("空")))
 		if account.account_name != rule["account_name"]:
@@ -245,9 +274,9 @@ def validate_profile(company, include_defaults=True):
 				})
 	return {
 		"supported": True,
-		"template": CHART_TEMPLATE,
-		"version": CHART_VERSION,
-		"hash": get_chart_hash(),
+		"template": profile["template"],
+		"version": profile["version"],
+		"hash": profile["hash"],
 		"status": "Ready" if not errors else "Needs Attention",
 		"errors": errors,
 		"warnings": warnings,
@@ -286,9 +315,9 @@ def update_settings_profile(settings, status=None):
 		return
 	status = status or validate_profile(settings.company)
 	values = {
-		"coa_template": CHART_TEMPLATE,
-		"coa_version": CHART_VERSION,
-		"coa_hash": get_chart_hash(),
+		"coa_template": status["template"],
+		"coa_version": status["version"],
+		"coa_hash": status["hash"],
 		"coa_last_checked_on": now_datetime(),
 		"coa_integrity_status": status["status"],
 		"coa_integrity_details": "\n".join([*status["errors"], *status["warnings"]]) or _("科目模板完整"),

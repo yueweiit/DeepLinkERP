@@ -1123,11 +1123,6 @@
             "account_name": "研发支出－费用化支出",
             "account_number": "530101",
             "account_currency": "CNY"
-          },
-          "研发支出－资本化支出": {
-            "account_name": "研发支出－资本化支出",
-            "account_number": "530102",
-            "account_currency": "CNY"
           }
         }
       },
@@ -1824,7 +1819,12 @@
         "开发支出": {
           "account_name": "开发支出",
           "account_currency": "CNY",
-          "is_group": 1
+          "is_group": 1,
+          "研发支出－资本化支出": {
+            "account_name": "研发支出－资本化支出",
+            "account_number": "530102",
+            "account_currency": "CNY"
+          }
         }
       }
     }

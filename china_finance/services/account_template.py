@@ -69,7 +69,7 @@ def company_template_available():
 
 
 def build_company_template_chart(company):
-	"""Build a lossless chart tree, including same-name sibling accounts."""
+	"""Export a coherent chart; ERPNext imports descendants with their root's type."""
 	accounts = frappe.get_all(
 		"Account",
 		filters={"company": company, "disabled": 0},
@@ -81,14 +81,22 @@ def build_company_template_chart(company):
 			"account_category",
 			"is_group",
 			"root_type",
+			"report_type",
 			"tax_rate",
 			"account_number",
 			"account_currency",
 		],
 		order_by="lft, rgt",
 	)
+	by_name = {account.name: account for account in accounts}
 	children_by_parent = defaultdict(list)
 	for account in accounts:
+		parent = by_name.get(account.parent_account)
+		expected_report = (
+			"Balance Sheet" if account.root_type in {"Asset", "Liability", "Equity"} else "Profit and Loss"
+		)
+		if (parent and parent.root_type != account.root_type) or account.report_type != expected_report:
+			raise ValueError(f"科目 {account.name} 的根类型、报表类型或父级不一致，请核对后再导出模板")
 		children_by_parent[account.parent_account or ""].append(account)
 
 	def build_children(parent_name=""):
@@ -652,6 +660,7 @@ def _match_template_accounts(template_rows, existing):
 def _account_metadata_differs(account, row):
 	expected = {
 		"root_type": row["root_type"],
+		"report_type": row["report_type"],
 		"report_type": row["report_type"],
 		"is_group": row["is_group"],
 		"account_type": "" if row["is_group"] else row["account_type"],
