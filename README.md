@@ -37,6 +37,8 @@ bench --site SITE execute china_finance.api.initialize_company --kwargs \
 
 ## 公共接口
 
+已用标准模板新建、尚未录入业务的公司，可参考[新公司科目模板与启用](docs/新公司科目模板与启用.md)，预览并同步至应用内置的悦为公司科目模板，然后配置小企业会计准则及正式记账日期。
+
 - `china_finance.api.initialize_company`：初始化公司设置和建议科目映射；
 - `china_finance.api.deployment_health`：检查部署结构和标准数据；
 - `china_finance.services.voucher.rebuild_missing_vouchers`：幂等补建切换日后的缺失凭证；
