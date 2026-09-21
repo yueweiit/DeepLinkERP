@@ -11,6 +11,8 @@
     if (!content || !scrollbar || !spacer) return () => {};
     let syncing = false;
     let frame = null;
+    let programmaticContentLeft = null;
+    let programmaticScrollbarLeft = null;
     const interact = () => {
       if (typeof onInteraction === "function") onInteraction();
     };
@@ -28,7 +30,10 @@
       if (content.scrollLeft !== left) content.scrollLeft = left;
       if (header) header.scrollLeft = left;
       const scrollbarLeft = contentMax > 0 ? (left / contentMax) * scrollbarMax : 0;
-      if (Math.abs(scrollbar.scrollLeft - scrollbarLeft) > 0.5) scrollbar.scrollLeft = scrollbarLeft;
+      if (Math.abs(scrollbar.scrollLeft - scrollbarLeft) > 0.5) {
+        programmaticScrollbarLeft = scrollbarLeft;
+        scrollbar.scrollLeft = scrollbarLeft;
+      }
       setButtons(contentMax);
     };
     const refresh = () => {
@@ -43,6 +48,15 @@
     };
     const onContentScroll = () => {
       if (syncing) return;
+      if (programmaticContentLeft !== null) {
+        const matched = Math.abs(content.scrollLeft - programmaticContentLeft) <= 0.5;
+        programmaticContentLeft = null;
+        if (matched) {
+          if (header) header.scrollLeft = content.scrollLeft;
+          setButtons(metrics().contentMax);
+          return;
+        }
+      }
       syncing = true;
       interact();
       syncFromContent();
@@ -50,11 +64,19 @@
     };
     const onScrollbarScroll = () => {
       if (syncing) return;
+      if (programmaticScrollbarLeft !== null) {
+        const matched = Math.abs(scrollbar.scrollLeft - programmaticScrollbarLeft) <= 0.5;
+        programmaticScrollbarLeft = null;
+        if (matched) return;
+      }
       syncing = true;
       interact();
       const { contentMax, scrollbarMax } = metrics();
-      content.scrollLeft = scrollbarMax > 0 ? (scrollbar.scrollLeft / scrollbarMax) * contentMax : 0;
-      syncFromContent();
+      const nextLeft = scrollbarMax > 0 ? (scrollbar.scrollLeft / scrollbarMax) * contentMax : 0;
+      programmaticContentLeft = nextLeft;
+      content.scrollLeft = nextLeft;
+      if (header) header.scrollLeft = nextLeft;
+      setButtons(contentMax);
       syncing = false;
     };
     const move = (direction) => {

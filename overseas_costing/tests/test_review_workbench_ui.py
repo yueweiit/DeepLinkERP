@@ -105,6 +105,44 @@ def test_result_and_sku_tables_share_one_scroll_controller_without_geometry_feed
     assert 'column.style.width' not in helper_source
 
 
+def test_shared_scroll_controller_does_not_cancel_smooth_button_scroll_with_feedback():
+    helper_path = json.dumps(str(PARTS / "15-horizontal-scroll.js"))
+    script = f"""
+const fs=require('fs');
+const helper=fs.readFileSync({helper_path},'utf8');
+const Controller=Function('return class Controller {{'+helper+'}}')();
+const eventQueue=[]; const frames=[];
+global.window={{
+  requestAnimationFrame:fn=>{{frames.push(fn);return frames.length;}}, cancelAnimationFrame:()=>{{}},
+  addEventListener:()=>{{}}, removeEventListener:()=>{{}}
+}};
+global.ResizeObserver=undefined;
+class Target {{
+  constructor(clientWidth,scrollWidth){{this.clientWidth=clientWidth;this.scrollWidth=scrollWidth;this._left=0;this.listeners={{}};this.disabled=false;this.style={{}};this.classList={{toggle:()=>{{}}}};}}
+  get scrollLeft(){{return this._left;}}
+  set scrollLeft(value){{this.smoothTarget=null;this._left=Math.max(0,Math.min(value,this.scrollWidth-this.clientWidth));eventQueue.push(()=>this.emit('scroll'));}}
+  addEventListener(name,fn){{(this.listeners[name]??=[]).push(fn);}}
+  removeEventListener(){{}}
+  emit(name){{for(const fn of this.listeners[name]||[])fn();}}
+  querySelector(){{return null;}}
+  scrollBy({{left}}){{this.smoothTarget=Math.max(0,Math.min(this._left+left,this.scrollWidth-this.clientWidth));this._left=Math.min(this.smoothTarget,this._left+1);eventQueue.push(()=>this.emit('scroll'));}}
+}}
+const flushEvents=()=>{{while(eventQueue.length)eventQueue.shift()();}};
+const flushFrame=()=>{{while(frames.length)frames.shift()();for(const target of [content,bar]){{if(target.smoothTarget!=null){{target._left=target.smoothTarget;target.smoothTarget=null;eventQueue.push(()=>target.emit('scroll'));}}}}flushEvents();}};
+const content=new Target(100,300),bar=new Target(100,300),left=new Target(0,0),right=new Target(0,0),spacer={{style:{{}}}};
+new Controller().bindHorizontalScrollController({{content,scrollbar:bar,spacer,leftButton:left,rightButton:right}});
+flushFrame(); right.emit('click'); flushEvents(); flushFrame();
+const afterRight=content.scrollLeft;
+left.emit('click'); flushEvents(); flushFrame();
+console.log(JSON.stringify({{afterRight,afterLeft:content.scrollLeft,max:content.scrollWidth-content.clientWidth}}));
+"""
+
+    result = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+
+    assert result["afterRight"] > result["max"] * 0.5
+    assert result["afterLeft"] == 0
+
+
 def test_missing_status_copy_uses_danger_color_while_pending_sources_remain_amber():
     settlement_css = (PARTS / '47-settlement.css').read_text(encoding='utf-8')
     shell_css = (PARTS / '10-shell.css').read_text(encoding='utf-8')
