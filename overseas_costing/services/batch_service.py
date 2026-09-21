@@ -3173,6 +3173,24 @@ def _build_authoritative_review_readiness(context: dict) -> dict:
     )
 
 
+def _build_review_remediation_gate(batch_name: str, *, for_update=False) -> dict:
+    """Read the active remediation gate after Batch/Version locks are acquired."""
+
+    sql = getattr(getattr(frappe, "db", None), "sql", None) if frappe is not None else None
+    if not callable(sql):
+        return {
+            "remediation_state": "none", "round_name": "", "round_no": 0,
+            "issue_count": 0, "unresolved_count": 0, "addressed_count": 0,
+            "erp_blocked": False, "blocking_reasons": [],
+        }
+    from overseas_costing.services.review_communication_service import FrappeReviewRepository, get_review_gate
+    return get_review_gate(
+        batch_name,
+        for_update=for_update,
+        repository=FrappeReviewRepository(frappe),
+    )
+
+
 def _lock_confirmation_records(batch_doc_name: str, version_name: str | None) -> str | None:
     """Serialize the readiness check and confirmation writes in one transaction."""
 
@@ -3344,6 +3362,21 @@ def confirm_calculation_result(batch_name: str, version_name: str | None = None,
             **readiness,
         }
 
+    remediation_gate = _build_review_remediation_gate(batch_doc_name, for_update=True)
+    if remediation_gate.get("erp_blocked"):
+        blocking_reasons = list(remediation_gate.get("blocking_reasons") or [])
+        return {
+            "ok": False,
+            "confirmed": False,
+            "ready": False,
+            "batch_name": context["batch_doc_name"],
+            "version_name": context["version_name"],
+            **readiness,
+            **remediation_gate,
+            "blocking_reasons": blocking_reasons,
+            "message": "；".join(blocking_reasons),
+        }
+
     confirmation_readiness = _build_calculation_confirmation_readiness(
         batch=context["batch"],
         items=context["items"],
@@ -3443,6 +3476,17 @@ def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dic
     if not context.get("ok"):
         return {**context, "ready": False}
 
+    remediation_gate = _build_review_remediation_gate(context["batch_doc_name"])
+    if remediation_gate.get("erp_blocked"):
+        return {
+            "ok": False,
+            "ready": False,
+            "batch_name": context["batch_doc_name"],
+            "version_name": context["version_name"],
+            **remediation_gate,
+            "message": "；".join(remediation_gate.get("blocking_reasons") or []),
+        }
+
     readiness = _build_writeback_readiness(
         batch=context["batch"],
         items=context["items"],
@@ -3506,6 +3550,16 @@ def writeback_to_erp(batch_name: str, version_name: str | None = None) -> dict:
         settlement_issues = lock_for_final_action(_resolve_batch_name(batch_name) or batch_name, version_name) if installed() else []
         if settlement_issues:
             return {'ok': False, 'queued': False, 'pushed': False, 'blocking_reasons': settlement_issues, 'message': '；'.join(settlement_issues)}
+        if callable(getattr(getattr(frappe, "db", None), "sql", None)):
+            batch_doc_name = _resolve_batch_name(batch_name) or batch_name
+            _lock_confirmation_records(batch_doc_name, version_name)
+            remediation_gate = _build_review_remediation_gate(batch_doc_name, for_update=True)
+            if remediation_gate.get("erp_blocked"):
+                return {
+                    "ok": False, "queued": False, "pushed": False, "retryable": False,
+                    **remediation_gate,
+                    "message": "；".join(remediation_gate.get("blocking_reasons") or []),
+                }
     preview = preview_erp_payload(batch_name=batch_name, version_name=version_name)
     if not preview.get("ok"):
         return {

@@ -453,3 +453,21 @@ def get_review_communication(batch_name) -> dict:
         "history": history,
         "projection": project_review_state(current, current.get("issues") if current else []),
     }
+
+
+def get_review_gate(batch_name, *, for_update=False, repository=None) -> dict:
+    """Return the authoritative final-action gate for an active remediation round."""
+
+    repo = repository or _repository()
+    review_round = repo.load_active_round(_clean(batch_name), for_update=for_update)
+    if not review_round:
+        return {**project_review_state(None), "blocking_reasons": []}
+    issues = repo.list_round_issues(review_round["name"], for_update=for_update)
+    projection = project_review_state(review_round, issues)
+    if not projection["erp_blocked"]:
+        return {**projection, "blocking_reasons": []}
+    if projection["remediation_state"] == "resubmitted":
+        message = "财务尚未确认全部整改问题，不能确认计算结果或推送 ERP。"
+    else:
+        message = "当前仍有整改问题未完成，不能确认计算结果或推送 ERP。"
+    return {**projection, "blocking_reasons": [message]}

@@ -164,10 +164,15 @@ def filter_batches_for_task(rows: list[dict], task: str, review_status: str = "p
     if task == "pending":
         return [
             row for row in rows
-            if row.get("review_state") == "processing"
-            and (
-                not row.get("cost_review_started")
-                or row.get("cost_review_eligible", True) is False
+            if (
+                str(row.get("remediation_state") or "").lower() == "returned"
+                or (
+                    row.get("review_state") == "processing"
+                    and (
+                        not row.get("cost_review_started")
+                        or row.get("cost_review_eligible", True) is False
+                    )
+                )
             )
         ]
     if task == "cost":
@@ -175,7 +180,10 @@ def filter_batches_for_task(rows: list[dict], task: str, review_status: str = "p
             return [row for row in rows if row.get("review_state") == "confirmed"]
         return [
             row for row in rows
-            if row.get("cost_review_started")
+            if (
+                row.get("cost_review_started")
+                or str(row.get("remediation_state") or "").lower() in {"returned", "resubmitted"}
+            )
             and row.get("cost_review_eligible", True) is not False
             and row.get("review_state") != "confirmed"
         ]
@@ -526,6 +534,8 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
         names = [row["name"] for row in chunk]
         versions = [row["current_version"] for row in chunk if row.get("current_version")]
         version_rows, item_rows, rule_rows, evidence_rows, component_rows, audit_rows = [], [], [], [], [], []
+        review_round_rows, review_issue_rows = [], []
+        latest_rounds = {}
         if frappe is not None and versions:
             filters = {"batch": ["in", names], "version": ["in", versions]}
             version_rows = frappe.get_all("Overseas Cost Version",
@@ -558,6 +568,26 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
                              "action_type": "BATCH_EDIT", "field_name": "confirm_status"},
                     fields=["batch", "version", "creation", "new_value"],
                     order_by="creation desc", limit_page_length=0)
+            review_round_rows = frappe.get_all(
+                "Overseas Cost Review Round",
+                filters={"batch": ["in", names]},
+                fields=["name", "batch", "version", "round_no", "status", "trial_signature",
+                        "returned_by", "returned_at", "resubmitted_by", "resubmitted_at",
+                        "resolved_by", "resolved_at", "creation", "modified"],
+                order_by="batch asc, round_no desc, creation desc",
+                limit_page_length=0,
+            )
+            for review_round in review_round_rows:
+                latest_rounds.setdefault(review_round.get("batch"), dict(review_round))
+            round_names = [row.get("name") for row in latest_rounds.values() if row.get("name")]
+            if round_names:
+                review_issue_rows = frappe.get_all(
+                    "Overseas Cost Review Issue",
+                    filters={"review_round": ["in", round_names]},
+                    fields=["name", "review_round", "status"],
+                    order_by="review_round asc, order_no asc",
+                    limit_page_length=0,
+                )
         by_version = {(row["batch"], row["name"]): dict(row) for row in version_rows}
         groups = []
         for rows in (item_rows, rule_rows, evidence_rows, component_rows):
@@ -569,16 +599,26 @@ def _load_review_readiness(batches: list[dict]) -> dict[str, dict]:
         for row in audit_rows:
             if _load_result_preview_json(row.get("new_value")).get("confirm_status") == "Confirmed":
                 reviewed.setdefault((row.get("batch"), row.get("version")), row.get("creation"))
+        issues_by_round = {}
+        for issue in review_issue_rows:
+            issues_by_round.setdefault(issue.get("review_round"), []).append(dict(issue))
+        from overseas_costing.services.review_communication_service import project_review_state
         for batch in chunk:
             key = (batch["name"], batch.get("current_version"))
             version = by_version.get(key, {})
             version["reviewed_at"] = reviewed.get(key)
             from overseas_costing.services.effective_source_values import batch_source_context
             context = batch_source_context(batch['name'], batch.get('current_version'))
-            result[batch["name"]] = cost_review_service.evaluate_review_readiness(
+            readiness = cost_review_service.evaluate_review_readiness(
                 batch=batch, version=version, items=groups[0].get(key, []),
                 fees=groups[1].get(key, []), evidence=groups[2].get(key, []),
                 fee_components=groups[3].get(key, []), source_context=context)
+            review_round = latest_rounds.get(batch["name"])
+            projection = project_review_state(
+                review_round,
+                issues_by_round.get(review_round.get("name"), []) if review_round else [],
+            )
+            result[batch["name"]] = cost_review_service.apply_remediation_projection(readiness, projection)
     return result
 
 

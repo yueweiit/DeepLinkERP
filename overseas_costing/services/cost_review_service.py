@@ -298,3 +298,17 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
             "primary_action": action, "reviewed_at": version.get("reviewed_at") or version.get("confirmed_at") if confirmed else None,
             "reviewed_version": version.get("name") if confirmed else None,
             "reviewed_version_code": version.get("version_code") if confirmed else None}
+
+
+def apply_remediation_projection(readiness: dict, projection: dict | None) -> dict:
+    """Merge review collaboration state without rewriting calculation readiness."""
+
+    result = dict(readiness or {})
+    projected = dict(projection or {})
+    result.update(projected)
+    state = str(projected.get("remediation_state") or "none").strip().lower()
+    if state in {"returned", "resubmitted"}:
+        result["issue_codes"] = list(dict.fromkeys(["remediation", *(result.get("issue_codes") or [])]))
+        result["primary_issue"] = "remediation"
+        result["primary_action"] = "review_remediation"
+    return result

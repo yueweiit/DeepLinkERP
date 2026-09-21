@@ -191,6 +191,70 @@ def test_saved_trial_with_partial_purchase_value_enters_cost_review() -> None:
     assert filter_batches_for_task([row], "cost", "pending") == [row]
 
 
+def test_returned_review_is_shared_between_pending_and_cost_until_resubmitted() -> None:
+    returned = {
+        "name": "RETURNED",
+        "review_state": "ready",
+        "cost_review_started": True,
+        "cost_review_eligible": True,
+        "remediation_state": "returned",
+    }
+    resubmitted = {**returned, "name": "RESUBMITTED", "remediation_state": "resubmitted"}
+    resolved = {**returned, "name": "RESOLVED", "remediation_state": "resolved"}
+    missing_value = {**returned, "name": "NO-VALUE", "cost_review_eligible": False}
+
+    assert [row["name"] for row in filter_batches_for_task(
+        [returned, resubmitted, resolved, missing_value], "pending"
+    )] == ["RETURNED", "NO-VALUE"]
+    assert [row["name"] for row in filter_batches_for_task(
+        [returned, resubmitted, resolved, missing_value], "cost", "pending"
+    )] == ["RETURNED", "RESUBMITTED", "RESOLVED"]
+
+
+def test_review_loader_fetches_rounds_and_issues_in_bulk(monkeypatch) -> None:
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            if doctype == "Overseas Cost Version":
+                return [{"name": "VER-1", "batch": "BATCH-1"}]
+            if doctype == "Overseas Cost Review Round":
+                return [{"name": "ROUND-1", "batch": "BATCH-1", "version": "VER-1",
+                         "round_no": 1, "status": "Returned"}]
+            if doctype == "Overseas Cost Review Issue":
+                return [
+                    {"name": "ISSUE-1", "review_round": "ROUND-1", "status": "Open"},
+                    {"name": "ISSUE-2", "review_round": "ROUND-1", "status": "Addressed"},
+                ]
+            return []
+
+    monkeypatch.setattr(workbench_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        workbench_service.cost_review_service,
+        "evaluate_review_readiness",
+        lambda **_kwargs: {
+            "review_state": "ready", "cost_review_started": True,
+            "cost_review_eligible": True, "issue_codes": [],
+            "primary_issue": "ready", "primary_action": "review",
+        },
+    )
+    from overseas_costing.services import effective_source_values
+    monkeypatch.setattr(effective_source_values, "batch_source_context", lambda *_args, **_kwargs: {})
+
+    result = workbench_service._load_review_readiness([{
+        "name": "BATCH-1", "current_version": "VER-1", "confirm_status": "Pending",
+    }])
+
+    assert result["BATCH-1"]["remediation_state"] == "returned"
+    assert result["BATCH-1"]["unresolved_count"] == 1
+    assert result["BATCH-1"]["addressed_count"] == 1
+    assert result["BATCH-1"]["primary_action"] == "review_remediation"
+    assert [doctype for doctype, _kwargs in calls].count("Overseas Cost Review Round") == 1
+    assert [doctype for doctype, _kwargs in calls].count("Overseas Cost Review Issue") == 1
+
+
 def test_logistics_group_keeps_two_fixed_columns() -> None:
     fields = [column["fieldname"] for column in select_item_columns(EXCEL_COLUMNS, "logistics")]
     assert fields[:2] == ["material_code", "product_name"]

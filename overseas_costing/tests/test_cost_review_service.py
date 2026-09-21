@@ -515,3 +515,37 @@ def test_unrelated_sku_derived_metadata_does_not_invalidate_saved_allocations():
     derived["packing_note"] = "Separate source annotation"
     context["items"][0]["derived_json"] = json.dumps(derived)
     assert evaluate(context)["review_state"] == "ready"
+
+
+def test_remediation_projection_overrides_action_without_hiding_calculation_readiness():
+    from overseas_costing.services.cost_review_service import apply_remediation_projection
+
+    base = {
+        "review_state": "ready",
+        "issue_codes": [],
+        "primary_issue": "ready",
+        "primary_action": "review",
+    }
+    returned = apply_remediation_projection(base, {
+        "remediation_state": "returned",
+        "round_name": "ROUND-1",
+        "round_no": 1,
+        "issue_count": 2,
+        "unresolved_count": 1,
+        "addressed_count": 1,
+        "erp_blocked": True,
+    })
+
+    assert returned["review_state"] == "ready"
+    assert returned["remediation_state"] == "returned"
+    assert returned["primary_issue"] == "remediation"
+    assert returned["primary_action"] == "review_remediation"
+    assert returned["issue_codes"] == ["remediation"]
+    assert returned["unresolved_count"] == 1
+
+    resolved = apply_remediation_projection(base, {
+        "remediation_state": "resolved",
+        "erp_blocked": False,
+    })
+    assert resolved["primary_action"] == "review"
+    assert resolved["primary_issue"] == "ready"

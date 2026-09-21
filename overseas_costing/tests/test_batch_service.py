@@ -1918,6 +1918,69 @@ def test_writeback_to_erp_blocks_when_not_confirmed(monkeypatch) -> None:
     assert set_values == []
 
 
+def test_confirm_calculation_result_rejects_active_review_round(monkeypatch) -> None:
+    writes = []
+
+    class DB:
+        def sql(self, *args, **kwargs):
+            return []
+
+        def set_value(self, *args, **kwargs):
+            writes.append((args, kwargs))
+
+    monkeypatch.setattr(batch_service, "frappe", SimpleNamespace(db=DB()))
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda _value: "BATCH-001")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *_args: "VERSION-001")
+    monkeypatch.setattr(batch_service, "_load_erp_push_context", lambda *_args: {
+        "ok": True, "batch_doc_name": "BATCH-001", "version_name": "VERSION-001",
+        "batch": {}, "version": {}, "items": [], "rules": [],
+    })
+    monkeypatch.setattr(batch_service, "_build_authoritative_review_readiness", lambda _context: {
+        "review_state": "ready", "review_blockers": [], "review_warnings": [],
+    })
+    monkeypatch.setattr(batch_service, "_build_review_remediation_gate", lambda *_args, **_kwargs: {
+        "erp_blocked": True, "remediation_state": "returned",
+        "blocking_reasons": ["当前仍有整改问题未完成，不能确认计算结果或推送 ERP。"],
+    }, raising=False)
+    from overseas_costing.services.logistics_settlement import runtime
+    monkeypatch.setattr(runtime, "installed", lambda: False)
+
+    result = batch_service.confirm_calculation_result("BATCH-001", "VERSION-001")
+
+    assert result["ok"] is False
+    assert result["confirmed"] is False
+    assert result["remediation_state"] == "returned"
+    assert writes == []
+
+
+def test_writeback_to_erp_rejects_active_review_round_before_preview(monkeypatch) -> None:
+    class DB:
+        def sql(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(batch_service, "frappe", SimpleNamespace(db=DB()))
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda _value: "BATCH-001")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *_args: "VERSION-001")
+    monkeypatch.setattr(batch_service, "_build_review_remediation_gate", lambda *_args, **_kwargs: {
+        "erp_blocked": True, "remediation_state": "resubmitted",
+        "blocking_reasons": ["财务尚未确认全部整改问题，不能推送 ERP。"],
+    }, raising=False)
+    monkeypatch.setattr(
+        batch_service,
+        "preview_erp_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("blocked request must not preview")),
+    )
+    from overseas_costing.services.logistics_settlement import runtime
+    monkeypatch.setattr(runtime, "installed", lambda: False)
+
+    result = batch_service.writeback_to_erp("BATCH-001", "VERSION-001")
+
+    assert result["ok"] is False
+    assert result["queued"] is False
+    assert result["pushed"] is False
+    assert result["remediation_state"] == "resubmitted"
+
+
 def test_writeback_to_erp_records_success_and_target_doc(monkeypatch) -> None:
     from overseas_costing.services import batch_service
 
