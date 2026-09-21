@@ -1981,6 +1981,38 @@ def test_writeback_to_erp_rejects_active_review_round_before_preview(monkeypatch
     assert result["remediation_state"] == "resubmitted"
 
 
+def test_batch_detail_projects_current_review_remediation_state(monkeypatch) -> None:
+    from overseas_costing.services import effective_logistics_source
+
+    class DB:
+        @staticmethod
+        def get_value(doctype, name, fields, as_dict=False):
+            if doctype == "Overseas Cost Batch":
+                return {"name": "BATCH-001", "batch_no": "BATCH-001", "current_version": "VERSION-001", "status": "Calculated"}
+            if doctype == "Overseas Cost Version":
+                return {"name": "VERSION-001", "summary_snapshot_json": "{}"}
+            return None
+
+    fake = SimpleNamespace(db=DB(), get_all=lambda *args, **kwargs: [])
+    monkeypatch.setattr(batch_service, "frappe", fake)
+    monkeypatch.setattr(batch_service, "_resolve_batch_name", lambda _value: "BATCH-001")
+    monkeypatch.setattr(batch_service, "_resolve_version_name", lambda *_args: "VERSION-001")
+    monkeypatch.setattr(batch_service, "_db_has_column", lambda *_args: False)
+    monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda _rows: None)
+    monkeypatch.setattr(effective_logistics_source, "current_source_bundle", lambda *_args: None)
+    monkeypatch.setattr(batch_service, "_build_review_remediation_gate", lambda *_args, **_kwargs: {
+        "remediation_state": "returned", "round_name": "ROUND-1", "round_no": 1,
+        "issue_count": 2, "unresolved_count": 1, "addressed_count": 1,
+        "erp_blocked": True, "blocking_reasons": ["当前仍有整改问题未完成。"],
+    })
+
+    result = batch_service.get_batch_detail("BATCH-001")
+
+    assert result["header"]["remediation_state"] == "returned"
+    assert result["header"]["unresolved_count"] == 1
+    assert result["header"]["round_name"] == "ROUND-1"
+
+
 def test_writeback_to_erp_records_success_and_target_doc(monkeypatch) -> None:
     from overseas_costing.services import batch_service
 

@@ -14,7 +14,8 @@ global.OverseasCostWorkbenchState=require({json.dumps(str(PARTS / '05-workbench-
 const calculation=fs.readFileSync({json.dumps(str(PARTS / '30-calculation-erp.js'))},'utf8');
 const vouchers=fs.readFileSync({json.dumps(str(PARTS / '40-vouchers.js'))},'utf8');
 const drawer=fs.readFileSync({json.dumps(str(PARTS / '80-drawer-profit.js'))},'utf8');
-const View=Function('return class View {{'+calculation+vouchers+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+drawer+fs.readFileSync({json.dumps(str(PARTS / '82-detail-page.js'))},'utf8')+'}}')();
+const review=fs.readFileSync({json.dumps(str(PARTS / '88-review-communication.js'))},'utf8');
+const View=Function('return class View {{'+calculation+vouchers+fs.readFileSync({json.dumps(str(PARTS / '35-workbench-view.js'))},'utf8')+drawer+fs.readFileSync({json.dumps(str(PARTS / '82-detail-page.js'))},'utf8')+review+'}}')();
 function makeView(task='cost') {{
  const v=new View(); v.viewState={{task,page:1,q:'',screen:'workbench'}};
  v.filters={{review_status:'pending',review_warning:'',issue:''}};
@@ -804,3 +805,53 @@ console.log(JSON.stringify({found,task:v.viewState.task,replacements,refreshed:v
     assert result['replacements'] == []
     assert result['refreshed'] == 1
     assert result['loaded'] == 0
+
+
+def test_finance_remediation_drawer_is_client_draft_until_one_formal_submit():
+    source = (PARTS / '88-review-communication.js').read_text(encoding='utf-8')
+    css = (PARTS / '52-review-communication.css').read_text(encoding='utf-8')
+
+    assert 'data-action="open-review-remediation"' in source
+    assert '提出整改' in source
+    assert '退回整改 (' in source
+    assert 'overseas_costing.api.review.return_for_remediation' in source
+    assert 'data-review-draft-description' in source
+    assert 'data-review-draft-attachment' in source
+    assert '问题类型' not in source
+    assert '责任方' not in source
+    assert '.ocw-review-drawer__body' in css
+    assert 'overflow-y: auto' in css
+    assert '.ocw-review-drawer__footer' in css
+
+
+def test_review_communication_tab_supports_reply_resubmit_resolution_and_direct_target():
+    source = (PARTS / '88-review-communication.js').read_text(encoding='utf-8')
+    detail_source = (PARTS / '82-detail-page.js').read_text(encoding='utf-8')
+
+    assert '复核沟通' in detail_source
+    assert 'renderReviewCommunicationTab' in detail_source
+    assert 'overseas_costing.api.review.get_review_communication' in source
+    assert 'overseas_costing.api.review.address_review_issue' in source
+    assert 'overseas_costing.api.review.resubmit_review_round' in source
+    assert 'overseas_costing.api.review.resolve_review_issue' in source
+    assert '回复并标记已处理' in source
+    assert '提交财务复核' in source
+    assert '确认整改完成' in source
+    assert '去修改' in source
+    assert '返回整改问题' in source
+    assert 'scrollIntoView' in source
+    assert 'ocw-review-target-highlight' in source
+
+
+def test_contextual_feedback_hooks_only_use_stable_fee_and_sku_targets():
+    review_source = (PARTS / '88-review-communication.js').read_text(encoding='utf-8')
+    fee_source = (PARTS / '78-material-fee-workspace.js').read_text(encoding='utf-8')
+    detail_source = (PARTS / '82-detail-page.js').read_text(encoding='utf-8')
+
+    assert 'renderReviewFeedbackButton' in review_source
+    assert 'renderReviewFeedbackButton' in fee_source
+    assert 'renderReviewFeedbackButton' in detail_source
+    assert 'target_tab' in review_source
+    assert 'target_field' in review_source
+    assert 'target_row' in review_source
+    assert 'target_item' in review_source

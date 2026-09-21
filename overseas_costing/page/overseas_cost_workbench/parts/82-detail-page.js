@@ -252,6 +252,7 @@
             </div>
           </div>
           <div class="ocw-detail-header-actions">
+            ${this.renderReviewReturnAction?.(batch) || ""}
             ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
@@ -287,10 +288,12 @@
             ["documents", "资料与费用"],
             ["items", "SKU 明细"],
             ["vouchers", "凭证核对"],
+            ["review", `复核沟通${Number(batch.unresolved_count || 0) ? ` <span class="ocw-detail-tab-badge">${Number(batch.unresolved_count || 0)}</span>` : ""}`],
             ["audit", "操作记录"],
           ].map(([key, label]) => `<button class="${this.detailState.tab === key ? "is-active" : ""}" type="button" data-action="switch-detail-tab" data-tab="${key}">${label}</button>`).join("")}
         </nav>
         <section class="ocw-detail-content" data-area="detail-content"></section>
+        <div data-area="review-drawer-host"></div>
       </div>
     `);
   }
@@ -314,6 +317,7 @@
     if (allowed === "vouchers") return this.renderVoucherDetailTab();
     if (allowed === "dingtalk") return this.renderDingtalkApprovalTab();
     if (allowed === "documents") return this.renderDocumentsDetailTab();
+    if (allowed === "review") return this.renderReviewCommunicationTab();
     return this.renderOverviewDetailTab();
   }
 
@@ -496,7 +500,7 @@
         data-batch-name="${this.escape(this.detailState.batchName)}" data-item-name="${this.escape(row.name || "")}"
         data-version-name="${this.escape(this.detailState.versionName || "")}" data-fieldname="${this.escape(column.fieldname)}"
         data-field-label="${this.escape(column.label)}" data-raw-value="${this.escape(rawValue)}"
-        data-special-override="${this.specialOverrideFields.has(column.fieldname) ? "1" : "0"}">${index < 2 ? `<span class="ocw-sku-sticky-content">${content}</span>` : content}</td>
+        data-special-override="${this.specialOverrideFields.has(column.fieldname) ? "1" : "0"}">${index < 2 ? `<span class="ocw-sku-sticky-content">${content}</span>` : content}${column.fieldname === "product_name" ? (this.renderReviewFeedbackButton?.({ target_tab: "items", target_field: column.fieldname, target_item: row.name }, "反馈此行") || "") : ""}</td>
     `;
   }
 
@@ -689,13 +693,16 @@
   }
 
   async confirmDiscardDetailChanges() {
-    if (!this.detailState.dirty) return true;
+    const hasCellChanges = Boolean(this.detailState.dirty);
+    const hasReviewDrafts = Boolean(this.hasUnsavedReviewDrafts?.());
+    if (!hasCellChanges && !hasReviewDrafts) return true;
     return new Promise((resolve) => {
       frappe.confirm(
-        "当前单元格修改尚未保存，确认放弃并离开？",
+        hasReviewDrafts ? "当前有未提交的整改问题，确认放弃并离开？" : "当前单元格修改尚未保存，确认放弃并离开？",
         () => {
           this.$root.find(".ocw-cell-editor").each((_, editor) => this.cancelCellEdit($(editor).closest("td")));
           this.detailState.dirty = false;
+          if (hasReviewDrafts) this.discardReviewDrafts?.();
           resolve(true);
         },
         () => resolve(false)

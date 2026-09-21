@@ -157,6 +157,7 @@
 .ocw-detail-tabs button { position: relative; padding: 13px 16px 12px; border: 0; background: transparent; color: var(--ocw-muted); font-weight: 700; }
 .ocw-detail-tabs button.is-active { color: var(--ocw-accent-dark); }
 .ocw-detail-tabs button.is-active::after { content: ""; position: absolute; right: 12px; bottom: -1px; left: 12px; height: 3px; border-radius: 3px 3px 0 0; background: var(--ocw-accent); }
+.ocw-detail-tab-badge { display: inline-grid; min-width: 18px; height: 18px; margin-left: 4px; padding: 0 5px; place-items: center; border-radius: 9px; background: #e24b3b; color: #fff; font-size: 11px; line-height: 18px; }
 
 .ocw-detail-content { min-height: 560px; padding: 18px 20px 24px; }
 .ocw-detail-section-head { justify-content: space-between; gap: 14px; margin-bottom: 14px; }

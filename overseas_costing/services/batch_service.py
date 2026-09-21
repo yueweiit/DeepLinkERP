@@ -1614,6 +1614,11 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
             # Read projection only; frozen records remain byte-for-byte intact.
             header['status'] = 'Dirty'
 
+    # Detail refreshes must carry the same authoritative remediation projection
+    # as queue rows; otherwise a just-returned batch would keep stale header
+    # actions until the user leaves the detail page.
+    header.update(_build_review_remediation_gate(batch_doc_name, for_update=False))
+
     return {
         "ok": True,
         "message": "批次详情已返回。",

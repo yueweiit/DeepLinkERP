@@ -120,7 +120,7 @@
     $(window)
       .off("beforeunload.ocwDetailEdit")
       .on("beforeunload.ocwDetailEdit", (event) => {
-        if (!this.detailState?.dirty) return undefined;
+        if (!this.detailState?.dirty && !this.hasUnsavedReviewDrafts?.()) return undefined;
         event.preventDefault();
         event.returnValue = "";
         return "";

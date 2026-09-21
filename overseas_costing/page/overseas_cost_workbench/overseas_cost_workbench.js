@@ -85,7 +85,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window, function () {
   const TASKS = new Set(["pending", "cost", "erp"]);
-  const TABS = new Set(["overview", "dingtalk", "documents", "items", "vouchers", "audit"]);
+  const TABS = new Set(["overview", "dingtalk", "documents", "items", "vouchers", "review", "audit"]);
   const TRANSPORT_MODE_ALIASES = Object.freeze({
     SEA: "SEA",
     AIR: "AIR",
@@ -276,6 +276,8 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
 
   function detailTabForAction(action) {
     if (action === "supplement") return "documents";
+    if (action === "review") return "documents";
+    if (action === "review_remediation") return "review";
     if (action === "erp_retry") return "overview";
     return "items";
   }
@@ -351,6 +353,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
       documents: "documents",
       items: "items",
       vouchers: "vouchers",
+      review: "review",
       audit: "audit",
     };
     return resources[tab] || resources.items;
@@ -1003,6 +1006,7 @@ class OverseasCostWorkbench {
   bindEvents() {
     if (this.bindRedesignEvents) this.bindRedesignEvents();
     if (this.bindMaterialFeeWorkspaceEvents) this.bindMaterialFeeWorkspaceEvents();
+    if (this.bindReviewCommunicationEvents) this.bindReviewCommunicationEvents();
     this.$root.on("click", "[data-batch-name]", (event) => {
       // 新工作台由显式的详情导航设置批次上下文；这里仅保留旧壳层的隐式选中兼容。
       if (this.$root.hasClass("ocw-redesign")) return;
@@ -1053,7 +1057,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='manual-logistics-quote']", (event) => this.openLogisticsQuoteDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='source-center']", (event) => this.openSourceCenterDialog($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='row-more']", (event) => this.openRowMoreDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", ".ocw-parent-row", (event) => {
       if ($(event.target).closest("button, input, select, textarea, a").length) return;
       const batchName = $(event.currentTarget).attr("data-batch-name");
@@ -3773,7 +3776,7 @@ class OverseasCostWorkbench {
     $(window)
       .off("beforeunload.ocwDetailEdit")
       .on("beforeunload.ocwDetailEdit", (event) => {
-        if (!this.detailState?.dirty) return undefined;
+        if (!this.detailState?.dirty && !this.hasUnsavedReviewDrafts?.()) return undefined;
         event.preventDefault();
         event.returnValue = "";
         return "";
@@ -3812,7 +3815,7 @@ class OverseasCostWorkbench {
       this.loadBatches();
     });
     this.$root.on("click", "[data-action='open-batch-detail']", (event) => {
-      this.openBatchDetail($(event.currentTarget).attr("data-batch-name"));
+      this.openBatchDetail($(event.currentTarget).attr("data-batch-name"), "documents");
     });
     this.$root.on("click", "[data-action='toggle-result-preview']", (event) => {
       event.preventDefault();
@@ -3839,8 +3842,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='workbench-primary']", async (event) => {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const action = $(event.currentTarget).attr("data-primary-action");
+      if (action === "review_remediation") return this.openBatchDetail(batchName, "review");
       if (["supplement", "supplement_fees", "supplement_allocation"].includes(action)) return this.openBatchDetail(batchName, "documents");
-      if (action === "review") return this.openBatchDetail(batchName, "overview");
+      if (action === "review") return this.openBatchDetail(batchName, "documents");
       if (action === "recalculate") return this.recalculate(batchName);
       return this.openBatchDetail(batchName, OverseasCostWorkbenchState.detailTabForAction(action));
     });
@@ -4204,6 +4208,8 @@ class OverseasCostWorkbench {
   }
 
   workbenchRowStatusLabel(batch) {
+    if (String(batch.remediation_state || "").toLowerCase() === "returned") return "待整改";
+    if (String(batch.remediation_state || "").toLowerCase() === "resubmitted") return "待财务复核";
     if (batch.review_state === "confirmed") return "已核对";
     if (batch.review_state === "ready") return "可核对";
     return {
@@ -4620,8 +4626,19 @@ class OverseasCostWorkbench {
   renderWorkbenchBatchRow(batch) {
     const reference = batch.batch_no || batch.source_approval_no || batch.name;
     const logisticsNo = batch.waybill_no || batch.customs_no || "未填写物流单号";
-    const actionLabels = {review: "核对成本", supplement: "补资料", supplement_fees: "补费用", supplement_allocation: "补分摊数据", recalculate: "重新试算", view: "查看详情", erp_retry: "重试 ERP"};
-    const action = actionLabels[batch.primary_action] ? {action: batch.primary_action, label: actionLabels[batch.primary_action]} : OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
+    const remediationState = String(batch.remediation_state || "").toLowerCase();
+    let action;
+    if (remediationState === "returned") {
+      action = {action: "review_remediation", label: `待整改 ${Number(batch.unresolved_count || batch.issue_count || 0)}`};
+    } else if (remediationState === "resubmitted") {
+      action = {action: "review_remediation", label: "待财务复核"};
+    } else if (this.viewState.task === "cost") {
+      action = {action: "review", label: "成本核算"};
+    } else if (this.viewState.task === "erp") {
+      action = {action: "erp_retry", label: "处理 ERP"};
+    } else {
+      action = {action: "supplement", label: "继续处理"};
+    }
     const totalCost = batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
     const rowStatus = this.workbenchRowStatusLabel(batch);
     const reviewTags = this.renderWorkbenchReviewTags(batch);
@@ -4644,7 +4661,6 @@ class OverseasCostWorkbench {
           <div><strong>${this.escape(this.formatDateTimeMinute(batch.source_created_at) || "—")}</strong><span>${this.escape(batch.review_state === "confirmed" ? `确认版本 ${batch.reviewed_version || batch.current_version || "—"}` : batch.result_is_current === false ? "待重新试算" : batch.status || "")}</span></div>
           <div class="ocw-row-actions">
             <button class="ocw-primary-btn" type="button" data-action="workbench-primary" data-primary-action="${action.action}" data-batch-name="${this.escape(batch.name)}">${action.label}</button>
-            <button class="ocw-outline-btn" type="button" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
           </div>
         </article>
         ${expanded ? this.renderBatchResultPreviewState() : ""}
@@ -11444,7 +11460,7 @@ class OverseasCostWorkbench {
         <td><span class="ocw-mf-badge is-danger">费用重复 · 未计入</span><small>${this.escape(this.materialFeeAmountStatus(fee.amount_state || fee.amount_status).label)}</small></td>
         <td>${this.escape(fee.currency || "RMB")} ${this.escape(fee.amount ?? "未填写")}<small>请先核对并停用重复记录，再保存或试算。</small></td>
         <td>${evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · ${this.escape(row.attachment || row.name || "")}</span>`).join("") || "暂无关联凭证"}</td>
-        <td><strong>冲突记录</strong><small>${fee.duplicate_rule_names.map((name) => this.escape(name)).join("、")}</small></td>
+        <td><strong>冲突记录</strong><small>${fee.duplicate_rule_names.map((name) => this.escape(name)).join("、")}</small>${this.renderReviewFeedbackButton?.({ target_tab: "documents", target_field: String(fee.logical_fee_key || fee.fee_key || "") }) || ""}</td>
       </tr>`;
     }
     const amountInfo = this.materialFeeAmountStatus(fee.amount_state || fee.amount_status);
@@ -11493,7 +11509,7 @@ class OverseasCostWorkbench {
         <td><span class="ocw-mf-badge is-${amountInfo.tone}">${this.escape(amountInfo.label)}</span>${inclusionLabel ? `<small>${this.escape(inclusionLabel)}</small>` : ""}</td>
         <td><small>当前采用金额</small><strong>${this.escape(currency)} ${this.escape(fee.applied_amount ?? amount)}</strong><small>原始证据金额：${this.escape(currency)} ${this.escape(fee.original_amount ?? "待核对")}</small></td>
         <td><span>${this.escape(sourceLabel)}</span><small>${this.escape(fee.source_approval_no || "来源与更正记录可追溯")}</small></td>
-        <td><div class="ocw-mf-row-actions">${readonly ? "" : ["amount", "replace", "revoke"].map((action, index) => `<button type="button" data-mf-freight-action="${action}" data-fee-key="${this.escape(feeKey)}" ${editor?.freightWriting ? "disabled" : ""}>${["改金额", "换来源", "撤销采用"][index]}</button>`).join("")}<button type="button" data-action="mf-view-settlement-source">查看支付来源与记录</button></div>
+        <td><div class="ocw-mf-row-actions">${readonly ? "" : ["amount", "replace", "revoke"].map((action, index) => `<button type="button" data-mf-freight-action="${action}" data-fee-key="${this.escape(feeKey)}" ${editor?.freightWriting ? "disabled" : ""}>${["改金额", "换来源", "撤销采用"][index]}</button>`).join("")}<button type="button" data-action="mf-view-settlement-source">查看支付来源与记录</button>${this.renderReviewFeedbackButton?.({ target_tab: "documents", target_field: feeKey }) || ""}</div>
           <details class="ocw-mf-row-details"><summary>范围与分摊说明</summary><div><span>适用：${this.escape(scopeLabel)}</span><span>分摊：${this.escape(this.materialFeeBasisLabel(fee.allocation?.basis || fee.allocation_basis))}</span>${inclusionLabel ? `<span>${this.escape(inclusionLabel)}</span>` : ""}</div></details>
         </td>
       </tr>${this.renderMaterialFeeFreightEditor(feeKey)}`;
@@ -11518,7 +11534,7 @@ class OverseasCostWorkbench {
           <small id="${this.escape(errorId)}" class="ocw-mf-fee-inline-error-text ${inlineError ? "is-visible" : ""}" data-mf-fee-error="1">${this.escape(inlineError)}</small>
         </td>
         <td><span class="ocw-mf-badge is-${evidenceInfo.tone}">${this.escape(evidenceInfo.label)}</span><small>${evidenceAttachmentCount ? `${evidenceAttachmentCount} 份已关联` : "可上传或关联已有资料"}</small></td>
-        <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">更多设置</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联并解析凭证</button></div>
+        <td><div class="ocw-mf-row-actions"><button type="button" data-action="mf-edit-fee" data-fee-key="${this.escape(fee.logical_fee_key || "")}">更多设置</button><button type="button" data-action="mf-link-evidence" data-fee-key="${this.escape(fee.logical_fee_key || "")}">关联并解析凭证</button>${this.renderReviewFeedbackButton?.({ target_tab: "documents", target_field: feeKey }) || ""}</div>
           <details class="ocw-mf-row-details"><summary>范围与凭证详情</summary><div><span>适用：${this.escape(scopeLabel)}</span>${finalRows.length ? `<span>最终账单：${this.escape(finalRows.join("；"))}</span>` : ""}${settlementRows.length ? `<span>已付款净额：${this.escape(settlementRows.join("；"))}（不与账单重复计费）</span>` : ""}${evidence.length ? evidence.map((row) => `<span>${this.escape(row.evidence_role || "凭证")} · ${this.escape(row.evidence_type || "待分类")} · ${this.escape(row.currency || "")} ${this.escape(row.original_amount ?? "待补金额")}${row.related_evidence ? ` · 原付款 ${this.escape(row.related_evidence)}` : ""} · 终核状态：${this.escape(this.materialFeeEvidenceFinalLabel(row.validation_status))} <button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="VALID">确认有效</button><button type="button" data-action="mf-evidence-status" data-evidence-name="${this.escape(row.name || "")}" data-status="INVALID">标记无效</button></span>`).join("") : "<span>暂无关联凭证</span>"}</div></details>
         </td>
       </tr>
@@ -12145,7 +12161,7 @@ class OverseasCostWorkbench {
     const reason = draft?.error || (column.field === "shipment_value_rmb" ? item.shipment_valuation?.error_detail : "") || (item.requirements?.field_reasons?.[column.field] || []).map((row) => row.message || row.code).join("；");
     if (column.readonly) {
       const fullValue = this.formatValue(value ?? "--");
-      return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}</td>`;
+      return `<td class="${classes}" data-item-name="${this.escape(item.name || "")}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="${this.escape(column.field === "product_name" || column.field === "source_doc_no" ? fullValue : reason)}"><span>${this.escape(fullValue)}</span>${column.field === "source_doc_no" ? this.renderApprovalLinkMarker(item.approval_link) : ""}${column.field === "product_name" ? (this.renderReviewFeedbackButton?.({ target_tab: "documents", target_field: column.field, target_item: item.name }, "反馈此行") || "") : ""}</td>`;
     }
     if (requiresCorrection) {
       return `<td class="${classes}" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}" title="已有有效值；修正时需填写原因"><span>${this.escape(this.formatValue(value ?? "--"))}</span>${valuationMeta}<button type="button" class="ocw-mf-purchase-correct" data-action="mf-correct-purchase" data-item-name="${this.escape(item.name || "")}" data-fieldname="${this.escape(column.field)}">修正</button>${this.renderMaterialAICandidates(item.name, column.field, aiCell, false)}</td>`;
@@ -17731,7 +17747,7 @@ class OverseasCostWorkbench {
     return "ready";
   }
 
-  async openBatchDetail(batchName = "", tab = "items", options = {}) {
+  async openBatchDetail(batchName = "", tab = "documents", options = {}) {
     const normalizedName = String(batchName || "").trim();
     if (!normalizedName) {
       this.showPendingFeature("缺少批次号，无法打开详情。");
@@ -17966,6 +17982,7 @@ class OverseasCostWorkbench {
             </div>
           </div>
           <div class="ocw-detail-header-actions">
+            ${this.renderReviewReturnAction?.(batch) || ""}
             ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
@@ -18001,10 +18018,12 @@ class OverseasCostWorkbench {
             ["documents", "资料与费用"],
             ["items", "SKU 明细"],
             ["vouchers", "凭证核对"],
+            ["review", `复核沟通${Number(batch.unresolved_count || 0) ? ` <span class="ocw-detail-tab-badge">${Number(batch.unresolved_count || 0)}</span>` : ""}`],
             ["audit", "操作记录"],
           ].map(([key, label]) => `<button class="${this.detailState.tab === key ? "is-active" : ""}" type="button" data-action="switch-detail-tab" data-tab="${key}">${label}</button>`).join("")}
         </nav>
         <section class="ocw-detail-content" data-area="detail-content"></section>
+        <div data-area="review-drawer-host"></div>
       </div>
     `);
   }
@@ -18028,6 +18047,7 @@ class OverseasCostWorkbench {
     if (allowed === "vouchers") return this.renderVoucherDetailTab();
     if (allowed === "dingtalk") return this.renderDingtalkApprovalTab();
     if (allowed === "documents") return this.renderDocumentsDetailTab();
+    if (allowed === "review") return this.renderReviewCommunicationTab();
     return this.renderOverviewDetailTab();
   }
 
@@ -18210,7 +18230,7 @@ class OverseasCostWorkbench {
         data-batch-name="${this.escape(this.detailState.batchName)}" data-item-name="${this.escape(row.name || "")}"
         data-version-name="${this.escape(this.detailState.versionName || "")}" data-fieldname="${this.escape(column.fieldname)}"
         data-field-label="${this.escape(column.label)}" data-raw-value="${this.escape(rawValue)}"
-        data-special-override="${this.specialOverrideFields.has(column.fieldname) ? "1" : "0"}">${index < 2 ? `<span class="ocw-sku-sticky-content">${content}</span>` : content}</td>
+        data-special-override="${this.specialOverrideFields.has(column.fieldname) ? "1" : "0"}">${index < 2 ? `<span class="ocw-sku-sticky-content">${content}</span>` : content}${column.fieldname === "product_name" ? (this.renderReviewFeedbackButton?.({ target_tab: "items", target_field: column.fieldname, target_item: row.name }, "反馈此行") || "") : ""}</td>
     `;
   }
 
@@ -18403,13 +18423,16 @@ class OverseasCostWorkbench {
   }
 
   async confirmDiscardDetailChanges() {
-    if (!this.detailState.dirty) return true;
+    const hasCellChanges = Boolean(this.detailState.dirty);
+    const hasReviewDrafts = Boolean(this.hasUnsavedReviewDrafts?.());
+    if (!hasCellChanges && !hasReviewDrafts) return true;
     return new Promise((resolve) => {
       frappe.confirm(
-        "当前单元格修改尚未保存，确认放弃并离开？",
+        hasReviewDrafts ? "当前有未提交的整改问题，确认放弃并离开？" : "当前单元格修改尚未保存，确认放弃并离开？",
         () => {
           this.$root.find(".ocw-cell-editor").each((_, editor) => this.cancelCellEdit($(editor).closest("td")));
           this.detailState.dirty = false;
+          if (hasReviewDrafts) this.discardReviewDrafts?.();
           resolve(true);
         },
         () => resolve(false)
@@ -20779,6 +20802,409 @@ class OverseasCostWorkbench {
       await this.settlementWrite(state,()=>this.settlementApi('resolve_freight_packing_checks',{batch_name:batchName,version_name:versionName,selections:JSON.stringify(selections),reason}));
       state.dialog.hide();await this.refreshSettlementBatch(batchName);await onComplete();
     });
+  }
+
+  ensureReviewCommunicationState() {
+    const batchName = String(this.detailState?.batchName || "");
+    if (!this.reviewCommunicationState || this.reviewCommunicationState.batchName !== batchName) {
+      this.reviewCommunicationState = {
+        batchName,
+        drawerOpen: false,
+        drafts: [],
+        data: null,
+        loading: false,
+        submitting: false,
+        replyDrafts: {},
+        returnTarget: null,
+      };
+    }
+    return this.reviewCommunicationState;
+  }
+
+  isFinanceReviewContext() {
+    return String(this.viewState?.task || "") === "cost";
+  }
+
+  hasUnsavedReviewDrafts() {
+    const state = this.reviewCommunicationState;
+    return Boolean(state?.drawerOpen && (state.drafts || []).some((row) =>
+      String(row.description || "").trim() || (row.attachments || []).length
+    ));
+  }
+
+  discardReviewDrafts() {
+    const state = this.ensureReviewCommunicationState();
+    state.drawerOpen = false;
+    state.drafts = [];
+    this.renderReviewRemediationDrawer();
+  }
+
+  reviewTrialSignature() {
+    const batch = this.getDetailBatch?.() || {};
+    return String(
+      batch.summary_snapshot?.input_hash
+      || this.detailState?.detail?.summary?.input_hash
+      || ""
+    );
+  }
+
+  canOpenReviewRemediation(batch = {}) {
+    const confirmed = String(batch.confirm_status || "").toLowerCase() === "confirmed";
+    const state = String(batch.remediation_state || "none").toLowerCase();
+    return this.isFinanceReviewContext() && !confirmed && ["", "none", "resolved"].includes(state);
+  }
+
+  renderReviewReturnAction(batch = {}) {
+    if (!this.canOpenReviewRemediation(batch)) return "";
+    return `<button class="ocw-review-return-btn" type="button" data-action="open-review-remediation">提出整改</button>`;
+  }
+
+  renderReviewFeedbackButton(anchor = {}, label = "反馈此项") {
+    if (!this.canOpenReviewRemediation(this.getDetailBatch?.() || {})) return "";
+    const value = (key) => this.escape(String(anchor[key] || ""));
+    return `<button class="ocw-review-feedback-btn" type="button" data-action="review-feedback-item"
+      data-review-target-tab="${value("target_tab")}" data-review-target-field="${value("target_field")}"
+      data-review-target-row="${value("target_row")}" data-review-target-item="${value("target_item")}">${this.escape(label)}</button>`;
+  }
+
+  reviewAnchorFromElement($element) {
+    return {
+      target_tab: String($element.attr("data-review-target-tab") || ""),
+      target_field: String($element.attr("data-review-target-field") || ""),
+      target_row: String($element.attr("data-review-target-row") || ""),
+      target_item: String($element.attr("data-review-target-item") || ""),
+    };
+  }
+
+  reviewAnchorLabel(anchor = {}) {
+    const labels = { documents: "资料与费用", items: "SKU 明细", vouchers: "凭证核对", overview: "总览", dingtalk: "钉钉审批" };
+    const parts = [labels[anchor.target_tab] || anchor.target_tab, anchor.target_field, anchor.target_item || anchor.target_row].filter(Boolean);
+    return parts.join(" / ");
+  }
+
+  addReviewRemediationDraft(anchor = {}) {
+    const state = this.ensureReviewCommunicationState();
+    state.drafts.push({
+      id: `draft-${Date.now()}-${state.drafts.length}`,
+      description: "",
+      target_tab: String(anchor.target_tab || ""),
+      target_field: String(anchor.target_field || ""),
+      target_row: String(anchor.target_row || ""),
+      target_item: String(anchor.target_item || ""),
+      attachments: [],
+    });
+    return state.drafts.length - 1;
+  }
+
+  openReviewRemediationDrawer(anchor = null) {
+    const state = this.ensureReviewCommunicationState();
+    if (!this.canOpenReviewRemediation(this.getDetailBatch?.() || {})) return;
+    state.drawerOpen = true;
+    if (anchor || !state.drafts.length) this.addReviewRemediationDraft(anchor || {});
+    this.renderReviewRemediationDrawer();
+    window.requestAnimationFrame(() => {
+      const index = Math.max(0, state.drafts.length - 1);
+      this.$root.find(`[data-review-draft-description="${index}"]`).trigger("focus");
+    });
+  }
+
+  async closeReviewRemediationDrawer(force = false) {
+    if (!force && this.hasUnsavedReviewDrafts()) {
+      const confirmed = await new Promise((resolve) => frappe.confirm(
+        "尚有未提交的整改问题，确认放弃草稿？",
+        () => resolve(true),
+        () => resolve(false)
+      ));
+      if (!confirmed) return false;
+    }
+    this.discardReviewDrafts();
+    return true;
+  }
+
+  renderReviewRemediationDrawer() {
+    const state = this.ensureReviewCommunicationState();
+    let $host = this.$root.find("[data-area='review-drawer-host']");
+    if (!$host.length) {
+      this.$root.find("[data-area='detail-screen']").append('<div data-area="review-drawer-host"></div>');
+      $host = this.$root.find("[data-area='review-drawer-host']");
+    }
+    if (!state.drawerOpen) {
+      $host.empty();
+      return;
+    }
+    const rows = state.drafts.map((row, index) => {
+      const anchorLabel = this.reviewAnchorLabel(row);
+      return `<article class="ocw-review-draft-card" data-review-draft="${index}">
+        <div class="ocw-review-draft-head"><strong>整改问题 ${index + 1}</strong><button type="button" data-action="delete-review-draft" data-index="${index}" aria-label="删除该问题">删除</button></div>
+        ${anchorLabel ? `<div class="ocw-review-anchor"><span>关联位置</span><strong>${this.escape(anchorLabel)}</strong><small>提交后不可在本轮中修改</small></div>` : ""}
+        <label><span>问题说明 <em>*</em></span><textarea data-review-draft-description="${index}" rows="4" placeholder="请直接说明需要改什么、正确值或核对要求">${this.escape(row.description || "")}</textarea></label>
+        <div class="ocw-review-attachments">
+          ${(row.attachments || []).map((file, fileIndex) => `<span><a href="${this.escape(file.file_url || "#")}" target="_blank" rel="noopener">${this.escape(file.file_name || file.name)}</a><button type="button" data-action="remove-review-attachment" data-index="${index}" data-file-index="${fileIndex}">移除</button></span>`).join("")}
+          <label class="ocw-review-upload"><input type="file" data-review-draft-attachment="${index}" hidden />+上传附件（可选）</label>
+        </div>
+      </article>`;
+    }).join("");
+    const completeCount = state.drafts.filter((row) => String(row.description || "").trim()).length;
+    $host.html(`<div class="ocw-review-drawer-mask" data-action="close-review-remediation"></div>
+      <aside class="ocw-review-drawer" role="dialog" aria-modal="true" aria-label="提出整改">
+        <header><div><small>成本核对</small><h2>提出整改</h2><p>先在本地编辑，只有点击“退回整改”才会写入并改变批次状态。</p></div><button type="button" data-action="close-review-remediation" aria-label="关闭">×</button></header>
+        <div class="ocw-review-drawer__body">${rows}<button class="ocw-outline-btn" type="button" data-action="add-review-draft">+添加一项整改问题</button></div>
+        <footer class="ocw-review-drawer__footer"><button class="ocw-outline-btn" type="button" data-action="close-review-remediation" ${state.submitting ? "disabled" : ""}>取消</button><button class="ocw-primary-btn" type="button" data-action="submit-review-remediation" ${!completeCount || completeCount !== state.drafts.length || state.submitting ? "disabled" : ""}>${state.submitting ? "正在退回…" : `退回整改 (${completeCount})`}</button></footer>
+      </aside>`);
+  }
+
+  async uploadReviewDraftAttachment(index, file) {
+    if (!file) return;
+    const state = this.ensureReviewCommunicationState();
+    const draft = state.drafts[index];
+    if (!draft) return;
+    try {
+      const uploaded = await this.uploadImportFile(file);
+      draft.attachments.push({ name: uploaded.name, file_name: uploaded.file_name || file.name, file_url: uploaded.file_url });
+      this.renderReviewRemediationDrawer();
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  async submitReviewRemediation() {
+    const state = this.ensureReviewCommunicationState();
+    if (state.submitting) return;
+    const issues = state.drafts.map((row) => ({
+      description: String(row.description || "").trim(),
+      target_tab: row.target_tab || "",
+      target_field: row.target_field || "",
+      target_row: row.target_row || "",
+      target_item: row.target_item || "",
+      attachments: (row.attachments || []).map((file) => file.name),
+    }));
+    if (!issues.length || issues.some((row) => !row.description)) {
+      frappe.show_alert({ message: "请填写每一项整改问题。", indicator: "orange" });
+      return;
+    }
+    state.submitting = true;
+    this.renderReviewRemediationDrawer();
+    try {
+      const result = await this.call("overseas_costing.api.review.return_for_remediation", {
+        batch_name: state.batchName,
+        version_name: this.detailState.versionName,
+        trial_signature: this.reviewTrialSignature(),
+        issues_json: JSON.stringify(issues),
+      });
+      if (!result?.ok) throw new Error(result?.message || "整改退回失败。");
+      state.drafts = [];
+      state.drawerOpen = false;
+      state.data = null;
+      this.renderReviewRemediationDrawer();
+      await this.refreshDetailSummary({ refreshCurrentTab: false });
+      await this.switchDetailTab("review");
+      frappe.show_alert({ message: "已退回待整改，采购和墨西哥同事可在复核沟通中回复。", indicator: "green" });
+    } catch (error) {
+      this.showError(error);
+    } finally {
+      state.submitting = false;
+      if (state.drawerOpen) this.renderReviewRemediationDrawer();
+    }
+  }
+
+  reviewStatusLabel(value) {
+    return ({ Returned: "待整改", Resubmitted: "待财务复核", Resolved: "已完成", Open: "待处理", Addressed: "已处理待复核" })[value] || value || "--";
+  }
+
+  async loadReviewCommunication(force = false) {
+    const state = this.ensureReviewCommunicationState();
+    if (state.loading) return state.data;
+    if (state.data && !force) return state.data;
+    state.loading = true;
+    try {
+      const result = await this.call("overseas_costing.api.review.get_review_communication", { batch_name: state.batchName });
+      if (!result?.ok) throw new Error(result?.message || "复核沟通读取失败。");
+      state.data = result;
+      return result;
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  renderReviewIssue(issue = {}, index = 0, round = {}) {
+    const state = this.ensureReviewCommunicationState();
+    const isFinance = this.isFinanceReviewContext();
+    const reply = Object.prototype.hasOwnProperty.call(state.replyDrafts, issue.name) ? state.replyDrafts[issue.name] : (issue.reply || "");
+    const canReply = !isFinance && round.status === "Returned" && issue.status === "Open";
+    const canResolve = isFinance && round.status === "Resubmitted" && issue.status === "Addressed";
+    const anchor = this.reviewAnchorLabel(issue);
+    return `<article class="ocw-review-issue is-${String(issue.status || "open").toLowerCase()}" data-review-issue="${this.escape(issue.name || "")}">
+      <header><div><h3>①${index ? `-${index + 1}` : ""} ${this.escape(issue.description || "")}</h3>${anchor ? `<small>关联：${this.escape(anchor)}</small>` : ""}</div><span>${this.escape(this.reviewStatusLabel(issue.status))}</span></header>
+      ${(issue.attachments || []).length ? `<div class="ocw-review-issue-files">${issue.attachments.map((file) => `<a href="${this.escape(file.file_url || "#")}" target="_blank" rel="noopener">📎 ${this.escape(file.file_name || file.name || "附件")}</a>`).join("")}</div>` : ""}
+      ${issue.reply ? `<div class="ocw-review-reply"><strong>处理回复</strong><p>${this.escape(issue.reply)}</p><small>${this.escape(issue.addressed_by || "--")} · ${this.escape(this.formatDateTimeMinute(issue.addressed_at) || issue.addressed_at || "--")}</small></div>` : ""}
+      <footer>
+        ${issue.target_tab ? `<button class="ocw-outline-btn" type="button" data-action="review-go-target" data-issue-name="${this.escape(issue.name || "")}">去修改</button>` : ""}
+        ${canReply ? `<textarea data-review-reply="${this.escape(issue.name || "")}" rows="2" placeholder="填写处理说明…">${this.escape(reply)}</textarea><button class="ocw-primary-btn" type="button" data-action="address-review-issue" data-issue-name="${this.escape(issue.name || "")}">回复并标记已处理</button>` : ""}
+        ${canResolve ? `<button class="ocw-primary-btn" type="button" data-action="resolve-review-issue" data-issue-name="${this.escape(issue.name || "")}">确认整改完成</button>` : ""}
+      </footer>
+    </article>`;
+  }
+
+  renderReviewRound(round = {}, current = false) {
+    const issues = round.issues || [];
+    const allAddressed = issues.length && issues.every((row) => row.status === "Addressed");
+    const isProcurement = !this.isFinanceReviewContext();
+    const content = `<div class="ocw-review-round-head"><div><h2>${current ? "本轮整改" : `第 ${Number(round.round_no || 0)} 轮`}</h2><p>财务于 ${this.escape(this.formatDateTimeMinute(round.returned_at) || round.returned_at || "--")} 退回 · 共 ${issues.length} 项</p></div><span>${this.escape(this.reviewStatusLabel(round.status))}</span></div>
+      <div class="ocw-review-issue-list">${issues.map((issue, index) => this.renderReviewIssue(issue, index, round)).join("")}</div>
+      ${current && isProcurement && round.status === "Returned" ? `<div class="ocw-review-resubmit"><p>${allAddressed ? "全部问题已处理，提交时服务器会再次校验当前试算。" : "请先逐项回复并标记已处理。"}</p><button class="ocw-primary-btn" type="button" data-action="resubmit-review-round" ${allAddressed ? "" : "disabled"}>提交财务复核</button></div>` : ""}`;
+    return current ? `<section class="ocw-review-current">${content}</section>` : `<details class="ocw-review-history-round"><summary>第 ${Number(round.round_no || 0)} 轮 · ${this.escape(this.reviewStatusLabel(round.status))}</summary>${content}</details>`;
+  }
+
+  async renderReviewCommunicationTab() {
+    const batchName = this.detailState.batchName;
+    this.renderDetailTabLoading("正在读取复核沟通记录");
+    try {
+      const data = await this.loadReviewCommunication(true);
+      if (this.detailState.batchName !== batchName || this.detailState.tab !== "review") return;
+      const current = data.current_round;
+      const history = data.history || [];
+      this.$root.find("[data-area='detail-content']").html(`<div class="ocw-review-workspace">
+        <div class="ocw-detail-section-head"><div><span>可追溯协作</span><h2>复核沟通</h2></div>${this.renderReviewReturnAction(this.getDetailBatch?.() || {})}</div>
+        ${current ? this.renderReviewRound(current, true) : `<div class="ocw-detail-empty"><strong>当前没有待处理的整改问题</strong><span>财务提交后，问题、附件、回复和操作人将保留在这里。</span></div>`}
+        ${history.length ? `<section class="ocw-review-history"><h3>历史整改轮次（${history.length}）</h3>${history.map((round) => this.renderReviewRound(round, false)).join("")}</section>` : ""}
+      </div>`);
+      this.restoreReviewTargetFocus();
+    } catch (error) {
+      this.renderDetailTabError("复核沟通", error);
+    }
+  }
+
+  reviewCurrentIssue(issueName) {
+    const current = this.ensureReviewCommunicationState().data?.current_round;
+    return (current?.issues || []).find((row) => String(row.name) === String(issueName));
+  }
+
+  async addressReviewIssue(issueName) {
+    const state = this.ensureReviewCommunicationState();
+    const issue = this.reviewCurrentIssue(issueName);
+    const reply = String(state.replyDrafts[issueName] ?? issue?.reply ?? "").trim();
+    if (!reply) return frappe.show_alert({ message: "请先填写处理回复。", indicator: "orange" });
+    try {
+      await this.call("overseas_costing.api.review.address_review_issue", { batch_name: state.batchName, issue_name: issueName, reply, expected_modified: issue?.modified || "" });
+      delete state.replyDrafts[issueName];
+      state.data = null;
+      await this.renderReviewCommunicationTab();
+    } catch (error) { this.showError(error); }
+  }
+
+  async resubmitReviewRound() {
+    const state = this.ensureReviewCommunicationState();
+    const round = state.data?.current_round;
+    if (!round) return;
+    try {
+      await this.call("overseas_costing.api.review.resubmit_review_round", { batch_name: state.batchName, round_name: round.name, expected_modified: round.modified || "" });
+      state.data = null;
+      await this.refreshDetailSummary({ refreshCurrentTab: false });
+      await this.switchDetailTab("review", { updateUrl: false });
+    } catch (error) { this.showError(error); }
+  }
+
+  async resolveReviewIssue(issueName) {
+    const state = this.ensureReviewCommunicationState();
+    const issue = this.reviewCurrentIssue(issueName);
+    try {
+      await this.call("overseas_costing.api.review.resolve_review_issue", { batch_name: state.batchName, issue_name: issueName, expected_modified: issue?.modified || "" });
+      state.data = null;
+      await this.refreshDetailSummary({ refreshCurrentTab: false });
+      await this.switchDetailTab("review", { updateUrl: false });
+    } catch (error) { this.showError(error); }
+  }
+
+  async goToReviewTarget(issueName) {
+    const state = this.ensureReviewCommunicationState();
+    const issue = this.reviewCurrentIssue(issueName) || (state.data?.history || []).flatMap((round) => round.issues || []).find((row) => row.name === issueName);
+    if (!issue?.target_tab) return;
+    state.returnTarget = { issueName, orderNo: issue.order_no, anchor: issue };
+    await this.switchDetailTab(issue.target_tab);
+    window.requestAnimationFrame(() => this.focusReviewTarget(issue));
+  }
+
+  reviewTargetElements(issue = {}) {
+    const matches = [];
+    this.$root.find("[data-item-name], [data-fee-key], [data-mf-grid-field], [data-fieldname]").each((_, element) => {
+      const $element = $(element);
+      const itemMatch = !issue.target_item || String($element.attr("data-item-name") || "") === String(issue.target_item);
+      const rowMatch = !issue.target_row || ["data-item-name", "data-fee-key", "data-evidence-name"].some((name) => String($element.attr(name) || "") === String(issue.target_row));
+      const fieldMatch = !issue.target_field || ["data-fieldname", "data-mf-grid-field", "data-fee-key"].some((name) => String($element.attr(name) || "") === String(issue.target_field));
+      if (itemMatch && rowMatch && fieldMatch) matches.push(element);
+    });
+    return $(matches);
+  }
+
+  focusReviewTarget(issue = {}) {
+    const $matches = this.reviewTargetElements(issue);
+    this.renderReviewReturnBanner(issue);
+    const element = $matches.get(0);
+    if (!element) {
+      frappe.show_alert({ message: "原关联位置已变化，已打开原页签，请手工核对。", indicator: "orange" });
+      return;
+    }
+    const $target = $(element).closest("td, tr, .ocw-mf-fee-row").first().length ? $(element).closest("td, tr, .ocw-mf-fee-row").first() : $(element);
+    element.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    $target.addClass("ocw-review-target-highlight");
+    window.setTimeout(() => $target.removeClass("ocw-review-target-highlight"), 2600);
+    const $input = $(element).is("input, select, textarea") ? $(element) : $(element).find("input:not(:disabled), select:not(:disabled), textarea:not(:disabled)").first();
+    if ($input.length) $input.trigger("focus");
+  }
+
+  renderReviewReturnBanner(issue = {}) {
+    this.$root.find("[data-review-return-banner]").remove();
+    this.$root.find("[data-area='detail-content']").prepend(`<div class="ocw-review-return-banner" data-review-return-banner="1"><span>正在查看整改问题 ${this.escape(issue.order_no || "")}的关联位置</span><button type="button" data-action="return-review-issue" data-issue-name="${this.escape(issue.name || "")}">返回整改问题 ${this.escape(issue.order_no || "")}</button></div>`);
+  }
+
+  restoreReviewTargetFocus() {
+    const state = this.ensureReviewCommunicationState();
+    const issueName = state.returnTarget?.issueName;
+    if (!issueName) return;
+    window.requestAnimationFrame(() => {
+      const element = this.$root.find(`[data-review-issue="${issueName}"]`).get(0);
+      if (element) element.scrollIntoView({ behavior: "smooth", block: "center" });
+      state.returnTarget = null;
+    });
+  }
+
+  async returnToReviewIssue() {
+    await this.switchDetailTab("review");
+  }
+
+  bindReviewCommunicationEvents() {
+    this.$root.on("click", "[data-action='open-review-remediation']", () => this.openReviewRemediationDrawer());
+    this.$root.on("click", "[data-action='review-feedback-item']", (event) => this.openReviewRemediationDrawer(this.reviewAnchorFromElement($(event.currentTarget))));
+    this.$root.on("click", "[data-action='add-review-draft']", () => { this.addReviewRemediationDraft(); this.renderReviewRemediationDrawer(); });
+    this.$root.on("input", "[data-review-draft-description]", (event) => {
+      const index = Number($(event.currentTarget).attr("data-review-draft-description"));
+      const draft = this.ensureReviewCommunicationState().drafts[index];
+      if (draft) draft.description = String($(event.currentTarget).val() || "");
+      const drafts = this.ensureReviewCommunicationState().drafts;
+      const completeCount = drafts.filter((row) => String(row.description || "").trim()).length;
+      this.$root.find("[data-action='submit-review-remediation']")
+        .prop("disabled", completeCount !== drafts.length)
+        .text(`退回整改 (${completeCount})`);
+    });
+    this.$root.on("click", "[data-action='delete-review-draft']", (event) => {
+      this.ensureReviewCommunicationState().drafts.splice(Number($(event.currentTarget).attr("data-index")), 1);
+      if (!this.ensureReviewCommunicationState().drafts.length) this.addReviewRemediationDraft();
+      this.renderReviewRemediationDrawer();
+    });
+    this.$root.on("change", "[data-review-draft-attachment]", (event) => this.uploadReviewDraftAttachment(Number($(event.currentTarget).attr("data-review-draft-attachment")), event.currentTarget.files?.[0]));
+    this.$root.on("click", "[data-action='remove-review-attachment']", (event) => {
+      const state = this.ensureReviewCommunicationState();
+      state.drafts[Number($(event.currentTarget).attr("data-index"))]?.attachments.splice(Number($(event.currentTarget).attr("data-file-index")), 1);
+      this.renderReviewRemediationDrawer();
+    });
+    this.$root.on("click", "[data-action='close-review-remediation']", () => this.closeReviewRemediationDrawer());
+    this.$root.on("click", "[data-action='submit-review-remediation']", () => this.submitReviewRemediation());
+    this.$root.on("input", "[data-review-reply]", (event) => { this.ensureReviewCommunicationState().replyDrafts[$(event.currentTarget).attr("data-review-reply")] = String($(event.currentTarget).val() || ""); });
+    this.$root.on("click", "[data-action='address-review-issue']", (event) => this.addressReviewIssue($(event.currentTarget).attr("data-issue-name")));
+    this.$root.on("click", "[data-action='resubmit-review-round']", () => this.resubmitReviewRound());
+    this.$root.on("click", "[data-action='resolve-review-issue']", (event) => this.resolveReviewIssue($(event.currentTarget).attr("data-issue-name")));
+    this.$root.on("click", "[data-action='review-go-target']", (event) => this.goToReviewTarget($(event.currentTarget).attr("data-issue-name")));
+    this.$root.on("click", "[data-action='return-review-issue']", () => this.returnToReviewIssue());
   }
 
   splitHeaderLabel(label) {
