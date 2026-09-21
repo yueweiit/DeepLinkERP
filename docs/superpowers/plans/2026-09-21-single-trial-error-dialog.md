@@ -4,7 +4,7 @@
 
 **Goal:** Show only the workbench business error dialog when a trial calculation request fails.
 
-**Architecture:** Reuse the workbench's existing opt-in direct-AJAX transport for endpoints whose errors are rendered locally. Add only the trial calculation endpoint to the allowlist and opt that call into the transport; all other requests keep the default Frappe behavior.
+**Architecture:** Use an opt-in native-fetch transport for endpoints whose errors are rendered locally. Add the ordinary recalculation endpoint and the full detail-page AI trial lifecycle to the allowlist; all unrelated requests keep the default Frappe behavior.
 
 **Tech Stack:** ERPNext/Frappe client JavaScript, native Fetch API, pytest-driven Node harness, generated workbench assets.
 
@@ -18,7 +18,7 @@
 
 - [ ] **Step 1: Add a failing transport test**
 
-Extend the locally handled transport parameterization to include `overseas_costing.api.calculate.recalculate_batch`. Assert neither `frappe.call` nor jQuery AJAX is used, native `fetch` receives the method URL and form data, and the failure response remains available to the workbench error renderer.
+Extend the locally handled transport parameterization to include `recalculate_batch` and the AI trial start, status, preview, confirm, and discard endpoints. Assert neither `frappe.call` nor jQuery AJAX is used, native `fetch` receives the method URL and form data, and the failure response remains available to the workbench error renderer.
 
 - [ ] **Step 2: Add a failing trial-flow test**
 
@@ -41,6 +41,7 @@ Expected: both tests fail because trial calculation is not yet opted into the lo
 **Files:**
 - Modify: `overseas_costing/page/overseas_cost_workbench/parts/20-data-filters.js`
 - Modify: `overseas_costing/page/overseas_cost_workbench/parts/30-calculation-erp.js`
+- Modify: `overseas_costing/page/overseas_cost_workbench/parts/78-material-fee-workspace.js`
 - Regenerate: `overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js`
 - Regenerate: `overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js`
 
@@ -52,11 +53,11 @@ Rename the local boolean to describe locally handled errors and include:
 "overseas_costing.api.calculate.recalculate_batch"
 ```
 
-Continue using the local native-fetch transport only when `options.inlineErrors === true`.
+Continue using the local native-fetch transport only when `options.inlineErrors === true`; include the five AI trial lifecycle endpoints in the explicit allowlist.
 
 - [ ] **Step 2: Opt the trial request into that transport**
 
-Pass the existing fourth options argument from `recalculate()`:
+Pass the existing fourth options argument from `recalculate()` and every detail-page AI trial lifecycle call:
 
 ```javascript
 true,

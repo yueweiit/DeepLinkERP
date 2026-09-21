@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -1795,6 +1796,24 @@ console.log(JSON.stringify({endpoint,args,modified:workspace.detailState.expecte
     assert result["modified"] == "M2"
     assert float(result["batch"]["estimated_total_cost_rmb"]) == 64800
     assert result["batch"]["status"] == "Calculated"
+
+
+def test_cost_trial_requests_opt_into_single_error_dialog_transport():
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    endpoints = [
+        "start_cost_trial_ai_review",
+        "get_cost_trial_ai_review_status",
+        "preview_cost_trial",
+        "confirm_cost_trial",
+        "discard_cost_trial_ai_review",
+    ]
+
+    for endpoint in endpoints:
+        matches = list(re.finditer(rf'this\.call\("overseas_costing\.api\.calculate\.{endpoint}"', source))
+        assert matches, endpoint
+        for match in matches:
+            call = source[match.start():source.find(");", match.start()) + 2]
+            assert "{ inlineErrors: true }" in call, f"{endpoint} must own its handled error UI"
 
 
 def test_local_packing_attachment_previews_exact_sheet_without_dingtalk_download():

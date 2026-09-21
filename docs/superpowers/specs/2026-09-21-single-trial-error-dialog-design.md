@@ -6,17 +6,17 @@
 
 ## 根因
 
-工作台试算通过 `frappe.call` 发起请求。服务器返回业务拒绝时，Frappe 的全局 500 处理先弹出「服务器错误」，随后工作台 `recalculate()` 的 `catch` 再调用 `showError()` 弹出「操作失败」，因此同一错误被展示两次。
+工作台普通重算和详情页 AI 试算都通过 `frappe.call` 发起请求。服务器返回业务拒绝时，Frappe 的全局 500 处理先弹出「服务器错误」，随后工作台自己的 `catch` 再调用 `showError()` 弹出「操作失败」，因此同一错误被展示两次。
 
 ## 方案
 
-- 复用现有 AI 请求的「由页面自行展示错误」传输模式，将 `recalculate_batch` 加入显式允许列表。
-- `recalculate()` 调用试算接口时传入 `inlineErrors: true`，使用原生 `fetch`，绕开 `frappe.call` 和 jQuery 全局 500 状态处理。
-- 异常继续原样抛回，仍由 `recalculate()` 现有 `catch` 记录失败并调用 `showError()`，业务文案和审计逻辑不变。
+- 复用「由页面自行展示错误」的传输模式，将普通重算及 AI 试算的启动、轮询、预览、确认、放弃接口加入显式允许列表。
+- 这些试算调用传入 `inlineErrors: true`，使用原生 `fetch`，绕开 `frappe.call` 和 jQuery 全局 500 状态处理。
+- 异常继续以工作台可解析的结构抛回，仍由现有调用链的 `catch` 调用 `showError()`，业务文案和审计逻辑不变。
 - 其他接口仍默认使用 `frappe.call`，避免全局吞掉未处理的服务器错误。
 
 ## 验证
 
-- 传输层测试验证 `recalculate_batch + inlineErrors` 只走原生 `fetch`，并将失败响应保留为工作台可解析的异常对象。
-- 试算流程测试验证请求显式开启 `inlineErrors`，失败后仍只调用一次 `showError()`。
+- 传输层测试验证普通重算及 AI 试算接口在 `inlineErrors` 下只走原生 `fetch`，并将失败响应保留为工作台可解析的异常对象。
+- 试算流程测试验证普通重算和详情页 AI 试算请求均显式开启 `inlineErrors`，失败后仍只调用一次 `showError()`。
 - 重建两套工作台资源，要求第二次构建返回 `changed: []`，再运行 JS 语法、受影响测试、全量测试和线上弹窗验收。

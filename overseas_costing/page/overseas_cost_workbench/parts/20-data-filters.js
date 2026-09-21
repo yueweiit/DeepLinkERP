@@ -3,6 +3,11 @@
       "overseas_costing.api.materials.start_source_ai_review",
       "overseas_costing.api.materials.get_source_ai_review_status",
       "overseas_costing.api.calculate.recalculate_batch",
+      "overseas_costing.api.calculate.start_cost_trial_ai_review",
+      "overseas_costing.api.calculate.get_cost_trial_ai_review_status",
+      "overseas_costing.api.calculate.preview_cost_trial",
+      "overseas_costing.api.calculate.confirm_cost_trial",
+      "overseas_costing.api.calculate.discard_cost_trial_ai_review",
     ].includes(method);
     // Frappe and jQuery both install global status handlers that show a second
     // dialog even when a caller handles the error. Use native fetch only for

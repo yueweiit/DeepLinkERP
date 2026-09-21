@@ -449,6 +449,11 @@ def test_material_scrollbar_has_sixteen_pixel_visible_thumb_and_single_track():
     'overseas_costing.api.materials.start_source_ai_review',
     'overseas_costing.api.materials.get_source_ai_review_status',
     'overseas_costing.api.calculate.recalculate_batch',
+    'overseas_costing.api.calculate.start_cost_trial_ai_review',
+    'overseas_costing.api.calculate.get_cost_trial_ai_review_status',
+    'overseas_costing.api.calculate.preview_cost_trial',
+    'overseas_costing.api.calculate.confirm_cost_trial',
+    'overseas_costing.api.calculate.discard_cost_trial_ai_review',
 ])
 def test_inline_error_transport_uses_native_fetch_and_preserves_failure_response(method):
     result = _fee_workspace_result(FIXTURE + f"const method={json.dumps(method)};" + f"""

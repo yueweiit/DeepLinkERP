@@ -5058,7 +5058,7 @@
         expected_modified: this.detailState.expectedModified,
         force: 0,
         reuse_only: 0,
-      });
+      }, false, { inlineErrors: true });
       if (!started?.ok) throw new Error(started?.message || "AI 试算任务启动失败。");
       if (!inputsUnchanged()) return false;
       state.costTrialAI = {
@@ -5114,7 +5114,7 @@
         batch_name: batchName,
         run_id: runId,
         after_revision: current.progressRevision ?? null,
-      });
+      }, false, { inlineErrors: true });
       if (!isCurrent()) return false;
       state.costTrialAI = {
         ...current,
@@ -5426,7 +5426,7 @@
         batch_name: this.detailState.batchName,
         run_id: trial.runId,
         selections: JSON.stringify(selections),
-      });
+      }, false, { inlineErrors: true });
       if (!preview?.ok) throw new Error(preview?.message || "试算预览失败。");
       trial.preview = preview;
       trial.selections = selections;
@@ -5469,7 +5469,7 @@
           batch_name: batchName,
           run_id: trial.runId,
           selections: JSON.stringify(currentSelections),
-        });
+        }, false, { inlineErrors: true });
         if (!preview?.ok || !preview.preview_token) throw new Error(preview?.message || "试算预览失败。");
         const latestSelections = this.collectCostTrialAISelections();
         if (JSON.stringify(latestSelections) !== JSON.stringify(currentSelections)) {
@@ -5488,7 +5488,7 @@
         selections: JSON.stringify(currentSelections),
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
-      });
+      }, false, { inlineErrors: true });
       state.calculationWrite = calculationWrite;
       const result = await calculationWrite;
       if (!result?.ok || !result?.saved) throw new Error(result?.message || "AI 试算保存失败。");
@@ -5533,7 +5533,7 @@
     const trial = state.costTrialAI;
     if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
       batch_name: this.detailState.batchName, run_id: trial.runId,
-    });
+    }, false, { inlineErrors: true });
     state.costTrialDialog?.hide?.();
     state.costTrialDialog = null;
     state.costTrialAI = null;
@@ -5568,7 +5568,7 @@
         expected_modified: this.detailState.expectedModified,
         force: 0,
         reuse_only: 1,
-      });
+      }, false, { inlineErrors: true });
       if (!started?.ok) throw new Error(started?.message || "读取已保存分摊口径失败。");
       if (!isCurrent() || state.requestId !== requestId || state.feeRequestId !== feeRequestId
         || state.inputRevision !== inputRevision) return false;
@@ -5618,7 +5618,7 @@
         && state.inputRevision === inputRevision;
       if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
         batch_name: batchName, run_id: trial.runId,
-      });
+      }, false, { inlineErrors: true });
       state.costTrialDialog?.hide?.();
       state.costTrialDialog = null;
       state.costTrialAI = null;
@@ -5630,7 +5630,7 @@
         expected_modified: this.detailState.expectedModified,
         force: 1,
         reuse_only: 0,
-      });
+      }, false, { inlineErrors: true });
       if (!started?.ok) throw new Error(started?.message || "AI 试算任务重试失败。");
       if (!isCurrent()) return false;
       state.costTrialAI = {
