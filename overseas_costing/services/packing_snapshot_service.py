@@ -1211,6 +1211,9 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
                 or source.get("source_hash")
                 or ""
             ),
+            "archive_binding_complete": bool(source.get("archive_binding_complete")),
+            "analysis_only": bool(source.get("analysis_only")),
+            "adoption_restriction": str(source.get("adoption_restriction") or ""),
         }
         if detail.get('local_only') and not public['source_context'] and kind in {'manual_attachment', 'wiki_sheet'}:
             public['source_context'] = {'batch': str(batch_name), 'cost_version': detail.get('cost_version') or '',
@@ -1232,9 +1235,17 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
         public["source_hash"] = hashlib.sha256(_json(hash_basis).encode("utf-8")).hexdigest()
         if key in seen:
             # The same OA file can have audit copies and an older usable local
-            # archive. A newer excluded copy must not hide that archive.
+            # archive. Prefer the fully bound immutable archive; database row
+            # order and a newer helper row must never choose the evidence.
             def availability(row):
-                return (not row.get('excluded'), bool(row.get('available')), bool(row.get('can_download')))
+                return (
+                    not row.get('excluded'),
+                    bool(row.get('archive_binding_complete')),
+                    bool(row.get('available')),
+                    bool(row.get('content_hash')),
+                    bool(row.get('can_download')),
+                    str(row.get('source_id') or ''),
+                )
             index = seen[key]
             if availability(public) > availability(result[index]):
                 result[index] = public
@@ -1346,6 +1357,19 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             and packing_source_service._attachment_is_audit_only(row)
         )
         snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
+        archive_binding_complete = bool(
+            str(row.get("source_type") or "").upper() == "OA"
+            and packing_source_service.dingtalk_approval_service.attachment_has_complete_archive_binding(row)
+        )
+        descriptor = snapshot.get("settlement_document") or {}
+        analysis_only = bool(
+            audit_only
+            and archive_binding_complete
+            and not snapshot.get("approval_excluded")
+            and snapshot.get("cost_source_allowed") is not False
+            and not descriptor.get("retired")
+            and not descriptor.get("disabled")
+        )
         attachment_instance = str(
             snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""
         )
@@ -1396,9 +1420,16 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             "excluded": audit_only or invalid_approval,
             "exclude_reason": (
                 "审计专用附件，不参与资料分析。"
-                if audit_only
+                if audit_only and not analysis_only
                 else "所属审批已失效，不参与资料分析。"
                 if invalid_approval
+                else ""
+            ),
+            "archive_binding_complete": archive_binding_complete,
+            "analysis_only": analysis_only,
+            "adoption_restriction": (
+                "该附件仅用于 AI 读取和预览，其提案需由其他有效资料或人工确认。"
+                if analysis_only
                 else ""
             ),
             "content_hash": str((
@@ -1415,6 +1446,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             "source_field": str(snapshot.get("source_field") or ""),
             "workflow_field_id": str(snapshot.get("workflow_field_id") or snapshot.get("component_id") or ""),
         }
+        if analysis_only and not invalid_approval:
+            source["excluded"] = False
         sheets = ([str(table['title']) for table in (snapshot.get('settlement_document') or {}).get('tables') or [] if table.get('title')]
                   if detail.get('local_only') else _attachment_sheet_names(row) if file_name.lower().endswith((".xlsx", ".xlsm")) else [])
         if sheets:

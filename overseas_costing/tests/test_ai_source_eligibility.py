@@ -107,6 +107,32 @@ def test_non_invalid_status_is_allowed_as_final_fee(state, result):
     }
 
 
+def test_analysis_only_archive_is_readable_but_never_final_fee_authority():
+    store, ledger, batch, _source = pending_archive()
+    raw = {
+        'source_id': 'ATTACHMENT',
+        'source_kind': 'approval_attachment',
+        'process_instance_id': 'E',
+        'available': True,
+        'analysis_only': True,
+        'adoption_restriction': '只读审批附件',
+    }
+    monkeypatch_source = ledger.create('attachment', {
+        'batch': batch['name'],
+        'file_url': '/private/files/fuel.png',
+    })
+    raw['source_id'] = monkeypatch_source['name']
+
+    annotated = deps.annotate_source_eligibility(
+        [raw], store=store, ledger=ledger, batch_name=batch['name']
+    )[0]
+
+    assert annotated['analysis_allowed'] is True
+    assert annotated['adoption_allowed'] is False
+    assert annotated['final_fee_allowed'] is False
+    assert annotated['adoption_restriction'] == '只读审批附件'
+
+
 @pytest.mark.parametrize('field,value', [
     ('invalid', True),
     ('disabled', True),

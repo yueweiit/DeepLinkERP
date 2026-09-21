@@ -305,7 +305,9 @@ def attachment_has_complete_archive_binding(row: dict | None) -> bool:
         return False
     if descriptor.get("retired") or descriptor.get("disabled"):
         return False
-    process_id = str(snapshot.get("process_instance_id") or "").strip()
+    process_id = str(
+        snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""
+    ).strip()
     file_id = str(snapshot.get("file_id") or "").strip()
     manifest_process_id = str(manifest.get("process_instance_id") or "").strip()
     manifest_file_id = str(manifest.get("file_id") or "").strip()
@@ -369,7 +371,9 @@ def _local_attachment_map(
     for row in rows:
         snapshot = _json_dict(row.get("parse_result_json"))
         file_id = str(snapshot.get("file_id") or "").strip()
-        instance_id = str(snapshot.get("process_instance_id") or "").strip()
+        instance_id = str(
+            snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""
+        ).strip()
         if file_id:
             grouped[(instance_id, file_id)].append(row)
     return {
@@ -408,7 +412,7 @@ def resolve_canonical_batch_attachment(
     for row in rows:
         snapshot = _json_dict(row.get("parse_result_json"))
         if (
-            str(snapshot.get("process_instance_id") or "")
+            str(snapshot.get("process_instance_id") or snapshot.get("instance_id") or "")
             == str(process_instance_id or "")
             and str(snapshot.get("file_id") or "") == str(file_id or "")
         ):

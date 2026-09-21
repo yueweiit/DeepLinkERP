@@ -72,6 +72,25 @@ def test_running_approval_audit_attachment_remains_blocked_for_adoption():
         capture_dependencies(selected, purpose='adoption', **options)
 
 
+def test_legacy_descriptor_audit_only_is_readable_but_not_adoptable():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    attachment = ledger.get('attachment', selected[0]['source_id'])
+    metadata = json.loads(attachment['parse_result_json'])
+    metadata.pop('approval_excluded', None)
+    metadata.pop('cost_source_allowed', None)
+    metadata['settlement_document']['audit_only'] = True
+    ledger.put('attachment', attachment['name'], {'parse_result_json': dumps(metadata)})
+    options = dict(
+        store=store, ledger=ledger, batch_name=batch['name'], source_context={}
+    )
+
+    dependencies = capture_dependencies(selected, purpose='analysis', **options)
+    assert {row['kind'] for row in dependencies} == {'approval', 'attachment'}
+    with pytest.raises(ValueError, match='已被排除'):
+        capture_dependencies(selected, purpose='adoption', **options)
+
+
 def test_rejected_approval_audit_attachment_remains_blocked_for_analysis():
     store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
     source, selected = restricted_approval_attachment(store, ledger, batch, version)

@@ -56,6 +56,33 @@ def test_local_attachment_map_prefers_current_fully_archived_row_independent_of_
     assert result[("PROC-MAIN", "FILE-1")]["name"] == "ATT-CANONICAL"
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_local_attachment_map_groups_legacy_instance_id_with_canonical_archive(
+    monkeypatch, reverse
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    temporary = _oa_attachment_row("ATT-TEMP", archived=False)
+    temporary_snapshot = json.loads(temporary["parse_result_json"])
+    temporary_snapshot["instance_id"] = temporary_snapshot.pop("process_instance_id")
+    temporary["parse_result_json"] = json.dumps(temporary_snapshot)
+    rows = [temporary, _oa_attachment_row("ATT-CANONICAL", archived=True)]
+    if reverse:
+        rows.reverse()
+
+    class FakeFrappe:
+        @staticmethod
+        def get_list(*_args, **_kwargs):
+            return rows
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+
+    result = service._local_attachment_map("BATCH-1", current_version="VERSION-1")
+
+    assert set(result) == {("PROC-MAIN", "FILE-1")}
+    assert result[("PROC-MAIN", "FILE-1")]["name"] == "ATT-CANONICAL"
+
+
 def test_batch_detail_normalizes_main_linked_comments_and_archives(monkeypatch) -> None:
     from overseas_costing.services import dingtalk_approval_service as service
 

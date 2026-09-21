@@ -793,6 +793,91 @@ def test_material_ai_duplicate_audit_copy_cannot_hide_readable_attachment(monkey
         prepare_source_manifest(excluded, selected_source_ids=[selected_id])
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+def test_material_ai_catalog_prefers_fully_bound_archive_over_legacy_helper(monkeypatch, reverse):
+    import json
+    from types import SimpleNamespace
+
+    process_id = 'PROC-MAIN'
+    file_id = 'FILE-1'
+    helper = {
+        'name': 'ATT-TEMP', 'version': 'V1', 'source_type': 'OA',
+        'file_name': 'fuel.png', 'file_url': '/private/files/fuel.png',
+        'modified': '2026-09-21 12:53:11',
+        'parse_result_json': json.dumps({
+            'instance_id': process_id, 'file_id': file_id,
+            'download': {'sha256': 'a' * 64},
+        }),
+    }
+    canonical = {
+        **helper,
+        'name': 'ATT-CANONICAL',
+        'modified': '2026-09-12 18:00:36',
+        'parse_result_json': json.dumps({
+            'process_instance_id': process_id,
+            'file_id': file_id,
+            'settlement_document': {
+                'audit_only': True,
+                'document_id': 'DOC-1',
+                'source_id': 'SOURCE-1',
+                'fingerprint': 'DOC-1',
+                'manifest': {
+                    'process_instance_id': process_id,
+                    'file_id': file_id,
+                    'sha256': 'a' * 64,
+                },
+            },
+        }),
+    }
+    rows = [helper, canonical]
+    if reverse:
+        rows.reverse()
+
+    monkeypatch.setattr(service, 'frappe', SimpleNamespace(get_list=lambda *_args, **_kwargs: rows))
+    monkeypatch.setattr(service.effective_source, 'current_source_bundle', lambda *_args: None)
+    monkeypatch.setattr(
+        service.packing_source_service.dingtalk_approval_service,
+        'get_batch_dingtalk_approval_detail',
+        lambda *_args: {},
+    )
+    monkeypatch.setattr(service, 'get_current_packing_snapshot', lambda *_args: {})
+    monkeypatch.setattr(service, '_list_approval_body_ai_sources', lambda *_args, **_kwargs: [{
+        'source_id': 'approval:MAIN:form',
+        'source_kind': 'approval_form',
+        'process_instance_id': process_id,
+        'approval_role': 'international_logistics',
+    }])
+    monkeypatch.setattr(service, 'list_packing_sources', lambda *_args, **_kwargs: {
+        'wiki_workbooks': [],
+        'approval_sources': [{
+            'source_kind': 'approval_attachment',
+            'source_id': 'ATT-TEMP',
+            'attachment_name': 'ATT-TEMP',
+            'source_label': 'fuel.png',
+            'file_name': 'fuel.png',
+            'process_instance_id': process_id,
+            'file_id': file_id,
+            'available': True,
+            'download_required': False,
+        }],
+    })
+    monkeypatch.setattr(service, '_attachment_sheet_names', lambda _row: [])
+    monkeypatch.setattr(service.packing_source_service, '_attachment_hash', lambda _row: 'a' * 64)
+
+    result = service._list_material_ai_sources('B1', 'V1')
+
+    attachments = [
+        row for row in result
+        if row.get('logical_source_id') == f'oa:{process_id}:{file_id}'
+    ]
+    assert len(attachments) == 1
+    assert attachments[0]['source_id'] == 'ATT-CANONICAL'
+    assert attachments[0]['available'] is True
+    assert attachments[0]['excluded'] is False
+    assert attachments[0]['analysis_only'] is True
+    assert attachments[0]['archive_binding_complete'] is True
+
+
 def test_international_logistics_packing_attachment_precedes_approval_body():
     from overseas_costing.services.source_priority_service import material_packing_source_priority
 
