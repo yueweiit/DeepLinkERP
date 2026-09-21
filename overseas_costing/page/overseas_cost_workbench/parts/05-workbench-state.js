@@ -4,7 +4,7 @@
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window, function () {
   const TASKS = new Set(["pending", "cost", "erp"]);
-  const TABS = new Set(["overview", "dingtalk", "documents", "items", "vouchers", "audit"]);
+  const TABS = new Set(["overview", "dingtalk", "documents", "items", "vouchers", "review", "audit"]);
   const TRANSPORT_MODE_ALIASES = Object.freeze({
     SEA: "SEA",
     AIR: "AIR",
@@ -195,6 +195,8 @@
 
   function detailTabForAction(action) {
     if (action === "supplement") return "documents";
+    if (action === "review") return "documents";
+    if (action === "review_remediation") return "review";
     if (action === "erp_retry") return "overview";
     return "items";
   }
@@ -270,6 +272,7 @@
       documents: "documents",
       items: "items",
       vouchers: "vouchers",
+      review: "review",
       audit: "audit",
     };
     return resources[tab] || resources.items;

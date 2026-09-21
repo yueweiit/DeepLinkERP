@@ -159,7 +159,7 @@
       this.loadBatches();
     });
     this.$root.on("click", "[data-action='open-batch-detail']", (event) => {
-      this.openBatchDetail($(event.currentTarget).attr("data-batch-name"));
+      this.openBatchDetail($(event.currentTarget).attr("data-batch-name"), "documents");
     });
     this.$root.on("click", "[data-action='toggle-result-preview']", (event) => {
       event.preventDefault();
@@ -186,8 +186,9 @@
     this.$root.on("click", "[data-action='workbench-primary']", async (event) => {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const action = $(event.currentTarget).attr("data-primary-action");
+      if (action === "review_remediation") return this.openBatchDetail(batchName, "review");
       if (["supplement", "supplement_fees", "supplement_allocation"].includes(action)) return this.openBatchDetail(batchName, "documents");
-      if (action === "review") return this.openBatchDetail(batchName, "overview");
+      if (action === "review") return this.openBatchDetail(batchName, "documents");
       if (action === "recalculate") return this.recalculate(batchName);
       return this.openBatchDetail(batchName, OverseasCostWorkbenchState.detailTabForAction(action));
     });
@@ -551,6 +552,8 @@
   }
 
   workbenchRowStatusLabel(batch) {
+    if (String(batch.remediation_state || "").toLowerCase() === "returned") return "待整改";
+    if (String(batch.remediation_state || "").toLowerCase() === "resubmitted") return "待财务复核";
     if (batch.review_state === "confirmed") return "已核对";
     if (batch.review_state === "ready") return "可核对";
     return {
@@ -967,8 +970,19 @@
   renderWorkbenchBatchRow(batch) {
     const reference = batch.batch_no || batch.source_approval_no || batch.name;
     const logisticsNo = batch.waybill_no || batch.customs_no || "未填写物流单号";
-    const actionLabels = {review: "核对成本", supplement: "补资料", supplement_fees: "补费用", supplement_allocation: "补分摊数据", recalculate: "重新试算", view: "查看详情", erp_retry: "重试 ERP"};
-    const action = actionLabels[batch.primary_action] ? {action: batch.primary_action, label: actionLabels[batch.primary_action]} : OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
+    const remediationState = String(batch.remediation_state || "").toLowerCase();
+    let action;
+    if (remediationState === "returned") {
+      action = {action: "review_remediation", label: `待整改 ${Number(batch.unresolved_count || batch.issue_count || 0)}`};
+    } else if (remediationState === "resubmitted") {
+      action = {action: "review_remediation", label: "待财务复核"};
+    } else if (this.viewState.task === "cost") {
+      action = {action: "review", label: "成本核算"};
+    } else if (this.viewState.task === "erp") {
+      action = {action: "erp_retry", label: "处理 ERP"};
+    } else {
+      action = {action: "supplement", label: "继续处理"};
+    }
     const totalCost = batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
     const rowStatus = this.workbenchRowStatusLabel(batch);
     const reviewTags = this.renderWorkbenchReviewTags(batch);
@@ -991,7 +1005,6 @@
           <div><strong>${this.escape(this.formatDateTimeMinute(batch.source_created_at) || "—")}</strong><span>${this.escape(batch.review_state === "confirmed" ? `确认版本 ${batch.reviewed_version || batch.current_version || "—"}` : batch.result_is_current === false ? "待重新试算" : batch.status || "")}</span></div>
           <div class="ocw-row-actions">
             <button class="ocw-primary-btn" type="button" data-action="workbench-primary" data-primary-action="${action.action}" data-batch-name="${this.escape(batch.name)}">${action.label}</button>
-            <button class="ocw-outline-btn" type="button" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
           </div>
         </article>
         ${expanded ? this.renderBatchResultPreviewState() : ""}

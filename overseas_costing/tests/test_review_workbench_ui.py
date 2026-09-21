@@ -58,11 +58,45 @@ def test_cost_row_uses_review_action_and_compact_warning_tags():
 name:'B',batch_no:'B',primary_issue:'ready',primary_action:'review',review_state:'ready',
 review_blockers:[],review_warnings:[{code:'ESTIMATED_AMOUNT',message:'含暂估费用，可先审核，最终确认前仍需补充实际金额。'}],
 result_is_current:true,estimated_total_cost_rmb:100,status:'Calculated'})));""")
-    assert '核对成本' in text
+    assert '成本核算' in text
     assert '实际费用待确认' in text
     assert 'ocw-review-tag' in text
     assert '最终确认前' not in text
     assert 'data-primary-action="review"' in text
+
+
+def test_list_rows_use_one_dynamic_action_and_no_legacy_more_button():
+    result=run_js("""
+const base={name:'B',batch_no:'B',review_state:'ready',cost_review_started:true,
+ cost_review_eligible:true,review_blockers:[],review_warnings:[],result_is_current:true,
+ estimated_total_cost_rmb:100,status:'Calculated'};
+const pending=makeView('pending').renderWorkbenchBatchRow({...base,primary_issue:'purchase',primary_action:'supplement'});
+const returned=makeView('pending').renderWorkbenchBatchRow({...base,remediation_state:'returned',unresolved_count:2,primary_issue:'remediation',primary_action:'review_remediation'});
+const cost=makeView('cost').renderWorkbenchBatchRow({...base,primary_issue:'ready',primary_action:'review'});
+console.log(JSON.stringify({pending,returned,cost}));
+""")
+    assert '继续处理' in result['pending']
+    assert '待整改 2' in result['returned']
+    assert '成本核算' in result['cost']
+    for text in result.values():
+        assert text.count('data-action="workbench-primary"') == 1
+        assert 'data-action="row-more"' not in text
+        assert '>更多<' not in text
+
+
+def test_review_tab_is_stable_and_list_navigation_routes_to_expected_tab():
+    result=run_js("""
+const state=OverseasCostWorkbenchState.parseWorkbenchState('/desk/x?screen=detail&batch=B&tab=review');
+console.log(JSON.stringify({tab:state.tab,resource:OverseasCostWorkbenchState.detailTabResource('review'),
+ returned:OverseasCostWorkbenchState.detailTabForAction('review_remediation'),
+ normal:OverseasCostWorkbenchState.detailTabForAction('review')}));
+""")
+    assert result == {
+        'tab': 'review',
+        'resource': 'review',
+        'returned': 'review',
+        'normal': 'documents',
+    }
 
 
 def test_stale_row_shows_old_result_and_specific_blocker():

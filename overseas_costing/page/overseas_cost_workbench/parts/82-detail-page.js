@@ -17,7 +17,7 @@
     return "ready";
   }
 
-  async openBatchDetail(batchName = "", tab = "items", options = {}) {
+  async openBatchDetail(batchName = "", tab = "documents", options = {}) {
     const normalizedName = String(batchName || "").trim();
     if (!normalizedName) {
       this.showPendingFeature("缺少批次号，无法打开详情。");

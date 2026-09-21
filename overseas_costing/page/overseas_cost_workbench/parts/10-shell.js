@@ -483,7 +483,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='manual-logistics-quote']", (event) => this.openLogisticsQuoteDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='source-center']", (event) => this.openSourceCenterDialog($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='row-more']", (event) => this.openRowMoreDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", ".ocw-parent-row", (event) => {
       if ($(event.target).closest("button, input, select, textarea, a").length) return;
       const batchName = $(event.currentTarget).attr("data-batch-name");
