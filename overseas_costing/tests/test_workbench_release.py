@@ -161,6 +161,71 @@ console.log(JSON.stringify({checks,dialogs,blocked,releaseBlocked:workspace.rele
     assert result == {"checks": 1, "dialogs": 1, "blocked": True, "releaseBlocked": True}
 
 
+def test_deployment_error_dialog_is_replaced_only_after_release_check_confirms_outage() -> None:
+    result = _request_result(
+        """
+const deploymentDialog={
+  classList:{contains:(name)=>name==='modal'},
+  textContent:'信息 内部服务器错误 内部服务器错误'
+};
+const businessDialog={
+  classList:{contains:(name)=>name==='modal'},
+  textContent:'操作失败 还有 2 行本次发货货值缺失'
+};
+let checks=0,hidden=[];
+global.document.querySelectorAll=()=>[deploymentDialog,businessDialog];
+global.$=(element)=>({modal:(action)=>hidden.push({dialog:element===deploymentDialog?'deployment':'business',action})});
+workspace.checkWorkbenchRelease=async(options)=>{checks+=options.deploymentFailure===true?1:100;workspace.releaseBlocked=true;return {unavailable:true}};
+await workspace.handlePotentialDeploymentDialog({target:businessDialog});
+await workspace.handlePotentialDeploymentDialog({target:deploymentDialog});
+console.log(JSON.stringify({checks,hidden,business:workspace.isDeploymentErrorDialog(businessDialog),deployment:workspace.isDeploymentErrorDialog(deploymentDialog)}));
+"""
+    )
+    assert result == {
+        "checks": 1,
+        "hidden": [{"dialog": "deployment", "action": "hide"}],
+        "business": False,
+        "deployment": True,
+    }
+
+
+def test_non_transport_marker_error_keeps_real_server_error_visible() -> None:
+    result = _request_result(
+        """
+let dialogs=0;
+workspace.requestJson=async()=>{throw Object.assign(new Error('Forbidden'),{status:403})};
+workspace.showWorkbenchReleaseDialog=()=>{dialogs+=1};
+const state=await workspace.checkWorkbenchRelease({deploymentFailure:true});
+console.log(JSON.stringify({dialogs,blocked:!!workspace.releaseBlocked,deployment:state.deployment,unavailable:state.unavailable}));
+"""
+    )
+    assert result == {"dialogs": 0, "blocked": False, "deployment": False, "unavailable": True}
+
+
+def test_late_release_failure_after_page_hide_cannot_restore_modal_or_timer() -> None:
+    result = _request_result(
+        """
+global.$=()=>({off:()=>{},on:()=>{}});
+workspace.startWorkbenchReleaseMonitor();
+let rejectRequest,dialogs=0,reschedules=0;
+workspace.requestJson=()=>new Promise((_resolve,reject)=>{rejectRequest=reject});
+workspace.showWorkbenchReleaseDialog=()=>{dialogs+=1};
+workspace.scheduleWorkbenchReleaseCheck=()=>{reschedules+=1};
+const pending=workspace.checkWorkbenchRelease({deploymentFailure:true});
+workspace.stopWorkbenchReleaseMonitor();
+rejectRequest(Object.assign(new Error('Unavailable'),{status:503}));
+const state=await pending;
+console.log(JSON.stringify({state,dialogs,reschedules,active:workspace._releaseMonitorActive}));
+"""
+    )
+    assert result == {
+        "state": {"cancelled": True},
+        "dialogs": 0,
+        "reschedules": 0,
+        "active": False,
+    }
+
+
 def test_request_layer_owns_calls_uploads_usage_and_settlement_without_frappe_transport() -> None:
     data = (PARTS / "20-data-filters.js").read_text(encoding="utf-8")
     upload = (PARTS / "50-import-category.js").read_text(encoding="utf-8")
@@ -181,4 +246,5 @@ def test_page_show_resumes_release_monitor_after_page_hide_cleanup() -> None:
     assert "startWorkbenchReleaseMonitor" in data
     assert "resumeWorkbenchReleaseMonitor" in data
     assert "workbench.resumeWorkbenchReleaseMonitor()" in bootstrap
-    assert 'window.removeEventListener("focus", this._releaseFocusHandler)' in shell
+    assert "this.stopWorkbenchReleaseMonitor()" in shell
+    assert 'window.removeEventListener("focus", this._releaseFocusHandler)' in data

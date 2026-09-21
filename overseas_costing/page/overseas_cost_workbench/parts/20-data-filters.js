@@ -83,8 +83,9 @@
       } catch (error) {
         if (!this.isDeploymentTransportError(error) || String(method).endsWith(".get_workbench_release")) throw error;
         const releaseState = await this.checkWorkbenchRelease({ deploymentFailure: true });
-        if (this.releaseBlocked || releaseState?.unavailable || !this.isReadOnlyRequest(method, options)) {
-          if (this.releaseBlocked || releaseState?.unavailable) error.workbenchReleaseHandled = true;
+        const deploymentUnavailable = releaseState?.deployment === true;
+        if (this.releaseBlocked || deploymentUnavailable || !this.isReadOnlyRequest(method, options)) {
+          if (this.releaseBlocked || deploymentUnavailable) error.workbenchReleaseHandled = true;
           throw error;
         }
         const payload = await request();
@@ -103,20 +104,23 @@
     } catch (error) {
       if (this.isDeploymentTransportError(error)) {
         const releaseState = await this.checkWorkbenchRelease({ deploymentFailure: true });
-        if (this.releaseBlocked || releaseState?.unavailable) error.workbenchReleaseHandled = true;
+        if (this.releaseBlocked || releaseState?.deployment === true) error.workbenchReleaseHandled = true;
       }
       throw error;
     }
   }
 
   async checkWorkbenchRelease(options = {}) {
+    if (options.deploymentFailure) this._releaseDeploymentFailureRequested = true;
     if (this._releaseCheckPromise) return this._releaseCheckPromise;
-    this._releaseCheckPromise = (async () => {
+    const generation = Number(this._releaseMonitorGeneration || 0);
+    const pending = (async () => {
       try {
         const payload = await this.requestJson(
           "/api/method/overseas_costing.api.workbench.get_workbench_release",
           { method: "GET" }
         );
+        if (!this.isWorkbenchReleaseMonitorCurrent(generation)) return { cancelled: true };
         const result = payload.message || payload || {};
         const releaseId = String(result.release_id || "").trim();
         if (!releaseId) throw new Error("发布标识为空");
@@ -136,23 +140,60 @@
         if (wasUpdating) this.hideWorkbenchReleaseDialog();
         return { changed: false, releaseId };
       } catch (error) {
-        if (!options.deploymentFailure) return { unavailable: true, error };
+        if (!this.isWorkbenchReleaseMonitorCurrent(generation)) return { cancelled: true };
+        const deploymentFailure = options.deploymentFailure || this._releaseDeploymentFailureRequested;
+        if (!deploymentFailure || !this.isDeploymentTransportError(error)) {
+          return { unavailable: true, deployment: false, error };
+        }
         this.releaseUpdating = true;
         this.releaseBlocked = true;
         this.showWorkbenchReleaseDialog("updating");
         this.scheduleWorkbenchReleaseCheck(3000);
-        return { unavailable: true, error };
+        return { unavailable: true, deployment: true, error };
       }
     })();
+    this._releaseCheckPromise = pending;
     try {
-      return await this._releaseCheckPromise;
+      return await pending;
     } finally {
-      this._releaseCheckPromise = null;
+      if (this._releaseCheckPromise === pending) {
+        this._releaseCheckPromise = null;
+        this._releaseDeploymentFailureRequested = false;
+      }
     }
+  }
+
+  isWorkbenchReleaseMonitorCurrent(generation) {
+    return this._releaseMonitorActive !== false
+      && Number(this._releaseMonitorGeneration || 0) === Number(generation || 0);
+  }
+
+  isDeploymentErrorDialog(element) {
+    if (!element?.classList?.contains?.("modal")) return false;
+    if (element.classList.contains("ocw-release-modal") || element.classList.contains("ocw-error-modal")) return false;
+    const text = String(element.textContent || "").replace(/\s+/g, " ").trim();
+    return /(内部服务器错误|Internal Server Error|Server Error)/i.test(text);
+  }
+
+  dismissDeploymentErrorDialogs() {
+    Array.from(document.querySelectorAll?.(".modal.show, .modal.in") || [])
+      .filter((element) => this.isDeploymentErrorDialog(element))
+      .forEach((element) => {
+        const $dialog = $(element);
+        if (typeof $dialog.modal === "function") $dialog.modal("hide");
+        else $dialog.hide?.();
+      });
+  }
+
+  async handlePotentialDeploymentDialog(event) {
+    if (!this.isDeploymentErrorDialog(event?.target)) return;
+    const state = await this.checkWorkbenchRelease({ deploymentFailure: true });
+    if (this.releaseBlocked || state?.changed || state?.deployment === true) this.dismissDeploymentErrorDialogs();
   }
 
   showWorkbenchReleaseDialog(mode) {
     const updated = mode === "updated";
+    this.dismissDeploymentErrorDialogs();
     if (!this._releaseDialog) {
       const dialog = new frappe.ui.Dialog({
         title: "系统版本更新",
@@ -186,19 +227,32 @@
   }
 
   scheduleWorkbenchReleaseCheck(delay = 60000) {
+    if (this._releaseMonitorActive === false) return;
+    const generation = Number(this._releaseMonitorGeneration || 0);
     window.clearTimeout(this._releaseCheckTimer);
     this._releaseCheckTimer = window.setTimeout(async () => {
+      if (!this.isWorkbenchReleaseMonitorCurrent(generation)) return;
       if (document.visibilityState === "visible") await this.checkWorkbenchRelease();
+      if (!this.isWorkbenchReleaseMonitorCurrent(generation)) return;
       this.scheduleWorkbenchReleaseCheck(this.releaseUpdating ? 3000 : 60000);
     }, delay);
   }
 
   async initializeWorkbenchRelease() {
+    this.activateWorkbenchReleaseMonitor();
     await this.checkWorkbenchRelease();
+    if (this._releaseMonitorActive === false) return;
     this.startWorkbenchReleaseMonitor();
   }
 
+  activateWorkbenchReleaseMonitor() {
+    if (this._releaseMonitorActive === true) return;
+    this._releaseMonitorActive = true;
+    this._releaseMonitorGeneration = Number(this._releaseMonitorGeneration || 0) + 1;
+  }
+
   startWorkbenchReleaseMonitor() {
+    this.activateWorkbenchReleaseMonitor();
     if (this._releaseFocusHandler) window.removeEventListener("focus", this._releaseFocusHandler);
     if (this._releaseVisibilityHandler) document.removeEventListener("visibilitychange", this._releaseVisibilityHandler);
     this._releaseFocusHandler = () => this.checkWorkbenchRelease();
@@ -207,10 +261,27 @@
     };
     window.addEventListener("focus", this._releaseFocusHandler);
     document.addEventListener("visibilitychange", this._releaseVisibilityHandler);
+    if (this._releaseModalHandler) $(document).off("shown.bs.modal.ocwReleaseGuard", this._releaseModalHandler);
+    this._releaseModalHandler = (event) => {
+      this.handlePotentialDeploymentDialog(event).catch(() => {});
+    };
+    $(document).on("shown.bs.modal.ocwReleaseGuard", this._releaseModalHandler);
     this.scheduleWorkbenchReleaseCheck(60000);
   }
 
+  stopWorkbenchReleaseMonitor() {
+    this._releaseMonitorActive = false;
+    this._releaseMonitorGeneration = Number(this._releaseMonitorGeneration || 0) + 1;
+    this._releaseCheckPromise = null;
+    this._releaseDeploymentFailureRequested = false;
+    window.clearTimeout(this._releaseCheckTimer);
+    if (this._releaseFocusHandler) window.removeEventListener("focus", this._releaseFocusHandler);
+    if (this._releaseVisibilityHandler) document.removeEventListener("visibilitychange", this._releaseVisibilityHandler);
+    if (this._releaseModalHandler) $(document).off("shown.bs.modal.ocwReleaseGuard", this._releaseModalHandler);
+  }
+
   resumeWorkbenchReleaseMonitor() {
+    this.activateWorkbenchReleaseMonitor();
     this.startWorkbenchReleaseMonitor();
     return this.checkWorkbenchRelease();
   }

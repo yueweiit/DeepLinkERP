@@ -91,6 +91,8 @@ class OverseasCostWorkbench {
     };
     this.resultPreviewCache = new Map();
     this._resultPreviewScrollCleanup = null;
+    this._releaseMonitorActive = false;
+    this._releaseMonitorGeneration = 0;
     this.detailState = {
       batchName: this.viewState.batch,
       versionName: "",
@@ -150,9 +152,7 @@ class OverseasCostWorkbench {
 
   // 离开工作台时恢复上面隐藏的元素，避免影响其它页面。
   restoreDeskChrome() {
-    window.clearTimeout(this._releaseCheckTimer);
-    if (this._releaseFocusHandler) window.removeEventListener("focus", this._releaseFocusHandler);
-    if (this._releaseVisibilityHandler) document.removeEventListener("visibilitychange", this._releaseVisibilityHandler);
+    this.stopWorkbenchReleaseMonitor();
     $(window).off("beforeunload.ocwDetailEdit");
     if (this.releaseEditSession && this.detailState?.editToken) {
       this.releaseEditSession();
