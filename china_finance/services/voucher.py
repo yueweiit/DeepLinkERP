@@ -278,6 +278,9 @@ def batch_post_imported_journal_entries(names, reason=None):
 		frappe.throw(_("处理原因不能超过 500 个字符"))
 
 	batch_id = f"IBP-{now_datetime().strftime('%Y%m%d%H%M%S')}-{frappe.generate_hash(length=6).upper()}"
+	from china_finance.services.voucher_batch import sort_voucher_names
+
+	names = sort_voucher_names("Journal Entry", names)
 	results = []
 	for name in names:
 		save_point = f"china_import_batch_{frappe.generate_hash(length=8)}"

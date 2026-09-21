@@ -75,6 +75,7 @@ def execute(filters=None):
 				ELSE v.statutory_number
 			END AS statutory_number,
 			v.voucher_word, v.source_doctype, v.source_name, v.source_event,
+			COALESCE(NULLIF(v.currency, ''), company.default_currency) AS currency,
 			CASE WHEN v.status='Reversed' THEN 2 ELSE 1 END AS voucher_status,
 			COALESCE(e.debit, 0) + COALESCE(e.credit, 0) AS base_total_amount,
 			e.idx AS entry_idx,
@@ -87,6 +88,7 @@ def execute(filters=None):
 			END AS remarks,
 			e.debit, e.credit
 		FROM `tabChina Accounting Voucher` v
+		INNER JOIN `tabCompany` company ON company.name=v.company
 		INNER JOIN `tabChina Accounting Voucher Entry` e ON e.parent=v.name
 		LEFT JOIN `tabJournal Entry` je ON v.source_doctype='Journal Entry' AND je.name=v.source_name
 		LEFT JOIN `tabJournal Entry Account` jea
@@ -217,8 +219,9 @@ def get_columns():
 		{"label": _("摘要"), "fieldname": "remarks", "fieldtype": "Data", "width": 270},
 		{"label": _("科目"), "fieldname": "account", "fieldtype": "Data", "width": 330},
 		{"label": _("往来单位"), "fieldname": "party", "fieldtype": "Dynamic Link", "options": "party_type", "width": 150},
-		{"label": _("借方"), "fieldname": "debit", "fieldtype": "Currency", "width": 150},
-		{"label": _("贷方"), "fieldname": "credit", "fieldtype": "Currency", "width": 150},
-		{"label": _("本位币金额"), "fieldname": "base_total_amount", "fieldtype": "Currency", "width": 160},
+		{"label": _("借方"), "fieldname": "debit", "fieldtype": "Currency", "options": "currency", "width": 150},
+		{"label": _("贷方"), "fieldname": "credit", "fieldtype": "Currency", "options": "currency", "width": 150},
+		{"label": _("本位币金额"), "fieldname": "base_total_amount", "fieldtype": "Currency", "options": "currency", "width": 160},
+		{"label": _("本位币"), "fieldname": "currency", "fieldtype": "Link", "options": "Currency", "hidden": 1},
 		{"label": _("操作"), "fieldname": "source_action", "fieldtype": "Data", "width": 130},
 	]

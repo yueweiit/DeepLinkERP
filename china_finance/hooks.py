@@ -107,6 +107,10 @@ doctype_tree_js = {
 }
 
 override_whitelisted_methods = {
+	"frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs":
+		"china_finance.services.voucher_batch.submit_cancel_or_update_docs",
+	"frappe.model.workflow.bulk_workflow_approval":
+		"china_finance.services.voucher_batch.bulk_workflow_approval",
 	"erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool.get_bank_transactions":
 		"china_finance.services.bank_reconciliation.get_bank_transactions_with_summary",
 	"erpnext.accounts.doctype.account.chart_of_accounts.chart_of_accounts.get_charts_for_country":
