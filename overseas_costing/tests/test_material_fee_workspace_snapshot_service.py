@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -218,6 +220,94 @@ def test_concurrent_refresh_reuses_last_good_snapshot_without_duplicate_build() 
     assert concurrent["data"]["preview"]["summary"]["total_cost_rmb"] == "100.00"
     assert concurrent["cache"]["served_from_cache"] is True
     assert concurrent["cache"]["status"] == "refreshing"
+
+
+def test_begin_refresh_retries_record_changed_conflict_after_rollback() -> None:
+    from overseas_costing.services import material_fee_workspace_snapshot_service as service
+
+    class QueryDeadlockError(Exception):
+        pass
+
+    class ConflictStore:
+        def __init__(self) -> None:
+            self.state = {}
+            self.lock_attempts = 0
+            self.rollbacks = 0
+            self.commits = 0
+
+        @contextmanager
+        def atomic(self):
+            yield
+
+        def get(self, table, state_id, lock=False):
+            assert table == "state"
+            if state_id == "snapshot-1" and lock:
+                self.lock_attempts += 1
+                if self.lock_attempts == 1:
+                    raise QueryDeadlockError(1020, "Record has changed since last read")
+            return self.state.get(state_id)
+
+        def put(self, table, value):
+            assert table == "state"
+            self.state[value["id"]] = dict(value)
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def commit(self):
+            self.commits += 1
+
+    store = ConflictStore()
+    started = service._begin_refresh(
+        store,
+        "snapshot-1",
+        {"batch_name": "B1", "version_name": "V1", "page": 1, "page_length": 200},
+        "2026-09-21T02:32:04+00:00",
+    )
+
+    assert started is not None
+    assert store.lock_attempts == 2
+    assert store.rollbacks == 1
+    assert store.commits == 1
+    assert json.loads(store.state["snapshot-1"]["data"])["run_status"] == "running"
+
+
+def test_begin_refresh_rolls_back_final_lock_conflict_before_raising() -> None:
+    from overseas_costing.services import material_fee_workspace_snapshot_service as service
+
+    class QueryDeadlockError(Exception):
+        pass
+
+    class AlwaysConflictStore:
+        def __init__(self) -> None:
+            self.lock_attempts = 0
+            self.rollbacks = 0
+
+        @contextmanager
+        def atomic(self):
+            yield
+
+        def get(self, table, state_id, lock=False):
+            assert table == "state"
+            if state_id == "snapshot-1" and lock:
+                self.lock_attempts += 1
+                raise QueryDeadlockError(1020, "Record has changed since last read")
+            return None
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    store = AlwaysConflictStore()
+    with pytest.raises(QueryDeadlockError, match="Record has changed"):
+        service._begin_refresh(
+            store,
+            "snapshot-1",
+            {"batch_name": "B1", "version_name": "V1", "page": 1, "page_length": 200},
+            "2026-09-21T02:32:04+00:00",
+        )
+
+    assert store.lock_attempts == service.REFRESH_LOCK_RETRIES + 1
+    assert store.rollbacks == service.REFRESH_LOCK_RETRIES + 1
 
 
 def test_context_rejects_a_version_owned_by_another_batch(monkeypatch) -> None:

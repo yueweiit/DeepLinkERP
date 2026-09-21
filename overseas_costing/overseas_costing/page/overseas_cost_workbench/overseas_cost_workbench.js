@@ -10613,6 +10613,7 @@ class OverseasCostWorkbench {
     if (!Number.isFinite(this.materialFeeState.feeRequestId)) this.materialFeeState.feeRequestId = 0;
     this.materialFeeState.feeDrafts = this.materialFeeState.feeDrafts || {};
     this.materialFeeState.pendingWrites = this.materialFeeState.pendingWrites || new Set();
+    this.materialFeeState.feeCellWrites = this.materialFeeState.feeCellWrites || new Map();
     this.materialFeeState.materialCellWrites = this.materialFeeState.materialCellWrites || new Map();
     this.materialFeeState.materialCellWriteTargets = this.materialFeeState.materialCellWriteTargets || {};
     if (!Number.isFinite(this.materialFeeState.materialCellWriteRevision)) this.materialFeeState.materialCellWriteRevision = 0;
@@ -14727,24 +14728,79 @@ class OverseasCostWorkbench {
   }
 
   async saveMaterialFeeInlineAmount($input) {
-    return this.trackMaterialFeeWrite(() => this.persistMaterialFeeInlineAmount($input));
+    if (!$input?.length) return false;
+    const state = this.ensureMaterialFeeState();
+    const feeKey = String($input.attr("data-fee-key") || "");
+    const currentWrite = state.feeCellWrites.get(feeKey);
+    if (currentWrite) return currentWrite;
+    const write = this.trackMaterialFeeWrite(() => this.persistMaterialFeeInlineAmount($input));
+    state.feeCellWrites.set(feeKey, write);
+    try {
+      return await write;
+    } finally {
+      if (state.feeCellWrites.get(feeKey) === write) state.feeCellWrites.delete(feeKey);
+    }
   }
 
   async trackMaterialFeeWrite(operation) {
     const state = this.ensureMaterialFeeState();
+    const batchName = this.detailState.batchName;
     const versionName = this.detailState.versionName;
-    const pending = (async () => {
+    const requestId = state.requestId;
+    const previous = state.materialFeeWriteQueue;
+    const run = async () => {
+      const isCurrent = () => this.materialFeeState === state
+        && this.detailState.batchName === batchName
+        && this.detailState.versionName === versionName
+        && (!this.detailState.tab || this.detailState.tab === "documents");
+      if (!isCurrent()) return false;
       if (state.calculationWrite) {
         try { await state.calculationWrite; } catch (_error) { /* The trial reports its own failure. */ }
-        if (this.materialFeeState !== state || this.detailState.batchName !== state.batchName || this.detailState.versionName !== versionName) return false;
+        if (!isCurrent()) return false;
       }
       return operation();
-    })();
+    };
+    const pending = previous ? previous.catch(() => false).then(run) : run();
+    state.materialFeeWriteQueue = pending;
     state.pendingWrites.add(pending);
     try {
       return await pending;
     } finally {
       state.pendingWrites.delete(pending);
+      if (
+        state.materialFeeWriteQueue === pending
+        && state.pendingWrites.size === 0
+        && state.cacheDirty
+        && this.materialFeeState === state
+        && this.detailState.batchName === batchName
+        && this.detailState.versionName === versionName
+        && this.detailState.tab === "documents"
+      ) {
+        const shouldReportRefreshFailure = state.requestId === requestId;
+        const refresh = this.loadMaterialFeeWorkspace({ quiet: true });
+        const refreshRequestId = state.requestId;
+        state.materialFeeWriteQueue = refresh;
+        state.pendingWrites.add(refresh);
+        try {
+          const refreshed = await refresh;
+          if (
+            refreshed === false
+            && this.materialFeeState === state
+            && this.detailState.batchName === batchName
+            && this.detailState.versionName === versionName
+            && this.detailState.tab === "documents"
+            && shouldReportRefreshFailure
+            && state.requestId === refreshRequestId
+          ) {
+            frappe.show_alert({ message: "数据已保存，但最新状态读取失败，请点击重试。", indicator: "orange" });
+          }
+        } finally {
+          state.pendingWrites.delete(refresh);
+          if (state.materialFeeWriteQueue === refresh) state.materialFeeWriteQueue = null;
+        }
+      } else if (state.materialFeeWriteQueue === pending) {
+        state.materialFeeWriteQueue = null;
+      }
     }
   }
 
@@ -14817,15 +14873,10 @@ class OverseasCostWorkbench {
         $cell.data("saving", false).removeClass("is-saving");
         $inputs.prop("disabled", false);
       }
-      const loaded = await this.loadMaterialFeeWorkspace({ quiet: true });
-      if (
-        !loaded
-        || this.detailState.batchName !== batchName
-        || this.detailState.tab !== "documents"
-        || this.materialFeeState !== saveState
-        || saveState.loading
-      ) return;
-      frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
+      if (this.detailState.tab === "documents" && saveState.requestId === fullRequestId) {
+        frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
+      }
+      return true;
     } catch (error) {
       const originalMessage = this.normalizeErrorMessage(error);
       if (this.detailState.batchName !== batchName || this.materialFeeState !== saveState) return;
@@ -14959,7 +15010,7 @@ class OverseasCostWorkbench {
 
   async saveMaterialFeeDialog(dialog, fee) {
     const values = dialog.get_values();
-    if (!values || !(await this.ensureEditSession())) return;
+    if (!values) return false;
     const scopeKeys = dialog.$wrapper.find("[data-mf-scope-key]:checked").toArray().map((node) => $(node).attr("data-mf-scope-key"));
     const payload = {
       logical_fee_key: fee.logical_fee_key,
@@ -14978,18 +15029,21 @@ class OverseasCostWorkbench {
       is_active: 1,
       is_enabled: 1,
     };
-    const result = await this.call("overseas_costing.api.fees.save_fee", {
-      batch_name: this.detailState.batchName,
-      version_name: this.detailState.versionName,
-      fee_payload: JSON.stringify(payload),
-      edit_token: this.detailState.editToken,
-      expected_modified: this.detailState.expectedModified,
-    }, true);
-    if (!result || !result.ok) throw new Error(result?.message || "费用保存失败");
-    this.updateMaterialFeeExpectedModified(result);
-    dialog.hide();
-    frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
-    await this.loadMaterialFeeWorkspace({ quiet: true });
+    return this.trackMaterialFeeWrite(async () => {
+      if (!(await this.ensureMaterialFeeEditSession())) return false;
+      const result = await this.call("overseas_costing.api.fees.save_fee", {
+        batch_name: this.detailState.batchName,
+        version_name: this.detailState.versionName,
+        fee_payload: JSON.stringify(payload),
+        edit_token: this.detailState.editToken,
+        expected_modified: this.detailState.expectedModified,
+      }, true);
+      if (!result || !result.ok) throw new Error(result?.message || "费用保存失败");
+      this.updateMaterialFeeExpectedModified(result);
+      dialog.hide();
+      frappe.show_alert({ message: result.message || "费用已保存", indicator: "green" });
+      return true;
+    });
   }
 
   materialFeeStatusNeedsReason(fee, nextStatus) {
@@ -15044,32 +15098,36 @@ class OverseasCostWorkbench {
       frappe.show_alert({ message: "暂估或实际费用需要金额；也可以先关联并解析凭证。", indicator: "orange" });
       return;
     }
-    if (!(await this.ensureMaterialFeeEditSession())) {
-      $select.val(previous);
-      return;
-    }
-    $select.prop("disabled", true);
-    try {
-      const payload = this.materialFeeSavePayload(fee, {
-        amount_status: nextStatus,
-        status_change_reason: reason,
-      });
-      if (["NOT_INCURRED", "INCLUDED"].includes(nextStatus) && reason) payload.remark = reason;
-      const result = await this.call("overseas_costing.api.fees.save_fee", {
-        batch_name: this.detailState.batchName,
-        version_name: this.detailState.versionName,
-        fee_payload: JSON.stringify(payload),
-        edit_token: this.detailState.editToken,
-        expected_modified: this.detailState.expectedModified,
-      }, false);
-      if (!result?.ok) throw new Error(result?.message || "费用状态保存失败");
-      this.updateMaterialFeeExpectedModified(result);
-      frappe.show_alert({ message: "费用状态已保存，试算结果待更新", indicator: "green" });
-      await this.loadMaterialFeeWorkspace({ quiet: true });
-    } catch (error) {
-      $select.val(previous).prop("disabled", false);
-      throw error;
-    }
+    return this.trackMaterialFeeWrite(async () => {
+      if (!(await this.ensureMaterialFeeEditSession())) {
+        $select.val(previous);
+        return false;
+      }
+      $select.prop("disabled", true);
+      try {
+        const latestFee = this.findMaterialFee(feeKey);
+        if (!latestFee) throw new Error("费用项已变更，请刷新后重试");
+        const payload = this.materialFeeSavePayload(latestFee, {
+          amount_status: nextStatus,
+          status_change_reason: reason,
+        });
+        if (["NOT_INCURRED", "INCLUDED"].includes(nextStatus) && reason) payload.remark = reason;
+        const result = await this.call("overseas_costing.api.fees.save_fee", {
+          batch_name: this.detailState.batchName,
+          version_name: this.detailState.versionName,
+          fee_payload: JSON.stringify(payload),
+          edit_token: this.detailState.editToken,
+          expected_modified: this.detailState.expectedModified,
+        }, false);
+        if (!result?.ok) throw new Error(result?.message || "费用状态保存失败");
+        this.updateMaterialFeeExpectedModified(result);
+        frappe.show_alert({ message: "费用状态已保存，试算结果待更新", indicator: "green" });
+        return true;
+      } catch (error) {
+        $select.val(previous).prop("disabled", false);
+        throw error;
+      }
+    });
   }
 
   openMaterialFeeEvidenceDialog(feeKey) {

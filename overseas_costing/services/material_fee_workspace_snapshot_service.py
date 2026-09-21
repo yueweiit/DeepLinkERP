@@ -15,6 +15,7 @@ RUN_LEASE = timedelta(minutes=5)
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_LENGTH = 200
 MAX_PAGE_LENGTH = 500
+REFRESH_LOCK_RETRIES = 2
 
 _DROP = object()
 _BINARY_KEYS = {
@@ -109,6 +110,24 @@ def _commit(store) -> None:
     commit = getattr(store, "commit", None)
     if callable(commit):
         commit()
+
+
+def _rollback(store) -> None:
+    rollback = getattr(store, "rollback", None)
+    if not callable(rollback):
+        rollback = getattr(getattr(store, "db", None), "rollback", None)
+    if callable(rollback):
+        rollback()
+
+
+def _is_refresh_lock_conflict(error: Exception) -> bool:
+    if type(error).__name__ == "QueryDeadlockError":
+        return True
+    code = error.args[0] if getattr(error, "args", ()) else None
+    try:
+        return int(code) in {1020, 1205, 1213}
+    except (TypeError, ValueError):
+        return False
 
 
 def _sanitized(value: Any, *, key: str = ""):
@@ -396,8 +415,7 @@ def _public(state: dict, *, served_from_cache: bool) -> dict:
     }
 
 
-def _begin_refresh(store, state_id: str, context: dict, now: str) -> tuple[str, dict] | None:
-    token = uuid.uuid4().hex
+def _begin_refresh_once(store, state_id: str, context: dict, now: str, token: str) -> tuple[str, dict] | None:
     with store.atomic():
         # The permanent lock row also serializes the first insert for a new snapshot key.
         store.get("state", "job_lock", lock=True)
@@ -424,6 +442,20 @@ def _begin_refresh(store, state_id: str, context: dict, now: str) -> tuple[str, 
         _put_state(store, state_id, running, now)
     _commit(store)
     return token, previous
+
+
+def _begin_refresh(store, state_id: str, context: dict, now: str) -> tuple[str, dict] | None:
+    token = uuid.uuid4().hex
+    for attempt in range(REFRESH_LOCK_RETRIES + 1):
+        try:
+            return _begin_refresh_once(store, state_id, context, now, token)
+        except Exception as error:
+            retryable = _is_refresh_lock_conflict(error)
+            if retryable:
+                _rollback(store)
+            if not retryable or attempt >= REFRESH_LOCK_RETRIES:
+                raise
+    raise RuntimeError("资料页快照锁定失败。")
 
 
 def refresh_snapshot(
