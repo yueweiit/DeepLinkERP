@@ -6,6 +6,7 @@ from erpnext.accounts.utils import get_fiscal_year
 
 from china_finance.services.financial_statement import (
 	PROFIT_AND_LOSS_CLOSING_REMARK,
+	get_comparison_period,
 	get_template,
 	snapshot_statement,
 	validate_statement_links,
@@ -26,6 +27,7 @@ from china_finance.setup.china_coa_profile import (
 	get_company_accounts_by_number, get_profile_status,
 )
 from china_finance.setup.templates import (
+	STATEMENT_TYPE_LABELS,
 	classify_company_account, is_strictly_excluded_from_statement,
 	refine_classification_for_template, requires_manual_cash_flow_assignment,
 )
@@ -177,6 +179,8 @@ def run_closing_checks(company, from_date, to_date, period_closing_voucher=None,
 	# Monthly closing is an operational lock.  The statutory report package has
 	# its own readiness gate, so report mapping and disclosure checks belong to
 	# year-end/report preparation instead of every monthly close.
+	if closing_type == "Monthly":
+		checks.extend(get_monthly_report_template_checks(company, from_date, to_date))
 	if closing_type == "Year End":
 		current_templates = [
 			get_template(company, statement_type, to_date).name
@@ -505,6 +509,30 @@ def count_voucher_hash_errors(company, from_date, to_date):
 		if calculate_entries_hash(doc.entries) != doc.source_hash:
 			errors += 1
 	return errors
+
+
+def get_monthly_report_template_checks(company, from_date, to_date):
+	missing_current, missing_comparison = [], []
+	for statement_type, label in STATEMENT_TYPE_LABELS.items():
+		if not get_template(company, statement_type, to_date, required=False):
+			missing_current.append(f"{label}（{to_date}）")
+		_comparison_from, comparison_to = get_comparison_period(company, statement_type, from_date, to_date)
+		if not get_template(company, statement_type, comparison_to, required=False):
+			missing_comparison.append(f"{label}（{comparison_to}）")
+	return [
+		{
+			"check_code": "REPORT_TEMPLATE_COVERAGE", "description": _("本期报表模板可用"),
+			"passed": int(not missing_current), "severity": "Blocking",
+			"details": _("缺少本期报表模板：{0}").format("；".join(missing_current)) if missing_current else "",
+		},
+		{
+			"check_code": "COMPARISON_TEMPLATE_COVERAGE", "description": _("比较期报表模板可用"),
+			"passed": int(not missing_comparison), "severity": "Warning",
+			"details": _("缺少比较期报表模板：{0}。月结可继续，相关报表保留为草表，比较金额留空；正式报表需补齐比较数据。").format(
+				"；".join(missing_comparison)
+			) if missing_comparison else "",
+		},
+	]
 
 
 def create_report_snapshots(closing_run):

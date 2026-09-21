@@ -143,7 +143,9 @@ def get_template(company, statement_type, to_date, accounting_standard=None, req
 	)
 	if not name:
 		if required:
-			frappe.throw(_("未找到适用于 {0} 的 {1} 报表模板").format(accounting_standard, statement_type))
+			frappe.throw(_("未找到适用于 {0}、截止日期 {1} 的 {2} 报表模板").format(
+				accounting_standard, to_date, statement_type
+			))
 		return None
 	return frappe.get_cached_doc("China Financial Statement Template", name)
 
@@ -1389,17 +1391,34 @@ def snapshot_statement(closing_run, statement_type, validation_results=None, not
 	comparison_from, comparison_to = get_comparison_period(
 		closing_run.company, statement_type, closing_run.from_date, closing_run.to_date
 	)
-	comparison = build_statement(
-		closing_run.company, statement_type, comparison_from, comparison_to, restate_prior_period=True
+	# A monthly operational close can retain a draft of the current report when
+	# the prior-year template has not been installed. Never invent zero amounts
+	# for unavailable comparisons or suppress actual calculation errors.
+	comparison_template = get_template(
+		closing_run.company, statement_type, comparison_to,
+		required=closing_run.closing_type != "Monthly",
 	)
-	comparison_values = {row["row_code"]: row["amount"] for row in comparison["rows"]}
+	comparison = None
+	if comparison_template:
+		comparison = build_statement(
+			closing_run.company, statement_type, comparison_from, comparison_to, restate_prior_period=True
+		)
+	comparison_values = {row["row_code"]: row["amount"] for row in comparison["rows"]} if comparison else {}
 	for row in result["rows"]:
-		row["comparison_amount"] = comparison_values.get(row["row_code"], 0)
+		row["comparison_amount"] = comparison_values.get(row["row_code"], 0) if comparison else None
 	result["comparison_from_date"] = str(comparison_from) if comparison_from else None
 	result["comparison_to_date"] = str(comparison_to)
+	result["comparison_status"] = "Available" if comparison else "Missing Template"
+	if not comparison:
+		result["comparison_details"] = _("缺少截至 {0} 的比较期报表模板；本期报表保留为草表，比较金额未生成。").format(comparison_to)
+		result["warnings"].append(result["comparison_details"])
+		result["checks"].append({
+			"code": "COMPARISON_TEMPLATE", "passed": False, "blocking": True,
+			"message": result["comparison_details"],
+		})
 	if statement_type == "Changes in Equity":
-		result["comparison_equity_matrix"] = comparison.get("equity_matrix")
-	result["report_status"] = "正式"
+		result["comparison_equity_matrix"] = comparison.get("equity_matrix") if comparison else None
+	result["report_status"] = "正式" if comparison else "草表"
 	if validation_results:
 		if statement_type == "Balance Sheet":
 			result["validation"] = {"balance_sheet": validation_results["balance_sheet"]}
@@ -1411,21 +1430,20 @@ def snapshot_statement(closing_run, statement_type, validation_results=None, not
 		result["financial_statement_notes"] = notes_payload
 	payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 	template = frappe.get_cached_doc("China Financial Statement Template", result["template"])
-	comparison_template = frappe.get_cached_doc("China Financial Statement Template", comparison["template"])
 	if statement_type == "Balance Sheet":
-		mapping_rows = [
-			*get_mappings(closing_run.company, template, closing_run.to_date),
-			*get_mappings(closing_run.company, comparison_template, comparison_to),
-		]
+		mapping_rows = get_mappings(closing_run.company, template, closing_run.to_date)
+		if comparison:
+			comparison_template = frappe.get_cached_doc("China Financial Statement Template", comparison["template"])
+			mapping_rows += get_mappings(closing_run.company, comparison_template, comparison_to)
 	else:
-		mapping_rows = [
-			*get_mapping_revisions(
-				closing_run.company, template, closing_run.from_date, closing_run.to_date
-			),
-			*get_mapping_revisions(
+		mapping_rows = get_mapping_revisions(
+			closing_run.company, template, closing_run.from_date, closing_run.to_date
+		)
+		if comparison:
+			comparison_template = frappe.get_cached_doc("China Financial Statement Template", comparison["template"])
+			mapping_rows += get_mapping_revisions(
 				closing_run.company, comparison_template, comparison_from, comparison_to
-			),
-		]
+			)
 	mapping_payload = [dict(row) for row in {row.name: row for row in mapping_rows}.values()]
 	mapping_sha256 = hashlib.sha256(
 		json.dumps(mapping_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -1440,7 +1458,7 @@ def snapshot_statement(closing_run, statement_type, validation_results=None, not
 			"doctype": "China Report Snapshot", "company": closing_run.company,
 			"closing_run": closing_run.name, "statement_type": statement_type,
 			"template": result["template"], "from_date": closing_run.from_date,
-			"template_version": result["template_version"], "report_status": "正式",
+			"template_version": result["template_version"], "report_status": result["report_status"],
 			"to_date": closing_run.to_date, "data_json": payload,
 			"comparison_from_date": comparison_from, "comparison_to_date": comparison_to,
 			"amount_unit": result.get("amount_unit") or "元",

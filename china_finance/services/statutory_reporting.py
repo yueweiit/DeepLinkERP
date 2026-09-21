@@ -523,10 +523,12 @@ def generate_statutory_report_package(closing_run, formats=None):
 	if not readiness["passed"]:
 		frappe.throw(_("正式法定财务报表就绪度未通过，阻断项 {0} 个").format(readiness["blocking_count"]))
 	snapshots = frappe.get_all(
-		"China Report Snapshot", filters={"closing_run": run.name, "report_status": "正式"},
-		fields=["name", "statement_type", "from_date", "to_date", "template_version", "amount_unit", "data_json", "approved_by", "approved_on"],
+		"China Report Snapshot", filters={"closing_run": run.name},
+		fields=["name", "statement_type", "report_status", "from_date", "to_date", "template_version", "amount_unit", "data_json", "approved_by", "approved_on"],
 		order_by="statement_type",
 	)
+	if any(row.report_status != "正式" for row in snapshots):
+		frappe.throw(_("本次结账包含草表快照；请补齐比较数据，并按结账修订流程生成完整的正式快照后再导出。"))
 	if len(snapshots) != 4:
 		frappe.throw(_("期末智能结转缺少完整四表快照"))
 	requested = set(frappe.parse_json(formats) if isinstance(formats, str) else (formats or ["PDF", "Excel"]))
