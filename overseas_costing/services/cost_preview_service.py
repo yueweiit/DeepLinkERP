@@ -1027,6 +1027,8 @@ def calculate_comprehensive_cost(batch_name, version_name=None, *, edit_token=No
             raise ValueError("只能试算当前版本，请刷新批次。")
         if context.get("version_status") in {"Confirmed", "Archived"} or context.get("confirm_status") == "Confirmed" or context.get("is_locked"):
             raise PermissionError("已确认或归档版本不能覆盖，请先创建调整版本。")
+        from overseas_costing.services.material_input_service import assert_complete_purchase_values
+        assert_complete_purchase_values(items)
         persister = getattr(repo, "persist_fx_resolution", None)
         if fx_resolution and callable(persister):
             persisted_fx = persister(context, fx_resolution) or {}

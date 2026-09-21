@@ -293,12 +293,12 @@ def test_saved_trial_without_any_purchase_goods_value_is_not_cost_review_eligibl
 
     result = evaluate(context)
 
-    assert result["cost_review_started"] is True
+    assert result["cost_review_started"] is False
     assert result["cost_review_eligible"] is False
     assert "GOODS_VALUE_MISSING" in codes(result)
 
 
-def test_saved_trial_with_one_trusted_purchase_value_is_cost_review_eligible():
+def test_saved_trial_with_partial_purchase_value_is_not_cost_review_eligible():
     context = saved_context()
     missing = deepcopy(context["items"][0])
     missing.update(name="I-2", row_no=2, stable_line_key="line-2", material_code="SKU-2", goods_value=None)
@@ -307,8 +307,48 @@ def test_saved_trial_with_one_trusted_purchase_value_is_cost_review_eligible():
 
     result = evaluate(context)
 
-    assert result["cost_review_eligible"] is True
+    assert result["cost_review_started"] is False
+    assert result["cost_review_eligible"] is False
     assert "GOODS_VALUE_MISSING" in codes(result)
+
+
+def test_stale_purchase_value_source_uses_the_purchase_data_blocker() -> None:
+    context = saved_context()
+    item = context["items"][0]
+    item["goods_value"] = 0
+    item["extra_json"] = json.dumps({
+        "shipment_valuation": {
+            "amount_rmb": "100",
+            "currency": "RMB",
+            "quantity": "9",
+            "uom": "件",
+            "method": "SYSTEM_EXCEL",
+            "status": "automatic",
+            "error": "",
+        }
+    })
+    save_result(context)
+
+    result = evaluate(context)
+
+    assert "GOODS_VALUE_MISSING" in codes(result)
+    assert "SHIPMENT_VALUATION_STALE" not in codes(result)
+    assert result["primary_issue"] == "purchase"
+    assert result["primary_action"] == "supplement"
+
+
+def test_filling_current_values_does_not_make_an_old_partial_snapshot_reviewable():
+    context = saved_context()
+    context["items"][0]["goods_value"] = None
+    save_result(context)
+    context["items"][0]["goods_value"] = 100
+
+    result = evaluate(context)
+
+    assert result["cost_review_eligible"] is True
+    assert result["cost_review_started"] is False
+    assert result["review_state"] == "processing"
+    assert result["primary_action"] == "recalculate"
 
 
 def test_explicitly_confirmed_zero_purchase_value_is_cost_review_eligible():
@@ -329,6 +369,7 @@ def test_explicitly_confirmed_zero_purchase_value_is_cost_review_eligible():
 
     result = evaluate(context)
 
+    assert result["cost_review_started"] is True
     assert result["cost_review_eligible"] is True
 
 

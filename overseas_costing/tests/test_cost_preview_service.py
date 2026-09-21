@@ -597,6 +597,7 @@ class AutoFxCalculationRepository:
         self.saved = None
         self.commits = 0
         self.rollbacks = 0
+        self.items = _items()
 
     def prepare_fx_resolution(self, batch_name, version_name):
         assert batch_name == "B1" and version_name == "V1"
@@ -623,7 +624,7 @@ class AutoFxCalculationRepository:
                 "is_locked": 0,
                 "transport_mode": "AIR",
             },
-            _items(),
+            deepcopy(self.items),
             [{
                 "name": "F1", "logical_fee_key": "international_air_freight",
                 "expense_category": "国际空运费", "amount_status": "ACTUAL", "amount": "100",
@@ -684,6 +685,22 @@ def test_direct_calculation_rolls_back_when_fx_persistence_fails() -> None:
     with pytest.raises(ValueError, match="当日汇率已变化"):
         cost_preview_service.calculate_comprehensive_cost("B1", "V1", repository=repository)
 
+    assert repository.saved is None
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+
+
+def test_direct_calculation_rejects_missing_purchase_values_before_any_write() -> None:
+    repository = AutoFxCalculationRepository()
+    repository.items[1]["goods_value"] = ""
+
+    with pytest.raises(
+        ValueError,
+        match="还有 1 行本次发货货值缺失或失效，请先补齐后再试算",
+    ):
+        cost_preview_service.calculate_comprehensive_cost("B1", "V1", repository=repository)
+
+    assert repository.persisted == 0
     assert repository.saved is None
     assert repository.commits == 0
     assert repository.rollbacks == 1

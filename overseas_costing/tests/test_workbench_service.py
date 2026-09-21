@@ -179,16 +179,29 @@ def test_saved_trial_without_reviewable_purchase_value_stays_pending() -> None:
     assert filter_batches_for_task([row], "cost", "pending") == []
 
 
-def test_saved_trial_with_partial_purchase_value_enters_cost_review() -> None:
+def test_saved_trial_with_partial_purchase_value_stays_pending() -> None:
     row = {
         "name": "SAVED-WITH-PARTIAL-GOODS",
         "review_state": "processing",
-        "cost_review_started": True,
-        "cost_review_eligible": True,
+        "cost_review_started": False,
+        "cost_review_eligible": False,
+    }
+
+    assert filter_batches_for_task([row], "pending") == [row]
+    assert filter_batches_for_task([row], "cost", "pending") == []
+
+
+def test_confirmed_history_remains_visible_when_current_purchase_value_is_incomplete() -> None:
+    row = {
+        "name": "CONFIRMED-WITH-MISSING-GOODS",
+        "review_state": "confirmed",
+        "cost_review_started": False,
+        "cost_review_eligible": False,
     }
 
     assert filter_batches_for_task([row], "pending") == []
-    assert filter_batches_for_task([row], "cost", "pending") == [row]
+    assert filter_batches_for_task([row], "cost", "pending") == []
+    assert filter_batches_for_task([row], "cost", "confirmed") == [row]
 
 
 def test_logistics_group_keeps_two_fixed_columns() -> None:

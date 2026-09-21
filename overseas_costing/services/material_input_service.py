@@ -246,6 +246,54 @@ def present_material_row(item: dict) -> dict:
     return row
 
 
+def purchase_value_coverage(items: list[dict]) -> dict:
+    """Return whether every active material has a current, evidenced value."""
+
+    from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
+
+    active = [
+        dict(row or {})
+        for row in (items or [])
+        if str((row or {}).get("is_excluded") or "").strip().lower()
+        not in {"1", "true", "yes"}
+    ]
+    missing_items = []
+    for raw in active:
+        row = present_material_row(raw)
+        amount = _positive_decimal(row.get("shipment_value_rmb"))
+        valuation = row.get("shipment_valuation") or {}
+        if amount is not None or is_explicit_shipment_zero(valuation):
+            continue
+        missing_items.append(
+            {
+                "name": str(row.get("name") or ""),
+                "stable_line_key": str(row.get("stable_line_key") or ""),
+                "row_no": row.get("row_no"),
+                "material_code": str(row.get("material_code") or ""),
+                "reason_code": str(valuation.get("error") or "GOODS_VALUE_MISSING"),
+            }
+        )
+    return {
+        "complete": bool(active) and not missing_items,
+        "item_count": len(active),
+        "missing_count": len(missing_items),
+        "missing_items": missing_items,
+    }
+
+
+def assert_complete_purchase_values(items: list[dict]) -> dict:
+    """Reject formal calculations until all active shipment values are valid."""
+
+    coverage = purchase_value_coverage(items)
+    if not coverage["item_count"]:
+        raise ValueError("当前批次没有物料，请先补充物料后再试算。")
+    if coverage["missing_count"]:
+        raise ValueError(
+            f"还有 {coverage['missing_count']} 行本次发货货值缺失或失效，请先补齐后再试算。"
+        )
+    return coverage
+
+
 def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:
     """Derive red cells from effective system bases; project ownership is informational."""
 
