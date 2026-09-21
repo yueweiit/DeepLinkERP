@@ -445,9 +445,13 @@ def test_material_scrollbar_has_sixteen_pixel_visible_thumb_and_single_track():
     assert 'display: none' in rules['.ocw-mf-grid-scroll::-webkit-scrollbar']
 
 
-@pytest.mark.parametrize('method', ['start_source_ai_review', 'get_source_ai_review_status'])
-def test_inline_ai_transport_uses_local_ajax_and_preserves_failure_response(method):
-    result = _fee_workspace_result(FIXTURE + f"const method='overseas_costing.api.materials.{method}';" + f"""
+@pytest.mark.parametrize('method', [
+    'overseas_costing.api.materials.start_source_ai_review',
+    'overseas_costing.api.materials.get_source_ai_review_status',
+    'overseas_costing.api.calculate.recalculate_batch',
+])
+def test_inline_error_transport_uses_local_ajax_and_preserves_failure_response(method):
+    result = _fee_workspace_result(FIXTURE + f"const method={json.dumps(method)};" + f"""
 const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
 workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
 """ + r"""
@@ -458,7 +462,7 @@ let caught;try{await workspace.call(method,{batch_name:'B1'},false,{inlineErrors
 console.log(JSON.stringify({normal,request,caught}));
 """)
     assert result['normal'] == 0 and result['caught']
-    assert result['request']['url'] == '/api/method/overseas_costing.api.materials.' + method
+    assert result['request']['url'] == '/api/method/' + method
     assert result['request']['type'] == 'POST'
     assert result['request']['data'] == {'batch_name': 'B1'}
     assert result['request']['headers']['X-Frappe-CSRF-Token'] == 'csrf-test'
@@ -478,6 +482,21 @@ console.log(JSON.stringify({calls,a,b}));
 """)
     assert result['a'] == result['b'] == {'value': 42}
     assert result['calls'][0]['freeze'] is True and result['calls'][1]['freeze'] is False
+
+
+def test_inline_recalculation_transport_preserves_freeze_lifecycle_on_failure():
+    result = _fee_workspace_result(FIXTURE + f"""
+const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
+workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
+""" + r"""
+const events=[];frappe.csrf_token='csrf-test';frappe.dom={freeze:()=>events.push('freeze'),unfreeze:()=>events.push('unfreeze')};
+frappe.call=async()=>{throw new Error('must use local transport')};
+const failure=new Error('blocked');global.$={ajax:async()=>{events.push('request');throw failure}};
+let caught=false;try{await workspace.call('overseas_costing.api.calculate.recalculate_batch',{},true,{inlineErrors:true})}catch(error){caught=error===failure}
+console.log(JSON.stringify({events,caught}));
+""")
+
+    assert result == {'events': ['freeze', 'request', 'unfreeze'], 'caught': True}
 
 
 def test_read_snapshot_transport_can_explicitly_use_get():

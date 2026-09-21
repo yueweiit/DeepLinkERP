@@ -1,19 +1,27 @@
   async call(method, args = {}, freeze = false, options = {}) {
-    const inlineAIRequest = options.inlineErrors === true && [
+    const locallyHandledErrorRequest = options.inlineErrors === true && [
       "overseas_costing.api.materials.start_source_ai_review",
       "overseas_costing.api.materials.get_source_ai_review_status",
+      "overseas_costing.api.calculate.recalculate_batch",
     ].includes(method);
     // Frappe's status handlers show a second dialog even when a caller handles the error.
-    const response = inlineAIRequest
-      ? await $.ajax({
-          url: `/api/method/${method}`,
-          type: "POST",
-          data: args,
-          dataType: "json",
-          headers: { "X-Frappe-CSRF-Token": frappe.csrf_token, Accept: "application/json" },
-        })
-      : await frappe.call({ method, args, freeze, ...(options.type ? { type: options.type } : {}) });
-    return response.message || {};
+    if (!locallyHandledErrorRequest) {
+      const response = await frappe.call({ method, args, freeze, ...(options.type ? { type: options.type } : {}) });
+      return response.message || {};
+    }
+    if (freeze) frappe.dom?.freeze?.();
+    try {
+      const response = await $.ajax({
+        url: `/api/method/${method}`,
+        type: "POST",
+        data: args,
+        dataType: "json",
+        headers: { "X-Frappe-CSRF-Token": frappe.csrf_token, Accept: "application/json" },
+      });
+      return response.message || {};
+    } finally {
+      if (freeze) frappe.dom?.unfreeze?.();
+    }
   }
   async loadBatches() {
     this.setTableLoading();

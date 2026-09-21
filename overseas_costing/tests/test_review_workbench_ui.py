@@ -433,6 +433,30 @@ console.log(JSON.stringify({task:v.viewState.task,header:v.detailState.header,ca
     assert any(call['args'].get('task') == 'pending' for call in result['calls'] if call['method'].endswith('get_batches'))
 
 
+def test_failed_recalculation_uses_single_locally_handled_error():
+    result = run_js("""
+global.frappe={show_alert:()=>{}};
+const v=makeView('pending'),calls=[],errors=[];
+const batch={name:'B',current_version:'V',review_state:'processing',status:'Dirty'};
+v.batches=[batch];v.findBatch=()=>batch;
+v.viewState={task:'pending',screen:'detail',batch:'B',tab:'documents',page:1};
+v.detailState={batchName:'B',tab:'documents',header:batch,editToken:'TOKEN',expectedModified:'M1'};
+v.ensureEditSession=async()=>true;v.recordUsage=()=>{};v.showError=error=>errors.push(error.message);
+v.call=async(method,args,freeze=false,options={})=>{
+ calls.push({method,args,freeze,options});
+ if(method.endsWith('recalculate_batch'))throw new Error('还有 2 行本次发货货值缺失或失效，请先补齐后再试算。');
+ return {ok:true};
+};
+await v.recalculate('B');
+console.log(JSON.stringify({calls,errors}));
+""")
+
+    trial_call = next(call for call in result['calls'] if call['method'].endswith('recalculate_batch'))
+    assert trial_call['freeze'] is True
+    assert trial_call['options']['inlineErrors'] is True
+    assert result['errors'] == ['还有 2 行本次发货货值缺失或失效，请先补齐后再试算。']
+
+
 def test_processing_detail_renders_authoritative_review_blockers():
     html = run_js("""
 const v=makeView('pending');

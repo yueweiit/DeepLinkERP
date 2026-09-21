@@ -39,7 +39,8 @@
           edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
           expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
-        true
+        true,
+        { inlineErrors: true }
       );
       if (!result?.ok) {
         throw new Error(result?.message || "重新试算被服务器拒绝，未修改批次数据。");
