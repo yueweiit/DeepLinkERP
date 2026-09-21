@@ -791,6 +791,8 @@ def start_cost_trial_ai_review(
         )
         inputs = _apply_fx_resolution(inputs, fx_resolution)
         _assert_trial_writable_context(inputs["context"])
+        from overseas_costing.services.material_input_service import assert_complete_purchase_values
+        assert_complete_purchase_values(inputs["items"])
         fingerprint = _input_fingerprint(inputs)
         context = inputs["context"]
         batch = str(context.get("batch_name") or context.get("batch") or batch_name)
@@ -946,6 +948,8 @@ def execute_cost_trial_ai_review(
         )
         inputs = _apply_fx_resolution(inputs, run_meta.get("fx_resolution"))
         _assert_trial_writable_context(inputs["context"])
+        from overseas_costing.services.material_input_service import assert_complete_purchase_values
+        assert_complete_purchase_values(inputs["items"])
         if _input_fingerprint(inputs) != str(run.get("input_fingerprint") or ""):
             stale = _save_run_if_status(
                 repo, str(run_id), "RUNNING",
@@ -1157,6 +1161,8 @@ def confirm_cost_trial(
             edit_token=edit_token, expected_modified=expected_modified,
         )
         _assert_trial_writable_context(inputs["context"])
+        from overseas_costing.services.material_input_service import assert_complete_purchase_values
+        assert_complete_purchase_values(inputs["items"])
         draft = _json_dict(run.get("draft_json"))
         preview = preview_selected_cost_trial(
             items=inputs["items"], fees=inputs["fees"], fx_context=inputs["fx_context"],
@@ -1403,6 +1409,8 @@ class FrappeCostTrialAIRepository:  # pragma: no cover - exercised in Frappe int
         return True
 
     def save_calculation(self, inputs, preview, trial_review):
+        from overseas_costing.services.material_input_service import assert_complete_purchase_values
+        assert_complete_purchase_values(inputs["items"])
         choices = {row["suggestion_id"]: row for row in trial_review.get("fee_choices") or []}
         draft = _json_dict(self.get_run(trial_review["run_id"]).get("draft_json"))
         proposal_by_id = {row["suggestion_id"]: row for row in draft.get("fee_suggestions") or []}

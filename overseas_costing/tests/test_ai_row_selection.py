@@ -1482,7 +1482,7 @@ def test_single_proposal_referencing_payment_and_purchase_is_a_conflict_in_both_
 
 
 def test_row_review_policy_is_stage_snapshot_version():
-    assert service.POLICY == 'ai-field-review-6'
+    assert service.POLICY == 'ai-field-review-7'
 
 
 def test_fee_stage_snapshots_are_fixed_even_when_no_fee_source_exists():
@@ -1492,13 +1492,14 @@ def test_fee_stage_snapshots_are_fixed_even_when_no_fee_source_exists():
             for stage in review['fee_stage_snapshots']] == [
         ('payment', 0, 'UNAVAILABLE'),
         ('international_logistics', 1, 'UNAVAILABLE'),
+        ('purchase', 2, 'UNAVAILABLE'),
     ]
     assert all(stage['processes'] == [] for stage in review['fee_stage_snapshots'])
     assert all(stage['fees'] == [] for stage in review['fee_stage_snapshots'])
     assert 'fee_stage_snapshots' in review
 
 
-def test_fee_stage_snapshots_group_safe_summaries_and_exclude_purchase():
+def test_fee_stage_snapshots_group_safe_summaries_and_include_purchase():
     sources = [
         {'source_id': 'PAY-FORM', 'process_instance_id': 'PAY-1',
          'source_kind': 'approval_form', 'approval_role': 'payment',
@@ -1535,7 +1536,7 @@ def test_fee_stage_snapshots_group_safe_summaries_and_exclude_purchase():
     ]
 
     review = catalog([], proposals, sources)
-    payment, logistics = review['fee_stage_snapshots']
+    payment, logistics, purchase = review['fee_stage_snapshots']
 
     assert payment['status'] == 'AVAILABLE'
     assert payment['processes'][0]['process_instance_id'] == 'PAY-1'
@@ -1543,8 +1544,7 @@ def test_fee_stage_snapshots_group_safe_summaries_and_exclude_purchase():
     assert payment['fees'][0]['amount'] == '120'
     assert payment['fees'][0]['currency'] == 'RMB'
     assert [fee['proposal_id'] for fee in logistics['fees']] == ['LOG']
-    assert all(fee['proposal_id'] != 'PUR'
-               for stage in review['fee_stage_snapshots'] for fee in stage['fees'])
+    assert [fee['proposal_id'] for fee in purchase['fees']] == ['PUR']
     assert all('source_refs' not in fee and 'payload' not in fee
                for stage in review['fee_stage_snapshots'] for fee in stage['fees'])
 

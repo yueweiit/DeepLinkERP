@@ -188,7 +188,6 @@
     const summary = batch.summary_snapshot || {};
     const hasSavedResult = Boolean(
       batch.calculated_at
-      || batch.result_is_current === false
       || summary.calculation_schema
       || status.includes("calculated")
       || status.includes("confirmed")
@@ -254,14 +253,13 @@
           <div class="ocw-detail-header-actions">
             ${this.renderReviewReturnAction?.(batch) || ""}
             ${this.renderDetailErpAction(batch)}
+            <button class="ocw-outline-btn" type="button" data-action="detail-dingtalk">打开钉钉原单</button>
             <div class="ocw-menu-wrap">
-              <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
+              <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">更多操作 ▾</button>
               <div class="ocw-detail-tools" data-area="detail-tools" hidden>
-                <button type="button" data-action="detail-export">导出本批次</button>
+                <button type="button" data-action="detail-export">导出</button>
                 <button type="button" data-action="detail-voucher">凭证对比</button>
                 <button type="button" data-action="detail-category">商品归类</button>
-                <button type="button" data-action="detail-dingtalk">打开钉钉来源</button>
-                <button type="button" data-action="detail-repull">重拉本批次</button>
                 <button type="button" data-action="detail-excel">单批次 Excel 补充</button>
               </div>
             </div>
@@ -471,7 +469,7 @@
         </div>
         <div class="ocw-sku-scroll-controls">
           <button type="button" data-action="sku-scroll" data-direction="-1" aria-label="向左滚动 SKU 表">◀</button>
-          <input class="ocw-sku-scrollbar" type="range" min="0" max="0" step="1" value="0" data-role="sku-scrollbar" aria-label="SKU 明细水平滚动条" disabled />
+          <div class="ocw-horizontal-scrollbar ocw-sku-scrollbar" data-role="sku-scrollbar" data-ocw-scrollbar tabindex="0" aria-label="SKU 明细水平滚动条"><div data-role="sku-scrollbar-spacer"></div></div>
           <button type="button" data-action="sku-scroll" data-direction="1" aria-label="向右滚动 SKU 表">▶</button>
           <span>当前 ${this.escape(groups.find(([key]) => key === sku.fieldGroup)?.[1] || "基础信息")} · 全部 A–BE</span>
         </div>
@@ -504,11 +502,6 @@
     `;
   }
 
-  shouldCompactSkuColumns(scrollLeft, currentlyCompact = false) {
-    const position = Math.max(0, Number(scrollLeft) || 0);
-    return currentlyCompact ? position > 32 : position > 148;
-  }
-
   cleanupSkuScrollControls() {
     const cleanup = this.skuScrollCleanup;
     this.skuScrollCleanup = null;
@@ -518,97 +511,13 @@
   bindSkuScrollControls() {
     this.cleanupSkuScrollControls();
     this.cleanupMaterialGridScrollControls?.();
-    const $table = this.$root.find("[data-role='sku-table-scroll']");
-    const $range = this.$root.find("[data-role='sku-scrollbar']");
-    const $shell = $table.closest(".ocw-sku-table-shell");
-    const table = $table.get(0);
-    const range = $range.get(0);
-    if (!table || !range) return;
-
-    const skuTable = table.querySelector(".ocw-sku-table");
-    let syncing = false;
-    let compact = false;
-    let refreshFrame = null;
-    let resizeObserver = null;
-
-    const updateCompactState = (scrollLeft) => {
-      const nextCompact = this.shouldCompactSkuColumns(scrollLeft, compact);
-      if (nextCompact === compact) return;
-      compact = nextCompact;
-      $shell.toggleClass("is-sku-compact", compact);
-      scheduleMetricsRefresh();
-    };
-
-    const refreshMetrics = () => {
-      const maxScrollLeft = Math.max(0, table.scrollWidth - table.clientWidth);
-      const scrollLeft = Math.min(maxScrollLeft, Math.max(0, table.scrollLeft));
-      if (table.scrollLeft !== scrollLeft) table.scrollLeft = scrollLeft;
-      range.max = String(maxScrollLeft);
-      range.value = String(scrollLeft);
-      range.disabled = maxScrollLeft <= 0;
-      this.updateSkuScrollButtons(table, maxScrollLeft);
-      updateCompactState(scrollLeft);
-    };
-
-    const scheduleMetricsRefresh = () => {
-      if (refreshFrame !== null) return;
-      refreshFrame = window.requestAnimationFrame(() => {
-        refreshFrame = null;
-        refreshMetrics();
-      });
-    };
-
-    const onTableScroll = () => {
-      if (syncing) return;
-      syncing = true;
-      refreshMetrics();
-      syncing = false;
-    };
-
-    const onRangeInput = () => {
-      if (syncing) return;
-      syncing = true;
-      const maxScrollLeft = Math.max(0, table.scrollWidth - table.clientWidth);
-      const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, Number(range.value) || 0));
-      table.scrollLeft = nextScrollLeft;
-      refreshMetrics();
-      syncing = false;
-    };
-
-    const onColumnTransitionEnd = (event) => {
-      if (!event.target.classList.contains("ocw-sku-sticky")) return;
-      scheduleMetricsRefresh();
-    };
-
-    table.addEventListener("scroll", onTableScroll, { passive: true });
-    range.addEventListener("input", onRangeInput);
-    skuTable?.addEventListener("transitionend", onColumnTransitionEnd);
-    window.addEventListener("resize", scheduleMetricsRefresh);
-
-    if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(scheduleMetricsRefresh);
-      resizeObserver.observe(table);
-      if (skuTable) resizeObserver.observe(skuTable);
-    }
-
-    this.skuScrollCleanup = () => {
-      table.removeEventListener("scroll", onTableScroll);
-      range.removeEventListener("input", onRangeInput);
-      skuTable?.removeEventListener("transitionend", onColumnTransitionEnd);
-      window.removeEventListener("resize", scheduleMetricsRefresh);
-      resizeObserver?.disconnect();
-      if (refreshFrame !== null) window.cancelAnimationFrame(refreshFrame);
-      $shell.removeClass("is-sku-compact");
-    };
-
-    refreshMetrics();
-  }
-
-  updateSkuScrollButtons(table = this.$root.find("[data-role='sku-table-scroll']").get(0), maxScrollLeft = null) {
-    if (!table) return;
-    const max = maxScrollLeft === null ? Math.max(0, table.scrollWidth - table.clientWidth) : maxScrollLeft;
-    this.$root.find("[data-action='sku-scroll'][data-direction='-1']").prop("disabled", max <= 1 || table.scrollLeft <= 1);
-    this.$root.find("[data-action='sku-scroll'][data-direction='1']").prop("disabled", max <= 1 || table.scrollLeft >= max - 1);
+    this.skuScrollCleanup = this.bindHorizontalScrollController({
+      content: this.$root.find("[data-role='sku-table-scroll']").get(0),
+      scrollbar: this.$root.find("[data-role='sku-scrollbar']").get(0),
+      spacer: this.$root.find("[data-role='sku-scrollbar-spacer']").get(0),
+      leftButton: this.$root.find("[data-action='sku-scroll'][data-direction='-1']").get(0),
+      rightButton: this.$root.find("[data-action='sku-scroll'][data-direction='1']").get(0),
+    });
   }
 
   async ensureEditSession() {

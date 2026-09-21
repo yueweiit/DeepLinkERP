@@ -48,6 +48,21 @@ assert(html.includes('data-mf-ai-row-select="source"'));assert(html.includes('da
 """)
 
 
+def test_purchase_value_candidate_and_readonly_derived_price_are_visible():
+    run_ui(r"""
+const fill=ready();fill.row_review={...fill.row_review,field_candidates:[
+ {candidate_id:'LOG-V',item_name:'I1',fieldname:'goods_value',suggested_value:'800',source_label:'国际物流审批',workflow_stage:'international_logistics',workflow_rank:1,evidence_kind:'approval_form',can_apply:true,default_selected:true,resolution_reason:'货值、数量和币种来自同一行'},
+]};delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);
+selection.previewKey=w.materialAIRowSelectionKey(fill);
+selection.preview={id:'P',revision:'R',rows:[{material_code:'SKU',quantity:4,unit_price:0,shipment_value_rmb:'800',adopted_price:{value:'200.00',currency:'RMB',unit:'kg',source_type:'purchase_total_derived'}}]};
+const html=w.renderMaterialAIReviewDialogContent();
+assert(html.includes('采购货值 RMB'));
+assert(html.includes('value="LOG-V"'));
+assert(html.includes('200.00'));
+assert(html.includes('按同来源货值÷数量计算'));
+""")
+
+
 def test_review_explains_server_selected_main_material_scope_safely():
     run_ui(r"""
 const fill=ready();fill.row_review={...fill.row_review,
@@ -337,7 +352,7 @@ assert(!advanced.includes('国际空运费'));
 """)
 
 
-def test_current_policy_renders_two_fee_stages_with_total_components_and_other_records():
+def test_current_policy_renders_three_fee_stages_with_total_components_and_other_records():
     run_ui(r"""
 const fill=ready();fill.row_review={...fill.row_review,policy:'ai-field-review-4',field_candidates:[],fees:[
  {proposal_id:'TOTAL',workflow_stage:'payment',selection_role:'primary_total',payload:{logical_fee_key:'international_air_freight',expense_category:'国际空运费',amount:'10347',currency:'RMB',source_label:'月结付款'},can_apply:true,default_selected:true,resolution_reason:'分项合计 10346.99，差额 0.01 RMB'},
@@ -359,7 +374,7 @@ fill.row_review.fee_stage_snapshots=[
 ];
 delete fill.rowSelection;const selection=w.ensureMaterialAIRowSelection(fill);w.scheduleMaterialAIRowPreview=()=>{};
 let html=w.renderMaterialAIReviewDialogContent();
-assert.equal((html.match(/data-mf-ai-fee-stage=/g)||[]).length,2);
+assert.equal((html.match(/data-mf-ai-fee-stage=/g)||[]).length,3);
 assert(!html.includes('来源 1 · 国际物流装箱清单.xlsx'));
 assert(html.indexOf('data-mf-ai-fee-stage="payment"')<html.indexOf('data-mf-ai-fee-stage="international_logistics"'));
 const payment=html.slice(html.indexOf('data-mf-ai-fee-stage="payment"'),html.indexOf('data-mf-ai-fee-stage="international_logistics"'));

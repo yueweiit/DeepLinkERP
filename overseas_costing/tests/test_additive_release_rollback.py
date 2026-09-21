@@ -11,6 +11,11 @@ SCRIPT = ROOT / ".github/scripts/manage_material_ai_release.sh"
 
 
 def run_rollback(tmp_path, *, missing_image=False):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / "workbench-release-test-release.json").write_text(
+        json.dumps({"present": True, "value": "previous-release"})
+    )
     docker = tmp_path / "docker"
     docker.write_text("""#!/usr/bin/env python3
 import json,os,pathlib,sys
@@ -63,6 +68,10 @@ def test_code_rollback_restores_old_image_assets_and_ui_without_restoring_databa
     assert "install._set_workspace_content(" in rollback_body
     assert "install.ensure_workspace()" not in rollback_body
     assert "drop" not in rollback_body.lower() and "delete" not in rollback_body.lower()
+    assert any(
+        "set-config overseas_costing_release_id previous-release" in command
+        for command in rendered
+    )
 
 
 def test_code_rollback_with_missing_backup_image_stops_before_service_changes(tmp_path):

@@ -66,6 +66,19 @@ def build_manual_shipment_valuation(row, amount_rmb, *, actor, reason='', confir
     }
 
 
+def activate_shipment_valuation(metadata, valuation):
+    """Activate one trusted valuation while preserving superseded evidence."""
+
+    from .purchase_value_evidence import retire_purchase_value
+
+    retire_purchase_value(metadata)
+    value = {**deepcopy(valuation), 'trusted_shipment_source': True}
+    metadata['shipment_valuation'] = value
+    if metadata.get('settlement_cargo'):
+        metadata['settlement_valuation'] = deepcopy(value)
+    return value
+
+
 def build_legacy_shipment_valuation(row):
     """Freeze a positive legacy mirror before a server-managed manual override."""
     amount = number(row.get('goods_value'))
@@ -244,6 +257,9 @@ def shipment_value(row):
     manual = _manual_value(row, metadata.get('manual_shipment_valuation'))
     if manual is not None:
         return manual
+    from .purchase_value_evidence import META_KEY, shipment_valuation as purchase_valuation
+    if isinstance(metadata.get(META_KEY), dict) and metadata[META_KEY].get('source_refs'):
+        return purchase_valuation(row, metadata[META_KEY])
     if 'settlement_cargo' in metadata:
         cargo = metadata.get('settlement_cargo')
         valuation = metadata.get('settlement_valuation')

@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 import hashlib
+import json
 
 import pytest
 
@@ -919,6 +920,8 @@ def test_force_ai_candidate_does_not_carry_old_decision_outputs():
 
 
 def test_no_complete_basis_blocks_without_calling_ai():
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
     repo = TrialRepository()
     repo.items = [
         {**ITEMS[0], "goods_value": 0, "shipment_value_rmb": 0, "gross_weight_kg": 0,
@@ -926,6 +929,12 @@ def test_no_complete_basis_blocks_without_calling_ai():
         {**ITEMS[1], "goods_value": 0, "shipment_value_rmb": 0, "gross_weight_kg": 0,
          "volume_m3": 0, "chargeable_weight_kg": 0},
     ]
+    for row in repo.items:
+        row["extra_json"] = json.dumps({
+            "manual_shipment_valuation": build_manual_shipment_valuation(
+                row, 0, actor="buyer@example.com", reason="免费样品"
+            )
+        })
     queued = []
 
     started = cost_trial_ai_service.start_cost_trial_ai_review(
@@ -1110,6 +1119,52 @@ def test_feature_switch_can_disable_new_ai_trial_entry(monkeypatch):
     assert repo.created == 0
 
 
+def test_start_rejects_missing_purchase_values_before_creating_or_enqueuing_ai_run():
+    repo = TrialRepository()
+    repo.items = [dict(ITEMS[0]), {**ITEMS[1], "goods_value": "", "shipment_value_rmb": None}]
+    queued = []
+
+    with pytest.raises(
+        ValueError,
+        match="还有 1 行本次发货货值缺失或失效，请先补齐后再试算",
+    ):
+        cost_trial_ai_service.start_cost_trial_ai_review(
+            "B1", "V1", edit_token="T", expected_modified="m1",
+            repository=repo, enqueue=queued.append,
+        )
+
+    assert repo.created == 0
+    assert queued == []
+    assert repo.saved_calculation is None
+    assert repo.commits == 0
+    assert repo.rollbacks == 1
+
+
+def test_legacy_queued_run_with_missing_purchase_values_fails_before_ai_invocation():
+    repo = TrialRepository()
+    repo.items = [dict(ITEMS[0]), {**ITEMS[1], "goods_value": "", "shipment_value_rmb": None}]
+    inputs = repo.load_trial_inputs("B1", "V1", write=False, trusted=True)
+    run = repo.create_run({
+        "batch": "B1",
+        "version": "V1",
+        "status": "QUEUED",
+        "input_fingerprint": cost_trial_ai_service._input_fingerprint(inputs),
+        "progress_revision": 0,
+        "draft_json": {},
+    })
+    invoked = []
+
+    result = cost_trial_ai_service.execute_cost_trial_ai_review(
+        run["name"], repository=repo,
+        ai_suggester=lambda **kwargs: invoked.append(kwargs) or {"ok": True, "rules": []},
+    )
+
+    assert result["status"] == "FAILED"
+    assert "还有 1 行" in result["message"]
+    assert invoked == []
+    assert repo.runs[run["name"]]["status"] == "FAILED"
+
+
 def test_preview_marks_run_stale_when_any_trial_input_changes():
     repo = TrialRepository()
     started = cost_trial_ai_service.start_cost_trial_ai_review(
@@ -1153,6 +1208,43 @@ def test_confirm_validates_server_preview_token_and_saves_trial_audit():
     assert saved["trial_review"]["is_temporary"] is False
     assert repo.runs["RUN-1"]["status"] == "CONFIRMED"
     assert repo.saved_calculation["trial_review"]["fee_choices"][0]["basis"] == "gross_weight"
+
+
+def test_confirm_rejects_a_matching_legacy_ready_run_with_missing_purchase_values():
+    repo = TrialRepository()
+    repo.items = [dict(ITEMS[0]), {**ITEMS[1], "goods_value": "", "shipment_value_rmb": None}]
+    repo.fees = [_fee(amount=0)]
+    inputs = repo.load_trial_inputs("B1", "V1", write=False, trusted=True)
+    draft = cost_trial_ai_service.build_cost_trial_review_draft(
+        items=inputs["items"],
+        fees=inputs["fees"],
+        fx_context=inputs["fx_context"],
+        context=inputs["context"],
+        fee_components=[],
+        ai_result={"ok": True, "action": "not_needed", "model": "", "rules": []},
+    )
+    run = repo.create_run({
+        "batch": "B1",
+        "version": "V1",
+        "status": "READY",
+        "input_fingerprint": cost_trial_ai_service._input_fingerprint(inputs),
+        "progress_revision": 0,
+        "draft_json": draft,
+    })
+    preview = cost_trial_ai_service.preview_cost_trial("B1", run["name"], [], repository=repo)
+
+    with pytest.raises(
+        ValueError,
+        match="还有 1 行本次发货货值缺失或失效，请先补齐后再试算",
+    ):
+        cost_trial_ai_service.confirm_cost_trial(
+            "B1", run["name"], preview["preview_token"], [],
+            edit_token="T", expected_modified="m1", repository=repo,
+        )
+
+    assert repo.saved_calculation is None
+    assert repo.runs[run["name"]]["status"] == "READY"
+    assert "还有 1 行" in repo.runs[run["name"]]["error_message"]
 
 
 def test_trial_carries_signed_fx_resolution_and_persists_it_only_on_valid_confirm():

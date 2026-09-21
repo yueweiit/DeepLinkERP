@@ -103,6 +103,53 @@ def _items():
     ]
 
 
+def test_formal_cost_inputs_preserve_purchase_value_identity_fields() -> None:
+    from overseas_costing.services.purchase_value_evidence import META_KEY
+    from overseas_costing.services.material_input_service import present_material_row
+
+    row = {
+        **_items()[0],
+        "material_code": "FL004195",
+        "spec_model": "PIGMENT-RED",
+        "quantity": "4",
+        "actual_shipped_qty": "4",
+        "actual_shipped_qty_mode": "MANUAL_CONFIRMED",
+        "purchase_uom": "kg",
+        "shipped_uom": "kg",
+        "goods_value": 0,
+        "extra_json": json.dumps({
+            META_KEY: {
+                "amount_rmb": "800",
+                "quantity": "4",
+                "uom": "kg",
+                "material_code": "FL004195",
+                "spec_model": "PIGMENT-RED",
+                "source_refs": [{"document_id": "DOC-1", "row": 1}],
+            }
+        }),
+    }
+    formal_input = {
+        field: row.get(field)
+        for field in cost_preview_service.COST_INPUT_FIELDS
+    }
+
+    presented = present_material_row(formal_input)
+
+    assert formal_input["spec_model"] == "PIGMENT-RED"
+    assert presented["shipment_value_rmb"] == "800"
+    assert presented["shipment_valuation"]["error"] == ""
+
+
+def test_spec_model_query_fix_does_not_invalidate_legacy_snapshot_hash() -> None:
+    item = _items()[0]
+    legacy = {key: value for key, value in item.items() if key != "spec_model"}
+    current = {**legacy, "spec_model": "PIGMENT-RED"}
+
+    assert cost_preview_service.cost_input_hash(
+        [legacy], [], {}, "SEA"
+    ) == cost_preview_service.cost_input_hash([current], [], {}, "SEA")
+
+
 def test_preview_conserves_direct_and_allocated_fees_with_dual_unit_output() -> None:
     result = preview_comprehensive_cost_data(
         _items(),
@@ -597,6 +644,7 @@ class AutoFxCalculationRepository:
         self.saved = None
         self.commits = 0
         self.rollbacks = 0
+        self.items = _items()
 
     def prepare_fx_resolution(self, batch_name, version_name):
         assert batch_name == "B1" and version_name == "V1"
@@ -623,7 +671,7 @@ class AutoFxCalculationRepository:
                 "is_locked": 0,
                 "transport_mode": "AIR",
             },
-            _items(),
+            deepcopy(self.items),
             [{
                 "name": "F1", "logical_fee_key": "international_air_freight",
                 "expense_category": "国际空运费", "amount_status": "ACTUAL", "amount": "100",
@@ -684,6 +732,22 @@ def test_direct_calculation_rolls_back_when_fx_persistence_fails() -> None:
     with pytest.raises(ValueError, match="当日汇率已变化"):
         cost_preview_service.calculate_comprehensive_cost("B1", "V1", repository=repository)
 
+    assert repository.saved is None
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+
+
+def test_direct_calculation_rejects_missing_purchase_values_before_any_write() -> None:
+    repository = AutoFxCalculationRepository()
+    repository.items[1]["goods_value"] = ""
+
+    with pytest.raises(
+        ValueError,
+        match="还有 1 行本次发货货值缺失或失效，请先补齐后再试算",
+    ):
+        cost_preview_service.calculate_comprehensive_cost("B1", "V1", repository=repository)
+
+    assert repository.persisted == 0
     assert repository.saved is None
     assert repository.commits == 0
     assert repository.rollbacks == 1

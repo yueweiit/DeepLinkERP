@@ -5,6 +5,14 @@
     });
   }
 
+  purchasePriceValue(row = {}) {
+    return row.adopted_price?.value ?? row.unit_price;
+  }
+
+  purchasePriceCurrency(row = {}) {
+    return row.adopted_price?.currency || row.purchase_currency || "";
+  }
+
   workRoleInfo(role = this.workRole) {
     if (role === "finance") {
       return {
@@ -42,7 +50,7 @@
     if (!itemCount) reasons.push("缺少物料明细");
     if (hasLoadedItems) {
       const missingItem = itemRows.filter((row) => !this.hasText(row.material_code) || !this.hasText(row.product_name) || !this.isPositive(row.quantity)).length;
-      const missingPurchase = itemRows.filter((row) => !this.isPositive(row.unit_price) || !this.hasText(row.purchase_currency) || !this.isPositive(row.goods_value)).length;
+      const missingPurchase = itemRows.filter((row) => !this.isPositive(this.purchasePriceValue(row)) || !this.hasText(this.purchasePriceCurrency(row)) || !this.isPositive(row.goods_value)).length;
       const missingShipping = itemRows.filter((row) => !this.isPositive(row.actual_shipped_qty) || !this.isPositive(row.gross_weight_kg)).length;
       if (missingItem) reasons.push(`物料基础字段缺 ${missingItem} 行`);
       if (missingPurchase) reasons.push(`采购金额字段缺 ${missingPurchase} 行`);
@@ -698,6 +706,7 @@
   }
 
   showError(error) {
+    if (error?.workbenchReleaseHandled || error?.workbenchReleaseBlocked) return;
     const detail = this.extractStructuredError(error);
     const message = this.normalizeErrorMessage(error);
     const rows = detail

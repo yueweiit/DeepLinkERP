@@ -97,6 +97,9 @@ def test_source_tabs_keep_only_packing_plan_and_local_upload() -> None:
     assert "本地上传装箱单" in tabs
     assert "钉钉表单附件" not in tabs
     assert "评论附件与评论" not in tabs
+    loader = source.split("async loadWikiMaterialSources", 1)[1].split("renderMaterialSourceTabs", 1)[0]
+    assert "result?.manual_attachments" in loader
+    assert "result?.approval_sources" not in loader
     assert "allowed_file_types" in source
     for suffix in (".xlsx", ".xlsm", ".pdf", ".png", ".doc", ".docx"):
         assert suffix in source
@@ -134,7 +137,7 @@ console.log(JSON.stringify({
         "refreshBeforeUpload": True,
         "expenseHasActions": True,
         "expenseHasRefresh": True,
-        "expenseHasUpload": False,
+        "expenseHasUpload": True,
     }
 
     css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
@@ -161,7 +164,7 @@ def test_material_grid_uses_sticky_readable_identity_columns_and_scroll_controls
     assert ".ocw-mf-grid-table th:nth-child(-n+4)" not in css
     assert '[data-mf-grid-field="material_code"]' in css
     assert '[data-mf-grid-field="product_name"]' in css
-    assert 'is-mf-grid-compact' in css
+    assert 'is-mf-grid-compact' not in css
     assert "position: sticky" in css
 
 
@@ -373,6 +376,15 @@ def test_material_grid_keeps_static_widths_while_scrolling() -> None:
     assert "is-horizontally-scrolled" not in scroll
     assert "column.style.width" not in scroll
     assert ".ocw-mf-grid-shell.is-horizontally-scrolled" not in css
+
+
+def test_missing_status_is_red_while_conflict_and_stale_remain_amber() -> None:
+    css = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+
+    missing = css.split(".ocw-mf-cell.is-valuation-missing .ocw-mf-valuation-status", 1)[1].split("}", 1)[0]
+    conflict = css.split(".ocw-mf-cell:is(.is-valuation-conflict, .is-valuation-stale) .ocw-mf-valuation-status", 1)[1].split("}", 1)[0]
+    assert "#b42318" in missing
+    assert "#9a5b00" in conflict
 
 
 def test_purchase_source_copy_distinguishes_logistics_source_from_missing_purchase_link() -> None:
@@ -790,36 +802,22 @@ console.log(JSON.stringify({accepted,manual:state.aiFill.manualUpdates,edits:sta
     assert "data-mf-ai-edit" not in result["html"]
 
 
-def test_autofill_force_retry_preserves_force_and_sources_after_network_failure() -> None:
+def test_autofill_write_failure_is_not_replayed_and_keeps_explicit_retry_payload() -> None:
     result = _fee_workspace_result(AUTOFILL_FIXTURE + r"""
 state.pendingWrites=new Set();
 state.aiRunGeneration=1;
 workspace.updateMaterialAIProgressSurface=()=>{};
 workspace.openMaterialAIProgressDialog=()=>{};
 workspace.pollMaterialAIFill=async()=>{};
-global.window={setTimeout:(resolve)=>resolve()};
 const requests=[];
-workspace.call=async(_method,args)=>{requests.push(args);if(requests.length===1)throw new Error('connection failed before dispatch');return {ok:true,run_id:'NEW',status:'QUEUED'}};
-await workspace.runMaterialAIFillStart(state,{force:true,selectedSourceIds:['S1']});
-console.log(JSON.stringify({forces:requests.map((row)=>row.force),sources:requests.map((row)=>row.selected_source_ids_json)}));
+workspace.call=async(_method,args)=>{requests.push(args);throw new Error('connection failed after an unknown dispatch state')};
+let caught='';try{await workspace.runMaterialAIFillStart(state,{force:true,selectedSourceIds:['S1']})}catch(error){caught=error.message}
+console.log(JSON.stringify({count:requests.length,caught,retry:state.aiStartOptions.requestPayload}));
 """)
-    assert result == {"forces": [1, 1], "sources": ['["S1"]', '["S1"]']}
-
-
-def test_autofill_retired_start_generation_stops_before_request_after_backoff() -> None:
-    result = _fee_workspace_result(AUTOFILL_FIXTURE + r"""
-state.pendingWrites=new Set();
-state.aiRunGeneration=1;
-workspace.updateMaterialAIProgressSurface=()=>{};
-workspace.openMaterialAIProgressDialog=()=>{};
-workspace.pollMaterialAIFill=async()=>{};
-let calls=0;
-workspace.call=async()=>{calls+=1;if(calls===1)throw new Error('network down');return {ok:true,run_id:'OLD',status:'QUEUED'}};
-global.window={setTimeout:(resolve)=>{state.aiRunGeneration=2;state.aiFill={status:'RUNNING',runId:'NEW'};resolve()}};
-await workspace.runMaterialAIFillStart(state,{force:true});
-console.log(JSON.stringify({calls,runId:state.aiFill.runId}));
-""")
-    assert result == {"calls": 1, "runId": "NEW"}
+    assert result["count"] == 1
+    assert result["caught"] == "connection failed after an unknown dispatch state"
+    assert result["retry"]["force"] == 1
+    assert result["retry"]["selected_source_ids_json"] == '["S1"]'
 
 
 def test_autofill_selected_material_split_and_edits_overlay_server_preview() -> None:

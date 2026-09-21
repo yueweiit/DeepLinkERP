@@ -66,6 +66,15 @@ def annotate_source_eligibility(sources, *, store, ledger, batch_name):
             # Explicit selection ensures excluded rows cannot silently pass this check.
             capture_dependencies([{**raw, 'selected': True}], store=store, ledger=ledger,
                 batch_name=batch_name, source_context=context, allow_pending=True, purpose='analysis', lock=False)
+            if raw.get('analysis_only'):
+                source.update(
+                    adoption_allowed=False,
+                    final_fee_allowed=False,
+                    adoption_restriction=(
+                        raw.get('adoption_restriction')
+                        or '该附件仅用于 AI 读取和预览，不能单独作为最终采用依据。'
+                    ),
+                )
         except (ValueError, OSError) as error:
             source.update(analysis_allowed=False, adoption_allowed=False, final_fee_allowed=False,
                 analysis_reason=str(error), analysis_code=getattr(error, 'code', 'SOURCE_ARCHIVE_UNAVAILABLE'))
@@ -185,7 +194,12 @@ def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpo
         metadata = row_meta({'extra_json': attachment.get('parse_result_json')})
         if not _enabled(metadata or {'present': True}):
             raise ValueError('附件来源已被排除。')
-        restricted = metadata.get('approval_excluded') or metadata.get('cost_source_allowed') is False
+        descriptor = metadata.get('settlement_document') or {}
+        restricted = (
+            metadata.get('approval_excluded')
+            or metadata.get('cost_source_allowed') is False
+            or descriptor.get('audit_only')
+        )
         current_approval = (_current_attachment_approval(dependency, metadata, store)
                             if dependency.get('approval_source_id') else None)
         if restricted:
@@ -197,7 +211,6 @@ def _read_dependency(dependency, store, ledger, batch_name, *, lock=False, purpo
                     eligibility['analysis_reason'], source=current_approval,
                     code=eligibility['analysis_code'],
                 )
-        descriptor = metadata.get('settlement_document') or {}
         document_id = descriptor.get('document_id')
         document = store.get('document', document_id, lock=lock) if document_id else None
         if document_id and (not document or document_retired(document) or document.get('status') in {'pending', 'failed', 'error', 'invalid'}):

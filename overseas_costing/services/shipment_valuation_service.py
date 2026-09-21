@@ -1,4 +1,4 @@
-"""Pure, traceable shipment valuation; purchase totals are never apportioned or changed."""
+"""Traceable shipment valuation; totals use their own row quantity and unit."""
 
 from __future__ import annotations
 
@@ -103,6 +103,8 @@ def _packing_value(item, row, source, qty, uom):
         return None, "装箱价格或金额来自跨行合并单元格，仅可核对组控制总额，不能重复用于各行。"
     if _currency(row.get("currency")) != "RMB" or not row.get("currency_evidence"):
         return None, "装箱价格缺少明确人民币币种证据，不能生成发货估值。"
+    if price is None and amount is not None and amount >= 0 and qty > 0:
+        price = amount / qty
     if price is None or price < 0:
         return None, "装箱单价缺失或无效，无法核对该行金额。"
     calculated = qty * price
@@ -170,6 +172,9 @@ def _verify_group_controls(items, rows, valuations, warnings):
             expected_count = region["end_row"] - region["start_row"] + 1
         else:
             price, qty = _number(row.get("unit_price")), _number(row.get("quantity"))
+            valued = valuations.get(names.get(_text(row.get('_target_stable_line_key')), '')) or {}
+            if valued.get('method') == 'packing_row_total' and _number(valued.get('amount_rmb')) == amount:
+                continue
             if price is not None and qty is not None and abs(amount - price * qty) <= MONEY_TOLERANCE:
                 continue
             members = [row]
@@ -220,7 +225,7 @@ def _shared_field(row, field):
 
 
 def _valuation(item, row, source, qty, uom, price, amount, method):
-    return {"amount_rmb": _decimal(amount.quantize(MONEY_TOLERANCE, rounding=ROUND_HALF_UP)),
+    return {"amount_rmb": _decimal(amount),
             "unit_price": _decimal(price), "currency": "RMB", "quantity": _decimal(qty),
             "uom": uom, "method": method, "source_hash": source.get("source_hash"),
             "source_refs": [{"source_id": source.get("source_id"), "source_kind": source.get("source_kind"),

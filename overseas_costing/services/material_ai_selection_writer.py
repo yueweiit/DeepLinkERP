@@ -37,7 +37,9 @@ def write_rows(store,ledger,preview,context):
             # The catalog derives this only from trusted purchase evidence and
             # public payload sanitization removes it before returning previews.
             for key,value in incoming['_price_metadata'].items():
-                meta[key]=deepcopy(value)
+                if key not in {'adopted_purchase_value','purchase_value_history','shipment_valuation',
+                               'settlement_valuation','manual_shipment_valuation'}:
+                    meta[key]=deepcopy(value)
         if original:
             meta.setdefault('ai_fill_original_values', original_value_snapshot(original))
         if preview['mode']=='replace_all' or not original:

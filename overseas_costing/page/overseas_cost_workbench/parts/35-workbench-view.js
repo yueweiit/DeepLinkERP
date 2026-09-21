@@ -176,13 +176,6 @@
       if (!this.resultPreviewState.batchName) return;
       this.loadBatchResultPreview(this.resultPreviewState.batchName, this.resultPreviewState.page, { force: true });
     });
-    this.$root.on("click", "[data-action='result-preview-scroll']", (event) => {
-      const direction = Number($(event.currentTarget).attr("data-direction") || 1);
-      this.$root.find("[data-role='result-preview-table-scroll']").get(0)?.scrollBy({
-        left: direction * 320,
-        behavior: "smooth",
-      });
-    });
     this.$root.on("click", "[data-action='workbench-primary']", async (event) => {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const action = $(event.currentTarget).attr("data-primary-action");
@@ -255,7 +248,6 @@
     this.$root.on("click", "[data-action='detail-voucher']", () => this.openFileParseDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-category']", () => this.openCategoryPreviewDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-dingtalk']", () => this.openDingtalkOrder(this.detailState.batchName));
-    this.$root.on("click", "[data-action='detail-repull']", () => this.repullGapDingtalk(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-excel']", () => this.openBatchExcelSupplementDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='open-voucher-record']", (event) =>
       this.openTaxCertificateRecordDialog($(event.currentTarget).attr("data-record-name"))
@@ -331,10 +323,6 @@
       this.detailState.sku.sortBy = sortBy;
       this.detailState.sku.page = 1;
       this.loadSkuPage();
-    });
-    this.$root.on("click", "[data-action='sku-scroll']", (event) => {
-      const direction = Number($(event.currentTarget).attr("data-direction") || 1);
-      this.$root.find("[data-role='sku-table-scroll']").get(0)?.scrollBy({ left: direction * 320, behavior: "smooth" });
     });
   }
 
@@ -795,7 +783,7 @@
         <td class="ocw-result-cell is-sticky-code"${cellHeaders(0)} title="${this.escape(item.material_code || "")}"><span>${this.escape(item.material_code || "—")}</span></td>
         <td class="ocw-result-cell is-sticky-name"${cellHeaders(1)} title="${this.escape(item.product_name || "")}"><span>${this.escape(item.product_name || "—")}</span></td>
         <td class="ocw-result-cell"${cellHeaders(2)} title="${this.escape(item.spec_model || "")}">${this.escape(item.spec_model || "—")}</td>
-        <td class="ocw-result-cell is-number"${cellHeaders(3)}>${sourceMoneyCell(item.unit_price, item.purchase_currency || "")}</td>
+        <td class="ocw-result-cell is-number"${cellHeaders(3)}>${sourceMoneyCell(item.adopted_price?.value ?? item.unit_price, item.adopted_price?.currency || item.purchase_currency || "")}${item.adopted_price?.source_type === "purchase_total_derived" ? '<small class="ocw-result-source">按货值÷采购数量计算</small>' : ""}</td>
         <td class="ocw-result-cell is-number"${cellHeaders(4)}>${this.escape(this.formatNumber(item.quantity) || "—")}</td>
         <td class="ocw-result-cell is-number"${cellHeaders(5)}>${moneyCell(item.freight_alloc_rmb)}</td>
         <td class="ocw-result-cell is-number"${cellHeaders(6)}>${moneyCell(item.tax_alloc_rmb)}</td>
@@ -822,7 +810,7 @@
             ${calculationPending ? `<p class="ocw-result-pending-note">当前版本尚未完成计算，核算结果显示为“未计算”。</p>` : ""}
             <div class="ocw-result-scroll-controls">
               <button class="ocw-scroll-arrow" type="button" data-action="result-preview-scroll" data-direction="-1" aria-label="向左滚动 SKU 结果">‹</button>
-              <input class="ocw-result-scrollbar" type="range" min="0" max="0" step="1" value="0" data-role="result-preview-scrollbar" aria-label="横向滚动 SKU 结果" disabled />
+              <div class="ocw-horizontal-scrollbar ocw-result-scrollbar" data-role="result-preview-scrollbar" data-ocw-scrollbar tabindex="0" aria-label="横向滚动 SKU 结果"><div data-role="result-preview-scrollbar-spacer"></div></div>
               <button class="ocw-scroll-arrow" type="button" data-action="result-preview-scroll" data-direction="1" aria-label="向右滚动 SKU 结果">›</button>
             </div>
             <div class="ocw-result-header-scroll" data-role="result-preview-header-scroll" aria-hidden="true">
@@ -852,91 +840,20 @@
     `;
   }
 
-  shouldCompactResultPreviewColumns(scrollLeft, currentlyCompact = false) {
-    const position = Math.max(0, Number(scrollLeft) || 0);
-    return currentlyCompact ? position > 32 : position > 148;
-  }
-
   bindResultPreviewScrollControls() {
     this.cleanupResultPreviewScrollControls();
     const tableScroll = this.$root.find("[data-role='result-preview-table-scroll']").get(0);
     const headerScroll = this.$root.find("[data-role='result-preview-header-scroll']").get(0);
-    const range = this.$root.find("[data-role='result-preview-scrollbar']").get(0);
-    const $preview = this.$root.find(".ocw-result-preview");
-    if (!tableScroll || !headerScroll || !range) return;
-    const table = tableScroll.querySelector(".ocw-result-data-table");
-    const headerTable = headerScroll.querySelector(".ocw-result-header-table");
-    let syncing = false;
-    let compact = false;
-    let refreshFrame = null;
-    let resizeObserver = null;
-
-    const updateCompactState = (scrollLeft) => {
-      const nextCompact = this.shouldCompactResultPreviewColumns(scrollLeft, compact);
-      if (nextCompact === compact) return;
-      compact = nextCompact;
-      $preview.toggleClass("is-result-compact", compact);
-      scheduleUpdate();
-    };
-    const update = () => {
-      const max = Math.max(0, tableScroll.scrollWidth - tableScroll.clientWidth);
-      const left = Math.min(max, Math.max(0, tableScroll.scrollLeft));
-      if (tableScroll.scrollLeft !== left) tableScroll.scrollLeft = left;
-      headerScroll.scrollLeft = left;
-      range.max = String(max);
-      range.value = String(left);
-      range.disabled = max <= 1;
-      this.$root.find("[data-action='result-preview-scroll'][data-direction='-1']").prop("disabled", max <= 1 || left <= 1);
-      this.$root.find("[data-action='result-preview-scroll'][data-direction='1']").prop("disabled", max <= 1 || left >= max - 1);
-      updateCompactState(left);
-    };
-    const scheduleUpdate = () => {
-      if (refreshFrame !== null) return;
-      refreshFrame = window.requestAnimationFrame(() => {
-        refreshFrame = null;
-        update();
-      });
-    };
-    const onScroll = () => {
-      if (syncing) return;
-      syncing = true;
-      update();
-      syncing = false;
-    };
-    const onInput = () => {
-      if (syncing) return;
-      syncing = true;
-      const max = Math.max(0, tableScroll.scrollWidth - tableScroll.clientWidth);
-      tableScroll.scrollLeft = Math.min(max, Math.max(0, Number(range.value || 0)));
-      update();
-      syncing = false;
-    };
-    const onColumnTransitionEnd = (event) => {
-      if (!event.target.classList?.contains("ocw-result-cell")) return;
-      scheduleUpdate();
-    };
-    tableScroll.addEventListener("scroll", onScroll, { passive: true });
-    range.addEventListener("input", onInput);
-    table?.addEventListener("transitionend", onColumnTransitionEnd);
-    headerTable?.addEventListener("transitionend", onColumnTransitionEnd);
-    window.addEventListener("resize", scheduleUpdate);
-    if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(scheduleUpdate);
-      resizeObserver.observe(tableScroll);
-      if (table) resizeObserver.observe(table);
-      if (headerTable) resizeObserver.observe(headerTable);
-    }
-    update();
-    this._resultPreviewScrollCleanup = () => {
-      tableScroll.removeEventListener("scroll", onScroll);
-      range.removeEventListener("input", onInput);
-      table?.removeEventListener("transitionend", onColumnTransitionEnd);
-      headerTable?.removeEventListener("transitionend", onColumnTransitionEnd);
-      window.removeEventListener("resize", scheduleUpdate);
-      resizeObserver?.disconnect();
-      if (refreshFrame !== null) window.cancelAnimationFrame(refreshFrame);
-      $preview.removeClass("is-result-compact");
-    };
+    const scrollbar = this.$root.find("[data-role='result-preview-scrollbar']").get(0);
+    const spacer = this.$root.find("[data-role='result-preview-scrollbar-spacer']").get(0);
+    this._resultPreviewScrollCleanup = this.bindHorizontalScrollController({
+      content: tableScroll,
+      header: headerScroll,
+      scrollbar,
+      spacer,
+      leftButton: this.$root.find("[data-action='result-preview-scroll'][data-direction='-1']").get(0),
+      rightButton: this.$root.find("[data-action='result-preview-scroll'][data-direction='1']").get(0),
+    });
   }
 
   renderWorkbenchBatchList() {

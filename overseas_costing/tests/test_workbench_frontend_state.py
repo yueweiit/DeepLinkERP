@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -501,7 +502,7 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
     assert "DUPLICATE_TARGET_SELECTION" in workspace
     assert "未识别出可安全拆分的金额，可保留凭证后人工补录" in workspace
     assert "writeback" not in workspace.lower()
-    assert "recalculate" not in workspace.lower()
+    assert 'data-action="detail-primary" data-primary-action="recalculate"' in workspace
     assert ".ocw-mf-workspace" in stylesheet
     assert ".ocw-mf-cell.is-missing" in stylesheet
     assert ".ocw-mf-cell.is-default" in stylesheet
@@ -1160,6 +1161,12 @@ def test_material_fee_metric_styles_keep_buttons_responsive_and_focus_visible() 
     assert "scroll-margin-top" in stylesheet
     assert "@media (max-width: 1050px)" in stylesheet
     assert "@media (max-width: 640px)" in stylesheet
+    mobile_rule = stylesheet.split("@media (max-width: 640px)", 1)[1]
+    assert ".ocw-mf-section-title { flex-direction: column; align-items: stretch; }" in mobile_rule
+    assert ".ocw-mf-cost-actions { justify-content: flex-start; }" in mobile_rule
+    assert stylesheet.index(".ocw-mf-cost-actions { display: flex;") < stylesheet.index(
+        ".ocw-mf-cost-actions { justify-content: flex-start; }"
+    )
 
 
 def test_cost_trial_dialog_defines_visible_brand_buttons_and_narrow_layout() -> None:
@@ -1362,6 +1369,145 @@ def test_fee_workspace_duplicate_blur_is_ignored_while_inline_save_is_pending() 
     )
 
     assert result == {"saveCalls": 1}
+
+
+def test_fee_workspace_rapid_cross_row_saves_are_serialized_and_share_one_refresh() -> None:
+    result = _fee_workspace_result(
+        FEE_INPUT_FIXTURE
+        + "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "const feeA={logical_fee_key:'fee-a',expense_category:'A 费用',amount_status:'ACTUAL',amount:'100',currency:'RMB',allocation_basis:'volume',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "const feeB={...feeA,logical_fee_key:'fee-b',expense_category:'B 费用',amount:'200'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[feeA,feeB]},requestId:0,feeDrafts:{},pendingWrites:new Set()};"
+        "workspace.ensureEditSession=async()=>true;workspace.normalizeErrorMessage=(error)=>error.message;"
+        "let releaseFirst;const firstGate=new Promise((resolve)=>{releaseFirst=resolve});let saveCalls=0,active=0,maxActive=0,refreshCalls=0;const expected=[];"
+        "workspace.call=async(endpoint,args)=>{if(!endpoint.endsWith('save_fee'))throw new Error(endpoint);"
+        "saveCalls+=1;const callNo=saveCalls;expected.push(args.expected_modified);active+=1;maxActive=Math.max(maxActive,active);"
+        "if(callNo===1)await firstGate;active-=1;return {ok:true,batch_modified:callNo===1?'m2':'m3',message:'saved'}};"
+        "workspace.loadMaterialFeeWorkspace=async()=>{refreshCalls+=1;workspace.materialFeeState.cacheDirty=false;return true};"
+        "const fixtureA=makeFeeInput({amount:'150',currency:'RMB',originalAmount:'100',originalCurrency:'RMB',feeKey:'fee-a'});"
+        "const fixtureB=makeFeeInput({amount:'250',currency:'RMB',originalAmount:'200',originalCurrency:'RMB',feeKey:'fee-b'});"
+        "const first=workspace.saveMaterialFeeInlineAmount(fixtureA.amountInput);"
+        "const second=workspace.saveMaterialFeeInlineAmount(fixtureB.amountInput);await new Promise((resolve)=>setImmediate(resolve));"
+        "const beforeRelease={saveCalls,maxActive};releaseFirst();await Promise.all([first,second]);"
+        "console.log(JSON.stringify({beforeRelease,saveCalls,maxActive,refreshCalls,expected,modified:workspace.detailState.expectedModified,pending:workspace.materialFeeState.pendingWrites.size}));"
+    )
+
+    assert result == {
+        "beforeRelease": {"saveCalls": 1, "maxActive": 1},
+        "saveCalls": 2,
+        "maxActive": 1,
+        "refreshCalls": 1,
+        "expected": ["m1", "m2"],
+        "modified": "m3",
+        "pending": 0,
+    }
+
+
+def test_fee_workspace_drops_queued_write_after_batch_switch() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents'};"
+        "const oldState={batchName:'B-1',pendingWrites:new Set(),feeDrafts:{}};workspace.materialFeeState=oldState;"
+        "let releaseFirst;const firstGate=new Promise((resolve)=>{releaseFirst=resolve});let firstCalls=0,secondCalls=0;"
+        "const first=workspace.trackMaterialFeeWrite(async()=>{firstCalls+=1;await firstGate;return true});"
+        "const second=workspace.trackMaterialFeeWrite(async()=>{secondCalls+=1;return true});"
+        "await new Promise((resolve)=>setImmediate(resolve));workspace.detailState={batchName:'B-2',versionName:'V-2',tab:'documents'};"
+        "workspace.materialFeeState={batchName:'B-2',pendingWrites:new Set(),feeDrafts:{}};releaseFirst();"
+        "const values=await Promise.all([first,second]);"
+        "console.log(JSON.stringify({firstCalls,secondCalls,values,oldPending:oldState.pendingWrites.size}));"
+    )
+
+    assert result == {"firstCalls": 1, "secondCalls": 0, "values": [True, False], "oldPending": 0}
+
+
+def test_fee_workspace_warns_when_shared_refresh_fails_after_save() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents'};"
+        "workspace.materialFeeState={batchName:'B-1',pendingWrites:new Set(),feeDrafts:{},cacheDirty:true};"
+        "let refreshCalls=0;workspace.loadMaterialFeeWorkspace=async()=>{refreshCalls+=1;return false};"
+        "const saved=await workspace.trackMaterialFeeWrite(async()=>true);"
+        "console.log(JSON.stringify({saved,refreshCalls,alerts:global.alerts,pending:workspace.materialFeeState.pendingWrites.size}));"
+    )
+
+    assert result == {
+        "saved": True,
+        "refreshCalls": 1,
+        "alerts": [{"message": "数据已保存，但最新状态读取失败，请点击重试。", "indicator": "orange"}],
+        "pending": 0,
+    }
+
+
+def test_fee_workspace_stale_shared_refresh_does_not_warn_newer_request() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents'};"
+        "workspace.materialFeeState={batchName:'B-1',requestId:1,pendingWrites:new Set(),feeDrafts:{},cacheDirty:true};"
+        "let releaseRefresh;workspace.loadMaterialFeeWorkspace=async()=>{workspace.materialFeeState.requestId+=1;"
+        "await new Promise((resolve)=>{releaseRefresh=resolve});return false};"
+        "const saving=workspace.trackMaterialFeeWrite(async()=>true);await new Promise((resolve)=>setImmediate(resolve));"
+        "workspace.materialFeeState.requestId+=1;releaseRefresh();const saved=await saving;"
+        "console.log(JSON.stringify({saved,alerts:global.alerts,requestId:workspace.materialFeeState.requestId,pending:workspace.materialFeeState.pendingWrites.size}));"
+    )
+
+    assert result == {"saved": True, "alerts": [], "requestId": 3, "pending": 0}
+
+
+def test_fee_dialog_save_joins_inline_write_queue_and_shared_refresh() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "workspace.materialFeeState={batchName:'B-1',pendingWrites:new Set(),feeDrafts:{}};workspace.ensureEditSession=async()=>true;"
+        "let releaseFirst;const firstGate=new Promise((resolve)=>{releaseFirst=resolve});let saveCalls=0,refreshCalls=0,hidden=0;const expected=[];"
+        "workspace.call=async(endpoint,args)=>{if(!endpoint.endsWith('save_fee'))throw new Error(endpoint);saveCalls+=1;expected.push(args.expected_modified);return {ok:true,batch_modified:'m3'}};"
+        "workspace.loadMaterialFeeWorkspace=async()=>{refreshCalls+=1;workspace.materialFeeState.cacheDirty=false;return true};"
+        "const first=workspace.trackMaterialFeeWrite(async()=>{await firstGate;workspace.updateMaterialFeeExpectedModified({batch_modified:'m2'});return true});"
+        "const dialog={get_values:()=>({amount_status:'ACTUAL',amount:'25',currency:'RMB',scope_type:'ALL_ITEMS',included_in_fee_key:'',remark:''}),"
+        "$wrapper:{find:()=>({toArray:()=>[]})},hide:()=>{hidden+=1}};"
+        "const fee={logical_fee_key:'fee-a',expense_category:'A 费用',amount_status:'ACTUAL',amount:'20',currency:'RMB',allocation_basis:'goods_value',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "const dialogSave=workspace.saveMaterialFeeDialog(dialog,fee);await new Promise((resolve)=>setImmediate(resolve));const beforeRelease={saveCalls,refreshCalls};"
+        "releaseFirst();await Promise.all([first,dialogSave]);"
+        "console.log(JSON.stringify({beforeRelease,saveCalls,refreshCalls,expected,hidden,modified:workspace.detailState.expectedModified,pending:workspace.materialFeeState.pendingWrites.size}));"
+    )
+
+    assert result == {
+        "beforeRelease": {"saveCalls": 0, "refreshCalls": 0},
+        "saveCalls": 1,
+        "refreshCalls": 1,
+        "expected": ["m2"],
+        "hidden": 1,
+        "modified": "m3",
+        "pending": 0,
+    }
+
+
+def test_fee_status_save_joins_inline_write_queue() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "workspace.detailState={batchName:'B-1',versionName:'V-1',tab:'documents',editToken:'token-1',expectedModified:'m1',header:{modified:'m1'}};"
+        "const fee={logical_fee_key:'fee-a',expense_category:'A 费用',amount_status:'MISSING',amount:'25',currency:'RMB',allocation_basis:'goods_value',scope_type:'ALL_ITEMS',scope_value_json:'[]'};"
+        "workspace.materialFeeState={batchName:'B-1',fees:{fees:[fee]},pendingWrites:new Set(),feeDrafts:{}};workspace.ensureEditSession=async()=>true;"
+        "let releaseFirst;const firstGate=new Promise((resolve)=>{releaseFirst=resolve});let saveCalls=0,refreshCalls=0;const expected=[];"
+        "workspace.call=async(endpoint,args)=>{if(!endpoint.endsWith('save_fee'))throw new Error(endpoint);saveCalls+=1;expected.push(args.expected_modified);return {ok:true,batch_modified:'m3'}};"
+        "workspace.loadMaterialFeeWorkspace=async()=>{refreshCalls+=1;workspace.materialFeeState.cacheDirty=false;return true};"
+        "const first=workspace.trackMaterialFeeWrite(async()=>{await firstGate;workspace.updateMaterialFeeExpectedModified({batch_modified:'m2'});return true});"
+        "const attrs={'data-fee-key':'fee-a','data-original-value':'MISSING'};let value='ESTIMATED',disabled=false;const select={"
+        "attr:(name)=>attrs[name],val(next){if(arguments.length){value=next;return this}return value},prop(name,next){if(name==='disabled')disabled=next;return this}};"
+        "const statusSave=workspace.changeMaterialFeeStatus(select);await new Promise((resolve)=>setImmediate(resolve));const beforeRelease={saveCalls,refreshCalls};"
+        "releaseFirst();await Promise.all([first,statusSave]);"
+        "console.log(JSON.stringify({beforeRelease,saveCalls,refreshCalls,expected,modified:workspace.detailState.expectedModified,disabled,pending:workspace.materialFeeState.pendingWrites.size}));"
+    )
+
+    assert result == {
+        "beforeRelease": {"saveCalls": 0, "refreshCalls": 0},
+        "saveCalls": 1,
+        "refreshCalls": 1,
+        "expected": ["m2"],
+        "modified": "m3",
+        "disabled": True,
+        "pending": 0,
+    }
 
 
 def test_fee_workspace_edit_session_acquire_is_single_flight() -> None:
@@ -1650,6 +1796,22 @@ console.log(JSON.stringify({endpoint,args,modified:workspace.detailState.expecte
     assert result["modified"] == "M2"
     assert float(result["batch"]["estimated_total_cost_rmb"]) == 64800
     assert result["batch"]["status"] == "Calculated"
+
+
+def test_cost_trial_requests_use_unified_transport_without_legacy_inline_option():
+    source = (PARTS / "78-material-fee-workspace.js").read_text(encoding="utf-8")
+    endpoints = [
+        "start_cost_trial_ai_review",
+        "get_cost_trial_ai_review_status",
+        "preview_cost_trial",
+        "confirm_cost_trial",
+        "discard_cost_trial_ai_review",
+    ]
+
+    for endpoint in endpoints:
+        matches = list(re.finditer(rf'this\.call\("overseas_costing\.api\.calculate\.{endpoint}"', source))
+        assert matches, endpoint
+    assert "inlineErrors" not in source
 
 
 def test_local_packing_attachment_previews_exact_sheet_without_dingtalk_download():

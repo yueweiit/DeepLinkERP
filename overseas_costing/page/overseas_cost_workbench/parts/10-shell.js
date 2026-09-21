@@ -91,6 +91,8 @@ class OverseasCostWorkbench {
     };
     this.resultPreviewCache = new Map();
     this._resultPreviewScrollCleanup = null;
+    this._releaseMonitorActive = false;
+    this._releaseMonitorGeneration = 0;
     this.detailState = {
       batchName: this.viewState.batch,
       versionName: "",
@@ -105,7 +107,7 @@ class OverseasCostWorkbench {
     };
   }
 
-  init() {
+  async init() {
     this.resetDeskLayoutClasses();
     this.prepareWorkbenchContainer();
     this.page = frappe.ui.make_app_page({
@@ -117,6 +119,8 @@ class OverseasCostWorkbench {
     this.addActions();
     this.renderShell();
     this.bindEvents();
+    await this.initializeWorkbenchRelease();
+    if (this.releaseBlocked) return;
     this.loadBusinessEntityOptions();
     this.loadBatches();
     this.recordUsage("PAGE_VIEW", { remark: "进入海外采购综合成本核算工作台" });
@@ -148,6 +152,7 @@ class OverseasCostWorkbench {
 
   // 离开工作台时恢复上面隐藏的元素，避免影响其它页面。
   restoreDeskChrome() {
+    this.stopWorkbenchReleaseMonitor();
     $(window).off("beforeunload.ocwDetailEdit");
     if (this.releaseEditSession && this.detailState?.editToken) {
       this.releaseEditSession();

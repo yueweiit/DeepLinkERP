@@ -76,5 +76,6 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   hideDeskChromeWhenReady(workbench);
   workbench.applyDeskLayout();
   workbench.applyModuleSidebarPreference();
+  workbench.resumeWorkbenchReleaseMonitor();
   requestAnimationFrame(() => workbench.applyDeskLayout());
 };

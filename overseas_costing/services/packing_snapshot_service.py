@@ -533,6 +533,18 @@ def get_current_packing_snapshot(batch_name: str, version_name: str | None = Non
     if bundle and (bundle['context']['root_kind'] == 'expense' or (bundle['context'].get('packing') or {}).get('selected_source') or effective_source.json_dict(snapshot.get('source_context_json'))):
         context = bundle['context']
         saved = effective_source.json_dict(snapshot.get('source_context_json'))
+        if saved.get('source_lineage'):
+            try:
+                selected = effective_source.validate_packing_source(batch_name, snapshot['source_kind'], snapshot['source_id'],
+                    bundle=bundle, attachment=packing_source_service._attachment_source_v2(batch_name, snapshot['source_id'])
+                    if snapshot['source_kind'] in {'approval_attachment', 'manual_attachment'} else None)
+                current = (selected or {}).get('context') or {}
+                if saved.get('fingerprint') != current.get('fingerprint'):
+                    return None
+                effective_source.require_readable(current)
+            except ValueError:
+                return None
+            return snapshot
         if saved.get('fingerprint') != context['fingerprint'] or not context['approved'] or context['invalid'] or not context['available']:
             return None
     return snapshot
@@ -548,23 +560,26 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
         effective_source.original_source_bundle(batch_name)
         if original_scope else effective_source.current_source_bundle(batch_name)
     )
-    if bundle and (bundle['context'].get('packing') or {}).get('selected_source'):
-        selected=selected_packing_ai_sources(batch_name,bundle)
-        return {'approval_sources':[{k:v for k,v in row.items() if k not in ('scoped_goods','scoped_text','form_fields')} for row in selected],
-                'manual_sources':[],'manual_attachments':[],'wiki_workbooks':[],'source_context':bundle['context']}
-    if bundle and bundle['context']['root_kind'] == 'expense':
-        sources = _bound_material_sources(batch_name, bundle)
+    if bundle and (bundle['context']['root_kind'] == 'expense'
+                   or (bundle['context'].get('packing') or {}).get('selected_source')):
+        sources = _list_material_ai_sources(batch_name, bundle['context'].get('cost_version'),
+                                             original_scope=original_scope)
         # The picker receives descriptors, never raw form/comment content.
-        return {'approval_sources': [{k: v for k, v in row.items() if k not in {'form_fields', 'approval_decisions', 'comment_text'}}
-                    for row in sources if row['source_kind'] not in {'approval_form', 'wiki_sheet'}],
-                'manual_sources': [], 'manual_attachments': [],
+        descriptors = [{k: v for k, v in row.items() if k not in {
+            'form_fields', 'approval_decisions', 'comment_text', 'scoped_goods', 'scoped_text'}}
+            for row in sources]
+        manual = [row for row in descriptors if row['source_kind'] == 'manual_attachment']
+        return {'approval_sources': [row for row in descriptors if row['source_kind'] not in {'approval_form', 'wiki_sheet', 'manual_attachment'}],
+                'manual_sources': manual, 'manual_attachments': manual,
                 'wiki_workbooks': [{'workbook_id': row['source_id'].split(':')[0], 'label': row['source_label'], 'sheets': [row]}
                                    for row in sources if include_wiki and row['source_kind'] == 'wiki_sheet'],
                 'source_context': bundle['context']}
+    if bundle and approval_detail is None:
+        approval_detail = packing_source_service.related_approval_detail(batch_name, bundle=bundle)
     attachment_rows = frappe.get_list(
         "Overseas Cost Attachment",
         filters={"batch": str(batch_name)},
-        fields=["name", "batch", "source_type", "oa_attachment_origin", "attachment_type", "file_name", "file_url", "modified", "parse_result_json"],
+        fields=["name", "batch", "version", "source_type", "oa_attachment_origin", "attachment_type", "file_name", "file_url", "modified", "parse_result_json"],
         limit_page_length=1000,
     )
     manual = []
@@ -572,6 +587,8 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
     approval_by_identity = {}
     approval_by_name = {}
     for row in attachment_rows:
+        if (approval_detail or {}).get('local_only') and not _is_current_local_attachment(row, approval_detail):
+            continue
         if not _is_material_ai_attachment(row.get("file_name")):
             continue
         if str(row.get("source_type") or "").upper() == "OA" and packing_source_service._attachment_is_audit_only(row):
@@ -579,7 +596,9 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
         snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
         archive = snapshot.get("archive") if isinstance(snapshot.get("archive"), dict) else {}
         download = snapshot.get("download") if isinstance(snapshot.get("download"), dict) else {}
-        sheets = _attachment_sheet_names(row)
+        descriptor = snapshot.get('settlement_document') or {}
+        sheets = ([str(table['title']) for table in descriptor.get('tables') or [] if table.get('title')]
+                  if (approval_detail or {}).get('local_only') else _attachment_sheet_names(row))
         item = {
             "source_id": row.get("name"),
             "attachment_name": row.get("name"),
@@ -589,7 +608,8 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
             "download_required": not bool(row.get("file_url")),
             "supported_for_material_import": str(row.get("file_name") or "").lower().endswith((".xlsx", ".xlsm")),
             "attachment_type": row.get("attachment_type") or "",
-            "content_hash": str(download.get("sha256") or archive.get("sha256") or ""),
+            "content_hash": str(download.get("sha256") or archive.get("sha256")
+                                or (descriptor.get('manifest') or {}).get('sha256') or ""),
             "sheets": sheets,
             "source_field": str(snapshot.get("source_field") or ""),
             "workflow_field_id": str(snapshot.get("workflow_field_id") or snapshot.get("component_id") or ""),
@@ -719,6 +739,11 @@ def list_packing_sources(batch_name: str, *, approval_detail: dict | None = None
             "wiki_workbooks": [],
             "source_context": (bundle or {}).get("context") or {},
         }
+    if detail.get('local_only'):
+        from .packing_sheet_cache_service import get_cached_catalog
+        return {**get_cached_catalog(), 'approval_sources': [*approval, *comments],
+                'manual_sources': manual, 'manual_attachments': manual,
+                'source_context': (bundle or {}).get('context') or {}}
     wiki = []
     wiki_error = ""
     try:
@@ -910,6 +935,7 @@ def _list_approval_body_ai_sources(batch_name: str, *, detail: dict | None = Non
             "source_label": f"{title}正文",
             "process_instance_id": instance_id,
             "approval_role": role,
+            "source_context": approval.get("source_context") or {},
             "approval_title": title,
             "process_code": str(approval.get("process_code") or approval.get("process_code_name") or ""),
             "excluded": bool(approval.get("excluded")),
@@ -971,33 +997,63 @@ def selected_packing_ai_sources(batch_name, bundle):
 
 
 def _combine_actual_packing_with_fallbacks(actual_sources, fallback_sources, context):
-    """Keep verified workflow evidence as a lower-priority supplement to an applied match."""
+    """Rank all verified evidence without changing each source's dependency context."""
 
-    from .source_priority_service import is_workflow_packing_attachment, rank_material_packing_sources
+    from .source_priority_service import rank_material_packing_sources
 
     actual = [dict(row or {}) for row in actual_sources or []]
-    identities = {
-        str(row.get('logical_source_id') or row.get('source_id') or '')
-        for row in actual
-    }
+    def identity(row):
+        return (str(row.get('source_kind') or ''),
+                str(row.get('logical_source_id') or row.get('source_id') or ''),
+                str(row.get('sheet_name') or ''))
+    identities = {identity(row) for row in actual}
     supplemental = []
     for source in fallback_sources or []:
-        # Crossing from the currently bound expense back to the original
-        # logistics process is deliberately narrow: only the trusted workflow
-        # packing component may fill gaps. Bodies, comments and manual uploads
-        # stay isolated from the bound source.
-        if not is_workflow_packing_attachment(source):
-            continue
-        identity = str(source.get('logical_source_id') or source.get('source_id') or '')
-        if not identity or identity in identities:
+        source_identity = identity(source)
+        if not source_identity[1] or source_identity in identities:
             continue
         supplemental.append({
             **source,
-            'source_context': context,
             'supplemental_for_actual_packing': True,
         })
-        identities.add(identity)
+        identities.add(source_identity)
     return rank_material_packing_sources([*actual, *supplemental])
+
+
+def _payment_source_contexts(sources, *, store, ledger, batch_name, version_name):
+    """Bind matcher-produced, shipment-scoped evidence to its local dependency root."""
+    from .material_ai_payment_match import _current_logistics
+
+    logistics = _current_logistics(store, ledger, batch_name, version_name)
+    if not logistics:
+        return []
+    result = []
+    for row in sources:
+        selected = row.get('selected_source') or {}
+        source = store.get('source', selected.get('source_id') or '') or {}
+        if (not source or source.get('corp') != logistics.get('corp')
+                or source.get('instance') != row.get('process_instance_id')
+                or source.get('snapshot') != selected.get('source_snapshot')):
+            continue
+        candidates = store.find('freight_candidate', logistics_id=logistics['id'], expense_id=source['id'])
+        if row.get('payment_match_candidate'):
+            candidates = [candidate for candidate in candidates
+                          if candidate.get('id') == row.get('payment_match_candidate_id')
+                          and candidate.get('revision') == row.get('payment_match_candidate_revision')
+                          and row.get('payment_match_version') == version_name]
+        if not candidates:
+            continue
+        context = effective_source.context_for_source(source, None, version_name, batch_name)
+        context['source_lineage'] = {
+            'batch': str(batch_name), 'cost_version': str(version_name),
+            'logistics_source_id': logistics['id'], 'logistics_snapshot': logistics.get('snapshot') or '',
+            'instance_id': source['instance'],
+            'candidate_id': row.get('payment_match_candidate_id') or '',
+            'candidate_revision': row.get('payment_match_candidate_revision') or '',
+        }
+        context['fingerprint'] = effective_source.digest({key: value for key, value in context.items() if key != 'fingerprint'})
+        result.append({**row, 'source_context': context})
+    return result
 
 
 def list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
@@ -1036,9 +1092,11 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
             # it never blocks the remaining workflow sources.
             try:
                 sources=rank_material_packing_sources([
-                    *(source for selected_reference in selected_references for source in preview_sources(
-                        store,ledger,batch_name,selected_version,selected_reference,freight_mode=True,
-                        user_selected=references is not None)),
+                    *_payment_source_contexts(
+                        [source for selected_reference in selected_references for source in preview_sources(
+                            store,ledger,batch_name,selected_version,selected_reference,freight_mode=True,
+                            user_selected=references is not None)],
+                        store=store, ledger=ledger, batch_name=batch_name, version_name=selected_version),
                     *sources,
                 ])
             except (KeyError, TypeError, ValueError):
@@ -1049,9 +1107,9 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
             # text, or confirmation credential can cross this fallback.
             try:
                 sources=rank_material_packing_sources([
-                    *preview_process_sources(
-                        store,ledger,batch_name,selected_version,freight_mode=True
-                    ),
+                    *_payment_source_contexts(preview_process_sources(
+                        store,ledger,batch_name,selected_version,freight_mode=True),
+                        store=store, ledger=ledger, batch_name=batch_name, version_name=selected_version),
                     *sources,
                 ])
             except (KeyError, TypeError, ValueError):
@@ -1063,7 +1121,8 @@ def list_material_ai_sources(batch_name: str, version_name: str | None = None, *
 
 def _list_material_ai_sources(batch_name: str, version_name: str | None = None, *,
                               original_scope: bool = False,
-                              _ignore_effective_context: bool = False) -> list[dict[str, Any]]:
+                              _ignore_effective_context: bool = False,
+                              _approval_detail: dict | None = None) -> list[dict[str, Any]]:
     """Return a stable manifest of every trusted source the material AI task may read."""
 
     if frappe is None:
@@ -1079,12 +1138,17 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             version_name,
             original_scope=original_scope,
             _ignore_effective_context=True,
+            _approval_detail=packing_source_service.related_approval_detail(batch_name, version_name, bundle=bundle),
         )
         return _combine_actual_packing_with_fallbacks(actual, fallbacks, bundle['context'])
     if bundle and bundle['context']['root_kind'] == 'expense':
-        from .source_priority_service import rank_material_packing_sources
-        return rank_material_packing_sources(_bound_material_sources(batch_name, bundle))
-    detail = packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {}
+        fallbacks = _list_material_ai_sources(batch_name, version_name, original_scope=original_scope,
+            _ignore_effective_context=True,
+            _approval_detail=packing_source_service.related_approval_detail(batch_name, version_name, bundle=bundle))
+        return _combine_actual_packing_with_fallbacks(_bound_material_sources(batch_name, bundle), fallbacks, bundle['context'])
+    detail = (_approval_detail if _approval_detail is not None else
+              packing_source_service.related_approval_detail(batch_name, version_name, bundle=bundle) if bundle else
+              packing_source_service.dingtalk_approval_service.get_batch_dingtalk_approval_detail(str(batch_name)) or {})
     packing = list_packing_sources(str(batch_name), approval_detail=detail, include_wiki=False,
                                    original_scope=original_scope,
                                    _ignore_effective_context=_ignore_effective_context)
@@ -1121,6 +1185,7 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             "process_instance_id": str(source.get("process_instance_id") or ""),
             "file_id": str(source.get("file_id") or ""),
             "approval_role": str(source.get("approval_role") or ""),
+            "source_context": source.get("source_context") or {},
             "approval_title": str(source.get("approval_title") or source.get("process_title") or ""),
             "process_code": str(source.get("process_code") or ""),
             "approval_no": str(source.get("approval_no") or source.get("business_id") or ""),
@@ -1146,7 +1211,15 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
                 or source.get("source_hash")
                 or ""
             ),
+            "archive_binding_complete": bool(source.get("archive_binding_complete")),
+            "analysis_only": bool(source.get("analysis_only")),
+            "adoption_restriction": str(source.get("adoption_restriction") or ""),
         }
+        if detail.get('local_only') and not public['source_context'] and kind in {'manual_attachment', 'wiki_sheet'}:
+            public['source_context'] = {'batch': str(batch_name), 'cost_version': detail.get('cost_version') or '',
+                                        'root_kind': 'manual' if kind == 'manual_attachment' else 'wiki',
+                                        'source_lineage': {**(detail.get('source_lineage') or {}), 'instance_id': ''}}
+            public['source_context']['fingerprint'] = effective_source.digest(public['source_context'])
         hash_basis = {
             "source_kind": kind,
             "logical_source_id": logical_source_id,
@@ -1162,9 +1235,17 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
         public["source_hash"] = hashlib.sha256(_json(hash_basis).encode("utf-8")).hexdigest()
         if key in seen:
             # The same OA file can have audit copies and an older usable local
-            # archive. A newer excluded copy must not hide that archive.
+            # archive. Prefer the fully bound immutable archive; database row
+            # order and a newer helper row must never choose the evidence.
             def availability(row):
-                return (not row.get('excluded'), bool(row.get('available')), bool(row.get('can_download')))
+                return (
+                    not row.get('excluded'),
+                    bool(row.get('archive_binding_complete')),
+                    bool(row.get('available')),
+                    bool(row.get('content_hash')),
+                    bool(row.get('can_download')),
+                    str(row.get('source_id') or ''),
+                )
             index = seen[key]
             if availability(public) > availability(result[index]):
                 result[index] = public
@@ -1204,7 +1285,13 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             workbook_id, separator, sheet_id = current_wiki_source.partition(":")
             if not separator or not workbook_id or not sheet_id:
                 raise ValueError("当前装箱计划来源 ID 不合法。")
-            manifest = get_packing_runtime_clients().catalog.get_latest_snapshot(workbook_id, sheet_id) or {}
+            if detail.get('local_only'):
+                from .packing_sheet_cache_service import get_cached_sheet
+                cached = get_cached_sheet(current_wiki_source)
+                manifest = {'content_sha256': cached.get('source_hash'),
+                            'capture_finished_at': (cached.get('source') or {}).get('source_updated_at')}
+            else:
+                manifest = get_packing_runtime_clients().catalog.get_latest_snapshot(workbook_id, sheet_id) or {}
             content_hash = str(manifest.get("content_sha256") or "")
             if not content_hash:
                 raise ValueError("当前装箱计划 Sheet 缺少可验证的归档哈希。")
@@ -1224,6 +1311,7 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
         owning = approval_body_by_instance.get(str(source.get("process_instance_id") or "")) or {}
         packing_fields = {key: value for key, value in (owning.get("form_fields") or {}).items() if "装箱单附件" in key}
         source = {**source, "approval_role": owning.get("approval_role") or source.get("approval_role"),
+                  "source_context": owning.get("source_context") or source.get("source_context") or {},
                   "approval_title": owning.get("approval_title") or source.get("approval_title"),
                   "process_code": owning.get("process_code") or source.get("process_code"),
                   "dedicated_packing": bool(packing_fields and str(source.get("file_name") or source.get("source_label") or "--") in _json(packing_fields))}
@@ -1257,6 +1345,8 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
         if str(source.get("process_instance_id") or "")
     }
     for row in attachment_rows:
+        if detail.get('local_only') and not _is_current_local_attachment(row, detail):
+            continue
         if version_name and row.get("version") and str(row.get("version")) != str(version_name):
             continue
         file_name = str(row.get("file_name") or "")
@@ -1267,6 +1357,20 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             and packing_source_service._attachment_is_audit_only(row)
         )
         snapshot = packing_source_service.import_service._json_loads_dict(row.get("parse_result_json"))
+        archive_binding_complete = bool(
+            str(row.get("source_type") or "").upper() == "OA"
+            and packing_source_service.dingtalk_approval_service.attachment_has_complete_archive_binding(row)
+        )
+        descriptor = snapshot.get("settlement_document") or {}
+        # Older audit-only archives recorded approval_excluded/cost_source_allowed
+        # as adoption policy.  A complete immutable archive may still be read for
+        # preview; current approval validity below remains the analysis gate.
+        analysis_only = bool(
+            audit_only
+            and archive_binding_complete
+            and not descriptor.get("retired")
+            and not descriptor.get("disabled")
+        )
         attachment_instance = str(
             snapshot.get("process_instance_id") or snapshot.get("instance_id") or ""
         )
@@ -1296,6 +1400,7 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             ),
             "source_id": row.get("name"),
             "approval_role": owning_approval.get("approval_role") or "",
+            "source_context": owning_approval.get("source_context") or {},
             "approval_title": owning_approval.get("approval_title") or "",
             "process_code": owning_approval.get("process_code") or "",
             "dedicated_packing": bool(packing_fields and file_name in _json(packing_fields)),
@@ -1316,12 +1421,22 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             "excluded": audit_only or invalid_approval,
             "exclude_reason": (
                 "审计专用附件，不参与资料分析。"
-                if audit_only
+                if audit_only and not analysis_only
                 else "所属审批已失效，不参与资料分析。"
                 if invalid_approval
                 else ""
             ),
-            "content_hash": str(packing_source_service._attachment_hash(row) if row.get("file_url") else (
+            "archive_binding_complete": archive_binding_complete,
+            "analysis_only": analysis_only,
+            "adoption_restriction": (
+                "该附件仅用于 AI 读取和预览，其提案需由其他有效资料或人工确认。"
+                if analysis_only
+                else ""
+            ),
+            "content_hash": str((
+                ((snapshot.get('settlement_document') or {}).get('manifest') or {}).get('sha256')
+                or (snapshot.get('download') or {}).get('sha256') or (snapshot.get('archive') or {}).get('sha256') or ''
+            ) if detail.get('local_only') else packing_source_service._attachment_hash(row) if row.get("file_url") else (
                 (
                     snapshot.get("download")
                     if isinstance(snapshot.get("download"), dict)
@@ -1332,7 +1447,10 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             "source_field": str(snapshot.get("source_field") or ""),
             "workflow_field_id": str(snapshot.get("workflow_field_id") or snapshot.get("component_id") or ""),
         }
-        sheets = _attachment_sheet_names(row) if file_name.lower().endswith((".xlsx", ".xlsm")) else []
+        if analysis_only and not invalid_approval:
+            source["excluded"] = False
+        sheets = ([str(table['title']) for table in (snapshot.get('settlement_document') or {}).get('tables') or [] if table.get('title')]
+                  if detail.get('local_only') else _attachment_sheet_names(row) if file_name.lower().endswith((".xlsx", ".xlsm")) else [])
         if sheets:
             for sheet_name in sheets:
                 append_source(source, sheet_name=sheet_name)
@@ -1340,6 +1458,26 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             append_source(source)
     from .source_priority_service import rank_material_packing_sources
     return rank_material_packing_sources(result)
+
+
+def _is_current_local_attachment(row, detail):
+    """Keep cached files inside the locally verified batch and approval inventory."""
+    if row.get('batch') and str(row['batch']) != str(detail.get('batch') or ''):
+        return False
+    if str(row.get('source_type') or '').upper() != 'OA':
+        return bool(detail.get('cost_version') and str(row.get('version') or '') == detail['cost_version'])
+    meta = effective_source.json_dict(row.get('parse_result_json'))
+    instance = str(meta.get('process_instance_id') or meta.get('instance_id') or '')
+    file_id = str(meta.get('file_id') or '')
+    for approval in [detail.get('main_approval') or {}, *(detail.get('linked_purchase_approvals') or []),
+                     *(detail.get('excluded_linked_purchase_approvals') or [])]:
+        if not instance or instance != approval.get('instance_id'):
+            continue
+        if meta.get('corp_id') and str(meta['corp_id']) != str(approval.get('corp_id') or ''):
+            return False
+        return bool(file_id and any(str(attachment.get('file_id') or '') == file_id
+                                    for attachment in approval.get('attachments') or []))
+    return False
 
 
 def _bound_material_sources(batch_name, bundle):

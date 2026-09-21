@@ -214,17 +214,23 @@
   }
 
   renderBatchDrawerItems(batch, items) {
-    const rows = (items || []).map((item, index) => `
+    const rows = (items || []).map((item, index) => {
+      const adoptedPrice = item.adopted_price || {};
+      const priceSource = adoptedPrice.source_type === "purchase_total_derived"
+        ? '<small class="ocw-result-source">按货值÷采购数量计算</small>'
+        : "";
+      return `
       <tr>
         <td>${this.escape(String(index + 1))}</td>
         <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
         <td>${this.escape(this.formatValue(item.product_name || item.product_name_es || "--"))}</td>
         <td>${this.escape(this.formatValue(item.quantity))}</td>
-        <td>${this.escape(this.formatMoney(item.unit_price))}</td>
-        <td>${this.escape(this.formatValue(item.purchase_currency || "--"))}</td>
+        <td>${this.escape(this.formatMoney(item.adopted_price?.value ?? item.unit_price))}${priceSource}</td>
+        <td>${this.escape(this.formatValue(item.adopted_price?.currency || item.purchase_currency || "--"))}</td>
         <td>${this.escape(this.formatMoney(item.total_unit_rmb || "--"))}</td>
       </tr>
-    `).join("");
+    `;
+    }).join("");
     return `
       <div class="ocw-batch-drawer-section">
         <div class="ocw-batch-drawer-section-head"><h4>物料明细</h4><span>${items.length} 行，完整展示</span></div>

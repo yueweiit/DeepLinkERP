@@ -10,7 +10,7 @@ import json
 from decimal import Decimal
 
 from overseas_costing.services import cost_preview_service, fee_service, fee_status_service
-from overseas_costing.services.material_input_service import present_material_row
+from overseas_costing.services.material_input_service import present_material_row, purchase_value_coverage
 from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
 from overseas_costing.services.transport_fee_service import fee_is_active
 
@@ -86,16 +86,20 @@ def _source_invalid(source: dict, items: list[dict]) -> bool:
     return False
 
 
-def _has_reviewable_goods_value(items: list[dict]) -> bool:
-    """Return whether at least one active row has a trusted shipment value."""
-    for item in items:
-        presented = present_material_row(dict(item or {}))
-        amount = cost_preview_service._decimal(presented.get("shipment_value_rmb"))
-        if amount is not None and (
-            amount > 0 or is_explicit_shipment_zero(presented.get("shipment_valuation"))
-        ):
-            return True
-    return False
+def _saved_result_has_complete_purchase_values(snapshot: dict) -> bool:
+    """A formal review can only start from a complete saved calculation."""
+
+    saved = _dict(snapshot.get("comprehensive_cost"))
+    saved_items = saved.get("items")
+    if not isinstance(saved_items, list) or not saved_items:
+        return False
+    for row in saved_items:
+        amount = cost_preview_service._decimal(row.get("goods_value_rmb"))
+        if amount is None or amount < 0:
+            return False
+        if amount == 0 and not is_explicit_shipment_zero(row.get("valuation_source")):
+            return False
+    return True
 
 
 def _saved_result_matches(snapshot: dict, expected: dict, items: list[dict]) -> bool:
@@ -171,7 +175,7 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
     inputs = project_packing_groups(inputs, groups_from_version(version))["items"]
     inputs.sort(key=lambda row: (cost_preview_service._decimal(row.get("row_no")) or Decimal(0), str(row.get("name") or "")))
-    cost_review_eligible = _has_reviewable_goods_value(inputs)
+    cost_review_eligible = purchase_value_coverage(inputs)["complete"]
     raw_fees = [{field: row.get(field) for field in fee_service._rule_fields()} for row in fees]
     from overseas_costing.services.effective_source_values import source_context_from_items
     composed = fee_service.compose_fee_worklist_rows(raw_fees, mode,source_context=source_context_from_items(inputs))
@@ -183,6 +187,7 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
         snapshot.get("calculation_schema") == 2
         and snapshot.get("input_hash")
         and isinstance(snapshot.get("comprehensive_cost"), dict)
+        and _saved_result_has_complete_purchase_values(snapshot)
         and version.get("calculated_at")
         and snapshot.get("calculated_at")
     )
@@ -234,7 +239,11 @@ def evaluate_review_readiness(*, batch: dict, version: dict, items: list[dict], 
     if len(set(keys)) != len(keys):
         block("STABLE_ITEM_KEY_DUPLICATED")
     for reason in expected["incomplete_reasons"]:
-        code = reason["reason_code"]
+        code = (
+            "GOODS_VALUE_MISSING"
+            if reason.get("field") == "goods_value"
+            else reason["reason_code"]
+        )
         if code == "ESTIMATED_AMOUNT":
             warn(code)
         else:

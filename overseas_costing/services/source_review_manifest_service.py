@@ -51,7 +51,8 @@ def source_parse_method(source: dict) -> str:
         return "SYSTEM_APPROVAL"
     file_name = _text(source.get("file_name") or source.get("source_label")).lower()
     suffix = PurePath(file_name).suffix
-    if kind == "wiki_sheet" or suffix in {".xlsx", ".xlsm"} or (suffix == '.xls' and (source.get('source_context') or {}).get('root_kind')=='expense'):
+    context = source.get('source_context') or {}
+    if kind == "wiki_sheet" or suffix in {".xlsx", ".xlsm"} or (suffix == '.xls' and (context.get('root_kind') == 'expense' or context.get('source_lineage'))):
         return "SYSTEM_EXCEL"
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}:
         return "AI_VISION"
@@ -72,21 +73,39 @@ def prepare_source_manifest(
 
     raw_sources = list(raw_sources or [])
     contexts = [row.get('source_context') or {} for row in raw_sources if (row.get('source_context') or {}).get('root_kind') == 'expense']
+    contexts = contexts or [row['source_context'] for row in raw_sources
+                            if (row.get('source_context') or {}).get('source_lineage')]
     if contexts:
         context = contexts[0]
-        if any((row.get('source_context') or {}).get('fingerprint') != context.get('fingerprint')
-               or (row.get('process_instance_id') != context.get('instance_id')
-                   and not row.get('supplemental_for_actual_packing'))
-               or row.get('source_kind') == 'manual_attachment' for row in raw_sources):
-            raise ValueError('资料来源不属于同一当前采购支出，请刷新来源。')
+        for row in raw_sources:
+            own = row.get('source_context') or {}
+            if (own.get('fingerprint') == context.get('fingerprint')
+                    and row.get('process_instance_id') == context.get('instance_id')
+                    and row.get('source_kind') != 'manual_attachment'):
+                continue
+            lineage = own.get('source_lineage') or {}
+            related = bool(context.get('batch') and context.get('cost_version')
+                and own.get('batch') == context['batch'] == lineage.get('batch')
+                and own.get('cost_version') == context['cost_version'] == lineage.get('cost_version')
+                and lineage.get('logistics_source_id') and lineage.get('logistics_snapshot')
+                and str(row.get('process_instance_id') or '') == str(own.get('instance_id') or '') == str(lineage.get('instance_id') or '')
+                and (not row.get('process_instance_id') or (
+                    own.get('root_source_id') and own.get('source_snapshot')
+                    and str(own.get('corp_id') or '') == str(context.get('corp_id') or ''))))
+            if not related:
+                raise ValueError('资料来源缺少同批次当前有效关联，请刷新来源。')
     prepared: list[dict] = []
     by_id: dict[str, dict] = {}
+    if not any(row.get('analysis_allowed') is not False and not row.get('excluded')
+               and (row.get('available', True) or row.get('can_download')) for row in raw_sources):
+        required = next((row for row in raw_sources if row.get('analysis_required')
+                         and row.get('analysis_allowed') is False), None)
+        if required:
+            from .material_ai_source_dependencies import SourceEligibilityError
+            raise SourceEligibilityError(required.get('analysis_reason') or '资料不可读取。', source=required,
+                code=required.get('analysis_code') or 'SOURCE_UNAVAILABLE')
     for raw in raw_sources or []:
         source = deepcopy(raw or {})
-        if source.get('analysis_allowed') is False and source.get('analysis_required'):
-            from .material_ai_source_dependencies import SourceEligibilityError
-            raise SourceEligibilityError(source.get('analysis_reason') or '必需来源不可读取。', source=source,
-                code=source.get('analysis_code') or 'SOURCE_UNAVAILABLE')
         if source.get('analysis_allowed') is False:
             source.update(excluded=True, exclude_reason=source.get('analysis_reason') or '来源不可读取。')
         public_id, parent_id = stable_source_identity(source)

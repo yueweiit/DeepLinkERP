@@ -714,6 +714,16 @@ def _without_private_trial_fields(value):
 
 
 def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None) -> str:
+    # `spec_model` was added to the formal query in schema 2 so purchase-value
+    # evidence can validate row identity.  Keep the existing snapshot hash
+    # compatible: a genuine identity mismatch changes the effective valuation
+    # and is caught by saved-result verification without staling every legacy
+    # snapshot merely because this previously omitted query field now exists.
+    hash_items = [
+        {key: value for key, value in row.items() if key != "spec_model"}
+        if isinstance(row, dict) else row
+        for row in (items or [])
+    ]
     components = sorted(
         ({field: (row or {}).get(field) for field in FEE_COMPONENT_INPUT_FIELDS}
          for row in (fee_components or [])),
@@ -726,7 +736,7 @@ def cost_input_hash(items, fees, fx_context, transport_mode, fee_components=None
         ),
     )
     return hashlib.sha256(
-        _json(_without_private_trial_fields([items, fees, fx_context, transport_mode, components])).encode()
+        _json(_without_private_trial_fields([hash_items, fees, fx_context, transport_mode, components])).encode()
     ).hexdigest()
 
 
@@ -995,7 +1005,7 @@ class FrappeCostRepository:
 COST_INPUT_FIELDS = [
     *LEGACY_POOL_CURRENCIES,
     'extra_json',
-    "name", "row_no", "stable_line_key", "material_code", "product_name", "unit", "purchase_uom",
+    "name", "row_no", "stable_line_key", "material_code", "product_name", "spec_model", "unit", "purchase_uom",
     "unit_price", "purchase_currency", "source_doc_no",
     "unit_price_uom", "quantity", "actual_shipped_qty", "actual_shipped_qty_mode",
     "actual_shipped_qty_source_revision", "shipped_uom", "goods_value", "net_weight_kg",
@@ -1027,6 +1037,8 @@ def calculate_comprehensive_cost(batch_name, version_name=None, *, edit_token=No
             raise ValueError("只能试算当前版本，请刷新批次。")
         if context.get("version_status") in {"Confirmed", "Archived"} or context.get("confirm_status") == "Confirmed" or context.get("is_locked"):
             raise PermissionError("已确认或归档版本不能覆盖，请先创建调整版本。")
+        from overseas_costing.services.material_input_service import assert_complete_purchase_values
+        assert_complete_purchase_values(items)
         persister = getattr(repo, "persist_fx_resolution", None)
         if fx_resolution and callable(persister):
             persisted_fx = persister(context, fx_resolution) or {}

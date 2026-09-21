@@ -2,18 +2,6 @@
     return `${evidence.file_name || "审批正文"} · ${evidence.sheet || "明细"}${evidence.row != null ? ` · 第 ${evidence.row} 行` : ""}`;
   }
 
-  renderFreightStrip(data) {
-    const unified = Array.isArray(data.payment_claims) || Array.isArray(data.payment_candidates) || !!data.payment_matching;
-    const claims = unified ? (data.payment_claims || []).filter(row => row.active === true
-      || (!Object.hasOwn(row, 'active') && !['revoked', 'inactive'].includes(String(row.status || '').toLowerCase())))
-      : data.freight?.claims || [];
-    const amount = claims.length ? claims.map(r => `${r.applied_amount ?? r.amount} ${r.currency}`).join(" + ") : "待查找／待确认";
-    return `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "历史版本" : "本票"}当前采用${unified ? '实际费用' : '运费'}：${this.escape(amount)}</strong>
-      <small>装箱：${this.escape(data.packing?.message || "保留当前资料，变更单独核对")}</small>
-      ${(data.payment_blocking_reasons || data.freight?.issues || []).map(v => `<small class="ocw-settlement-notice">${this.escape(v)}</small>`).join("")}</div>
-      <div class="ocw-settlement-toolbar">${data.logistics?.open_url ? '<button class="ocw-outline-btn" data-settlement-strip-action="source">打开国际物流原单</button>' : ""}</div></div>`;
-  }
-
   freightMoney(amount, currency) {
     return `${this.escape(amount ?? '待核对')} ${this.escape(currency || '')}`;
   }

@@ -32,10 +32,7 @@ global.crypto={randomUUID:()=> 'REQ'};
 
 def test_standalone_payment_source_button_and_workspace_are_removed():
     run_ui(r'''
-const data={payment_claims:[],payment_candidates:[],payment_matching:{status:'completed'},packing:{message:'保留当前资料'},logistics:{}};
-const html=w.renderFreightStrip(data);
-assert(!html.includes('实际支付流程/装箱资料来源'));
-assert(!html.includes('实际支付流程/装箱变更'));
+assert(!source.includes('renderFreightStrip'));
 assert(!source.includes('renderPaymentSourceWorkspace'));
 assert(!source.includes('preview_payment_source_selection'));
 ''')

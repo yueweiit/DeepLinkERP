@@ -4,6 +4,7 @@ import pytest
 
 from overseas_costing.services.material_import_service import (
     FrappeMaterialImportRepository,
+    _persist_virtual_item_updates,
     apply_material_import,
     apply_wiki_group_allocations,
     build_field_changes,
@@ -968,6 +969,75 @@ def test_excel_supplement_never_overwrites_oa_purchase_facts() -> None:
     ]
 
 
+@pytest.mark.parametrize("existing_value", [None, "", 0, -1])
+def test_local_packing_can_fill_only_missing_or_invalid_goods_value(existing_value) -> None:
+    valuation = {"amount_rmb": "15100", "currency": "RMB", "method": "packing_row_total"}
+    changes = build_field_changes(
+        existing={"goods_value": existing_value},
+        incoming={"goods_value": "15100", "_shipment_valuation": valuation},
+    )
+
+    assert changes == [
+        {"field": "goods_value", "old": existing_value, "new": "15100", "conflict": False}
+    ]
+
+
+@pytest.mark.parametrize("incoming_value", [None, "", 0, -1, "not-a-number"])
+def test_local_packing_invalid_goods_value_never_clears_current_value(incoming_value) -> None:
+    assert build_field_changes(
+        existing={"goods_value": 3200},
+        incoming={
+            "goods_value": incoming_value,
+            "_shipment_valuation": {"amount_rmb": incoming_value, "currency": "RMB"},
+        },
+    ) == []
+
+
+def test_local_packing_never_overwrites_positive_goods_value() -> None:
+    assert build_field_changes(
+        existing={"goods_value": 3200},
+        incoming={
+            "goods_value": 15100,
+            "_shipment_valuation": {"amount_rmb": 15100, "currency": "RMB"},
+        },
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "valuation",
+    [None, {}, {"amount_rmb": 15100, "currency": "USD"}, {"amount_rmb": 99, "currency": "RMB"}],
+)
+def test_local_packing_goods_value_requires_matching_rmb_valuation(valuation) -> None:
+    assert build_field_changes(
+        existing={"goods_value": 0},
+        incoming={"goods_value": 15100, "_shipment_valuation": valuation},
+    ) == []
+
+
+def test_virtual_package_count_uses_existing_metadata_projection_with_source_evidence() -> None:
+    updates = _persist_virtual_item_updates(
+        {"extra_json": '{"ai_row_packing_values":{"packaging_type":"托盘"}}'},
+        {"package_count": "8", "gross_weight_kg": "100"},
+        {
+            "source_kind": "manual_attachment",
+            "source_id": "FILE-1",
+            "source_hash": "a" * 64,
+            "source_rows": [2, 3],
+        },
+    )
+
+    import json
+
+    metadata = json.loads(updates["extra_json"])
+    assert "package_count" not in updates
+    assert updates["gross_weight_kg"] == "100"
+    assert metadata["ai_row_packing_values"] == {
+        "packaging_type": "托盘",
+        "package_count": "8",
+    }
+    assert metadata["material_import_packing_evidence"]["package_count"]["source_id"] == "FILE-1"
+
+
 def test_frappe_default_zero_is_empty_for_positive_supplement_fields() -> None:
     assert build_field_changes(
         existing={"gross_weight_kg": 0.0, "volume_m3": 0},
@@ -1019,6 +1089,84 @@ def test_trusted_preview_binds_batch_version_sheet_and_source_hash() -> None:
     assert claims["version"] == "V1"
     assert claims["sheet"] == "油漆"
     assert claims["source_hash"] == "a" * 64
+
+
+@pytest.mark.parametrize("existing_goods_value, imports_value", [(0, True), (75, False)])
+def test_trusted_local_packing_only_fills_missing_goods_value(
+    existing_goods_value, imports_value
+) -> None:
+    repository = FakeRepository()
+    repository.items[0].update(
+        {
+            "goods_value": existing_goods_value,
+            "actual_shipped_qty": 0,
+            "unit": "桶",
+            "extra_json": "{}",
+        }
+    )
+
+    def resolver(**_kwargs):
+        return {
+            "source_hash": "b" * 64,
+            "source": {
+                "source_kind": "manual_attachment",
+                "source_id": "FILE-PRICE",
+                "source_label": "本地装箱单.xlsx",
+                "sheet_name": "装箱资料",
+            },
+            "preview": {
+                "material_rows": [
+                    {
+                        "source_row": 9,
+                        "source_doc_no": "PO1",
+                        "material_code": "M1",
+                        "quantity": "5",
+                        "unit": "桶",
+                        "unit_price": "10",
+                        "total_amount": "50",
+                        "currency": "RMB",
+                        "currency_evidence": {"kind": "column_header", "raw": "人民币"},
+                    }
+                ]
+            },
+        }
+
+    preview = preview_material_import(
+        "B1",
+        "manual_attachment",
+        "FILE-PRICE",
+        repository=repository,
+        resolver=resolver,
+        signing_key=b"secret",
+    )
+    row = preview["rows"][0]
+    changed_fields = {change["field"] for change in row["changes"]}
+    assert ("goods_value" in changed_fields) is imports_value
+
+    applied = apply_material_import(
+        "B1",
+        preview["preview_revision"],
+        {},
+        "EDIT-1",
+        "BM1",
+        repository=repository,
+        resolver=resolver,
+        signing_key=b"secret",
+    )
+    assert applied["ok"] is True
+    saved = repository.writes[0][1]
+    assert ("_shipment_valuation" in saved) is imports_value
+    if imports_value:
+        assert saved["goods_value"] == "50"
+        assert saved["_shipment_valuation"]["method"] == "packing_row_total"
+        assert saved["_shipment_valuation"]["source_refs"][0] == {
+            "source_id": "FILE-PRICE",
+            "source_kind": "manual_attachment",
+            "source_hash": "b" * 64,
+            "sheet_name": "装箱资料",
+            "source_row": 9,
+            "field_ranges": {},
+        }
 
 
 @pytest.mark.parametrize("source_kind", ["wiki_sheet", "approval_attachment", "manual_attachment"])

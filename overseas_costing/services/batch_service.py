@@ -257,6 +257,11 @@ EXCEL_COLUMNS = [
     {"excel_col": "BE", "fieldname": "transport_mode", "label": "运输方式"},
 ]
 EXCEL_FIELDNAMES = [column["fieldname"] for column in EXCEL_COLUMNS]
+EXPORT_COLUMNS = [
+    *EXCEL_COLUMNS[:4],
+    {"excel_col": "C0", "fieldname": "purchase_price_source", "label": "采购单价来源"},
+    *EXCEL_COLUMNS[4:],
+]
 VIRTUAL_ITEM_FIELDNAMES = frozenset({"package_count", "packaging_type"})
 EXTRA_ITEM_FIELDS = [
     "name",
@@ -1700,8 +1705,8 @@ def get_batch_items(
         batch_fields,
         as_dict=True,
     ) or {}
-    from overseas_costing.services.effective_source_values import project_source_values
-    items = [project_source_values(item) for item in items]
+    from overseas_costing.services.material_input_service import present_material_row
+    items = [present_material_row(item) for item in items]
     from overseas_costing.services.material_packing_group_service import groups_from_version, project_packing_groups
     version_row = frappe.db.get_value("Overseas Cost Version", resolved_version_name,
                                       ["extra_json"], as_dict=True) or {}
@@ -2214,7 +2219,16 @@ def export_current_result_xlsx(batch_names_json=None, transport_label: str | Non
         detail_items = detail.get("items") or []
         group_starts = {}
         for item in detail_items:
-            export_item = dict(item)
+            export_item = _effective_purchase_item(item)
+            adopted = export_item.get("adopted_price") or {}
+            if adopted:
+                export_item["unit_price"] = adopted.get("value")
+                export_item["purchase_currency"] = adopted.get("currency") or export_item.get("purchase_currency")
+                export_item["purchase_price_source"] = (
+                    "按货值÷采购数量计算"
+                    if adopted.get("source_type") == "purchase_total_derived"
+                    else ""
+                )
             group = item.get('packing_group') or {}
             if item.get('packing_group_id'):
                 if int(item.get('packing_group_position') or 0) == 0:
@@ -2227,12 +2241,12 @@ def export_current_result_xlsx(batch_names_json=None, transport_label: str | Non
                     if int(item.get('packing_group_position') or 0) == int(item.get('packing_group_size') or 1) - 1:
                         packing_merge_ranges.append({'start':group_starts.get(item['packing_group_id'], len(export_rows)),
                                                      'end':len(export_rows)})
-            export_rows.append([_export_cell_value(export_item, batch, column) for column in EXCEL_COLUMNS])
+            export_rows.append([_export_cell_value(export_item, batch, column) for column in EXPORT_COLUMNS])
 
     if not export_rows:
         return {"ok": False, "message": "当前批次没有可导出的 SKU 明细。"}
 
-    content = _build_export_xlsx_content(EXCEL_COLUMNS, export_rows, packing_merge_ranges)
+    content = _build_export_xlsx_content(EXPORT_COLUMNS, export_rows, packing_merge_ranges)
     label = _clean_export_filename_part(transport_label or "全部")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"海外采购综合成本核算_{label}_{stamp}.xlsx"
@@ -2384,27 +2398,22 @@ def _positive_decimal(value) -> Decimal | None:
 
 
 def _effective_purchase_item(item: dict) -> dict:
-    """Project a usable purchase price without changing the stored source row."""
+    """Consume the canonical material projection without changing source evidence."""
 
     projected = _effective_calculated_item(item)
-    raw_price = projected.get("unit_price")
-    parsed_price = _finite_decimal(raw_price)
-    if parsed_price is not None and parsed_price > 0:
-        return projected
-    # A zero/blank source price is a placeholder when the same row already has
-    # an RMB total, purchase quantity and purchase unit. Keep full Decimal
-    # precision here; two-decimal rounding belongs only to the UI projection.
-    if not _is_blank(raw_price) and (parsed_price is None or parsed_price < 0):
-        return projected
-    goods_value = _positive_decimal(projected.get("goods_value"))
-    quantity = _positive_decimal(projected.get("quantity"))
-    purchase_uom = str(projected.get("purchase_uom") or projected.get("unit") or "").strip()
-    if goods_value is None or quantity is None or not purchase_uom:
+    from overseas_costing.services.material_input_service import present_material_row
+
+    presented = present_material_row(projected)
+    adopted = presented.get("adopted_price") or {}
+    adopted_value = _finite_decimal(adopted.get("calculation_value") or adopted.get("value"))
+    if adopted_value is None or adopted_value < 0:
         return projected
     return {
         **projected,
-        "unit_price": goods_value / quantity,
-        "purchase_currency": "RMB",
+        "unit_price": adopted_value,
+        "purchase_currency": adopted.get("currency") or projected.get("purchase_currency") or "",
+        "unit_price_uom": adopted.get("unit") or projected.get("unit_price_uom") or "",
+        "adopted_price": adopted,
     }
 
 
@@ -2968,6 +2977,7 @@ def _build_erp_push_payload(
                 "supplier": item.get("supplier") or "",
                 "original_unit_price": formula["original_unit_price"],
                 "purchase_currency": item.get("purchase_currency") or "",
+                "adopted_price": item.get("adopted_price") or {},
                 "comprehensive_unit_price": formula["comprehensive_unit_price"],
                 "outbound_quantity": _round_payload_amount(item.get("actual_shipped_qty")),
                 "source_quantity": _round_payload_amount(item.get("quantity")),

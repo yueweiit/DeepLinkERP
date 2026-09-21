@@ -72,6 +72,25 @@ def test_running_approval_audit_attachment_remains_blocked_for_adoption():
         capture_dependencies(selected, purpose='adoption', **options)
 
 
+def test_legacy_descriptor_audit_only_is_readable_but_not_adoptable():
+    store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
+    _source, selected = restricted_approval_attachment(store, ledger, batch, version)
+    attachment = ledger.get('attachment', selected[0]['source_id'])
+    metadata = json.loads(attachment['parse_result_json'])
+    metadata.pop('approval_excluded', None)
+    metadata.pop('cost_source_allowed', None)
+    metadata['settlement_document']['audit_only'] = True
+    ledger.put('attachment', attachment['name'], {'parse_result_json': dumps(metadata)})
+    options = dict(
+        store=store, ledger=ledger, batch_name=batch['name'], source_context={}
+    )
+
+    dependencies = capture_dependencies(selected, purpose='analysis', **options)
+    assert {row['kind'] for row in dependencies} == {'approval', 'attachment'}
+    with pytest.raises(ValueError, match='已被排除'):
+        capture_dependencies(selected, purpose='adoption', **options)
+
+
 def test_rejected_approval_audit_attachment_remains_blocked_for_analysis():
     store, ledger, batch, version, *_ = settlement_fixture.__wrapped__()
     source, selected = restricted_approval_attachment(store, ledger, batch, version)
@@ -199,6 +218,131 @@ def test_download_identity_can_be_captured_but_is_not_a_final_attachment_depende
     assert dependency_issues({'dependencies': baseline}, store=store, ledger=ledger, batch_name=batch['name'])
 
 
+def test_ensure_local_attachment_rebinds_download_to_canonical_archive(monkeypatch, tmp_path):
+    path = tmp_path / 'fuel.png'
+    path.write_bytes(b'fuel evidence')
+    rows = {
+        'ATT-CANONICAL': {
+            'name': 'ATT-CANONICAL', 'batch': 'B1', 'version': 'V1',
+            'file_name': 'fuel.png', 'file_url': str(path), 'source_type': 'OA',
+            'parse_result_json': json.dumps({
+                'process_instance_id': 'E', 'file_id': 'FILE',
+                'settlement_document': {
+                    'document_id': 'DOC', 'source_id': 'SOURCE',
+                    'fingerprint': 'FINGERPRINT',
+                    'manifest': {
+                        'process_instance_id': 'E', 'file_id': 'FILE',
+                        'sha256': 'a' * 64,
+                    },
+                },
+            }),
+        },
+    }
+
+    class DB:
+        @staticmethod
+        def commit():
+            return None
+
+        @staticmethod
+        def get_value(_doctype, name, _fields, as_dict=False):
+            return rows.get(name)
+
+    monkeypatch.setattr(ai, 'frappe', type('F', (), {'db': DB()})())
+    monkeypatch.setattr(ai.effective_source, 'current_source_bundle', lambda _batch: None)
+
+    from overseas_costing.services import (
+        attachment_parse_service,
+        dingtalk_approval_service,
+        import_service,
+    )
+    monkeypatch.setattr(
+        dingtalk_approval_service,
+        'materialize_batch_dingtalk_attachment',
+        lambda *_args: {'ok': True, 'attachment_name': 'ATT-TEMP', 'created': False},
+    )
+    monkeypatch.setattr(
+        dingtalk_approval_service,
+        'resolve_canonical_batch_attachment',
+        lambda *_args, **_kwargs: rows['ATT-CANONICAL'],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        import_service,
+        'download_oa_form_attachment',
+        lambda name: {'ok': True, 'attachment_name': name},
+    )
+    monkeypatch.setattr(
+        attachment_parse_service,
+        '_resolve_source_file_path',
+        lambda **_kwargs: path,
+    )
+
+    result = ai._ensure_local_attachment({**pending_source(), 'batch': 'B1'})
+
+    assert result['source_id'] == 'ATT-CANONICAL'
+    assert result['name'] == 'ATT-CANONICAL'
+
+
+def test_ensure_local_attachment_marks_incomplete_optional_archive_as_skipped(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / 'fuel.png'
+    path.write_bytes(b'fuel evidence')
+    incomplete = {
+        'name': 'ATT-TEMP', 'batch': 'B1', 'version': 'V1',
+        'file_name': 'fuel.png', 'file_url': str(path), 'source_type': 'OA',
+        'parse_result_json': json.dumps({
+            'process_instance_id': 'E', 'file_id': 'FILE',
+        }),
+    }
+
+    class DB:
+        @staticmethod
+        def commit():
+            return None
+
+        @staticmethod
+        def get_value(_doctype, _name, _fields, as_dict=False):
+            return incomplete
+
+    monkeypatch.setattr(ai, 'frappe', type('F', (), {'db': DB()})())
+    monkeypatch.setattr(ai.effective_source, 'current_source_bundle', lambda _batch: None)
+
+    from overseas_costing.services import (
+        attachment_parse_service,
+        dingtalk_approval_service,
+        import_service,
+    )
+    monkeypatch.setattr(
+        dingtalk_approval_service,
+        'materialize_batch_dingtalk_attachment',
+        lambda *_args: {'ok': True, 'attachment_name': 'ATT-TEMP', 'created': False},
+    )
+    monkeypatch.setattr(
+        dingtalk_approval_service,
+        'resolve_canonical_batch_attachment',
+        lambda *_args, **_kwargs: incomplete,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        import_service,
+        'download_oa_form_attachment',
+        lambda _name: {'ok': True},
+    )
+    monkeypatch.setattr(
+        attachment_parse_service,
+        '_resolve_source_file_path',
+        lambda **_kwargs: path,
+    )
+
+    with pytest.raises(ai.EvidenceReadSkipped) as error:
+        ai._ensure_local_attachment({**pending_source(), 'batch': 'B1'})
+
+    assert error.value.code == 'SOURCE_ARCHIVE_INCOMPLETE'
+    assert '归档绑定不完整' in error.value.safe_text
+
+
 @pytest.mark.parametrize('change', ['', 'during_download', 'during_read'])
 def test_worker_seals_downloaded_file_before_read_and_rechecks_it(monkeypatch, tmp_path, change):
     store, ledger, *_ = settlement_fixture.__wrapped__()
@@ -241,7 +385,7 @@ def test_worker_seals_downloaded_file_before_read_and_rechecks_it(monkeypatch, t
 
     def read_document(**kwargs):
         saved = ai._load_json(repo.run['draft_json'], {})['review_input']['source_dependencies']
-        read_baselines.append(any(row['kind'] == 'attachment' and row['attachment_id'] == local['name'] for row in saved))
+        read_baselines.append({row['kind'] for row in saved})
         if change == 'during_read':
             ledger.put('attachment', local['name'], {'file_name': 'changed.txt'})
         return {'text_content': 'packing details', 'extraction_method': 'text'}
@@ -256,7 +400,9 @@ def test_worker_seals_downloaded_file_before_read_and_rechecks_it(monkeypatch, t
     assert started['status'] == 'QUEUED' and queued == ['RUN-1']
     result = ai.execute_material_ai_fill('RUN-1', repository=repo)
     assert result['status'] == ('STALE' if change else 'READY_WITH_WARNINGS'), repo.run.get('error_message')
-    assert read_baselines == ([] if change == 'during_download' else [True])
+    assert read_baselines == (
+        [] if change == 'during_download' else [{'approval', 'attachment'}]
+    )
     if not change:
         from overseas_costing.services.material_ai_selection_service import material_fingerprint
         final_draft = ai._load_json(repo.run['draft_json'], {})

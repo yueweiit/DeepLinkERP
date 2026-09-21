@@ -168,11 +168,13 @@ def _purchase_total_unit_price(row: dict) -> dict | None:
     if not amount.is_finite() or amount <= 0 or not quantity.is_finite() or quantity <= 0 or not uom:
         return None
     try:
-        value = (amount / quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        calculation_value = amount / quantity
+        value = calculation_value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except InvalidOperation:
         return None
     return {
         "value": format(value, ".2f"),
+        "calculation_value": format(calculation_value, "f"),
         "currency": "RMB",
         "unit": uom,
         "error": "",
@@ -183,6 +185,68 @@ def _purchase_total_unit_price(row: dict) -> dict | None:
             "purchase_quantity": format(quantity.normalize(), "f"),
             "purchase_uom": uom,
         },
+    }
+
+
+def _explicit_purchase_unit_price(row: dict) -> dict | None:
+    """Project a complete stored purchase-price tuple without changing evidence."""
+
+    from overseas_costing.services.material_value_semantics import is_effectively_missing
+
+    if is_effectively_missing("unit_price", row.get("unit_price"), row):
+        return None
+    try:
+        value = Decimal(str(row.get("unit_price")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    currency = str(row.get("purchase_currency") or "").strip().upper()
+    uom = str(row.get("unit_price_uom") or row.get("purchase_uom") or row.get("unit") or "").strip()
+    if not value.is_finite() or value < 0 or not currency or not uom:
+        return None
+    return {
+        "value": format(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), ".2f"),
+        "calculation_value": format(value, "f"),
+        "currency": currency,
+        "unit": uom,
+        "error": "",
+        "source_type": "explicit_purchase_price",
+        "source": str(row.get("source_type") or "ITEM_PURCHASE"),
+        "evidence": {
+            "unit_price": str(row.get("unit_price")),
+            "purchase_currency": currency,
+            "unit_price_uom": uom,
+            "source_doc_no": str(row.get("source_doc_no") or ""),
+        },
+    }
+
+
+def _settlement_unit_price(valuation: dict) -> dict | None:
+    """Project a unit-price valuation only when its complete tuple is present."""
+
+    method = str((valuation or {}).get("method") or "")
+    if method not in {"settlement_expense_unit_price", "settlement_purchase_unit_price"}:
+        return None
+    status = str(valuation.get("status") or "").strip().lower()
+    if valuation.get("error") or status in {"missing", "conflict", "invalid", "stale", "historical_pending"}:
+        return None
+    evidence = valuation.get("input_evidence") or {}
+    try:
+        price = Decimal(str(evidence.get("price")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    currency = str(evidence.get("original_currency") or "").strip().upper()
+    unit = str(evidence.get("price_uom") or "").strip()
+    if not price.is_finite() or price < 0 or not currency or not unit:
+        return None
+    return {
+        "value": format(price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), ".2f"),
+        "calculation_value": format(price, "f"),
+        "currency": currency,
+        "unit": unit,
+        "source_type": "expense" if method == "settlement_expense_unit_price" else "commodity_purchase",
+        "source": evidence.get("purchase_source"),
+        "error": valuation.get("error"),
+        "evidence": evidence.get("price_evidence") or evidence,
     }
 
 
@@ -221,17 +285,74 @@ def present_material_row(item: dict) -> dict:
     valuation = shipment_value(row)
     row['shipment_value_rmb'] = valuation['amount_rmb']
     row['shipment_valuation'] = valuation
-    if (row.get('source_context') or {}).get('root_kind') == 'expense':
-        evidence = valuation.get('input_evidence') or {}
-        row['adopted_price'] = {'value':evidence.get('price'), 'currency':evidence.get('original_currency'),
-                                'unit':evidence.get('price_uom'), 'error':valuation.get('error'),
-                                'source_type':'expense' if valuation.get('method') == 'settlement_expense_unit_price' else 'commodity_purchase',
-                                'source':evidence.get('purchase_source'), 'evidence':evidence.get('price_evidence')}
+    from .purchase_value_evidence import META_KEY, adopted_price
+    fact = object_json(row.get('extra_json')).get(META_KEY)
+    row.pop('adopted_price', None)
+    if fact:
+        row['adopted_price'] = adopted_price(fact, row) or {}
     else:
-        derived_price = _purchase_total_unit_price(row)
-        if derived_price is not None:
-            row['adopted_price'] = derived_price
+        settlement_method = valuation.get('method') in {
+            'settlement_expense_unit_price', 'settlement_purchase_unit_price'
+        }
+        if settlement_method:
+            price = _settlement_unit_price(valuation)
+            if valuation.get('method') == 'settlement_purchase_unit_price' and not valuation.get('trusted_shipment_source'):
+                price = None
+        else:
+            price = _explicit_purchase_unit_price(row) or _purchase_total_unit_price(row)
+        if price is not None:
+            row['adopted_price'] = price
+    if (row.get("adopted_price") or {}).get("source_type") == "purchase_total_derived":
+        row["purchase_price_source"] = "按货值÷采购数量计算"
     return row
+
+
+def purchase_value_coverage(items: list[dict]) -> dict:
+    """Return whether every active material has a current, evidenced value."""
+
+    from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
+
+    active = [
+        dict(row or {})
+        for row in (items or [])
+        if str((row or {}).get("is_excluded") or "").strip().lower()
+        not in {"1", "true", "yes"}
+    ]
+    missing_items = []
+    for raw in active:
+        row = present_material_row(raw)
+        amount = _positive_decimal(row.get("shipment_value_rmb"))
+        valuation = row.get("shipment_valuation") or {}
+        if amount is not None or is_explicit_shipment_zero(valuation):
+            continue
+        missing_items.append(
+            {
+                "name": str(row.get("name") or ""),
+                "stable_line_key": str(row.get("stable_line_key") or ""),
+                "row_no": row.get("row_no"),
+                "material_code": str(row.get("material_code") or ""),
+                "reason_code": str(valuation.get("error") or "GOODS_VALUE_MISSING"),
+            }
+        )
+    return {
+        "complete": bool(active) and not missing_items,
+        "item_count": len(active),
+        "missing_count": len(missing_items),
+        "missing_items": missing_items,
+    }
+
+
+def assert_complete_purchase_values(items: list[dict]) -> dict:
+    """Reject formal calculations until all active shipment values are valid."""
+
+    coverage = purchase_value_coverage(items)
+    if not coverage["item_count"]:
+        raise ValueError("当前批次没有物料，请先补充物料后再试算。")
+    if coverage["missing_count"]:
+        raise ValueError(
+            f"还有 {coverage['missing_count']} 行本次发货货值缺失或失效，请先补齐后再试算。"
+        )
+    return coverage
 
 
 def analyze_material_requirements(items: list[dict], fees: list[dict]) -> dict:

@@ -100,6 +100,94 @@ console.log(JSON.stringify({tab:state.tab,resource:OverseasCostWorkbenchState.de
     }
 
 
+def test_result_preview_uses_server_adopted_price_and_shared_native_scrollbar():
+    source = (PARTS / '35-workbench-view.js').read_text(encoding='utf-8')
+    renderer = source.split('renderBatchResultPreview(data)', 1)[1].split('bindResultPreviewScrollControls', 1)[0]
+    assert 'item.adopted_price' in renderer
+    assert 'data-ocw-scrollbar' in renderer
+    assert 'type="range"' not in renderer
+    assert 'shouldCompactResultPreviewColumns' not in source
+
+
+def test_drawer_and_erp_preview_use_server_adopted_price_projection():
+    drawer = (PARTS / "80-drawer-profit.js").read_text(encoding="utf-8")
+    erp = (PARTS / "30-calculation-erp.js").read_text(encoding="utf-8")
+
+    assert "item.adopted_price?.value ?? item.unit_price" in drawer
+    assert "按货值÷采购数量计算" in drawer
+    assert "item.adopted_price?.value ?? item.original_unit_price" in erp
+    assert "按货值÷采购数量计算" in erp
+
+
+def test_result_and_sku_tables_share_one_scroll_controller_without_geometry_feedback():
+    result_source = (PARTS / '35-workbench-view.js').read_text(encoding='utf-8')
+    sku_source = (PARTS / '82-detail-page.js').read_text(encoding='utf-8')
+    material_source = (PARTS / '78-material-fee-workspace.js').read_text(encoding='utf-8')
+    allocation_source = (PARTS / '76-allocation.js').read_text(encoding='utf-8')
+    material_css = (PARTS / '48-material-fee-workspace.css').read_text(encoding='utf-8')
+    helper_source = (PARTS / '15-horizontal-scroll.js').read_text(encoding='utf-8')
+
+    assert 'bindHorizontalScrollController' in helper_source
+    assert 'shouldCompactResultPreviewColumns' not in result_source
+    assert 'shouldCompactSkuColumns' not in sku_source
+    assert 'bindHorizontalScrollController' in result_source
+    assert 'bindHorizontalScrollController' in sku_source
+    assert 'bindHorizontalScrollController' in material_source
+    assert 'bindHorizontalScrollController' in allocation_source
+    assert 'const bindPair =' not in allocation_source
+    assert 'compactWidth' not in material_source
+    assert '--mf-grid-reduction' not in material_css
+    assert 'column.style.width' not in helper_source
+
+
+def test_shared_scroll_controller_does_not_cancel_smooth_button_scroll_with_feedback():
+    helper_path = json.dumps(str(PARTS / "15-horizontal-scroll.js"))
+    script = f"""
+const fs=require('fs');
+const helper=fs.readFileSync({helper_path},'utf8');
+const Controller=Function('return class Controller {{'+helper+'}}')();
+const eventQueue=[]; const frames=[];
+global.window={{
+  requestAnimationFrame:fn=>{{frames.push(fn);return frames.length;}}, cancelAnimationFrame:()=>{{}},
+  addEventListener:()=>{{}}, removeEventListener:()=>{{}}
+}};
+global.ResizeObserver=undefined;
+class Target {{
+  constructor(clientWidth,scrollWidth){{this.clientWidth=clientWidth;this.scrollWidth=scrollWidth;this._left=0;this.listeners={{}};this.disabled=false;this.style={{}};this.classList={{toggle:()=>{{}}}};}}
+  get scrollLeft(){{return this._left;}}
+  set scrollLeft(value){{this.smoothTarget=null;this._left=Math.max(0,Math.min(value,this.scrollWidth-this.clientWidth));eventQueue.push(()=>this.emit('scroll'));}}
+  addEventListener(name,fn){{(this.listeners[name]??=[]).push(fn);}}
+  removeEventListener(){{}}
+  emit(name){{for(const fn of this.listeners[name]||[])fn();}}
+  querySelector(){{return null;}}
+  scrollBy({{left}}){{this.smoothTarget=Math.max(0,Math.min(this._left+left,this.scrollWidth-this.clientWidth));this._left=Math.min(this.smoothTarget,this._left+1);eventQueue.push(()=>this.emit('scroll'));}}
+}}
+const flushEvents=()=>{{while(eventQueue.length)eventQueue.shift()();}};
+const flushFrame=()=>{{while(frames.length)frames.shift()();for(const target of [content,bar]){{if(target.smoothTarget!=null){{target._left=target.smoothTarget;target.smoothTarget=null;eventQueue.push(()=>target.emit('scroll'));}}}}flushEvents();}};
+const content=new Target(100,300),bar=new Target(100,300),left=new Target(0,0),right=new Target(0,0),spacer={{style:{{}}}};
+new Controller().bindHorizontalScrollController({{content,scrollbar:bar,spacer,leftButton:left,rightButton:right}});
+flushFrame(); right.emit('click'); flushEvents(); flushFrame();
+const afterRight=content.scrollLeft;
+left.emit('click'); flushEvents(); flushFrame();
+console.log(JSON.stringify({{afterRight,afterLeft:content.scrollLeft,max:content.scrollWidth-content.clientWidth}}));
+"""
+
+    result = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+
+    assert result["afterRight"] > result["max"] * 0.5
+    assert result["afterLeft"] == 0
+
+
+def test_missing_status_copy_uses_danger_color_while_pending_sources_remain_amber():
+    settlement_css = (PARTS / '47-settlement.css').read_text(encoding='utf-8')
+    shell_css = (PARTS / '10-shell.css').read_text(encoding='utf-8')
+
+    assert '.ocw-freight-missing { color: #b42318; }' in settlement_css
+    assert '.ocw-purchase-approval-metric.is-missing strong' in shell_css
+    assert 'color: #b42318;' in shell_css.split('.ocw-purchase-approval-metric.is-missing strong', 1)[1].split('}', 1)[0]
+    assert 'color: #9a6700;' in shell_css.split('.ocw-purchase-approval-metric.is-pending strong', 1)[1].split('}', 1)[0]
+
+
 def test_stale_row_shows_old_result_and_specific_blocker():
     text=run_js("""const v=makeView('pending');console.log(JSON.stringify(v.renderWorkbenchBatchRow({
 name:'B',batch_no:'B',primary_issue:'calculation',primary_action:'recalculate',review_state:'processing',
@@ -296,6 +384,7 @@ console.log(JSON.stringify({calls,rows:v.batches,counts:v.exceptionCounts,review
     ('batch', 'expected_label'),
     [
         ({'status': 'Draft', 'summary_snapshot': {}}, '开始试算'),
+        ({'status': 'Dirty', 'result_is_current': False, 'summary_snapshot': {}}, '开始试算'),
         ({'status': 'Dirty', 'calculated_at': '2026-09-12 15:00:00', 'result_is_current': False}, '重新试算'),
     ],
 )
@@ -465,6 +554,30 @@ console.log(JSON.stringify({task:v.viewState.task,header:v.detailState.header,ca
     assert result['task'] == 'pending'
     assert result['header']['review_blockers'][0]['message'] == '还有 1 行采购单价待补'
     assert any(call['args'].get('task') == 'pending' for call in result['calls'] if call['method'].endswith('get_batches'))
+
+
+def test_failed_recalculation_uses_single_locally_handled_error():
+    result = run_js("""
+global.frappe={show_alert:()=>{}};
+const v=makeView('pending'),calls=[],errors=[];
+const batch={name:'B',current_version:'V',review_state:'processing',status:'Dirty'};
+v.batches=[batch];v.findBatch=()=>batch;
+v.viewState={task:'pending',screen:'detail',batch:'B',tab:'documents',page:1};
+v.detailState={batchName:'B',tab:'documents',header:batch,editToken:'TOKEN',expectedModified:'M1'};
+v.ensureEditSession=async()=>true;v.recordUsage=()=>{};v.showError=error=>errors.push(error.message);
+v.call=async(method,args,freeze=false,options={})=>{
+ calls.push({method,args,freeze,options});
+ if(method.endsWith('recalculate_batch'))throw new Error('还有 2 行本次发货货值缺失或失效，请先补齐后再试算。');
+ return {ok:true};
+};
+await v.recalculate('B');
+console.log(JSON.stringify({calls,errors}));
+""")
+
+    trial_call = next(call for call in result['calls'] if call['method'].endswith('recalculate_batch'))
+    assert trial_call['freeze'] is True
+    assert trial_call['options'] == {}
+    assert result['errors'] == ['还有 2 行本次发货货值缺失或失效，请先补齐后再试算。']
 
 
 def test_processing_detail_renders_authoritative_review_blockers():

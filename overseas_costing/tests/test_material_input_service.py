@@ -5,13 +5,17 @@ from decimal import Decimal
 import json
 from pathlib import Path
 
+import pytest
+
 from overseas_costing.services.material_input_service import (
     GRID_FIELDS,
     analyze_material_requirements,
+    assert_complete_purchase_values,
     build_shipping_quantity_updates,
     ensure_stable_line_key,
     normalize_grid_page,
     present_material_row,
+    purchase_value_coverage,
     resolve_effective_quantity,
 )
 
@@ -132,6 +136,7 @@ def test_missing_purchase_price_uses_purchase_total_and_partial_shipment_is_pror
 
     assert presented["adopted_price"] == {
         "value": "1.22",
+        "calculation_value": "1.215882352941176470588235294",
         "currency": "RMB",
         "unit": "pieza",
         "error": "",
@@ -188,8 +193,95 @@ def test_existing_purchase_price_wins_over_shipment_value_derived_price() -> Non
 
     presented = present_material_row(source)
 
-    assert "adopted_price" not in presented
+    assert presented["adopted_price"]["value"] == "3.50"
+    assert presented["adopted_price"]["calculation_value"] == "3.50"
+    assert presented["adopted_price"]["source_type"] == "explicit_purchase_price"
     assert presented["unit_price"] == "3.50"
+
+
+@pytest.mark.parametrize(
+    ("price_fields", "expected_value", "expected_source"),
+    [
+        (
+            {"unit_price": "3.50", "purchase_currency": "USD", "unit_price_uom": "kg"},
+            "3.50",
+            "explicit_purchase_price",
+        ),
+        (
+            {"unit_price": 0, "purchase_currency": "", "unit_price_uom": ""},
+            "200.00",
+            "purchase_total_derived",
+        ),
+    ],
+)
+def test_payment_bound_local_packing_value_uses_canonical_price_projection(
+    price_fields, expected_value, expected_source
+) -> None:
+    source = {
+        "name": "ITEM-1",
+        "quantity": 4,
+        "purchase_uom": "kg",
+        "unit": "kg",
+        "goods_value": 800,
+        **price_fields,
+        "extra_json": json.dumps({
+            "effective_logistics_source": {
+                "root_kind": "expense",
+                "separate_adoption": True,
+            },
+            "shipment_valuation": {
+                "amount_rmb": "800",
+                "quantity": "4",
+                "uom": "kg",
+                "currency": "RMB",
+                "method": "packing_row_total",
+                "source_refs": [{"source_id": "LOCAL-PACK", "row": 2}],
+            },
+        }),
+    }
+
+    presented = present_material_row(source)
+
+    assert presented["adopted_price"]["value"] == expected_value
+    assert presented["adopted_price"]["source_type"] == expected_source
+
+
+def test_errored_settlement_price_is_not_adopted_or_reused_from_raw_fields() -> None:
+    source = {
+        "name": "ITEM-1",
+        "quantity": 4,
+        "actual_shipped_qty": 4,
+        "shipped_uom": "kg",
+        "purchase_uom": "kg",
+        "unit": "kg",
+        "unit_price": 300,
+        "purchase_currency": "RMB",
+        "unit_price_uom": "kg",
+        "goods_value": 1200,
+        "extra_json": json.dumps({
+            "settlement_cargo": {"quantity": "4", "unit": "kg"},
+            "settlement_valuation": {
+                "amount_rmb": None,
+                "quantity": "4",
+                "uom": "kg",
+                "currency": "RMB",
+                "method": "settlement_expense_unit_price",
+                "status": "conflict",
+                "error": "SETTLEMENT_EXPENSE_PRICE_AMBIGUOUS",
+                "trusted_shipment_source": True,
+                "input_evidence": {
+                    "price": "300",
+                    "original_currency": "RMB",
+                    "price_uom": "kg",
+                    "purchase_source": "PAYMENT-1",
+                },
+            },
+        }),
+    }
+
+    presented = present_material_row(source)
+
+    assert presented.get("adopted_price") in (None, {})
 
 
 def test_grid_pagination_is_bounded_without_silently_skipping_page() -> None:
@@ -362,3 +454,108 @@ def test_bare_legacy_zero_is_missing_but_structured_automatic_zero_is_explicit()
     assert result["rows"]["BARE"]["missing_fields"] == ["goods_value"]
     assert result["rows"]["BARE"]["field_reasons"]["goods_value"][0]["code"] == "GOODS_VALUE_MISSING"
     assert result["rows"]["AUTO"]["missing_fields"] == []
+
+
+def _purchase_value_row(name: str, value: object = "100") -> dict:
+    return {
+        "name": name,
+        "stable_line_key": name,
+        "quantity": 1,
+        "purchase_uom": "件",
+        "actual_shipped_qty_mode": "DEFAULT_PURCHASE",
+        "shipped_uom": "件",
+        "goods_value": value,
+        "extra_json": "{}",
+    }
+
+
+def test_purchase_value_coverage_requires_every_active_row() -> None:
+    result = purchase_value_coverage([
+        _purchase_value_row("VALID", "100"),
+        _purchase_value_row("MISSING", ""),
+        {**_purchase_value_row("EXCLUDED", ""), "is_excluded": 1},
+    ])
+
+    assert result["complete"] is False
+    assert result["item_count"] == 2
+    assert result["missing_count"] == 1
+    assert [row["stable_line_key"] for row in result["missing_items"]] == ["MISSING"]
+
+
+@pytest.mark.parametrize("value", [None, "", "0", 0, "-1"])
+def test_purchase_value_coverage_rejects_blank_plain_zero_and_negative(value) -> None:
+    result = purchase_value_coverage([_purchase_value_row("INVALID", value)])
+
+    assert result["complete"] is False
+    assert result["missing_count"] == 1
+
+
+def test_purchase_value_coverage_accepts_structured_confirmed_zero() -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    row = _purchase_value_row("FREE-SAMPLE", 0)
+    row["extra_json"] = json.dumps({
+        "manual_shipment_valuation": build_manual_shipment_valuation(
+            row, 0, actor="buyer@example.com", reason="免费样品", confirmed_at="2026-09-21 09:00:00"
+        )
+    })
+
+    assert purchase_value_coverage([row]) == {
+        "complete": True,
+        "item_count": 1,
+        "missing_count": 0,
+        "missing_items": [],
+    }
+
+
+def test_purchase_value_coverage_rejects_stale_source_and_expired_manual_confirmation() -> None:
+    from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
+
+    stale_source = _purchase_value_row("STALE-SOURCE", 0)
+    stale_source["extra_json"] = json.dumps({
+        "shipment_valuation": {
+            "amount_rmb": "10",
+            "currency": "RMB",
+            "quantity": "1",
+            "uom": "件",
+            "method": "SYSTEM_EXCEL",
+            "status": "stale",
+            "error": "SHIPMENT_VALUATION_STALE",
+        }
+    })
+    expired_confirmation = _purchase_value_row("EXPIRED-MANUAL", 0)
+    confirmed = build_manual_shipment_valuation(
+        expired_confirmation, 0, actor="buyer@example.com", confirmed_at="2026-09-21 09:00:00"
+    )
+    expired_confirmation["quantity"] = 2
+    expired_confirmation["extra_json"] = json.dumps({"manual_shipment_valuation": confirmed})
+
+    result = purchase_value_coverage([stale_source, expired_confirmation])
+
+    assert result["complete"] is False
+    assert result["missing_count"] == 2
+
+
+def test_purchase_value_coverage_rejects_an_empty_active_batch() -> None:
+    result = purchase_value_coverage([])
+
+    assert result == {
+        "complete": False,
+        "item_count": 0,
+        "missing_count": 0,
+        "missing_items": [],
+    }
+    with pytest.raises(ValueError, match="当前批次没有物料"):
+        assert_complete_purchase_values([])
+
+
+def test_purchase_value_assertion_reports_missing_row_count() -> None:
+    with pytest.raises(
+        ValueError,
+        match="还有 2 行本次发货货值缺失或失效，请先补齐后再试算",
+    ):
+        assert_complete_purchase_values([
+            _purchase_value_row("MISSING-1", ""),
+            _purchase_value_row("MISSING-2", "-1"),
+            _purchase_value_row("VALID", "100"),
+        ])

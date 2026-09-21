@@ -145,9 +145,8 @@ await w.handleFreightAction(state,'freight-save',button({}),noop);assert.equal(c
 ''')
 
 
-def test_corrected_amount_strip_is_current_adoption_and_null_packaging_stays_pending():
+def test_null_packaging_stays_pending():
     run_js(HARNESS + r'''
-const strip=w.renderFreightStrip(data);assert(strip.includes('当前采用运费'));assert(!strip.includes('已审批运费'));
 state.freightTab='packing';state.packingSources=[];state.packingPreview={id:'preview',revision:'r',selection:{can_adopt:true},goods:[{material_code:'SKU-TEST',quantity:1,unit:'件',physical:null,packaging:null}]};
 const html=w.renderFreightContent(data,state);assert(html.includes('待补'));assert(!html.includes('null'));
 ''')

@@ -793,6 +793,96 @@ def test_material_ai_duplicate_audit_copy_cannot_hide_readable_attachment(monkey
         prepare_source_manifest(excluded, selected_source_ids=[selected_id])
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+def test_material_ai_catalog_prefers_fully_bound_archive_over_legacy_helper(monkeypatch, reverse):
+    import json
+    from types import SimpleNamespace
+
+    process_id = 'PROC-MAIN'
+    file_id = 'FILE-1'
+    helper = {
+        'name': 'ATT-TEMP', 'version': 'V1', 'source_type': 'OA',
+        'file_name': 'fuel.png', 'file_url': '/private/files/fuel.png',
+        'modified': '2026-09-21 12:53:11',
+        'parse_result_json': json.dumps({
+            'instance_id': process_id, 'file_id': file_id,
+            'download': {'sha256': 'a' * 64},
+        }),
+    }
+    canonical = {
+        **helper,
+        'name': 'ATT-CANONICAL',
+        'modified': '2026-09-12 18:00:36',
+        'parse_result_json': json.dumps({
+            'process_instance_id': process_id,
+            'file_id': file_id,
+            # Legacy settlement archives persisted these two policy flags when
+            # audit-only evidence was barred from direct adoption.  They must
+            # not also bar the immutable file from read-only AI analysis.
+            'approval_excluded': True,
+            'cost_source_allowed': False,
+            'settlement_document': {
+                'audit_only': True,
+                'document_id': 'DOC-1',
+                'source_id': 'SOURCE-1',
+                'fingerprint': 'DOC-1',
+                'manifest': {
+                    'process_instance_id': process_id,
+                    'file_id': file_id,
+                    'sha256': 'a' * 64,
+                },
+            },
+        }),
+    }
+    rows = [helper, canonical]
+    if reverse:
+        rows.reverse()
+
+    monkeypatch.setattr(service, 'frappe', SimpleNamespace(get_list=lambda *_args, **_kwargs: rows))
+    monkeypatch.setattr(service.effective_source, 'current_source_bundle', lambda *_args: None)
+    monkeypatch.setattr(
+        service.packing_source_service.dingtalk_approval_service,
+        'get_batch_dingtalk_approval_detail',
+        lambda *_args: {},
+    )
+    monkeypatch.setattr(service, 'get_current_packing_snapshot', lambda *_args: {})
+    monkeypatch.setattr(service, '_list_approval_body_ai_sources', lambda *_args, **_kwargs: [{
+        'source_id': 'approval:MAIN:form',
+        'source_kind': 'approval_form',
+        'process_instance_id': process_id,
+        'approval_role': 'international_logistics',
+    }])
+    monkeypatch.setattr(service, 'list_packing_sources', lambda *_args, **_kwargs: {
+        'wiki_workbooks': [],
+        'approval_sources': [{
+            'source_kind': 'approval_attachment',
+            'source_id': 'ATT-TEMP',
+            'attachment_name': 'ATT-TEMP',
+            'source_label': 'fuel.png',
+            'file_name': 'fuel.png',
+            'process_instance_id': process_id,
+            'file_id': file_id,
+            'available': True,
+            'download_required': False,
+        }],
+    })
+    monkeypatch.setattr(service, '_attachment_sheet_names', lambda _row: [])
+    monkeypatch.setattr(service.packing_source_service, '_attachment_hash', lambda _row: 'a' * 64)
+
+    result = service._list_material_ai_sources('B1', 'V1')
+
+    attachments = [
+        row for row in result
+        if row.get('logical_source_id') == f'oa:{process_id}:{file_id}'
+    ]
+    assert len(attachments) == 1
+    assert attachments[0]['source_id'] == 'ATT-CANONICAL'
+    assert attachments[0]['available'] is True
+    assert attachments[0]['excluded'] is False
+    assert attachments[0]['analysis_only'] is True
+    assert attachments[0]['archive_binding_complete'] is True
+
+
 def test_international_logistics_packing_attachment_precedes_approval_body():
     from overseas_costing.services.source_priority_service import material_packing_source_priority
 
@@ -1015,10 +1105,13 @@ def test_multiple_actual_packing_matches_are_ambiguous_and_do_not_outrank_workfl
     assert all(row['read_status'] == 'EXCLUDED' for row in unresolved)
 
 
-def test_selected_actual_packing_keeps_workflow_attachment_as_trusted_fallback():
+def test_selected_actual_packing_keeps_all_locally_verified_related_evidence():
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
 
     context = {
+        'batch': 'B1',
+        'cost_version': 'V1',
+        'corp_id': 'C',
         'root_kind': 'expense',
         'instance_id': 'EXPENSE',
         'fingerprint': 'context-fingerprint',
@@ -1026,6 +1119,10 @@ def test_selected_actual_packing_keeps_workflow_attachment_as_trusted_fallback()
         'approved': True,
         'invalid': False,
     }
+    lineage = {'batch': 'B1', 'cost_version': 'V1', 'logistics_source_id': 'L', 'logistics_snapshot': 'LS'}
+    logistics_context = {'batch': 'B1', 'cost_version': 'V1', 'corp_id': 'C', 'root_kind': 'logistics',
+                         'instance_id': 'LOGISTICS', 'root_source_id': 'L', 'source_snapshot': 'LS',
+                         'source_lineage': {**lineage, 'instance_id': 'LOGISTICS'}, 'fingerprint': 'logistics'}
     actual = [{
         'source_id': 'ACTUAL',
         'logical_source_id': 'ACTUAL',
@@ -1041,24 +1138,29 @@ def test_selected_actual_packing_keeps_workflow_attachment_as_trusted_fallback()
         'logical_source_id': 'oa:LOGISTICS:FILE-1',
         'source_kind': 'approval_attachment',
         'process_instance_id': 'LOGISTICS',
+        'source_context': logistics_context,
         'source_field': '装箱单附件（Excel）',
         'available': True,
     }, {
         'source_id': 'MANUAL',
         'source_kind': 'manual_attachment',
+        'source_context': {'batch': 'B1', 'cost_version': 'V1', 'root_kind': 'manual',
+                           'source_lineage': {**lineage, 'instance_id': ''}},
         'available': True,
     }, {
         'source_id': 'OLD-BODY',
         'source_kind': 'approval_form',
+        'process_instance_id': 'LOGISTICS',
+        'source_context': logistics_context,
         'approval_role': 'international_logistics',
         'available': True,
     }]
 
     combined = service._combine_actual_packing_with_fallbacks(actual, fallbacks, context)
 
-    assert [row['source_id'] for row in combined] == ['ACTUAL', 'FLOW-PACK']
+    assert [row['source_id'] for row in combined] == ['ACTUAL', 'FLOW-PACK', 'OLD-BODY', 'MANUAL']
     assert combined[1]['supplemental_for_actual_packing'] is True
-    assert combined[1]['source_context'] == context
+    assert combined[1]['source_context'] == logistics_context
     manifest = prepare_source_manifest(combined)
     assert all(row['selected'] for row in manifest)
 
