@@ -1,0 +1,40 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Review Round",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "batch",
+  "track_changes": 1,
+  "sort_field": "creation",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version",
+    "round_no",
+    "status",
+    "trial_signature",
+    "returned_by",
+    "returned_at",
+    "resubmitted_by",
+    "resubmitted_at",
+    "resolved_by",
+    "resolved_at"
+  ],
+  "fields": [
+    {"fieldname": "batch", "fieldtype": "Link", "label": "所属批次", "options": "Overseas Cost Batch", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "version", "fieldtype": "Link", "label": "所属版本", "options": "Overseas Cost Version", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "round_no", "fieldtype": "Int", "label": "整改轮次", "reqd": 1, "read_only": 1, "in_list_view": 1},
+    {"fieldname": "status", "fieldtype": "Select", "label": "状态", "options": "Returned\nResubmitted\nResolved", "default": "Returned", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "trial_signature", "fieldtype": "Data", "label": "试算签名", "reqd": 1, "read_only": 1},
+    {"fieldname": "returned_by", "fieldtype": "Link", "label": "退回人", "options": "User", "read_only": 1},
+    {"fieldname": "returned_at", "fieldtype": "Datetime", "label": "退回时间", "read_only": 1},
+    {"fieldname": "resubmitted_by", "fieldtype": "Link", "label": "再次提交人", "options": "User", "read_only": 1},
+    {"fieldname": "resubmitted_at", "fieldtype": "Datetime", "label": "再次提交时间", "read_only": 1},
+    {"fieldname": "resolved_by", "fieldtype": "Link", "label": "完成复核人", "options": "User", "read_only": 1},
+    {"fieldname": "resolved_at", "fieldtype": "Datetime", "label": "完成复核时间", "read_only": 1}
+  ],
+  "permissions": [
+    {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1, "print": 1, "export": 1},
+    {"role": "海外成本核算用户", "read": 1, "write": 1, "create": 1, "print": 1, "export": 1, "report": 1}
+  ]
+}

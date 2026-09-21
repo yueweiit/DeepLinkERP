@@ -1,0 +1,50 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Review Issue",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "description",
+  "track_changes": 1,
+  "sort_field": "creation",
+  "sort_order": "ASC",
+  "field_order": [
+    "batch",
+    "version",
+    "review_round",
+    "order_no",
+    "status",
+    "description",
+    "target_tab",
+    "target_field",
+    "target_row",
+    "target_item",
+    "attachment_manifest_json",
+    "reply",
+    "addressed_by",
+    "addressed_at",
+    "resolved_by",
+    "resolved_at"
+  ],
+  "fields": [
+    {"fieldname": "batch", "fieldtype": "Link", "label": "所属批次", "options": "Overseas Cost Batch", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "version", "fieldtype": "Link", "label": "所属版本", "options": "Overseas Cost Version", "reqd": 1},
+    {"fieldname": "review_round", "fieldtype": "Link", "label": "整改轮次", "options": "Overseas Cost Review Round", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "order_no", "fieldtype": "Int", "label": "顺序", "reqd": 1, "read_only": 1},
+    {"fieldname": "status", "fieldtype": "Select", "label": "状态", "options": "Open\nAddressed\nResolved", "default": "Open", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "description", "fieldtype": "Text", "label": "整改问题", "reqd": 1},
+    {"fieldname": "target_tab", "fieldtype": "Data", "label": "关联页签", "reqd": 0, "read_only": 1},
+    {"fieldname": "target_field", "fieldtype": "Data", "label": "关联字段", "reqd": 0, "read_only": 1},
+    {"fieldname": "target_row", "fieldtype": "Data", "label": "关联行", "reqd": 0, "read_only": 1},
+    {"fieldname": "target_item", "fieldtype": "Link", "label": "关联物料", "options": "Overseas Cost Item", "reqd": 0, "read_only": 1},
+    {"fieldname": "attachment_manifest_json", "fieldtype": "Long Text", "label": "附件清单 JSON", "read_only": 1},
+    {"fieldname": "reply", "fieldtype": "Text", "label": "处理回复"},
+    {"fieldname": "addressed_by", "fieldtype": "Link", "label": "处理人", "options": "User", "read_only": 1},
+    {"fieldname": "addressed_at", "fieldtype": "Datetime", "label": "处理时间", "read_only": 1},
+    {"fieldname": "resolved_by", "fieldtype": "Link", "label": "财务确认人", "options": "User", "read_only": 1},
+    {"fieldname": "resolved_at", "fieldtype": "Datetime", "label": "财务确认时间", "read_only": 1}
+  ],
+  "permissions": [
+    {"role": "System Manager", "read": 1, "write": 1, "create": 1, "delete": 1, "print": 1, "export": 1},
+    {"role": "海外成本核算用户", "read": 1, "write": 1, "create": 1, "print": 1, "export": 1, "report": 1}
+  ]
+}
