@@ -2,6 +2,59 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+
+def _oa_attachment_row(name: str, *, version: str = "VERSION-1", archived: bool) -> dict:
+    snapshot = {
+        "process_instance_id": "PROC-MAIN",
+        "file_id": "FILE-1",
+    }
+    if archived:
+        snapshot["settlement_document"] = {
+            "document_id": "DOC-1",
+            "source_id": "SOURCE-1",
+            "fingerprint": "FINGERPRINT-1",
+            "manifest": {
+                "process_instance_id": "PROC-MAIN",
+                "file_id": "FILE-1",
+                "sha256": "a" * 64,
+            },
+        }
+    return {
+        "name": name,
+        "version": version,
+        "file_name": "fuel.png",
+        "file_url": "/private/files/fuel.png",
+        "modified": "2026-09-21 12:53:11",
+        "parse_result_json": json.dumps(snapshot),
+    }
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_local_attachment_map_prefers_current_fully_archived_row_independent_of_db_order(
+    monkeypatch, reverse
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    rows = [
+        _oa_attachment_row("ATT-TEMP", archived=False),
+        _oa_attachment_row("ATT-CANONICAL", archived=True),
+    ]
+    if reverse:
+        rows.reverse()
+
+    class FakeFrappe:
+        @staticmethod
+        def get_list(*_args, **_kwargs):
+            return rows
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+
+    result = service._local_attachment_map("BATCH-1", current_version="VERSION-1")
+
+    assert result[("PROC-MAIN", "FILE-1")]["name"] == "ATT-CANONICAL"
+
 
 def test_batch_detail_normalizes_main_linked_comments_and_archives(monkeypatch) -> None:
     from overseas_costing.services import dingtalk_approval_service as service
@@ -557,6 +610,64 @@ def test_materialize_rechecks_existing_attachment_while_batch_is_locked(monkeypa
 
     assert result == {"ok": True, "attachment_name": "ATT-EXISTING", "created": False}
     assert "FOR UPDATE" in sql_calls[0][0]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_materialize_reuses_canonical_archive_when_temporary_duplicate_exists(
+    monkeypatch, reverse
+) -> None:
+    from overseas_costing.services import dingtalk_approval_service as service
+
+    rows = [
+        _oa_attachment_row("ATT-TEMP", archived=False),
+        _oa_attachment_row("ATT-CANONICAL", archived=True),
+    ]
+    if reverse:
+        rows.reverse()
+
+    class FakeDB:
+        @staticmethod
+        def sql(*_args, **_kwargs):
+            return []
+
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return {"name": "BATCH-1", "current_version": "VERSION-1"}
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return rows
+
+        @staticmethod
+        def get_doc(*_args, **_kwargs):
+            raise AssertionError("existing canonical attachment must be reused")
+
+    monkeypatch.setattr(service, "frappe", FakeFrappe)
+    monkeypatch.setattr(service, "get_batch_dingtalk_approval_detail", lambda _batch: {
+        "ok": True,
+        "main_approval": {
+            "instance_id": "PROC-MAIN",
+            "attachments": [{
+                "file_id": "FILE-1",
+                "attachment_name": "",
+                "archive_status": "archived",
+            }],
+        },
+        "linked_purchase_approvals": [],
+    })
+
+    result = service.materialize_batch_dingtalk_attachment(
+        "BATCH-1", "PROC-MAIN", "FILE-1"
+    )
+
+    assert result == {
+        "ok": True,
+        "attachment_name": "ATT-CANONICAL",
+        "created": False,
+    }
 
 
 def test_materialize_allows_download_from_excluded_approval_audit(monkeypatch) -> None:

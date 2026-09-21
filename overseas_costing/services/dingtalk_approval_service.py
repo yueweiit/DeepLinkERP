@@ -285,23 +285,135 @@ def _timeline(payload: dict, instance_id: str, actors: dict | None = None) -> li
     return result
 
 
-def _local_attachment_map(batch_name: str) -> dict[tuple[str, str], dict]:
+_LOCAL_ATTACHMENT_FIELDS = [
+    "name",
+    "version",
+    "file_name",
+    "file_url",
+    "modified",
+    "parse_result_json",
+]
+
+
+def attachment_has_complete_archive_binding(row: dict | None) -> bool:
+    """Return whether an OA row is bound to one immutable approval archive file."""
+
+    snapshot = _json_dict((row or {}).get("parse_result_json"))
+    descriptor = snapshot.get("settlement_document") or {}
+    manifest = descriptor.get("manifest") or {}
+    if not isinstance(descriptor, dict) or not isinstance(manifest, dict):
+        return False
+    if descriptor.get("retired") or descriptor.get("disabled"):
+        return False
+    process_id = str(snapshot.get("process_instance_id") or "").strip()
+    file_id = str(snapshot.get("file_id") or "").strip()
+    manifest_process_id = str(manifest.get("process_instance_id") or "").strip()
+    manifest_file_id = str(manifest.get("file_id") or "").strip()
+    return bool(
+        descriptor.get("document_id")
+        and descriptor.get("source_id")
+        and descriptor.get("fingerprint")
+        and process_id
+        and file_id
+        and manifest_process_id == process_id
+        and manifest_file_id == file_id
+    )
+
+
+def _attachment_content_hash(row: dict | None) -> str:
+    snapshot = _json_dict((row or {}).get("parse_result_json"))
+    descriptor = snapshot.get("settlement_document") or {}
+    manifest = descriptor.get("manifest") or {}
+    return str(
+        manifest.get("sha256")
+        or snapshot.get("content_sha256")
+        or snapshot.get("sha256")
+        or ""
+    ).strip().lower()
+
+
+def _canonical_attachment_row(rows: list[dict], current_version: str = "") -> dict:
+    """Choose one OA row by stable archive quality, never database row order."""
+
+    current_version = str(current_version or "").strip()
+
+    def rank(row: dict) -> tuple:
+        row_version = str(row.get("version") or "").strip()
+        is_current = not current_version or row_version == current_version
+        has_binding = attachment_has_complete_archive_binding(row)
+        has_file = bool(str(row.get("file_url") or "").strip())
+        has_hash = bool(_attachment_content_hash(row))
+        return (
+            -int(is_current),
+            -int(has_binding),
+            -int(has_file and has_hash),
+            -int(has_file),
+            str(row.get("name") or ""),
+        )
+
+    return sorted((dict(row) for row in rows), key=rank)[0] if rows else {}
+
+
+def _local_attachment_map(
+    batch_name: str, current_version: str = ""
+) -> dict[tuple[str, str], dict]:
     if frappe is None or not hasattr(frappe, "get_list"):
         return {}
     rows = frappe.get_list(
         "Overseas Cost Attachment",
         filters={"batch": batch_name, "source_type": "OA"},
-        fields=["name", "file_name", "file_url", "modified", "parse_result_json"],
+        fields=_LOCAL_ATTACHMENT_FIELDS,
         limit_page_length=1000,
     )
-    result = {}
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for row in rows:
         snapshot = _json_dict(row.get("parse_result_json"))
         file_id = str(snapshot.get("file_id") or "").strip()
         instance_id = str(snapshot.get("process_instance_id") or "").strip()
         if file_id:
-            result[(instance_id, file_id)] = row
-    return result
+            grouped[(instance_id, file_id)].append(row)
+    return {
+        identity: _canonical_attachment_row(candidates, current_version)
+        for identity, candidates in grouped.items()
+    }
+
+
+def resolve_canonical_batch_attachment(
+    batch_name: str,
+    process_instance_id: str,
+    file_id: str,
+    *,
+    current_version: str = "",
+) -> dict:
+    """Resolve an OA attachment after download without creating another row."""
+
+    if frappe is None or not hasattr(frappe, "get_all"):
+        return {}
+    if not current_version:
+        get_value = getattr(getattr(frappe, "db", None), "get_value", None)
+        if callable(get_value):
+            resolved_version = get_value(
+                "Overseas Cost Batch", batch_name, "current_version"
+            )
+            if isinstance(resolved_version, dict):
+                resolved_version = resolved_version.get("current_version")
+            current_version = str(resolved_version or "")
+    rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters={"batch": batch_name, "source_type": "OA"},
+        fields=_LOCAL_ATTACHMENT_FIELDS,
+        limit_page_length=1000,
+    )
+    matches = []
+    for row in rows:
+        snapshot = _json_dict(row.get("parse_result_json"))
+        if (
+            str(snapshot.get("process_instance_id") or "")
+            == str(process_instance_id or "")
+            and str(snapshot.get("file_id") or "") == str(file_id or "")
+        ):
+            matches.append(row)
+    return _canonical_attachment_row(matches, current_version)
 
 
 def _attachment_item(row: dict, local: dict | None, actors: dict | None = None) -> dict:
@@ -438,7 +550,15 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
     batch = frappe.db.get_value(
         "Overseas Cost Batch",
         batch_name,
-        ["name", "batch_no", "source_type", "source_approval_no", "source_instance_id", "extra_json"],
+        [
+            "name",
+            "batch_no",
+            "source_type",
+            "source_approval_no",
+            "source_instance_id",
+            "current_version",
+            "extra_json",
+        ],
         as_dict=True,
     ) or {}
     main_id = str(batch.get("source_instance_id") or "").strip()
@@ -523,7 +643,10 @@ def get_batch_dingtalk_approval_detail(batch_name: str) -> dict:
 
     actors = bundle.get("actors") or {}
     manifests_by_instance: dict[str, list[dict]] = defaultdict(list)
-    local_by_file = _local_attachment_map(batch.get("name") or batch_name)
+    local_by_file = _local_attachment_map(
+        batch.get("name") or batch_name,
+        current_version=str(batch.get("current_version") or ""),
+    )
     field_records_by_instance = {
         instance_id: _attachment_field_records(payload, instance_id)
         for instance_id, payload in instances.items()
@@ -694,22 +817,31 @@ def materialize_batch_dingtalk_attachment(batch_name: str, process_instance_id: 
             "SELECT name FROM `tabOverseas Cost Batch` WHERE name=%s FOR UPDATE",
             (batch_name,),
         )
-    existing_rows = frappe.get_all(
-        "Overseas Cost Attachment",
-        filters={"batch": batch_name, "source_type": "OA"},
-        fields=["name", "parse_result_json"],
-        limit_page_length=1000,
+    get_value = getattr(getattr(frappe, "db", None), "get_value", None)
+    batch = (
+        get_value(
+            "Overseas Cost Batch",
+            batch_name,
+            ["name", "current_version"],
+            as_dict=True,
+        )
+        if callable(get_value)
+        else {}
+    ) or {}
+    existing = resolve_canonical_batch_attachment(
+        batch_name,
+        process_instance_id,
+        file_id,
+        current_version=str(batch.get("current_version") or ""),
     )
-    for row in existing_rows:
-        snapshot = _json_dict(row.get("parse_result_json"))
-        if (
-            str(snapshot.get("process_instance_id") or "") == str(process_instance_id or "")
-            and str(snapshot.get("file_id") or "") == str(file_id or "")
-        ):
-            _backfill_attachment_audit_policy(row.get("name"), source_approval)
-            return {"ok": True, "attachment_name": row.get("name"), "created": False}
+    if existing:
+        _backfill_attachment_audit_policy(existing.get("name"), source_approval)
+        return {
+            "ok": True,
+            "attachment_name": existing.get("name"),
+            "created": False,
+        }
 
-    batch = frappe.db.get_value("Overseas Cost Batch", batch_name, ["name", "current_version"], as_dict=True) or {}
     parse_snapshot = {
         "source": "dingtalk_postgres_archive",
         "approval_excluded": bool(source_approval.get("excluded")),

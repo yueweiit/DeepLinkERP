@@ -4332,6 +4332,15 @@ def _ensure_local_attachment(source: dict) -> dict:
         if not downloaded.get("ok"):
             raise ValueError(str(downloaded.get("message") or "钉钉附件下载失败。"))
         frappe.db.commit()
+        # Materialization may have downloaded a legacy helper row while a
+        # fully bound approval archive row already exists for the same file.
+        # Re-resolve after the commit so dependency sealing uses the immutable
+        # archive identity instead of whichever duplicate row the DB returned.
+        canonical = dingtalk_approval_service.resolve_canonical_batch_attachment(
+            str(source.get("batch") or ""), process_id, file_id
+        )
+        if canonical.get("name"):
+            source_id = str(canonical["name"])
     row = frappe.db.get_value(
         "Overseas Cost Attachment",
         source_id,
@@ -4340,6 +4349,15 @@ def _ensure_local_attachment(source: dict) -> dict:
     ) or {}
     if str(row.get("batch") or "") != str(source.get("batch") or ""):
         raise EvidenceIntegrityError("附件已不属于当前批次，请重新分析。")
+    if (
+        source.get("download_required")
+        and str(row.get("source_type") or "") == "OA"
+        and not dingtalk_approval_service.attachment_has_complete_archive_binding(row)
+    ):
+        raise EvidenceReadSkipped(
+            "SOURCE_ARCHIVE_INCOMPLETE",
+            "附件审批归档绑定不完整，本次已跳过该可选资料。",
+        )
     if bound:
         selected_bundle = effective_source.validate_packing_source(
             str(source.get('batch') or ''), str(source.get('source_kind') or ''),
@@ -5823,7 +5841,28 @@ def execute_material_ai_fill(run_id: str, *, repository: Any | None = None) -> d
                 except ValueError as error:
                     raise EvidenceIntegrityError(str(error)) from error
                 from .logistics_settlement.model import digest
-                merged = {digest({k:v for k,v in d.items() if k != 'fingerprint'}): d for d in dependency_baseline}
+                process_id = str(source.get('process_instance_id') or '')
+                file_id = str(source.get('file_id') or '')
+
+                def replaced_pending(dependency):
+                    return (
+                        dependency.get('kind') == 'pending_attachment'
+                        and str(dependency.get('process_instance_id') or '') == process_id
+                        and str(dependency.get('file_id') or '') == file_id
+                    )
+
+                # The local archive is now the evidence fence. Keeping the
+                # remote pending locator as a second dependency makes this
+                # worker's own materialization look like an external change.
+                remaining = [
+                    dependency
+                    for dependency in dependency_baseline
+                    if not replaced_pending(dependency)
+                ]
+                merged = {
+                    digest({k:v for k,v in dependency.items() if k != 'fingerprint'}): dependency
+                    for dependency in remaining
+                }
                 for dependency in sealed:
                     key = digest({k:v for k,v in dependency.items() if k != 'fingerprint'})
                     if key in merged and merged[key] != dependency:
