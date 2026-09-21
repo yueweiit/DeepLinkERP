@@ -855,3 +855,26 @@ def test_contextual_feedback_hooks_only_use_stable_fee_and_sku_targets():
     assert 'target_field' in review_source
     assert 'target_row' in review_source
     assert 'target_item' in review_source
+
+
+def test_browser_history_navigation_does_not_discard_review_draft_without_confirmation():
+    result = run_js("""
+global.window={location:{href:'/desk/x?task=pending',pathname:'/desk/x'},history:{state:{},pushState:()=>{},replaceState:()=>{}},scrollTo:()=>{}};
+global.requestAnimationFrame=callback=>callback();
+const v=makeView('cost');v.viewState={task:'cost',screen:'detail',batch:'B',tab:'documents',page:1,q:''};
+v.detailState={batchName:'B',tab:'documents',header:{name:'B'},requestId:1,skuRequestId:0,refreshRequestId:0};
+v.getDefaultPullDateRange=()=>({start_date:'2026-07-01',end_date:'2026-09-21'});
+v.confirmDiscardDetailChanges=async()=>{v.confirmed=(v.confirmed||0)+1;return false};
+v.openBatchDetail=async()=>{v.opened=(v.opened||0)+1};v.loadBatches=async()=>{v.loaded=(v.loaded||0)+1};
+await v.handleWorkbenchPopState();
+console.log(JSON.stringify({confirmed:v.confirmed||0,opened:v.opened||0,loaded:v.loaded||0,screen:v.viewState.screen,batch:v.viewState.batch}));
+""")
+    assert result == {'confirmed': 1, 'opened': 0, 'loaded': 0, 'screen': 'detail', 'batch': 'B'}
+
+
+def test_remediation_audit_actions_have_human_readable_labels():
+    source = (PARTS / '90-audit-logs.js').read_text(encoding='utf-8')
+    assert 'REVIEW_RETURN: "退回整改"' in source
+    assert 'REVIEW_REPLY: "整改回复"' in source
+    assert 'REVIEW_RESUBMIT: "提交财务复核"' in source
+    assert 'REVIEW_RESOLVE: "确认整改"' in source

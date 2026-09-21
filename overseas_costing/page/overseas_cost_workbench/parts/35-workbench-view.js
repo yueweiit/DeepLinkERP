@@ -1014,7 +1014,38 @@
 
   async handleWorkbenchPopState() {
     const previousDetailBatch = this.detailState.batchName;
-    this.viewState = OverseasCostWorkbenchState.parseWorkbenchState(window.location.href);
+    const previousViewState = { ...(this.viewState || {}) };
+    const nextViewState = OverseasCostWorkbenchState.parseWorkbenchState(window.location.href);
+    const leavesCurrentDetail = Boolean(
+      previousDetailBatch
+      && (
+        nextViewState.screen !== "detail"
+        || nextViewState.batch !== previousDetailBatch
+        || nextViewState.tab !== this.detailState.tab
+      )
+    );
+    if (leavesCurrentDetail && !(await this.confirmDiscardDetailChanges())) {
+      const restoredUrl = OverseasCostWorkbenchState.buildWorkbenchUrl(window.location.href, {
+        task: previousViewState.task,
+        screen: previousViewState.screen,
+        batch: previousViewState.batch,
+        tab: previousViewState.tab,
+        q: previousViewState.q,
+        page: previousViewState.page,
+        issue: previousViewState.issue,
+        business_type: previousViewState.businessType,
+        subsidiary_code: previousViewState.subsidiaryCode,
+        start_date: previousViewState.startDate,
+        end_date: previousViewState.endDate,
+        erp_status: previousViewState.erpStatus,
+        review_status: previousViewState.reviewStatus,
+        review_warning: previousViewState.reviewWarning,
+      });
+      window.history.pushState({ ...(window.history.state || {}), overseasCostWorkbench: true }, "", restoredUrl);
+      this.viewState = previousViewState;
+      return;
+    }
+    this.viewState = nextViewState;
     const defaults = this.getDefaultPullDateRange();
     Object.assign(this.filters, {
       issue: this.viewState.issue, business_type: this.viewState.businessType,

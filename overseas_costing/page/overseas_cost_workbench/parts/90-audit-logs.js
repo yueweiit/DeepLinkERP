@@ -314,6 +314,10 @@
       SWITCH_VERSION: "切换版本",
       UPLOAD_ATTACHMENT: "上传附件",
       WRITEBACK: "回写",
+      REVIEW_RETURN: "退回整改",
+      REVIEW_REPLY: "整改回复",
+      REVIEW_RESUBMIT: "提交财务复核",
+      REVIEW_RESOLVE: "确认整改",
     };
     return labels[actionType] || actionType || "操作";
   }
