@@ -1189,21 +1189,52 @@ class OverseasCostWorkbench {
       "overseas_costing.api.materials.get_source_ai_review_status",
       "overseas_costing.api.calculate.recalculate_batch",
     ].includes(method);
-    // Frappe's status handlers show a second dialog even when a caller handles the error.
+    // Frappe and jQuery both install global status handlers that show a second
+    // dialog even when a caller handles the error. Use native fetch only for
+    // the explicitly opted-in requests so their owner remains the sole error UI.
     if (!locallyHandledErrorRequest) {
       const response = await frappe.call({ method, args, freeze, ...(options.type ? { type: options.type } : {}) });
       return response.message || {};
     }
     if (freeze) frappe.dom?.freeze?.();
     try {
-      const response = await $.ajax({
-        url: `/api/method/${method}`,
-        type: "POST",
-        data: args,
-        dataType: "json",
-        headers: { "X-Frappe-CSRF-Token": frappe.csrf_token, Accept: "application/json" },
+      const body = new URLSearchParams();
+      Object.entries(args || {}).forEach(([key, value]) => {
+        const encoded = value !== null && typeof value === "object" ? JSON.stringify(value) : value;
+        body.set(key, encoded === null || encoded === undefined ? "" : String(encoded));
       });
-      return response.message || {};
+      const response = await fetch(`/api/method/${method}`, {
+        method: "POST",
+        credentials: "same-origin",
+        body: body.toString(),
+        headers: {
+          "X-Frappe-CSRF-Token": frappe.csrf_token,
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+      });
+      const responseText = await response.text();
+      let payload = {};
+      try {
+        payload = responseText ? JSON.parse(responseText) : {};
+      } catch (_error) {
+        payload = {};
+      }
+      if (!response.ok) {
+        const serverMessage = payload.exception
+          || payload.exc
+          || (typeof payload.message === "string" ? payload.message : "")
+          || response.statusText
+          || `HTTP ${response.status}`;
+        const error = new Error(serverMessage);
+        error.status = response.status;
+        error.statusText = response.statusText;
+        error.responseJSON = payload;
+        error.responseText = responseText;
+        throw error;
+      }
+      return payload.message || {};
     } finally {
       if (freeze) frappe.dom?.unfreeze?.();
     }

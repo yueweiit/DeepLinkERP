@@ -6,7 +6,7 @@
 
 **Architecture:** Reuse the workbench's existing opt-in direct-AJAX transport for endpoints whose errors are rendered locally. Add only the trial calculation endpoint to the allowlist and opt that call into the transport; all other requests keep the default Frappe behavior.
 
-**Tech Stack:** ERPNext/Frappe client JavaScript, jQuery AJAX, pytest-driven Node harness, generated workbench assets.
+**Tech Stack:** ERPNext/Frappe client JavaScript, native Fetch API, pytest-driven Node harness, generated workbench assets.
 
 ---
 
@@ -18,7 +18,7 @@
 
 - [ ] **Step 1: Add a failing transport test**
 
-Extend the direct-AJAX transport parameterization to include `overseas_costing.api.calculate.recalculate_batch`. Assert `frappe.call` is not used, `$.ajax` receives the method URL and request data, and the exact failure object is rethrown.
+Extend the locally handled transport parameterization to include `overseas_costing.api.calculate.recalculate_batch`. Assert neither `frappe.call` nor jQuery AJAX is used, native `fetch` receives the method URL and form data, and the failure response remains available to the workbench error renderer.
 
 - [ ] **Step 2: Add a failing trial-flow test**
 
@@ -30,7 +30,7 @@ Run:
 
 ```bash
 python3 -m pytest \
-  overseas_costing/tests/test_material_ai_error_ui.py::test_inline_error_transport_uses_local_ajax_and_preserves_failure_response \
+  overseas_costing/tests/test_material_ai_error_ui.py::test_inline_error_transport_uses_native_fetch_and_preserves_failure_response \
   overseas_costing/tests/test_review_workbench_ui.py::test_failed_recalculation_uses_single_locally_handled_error -q
 ```
 
@@ -52,7 +52,7 @@ Rename the local boolean to describe locally handled errors and include:
 "overseas_costing.api.calculate.recalculate_batch"
 ```
 
-Continue using direct AJAX only when `options.inlineErrors === true`.
+Continue using the local native-fetch transport only when `options.inlineErrors === true`.
 
 - [ ] **Step 2: Opt the trial request into that transport**
 
@@ -108,4 +108,3 @@ Commit the design, plan, tests, source parts, and generated mirrors, then push t
 - [ ] **Step 4: Monitor and accept production**
 
 Wait for the real `yueweiit/DeepLinkERP` deployment workflow to complete successfully. On a batch with missing shipment values, trigger trial once and verify only the business `操作失败` dialog is visible, with no simultaneous or subsequent `服务器错误` dialog and no saved trial result.
-

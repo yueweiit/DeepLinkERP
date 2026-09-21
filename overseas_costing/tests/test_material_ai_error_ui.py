@@ -450,23 +450,30 @@ def test_material_scrollbar_has_sixteen_pixel_visible_thumb_and_single_track():
     'overseas_costing.api.materials.get_source_ai_review_status',
     'overseas_costing.api.calculate.recalculate_batch',
 ])
-def test_inline_error_transport_uses_local_ajax_and_preserves_failure_response(method):
+def test_inline_error_transport_uses_native_fetch_and_preserves_failure_response(method):
     result = _fee_workspace_result(FIXTURE + f"const method={json.dumps(method)};" + f"""
 const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
 workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
 """ + r"""
 let request,normal=0;frappe.csrf_token='csrf-test';frappe.call=async()=>{normal++;return {message:{ok:true}}};
-const failure={status:403,responseJSON:{message:'没有读取当前批次的权限'}};
-global.$={ajax:async(options)=>{request=options;throw failure}};
-let caught;try{await workspace.call(method,{batch_name:'B1'},false,{inlineErrors:true})}catch(error){caught=error===failure}
-console.log(JSON.stringify({normal,request,caught}));
+global.$={ajax:async()=>{throw new Error('local jQuery transport must not run global Frappe handlers')}};
+global.fetch=async(url,options)=>{request={url,...options};return {ok:false,status:403,statusText:'Forbidden',text:async()=>JSON.stringify({exception:'没有读取当前批次的权限'})}};
+let caught;try{await workspace.call(method,{batch_name:'B1'},false,{inlineErrors:true})}catch(error){caught=error}
+console.log(JSON.stringify({normal,request,caught:{message:caught?.message,status:caught?.status,responseJSON:caught?.responseJSON}}));
 """)
-    assert result['normal'] == 0 and result['caught']
+    assert result['normal'] == 0
     assert result['request']['url'] == '/api/method/' + method
-    assert result['request']['type'] == 'POST'
-    assert result['request']['data'] == {'batch_name': 'B1'}
+    assert result['request']['method'] == 'POST'
+    assert result['request']['credentials'] == 'same-origin'
+    assert result['request']['body'] == 'batch_name=B1'
     assert result['request']['headers']['X-Frappe-CSRF-Token'] == 'csrf-test'
     assert result['request']['headers']['Accept'] == 'application/json'
+    assert result['request']['headers']['Content-Type'].startswith('application/x-www-form-urlencoded')
+    assert result['caught'] == {
+        'message': '没有读取当前批次的权限',
+        'status': 403,
+        'responseJSON': {'exception': '没有读取当前批次的权限'},
+    }
 
 
 def test_other_calls_keep_frappe_transport_even_if_inline_option_is_supplied():
@@ -491,8 +498,9 @@ workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
 """ + r"""
 const events=[];frappe.csrf_token='csrf-test';frappe.dom={freeze:()=>events.push('freeze'),unfreeze:()=>events.push('unfreeze')};
 frappe.call=async()=>{throw new Error('must use local transport')};
-const failure=new Error('blocked');global.$={ajax:async()=>{events.push('request');throw failure}};
-let caught=false;try{await workspace.call('overseas_costing.api.calculate.recalculate_batch',{},true,{inlineErrors:true})}catch(error){caught=error===failure}
+global.$={ajax:async()=>{throw new Error('must not use local jQuery transport')}};
+global.fetch=async()=>{events.push('request');return {ok:false,status:500,statusText:'Server Error',text:async()=>JSON.stringify({exception:'blocked'})}};
+let caught=false;try{await workspace.call('overseas_costing.api.calculate.recalculate_batch',{},true,{inlineErrors:true})}catch(error){caught=error.message==='blocked'}
 console.log(JSON.stringify({events,caught}));
 """)
 

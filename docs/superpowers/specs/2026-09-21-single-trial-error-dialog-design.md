@@ -11,13 +11,12 @@
 ## 方案
 
 - 复用现有 AI 请求的「由页面自行展示错误」传输模式，将 `recalculate_batch` 加入显式允许列表。
-- `recalculate()` 调用试算接口时传入 `inlineErrors: true`，使用本地 `$.ajax` 而不是会自动弹窗的 `frappe.call`。
+- `recalculate()` 调用试算接口时传入 `inlineErrors: true`，使用原生 `fetch`，绕开 `frappe.call` 和 jQuery 全局 500 状态处理。
 - 异常继续原样抛回，仍由 `recalculate()` 现有 `catch` 记录失败并调用 `showError()`，业务文案和审计逻辑不变。
 - 其他接口仍默认使用 `frappe.call`，避免全局吞掉未处理的服务器错误。
 
 ## 验证
 
-- 传输层测试验证 `recalculate_batch + inlineErrors` 只走 `$.ajax`，并保留原异常对象。
+- 传输层测试验证 `recalculate_batch + inlineErrors` 只走原生 `fetch`，并将失败响应保留为工作台可解析的异常对象。
 - 试算流程测试验证请求显式开启 `inlineErrors`，失败后仍只调用一次 `showError()`。
 - 重建两套工作台资源，要求第二次构建返回 `changed: []`，再运行 JS 语法、受影响测试、全量测试和线上弹窗验收。
-
