@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from overseas_costing.services import review_communication_service as service
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MIRROR_ROOT = ROOT / "overseas_costing"
@@ -121,3 +123,197 @@ def test_normalize_issue_draft_requires_text_and_preserves_only_supported_anchor
         "target_item": "",
         "attachments": ["FILE-1", "FILE-2"],
     }
+
+
+class FakeReviewRepository:
+    def __init__(self) -> None:
+        self.context = {
+            "batch_name": "B-1",
+            "version_name": "V-1",
+            "trial_signature": "HASH-1",
+            "result_is_current": True,
+            "cost_review_eligible": True,
+            "confirmed": False,
+        }
+        self.rounds: list[dict] = []
+        self.issues: list[dict] = []
+        self.audits: list[dict] = []
+        self.attached: list[tuple[str, str]] = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def lock_cost_context(self, batch_name, version_name=None):
+        assert batch_name == "B-1"
+        if version_name and version_name != self.context["version_name"]:
+            raise ValueError("版本已变化，请刷新后重试。")
+        return dict(self.context)
+
+    def load_active_round(self, batch_name, for_update=False):
+        del batch_name, for_update
+        return next((row for row in reversed(self.rounds) if row["status"] != "Resolved"), None)
+
+    def next_round_no(self, batch_name):
+        del batch_name
+        return len(self.rounds) + 1
+
+    def validate_anchor(self, batch_name, version_name, draft):
+        del batch_name, version_name
+        if draft.get("target_item") == "FOREIGN":
+            raise ValueError("整改问题关联的物料不属于当前批次。")
+
+    def file_manifest(self, names):
+        if "FOREIGN-FILE" in names:
+            raise ValueError("整改附件不存在或不可用。")
+        return [{"name": name, "file_name": f"{name}.png", "file_url": f"/private/files/{name}.png"} for name in names]
+
+    def insert_round(self, values):
+        row = {**values, "name": f"ROUND-{len(self.rounds) + 1}", "modified": "2026-09-21 10:00:00"}
+        self.rounds.append(row)
+        return row
+
+    def insert_issue(self, values):
+        row = {**values, "name": f"ISSUE-{len(self.issues) + 1}", "modified": "2026-09-21 10:00:00"}
+        self.issues.append(row)
+        return row
+
+    def attach_file(self, file_name, issue_name):
+        self.attached.append((file_name, issue_name))
+
+    def insert_audit(self, **values):
+        self.audits.append(values)
+
+    def get_issue_for_update(self, batch_name, issue_name):
+        return next((row for row in self.issues if row["batch"] == batch_name and row["name"] == issue_name), None)
+
+    def get_round_for_update(self, batch_name, round_name):
+        return next((row for row in self.rounds if row["batch"] == batch_name and row["name"] == round_name), None)
+
+    def list_round_issues(self, round_name, for_update=False):
+        del for_update
+        return [row for row in self.issues if row["review_round"] == round_name]
+
+    def update_issue(self, issue_name, values):
+        row = next(row for row in self.issues if row["name"] == issue_name)
+        row.update(values, modified="2026-09-21 11:00:00")
+        return row
+
+    def update_round(self, round_name, values):
+        row = next(row for row in self.rounds if row["name"] == round_name)
+        row.update(values, modified="2026-09-21 11:00:00")
+        return row
+
+    def list_rounds(self, batch_name):
+        return [row for row in reversed(self.rounds) if row["batch"] == batch_name]
+
+    def list_issues(self, batch_name):
+        return [row for row in self.issues if row["batch"] == batch_name]
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_return_for_remediation_writes_one_round_ordered_issues_and_audit(monkeypatch) -> None:
+    repo = FakeReviewRepository()
+    monkeypatch.setattr(service, "_repository", lambda: repo)
+    monkeypatch.setattr(service, "_current_user", lambda: "finance@example.com")
+    monkeypatch.setattr(service, "_now", lambda: "2026-09-21 10:00:00")
+
+    result = service.return_for_remediation(
+        "B-1",
+        "V-1",
+        "HASH-1",
+        [
+            {"description": "清关费金额不一致", "target_tab": "documents", "target_row": "RULE-1", "attachments": ["FILE-1"]},
+            {"description": "请说明快递费分摊口径"},
+        ],
+    )
+
+    assert result["ok"] is True
+    assert result["round"]["status"] == "Returned"
+    assert [row["order_no"] for row in repo.issues] == [1, 2]
+    assert [row["status"] for row in repo.issues] == ["Open", "Open"]
+    assert repo.attached == [("FILE-1", "ISSUE-1")]
+    assert repo.audits[-1]["action_type"] == "REVIEW_RETURN"
+    assert repo.commits == 1
+    assert repo.rollbacks == 0
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda repo: repo.context.update(trial_signature="CHANGED"), "试算结果已变化"),
+        (lambda repo: repo.rounds.append({"name": "ACTIVE", "batch": "B-1", "version": "V-1", "status": "Returned"}), "已有未完成的整改轮次"),
+    ],
+)
+def test_return_rejects_stale_trial_or_duplicate_active_round(monkeypatch, mutate, message) -> None:
+    repo = FakeReviewRepository()
+    mutate(repo)
+    monkeypatch.setattr(service, "_repository", lambda: repo)
+
+    with pytest.raises(ValueError, match=message):
+        service.return_for_remediation("B-1", "V-1", "HASH-1", [{"description": "问题"}])
+
+    assert repo.issues == []
+    assert repo.commits == 0
+    assert repo.rollbacks == 1
+
+
+def test_address_resubmit_and_finance_resolution_follow_round_state(monkeypatch) -> None:
+    repo = FakeReviewRepository()
+    monkeypatch.setattr(service, "_repository", lambda: repo)
+    monkeypatch.setattr(service, "_current_user", lambda: "buyer@example.com")
+    monkeypatch.setattr(service, "_now", lambda: "2026-09-21 11:00:00")
+    created = service.return_for_remediation("B-1", "V-1", "HASH-1", [{"description": "请修正清关费"}])
+    issue = created["issues"][0]
+
+    addressed = service.address_review_issue("B-1", issue["name"], "已修正并重新试算", issue["modified"])
+    assert addressed["issue"]["status"] == "Addressed"
+    assert addressed["issue"]["addressed_by"] == "buyer@example.com"
+
+    repo.context["trial_signature"] = "HASH-2"
+    resubmitted = service.resubmit_review_round("B-1", created["round"]["name"], created["round"]["modified"])
+    assert resubmitted["round"]["status"] == "Resubmitted"
+    assert resubmitted["round"]["trial_signature"] == "HASH-2"
+
+    monkeypatch.setattr(service, "_current_user", lambda: "finance@example.com")
+    resolved = service.resolve_review_issue("B-1", issue["name"], addressed["issue"]["modified"])
+    assert resolved["issue"]["status"] == "Resolved"
+    assert resolved["round"]["status"] == "Resolved"
+    assert [row["action_type"] for row in repo.audits] == [
+        "REVIEW_RETURN",
+        "REVIEW_REPLY",
+        "REVIEW_RESUBMIT",
+        "REVIEW_RESOLVE",
+    ]
+
+
+def test_resubmit_requires_all_issues_addressed_and_current_trial(monkeypatch) -> None:
+    repo = FakeReviewRepository()
+    monkeypatch.setattr(service, "_repository", lambda: repo)
+    created = service.return_for_remediation("B-1", "V-1", "HASH-1", [{"description": "问题"}])
+
+    with pytest.raises(ValueError, match="全部回复并标记已处理"):
+        service.resubmit_review_round("B-1", created["round"]["name"], created["round"]["modified"])
+
+    repo.issues[0]["status"] = "Addressed"
+    repo.context["result_is_current"] = False
+    with pytest.raises(ValueError, match="重新试算"):
+        service.resubmit_review_round("B-1", created["round"]["name"], created["round"]["modified"])
+
+
+def test_get_review_communication_returns_current_round_and_history(monkeypatch) -> None:
+    repo = FakeReviewRepository()
+    monkeypatch.setattr(service, "_repository", lambda: repo)
+    first = service.return_for_remediation("B-1", "V-1", "HASH-1", [{"description": "第一轮"}])
+    repo.rounds[0]["status"] = "Resolved"
+    repo.issues[0]["status"] = "Resolved"
+    second = service.return_for_remediation("B-1", "V-1", "HASH-1", [{"description": "第二轮"}])
+
+    result = service.get_review_communication("B-1")
+
+    assert result["current_round"]["name"] == second["round"]["name"]
+    assert result["history"][0]["name"] == first["round"]["name"]
+    assert result["projection"]["unresolved_count"] == 1
