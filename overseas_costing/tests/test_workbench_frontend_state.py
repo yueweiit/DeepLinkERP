@@ -524,7 +524,7 @@ def test_fee_workspace_pending_evidence_is_linked_without_inflating_missing_coun
         "const row=workspace.renderMaterialFeeRow({logical_fee_key:'import_tax',expense_category:'\u8fdb\u53e3\u7a0e\u8d39',"
         "amount_status:'ACTUAL',amount:'2000',currency:'RMB',allocation:{status:'ALLOCATED'},"
         "evidence_state:'PENDING',evidence:[{name:'EV-1',evidence_role:'tax_certificate',validation_status:'PENDING'}]});"
-        "console.log(JSON.stringify({metric:html.includes('<span>\u51ed\u8bc1\u5f85\u8865</span><strong>2</strong>'),"
+        "console.log(JSON.stringify({metric:html.includes('<span>\u8d39\u7528\u51ed\u8bc1\u672a\u9f50</span><strong>2</strong>'),"
         "linked:row.includes('is-info')&&row.includes('\u5df2\u5173\u8054'),"
         "pending:row.includes('\u7ec8\u6838\u72b6\u6001\uff1a\u5f85\u6838\u5bf9'),"
         "actions:row.includes('\u786e\u8ba4\u6709\u6548')&&row.includes('\u6807\u8bb0\u65e0\u6548')}));"
@@ -1104,20 +1104,62 @@ def test_fee_workspace_freshness_failure_keeps_last_good_snapshot_visible() -> N
     assert result["cache"]["refresh_error"] == "本地数据库繁忙"
 
 
-def test_calculation_red_cells_alone_use_green_check_when_clear() -> None:
+def test_all_material_fee_metrics_use_buttons_and_green_checks_when_clear() -> None:
     result = _fee_workspace_result(
         "const workspace=Object.create(Harness.prototype);workspace.escape=value=>String(value??'');"
         "console.log(JSON.stringify({"
-        "calculation:workspace.renderMaterialFeeMetric('计算红格',0,'danger',true),"
-        "fee:workspace.renderMaterialFeeMetric('费用未定',0,'danger'),"
-        "nonzero:workspace.renderMaterialFeeMetric('计算红格',2,'danger',true)}));"
+        "materials:workspace.renderMaterialFeeMetric('基础资料待补',0,'danger','materials','装箱单物料信息'),"
+        "fee:workspace.renderMaterialFeeMetric('费用金额待补',0,'danger','fees','运费、税费、清关费等运输费用'),"
+        "evidence:workspace.renderMaterialFeeMetric('费用凭证未齐',0,'warn','fees','运费、税费、关税等费用凭证'),"
+        "estimated:workspace.renderMaterialFeeMetric('实际费用待确认',0,'warn','fees','当前使用暂估金额，等待确认实际金额'),"
+        "nonzero:workspace.renderMaterialFeeMetric('基础资料待补',2,'danger','materials','装箱单物料信息')}));"
     )
 
-    assert "is-cleared" in result["calculation"]
-    assert "✓" in result["calculation"]
-    assert 'aria-label="0 个计算红格，已清零"' in result["calculation"]
-    assert "is-cleared" not in result["fee"] and ">0<" in result["fee"]
+    for key in ("materials", "fee", "evidence", "estimated"):
+        assert result[key].startswith('<button class="ocw-mf-metric is-cleared"')
+        assert 'data-action="mf-jump-status"' in result[key]
+        assert "✓" in result[key]
+        assert "已处理" in result[key]
+        assert ">0<" not in result[key]
+    assert 'data-target="materials"' in result["materials"]
+    assert 'data-target="fees"' in result["fee"]
+    assert "运费、税费、关税等费用凭证" in result["evidence"]
     assert "is-cleared" not in result["nonzero"] and ">2<" in result["nonzero"]
+
+
+def test_material_fee_metric_jump_only_scrolls_and_focuses_target_section() -> None:
+    result = _fee_workspace_result(
+        "const workspace=Object.create(Harness.prototype);"
+        "const state={onlyMissing:false,marker:'unchanged'};workspace.materialFeeState=state;"
+        "const calls=[];const element={scrollIntoView:options=>calls.push(['scroll',options]),focus:options=>calls.push(['focus',options])};"
+        "workspace.$root={find:selector=>({length:1,0:element})};"
+        "const exists=typeof workspace.jumpToMaterialFeeSection==='function';"
+        "if(exists){workspace.jumpToMaterialFeeSection('fees');workspace.jumpToMaterialFeeSection('materials');}"
+        "console.log(JSON.stringify({exists,calls,state,hasHandler:Harness.toString().includes(\"[data-action='mf-jump-status']\")}));"
+    )
+
+    assert result["exists"] is True
+    assert result["hasHandler"] is True
+    assert result["calls"] == [
+        ["scroll", {"behavior": "smooth", "block": "start"}],
+        ["focus", {"preventScroll": True}],
+        ["scroll", {"behavior": "smooth", "block": "start"}],
+        ["focus", {"preventScroll": True}],
+    ]
+    assert result["state"] == {"onlyMissing": False, "marker": "unchanged"}
+
+
+def test_material_fee_metric_styles_keep_buttons_responsive_and_focus_visible() -> None:
+    stylesheet = (PARTS / "48-material-fee-workspace.css").read_text(encoding="utf-8")
+
+    metric_rule = stylesheet.split(".ocw-mf-metric {", 1)[1].split("}", 1)[0]
+    assert "cursor: pointer" in metric_rule
+    assert "font: inherit" in metric_rule
+    assert ".ocw-mf-metric:focus-visible" in stylesheet
+    assert ".ocw-mf-section[data-mf-status-section]" in stylesheet
+    assert "scroll-margin-top" in stylesheet
+    assert "@media (max-width: 1050px)" in stylesheet
+    assert "@media (max-width: 640px)" in stylesheet
 
 
 def test_cost_trial_dialog_defines_visible_brand_buttons_and_narrow_layout() -> None:

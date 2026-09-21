@@ -4203,6 +4203,78 @@ class OverseasCostWorkbench {
     }[issue] || "待核对";
   }
 
+  workbenchRowStatusLabel(batch) {
+    if (batch.review_state === "confirmed") return "已核对";
+    if (batch.review_state === "ready") return "可核对";
+    return {
+      purchase: "资料待补",
+      logistics: "资料待补",
+      calculation: "待重新计算",
+      erp_failed: "ERP 回写失败",
+    }[batch.primary_issue] || "待核对";
+  }
+
+  workbenchReviewTagLabel(code) {
+    const labels = {
+      MATERIAL_ITEMS_REQUIRED: "采购资料待补",
+      GOODS_VALUE_MISSING: "采购资料待补",
+      PURCHASE_SOURCE_INVALID: "采购资料待补",
+      SOURCE_ADOPTION_PENDING: "采购资料待采用",
+      TRANSPORT_MODE_REQUIRED: "运输方式待确认",
+      AMOUNT_MISSING: "费用金额待补",
+      AMOUNT_STATUS_INVALID: "费用状态待确认",
+      FEE_AMOUNT_INVALID: "费用金额待核对",
+      DUPLICATE_LOGICAL_FEE: "重复费用待处理",
+      FX_RATE_MISSING: "费用汇率待补",
+      CURRENCY_UNSUPPORTED: "费用币种待核对",
+      ESTIMATED_AMOUNT: "实际费用待确认",
+      EVIDENCE_MISSING: "费用凭证未齐",
+      FINAL_FEE_REVIEW_REQUIRED: "费用待核对",
+      ALLOCATION_REQUIRED: "分摊资料待补",
+      SHIPPING_UNIT_REQUIRED: "分摊资料待补",
+      ALLOCATION_BASIS_INCOMPLETE: "分摊资料待补",
+      ALLOCATION_DENOMINATOR_ZERO: "分摊资料待补",
+      FEE_SCOPE_EMPTY: "分摊资料待补",
+      FEE_SCOPE_INVALID: "分摊资料待补",
+      DIRECT_ITEM_SCOPE_INVALID: "分摊资料待补",
+      STABLE_ITEM_KEY_REQUIRED: "分摊资料待补",
+      STABLE_ITEM_KEY_DUPLICATED: "分摊资料待补",
+      TEMPORARY_ALLOCATION_BASIS: "分摊资料待补",
+      RESULT_NOT_SAVED: "待重新计算",
+      RESULT_LEGACY: "待重新计算",
+      RESULT_STALE: "待重新计算",
+      SAVED_RESULT_INVALID: "待重新计算",
+      STALE: "待重新计算",
+      purchase: "采购资料待补",
+      logistics: "分摊资料待补",
+      calculation: "待重新计算",
+      erp_failed: "ERP 回写待处理",
+    };
+    return labels[String(code || "")] || "其他问题待处理";
+  }
+
+  renderWorkbenchReviewTags(batch) {
+    const entries = [
+      ...(batch.review_blockers || []).map((row) => ({...row, tone: "danger"})),
+      ...(batch.review_warnings || []).map((row) => ({...row, tone: "warn"})),
+    ];
+    if (!entries.length) {
+      entries.push(...(batch.issue_codes || []).map((code) => ({code, tone: "neutral"})));
+    }
+    const unique = [];
+    const seen = new Set();
+    entries.forEach((row) => {
+      const label = this.workbenchReviewTagLabel(row.code);
+      if (seen.has(label)) return;
+      seen.add(label);
+      unique.push({label, tone: row.tone});
+    });
+    if (!unique.length) return "";
+    const visible = unique.slice(0, 3);
+    const remaining = unique.length - visible.length;
+    return `<div class="ocw-review-tags" aria-label="状态摘要">${visible.map((row) => `<span class="ocw-review-tag is-${this.escape(row.tone)}">${this.escape(row.label)}</span>`).join("")}${remaining ? `<span class="ocw-review-tag is-more">另有 ${remaining} 项</span>` : ""}</div>`;
+  }
+
   resultPreviewCacheKey(batchName, page) {
     const batch = (this.batches || []).find((row) => row.name === batchName);
     const currentVersion = batch?.current_version || "current";
@@ -4551,8 +4623,8 @@ class OverseasCostWorkbench {
     const actionLabels = {review: "核对成本", supplement: "补资料", supplement_fees: "补费用", supplement_allocation: "补分摊数据", recalculate: "重新试算", view: "查看详情", erp_retry: "重试 ERP"};
     const action = actionLabels[batch.primary_action] ? {action: batch.primary_action, label: actionLabels[batch.primary_action]} : OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
     const totalCost = batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
-    const reviewMessages = [...(batch.review_blockers || []), ...(batch.review_warnings || [])].map(row => row.message);
-    const rowStatus = batch.review_state === "confirmed" ? "已核对" : batch.review_state === "ready" ? "可核对" : this.issueLabel(batch.primary_issue);
+    const rowStatus = this.workbenchRowStatusLabel(batch);
+    const reviewTags = this.renderWorkbenchReviewTags(batch);
     const hasSavedResult = Boolean(batch.calculated_at || Number(totalCost || 0) > 0);
     const expanded = this.resultPreviewState?.batchName === batch.name;
     return `
@@ -4566,7 +4638,7 @@ class OverseasCostWorkbench {
             <span>${this.escape(logisticsNo)}</span>
           </div>
           <div><strong>${this.escape(this.businessTypeLabel(batch.business_type) || batch.transport_mode || "-")}</strong><span>${Number(batch.item_count || 0)} 个 SKU</span></div>
-          <div><strong class="ocw-issue is-${this.escape(batch.primary_issue)}">${this.escape(rowStatus)}</strong><span>${this.escape(reviewMessages.join("；") || (batch.issue_codes || []).map((code) => this.issueLabel(code)).join("、") || "分摊结果可用")}</span></div>
+          <div><strong class="ocw-issue is-${this.escape(batch.primary_issue)}">${this.escape(rowStatus)}</strong>${reviewTags}</div>
           <div><strong>${this.escape(this.formatMoney(batch.total_goods_value || 0))}</strong><span>RMB</span></div>
           <div><strong>${this.escape(this.formatMoney(totalCost || 0))}</strong><span>RMB${batch.result_is_current === false && hasSavedResult ? " · 上次结果，待更新" : ""}</span></div>
           <div><strong>${this.escape(this.formatDateTimeMinute(batch.source_created_at) || "—")}</strong><span>${this.escape(batch.review_state === "confirmed" ? `确认版本 ${batch.reviewed_version || batch.current_version || "—"}` : batch.result_is_current === false ? "待重新试算" : batch.status || "")}</span></div>
@@ -10563,6 +10635,9 @@ class OverseasCostWorkbench {
       this.clearMaterialSelection(false);
       this.loadMaterialFeeWorkspace({ forceRefresh: true });
     });
+    this.$root.on("click", "[data-action='mf-jump-status']", (event) => {
+      this.jumpToMaterialFeeSection($(event.currentTarget).attr("data-target"));
+    });
     this.$root.on("click", "[data-action='mf-view-settlement-source']", () => {
       this.openBatchSettlementDialog(this.detailState.batchName, this.detailState.versionName || null);
     });
@@ -11215,12 +11290,12 @@ class OverseasCostWorkbench {
         <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
         ${feeSummary.source_pending ? `<p class="ocw-mf-dialog-note">${this.escape(feeSummary.source_message)}</p>` : ""}
         <div class="ocw-mf-alert-strip" aria-label="当前待办摘要">
-          ${this.renderMaterialFeeMetric("计算红格", materialSummary.missing_cell_count || 0, "danger", true)}
-          ${this.renderMaterialFeeMetric("费用未定", feeSummary.missing_amount_fee_count || 0, "danger")}
-          ${this.renderMaterialFeeMetric("凭证待补", evidencePending, evidencePending ? "warn" : "ok")}
-          ${this.renderMaterialFeeMetric("暂估待核", feeSummary.estimated_fee_count || 0, Number(feeSummary.estimated_fee_count || 0) ? "warn" : "ok")}
+          ${this.renderMaterialFeeMetric("基础资料待补", materialSummary.missing_cell_count || 0, "danger", "materials", "装箱单物料信息")}
+          ${this.renderMaterialFeeMetric("费用金额待补", feeSummary.missing_amount_fee_count || 0, "danger", "fees", "运费、税费、清关费等运输费用")}
+          ${this.renderMaterialFeeMetric("费用凭证未齐", evidencePending, "warn", "fees", "运费、税费、关税等费用凭证")}
+          ${this.renderMaterialFeeMetric("实际费用待确认", feeSummary.estimated_fee_count || 0, "warn", "fees", "当前使用暂估金额，等待确认实际金额")}
         </div>
-        <section class="ocw-mf-section ocw-mf-material-section">
+        <section class="ocw-mf-section ocw-mf-material-section" data-mf-status-section="materials" tabindex="-1">
           <div class="ocw-mf-section-title ocw-mf-material-title">
             <div><span>01</span><h3>物料与装箱数据</h3><p>采购标识与数量保持只读；缺失的采购金额、币种和单位可直接补录。${hasSettlementCargo ? "发货数量按结算采购支出采用，原装箱数量单独保留。" : "蓝色发货数量默认等于采购数量。"}</p></div>
           </div>
@@ -11245,7 +11320,7 @@ class OverseasCostWorkbench {
           ${this.renderMaterialFeeGrid()}
           <div class="ocw-mf-ai-candidate-popover" data-mf-ai-candidate-popover="1" role="dialog" aria-label="AI 候选详情" hidden></div>
         </section>
-        <section class="ocw-mf-section ocw-mf-fee-section">
+        <section class="ocw-mf-section ocw-mf-fee-section" data-mf-status-section="fees" tabindex="-1">
           <div class="ocw-mf-section-title"><div><span>02</span><h3>费用与凭证</h3><p>录入金额后自动保存；凭证可稍后补充，系统会在 SKU 试算时统一分摊。</p></div></div>
           <div class="ocw-mf-fee-layout">
             <div class="ocw-mf-fee-table-wrap">${this.renderMaterialFeeTable(state.fees.fees || state.fees.items || [])}</div>
@@ -11261,13 +11336,26 @@ class OverseasCostWorkbench {
     this.restoreMaterialFeeInputFocus();
   }
 
-  renderMaterialFeeMetric(label, value, tone, successOnZero = false) {
+  renderMaterialFeeMetric(label, value, tone, target, description) {
     const number = Number(value || 0);
-    const cleared = successOnZero && number === 0;
+    const cleared = number === 0;
     const className = cleared ? "is-cleared" : `is-${this.escape(tone)}`;
-    const accessible = cleared ? ` aria-label="0 个${this.escape(label)}，已清零"` : "";
     const hidden = cleared ? ' aria-hidden="true"' : "";
-    return `<div class="ocw-mf-metric ${className}"${accessible}><span>${this.escape(label)}</span><strong${hidden}>${cleared ? "✓" : this.escape(String(number))}</strong><em>${number ? "待处理" : "已清零"}</em></div>`;
+    const status = cleared ? "已处理" : "点击查看";
+    const accessible = `${label}：${cleared ? "已处理" : `${number} 项待处理`}；${description}`;
+    return `<button class="ocw-mf-metric ${className}" type="button" data-action="mf-jump-status" data-target="${this.escape(target)}" aria-label="${this.escape(accessible)}"><span>${this.escape(label)}</span><strong${hidden}>${cleared ? "✓" : this.escape(String(number))}</strong><em>${status}</em><small>${this.escape(description)}</small></button>`;
+  }
+
+  jumpToMaterialFeeSection(target) {
+    const selector = {
+      materials: "[data-mf-status-section='materials']",
+      fees: "[data-mf-status-section='fees']",
+    }[String(target || "")];
+    if (!selector) return;
+    const element = this.$root.find(selector)?.[0];
+    if (!element) return;
+    element.scrollIntoView({ behavior: "smooth", block: "start" });
+    element.focus({ preventScroll: true });
   }
 
   materialFeeCacheStatus() {

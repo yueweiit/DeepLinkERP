@@ -53,13 +53,15 @@ def test_workbench_shell_has_no_summary_card_row_for_any_task():
     assert "data-action='set-issue'" not in source
 
 
-def test_cost_row_uses_review_action_and_warning_cells():
+def test_cost_row_uses_review_action_and_compact_warning_tags():
     text=run_js("""const v=makeView();console.log(JSON.stringify(v.renderWorkbenchBatchRow({
 name:'B',batch_no:'B',primary_issue:'ready',primary_action:'review',review_state:'ready',
-review_blockers:[],review_warnings:[{code:'ESTIMATED_AMOUNT',message:'含暂估费用'}],
+review_blockers:[],review_warnings:[{code:'ESTIMATED_AMOUNT',message:'含暂估费用，可先审核，最终确认前仍需补充实际金额。'}],
 result_is_current:true,estimated_total_cost_rmb:100,status:'Calculated'})));""")
     assert '核对成本' in text
-    assert '含暂估费用' in text
+    assert '实际费用待确认' in text
+    assert 'ocw-review-tag' in text
+    assert '最终确认前' not in text
     assert 'data-primary-action="review"' in text
 
 
@@ -69,7 +71,38 @@ name:'B',batch_no:'B',primary_issue:'calculation',primary_action:'recalculate',r
 review_blockers:[{code:'STALE',message:'费用已变化，请重新试算'}],review_warnings:[],
 result_is_current:false,calculated_at:'2026-09-08',estimated_total_cost_rmb:100,status:'Dirty'})));""")
     assert '上次结果，待更新' in text
-    assert '费用已变化，请重新试算' in text
+    assert '待重新计算' in text
+    assert '费用已变化，请重新试算' not in text
+
+
+def test_processing_row_limits_short_tags_and_hides_raw_messages():
+    text=run_js("""const v=makeView('pending');console.log(JSON.stringify(v.renderWorkbenchBatchRow({
+name:'B',batch_no:'B',primary_issue:'logistics',primary_action:'supplement_fees',review_state:'processing',
+review_blockers:[
+ {code:'AMOUNT_MISSING',message:'存在未填金额的费用，请补充费用。'},
+ {code:'PURCHASE_SOURCE_INVALID',message:'采购来源已失效或无法读取，请先核对采购资料。'},
+ {code:'UNEXPECTED_REVIEW_CODE',message:'这是一段不应直接出现在列表中的长说明。'}
+],
+review_warnings:[{code:'EVIDENCE_MISSING',message:'费用凭证缺失或尚未通过校验，可先审核。'}],
+result_is_current:false,calculated_at:'2026-09-08',estimated_total_cost_rmb:100,status:'Dirty'})));""")
+    assert '资料待补' in text
+    assert '费用金额待补' in text
+    assert '采购资料待补' in text
+    assert '其他问题待处理' in text
+    assert '另有 1 项' in text
+    assert text.count('ocw-review-tag ') == 4
+    assert '存在未填金额的费用' not in text
+    assert '不应直接出现' not in text
+
+
+def test_review_tag_labels_cover_current_allocation_and_final_fee_codes():
+    result=run_js("""const v=makeView();console.log(JSON.stringify({
+allocation:v.workbenchReviewTagLabel('ALLOCATION_REQUIRED'),
+finalFee:v.workbenchReviewTagLabel('FINAL_FEE_REVIEW_REQUIRED')}));""")
+    assert result == {
+        'allocation': '分摊资料待补',
+        'finalFee': '费用待核对',
+    }
 
 
 def test_out_of_order_success_and_error_cannot_replace_latest_task():

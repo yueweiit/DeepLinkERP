@@ -550,6 +550,78 @@
     }[issue] || "待核对";
   }
 
+  workbenchRowStatusLabel(batch) {
+    if (batch.review_state === "confirmed") return "已核对";
+    if (batch.review_state === "ready") return "可核对";
+    return {
+      purchase: "资料待补",
+      logistics: "资料待补",
+      calculation: "待重新计算",
+      erp_failed: "ERP 回写失败",
+    }[batch.primary_issue] || "待核对";
+  }
+
+  workbenchReviewTagLabel(code) {
+    const labels = {
+      MATERIAL_ITEMS_REQUIRED: "采购资料待补",
+      GOODS_VALUE_MISSING: "采购资料待补",
+      PURCHASE_SOURCE_INVALID: "采购资料待补",
+      SOURCE_ADOPTION_PENDING: "采购资料待采用",
+      TRANSPORT_MODE_REQUIRED: "运输方式待确认",
+      AMOUNT_MISSING: "费用金额待补",
+      AMOUNT_STATUS_INVALID: "费用状态待确认",
+      FEE_AMOUNT_INVALID: "费用金额待核对",
+      DUPLICATE_LOGICAL_FEE: "重复费用待处理",
+      FX_RATE_MISSING: "费用汇率待补",
+      CURRENCY_UNSUPPORTED: "费用币种待核对",
+      ESTIMATED_AMOUNT: "实际费用待确认",
+      EVIDENCE_MISSING: "费用凭证未齐",
+      FINAL_FEE_REVIEW_REQUIRED: "费用待核对",
+      ALLOCATION_REQUIRED: "分摊资料待补",
+      SHIPPING_UNIT_REQUIRED: "分摊资料待补",
+      ALLOCATION_BASIS_INCOMPLETE: "分摊资料待补",
+      ALLOCATION_DENOMINATOR_ZERO: "分摊资料待补",
+      FEE_SCOPE_EMPTY: "分摊资料待补",
+      FEE_SCOPE_INVALID: "分摊资料待补",
+      DIRECT_ITEM_SCOPE_INVALID: "分摊资料待补",
+      STABLE_ITEM_KEY_REQUIRED: "分摊资料待补",
+      STABLE_ITEM_KEY_DUPLICATED: "分摊资料待补",
+      TEMPORARY_ALLOCATION_BASIS: "分摊资料待补",
+      RESULT_NOT_SAVED: "待重新计算",
+      RESULT_LEGACY: "待重新计算",
+      RESULT_STALE: "待重新计算",
+      SAVED_RESULT_INVALID: "待重新计算",
+      STALE: "待重新计算",
+      purchase: "采购资料待补",
+      logistics: "分摊资料待补",
+      calculation: "待重新计算",
+      erp_failed: "ERP 回写待处理",
+    };
+    return labels[String(code || "")] || "其他问题待处理";
+  }
+
+  renderWorkbenchReviewTags(batch) {
+    const entries = [
+      ...(batch.review_blockers || []).map((row) => ({...row, tone: "danger"})),
+      ...(batch.review_warnings || []).map((row) => ({...row, tone: "warn"})),
+    ];
+    if (!entries.length) {
+      entries.push(...(batch.issue_codes || []).map((code) => ({code, tone: "neutral"})));
+    }
+    const unique = [];
+    const seen = new Set();
+    entries.forEach((row) => {
+      const label = this.workbenchReviewTagLabel(row.code);
+      if (seen.has(label)) return;
+      seen.add(label);
+      unique.push({label, tone: row.tone});
+    });
+    if (!unique.length) return "";
+    const visible = unique.slice(0, 3);
+    const remaining = unique.length - visible.length;
+    return `<div class="ocw-review-tags" aria-label="状态摘要">${visible.map((row) => `<span class="ocw-review-tag is-${this.escape(row.tone)}">${this.escape(row.label)}</span>`).join("")}${remaining ? `<span class="ocw-review-tag is-more">另有 ${remaining} 项</span>` : ""}</div>`;
+  }
+
   resultPreviewCacheKey(batchName, page) {
     const batch = (this.batches || []).find((row) => row.name === batchName);
     const currentVersion = batch?.current_version || "current";
@@ -898,8 +970,8 @@
     const actionLabels = {review: "核对成本", supplement: "补资料", supplement_fees: "补费用", supplement_allocation: "补分摊数据", recalculate: "重新试算", view: "查看详情", erp_retry: "重试 ERP"};
     const action = actionLabels[batch.primary_action] ? {action: batch.primary_action, label: actionLabels[batch.primary_action]} : OverseasCostWorkbenchState.primaryActionForIssue(batch.primary_issue);
     const totalCost = batch.summary_snapshot?.calculation_schema === 2 ? batch.summary_snapshot.total_cost_rmb : batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb;
-    const reviewMessages = [...(batch.review_blockers || []), ...(batch.review_warnings || [])].map(row => row.message);
-    const rowStatus = batch.review_state === "confirmed" ? "已核对" : batch.review_state === "ready" ? "可核对" : this.issueLabel(batch.primary_issue);
+    const rowStatus = this.workbenchRowStatusLabel(batch);
+    const reviewTags = this.renderWorkbenchReviewTags(batch);
     const hasSavedResult = Boolean(batch.calculated_at || Number(totalCost || 0) > 0);
     const expanded = this.resultPreviewState?.batchName === batch.name;
     return `
@@ -913,7 +985,7 @@
             <span>${this.escape(logisticsNo)}</span>
           </div>
           <div><strong>${this.escape(this.businessTypeLabel(batch.business_type) || batch.transport_mode || "-")}</strong><span>${Number(batch.item_count || 0)} 个 SKU</span></div>
-          <div><strong class="ocw-issue is-${this.escape(batch.primary_issue)}">${this.escape(rowStatus)}</strong><span>${this.escape(reviewMessages.join("；") || (batch.issue_codes || []).map((code) => this.issueLabel(code)).join("、") || "分摊结果可用")}</span></div>
+          <div><strong class="ocw-issue is-${this.escape(batch.primary_issue)}">${this.escape(rowStatus)}</strong>${reviewTags}</div>
           <div><strong>${this.escape(this.formatMoney(batch.total_goods_value || 0))}</strong><span>RMB</span></div>
           <div><strong>${this.escape(this.formatMoney(totalCost || 0))}</strong><span>RMB${batch.result_is_current === false && hasSavedResult ? " · 上次结果，待更新" : ""}</span></div>
           <div><strong>${this.escape(this.formatDateTimeMinute(batch.source_created_at) || "—")}</strong><span>${this.escape(batch.review_state === "confirmed" ? `确认版本 ${batch.reviewed_version || batch.current_version || "—"}` : batch.result_is_current === false ? "待重新试算" : batch.status || "")}</span></div>

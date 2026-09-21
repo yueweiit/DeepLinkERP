@@ -59,6 +59,9 @@
       this.clearMaterialSelection(false);
       this.loadMaterialFeeWorkspace({ forceRefresh: true });
     });
+    this.$root.on("click", "[data-action='mf-jump-status']", (event) => {
+      this.jumpToMaterialFeeSection($(event.currentTarget).attr("data-target"));
+    });
     this.$root.on("click", "[data-action='mf-view-settlement-source']", () => {
       this.openBatchSettlementDialog(this.detailState.batchName, this.detailState.versionName || null);
     });
@@ -711,12 +714,12 @@
         <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
         ${feeSummary.source_pending ? `<p class="ocw-mf-dialog-note">${this.escape(feeSummary.source_message)}</p>` : ""}
         <div class="ocw-mf-alert-strip" aria-label="当前待办摘要">
-          ${this.renderMaterialFeeMetric("计算红格", materialSummary.missing_cell_count || 0, "danger", true)}
-          ${this.renderMaterialFeeMetric("费用未定", feeSummary.missing_amount_fee_count || 0, "danger")}
-          ${this.renderMaterialFeeMetric("凭证待补", evidencePending, evidencePending ? "warn" : "ok")}
-          ${this.renderMaterialFeeMetric("暂估待核", feeSummary.estimated_fee_count || 0, Number(feeSummary.estimated_fee_count || 0) ? "warn" : "ok")}
+          ${this.renderMaterialFeeMetric("基础资料待补", materialSummary.missing_cell_count || 0, "danger", "materials", "装箱单物料信息")}
+          ${this.renderMaterialFeeMetric("费用金额待补", feeSummary.missing_amount_fee_count || 0, "danger", "fees", "运费、税费、清关费等运输费用")}
+          ${this.renderMaterialFeeMetric("费用凭证未齐", evidencePending, "warn", "fees", "运费、税费、关税等费用凭证")}
+          ${this.renderMaterialFeeMetric("实际费用待确认", feeSummary.estimated_fee_count || 0, "warn", "fees", "当前使用暂估金额，等待确认实际金额")}
         </div>
-        <section class="ocw-mf-section ocw-mf-material-section">
+        <section class="ocw-mf-section ocw-mf-material-section" data-mf-status-section="materials" tabindex="-1">
           <div class="ocw-mf-section-title ocw-mf-material-title">
             <div><span>01</span><h3>物料与装箱数据</h3><p>采购标识与数量保持只读；缺失的采购金额、币种和单位可直接补录。${hasSettlementCargo ? "发货数量按结算采购支出采用，原装箱数量单独保留。" : "蓝色发货数量默认等于采购数量。"}</p></div>
           </div>
@@ -741,7 +744,7 @@
           ${this.renderMaterialFeeGrid()}
           <div class="ocw-mf-ai-candidate-popover" data-mf-ai-candidate-popover="1" role="dialog" aria-label="AI 候选详情" hidden></div>
         </section>
-        <section class="ocw-mf-section ocw-mf-fee-section">
+        <section class="ocw-mf-section ocw-mf-fee-section" data-mf-status-section="fees" tabindex="-1">
           <div class="ocw-mf-section-title"><div><span>02</span><h3>费用与凭证</h3><p>录入金额后自动保存；凭证可稍后补充，系统会在 SKU 试算时统一分摊。</p></div></div>
           <div class="ocw-mf-fee-layout">
             <div class="ocw-mf-fee-table-wrap">${this.renderMaterialFeeTable(state.fees.fees || state.fees.items || [])}</div>
@@ -757,13 +760,26 @@
     this.restoreMaterialFeeInputFocus();
   }
 
-  renderMaterialFeeMetric(label, value, tone, successOnZero = false) {
+  renderMaterialFeeMetric(label, value, tone, target, description) {
     const number = Number(value || 0);
-    const cleared = successOnZero && number === 0;
+    const cleared = number === 0;
     const className = cleared ? "is-cleared" : `is-${this.escape(tone)}`;
-    const accessible = cleared ? ` aria-label="0 个${this.escape(label)}，已清零"` : "";
     const hidden = cleared ? ' aria-hidden="true"' : "";
-    return `<div class="ocw-mf-metric ${className}"${accessible}><span>${this.escape(label)}</span><strong${hidden}>${cleared ? "✓" : this.escape(String(number))}</strong><em>${number ? "待处理" : "已清零"}</em></div>`;
+    const status = cleared ? "已处理" : "点击查看";
+    const accessible = `${label}：${cleared ? "已处理" : `${number} 项待处理`}；${description}`;
+    return `<button class="ocw-mf-metric ${className}" type="button" data-action="mf-jump-status" data-target="${this.escape(target)}" aria-label="${this.escape(accessible)}"><span>${this.escape(label)}</span><strong${hidden}>${cleared ? "✓" : this.escape(String(number))}</strong><em>${status}</em><small>${this.escape(description)}</small></button>`;
+  }
+
+  jumpToMaterialFeeSection(target) {
+    const selector = {
+      materials: "[data-mf-status-section='materials']",
+      fees: "[data-mf-status-section='fees']",
+    }[String(target || "")];
+    if (!selector) return;
+    const element = this.$root.find(selector)?.[0];
+    if (!element) return;
+    element.scrollIntoView({ behavior: "smooth", block: "start" });
+    element.focus({ preventScroll: true });
   }
 
   materialFeeCacheStatus() {

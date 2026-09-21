@@ -3973,6 +3973,32 @@ body.ocw-workspace-sidebar-collapsed .body-sidebar-container {
 .ocw-issue.is-calculation { color: #175cd3; }
 .ocw-issue.is-ready { color: #067647; }
 
+.ocw-review-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.ocw-workbench-row .ocw-review-tag {
+  display: inline-flex;
+  width: fit-content;
+  margin: 0;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #f2f4f7;
+  color: #475467;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.2;
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+
+.ocw-workbench-row .ocw-review-tag.is-danger { background: #fff0ee; color: #b42318; }
+.ocw-workbench-row .ocw-review-tag.is-warn { background: #fff4d8; color: #965000; }
+.ocw-workbench-row .ocw-review-tag.is-more { background: #eef4fb; color: #475467; }
+
 .ocw-row-actions {
   justify-self: end;
   justify-content: flex-end;
@@ -7318,15 +7344,23 @@ input[type="range"].ocw-result-scrollbar:disabled {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: baseline;
+  width: 100%;
   padding: 13px 15px;
   border: 1px solid var(--mf-border);
   border-radius: 10px;
   background: #fff;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .ocw-mf-metric span { color: var(--mf-muted); font-size: 12px; }
 .ocw-mf-metric strong { font-size: 24px; line-height: 1; }
 .ocw-mf-metric em { grid-column: 1 / -1; margin-top: 5px; color: var(--mf-muted); font-size: 11px; font-style: normal; }
+.ocw-mf-metric small { grid-column: 1 / -1; margin-top: 3px; color: var(--mf-muted); font-size: 11px; line-height: 1.4; }
+.ocw-mf-metric:hover { box-shadow: 0 5px 14px rgba(16, 24, 40, 0.08); transform: translateY(-1px); }
+.ocw-mf-metric:focus-visible { outline: 3px solid rgba(11, 140, 240, 0.2); outline-offset: 2px; }
 .ocw-mf-metric.is-danger { border-color: #f7c8c8; background: #fff8f7; }
 .ocw-mf-metric.is-danger strong { color: #c43232; }
 .ocw-mf-metric.is-warn { border-color: #f6d59b; background: #fffaf0; }
@@ -7342,6 +7376,9 @@ input[type="range"].ocw-result-scrollbar:disabled {
   background: #fff;
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03);
 }
+
+.ocw-mf-section[data-mf-status-section] { scroll-margin-top: 96px; }
+.ocw-mf-section[data-mf-status-section]:focus-visible { outline: 3px solid rgba(11, 140, 240, 0.18); outline-offset: 2px; }
 
 .ocw-mf-section-title {
   display: flex;
