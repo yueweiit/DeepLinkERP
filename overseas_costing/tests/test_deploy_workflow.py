@@ -196,3 +196,15 @@ def test_asset_script_rejects_stale_overseas_costing_release():
 
     assert "get_batch_dingtalk_approval_detail" in script
     assert "renderDingtalkApprovalTab" in script
+
+
+def test_release_marker_switches_only_after_asset_verification() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    deploy = workflow.split("\n  deploy:\n", maxsplit=1)[1]
+
+    assets = deploy.index("Synchronize and verify frontend assets")
+    marker = deploy.index("Publish workbench release marker")
+    health = deploy.index("Check online login page")
+    assert assets < marker < health
+    assert "overseas_costing_release_id" in deploy
+    assert "${GITHUB_SHA}" in deploy

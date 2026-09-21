@@ -115,16 +115,16 @@ console.log(JSON.stringify({calls,globalErrors,fill:state.aiFill,note:state.aiCl
     assert '[object Object]' not in result['html']
 
 
-def test_start_only_retries_transient_transport_failures_at_most_three_attempts():
+def test_start_write_failure_waits_for_explicit_retry_without_replaying():
     result = _fee_workspace_result(FIXTURE + r"""
 const requests=[];workspace.call=async(method,args,freeze,options)=>{requests.push({method,args,freeze,options});throw {status:503,statusText:'Service Unavailable'}};
 await workspace.startMaterialAIFill({force:true,selectedSourceIds:['S1']});
 console.log(JSON.stringify({requests,globalErrors,status:state.aiFill.status}));
 """)
-    assert len(result['requests']) == 3
+    assert len(result['requests']) == 1
     assert result['globalErrors'] == 0 and result['status'] == 'FAILED'
     assert all(request['args']['selected_source_ids_json'] == '["S1"]' for request in result['requests'])
-    assert all(request['options']['inlineErrors'] for request in result['requests'])
+    assert all(request.get('options') is None for request in result['requests'])
 
 
 def test_status_fetch_stops_after_three_failures_and_retry_resumes_existing_run():
@@ -432,38 +432,37 @@ def test_progress_refresh_preserves_expanded_logical_source_groups():
 
 
 def test_material_scrollbar_has_sixteen_pixel_visible_thumb_and_single_track():
-    css = (PARTS / '48-material-fee-workspace.css').read_text(encoding='utf-8')
+    css = (PARTS / '00-foundation.css').read_text(encoding='utf-8')
     css = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
     rules = {selector.strip(): body for selector, body in re.findall(r'([^{}]+)\{([^{}]*)\}', css)}
-    outer = rules['.ocw-mf-grid-scrollbar']
+    outer = rules['.ocw-horizontal-scrollbar']
     assert re.search(r'height:\s*24px', outer)
     assert 'overflow-x: scroll' in outer
-    assert re.search(r'height:\s*20px\s*!important', rules['.ocw-mf-grid-scrollbar::-webkit-scrollbar'])
-    thumb = rules['.ocw-mf-grid-scrollbar::-webkit-scrollbar-thumb']
+    assert re.search(r'height:\s*20px\s*!important', rules['.ocw-horizontal-scrollbar::-webkit-scrollbar'])
+    thumb = rules['.ocw-horizontal-scrollbar::-webkit-scrollbar-thumb']
     assert 'border: 2px solid' in thumb
     assert '#78bdf0' not in thumb
-    assert 'display: none' in rules['.ocw-mf-grid-scroll::-webkit-scrollbar']
+    material_css = (PARTS / '48-material-fee-workspace.css').read_text(encoding='utf-8')
+    material_rules = {selector.strip(): body for selector, body in re.findall(r'([^{}]+)\{([^{}]*)\}', material_css)}
+    assert 'display: none' in material_rules['.ocw-mf-grid-scroll::-webkit-scrollbar']
 
 
 @pytest.mark.parametrize('method', [
     'overseas_costing.api.materials.start_source_ai_review',
     'overseas_costing.api.materials.get_source_ai_review_status',
     'overseas_costing.api.calculate.recalculate_batch',
-    'overseas_costing.api.calculate.start_cost_trial_ai_review',
-    'overseas_costing.api.calculate.get_cost_trial_ai_review_status',
-    'overseas_costing.api.calculate.preview_cost_trial',
-    'overseas_costing.api.calculate.confirm_cost_trial',
-    'overseas_costing.api.calculate.discard_cost_trial_ai_review',
+    'overseas_costing.api.batch.get_batch_list',
+    'overseas_costing.api.usage.record_usage',
 ])
-def test_inline_error_transport_uses_native_fetch_and_preserves_failure_response(method):
+def test_unified_transport_uses_native_fetch_and_preserves_failure_response(method):
     result = _fee_workspace_result(FIXTURE + f"const method={json.dumps(method)};" + f"""
 const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
-workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
+const Api=Function('return class Api {{'+callSource+'}}')();Object.getOwnPropertyNames(Api.prototype).forEach((name)=>{{if(name!=='constructor')workspace[name]=Api.prototype[name]}});
 """ + r"""
 let request,normal=0;frappe.csrf_token='csrf-test';frappe.call=async()=>{normal++;return {message:{ok:true}}};
 global.$={ajax:async()=>{throw new Error('local jQuery transport must not run global Frappe handlers')}};
 global.fetch=async(url,options)=>{request={url,...options};return {ok:false,status:403,statusText:'Forbidden',text:async()=>JSON.stringify({exception:'没有读取当前批次的权限'})}};
-let caught;try{await workspace.call(method,{batch_name:'B1'},false,{inlineErrors:true})}catch(error){caught=error}
+let caught;try{await workspace.call(method,{batch_name:'B1'})}catch(error){caught=error}
 console.log(JSON.stringify({normal,request,caught:{message:caught?.message,status:caught?.status,responseJSON:caught?.responseJSON}}));
 """)
     assert result['normal'] == 0
@@ -481,31 +480,37 @@ console.log(JSON.stringify({normal,request,caught:{message:caught?.message,statu
     }
 
 
-def test_other_calls_keep_frappe_transport_even_if_inline_option_is_supplied():
+def test_unified_transport_no_longer_has_endpoint_allowlist_or_frappe_call_branch():
+    source = (PARTS / '20-data-filters.js').read_text(encoding='utf-8')
+    assert 'locallyHandledErrorRequest' not in source
+    assert 'frappe.call' not in source
+
+
+def test_unified_transport_returns_success_for_all_callers():
     result = _fee_workspace_result(FIXTURE + f"""
 const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
-workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
+const Api=Function('return class Api {{'+callSource+'}}')();Object.getOwnPropertyNames(Api.prototype).forEach((name)=>{{if(name!=='constructor')workspace[name]=Api.prototype[name]}});
 """ + r"""
-const calls=[];frappe.call=async(options)=>{calls.push(options);return {message:{value:42}}};
-global.$={ajax:async()=>{throw new Error('unrelated calls must retain Frappe transport')}};
-const a=await workspace.call('overseas_costing.api.materials.get_material_grid',{batch_name:'B1'},true,{inlineErrors:true});
+const requests=[];frappe.csrf_token='csrf-test';frappe.call=async()=>{throw new Error('global transport must not run')};
+global.fetch=async(url,options)=>{requests.push({url,...options});return {ok:true,status:200,statusText:'OK',text:async()=>JSON.stringify({message:{value:42}})}};
+const a=await workspace.call('overseas_costing.api.materials.get_material_grid',{batch_name:'B1'},true);
 const b=await workspace.call('overseas_costing.api.materials.start_source_ai_review',{},false);
-console.log(JSON.stringify({calls,a,b}));
+console.log(JSON.stringify({requests,a,b}));
 """)
     assert result['a'] == result['b'] == {'value': 42}
-    assert result['calls'][0]['freeze'] is True and result['calls'][1]['freeze'] is False
+    assert len(result['requests']) == 2
 
 
 def test_inline_recalculation_transport_preserves_freeze_lifecycle_on_failure():
     result = _fee_workspace_result(FIXTURE + f"""
 const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
-workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
+const Api=Function('return class Api {{'+callSource+'}}')();Object.getOwnPropertyNames(Api.prototype).forEach((name)=>{{if(name!=='constructor')workspace[name]=Api.prototype[name]}});
 """ + r"""
 const events=[];frappe.csrf_token='csrf-test';frappe.dom={freeze:()=>events.push('freeze'),unfreeze:()=>events.push('unfreeze')};
 frappe.call=async()=>{throw new Error('must use local transport')};
 global.$={ajax:async()=>{throw new Error('must not use local jQuery transport')}};
 global.fetch=async()=>{events.push('request');return {ok:false,status:500,statusText:'Server Error',text:async()=>JSON.stringify({exception:'blocked'})}};
-let caught=false;try{await workspace.call('overseas_costing.api.calculate.recalculate_batch',{},true,{inlineErrors:true})}catch(error){caught=error.message==='blocked'}
+let caught=false;try{await workspace.call('overseas_costing.api.calculate.recalculate_batch',{},true)}catch(error){caught=error.message==='blocked'}
 console.log(JSON.stringify({events,caught}));
 """)
 
@@ -515,15 +520,16 @@ console.log(JSON.stringify({events,caught}));
 def test_read_snapshot_transport_can_explicitly_use_get():
     result = _fee_workspace_result(FIXTURE + f"""
 const callSource=fs.readFileSync({json.dumps(str(PARTS / '20-data-filters.js'))},'utf8').split('  async loadBatches(')[0];
-workspace.call=Function('return class Api {{'+callSource+'}}')().prototype.call;
+const Api=Function('return class Api {{'+callSource+'}}')();Object.getOwnPropertyNames(Api.prototype).forEach((name)=>{{if(name!=='constructor')workspace[name]=Api.prototype[name]}});
 """ + r"""
-let request;frappe.call=async(options)=>{request=options;return {message:{ok:true}}};
+let request;frappe.csrf_token='csrf-test';global.fetch=async(url,options)=>{request={url,...options};return {ok:true,status:200,statusText:'OK',text:async()=>JSON.stringify({message:{ok:true}})}};
 await workspace.call('overseas_costing.api.material_fee_workspace.get_snapshot',{batch_name:'B1'},false,{type:'GET'});
 console.log(JSON.stringify(request));
 """)
 
-    assert result['method'].endswith('.get_snapshot')
-    assert result['type'] == 'GET'
+    assert result['url'].endswith('/api/method/overseas_costing.api.material_fee_workspace.get_snapshot?batch_name=B1')
+    assert result['method'] == 'GET'
+    assert 'body' not in result
 
 
 @pytest.mark.parametrize('status, message', [(401, '登录'), (403, '权限'), (0, '网络'), (504, '服务')])
@@ -589,11 +595,11 @@ console.log(JSON.stringify({message:workspace.materialAIErrorMessage(error),retr
     assert '自动重试' not in result['message']
 
 
-def test_lost_start_response_reuses_request_id_for_automatic_and_manual_retry():
+def test_lost_start_response_reuses_request_id_for_explicit_manual_retry():
     result = _fee_workspace_result(FIXTURE + r"""
 workspace.pollMaterialAIFill=async()=>{};
 const requests=[];workspace.call=async(_method,args)=>{
- requests.push(args);if(requests.length<=3)throw {status:504,statusText:'Gateway Timeout'};
+ requests.push(args);if(requests.length===1)throw {status:504,statusText:'Gateway Timeout'};
  return {ok:true,run_id:'SERVER-ALREADY-CREATED',status:'QUEUED'};
 };
 await workspace.startMaterialAIFill({force:true,selectedSourceIds:['S1']});
@@ -601,7 +607,7 @@ const failed=state.aiFill.status;
 await workspace.retryMaterialAIProgress();
 console.log(JSON.stringify({requests,failed,stored:state.aiStartOptions.request_id,runId:state.aiFill.runId}));
 """)
-    assert result['failed'] == 'FAILED' and len(result['requests']) == 4
+    assert result['failed'] == 'FAILED' and len(result['requests']) == 2
     ids = [request.get('request_id') for request in result['requests']]
     assert all(ids), 'Every start needs an idempotency key before sending the request'
     assert len(set(ids)) == 1 and result['stored'] == ids[0]
@@ -672,7 +678,7 @@ workspace.pollMaterialAIFill=async()=>{};
 state.aiClarification='原说明';
 const requests=[];workspace.call=async(_method,args)=>{
  requests.push(JSON.parse(JSON.stringify(args)));
- if(requests.length<=3)throw {status:504,statusText:'Gateway Timeout'};
+ if(requests.length===1)throw {status:504,statusText:'Gateway Timeout'};
  return {ok:true,run_id:'SERVER-ALREADY-CREATED',status:'QUEUED'};
 };
 await workspace.startMaterialAIFill({force:false,...(withSourceSelection?{selectedSourceIds:['S1']}:{})});
@@ -681,7 +687,7 @@ state.aiClarification='尚未重新分析的新说明';
 await workspace.retryMaterialAIProgress();
 console.log(JSON.stringify({requests,runId:state.aiFill.runId}));
 """)
-    assert len(result['requests']) == 4
+    assert len(result['requests']) == 2
     original = result['requests'][0]
     assert original['force'] == 0 and original['request_id']
     assert ('selected_source_ids_json' in original) is with_source_selection

@@ -627,7 +627,7 @@
       this.sumRowsNumber(loadedItems, "mexico_inland_mxn") ||
       this.sumRowsNumber(loadedItems, "mexico_misc_mxn") ||
       this.sumRowsNumber(loadedItems, "mexico_inland_misc_rmb");
-    const missingPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.unit_price)) : 0;
+    const missingPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(this.purchasePriceValue(row))) : 0;
     const missingGoods = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.goods_value)) : 0;
     const missingWeight = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.gross_weight_kg)) : 0;
     const missingCost = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.total_unit_rmb)) : 0;
@@ -767,8 +767,8 @@
     const missingCode = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.material_code)) : 0;
     const missingName = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.product_name)) : 0;
     const badQuantity = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.quantity)) : 0;
-    const badPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.unit_price)) : 0;
-    const badCurrency = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.purchase_currency)) : 0;
+    const badPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(this.purchasePriceValue(row))) : 0;
+    const badCurrency = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(this.purchasePriceCurrency(row))) : 0;
     const badGoods = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.goods_value)) : 0;
     const badActualQty = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.actual_shipped_qty)) : 0;
     const badWeight = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.gross_weight_kg)) : 0;
@@ -790,7 +790,7 @@
     );
     const missingPurchaseDetail = this.describeProblemRows(
       loadedItems,
-      (row) => !this.isPositive(row.unit_price) || !this.hasText(row.purchase_currency) || !this.isPositive(row.goods_value)
+      (row) => !this.isPositive(this.purchasePriceValue(row)) || !this.hasText(this.purchasePriceCurrency(row)) || !this.isPositive(row.goods_value)
     );
     const missingPackingDetail = this.describeProblemRows(
       loadedItems,

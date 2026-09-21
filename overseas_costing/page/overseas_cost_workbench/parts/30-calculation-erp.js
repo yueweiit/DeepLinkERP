@@ -39,8 +39,7 @@
           edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
           expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
-        true,
-        { inlineErrors: true }
+        true
       );
       if (!result?.ok) {
         throw new Error(result?.message || "重新试算被服务器拒绝，未修改批次数据。");
@@ -942,11 +941,12 @@
     const allocations = pools.item_allocations || {};
     const rows = items.slice(0, 12).map((item, index) => {
       const formula = item.cost_formula || {};
+      const derivedPrice = item.adopted_price?.source_type === "purchase_total_derived";
       return `
         <tr>
           <td>${this.escape(String(index + 1))}</td>
           <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
-          <td>${this.escape(this.formatMoney(item.original_unit_price ?? formula.original_unit_price ?? "--"))}</td>
+          <td>${this.escape(this.formatMoney(item.adopted_price?.value ?? item.original_unit_price ?? formula.original_unit_price ?? "--"))}${derivedPrice ? '<small class="ocw-result-source">按货值÷采购数量计算</small>' : ""}</td>
           <td>${this.escape(this.formatMoney(item.comprehensive_unit_price ?? formula.comprehensive_unit_price ?? "--"))}</td>
           <td>${this.escape(this.formatValue(item.outbound_quantity ?? "--"))}</td>
           <td>${this.escape(this.formatMoney(formula.allocated_logistics_cost ?? 0))}</td>

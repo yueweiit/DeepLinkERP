@@ -686,19 +686,7 @@
     formData.append("is_private", "1");
     formData.append("folder", "Home");
 
-    const response = await fetch("/api/method/upload_file", {
-      method: "POST",
-      body: formData,
-      credentials: "same-origin",
-      headers: {
-        "X-Frappe-CSRF-Token": frappe.csrf_token || "",
-      },
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.exc) {
-      throw new Error(this.extractServerMessage(data) || "Excel 文件上传失败");
-    }
-    const message = data.message || data;
+    const message = await this.uploadFileRequest(formData);
     if (!message.file_url) {
       throw new Error("Excel 文件已上传，但没有返回文件地址。");
     }

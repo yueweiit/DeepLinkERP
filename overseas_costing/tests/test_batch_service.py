@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from overseas_costing.services import batch_service
 from overseas_costing.services.batch_service import (
     EXCEL_COLUMNS,
+    EXPORT_COLUMNS,
     EXTRA_ITEM_FIELDS,
     _build_item_query_args,
     _build_batch_source_status,
@@ -193,6 +194,15 @@ def test_excel_columns_include_spec_model_after_product_name() -> None:
     assert unit_column["label"] == "单位"
     assert total_unit_column["label"] == "综合单价 RMB"
     assert "business_type" not in fieldnames
+
+
+def test_export_adds_derived_purchase_price_source_without_changing_workbench_columns() -> None:
+    workbench_fields = [column["fieldname"] for column in EXCEL_COLUMNS]
+    export_fields = [column["fieldname"] for column in EXPORT_COLUMNS]
+
+    assert "purchase_price_source" not in workbench_fields
+    assert export_fields.index("purchase_price_source") == export_fields.index("unit_price") + 1
+    assert len(export_fields) == len(workbench_fields) + 1
 
 
 def test_sea_air_express_share_same_item_columns() -> None:
@@ -1347,6 +1357,9 @@ def test_build_erp_push_payload_uses_full_precision_derived_purchase_price_and_r
 
     assert payload["items"][0]["original_unit_price"] == 1.215882
     assert payload["items"][0]["purchase_currency"] == "RMB"
+    assert payload["items"][0]["adopted_price"]["value"] == "1.22"
+    assert payload["items"][0]["adopted_price"]["calculation_value"].startswith("1.215882")
+    assert payload["items"][0]["adopted_price"]["source_type"] == "purchase_total_derived"
     assert item == original
 
 

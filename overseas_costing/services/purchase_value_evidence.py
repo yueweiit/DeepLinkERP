@@ -215,7 +215,9 @@ def adopted_price(fact, row=None):
     if total is None or total < 0 or quantity is None or quantity <= 0:
         return None
     from decimal import ROUND_HALF_UP
-    return {'value': format((total / quantity).quantize(Decimal('.01'), rounding=ROUND_HALF_UP), '.2f'),
+    calculation_value = total / quantity
+    return {'value': format(calculation_value.quantize(Decimal('.01'), rounding=ROUND_HALF_UP), '.2f'),
+            'calculation_value': format(calculation_value, 'f'),
             'currency': 'RMB', 'unit': fact.get('uom'), 'source_type': 'purchase_total_derived',
             'source': fact.get('source_type'), 'error': '', 'evidence': deepcopy(fact)}
 

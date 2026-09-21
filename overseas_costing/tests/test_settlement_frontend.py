@@ -177,11 +177,11 @@ w.settlementNotice=(s,message)=>s.notice=message;
 
 def test_batch_rpc_reads_with_get_and_starts_with_post():
     run_js('''
-const calls=[];global.frappe={call:async request=>{calls.push(request);return {message:{ok:true}}}};
-w.call=async(method,args)=>{calls.push({method,args});return {ok:true}};
+const calls=[];
+w.call=async(method,args,freeze,options)=>{calls.push({method,args,freeze,options});return {ok:true}};
 assert.deepEqual(await w.settlementApi('get_batch_settlement',{batch_name:'B',version_name:'V'}),{ok:true});
 await w.settlementApi('start_batch_matching',{batch_name:'B',version_name:'V'});
-assert.equal(calls[0].type,'GET');assert.equal(calls[1].type,'POST');
+assert.equal(calls[0].options.type,'GET');assert.equal(calls[1].options.type,'POST');
 assert(calls.every(x=>x.args.batch_name==='B'&&x.args.version_name==='V'));
 ''')
 

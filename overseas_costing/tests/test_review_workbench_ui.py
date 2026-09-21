@@ -65,6 +65,56 @@ result_is_current:true,estimated_total_cost_rmb:100,status:'Calculated'})));""")
     assert 'data-primary-action="review"' in text
 
 
+def test_result_preview_uses_server_adopted_price_and_shared_native_scrollbar():
+    source = (PARTS / '35-workbench-view.js').read_text(encoding='utf-8')
+    renderer = source.split('renderBatchResultPreview(data)', 1)[1].split('bindResultPreviewScrollControls', 1)[0]
+    assert 'item.adopted_price' in renderer
+    assert 'data-ocw-scrollbar' in renderer
+    assert 'type="range"' not in renderer
+    assert 'shouldCompactResultPreviewColumns' not in source
+
+
+def test_drawer_and_erp_preview_use_server_adopted_price_projection():
+    drawer = (PARTS / "80-drawer-profit.js").read_text(encoding="utf-8")
+    erp = (PARTS / "30-calculation-erp.js").read_text(encoding="utf-8")
+
+    assert "item.adopted_price?.value ?? item.unit_price" in drawer
+    assert "按货值÷采购数量计算" in drawer
+    assert "item.adopted_price?.value ?? item.original_unit_price" in erp
+    assert "按货值÷采购数量计算" in erp
+
+
+def test_result_and_sku_tables_share_one_scroll_controller_without_geometry_feedback():
+    result_source = (PARTS / '35-workbench-view.js').read_text(encoding='utf-8')
+    sku_source = (PARTS / '82-detail-page.js').read_text(encoding='utf-8')
+    material_source = (PARTS / '78-material-fee-workspace.js').read_text(encoding='utf-8')
+    allocation_source = (PARTS / '76-allocation.js').read_text(encoding='utf-8')
+    material_css = (PARTS / '48-material-fee-workspace.css').read_text(encoding='utf-8')
+    helper_source = (PARTS / '15-horizontal-scroll.js').read_text(encoding='utf-8')
+
+    assert 'bindHorizontalScrollController' in helper_source
+    assert 'shouldCompactResultPreviewColumns' not in result_source
+    assert 'shouldCompactSkuColumns' not in sku_source
+    assert 'bindHorizontalScrollController' in result_source
+    assert 'bindHorizontalScrollController' in sku_source
+    assert 'bindHorizontalScrollController' in material_source
+    assert 'bindHorizontalScrollController' in allocation_source
+    assert 'const bindPair =' not in allocation_source
+    assert 'compactWidth' not in material_source
+    assert '--mf-grid-reduction' not in material_css
+    assert 'column.style.width' not in helper_source
+
+
+def test_missing_status_copy_uses_danger_color_while_pending_sources_remain_amber():
+    settlement_css = (PARTS / '47-settlement.css').read_text(encoding='utf-8')
+    shell_css = (PARTS / '10-shell.css').read_text(encoding='utf-8')
+
+    assert '.ocw-freight-missing { color: #b42318; }' in settlement_css
+    assert '.ocw-purchase-approval-metric.is-missing strong' in shell_css
+    assert 'color: #b42318;' in shell_css.split('.ocw-purchase-approval-metric.is-missing strong', 1)[1].split('}', 1)[0]
+    assert 'color: #9a6700;' in shell_css.split('.ocw-purchase-approval-metric.is-pending strong', 1)[1].split('}', 1)[0]
+
+
 def test_stale_row_shows_old_result_and_specific_blocker():
     text=run_js("""const v=makeView('pending');console.log(JSON.stringify(v.renderWorkbenchBatchRow({
 name:'B',batch_no:'B',primary_issue:'calculation',primary_action:'recalculate',review_state:'processing',
@@ -453,7 +503,7 @@ console.log(JSON.stringify({calls,errors}));
 
     trial_call = next(call for call in result['calls'] if call['method'].endswith('recalculate_batch'))
     assert trial_call['freeze'] is True
-    assert trial_call['options']['inlineErrors'] is True
+    assert trial_call['options'] == {}
     assert result['errors'] == ['还有 2 行本次发货货值缺失或失效，请先补齐后再试算。']
 
 

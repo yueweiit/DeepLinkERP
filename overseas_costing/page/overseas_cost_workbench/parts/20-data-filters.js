@@ -1,63 +1,218 @@
-  async call(method, args = {}, freeze = false, options = {}) {
-    const locallyHandledErrorRequest = options.inlineErrors === true && [
-      "overseas_costing.api.materials.start_source_ai_review",
-      "overseas_costing.api.materials.get_source_ai_review_status",
-      "overseas_costing.api.calculate.recalculate_batch",
-      "overseas_costing.api.calculate.start_cost_trial_ai_review",
-      "overseas_costing.api.calculate.get_cost_trial_ai_review_status",
-      "overseas_costing.api.calculate.preview_cost_trial",
-      "overseas_costing.api.calculate.confirm_cost_trial",
-      "overseas_costing.api.calculate.discard_cost_trial_ai_review",
-    ].includes(method);
-    // Frappe and jQuery both install global status handlers that show a second
-    // dialog even when a caller handles the error. Use native fetch only for
-    // the explicitly opted-in requests so their owner remains the sole error UI.
-    if (!locallyHandledErrorRequest) {
-      const response = await frappe.call({ method, args, freeze, ...(options.type ? { type: options.type } : {}) });
-      return response.message || {};
+  requestParameters(args = {}) {
+    const parameters = new URLSearchParams();
+    Object.entries(args || {}).forEach(([key, value]) => {
+      const encoded = value !== null && typeof value === "object" ? JSON.stringify(value) : value;
+      parameters.set(key, encoded === null || encoded === undefined ? "" : String(encoded));
+    });
+    return parameters;
+  }
+
+  async requestJson(url, options = {}) {
+    const method = String(options.method || "POST").toUpperCase();
+    const parameters = this.requestParameters(options.args || {});
+    const formData = options.formData || null;
+    const headers = {
+      "X-Frappe-CSRF-Token": frappe.csrf_token || "",
+      "X-Requested-With": "XMLHttpRequest",
+      Accept: "application/json",
+      ...(options.headers || {}),
+    };
+    let requestUrl = url;
+    const request = { method, credentials: "same-origin", headers };
+    if (method === "GET") {
+      const query = parameters.toString();
+      if (query) requestUrl += `${requestUrl.includes("?") ? "&" : "?"}${query}`;
+    } else if (formData) {
+      request.body = formData;
+    } else {
+      request.body = parameters.toString();
+      headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
     }
+    const response = await fetch(requestUrl, request);
+    const responseText = await response.text();
+    let payload = {};
+    try {
+      payload = responseText ? JSON.parse(responseText) : {};
+    } catch (_error) {
+      payload = {};
+    }
+    if (!response.ok || payload.exc) {
+      const serverMessage = payload.exception
+        || payload.exc
+        || (typeof payload.message === "string" ? payload.message : "")
+        || response.statusText
+        || `HTTP ${response.status}`;
+      const error = new Error(serverMessage);
+      error.status = response.status;
+      error.statusText = response.statusText;
+      error.responseJSON = payload;
+      error.responseText = responseText;
+      throw error;
+    }
+    return payload;
+  }
+
+  isReadOnlyRequest(method, options = {}) {
+    if (options.readOnly === true || String(options.type || "").toUpperCase() === "GET") return true;
+    if (options.businessWrite === true) return false;
+    const action = String(method || "").split(".").pop().toLowerCase();
+    return /^(get|list|search|preview|check|locate|export|find)_/.test(action);
+  }
+
+  isDeploymentTransportError(error) {
+    return [0, 502, 503, 504].includes(Number(error?.status || 0));
+  }
+
+  workbenchReleaseBlockedError(message = "页面版本已失效，请刷新后继续使用。") {
+    const error = new Error(message);
+    error.workbenchReleaseBlocked = true;
+    return error;
+  }
+
+  async call(method, args = {}, freeze = false, options = {}) {
+    if (this.releaseBlocked && !String(method).endsWith(".get_workbench_release")) {
+      throw this.workbenchReleaseBlockedError();
+    }
+    const type = String(options.type || "POST").toUpperCase();
+    const request = () => this.requestJson(`/api/method/${method}`, { method: type, args });
     if (freeze) frappe.dom?.freeze?.();
     try {
-      const body = new URLSearchParams();
-      Object.entries(args || {}).forEach(([key, value]) => {
-        const encoded = value !== null && typeof value === "object" ? JSON.stringify(value) : value;
-        body.set(key, encoded === null || encoded === undefined ? "" : String(encoded));
-      });
-      const response = await fetch(`/api/method/${method}`, {
-        method: "POST",
-        credentials: "same-origin",
-        body: body.toString(),
-        headers: {
-          "X-Frappe-CSRF-Token": frappe.csrf_token,
-          "X-Requested-With": "XMLHttpRequest",
-          Accept: "application/json",
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        },
-      });
-      const responseText = await response.text();
-      let payload = {};
       try {
-        payload = responseText ? JSON.parse(responseText) : {};
-      } catch (_error) {
-        payload = {};
+        const payload = await request();
+        return payload.message || {};
+      } catch (error) {
+        if (!this.isDeploymentTransportError(error) || String(method).endsWith(".get_workbench_release")) throw error;
+        const releaseState = await this.checkWorkbenchRelease({ deploymentFailure: true });
+        if (this.releaseBlocked || releaseState?.unavailable || !this.isReadOnlyRequest(method, options)) {
+          if (this.releaseBlocked || releaseState?.unavailable) error.workbenchReleaseHandled = true;
+          throw error;
+        }
+        const payload = await request();
+        return payload.message || {};
       }
-      if (!response.ok) {
-        const serverMessage = payload.exception
-          || payload.exc
-          || (typeof payload.message === "string" ? payload.message : "")
-          || response.statusText
-          || `HTTP ${response.status}`;
-        const error = new Error(serverMessage);
-        error.status = response.status;
-        error.statusText = response.statusText;
-        error.responseJSON = payload;
-        error.responseText = responseText;
-        throw error;
-      }
-      return payload.message || {};
     } finally {
       if (freeze) frappe.dom?.unfreeze?.();
     }
+  }
+
+  async uploadFileRequest(formData) {
+    if (this.releaseBlocked) throw this.workbenchReleaseBlockedError();
+    try {
+      const payload = await this.requestJson("/api/method/upload_file", { method: "POST", formData });
+      return payload.message || payload || {};
+    } catch (error) {
+      if (this.isDeploymentTransportError(error)) {
+        const releaseState = await this.checkWorkbenchRelease({ deploymentFailure: true });
+        if (this.releaseBlocked || releaseState?.unavailable) error.workbenchReleaseHandled = true;
+      }
+      throw error;
+    }
+  }
+
+  async checkWorkbenchRelease(options = {}) {
+    if (this._releaseCheckPromise) return this._releaseCheckPromise;
+    this._releaseCheckPromise = (async () => {
+      try {
+        const payload = await this.requestJson(
+          "/api/method/overseas_costing.api.workbench.get_workbench_release",
+          { method: "GET" }
+        );
+        const result = payload.message || payload || {};
+        const releaseId = String(result.release_id || "").trim();
+        if (!releaseId) throw new Error("发布标识为空");
+        if (!this.initialReleaseId) {
+          this.initialReleaseId = releaseId;
+          return { changed: false, releaseId };
+        }
+        if (releaseId !== this.initialReleaseId) {
+          this.releaseBlocked = true;
+          this.releaseUpdating = false;
+          this.showWorkbenchReleaseDialog("updated");
+          return { changed: true, releaseId };
+        }
+        const wasUpdating = this.releaseUpdating;
+        this.releaseUpdating = false;
+        this.releaseBlocked = false;
+        if (wasUpdating) this.hideWorkbenchReleaseDialog();
+        return { changed: false, releaseId };
+      } catch (error) {
+        if (!options.deploymentFailure) return { unavailable: true, error };
+        this.releaseUpdating = true;
+        this.releaseBlocked = true;
+        this.showWorkbenchReleaseDialog("updating");
+        this.scheduleWorkbenchReleaseCheck(3000);
+        return { unavailable: true, error };
+      }
+    })();
+    try {
+      return await this._releaseCheckPromise;
+    } finally {
+      this._releaseCheckPromise = null;
+    }
+  }
+
+  showWorkbenchReleaseDialog(mode) {
+    const updated = mode === "updated";
+    if (!this._releaseDialog) {
+      const dialog = new frappe.ui.Dialog({
+        title: "系统版本更新",
+        fields: [{ fieldtype: "HTML", fieldname: "release_status" }],
+        primary_action_label: "立即刷新",
+        primary_action: () => window.location.reload(),
+      });
+      dialog.show();
+      dialog.$wrapper?.addClass?.("ocw-release-modal");
+      dialog.$wrapper?.find?.(".btn-modal-close, .modal-header .close")?.hide?.();
+      dialog.$wrapper?.off?.("hide.bs.modal.ocwRelease")?.on?.("hide.bs.modal.ocwRelease", (event) => {
+        if (this.releaseBlocked) event.preventDefault();
+      });
+      this._releaseDialog = dialog;
+    }
+    const message = updated
+      ? "系统已更新，请刷新后继续使用。"
+      : "系统正在更新，请稍候。新版本就绪后即可刷新。";
+    this._releaseDialog.fields_dict?.release_status?.$wrapper?.html?.(
+      `<div class="ocw-release-message">${message}</div>`
+    );
+    this._releaseDialog.get_primary_btn?.().toggle?.(updated);
+    this._releaseDialog.show?.();
+  }
+
+  hideWorkbenchReleaseDialog() {
+    if (!this._releaseDialog) return;
+    const dialog = this._releaseDialog;
+    this._releaseDialog = null;
+    dialog.hide?.();
+  }
+
+  scheduleWorkbenchReleaseCheck(delay = 60000) {
+    window.clearTimeout(this._releaseCheckTimer);
+    this._releaseCheckTimer = window.setTimeout(async () => {
+      if (document.visibilityState === "visible") await this.checkWorkbenchRelease();
+      this.scheduleWorkbenchReleaseCheck(this.releaseUpdating ? 3000 : 60000);
+    }, delay);
+  }
+
+  async initializeWorkbenchRelease() {
+    await this.checkWorkbenchRelease();
+    this.startWorkbenchReleaseMonitor();
+  }
+
+  startWorkbenchReleaseMonitor() {
+    if (this._releaseFocusHandler) window.removeEventListener("focus", this._releaseFocusHandler);
+    if (this._releaseVisibilityHandler) document.removeEventListener("visibilitychange", this._releaseVisibilityHandler);
+    this._releaseFocusHandler = () => this.checkWorkbenchRelease();
+    this._releaseVisibilityHandler = () => {
+      if (document.visibilityState === "visible") this.checkWorkbenchRelease();
+    };
+    window.addEventListener("focus", this._releaseFocusHandler);
+    document.addEventListener("visibilitychange", this._releaseVisibilityHandler);
+    this.scheduleWorkbenchReleaseCheck(60000);
+  }
+
+  resumeWorkbenchReleaseMonitor() {
+    this.startWorkbenchReleaseMonitor();
+    return this.checkWorkbenchRelease();
   }
   async loadBatches() {
     this.setTableLoading();
@@ -149,11 +304,7 @@
       route: window.location.hash || window.location.pathname || "",
       extra_json: JSON.stringify(options.extra || {}),
     };
-    frappe
-      .call({
-        method: "overseas_costing.api.usage.record_usage",
-        args: payload,
-      })
+    this.call("overseas_costing.api.usage.record_usage", payload, false, { businessWrite: true })
       .catch((error) => {
         console.warn("[overseas-cost-workbench] 使用记录写入失败", error);
       });

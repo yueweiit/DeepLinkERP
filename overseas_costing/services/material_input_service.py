@@ -168,11 +168,13 @@ def _purchase_total_unit_price(row: dict) -> dict | None:
     if not amount.is_finite() or amount <= 0 or not quantity.is_finite() or quantity <= 0 or not uom:
         return None
     try:
-        value = (amount / quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        calculation_value = amount / quantity
+        value = calculation_value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except InvalidOperation:
         return None
     return {
         "value": format(value, ".2f"),
+        "calculation_value": format(calculation_value, "f"),
         "currency": "RMB",
         "unit": uom,
         "error": "",
@@ -183,6 +185,68 @@ def _purchase_total_unit_price(row: dict) -> dict | None:
             "purchase_quantity": format(quantity.normalize(), "f"),
             "purchase_uom": uom,
         },
+    }
+
+
+def _explicit_purchase_unit_price(row: dict) -> dict | None:
+    """Project a complete stored purchase-price tuple without changing evidence."""
+
+    from overseas_costing.services.material_value_semantics import is_effectively_missing
+
+    if is_effectively_missing("unit_price", row.get("unit_price"), row):
+        return None
+    try:
+        value = Decimal(str(row.get("unit_price")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    currency = str(row.get("purchase_currency") or "").strip().upper()
+    uom = str(row.get("unit_price_uom") or row.get("purchase_uom") or row.get("unit") or "").strip()
+    if not value.is_finite() or value < 0 or not currency or not uom:
+        return None
+    return {
+        "value": format(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), ".2f"),
+        "calculation_value": format(value, "f"),
+        "currency": currency,
+        "unit": uom,
+        "error": "",
+        "source_type": "explicit_purchase_price",
+        "source": str(row.get("source_type") or "ITEM_PURCHASE"),
+        "evidence": {
+            "unit_price": str(row.get("unit_price")),
+            "purchase_currency": currency,
+            "unit_price_uom": uom,
+            "source_doc_no": str(row.get("source_doc_no") or ""),
+        },
+    }
+
+
+def _settlement_unit_price(valuation: dict) -> dict | None:
+    """Project a unit-price valuation only when its complete tuple is present."""
+
+    method = str((valuation or {}).get("method") or "")
+    if method not in {"settlement_expense_unit_price", "settlement_purchase_unit_price"}:
+        return None
+    status = str(valuation.get("status") or "").strip().lower()
+    if valuation.get("error") or status in {"missing", "conflict", "invalid", "stale", "historical_pending"}:
+        return None
+    evidence = valuation.get("input_evidence") or {}
+    try:
+        price = Decimal(str(evidence.get("price")))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    currency = str(evidence.get("original_currency") or "").strip().upper()
+    unit = str(evidence.get("price_uom") or "").strip()
+    if not price.is_finite() or price < 0 or not currency or not unit:
+        return None
+    return {
+        "value": format(price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), ".2f"),
+        "calculation_value": format(price, "f"),
+        "currency": currency,
+        "unit": unit,
+        "source_type": "expense" if method == "settlement_expense_unit_price" else "commodity_purchase",
+        "source": evidence.get("purchase_source"),
+        "error": valuation.get("error"),
+        "evidence": evidence.get("price_evidence") or evidence,
     }
 
 
@@ -226,23 +290,20 @@ def present_material_row(item: dict) -> dict:
     row.pop('adopted_price', None)
     if fact:
         row['adopted_price'] = adopted_price(fact, row) or {}
-    elif valuation.get('method') == 'settlement_purchase_unit_price' and valuation.get('trusted_shipment_source'):
-        evidence = valuation.get('input_evidence') or {}
-        price = Decimal(str(evidence['price']))
-        row['adopted_price'] = {'value': format(price.quantize(Decimal('.01'), rounding=ROUND_HALF_UP), '.2f'),
-            'currency': evidence.get('original_currency'), 'unit': evidence.get('price_uom'),
-            'source_type': 'commodity_purchase', 'source': evidence.get('purchase_source'),
-            'error': valuation.get('error'), 'evidence': evidence}
-    elif (row.get('source_context') or {}).get('root_kind') == 'expense':
-        evidence = valuation.get('input_evidence') or {}
-        row['adopted_price'] = {'value':evidence.get('price'), 'currency':evidence.get('original_currency'),
-                                'unit':evidence.get('price_uom'), 'error':valuation.get('error'),
-                                'source_type':'expense' if valuation.get('method') == 'settlement_expense_unit_price' else 'commodity_purchase',
-                                'source':evidence.get('purchase_source'), 'evidence':evidence.get('price_evidence')}
     else:
-        derived_price = _purchase_total_unit_price(row)
-        if derived_price is not None:
-            row['adopted_price'] = derived_price
+        settlement_method = valuation.get('method') in {
+            'settlement_expense_unit_price', 'settlement_purchase_unit_price'
+        }
+        if settlement_method:
+            price = _settlement_unit_price(valuation)
+            if valuation.get('method') == 'settlement_purchase_unit_price' and not valuation.get('trusted_shipment_source'):
+                price = None
+        else:
+            price = _explicit_purchase_unit_price(row) or _purchase_total_unit_price(row)
+        if price is not None:
+            row['adopted_price'] = price
+    if (row.get("adopted_price") or {}).get("source_type") == "purchase_total_derived":
+        row["purchase_price_source"] = "按货值÷采购数量计算"
     return row
 
 

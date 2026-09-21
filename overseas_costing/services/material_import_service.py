@@ -32,8 +32,10 @@ MATERIAL_PURCHASE_FACT_FIELDS = (
 )
 
 MATERIAL_IMPORT_FIELDS = (
+    "goods_value",
     "actual_shipped_qty",
     "shipped_uom",
+    "package_count",
     "net_weight_kg",
     "gross_weight_kg",
     "volume_m3",
@@ -50,6 +52,7 @@ POSITIVE_SUPPLEMENT_FIELDS = frozenset(
         "volume_m3",
         "volume_weight_kg",
         "chargeable_weight_kg",
+        "package_count",
     }
 )
 
@@ -104,6 +107,41 @@ def build_field_changes(existing: dict, incoming: dict) -> list:
     for fieldname in MATERIAL_IMPORT_FIELDS:
         new_value = incoming.get(fieldname)
         if new_value in (None, ""):
+            continue
+        if fieldname == "goods_value":
+            valuation = incoming.get("_shipment_valuation")
+            if not isinstance(valuation, dict) or valuation.get("error"):
+                continue
+            try:
+                incoming_amount = Decimal(str(new_value))
+                evidenced_amount = Decimal(str(valuation.get("amount_rmb")))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if (
+                not incoming_amount.is_finite()
+                or not evidenced_amount.is_finite()
+                or incoming_amount <= 0
+                or evidenced_amount != incoming_amount
+                or str(valuation.get("currency") or "").upper() not in {"RMB", "CNY"}
+            ):
+                continue
+            from overseas_costing.services.shipment_cost_service import shipment_value
+
+            current_amount = shipment_value(existing).get("amount_rmb")
+            try:
+                current_amount = Decimal(str(current_amount))
+            except (InvalidOperation, TypeError, ValueError):
+                current_amount = None
+            if current_amount is not None and current_amount.is_finite() and current_amount > 0:
+                continue
+            changes.append(
+                {
+                    "field": fieldname,
+                    "old": existing.get(fieldname),
+                    "new": new_value,
+                    "conflict": False,
+                }
+            )
             continue
         if fieldname in POSITIVE_SUPPLEMENT_FIELDS:
             try:
@@ -265,8 +303,7 @@ def build_material_import_preview(existing: list, incoming: list, source: dict) 
             classification = "supplement"
         else:
             classification = "no_change"
-        preview_rows.append(
-            {
+        preview_row = {
                 "source_row": normalized_row.get("source_row"),
                 "match_status": status,
                 "classification": classification,
@@ -281,7 +318,9 @@ def build_material_import_preview(existing: list, incoming: list, source: dict) 
                     if normalized_row.get(fieldname) not in (None, "")
                 },
             }
-        )
+        if isinstance(normalized_row.get("_shipment_valuation"), dict):
+            preview_row["_shipment_valuation"] = normalized_row["_shipment_valuation"]
+        preview_rows.append(preview_row)
 
     result = {
         "source": dict(source or {}),
@@ -595,6 +634,9 @@ def build_wiki_material_projection(existing: list, parsed_preview: dict) -> dict
         chargeable = _sum_source_field(rows, "chargeable_weight_kg", set(row_numbers))
         if chargeable is not None:
             result["chargeable_weight_kg"] = _decimal_text(chargeable)
+        package_count = _sum_source_field(rows, "package_count", set(row_numbers))
+        if package_count is not None:
+            result["package_count"] = _decimal_text(package_count)
 
         incomplete_rows = []
         allocation_required = False
@@ -1203,10 +1245,25 @@ class FrappeMaterialImportRepository:
     def update_item(self, item_name: str, updates: dict, audit_context: dict) -> None:
         from overseas_costing.services import import_service
 
+        updates = dict(updates)
+        valuation = updates.pop("_shipment_valuation", None)
+        row = frappe.get_doc('Overseas Cost Item', item_name).as_dict()
         bundle = effective_source.current_source_bundle(audit_context['batch'], audit_context['version'], lock=True)
-        if bundle and bundle['context']['root_kind'] == 'expense':
-            row = frappe.get_doc('Overseas Cost Item', item_name).as_dict()
+        if bundle:
             updates = effective_source.physical_update_values(row, updates, bundle['context'], audit_context)
+        updates = _persist_virtual_item_updates(row, updates, audit_context)
+        if valuation is not None:
+            from overseas_costing.services.shipment_cost_service import (
+                activate_shipment_valuation,
+                object_json,
+            )
+
+            metadata = object_json(updates.get("extra_json") or row.get("extra_json"))
+            activated = activate_shipment_valuation(metadata, valuation)
+            updates["goods_value"] = activated["amount_rmb"]
+            updates["extra_json"] = json.dumps(
+                metadata, ensure_ascii=False, default=str, separators=(",", ":")
+            )
         import_service._update_item_fields(
             item_name=item_name,
             batch_doc_name=audit_context["batch"],
@@ -1253,13 +1310,112 @@ class FrappeMaterialImportRepository:
         frappe.db.rollback()
 
 
+def _persist_virtual_item_updates(row: dict, updates: dict, audit_context: dict) -> dict:
+    """Store schema-free packing fields in the existing projected metadata."""
+
+    from overseas_costing.services.shipment_cost_service import object_json
+
+    result = dict(updates)
+    virtual = {
+        field: result.pop(field)
+        for field in ("package_count", "packaging_type")
+        if field in result
+    }
+    if not virtual:
+        return result
+    metadata = object_json(result.get("extra_json") or row.get("extra_json"))
+    projected = dict(metadata.get("ai_row_packing_values") or {})
+    projected.update(virtual)
+    metadata["ai_row_packing_values"] = projected
+    evidence = dict(metadata.get("material_import_packing_evidence") or {})
+    source = {
+        key: audit_context.get(key)
+        for key in ("source_kind", "source_id", "source_hash", "sheet", "source_rows")
+        if audit_context.get(key) not in (None, "", [])
+    }
+    evidence.update({field: source for field in virtual})
+    metadata["material_import_packing_evidence"] = evidence
+    result["extra_json"] = json.dumps(
+        metadata, ensure_ascii=False, default=str, separators=(",", ":")
+    )
+    return result
+
+
+def _attach_packing_valuations(
+    existing: list,
+    parsed_preview: dict,
+    projection: dict,
+    source: dict,
+) -> list[str]:
+    """Reuse the canonical packing valuation engine for missing-value imports."""
+
+    from copy import deepcopy
+    from overseas_costing.services.shipment_valuation_service import build_shipment_valuations
+
+    linked_rows = []
+    item_overrides = {}
+    target_by_source_row = {}
+    for projected in projection.get("incoming") or []:
+        candidates = _match_wiki_candidates(existing, projected)
+        if len(candidates) != 1:
+            continue
+        target = candidates[0]
+        target_key = _stable_item_key(target)
+        target_by_source_row.update(
+            {int(number): target_key for number in projected.get("source_rows") or []}
+        )
+        item_overrides[target_key] = {
+            **target,
+            "actual_shipped_qty": projected.get("actual_shipped_qty") or target.get("actual_shipped_qty"),
+            "shipped_uom": projected.get("shipped_uom") or target.get("shipped_uom") or target.get("unit"),
+        }
+    for original in parsed_preview.get("material_rows") or []:
+        row = deepcopy(original)
+        target_key = target_by_source_row.get(int(row.get("source_row") or 0))
+        if target_key:
+            row["_target_stable_line_key"] = target_key
+        linked_rows.append(row)
+
+    valuation_source = {
+        "source_kind": source.get("source_kind") or source.get("kind"),
+        "source_id": source.get("source_id") or source.get("id"),
+        "source_hash": source.get("source_hash"),
+        "sheet_name": source.get("sheet_name") or source.get("sheet"),
+    }
+    result = build_shipment_valuations(
+        list(item_overrides.values()),
+        {**parsed_preview, "material_rows": linked_rows},
+        valuation_source,
+    )
+    valuations_by_key = {
+        _stable_item_key(item): result.get("valuations", {}).get(str(item.get("name") or ""))
+        for item in item_overrides.values()
+    }
+    for projected in projection.get("incoming") or []:
+        candidates = _match_wiki_candidates(existing, projected)
+        if len(candidates) != 1:
+            continue
+        valuation = valuations_by_key.get(_stable_item_key(candidates[0])) or {}
+        try:
+            amount = Decimal(str(valuation.get("amount_rmb")))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if not amount.is_finite() or amount <= 0 or valuation.get("error"):
+            continue
+        projected["goods_value"] = valuation["amount_rmb"]
+        projected["_shipment_valuation"] = valuation
+    return list(result.get("warnings") or [])
+
+
 def _build_trusted_comparison(existing: list, kind: str, trusted: dict, source: dict) -> dict:
     parsed_preview = trusted.get("preview") or {}
     projection = None
     if kind in EXCEL_PACKING_SOURCE_KINDS:
         projection = build_wiki_material_projection(existing, parsed_preview)
+        valuation_warnings = _attach_packing_valuations(existing, parsed_preview, projection, source)
         incoming = projection["incoming"]
     else:
+        valuation_warnings = []
         incoming = _incoming_material_rows(parsed_preview)
 
     comparison = build_material_import_preview(existing, incoming, source)
@@ -1287,6 +1443,10 @@ def _build_trusted_comparison(existing: list, kind: str, trusted: dict, source: 
         )
         comparison["summary"]["out_of_batch"] = len(projection["out_of_batch"])
     comparison["source_validation"] = _source_validation(parsed_preview)
+    comparison["source_validation"]["warnings"].extend(
+        {"code": "shipment_valuation_unavailable", "message": message}
+        for message in valuation_warnings
+    )
     _attach_source_grid(comparison, trusted, existing, kind)
     if projection is not None and not (
         projection["confirmation_groups"] or projection["shared_groups"]
@@ -1645,6 +1805,19 @@ def apply_material_import(
             if merge_error:
                 repo.rollback()
                 return merge_error
+            _attach_packing_valuations(
+                existing,
+                trusted.get("preview") or {},
+                {"incoming": resolved_rows},
+                {
+                    "kind": claims.get("kind"),
+                    "id": str(source.get("source_id") or claims.get("id") or ""),
+                    "label": str(source.get("source_label") or claims.get("id") or ""),
+                    "source_hash": claims.get("source_hash"),
+                    "sheet": str(source.get("sheet_name") or claims.get("sheet") or ""),
+                    "source_updated_at": source.get("source_updated_at"),
+                },
+            )
             comparison = build_material_import_preview(
                 existing,
                 resolved_rows,
@@ -1740,6 +1913,8 @@ def apply_material_import(
                 }
             selected_targets[target_key] = source_row
             incoming = dict(row["incoming"])
+            if isinstance(row.get("_shipment_valuation"), dict):
+                incoming["_shipment_valuation"] = row["_shipment_valuation"]
             merged_source_fields = (
                 choices.get("merged_source_fields")
                 if isinstance(choices.get("merged_source_fields"), dict)
@@ -1792,6 +1967,8 @@ def apply_material_import(
             if "actual_shipped_qty" in updates:
                 updates["actual_shipped_qty_mode"] = "EXPLICIT_SOURCE"
                 updates["actual_shipped_qty_source_revision"] = str(claims["source_hash"])
+            if "goods_value" in updates and incoming.get("_shipment_valuation"):
+                updates["_shipment_valuation"] = incoming["_shipment_valuation"]
             if updates:
                 pending_updates.append((target, updates, source_row))
 
@@ -1813,6 +1990,11 @@ def apply_material_import(
                     "batch": context["batch"],
                     "version": context["version"],
                     "row_no": target.get("row_no"),
+                    "source_kind": str(claims.get("kind") or ""),
+                    "source_id": str(source.get("source_id") or claims.get("id") or ""),
+                    "source_hash": str(claims.get("source_hash") or ""),
+                    "sheet": str(source.get("sheet_name") or claims.get("sheet") or ""),
+                    "source_rows": list(preview_row.get("source_rows") or [source_row]),
                     **({'source_context': source_context} if source_context else {}),
                     "remark": f"确认采用物料来源 {claims.get('id')} 第 {source_rows} 行{group_remark}",
                 },

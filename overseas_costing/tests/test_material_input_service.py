@@ -136,6 +136,7 @@ def test_missing_purchase_price_uses_purchase_total_and_partial_shipment_is_pror
 
     assert presented["adopted_price"] == {
         "value": "1.22",
+        "calculation_value": "1.215882352941176470588235294",
         "currency": "RMB",
         "unit": "pieza",
         "error": "",
@@ -192,8 +193,95 @@ def test_existing_purchase_price_wins_over_shipment_value_derived_price() -> Non
 
     presented = present_material_row(source)
 
-    assert "adopted_price" not in presented
+    assert presented["adopted_price"]["value"] == "3.50"
+    assert presented["adopted_price"]["calculation_value"] == "3.50"
+    assert presented["adopted_price"]["source_type"] == "explicit_purchase_price"
     assert presented["unit_price"] == "3.50"
+
+
+@pytest.mark.parametrize(
+    ("price_fields", "expected_value", "expected_source"),
+    [
+        (
+            {"unit_price": "3.50", "purchase_currency": "USD", "unit_price_uom": "kg"},
+            "3.50",
+            "explicit_purchase_price",
+        ),
+        (
+            {"unit_price": 0, "purchase_currency": "", "unit_price_uom": ""},
+            "200.00",
+            "purchase_total_derived",
+        ),
+    ],
+)
+def test_payment_bound_local_packing_value_uses_canonical_price_projection(
+    price_fields, expected_value, expected_source
+) -> None:
+    source = {
+        "name": "ITEM-1",
+        "quantity": 4,
+        "purchase_uom": "kg",
+        "unit": "kg",
+        "goods_value": 800,
+        **price_fields,
+        "extra_json": json.dumps({
+            "effective_logistics_source": {
+                "root_kind": "expense",
+                "separate_adoption": True,
+            },
+            "shipment_valuation": {
+                "amount_rmb": "800",
+                "quantity": "4",
+                "uom": "kg",
+                "currency": "RMB",
+                "method": "packing_row_total",
+                "source_refs": [{"source_id": "LOCAL-PACK", "row": 2}],
+            },
+        }),
+    }
+
+    presented = present_material_row(source)
+
+    assert presented["adopted_price"]["value"] == expected_value
+    assert presented["adopted_price"]["source_type"] == expected_source
+
+
+def test_errored_settlement_price_is_not_adopted_or_reused_from_raw_fields() -> None:
+    source = {
+        "name": "ITEM-1",
+        "quantity": 4,
+        "actual_shipped_qty": 4,
+        "shipped_uom": "kg",
+        "purchase_uom": "kg",
+        "unit": "kg",
+        "unit_price": 300,
+        "purchase_currency": "RMB",
+        "unit_price_uom": "kg",
+        "goods_value": 1200,
+        "extra_json": json.dumps({
+            "settlement_cargo": {"quantity": "4", "unit": "kg"},
+            "settlement_valuation": {
+                "amount_rmb": None,
+                "quantity": "4",
+                "uom": "kg",
+                "currency": "RMB",
+                "method": "settlement_expense_unit_price",
+                "status": "conflict",
+                "error": "SETTLEMENT_EXPENSE_PRICE_AMBIGUOUS",
+                "trusted_shipment_source": True,
+                "input_evidence": {
+                    "price": "300",
+                    "original_currency": "RMB",
+                    "price_uom": "kg",
+                    "purchase_source": "PAYMENT-1",
+                },
+            },
+        }),
+    }
+
+    presented = present_material_row(source)
+
+    assert presented.get("adopted_price") in (None, {})
 
 
 def test_grid_pagination_is_bounded_without_silently_skipping_page() -> None:

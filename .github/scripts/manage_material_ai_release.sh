@@ -12,6 +12,7 @@ compose_file="$compose_root/compose.custom.yaml"
 base_image="deeplinkerp-custom:v16.23.0-latest"
 backup_image="deeplinkerp-custom:pre-material-ai-release-$release_id"
 backup_archive="$compose_root/backups/material-ai-release-$release_id.tar.gz"
+release_marker_backup="$compose_root/backups/workbench-release-$release_id.json"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 asset_sync_script="${ASSET_SYNC_SCRIPT:-}"
 if [ -z "$asset_sync_script" ] && [ -f "$script_dir/sync_and_verify_assets.sh" ]; then
@@ -29,6 +30,23 @@ sync_and_verify_assets_only() {
 
 prepare_release() {
   mkdir -p "$compose_root/backups"
+  backend_id=$(docker compose -f "$compose_file" ps -q backend)
+  test -n "$backend_id"
+  marker_config=$(mktemp)
+  docker cp "$backend_id:/home/frappe/frappe-bench/sites/$site_name/site_config.json" "$marker_config"
+  python3 - "$marker_config" "$release_marker_backup" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:]
+with open(source, encoding="utf-8") as handle:
+    config = json.load(handle)
+key = "overseas_costing_release_id"
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump({"present": key in config, "value": config.get(key) or ""}, handle)
+PY
+  rm -f "$marker_config"
+  test -s "$release_marker_backup"
   docker image inspect "$base_image" >/dev/null
   docker image tag "$base_image" "$backup_image"
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
@@ -90,6 +108,7 @@ rollback_code_release() {
   # Additive releases retain the current database, files and site configuration.
   # The original rollback mode remains available for deliberate full recovery.
   docker image inspect "$backup_image" >/dev/null
+  test -s "$release_marker_backup"
   docker compose -f "$compose_file" stop frontend websocket queue-short queue-long scheduler >/dev/null
   docker image tag "$backup_image" "$base_image"
   docker compose -f "$compose_file" up -d --no-deps --force-recreate backend
@@ -141,6 +160,19 @@ PY
   docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
     bench --site "$site_name" clear-website-cache
   sync_and_verify_assets_only
+  previous_release_id=$(python3 - "$release_marker_backup" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    marker = json.load(handle)
+print(str(marker.get("value") or ""))
+PY
+  )
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+    bench --site "$site_name" set-config overseas_costing_release_id "$previous_release_id"
+  docker compose -f "$compose_file" exec -T -w /home/frappe/frappe-bench backend \
+    bench --site "$site_name" clear-cache
 }
 
 case "$mode" in

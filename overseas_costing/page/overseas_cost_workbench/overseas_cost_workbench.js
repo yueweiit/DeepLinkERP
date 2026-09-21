@@ -76,6 +76,7 @@ frappe.pages["overseas-cost-workbench"].on_page_show = function () {
   hideDeskChromeWhenReady(workbench);
   workbench.applyDeskLayout();
   workbench.applyModuleSidebarPreference();
+  workbench.resumeWorkbenchReleaseMonitor();
   requestAnimationFrame(() => workbench.applyDeskLayout());
 };
 
@@ -675,7 +676,7 @@ class OverseasCostWorkbench {
     };
   }
 
-  init() {
+  async init() {
     this.resetDeskLayoutClasses();
     this.prepareWorkbenchContainer();
     this.page = frappe.ui.make_app_page({
@@ -687,6 +688,8 @@ class OverseasCostWorkbench {
     this.addActions();
     this.renderShell();
     this.bindEvents();
+    await this.initializeWorkbenchRelease();
+    if (this.releaseBlocked) return;
     this.loadBusinessEntityOptions();
     this.loadBatches();
     this.recordUsage("PAGE_VIEW", { remark: "进入海外采购综合成本核算工作台" });
@@ -718,6 +721,9 @@ class OverseasCostWorkbench {
 
   // 离开工作台时恢复上面隐藏的元素，避免影响其它页面。
   restoreDeskChrome() {
+    window.clearTimeout(this._releaseCheckTimer);
+    if (this._releaseFocusHandler) window.removeEventListener("focus", this._releaseFocusHandler);
+    if (this._releaseVisibilityHandler) document.removeEventListener("visibilitychange", this._releaseVisibilityHandler);
     $(window).off("beforeunload.ocwDetailEdit");
     if (this.releaseEditSession && this.detailState?.editToken) {
       this.releaseEditSession();
@@ -1183,66 +1189,310 @@ class OverseasCostWorkbench {
       });
   }
 
-  async call(method, args = {}, freeze = false, options = {}) {
-    const locallyHandledErrorRequest = options.inlineErrors === true && [
-      "overseas_costing.api.materials.start_source_ai_review",
-      "overseas_costing.api.materials.get_source_ai_review_status",
-      "overseas_costing.api.calculate.recalculate_batch",
-      "overseas_costing.api.calculate.start_cost_trial_ai_review",
-      "overseas_costing.api.calculate.get_cost_trial_ai_review_status",
-      "overseas_costing.api.calculate.preview_cost_trial",
-      "overseas_costing.api.calculate.confirm_cost_trial",
-      "overseas_costing.api.calculate.discard_cost_trial_ai_review",
-    ].includes(method);
-    // Frappe and jQuery both install global status handlers that show a second
-    // dialog even when a caller handles the error. Use native fetch only for
-    // the explicitly opted-in requests so their owner remains the sole error UI.
-    if (!locallyHandledErrorRequest) {
-      const response = await frappe.call({ method, args, freeze, ...(options.type ? { type: options.type } : {}) });
-      return response.message || {};
+  bindHorizontalScrollController({
+    content,
+    header = null,
+    scrollbar,
+    spacer,
+    leftButton = null,
+    rightButton = null,
+    onInteraction = null,
+    onRefresh = null,
+  }) {
+    if (!content || !scrollbar || !spacer) return () => {};
+    let syncing = false;
+    let frame = null;
+    const interact = () => {
+      if (typeof onInteraction === "function") onInteraction();
+    };
+    const metrics = () => ({
+      contentMax: Math.max(0, content.scrollWidth - content.clientWidth),
+      scrollbarMax: Math.max(0, scrollbar.scrollWidth - scrollbar.clientWidth),
+    });
+    const setButtons = (maximum) => {
+      if (leftButton) leftButton.disabled = maximum <= 1 || content.scrollLeft <= 1;
+      if (rightButton) rightButton.disabled = maximum <= 1 || content.scrollLeft >= maximum - 1;
+    };
+    const syncFromContent = () => {
+      const { contentMax, scrollbarMax } = metrics();
+      const left = Math.min(contentMax, Math.max(0, content.scrollLeft));
+      if (content.scrollLeft !== left) content.scrollLeft = left;
+      if (header) header.scrollLeft = left;
+      const scrollbarLeft = contentMax > 0 ? (left / contentMax) * scrollbarMax : 0;
+      if (Math.abs(scrollbar.scrollLeft - scrollbarLeft) > 0.5) scrollbar.scrollLeft = scrollbarLeft;
+      setButtons(contentMax);
+    };
+    const refresh = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        spacer.style.width = `${Math.max(content.scrollWidth, scrollbar.clientWidth)}px`;
+        scrollbar.classList.toggle("is-hidden", content.scrollWidth <= content.clientWidth + 1);
+        syncFromContent();
+        if (typeof onRefresh === "function") onRefresh();
+      });
+    };
+    const onContentScroll = () => {
+      if (syncing) return;
+      syncing = true;
+      interact();
+      syncFromContent();
+      syncing = false;
+    };
+    const onScrollbarScroll = () => {
+      if (syncing) return;
+      syncing = true;
+      interact();
+      const { contentMax, scrollbarMax } = metrics();
+      content.scrollLeft = scrollbarMax > 0 ? (scrollbar.scrollLeft / scrollbarMax) * contentMax : 0;
+      syncFromContent();
+      syncing = false;
+    };
+    const move = (direction) => {
+      interact();
+      content.scrollBy({
+        left: direction * Math.max(240, content.clientWidth * 0.65),
+        behavior: "smooth",
+      });
+    };
+    const moveLeft = () => move(-1);
+    const moveRight = () => move(1);
+    content.addEventListener("scroll", onContentScroll, { passive: true });
+    scrollbar.addEventListener("scroll", onScrollbarScroll, { passive: true });
+    leftButton?.addEventListener("click", moveLeft);
+    rightButton?.addEventListener("click", moveRight);
+    window.addEventListener("resize", refresh);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(refresh);
+    observer?.observe(content);
+    const table = content.querySelector("table");
+    if (table) observer?.observe(table);
+    refresh();
+    return () => {
+      content.removeEventListener("scroll", onContentScroll);
+      scrollbar.removeEventListener("scroll", onScrollbarScroll);
+      leftButton?.removeEventListener("click", moveLeft);
+      rightButton?.removeEventListener("click", moveRight);
+      window.removeEventListener("resize", refresh);
+      observer?.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }
+
+  requestParameters(args = {}) {
+    const parameters = new URLSearchParams();
+    Object.entries(args || {}).forEach(([key, value]) => {
+      const encoded = value !== null && typeof value === "object" ? JSON.stringify(value) : value;
+      parameters.set(key, encoded === null || encoded === undefined ? "" : String(encoded));
+    });
+    return parameters;
+  }
+
+  async requestJson(url, options = {}) {
+    const method = String(options.method || "POST").toUpperCase();
+    const parameters = this.requestParameters(options.args || {});
+    const formData = options.formData || null;
+    const headers = {
+      "X-Frappe-CSRF-Token": frappe.csrf_token || "",
+      "X-Requested-With": "XMLHttpRequest",
+      Accept: "application/json",
+      ...(options.headers || {}),
+    };
+    let requestUrl = url;
+    const request = { method, credentials: "same-origin", headers };
+    if (method === "GET") {
+      const query = parameters.toString();
+      if (query) requestUrl += `${requestUrl.includes("?") ? "&" : "?"}${query}`;
+    } else if (formData) {
+      request.body = formData;
+    } else {
+      request.body = parameters.toString();
+      headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
     }
+    const response = await fetch(requestUrl, request);
+    const responseText = await response.text();
+    let payload = {};
+    try {
+      payload = responseText ? JSON.parse(responseText) : {};
+    } catch (_error) {
+      payload = {};
+    }
+    if (!response.ok || payload.exc) {
+      const serverMessage = payload.exception
+        || payload.exc
+        || (typeof payload.message === "string" ? payload.message : "")
+        || response.statusText
+        || `HTTP ${response.status}`;
+      const error = new Error(serverMessage);
+      error.status = response.status;
+      error.statusText = response.statusText;
+      error.responseJSON = payload;
+      error.responseText = responseText;
+      throw error;
+    }
+    return payload;
+  }
+
+  isReadOnlyRequest(method, options = {}) {
+    if (options.readOnly === true || String(options.type || "").toUpperCase() === "GET") return true;
+    if (options.businessWrite === true) return false;
+    const action = String(method || "").split(".").pop().toLowerCase();
+    return /^(get|list|search|preview|check|locate|export|find)_/.test(action);
+  }
+
+  isDeploymentTransportError(error) {
+    return [0, 502, 503, 504].includes(Number(error?.status || 0));
+  }
+
+  workbenchReleaseBlockedError(message = "页面版本已失效，请刷新后继续使用。") {
+    const error = new Error(message);
+    error.workbenchReleaseBlocked = true;
+    return error;
+  }
+
+  async call(method, args = {}, freeze = false, options = {}) {
+    if (this.releaseBlocked && !String(method).endsWith(".get_workbench_release")) {
+      throw this.workbenchReleaseBlockedError();
+    }
+    const type = String(options.type || "POST").toUpperCase();
+    const request = () => this.requestJson(`/api/method/${method}`, { method: type, args });
     if (freeze) frappe.dom?.freeze?.();
     try {
-      const body = new URLSearchParams();
-      Object.entries(args || {}).forEach(([key, value]) => {
-        const encoded = value !== null && typeof value === "object" ? JSON.stringify(value) : value;
-        body.set(key, encoded === null || encoded === undefined ? "" : String(encoded));
-      });
-      const response = await fetch(`/api/method/${method}`, {
-        method: "POST",
-        credentials: "same-origin",
-        body: body.toString(),
-        headers: {
-          "X-Frappe-CSRF-Token": frappe.csrf_token,
-          "X-Requested-With": "XMLHttpRequest",
-          Accept: "application/json",
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        },
-      });
-      const responseText = await response.text();
-      let payload = {};
       try {
-        payload = responseText ? JSON.parse(responseText) : {};
-      } catch (_error) {
-        payload = {};
+        const payload = await request();
+        return payload.message || {};
+      } catch (error) {
+        if (!this.isDeploymentTransportError(error) || String(method).endsWith(".get_workbench_release")) throw error;
+        const releaseState = await this.checkWorkbenchRelease({ deploymentFailure: true });
+        if (this.releaseBlocked || releaseState?.unavailable || !this.isReadOnlyRequest(method, options)) {
+          if (this.releaseBlocked || releaseState?.unavailable) error.workbenchReleaseHandled = true;
+          throw error;
+        }
+        const payload = await request();
+        return payload.message || {};
       }
-      if (!response.ok) {
-        const serverMessage = payload.exception
-          || payload.exc
-          || (typeof payload.message === "string" ? payload.message : "")
-          || response.statusText
-          || `HTTP ${response.status}`;
-        const error = new Error(serverMessage);
-        error.status = response.status;
-        error.statusText = response.statusText;
-        error.responseJSON = payload;
-        error.responseText = responseText;
-        throw error;
-      }
-      return payload.message || {};
     } finally {
       if (freeze) frappe.dom?.unfreeze?.();
     }
+  }
+
+  async uploadFileRequest(formData) {
+    if (this.releaseBlocked) throw this.workbenchReleaseBlockedError();
+    try {
+      const payload = await this.requestJson("/api/method/upload_file", { method: "POST", formData });
+      return payload.message || payload || {};
+    } catch (error) {
+      if (this.isDeploymentTransportError(error)) {
+        const releaseState = await this.checkWorkbenchRelease({ deploymentFailure: true });
+        if (this.releaseBlocked || releaseState?.unavailable) error.workbenchReleaseHandled = true;
+      }
+      throw error;
+    }
+  }
+
+  async checkWorkbenchRelease(options = {}) {
+    if (this._releaseCheckPromise) return this._releaseCheckPromise;
+    this._releaseCheckPromise = (async () => {
+      try {
+        const payload = await this.requestJson(
+          "/api/method/overseas_costing.api.workbench.get_workbench_release",
+          { method: "GET" }
+        );
+        const result = payload.message || payload || {};
+        const releaseId = String(result.release_id || "").trim();
+        if (!releaseId) throw new Error("发布标识为空");
+        if (!this.initialReleaseId) {
+          this.initialReleaseId = releaseId;
+          return { changed: false, releaseId };
+        }
+        if (releaseId !== this.initialReleaseId) {
+          this.releaseBlocked = true;
+          this.releaseUpdating = false;
+          this.showWorkbenchReleaseDialog("updated");
+          return { changed: true, releaseId };
+        }
+        const wasUpdating = this.releaseUpdating;
+        this.releaseUpdating = false;
+        this.releaseBlocked = false;
+        if (wasUpdating) this.hideWorkbenchReleaseDialog();
+        return { changed: false, releaseId };
+      } catch (error) {
+        if (!options.deploymentFailure) return { unavailable: true, error };
+        this.releaseUpdating = true;
+        this.releaseBlocked = true;
+        this.showWorkbenchReleaseDialog("updating");
+        this.scheduleWorkbenchReleaseCheck(3000);
+        return { unavailable: true, error };
+      }
+    })();
+    try {
+      return await this._releaseCheckPromise;
+    } finally {
+      this._releaseCheckPromise = null;
+    }
+  }
+
+  showWorkbenchReleaseDialog(mode) {
+    const updated = mode === "updated";
+    if (!this._releaseDialog) {
+      const dialog = new frappe.ui.Dialog({
+        title: "系统版本更新",
+        fields: [{ fieldtype: "HTML", fieldname: "release_status" }],
+        primary_action_label: "立即刷新",
+        primary_action: () => window.location.reload(),
+      });
+      dialog.show();
+      dialog.$wrapper?.addClass?.("ocw-release-modal");
+      dialog.$wrapper?.find?.(".btn-modal-close, .modal-header .close")?.hide?.();
+      dialog.$wrapper?.off?.("hide.bs.modal.ocwRelease")?.on?.("hide.bs.modal.ocwRelease", (event) => {
+        if (this.releaseBlocked) event.preventDefault();
+      });
+      this._releaseDialog = dialog;
+    }
+    const message = updated
+      ? "系统已更新，请刷新后继续使用。"
+      : "系统正在更新，请稍候。新版本就绪后即可刷新。";
+    this._releaseDialog.fields_dict?.release_status?.$wrapper?.html?.(
+      `<div class="ocw-release-message">${message}</div>`
+    );
+    this._releaseDialog.get_primary_btn?.().toggle?.(updated);
+    this._releaseDialog.show?.();
+  }
+
+  hideWorkbenchReleaseDialog() {
+    if (!this._releaseDialog) return;
+    const dialog = this._releaseDialog;
+    this._releaseDialog = null;
+    dialog.hide?.();
+  }
+
+  scheduleWorkbenchReleaseCheck(delay = 60000) {
+    window.clearTimeout(this._releaseCheckTimer);
+    this._releaseCheckTimer = window.setTimeout(async () => {
+      if (document.visibilityState === "visible") await this.checkWorkbenchRelease();
+      this.scheduleWorkbenchReleaseCheck(this.releaseUpdating ? 3000 : 60000);
+    }, delay);
+  }
+
+  async initializeWorkbenchRelease() {
+    await this.checkWorkbenchRelease();
+    this.startWorkbenchReleaseMonitor();
+  }
+
+  startWorkbenchReleaseMonitor() {
+    if (this._releaseFocusHandler) window.removeEventListener("focus", this._releaseFocusHandler);
+    if (this._releaseVisibilityHandler) document.removeEventListener("visibilitychange", this._releaseVisibilityHandler);
+    this._releaseFocusHandler = () => this.checkWorkbenchRelease();
+    this._releaseVisibilityHandler = () => {
+      if (document.visibilityState === "visible") this.checkWorkbenchRelease();
+    };
+    window.addEventListener("focus", this._releaseFocusHandler);
+    document.addEventListener("visibilitychange", this._releaseVisibilityHandler);
+    this.scheduleWorkbenchReleaseCheck(60000);
+  }
+
+  resumeWorkbenchReleaseMonitor() {
+    this.startWorkbenchReleaseMonitor();
+    return this.checkWorkbenchRelease();
   }
   async loadBatches() {
     this.setTableLoading();
@@ -1334,11 +1584,7 @@ class OverseasCostWorkbench {
       route: window.location.hash || window.location.pathname || "",
       extra_json: JSON.stringify(options.extra || {}),
     };
-    frappe
-      .call({
-        method: "overseas_costing.api.usage.record_usage",
-        args: payload,
-      })
+    this.call("overseas_costing.api.usage.record_usage", payload, false, { businessWrite: true })
       .catch((error) => {
         console.warn("[overseas-cost-workbench] 使用记录写入失败", error);
       });
@@ -1745,8 +1991,7 @@ class OverseasCostWorkbench {
           edit_token: inDetail ? this.detailState.editToken : acquired.edit_token,
           expected_modified: inDetail ? this.detailState.expectedModified : acquired.modified,
         },
-        true,
-        { inlineErrors: true }
+        true
       );
       if (!result?.ok) {
         throw new Error(result?.message || "重新试算被服务器拒绝，未修改批次数据。");
@@ -2648,11 +2893,12 @@ class OverseasCostWorkbench {
     const allocations = pools.item_allocations || {};
     const rows = items.slice(0, 12).map((item, index) => {
       const formula = item.cost_formula || {};
+      const derivedPrice = item.adopted_price?.source_type === "purchase_total_derived";
       return `
         <tr>
           <td>${this.escape(String(index + 1))}</td>
           <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
-          <td>${this.escape(this.formatMoney(item.original_unit_price ?? formula.original_unit_price ?? "--"))}</td>
+          <td>${this.escape(this.formatMoney(item.adopted_price?.value ?? item.original_unit_price ?? formula.original_unit_price ?? "--"))}${derivedPrice ? '<small class="ocw-result-source">按货值÷采购数量计算</small>' : ""}</td>
           <td>${this.escape(this.formatMoney(item.comprehensive_unit_price ?? formula.comprehensive_unit_price ?? "--"))}</td>
           <td>${this.escape(this.formatValue(item.outbound_quantity ?? "--"))}</td>
           <td>${this.escape(this.formatMoney(formula.allocated_logistics_cost ?? 0))}</td>
@@ -3874,13 +4120,6 @@ class OverseasCostWorkbench {
       if (!this.resultPreviewState.batchName) return;
       this.loadBatchResultPreview(this.resultPreviewState.batchName, this.resultPreviewState.page, { force: true });
     });
-    this.$root.on("click", "[data-action='result-preview-scroll']", (event) => {
-      const direction = Number($(event.currentTarget).attr("data-direction") || 1);
-      this.$root.find("[data-role='result-preview-table-scroll']").get(0)?.scrollBy({
-        left: direction * 320,
-        behavior: "smooth",
-      });
-    });
     this.$root.on("click", "[data-action='workbench-primary']", async (event) => {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       const action = $(event.currentTarget).attr("data-primary-action");
@@ -4028,10 +4267,6 @@ class OverseasCostWorkbench {
       this.detailState.sku.sortBy = sortBy;
       this.detailState.sku.page = 1;
       this.loadSkuPage();
-    });
-    this.$root.on("click", "[data-action='sku-scroll']", (event) => {
-      const direction = Number($(event.currentTarget).attr("data-direction") || 1);
-      this.$root.find("[data-role='sku-table-scroll']").get(0)?.scrollBy({ left: direction * 320, behavior: "smooth" });
     });
   }
 
@@ -4490,7 +4725,7 @@ class OverseasCostWorkbench {
         <td class="ocw-result-cell is-sticky-code"${cellHeaders(0)} title="${this.escape(item.material_code || "")}"><span>${this.escape(item.material_code || "—")}</span></td>
         <td class="ocw-result-cell is-sticky-name"${cellHeaders(1)} title="${this.escape(item.product_name || "")}"><span>${this.escape(item.product_name || "—")}</span></td>
         <td class="ocw-result-cell"${cellHeaders(2)} title="${this.escape(item.spec_model || "")}">${this.escape(item.spec_model || "—")}</td>
-        <td class="ocw-result-cell is-number"${cellHeaders(3)}>${sourceMoneyCell(item.unit_price, item.purchase_currency || "")}</td>
+        <td class="ocw-result-cell is-number"${cellHeaders(3)}>${sourceMoneyCell(item.adopted_price?.value ?? item.unit_price, item.adopted_price?.currency || item.purchase_currency || "")}${item.adopted_price?.source_type === "purchase_total_derived" ? '<small class="ocw-result-source">按货值÷采购数量计算</small>' : ""}</td>
         <td class="ocw-result-cell is-number"${cellHeaders(4)}>${this.escape(this.formatNumber(item.quantity) || "—")}</td>
         <td class="ocw-result-cell is-number"${cellHeaders(5)}>${moneyCell(item.freight_alloc_rmb)}</td>
         <td class="ocw-result-cell is-number"${cellHeaders(6)}>${moneyCell(item.tax_alloc_rmb)}</td>
@@ -4517,7 +4752,7 @@ class OverseasCostWorkbench {
             ${calculationPending ? `<p class="ocw-result-pending-note">当前版本尚未完成计算，核算结果显示为“未计算”。</p>` : ""}
             <div class="ocw-result-scroll-controls">
               <button class="ocw-scroll-arrow" type="button" data-action="result-preview-scroll" data-direction="-1" aria-label="向左滚动 SKU 结果">‹</button>
-              <input class="ocw-result-scrollbar" type="range" min="0" max="0" step="1" value="0" data-role="result-preview-scrollbar" aria-label="横向滚动 SKU 结果" disabled />
+              <div class="ocw-horizontal-scrollbar ocw-result-scrollbar" data-role="result-preview-scrollbar" data-ocw-scrollbar tabindex="0" aria-label="横向滚动 SKU 结果"><div data-role="result-preview-scrollbar-spacer"></div></div>
               <button class="ocw-scroll-arrow" type="button" data-action="result-preview-scroll" data-direction="1" aria-label="向右滚动 SKU 结果">›</button>
             </div>
             <div class="ocw-result-header-scroll" data-role="result-preview-header-scroll" aria-hidden="true">
@@ -4547,91 +4782,20 @@ class OverseasCostWorkbench {
     `;
   }
 
-  shouldCompactResultPreviewColumns(scrollLeft, currentlyCompact = false) {
-    const position = Math.max(0, Number(scrollLeft) || 0);
-    return currentlyCompact ? position > 32 : position > 148;
-  }
-
   bindResultPreviewScrollControls() {
     this.cleanupResultPreviewScrollControls();
     const tableScroll = this.$root.find("[data-role='result-preview-table-scroll']").get(0);
     const headerScroll = this.$root.find("[data-role='result-preview-header-scroll']").get(0);
-    const range = this.$root.find("[data-role='result-preview-scrollbar']").get(0);
-    const $preview = this.$root.find(".ocw-result-preview");
-    if (!tableScroll || !headerScroll || !range) return;
-    const table = tableScroll.querySelector(".ocw-result-data-table");
-    const headerTable = headerScroll.querySelector(".ocw-result-header-table");
-    let syncing = false;
-    let compact = false;
-    let refreshFrame = null;
-    let resizeObserver = null;
-
-    const updateCompactState = (scrollLeft) => {
-      const nextCompact = this.shouldCompactResultPreviewColumns(scrollLeft, compact);
-      if (nextCompact === compact) return;
-      compact = nextCompact;
-      $preview.toggleClass("is-result-compact", compact);
-      scheduleUpdate();
-    };
-    const update = () => {
-      const max = Math.max(0, tableScroll.scrollWidth - tableScroll.clientWidth);
-      const left = Math.min(max, Math.max(0, tableScroll.scrollLeft));
-      if (tableScroll.scrollLeft !== left) tableScroll.scrollLeft = left;
-      headerScroll.scrollLeft = left;
-      range.max = String(max);
-      range.value = String(left);
-      range.disabled = max <= 1;
-      this.$root.find("[data-action='result-preview-scroll'][data-direction='-1']").prop("disabled", max <= 1 || left <= 1);
-      this.$root.find("[data-action='result-preview-scroll'][data-direction='1']").prop("disabled", max <= 1 || left >= max - 1);
-      updateCompactState(left);
-    };
-    const scheduleUpdate = () => {
-      if (refreshFrame !== null) return;
-      refreshFrame = window.requestAnimationFrame(() => {
-        refreshFrame = null;
-        update();
-      });
-    };
-    const onScroll = () => {
-      if (syncing) return;
-      syncing = true;
-      update();
-      syncing = false;
-    };
-    const onInput = () => {
-      if (syncing) return;
-      syncing = true;
-      const max = Math.max(0, tableScroll.scrollWidth - tableScroll.clientWidth);
-      tableScroll.scrollLeft = Math.min(max, Math.max(0, Number(range.value || 0)));
-      update();
-      syncing = false;
-    };
-    const onColumnTransitionEnd = (event) => {
-      if (!event.target.classList?.contains("ocw-result-cell")) return;
-      scheduleUpdate();
-    };
-    tableScroll.addEventListener("scroll", onScroll, { passive: true });
-    range.addEventListener("input", onInput);
-    table?.addEventListener("transitionend", onColumnTransitionEnd);
-    headerTable?.addEventListener("transitionend", onColumnTransitionEnd);
-    window.addEventListener("resize", scheduleUpdate);
-    if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(scheduleUpdate);
-      resizeObserver.observe(tableScroll);
-      if (table) resizeObserver.observe(table);
-      if (headerTable) resizeObserver.observe(headerTable);
-    }
-    update();
-    this._resultPreviewScrollCleanup = () => {
-      tableScroll.removeEventListener("scroll", onScroll);
-      range.removeEventListener("input", onInput);
-      table?.removeEventListener("transitionend", onColumnTransitionEnd);
-      headerTable?.removeEventListener("transitionend", onColumnTransitionEnd);
-      window.removeEventListener("resize", scheduleUpdate);
-      resizeObserver?.disconnect();
-      if (refreshFrame !== null) window.cancelAnimationFrame(refreshFrame);
-      $preview.removeClass("is-result-compact");
-    };
+    const scrollbar = this.$root.find("[data-role='result-preview-scrollbar']").get(0);
+    const spacer = this.$root.find("[data-role='result-preview-scrollbar-spacer']").get(0);
+    this._resultPreviewScrollCleanup = this.bindHorizontalScrollController({
+      content: tableScroll,
+      header: headerScroll,
+      scrollbar,
+      spacer,
+      leftButton: this.$root.find("[data-action='result-preview-scroll'][data-direction='-1']").get(0),
+      rightButton: this.$root.find("[data-action='result-preview-scroll'][data-direction='1']").get(0),
+    });
   }
 
   renderWorkbenchBatchList() {
@@ -5418,19 +5582,7 @@ class OverseasCostWorkbench {
     formData.append("is_private", "1");
     formData.append("folder", "Home");
 
-    const response = await fetch("/api/method/upload_file", {
-      method: "POST",
-      body: formData,
-      credentials: "same-origin",
-      headers: {
-        "X-Frappe-CSRF-Token": frappe.csrf_token || "",
-      },
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.exc) {
-      throw new Error(this.extractServerMessage(data) || "Excel 文件上传失败");
-    }
-    const message = data.message || data;
+    const message = await this.uploadFileRequest(formData);
     if (!message.file_url) {
       throw new Error("Excel 文件已上传，但没有返回文件地址。");
     }
@@ -9713,47 +9865,26 @@ class OverseasCostWorkbench {
   }
 
   bindHierarchyScrollbars() {
-    const bindPair = ($source, $bar) => {
+    (this.hierarchyScrollCleanups || []).forEach((cleanup) => cleanup());
+    this.hierarchyScrollCleanups = [];
+    const bind = ($source, $bar) => {
       if (!$source.length || !$bar.length) return;
-      const source = $source.get(0);
-      const bar = $bar.get(0);
-      const $spacer = $bar.find("[data-role$='scroll-spacer']");
-      const $header = $source.prev("[data-role='child-table-head-scroll']");
-      const syncHeader = () => {
-        if ($header.length) $header.get(0).scrollLeft = source.scrollLeft;
-      };
-      const update = () => {
-        const width = source.scrollWidth || source.clientWidth;
-        $spacer.css("width", `${width}px`);
-        $bar.toggleClass("is-hidden", width <= source.clientWidth + 1);
-        bar.scrollLeft = source.scrollLeft;
-        syncHeader();
-      };
-      let syncing = false;
-      $source.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
-        if (syncing) return;
-        syncing = true;
-        bar.scrollLeft = source.scrollLeft;
-        syncHeader();
-        syncing = false;
+      const cleanup = this.bindHorizontalScrollController({
+        content: $source.get(0),
+        header: $source.prev("[data-role='child-table-head-scroll']").get(0),
+        scrollbar: $bar.get(0),
+        spacer: $bar.find("[data-role$='scroll-spacer']").get(0),
+        onInteraction: () => this.positionChildScrollbars(),
+        onRefresh: () => this.positionChildScrollbars(),
       });
-      $bar.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
-        if (syncing) return;
-        syncing = true;
-        source.scrollLeft = bar.scrollLeft;
-        syncHeader();
-        syncing = false;
-      });
-      update();
-      window.requestAnimationFrame(update);
-      window.setTimeout(update, 80);
+      this.hierarchyScrollCleanups.push(cleanup);
     };
 
     const $hierarchyWrap = this.$root.find("[data-area='table']");
-    bindPair($hierarchyWrap, this.$root.find("[data-role='hierarchy-x-scroll']"));
+    bind($hierarchyWrap, this.$root.find("[data-role='hierarchy-x-scroll']"));
     this.$root.find("[data-role='child-table-scroll']").each((_, element) => {
       const $source = $(element);
-      bindPair($source, $source.next("[data-role='child-table-x-scroll']"));
+      bind($source, $source.next("[data-role='child-table-x-scroll']"));
     });
     this.positionChildScrollbars();
     $hierarchyWrap
@@ -9764,7 +9895,7 @@ class OverseasCostWorkbench {
     $(window)
       .off("resize.ocwHierarchyScrollbars")
       .on("resize.ocwHierarchyScrollbars", () => {
-        window.requestAnimationFrame(() => this.bindHierarchyScrollbars());
+        window.requestAnimationFrame(() => this.positionChildScrollbars());
       });
   }
 
@@ -10852,12 +10983,6 @@ class OverseasCostWorkbench {
     this.$root.on("change", "select[data-mf-ai-edit]", (event) => {
       this.updateSourceAIReviewEdit($(event.currentTarget));
     });
-    this.$root.on("click", "[data-action='mf-grid-scroll-left'], [data-action='mf-grid-scroll-right']", (event) => {
-      this.closeMaterialAICandidatePopover();
-      const direction = $(event.currentTarget).attr("data-action") === "mf-grid-scroll-left" ? -1 : 1;
-      const viewport = this.$root.find("[data-mf-grid-viewport]").get(0);
-      if (viewport) viewport.scrollBy({ left: direction * Math.max(240, viewport.clientWidth * 0.65), behavior: "smooth" });
-    });
     this.$root.on("focus", "[data-mf-fee-input]", (event) => {
       const $input = $(event.currentTarget);
       const state = this.ensureMaterialFeeState();
@@ -11143,7 +11268,7 @@ class OverseasCostWorkbench {
             batch_name: batchName,
             version_name: versionName,
             run_id: "",
-          }, false, { inlineErrors: true })
+          }, false)
         : await this.call("overseas_costing.api.materials.get_source_ai_clarification", {
             batch_name: batchName,
           }, false);
@@ -11698,10 +11823,10 @@ class OverseasCostWorkbench {
   materialFeeGridColumns() {
     const state = this.ensureMaterialFeeState();
     const columns = [
-      { field: "__group_select", label: "选择", readonly: true, width: 48, compactWidth: 42 },
-      { field: "row_no", label: "行", readonly: true, width: 40, compactWidth: 32 },
-      { field: "material_code", label: "物料编码", readonly: true, width: 100, compactWidth: 88 },
-      { field: "product_name", label: "物料名称", readonly: true, width: 180, compactWidth: 120 },
+      { field: "__group_select", label: "选择", readonly: true, width: 48 },
+      { field: "row_no", label: "行", readonly: true, width: 40 },
+      { field: "material_code", label: "物料编码", readonly: true, width: 100 },
+      { field: "product_name", label: "物料名称", readonly: true, width: 180 },
       { field: "quantity", label: "采购数量", readonly: true, numeric: true, width: 130 },
       { field: "actual_shipped_qty", label: "发货数量", numeric: true, width: 140 },
       { field: "shipped_uom", label: "发货单位", width: 130 },
@@ -12008,22 +12133,19 @@ class OverseasCostWorkbench {
     const page = Number(materialData.page || state.page || 1);
     const pageCount = Math.max(1, Number(materialData.page_count || 1));
     const tableWidth = columns.reduce((sum, column) => sum + Number(column.width || 130), 0);
-    const fixedColumns = columns.filter((column) => column.compactWidth);
-    const widthVariables = fixedColumns.map((column) => `--mf-grid-${column.field}-expanded:${column.width}px;--mf-grid-${column.field}-compact:${column.compactWidth}px`).join(";");
-    const compactReduction = fixedColumns.reduce((sum, column) => sum + column.width - column.compactWidth, 0);
     return `
-      <div class="ocw-mf-grid-shell" style="--mf-grid-expanded-width:${tableWidth}px;--mf-grid-compact-reduction:${compactReduction}px;${widthVariables}">
+      <div class="ocw-mf-grid-shell" style="--mf-grid-table-width:${tableWidth}px">
         <div class="ocw-mf-grid-note"><span>${this.isMaterialAIReadyStatus(state.aiFill?.status) && state.aiFill?.draftVisible ? "AI 草稿中，单格修改只更新草稿" : "单格离开或按 Enter 自动保存"}</span><span>Tab 可连续操作</span><span>多格粘贴会先预览再整体确认</span><span>项目归属缺失不阻断试算</span></div>
         <div class="ocw-mf-grid-scroll" data-mf-grid-viewport>
           <div class="ocw-mf-grid-track"><table class="ocw-mf-grid-table">
-            <colgroup>${columns.map((column) => `<col style="width:${column.compactWidth ? `var(--mf-grid-${column.field}-width)` : `${Number(column.width || 130)}px`}">`).join("")}</colgroup>
+            <colgroup>${columns.map((column) => `<col style="width:${Number(column.width || 130)}px">`).join("")}</colgroup>
             <thead><tr>${columns.map((column) => column.field === "__group_select"
               ? `<th data-mf-grid-field="__group_select"><input type="checkbox" data-mf-page-select="1" aria-label="选择当前页可操作物料" ${this.materialPageSelectionState().checked ? "checked" : ""} ${this.materialPageSelectionState().total ? "" : "disabled"}></th>`
               : `<th data-mf-grid-field="${column.field}">${this.escape(column.label)}</th>`).join("")}</tr></thead>
             <tbody>${items.length ? items.map((item, index) => item.__aiReplacement ? this.renderMaterialReplacementGridRow(item, columns, index) : this.renderMaterialFeeGridRow(item, columns, index)).join("") : `<tr><td class="ocw-mf-grid-empty" colspan="${columns.length}">${state.onlyMissing ? "当前页没有缺项" : "当前批次暂无物料行"}</td></tr>`}</tbody>
           </table></div>
         </div>
-        <div class="ocw-mf-grid-scroll-controls"><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-left" aria-label="向左滚动">‹</button><div class="ocw-mf-grid-scrollbar" data-mf-grid-scrollbar><div style="width:${tableWidth}px"></div></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-right" aria-label="向右滚动">›</button></div>
+        <div class="ocw-mf-grid-scroll-controls"><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-left" aria-label="向左滚动">‹</button><div class="ocw-horizontal-scrollbar ocw-mf-grid-scrollbar" data-mf-grid-scrollbar tabindex="0" aria-label="物料表水平滚动条"><div style="width:${tableWidth}px"></div></div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-grid-scroll-right" aria-label="向右滚动">›</button></div>
         <div class="ocw-mf-grid-footer"><span>共 ${items.length !== (materialData.items || []).length ? `${items.length} 行（含 AI 临时明细）` : `${Number(materialData.total || 0)} 行`} · 当前第 ${page}/${pageCount} 页</span><div><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>上一页</button><button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="mf-material-page" data-page="${page + 1}" ${page >= pageCount ? "disabled" : ""}>下一页</button></div></div>
       </div>
     `;
@@ -12155,7 +12277,7 @@ class OverseasCostWorkbench {
         : price.source_type === "expense"
           ? "采购支出商品价"
           : price.source_type === "purchase_total_derived"
-            ? "按总货值÷采购数量计算"
+            ? "按货值÷采购数量计算"
             : "原商品采购价";
       return `<td class="ocw-mf-cell is-readonly" data-mf-column-index="${columnIndex}" data-mf-grid-field="${column.field}"><span>${this.escape(current ?? "待补")}</span><small>${sourceLabel}</small></td>`;
     }
@@ -13721,68 +13843,18 @@ class OverseasCostWorkbench {
     const scrollbar = $scrollbar.get(0);
     if (!viewport || !scrollbar) return;
     const shell = viewport.closest(".ocw-mf-grid-shell");
-    const table = viewport.querySelector("table");
     const spacer = scrollbar.firstElementChild;
     const leftButton = shell.querySelector("[data-action='mf-grid-scroll-left']");
     const rightButton = shell.querySelector("[data-action='mf-grid-scroll-right']");
-    let compact = false;
-    let frame = null;
-    let viewportPosition = -1;
-    let scrollbarPosition = -1;
-
-    const sync = (requestedLeft, fromScroll = false) => {
-      const left = Math.max(0, Number(requestedLeft) || 0);
-      const expandedWidth = parseFloat(shell.style.getPropertyValue("--mf-grid-expanded-width"));
-      // A layout refresh must not treat browser scroll clamping as a user scroll.
-      const nextCompact = expandedWidth <= viewport.clientWidth ? false : fromScroll ? left > 0 : compact;
-      if (nextCompact !== compact) {
-        compact = nextCompact;
-        shell.classList.toggle("is-mf-grid-compact", compact);
-      }
-      const max = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
-      const nextLeft = Math.min(max, left);
-      // Reassigning the current position would interrupt native smooth scrolling.
-      if (viewport.scrollLeft !== nextLeft) viewport.scrollLeft = nextLeft;
-      // The scrollbar is narrower than the viewport because of its arrow buttons.
-      spacer.style.width = `${max + scrollbar.clientWidth}px`;
-      if (scrollbar.scrollLeft !== viewport.scrollLeft) scrollbar.scrollLeft = viewport.scrollLeft;
-      viewportPosition = viewport.scrollLeft;
-      scrollbarPosition = scrollbar.scrollLeft;
-      leftButton.disabled = viewportPosition <= 0;
-      rightButton.disabled = max <= 0 || viewportPosition >= max - 1;
-    };
-    const onViewportScroll = () => {
-      if (viewport.scrollLeft === viewportPosition) return;
-      this.closeMaterialAICandidatePopover();
-      sync(viewport.scrollLeft, true);
-    };
-    const onScrollbarScroll = () => {
-      if (scrollbar.scrollLeft === scrollbarPosition) return;
-      this.closeMaterialAICandidatePopover();
-      sync(scrollbar.scrollLeft, true);
-    };
-    const refresh = () => {
-      if (frame !== null) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
-        sync(viewport.scrollLeft);
-      });
-    };
-    viewport.addEventListener("scroll", onViewportScroll, { passive: true });
-    scrollbar.addEventListener("scroll", onScrollbarScroll, { passive: true });
-    window.addEventListener("resize", refresh);
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(refresh);
-    observer?.observe(viewport);
-    observer?.observe(table);
-    this.refreshMaterialGridScroll = () => sync(viewport.scrollLeft, true);
-    this.materialGridScrollCleanup = () => {
-      viewport.removeEventListener("scroll", onViewportScroll);
-      scrollbar.removeEventListener("scroll", onScrollbarScroll);
-      window.removeEventListener("resize", refresh);
-      observer?.disconnect();
-      if (frame !== null) window.cancelAnimationFrame(frame);
-    };
-    sync(viewport.scrollLeft, true);
+    this.materialGridScrollCleanup = this.bindHorizontalScrollController({
+      content: viewport,
+      scrollbar,
+      spacer,
+      leftButton,
+      rightButton,
+      onInteraction: () => this.closeMaterialAICandidatePopover(),
+    });
+    this.refreshMaterialGridScroll = () => viewport.dispatchEvent(new Event("scroll"));
   }
 
   initializeMaterialAIDraft(status) {
@@ -13882,6 +13954,7 @@ class OverseasCostWorkbench {
   }
 
   materialAIRequestRetryable(error) {
+    if (error?.workbenchReleaseHandled || error?.workbenchReleaseBlocked) return false;
     const payload = this.materialAIErrorPayload(error);
     if (payload?.ok === false || payload?.retryable === false || payload?.error?.retryable === false) return false;
     const status = error?.status ?? error?.xhr?.status;
@@ -14069,28 +14142,11 @@ class OverseasCostWorkbench {
         }));
       }
     }
-    // Retry the exact request: note edits and source refreshes may happen while its response is missing.
+    // Keep the exact request for an explicit user retry. Write requests are
+    // never replayed automatically because the first response may have been lost.
     state.aiStartOptions = { ...options, request_id: requestId, requestPayload: { ...payload } };
-    let started = null;
-    let lastError = null;
-    for (let attempt = 0; attempt < 3 && !started; attempt += 1) {
-      if (!isCurrent()) return;
-      try {
-        started = await this.call("overseas_costing.api.materials.start_source_ai_review", { ...payload }, false, { inlineErrors: true });
-        if (!isCurrent()) return;
-        if (!started?.ok) throw started || new Error("AI 分析任务启动失败。");
-      } catch (error) {
-        if (!isCurrent()) return;
-        if (!this.materialAIRequestRetryable(error)) throw error;
-        started = null;
-        lastError = error;
-        state.aiFill = { ...state.aiFill, progress_step: attempt < 2 ? "连接中断，正在重试" : "启动请求未完成", connection_error: this.materialAIErrorMessage(error, "启动请求暂时失败，正在自动重试。") };
-        this.updateMaterialAIProgressSurface();
-        if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 700 * (attempt + 1)));
-      }
-    }
+    const started = await this.call("overseas_costing.api.materials.start_source_ai_review", { ...payload });
     if (!isCurrent()) return;
-    if (!started && lastError) throw lastError;
     if (!started?.ok) throw started || new Error("AI 分析任务启动失败。");
     if (started.status === "PAYMENT_SELECTION") {
       const scope = started.payment_preflight || {};
@@ -14140,7 +14196,7 @@ class OverseasCostWorkbench {
             batch_name: batchName,
             run_id: runId,
             after_revision: Number(state.aiFill?.progress_revision || 0),
-          }, false, { inlineErrors: true });
+          }, false);
           if (!isCurrent()) return;
           if (!status?.ok) throw status || new Error("AI 分析状态读取失败。");
           failureCount = 0;
@@ -15679,7 +15735,7 @@ class OverseasCostWorkbench {
         expected_modified: this.detailState.expectedModified,
         force: 0,
         reuse_only: 0,
-      }, false, { inlineErrors: true });
+      });
       if (!started?.ok) throw new Error(started?.message || "AI 试算任务启动失败。");
       if (!inputsUnchanged()) return false;
       state.costTrialAI = {
@@ -15735,7 +15791,7 @@ class OverseasCostWorkbench {
         batch_name: batchName,
         run_id: runId,
         after_revision: current.progressRevision ?? null,
-      }, false, { inlineErrors: true });
+      });
       if (!isCurrent()) return false;
       state.costTrialAI = {
         ...current,
@@ -16047,7 +16103,7 @@ class OverseasCostWorkbench {
         batch_name: this.detailState.batchName,
         run_id: trial.runId,
         selections: JSON.stringify(selections),
-      }, false, { inlineErrors: true });
+      });
       if (!preview?.ok) throw new Error(preview?.message || "试算预览失败。");
       trial.preview = preview;
       trial.selections = selections;
@@ -16090,7 +16146,7 @@ class OverseasCostWorkbench {
           batch_name: batchName,
           run_id: trial.runId,
           selections: JSON.stringify(currentSelections),
-        }, false, { inlineErrors: true });
+        });
         if (!preview?.ok || !preview.preview_token) throw new Error(preview?.message || "试算预览失败。");
         const latestSelections = this.collectCostTrialAISelections();
         if (JSON.stringify(latestSelections) !== JSON.stringify(currentSelections)) {
@@ -16109,7 +16165,7 @@ class OverseasCostWorkbench {
         selections: JSON.stringify(currentSelections),
         edit_token: this.detailState.editToken,
         expected_modified: this.detailState.expectedModified,
-      }, false, { inlineErrors: true });
+      });
       state.calculationWrite = calculationWrite;
       const result = await calculationWrite;
       if (!result?.ok || !result?.saved) throw new Error(result?.message || "AI 试算保存失败。");
@@ -16154,7 +16210,7 @@ class OverseasCostWorkbench {
     const trial = state.costTrialAI;
     if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
       batch_name: this.detailState.batchName, run_id: trial.runId,
-    }, false, { inlineErrors: true });
+    });
     state.costTrialDialog?.hide?.();
     state.costTrialDialog = null;
     state.costTrialAI = null;
@@ -16189,7 +16245,7 @@ class OverseasCostWorkbench {
         expected_modified: this.detailState.expectedModified,
         force: 0,
         reuse_only: 1,
-      }, false, { inlineErrors: true });
+      });
       if (!started?.ok) throw new Error(started?.message || "读取已保存分摊口径失败。");
       if (!isCurrent() || state.requestId !== requestId || state.feeRequestId !== feeRequestId
         || state.inputRevision !== inputRevision) return false;
@@ -16239,7 +16295,7 @@ class OverseasCostWorkbench {
         && state.inputRevision === inputRevision;
       if (trial?.runId) await this.call("overseas_costing.api.calculate.discard_cost_trial_ai_review", {
         batch_name: batchName, run_id: trial.runId,
-      }, false, { inlineErrors: true });
+      });
       state.costTrialDialog?.hide?.();
       state.costTrialDialog = null;
       state.costTrialAI = null;
@@ -16251,7 +16307,7 @@ class OverseasCostWorkbench {
         expected_modified: this.detailState.expectedModified,
         force: 1,
         reuse_only: 0,
-      }, false, { inlineErrors: true });
+      });
       if (!started?.ok) throw new Error(started?.message || "AI 试算任务重试失败。");
       if (!isCurrent()) return false;
       state.costTrialAI = {
@@ -16624,9 +16680,8 @@ class OverseasCostWorkbench {
       && dialog.sourceContext.fingerprint !== nextContext.fingerprint
     ) throw new Error("当前资料来源已变化，请关闭后重新获取资料。");
     dialog.sourceContext = nextContext;
-    dialog.materialAttachmentSources = dialog.sourceContext.root_kind === "expense"
-      ? [...(result?.approval_sources || [])].filter((row) => row.source_kind === "approval_attachment")
-      : [...(result?.manual_attachments || [])];
+    dialog.materialAttachmentSources = [...(result?.manual_attachments || [])]
+      .filter((row, index, rows) => rows.findIndex((candidate) => candidate.source_id === row.source_id) === index);
     dialog.materialAttachmentsLoaded = true;
     dialog.wikiMaterialOperationError = "";
     if (!dialog.wikiMaterialClosed) this.renderWikiMaterialSources(dialog);
@@ -16680,12 +16735,12 @@ class OverseasCostWorkbench {
   }
 
   renderMaterialSourceTabs(dialog) {
-    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["local", dialog.sourceContext?.root_kind === "expense" ? "采购支出附件" : "本地上传装箱单"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
+    return `<div class="ocw-packing-source-tabs">${[["wiki", "装箱计划表"], ["local", "本地上传装箱单"]].map(([key,label]) => `<button type="button" data-mf-source-tab="${key}" class="${(dialog.materialSourceTab || "wiki") === key ? "active" : ""}" ${dialog.wikiMaterialBusy ? "disabled" : ""}>${label}</button>`).join("")}</div>`;
   }
 
   renderMaterialAttachmentSources(dialog) {
     const bound = dialog.sourceContext?.root_kind === "expense";
-    const rows = (dialog.materialAttachmentSources || []).filter((row) => row.source_kind === (bound ? "approval_attachment" : "manual_attachment"));
+    const rows = (dialog.materialAttachmentSources || []).filter((row) => row.source_kind === "manual_attachment");
     const cards = rows.map((row) => {
       const sheets = row.sheets?.length ? row.sheets : [""];
       const semanticOnly = row.supported_for_material_import === false;
@@ -16697,11 +16752,11 @@ class OverseasCostWorkbench {
         <span>${bound ? "当前资料来源：采购支出。正文、评论和附件也会纳入“AI 分析资料”。" : "本地装箱单；国际物流正文、附件和评论由 AI 自动收集。"}</span>
         <div class="ocw-mf-wiki-toolbar-actions">
           <button class="ocw-outline-btn" type="button" data-action="mf-source-reload" ${dialog.wikiMaterialBusy ? "disabled" : ""}>刷新来源</button>
-          ${bound ? "" : '<button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>'}
+          <button class="ocw-primary-btn" type="button" data-action="mf-source-upload">本地上传装箱单</button>
         </div>
       </div>
       ${dialog.wikiMaterialOperationError ? `<div class="ocw-mf-wiki-error">${this.escape(dialog.wikiMaterialOperationError)}</div>` : ""}
-      <div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>${bound ? "采购支出装箱附件待补" : "暂无本地装箱单"}</strong></div>`}</div>
+      <div class="ocw-mf-wiki-list">${cards || `<div class="ocw-detail-empty"><strong>暂无本地装箱单</strong></div>`}</div>
     `;
   }
 
@@ -17441,17 +17496,23 @@ class OverseasCostWorkbench {
   }
 
   renderBatchDrawerItems(batch, items) {
-    const rows = (items || []).map((item, index) => `
+    const rows = (items || []).map((item, index) => {
+      const adoptedPrice = item.adopted_price || {};
+      const priceSource = adoptedPrice.source_type === "purchase_total_derived"
+        ? '<small class="ocw-result-source">按货值÷采购数量计算</small>'
+        : "";
+      return `
       <tr>
         <td>${this.escape(String(index + 1))}</td>
         <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
         <td>${this.escape(this.formatValue(item.product_name || item.product_name_es || "--"))}</td>
         <td>${this.escape(this.formatValue(item.quantity))}</td>
-        <td>${this.escape(this.formatMoney(item.unit_price))}</td>
-        <td>${this.escape(this.formatValue(item.purchase_currency || "--"))}</td>
+        <td>${this.escape(this.formatMoney(item.adopted_price?.value ?? item.unit_price))}${priceSource}</td>
+        <td>${this.escape(this.formatValue(item.adopted_price?.currency || item.purchase_currency || "--"))}</td>
         <td>${this.escape(this.formatMoney(item.total_unit_rmb || "--"))}</td>
       </tr>
-    `).join("");
+    `;
+    }).join("");
     return `
       <div class="ocw-batch-drawer-section">
         <div class="ocw-batch-drawer-section-head"><h4>物料明细</h4><span>${items.length} 行，完整展示</span></div>
@@ -18294,7 +18355,7 @@ class OverseasCostWorkbench {
         </div>
         <div class="ocw-sku-scroll-controls">
           <button type="button" data-action="sku-scroll" data-direction="-1" aria-label="向左滚动 SKU 表">◀</button>
-          <input class="ocw-sku-scrollbar" type="range" min="0" max="0" step="1" value="0" data-role="sku-scrollbar" aria-label="SKU 明细水平滚动条" disabled />
+          <div class="ocw-horizontal-scrollbar ocw-sku-scrollbar" data-role="sku-scrollbar" data-ocw-scrollbar tabindex="0" aria-label="SKU 明细水平滚动条"><div data-role="sku-scrollbar-spacer"></div></div>
           <button type="button" data-action="sku-scroll" data-direction="1" aria-label="向右滚动 SKU 表">▶</button>
           <span>当前 ${this.escape(groups.find(([key]) => key === sku.fieldGroup)?.[1] || "基础信息")} · 全部 A–BE</span>
         </div>
@@ -18327,11 +18388,6 @@ class OverseasCostWorkbench {
     `;
   }
 
-  shouldCompactSkuColumns(scrollLeft, currentlyCompact = false) {
-    const position = Math.max(0, Number(scrollLeft) || 0);
-    return currentlyCompact ? position > 32 : position > 148;
-  }
-
   cleanupSkuScrollControls() {
     const cleanup = this.skuScrollCleanup;
     this.skuScrollCleanup = null;
@@ -18341,97 +18397,13 @@ class OverseasCostWorkbench {
   bindSkuScrollControls() {
     this.cleanupSkuScrollControls();
     this.cleanupMaterialGridScrollControls?.();
-    const $table = this.$root.find("[data-role='sku-table-scroll']");
-    const $range = this.$root.find("[data-role='sku-scrollbar']");
-    const $shell = $table.closest(".ocw-sku-table-shell");
-    const table = $table.get(0);
-    const range = $range.get(0);
-    if (!table || !range) return;
-
-    const skuTable = table.querySelector(".ocw-sku-table");
-    let syncing = false;
-    let compact = false;
-    let refreshFrame = null;
-    let resizeObserver = null;
-
-    const updateCompactState = (scrollLeft) => {
-      const nextCompact = this.shouldCompactSkuColumns(scrollLeft, compact);
-      if (nextCompact === compact) return;
-      compact = nextCompact;
-      $shell.toggleClass("is-sku-compact", compact);
-      scheduleMetricsRefresh();
-    };
-
-    const refreshMetrics = () => {
-      const maxScrollLeft = Math.max(0, table.scrollWidth - table.clientWidth);
-      const scrollLeft = Math.min(maxScrollLeft, Math.max(0, table.scrollLeft));
-      if (table.scrollLeft !== scrollLeft) table.scrollLeft = scrollLeft;
-      range.max = String(maxScrollLeft);
-      range.value = String(scrollLeft);
-      range.disabled = maxScrollLeft <= 0;
-      this.updateSkuScrollButtons(table, maxScrollLeft);
-      updateCompactState(scrollLeft);
-    };
-
-    const scheduleMetricsRefresh = () => {
-      if (refreshFrame !== null) return;
-      refreshFrame = window.requestAnimationFrame(() => {
-        refreshFrame = null;
-        refreshMetrics();
-      });
-    };
-
-    const onTableScroll = () => {
-      if (syncing) return;
-      syncing = true;
-      refreshMetrics();
-      syncing = false;
-    };
-
-    const onRangeInput = () => {
-      if (syncing) return;
-      syncing = true;
-      const maxScrollLeft = Math.max(0, table.scrollWidth - table.clientWidth);
-      const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, Number(range.value) || 0));
-      table.scrollLeft = nextScrollLeft;
-      refreshMetrics();
-      syncing = false;
-    };
-
-    const onColumnTransitionEnd = (event) => {
-      if (!event.target.classList.contains("ocw-sku-sticky")) return;
-      scheduleMetricsRefresh();
-    };
-
-    table.addEventListener("scroll", onTableScroll, { passive: true });
-    range.addEventListener("input", onRangeInput);
-    skuTable?.addEventListener("transitionend", onColumnTransitionEnd);
-    window.addEventListener("resize", scheduleMetricsRefresh);
-
-    if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(scheduleMetricsRefresh);
-      resizeObserver.observe(table);
-      if (skuTable) resizeObserver.observe(skuTable);
-    }
-
-    this.skuScrollCleanup = () => {
-      table.removeEventListener("scroll", onTableScroll);
-      range.removeEventListener("input", onRangeInput);
-      skuTable?.removeEventListener("transitionend", onColumnTransitionEnd);
-      window.removeEventListener("resize", scheduleMetricsRefresh);
-      resizeObserver?.disconnect();
-      if (refreshFrame !== null) window.cancelAnimationFrame(refreshFrame);
-      $shell.removeClass("is-sku-compact");
-    };
-
-    refreshMetrics();
-  }
-
-  updateSkuScrollButtons(table = this.$root.find("[data-role='sku-table-scroll']").get(0), maxScrollLeft = null) {
-    if (!table) return;
-    const max = maxScrollLeft === null ? Math.max(0, table.scrollWidth - table.clientWidth) : maxScrollLeft;
-    this.$root.find("[data-action='sku-scroll'][data-direction='-1']").prop("disabled", max <= 1 || table.scrollLeft <= 1);
-    this.$root.find("[data-action='sku-scroll'][data-direction='1']").prop("disabled", max <= 1 || table.scrollLeft >= max - 1);
+    this.skuScrollCleanup = this.bindHorizontalScrollController({
+      content: this.$root.find("[data-role='sku-table-scroll']").get(0),
+      scrollbar: this.$root.find("[data-role='sku-scrollbar']").get(0),
+      spacer: this.$root.find("[data-role='sku-scrollbar-spacer']").get(0),
+      leftButton: this.$root.find("[data-action='sku-scroll'][data-direction='-1']").get(0),
+      rightButton: this.$root.find("[data-action='sku-scroll'][data-direction='1']").get(0),
+    });
   }
 
   async ensureEditSession() {
@@ -18914,8 +18886,7 @@ class OverseasCostWorkbench {
 
   async settlementApi(action, args = {}) {
     const type = ["get_batch_settlement", "get_matching_status", "find_expenses"].includes(action) ? "GET" : "POST";
-    const response = await frappe.call({ method: `overseas_costing.api.logistics_settlement.${action}`, args, type });
-    return response.message || {};
+    return this.call(`overseas_costing.api.logistics_settlement.${action}`, args, false, { type });
   }
 
   settlementAmount(source = {}) {
@@ -21523,7 +21494,7 @@ class OverseasCostWorkbench {
       this.sumRowsNumber(loadedItems, "mexico_inland_mxn") ||
       this.sumRowsNumber(loadedItems, "mexico_misc_mxn") ||
       this.sumRowsNumber(loadedItems, "mexico_inland_misc_rmb");
-    const missingPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.unit_price)) : 0;
+    const missingPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(this.purchasePriceValue(row))) : 0;
     const missingGoods = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.goods_value)) : 0;
     const missingWeight = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.gross_weight_kg)) : 0;
     const missingCost = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.total_unit_rmb)) : 0;
@@ -21663,8 +21634,8 @@ class OverseasCostWorkbench {
     const missingCode = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.material_code)) : 0;
     const missingName = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.product_name)) : 0;
     const badQuantity = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.quantity)) : 0;
-    const badPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.unit_price)) : 0;
-    const badCurrency = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.purchase_currency)) : 0;
+    const badPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(this.purchasePriceValue(row))) : 0;
+    const badCurrency = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(this.purchasePriceCurrency(row))) : 0;
     const badGoods = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.goods_value)) : 0;
     const badActualQty = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.actual_shipped_qty)) : 0;
     const badWeight = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.gross_weight_kg)) : 0;
@@ -21686,7 +21657,7 @@ class OverseasCostWorkbench {
     );
     const missingPurchaseDetail = this.describeProblemRows(
       loadedItems,
-      (row) => !this.isPositive(row.unit_price) || !this.hasText(row.purchase_currency) || !this.isPositive(row.goods_value)
+      (row) => !this.isPositive(this.purchasePriceValue(row)) || !this.hasText(this.purchasePriceCurrency(row)) || !this.isPositive(row.goods_value)
     );
     const missingPackingDetail = this.describeProblemRows(
       loadedItems,
@@ -22532,6 +22503,14 @@ class OverseasCostWorkbench {
     });
   }
 
+  purchasePriceValue(row = {}) {
+    return row.adopted_price?.value ?? row.unit_price;
+  }
+
+  purchasePriceCurrency(row = {}) {
+    return row.adopted_price?.currency || row.purchase_currency || "";
+  }
+
   workRoleInfo(role = this.workRole) {
     if (role === "finance") {
       return {
@@ -22569,7 +22548,7 @@ class OverseasCostWorkbench {
     if (!itemCount) reasons.push("缺少物料明细");
     if (hasLoadedItems) {
       const missingItem = itemRows.filter((row) => !this.hasText(row.material_code) || !this.hasText(row.product_name) || !this.isPositive(row.quantity)).length;
-      const missingPurchase = itemRows.filter((row) => !this.isPositive(row.unit_price) || !this.hasText(row.purchase_currency) || !this.isPositive(row.goods_value)).length;
+      const missingPurchase = itemRows.filter((row) => !this.isPositive(this.purchasePriceValue(row)) || !this.hasText(this.purchasePriceCurrency(row)) || !this.isPositive(row.goods_value)).length;
       const missingShipping = itemRows.filter((row) => !this.isPositive(row.actual_shipped_qty) || !this.isPositive(row.gross_weight_kg)).length;
       if (missingItem) reasons.push(`物料基础字段缺 ${missingItem} 行`);
       if (missingPurchase) reasons.push(`采购金额字段缺 ${missingPurchase} 行`);
@@ -23225,6 +23204,7 @@ class OverseasCostWorkbench {
   }
 
   showError(error) {
+    if (error?.workbenchReleaseHandled || error?.workbenchReleaseBlocked) return;
     const detail = this.extractStructuredError(error);
     const message = this.normalizeErrorMessage(error);
     const rows = detail

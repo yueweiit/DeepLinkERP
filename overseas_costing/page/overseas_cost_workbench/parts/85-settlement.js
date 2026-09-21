@@ -1,7 +1,6 @@
   async settlementApi(action, args = {}) {
     const type = ["get_batch_settlement", "get_matching_status", "find_expenses"].includes(action) ? "GET" : "POST";
-    const response = await frappe.call({ method: `overseas_costing.api.logistics_settlement.${action}`, args, type });
-    return response.message || {};
+    return this.call(`overseas_costing.api.logistics_settlement.${action}`, args, false, { type });
   }
 
   settlementAmount(source = {}) {

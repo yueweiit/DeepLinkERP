@@ -37,7 +37,10 @@ RESULT_PREVIEW_ITEM_FIELDS = [
     "material_code",
     "product_name",
     "spec_model",
+    "unit",
+    "purchase_uom",
     "unit_price",
+    "unit_price_uom",
     "purchase_currency",
     "quantity",
     "goods_value",
@@ -49,6 +52,7 @@ RESULT_PREVIEW_ITEM_FIELDS = [
     *batch_service.TAX_COMPONENT_FIELDS,
     "total_cost_rmb",
     "total_unit_rmb",
+    "extra_json",
     "derived_json",
 ]
 RESULT_PREVIEW_OUTPUT_FIELDS = (
@@ -56,6 +60,7 @@ RESULT_PREVIEW_OUTPUT_FIELDS = (
     "product_name",
     "spec_model",
     "unit_price",
+    "adopted_price",
     "purchase_currency",
     "quantity",
     "freight_alloc_rmb",
@@ -250,6 +255,10 @@ def _rule_bucket(rule: dict) -> str:
 def build_batch_result_preview_item(item: dict, *, calculated: bool) -> dict:
     """将一行明细收敛为快捷结果口径，不把普通杂费冒充清关费。"""
 
+    from overseas_costing.services.material_input_service import present_material_row
+
+    presented = present_material_row(item)
+
     result = {
         "name": item.get("name") or "",
         "row_no": item.get("row_no"),
@@ -257,6 +266,7 @@ def build_batch_result_preview_item(item: dict, *, calculated: bool) -> dict:
         "product_name": item.get("product_name") or "",
         "spec_model": item.get("spec_model") or "",
         "unit_price": item.get("unit_price"),
+        "adopted_price": presented.get("adopted_price") or {},
         "purchase_currency": item.get("purchase_currency") or "",
         "quantity": item.get("quantity"),
         "freight_alloc_rmb": None,
@@ -654,8 +664,12 @@ def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
     item = dict(row)
     from overseas_costing.services.material_input_service import present_material_row
     current = present_material_row(item)
+    price = current.get('adopted_price') or {}
+    if price:
+        item['adopted_price'] = price
+    if current.get('purchase_price_source'):
+        item['purchase_price_source'] = current['purchase_price_source']
     if (item.get('source_context') or {}).get('root_kind') == 'expense':
-        price = current.get('adopted_price') or {}
         item.update(quantity=current.get('effective_shipping_quantity'),
                     actual_shipped_qty=current.get('effective_shipping_quantity'),
                     unit=current.get('effective_shipping_uom'),
@@ -663,7 +677,6 @@ def present_saved_sku_result(row: dict, transport_mode: str = "") -> dict:
                     unit_price=price.get('value'),purchase_currency=price.get('currency'),
                     goods_value=current.get('shipment_value_rmb'),adopted_price=price)
     elif (current.get('adopted_price') or {}).get('source_type') == 'purchase_total_derived':
-        price = current['adopted_price']
         item.update(
             unit_price=price.get('value'),
             purchase_currency=price.get('currency'),

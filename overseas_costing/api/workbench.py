@@ -6,7 +6,7 @@ import json
 
 import frappe
 
-from overseas_costing.services import workbench_service
+from overseas_costing.services import workbench_service, workbench_release_service
 from overseas_costing.services import dingtalk_approval_service
 from overseas_costing.services import approval_repair_service
 from overseas_costing.services.access_control import require_batch_permission, require_overseas_cost_access
@@ -16,6 +16,14 @@ def _filters(value: str | dict | None) -> dict:
     if isinstance(value, dict):
         return value
     return json.loads(value or "{}")
+
+
+@frappe.whitelist()
+def get_workbench_release() -> dict:
+    """Return the marker published only after a release is ready to serve."""
+
+    require_overseas_cost_access()
+    return {"ok": True, "release_id": workbench_release_service.get_release_id()}
 
 
 @frappe.whitelist()

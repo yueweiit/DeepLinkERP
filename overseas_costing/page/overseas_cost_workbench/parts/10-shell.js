@@ -105,7 +105,7 @@ class OverseasCostWorkbench {
     };
   }
 
-  init() {
+  async init() {
     this.resetDeskLayoutClasses();
     this.prepareWorkbenchContainer();
     this.page = frappe.ui.make_app_page({
@@ -117,6 +117,8 @@ class OverseasCostWorkbench {
     this.addActions();
     this.renderShell();
     this.bindEvents();
+    await this.initializeWorkbenchRelease();
+    if (this.releaseBlocked) return;
     this.loadBusinessEntityOptions();
     this.loadBatches();
     this.recordUsage("PAGE_VIEW", { remark: "进入海外采购综合成本核算工作台" });
@@ -148,6 +150,9 @@ class OverseasCostWorkbench {
 
   // 离开工作台时恢复上面隐藏的元素，避免影响其它页面。
   restoreDeskChrome() {
+    window.clearTimeout(this._releaseCheckTimer);
+    if (this._releaseFocusHandler) window.removeEventListener("focus", this._releaseFocusHandler);
+    if (this._releaseVisibilityHandler) document.removeEventListener("visibilitychange", this._releaseVisibilityHandler);
     $(window).off("beforeunload.ocwDetailEdit");
     if (this.releaseEditSession && this.detailState?.editToken) {
       this.releaseEditSession();

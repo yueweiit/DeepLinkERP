@@ -9,6 +9,7 @@ from .effective_logistics_source import json_dict
 from .logistics_settlement.fee_policy import row_scopes
 from .logistics_settlement.model import digest
 from .material_value_semantics import is_effectively_missing
+from .shipment_cost_service import activate_shipment_valuation
 from overseas_costing.utils.field_mapper import normalize_unit
 
 POLICY = 'ai-field-review-7'
@@ -1666,7 +1667,7 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
                 _activate_purchase_value(row, meta, choice['_purchase_value_fact'])
             if field=='shipment_value_rmb' and choice.get('_shipment_valuation'):
                 row['_shipment_valuation']=deepcopy(choice['_shipment_valuation'])
-                _activate_shipment_value(meta, choice['_shipment_valuation'])
+                activate_shipment_valuation(meta, choice['_shipment_valuation'])
             if field in ('unit_price','purchase_currency','purchase_uom','unit_price_uom') and choice.get('_price_metadata'):
                 row['_price_metadata']=deepcopy(choice['_price_metadata'])
             field_refs[field]={'candidate_id':candidate['candidate_id'],'row_id':candidate['row_id'],
@@ -1740,7 +1741,7 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             row['_price_metadata']=deepcopy(choice['_price_metadata'])
         if ('shipment_value_rmb' in fields and choice.get('_shipment_valuation') is not None):
             row['_shipment_valuation']=deepcopy(choice['_shipment_valuation'])
-            _activate_shipment_value(meta, choice['_shipment_valuation'])
+            activate_shipment_valuation(meta, choice['_shipment_valuation'])
         for field in fields:
             before=row.get(field)
             row[field]=deepcopy(incoming[field]);field_refs[field]={'row_id':choice['row_id'],'source_refs':refs}
@@ -1779,16 +1780,6 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             'catalog_fingerprint':catalog['fingerprint']}
 
 
-def _activate_shipment_value(meta, valuation):
-    """An explicit new valuation supersedes, but does not erase, the old basis."""
-    from .purchase_value_evidence import retire_purchase_value
-    retire_purchase_value(meta)
-    value = {**deepcopy(valuation), 'trusted_shipment_source': True}
-    meta['shipment_valuation'] = value
-    if meta.get('settlement_cargo'):
-        meta['settlement_valuation'] = deepcopy(value)
-
-
 def _activate_purchase_value(row, meta, fact):
     from .purchase_value_evidence import META_KEY, retire_purchase_value
     if meta.get(META_KEY) != fact:
@@ -1808,7 +1799,7 @@ def _activate_selected_price(row, choice, catalog):
     valuation = price_valuation(row, price_meta, choice['source_refs'], fx_rates=catalog.get('_review_fx_rates'))
     if valuation is None:
         raise ValueError('采购单价缺少同源数量、单位、币种或汇率依据，请重新核对。')
-    _activate_shipment_value(meta, valuation)
+    activate_shipment_valuation(meta, valuation)
     row['_shipment_valuation'] = deepcopy(valuation)
     row['shipment_value_rmb'] = valuation['amount_rmb']
     for key in ('adopted_purchase_value', 'purchase_value_history', 'shipment_valuation',

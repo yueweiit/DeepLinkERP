@@ -65,7 +65,7 @@ console.log(JSON.stringify(h.renderMaterialFeeGridCell(item,{field:'unit_price',
 """)
 
     assert "1.22" in html
-    assert "按总货值÷采购数量计算" in html
+    assert "按货值÷采购数量计算" in html
     assert "data-mf-cell-input" not in html
 
 

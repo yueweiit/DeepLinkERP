@@ -227,6 +227,70 @@ def test_item_query_defaults_to_fifty_rows() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("row", "expected_value", "expected_source"),
+    [
+        (
+            {
+                "unit_price": 12.345,
+                "purchase_currency": "RMB",
+                "unit_price_uom": "个",
+                "quantity": 4,
+                "goods_value": 80,
+            },
+            "12.35",
+            "explicit_purchase_price",
+        ),
+        (
+            {
+                "unit_price": 0,
+                "purchase_currency": "",
+                "unit_price_uom": "",
+                "purchase_uom": "个",
+                "quantity": 4,
+                "goods_value": 80,
+            },
+            "20.00",
+            "purchase_total_derived",
+        ),
+    ],
+)
+def test_result_preview_projects_canonical_adopted_price(row, expected_value, expected_source) -> None:
+    result = workbench_service.build_batch_result_preview_item(
+        {
+            "name": "ITEM-1",
+            "material_code": "SKU-1",
+            "product_name": "产品",
+            **row,
+        },
+        calculated=True,
+    )
+
+    assert result["adopted_price"]["value"] == expected_value
+    assert result["adopted_price"]["source_type"] == expected_source
+    # Backward compatibility: the raw field remains available to old callers.
+    assert "unit_price" in result
+
+
+def test_result_preview_payload_keeps_canonical_adopted_price() -> None:
+    result = workbench_service.build_batch_result_preview_payload(
+        batch={"name": "BATCH-1", "batch_no": "BATCH-1"},
+        version={"name": "VERSION-1", "calculated_at": "2026-09-21 10:00:00"},
+        items=[{
+            "name": "ITEM-1",
+            "material_code": "SKU-1",
+            "product_name": "产品",
+            "unit_price": 0,
+            "purchase_uom": "个",
+            "quantity": 4,
+            "goods_value": 80,
+        }],
+    )
+
+    assert result["items"][0]["adopted_price"]["value"] == "20.00"
+    assert result["items"][0]["adopted_price"]["source_type"] == "purchase_total_derived"
+
+
 def test_saved_sku_projects_missing_purchase_price_from_purchase_total() -> None:
     from overseas_costing.services.shipment_cost_service import build_manual_shipment_valuation
 
@@ -254,6 +318,7 @@ def test_saved_sku_projects_missing_purchase_price_from_purchase_total() -> None
     assert presented["purchase_currency"] == "RMB"
     assert presented["unit_price_uom"] == "pieza"
     assert presented["adopted_price"]["source_type"] == "purchase_total_derived"
+    assert presented["purchase_price_source"] == "按货值÷采购数量计算"
 
 
 def test_review_readiness_loader_includes_version_packing_groups(monkeypatch) -> None:
@@ -756,6 +821,7 @@ def test_result_preview_queries_only_current_version_and_lightweight_fields(monk
                     "name": f"ITEM-{index:02d}",
                     "row_no": index,
                     "material_code": f"SKU-{index:02d}",
+                    "purchase_uom": "个",
                     "purchase_currency": "RMB",
                     "quantity": 1,
                     "goods_value": 1,
@@ -776,11 +842,13 @@ def test_result_preview_queries_only_current_version_and_lightweight_fields(monk
     assert result["version_name"] == "VER-1"
     assert result["page"] == 2
     assert len(result["items"]) == 5
+    assert result["items"][0]["adopted_price"]["value"] == "1.00"
     assert set(result["items"][0]) == {
         "material_code",
         "product_name",
         "spec_model",
         "unit_price",
+        "adopted_price",
         "purchase_currency",
         "quantity",
         "freight_alloc_rmb",
@@ -791,6 +859,7 @@ def test_result_preview_queries_only_current_version_and_lightweight_fields(monk
     item_call = next(call for call in calls if call[0] == "Overseas Cost Item")
     assert item_call[1]["filters"] == {"batch": "BATCH-DOC", "version": "VER-1", "is_excluded": 0}
     assert item_call[1]["fields"] == workbench_service.RESULT_PREVIEW_ITEM_FIELDS
+    assert {"purchase_uom", "unit_price_uom", "unit", "extra_json"}.issubset(item_call[1]["fields"])
     assert item_call[1]["limit_page_length"] == 0
     assert "raw_excel_json" not in item_call[1]["fields"]
 

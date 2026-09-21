@@ -385,47 +385,26 @@
   }
 
   bindHierarchyScrollbars() {
-    const bindPair = ($source, $bar) => {
+    (this.hierarchyScrollCleanups || []).forEach((cleanup) => cleanup());
+    this.hierarchyScrollCleanups = [];
+    const bind = ($source, $bar) => {
       if (!$source.length || !$bar.length) return;
-      const source = $source.get(0);
-      const bar = $bar.get(0);
-      const $spacer = $bar.find("[data-role$='scroll-spacer']");
-      const $header = $source.prev("[data-role='child-table-head-scroll']");
-      const syncHeader = () => {
-        if ($header.length) $header.get(0).scrollLeft = source.scrollLeft;
-      };
-      const update = () => {
-        const width = source.scrollWidth || source.clientWidth;
-        $spacer.css("width", `${width}px`);
-        $bar.toggleClass("is-hidden", width <= source.clientWidth + 1);
-        bar.scrollLeft = source.scrollLeft;
-        syncHeader();
-      };
-      let syncing = false;
-      $source.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
-        if (syncing) return;
-        syncing = true;
-        bar.scrollLeft = source.scrollLeft;
-        syncHeader();
-        syncing = false;
+      const cleanup = this.bindHorizontalScrollController({
+        content: $source.get(0),
+        header: $source.prev("[data-role='child-table-head-scroll']").get(0),
+        scrollbar: $bar.get(0),
+        spacer: $bar.find("[data-role$='scroll-spacer']").get(0),
+        onInteraction: () => this.positionChildScrollbars(),
+        onRefresh: () => this.positionChildScrollbars(),
       });
-      $bar.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
-        if (syncing) return;
-        syncing = true;
-        source.scrollLeft = bar.scrollLeft;
-        syncHeader();
-        syncing = false;
-      });
-      update();
-      window.requestAnimationFrame(update);
-      window.setTimeout(update, 80);
+      this.hierarchyScrollCleanups.push(cleanup);
     };
 
     const $hierarchyWrap = this.$root.find("[data-area='table']");
-    bindPair($hierarchyWrap, this.$root.find("[data-role='hierarchy-x-scroll']"));
+    bind($hierarchyWrap, this.$root.find("[data-role='hierarchy-x-scroll']"));
     this.$root.find("[data-role='child-table-scroll']").each((_, element) => {
       const $source = $(element);
-      bindPair($source, $source.next("[data-role='child-table-x-scroll']"));
+      bind($source, $source.next("[data-role='child-table-x-scroll']"));
     });
     this.positionChildScrollbars();
     $hierarchyWrap
@@ -436,7 +415,7 @@
     $(window)
       .off("resize.ocwHierarchyScrollbars")
       .on("resize.ocwHierarchyScrollbars", () => {
-        window.requestAnimationFrame(() => this.bindHierarchyScrollbars());
+        window.requestAnimationFrame(() => this.positionChildScrollbars());
       });
   }
 
