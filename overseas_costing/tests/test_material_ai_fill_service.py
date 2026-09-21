@@ -1756,7 +1756,7 @@ def test_fee_default_falls_back_to_logistics_when_payment_confidence_is_low() ->
     assert by_id["LOG"]["default_selected"] is True
 
 
-def test_product_purchase_freight_is_not_a_selectable_fee_source() -> None:
+def test_product_purchase_freight_is_lower_priority_valid_fee_source() -> None:
     document = _fee_document("DOC-PURCHASE", "国际运费 RMB 100")
     document["source_ref"].update(
         source_id="PUR-FORM", process_instance_id="PUR-1",
@@ -1774,9 +1774,9 @@ def test_product_purchase_freight_is_not_a_selectable_fee_source() -> None:
         normalized, [], {}
     )
 
-    assert decorated[0]["default_selected"] is False
-    assert decorated[0]["can_apply"] is False
-    assert "采购支出" in decorated[0]["blocked_reason"]
+    assert decorated[0]["default_selected"] is True
+    assert decorated[0]["can_apply"] is True
+    assert not decorated[0]["blocked_reason"]
 
 
 def test_ai_cannot_forge_payment_authority_over_server_document_source() -> None:
@@ -1840,7 +1840,7 @@ def test_fee_candidate_spanning_payment_and_logistics_is_not_applicable() -> Non
     assert "阶段" in decorated[0]["blocked_reason"]
 
 
-def test_product_purchase_cannot_default_other_fee() -> None:
+def test_product_purchase_can_fill_missing_other_fee() -> None:
     document = _fee_document("DOC-PURCHASE", "清关费 RMB 100")
     document["source_ref"].update(
         workflow_stage="purchase", workflow_rank=2,
@@ -1851,9 +1851,9 @@ def test_product_purchase_cannot_default_other_fee() -> None:
     normalized = normalize_source_review_proposals([proposal], _items(), [document])
     decorated = material_ai_fill_service.material_ai_fee_policy.decorate(normalized, [], {})
 
-    assert decorated[0]["default_selected"] is False
-    assert decorated[0]["can_apply"] is False
-    assert "商品采购" in decorated[0]["blocked_reason"]
+    assert decorated[0]["default_selected"] is True
+    assert decorated[0]["can_apply"] is True
+    assert not decorated[0]["blocked_reason"]
 
 
 def test_document_fee_parser_extracts_explicit_freight_components_and_total() -> None:

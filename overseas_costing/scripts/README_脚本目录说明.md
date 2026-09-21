@@ -30,7 +30,7 @@
 
 最小目标：先拉一批 `国际物流 Logística Internacional` 审批单，筛出物流方式为海运的记录，保留审批实例 ID、审批编号、钉钉原单链接、审批状态、柜号/运单号等追溯字段。
 
-当前脚本还会从国际物流表单的 `关联审批单Asociar órdenes de compra.` 控件中读取隐藏的 `businessId / procInstId`，把关联采购支出审批单保存到输出 JSON 的 `linked_purchase_approvals` 中。后续补采购单价、币种、货值时，应优先使用这些关联采购支出审批单。
+当前脚本还会从国际物流表单的 `关联审批单Asociar órdenes de compra.` 控件中读取隐藏的 `businessId / procInstId`，把关联采购支出审批单保存到输出 JSON 的 `linked_purchase_approvals` 中。后续采购单价、币种、货值使用[字段优先级规则](../../docs/source-field-priority.md)：支付申请、国际物流、商品采购逐字段补充，明确关联的商品采购审批仍是可选证据，不整组排除低优先级来源。
 
 本脚本默认不会写入 ERP/Frappe，只输出本地文件；确认数据正确后，可以再显式执行保存入口导入追溯字段。
 

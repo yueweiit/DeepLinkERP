@@ -6,7 +6,7 @@ from . import material_ai_row_selection as rows, material_ai_fee_policy as fees
 from .logistics_settlement.model import digest
 
 
-RECEIPT_POLICY = 'ai-field-preview-receipt-6'
+RECEIPT_POLICY = 'ai-field-preview-receipt-7'
 
 _SKIPPED_PROGRESS_STATUSES = frozenset({
     'FAILED', 'SKIPPED', 'UNREADABLE', 'TIMEOUT', 'FORBIDDEN', 'MISSING',
@@ -236,7 +236,8 @@ def _inputs(repo, batch, run, *, locked=False):
         raise ValueError('AI 预览规则已升级，请重新分析资料。')
     context=ai._review_context(repo,batch,str(ai._record_value(run,'version')),
         original_sources=ai._run_uses_original_sources(run))
-    ai.effective_source.require_readable(context.get('effective_source') or {})
+    # Validate selected evidence below; one unavailable primary source must
+    # not veto a valid lower-priority source in the same batch.
     if ai._clarification_changed(repo,batch,run,locked=locked):raise ValueError('说明已变化，请按新说明重新分析。')
     items=repo.get_items(batch,context['version'])
     sources=ai._reload_review_manifest(repo,batch,context['version'],run)
@@ -252,7 +253,7 @@ def _inputs(repo, batch, run, *, locked=False):
     current_fees=repo.get_fees(batch,context['version'])
     proposals=ai._load_json(ai._record_value(run,'candidates_json'),[])
     result=rows.catalog(items,proposals,current_fees,context.get('effective_source') or {},
-                        run_id=ai._record_value(run,'name'),sources=sources)
+                        run_id=ai._record_value(run,'name'),sources=sources,fx_rates=context.get('fx_rates'))
     return context,items,sources,current_fees,result
 
 

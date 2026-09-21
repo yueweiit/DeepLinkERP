@@ -297,25 +297,135 @@ def _attachment_source_v2(batch_name: str, source_id: str) -> dict:
     ) or {}
 
 
-def _attachment_is_audit_only(source: dict) -> bool:
+def _attachment_is_audit_only(source: dict, *, bundle: dict | None = None) -> bool:
     try:
         snapshot = json.loads(source.get("parse_result_json") or "{}")
     except (TypeError, ValueError):
         snapshot = {}
     if not isinstance(snapshot, dict):
         return False
+    descriptor = snapshot.get('settlement_document') or {}
+    for record in (source, snapshot, descriptor):
+        if (record.get('disabled') or record.get('excluded') or record.get('invalid')
+                or record.get('retired') or record.get('retired_at')
+                or record.get('available') is False or record.get('is_active') in (0, '0')):
+            return True
+    # These are the exact reasons written by the approval exclusion backfill.
+    # Archive audit_only also means frozen/history-only; without a specific
+    # approval reason it must not be mistaken for a stale approval-state flag.
+    approval_reasons = {'审批结果为拒绝', '审批状态为拒绝', '审批已撤销、终止或作废'}
+    reason = str(snapshot.get('exclusion_reason') or '').strip()
+    unknown_audit = bool(source.get('audit_only') or snapshot.get('audit_only')
+                         or (reason and reason not in approval_reasons)
+                         or ((snapshot.get('cost_source_allowed') is False or descriptor.get('audit_only'))
+                             and reason not in approval_reasons))
+    if unknown_audit:
+        return True
+    context = (bundle or {}).get('context') or {}
+    lineage = context.get('source_lineage') or {}
+    if (snapshot.get('approval_excluded') and lineage
+            and str(lineage.get('batch') or '') == str(source.get('batch') or '')
+            and str(lineage.get('cost_version') or '') == str(context.get('cost_version') or '')
+            and str(lineage.get('instance_id') or '') == str(context.get('instance_id') or '')
+            and effective_source.attachment_allowed(source, bundle, for_analysis=True)):
+        return False  # Current verified local approval supersedes only its old status.
     return bool(
         snapshot.get("approval_excluded")
         or snapshot.get("cost_source_allowed") is False
+        or descriptor.get('audit_only')
         or import_service._approval_reference_is_excluded(str(source.get("batch") or ""), snapshot)
     )
 
 
+def related_approval_detail(batch_name, version_name=None, *, bundle=None, store=None, ledger=None):
+    """Read the current batch's original workflow and explicit links from local archives.
+
+    An expense binding supplies defaults; it does not erase these relationships.
+    This resolver neither syncs upstream data nor materializes attachment records.
+    """
+    from .logistics_settlement.store import Store
+    from .logistics_settlement.ledger import FrappeLedger
+    from .logistics_settlement.document_writer import document_retired
+    from .material_ai_source_dependencies import approval_eligibility
+
+    empty = {'ok': False, 'main_approval': {}, 'linked_purchase_approvals': [],
+             'excluded_linked_purchase_approvals': [], 'local_only': True}
+    try:
+        store = store if store is not None else Store.frappe()
+        ledger = ledger if ledger is not None else FrappeLedger()
+    except (ImportError, AttributeError):
+        return empty
+    batch = (bundle or {}).get('batch') or ledger.get('batch', batch_name) or {}
+    version_name = str(version_name or ((bundle or {}).get('context') or {}).get('cost_version')
+                       or batch.get('current_version') or '')
+    empty.update(batch=str(batch_name), cost_version=version_name)
+    if version_name and batch.get('current_version') and version_name != batch['current_version']:
+        return empty  # Historical reviews retain their frozen evidence.
+    mappings = store.find('batch_map', batch=batch_name)
+    if len(mappings) != 1:
+        return empty
+    logistics = store.get('source', mappings[0]['source_id']) or {}
+    expected_corp = str(((bundle or {}).get('context') or {}).get('corp_id') or '')
+    if (not logistics or logistics.get('kind') != 'logistics'
+            or (expected_corp and str(logistics.get('corp') or '') != expected_corp)
+            or (batch.get('source_instance_id') and logistics.get('instance') != batch['source_instance_id'])):
+        return empty
+    lineage = {'batch': str(batch_name), 'cost_version': version_name,
+               'logistics_source_id': logistics['id'], 'logistics_snapshot': logistics.get('snapshot') or ''}
+    empty['source_lineage'] = lineage
+
+    def approval_for(source):
+        context = effective_source.context_for_source(source, None, version_name, batch_name)
+        context['source_lineage'] = {**lineage, 'instance_id': source.get('instance') or ''}
+        context['fingerprint'] = effective_source.digest({key: value for key, value in context.items() if key != 'fingerprint'})
+        detail = effective_source.approval_detail_for_bundle({'source': source, 'context': context})
+        approval = detail['main_approval']
+        eligibility = approval_eligibility(source)
+        approval.update(source_context=context, excluded=not eligibility['analysis_allowed'],
+                        exclusion_reason=eligibility['analysis_reason'])
+        attachments = []
+        for document in source.get('documents') or []:
+            if document_retired(document):
+                continue
+            manifest = document.get('manifest') or {}
+            attachments.append({
+                'file_id': manifest.get('file_id') or '',
+                'file_name': document.get('file_name') or manifest.get('file_name') or '',
+                'origin': manifest.get('attachment_origin') or 'Form',
+                'archive_status': 'archived' if document.get('file_url') else 'pending',
+                'sha256': manifest.get('sha256') or manifest.get('content_sha256') or '',
+                'source_field': manifest.get('source_field') or '',
+                'workflow_field_id': manifest.get('workflow_field_id') or '',
+                'source_updated_at': source.get('source_updated_at') or '',
+                'sheets': [str(table['title']) for table in document.get('tables') or [] if table.get('title')],
+            })
+        approval['attachments'] = attachments
+        return approval
+
+    main = approval_for(logistics)
+    linked, excluded = [], []
+    for instance in dingtalk_approval_service._trusted_linked_instance_ids(logistics.get('raw') or {}):
+        if instance == logistics.get('instance'):
+            continue
+        matches = store.find('source', corp=logistics.get('corp') or '', instance=instance)
+        if len(matches) != 1:
+            continue
+        approval = approval_for(matches[0])
+        (excluded if approval['excluded'] else linked).append(approval)
+    return {**empty, 'ok': True, 'main_approval': main, 'linked_purchase_approvals': linked,
+            'excluded_linked_purchase_approvals': excluded}
+
+
 def _find_comment_source(batch_name: str, source_id: str) -> dict:
     bundle = effective_source.current_source_bundle(batch_name)
-    detail = (effective_source.approval_detail_for_bundle(bundle) if bundle and bundle['context']['root_kind'] == 'expense'
-              else dingtalk_approval_service.get_batch_dingtalk_approval_detail(batch_name))
-    approvals = [detail.get("main_approval"), *(detail.get("linked_purchase_approvals") or [])]
+    if bundle and bundle['context']['root_kind'] == 'expense':
+        bound = effective_source.approval_detail_for_bundle(bundle)
+        detail = related_approval_detail(batch_name, bundle=bundle)
+        approvals = [bound.get('main_approval'), detail.get('main_approval'),
+                     *(detail.get('linked_purchase_approvals') or [])]
+    else:
+        detail = dingtalk_approval_service.get_batch_dingtalk_approval_detail(batch_name)
+        approvals = [detail.get('main_approval'), *(detail.get('linked_purchase_approvals') or [])]
     for approval in approvals:
         if not isinstance(approval, dict) or approval.get("excluded"):
             continue
@@ -325,6 +435,7 @@ def _find_comment_source(batch_name: str, source_id: str) -> dict:
             return {
                 **item,
                 "instance_id": approval.get("instance_id") or "",
+                **({'source_context': approval['source_context']} if approval.get('source_context') else {}),
             }
     return {}
 
@@ -335,10 +446,15 @@ def resolve_trusted_packing_source(
 ) -> dict:
     bundle = effective_source.current_source_bundle(batch_name)
     context = (bundle or {}).get('context') or {}
-    effective_source.require_readable(context)
     trusted = _resolve_trusted_packing_source(batch_name=batch_name, source_kind=source_kind,
         source_id=source_id, sheet_name=sheet_name, strict_material_xlsx=strict_material_xlsx)
-    latest = effective_source.current_source_bundle(batch_name)
+    if trusted.get('source_context'):
+        context = trusted['source_context']
+        kind = normalize_packing_source_kind(source_kind)
+        latest = effective_source.validate_packing_source(batch_name, kind, source_id,
+            attachment=_attachment_source_v2(batch_name, source_id) if kind in {'manual_attachment', 'approval_attachment'} else None)
+    else:
+        latest = effective_source.current_source_bundle(batch_name)
     if context != ((latest or {}).get('context') or {}):
         raise PackingSourceIntegrityError('当前关联来源已变化，请重新预览。')
     if context:
@@ -349,7 +465,7 @@ def resolve_trusted_packing_source(
 
 def resolve_packing_attachment_path(source,bundle=None):
     """Keep bound XLS support inside the already-authorized attachment scope."""
-    if bundle and bundle['context']['root_kind']=='expense':
+    if bundle and (bundle['context']['root_kind']=='expense' or bundle['context'].get('source_lineage')):
         if not effective_source.attachment_allowed(source,bundle,for_analysis=True):
             raise ValueError('附件不属于当前采购支出资料。')
         if str(source.get('file_name') or '').lower().endswith('.xls'):
@@ -493,20 +609,19 @@ def _resolve_trusted_packing_source(
     resolved_source_id = str(source_id or "").strip()
     if kind in {"manual_attachment", "approval_attachment"}:
         source = _attachment_source_v2(batch_name, resolved_source_id)
-        effective_source.validate_packing_source(batch_name, kind, resolved_source_id, attachment=source)
+        bundle = effective_source.validate_packing_source(batch_name, kind, resolved_source_id, attachment=source)
         if not source:
             raise ValueError("未找到当前批次的装箱附件。")
         if kind == "approval_attachment" and str(source.get("source_type") or "").upper() != "OA":
             raise ValueError("所选附件不是当前批次的钉钉审批附件。")
-        bundle = effective_source.current_source_bundle(batch_name)
-        if _attachment_is_audit_only(source) and not (bundle and bundle['context']['root_kind'] == 'expense'):
+        if _attachment_is_audit_only(source, bundle=bundle):
             raise ValueError("该附件来自已排除审批，只能审计查看，不能作为装箱来源。")
         file_url = str(source.get("file_url") or "").strip()
         if not file_url:
             raise ValueError("装箱附件尚未保存到系统。")
         selected_sheet = str(sheet_name or "").strip()
         path = resolve_packing_attachment_path(source,bundle)
-        bound_xls = bool(bundle and bundle['context']['root_kind']=='expense' and path.suffix.lower()=='.xls')
+        bound_xls = bool(bundle and (bundle['context']['root_kind']=='expense' or bundle['context'].get('source_lineage')) and path.suffix.lower()=='.xls')
         if strict_material_xlsx and not bound_xls:
             from overseas_costing.services.material_import_service import validate_material_workbook_metadata
 
@@ -526,6 +641,7 @@ def _resolve_trusted_packing_source(
         ).hexdigest()
         return {
             "source_hash": source_hash,
+            "source_context": (bundle or {}).get('context') or {},
             "source": {
                 "source_kind": kind,
                 "source_id": resolved_source_id,
@@ -538,7 +654,7 @@ def _resolve_trusted_packing_source(
         }
 
     if kind == "approval_comment":
-        effective_source.validate_packing_source(batch_name, kind, resolved_source_id)
+        bundle = effective_source.validate_packing_source(batch_name, kind, resolved_source_id)
         source = _find_comment_source(batch_name, resolved_source_id)
         if not source:
             raise ValueError("未找到该钉钉评论，可能已重新同步。")
@@ -560,6 +676,7 @@ def _resolve_trusted_packing_source(
         ).hexdigest()
         return {
             "source_hash": source_hash,
+            "source_context": (bundle or {}).get('context') or {},
             "source": {
                 "source_kind": kind,
                 "source_id": resolved_source_id,

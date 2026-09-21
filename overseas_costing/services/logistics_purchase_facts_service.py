@@ -122,7 +122,8 @@ def _purchase_candidates(sources: list[dict], fx_rates: dict | None = None) -> l
             usable_rate = rate is not None and Decimal(str(rate)) > 0
             converted = (_number((Decimal(str(amount)) * Decimal(str(rate))).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
                          if amount is not None and usable_rate else None)
-            fact = {"quantity": quantity, "goods_value": converted,
+            fact = {"material_code": code, "spec_model": _text(mapped.get("spec_model")),
+                    "quantity": quantity, "goods_value": converted,
                     "unit_price": _number(mapped.get("unit_price")),
                     "purchase_currency": currency_code,
                     "original_goods_value": amount, "original_currency": currency_code,
@@ -130,7 +131,9 @@ def _purchase_candidates(sources: list[dict], fx_rates: dict | None = None) -> l
                     "purchase_uom": mapped.get("purchase_uom") or mapped.get("unit") or None,
                     "unit_price_uom": mapped.get("unit_price_uom") or mapped.get("unit") or None,
                     "source_doc_no": source.get("approval_no") or source["source_id"],
-                    "source_type": "PURCHASE_EXPENSE_OA"}
+                    "source_type": "PURCHASE_EXPENSE_OA",
+                    "source_refs": [{"source_id": source["source_id"], "field": table_name,
+                                     "row": table_index, "source_row_id": row_id}]}
             candidates.append({"purchase_key": key, "material_code": code,
                                "spec_model": _text(mapped.get("spec_model")), "purchase_fact": fact,
                                "purchase_source_id": source["source_id"], "purchase_row_id": row_id,

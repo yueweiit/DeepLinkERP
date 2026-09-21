@@ -244,6 +244,9 @@ def shipment_value(row):
     manual = _manual_value(row, metadata.get('manual_shipment_valuation'))
     if manual is not None:
         return manual
+    from .purchase_value_evidence import META_KEY, shipment_valuation as purchase_valuation
+    if isinstance(metadata.get(META_KEY), dict) and metadata[META_KEY].get('source_refs'):
+        return purchase_valuation(row, metadata[META_KEY])
     if 'settlement_cargo' in metadata:
         cargo = metadata.get('settlement_cargo')
         valuation = metadata.get('settlement_valuation')

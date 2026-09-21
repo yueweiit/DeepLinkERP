@@ -221,7 +221,19 @@ def present_material_row(item: dict) -> dict:
     valuation = shipment_value(row)
     row['shipment_value_rmb'] = valuation['amount_rmb']
     row['shipment_valuation'] = valuation
-    if (row.get('source_context') or {}).get('root_kind') == 'expense':
+    from .purchase_value_evidence import META_KEY, adopted_price
+    fact = object_json(row.get('extra_json')).get(META_KEY)
+    row.pop('adopted_price', None)
+    if fact:
+        row['adopted_price'] = adopted_price(fact, row) or {}
+    elif valuation.get('method') == 'settlement_purchase_unit_price' and valuation.get('trusted_shipment_source'):
+        evidence = valuation.get('input_evidence') or {}
+        price = Decimal(str(evidence['price']))
+        row['adopted_price'] = {'value': format(price.quantize(Decimal('.01'), rounding=ROUND_HALF_UP), '.2f'),
+            'currency': evidence.get('original_currency'), 'unit': evidence.get('price_uom'),
+            'source_type': 'commodity_purchase', 'source': evidence.get('purchase_source'),
+            'error': valuation.get('error'), 'evidence': evidence}
+    elif (row.get('source_context') or {}).get('root_kind') == 'expense':
         evidence = valuation.get('input_evidence') or {}
         row['adopted_price'] = {'value':evidence.get('price'), 'currency':evidence.get('original_currency'),
                                 'unit':evidence.get('price_uom'), 'error':valuation.get('error'),

@@ -1015,10 +1015,13 @@ def test_multiple_actual_packing_matches_are_ambiguous_and_do_not_outrank_workfl
     assert all(row['read_status'] == 'EXCLUDED' for row in unresolved)
 
 
-def test_selected_actual_packing_keeps_workflow_attachment_as_trusted_fallback():
+def test_selected_actual_packing_keeps_all_locally_verified_related_evidence():
     from overseas_costing.services.source_review_manifest_service import prepare_source_manifest
 
     context = {
+        'batch': 'B1',
+        'cost_version': 'V1',
+        'corp_id': 'C',
         'root_kind': 'expense',
         'instance_id': 'EXPENSE',
         'fingerprint': 'context-fingerprint',
@@ -1026,6 +1029,10 @@ def test_selected_actual_packing_keeps_workflow_attachment_as_trusted_fallback()
         'approved': True,
         'invalid': False,
     }
+    lineage = {'batch': 'B1', 'cost_version': 'V1', 'logistics_source_id': 'L', 'logistics_snapshot': 'LS'}
+    logistics_context = {'batch': 'B1', 'cost_version': 'V1', 'corp_id': 'C', 'root_kind': 'logistics',
+                         'instance_id': 'LOGISTICS', 'root_source_id': 'L', 'source_snapshot': 'LS',
+                         'source_lineage': {**lineage, 'instance_id': 'LOGISTICS'}, 'fingerprint': 'logistics'}
     actual = [{
         'source_id': 'ACTUAL',
         'logical_source_id': 'ACTUAL',
@@ -1041,24 +1048,29 @@ def test_selected_actual_packing_keeps_workflow_attachment_as_trusted_fallback()
         'logical_source_id': 'oa:LOGISTICS:FILE-1',
         'source_kind': 'approval_attachment',
         'process_instance_id': 'LOGISTICS',
+        'source_context': logistics_context,
         'source_field': '装箱单附件（Excel）',
         'available': True,
     }, {
         'source_id': 'MANUAL',
         'source_kind': 'manual_attachment',
+        'source_context': {'batch': 'B1', 'cost_version': 'V1', 'root_kind': 'manual',
+                           'source_lineage': {**lineage, 'instance_id': ''}},
         'available': True,
     }, {
         'source_id': 'OLD-BODY',
         'source_kind': 'approval_form',
+        'process_instance_id': 'LOGISTICS',
+        'source_context': logistics_context,
         'approval_role': 'international_logistics',
         'available': True,
     }]
 
     combined = service._combine_actual_packing_with_fallbacks(actual, fallbacks, context)
 
-    assert [row['source_id'] for row in combined] == ['ACTUAL', 'FLOW-PACK']
+    assert [row['source_id'] for row in combined] == ['ACTUAL', 'FLOW-PACK', 'OLD-BODY', 'MANUAL']
     assert combined[1]['supplemental_for_actual_packing'] is True
-    assert combined[1]['source_context'] == context
+    assert combined[1]['source_context'] == logistics_context
     manifest = prepare_source_manifest(combined)
     assert all(row['selected'] for row in manifest)
 

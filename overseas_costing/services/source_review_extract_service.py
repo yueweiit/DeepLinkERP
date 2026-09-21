@@ -106,7 +106,7 @@ def _approval_goods_rows(source: dict) -> list[dict]:
     return []
 
 
-def _match_item(items: list[dict], material_code: Any, source_doc_no: Any = "") -> Optional[dict]:
+def _match_item(items: list[dict], material_code: Any, source_doc_no: Any = "", *, mapped=None) -> Optional[dict]:
     code = str(material_code or "").strip().casefold()
     if not code:
         return None
@@ -122,6 +122,16 @@ def _match_item(items: list[dict], material_code: Any, source_doc_no: Any = "") 
         ]
         if scoped:
             candidates = scoped
+    if len(candidates) > 1 and mapped:
+        from .purchase_value_evidence import uom
+        if uom(mapped.get('unit')):
+            candidates = [item for item in candidates if uom(item.get('shipped_uom') or item.get('unit')) == uom(mapped['unit'])]
+        if mapped.get('spec_model'):
+            candidates = [item for item in candidates if str(item.get('spec_model') or '').strip().casefold()
+                          == str(mapped['spec_model']).strip().casefold()]
+        if len(candidates) > 1:
+            candidates = [item for item in candidates if _decimal(item.get('actual_shipped_qty') or item.get('quantity'))
+                          == _decimal(mapped.get('quantity'))]
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -130,29 +140,30 @@ def build_system_approval_proposals(
     source: dict,
     *,
     transport_mode: str = "",
+    fx_rates: dict | None = None,
 ) -> list[dict]:
-    """Read logistics form rows without an AI call.
+    """Read same-row logistics quantities and purchase totals without an AI call.
 
-    Purchase approvals are intentionally matching-only evidence.  A logistics
-    approval can propose shipped quantity/UOM and logistics physical measures,
-    but never purchase code, purchase quantity, price or goods value.
+    Source priority chooses defaults; it never forbids valid lower-priority
+    purchase evidence. Identity and original purchase quantities stay read-only.
     """
 
-    if str(source.get("approval_role") or "") != "international_logistics":
+    role = str(source.get('approval_role') or '')
+    if role not in {'international_logistics', 'payment', 'purchase', 'logistics_expense'}:
         return []
     from overseas_costing.scripts.import_oa_logistics import (
         LOGISTICS_WEIGHT_FIELD_ALIASES,
         _find_field_value,
     )
-    from overseas_costing.utils.field_mapper import map_oa_row_to_item
+    from .purchase_value_evidence import mapped_row, row_context
 
-    goods_rows = _approval_goods_rows(source)
+    goods_rows = [row_context(row, source) for row in _approval_goods_rows(source)]
     mapped_rows = []
     allocation_targets: set[str] = set()
     complete_net_set = bool(goods_rows)
     for source_row, raw in enumerate(goods_rows, start=1):
-        mapped = map_oa_row_to_item(raw)
-        item = _match_item(items, mapped.get("material_code"), raw.get("source_doc_no"))
+        mapped = mapped_row(raw)
+        item = _match_item(items, mapped.get("material_code"), raw.get("source_doc_no"), mapped=mapped)
         quantity = _decimal(mapped.get("quantity"))
         if not item or quantity is None or quantity <= 0:
             complete_net_set = False
@@ -165,18 +176,23 @@ def build_system_approval_proposals(
         fields = {
             "actual_shipped_qty": _decimal_text(quantity),
             "shipped_uom": uom,
-        }
-        if uom == "kg":
+        } if role == 'international_logistics' else {}
+        if role == 'international_logistics' and uom == "kg":
             fields["net_weight_kg"] = _decimal_text(quantity)
         row_gross = _decimal(mapped.get("gross_weight_kg"))
-        if row_gross is not None and row_gross > 0:
+        if role == 'international_logistics' and row_gross is not None and row_gross > 0:
             fields["gross_weight_kg"] = _decimal_text(row_gross)
-        mapped_rows.append((source_row, item, fields))
+        from .purchase_value_evidence import extract_row_fact
+        fact = extract_row_fact(raw, role=str(source.get('approval_role') or ''), fx_rates=fx_rates)
+        if fact:
+            fields['goods_value'] = fact['amount_rmb']
+        if fields:
+            mapped_rows.append((source_row, item, fields))
 
     form_fields = source.get("form_fields") if isinstance(source.get("form_fields"), dict) else {}
     total_gross = _decimal(_find_field_value(form_fields, LOGISTICS_WEIGHT_FIELD_ALIASES))
     if (
-        total_gross
+        role == 'international_logistics' and total_gross
         and complete_net_set
         and len(mapped_rows) == len(goods_rows)
         and not any("gross_weight_kg" in fields for _, _, fields in mapped_rows)
@@ -206,8 +222,10 @@ def build_system_approval_proposals(
                 "conflict": conflict,
                 "default_selected": not conflict,
                 "result_origin": "SYSTEM",
-                "reason": "钉钉物流审批结构化明细由系统直接读取。",
-                "source_refs": [_source_ref(source, row=source_row, field="货物信息")],
+                "reason": "钉钉审批结构化明细由系统直接读取；同一行货值与数量配对。",
+                "source_refs": [_source_ref(source, row=source_row, field=next(
+                    (str(label) for label in form_fields if any(word in str(label) for word in ('货物信息', '采购明细', '需求明细'))),
+                    '货物信息'))],
                 "payload": {"item_name": str(item.get("name") or ""), "fields": fields},
             }
         )

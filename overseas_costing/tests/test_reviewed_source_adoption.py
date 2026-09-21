@@ -314,7 +314,7 @@ def test_bound_ai_rejects_raw_purchase_fields_before_shared_adoption(setup,monke
     s,l,b,v,i,r,binding=setup
     bundle,evidence,rows=review_input(setup)
     run=SimpleNamespace(name='RUN',draft_json='{}')
-    with pytest.raises(ValueError,match='采购事实'):
+    with pytest.raises(ValueError,match='采购字段缺少对应行'):
         ai.FrappeMaterialAIFillRepository()._apply_bound_source_review(run,
             [{'proposal_type':'item_update','payload':{'item_name':i['name'],'fields':{'quantity':6}}}],[],
             {'batch':b['name'],'version':v['name'],'operator':'u','input_fingerprint':'a'*64,'source_review':{'complete_cargo':True}},bundle)

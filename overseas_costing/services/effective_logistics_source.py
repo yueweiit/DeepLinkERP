@@ -1,4 +1,4 @@
-"""Server-owned logistics evidence root. A confirmed binding never falls back."""
+"""Server-owned evidence contexts; bindings preserve their own audit identity."""
 from __future__ import annotations
 import json
 from copy import deepcopy
@@ -8,7 +8,7 @@ from .logistics_settlement.model import digest
 from .source_read_errors import SourceIntegrityError
 
 POLICY_VERSION = 'procurement-source-2'
-CONTEXT_FIELDS = ('selected_source', 'separate_adoption', 'freight', 'packing', 'policy_version', 'batch', 'cost_version', 'root_kind', 'root_source_id', 'corp_id', 'instance_id',
+CONTEXT_FIELDS = ('source_lineage', 'selected_source', 'separate_adoption', 'freight', 'packing', 'policy_version', 'batch', 'cost_version', 'root_kind', 'root_source_id', 'corp_id', 'instance_id',
                   'binding_id', 'binding_revision', 'source_snapshot', 'approved', 'invalid', 'available', 'fingerprint')
 
 
@@ -191,6 +191,10 @@ def require_available(context):
 def require_readable(context):
     if (context.get('root_kind') == 'expense' or (context.get('packing') or {}).get('selected_source')) and not context.get('available'):
         raise EffectiveSourceIntegrityError('当前关联采购支出缺少本地归档，暂时无法分析；请等待同步。')
+    if context.get('source_lineage') and context.get('instance_id') and (
+        not context.get('available') or context.get('invalid')
+    ):
+        raise EffectiveSourceIntegrityError('所选审批资料缺少本地归档或已失效，请核对该来源。')
 
 
 def json_dict(value):
@@ -204,6 +208,30 @@ def json_dict(value):
 def attachment_allowed(row, bundle, *, for_analysis=False):
     from .logistics_settlement.document_writer import document_retired
     context = bundle['context']
+    if context.get('source_lineage'):
+        if str(row.get('batch') or '') != str(context.get('batch') or ''):
+            return False
+        if context.get('root_kind') == 'manual':
+            return bool(str(row.get('source_type') or '').upper() != 'OA'
+                        and row.get('version') == context.get('cost_version')
+                        and row.get('file_url'))
+        from .material_ai_source_dependencies import _assert_archived_approval_attachment, approval_eligibility
+        source = bundle.get('source') or {}
+        if not approval_eligibility(source)['analysis_allowed']:
+            return False
+        meta = json_dict(row.get('parse_result_json'))
+        descriptor = meta.get('settlement_document') or {}
+        archived = [document for document in source.get('documents') or []
+                    if str(document.get('id') or '') == str(descriptor.get('document_id') or descriptor.get('id') or '')]
+        if len(archived) != 1 or descriptor.get('retired') or document_retired(descriptor):
+            return False
+        try:
+            _assert_archived_approval_attachment(row, meta,
+                {**descriptor, 'document_id': archived[0]['id']}, archived[0], source)
+        except ValueError:
+            return False
+        return bool(for_analysis or not (descriptor.get('audit_only') or meta.get('approval_excluded')
+                                        or meta.get('cost_source_allowed') is False))
     if (context.get('packing') or {}).get('selected_source'):
         # Full archived files cannot re-enter analysis after selecting a shipment slice.
         return False
@@ -280,21 +308,57 @@ def approval_detail_for_bundle(bundle):
 
 
 def validate_packing_source(batch_name, kind, source_id, *, attachment=None, bundle=None):
+    """Resolve the selected evidence within its own locally verified lineage."""
     bundle = bundle if bundle is not None else current_source_bundle(batch_name)
-    if not bundle or bundle['context']['root_kind'] != 'expense':
+    if not bundle:
         return bundle
-    require_readable(bundle['context'])
-    if kind in {'manual_attachment', 'approval_attachment'}:
-        if not attachment or not attachment_allowed(attachment, bundle, for_analysis=True):
-            raise EffectiveSourceIntegrityError('所选附件不属于当前关联采购支出及成本版本。')
-    elif kind == 'wiki_sheet':
-        if source_id not in explicit_wiki_sources(bundle.get('source')):
-            raise EffectiveSourceIntegrityError('该装箱计划表没有由当前关联采购支出明确链接。')
-    elif kind == 'approval_comment':
+    context = bundle['context']
+    if kind == 'wiki_sheet' and context.get('root_kind') != 'expense' and not (context.get('packing') or {}).get('selected_source'):
+        return bundle  # The unbound picker already validates the chosen cached workbook/sheet.
+    if (context.get('root_kind') == 'expense'
+            and kind in {'manual_attachment', 'approval_attachment'}
+            and attachment and attachment_allowed(attachment, bundle, for_analysis=True)):
+        require_readable(context)
+        return bundle
+    if context.get('root_kind') == 'expense' and kind == 'wiki_sheet' and source_id in explicit_wiki_sources(bundle.get('source')):
+        require_readable(context)
+        return bundle
+    if context.get('root_kind') == 'expense' and kind == 'approval_comment':
         comments = approval_detail_for_bundle(bundle)['main_approval']['timeline']
-        if not any(row.get('source_id') == source_id for row in comments):
-            raise EffectiveSourceIntegrityError('所选评论不属于当前关联采购支出。')
-    return bundle
+        if any(row.get('source_id') == source_id for row in comments):
+            require_readable(context)
+            return bundle
+
+    from .packing_source_service import related_approval_detail
+    detail = related_approval_detail(batch_name, context.get('cost_version'), bundle=bundle)
+    if detail.get('ok'):
+        from .logistics_settlement.store import Store
+        store = Store.frappe()
+        for approval in [detail.get('main_approval') or {}, *(detail.get('linked_purchase_approvals') or [])]:
+            if approval.get('excluded'):
+                continue
+            selected_context = approval.get('source_context') or {}
+            selected = {**bundle, 'binding': None, 'context': selected_context,
+                        'source': store.get('source', selected_context.get('root_source_id') or '') or {}}
+            if kind == 'approval_attachment' and attachment:
+                if str(attachment.get('name') or '') == str(source_id) and attachment_allowed(attachment, selected, for_analysis=True):
+                    require_readable(selected_context)
+                    return selected
+            elif kind == 'approval_comment' and any(row.get('source_id') == source_id for row in approval.get('timeline') or []):
+                require_readable(selected_context)
+                return selected
+        if kind == 'manual_attachment' and attachment:
+            manual_context = {'batch': str(batch_name), 'cost_version': detail['cost_version'], 'root_kind': 'manual',
+                              'source_lineage': {**detail['source_lineage'], 'instance_id': ''}}
+            manual_context['fingerprint'] = digest(manual_context)
+            selected = {**bundle, 'binding': None, 'context': manual_context, 'source': {}}
+            if str(attachment.get('name') or '') == str(source_id) and attachment_allowed(attachment, selected, for_analysis=True):
+                return selected
+    # A legacy installation without a local evidence root keeps its original
+    # resolver; a locally managed batch must prove the selected relationship.
+    if context.get('root_kind') != 'expense' and not context.get('root_source_id'):
+        return bundle
+    raise EffectiveSourceIntegrityError('所选资料不属于当前批次的有效关联来源，或归档身份、版本已变化。')
 
 
 PHYSICAL_FIELDS = ('actual_shipped_qty', 'shipped_uom', 'net_weight_kg', 'gross_weight_kg',
@@ -306,7 +370,10 @@ def project_ai_items(items, bundle):
     if not bundle or (bundle['context']['root_kind'] != 'expense' and not (bundle['context'].get('packing') or {}).get('selected_source')):
         return items
     context = bundle['context']
-    require_readable(context)
+    if not context.get('available') or context.get('invalid'):
+        # Keep target identities when this one source is unavailable. The
+        # manifest still rejects selecting it; other local sources can fill.
+        return deepcopy(items)
     source = bundle.get('source') or {}
     result = []
     from .logistics_settlement.model import identity
@@ -314,6 +381,10 @@ def project_ai_items(items, bundle):
     def key(row):
         return (identity(row.get('material_code')), identity(row.get('spec_model')), normalize_unit(row.get('unit') or row.get('purchase_uom')))
     goods_rows = source.get('goods') or []
+    if not goods_rows:
+        # A missing high-priority document is not an empty material scope.
+        # Keep current identities so other same-batch sources can fill fields.
+        return deepcopy(items)
     used = set()
     for goods in goods_rows:
         def line_keys(item):
@@ -333,7 +404,7 @@ def project_ai_items(items, bundle):
         projected.update(unit_price=None, goods_value=None)
         projected.update(name=item['name'], source_doc_no=source.get('approval_no') or source.get('instance'),
                          purchase_uom=goods.get('unit'), unit_price_uom=goods.get('unit'), purchase_currency=goods.get('currency'))
-        # A traceable standalone purchase may contribute price only, never its quantity/value/packing.
+        # Purchase evidence keeps its own price basis; no source type bans values.
         price = goods.get('merchandise_price') or {}
         if price.get('present'):
             if not price.get('ambiguous'):
@@ -351,7 +422,15 @@ def project_ai_items(items, bundle):
         projected['extra_json'] = {'effective_logistics_source': context,
             'settlement_cargo': {**goods, 'source_snapshot': context['source_snapshot'], 'binding_id': context['binding_id']},
             'settlement_physical': deepcopy((values.get('extra_json') or {}).get('settlement_physical') or {})}
+        for name in ('adopted_purchase_value', 'purchase_value_history', 'manual_shipment_valuation'):
+            if meta.get(name):
+                projected['extra_json'][name]=deepcopy(meta[name])
+        from .purchase_value_evidence import identity_matches, retire_purchase_value
+        fact = projected['extra_json'].get('adopted_purchase_value')
+        if fact and not identity_matches(goods, fact):
+            retire_purchase_value(projected['extra_json'])
         result.append(projected)
+    result.extend(deepcopy(item) for item in items if item.get('name') not in used)
     return result
 
 

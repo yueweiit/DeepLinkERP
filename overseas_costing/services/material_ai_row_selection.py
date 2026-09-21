@@ -11,17 +11,19 @@ from .logistics_settlement.model import digest
 from .material_value_semantics import is_effectively_missing
 from overseas_costing.utils.field_mapper import normalize_unit
 
-POLICY = 'ai-field-review-6'
+POLICY = 'ai-field-review-7'
 PHYSICAL = ('gross_weight_kg','net_weight_kg','volume_m3','volume_weight_kg','chargeable_weight_kg','weight_ratio','package_count','packaging_type')
 IDENTITY = ('material_code','product_name','spec_model')
-FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','shipment_value_rmb')
+FILL_FIELDS = (*PHYSICAL,'actual_shipped_qty','shipped_uom','project_collection','unit_price','purchase_currency','purchase_uom','unit_price_uom','goods_value','shipment_value_rmb')
+VALUE_FIELDS = frozenset({'goods_value', 'shipment_value_rmb', 'unit_price'})
+PRICE_FIELDS = frozenset({'unit_price', 'purchase_currency', 'purchase_uom', 'unit_price_uom'})
 MISSING_LABELS = {'material_code':'SKU','actual_shipped_qty':'数量','shipped_uom':'单位','gross_weight_kg':'毛重','volume_m3':'体积'}
 STAGE_SPECS = (
     ('payment', 0, '支付申请'),
     ('international_logistics', 1, '国际物流'),
     ('purchase', 2, '采购支出'),
 )
-FEE_STAGE_SPECS = STAGE_SPECS[:2]
+FEE_STAGE_SPECS = STAGE_SPECS
 DEFAULT_WORKFLOW_STAGES = frozenset(stage for stage,_rank,_label in STAGE_SPECS)
 MATERIAL_SCOPE_STAGES = ('international_logistics', 'payment', 'purchase')
 EXPLICIT_CORRECTION_MARKERS = ('更正', '改为', '以此为准', '原值错误')
@@ -42,6 +44,7 @@ CORRECTION_FIELD_MARKERS = {
     'purchase_uom': ('采购单位',),
     'unit_price_uom': ('单价单位',),
     'shipment_value_rmb': ('本次发货货值', '货值'),
+    'goods_value': ('采购货值', '总货值', '货值'),
 }
 _FIELD_MARKER_TO_FIELDS = {}
 for _field_name, _field_markers in CORRECTION_FIELD_MARKERS.items():
@@ -592,6 +595,7 @@ def _field_candidates(catalog_rows):
 
     result=[]
     rows_by_id={str(row.get('row_id') or ''):row for row in catalog_rows}
+    current_by_item={row['target_item_name']:row['values'] for row in catalog_rows if row.get('origin')=='current'}
     identifier_counts=_material_identifier_counts(catalog_rows)
     correction_clause_cache=_correction_clause_cache(catalog_rows,identifier_counts)
     default_stages=DEFAULT_WORKFLOW_STAGES
@@ -609,6 +613,19 @@ def _field_candidates(catalog_rows):
             process_conflict=bool(row.get('_review_process_conflict') or process_conflict_ids)
             candidate_id=digest(POLICY,'field-candidate',row.get('row_id'),row.get('target_item_name'),fieldname)
             can_apply=bool(row.get('candidate_can_apply'))
+            value_error = ''
+            if fieldname == 'goods_value' and row.get('proposal_type') == 'item_update' and not row.get('_purchase_value_fact'):
+                can_apply = False
+                value_error = '货值缺少同一来源行的数量、单位或币种依据，请核对资料后重新分析。'
+            if fieldname in PRICE_FIELDS and row.get('_price_metadata') and not row.get('_review_price_valuation'):
+                can_apply = False
+                value_error = '采购单价缺少同源数量、单位、币种或汇率依据，仅供核对。'
+            current = current_by_item.get(row.get('target_item_name'), {})
+            from .purchase_value_evidence import number
+            current_meta = json_dict(current.get('extra_json'))
+            protected_value = (number(current.get('unit_price')) is not None and number(current['unit_price']) > 0
+                or current_meta.get('manual_shipment_valuation')
+                or current.get('shipment_value_rmb') is not None)
             result.append({
                 'candidate_id':candidate_id,'item_name':row.get('target_item_name'),'fieldname':fieldname,
                 'suggested_value':deepcopy(value),'row_id':row.get('row_id'),'source_group_id':row.get('source_group_id'),
@@ -621,6 +638,7 @@ def _field_candidates(catalog_rows):
                 'default_eligible':(
                     not process_conflict
                     and not field_mismatch
+                    and not (fieldname in VALUE_FIELDS | PRICE_FIELDS and protected_value)
                     and fieldname not in set(row.get('existing_value_conflict_fields') or [])),
                 'stage_snapshot_id':(
                     (row.get('stage_snapshot_id') or _stage_snapshot_id(row.get('workflow_stage')))
@@ -637,7 +655,7 @@ def _field_candidates(catalog_rows):
                         if len(row.get('_review_evidence_chain') or [])==1 else '') or ''),
                 'correction_kind':('explicit' if correction_evidence else 'none'),
                 'supersedes_candidate_id':'','effective_in_stage':False,
-                'can_apply':can_apply,'default_selected':False,'resolution_reason':(
+                'can_apply':can_apply,'default_selected':False,'resolution_reason':value_error or (
                     '候选同时引用多个流程，保留手工核对但不作为默认值。'
                     if process_conflict else
                     '更正评论指向其他字段，本候选不作为默认值。'
@@ -774,6 +792,7 @@ def _field_candidates(catalog_rows):
                     '来源未分类，仅保留为审计候选，不参与默认裁决。'
                     if candidate['workflow_stage'] not in default_stages else
                     '未作为默认值，保留为本字段可改选候选。')
+    _resolve_value_basis_defaults(result, rows_by_id)
     defaults={candidate['row_id'] for candidate in result if candidate['default_selected']}
     for row_id,row in rows_by_id.items():
         if row.get('origin')!='source':
@@ -792,8 +811,80 @@ def _field_candidates(catalog_rows):
     return result
 
 
+def _value_basis(candidate, row):
+    field = candidate['fieldname']
+    if field == 'goods_value':
+        return row.get('_purchase_value_fact')
+    if field == 'shipment_value_rmb':
+        return row.get('_shipment_valuation')
+    if field == 'unit_price':
+        return row.get('_review_price_valuation')
+    return None
+
+
+def _resolve_value_basis_defaults(candidates, rows_by_id):
+    """A total, unit-price tuple, and shipment total compete for one valuation."""
+    by_item = {}
+    current = {row['target_item_name']: row['values'] for row in rows_by_id.values()
+               if row.get('origin') == 'current'}
+    from .purchase_value_evidence import number, shipment_valuation
+    def basis_amount(candidate):
+        basis = _value_basis(candidate, rows_by_id[candidate['row_id']])
+        if candidate['fieldname'] == 'goods_value':
+            basis = shipment_valuation(current[candidate['item_name']], basis)
+        return None if basis.get('error') else number(basis.get('amount_rmb'))
+    for candidate in candidates:
+        if candidate['fieldname'] in VALUE_FIELDS and _value_basis(candidate, rows_by_id[candidate['row_id']]):
+            by_item.setdefault(candidate['item_name'], []).append(candidate)
+    for item_name, values in by_item.items():
+        eligible = [candidate for candidate in values if candidate['can_apply']
+                    and candidate['default_eligible'] and candidate['effective_in_stage']
+                    and candidate['confidence'] >= .9 and basis_amount(candidate) is not None]
+        if not eligible:
+            continue
+        winner = None
+        for rank in sorted({candidate['workflow_rank'] for candidate in eligible}):
+            stage = [candidate for candidate in eligible if candidate['workflow_rank'] == rank]
+            amounts = {basis_amount(candidate) for candidate in stage}
+            if len(amounts) != 1:
+                continue
+            winner = min(stage, key=lambda candidate: (candidate['source_priority'], candidate['candidate_id']))
+            break
+        for candidate in candidates:
+            if candidate['item_name'] != item_name or candidate['fieldname'] not in VALUE_FIELDS | PRICE_FIELDS:
+                continue
+            keep = candidate is winner or (winner and winner['fieldname'] == 'unit_price'
+                and candidate['row_id'] == winner['row_id'] and candidate['fieldname'] in PRICE_FIELDS)
+            candidate['default_selected'] = bool(keep and candidate['can_apply'] and candidate['default_eligible'])
+            if not keep and candidate['can_apply']:
+                candidate['resolution_reason'] = '采购总额、采购单价与发货货值共用一套价值依据；本候选保留可手工改选。'
+
+
+def _coherent_value_choices(selected, candidates, rows_by_id):
+    by_item = {}
+    for candidate in selected:
+        if _value_basis(candidate, rows_by_id[candidate['row_id']]):
+            by_item.setdefault(candidate['item_name'], []).append(candidate)
+    result = list(selected)
+    for item_name, bases in by_item.items():
+        explicit = [candidate for candidate in bases if not candidate.get('default_selected')]
+        if len(explicit) > 1:
+            raise ValueError('同一物料只能选择一套采购价或货值依据，请保留一项。')
+        winner = explicit[0] if explicit else min(bases, key=lambda candidate:(candidate['workflow_rank'], candidate['source_priority']))
+        result = [candidate for candidate in result if candidate['item_name'] != item_name
+                  or candidate['fieldname'] not in VALUE_FIELDS | PRICE_FIELDS
+                  or candidate is winner
+                  or winner['fieldname']=='unit_price' and candidate['row_id']==winner['row_id'] and candidate['fieldname'] in PRICE_FIELDS]
+        if winner['fieldname']=='unit_price':
+            for candidate in candidates:
+                if (candidate['row_id']==winner['row_id'] and candidate['fieldname'] in PRICE_FIELDS
+                        and candidate['can_apply'] and candidate not in result):
+                    result.append(candidate)
+    return result
+
+
 def _canonical_field_candidate(fieldname,value):
-    if fieldname in PHYSICAL or fieldname in {'actual_shipped_qty','unit_price','shipment_value_rmb'}:
+    if fieldname in PHYSICAL or fieldname in {'actual_shipped_qty','unit_price','goods_value','shipment_value_rmb'}:
         try:return format(Decimal(str(value)).normalize(),'f')
         except (InvalidOperation,TypeError,ValueError):pass
     return str(value or '').strip().casefold()
@@ -835,7 +926,7 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
     )
     baseline_fields=(*IDENTITY,'actual_shipped_qty','shipped_uom','unit',*PHYSICAL,
                      'project_collection','unit_price','purchase_currency','purchase_uom',
-                     'unit_price_uom','shipment_value_rmb')
+                     'unit_price_uom','goods_value','shipment_value_rmb')
     def baseline_values(row):
         values=row.get('values') or {}
         return {field:deepcopy(values.get(field)) for field in baseline_fields}
@@ -1052,7 +1143,7 @@ def _stage_snapshots(catalog_rows, field_candidates, sources):
 
 
 def _fee_stage_snapshots(fees, sources):
-    """Return fixed, safe fee summaries for payment and logistics stages."""
+    """Return safe fee summaries for each verified workflow stage."""
 
     from .source_priority_service import rank_material_packing_sources
 
@@ -1303,7 +1394,7 @@ def _manual_scope_protected(row):
     )
 
 
-def catalog(items, proposals, fees, context, *, run_id, sources=None):
+def catalog(items, proposals, fees, context, *, run_id, sources=None, fx_rates=None):
     """Do not expose inherited purchase values as newly recognized packing evidence."""
     from .effective_source_values import project_source_values
     items=[project_source_values(i,context) for i in items]
@@ -1314,7 +1405,7 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
         item['shipment_valuation_status'] = current_valuation.get('status')
         item['shipment_value_source'] = deepcopy((current_valuation.get('source_refs') or [{}])[0])
     original={str(i['name']):i for i in items}
-    rows=[];occurrences=Counter();proposal_rows={}
+    rows=[];occurrences=Counter();proposal_rows={};reconciled_targets={}
     def add(values, proposal, *, origin='source', target='', stable='', fields=None, price_metadata=None,
             shipment_valuation=None):
         values=deepcopy(values)
@@ -1363,6 +1454,10 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                      'proposal_id':proposal.get('proposal_id'),'proposal_type':proposal.get('proposal_type'),'fields':fill_fields})
         if price_metadata is not None:
             rows[-1]['_price_metadata']=deepcopy(price_metadata)
+            from .purchase_value_evidence import price_valuation
+            rows[-1]['_review_price_valuation'] = price_valuation(
+                {**original.get(target, {}), **values}, price_metadata,
+                rows[-1]['source_refs'], fx_rates=fx_rates)
         if shipment_valuation is not None:
             rows[-1]['_shipment_valuation']=deepcopy(shipment_valuation)
         if stable:proposal_rows[stable]=rows[-1]
@@ -1392,8 +1487,27 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
                                    ('unit_price','purchase_currency','purchase_uom','unit_price_uom')})
                 else:
                     for field in ('unit_price','purchase_currency','purchase_uom','unit_price_uom'):values.pop(field,None)
-                add(values,proposal,stable=row.get('stable_line_key') or row.get('name'),
-                    price_metadata=row.get('_review_price_metadata'), shipment_valuation=shipment_valuation)
+                price_metadata = row.get('_review_price_metadata') or {}
+                purchase_fact = (price_metadata.get('logistics_row') or {}).get('purchase_fact') or {}
+                purchase_refs = purchase_fact.get('source_refs') if isinstance(purchase_fact, dict) else []
+                split_price = bool(isinstance(reviewed_purchase, dict) and purchase_refs)
+                add(({key:value for key,value in values.items() if key not in PRICE_FIELDS} if split_price else values),
+                    proposal,stable=row.get('stable_line_key') or row.get('name'),
+                    fields=([field for field in FILL_FIELDS if field not in PRICE_FIELDS] if split_price else None),
+                    price_metadata=(None if split_price else row.get('_review_price_metadata')),
+                    shipment_valuation=shipment_valuation)
+                reconciled_targets[str(row.get('name') or '')]=rows[-1]
+                if split_price:
+                    # Procurement evidence carried by a logistics reconciliation
+                    # keeps its own workflow and row references for arbitration.
+                    price_proposal = {**proposal, 'proposal_type':'item_update',
+                        'proposal_id':str(proposal.get('proposal_id') or '') + ':purchase-price',
+                        'source_refs':deepcopy(purchase_refs)}
+                    add(values, price_proposal, target=rows[-1]['target_item_name'],
+                        stable=row.get('stable_line_key') or row.get('name'),
+                        fields=[field for field in FILL_FIELDS if field in PRICE_FIELDS],
+                        price_metadata=price_metadata)
+                    rows[-1].update(can_add=False, can_replace=False, default_replace_selected=False)
         elif kind=='material_replace':
             for row in payload.get('replacement_rows') or []:
                 values=_source_values(row);values['material_code']=''
@@ -1411,12 +1525,33 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
             fields={k:v for k,v in (payload.get('fields') or {}).items() if k in FILL_FIELDS}
             if not fields:continue
             existing=original.get(target)
+            if not existing:
+                matched=reconciled_targets.get(target)
+                if matched:
+                    target=matched['target_item_name']
+                    existing=original.get(target)
             if not existing:continue
             values={k:existing.get(k) for k in (*IDENTITY,'unit','shipped_uom','stable_line_key')}
             values.update(fields)
+            fact=proposal.get('_purchase_value_fact')
+            if fact:
+                from .purchase_value_evidence import META_KEY
+                values['extra_json']={META_KEY:deepcopy(fact)}
             if 'actual_shipped_qty' in fields and proposal.get('result_origin')=='SYSTEM':
                 values['actual_shipped_qty_mode']='EXPLICIT_SOURCE'
             add(values,proposal,target=target,fields=list(fields))
+            if fact:
+                rows[-1]['_purchase_value_fact']=deepcopy(fact)
+            if 'goods_value' in fields:
+                from .purchase_value_evidence import number
+                existing_price=number(existing.get('unit_price'))
+                existing_value=shipment_value(existing)
+                metadata=json_dict(existing.get('extra_json'))
+                if (existing_price is not None and existing_price > 0
+                        or metadata.get('manual_shipment_valuation')
+                        or (existing_value.get('amount_rmb') is not None and not existing_value.get('error'))):
+                    rows[-1]['existing_value_conflict_fields']=sorted(set(
+                        rows[-1]['existing_value_conflict_fields']) | {'goods_value'})
     for item in items:
         add(deepcopy(item),{'proposal_id':'current:'+item['name']},origin='current',target=item['name'],stable=item['name'],fields=[])
     source_groups=_source_groups(rows,sources)
@@ -1448,6 +1583,7 @@ def catalog(items, proposals, fees, context, *, run_id, sources=None):
         and not _manual_scope_protected(item)
     )
     return {'policy':POLICY,'rows':scoped_rows,'fees':fee_rows,'source_groups':source_groups,
+            '_review_fx_rates':deepcopy(fx_rates or {}),
             'field_candidates':field_candidates,'stage_snapshots':stage_snapshots,
             'fee_stage_snapshots':fee_stage_snapshots,
             'material_scope_source':scope['source'],
@@ -1488,6 +1624,8 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             if not candidate.get('can_apply'):
                 raise ValueError(candidate.get('resolution_reason') or '本字段候选不可采用。')
             selected_field_candidates.append(candidate)
+        selected_field_candidates = _coherent_value_choices(
+            selected_field_candidates, catalog.get('field_candidates') or [], rows_by_id)
     for row in chosen:
         allowed_key=('can_fill' if mode=='fill_missing' else 'can_update' if mode=='update_selected'
                      else 'can_add' if mode=='add_selected' else 'can_replace')
@@ -1517,10 +1655,20 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             row=next((value for value in result if value.get('name')==candidate['item_name']),None)
             if row is None:raise ValueError('逐字段候选的目标物料已变化，请刷新。')
             field=candidate['fieldname']
+            if mode=='fill_missing' and field in PRICE_FIELDS and not missing(original[candidate['item_name']], 'unit_price'):
+                continue
             if mode=='fill_missing' and not missing(row,field):
                 continue
             before=row.get(field);row[field]=deepcopy(candidate['suggested_value'])
             meta=json_dict(row.get('extra_json'));field_refs=meta.setdefault('ai_row_fields',{})
+            choice=rows_by_id[candidate['row_id']]
+            if field=='goods_value' and choice.get('_purchase_value_fact'):
+                _activate_purchase_value(row, meta, choice['_purchase_value_fact'])
+            if field=='shipment_value_rmb' and choice.get('_shipment_valuation'):
+                row['_shipment_valuation']=deepcopy(choice['_shipment_valuation'])
+                _activate_shipment_value(meta, choice['_shipment_valuation'])
+            if field in ('unit_price','purchase_currency','purchase_uom','unit_price_uom') and choice.get('_price_metadata'):
+                row['_price_metadata']=deepcopy(choice['_price_metadata'])
             field_refs[field]={'candidate_id':candidate['candidate_id'],'row_id':candidate['row_id'],
                                'source_refs':deepcopy(candidate.get('source_refs') or [])}
             mask=set(meta.get('settlement_packing_missing') or []);mask.discard(field)
@@ -1531,7 +1679,13 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
                 'source_refs':deepcopy(candidate.get('source_refs') or []),'source_group_id':candidate.get('source_group_id'),
                 'source_priority':candidate.get('workflow_rank'),'workflow_stage':candidate.get('workflow_stage'),
                 'evidence_kind':candidate.get('evidence_kind'),'conflict_override':not candidate.get('default_selected')})
+        for row in result:
+            price_choices=[change for change in changes
+                           if change['item_name']==row.get('name') and change['fieldname']=='unit_price']
+            if price_choices:
+                _activate_selected_price(row, rows_by_id[price_choices[0]['row_id']], catalog)
         for index,row in enumerate(result,1):row['row_no']=index
+        _present_purchase_values(result)
         actual_by_field={(change['item_name'],change['fieldname']):{
             key:deepcopy(change.get(key)) for key in ('item_name','fieldname','candidate_id','row_id','source_refs','source_group_id','source_priority','workflow_stage','evidence_kind','conflict_override')
         } for change in changes}
@@ -1556,6 +1710,8 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             row=next(r for r in result if r['name']==target)
             fields=[f for f in choice['fields'] if not missing(incoming,f)
                     and (mode=='update_selected' or missing(row,f))]
+            if mode=='fill_missing' and not missing(row,'unit_price'):
+                fields=[field for field in fields if field not in PRICE_FIELDS]
         else:
             row={k:deepcopy(incoming.get(k)) for k in (*IDENTITY,*FILL_FIELDS,'quantity','unit','unverified_material_code')}
             row['_target']=target;row['stable_line_key']=((original.get(target) or {}).get('stable_line_key') if not duplicate_target else None) or choice['row_id']
@@ -1573,12 +1729,18 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             else:added+=1
             result.append(row)
         meta=json_dict(row.get('extra_json'));field_refs=meta.setdefault('ai_row_fields',{})
+        if ('goods_value' in fields and choice.get('proposal_type')=='item_update'
+                and not choice.get('_purchase_value_fact')):
+            raise ValueError('货值缺少同一来源行的数量、单位或币种依据，请逐字段核对。')
+        if 'goods_value' in fields and choice.get('_purchase_value_fact'):
+            _activate_purchase_value(row, meta, choice['_purchase_value_fact'])
         if mode=='update_selected' and choice.get('_price_metadata') is not None:
             # Keep the trusted purchase lineage server-side so a later source
             # refresh can detect and audit changed prices for the same row.
             row['_price_metadata']=deepcopy(choice['_price_metadata'])
         if ('shipment_value_rmb' in fields and choice.get('_shipment_valuation') is not None):
             row['_shipment_valuation']=deepcopy(choice['_shipment_valuation'])
+            _activate_shipment_value(meta, choice['_shipment_valuation'])
         for field in fields:
             before=row.get(field)
             row[field]=deepcopy(incoming[field]);field_refs[field]={'row_id':choice['row_id'],'source_refs':refs}
@@ -1592,10 +1754,13 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
         meta['settlement_packing_missing']=sorted(mask)
         meta['ai_row_selection']={'row_id':choice['row_id'],'source_refs':refs,'origin':'source'}
         row['extra_json']=meta;row['_target']='' if duplicate_target else target
+        if 'unit_price' in fields:
+            _activate_selected_price(row, choice, catalog)
         row['_row_action']='source'
         if duplicate_target:added+=1
         if target:used.add(target);used_choices[target]=choice
     for index,row in enumerate(result,1):row['row_no']=index
+    _present_purchase_values(result)
     removed=len(items)-len(used) if mode=='replace_all' else 0
     actual_by_field={}
     for change in changes:
@@ -1612,3 +1777,59 @@ def project(items, catalog, row_ids, fee_ids, mode, *, field_choices=None):
             'can_apply':bool(chosen or selected_fees or scope_excluded),
             'scope_excluded_item_names':sorted(scope_excluded),
             'catalog_fingerprint':catalog['fingerprint']}
+
+
+def _activate_shipment_value(meta, valuation):
+    """An explicit new valuation supersedes, but does not erase, the old basis."""
+    from .purchase_value_evidence import retire_purchase_value
+    retire_purchase_value(meta)
+    value = {**deepcopy(valuation), 'trusted_shipment_source': True}
+    meta['shipment_valuation'] = value
+    if meta.get('settlement_cargo'):
+        meta['settlement_valuation'] = deepcopy(value)
+
+
+def _activate_purchase_value(row, meta, fact):
+    from .purchase_value_evidence import META_KEY, retire_purchase_value
+    if meta.get(META_KEY) != fact:
+        retire_purchase_value(meta)
+    meta[META_KEY] = deepcopy(fact)
+    row.pop('_shipment_valuation', None)
+
+
+def _activate_selected_price(row, choice, catalog):
+    if not choice.get('_review_price_valuation'):
+        if choice.get('_price_metadata') and json_dict(row.get('extra_json')).get('adopted_purchase_value'):
+            raise ValueError('采购单价缺少同源数量、单位、币种或汇率依据，请重新核对。')
+        return
+    from .purchase_value_evidence import price_valuation
+    meta = json_dict(row.get('extra_json'))
+    price_meta = deepcopy(choice['_price_metadata'])
+    valuation = price_valuation(row, price_meta, choice['source_refs'], fx_rates=catalog.get('_review_fx_rates'))
+    if valuation is None:
+        raise ValueError('采购单价缺少同源数量、单位、币种或汇率依据，请重新核对。')
+    _activate_shipment_value(meta, valuation)
+    row['_shipment_valuation'] = deepcopy(valuation)
+    row['shipment_value_rmb'] = valuation['amount_rmb']
+    for key in ('adopted_purchase_value', 'purchase_value_history', 'shipment_valuation',
+                'settlement_valuation', 'manual_shipment_valuation'):
+        price_meta.pop(key, None)
+    row['_price_metadata'] = price_meta
+    row['extra_json'] = meta
+
+
+def _present_purchase_values(result):
+    """Return adopted totals/prices for previews without backfilling raw fields."""
+    from .material_input_service import present_material_row
+    for row in result:
+        if row.get('_shipment_valuation', {}).get('method') != 'settlement_purchase_unit_price':
+            if row.get('_shipment_valuation'):
+                row.pop('adopted_price', None)
+                continue
+            if not json_dict(row.get('extra_json')).get('adopted_purchase_value'):
+                continue
+        presented=present_material_row(row)
+        row.pop('adopted_price', None)
+        for field in ('adopted_price','shipment_value_rmb','shipment_valuation'):
+            if field in presented:
+                row[field]=deepcopy(presented[field])

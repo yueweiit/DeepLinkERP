@@ -13123,7 +13123,7 @@ class OverseasCostWorkbench {
   renderMaterialAIFeeStages(fill, selection, feePolicy, value, busy) {
     const catalog = fill.row_review || {};
     const snapshots = new Map((catalog.fee_stage_snapshots || []).map(stage => [String(stage.stage || ""), stage]));
-    const specs = [["payment", 0, "支付申请"], ["international_logistics", 1, "国际物流"]];
+    const specs = [["payment", 0, "支付申请"], ["international_logistics", 1, "国际物流"], ["purchase", 2, "采购支出"]];
     const feesById = new Map(feePolicy.fees.map(fee => [String(fee.proposal_id), fee]));
     const mainIds = new Set(feePolicy.mainFees.map(fee => String(fee.proposal_id)));
     const stages = specs.map(([stage, rank, label]) => ({ status: "UNAVAILABLE", processes: [], fees: [], warnings: [], fallback_reason: "本阶段未找到有效费用资料。", ...(snapshots.get(stage) || {}), stage, stage_rank: rank, stage_label: label }));
@@ -13180,7 +13180,7 @@ class OverseasCostWorkbench {
       return `<tr data-mf-ai-fee-record="${this.escape(id)}"><td>${control}</td><td>${value(values.expense_category || values.logical_fee_key)}</td><td>${value(values.amount)} ${value(values.currency)}</td><td>${this.escape(roleLabels[role] || role || "普通候选")}</td><td>${value(feeDescription(fee))}</td><td>${this.escape(reason)}</td></tr>`;
     }).join("");
     const unclassifiedSection = unclassified.length ? `<details class="ocw-mf-ai-unclassified" data-mf-ai-unclassified-fees="1"><summary>其他记录 / 未归类费用 <span>${unclassified.length} 条</span></summary><div class="ocw-mf-ai-preview-table"><table><thead><tr><th>选择</th><th>费用项目</th><th>金额</th><th>角色</th><th>来源</th><th>核对说明</th></tr></thead><tbody>${unclassifiedRows}</tbody></table></div></details>` : "";
-    return `<section class="ocw-mf-ai-preview-section" data-mf-ai-fee-stages><h4>费用 <span>已选 ${selection.fees.size}</span></h4><p>支付申请 → 国际物流；优先级只决定默认值，同一费用覆盖范围只能采用一份。</p>${panels}${unclassifiedSection}</section>`;
+    return `<section class="ocw-mf-ai-preview-section" data-mf-ai-fee-stages><h4>费用 <span>已选 ${selection.fees.size}</span></h4><p>支付申请 → 国际物流 → 采购支出；优先级只决定默认值，同一费用覆盖范围只能采用一份。</p>${panels}${unclassifiedSection}</section>`;
   }
 
   renderMaterialAIRowReview(fill) {
@@ -13189,7 +13189,17 @@ class OverseasCostWorkbench {
     const preview = selection.previewKey === this.materialAIRowSelectionKey(fill) ? selection.preview : null;
     const value = input => this.escape(input === null || input === undefined || input === "" ? "—" : input);
     const columns = [["material_code", "物料编码"], ["product_name", "物料名称"], ["quantity", "采购数量"], ["actual_shipped_qty", "实发数量"], ["shipped_uom", "单位"], ["unit_price", "采购单价"], ["purchase_currency", "币种"], ["shipment_value_rmb", "本次发货货值 RMB"], ["package_count", "箱数"], ["net_weight_kg", "净重 kg"], ["gross_weight_kg", "毛重 kg"], ["volume_m3", "体积 m³"], ["project_collection", "项目归属"]];
-    const cells = row => columns.map(([field]) => `<td>${value(row[field])}</td>`).join("");
+    const displayCell = (row, field) => {
+      if (field === "unit_price" && row.adopted_price?.value != null) {
+        const price = Number(row.adopted_price.value);
+        return `${Number.isFinite(price) ? value(price.toFixed(2)) : "—"}<small>按同来源货值÷数量计算</small>`;
+      }
+      if (field === "purchase_currency" && row.adopted_price?.currency) return value(row.adopted_price.currency);
+      if (field === "unit_price") return Number(row[field]) > 0 ? value(Number(row[field]).toFixed(2)) : "—";
+      if (field === "shipment_value_rmb" && row[field] != null && row[field] !== "") return value(Number(row[field]).toFixed(2));
+      return value(row[field]);
+    };
+    const cells = row => columns.map(([field]) => `<td>${displayCell(row, field)}</td>`).join("");
     const busy = fill.applying || fill.discarding ? "disabled" : "";
     const missing = preview?.missing_fields || [];
     const missingCount = Array.isArray(missing) ? missing.length : Number(missing.count ?? missing) || Object.keys(missing).length;
@@ -13214,7 +13224,7 @@ class OverseasCostWorkbench {
       const rowKey = String(row.stable_line_key || (row.name ? `legacy:${row.name}` : ""));
       const shared = sharedPackingByMember.get(rowKey);
       return columns.map(([field]) => {
-        if (!shared || !sharedPackingFields.has(field)) return `<td>${value(row[field])}</td>`;
+        if (!shared || !sharedPackingFields.has(field)) return `<td>${displayCell(row, field)}</td>`;
         if (shared.position > 0) return "";
         const total = field === "package_count"
           ? (shared.option.package_count_override ?? shared.group[field])
@@ -13246,7 +13256,7 @@ class OverseasCostWorkbench {
       const evidenceKinds = [...new Set([...group.candidates].sort((left, right) => Number(left.evidence_rank ?? 4) - Number(right.evidence_rank ?? 4)).map(candidate => candidate.evidence_kind || "other"))];
       return { ...group, workflowRank, evidenceRank, sourceLabel: representative.source_label || "未命名来源", workflowStage: representative.workflow_stage || "other", evidenceKinds, priorityReason: representative.priority_reason || "" };
     }).sort((left, right) => left.workflowRank - right.workflowRank || left.evidenceRank - right.evidenceRank || String(left.sourceLabel).localeCompare(String(right.sourceLabel), "zh-CN"));
-    const fieldColumnOrder = [...columns, ["purchase_uom", "采购单位"], ["unit_price_uom", "单价单位"], ["volume_weight_kg", "体积重 kg"], ["chargeable_weight_kg", "计费重 kg"], ["weight_ratio", "重量占比"], ["packaging_type", "包装类型"]];
+    const fieldColumnOrder = [...columns, ["goods_value", "采购货值 RMB"], ["purchase_uom", "采购单位"], ["unit_price_uom", "单价单位"], ["volume_weight_kg", "体积重 kg"], ["chargeable_weight_kg", "计费重 kg"], ["weight_ratio", "重量占比"], ["packaging_type", "包装类型"]];
     fieldColumnOrder.forEach(([fieldname, label]) => { fieldLabels[fieldname] = label; });
     const currentItems = catalog.rows || [];
     const itemLabel = itemName => {

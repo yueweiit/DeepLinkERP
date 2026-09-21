@@ -67,6 +67,10 @@ def is_effectively_missing(fieldname: str, value: Any, item: dict | None = None)
         return True
     field = str(fieldname or "")
     if field in ZERO_IS_MISSING_FIELDS and _is_zero(value):
+        if field == 'goods_value' and isinstance(metadata, dict):
+            fact = metadata.get('adopted_purchase_value') or {}
+            if fact.get('explicit_zero') and fact.get('source_refs') and _is_zero(fact.get('amount_rmb')):
+                return False
         return True
     if field == "actual_shipped_qty" and _is_zero(value):
         mode = str((item or {}).get("actual_shipped_qty_mode") or "").strip().upper()

@@ -1381,6 +1381,24 @@ def _attach_source_grid(comparison: dict, trusted: dict, existing: list, kind: s
         })
 
 
+def _selected_source_context(context: dict, trusted: dict) -> dict:
+    """Keep the verified source's dependencies separate from the default root."""
+    selected = dict(trusted.get('source_context') or context.get('source_context') or {})
+    for key, expected in (('batch', context['batch']), ('cost_version', context['version'])):
+        if selected.get(key) and str(selected[key]) != str(expected):
+            raise effective_source.EffectiveSourceIntegrityError('所选来源不属于当前批次或成本版本。')
+    current_corp = (context.get('source_context') or {}).get('corp_id')
+    if current_corp and selected.get('corp_id') and str(selected['corp_id']) != str(current_corp):
+        raise effective_source.EffectiveSourceIntegrityError('所选来源企业与当前批次不一致。')
+    lineage = selected.get('source_lineage') or {}
+    if lineage and any(str(lineage.get(key) or '') != str(expected or '') for key, expected in (
+        ('batch', context['batch']), ('cost_version', context['version']),
+        ('instance_id', selected.get('instance_id')),
+    )):
+        raise effective_source.EffectiveSourceIntegrityError('所选来源的批次依赖或审批身份不一致。')
+    return selected
+
+
 def preview_material_import(
     batch_name: str,
     source_kind: str,
@@ -1406,6 +1424,7 @@ def preview_material_import(
     if len(source_hash) != 64:
         raise ValueError("可信物料来源缺少 SHA-256。")
     trusted = _review_trusted_grid(trusted, merge_reviews_json)
+    source_context = _selected_source_context(context, trusted)
     source = dict(trusted.get("source") or {})
     selected_sheet = str(source.get("sheet_name") or sheet_name or "")
     source_descriptor = {
@@ -1433,7 +1452,7 @@ def preview_material_import(
         "source_hash": source_hash,
         "sheet": selected_sheet,
         "preview_hash": comparison["preview_hash"],
-        "source_context": context.get('source_context') or trusted.get('source_context') or {},
+        "source_context": source_context,
     }
     if trusted.get("merge_reviews") is not None:
         claims["merge_reviews"] = trusted["merge_reviews"]
@@ -1442,7 +1461,7 @@ def preview_material_import(
             "ok": True,
             "batch_name": context["batch"],
             "version_name": context["version"],
-            "source_context": context.get('source_context') or trusted.get('source_context') or {},
+            "source_context": source_context,
             "preview_revision": encode_material_preview_revision(claims, signing_key=signing_key),
             "sheet": {
                 "selected": selected_sheet,
@@ -1456,9 +1475,9 @@ def preview_material_import(
             "source_totals": _source_totals(trusted.get("preview") or {}),
         }
     )
-    if (context.get('source_context') or {}).get('root_kind') == 'expense' and not (context.get('source_context') or {}).get('separate_adoption'):
+    if source_context.get('root_kind') == 'expense' and not source_context.get('separate_adoption'):
         from .logistics_settlement.reviewed_cargo import cargo_review_for_preview
-        comparison['cargo_review'] = cargo_review_for_preview(trusted,context['source_context'])
+        comparison['cargo_review'] = cargo_review_for_preview(trusted, source_context)
     from overseas_costing.services.approval_link_service import attach_preview_approval_links
 
     attach_preview_approval_links(context["batch"], comparison, existing)
@@ -1538,10 +1557,6 @@ def apply_material_import(
     repo.lock(str(batch_name), str(claims.get("version") or ""))
     try:
         context = repo.get_context(str(batch_name))
-        effective_source.require_available(context.get('source_context') or {})
-        if (context.get('source_context') or {}) != (claims.get('source_context') or {}):
-            repo.rollback()
-            return {'ok': False, 'source_changed': True, 'code': 'EFFECTIVE_SOURCE_CHANGED'}
         if any(
             str(context.get(key) or "") != str(claims.get(key) or "")
             for key in ("batch", "version", "batch_modified", "version_modified")
@@ -1555,9 +1570,19 @@ def apply_material_import(
             source_id=str(claims.get("id") or ""),
             sheet_name=str(claims.get("sheet") or "") or None,
         )
-        if str(trusted.get("source_hash") or "") != str(claims.get("source_hash") or ""):
+        source = dict(trusted.get('source') or {})
+        if (str(trusted.get("source_hash") or "") != str(claims.get("source_hash") or "")
+                or (source.get('source_id') and str(source['source_id']) != str(claims.get('id') or ''))
+                or (source.get('sheet_name') and str(source['sheet_name']) != str(claims.get('sheet') or ''))):
             repo.rollback()
             return {"ok": False, "source_changed": True, "code": "SOURCE_CHANGED"}
+        source_context = _selected_source_context(context, trusted)
+        if source_context != (claims.get('source_context') or {}):
+            repo.rollback()
+            return {'ok': False, 'source_changed': True, 'code': 'EFFECTIVE_SOURCE_CHANGED'}
+        effective_source.require_readable(source_context)
+        effective_source.require_available(source_context)
+        context = {**context, 'source_context': source_context}
         trusted = _review_trusted_grid(trusted, claims.get("merge_reviews"))
 
         existing = repo.get_items(context["batch"], context["version"])
@@ -1788,6 +1813,7 @@ def apply_material_import(
                     "batch": context["batch"],
                     "version": context["version"],
                     "row_no": target.get("row_no"),
+                    **({'source_context': source_context} if source_context else {}),
                     "remark": f"确认采用物料来源 {claims.get('id')} 第 {source_rows} 行{group_remark}",
                 },
             )
@@ -1822,6 +1848,7 @@ def apply_material_import(
                         "sheet_id": sheet_id if separator else "",
                         "sheet": str(source.get("sheet_name") or claims.get("sheet") or ""),
                         "source_hash": str(claims.get("source_hash") or ""),
+                        **({'source_context': source_context} if source_context else {}),
                         "source_rows": audit_rows,
                         "source_groups": audit_groups,
                         **({"merge_reviews": claims["merge_reviews"],
