@@ -7362,55 +7362,6 @@ class OverseasCostWorkbench {
     }
   }
 
-  openRowMoreDialog(batchName = "") {
-    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
-    if (!batch) {
-      this.showPendingFeature("当前没有可操作的批次。");
-      return;
-    }
-    this.activeBatchName = batch.name;
-    const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
-    const dialog = new frappe.ui.Dialog({
-      title: "更多操作",
-      fields: [
-        {
-          fieldtype: "HTML",
-          fieldname: "row_more",
-          options: `
-            <div class="ocw-quick-panel">
-              <div class="ocw-quick-context">
-                <span>当前批次</span>
-                <strong>${this.escape(batchLabel)}</strong>
-              </div>
-              <button class="ocw-quick-card" data-action="more-open-dingtalk">
-                <strong>审批单</strong>
-                <span>打开钉钉原始审批表</span>
-              </button>
-              <button class="ocw-quick-card danger" data-action="more-delete">
-                <strong>删除批次</strong>
-                <span>删除前仍会二次确认</span>
-              </button>
-            </div>
-          `,
-        },
-      ],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
-    });
-    dialog.show();
-    dialog.$wrapper.addClass("ocw-quick-modal");
-    dialog.$wrapper
-      .off("click.ocwRowMore")
-      .on("click.ocwRowMore", "[data-action='more-open-dingtalk']", () => {
-        dialog.hide();
-        this.openDingtalkOrder(batch.name);
-      })
-      .on("click.ocwRowMore", "[data-action='more-delete']", () => {
-        dialog.hide();
-        this.confirmDeleteBatch(batch.name);
-      });
-  }
-
   openOaAttachmentDialog(batchName = "") {
     const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
     if (!batch) {
@@ -9367,7 +9318,6 @@ class OverseasCostWorkbench {
                  <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>试算</button>`
               : `<button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>重新试算</button>
                  <button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">资料</button>`}
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
           </div>
         </td>
       </tr>

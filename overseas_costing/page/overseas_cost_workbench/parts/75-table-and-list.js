@@ -526,7 +526,6 @@
                  <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>试算</button>`
               : `<button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}" ${recalculateDisabled}>重新试算</button>
                  <button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">资料</button>`}
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
           </div>
         </td>
       </tr>

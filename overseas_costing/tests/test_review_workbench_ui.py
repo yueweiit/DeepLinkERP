@@ -84,6 +84,11 @@ console.log(JSON.stringify({pending,returned,cost}));
         assert 'data-action="row-more"' not in text
         assert '>更多<' not in text
 
+    legacy_table = (PARTS / '75-table-and-list.js').read_text(encoding='utf-8')
+    attachments = (PARTS / '70-attachments.js').read_text(encoding='utf-8')
+    assert 'data-action="row-more"' not in legacy_table
+    assert 'openRowMoreDialog(' not in attachments
+
 
 def test_review_tab_is_stable_and_list_navigation_routes_to_expected_tab():
     result=run_js("""
