@@ -317,3 +317,28 @@ def test_get_review_communication_returns_current_round_and_history(monkeypatch)
     assert result["current_round"]["name"] == second["round"]["name"]
     assert result["history"][0]["name"] == first["round"]["name"]
     assert result["projection"]["unresolved_count"] == 1
+
+
+def test_snapshot_eligibility_accepts_explicitly_confirmed_zero_purchase_value() -> None:
+    snapshot = {
+        "purchase_goods_value_rmb": "0",
+        "comprehensive_cost": {
+            "items": [{
+                "goods_value_rmb": "0",
+                "valuation_source": {"amount_rmb": "0", "status": "manual", "error": ""},
+            }],
+        },
+    }
+
+    assert service.snapshot_cost_review_eligible(snapshot) is True
+
+
+def test_snapshot_eligibility_rejects_placeholder_zero_purchase_value() -> None:
+    snapshot = {
+        "purchase_goods_value_rmb": "0",
+        "comprehensive_cost": {
+            "items": [{"goods_value_rmb": "0", "valuation_source": None}],
+        },
+    }
+
+    assert service.snapshot_cost_review_eligible(snapshot) is False

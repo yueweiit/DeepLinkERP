@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
+
+from overseas_costing.services.shipment_cost_service import is_explicit_shipment_zero
 
 try:
     import frappe
@@ -82,6 +85,32 @@ def _json_object(value) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def snapshot_cost_review_eligible(snapshot: dict) -> bool:
+    """Return whether the saved trial contains a complete purchase valuation.
+
+    Explicitly confirmed zero-value samples are valid review inputs. Plain zero
+    placeholders remain ineligible, matching the canonical readiness rules.
+    """
+
+    comprehensive = _json_object(snapshot.get("comprehensive_cost"))
+    items = comprehensive.get("items")
+    if isinstance(items, list) and items:
+        for row in items:
+            try:
+                amount = Decimal(str(row.get("goods_value_rmb")))
+            except (InvalidOperation, TypeError, ValueError):
+                return False
+            if amount < 0:
+                return False
+            if amount == 0 and not is_explicit_shipment_zero(row.get("valuation_source")):
+                return False
+        return True
+    try:
+        return Decimal(str(snapshot.get("purchase_goods_value_rmb"))) > 0
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
 def _current_user() -> str:
     return _clean(getattr(getattr(frappe, "session", None), "user", None)) or "Guest"
 
@@ -139,10 +168,7 @@ class FrappeReviewRepository:
             and _clean(snapshot.get("calculated_at")) == _clean(row.get("calculated_at"))
             and _clean(row.get("batch_status")).lower() not in {"draft", "dirty"}
         )
-        try:
-            eligible = float(snapshot.get("purchase_goods_value_rmb") or 0) > 0
-        except (TypeError, ValueError):
-            eligible = False
+        eligible = snapshot_cost_review_eligible(snapshot)
         return {
             "batch_name": row["batch_name"], "version_name": row["version_name"],
             "trial_signature": signature, "result_is_current": result_current,

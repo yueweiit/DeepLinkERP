@@ -252,8 +252,8 @@
           </div>
           <div class="ocw-detail-header-actions">
             ${this.renderReviewReturnAction?.(batch) || ""}
-            ${this.renderDetailErpAction(batch)}
             <button class="ocw-outline-btn" type="button" data-action="detail-dingtalk">打开钉钉原单</button>
+            ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
               <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">更多操作 ▾</button>
               <div class="ocw-detail-tools" data-area="detail-tools" hidden>
