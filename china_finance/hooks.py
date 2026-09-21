@@ -410,3 +410,15 @@ scheduler_events = {
 # China Finance deliberately uses standard ERPNext posting behavior. Regional
 # overrides are not required because statutory vouchers are immutable snapshots
 # of the resulting GL Entries.
+
+# Currency context is part of each financial document, including historical reads.
+for _currency_doctype in (
+	"China Finance Settings", "China Cash Flow Assignment", "China Prior Period Error Adjustment",
+	"China Purchase Reconciliation Rule", "China Reconciliation Difference",
+	"China Reconciliation Scope", "China Reconciliation Statement",
+	"China Tax Invoice Request", "China Input Tax Deduction Batch",
+	"China Accounting Voucher", "China Tax Invoice",
+):
+	_currency_events = doc_events.setdefault(_currency_doctype, {})
+	for _currency_event in ("onload", "before_validate"):
+		_currency_events[_currency_event] = "china_finance.services.currency_context.set_document_currency"

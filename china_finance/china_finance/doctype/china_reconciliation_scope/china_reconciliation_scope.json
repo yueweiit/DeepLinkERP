@@ -1,9 +1,10 @@
 {
  "actions": [], "autoname": "field:scope_key", "doctype": "DocType", "engine": "InnoDB", "module": "China Finance", "name": "China Reconciliation Scope", "track_changes": 1,
- "field_order": ["scope_key", "company", "scope_type", "reference_doctype", "reference_name", "enabled", "effective_from", "effective_to", "confirmation_method", "amount_tolerance", "notes"],
+ "field_order": ["scope_key", "company","currency", "scope_type", "reference_doctype", "reference_name", "enabled", "effective_from", "effective_to", "confirmation_method", "amount_tolerance", "notes"],
  "fields": [
   {"fieldname":"scope_key","fieldtype":"Data","label":"范围唯一键","read_only":1,"unique":1},
   {"fieldname":"company","fieldtype":"Link","label":"公司","options":"Company","reqd":1,"in_list_view":1},
+  {"fieldname":"currency","fieldtype":"Link","options":"Currency","label":"币种","read_only":1},
   {"fieldname":"scope_type","fieldtype":"Select","label":"对账类型","options":"Customer\nSupplier\nBank","reqd":1,"in_list_view":1},
   {"fieldname":"reference_doctype","fieldtype":"Link","label":"对象类型","options":"DocType","read_only":1},
   {"fieldname":"reference_name","fieldtype":"Dynamic Link","label":"对账对象","options":"reference_doctype","reqd":1,"in_list_view":1},
@@ -11,7 +12,7 @@
   {"fieldname":"effective_from","fieldtype":"Date","label":"生效日期","reqd":1},
   {"fieldname":"effective_to","fieldtype":"Date","label":"失效日期"},
   {"fieldname":"confirmation_method","fieldtype":"Select","label":"确认方式","options":"External Confirmation\nInternal Review\nBank Statement","reqd":1},
-  {"fieldname":"amount_tolerance","fieldtype":"Currency","label":"金额容差","default":"0.01","non_negative":1,"reqd":1},
+  {"fieldname":"amount_tolerance","fieldtype":"Currency","options":"currency","label":"金额容差","default":"0.01","non_negative":1,"reqd":1},
   {"fieldname":"notes","fieldtype":"Small Text","label":"备注"}
  ],
  "permissions": [

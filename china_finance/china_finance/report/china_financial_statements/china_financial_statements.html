@@ -1,3 +1,4 @@
+{% var currency_context = data.find(row => row.currency) || {}; %}
 <style>
 	.statutory-report h2 { text-align: center; font-size: 18px; margin: 4px 0 10px; }
 	.statutory-report .meta { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 4px; }
@@ -39,7 +40,7 @@
 	}
 	function side_amount(value, side) {
 		if (!side.label || value === null || value === undefined) return "";
-		return frappe.format(value, {fieldtype: "Currency"});
+		return frappe.format(value, {fieldtype: "Currency", options: "currency"}, {}, currency_context);
 	}
 %}
 
@@ -56,7 +57,7 @@
 		</tr>
 		<tr>
 			<td>编制单位：{%= frappe.utils.escape_html(filters.company) %}</td>
-			<td class="right">单位：元</td>
+			<td class="right">币种：{%= currency_context.currency || "" %}　单位：元</td>
 		</tr>
 	</table>
 	<table class="grid">
@@ -91,7 +92,7 @@
 	<table class="meta">
 		<tr>
 			<td>编制单位：{%= frappe.utils.escape_html(filters.company) %></td>
-			<td class="right">{%= filters.from_date %} 至 {%= filters.to_date %}　单位：元</td>
+			<td class="right">{%= filters.from_date %} 至 {%= filters.to_date %}　币种：{%= currency_context.currency || "" %}　单位：元</td>
 		</tr>
 	</table>
 	<table class="grid">
@@ -108,7 +109,7 @@
 				<tr class="{%= row.bold ? "bold" : "" %}">
 					<td>{%= "&nbsp;".repeat((row.indent || 0) * 4) + frappe.utils.escape_html(row.label || "") %}</td>
 					{% for (var c = 1; c < columns.length; c++) { %}
-						<td class="num">{%= row[columns[c].fieldname] === null || row[columns[c].fieldname] === undefined ? "" : frappe.format(row[columns[c].fieldname], {fieldtype: "Currency"}) %}</td>
+						<td class="num">{%= row[columns[c].fieldname] === null || row[columns[c].fieldname] === undefined ? "" : frappe.format(row[columns[c].fieldname], columns[c], {}, row) %}</td>
 					{% } %}
 				</tr>
 			{% } %}

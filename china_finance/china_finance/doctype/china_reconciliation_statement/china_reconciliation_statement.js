@@ -1,13 +1,18 @@
 frappe.ui.form.on("China Reconciliation Statement", {
+	onload: sync_reconciliation_currency,
+	company: sync_reconciliation_currency,
+	account: sync_reconciliation_currency,
+	statement_type: sync_reconciliation_currency,
 	refresh(frm) {
 		if (!frm.is_new()) {
 			frm.add_custom_button(__("登记对账差异"), () => frappe.prompt([
 				{ fieldname: "difference_type", fieldtype: "Select", label: __("差异类型"), options: "Balance Difference\nBook Timing\nBank Timing\nMissing Entry\nOther", reqd: 1 },
-				{ fieldname: "amount", fieldtype: "Currency", label: __("差异金额"), reqd: 1, default: frm.doc.difference },
+				{ fieldname: "currency", fieldtype: "Link", options: "Currency", hidden: 1, default: frm.doc.bank_currency || frm.doc.currency },
+				{ fieldname: "amount", fieldtype: "Currency", options: "currency", label: __("差异金额"), reqd: 1, default: frm.doc.difference },
 				{ fieldname: "reason", fieldtype: "Small Text", label: __("差异原因"), reqd: 1 },
 				{ fieldname: "owner_user", fieldtype: "Link", options: "User", label: __("责任人"), reqd: 1 },
 				{ fieldname: "due_date", fieldtype: "Date", label: __("处理期限"), reqd: 1 },
-			], (values) => frappe.call({
+			], ({ currency, ...values }) => frappe.call({
 				method: "china_finance.services.reconciliation_control.create_difference",
 				args: { statement: frm.doc.name, ...values }, freeze: true,
 				callback: (response) => frappe.set_route("Form", "China Reconciliation Difference", response.message.name),
@@ -57,3 +62,22 @@ frappe.ui.form.on("China Reconciliation Statement", {
 		});
 	},
 });
+
+async function sync_reconciliation_currency(frm) {
+	if (frm.doc.docstatus) return;
+	const { company, account, statement_type } = frm.doc;
+	if (!company) return;
+	const base = await frappe.db.get_value("Company", company, "default_currency");
+	let bank_currency = base.message.default_currency;
+	if (statement_type === "Bank" && account) {
+		const bank = await frappe.db.get_value("Account", account, "account_currency");
+		bank_currency = bank.message.account_currency || bank_currency;
+	}
+	if (frm.doc.company !== company || frm.doc.account !== account || frm.doc.statement_type !== statement_type) return;
+	await frm.set_value({ currency: base.message.default_currency, bank_currency });
+	for (const row of frm.doc.lines || []) {
+		row.currency = ["Book Outstanding", "Bank Transaction"].includes(row.line_source)
+			? bank_currency : base.message.default_currency;
+	}
+	frm.refresh_field("lines");
+}

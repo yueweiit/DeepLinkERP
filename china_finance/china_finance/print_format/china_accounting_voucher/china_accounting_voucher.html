@@ -60,6 +60,7 @@
 </style>
 
 {% set page_size = 8 %}
+{% set voucher_currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency") %}
 {% set company_abbr = frappe.db.get_value("Company", doc.company, "abbr") or "" %}
 {% set pages = doc.entries|batch(page_size, fill_with=None)|list %}
 {% if not pages %}{% set pages = [[]] %}{% endif %}
@@ -110,16 +111,16 @@
               {% endif %}
               {% if row.party %}<div class="cf-subtext">{{ row.party_type or "往来" }}：{{ row.party }}</div>{% endif %}
             </td>
-            <td class="cf-num">{% if row.debit %}{{ row.get_formatted("debit", doc) }}{% endif %}</td>
-            <td class="cf-num">{% if row.credit %}{{ row.get_formatted("credit", doc) }}{% endif %}</td>
+            <td class="cf-num">{% if row.debit %}{{ row.get_formatted("debit", doc, currency=voucher_currency) }}{% endif %}</td>
+            <td class="cf-num">{% if row.credit %}{{ row.get_formatted("credit", doc, currency=voucher_currency) }}{% endif %}</td>
           </tr>
         {% endif %}
       {% endfor %}
       {% if loop.last %}
         <tr class="cf-total">
           <td colspan="2" class="cf-num">合计</td>
-          <td class="cf-num">{{ doc.get_formatted("total_debit") }}</td>
-          <td class="cf-num">{{ doc.get_formatted("total_credit") }}</td>
+          <td class="cf-num">{{ doc.get_formatted("total_debit", currency=voucher_currency) }}</td>
+          <td class="cf-num">{{ doc.get_formatted("total_credit", currency=voucher_currency) }}</td>
         </tr>
       {% endif %}
     </tbody>
@@ -135,7 +136,7 @@
         <td>制单：{{ doc.prepared_by or "__________" }}</td>
       </tr>
     </table>
-    <div class="cf-footnote">会计期间：{{ doc.accounting_period or "" }}　币种：{{ doc.currency or "CNY" }}</div>
+    <div class="cf-footnote">会计期间：{{ doc.accounting_period or "" }}　币种：{{ voucher_currency }}</div>
   {% endif %}
 </div>
 {% endfor %}

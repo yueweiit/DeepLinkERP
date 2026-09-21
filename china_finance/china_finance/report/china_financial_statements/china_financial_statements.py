@@ -1,6 +1,8 @@
 import frappe
 from frappe import _
 
+from china_finance.services.currency_context import bind_report_currency, company_currency
+
 from china_finance.services.account_display import get_account_display_title
 from frappe.utils import flt, getdate, nowdate
 from frappe.utils.file_manager import save_file
@@ -33,6 +35,15 @@ def _apply_default_period(filters):
 
 
 def execute(filters=None):
+	filters = frappe._dict(filters or {})
+	columns, rows, *rest = _execute(filters)
+	bind_report_currency(columns, rows, filters.company, force_company=True)
+	if len(rest) > 1 and isinstance(rest[1], dict):
+		rest[1]["currency"] = company_currency(filters.company)
+	return columns, rows, *rest
+
+
+def _execute(filters=None):
 	filters = frappe._dict(filters or {})
 	_apply_default_period(filters)
 	if filters.statement_type in ("Trial Balance", "Account Activity and Balance"):
@@ -337,12 +348,12 @@ def get_account_activity_columns(expand_party=False):
 		{"label": _("科目编码"), "fieldname": "account_number", "fieldtype": "Data", "width": 100},
 		{"label": _("科目名称"), "fieldname": "account_name", "fieldtype": "Data", "width": 260},
 		{"label": _("币种"), "fieldname": "currency", "fieldtype": "Data", "width": 70},
-		{"label": _("期初借方"), "fieldname": "opening_debit", "fieldtype": "Currency", "width": 150},
-		{"label": _("期初贷方"), "fieldname": "opening_credit", "fieldtype": "Currency", "width": 150},
-		{"label": _("本期借方"), "fieldname": "period_debit", "fieldtype": "Currency", "width": 150},
-		{"label": _("本期贷方"), "fieldname": "period_credit", "fieldtype": "Currency", "width": 150},
-		{"label": _("期末借方"), "fieldname": "closing_debit", "fieldtype": "Currency", "width": 150},
-		{"label": _("期末贷方"), "fieldname": "closing_credit", "fieldtype": "Currency", "width": 150},
+		{"label": _("期初借方"), "fieldname": "opening_debit", "fieldtype": "Currency", "options": "currency", "width": 150},
+		{"label": _("期初贷方"), "fieldname": "opening_credit", "fieldtype": "Currency", "options": "currency", "width": 150},
+		{"label": _("本期借方"), "fieldname": "period_debit", "fieldtype": "Currency", "options": "currency", "width": 150},
+		{"label": _("本期贷方"), "fieldname": "period_credit", "fieldtype": "Currency", "options": "currency", "width": 150},
+		{"label": _("期末借方"), "fieldname": "closing_debit", "fieldtype": "Currency", "options": "currency", "width": 150},
+		{"label": _("期末贷方"), "fieldname": "closing_credit", "fieldtype": "Currency", "options": "currency", "width": 150},
 	]
 	if expand_party:
 		columns.insert(3, {"label": _("往来单位"), "fieldname": "party", "fieldtype": "Data", "width": 220})
@@ -463,7 +474,7 @@ def _legacy_execute_account_activity_balance(filters):
 		values = balance_values(account_totals[account.name].copy())
 		if not filters.show_zero_values and not any(values.get(key) for key in ("opening_debit", "opening_credit", "period_debit", "period_credit", "closing_debit", "closing_credit")):
 			continue
-		rows_out.append({"account": account.name, "account_category": category.get(account.root_type or "", account.root_type or ""), "account_number": account.account_number or "", "account_name": account.account_name or account.name, "currency": account.account_currency or frappe.get_cached_value("Company", filters.company, "default_currency"), "parent_account": account.parent_account or "", "indent": levels[account.name], "is_group": account.is_group, **values})
+		rows_out.append({"account": account.name, "account_category": category.get(account.root_type or "", account.root_type or ""), "account_number": account.account_number or "", "account_name": account.account_name or account.name, "currency": company_currency(filters.company), "parent_account": account.parent_account or "", "indent": levels[account.name], "is_group": account.is_group, **values})
 		if filters.expand_party and not account.is_group:
 			for (account_name, party_type, party), party_values in leaf_totals.items():
 				if account_name != account.name:
@@ -471,7 +482,7 @@ def _legacy_execute_account_activity_balance(filters):
 				party_row = balance_values(party_values.copy())
 				if not filters.show_zero_values and not any(party_row.get(key) for key in ("opening_debit", "opening_credit", "period_debit", "period_credit", "closing_debit", "closing_credit")):
 					continue
-				rows_out.append({"account": "", "account_category": category.get(account.root_type or "", account.root_type or ""), "account_number": "", "account_name": "", "currency": account.account_currency or frappe.get_cached_value("Company", filters.company, "default_currency"), "party_type": party_type or _("未指定往来"), "party": _party_label(party_type, party), "parent_account": account.name, "indent": levels[account.name] + 1, "is_group": 0, **party_row})
+				rows_out.append({"account": "", "account_category": category.get(account.root_type or "", account.root_type or ""), "account_number": "", "account_name": "", "currency": company_currency(filters.company), "party_type": party_type or _("未指定往来"), "party": _party_label(party_type, party), "parent_account": account.name, "indent": levels[account.name] + 1, "is_group": 0, **party_row})
 	return get_account_activity_columns(bool(filters.expand_party)), rows_out, _("金额按 GL Entry 聚合；期初 + 本期发生 = 期末余额")
 
 
@@ -638,22 +649,22 @@ def _set_report_currency(columns, company):
 	"""Bind report currency fields to the selected company's currency."""
 	for column in columns:
 		if column.get("fieldtype") == "Currency":
-			column["options"] = "Company:company:default_currency"
+			column["options"] = "currency"
 	return columns
 
 
 def get_columns(include_comparison=False, include_variance=False, company=None):
 	columns = [
 		{"label": _("项目"), "fieldname": "label", "fieldtype": "Data", "width": 420},
-		{"label": _("期初金额"), "fieldname": "opening_amount", "fieldtype": "Currency", "width": 160},
-		{"label": _("本期金额/期末余额"), "fieldname": "amount", "fieldtype": "Currency", "width": 180},
-		{"label": _("本年累计"), "fieldname": "year_to_date_amount", "fieldtype": "Currency", "width": 160},
+		{"label": _("期初金额"), "fieldname": "opening_amount", "fieldtype": "Currency", "options": "currency", "width": 160},
+		{"label": _("本期金额/期末余额"), "fieldname": "amount", "fieldtype": "Currency", "options": "currency", "width": 180},
+		{"label": _("本年累计"), "fieldname": "year_to_date_amount", "fieldtype": "Currency", "options": "currency", "width": 160},
 	]
 	if include_comparison:
-		columns.append({"label": _("比较期金额"), "fieldname": "comparison_amount", "fieldtype": "Currency", "width": 180})
+		columns.append({"label": _("比较期金额"), "fieldname": "comparison_amount", "fieldtype": "Currency", "options": "currency", "width": 180})
 	if include_variance:
 		columns.extend([
-			{"label": _("增减额"), "fieldname": "variance_amount", "fieldtype": "Currency", "width": 160},
+			{"label": _("增减额"), "fieldname": "variance_amount", "fieldtype": "Currency", "options": "currency", "width": 160},
 			{"label": _("增减率"), "fieldname": "variance_rate", "fieldtype": "Percent", "width": 130},
 		])
 	return _set_report_currency(columns, company)
@@ -662,28 +673,28 @@ def get_columns(include_comparison=False, include_variance=False, company=None):
 def get_equity_columns(matrix, company=None):
 	columns = [{"label": _("项目"), "fieldname": "label", "fieldtype": "Data", "width": 320}]
 	columns.extend(
-		{"label": _(component["label"]), "fieldname": component["fieldname"], "fieldtype": "Currency", "width": 150}
+		{"label": _(component["label"]), "fieldname": component["fieldname"], "fieldtype": "Currency", "options": "currency", "width": 150}
 		for component in matrix["components"]
 	)
-	columns.append({"label": _("所有者权益合计"), "fieldname": "total", "fieldtype": "Currency", "width": 170})
+	columns.append({"label": _("所有者权益合计"), "fieldname": "total", "fieldtype": "Currency", "options": "currency", "width": 170})
 	return _set_report_currency(columns, company)
 
 
 def get_balance_sheet_columns(include_comparison=False, company=None):
 	columns = [
 		{"label": _("资产"), "fieldname": "asset_label", "fieldtype": "Data", "width": 280},
-		{"label": _("期初余额"), "fieldname": "asset_opening_amount", "fieldtype": "Currency", "width": 140},
-		{"label": _("期末余额"), "fieldname": "asset_amount", "fieldtype": "Currency", "width": 150},
+		{"label": _("期初余额"), "fieldname": "asset_opening_amount", "fieldtype": "Currency", "options": "currency", "width": 140},
+		{"label": _("期末余额"), "fieldname": "asset_amount", "fieldtype": "Currency", "options": "currency", "width": 150},
 	]
 	if include_comparison:
-		columns.append({"label": _("比较期余额"), "fieldname": "asset_comparison_amount", "fieldtype": "Currency", "width": 150})
+		columns.append({"label": _("比较期余额"), "fieldname": "asset_comparison_amount", "fieldtype": "Currency", "options": "currency", "width": 150})
 	columns.extend([
 		{"label": _("负债和所有者权益"), "fieldname": "liability_equity_label", "fieldtype": "Data", "width": 280},
-		{"label": _("期初余额"), "fieldname": "liability_equity_opening_amount", "fieldtype": "Currency", "width": 140},
-		{"label": _("期末余额"), "fieldname": "liability_equity_amount", "fieldtype": "Currency", "width": 150},
+		{"label": _("期初余额"), "fieldname": "liability_equity_opening_amount", "fieldtype": "Currency", "options": "currency", "width": 140},
+		{"label": _("期末余额"), "fieldname": "liability_equity_amount", "fieldtype": "Currency", "options": "currency", "width": 150},
 	])
 	if include_comparison:
-		columns.append({"label": _("比较期余额"), "fieldname": "liability_equity_comparison_amount", "fieldtype": "Currency", "width": 150})
+		columns.append({"label": _("比较期余额"), "fieldname": "liability_equity_comparison_amount", "fieldtype": "Currency", "options": "currency", "width": 150})
 	return _set_report_currency(columns, company)
 
 
@@ -957,7 +968,7 @@ def get_balance_sheet_chart(rows, company, filters):
 		},
 		"type": "bar",
 		"fieldtype": "Currency",
-		"options": "Company:company:default_currency",
+		"options": "currency",
 		"colors": ["#2563eb", "#f59e0b", "#16a34a"],
 	}
 
@@ -1023,7 +1034,7 @@ def get_profit_and_loss_chart(rows, company, filters):
 		},
 		"type": "bar",
 		"fieldtype": "Currency",
-		"options": "Company:company:default_currency",
+		"options": "currency",
 		"colors": ["#ec6d9d", "#3187d4", "#45b978"],
 	}
 
@@ -1103,7 +1114,7 @@ def get_cash_flow_chart(rows, company, filters):
 		},
 		"type": "bar",
 		"fieldtype": "Currency",
-		"options": "Company:company:default_currency",
+		"options": "currency",
 		"colors": ["#16a34a", "#2563eb", "#f59e0b", "#e76f51"],
 	}
 

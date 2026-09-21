@@ -8,9 +8,9 @@
   {"fieldname":"item_name","fieldtype":"Data","label":"货物或服务名称","reqd":1},
   {"fieldname":"quantity","fieldtype":"Float","label":"数量","reqd":1},
   {"fieldname":"uom","fieldtype":"Link","label":"单位","options":"UOM"},
-  {"fieldname":"net_amount","fieldtype":"Currency","label":"不含税金额","reqd":1,"in_list_view":1},
+  {"fieldname":"net_amount","fieldtype":"Currency","options":"currency","label":"不含税金额","reqd":1,"in_list_view":1},
   {"fieldname":"tax_rate","fieldtype":"Percent","label":"税率"},
-  {"fieldname":"tax_amount","fieldtype":"Currency","label":"税额","reqd":1,"in_list_view":1},
-  {"fieldname":"gross_amount","fieldtype":"Currency","label":"价税合计","read_only":1,"in_list_view":1}
+  {"fieldname":"tax_amount","fieldtype":"Currency","options":"currency","label":"税额","reqd":1,"in_list_view":1},
+  {"fieldname":"gross_amount","fieldtype":"Currency","options":"currency","label":"价税合计","read_only":1,"in_list_view":1}
  ]
 }

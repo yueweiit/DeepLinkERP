@@ -310,7 +310,7 @@ function show_source_edit_blocker(status) {
 					label: __("撤销本凭证核销并继续编辑"),
 					action: () => {
 						frappe.hide_msgprint();
-						const amount = format_currency(quick_unreconcile.amount);
+						const amount = format_currency(quick_unreconcile.amount, quick_unreconcile.currency);
 						frappe.confirm(
 							__(
 								"将只撤销银行流水 {0} 中与当前凭证对应的 {1} 分配，其他凭证的对账分配不变。随后系统会取消原凭证并打开修订草稿。是否继续？",

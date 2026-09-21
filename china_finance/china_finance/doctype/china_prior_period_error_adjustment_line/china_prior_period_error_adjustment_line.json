@@ -5,7 +5,7 @@
   {"fieldname":"account","fieldtype":"Link","in_list_view":1,"label":"会计科目","options":"Account","read_only":1},
   {"fieldname":"statement_type","fieldtype":"Select","in_list_view":1,"label":"报表类型","options":"Balance Sheet\nChanges in Equity","read_only":1},
   {"fieldname":"row_code","fieldtype":"Data","in_list_view":1,"label":"报表项目","read_only":1},
-  {"fieldname":"amount","fieldtype":"Currency","in_list_view":1,"label":"重述金额","read_only":1},
+  {"fieldname":"amount","fieldtype":"Currency","options":"currency","in_list_view":1,"label":"重述金额","read_only":1},
   {"fieldname":"equity_component","fieldtype":"Data","label":"权益列","read_only":1}
  ]
 }

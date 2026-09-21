@@ -188,6 +188,7 @@ def _get_quick_unreconcile_info(doc):
 	return {
 		"bank_transaction": bank_transaction.name,
 		"amount": flt(entry.allocated_amount),
+		"currency": bank_transaction.currency,
 	}
 
 

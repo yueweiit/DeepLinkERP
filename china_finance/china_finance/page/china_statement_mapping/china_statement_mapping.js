@@ -771,7 +771,7 @@ class ChinaStatementMapping {
 		);
 		$chip.append(`<span>${frappe.utils.escape_html(label)}</span>`);
 		if (mapping.debit_total !== undefined) {
-			const totals = `借 ${frappe.format(mapping.debit_total, { fieldtype: "Currency" })} · 贷 ${frappe.format(mapping.credit_total, { fieldtype: "Currency" })} · 余额 ${frappe.format(mapping.balance, { fieldtype: "Currency" })}`;
+			const totals = `借 ${frappe.format(mapping.debit_total, { fieldtype: "Currency", options: "currency" }, {}, this.data)} · 贷 ${frappe.format(mapping.credit_total, { fieldtype: "Currency", options: "currency" }, {}, this.data)} · 余额 ${frappe.format(mapping.balance, { fieldtype: "Currency", options: "currency" }, {}, this.data)}`;
 			$chip.attr("title", totals);
 		}
 		if (mapping.sign_multiplier === -1) {

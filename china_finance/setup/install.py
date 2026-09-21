@@ -314,7 +314,7 @@ const columns = report.get_columns_for_print().filter(col => !col.hidden);
     </div>
     <div>
       <span><b>{%= is_small ? "税款所属期起止" : "期间" %}：</b>{%= filters.from_date || "" %} 至 {%= filters.to_date || "" %}</span>
-      <span><b>单位：</b>{%= is_small ? "元" : (filters.presentation_currency || "CNY") %}</span>
+      <span><b>单位：</b>{%= is_small ? "元" : (data.find(row => row.currency)?.currency || "") %}</span>
     </div>
   </div>
   {% if (is_small && is_balance_sheet) { %}
@@ -324,15 +324,15 @@ const columns = report.get_columns_for_print().filter(col => !col.hidden);
   </tr></thead><tbody>
     {% for (let j = 0; j < data.length; j++) { const row = data[j]; %}
       <tr>
-        <td>{%= row.asset_statutory_line_number || "" %}</td><td>{%= row.asset_label || "" %}</td><td class="num">{%= frappe.format(row.asset_amount || 0, {fieldtype:"Currency"}) %}</td><td class="num">{%= frappe.format(row.asset_opening_amount || 0, {fieldtype:"Currency"}) %}</td>
-        <td>{%= row.liability_equity_statutory_line_number || "" %}</td><td>{%= row.liability_equity_label || "" %}</td><td class="num">{%= frappe.format(row.liability_equity_amount || 0, {fieldtype:"Currency"}) %}</td><td class="num">{%= frappe.format(row.liability_equity_opening_amount || 0, {fieldtype:"Currency"}) %}</td>
+        <td>{%= row.asset_statutory_line_number || "" %}</td><td>{%= row.asset_label || "" %}</td><td class="num">{%= frappe.format(row.asset_amount || 0, {fieldtype:"Currency", options:"currency"}, {}, row) %}</td><td class="num">{%= frappe.format(row.asset_opening_amount || 0, {fieldtype:"Currency", options:"currency"}, {}, row) %}</td>
+        <td>{%= row.liability_equity_statutory_line_number || "" %}</td><td>{%= row.liability_equity_label || "" %}</td><td class="num">{%= frappe.format(row.liability_equity_amount || 0, {fieldtype:"Currency", options:"currency"}, {}, row) %}</td><td class="num">{%= frappe.format(row.liability_equity_opening_amount || 0, {fieldtype:"Currency", options:"currency"}, {}, row) %}</td>
       </tr>
     {% } %}
   </tbody></table>
   {% } else if (is_small && is_profit_loss) { %}
   <table class="cf-table"><thead><tr><th>项目</th><th>行次</th><th>本期金额</th><th>本年累计金额</th></tr></thead><tbody>
     {% for (let j = 0; j < data.length; j++) { const row = data[j]; %}
-      <tr><td>{%= row.label || "" %}</td><td>{%= row.statutory_line_number || "" %}</td><td class="num">{%= frappe.format(row.amount || 0, {fieldtype:"Currency"}) %}</td><td class="num">{%= frappe.format(row.year_to_date_amount || row.amount || 0, {fieldtype:"Currency"}) %}</td></tr>
+      <tr><td>{%= row.label || "" %}</td><td>{%= row.statutory_line_number || "" %}</td><td class="num">{%= frappe.format(row.amount || 0, {fieldtype:"Currency", options:"currency"}, {}, row) %}</td><td class="num">{%= frappe.format(row.year_to_date_amount || row.amount || 0, {fieldtype:"Currency", options:"currency"}, {}, row) %}</td></tr>
     {% } %}
   </tbody></table>
   {% } else { %}
@@ -482,14 +482,14 @@ def sync_sales_settlement_custom_fields():
 			{"fieldname": "custom_china_settlement_override_reason", "label": "覆盖原因", "fieldtype": "Small Text", "read_only": 1, "insert_after": "custom_china_settlement_override"},
 			{"fieldname": "custom_china_settlement_override_by", "label": "覆盖操作人", "fieldtype": "Link", "options": "User", "read_only": 1, "insert_after": "custom_china_settlement_override_reason"},
 			{"fieldname": "custom_china_settlement_override_on", "label": "覆盖时间", "fieldtype": "Datetime", "read_only": 1, "insert_after": "custom_china_settlement_override_by"},
-			{"fieldname": "custom_china_settled_amount", "label": "已结算金额", "fieldtype": "Currency", "read_only": 1, "insert_after": "custom_china_settlement_override_on"},
+			{"fieldname": "custom_china_settled_amount", "label": "已结算金额", "fieldtype": "Currency", "options": "currency", "read_only": 1, "insert_after": "custom_china_settlement_override_on"},
 		],
 		"Delivery Note": [
 			{"fieldname": "custom_china_settlement_section", "label": "中国财务结算", "fieldtype": "Section Break", "insert_after": "customer_name"},
 			{"fieldname": "custom_china_settlement_mode", "label": "销售结算模式", "fieldtype": "Select", "options": "直接确认应收\n对账结算后确认应收", "read_only": 1, "insert_after": "custom_china_settlement_section"},
 			{"fieldname": "custom_china_settlement_confirmation_method", "label": "确认方式", "fieldtype": "Data", "read_only": 1, "insert_after": "custom_china_settlement_mode"},
-			{"fieldname": "custom_china_settled_amount", "label": "已结算金额", "fieldtype": "Currency", "read_only": 1, "insert_after": "custom_china_settlement_confirmation_method"},
-			{"fieldname": "custom_china_pending_settlement_amount", "label": "待结算金额", "fieldtype": "Currency", "read_only": 1, "insert_after": "custom_china_settled_amount"},
+			{"fieldname": "custom_china_settled_amount", "label": "已结算金额", "fieldtype": "Currency", "options": "currency", "read_only": 1, "insert_after": "custom_china_settlement_confirmation_method"},
+			{"fieldname": "custom_china_pending_settlement_amount", "label": "待结算金额", "fieldtype": "Currency", "options": "currency", "read_only": 1, "insert_after": "custom_china_settled_amount"},
 		],
 		"Sales Invoice": [
 			{"fieldname": "custom_china_sales_settlement", "label": "销售结算单", "fieldtype": "Link", "options": "China Sales Settlement", "read_only": 1, "insert_after": "customer_name"},

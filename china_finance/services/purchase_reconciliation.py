@@ -227,6 +227,8 @@ def get_purchase_order_reconciliation_rows(company, from_date, to_date, supplier
 	rows = frappe.db.sql(
 		f"""
 		SELECT po.name AS purchase_order, po.transaction_date, po.supplier,
+			COALESCE(invoices.currency, po.currency) AS currency,
+			COALESCE(invoices.party_account_currency, po.currency) AS party_account_currency,
 			COALESCE(po_qty.ordered_qty, 0) AS ordered_qty, receipts.purchase_receipts,
 			COALESCE(receipts.received_qty, 0) AS received_qty, invoices.purchase_invoices,
 			COALESCE(invoices.billed_qty, 0) AS billed_qty, tax.tax_invoices,
@@ -248,17 +250,19 @@ def get_purchase_order_reconciliation_rows(company, from_date, to_date, supplier
 		) receipts ON receipts.purchase_order=po.name
 		LEFT JOIN (
 			SELECT source.purchase_order,
+				GROUP_CONCAT(DISTINCT source.currency) AS currency,
+				GROUP_CONCAT(DISTINCT source.party_account_currency) AS party_account_currency,
 				GROUP_CONCAT(source.purchase_invoice ORDER BY source.purchase_invoice SEPARATOR ', ') AS purchase_invoices,
 				SUM(source.billed_qty) AS billed_qty, SUM(source.allocated_invoice_amount) AS grand_total,
 				SUM(source.allocated_outstanding_amount) AS outstanding_amount
 			FROM (
-				SELECT pii.purchase_order, pii.parent AS purchase_invoice, SUM(pii.qty) AS billed_qty,
+				SELECT pii.purchase_order, pii.parent AS purchase_invoice, pi.currency, pi.party_account_currency, SUM(pii.qty) AS billed_qty,
 					SUM(CASE WHEN pi.base_net_total > 0 THEN pi.grand_total * pii.base_amount / pi.base_net_total ELSE 0 END) AS allocated_invoice_amount,
 					SUM(CASE WHEN pi.base_net_total > 0 THEN pi.outstanding_amount * pii.base_amount / pi.base_net_total ELSE 0 END) AS allocated_outstanding_amount
 				FROM `tabPurchase Invoice Item` pii
 				INNER JOIN `tabPurchase Invoice` pi ON pi.name=pii.parent AND pi.docstatus=1
 				WHERE pii.purchase_order IS NOT NULL AND pii.purchase_order!=''
-				GROUP BY pii.purchase_order, pii.parent
+				GROUP BY pii.purchase_order, pii.parent, pi.currency, pi.party_account_currency
 			) source GROUP BY source.purchase_order
 		) invoices ON invoices.purchase_order=po.name
 		LEFT JOIN (

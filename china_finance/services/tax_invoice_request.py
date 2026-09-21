@@ -237,6 +237,7 @@ def _invoice_payload(request):
 	return {
 		"doctype": "China Tax Invoice",
 		"company": request.company,
+		"currency": request.currency,
 		"direction": "销项",
 		"invoice_type": "数电普通发票",
 		"invoice_date": getdate(),

@@ -53,14 +53,14 @@
   {"fieldname":"totals_section","fieldtype":"Section Break","label":"借贷合计"},
   {"fieldname":"currency","fieldtype":"Link","label":"本位币","options":"Currency","read_only":1},
   {"fieldname":"totals_column_2","fieldtype":"Column Break"},
-  {"fieldname":"total_debit","fieldtype":"Currency","label":"借方合计","read_only":1},
+  {"fieldname":"total_debit","fieldtype":"Currency","options":"currency","label":"借方合计","read_only":1},
   {"fieldname":"totals_column_3","fieldtype":"Column Break"},
-  {"fieldname":"total_credit","fieldtype":"Currency","label":"贷方合计","read_only":1}
+  {"fieldname":"total_credit","fieldtype":"Currency","options":"currency","label":"贷方合计","read_only":1}
  ],
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-07-17 00:00:00.000000",
+ "modified":"2026-09-21 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Accounting Voucher",

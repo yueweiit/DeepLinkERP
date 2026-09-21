@@ -1,9 +1,10 @@
 {
  "actions": [], "autoname": "naming_series:", "doctype": "DocType", "engine": "InnoDB", "module": "China Finance", "name": "China Input Tax Deduction Batch", "naming_rule": "By \"Naming Series\" field", "track_changes": 1,
- "field_order": ["naming_series", "company", "deduction_period", "status", "selected_by", "selected_on", "deducted_by", "deducted_on", "cancelled_by", "cancelled_on", "cancellation_reason", "amount_section", "invoice_count", "net_amount", "tax_amount", "gross_amount", "items_section", "items", "remarks"],
+ "field_order": ["naming_series", "company","currency", "deduction_period", "status", "selected_by", "selected_on", "deducted_by", "deducted_on", "cancelled_by", "cancelled_on", "cancellation_reason", "amount_section", "invoice_count", "net_amount", "tax_amount", "gross_amount", "items_section", "items", "remarks"],
  "fields": [
   {"fieldname":"naming_series","fieldtype":"Select","label":"编号规则","options":"CITD-.YYYY.-.#####","default":"CITD-.YYYY.-.#####","reqd":1},
   {"fieldname":"company","fieldtype":"Link","label":"公司","options":"Company","reqd":1,"in_list_view":1},
+  {"fieldname":"currency","fieldtype":"Link","options":"Currency","label":"金额币种","read_only":1},
   {"fieldname":"deduction_period","fieldtype":"Date","label":"抵扣期间","reqd":1,"in_list_view":1},
   {"fieldname":"status","fieldtype":"Select","label":"状态","options":"Draft\nSelected\nDeducted\nCancelled","default":"Draft","read_only":1,"in_list_view":1},
   {"fieldname":"selected_by","fieldtype":"Link","label":"勾选人","options":"User","read_only":1},
@@ -15,9 +16,9 @@
   {"fieldname":"cancellation_reason","fieldtype":"Small Text","label":"取消原因","read_only":1},
   {"fieldname":"amount_section","fieldtype":"Section Break","label":"金额汇总"},
   {"fieldname":"invoice_count","fieldtype":"Int","label":"发票张数","read_only":1},
-  {"fieldname":"net_amount","fieldtype":"Currency","label":"不含税金额","read_only":1},
-  {"fieldname":"tax_amount","fieldtype":"Currency","label":"税额","read_only":1},
-  {"fieldname":"gross_amount","fieldtype":"Currency","label":"价税合计","read_only":1},
+  {"fieldname":"net_amount","fieldtype":"Currency","options":"currency","label":"不含税金额","read_only":1},
+  {"fieldname":"tax_amount","fieldtype":"Currency","options":"currency","label":"税额","read_only":1},
+  {"fieldname":"gross_amount","fieldtype":"Currency","options":"currency","label":"价税合计","read_only":1},
   {"fieldname":"items_section","fieldtype":"Section Break","label":"进项税票"},
   {"fieldname":"items","fieldtype":"Table","label":"进项税票","options":"China Input Tax Deduction Item","reqd":1},
   {"fieldname":"remarks","fieldtype":"Small Text","label":"备注"}

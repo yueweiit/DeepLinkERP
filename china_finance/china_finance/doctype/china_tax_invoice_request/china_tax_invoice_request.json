@@ -1,10 +1,11 @@
 {
  "actions": [], "autoname": "naming_series:", "doctype": "DocType", "engine": "InnoDB", "module": "China Finance", "name": "China Tax Invoice Request", "naming_rule": "By \"Naming Series\" field", "track_changes": 1,
- "field_order": ["request_section", "naming_series", "company", "customer", "request_column_2", "request_type", "status", "tax_invoice", "requirement", "party_section", "seller_name", "seller_tax_id", "party_column_2", "buyer_name", "buyer_tax_id", "red_section", "original_invoice", "credit_note", "red_column_2", "approved_by", "approved_on", "rejection_reason", "items_section", "items", "total_section", "net_amount", "tax_amount", "gross_amount", "remarks"],
+ "field_order": ["request_section", "naming_series", "company","currency", "customer", "request_column_2", "request_type", "status", "tax_invoice", "requirement", "party_section", "seller_name", "seller_tax_id", "party_column_2", "buyer_name", "buyer_tax_id", "red_section", "original_invoice", "credit_note", "red_column_2", "approved_by", "approved_on", "rejection_reason", "items_section", "items", "total_section", "net_amount", "tax_amount", "gross_amount", "remarks"],
  "fields": [
   {"fieldname":"request_section","fieldtype":"Section Break","label":"开票申请"},
   {"fieldname":"naming_series","fieldtype":"Select","label":"编号规则","options":"CTIR-.YYYY.-.#####","default":"CTIR-.YYYY.-.#####","reqd":1},
   {"fieldname":"company","fieldtype":"Link","label":"公司","options":"Company","reqd":1,"in_list_view":1},
+  {"fieldname":"currency","fieldtype":"Link","options":"Currency","label":"金额币种","read_only":1},
   {"fieldname":"customer","fieldtype":"Link","label":"客户","options":"Customer","reqd":1,"in_list_view":1},
   {"fieldname":"request_column_2","fieldtype":"Column Break"},
   {"fieldname":"request_type","fieldtype":"Select","label":"申请类型","options":"Blue\nRed","default":"Blue","reqd":1,"in_list_view":1},
@@ -27,9 +28,9 @@
   {"fieldname":"items_section","fieldtype":"Section Break","label":"开票明细"},
   {"fieldname":"items","fieldtype":"Table","label":"开票明细","options":"China Tax Invoice Request Item","reqd":1},
   {"fieldname":"total_section","fieldtype":"Section Break","label":"金额"},
-  {"fieldname":"net_amount","fieldtype":"Currency","label":"不含税金额","read_only":1},
-  {"fieldname":"tax_amount","fieldtype":"Currency","label":"税额","read_only":1},
-  {"fieldname":"gross_amount","fieldtype":"Currency","label":"价税合计","read_only":1},
+  {"fieldname":"net_amount","fieldtype":"Currency","options":"currency","label":"不含税金额","read_only":1},
+  {"fieldname":"tax_amount","fieldtype":"Currency","options":"currency","label":"税额","read_only":1},
+  {"fieldname":"gross_amount","fieldtype":"Currency","options":"currency","label":"价税合计","read_only":1},
   {"fieldname":"remarks","fieldtype":"Small Text","label":"备注"}
  ],
  "permissions": [

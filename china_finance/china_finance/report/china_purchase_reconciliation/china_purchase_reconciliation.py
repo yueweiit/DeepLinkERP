@@ -1,6 +1,8 @@
 import frappe
 from frappe import _
 
+from china_finance.services.currency_context import currency_report_result
+
 from china_finance.services.purchase_reconciliation import (
 	evaluate_purchase_invoice,
 	get_purchase_invoice_payment_summary,
@@ -14,11 +16,13 @@ def execute(filters=None):
 		data = get_purchase_order_reconciliation_rows(
 			filters.company, filters.from_date, filters.to_date, filters.supplier, filters.purchase_order
 		)
+		if any("," in (row.get(field) or "") for row in data for field in ("currency", "party_account_currency")):
+			frappe.throw(_("采购订单关联了不同币种的发票，不能直接合计；请切换采购发票视图逐张核对"))
 		if filters.get("reconciliation_status"):
 			data = [row for row in data if row.reconciliation_status == filters.reconciliation_status]
 		if filters.get("exception_only"):
 			data = [row for row in data if row.reconciliation_status == "Blocked"]
-		return get_purchase_order_columns(), data
+		return currency_report_result(get_purchase_order_columns(), data, filters.company)
 
 	conditions = ["pi.company=%(company)s", "pi.posting_date BETWEEN %(from_date)s AND %(to_date)s", "pi.docstatus=1"]
 	if filters.get("supplier"):
@@ -29,7 +33,7 @@ def execute(filters=None):
 		)
 	invoices = frappe.db.sql(
 		f"""
-		SELECT pi.name, pi.posting_date, pi.supplier, pi.grand_total, pi.outstanding_amount
+		SELECT pi.name, pi.posting_date, pi.supplier, pi.currency, pi.party_account_currency, pi.grand_total, pi.outstanding_amount
 		FROM `tabPurchase Invoice` pi
 		WHERE {' AND '.join(conditions)}
 		ORDER BY posting_date, name
@@ -45,6 +49,8 @@ def execute(filters=None):
 		result.update(
 			{
 				"posting_date": invoice.posting_date,
+				"currency": invoice.currency,
+				"party_account_currency": invoice.party_account_currency,
 				"supplier": invoice.supplier,
 				"grand_total": invoice.grand_total,
 				"outstanding_amount": invoice.outstanding_amount,
@@ -52,7 +58,7 @@ def execute(filters=None):
 			}
 		)
 		data.append(result)
-	return get_purchase_invoice_columns(), data
+	return currency_report_result(get_purchase_invoice_columns(), data, filters.company)
 
 
 def get_purchase_invoice_columns():
@@ -74,9 +80,9 @@ def get_purchase_invoice_columns():
 		{"label": _("待票数量"), "fieldname": "remaining_bill_qty", "fieldtype": "Float", "width": 90},
 		{"label": _("订单差异"), "fieldname": "po_variance_status", "fieldtype": "Data", "width": 100},
 		{"label": _("订单差异原因"), "fieldname": "po_variance_reason", "fieldtype": "Data", "width": 220},
-		{"label": _("发票金额"), "fieldname": "grand_total", "fieldtype": "Currency", "width": 120},
-		{"label": _("已付金额"), "fieldname": "paid_amount", "fieldtype": "Currency", "width": 120},
-		{"label": _("未付金额"), "fieldname": "outstanding_amount", "fieldtype": "Currency", "width": 120},
+		{"label": _("发票金额"), "fieldname": "grand_total", "fieldtype": "Currency", "options": "currency", "width": 120},
+		{"label": _("已付金额"), "fieldname": "paid_amount", "fieldtype": "Currency", "options": "party_account_currency", "width": 120},
+		{"label": _("未付金额"), "fieldname": "outstanding_amount", "fieldtype": "Currency", "options": "party_account_currency", "width": 120},
 	]
 
 
@@ -95,9 +101,9 @@ def get_purchase_order_columns():
 		{"label": _("待票数量"), "fieldname": "remaining_bill_qty", "fieldtype": "Float", "width": 90},
 		{"label": _("进项税票"), "fieldname": "tax_invoices", "fieldtype": "Data", "width": 160},
 		{"label": _("付款单"), "fieldname": "payment_entries", "fieldtype": "Data", "width": 150},
-		{"label": _("发票金额"), "fieldname": "invoice_amount", "fieldtype": "Currency", "width": 110},
-		{"label": _("已付金额"), "fieldname": "paid_amount", "fieldtype": "Currency", "width": 110},
-		{"label": _("未付金额"), "fieldname": "outstanding_amount", "fieldtype": "Currency", "width": 110},
+		{"label": _("发票金额"), "fieldname": "invoice_amount", "fieldtype": "Currency", "options": "currency", "width": 110},
+		{"label": _("已付金额"), "fieldname": "paid_amount", "fieldtype": "Currency", "options": "party_account_currency", "width": 110},
+		{"label": _("未付金额"), "fieldname": "outstanding_amount", "fieldtype": "Currency", "options": "party_account_currency", "width": 110},
 		{"label": _("状态"), "fieldname": "reconciliation_status", "fieldtype": "Data", "width": 90},
 		{"label": _("异常原因"), "fieldname": "reconciliation_reason", "fieldtype": "Data", "width": 200},
 	]

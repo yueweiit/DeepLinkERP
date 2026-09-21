@@ -1,6 +1,6 @@
 {
  "actions":[], "creation":"2026-07-17 00:00:00.000000", "doctype":"DocType", "editable_grid":1, "engine":"InnoDB",
- "field_order":["period_category","line_source","match_status","posting_date","voucher_type","voucher_no","account","remarks","debit","credit","balance","reconciling_amount","purchase_invoice","purchase_orders","purchase_receipts","tax_invoices","reconciliation_policy","reconciliation_status","reconciliation_reason","waiver_reason","waived_by","waived_on"],
+ "field_order":["period_category","line_source","match_status","posting_date","voucher_type","voucher_no","account","remarks","currency","debit","credit","balance","reconciling_amount","purchase_invoice","purchase_orders","purchase_receipts","tax_invoices","reconciliation_policy","reconciliation_status","reconciliation_reason","waiver_reason","waived_by","waived_on"],
  "fields":[
   {"fieldname":"period_category","fieldtype":"Select","in_list_view":1,"label":"期间分类","options":"期初未达\n本期未达\n本期银行流水\n期初银行流水","read_only":1},
   {"fieldname":"line_source","fieldtype":"Select","label":"明细来源","options":"Ledger\nBook Outstanding\nBank Transaction","read_only":1},
@@ -10,10 +10,11 @@
   {"fieldname":"voucher_no","fieldtype":"Dynamic Link","in_list_view":1,"label":"单据","options":"voucher_type","read_only":1},
   {"fieldname":"account","fieldtype":"Link","label":"科目","options":"Account","read_only":1},
   {"fieldname":"remarks","fieldtype":"Small Text","label":"摘要","read_only":1},
-  {"fieldname":"debit","fieldtype":"Currency","label":"借方","read_only":1},
-  {"fieldname":"credit","fieldtype":"Currency","label":"贷方","read_only":1},
-  {"fieldname":"balance","fieldtype":"Currency","in_list_view":1,"label":"余额","read_only":1},
-  {"fieldname":"reconciling_amount","fieldtype":"Currency","label":"调节金额","read_only":1},
+  {"fieldname":"currency","fieldtype":"Link","options":"Currency","label":"金额币种","read_only":1},
+  {"fieldname":"debit","fieldtype":"Currency","options":"currency","label":"借方","read_only":1},
+  {"fieldname":"credit","fieldtype":"Currency","options":"currency","label":"贷方","read_only":1},
+  {"fieldname":"balance","fieldtype":"Currency","options":"currency","in_list_view":1,"label":"余额","read_only":1},
+  {"fieldname":"reconciling_amount","fieldtype":"Currency","options":"currency","label":"调节金额","read_only":1},
   {"fieldname":"purchase_invoice","fieldtype":"Link","label":"采购发票","options":"Purchase Invoice","read_only":1},
   {"fieldname":"purchase_orders","fieldtype":"Data","label":"采购订单","read_only":1},
   {"fieldname":"purchase_receipts","fieldtype":"Data","label":"采购收货单","read_only":1},
@@ -25,5 +26,5 @@
   {"fieldname":"waived_by","fieldtype":"Link","label":"豁免人","options":"User","read_only":1},
   {"fieldname":"waived_on","fieldtype":"Datetime","label":"豁免时间","read_only":1}
  ],
- "istable":1, "modified":"2026-07-17 00:00:00.000000", "modified_by":"Administrator", "module":"China Finance", "name":"China Reconciliation Line", "owner":"Administrator", "permissions":[]
+ "istable":1, "modified":"2026-09-21 14:00:00.000000", "modified_by":"Administrator", "module":"China Finance", "name":"China Reconciliation Line", "owner":"Administrator", "permissions":[]
 }

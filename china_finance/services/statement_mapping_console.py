@@ -80,6 +80,7 @@ def get_mapping_console(company, statement_type, accounting_standard=None):
 		order_by="lft",
 	)
 	payload = build_console_payload(template, mappings, leaf_accounts, all_accounts, company=company)
+	payload["currency"] = frappe.get_cached_value("Company", company, "default_currency")
 	_totals = get_mapping_account_totals(company, [mapping.account for mapping in mappings], today())
 	for row in payload["rows"]:
 		for mapping in row["mappings"]:

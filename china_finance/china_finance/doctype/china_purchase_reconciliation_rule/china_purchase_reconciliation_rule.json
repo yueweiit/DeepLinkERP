@@ -5,24 +5,25 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "naming_series", "company", "supplier", "enabled", "effective_from", "effective_to",
+  "naming_series", "company","currency", "supplier", "enabled", "effective_from", "effective_to",
   "policy", "amount_tolerance", "quantity_tolerance", "notes"
  ],
  "fields": [
   {"default":"CPR-.YYYY.-.#####","fieldname":"naming_series","fieldtype":"Select","label":"编号规则","options":"CPR-.YYYY.-.#####","reqd":1},
   {"fieldname":"company","fieldtype":"Link","in_list_view":1,"label":"公司","options":"Company","reqd":1},
+  {"fieldname":"currency","fieldtype":"Link","options":"Currency","label":"本位币","read_only":1,"fetch_from":"company.default_currency"},
   {"fieldname":"supplier","fieldtype":"Link","in_list_view":1,"label":"供应商","options":"Supplier"},
   {"default":"1","fieldname":"enabled","fieldtype":"Check","in_list_view":1,"label":"启用"},
   {"fieldname":"effective_from","fieldtype":"Date","in_list_view":1,"label":"生效日期","reqd":1},
   {"fieldname":"effective_to","fieldtype":"Date","label":"失效日期"},
   {"default":"Direct","fieldname":"policy","fieldtype":"Select","in_list_view":1,"label":"对账策略","options":"Direct\nReceipt and Invoice\nReceipt, Invoice and Tax Invoice","reqd":1},
-  {"default":"0.01","fieldname":"amount_tolerance","fieldtype":"Currency","label":"金额容差","reqd":1},
+  {"default":"0.01","fieldname":"amount_tolerance","fieldtype":"Currency","options":"currency","label":"金额容差","reqd":1},
   {"default":"0.0001","fieldname":"quantity_tolerance","fieldtype":"Float","label":"数量容差","reqd":1},
   {"fieldname":"notes","fieldtype":"Small Text","label":"说明"}
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-07-17 00:00:00.000000",
+ "modified":"2026-09-21 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "China Finance",
  "name": "China Purchase Reconciliation Rule",

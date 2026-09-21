@@ -4,10 +4,10 @@
  "fields": [
   {"fieldname":"reference_doctype","fieldtype":"Link","in_list_view":1,"label":"业务单据类型","options":"DocType","reqd":1},
   {"fieldname":"reference_name","fieldtype":"Dynamic Link","in_list_view":1,"label":"业务单据","options":"reference_doctype","reqd":1},
-  {"fieldname":"allocated_net_amount","fieldtype":"Currency","label":"分摊不含税金额","reqd":1},
-  {"fieldname":"allocated_tax_amount","fieldtype":"Currency","label":"分摊税额","reqd":1},
-  {"fieldname":"allocated_gross_amount","fieldtype":"Currency","in_list_view":1,"label":"分摊价税合计","read_only":1},
+  {"fieldname":"allocated_net_amount","fieldtype":"Currency","options":"currency","label":"分摊不含税金额","reqd":1},
+  {"fieldname":"allocated_tax_amount","fieldtype":"Currency","options":"currency","label":"分摊税额","reqd":1},
+  {"fieldname":"allocated_gross_amount","fieldtype":"Currency","options":"currency","in_list_view":1,"label":"分摊价税合计","read_only":1},
   {"fieldname":"remarks","fieldtype":"Small Text","label":"备注"}
  ],
- "istable": 1, "modified": "2026-07-17 00:00:00.000000", "modified_by": "Administrator", "module": "China Finance", "name": "China Tax Invoice Allocation", "owner": "Administrator", "permissions": []
+ "istable": 1, "modified":"2026-09-21 14:00:00.000000", "modified_by": "Administrator", "module": "China Finance", "name": "China Tax Invoice Allocation", "owner": "Administrator", "permissions": []
 }

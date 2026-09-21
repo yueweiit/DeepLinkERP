@@ -1,6 +1,8 @@
 import frappe
 from frappe import _
 
+from china_finance.services.currency_context import currency_report_result
+
 
 def execute(filters=None):
 	filters = frappe._dict(filters or {})
@@ -11,7 +13,7 @@ def execute(filters=None):
 		f"""
 		SELECT si.posting_date, si.customer, si.name AS sales_invoice,
 			items.sales_orders, items.delivery_notes, tax.tax_invoices, payments.payment_entries,
-			si.grand_total, si.outstanding_amount,
+			si.currency, si.party_account_currency, si.grand_total, si.outstanding_amount,
 			CASE WHEN si.outstanding_amount=0 THEN 'Paid' WHEN si.outstanding_amount<si.grand_total THEN 'Partly Paid' ELSE 'Unpaid' END AS payment_status
 		FROM `tabSales Invoice` si
 		LEFT JOIN (
@@ -37,7 +39,7 @@ def execute(filters=None):
 		filters,
 		as_dict=True,
 	)
-	return get_columns(), data
+	return currency_report_result(get_columns(), data, filters.company)
 
 
 def get_columns():
@@ -49,8 +51,8 @@ def get_columns():
 		{"label": _("应收发票"), "fieldname": "sales_invoice", "fieldtype": "Link", "options": "Sales Invoice", "width": 160},
 		{"label": _("税务发票"), "fieldname": "tax_invoices", "fieldtype": "Data", "width": 180},
 		{"label": _("收款单"), "fieldname": "payment_entries", "fieldtype": "Data", "width": 180},
-		{"label": _("发票金额"), "fieldname": "grand_total", "fieldtype": "Currency", "width": 120},
-		{"label": _("未收金额"), "fieldname": "outstanding_amount", "fieldtype": "Currency", "width": 120},
+		{"label": _("发票金额"), "fieldname": "grand_total", "fieldtype": "Currency", "options": "currency", "width": 120},
+		{"label": _("未收金额"), "fieldname": "outstanding_amount", "fieldtype": "Currency", "options": "party_account_currency", "width": 120},
 		{"label": _("回款状态"), "fieldname": "payment_status", "fieldtype": "Data", "width": 100},
 	]
 

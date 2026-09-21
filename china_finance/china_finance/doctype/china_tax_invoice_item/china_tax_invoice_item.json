@@ -6,12 +6,12 @@
   {"fieldname":"specification","fieldtype":"Data","label":"规格型号"},
   {"fieldname":"unit","fieldtype":"Data","label":"单位"},
   {"fieldname":"quantity","fieldtype":"Float","label":"数量"},
-  {"fieldname":"unit_price","fieldtype":"Currency","label":"单价"},
-  {"fieldname":"net_amount","fieldtype":"Currency","in_list_view":1,"label":"不含税金额","reqd":1},
+  {"fieldname":"unit_price","fieldtype":"Currency","options":"currency","label":"单价"},
+  {"fieldname":"net_amount","fieldtype":"Currency","options":"currency","in_list_view":1,"label":"不含税金额","reqd":1},
   {"fieldname":"tax_rate","fieldtype":"Percent","in_list_view":1,"label":"税率"},
-  {"fieldname":"tax_amount","fieldtype":"Currency","in_list_view":1,"label":"税额","reqd":1},
-  {"fieldname":"gross_amount","fieldtype":"Currency","label":"价税合计","read_only":1},
+  {"fieldname":"tax_amount","fieldtype":"Currency","options":"currency","in_list_view":1,"label":"税额","reqd":1},
+  {"fieldname":"gross_amount","fieldtype":"Currency","options":"currency","label":"价税合计","read_only":1},
   {"fieldname":"goods_service_code","fieldtype":"Data","label":"税收分类编码"}
  ],
- "istable": 1, "modified": "2026-07-17 00:00:00.000000", "modified_by": "Administrator", "module": "China Finance", "name": "China Tax Invoice Item", "owner": "Administrator", "permissions": []
+ "istable": 1, "modified":"2026-09-21 14:00:00.000000", "modified_by": "Administrator", "module": "China Finance", "name": "China Tax Invoice Item", "owner": "Administrator", "permissions": []
 }

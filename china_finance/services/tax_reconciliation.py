@@ -12,7 +12,8 @@ def get_output_invoice_rows(company, from_date, to_date):
 	rows = frappe.db.sql(
 		"""
 		SELECT si.name AS sales_invoice, si.company, si.posting_date, si.customer, si.customer_name,
-			si.grand_total, si.total_taxes_and_charges, si.outstanding_amount,
+			si.currency, si.party_account_currency, si.grand_total, si.total_taxes_and_charges, si.outstanding_amount,
+		allocations.allocation_currency,
 		requests.requests, requests.request_statuses, allocations.tax_invoices,
 		COALESCE(allocations.allocated_gross_amount, 0) AS allocated_gross_amount,
 		COALESCE(allocations.allocated_tax_amount, 0) AS allocated_tax_amount
@@ -28,6 +29,7 @@ def get_output_invoice_rows(company, from_date, to_date):
 		) requests ON requests.sales_invoice=si.name
 		LEFT JOIN (
 			SELECT allocation.reference_name,
+				GROUP_CONCAT(DISTINCT tax.currency) AS allocation_currency,
 				GROUP_CONCAT(DISTINCT tax.name ORDER BY tax.invoice_date, tax.name SEPARATOR ', ') AS tax_invoices,
 				SUM(allocation.allocated_gross_amount) AS allocated_gross_amount,
 				SUM(allocation.allocated_tax_amount) AS allocated_tax_amount
@@ -52,6 +54,10 @@ def evaluate_output_invoice_rows(company, from_date, to_date):
 	rows = get_output_invoice_rows(company, from_date, to_date)
 	for row in rows:
 		issues = []
+		if "," in (row.allocation_currency or ""):
+			frappe.throw(_("销售发票 {0} 关联了不同币种的税票，需按币种分别核对分摊金额").format(row.sales_invoice))
+		if row.allocation_currency and row.allocation_currency != row.currency:
+			issues.append(_("销售发票与税票币种不一致，未进行汇率换算"))
 		if row.requirement == "Required":
 			if not row.tax_invoices:
 				issues.append(_("未回填税务发票"))
