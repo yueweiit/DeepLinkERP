@@ -100,6 +100,7 @@ page_js = {
 app_include_js = [
 	"/assets/china_finance/js/bank_reconciliation_tool.js",
 	"/assets/china_finance/js/account_display.js",
+	"/assets/china_finance/js/company_context.js",
 ]
 
 doctype_tree_js = {

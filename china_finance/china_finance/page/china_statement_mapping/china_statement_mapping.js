@@ -5,7 +5,13 @@ frappe.pages["china-statement-mapping"].on_page_load = function (wrapper) {
 
 frappe.pages["china-statement-mapping"].on_page_show = function (wrapper) {
 	frappe.utils.set_title(__("China Statement Mapping"));
-	wrapper.china_statement_mapping.refresh();
+	const mapping = wrapper.china_statement_mapping;
+	const company = frappe.route_options?.company || window.china_finance?.company_context?.get_company();
+	if (company && mapping.company.get_value() !== company) {
+		mapping.company.set_value(company);
+	} else {
+		mapping.refresh();
+	}
 };
 
 class ChinaStatementMapping {
@@ -37,7 +43,7 @@ class ChinaStatementMapping {
 			fieldtype: "Link",
 			options: "Company",
 			reqd: 1,
-			default: frappe.defaults.get_user_default("Company"),
+			default: frappe.route_options?.company || window.china_finance?.company_context?.default_company() || frappe.defaults.get_user_default("Company"),
 			change: () => this.refresh(),
 		});
 		this.statement_type = this.page.add_field({
@@ -199,6 +205,7 @@ class ChinaStatementMapping {
 	}
 
 	async refresh(restore_scroll_top = null) {
+		const request = this.refresh_request = {};
 		const company = this.company.get_value();
 		const statement_type = this.statement_type.get_value();
 		if (!company || !statement_type) return;
@@ -210,7 +217,7 @@ class ChinaStatementMapping {
 		this.expanded_aggregates.clear();
 		this.$rows.html(`<div class="smc-empty">${__("Loading...")}</div>`);
 		this.$accounts.empty();
-		this.data = await frappe.xcall(
+		const data = await frappe.xcall(
 			"china_finance.services.statement_mapping_console.get_mapping_console",
 			{
 				company,
@@ -218,6 +225,9 @@ class ChinaStatementMapping {
 				accounting_standard: accounting_standard === "跟随公司设置" ? null : accounting_standard,
 			},
 		);
+		// A previous company's slower response must not replace the current view.
+		if (request !== this.refresh_request) return;
+		this.data = data;
 		this.render_all();
 		if (restore_scroll_top !== null) {
 			this.$rows.find(".smc-rows__list").scrollTop(restore_scroll_top);

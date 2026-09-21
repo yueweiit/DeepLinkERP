@@ -3,8 +3,9 @@ frappe.pages["china-banking"].on_page_load = function (wrapper) {
 	wrapper.china_banking = new ChinaBankingPage(wrapper);
 };
 
-frappe.pages["china-banking"].on_page_show = function () {
+frappe.pages["china-banking"].on_page_show = function (wrapper) {
 	frappe.utils.set_title(__("银行对账"));
+	wrapper.china_banking.sync_company();
 };
 
 class ChinaBankingPage {
@@ -23,6 +24,7 @@ class ChinaBankingPage {
 	}
 
 	mount_banking_app() {
+		this.sync_company();
 		const $main = $(this.wrapper).find(".layout-main-section").first();
 		$main.css({
 			padding: "0",
@@ -30,7 +32,7 @@ class ChinaBankingPage {
 			background: "var(--card-bg)",
 		});
 
-		$('<iframe>', {
+		this.$iframe = $('<iframe>', {
 			src: "/banking?embedded=1",
 			title: __("银行对账"),
 			class: "china-banking-embedded",
@@ -43,5 +45,16 @@ class ChinaBankingPage {
 			border: "0",
 			background: "#fff",
 		}).appendTo($main);
+	}
+
+	sync_company() {
+		const company = frappe.route_options?.company || window.china_finance?.company_context?.get_company();
+		if (!company) return;
+		const stored_company = localStorage.getItem("bank-rec-selected-company");
+		if (company === this.company && stored_company === JSON.stringify(company)) return;
+		this.company = company;
+		// The embedded ERPNext Banking app uses this native company selector store.
+		localStorage.setItem("bank-rec-selected-company", JSON.stringify(company));
+		if (this.$iframe) this.$iframe.attr("src", this.$iframe.attr("src"));
 	}
 }

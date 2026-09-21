@@ -72,7 +72,7 @@ frappe.query_reports["China Financial Statements"] = {
 		add_china_finance_export_actions(report);
 		bind_source_account_links();
 		if (!report.get_filter_value("company")) {
-			report.set_filter_value("company", frappe.defaults.get_user_default("Company"));
+			report.set_filter_value("company", window.china_finance?.company_context?.default_company() || frappe.defaults.get_user_default("Company"));
 		}
 		report.get_filter("company").on_change = () => sync_statutory_header(report);
 		sync_statutory_header(report);
