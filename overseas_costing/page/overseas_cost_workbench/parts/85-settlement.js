@@ -321,36 +321,6 @@
     this.openDingtalkLink(url);
   }
 
-  async loadSettlementStrip(batchName, cachedData = null) {
-    const request = this.settlementStripRequest = (this.settlementStripRequest || 0) + 1;
-    const viewedVersion = this.detailState.versionName || null;
-    const current = () => request === this.settlementStripRequest && this.detailState.batchName === batchName && this.detailState.tab === "documents" && (this.detailState.versionName || null) === viewedVersion;
-    try {
-      const data = cachedData && cachedData.viewed_version === viewedVersion ? cachedData
-        : await this.settlementApi("get_batch_settlement", { batch_name: batchName, version_name: viewedVersion });
-      if (!current()) return;
-      if (!data.ok) throw new Error(data.message || "读取关联失败");
-      if (this.materialFeeState?.batchName === batchName) this.materialFeeState.settlementData = data;
-      const currentSource = data.binding ? data.expense : data.logistics;
-      const sourceLabel = data.binding ? "采购支出" : "国际物流";
-      const $strip = this.$root.find("[data-area='settlement-strip']");
-      $strip.html(data.freight_mode ? this.renderFreightStrip(data) : `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "此版本资料来源" : "当前资料来源"}：${sourceLabel}</strong><span>${this.escape(this.settlementAdoption(data))}</span>
-        <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后，装箱、SKU、运费及 AI 资料统一切换至采购支出")}</small></div>
-        <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.historical ? "查看历史明细与费用" : data.binding ? "查看明细与费用" : "搜索／匹配采购支出"}</button>
-        ${currentSource?.open_url ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开${sourceLabel}原单</button>` : ""}${data.binding && !data.historical ? '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>' : ""}</div></div>`);
-      $strip.off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-action]", (event) => {
-        const action = $(event.currentTarget).attr("data-settlement-strip-action");
-        if (action === "source") { try { this.openSettlementSource(currentSource); } catch (error) { this.showError(error); } }
-        else if (action === "correct") this.openSettlementSearch(batchName, data, null, { versionName: viewedVersion, logistics: data.logistics });
-        else this.openBatchSettlementDialog(batchName, viewedVersion);
-      });
-    } catch (error) {
-      if (!current()) return;
-      this.$root.find("[data-area='settlement-strip']").html(`<div class="ocw-settlement-notice">物流采购支出：${this.escape(error.message || "读取失败")} <button class="ocw-outline-btn" data-settlement-strip-retry>重试</button></div>`)
-        .off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-retry]", () => this.loadSettlementStrip(batchName));
-    }
-  }
-
   async refreshSettlementBatch(batchName, expectedVersion = null) {
     if (this.detailState?.batchName === batchName) {
       // Adoption can create an adjustment version; fetch current header without the old version pin.

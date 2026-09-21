@@ -452,22 +452,21 @@ for (const name of Object.getOwnPropertyNames(Workspace.prototype)) if(name!=='c
 '''.replace('WORKSPACE', json.dumps(str(PARTS / '78-material-fee-workspace.js')))
 
 
-def test_current_inline_workspace_retains_material_fee_and_packing_controls_with_settlement_strip():
+def test_current_inline_workspace_retains_controls_without_deprecated_settlement_strip():
     run_js(WORKSPACE_METHODS + '''
 const state={batchName:'B',materials:{},fees:{summary:{}},preview:{}};
 w.ensureMaterialFeeState=()=>state;w.detailState={batchName:'B',versionName:'V',tab:'documents'};
-let html='';let loaded;
+let html='';
 w.$root={find:()=>({html:value=>html=value})};w.closeMaterialAICandidatePopover=()=>{};
 w.renderMaterialAIProgressChip=()=>'';w.renderMaterialFeeGrid=()=>'<table data-current-material-grid></table>';
 w.renderMaterialFeeTable=()=>'<table data-current-fee-table></table>';w.renderMaterialFeeCostTable=()=>'<section data-current-cost-result></section>';
 w.renderMaterialFeeTodos=()=>'';w.bindMaterialGridScrollControls=()=>{};w.restoreMaterialFeeInputFocus=()=>{};
-w.loadSettlementStrip=(batch)=>loaded=batch;
 w.renderMaterialFeeWorkspace();
-assert(html.includes('data-area="settlement-strip"'));
-assert(html.indexOf('ocw-mf-page-head')<html.indexOf('data-area="settlement-strip"'));
-assert(html.indexOf('data-area="settlement-strip"')<html.indexOf('ocw-mf-material-section'));
+assert(!html.includes('data-area="settlement-strip"'));
 for(const marker of ['data-current-material-grid','data-current-fee-table','data-current-cost-result','mf-import-wiki','mf-ai-fill','mf-show-sources'])assert(html.includes(marker));
-assert.equal(loaded,'B');assert(!html.includes('manual-documents'));
+assert.equal(typeof w.loadSettlementStrip,'undefined');
+assert.equal(typeof w.renderFreightStrip,'undefined');
+assert(!html.includes('manual-documents'));
 ''')
 
 

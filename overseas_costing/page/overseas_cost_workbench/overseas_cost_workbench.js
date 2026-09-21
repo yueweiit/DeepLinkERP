@@ -4284,7 +4284,6 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='detail-voucher']", () => this.openFileParseDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-category']", () => this.openCategoryPreviewDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-dingtalk']", () => this.openDingtalkOrder(this.detailState.batchName));
-    this.$root.on("click", "[data-action='detail-repull']", () => this.repullGapDingtalk(this.detailState.batchName));
     this.$root.on("click", "[data-action='detail-excel']", () => this.openBatchExcelSupplementDialog(this.detailState.batchName));
     this.$root.on("click", "[data-action='open-voucher-record']", (event) =>
       this.openTaxCertificateRecordDialog($(event.currentTarget).attr("data-record-name"))
@@ -11551,7 +11550,6 @@ class OverseasCostWorkbench {
             <button class="ocw-outline-btn" type="button" data-action="mf-reload">刷新</button>
           </div>
         </div>
-        <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
         ${feeSummary.source_pending ? `<p class="ocw-mf-dialog-note">${this.escape(feeSummary.source_message)}</p>` : ""}
         <div class="ocw-mf-alert-strip" aria-label="当前待办摘要">
           ${this.renderMaterialFeeMetric("基础资料待补", materialSummary.missing_cell_count || 0, "danger", "materials", "装箱单物料信息")}
@@ -11594,7 +11592,6 @@ class OverseasCostWorkbench {
         ${this.renderMaterialFeeTodos()}
       </div>
     `);
-    this.loadSettlementStrip?.(state.batchName, state.settlementData);
     this.bindMaterialGridScrollControls();
     this.syncMaterialPageCheckboxState();
     this.restoreMaterialFeeInputFocus();
@@ -18233,15 +18230,14 @@ class OverseasCostWorkbench {
             </div>
           </div>
           <div class="ocw-detail-header-actions">
+            <button class="ocw-outline-btn" type="button" data-action="detail-dingtalk">打开钉钉原单</button>
             ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
-              <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
+              <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">更多操作 ▾</button>
               <div class="ocw-detail-tools" data-area="detail-tools" hidden>
-                <button type="button" data-action="detail-export">导出本批次</button>
+                <button type="button" data-action="detail-export">导出</button>
                 <button type="button" data-action="detail-voucher">凭证对比</button>
                 <button type="button" data-action="detail-category">商品归类</button>
-                <button type="button" data-action="detail-dingtalk">打开钉钉来源</button>
-                <button type="button" data-action="detail-repull">重拉本批次</button>
                 <button type="button" data-action="detail-excel">单批次 Excel 补充</button>
               </div>
             </div>
@@ -19300,36 +19296,6 @@ class OverseasCostWorkbench {
     this.openDingtalkLink(url);
   }
 
-  async loadSettlementStrip(batchName, cachedData = null) {
-    const request = this.settlementStripRequest = (this.settlementStripRequest || 0) + 1;
-    const viewedVersion = this.detailState.versionName || null;
-    const current = () => request === this.settlementStripRequest && this.detailState.batchName === batchName && this.detailState.tab === "documents" && (this.detailState.versionName || null) === viewedVersion;
-    try {
-      const data = cachedData && cachedData.viewed_version === viewedVersion ? cachedData
-        : await this.settlementApi("get_batch_settlement", { batch_name: batchName, version_name: viewedVersion });
-      if (!current()) return;
-      if (!data.ok) throw new Error(data.message || "读取关联失败");
-      if (this.materialFeeState?.batchName === batchName) this.materialFeeState.settlementData = data;
-      const currentSource = data.binding ? data.expense : data.logistics;
-      const sourceLabel = data.binding ? "采购支出" : "国际物流";
-      const $strip = this.$root.find("[data-area='settlement-strip']");
-      $strip.html(data.freight_mode ? this.renderFreightStrip(data) : `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "此版本资料来源" : "当前资料来源"}：${sourceLabel}</strong><span>${this.escape(this.settlementAdoption(data))}</span>
-        <small>${this.escape(data.binding ? `${data.expense?.approval_no || data.expense?.instance || ""} · ${this.settlementAmount(data.expense || {})}` : data.message || "确认匹配后，装箱、SKU、运费及 AI 资料统一切换至采购支出")}</small></div>
-        <div class="ocw-settlement-toolbar"><button class="ocw-outline-btn" data-settlement-strip-action="detail">${data.historical ? "查看历史明细与费用" : data.binding ? "查看明细与费用" : "搜索／匹配采购支出"}</button>
-        ${currentSource?.open_url ? `<button class="ocw-outline-btn" data-settlement-strip-action="source">打开${sourceLabel}原单</button>` : ""}${data.binding && !data.historical ? '<button class="ocw-outline-btn" data-settlement-strip-action="correct">更正关联</button>' : ""}</div></div>`);
-      $strip.off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-action]", (event) => {
-        const action = $(event.currentTarget).attr("data-settlement-strip-action");
-        if (action === "source") { try { this.openSettlementSource(currentSource); } catch (error) { this.showError(error); } }
-        else if (action === "correct") this.openSettlementSearch(batchName, data, null, { versionName: viewedVersion, logistics: data.logistics });
-        else this.openBatchSettlementDialog(batchName, viewedVersion);
-      });
-    } catch (error) {
-      if (!current()) return;
-      this.$root.find("[data-area='settlement-strip']").html(`<div class="ocw-settlement-notice">物流采购支出：${this.escape(error.message || "读取失败")} <button class="ocw-outline-btn" data-settlement-strip-retry>重试</button></div>`)
-        .off("click.ocwSettlementStrip").on("click.ocwSettlementStrip", "[data-settlement-strip-retry]", () => this.loadSettlementStrip(batchName));
-    }
-  }
-
   async refreshSettlementBatch(batchName, expectedVersion = null) {
     if (this.detailState?.batchName === batchName) {
       // Adoption can create an adjustment version; fetch current header without the old version pin.
@@ -20158,18 +20124,6 @@ class OverseasCostWorkbench {
 
   freightEvidence(evidence = {}) {
     return `${evidence.file_name || "审批正文"} · ${evidence.sheet || "明细"}${evidence.row != null ? ` · 第 ${evidence.row} 行` : ""}`;
-  }
-
-  renderFreightStrip(data) {
-    const unified = Array.isArray(data.payment_claims) || Array.isArray(data.payment_candidates) || !!data.payment_matching;
-    const claims = unified ? (data.payment_claims || []).filter(row => row.active === true
-      || (!Object.hasOwn(row, 'active') && !['revoked', 'inactive'].includes(String(row.status || '').toLowerCase())))
-      : data.freight?.claims || [];
-    const amount = claims.length ? claims.map(r => `${r.applied_amount ?? r.amount} ${r.currency}`).join(" + ") : "待查找／待确认";
-    return `<div class="ocw-settlement-strip"><div><strong>${data.historical ? "历史版本" : "本票"}当前采用${unified ? '实际费用' : '运费'}：${this.escape(amount)}</strong>
-      <small>装箱：${this.escape(data.packing?.message || "保留当前资料，变更单独核对")}</small>
-      ${(data.payment_blocking_reasons || data.freight?.issues || []).map(v => `<small class="ocw-settlement-notice">${this.escape(v)}</small>`).join("")}</div>
-      <div class="ocw-settlement-toolbar">${data.logistics?.open_url ? '<button class="ocw-outline-btn" data-settlement-strip-action="source">打开国际物流原单</button>' : ""}</div></div>`;
   }
 
   freightMoney(amount, currency) {

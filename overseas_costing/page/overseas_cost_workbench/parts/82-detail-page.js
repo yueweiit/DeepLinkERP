@@ -251,15 +251,14 @@
             </div>
           </div>
           <div class="ocw-detail-header-actions">
+            <button class="ocw-outline-btn" type="button" data-action="detail-dingtalk">打开钉钉原单</button>
             ${this.renderDetailErpAction(batch)}
             <div class="ocw-menu-wrap">
-              <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">批次工具 ▾</button>
+              <button class="ocw-outline-btn" type="button" data-action="toggle-detail-tools" aria-expanded="false">更多操作 ▾</button>
               <div class="ocw-detail-tools" data-area="detail-tools" hidden>
-                <button type="button" data-action="detail-export">导出本批次</button>
+                <button type="button" data-action="detail-export">导出</button>
                 <button type="button" data-action="detail-voucher">凭证对比</button>
                 <button type="button" data-action="detail-category">商品归类</button>
-                <button type="button" data-action="detail-dingtalk">打开钉钉来源</button>
-                <button type="button" data-action="detail-repull">重拉本批次</button>
                 <button type="button" data-action="detail-excel">单批次 Excel 补充</button>
               </div>
             </div>

@@ -706,7 +706,6 @@
             <button class="ocw-outline-btn" type="button" data-action="mf-reload">刷新</button>
           </div>
         </div>
-        <div data-area="settlement-strip" aria-live="polite"><p class="ocw-settlement-hint">正在读取物流采购支出关联…</p></div>
         ${feeSummary.source_pending ? `<p class="ocw-mf-dialog-note">${this.escape(feeSummary.source_message)}</p>` : ""}
         <div class="ocw-mf-alert-strip" aria-label="当前待办摘要">
           ${this.renderMaterialFeeMetric("基础资料待补", materialSummary.missing_cell_count || 0, "danger", "materials", "装箱单物料信息")}
@@ -749,7 +748,6 @@
         ${this.renderMaterialFeeTodos()}
       </div>
     `);
-    this.loadSettlementStrip?.(state.batchName, state.settlementData);
     this.bindMaterialGridScrollControls();
     this.syncMaterialPageCheckboxState();
     this.restoreMaterialFeeInputFocus();

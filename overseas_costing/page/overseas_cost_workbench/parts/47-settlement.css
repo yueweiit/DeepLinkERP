@@ -7,23 +7,8 @@
   background: #0b8cf0;
   border-color: #0b8cf0;
 }
-.ocw-settlement-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 14px 16px;
-  margin-bottom: 16px;
-  border: 1px solid #dce7ef;
-  border-radius: 10px;
-  background: #f6faff;
-}
-.ocw-settlement-strip strong { margin-right: 12px; }
-.ocw-settlement-strip small,
 .ocw-settlement-table small { display: block; color: #66788a; margin-top: 4px; }
 .ocw-settlement-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
-.ocw-settlement-strip .ocw-settlement-toolbar { margin: 0; }
 .ocw-settlement-hint { color: #66788a; line-height: 1.6; margin: 8px 0 12px; }
 .ocw-settlement-notice { padding: 10px 12px; margin: 10px 0; border-radius: 6px; background: #fff5df; color: #765619; overflow-wrap: anywhere; }
 .ocw-settlement-notice.is-error { background: #fff0f0; color: #9e3434; }

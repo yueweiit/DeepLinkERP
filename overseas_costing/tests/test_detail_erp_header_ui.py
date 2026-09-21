@@ -201,6 +201,41 @@ console.log(JSON.stringify({button:button(view.html,'detail-writeback-to-erp'),t
     assert result["button"]["disabled"] is False
 
 
+def test_detail_header_is_compact_sticky_and_actions_are_consolidated():
+    result = run_view_js(
+        """
+const view=makeView({name:'B-1',status:'Calculated',confirm_status:'Confirmed',current_version:'V-1'});
+view.renderDetailShell();
+const header=view.html.split('</header>',1)[0];
+console.log(JSON.stringify({header}));
+"""
+    )
+
+    header = result["header"]
+    assert header.count('data-action="detail-dingtalk"') == 1
+    assert header.index("打开钉钉原单") < header.index('data-action="detail-writeback-to-erp"')
+    assert header.index('data-action="detail-writeback-to-erp"') < header.index("更多操作")
+    assert 'data-action="detail-export">导出</button>' in header
+    for removed in ("批次工具", "导出本批次", "打开钉钉来源", "重拉本批次", 'data-action="detail-repull"'):
+        assert removed not in header
+
+    stylesheet = (PARTS / "45-detail-page.css").read_text(encoding="utf-8")
+    page_rule = stylesheet.split(".ocw-detail-page {", 1)[1].split("}", 1)[0]
+    header_rule = stylesheet.split(".ocw-detail-header {", 1)[1].split("}", 1)[0]
+    erp_rule = stylesheet.split(".ocw-detail-erp-action {", 1)[1].split("}", 1)[0]
+    assert "overflow: clip" in page_rule
+    assert "position: sticky" in header_rule
+    assert "top: 12px" in header_rule
+    assert "z-index: 50" in header_rule
+    assert "flex: 0 0 auto" in erp_rule
+    assert "230px" not in erp_rule
+
+    event_source = (PARTS / "35-workbench-view.js").read_text(encoding="utf-8")
+    assert "[data-action='detail-dingtalk']" in event_source
+    assert "this.openDingtalkOrder(this.detailState.batchName)" in event_source
+    assert "[data-action='detail-repull']" not in event_source
+
+
 def test_confirm_status_never_falls_back_to_batch_status():
     result = run_view_js(
         """
