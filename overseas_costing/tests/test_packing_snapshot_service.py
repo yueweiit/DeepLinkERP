@@ -816,6 +816,11 @@ def test_material_ai_catalog_prefers_fully_bound_archive_over_legacy_helper(monk
         'parse_result_json': json.dumps({
             'process_instance_id': process_id,
             'file_id': file_id,
+            # Legacy settlement archives persisted these two policy flags when
+            # audit-only evidence was barred from direct adoption.  They must
+            # not also bar the immutable file from read-only AI analysis.
+            'approval_excluded': True,
+            'cost_source_allowed': False,
             'settlement_document': {
                 'audit_only': True,
                 'document_id': 'DOC-1',

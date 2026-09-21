@@ -1362,11 +1362,12 @@ def _list_material_ai_sources(batch_name: str, version_name: str | None = None, 
             and packing_source_service.dingtalk_approval_service.attachment_has_complete_archive_binding(row)
         )
         descriptor = snapshot.get("settlement_document") or {}
+        # Older audit-only archives recorded approval_excluded/cost_source_allowed
+        # as adoption policy.  A complete immutable archive may still be read for
+        # preview; current approval validity below remains the analysis gate.
         analysis_only = bool(
             audit_only
             and archive_binding_complete
-            and not snapshot.get("approval_excluded")
-            and snapshot.get("cost_source_allowed") is not False
             and not descriptor.get("retired")
             and not descriptor.get("disabled")
         )
