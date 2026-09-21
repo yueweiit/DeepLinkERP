@@ -69,7 +69,7 @@ console.log(JSON.stringify(h.renderMaterialFeeGridCell(item,{field:'unit_price',
     assert "data-mf-cell-input" not in html
 
 
-def test_material_fee_workspace_has_no_second_trial_entry_and_keeps_status_guidance() -> None:
+def test_material_fee_workspace_has_a_visible_trial_entry_next_to_status() -> None:
     result = _fee_workspace_result(r"""
 const w=Object.create(Harness.prototype);w.detailState={header:{status:'Dirty'}};
 const state=w.ensureMaterialFeeState();state.materials={packing_groups:[{
@@ -82,11 +82,13 @@ console.log(JSON.stringify({html,blocked:w.hasBlockingPackingGroups(state)}));
 
     assert result["blocked"] is True
     assert 'data-action="mf-preview-cost"' not in result["html"]
-    assert "请使用页头开始试算" in result["html"]
+    assert 'data-action="detail-primary"' in result["html"]
+    assert '开始试算' in result["html"]
+    assert "请使用页头开始试算" not in result["html"]
     assert "请先重新确认装箱组" in result["html"]
 
 
-def test_material_fee_workspace_with_preview_keeps_adjustment_but_no_trial_entry() -> None:
+def test_material_fee_workspace_with_preview_keeps_adjustment_and_retrial_entry() -> None:
     html = _frontend_result(FRONTEND_SETUP + """
 h.escape=x=>String(x ?? '');
 h.detailState.header={status:'Calculated',summary_snapshot:{comprehensive_cost:{summary:{is_complete:true,total_cost_rmb:'100.00'},items:[]}}};
@@ -94,6 +96,8 @@ console.log(JSON.stringify(h.renderMaterialFeeCostTable()));
 """)
     assert 'data-action="mf-adjust-cost"' in html
     assert 'data-action="mf-preview-cost"' not in html
+    assert 'data-action="detail-primary"' in html
+    assert '重新试算' in html
 
 
 def test_autofill_renders_shipment_value_and_project_summary():

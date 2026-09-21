@@ -501,7 +501,7 @@ def test_documents_tab_is_replaced_only_by_phase_one_material_fee_workspace() ->
     assert "DUPLICATE_TARGET_SELECTION" in workspace
     assert "未识别出可安全拆分的金额，可保留凭证后人工补录" in workspace
     assert "writeback" not in workspace.lower()
-    assert "recalculate" not in workspace.lower()
+    assert 'data-action="detail-primary" data-primary-action="recalculate"' in workspace
     assert ".ocw-mf-workspace" in stylesheet
     assert ".ocw-mf-cell.is-missing" in stylesheet
     assert ".ocw-mf-cell.is-default" in stylesheet
@@ -1160,6 +1160,12 @@ def test_material_fee_metric_styles_keep_buttons_responsive_and_focus_visible() 
     assert "scroll-margin-top" in stylesheet
     assert "@media (max-width: 1050px)" in stylesheet
     assert "@media (max-width: 640px)" in stylesheet
+    mobile_rule = stylesheet.split("@media (max-width: 640px)", 1)[1]
+    assert ".ocw-mf-section-title { flex-direction: column; align-items: stretch; }" in mobile_rule
+    assert ".ocw-mf-cost-actions { justify-content: flex-start; }" in mobile_rule
+    assert stylesheet.index(".ocw-mf-cost-actions { display: flex;") < stylesheet.index(
+        ".ocw-mf-cost-actions { justify-content: flex-start; }"
+    )
 
 
 def test_cost_trial_dialog_defines_visible_brand_buttons_and_narrow_layout() -> None:

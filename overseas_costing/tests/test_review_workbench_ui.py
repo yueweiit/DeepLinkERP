@@ -261,6 +261,7 @@ console.log(JSON.stringify({calls,rows:v.batches,counts:v.exceptionCounts,review
     ('batch', 'expected_label'),
     [
         ({'status': 'Draft', 'summary_snapshot': {}}, '开始试算'),
+        ({'status': 'Dirty', 'result_is_current': False, 'summary_snapshot': {}}, '开始试算'),
         ({'status': 'Dirty', 'calculated_at': '2026-09-12 15:00:00', 'result_is_current': False}, '重新试算'),
     ],
 )

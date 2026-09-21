@@ -373,6 +373,40 @@ def test_explicitly_confirmed_zero_purchase_value_is_cost_review_eligible():
     assert result["cost_review_eligible"] is True
 
 
+def test_purchase_evidence_with_spec_model_remains_reviewable_in_formal_inputs():
+    from overseas_costing.services.purchase_value_evidence import META_KEY
+
+    context = saved_context()
+    item = context["items"][0]
+    item.update(
+        material_code="FL004195",
+        spec_model="PIGMENT-RED",
+        quantity=4,
+        actual_shipped_qty=4,
+        actual_shipped_qty_mode="MANUAL_CONFIRMED",
+        purchase_uom="kg",
+        shipped_uom="kg",
+        goods_value=0,
+        extra_json=json.dumps({
+            META_KEY: {
+                "amount_rmb": "800",
+                "quantity": "4",
+                "uom": "kg",
+                "material_code": "FL004195",
+                "spec_model": "PIGMENT-RED",
+                "source_refs": [{"document_id": "DOC-1", "row": 1}],
+            }
+        }),
+    )
+    save_result(context)
+
+    result = evaluate(context)
+
+    assert result["cost_review_started"] is True
+    assert result["cost_review_eligible"] is True
+    assert "GOODS_VALUE_MISSING" not in codes(result)
+
+
 def test_confirmed_sku_component_is_part_of_saved_result_fingerprint():
     context = saved_context()
     tax = next(row for row in context["fees"] if row.get("logical_fee_key") == "import_tax")

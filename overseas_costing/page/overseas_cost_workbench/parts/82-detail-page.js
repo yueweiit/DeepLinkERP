@@ -188,7 +188,6 @@
     const summary = batch.summary_snapshot || {};
     const hasSavedResult = Boolean(
       batch.calculated_at
-      || batch.result_is_current === false
       || summary.calculation_schema
       || status.includes("calculated")
       || status.includes("confirmed")

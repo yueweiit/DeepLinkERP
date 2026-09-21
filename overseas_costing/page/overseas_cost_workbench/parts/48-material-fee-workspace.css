@@ -808,6 +808,10 @@
 .ocw-mf-cost-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; }
 .ocw-mf-cost-actions button { min-width: 110px; }
 .ocw-mf-cost-actions button:disabled { cursor: wait; opacity: 0.65; }
+@media (max-width: 640px) {
+  .ocw-mf-section-title { flex-direction: column; align-items: stretch; }
+  .ocw-mf-cost-actions { justify-content: flex-start; }
+}
 .ocw-mf-cost-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 20px 40px; padding: 20px; background: linear-gradient(120deg, #f0f7ff, #fcfdff); }
 .ocw-mf-cost-total { display: grid; gap: 5px; }
 .ocw-mf-cost-total span { color: var(--mf-muted); font-size: 12px; }
