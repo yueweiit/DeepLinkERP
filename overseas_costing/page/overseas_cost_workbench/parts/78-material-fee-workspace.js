@@ -4563,12 +4563,17 @@
           ? `<em>不在当前采购支出范围，解析后需人工确认</em>` : "";
         return `<label class="ocw-mf-evidence-option"><input type="radio" name="mf-evidence-attachment" data-mf-evidence-attachment="${this.escape(candidate.attachment || "")}"/><span><strong>${this.escape(candidate.file_name || candidate.attachment || "--")}</strong><small>${this.escape(candidate.source_type || "附件")} · ${this.escape(candidate.parse_status || "Draft")}${linked.has(candidate.attachment) ? " · 已关联，可重新解析" : ""}</small>${scopeNote}</span></label>`;
       }).join("");
-      return `<section class="ocw-mf-evidence-source-group"><header><strong>${this.escape(group.label)}</strong><b>${group.rows.length} 份</b></header>${records}</section>`;
+      const body = records
+        || `<div class="ocw-mf-evidence-source-empty">该流程暂无可关联资料，可上传新凭证。</div>`;
+      return `<section class="ocw-mf-evidence-source-group"><header><strong>${this.escape(group.label)}</strong><b>${group.rows.length} 份</b></header>${body}</section>`;
     }).join("");
     return `<div class="ocw-mf-evidence-picker"><div class="ocw-mf-dialog-note">可先选凭证，系统再提取金额、币种、费用类别及 SKU／税种关系。采购、费用申请、国际物流三类资料都可关联，所有结果都要在审核草稿中确认。</div>${cards || `<div class="ocw-detail-empty"><strong>暂无可关联资料</strong><span>可先上传新凭证。</span></div>`}<button class="ocw-outline-btn" type="button" data-action="mf-upload-evidence">上传新凭证并解析</button></div>`;
   }
 
   evidenceSourceGroups(candidates) {
+    // 采购、费用申请、国际物流三流程的分组标题恒定展示：某一流程当前没有可关联
+    // 资料时给出空态提示，而不是整组消失。否则用户无法判断“这条流程没有资料”
+    // 还是“这条流程没被支持”。“其他资料”仅在确有归属不明的候选时才出现。
     const order = ["payment", "international_logistics", "purchase", "other"];
     const labels = {
       payment: "费用申请",
@@ -4576,13 +4581,22 @@
       purchase: "采购",
       other: "其他资料",
     };
-    const grouped = new Map();
-    (Array.isArray(candidates) ? candidates : []).forEach((candidate, index) => {
-      const stage = order.includes(String(candidate.workflow_stage || "")) ? String(candidate.workflow_stage) : "other";
-      if (!grouped.has(stage)) grouped.set(stage, { stage, label: candidate.workflow_label || labels[stage], rows: [] });
-      grouped.get(stage).rows.push(candidate);
+    const alwaysVisible = ["payment", "international_logistics", "purchase"];
+    const grouped = new Map(
+      order.map((stage) => [stage, { stage, label: labels[stage], rows: [] }])
+    );
+    (Array.isArray(candidates) ? candidates : []).forEach((candidate) => {
+      const stage = order.includes(String(candidate.workflow_stage || ""))
+        ? String(candidate.workflow_stage)
+        : "other";
+      // 服务端返回的 workflow_label 是文案真源，优先采用。
+      const group = grouped.get(stage);
+      if (candidate.workflow_label) group.label = candidate.workflow_label;
+      group.rows.push(candidate);
     });
-    return order.filter((stage) => grouped.has(stage)).map((stage) => grouped.get(stage));
+    return order
+      .map((stage) => grouped.get(stage))
+      .filter((group) => group.rows.length || alwaysVisible.includes(group.stage));
   }
 
   async linkSelectedMaterialFeeEvidence(dialog, fee) {

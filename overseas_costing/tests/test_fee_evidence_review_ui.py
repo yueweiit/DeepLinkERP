@@ -542,7 +542,15 @@ def test_evidence_picker_groups_the_three_pullable_processes() -> None:
     # 分组标签面向业务，而不是直接展示英文阶段名。
     for label in ("费用申请", "国际物流", "采购"):
         assert label in groups
-    # 弹窗仍提供上传兜底，且候选为空时不渲染空分组。
+    # 三流程分组标题恒定展示：即使某流程当前 0 份也要出现，否则用户无法区分
+    # “这条流程没有资料”和“这条流程没被支持”。
+    assert "alwaysVisible" in groups
+    for stage in ("payment", "international_logistics", "purchase"):
+        assert f'alwaysVisible = ["payment", "international_logistics", "purchase"]' in groups
+    # 空分组给出空态提示，而不是整组消失。
+    assert "ocw-mf-evidence-source-empty" in picker
+    assert "该流程暂无可关联资料" in picker
+    # 弹窗仍提供上传兜底。
     assert "mf-upload-evidence" in picker
     assert "上传新凭证并解析" in picker
 
@@ -559,3 +567,31 @@ def test_evidence_picker_keeps_scope_warning_instead_of_hiding_candidates() -> N
     assert "stage_selectable" in picker
     assert "不在当前采购支出范围" in picker
     assert "audit_only" not in picker
+
+
+def test_evidence_picker_always_renders_the_three_process_group_titles() -> None:
+    """采购、费用申请、国际物流三组标题必须恒定出现，某组 0 份时显示空态。
+
+    只渲染“有数据的组”会让用户无法区分“这条流程没有资料”和“这条流程没被
+    支持”，因此分组标题集合与候选数据无关。
+    """
+
+    source = PART.read_text(encoding="utf-8")
+    groups = source.split("evidenceSourceGroups(candidates)", 1)[1].split(
+        "async linkSelectedMaterialFeeEvidence", 1
+    )[0]
+
+    # 固定顺序：三流程在前，其他资料垫底。
+    assert 'const order = ["payment", "international_logistics", "purchase", "other"]' in groups
+    # 恒定展示的集合只含三流程，不含“其他资料”。
+    assert 'const alwaysVisible = ["payment", "international_logistics", "purchase"]' in groups
+    assert "alwaysVisible.includes(group.stage)" in groups
+    # 空分组仍然产出分组对象（rows 为空），不是被 filter 掉。
+    assert "group.rows.length || alwaysVisible.includes(group.stage)" in groups
+
+    # 渲染层为空分组提供空态文案。
+    picker = source.split("renderMaterialFeeEvidencePicker(candidates, linked)", 1)[1].split(
+        "evidenceSourceGroups(candidates)", 1
+    )[0]
+    assert "ocw-mf-evidence-source-empty" in picker
+    assert "该流程暂无可关联资料，可上传新凭证。" in picker
