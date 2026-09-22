@@ -71,7 +71,10 @@ class MobileOperationsApp {
 	}
 
 	render_route() {
-		const main = this.root.querySelector("[data-region='main']");
+		// Keep previous views' event listeners and pending callbacks off the new page.
+		const previous_main = this.root.querySelector("[data-region='main']");
+		const main = previous_main.cloneNode(false);
+		previous_main.replaceWith(main);
 		const title = this.root.querySelector("[data-region='header-title']");
 		this.root.querySelectorAll("[data-nav]").forEach((button) => {
 			button.classList.toggle("is-active", button.dataset.nav === route_nav_key(this.route));
@@ -119,6 +122,12 @@ class MobileOperationsApp {
 			return;
 		}
 
+		if (this.route === "/mobile/production" || this.route.startsWith("/mobile/production/bom")) {
+			title.textContent = __("生产作业");
+			this.production = new MobileBOMView(main, this);
+			return;
+		}
+
 		title.textContent = this.route === "/mobile" ? __("移动作业") : route_title(this.route);
 		if (this.route === "/mobile") {
 			main.innerHTML = this.home_html();
@@ -153,8 +162,7 @@ class MobileOperationsApp {
 				<section class="mobile-home-section">
 					<div class="mobile-home-section-heading"><h2>${__("生产作业")}</h2><button data-route="/mobile/production">${__("查看全部")}</button></div>
 					<div class="mobile-home-module-grid mobile-home-production-grid">
-						<button class="mobile-home-module-card" data-route="/mobile/production"><i class="fa fa-gears"></i><strong>${__("生产作业")}</strong><small>${__("查看生产现场任务")}</small></button>
-						<button class="mobile-home-module-card" data-route="/mobile/production"><i class="fa fa-warning"></i><strong>${__("异常处理")}</strong><small>${__("查看生产异常")}</small></button>
+						<button class="mobile-home-module-card" data-route="/mobile/production"><i class="fa fa-sitemap"></i><strong>${__("BOM 物料清单")}</strong><small>${__("查询、创建和维护 BOM")}</small></button>
 					</div>
 				</section>
 			</div>
@@ -194,7 +202,6 @@ class MobileOperationsApp {
 		const content = {
 			"/mobile/inventory/query": ["fa-search", __("库存查询"), __("库存查询页面将在这里接入物料、仓库和实时库存筛选。")],
 			"/mobile/stock-entry": ["fa-exchange", __("物料移动"), __("物料移动页面将在这里接入扫码、数量和仓库选择。")],
-			"/mobile/production": ["fa-gears", __("生产作业"), __("生产现场页面将在这里接入领料、报工和异常处理。")],
 			"/mobile/material-request/new": ["fa-plus-circle", __("新建物料需求"), __("新建需求页面将在这里接入按物料、数量、仓库的快速录入。")],
 		}[route] || ["fa-mobile", __("移动作业"), __("页面正在规划中。")];
 
@@ -250,6 +257,8 @@ class MobileOperationsApp {
 			this.inventory.refresh();
 		} else if (this.inventory_query && this.route === "/mobile/inventory/query") {
 			this.inventory_query.refresh();
+		} else if (this.production && this.route.startsWith("/mobile/production")) {
+			this.production.refresh();
 		} else {
 			this.render_route();
 		}
@@ -1898,10 +1907,11 @@ class MobileStockEntryCreateView {
 		});
 	}
 
-	render_item_suggestions(index, items) {
-		const container = this.parent.querySelector(`[data-item-suggestions="${index}"]`);
+	render_item_suggestions(item_index, items) {
+		// Avoid Frappe's reserved index placeholder when this script is rendered inline.
+		const container = this.parent.querySelector(`[data-item-suggestions="${item_index}"]`);
 		if (!container) return;
-		render_mobile_item_suggestions(container, items, index, "se-create-select-item");
+		render_mobile_item_suggestions(container, items, item_index, "se-create-select-item");
 	}
 
 	select_item(index, code) {

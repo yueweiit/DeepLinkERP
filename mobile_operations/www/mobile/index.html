@@ -9,8 +9,14 @@
 
 {% block head_include %}
 <link rel="stylesheet" href="/assets/frappe/css/fonts/fontawesome/font-awesome.min.css">
+{{ include_style('/assets/mobile_operations/css/mobile_bom.css?v=' ~ mobile_bom_asset_version) }}
 {% endblock %}
 
 {% block content %}
 <div id="mobile-app" class="mobile-app-root"></div>
+{% endblock %}
+
+{% block body_include %}
+{{ super() }}
+{{ include_script('/assets/mobile_operations/js/mobile_bom.js?v=' ~ mobile_bom_asset_version) }}
 {% endblock %}

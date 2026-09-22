@@ -76,23 +76,39 @@ def search_mobile_material_request_items(search=None, limit=20):
 	if not frappe.has_permission("Material Request", "create"):
 		frappe.throw(_("当前用户没有创建物料需求的权限"), frappe.PermissionError)
 
+	return _search_mobile_items(search, limit)
+
+
+def _search_mobile_items(search=None, limit=20, min_length=2):
+	"""Rank code matches before name/description matches, before limiting results."""
 	search = (search or "").strip()
-	if len(search) < 2:
+	if len(search) < min_length:
 		return []
 
-	search_value = f"%{search}%"
-	return frappe.get_list(
-		"Item",
-		filters={"disabled": 0},
-		or_filters=[
-			["Item", "name", "like", search_value],
-			["Item", "item_name", "like", search_value],
-			["Item", "description", "like", search_value],
-		],
-		fields=["name", "item_name", "description", "stock_uom"],
-		order_by="name asc",
-		limit_page_length=max(1, min(cint(limit) or 20, 30)),
+	limit = max(1, min(cint(limit) or 20, 30))
+	# Treat typed wildcard characters as part of the item code or name.
+	literal_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+	prefix = f"{literal_search}%"
+	contains = f"%{literal_search}%"
+	item = frappe.qb.DocType("Item")
+	rank = (
+		Case()
+		.when(item.name == search, 0)
+		.when(item.name.like(prefix), 1)
+		.when(item.name.like(contains), 2)
+		.when(item.item_name.like(prefix), 3)
+		.when(item.item_name.like(contains), 4)
+		.else_(5)
 	)
+	query = frappe.qb.get_query(
+		item,
+		fields=[item.name, item.item_name, item.description, item.stock_uom],
+		filters=(item.disabled == 0)
+		& (item.name.like(contains) | item.item_name.like(contains) | item.description.like(contains)),
+		limit=limit,
+		ignore_permissions=False,
+	)
+	return query.orderby(rank, order=Order.asc).orderby(item.name, order=Order.asc).run(as_dict=True)
 
 
 @frappe.whitelist()
@@ -258,23 +274,7 @@ def search_mobile_stock_entry_items(search=None, limit=20):
 	if not frappe.has_permission("Stock Entry", "create"):
 		frappe.throw(_("当前账号没有创建物料移动的权限"), frappe.PermissionError)
 
-	search = (search or "").strip()
-	if len(search) < 2:
-		return []
-
-	search_value = f"%{search}%"
-	return frappe.get_list(
-		"Item",
-		filters={"disabled": 0},
-		or_filters=[
-			["Item", "name", "like", search_value],
-			["Item", "item_name", "like", search_value],
-			["Item", "description", "like", search_value],
-		],
-		fields=["name", "item_name", "description", "stock_uom"],
-		order_by="name asc",
-		limit_page_length=max(1, min(cint(limit) or 20, 30)),
-	)
+	return _search_mobile_items(search, limit)
 
 
 @frappe.whitelist()
@@ -767,18 +767,7 @@ def get_mobile_inventory_suggestions(kind=None, search_text=None, company=None, 
 
     search_value = f"%{search_text}%"
     if kind == "item":
-        rows = frappe.get_list(
-            "Item",
-            filters={"disabled": 0},
-            or_filters=[
-                ["Item", "name", "like", search_value],
-                ["Item", "item_name", "like", search_value],
-                ["Item", "description", "like", search_value],
-            ],
-            fields=["name", "item_name", "description"],
-            limit_page_length=limit,
-            order_by="name asc",
-        )
+        rows = _search_mobile_items(search_text, limit, min_length=1)
         return {
             "suggestions": [
                 {

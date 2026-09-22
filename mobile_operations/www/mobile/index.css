@@ -1085,6 +1085,10 @@ body {
 	font-size: 13px;
 }
 
+.mobile-mr-item-suggestions:empty {
+	display: none;
+}
+
 .mobile-mr-item-suggestions {
 	max-height: 220px;
 	overflow-y: auto;
